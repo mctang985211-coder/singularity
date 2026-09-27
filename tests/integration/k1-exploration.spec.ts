@@ -1060,7 +1060,9 @@ describe('K1-3: the evidence a parent rests on is the run\'s accumulated members
     const absent = await verdictOf(h, root.storeId, root.runId, 'map-absent-member')
     expect(absent.status).toBe('fail')
     expect(absent.details).toContain('child #4 does not exist')
-    expect(absent.details).toContain('the run\'s batches have admitted 4 members')
+    // The sequence is read by position (A6): a position the run does not hold is
+    // reported against the filled positions it does hold.
+    expect(absent.details).toContain('the run\'s member sequence holds 4 filled position(s)')
   })
 
   it('refuses a map whose entries name records that are not that member\'s', async () => {

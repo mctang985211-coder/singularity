@@ -42,10 +42,11 @@ interface VerifierSelftestSample {
  */
 interface VerifierSelftestStore {
   /**
-   * The run's accumulated members, in admission order — exactly the sequence
-   * `TaskService.runMembersIn` returns for a run, and therefore exactly what a
-   * store-reading judge's member lookup hands it. A criterion's `childIndex`
-   * resolves against this list.
+   * The run's members, in admission order — exactly the sequence
+   * `TaskService.runMemberSlotsIn` hands a store-reading judge, every position
+   * filled. A criterion's `childIndex` resolves against this list. A real run can
+   * hold a position its attempt has not filled yet; a sample lists members, so it
+   * has none.
    */
   children: TaskInstance[];
   /** Runs the sample judge reads (a child's verified run); `[]` when the sample needs none. */
@@ -144,6 +145,16 @@ declare class CommandVerifier implements Verifier {
 interface CompositeTaskSource {
   runMembersIn(storeId: string, runId: RunId): Promise<TaskInstance[]>;
   /**
+   * The judged run's members **by position** (`TaskService.runMemberSlotsIn`):
+   * `members[i]` is the task a criterion's `childIndex: i` names, and
+   * `undefined` is a position the run has not filled — a recovery attempt can
+   * claim a position (a passed sibling's evidence) and admit the members that
+   * fill the others in later batches, so a judgement made before it is complete
+   * reads the unfilled slots as "no member there" rather than shifting the
+   * positions behind them.
+   */
+  runMemberSlotsIn(storeId: string, runId: RunId): Promise<(TaskInstance | undefined)[]>;
+  /**
    * The full store snapshot. The plain conjunction needs only members, but a
    * parent's {@link AcceptanceCriterion.childEvidence} map is judged against
    * child evidence and run states, so the source exposes the snapshot too.
@@ -164,8 +175,9 @@ interface CompositeTaskSource {
  * carries the explicit heuristic label in its details, so a natural-language
  * coverage signal is never mistaken for a mechanical proof (KISS §5.1).
  *
- * `members` is the judged run's accumulative membership, in admission order
- * (`TaskService.runMembersIn`) — the sequence `childIndex` names. It is not the
+ * `members` is the judged run's member sequence **by position**
+ * (`TaskService.runMemberSlotsIn`) — the sequence `childIndex` names, where an
+ * unfilled position is `undefined` rather than a missing entry. It is not the
  * judged task's children: a parent's later batch appends and never renumbers an
  * earlier one's members, and a run that admitted no batch has none.
  *
@@ -177,7 +189,7 @@ interface CompositeTaskSource {
  * so production dispatches through {@link CompositeVerifier.verifyIn}; the
  * plain `verify` stays inconclusive.
  */
-declare function judgeCompositeCriterion(criterion: AcceptanceCriterion, members: readonly TaskInstance[], snapshot: () => Promise<TaskSnapshot>): Promise<VerificationResult>;
+declare function judgeCompositeCriterion(criterion: AcceptanceCriterion, members: readonly (TaskInstance | undefined)[], snapshot: () => Promise<TaskSnapshot>): Promise<VerificationResult>;
 declare class CompositeVerifier implements Verifier {
   private readonly task;
   readonly id = "composite";

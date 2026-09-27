@@ -242,7 +242,8 @@ import { canonicalJson, modelSelectionOf } from './replay.ts'
 import type { ModelSelection } from './replay.ts'
 import type { CommitFile, CommitHost, CommitRequest, CommitStage, ReconcileOutcome } from './commit.ts'
 import { commitIntent, committedRow, reconcileIntent, sha256Hex, syncDirectory } from './commit.ts'
-import { writeCapabilityRowToConfig } from './capability-config.ts'
+import type { CapabilityTableIdentity, CapabilityTableStates } from './capability-config.ts'
+import { capabilityTableDrift, capabilityTableIdentity, writeCapabilityRowToConfig } from './capability-config.ts'
 
 import type {
   ExperimentKey,
@@ -361,6 +362,24 @@ export interface PreparedView {
    * "the row is new" are always distinguished.
    */
   capabilityBaseline?: CapabilityRowIdentity | null
+  /**
+   * The capability table file's **composed identity**, frozen at prepare (A6, plan
+   * §F.4: "prepared 固定 capability 行、文件组合身份及生产基线"): the digest of the
+   * whole file as this prepare read it, and the digests of the whole files this
+   * proposal's own two directions leave (the apply's row written in, the
+   * rollback's row restored or removed). Three digests and nothing else — the
+   * file's second document carries the deployment's credentials, so no byte of it
+   * is ever recorded.
+   *
+   * Every write into that file is compared against these (EVO-2 内容漂移): an
+   * apply and a rollback each accept exactly the state they start from and the
+   * state their own write leaves, so a third party's edit is a named stop with
+   * nothing written, and a retry that finds the commit's own result still settles.
+   * Absent on a prepare whose deployment named no table file (there is nothing to
+   * freeze), and on lines written before this field existed — a table write that
+   * cannot be checked refuses by name instead of overwriting anything.
+   */
+  capabilityTable?: CapabilityTableIdentity
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[]
 }
@@ -468,6 +487,15 @@ export type EvolutionRecord =
       capabilityRow?: CapabilityRowIdentity
       /** The row the registry held at prepare, or `null` when it held none (A6); required on every capability prepare. */
       capabilityBaseline?: CapabilityRowIdentity | null
+      /**
+       * The composed identity of the deployment's capability table file, frozen at
+       * prepare (A6): the whole-file digests of the file as it was read, and of the
+       * files this proposal's own apply and rollback leave. Absent when the
+       * deployment names no table file, and on lines written before this field
+       * existed — a fold that accepts both is what lets an older ledger load, and
+       * the commit path refuses by name any table write it cannot compare.
+       */
+      capabilityTable?: CapabilityTableIdentity
       /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
       files: string[]
       actor: string
@@ -677,14 +705,21 @@ interface CapabilityRegistrySource {
  * the deployment's configuration). Resolved softly, and both members are
  * optional, so a deployment that mounts no runtime — or a runtime that offers no
  * such seam — gets a named refusal rather than a row that silently stays put.
- * `commitTargets` are the production files of the open commit intent this write
- * belongs to, so the row's own admission pre-check can exempt the very files it
- * is registering (see `TaskRuntime.applyCapabilityRow`); every other open intent
- * still refuses the row.
+ * `commitTargets` and `commitRow` are the open commit intent this write belongs
+ * to — its production files and the row it moves — so the row's own admission
+ * pre-check can exempt exactly what it is registering and nothing else (see
+ * `TaskRuntime.applyCapabilityRow`): the files it is writing, and the row it is
+ * installing, which is in flight by construction while this call runs (the
+ * intent exists first, and the row is a capability commit's own state). Every
+ * other open intent still refuses the row.
  */
 interface CapabilityRowWriter {
   readCapabilityRow?(name: string): Promise<CapabilityConfig | null>
-  applyCapabilityRow?(name: string, entry: CapabilityConfig | null, options?: { commitTargets?: readonly string[] }): Promise<void>
+  applyCapabilityRow?(
+    name: string,
+    entry: CapabilityConfig | null,
+    options?: { commitTargets?: readonly string[]; commitRow?: string },
+  ): Promise<void>
 }
 
 /** One accepted verdict as a promotion report entry: the role, the content it was taken from, and the verifier ref only an execution provider has. */
@@ -862,13 +897,17 @@ export interface Config {
   /**
    * The typed test seam of the capability-config write (A6), the same shape
    * `commitProbe` has for the file writes: it fires immediately before the
-   * config file is written and once the write has landed and been read back.
-   * Throwing from `before-write` aborts the write exactly where it stands — the
-   * commit intent stays open, production holds the row in the registry and not
-   * yet in the file, and the next reconciliation writes it. A production
-   * deployment never sets it.
+   * config file is written, once the bytes are staged and durable beside it
+   * (`staged` — the point the last whole-file verification runs at, and the only
+   * seam left before the rename), and once the write has landed and been read
+   * back. Throwing from `before-write` aborts the write exactly where it stands —
+   * the commit intent stays open, production holds the row in the registry and
+   * not yet in the file, and the next reconciliation writes it. A write landed
+   * from `staged` is refused by the verification that runs after it, with the
+   * staged bytes removed and the file left exactly as the third party wrote it.
+   * A production deployment never sets it.
    */
-  capabilityConfigProbe?: (stage: 'before-write' | 'written', row: string) => void
+  capabilityConfigProbe?: (stage: 'before-write' | 'staged' | 'written', row: string) => void
 }
 
 function nonEmpty(value: unknown, field: string): string {
@@ -1334,6 +1373,50 @@ function preparedRowIdentity(value: unknown, field: string, proposalId: string):
 }
 
 /**
+ * A prepared record's frozen table identity (A6), validated: the three whole-file
+ * digests of the deployment's capability table as prepare froze them, or
+ * `undefined` when the record carries none (a prepare whose deployment named no
+ * table file, or a line written before this field existed — both fold, and a table
+ * write that cannot be checked refuses by name). `field` names the record's own
+ * member in the refusal, because the operator reads the line.
+ */
+function preparedCapabilityTable(value: unknown, field: string, proposalId: string): CapabilityTableIdentity | undefined {
+  if (value === undefined) return undefined
+  const at = `prepared record for "${proposalId}"`
+  if (!isRecord(value)) {
+    throw new Error(
+      `evolution: ${at} has a ${field} that is not an object — a capability prepare freezes the composed identity of the table file ` +
+      'its row is written into as three whole-file digests and nothing else',
+    )
+  }
+  const digestOf = (half: 'baselineSha256' | 'applySha256' | 'rollbackSha256'): string => {
+    const digest = value[half]
+    if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) {
+      throw new Error(
+        `evolution: ${at} has no valid ${field}.${half} (${JSON.stringify(digest ?? null)}) — a capability prepare freezes the whole-file ` +
+        'SHA-256 of the table as it read it (`baselineSha256`) and of the table its own apply and rollback leave (`applySha256` / ' +
+        '`rollbackSha256`), so a file a third party moved is a named stop and the commit\'s own result is still recognized',
+      )
+    }
+    return digest
+  }
+  return { baselineSha256: digestOf('baselineSha256'), applySha256: digestOf('applySha256'), rollbackSha256: digestOf('rollbackSha256') }
+}
+
+/**
+ * The two whole-file states one capability direction may find in the deployment's
+ * table file (A6, EVO-2): what it starts from — the file prepare read for an
+ * apply, the file the apply left for a rollback — and the state its own write
+ * leaves. The two directions therefore never accept each other's intermediate
+ * results, and a retry of either finds its own.
+ */
+function capabilityTableStates(direction: CommitDirection, table: CapabilityTableIdentity): CapabilityTableStates {
+  return direction === 'apply'
+    ? { beforeSha256: table.baselineSha256, afterSha256: table.applySha256 }
+    : { beforeSha256: table.applySha256, afterSha256: table.rollbackSha256 }
+}
+
+/**
  * One half of a prepared record's frozen identity, validated and normalized: the
  * skill name, the `SKILL.md` digest, and — when, and only when, the object
  * carries an execution sidecar — the sidecar's exact-byte digest and canonical
@@ -1509,7 +1592,7 @@ export class EvolutionService extends Service {
   /** The deployment's capability table file, when it named one (see {@link Config.capabilityConfig}). */
   private readonly capabilityConfigPath?: string
   /** The capability-config write's typed test seam, when this instance was built with one (see {@link Config.capabilityConfigProbe}). */
-  private readonly capabilityConfigProbe?: (stage: 'before-write' | 'written', row: string) => void
+  private readonly capabilityConfigProbe?: (stage: 'before-write' | 'staged' | 'written', row: string) => void
   private records: EvolutionRecord[] = []
   private readonly loaded: Promise<void>
   private writes: Promise<void> = Promise.resolve()
@@ -1831,7 +1914,11 @@ export class EvolutionService extends Service {
    * (`null` when it held none: this candidate adds the row), together with the
    * new skill's whole-object content identity and the recorded *absence* of a
    * production object for it — a capability candidate adds a skill, and
-   * improving an existing one is the same-name path.
+   * improving an existing one is the same-name path. The deployment's table file
+   * is read once, beside the store, and its composed identity is frozen with all
+   * of them ({@link PreparedView.capabilityTable}): three whole-file digests —
+   * the file as read, and the files this proposal's own apply and rollback leave
+   * — so a commit writes into that file only while it reads as one of those.
    */
   private async prepareCapability(current: EvolutionProposal, actor: string): Promise<EvolutionProposal> {
     const proposalId = current.proposalId
@@ -1839,6 +1926,20 @@ export class EvolutionService extends Service {
     const store = await this.capabilityStore()
     const baselineEntry = store.table[candidate.row.name] ?? null
     await assertCapabilityCandidateAdmissible(store, candidate, baselineEntry)
+    // The table file's composed identity, frozen before anything of this candidate
+    // is materialized (A6, plan §F.4): the file as it is read here is the state
+    // every apply and rollback of this proposal is later compared against, and a
+    // file this writer cannot edit faithfully refuses now — a candidate whose row
+    // has nowhere to be written is not one this deployment can apply.
+    const capabilityTable = this.capabilityConfigPath === undefined
+      ? undefined
+      : capabilityTableIdentity({
+          text: await this.capabilityTableText(),
+          file: this.capabilityConfigPath,
+          name: candidate.row.name,
+          entry: candidate.row.entry,
+          restored: baselineEntry,
+        })
     const dir = join(this.root, 'sandbox', proposalId)
     const sandbox = `sandbox/${proposalId}`
     const rowRelative = `capability/${candidate.row.name}.json`
@@ -1901,11 +2002,35 @@ export class EvolutionService extends Service {
       ...(skillContent === undefined ? {} : { skillBaseline: null }),
       capabilityRow,
       capabilityBaseline,
+      ...(capabilityTable === undefined ? {} : { capabilityTable }),
       files,
       actor,
       at: new Date().toISOString(),
     })
     return this.get(proposalId)
+  }
+
+  /**
+   * The capability table's own text (A6), read at prepare: the file the composed
+   * identity is frozen from. A deployment that names no table file has nothing to
+   * freeze ({@link prepareCapability} records none, and a capability commit
+   * refuses by name when it reaches the table write); a file this deployment names
+   * but that cannot be read refuses here, before the candidate is materialized or
+   * recorded, because a table nothing can read is a table no later commit can
+   * prove it left alone.
+   */
+  private async capabilityTableText(): Promise<string> {
+    const file = this.capabilityConfigPath!
+    try {
+      return await readFile(file, 'utf8')
+    } catch (error) {
+      throw new Error(
+        `evolution: the capability table "${file}" this deployment names cannot be read ` +
+        `(${error instanceof Error ? error.message : String(error)}), so the file a later apply writes its row into cannot be frozen — ` +
+        'nothing was materialized, nothing was recorded and no row was changed; configure a readable capability table file ' +
+        '(Config.capabilityConfig) and prepare again',
+      )
+    }
   }
 
   /**
@@ -2960,6 +3085,29 @@ export class EvolutionService extends Service {
     return this.openIntents(this.fold(this.records)).flatMap(intent => intent.files.map(file => file.target))
   }
 
+  /**
+   * The capability rows a commit has left open (A6), in ledger order — the
+   * sibling of {@link openIntentTargets} for the half of a capability commit
+   * that is not a file. A row-only candidate (an L1 one that composes the
+   * deployment's existing providers) has an empty file set, so nothing about it
+   * can be keyed on a directory; and a candidate that also carries a new skill
+   * moves its row *last*, after the files, so a commit stopped between the two
+   * leaves a registry row nothing else names.
+   *
+   * The same fold, over the same open intents: one intent list, two projections,
+   * so an admission gate that reads both cannot see two different pictures of
+   * what is in flight. Pure, like its sibling — a read never settles anything.
+   */
+  async openIntentCapabilities(): Promise<readonly string[]> {
+    await this.loaded
+    const rows: string[] = []
+    for (const intent of this.openIntents(this.fold(this.records))) {
+      const name = intent.capability?.name
+      if (name !== undefined && !rows.includes(name)) rows.push(name)
+    }
+    return rows
+  }
+
   /** Every commit intent still open, in ledger order — one per proposal at most, validated by the fold. */
   private openIntents(proposals: ReadonlyMap<string, EvolutionProposal>): CommitIntentView[] {
     const open: CommitIntentView[] = []
@@ -3361,10 +3509,11 @@ export class EvolutionService extends Service {
    * for a candidate, the walk-verified production read, the ledger-root read for
    * a snapshot — the append funnel every line goes through (format check, staged
    * fold, serialized write), the whole-object checks that open and close a commit
-   * (what the directory must be before anything is written, what it is after),
-   * and the probe seam. The commit path owns the order; the service owns what
-   * may be read, what a line must say, and what "production is the object this
-   * direction promised" means.
+   * (what the directory must be before anything is written, what it is after,
+   * and whether the capability table a row would be written into is still the
+   * file prepare froze), and the probe seam. The commit path owns the order; the
+   * service owns what may be read, what a line must say, and what "production is
+   * the object this direction promised" means.
    */
   private commitHost(): CommitHost {
     return {
@@ -3384,6 +3533,7 @@ export class EvolutionService extends Service {
       },
       readProduction: relative => readProductionSkill(this.skillRoot, relative),
       objectWriteRefusal: intent => this.objectWriteRefusal(intent),
+      tableWriteRefusal: intent => this.tableWriteRefusal(intent),
       verifyCommitted: intent => this.verifyCommitted(intent),
       capability: {
         read: async name => {
@@ -3406,6 +3556,7 @@ export class EvolutionService extends Service {
           }
           await runtime.applyCapabilityRow(intent.capability!.name, entry, {
             commitTargets: intent.files.map(file => file.target),
+            commitRow: intent.capability!.name,
           })
         },
       },
@@ -3471,6 +3622,14 @@ export class EvolutionService extends Service {
    *
    * A deployment that names no file refuses by name rather than recording a
    * completion for a row that lives only in this process.
+   *
+   * The edit is written only into a file that reads as one of the two whole-file
+   * states this direction's prepare froze (EVO-2 内容漂移, {@link
+   * PreparedView.capabilityTable}) — the state it starts from, or the state its
+   * own write leaves — so a third party's edit of that file, of the row itself or
+   * of any other byte, refuses by name instead of being overwritten. A proposal
+   * whose prepare froze no table identity (a line written before that field
+   * existed) refuses too: nothing here writes a file it cannot prove it read.
    */
   private async persistCapabilityRowText(intent: CommitIntentView): Promise<void> {
     const capability = intent.capability
@@ -3483,11 +3642,22 @@ export class EvolutionService extends Service {
         'and retry, and the intent stays open in the meantime',
       )
     }
+    const proposal = await this.get(intent.proposalId)
+    const table = proposal.prepared?.capabilityTable
+    if (table === undefined) {
+      throw new Error(
+        `evolution: capability-table-unfrozen: proposal "${intent.proposalId}" records no composed identity for the capability table ` +
+        `"${this.capabilityConfigPath}", so whether the file still holds the state this ${intent.direction} was prepared against cannot be ` +
+        `established — the row "${capability.name}" was not written into it and no completion is recorded; prepare the candidate again ` +
+        '(a prepare reads the table and freezes the three whole-file digests every commit of it is compared against)',
+      )
+    }
     const entry = capability.contentSha256 === null ? null : await committedRow(this.commitHost(), capability)
     const written = await writeCapabilityRowToConfig({
       file: this.capabilityConfigPath,
       name: capability.name,
       entry,
+      states: capabilityTableStates(intent.direction, table),
       ...(this.capabilityConfigProbe === undefined ? {} : { probe: this.capabilityConfigProbe }),
     })
     if (written.direction === 'written' && written.rowDigest !== capabilityRowDigest(entry!)) {
@@ -3497,6 +3667,55 @@ export class EvolutionService extends Service {
         'stays open',
       )
     }
+  }
+
+  /**
+   * The capability table half of the commit path's **before** picture (A6, EVO-2):
+   * the named reason this commit must not write anything yet, because the table
+   * file its row would be written into no longer reads as a state this proposal
+   * froze — or `null` when it does, or when this commit moves no row.
+   *
+   * It is asked by {@link commitIntent} after the intent line and before the first
+   * write, and by every reconciliation before any branch writes or settles: the
+   * row is written into that file *last* of a commit's steps, so without this gate
+   * a drifted table would be discovered only after the skill files and the
+   * registry row had already moved, leaving a half-product a human must settle.
+   * Asked here, a third party's edit stops the commit with the intent open and
+   * production untouched. The file carries the deployment's credentials, so the
+   * reason names the file, the row and the digests compared — never a line of it.
+   */
+  private async tableWriteRefusal(intent: CommitIntentView): Promise<string | null> {
+    const capability = intent.capability
+    if (capability === undefined) return null
+    const file = this.capabilityConfigPath
+    // A deployment that names no table file refuses further along (the table write
+    // itself names the missing configuration); there is nothing to compare here.
+    if (file === undefined) return null
+    const table = (await this.get(intent.proposalId)).prepared?.capabilityTable
+    if (table === undefined) {
+      return (
+        `capability-table-unfrozen: the capability table "${file}" is not one this proposal may write — it records no composed identity for ` +
+        `that file, so the state this ${intent.direction} was prepared against cannot be proved (prepare the candidate again, which reads ` +
+        'the table and freezes it)'
+      )
+    }
+    let text: string
+    try {
+      text = await readFile(file, 'utf8')
+    } catch (error) {
+      return (
+        `capability-table-unreadable: the capability table "${file}" cannot be read ` +
+        `(${error instanceof Error ? error.message : String(error)}), so the state this ${intent.direction} would write into is unknown`
+      )
+    }
+    const drift = capabilityTableDrift({
+      name: capability.name,
+      seen: sha256Hex(Buffer.from(text, 'utf8')),
+      states: capabilityTableStates(intent.direction, table),
+    })
+    return drift === null
+      ? null
+      : `capability-table-changed: the capability table "${file}" is not a state this ${intent.direction} may write — ${drift}`
   }
 
   /**
@@ -4163,6 +4382,7 @@ export class EvolutionService extends Service {
                 )
               }
             }
+            const capabilityTable = preparedCapabilityTable(record.capabilityTable, 'capabilityTable', record.proposalId)
             current.prepared = {
               sandbox: record.sandbox,
               mechanical: true,
@@ -4171,6 +4391,7 @@ export class EvolutionService extends Service {
               ...(skillContent === undefined ? {} : { skillBaseline: null }),
               capabilityRow,
               capabilityBaseline,
+              ...(capabilityTable === undefined ? {} : { capabilityTable }),
               files: [...record.files],
             }
             break
@@ -4193,6 +4414,12 @@ export class EvolutionService extends Service {
               `${skillContent.contract === undefined ? 'guidance (no sidecar)' : 'an execution object (with a sidecar)'} while its ` +
               `production baseline is ${skillBaseline.contract === undefined ? 'guidance (no sidecar)' : 'an execution object (with a sidecar)'} ` +
               '— one prepare freezes one object, so a candidate that changed roles is refused at the fold',
+            )
+          }
+          if (record.capabilityTable !== undefined) {
+            throw new Error(
+              `evolution: prepared record for "${record.proposalId}" records a capability table identity — a prepare freezes the table file ` +
+              'of the one row a *capability* candidate writes, and a skill prepare writes no row at all',
             )
           }
           current.prepared = {

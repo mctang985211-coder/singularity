@@ -134,6 +134,11 @@ function skillBinding(provider: SelectedProvider): RunSkillBinding {
  * fails rather than loading bytes nothing judged. (Admission already refuses
  * such a batch; this is the same rule where the run is created, so a caller
  * that hands the cascade its own pre-check cannot slip past it.)
+ *
+ * A row the pre-check refused **as a row** (A6 — the capability an open
+ * evolution commit intent moves) contributes nothing at all: it was never
+ * resolved, so its declared skills are refused with the row's own reason rather
+ * than reported as names nothing was read for.
  */
 function selectedProviders(providers: ProviderPrecheck | undefined, rows: readonly string[], declaredBy: (row: string) => readonly string[]): SelectedProvider[] {
   if (providers === undefined) return []
@@ -141,6 +146,13 @@ function selectedProviders(providers: ProviderPrecheck | undefined, rows: readon
   const refused = new Map<string, SkillDefect[]>()
   for (const row of providers.capabilities) {
     if (!rows.includes(row.capability)) continue
+    // A row an open evolution commit intent moves was refused before it was
+    // resolved (A6): its declared skills are refused with the row's own reason,
+    // not silently treated as names nothing was read for.
+    if ((row.refusals ?? []).length > 0) {
+      for (const name of declaredBy(row.capability)) refused.set(name, [...(refused.get(name) ?? []), ...row.refusals!])
+      continue
+    }
     for (const verdict of row.skills) {
       if (!verdict.valid) {
         refused.set(verdict.name, [...(refused.get(verdict.name) ?? []), ...verdict.defects])

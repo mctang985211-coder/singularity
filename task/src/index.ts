@@ -25,7 +25,7 @@ import type {
   TaskRun,
   TaskSnapshot,
 } from './types.ts'
-import { runMemberTaskIds } from './types.ts'
+import { runMemberSlots, runMemberTaskIds } from './types.ts'
 import type { DecompositionAdmission } from './contract.ts'
 import { ROOT_PROPOSAL_TASK_ID, batchIdFor } from './proposal.ts'
 import type {
@@ -209,13 +209,37 @@ export class TaskService extends Service {
    */
   async runMembersIn(storeId: string, runId: RunId): Promise<TaskInstance[]> {
     const snapshot = await this.snapshotIn(storeId)
+    const run = this.requireRun(snapshot, runId)
+    return runMemberTaskIds(run).map(memberTaskId => this.requireMember(snapshot, memberTaskId))
+  }
+
+  /**
+   * The tasks one run reads **by position** — the sequence a parent criterion's
+   * `childIndex` indexes, with a not-yet-filled slot left `undefined`
+   * ({@link runMemberSlots}). This is the read a judge needs: a recovery
+   * attempt's sequence can carry a claimed position the attempt has not filled a
+   * member for yet, and a judgement about such a position is "the member does not
+   * exist", never a shift of the positions behind it.
+   *
+   * {@link runMembersIn} is the same sequence without the holes, for readers that
+   * only ask which tasks are members.
+   */
+  async runMemberSlotsIn(storeId: string, runId: RunId): Promise<(TaskInstance | undefined)[]> {
+    const snapshot = await this.snapshotIn(storeId)
+    const run = this.requireRun(snapshot, runId)
+    return runMemberSlots(run).map(taskId => taskId === undefined ? undefined : this.requireMember(snapshot, taskId))
+  }
+
+  private requireRun(snapshot: TaskSnapshot, runId: RunId): TaskRun {
     const run = snapshot.runs.find(item => item.runId === runId)
     if (run === undefined) throw new Error(`task: unknown run "${runId}"`)
-    return runMemberTaskIds(run).map(memberTaskId => {
-      const task = snapshot.tasks.find(item => item.taskId === memberTaskId)
-      if (task === undefined) throw new Error(`task: unknown task "${memberTaskId}"`)
-      return task
-    })
+    return run
+  }
+
+  private requireMember(snapshot: TaskSnapshot, memberTaskId: TaskId): TaskInstance {
+    const task = snapshot.tasks.find(item => item.taskId === memberTaskId)
+    if (task === undefined) throw new Error(`task: unknown task "${memberTaskId}"`)
+    return task
   }
 
   async createTaskIn(storeId: string, task: TaskInstance, actor: string): Promise<void> {

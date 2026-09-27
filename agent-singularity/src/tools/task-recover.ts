@@ -43,7 +43,12 @@ function renderOutcome(outcome: RecoveryCoordinationOutcome): string {
     ...outcome.coordination.map(line => `- ${line}`),
     outcome.reusedMembers.length === 0
       ? 'the attempt re-runs the work; no already-verified sibling was cited'
-      : `the attempt reads ${outcome.reusedMembers.length} already-verified sibling member(s) at its leading positions`,
+      : `the attempt reads ${outcome.reusedMembers.length} already-verified sibling member(s) at position(s) ` +
+        `${outcome.reusedMembers.map(member => member.childIndex).join(', ')}`,
+    ...(outcome.unboundMembers.length === 0
+      ? []
+      : [`${outcome.unboundMembers.length} position(s) whose passed sibling could not be bound are done again, with the reasons on the attempt's own record: ` +
+        outcome.unboundMembers.map(entry => `#${entry.childIndex} (${entry.reasons.join('; ')})`).join(', ')]),
     'the original acceptance criteria judge the new attempt, the old failure stays readable, and the store total it spends is the same one',
   ].join('\n')
 }

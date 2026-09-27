@@ -90,6 +90,7 @@ function request(criteria: AcceptanceCriterion[] = [criterion()], runId = 'r1'):
 function source(members: TaskInstance[], runs: TaskRun[] = [], evidence: EvidenceBundle[] = []) {
   return {
     runMembersIn: vi.fn(async (_storeId: string, _runId: string) => members),
+    runMemberSlotsIn: vi.fn(async (_storeId: string, _runId: string) => members),
     snapshotIn: vi.fn(async (_storeId: string) => snapshot(members, runs, evidence)),
   }
 }
@@ -104,6 +105,7 @@ function runSource(byRun: Record<string, TaskInstance[]>, runs: TaskRun[] = [], 
   const all = Object.values(byRun).flat()
   return {
     runMembersIn: vi.fn(async (_storeId: string, runId: string) => byRun[runId] ?? []),
+    runMemberSlotsIn: vi.fn(async (_storeId: string, runId: string) => byRun[runId] ?? []),
     snapshotIn: vi.fn(async (_storeId: string) => snapshot(all, runs, evidence)),
   }
 }
@@ -121,8 +123,9 @@ describe('CompositeVerifier', () => {
     const [result] = await verifier.verifyIn('sg-t-root', request())
     expect(result.status).toBe('pass')
     expect(result.verifierId).toBe('composite')
-    // The membership is read for the judged run, not for its task.
-    expect(members.runMembersIn).toHaveBeenCalledWith('sg-t-root', 'r1')
+    // The membership is read for the judged run, not for its task, and by
+    // position: the sequence a criterion's `childIndex` indexes.
+    expect(members.runMemberSlotsIn).toHaveBeenCalledWith('sg-t-root', 'r1')
   })
 
   test('fails when any child is not verified, naming the stragglers', async () => {
@@ -335,7 +338,35 @@ describe('CompositeVerifier run membership (K1 multi-batch)', () => {
     expect(result.status).toBe('fail')
     // Only the out-of-range entry is defective: the other entry is satisfied,
     // so a missing member does not turn the whole map into noise.
-    expect(result.details).toBe('incomplete childEvidence map: child #2 does not exist (the run\'s batches have admitted 2 members)')
+    expect(result.details).toBe('incomplete childEvidence map: child #2 does not exist (the run\'s member sequence holds 2 filled position(s))')
+  })
+
+  test('an unfilled position fails by name instead of shifting the members behind it (A6)', async () => {
+    // A recovery attempt claims position 1 for a passed sibling's evidence and has
+    // not admitted the member that fills position 0 yet: the sequence reads
+    // [unfilled, c1]. The judge must see the hole — the map's entry for position 1
+    // resolves the sibling, and the entry for position 0 fails as an unfilled
+    // position, never as the sibling sitting one place too early.
+    const sibling = verifiedMember('c1', 'ac1-1')
+    const source = {
+      runMembersIn: vi.fn(async () => [sibling.member]),
+      runMemberSlotsIn: vi.fn(async () => [undefined, sibling.member]),
+      snapshotIn: vi.fn(async () => snapshot([sibling.member], [sibling.run], [sibling.evidence])),
+    }
+    const verifier = new CompositeVerifier(source)
+    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({
+      childEvidence: [{ childIndex: 0 }, { childIndex: 1, criterionId: 'ac1-1' }],
+    })]))
+    expect(result.status).toBe('fail')
+    // The unfilled position is named *as a position*, and it is the only one
+    // reported: c1 at position 1 verified, so the hole did not shift it to 0.
+    expect(result.details).toBe('unverified children: #0 (unfilled)')
+
+    // A map entry that resolves the filled position needs the run to be whole
+    // first: an incomplete attempt is never read as a judgement about the map.
+    const [plain] = await verifier.verifyIn('sg-t-root', request([criterion()]))
+    expect(plain.status).toBe('fail')
+    expect(plain.details).toContain('#0 (unfilled)')
   })
 
   test('historical members belong to their own run: run2 resolves run2\'s first member', async () => {

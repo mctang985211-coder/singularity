@@ -22,6 +22,16 @@
  *   this module rendered, and the whole file' other bytes are unchanged.
  * - It never prints the file: a refusal names the path and the row, never a line
  *   of the configuration (the deployment's secrets live in that file).
+ * - It writes into the file only while the file reads as a state this proposal's
+ *   **prepare froze** (or as this commit's own write, so a retry after a crash
+ *   still settles, EVO-2 "内容漂移 … 零应用"): the whole file as prepare read it,
+ *   and the whole file this commit's own direction leaves, are three digests of
+ *   the file — recorded in the ledger, never a copy of it — and a file that reads
+ *   as neither is `capability-table-changed` with nothing written, because a
+ *   third party's edit (of the row itself or of any other byte) is not something
+ *   this writer may carry over. The same comparison is made across the write's
+ *   own seam, so an edit that lands between the read and the rename is refused
+ *   too rather than overwritten.
  * - A `null` entry removes the row (the rollback of a row the commit added) —
  *   the same edit in the other direction, so apply and rollback share one path.
  * - A file it cannot edit faithfully is a **named stop with nothing written**: no
@@ -72,6 +82,11 @@ function indentOf(line: string): number {
 /** One refusal of this module, naming the file and never quoting it. */
 function refusal(file: string, detail: string): Error {
   return new Error(`evolution: the capability table "${file}" cannot be edited: ${detail}`)
+}
+
+/** The refusal a table that is not a frozen state is reported by (EVO-2 内容漂移), naming the file and never quoting it. */
+function tableChanged(file: string, detail: string): Error {
+  return new Error(`evolution: capability-table-changed: the capability table "${file}" cannot be edited: ${detail}`)
 }
 
 /** Where one row's text lives inside one file. */
@@ -191,8 +206,8 @@ export function renderCapabilityRow(name: string, entry: CapabilityConfig, inden
 
 /**
  * The file's text with one row written, removed, or added. Pure: the caller
- * decides what the file's current state may be (the commit's own baseline check)
- * and this function only edits the one region.
+ * decides what the file's current state may be (the commit's own frozen-identity
+ * check) and this function only edits the one region.
  *
  * `entry === null` removes the row; a row the file does not hold is *added* at
  * the end of the capabilities block.
@@ -217,6 +232,87 @@ export function applyCapabilityRowToConfig(input: {
   // dropping it and re-adding the newline keeps every other byte in place.
   const joined = trailingNewline && edited[edited.length - 1] === '' ? edited.slice(0, -1).join('\n') + '\n' : edited.join('\n')
   return joined
+}
+
+/**
+ * One table file's **composed identity**, frozen when a capability candidate is
+ * prepared (A6, plan §F.4: "prepared 固定 capability 行、文件组合身份及生产基线"):
+ * the digest of the whole file as prepare read it, and the digests of the whole
+ * files this proposal's own two directions leave — what the apply writes and what
+ * the rollback writes. Digests only, never a copy: the file's second document is
+ * where a deployment keeps its credentials, and nothing of it but these hashes is
+ * recorded (in the ledger, or anywhere else).
+ *
+ * Every comparison a commit makes about that file is one of these three values
+ * (see {@link capabilityTableDrift}), so "the file prepare froze", "the file this
+ * commit's own write leaves" and "something a third party did" are three
+ * distinguishable states, and the third is never written over.
+ */
+export interface CapabilityTableIdentity {
+  /** SHA-256 of the whole file as prepare read it. */
+  readonly baselineSha256: string
+  /** SHA-256 of the whole file the apply leaves (this candidate's row written in). */
+  readonly applySha256: string
+  /** SHA-256 of the whole file the rollback leaves (the row it restores written in, or the row it removes). */
+  readonly rollbackSha256: string
+}
+
+/** The two whole-file states one capability write may find: the state it starts from, and the state its own write leaves. */
+export interface CapabilityTableStates {
+  readonly beforeSha256: string
+  readonly afterSha256: string
+}
+
+/**
+ * Freeze one table file's composed identity for one candidate (pure): the file as
+ * read, the file with this candidate's row written in, and the file with the row
+ * a rollback restores written in — or, for a row this candidate adds, the file
+ * the rollback leaves after removing that row. The rollback's text is computed
+ * from the text the *apply* leaves, which is the text the rollback really edits;
+ * a row the file already holds is restored in this writer's own rendering, so the
+ * rollback's file is not generally the file prepare read, and the identity says
+ * exactly which file it is.
+ */
+export function capabilityTableIdentity(input: {
+  readonly text: string
+  /** The file's path, for refusals only — never read from it here. */
+  readonly file: string
+  readonly name: string
+  /** The candidate's row — what an apply writes into the file. */
+  readonly entry: CapabilityConfig
+  /** The row a rollback restores, or `null` when this candidate adds the row and its rollback removes it. */
+  readonly restored: CapabilityConfig | null
+}): CapabilityTableIdentity {
+  const { text, file, name, entry, restored } = input
+  const digest = (value: string): string => sha256Hex(Buffer.from(value, 'utf8'))
+  const applied = applyCapabilityRowToConfig({ text, file, name, entry })
+  return {
+    baselineSha256: digest(text),
+    applySha256: digest(applied),
+    rollbackSha256: digest(applyCapabilityRowToConfig({ text: applied, file, name, entry: restored })),
+  }
+}
+
+/**
+ * The named reason one whole-file digest is not a state a capability write may
+ * find, or `null` when it is one of them: `states.beforeSha256`, the state this
+ * write starts from, or `states.afterSha256`, the state its own write leaves (so
+ * a retry after a crash finds its own result and still settles). Names the row and
+ * the digests it compared — never a line of the file, which carries the
+ * deployment's credentials; the caller names the file itself.
+ */
+export function capabilityTableDrift(input: {
+  readonly name: string
+  readonly seen: string
+  readonly states: CapabilityTableStates
+}): string | null {
+  const { name, seen, states } = input
+  if (seen === states.beforeSha256 || seen === states.afterSha256) return null
+  return (
+    `it reads sha256 ${seen}, which is neither the whole-file state this write starts from (sha256 ${states.beforeSha256}) nor the state ` +
+    `its own write leaves (sha256 ${states.afterSha256}) — the row "${name}" is not written over a third party's move of the file, and the ` +
+    'bytes that move left are exactly the bytes it keeps'
+  )
 }
 
 /**
@@ -263,20 +359,49 @@ function parsedRow(file: string, name: string, line: string): CapabilityConfig {
  * The order is the write's own: read the file, compute the edit and the region,
  * verify the row text this module is about to leave *parses back as the row it
  * was given* (its JSON scalar and its name), hand the probe its `before-write`
- * stage, write atomically, re-read the file and prove (a) the row region is
- * exactly the rendered text and (b) every other byte is what the read found.
- * Anything that fails is a named stop with the file untouched — except a failure
- * after the rename, which is `read back after the write` and leaves the file
- * holding the row while the commit intent stays open (the next reconciliation
- * re-runs the same edit, which is idempotent: it writes the same bytes again).
+ * stage, prove the file is still the text that edit was computed from **and** that
+ * this text is one of the two whole-file states `states` names (the state this
+ * write starts from, or the state its own write leaves), stage the bytes, hand
+ * the probe its `staged` stage, verify the file one last time (same two checks,
+ * asked of the file as it reads now), rename, re-read the file and prove (a) the
+ * row region is exactly the rendered text and (b) every other byte is what the
+ * read found. Anything that fails is a named stop with the file untouched —
+ * except a failure after the rename, which is `read back after the write` and
+ * leaves the file holding the row while the commit intent stays open (the next
+ * reconciliation re-runs the same edit, which is idempotent: it writes the same
+ * bytes again, and finds the file its own write left among the states it
+ * accepts).
+ *
+ * The checks before the write are the drift gate the commit path never had:
+ * without them this writer carried a *stale* read — of the row's own bytes and of
+ * every other byte of the file — over whatever a third party wrote in the
+ * meantime. The state comparisons run after each probe stage, so a write made at
+ * a seam is refused as well; they are asked of the file's bytes, never of a
+ * parsed row, because the deployment's file is not this writer's to reformat.
+ *
+ * **The `staged` check is the last observation of the file before the rename,
+ * and that is a requirement, not an implementation detail** (EVO-2 P2): POSIX
+ * rename replaces the target unconditionally, so a third party's write that
+ * lands after the last read and before the rename would be silently overwritten.
+ * `writeFileAtomic` fires its hook between the staging file's fsync and the
+ * rename, and the re-read and the whole-file comparison run inside that hook —
+ * there is no injectable seam left after them. A file that changed under the
+ * staged bytes is `capability-table-changed`, the staging file is removed and the
+ * target keeps exactly the third party's bytes.
  */
 export async function writeCapabilityRowToConfig(input: {
   readonly file: string
   readonly name: string
   readonly entry: CapabilityConfig | null
-  readonly probe?: (stage: 'before-write' | 'written', row: string) => void
+  /**
+   * The two whole-file states this write may find, as the proposal's prepare
+   * froze them for this direction (see {@link CapabilityTableIdentity}): the file
+   * it starts from, and the file its own write leaves.
+   */
+  readonly states: CapabilityTableStates
+  readonly probe?: (stage: 'before-write' | 'staged' | 'written', row: string) => void
 }): Promise<CapabilityConfigWrite> {
-  const { file, name, entry, probe } = input
+  const { file, name, entry, states, probe } = input
   let current: string
   try {
     current = await readFile(file, 'utf8')
@@ -303,7 +428,56 @@ export async function writeCapabilityRowToConfig(input: {
   }
   const next = applyCapabilityRowToConfig({ text: current, file, name, entry })
   probe?.('before-write', name)
-  await writeFileAtomic(file, Buffer.from(next, 'utf8'))
+  // The window between the read this edit was computed from and the rename is
+  // closed here: the file is read again, and a write that landed in that window
+  // is refused rather than carried over (the edit describes the text the first
+  // read found, and that text is no longer the file's).
+  let reread: string
+  try {
+    reread = await readFile(file, 'utf8')
+  } catch (error) {
+    throw refusal(
+      file,
+      `it could not be read again before the write (${error instanceof Error ? error.message : String(error)}) — nothing was written`,
+    )
+  }
+  if (reread !== current) {
+    throw tableChanged(
+      file,
+      `it changed between the read this write's edit was computed from and the write itself — the write that landed in that window is not ` +
+        `one this commit may carry over, so the row "${name}" was not written into it and the file is left exactly as that write left it`,
+    )
+  }
+  const drift = capabilityTableDrift({ name, seen: sha256Hex(Buffer.from(reread, 'utf8')), states })
+  if (drift !== null) throw tableChanged(file, `${drift}; nothing was written`)
+  // The staged seam is the last point at which a third party's write can still
+  // be seen: everything after it is one rename, and a rename replaces whatever
+  // the target holds. So the file is read and compared once more here, and a
+  // change that landed under the staged bytes removes them (the hook's failure
+  // path) instead of being overwritten — the third party's bytes are what the
+  // file keeps.
+  const verifyStaged = async (): Promise<void> => {
+    probe?.('staged', name)
+    let staged: string
+    try {
+      staged = await readFile(file, 'utf8')
+    } catch (error) {
+      throw refusal(
+        file,
+        `it could not be read again immediately before the rename (${error instanceof Error ? error.message : String(error)}) — ` +
+          `nothing was written, and the staged bytes of the row "${name}" are removed`,
+      )
+    }
+    const changed = capabilityTableDrift({ name, seen: sha256Hex(Buffer.from(staged, 'utf8')), states })
+    if (changed !== null) {
+      throw tableChanged(
+        file,
+        `${changed}; the write that landed in the window between this edit and the rename is not one this commit may carry over, so ` +
+          `the staged bytes of the row "${name}" were removed and the file keeps exactly what that write left`,
+      )
+    }
+  }
+  await writeFileAtomic(file, Buffer.from(next, 'utf8'), verifyStaged)
   probe?.('written', name)
   let back: string
   try {

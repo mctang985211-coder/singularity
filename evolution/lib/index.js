@@ -864,13 +864,20 @@ function sha256Hex(bytes) {
 * could not account for.
 *
 * `onStaged` fires between the fsync and the rename — the point where the new
-* bytes are durable beside the target but have not replaced it. A failure before
-* the rename — that hook included — removes the temp file and throws: a failed
-* write leaves no half-installed version behind, and the caller's intent stays
-* open. A failure of the directory fsync *after* the rename is the one failure
-* that leaves the target replaced with the durability of the rename unknown: it
-* throws by name, the intent stays open and no completion is recorded, because a
-* rename whose directory entry is not durable is not a settled commit.
+* bytes are durable beside the target but have not replaced it. It is awaited,
+* so a caller can make the last observation of the *target* here, after every
+* seam of its own: the capability table's write re-reads the file and re-checks
+* the whole-file identity in exactly this hook (A6, EVO-2 P2), because after it
+* there is no seam left before the rename — and a rename is an unconditional
+* replace, so a check that is not the last thing to observe the file is a check
+* a third party's write can slip past. A failure before the rename — that hook
+* included — removes the temp file and throws: a failed write leaves no
+* half-installed version behind, the target keeps exactly the bytes it had, and
+* the caller's intent stays open. A failure of the directory fsync *after* the
+* rename is the one failure that leaves the target replaced with the durability
+* of the rename unknown: it throws by name, the intent stays open and no
+* completion is recorded, because a rename whose directory entry is not durable
+* is not a settled commit.
 */
 async function writeFileAtomic(target, bytes, onStaged) {
 	const directory = dirname(target);
@@ -884,7 +891,7 @@ async function writeFileAtomic(target, bytes, onStaged) {
 		await handle.sync();
 		await handle.close();
 		handle = void 0;
-		onStaged?.();
+		await onStaged?.();
 		await rename(staging, target);
 		try {
 			await syncDirectory(directory);
@@ -952,9 +959,15 @@ async function sweepStaging(directory, target) {
 * refusal there is a named stop with no line recorded and nothing written,
 * instead of a commit that lands and then discovers the directory was not the
 * object it committed. Only then is the intent appended — through the service's
-* own durable append, so the line is on disk before production moves — and only
-* after every write has been read back and verified, the capability row is in
-* place (a capability commit, A6) and the whole object has passed
+* own durable append, so the line is on disk before production moves — and, once
+* the line is recorded and before the first write, the capability table the row
+* would be written into is re-read through {@link CommitHost.tableWriteRefusal}:
+* it must still hold a state the direction's prepare froze (or the file this
+* direction's own write leaves, so a retry settles), and a table a third party
+* moved stops the commit with the intent open and production untouched — instead
+* of being discovered once the files and the row had already moved. Only after
+* every write has been read back and verified, the capability row is in place (a
+* capability commit, A6) and the whole object has passed
 * {@link CommitHost.verifyCommitted}, is the completion appended.
 *
 * The order of the two halves is the direction's, and it is the one that leaves
@@ -1016,6 +1029,8 @@ async function commitIntent(host, request, bytes) {
 		...intent
 	});
 	host.probe("intent-recorded");
+	const tableRefusal = await host.tableWriteRefusal(intent);
+	if (tableRefusal !== null) throw new Error(`evolution: ${tableRefusal}; nothing was written for the ${request.direction} of proposal "${request.proposalId}", its commit intent "${intent.intentId}" is recorded and stays open and no completion is recorded, so the table keeps exactly the bytes it holds now and the row this commit was to install is not in it`);
 	await installDirection(host, intent, bytes, targets);
 	await host.verifyCommitted(intent);
 	host.probe("commit-verified");
@@ -1029,9 +1044,11 @@ async function commitIntent(host, request, bytes) {
 * pre-commit state, the committed content, absent or something else; read the
 * registry row and classify it the same three ways — a source that is gone or
 * changed, or a file or row that is missing or foreign, stops by name right
-* there, in its own words — and then ask
+* there, in its own words — then ask
 * {@link CommitHost.objectWriteRefusal} what the *directory* holds beyond the
-* files the intent names. If nothing refused, then
+* files the intent names, and {@link CommitHost.tableWriteRefusal} whether the
+* capability table a row would be written into still reads as a state the prepare
+* froze. If nothing refused, then
 *
 * - nothing has moved yet (every file still holds its baseline, the row its
 *   baseline): the same operation is carried out — an apply writes the files and
@@ -1054,7 +1071,14 @@ async function commitIntent(host, request, bytes) {
 * - the directory holding an entry the intent does not name — the object check
 *   above — a `blocked` outcome naming the entry, with nothing written: a
 *   recovery settles an intent over the object it commits, never over a
-*   directory a third party turned into something else.
+*   directory a third party turned into something else;
+* - the capability table a row would be written into reading as neither the
+*   state the direction starts from nor the state its own write leaves (A6,
+*   {@link CommitHost.tableWriteRefusal}) — a `blocked` outcome naming the file,
+*   the row and the digests, with nothing written: the row is a capability
+*   commit's last step, so a table a third party moved stops the recovery before
+*   it redoes the files or the registry row, and before a settlement whose only
+*   remaining step is that write records anything.
 *
 * The `completed-written` branch still fsyncs the production directories, even
 * though it writes no bytes: the completion is the claim that production holds
@@ -1146,6 +1170,8 @@ async function reconcileIntent(host, intent) {
 		const refusal$2 = await host.objectWriteRefusal(intent);
 		if (refusal$2 !== null) return outcome("blocked", `evolution: the ${intent.direction} of proposal "${intent.proposalId}" cannot write the skill object "${dirname(intent.files[0].target)}" of commit intent "${intent.intentId}" — ${refusal$2}; a commit replaces one complete object and nothing beside it, so nothing is written and the intent stays open until a human settles what the directory holds`);
 	}
+	const tableRefusal = await host.tableWriteRefusal(intent);
+	if (tableRefusal !== null) return outcome("blocked", `evolution: ${tableRefusal}; nothing was written for the ${intent.direction} of proposal "${intent.proposalId}" and commit intent "${intent.intentId}" stays open — a commit writes its row into that file only while it reads as a state the prepare froze, and a human settles the table (or restores it, and this recovery is run again)`);
 	if (!(states.every((state) => state === "content") && rowState === "content")) {
 		const writeFiles = async () => {
 			for (const [index, file] of intent.files.entries()) {
@@ -1492,6 +1518,10 @@ function indentOf(line) {
 function refusal(file, detail) {
 	return /* @__PURE__ */ new Error(`evolution: the capability table "${file}" cannot be edited: ${detail}`);
 }
+/** The refusal a table that is not a frozen state is reported by (EVO-2 内容漂移), naming the file and never quoting it. */
+function tableChanged(file, detail) {
+	return /* @__PURE__ */ new Error(`evolution: capability-table-changed: the capability table "${file}" cannot be edited: ${detail}`);
+}
 /** The `- id: task-runtime` entry's `capabilities:` block inside the first YAML document. */
 function capabilitiesBlock(lines, file) {
 	const separator = lines.findIndex((line) => line.trim() === "---");
@@ -1585,8 +1615,8 @@ function renderCapabilityRow(name, entry, indent) {
 }
 /**
 * The file's text with one row written, removed, or added. Pure: the caller
-* decides what the file's current state may be (the commit's own baseline check)
-* and this function only edits the one region.
+* decides what the file's current state may be (the commit's own frozen-identity
+* check) and this function only edits the one region.
 *
 * `entry === null` removes the row; a row the file does not hold is *added* at
 * the end of the capabilities block.
@@ -1606,6 +1636,49 @@ function applyCapabilityRowToConfig(input) {
 		...after
 	];
 	return trailingNewline && edited[edited.length - 1] === "" ? edited.slice(0, -1).join("\n") + "\n" : edited.join("\n");
+}
+/**
+* Freeze one table file's composed identity for one candidate (pure): the file as
+* read, the file with this candidate's row written in, and the file with the row
+* a rollback restores written in — or, for a row this candidate adds, the file
+* the rollback leaves after removing that row. The rollback's text is computed
+* from the text the *apply* leaves, which is the text the rollback really edits;
+* a row the file already holds is restored in this writer's own rendering, so the
+* rollback's file is not generally the file prepare read, and the identity says
+* exactly which file it is.
+*/
+function capabilityTableIdentity(input) {
+	const { text, file, name, entry, restored } = input;
+	const digest = (value) => sha256Hex(Buffer.from(value, "utf8"));
+	const applied = applyCapabilityRowToConfig({
+		text,
+		file,
+		name,
+		entry
+	});
+	return {
+		baselineSha256: digest(text),
+		applySha256: digest(applied),
+		rollbackSha256: digest(applyCapabilityRowToConfig({
+			text: applied,
+			file,
+			name,
+			entry: restored
+		}))
+	};
+}
+/**
+* The named reason one whole-file digest is not a state a capability write may
+* find, or `null` when it is one of them: `states.beforeSha256`, the state this
+* write starts from, or `states.afterSha256`, the state its own write leaves (so
+* a retry after a crash finds its own result and still settles). Names the row and
+* the digests it compared — never a line of the file, which carries the
+* deployment's credentials; the caller names the file itself.
+*/
+function capabilityTableDrift(input) {
+	const { name, seen, states } = input;
+	if (seen === states.beforeSha256 || seen === states.afterSha256) return null;
+	return `it reads sha256 ${seen}, which is neither the whole-file state this write starts from (sha256 ${states.beforeSha256}) nor the state its own write leaves (sha256 ${states.afterSha256}) — the row "${name}" is not written over a third party's move of the file, and the bytes that move left are exactly the bytes it keeps`;
 }
 /**
 * The row one rendered or read line holds, parsed back from the scalar this module
@@ -1630,15 +1703,38 @@ function parsedRow(file, name, line) {
 * The order is the write's own: read the file, compute the edit and the region,
 * verify the row text this module is about to leave *parses back as the row it
 * was given* (its JSON scalar and its name), hand the probe its `before-write`
-* stage, write atomically, re-read the file and prove (a) the row region is
-* exactly the rendered text and (b) every other byte is what the read found.
-* Anything that fails is a named stop with the file untouched — except a failure
-* after the rename, which is `read back after the write` and leaves the file
-* holding the row while the commit intent stays open (the next reconciliation
-* re-runs the same edit, which is idempotent: it writes the same bytes again).
+* stage, prove the file is still the text that edit was computed from **and** that
+* this text is one of the two whole-file states `states` names (the state this
+* write starts from, or the state its own write leaves), stage the bytes, hand
+* the probe its `staged` stage, verify the file one last time (same two checks,
+* asked of the file as it reads now), rename, re-read the file and prove (a) the
+* row region is exactly the rendered text and (b) every other byte is what the
+* read found. Anything that fails is a named stop with the file untouched —
+* except a failure after the rename, which is `read back after the write` and
+* leaves the file holding the row while the commit intent stays open (the next
+* reconciliation re-runs the same edit, which is idempotent: it writes the same
+* bytes again, and finds the file its own write left among the states it
+* accepts).
+*
+* The checks before the write are the drift gate the commit path never had:
+* without them this writer carried a *stale* read — of the row's own bytes and of
+* every other byte of the file — over whatever a third party wrote in the
+* meantime. The state comparisons run after each probe stage, so a write made at
+* a seam is refused as well; they are asked of the file's bytes, never of a
+* parsed row, because the deployment's file is not this writer's to reformat.
+*
+* **The `staged` check is the last observation of the file before the rename,
+* and that is a requirement, not an implementation detail** (EVO-2 P2): POSIX
+* rename replaces the target unconditionally, so a third party's write that
+* lands after the last read and before the rename would be silently overwritten.
+* `writeFileAtomic` fires its hook between the staging file's fsync and the
+* rename, and the re-read and the whole-file comparison run inside that hook —
+* there is no injectable seam left after them. A file that changed under the
+* staged bytes is `capability-table-changed`, the staging file is removed and the
+* target keeps exactly the third party's bytes.
 */
 async function writeCapabilityRowToConfig(input) {
-	const { file, name, entry, probe } = input;
+	const { file, name, entry, states, probe } = input;
 	let current;
 	try {
 		current = await readFile(file, "utf8");
@@ -1659,7 +1755,35 @@ async function writeCapabilityRowToConfig(input) {
 		entry
 	});
 	probe?.("before-write", name);
-	await writeFileAtomic(file, Buffer.from(next, "utf8"));
+	let reread;
+	try {
+		reread = await readFile(file, "utf8");
+	} catch (error) {
+		throw refusal(file, `it could not be read again before the write (${error instanceof Error ? error.message : String(error)}) — nothing was written`);
+	}
+	if (reread !== current) throw tableChanged(file, `it changed between the read this write's edit was computed from and the write itself — the write that landed in that window is not one this commit may carry over, so the row "${name}" was not written into it and the file is left exactly as that write left it`);
+	const drift = capabilityTableDrift({
+		name,
+		seen: sha256Hex(Buffer.from(reread, "utf8")),
+		states
+	});
+	if (drift !== null) throw tableChanged(file, `${drift}; nothing was written`);
+	const verifyStaged = async () => {
+		probe?.("staged", name);
+		let staged;
+		try {
+			staged = await readFile(file, "utf8");
+		} catch (error) {
+			throw refusal(file, `it could not be read again immediately before the rename (${error instanceof Error ? error.message : String(error)}) — nothing was written, and the staged bytes of the row "${name}" are removed`);
+		}
+		const changed = capabilityTableDrift({
+			name,
+			seen: sha256Hex(Buffer.from(staged, "utf8")),
+			states
+		});
+		if (changed !== null) throw tableChanged(file, `${changed}; the write that landed in the window between this edit and the rename is not one this commit may carry over, so the staged bytes of the row "${name}" were removed and the file keeps exactly what that write left`);
+	};
+	await writeFileAtomic(file, Buffer.from(next, "utf8"), verifyStaged);
 	probe?.("written", name);
 	let back;
 	try {
@@ -4246,6 +4370,45 @@ function preparedRowIdentity(value, field, proposalId) {
 	};
 }
 /**
+* A prepared record's frozen table identity (A6), validated: the three whole-file
+* digests of the deployment's capability table as prepare froze them, or
+* `undefined` when the record carries none (a prepare whose deployment named no
+* table file, or a line written before this field existed — both fold, and a table
+* write that cannot be checked refuses by name). `field` names the record's own
+* member in the refusal, because the operator reads the line.
+*/
+function preparedCapabilityTable(value, field, proposalId) {
+	if (value === void 0) return void 0;
+	const at = `prepared record for "${proposalId}"`;
+	if (!isRecord(value)) throw new Error(`evolution: ${at} has a ${field} that is not an object — a capability prepare freezes the composed identity of the table file its row is written into as three whole-file digests and nothing else`);
+	const digestOf$1 = (half) => {
+		const digest = value[half];
+		if (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)) throw new Error(`evolution: ${at} has no valid ${field}.${half} (${JSON.stringify(digest ?? null)}) — a capability prepare freezes the whole-file SHA-256 of the table as it read it (\`baselineSha256\`) and of the table its own apply and rollback leave (\`applySha256\` / \`rollbackSha256\`), so a file a third party moved is a named stop and the commit's own result is still recognized`);
+		return digest;
+	};
+	return {
+		baselineSha256: digestOf$1("baselineSha256"),
+		applySha256: digestOf$1("applySha256"),
+		rollbackSha256: digestOf$1("rollbackSha256")
+	};
+}
+/**
+* The two whole-file states one capability direction may find in the deployment's
+* table file (A6, EVO-2): what it starts from — the file prepare read for an
+* apply, the file the apply left for a rollback — and the state its own write
+* leaves. The two directions therefore never accept each other's intermediate
+* results, and a retry of either finds its own.
+*/
+function capabilityTableStates(direction, table) {
+	return direction === "apply" ? {
+		beforeSha256: table.baselineSha256,
+		afterSha256: table.applySha256
+	} : {
+		beforeSha256: table.applySha256,
+		afterSha256: table.rollbackSha256
+	};
+}
+/**
 * One half of a prepared record's frozen identity, validated and normalized: the
 * skill name, the `SKILL.md` digest, and — when, and only when, the object
 * carries an execution sidecar — the sidecar's exact-byte digest and canonical
@@ -4558,7 +4721,11 @@ var EvolutionService = class extends Service {
 	* (`null` when it held none: this candidate adds the row), together with the
 	* new skill's whole-object content identity and the recorded *absence* of a
 	* production object for it — a capability candidate adds a skill, and
-	* improving an existing one is the same-name path.
+	* improving an existing one is the same-name path. The deployment's table file
+	* is read once, beside the store, and its composed identity is frozen with all
+	* of them ({@link PreparedView.capabilityTable}): three whole-file digests —
+	* the file as read, and the files this proposal's own apply and rollback leave
+	* — so a commit writes into that file only while it reads as one of those.
 	*/
 	async prepareCapability(current, actor) {
 		const proposalId = current.proposalId;
@@ -4566,6 +4733,13 @@ var EvolutionService = class extends Service {
 		const store = await this.capabilityStore();
 		const baselineEntry = store.table[candidate.row.name] ?? null;
 		await assertCapabilityCandidateAdmissible(store, candidate, baselineEntry);
+		const capabilityTable = this.capabilityConfigPath === void 0 ? void 0 : capabilityTableIdentity({
+			text: await this.capabilityTableText(),
+			file: this.capabilityConfigPath,
+			name: candidate.row.name,
+			entry: candidate.row.entry,
+			restored: baselineEntry
+		});
 		const dir = join(this.root, "sandbox", proposalId);
 		const sandbox = `sandbox/${proposalId}`;
 		const rowRelative = `capability/${candidate.row.name}.json`;
@@ -4628,11 +4802,29 @@ var EvolutionService = class extends Service {
 			...skillContent === void 0 ? {} : { skillBaseline: null },
 			capabilityRow,
 			capabilityBaseline,
+			...capabilityTable === void 0 ? {} : { capabilityTable },
 			files,
 			actor,
 			at: (/* @__PURE__ */ new Date()).toISOString()
 		});
 		return this.get(proposalId);
+	}
+	/**
+	* The capability table's own text (A6), read at prepare: the file the composed
+	* identity is frozen from. A deployment that names no table file has nothing to
+	* freeze ({@link prepareCapability} records none, and a capability commit
+	* refuses by name when it reaches the table write); a file this deployment names
+	* but that cannot be read refuses here, before the candidate is materialized or
+	* recorded, because a table nothing can read is a table no later commit can
+	* prove it left alone.
+	*/
+	async capabilityTableText() {
+		const file = this.capabilityConfigPath;
+		try {
+			return await readFile(file, "utf8");
+		} catch (error) {
+			throw new Error(`evolution: the capability table "${file}" this deployment names cannot be read (${error instanceof Error ? error.message : String(error)}), so the file a later apply writes its row into cannot be frozen — nothing was materialized, nothing was recorded and no row was changed; configure a readable capability table file (Config.capabilityConfig) and prepare again`);
+		}
 	}
 	/**
 	* The store a capability candidate is judged against: the running registry
@@ -5421,6 +5613,28 @@ var EvolutionService = class extends Service {
 		await this.loaded;
 		return this.openIntents(this.fold(this.records)).flatMap((intent) => intent.files.map((file) => file.target));
 	}
+	/**
+	* The capability rows a commit has left open (A6), in ledger order — the
+	* sibling of {@link openIntentTargets} for the half of a capability commit
+	* that is not a file. A row-only candidate (an L1 one that composes the
+	* deployment's existing providers) has an empty file set, so nothing about it
+	* can be keyed on a directory; and a candidate that also carries a new skill
+	* moves its row *last*, after the files, so a commit stopped between the two
+	* leaves a registry row nothing else names.
+	*
+	* The same fold, over the same open intents: one intent list, two projections,
+	* so an admission gate that reads both cannot see two different pictures of
+	* what is in flight. Pure, like its sibling — a read never settles anything.
+	*/
+	async openIntentCapabilities() {
+		await this.loaded;
+		const rows = [];
+		for (const intent of this.openIntents(this.fold(this.records))) {
+			const name = intent.capability?.name;
+			if (name !== void 0 && !rows.includes(name)) rows.push(name);
+		}
+		return rows;
+	}
 	/** Every commit intent still open, in ledger order — one per proposal at most, validated by the fold. */
 	openIntents(proposals) {
 		const open$1 = [];
@@ -5709,10 +5923,11 @@ var EvolutionService = class extends Service {
 	* for a candidate, the walk-verified production read, the ledger-root read for
 	* a snapshot — the append funnel every line goes through (format check, staged
 	* fold, serialized write), the whole-object checks that open and close a commit
-	* (what the directory must be before anything is written, what it is after),
-	* and the probe seam. The commit path owns the order; the service owns what
-	* may be read, what a line must say, and what "production is the object this
-	* direction promised" means.
+	* (what the directory must be before anything is written, what it is after,
+	* and whether the capability table a row would be written into is still the
+	* file prepare froze), and the probe seam. The commit path owns the order; the
+	* service owns what may be read, what a line must say, and what "production is
+	* the object this direction promised" means.
 	*/
 	commitHost() {
 		return {
@@ -5727,6 +5942,7 @@ var EvolutionService = class extends Service {
 			},
 			readProduction: (relative$1) => readProductionSkill(this.skillRoot, relative$1),
 			objectWriteRefusal: (intent) => this.objectWriteRefusal(intent),
+			tableWriteRefusal: (intent) => this.tableWriteRefusal(intent),
 			verifyCommitted: (intent) => this.verifyCommitted(intent),
 			capability: {
 				read: async (name) => {
@@ -5737,7 +5953,10 @@ var EvolutionService = class extends Service {
 				apply: async (intent, entry) => {
 					const runtime = optionalService(this.ctx, "taskRuntime");
 					if (runtime?.applyCapabilityRow === void 0) throw new Error("this deployment offers no capability-registry entry (taskRuntime.applyCapabilityRow), so the row this commit carries cannot be installed");
-					await runtime.applyCapabilityRow(intent.capability.name, entry, { commitTargets: intent.files.map((file) => file.target) });
+					await runtime.applyCapabilityRow(intent.capability.name, entry, {
+						commitTargets: intent.files.map((file) => file.target),
+						commitRow: intent.capability.name
+					});
 				}
 			},
 			probe: (stage, target) => this.commitProbe?.(stage, target)
@@ -5800,19 +6019,65 @@ var EvolutionService = class extends Service {
 	*
 	* A deployment that names no file refuses by name rather than recording a
 	* completion for a row that lives only in this process.
+	*
+	* The edit is written only into a file that reads as one of the two whole-file
+	* states this direction's prepare froze (EVO-2 内容漂移, {@link
+	* PreparedView.capabilityTable}) — the state it starts from, or the state its
+	* own write leaves — so a third party's edit of that file, of the row itself or
+	* of any other byte, refuses by name instead of being overwritten. A proposal
+	* whose prepare froze no table identity (a line written before that field
+	* existed) refuses too: nothing here writes a file it cannot prove it read.
 	*/
 	async persistCapabilityRowText(intent) {
 		const capability = intent.capability;
 		if (capability === void 0) return;
 		if (this.capabilityConfigPath === void 0) throw new Error(`evolution: this deployment names no capability table file, so the row "${capability.name}" of the ${intent.direction} of proposal "${intent.proposalId}" cannot be persisted — a row that exists only in this process is gone after a restart, and the completion is not recorded for a row the deployment cannot keep; configure the capability table file (Config.capabilityConfig) and retry, and the intent stays open in the meantime`);
+		const table = (await this.get(intent.proposalId)).prepared?.capabilityTable;
+		if (table === void 0) throw new Error(`evolution: capability-table-unfrozen: proposal "${intent.proposalId}" records no composed identity for the capability table "${this.capabilityConfigPath}", so whether the file still holds the state this ${intent.direction} was prepared against cannot be established — the row "${capability.name}" was not written into it and no completion is recorded; prepare the candidate again (a prepare reads the table and freezes the three whole-file digests every commit of it is compared against)`);
 		const entry = capability.contentSha256 === null ? null : await committedRow(this.commitHost(), capability);
 		const written = await writeCapabilityRowToConfig({
 			file: this.capabilityConfigPath,
 			name: capability.name,
 			entry,
+			states: capabilityTableStates(intent.direction, table),
 			...this.capabilityConfigProbe === void 0 ? {} : { probe: this.capabilityConfigProbe }
 		});
 		if (written.direction === "written" && written.rowDigest !== capabilityRowDigest(entry)) throw new Error(`evolution: the capability row "${capability.name}" written into "${written.file}" reads back as ${written.rowDigest}, not as the row this ${intent.direction} committed (sha256 ${capabilityRowDigest(entry)}); nothing is recorded as settled and the intent stays open`);
+	}
+	/**
+	* The capability table half of the commit path's **before** picture (A6, EVO-2):
+	* the named reason this commit must not write anything yet, because the table
+	* file its row would be written into no longer reads as a state this proposal
+	* froze — or `null` when it does, or when this commit moves no row.
+	*
+	* It is asked by {@link commitIntent} after the intent line and before the first
+	* write, and by every reconciliation before any branch writes or settles: the
+	* row is written into that file *last* of a commit's steps, so without this gate
+	* a drifted table would be discovered only after the skill files and the
+	* registry row had already moved, leaving a half-product a human must settle.
+	* Asked here, a third party's edit stops the commit with the intent open and
+	* production untouched. The file carries the deployment's credentials, so the
+	* reason names the file, the row and the digests compared — never a line of it.
+	*/
+	async tableWriteRefusal(intent) {
+		const capability = intent.capability;
+		if (capability === void 0) return null;
+		const file = this.capabilityConfigPath;
+		if (file === void 0) return null;
+		const table = (await this.get(intent.proposalId)).prepared?.capabilityTable;
+		if (table === void 0) return `capability-table-unfrozen: the capability table "${file}" is not one this proposal may write — it records no composed identity for that file, so the state this ${intent.direction} was prepared against cannot be proved (prepare the candidate again, which reads the table and freezes it)`;
+		let text;
+		try {
+			text = await readFile(file, "utf8");
+		} catch (error) {
+			return `capability-table-unreadable: the capability table "${file}" cannot be read (${error instanceof Error ? error.message : String(error)}), so the state this ${intent.direction} would write into is unknown`;
+		}
+		const drift = capabilityTableDrift({
+			name: capability.name,
+			seen: sha256Hex(Buffer.from(text, "utf8")),
+			states: capabilityTableStates(intent.direction, table)
+		});
+		return drift === null ? null : `capability-table-changed: the capability table "${file}" is not a state this ${intent.direction} may write — ${drift}`;
 	}
 	/**
 	* The file half of {@link verifyCommitted}. A direction that ends with files
@@ -6214,6 +6479,7 @@ var EvolutionService = class extends Service {
 							if (record.skillBaseline !== null) throw new Error(`evolution: prepared record for "${record.proposalId}" records a production skill baseline for a capability candidate's new object — a capability candidate adds a skill, so its baseline is the recorded absence (\`null\`); improving an existing object is the same-name path`);
 							if (skillContent$1.contract === void 0) throw new Error(`evolution: prepared record for "${record.proposalId}" records a new skill without a declaration — a capability candidate's skill is an execution provider (SKILL.md plus SKILL.contract.json)`);
 						}
+						const capabilityTable = preparedCapabilityTable(record.capabilityTable, "capabilityTable", record.proposalId);
 						current.prepared = {
 							sandbox: record.sandbox,
 							mechanical: true,
@@ -6222,6 +6488,7 @@ var EvolutionService = class extends Service {
 							...skillContent$1 === void 0 ? {} : { skillBaseline: null },
 							capabilityRow,
 							capabilityBaseline,
+							...capabilityTable === void 0 ? {} : { capabilityTable },
 							files: [...record.files]
 						};
 						break;
@@ -6229,6 +6496,7 @@ var EvolutionService = class extends Service {
 					const skillContent = preparedIdentity(record.skillContent, "skillContent", record.proposalId);
 					const skillBaseline = preparedIdentity(record.skillBaseline, "skillBaseline", record.proposalId);
 					if (skillContent.contract === void 0 !== (skillBaseline.contract === void 0)) throw new Error(`evolution: prepared record for "${record.proposalId}" mixes object shapes — its candidate identity is ${skillContent.contract === void 0 ? "guidance (no sidecar)" : "an execution object (with a sidecar)"} while its production baseline is ${skillBaseline.contract === void 0 ? "guidance (no sidecar)" : "an execution object (with a sidecar)"} — one prepare freezes one object, so a candidate that changed roles is refused at the fold`);
+					if (record.capabilityTable !== void 0) throw new Error(`evolution: prepared record for "${record.proposalId}" records a capability table identity — a prepare freezes the table file of the one row a *capability* candidate writes, and a skill prepare writes no row at all`);
 					current.prepared = {
 						sandbox: record.sandbox,
 						mechanical: true,

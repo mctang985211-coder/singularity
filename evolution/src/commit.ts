@@ -41,6 +41,11 @@
  * behind. The directory fsync after each rename is *not* best-effort: a rename
  * whose directory entry is not durable is not a settled commit, so a failure
  * there throws by name with the intent left open and no completion recorded.
+ * A capability commit's row is the same kind of production state: its table file
+ * is re-read through {@link CommitHost.tableWriteRefusal} once the intent is
+ * recorded and before the first write, and the commit stops by name — with the
+ * intent open and nothing written, not even the skill files or the registry row —
+ * when that file no longer reads as a state the direction's prepare froze.
  * Only after every rename has been read back and verified — and after
  * {@link CommitHost.verifyCommitted} has re-read production as a *whole object*
  * (loadable, and carrying the identity this direction promised) — does the
@@ -222,6 +227,26 @@ export interface CommitHost {
    */
   objectWriteRefusal(intent: CommitIntentView): Promise<string | null>
   /**
+   * The named reason this commit must not write anything, because the capability
+   * table its row would be written into is no longer the file this proposal's
+   * prepare froze (nor the file this direction's own write leaves) — or `null`
+   * when it is, and for every commit that moves no row. The reason carries its own
+   * name (`capability-table-changed`, or `capability-table-unfrozen` for a
+   * proposal whose prepare froze no identity at all), so the entry point that
+   * refuses reports the same stop whichever question it asked.
+   *
+   * The row is the *last* thing a capability commit writes, so without this gate
+   * a table a third party moved would be discovered only after the skill files
+   * and the registry row had already moved, leaving a half-product a human must
+   * settle. It is asked therefore — in a fresh commit — after the intent line and
+   * before the first write, and in a recovery before any branch writes or settles
+   * anything: the intent stays open, nothing is written, and a human (or a table
+   * restored to the state prepare froze) is what lets the commit proceed. The
+   * table file holds the deployment's credentials, so a reason names the file,
+   * the row and the digests compared — never a line of it.
+   */
+  tableWriteRefusal(intent: CommitIntentView): Promise<string | null>
+  /**
    * Called after every file has been written and read back (and, for a
    * capability commit, after the row is in place) and before the completion is
    * recorded — in a fresh commit and in every reconciliation branch alike. The
@@ -282,15 +307,26 @@ export interface ReconcileOutcome {
  * could not account for.
  *
  * `onStaged` fires between the fsync and the rename — the point where the new
- * bytes are durable beside the target but have not replaced it. A failure before
- * the rename — that hook included — removes the temp file and throws: a failed
- * write leaves no half-installed version behind, and the caller's intent stays
- * open. A failure of the directory fsync *after* the rename is the one failure
- * that leaves the target replaced with the durability of the rename unknown: it
- * throws by name, the intent stays open and no completion is recorded, because a
- * rename whose directory entry is not durable is not a settled commit.
+ * bytes are durable beside the target but have not replaced it. It is awaited,
+ * so a caller can make the last observation of the *target* here, after every
+ * seam of its own: the capability table's write re-reads the file and re-checks
+ * the whole-file identity in exactly this hook (A6, EVO-2 P2), because after it
+ * there is no seam left before the rename — and a rename is an unconditional
+ * replace, so a check that is not the last thing to observe the file is a check
+ * a third party's write can slip past. A failure before the rename — that hook
+ * included — removes the temp file and throws: a failed write leaves no
+ * half-installed version behind, the target keeps exactly the bytes it had, and
+ * the caller's intent stays open. A failure of the directory fsync *after* the
+ * rename is the one failure that leaves the target replaced with the durability
+ * of the rename unknown: it throws by name, the intent stays open and no
+ * completion is recorded, because a rename whose directory entry is not durable
+ * is not a settled commit.
  */
-export async function writeFileAtomic(target: string, bytes: Buffer, onStaged?: () => void): Promise<void> {
+export async function writeFileAtomic(
+  target: string,
+  bytes: Buffer,
+  onStaged?: () => void | Promise<void>,
+): Promise<void> {
   const directory = dirname(target)
   const staging = join(directory, `.${basename(target)}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`)
   let handle: FileHandle | undefined
@@ -302,7 +338,7 @@ export async function writeFileAtomic(target: string, bytes: Buffer, onStaged?: 
     await handle.sync()
     await handle.close()
     handle = undefined
-    onStaged?.()
+    await onStaged?.()
     await rename(staging, target)
     try {
       await syncDirectory(directory)
@@ -385,9 +421,15 @@ async function sweepStaging(directory: string, target: string): Promise<void> {
  * refusal there is a named stop with no line recorded and nothing written,
  * instead of a commit that lands and then discovers the directory was not the
  * object it committed. Only then is the intent appended — through the service's
- * own durable append, so the line is on disk before production moves — and only
- * after every write has been read back and verified, the capability row is in
- * place (a capability commit, A6) and the whole object has passed
+ * own durable append, so the line is on disk before production moves — and, once
+ * the line is recorded and before the first write, the capability table the row
+ * would be written into is re-read through {@link CommitHost.tableWriteRefusal}:
+ * it must still hold a state the direction's prepare froze (or the file this
+ * direction's own write leaves, so a retry settles), and a table a third party
+ * moved stops the commit with the intent open and production untouched — instead
+ * of being discovered once the files and the row had already moved. Only after
+ * every write has been read back and verified, the capability row is in place (a
+ * capability commit, A6) and the whole object has passed
  * {@link CommitHost.verifyCommitted}, is the completion appended.
  *
  * The order of the two halves is the direction's, and it is the one that leaves
@@ -498,6 +540,24 @@ export async function commitIntent(
   }
   await host.append({ formatVersion: 4, kind: 'commit_intent', ...intent })
   host.probe('intent-recorded')
+  // The last gate before production moves, and the one that keeps a capability
+  // commit from writing a half-product: the row goes into the deployment's own
+  // configuration file, and that file must still read as the state this
+  // direction's prepare froze (or as this direction's own write, for a retry).
+  // It is asked *after* the intent line on purpose — the intent is the record of
+  // what is underway, and a table a third party moved leaves it open (nothing is
+  // written, nothing is settled) until a human settles the table or a new
+  // candidate is prepared against it. Asked before the first write, the skill
+  // files and the registry row this commit would otherwise install are not moved
+  // either.
+  const tableRefusal = await host.tableWriteRefusal(intent)
+  if (tableRefusal !== null) {
+    throw new Error(
+      `evolution: ${tableRefusal}; nothing was written for the ${request.direction} of proposal "${request.proposalId}", its commit intent ` +
+      `"${intent.intentId}" is recorded and stays open and no completion is recorded, so the table keeps exactly the bytes it holds now and ` +
+      'the row this commit was to install is not in it',
+    )
+  }
   await installDirection(host, intent, bytes, targets)
   await host.verifyCommitted(intent)
   host.probe('commit-verified')
@@ -512,9 +572,11 @@ export async function commitIntent(
  * pre-commit state, the committed content, absent or something else; read the
  * registry row and classify it the same three ways — a source that is gone or
  * changed, or a file or row that is missing or foreign, stops by name right
- * there, in its own words — and then ask
+ * there, in its own words — then ask
  * {@link CommitHost.objectWriteRefusal} what the *directory* holds beyond the
- * files the intent names. If nothing refused, then
+ * files the intent names, and {@link CommitHost.tableWriteRefusal} whether the
+ * capability table a row would be written into still reads as a state the prepare
+ * froze. If nothing refused, then
  *
  * - nothing has moved yet (every file still holds its baseline, the row its
  *   baseline): the same operation is carried out — an apply writes the files and
@@ -537,7 +599,14 @@ export async function commitIntent(
  * - the directory holding an entry the intent does not name — the object check
  *   above — a `blocked` outcome naming the entry, with nothing written: a
  *   recovery settles an intent over the object it commits, never over a
- *   directory a third party turned into something else.
+ *   directory a third party turned into something else;
+ * - the capability table a row would be written into reading as neither the
+ *   state the direction starts from nor the state its own write leaves (A6,
+ *   {@link CommitHost.tableWriteRefusal}) — a `blocked` outcome naming the file,
+ *   the row and the digests, with nothing written: the row is a capability
+ *   commit's last step, so a table a third party moved stops the recovery before
+ *   it redoes the files or the registry row, and before a settlement whose only
+ *   remaining step is that write records anything.
  *
  * The `completed-written` branch still fsyncs the production directories, even
  * though it writes no bytes: the completion is the claim that production holds
@@ -699,6 +768,24 @@ export async function reconcileIntent(host: CommitHost, intent: CommitIntentView
         'and nothing beside it, so nothing is written and the intent stays open until a human settles what the directory holds',
       )
     }
+  }
+
+  // The table half of that same before picture (A6, EVO-2): the row a capability
+  // commit writes goes into the deployment's own configuration file, which must
+  // still read as the state the prepare froze (or as this direction's own write).
+  // Asked before *any* branch below — before the redo writes the files and the
+  // row, and before a "nothing left to write" settlement records a completion —
+  // so a table a third party moved stops the recovery with nothing written and
+  // the intent open, rather than being discovered at the very end (or recorded
+  // over).
+  const tableRefusal = await host.tableWriteRefusal(intent)
+  if (tableRefusal !== null) {
+    return outcome(
+      'blocked',
+      `evolution: ${tableRefusal}; nothing was written for the ${intent.direction} of proposal "${intent.proposalId}" and commit intent ` +
+      `"${intent.intentId}" stays open — a commit writes its row into that file only while it reads as a state the prepare froze, and a ` +
+      'human settles the table (or restores it, and this recovery is run again)',
+    )
   }
 
   const settled = states.every(state => state === 'content') && rowState === 'content'

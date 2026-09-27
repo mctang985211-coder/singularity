@@ -417,3 +417,142 @@ describe('A6-2: a pure artifact gap is closed by producing the product, with no 
     expect(final.obligations.some(item => item.sourceTaskId === consumer)).toBe(true)
   })
 })
+
+describe('A6-3: a passed sibling the citation cannot bind is reported, and its position is done again', () => {
+  it('derives the binding from the failed run, reports the position it cannot bind, and redoes it', async () => {
+    // The failed attempt read two members: position 0 failed, position 1 passed —
+    // but the passed member's own evidence carries a **failing** verdict for the
+    // criterion the original map narrows that position to (its mandatory
+    // criterion held, so it verified; the map asks for more than that). A
+    // binding has to satisfy the map, so the derivation refuses that one and the
+    // position is left for the attempt's own member.
+    const firstBatch = Promise.withResolvers<void>()
+    const attemptBatch = Promise.withResolvers<void>()
+    const attemptSubmit = Promise.withResolvers<void>()
+    const h = await startScriptedLoop({
+      script: (_sessionId, index): readonly ScriptEntry[] => index === 0
+        ? [
+          {
+            tool: 'task_decompose',
+            args: batch('first attempt: one member fails, one passes', [
+              child('the member that fails', [commandCriterion('member-0', 'false')]),
+              child('the member that passes', [
+                commandCriterion('member-1', 'true'),
+                { ...commandCriterion('map-1', 'false'), mandatory: false },
+              ]),
+            ]),
+          },
+          { text: 'root: the first attempt is running' },
+          { waitFor: () => firstBatch.promise },
+          { tool: 'task_submit_result', args: { summary: 'the first attempt is handed in' } },
+          { text: 'root: handed in' },
+        ]
+        : index === 1 || index === 2
+          ? [
+            { tool: 'task_submit_result', args: { summary: 'the delegated member is done' } },
+            { text: 'member: handed in' },
+          ]
+          : index === 3
+            ? [
+              // No binding was derived for position 1, so both positions are the
+              // attempt's own work: the batch's members fill them in order.
+              {
+                tool: 'task_decompose',
+                args: batch('do both positions again', [
+                  child('the failed position', [commandCriterion('member-0', 'true')]),
+                  child('the position the map asks about', [commandCriterion('map-1', 'true')]),
+                ]),
+              },
+              { text: 'attempt: the replacements are running' },
+              { waitFor: () => attemptBatch.promise },
+              { tool: 'task_submit_result', args: { summary: 'both positions hold now' } },
+              { text: 'attempt: handed in' },
+            ]
+            : [
+              { tool: 'task_submit_result', args: { summary: 'the replacement holds' } },
+              { text: 'replacement: handed in' },
+            ],
+    })
+    const contract = rootContract([{ childIndex: 0, criterionId: 'member-0' }, { childIndex: 1, criterionId: 'map-1' }])
+    const root = await h.begin(contract)
+    const firstRunId = root.runId
+
+    // ── the first attempt: position 0 fails, position 1 passes ───────────────
+    await vi.waitFor(async () => expect((await runOf(h, STORE, firstRunId)).batches?.length).toBe(1), { timeout: 20_000 })
+    await h.runtime.awaitBatch(STORE, (await runOf(h, STORE, firstRunId)).batches![0]!.batchId)
+    const firstMembers = await members(h, STORE, firstRunId)
+    expect(firstMembers).toHaveLength(2)
+    const [failedMember, passedMember] = firstMembers as [string, string]
+    await vi.waitFor(async () => expect((await taskOf(h, STORE, passedMember)).status).toBe('verified'), { timeout: 20_000 })
+    expect((await taskOf(h, STORE, failedMember)).status).toBe('failed')
+    const passedRun = (await h.snapshot(STORE)).runs.find(item => item.taskId === passedMember && item.status === 'verified')!
+    const passedEvidence = (await h.snapshot(STORE)).evidence.find(item => item.taskRunId === passedRun.runId)!
+    expect(passedEvidence.verifierResults.find(item => item.criterionId === 'map-1')?.status).toBe('fail')
+    firstBatch.resolve()
+
+    // ── the root's own acceptance fails, and the diagnosis is what asks ───────
+    await vi.waitFor(async () => expect((await taskOf(h, STORE, root.taskId)).status).toBe('failed'), { timeout: 20_000 })
+    await h.task.recordDiagnosisIn(STORE, {
+      diagnosisId: 'd-map',
+      taskId: root.taskId,
+      observedFailure: 'the position the map asks about has no passing verdict',
+      scope: 'the root goal of this store',
+      localizedCause: 'the passed member never produced the evidence the map narrows to',
+      evidenceRefs: [passedEvidence.evidenceId],
+      reviewRefs: [],
+      confidence: 'high',
+      proposals: [],
+    }, 'test')
+
+    // ── the recovery, with the plan's two fields and nothing else ────────────
+    const outcome = await h.runtime.recoverRootTask(STORE, {
+      sourceTaskId: root.taskId,
+      sourceRunId: firstRunId,
+      sourceDiagnosisId: 'd-map',
+      requestKey: 'k-map',
+    }, { sessionId: ROOT })
+    expect(outcome.attempt).toBe('started')
+
+    // The passed sibling is *not* bound, and the position is reported with every
+    // reason — the finding is in the answer and on the attempt's own record.
+    expect(outcome.reusedMembers).toEqual([])
+    expect(outcome.unboundMembers).toHaveLength(1)
+    const [unbound] = outcome.unboundMembers
+    expect(unbound?.childIndex).toBe(1)
+    expect(unbound?.taskId).toBe(passedMember)
+    expect(unbound?.criterionId).toBe('map-1')
+    expect(unbound?.reasons.join('\n')).toContain('carries a "fail" verdict')
+    const attemptRun = (await h.snapshot(STORE)).runs.find(item => item.runId === outcome.runId)!
+    expect(attemptRun.recovery?.reusedMembers).toEqual([])
+    expect(attemptRun.recovery?.unboundMembers).toEqual(outcome.unboundMembers)
+
+    // ── the position is done again by the attempt's own members ──────────────
+    await vi.waitFor(async () => expect((await runOf(h, STORE, outcome.runId)).batches?.length).toBe(1), { timeout: 20_000 })
+    await h.runtime.awaitBatch(STORE, (await runOf(h, STORE, outcome.runId)).batches![0]!.batchId)
+    await vi.waitFor(async () => {
+      const slots = (await h.task.runMemberSlotsIn(STORE, outcome.runId)).map(task => task?.taskId)
+      expect(slots).toHaveLength(2)
+      expect(slots[0]).not.toBe(failedMember)
+      expect(slots[1]).not.toBe(passedMember)
+    }, { timeout: 20_000 })
+    const attemptMembers = await members(h, STORE, outcome.runId)
+    expect(attemptMembers).toHaveLength(2)
+    attemptBatch.resolve()
+
+    // ── the original acceptance criteria judge the attempt at both positions ─
+    attemptSubmit.resolve()
+    await vi.waitFor(async () => expect((await runOf(h, STORE, outcome.runId)).status).toBe('verified'), { timeout: 20_000 })
+    const mapVerdict = await verdict(h, STORE, outcome.runId, 'root-map')
+    expect(mapVerdict?.status).toBe('pass')
+    expect(mapVerdict?.details).toContain(`child #0 (${attemptMembers[0]}) criterion "member-0" passed`)
+    expect(mapVerdict?.details).toContain(`child #1 (${attemptMembers[1]}) criterion "map-1" passed`)
+    expect((await taskOf(h, STORE, root.taskId)).status).toBe('verified')
+
+    // The old facts stay readable: the failed member, the passed one (with its
+    // failing map verdict), and the failed source run.
+    const final = await h.snapshot(STORE)
+    expect(final.runs.filter(item => item.taskId === passedMember)).toHaveLength(1)
+    expect(final.evidence.find(item => item.evidenceId === passedEvidence.evidenceId)).toEqual(passedEvidence)
+    expect(final.runs.find(item => item.runId === firstRunId)?.status).toBe('failed')
+  })
+})

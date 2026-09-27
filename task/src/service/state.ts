@@ -43,7 +43,7 @@ import {
   type TaskProposalRootConsumption,
   type TaskProposalStatus,
 } from '../proposal.ts'
-import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, reaches, rootTaskStoreId } from '../types.ts'
+import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, reaches, rootTaskStoreId, runMemberSlots } from '../types.ts'
 import { answerIdOf, questionIdOf } from '../question.ts'
 import type { QuestionAnswerRecord, QuestionMessageRef, QuestionRecord, TaskQuestionIndex } from '../question.ts'
 import type {
@@ -639,6 +639,9 @@ export class TaskState {
     if (recovery.sourceRunId !== undefined && (typeof recovery.sourceRunId !== 'string' || recovery.sourceRunId.length === 0)) {
       throw new Error(`${where} source run id must be a non-empty string when present`)
     }
+    if (recovery.requestDigest !== undefined && (typeof recovery.requestDigest !== 'string' || recovery.requestDigest.trim().length === 0)) {
+      throw new Error(`${where} request digest must be a non-empty string when present`)
+    }
     const task = this.task(taskId)
     if (task.parentTaskId !== undefined) {
       throw new Error(`${where} names task "${taskId}", which has a parent; a recovery attempt is opened for the store's own root task`)
@@ -649,22 +652,31 @@ export class TaskState {
         'a recovery is asked for by a diagnosis of the failing task and by nothing else',
       )
     }
+    let sourceRun: TaskRun | undefined
     if (recovery.sourceRunId !== undefined) {
-      const source = this.value.runs.find(run => run.runId === recovery.sourceRunId)
-      if (source === undefined) throw new Error(`${where} cites unknown run "${recovery.sourceRunId}"`)
-      if (source.taskId !== taskId) {
-        throw new Error(`${where} cites run "${recovery.sourceRunId}", which belongs to task "${source.taskId}", not "${taskId}"`)
+      sourceRun = this.value.runs.find(run => run.runId === recovery.sourceRunId)
+      if (sourceRun === undefined) throw new Error(`${where} cites unknown run "${recovery.sourceRunId}"`)
+      if (sourceRun.taskId !== taskId) {
+        throw new Error(`${where} cites run "${recovery.sourceRunId}", which belongs to task "${sourceRun.taskId}", not "${taskId}"`)
       }
     }
     const reused = recovery.reusedMembers
     if (!Array.isArray(reused)) throw new Error(`${where} reused members must be an array`)
+    const claimed = new Set<number>()
     reused.forEach((member, position) => {
       const at = `${where} reused member ${position}`
       if (!isRecord(member)) throw new Error(`${at} must be an object`)
-      if (member.childIndex !== position) {
+      if (!Number.isInteger(member.childIndex) || (member.childIndex as number) < 0) {
+        throw new Error(`${at} childIndex ${JSON.stringify(member.childIndex)} must be a non-negative integer`)
+      }
+      if (claimed.has(member.childIndex as number)) {
+        throw new Error(`${at} claims position ${member.childIndex}, which another entry of this record already claims; one position reads one member`)
+      }
+      claimed.add(member.childIndex as number)
+      if (sourceRun !== undefined && runMemberSlots(sourceRun)[member.childIndex as number] !== member.taskId) {
         throw new Error(
-          `${at} declares childIndex ${JSON.stringify(member.childIndex)}; a reused member occupies its own position in the sequence ` +
-          `(${position}), because the store reads the pinned siblings first and the admitted members after them`,
+          `${at} claims position ${member.childIndex} for "${String(member.taskId)}", but the failed run "${sourceRun.runId}" reads ` +
+          `${runMemberSlots(sourceRun)[member.childIndex as number] === undefined ? 'no member' : `"${runMemberSlots(sourceRun)[member.childIndex as number]}"`} there`,
         )
       }
       const sibling = this.value.tasks.find(candidate => candidate.taskId === member.taskId)
@@ -723,7 +735,43 @@ export class TaskState {
           )
         }
       }
+      const mapEntry = task.acceptanceCriteria
+        .flatMap(criterion => criterion.childEvidence ?? [])
+        .find(entry => entry.childIndex === member.childIndex)
+      if (mapEntry !== undefined) {
+        if (mapEntry.criterionId !== undefined && mapEntry.criterionId !== member.criterionId) {
+          throw new Error(
+            `${at} claims position ${member.childIndex}, which the original acceptance map narrows to criterion "${mapEntry.criterionId}"; ` +
+            `this record ${member.criterionId === undefined ? 'names no criterion' : `names "${member.criterionId}"`}`,
+          )
+        }
+        if (mapEntry.evidenceRef !== undefined
+          && member.evidenceId !== mapEntry.evidenceRef
+          && !(member.artifactRefs ?? []).includes(mapEntry.evidenceRef)) {
+          throw new Error(
+            `${at} claims position ${member.childIndex}, which the original acceptance map narrows to evidence "${mapEntry.evidenceRef}"; ` +
+            'the cited bundle does not carry that identity (evidence id, artifact id or artifact kind)',
+          )
+        }
+      }
     })
+    const unbound = recovery.unboundMembers
+    if (unbound !== undefined) {
+      if (!Array.isArray(unbound)) throw new Error(`${where} unbound members must be an array`)
+      for (const [position, entry] of unbound.entries()) {
+        const at = `${where} unbound member ${position}`
+        if (!isRecord(entry)) throw new Error(`${at} must be an object`)
+        if (!Number.isInteger(entry.childIndex) || (entry.childIndex as number) < 0) {
+          throw new Error(`${at} childIndex ${JSON.stringify(entry.childIndex)} must be a non-negative integer`)
+        }
+        if (!Array.isArray(entry.reasons) || entry.reasons.length === 0 || entry.reasons.some(reason => typeof reason !== 'string' || reason.trim().length === 0)) {
+          throw new Error(`${at} must carry at least one non-empty reason; a position left unbound is a finding, never a silent omission`)
+        }
+        if (claimed.has(entry.childIndex as number)) {
+          throw new Error(`${at} names position ${entry.childIndex}, which this record also claims; a position is either bound or left open`)
+        }
+      }
+    }
   }
 
   private block(taskId: TaskId, runId: RunId | undefined): void {

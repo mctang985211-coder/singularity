@@ -3084,9 +3084,16 @@ function renderProvider(verdict) {
 * The provider line under one capability row: every skill's verdict, or the
 * fact that the row grants none. `rows` is the pre-check's own output, so an
 * error message or a missing skill cannot be papered over here.
+*
+* A row the pre-check refused *as a row* — the capability an open evolution
+* commit intent moves (A6) — has no verdicts to show: it was not resolved, and
+* that refusal is what the model has to see before it picks this name for a
+* batch admission will reject.
 */
 function renderProviders(row) {
 	if (row === void 0) return "providers: (not checked)";
+	const refusals = row.refusals ?? [];
+	if (refusals.length > 0) return `providers: (refused — ${refusals.map((item) => `${item.code}: ${item.detail}`).join("; ")})`;
 	if (row.skills.length === 0) return "providers: (none — the capability grants no skill)";
 	return `providers: ${row.skills.map(renderProvider).join(" · ")}`;
 }
@@ -3877,7 +3884,7 @@ function sessionId$14(exec) {
 function defineEvolutionPrepareTool(ctx) {
 	return defineTool({
 		name: "evolution_prepare",
-		description: "Materialize a skill candidate's structured mutation into the proposal sandbox (status: prepared). What is prepared is the complete object the candidate improves: a guidance skill is its `SKILL.md` alone, and an execution skill is `SKILL.md` plus the `SKILL.contract.json` beside it, derived from the production declaration with only content.skillMdSha256 recomputed — the model never submits a sidecar. One verified read of the production object comes first — it yields both the champion/ snapshot and the baseline identity a later apply compares against — and a target that is not there, or is not the loadable object its files claim (a defective declaration, an undeclared file), is refused by name before any sandbox or ledger write, never prepared against nothing. A knowledge sidecar, an object declaring resources and a non-skill proposal are refused by name too, and production fixes the shape: this path cannot add a `SKILL.contract.json` to a skill that has none, and it never changes the object's role. Writes go only to the proposal sandbox (<ledger root>/sandbox/<proposalId>/: `skills/<name>/SKILL.md` — plus `skills/<name>/SKILL.contract.json` for an execution object — and the same paths under `champion/` for the production bytes the snapshot captures). Nothing here touches production; the next step is evolution_replay, the two-sided experiment.",
+		description: "Materialize a candidate's structured mutation into the proposal sandbox (status: prepared). A skill candidate is prepared as the complete object it improves: a guidance skill is its `SKILL.md` alone, and an execution skill is `SKILL.md` plus the `SKILL.contract.json` beside it, derived from the production declaration with only content.skillMdSha256 recomputed — the model never submits a sidecar. A capability candidate (A6) is prepared as its whole row, plus the new execution skill that row grants when it carries one; the baseline a later apply compares against is then the row the registry held. One verified read of the production target comes first — it yields both the champion/ snapshot and the baseline identity a later apply compares against — and a target that is not there, or is not the loadable object its files claim (a defective declaration, an undeclared file), is refused by name before any sandbox or ledger write, never prepared against nothing. A knowledge sidecar, an object declaring resources and a proposal of any other kind are refused by name too, and production fixes the shape: this path cannot add a `SKILL.contract.json` to a skill that has none, and it never changes the object's role. Writes go only to the proposal sandbox (<ledger root>/sandbox/<proposalId>/: `skills/<name>/SKILL.md` — plus `skills/<name>/SKILL.contract.json` for an execution object — and the same paths under `champion/` for the production bytes the snapshot captures). Nothing here touches production; the next step is evolution_replay, the two-sided experiment.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
@@ -3892,6 +3899,17 @@ function defineEvolutionPrepareTool(ctx) {
 			try {
 				const prepared = await ctx.evolution.prepare(args.proposalId, caller);
 				const view = prepared.prepared;
+				if (view.capabilityRow !== void 0) {
+					const rowBaseline = view.capabilityBaseline ?? null;
+					return [
+						`proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
+						...view.files.map((file) => `  wrote ${file}`),
+						`candidate row: ${view.capabilityRow.name} sha256:${view.capabilityRow.digest.slice(0, 12)}…`,
+						rowBaseline === null ? "registry baseline: the table held no such row, so this candidate adds it" : `registry baseline: row sha256:${rowBaseline.digest.slice(0, 12)}… (an apply refuses if the registry row changed since this read)`,
+						view.skillContent === void 0 ? "candidate object: the row alone — no new skill object is materialized" : "candidate object: a new execution provider (SKILL.md + SKILL.contract.json) the row grants, judged by a registered verifier with resources: []",
+						"sandbox only — production was not touched; next: evolution_replay (the two-sided experiment), then evolution_gate"
+					].join("\n");
+				}
 				const baseline = view.skillBaseline;
 				return [
 					`proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
@@ -5690,7 +5708,8 @@ function renderOutcome$1(outcome) {
 		`task_recover: ${outcome.attempt === "started" ? "a new attempt was opened" : "this key already named an attempt"} for diagnosis ${outcome.sourceDiagnosisId} — run ${outcome.runId} (session ${outcome.sessionId}) is ${outcome.status}`,
 		`hand-off: delegated by session ${outcome.handoff.actor} to supervisor ${outcome.handoff.sessionId}`,
 		...outcome.coordination.map((line) => `- ${line}`),
-		outcome.reusedMembers.length === 0 ? "the attempt re-runs the work; no already-verified sibling was cited" : `the attempt reads ${outcome.reusedMembers.length} already-verified sibling member(s) at its leading positions`,
+		outcome.reusedMembers.length === 0 ? "the attempt re-runs the work; no already-verified sibling was cited" : `the attempt reads ${outcome.reusedMembers.length} already-verified sibling member(s) at position(s) ${outcome.reusedMembers.map((member) => member.childIndex).join(", ")}`,
+		...outcome.unboundMembers.length === 0 ? [] : [`${outcome.unboundMembers.length} position(s) whose passed sibling could not be bound are done again, with the reasons on the attempt's own record: ` + outcome.unboundMembers.map((entry) => `#${entry.childIndex} (${entry.reasons.join("; ")})`).join(", ")],
 		"the original acceptance criteria judge the new attempt, the old failure stays readable, and the store total it spends is the same one"
 	].join("\n");
 }

@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import { SessionNotInGraphError } from '../../../graphs/src/index.ts'
 import type { Diagnosis, EvidenceBundle, TaskInstance, TaskRun } from '../../../task/src/index.ts'
-import { TaskService, budgetExtensionRequestDigest, rootTaskStoreId, runMemberTaskIds } from '../../../task/src/index.ts'
+import { TaskService, batchIdFor, budgetExtensionRequestDigest, rootTaskStoreId, runMemberSlots, runMemberTaskIds } from '../../../task/src/index.ts'
 import { VerifierRegistry } from '../../../verifier/src/index.ts'
 import type { CapabilityConfig, Config, RootRecoveryRequest } from '../../src/index.ts'
 import { TaskRuntime } from '../../src/index.ts'
@@ -36,6 +37,10 @@ const NOW = '2026-09-28T00:00:00.000Z'
 const ROOT_SESSION = 'root-session'
 const SUPERVISOR = 'supervisor-session'
 const STORE = rootTaskStoreId(ROOT_SESSION)
+/** A second graph of the same deployment: its own root session and its own member. */
+const OTHER_ROOT = 'other-root'
+const OTHER_SUPERVISOR = 'other-supervisor'
+const OTHER_STORE = rootTaskStoreId(OTHER_ROOT)
 
 interface StoredSession {
   readonly header: SessionHeader
@@ -54,7 +59,7 @@ interface SpawnCall {
  * The model loop is not mounted: `agentRuntime.spawn` records and answers, which
  * is the boundary the entry's own rules stop at.
  */
-function harness(options: { config?: Partial<Config>; sessions?: Map<string, StoredSession>; verifier?: boolean } = {}) {
+function harness(options: { config?: Partial<Config>; sessions?: Map<string, StoredSession>; verifier?: boolean; live?: readonly string[] } = {}) {
   const sessions = options.sessions ?? new Map<string, StoredSession>()
   const disposers: Array<() => unknown> = []
   const spawns: SpawnCall[] = []
@@ -82,13 +87,33 @@ function harness(options: { config?: Partial<Config>; sessions?: Map<string, Sto
       }
     }),
   }
+  /**
+   * The graphs this deployment publishes, resolved the way a graph store's own
+   * agents answer: the fixed roots and members below, and — for a session one of
+   * them spawned — through the durable `parentSession` edge the real
+   * `AgentRuntime` writes and a reopened process reads back. A session no graph
+   * publishes is reported the way the real registry reports it
+   * (`SessionNotInGraphError`) rather than silently mapped onto some graph's
+   * root — a caller outside every graph is exactly what the ownership rule has
+   * to refuse, and a spawned session whose edge the fixture failed to record
+   * must not be read as "the store's own".
+   */
+  const fixedMembers: Record<string, { id: string; rootSessionId: string }> = {
+    [ROOT_SESSION]: { id: 'g1', rootSessionId: ROOT_SESSION },
+    [SUPERVISOR]: { id: 'g1', rootSessionId: ROOT_SESSION },
+    [OTHER_ROOT]: { id: 'g2', rootSessionId: OTHER_ROOT },
+    [OTHER_SUPERVISOR]: { id: 'g2', rootSessionId: OTHER_ROOT },
+  }
+  const resolveGraph = (sessionId: string, seen: Set<string> = new Set()): { id: string; rootSessionId: string } => {
+    const fixed = fixedMembers[sessionId]
+    if (fixed !== undefined) return fixed
+    const parent = sessions.get(sessionId)?.header.parentSession
+    if (parent === undefined || seen.has(sessionId)) throw new SessionNotInGraphError(sessionId)
+    seen.add(sessionId)
+    return resolveGraph(String(parent), seen)
+  }
   const graphs = {
-    graphForSession: vi.fn(async (sessionId: string) => ({
-      id: 'g1',
-      rootSessionId: sessionId === SUPERVISOR ? ROOT_SESSION : sessionId,
-      graphStoreId: 'sg-g-root',
-      layoutStoreId: 'sg-l-root',
-    })),
+    graphForSession: vi.fn(async (sessionId: string) => ({ ...resolveGraph(sessionId), graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root' })),
   }
   /**
    * The sessions this process image holds live: the caller, and every session its
@@ -96,17 +121,24 @@ function harness(options: { config?: Partial<Config>; sessions?: Map<string, Sto
    * exactly what "the run nobody in this process holds" means — so the resume
    * door is the one that has to bring a session back.
    */
-  const liveSessions = new Set<string>([SUPERVISOR])
+  const liveSessions = new Set<string>([SUPERVISOR, ...(options.live ?? [])])
   const agents = {
     get: (id: string) => (liveSessions.has(id) ? { id, followup: () => {} } : undefined),
   }
   const agentRuntime = {
     spawn: vi.fn(async (parent: unknown, request: SpawnCall['request']) => {
       spawns.push({ parent, request })
-      // The session a spawn creates is durable, as the real one is: a reopened
-      // process reads it back and brings it under its own identity.
+      // The session a spawn creates is durable, as the real one is — including
+      // the `parentSession` edge the real `AgentRuntime` records for it, which is
+      // how a reopened process resolves which graph a spawned session belongs to.
+      const parentId = String((parent as { id?: unknown } | undefined)?.id ?? '')
       sessions.set(request.sessionId, {
-        header: { id: request.sessionId, createdAt: NOW, updatedAt: NOW } as SessionHeader,
+        header: {
+          id: request.sessionId,
+          createdAt: NOW,
+          updatedAt: NOW,
+          ...(parentId.length === 0 ? {} : { parentSession: parentId }),
+        } as SessionHeader,
         events: [],
       })
       liveSessions.add(request.sessionId)
@@ -213,14 +245,18 @@ function run(runId: string, taskId: string, sessionId = ROOT_SESSION, extra: Par
 const MANIFEST = { capabilities: {}, missing: [], closure: 'closed' as const }
 
 /** One passed sibling of the failed attempt: a child task, its verified run and the bundle it left. */
-function passedSibling(childId: string, verdict: 'pass' | 'fail' = 'pass'): { task: TaskInstance; run: TaskRun; bundle: EvidenceBundle } {
+function passedSibling(
+  childId: string,
+  verdict: 'pass' | 'fail' = 'pass',
+  criterionId = 'child-0',
+): { task: TaskInstance; run: TaskRun; bundle: EvidenceBundle } {
   const task: TaskInstance = {
     taskId: childId,
     definitionRef: { taskType: 'child', version: 1 },
     parentTaskId: 'root',
     objective: childId,
     depth: 1,
-    acceptanceCriteria: [{ ...criterion('child-0'), verificationMode: 'deterministic' } as never],
+    acceptanceCriteria: [{ ...criterion(criterionId), verificationMode: 'deterministic' } as never],
     requestedCapabilities: [],
     decompositionStatus: 'leaf',
     status: 'created',
@@ -233,11 +269,85 @@ function passedSibling(childId: string, verdict: 'pass' | 'fail' = 'pass'): { ta
     taskRunId: `r-${childId}`,
     taskId: childId,
     artifacts: [{ artifactId: `a-${childId}`, kind: 'report', path: 'out/report.md' }],
-    verifierResults: [{ criterionId: 'child-0', status: verdict, verifierId: 'command' }],
+    verifierResults: [{ criterionId, status: verdict, verifierId: 'command' }],
     claims: [],
     generatedAt: NOW,
   }
   return { task, run: childRun, bundle }
+}
+
+/** How one member of the failed run reads: what it was, and whether it passed. */
+interface SourceMemberPlan {
+  childId: string
+  criterionId: string
+  /** `verified` is a passed sibling (a reuse candidate); `failed` is the work the new attempt is for. */
+  outcome: 'verified' | 'failed'
+  /** The verdict the member's own bundle carries for its criterion — the sibling's passed (or failed) evidence. */
+  verdict: 'pass' | 'fail'
+}
+
+/**
+ * Record one batch on a run: the members it read, in the positions it read them
+ * at. Written through the store's own entry, which is where a run's accumulation
+ * always comes from — the runtime never writes members itself.
+ */
+async function admitMembers(h: Harness, runId: string, members: readonly string[], proposalId = 'p-first'): Promise<void> {
+  await h.task.commitIn(STORE, [{
+    kind: 'TaskDecomposed',
+    taskId: 'root',
+    runId,
+    timestamp: NOW,
+    actor: 'test',
+    payload: { childTaskIds: [...members], batchId: batchIdFor(runId, proposalId), parentRunId: runId, proposalId },
+    schemaVersion: 1,
+  }] as never)
+}
+
+/**
+ * The store a derivation case starts from: the root task and its **failed first
+ * run**, which read exactly the members `plan` lists — a passed sibling is a
+ * child whose own run verified with the verdict given, and a failed member is
+ * the work the new attempt exists for. The root's acceptance map is the case's
+ * own `childEvidence`, because that is what a binding has to agree with.
+ */
+async function storeWithSourceRun(
+  h: Harness,
+  plan: readonly SourceMemberPlan[],
+  map: readonly { childIndex: number; criterionId?: string; evidenceRef?: string }[],
+): Promise<void> {
+  const base = rootTask()
+  const root: TaskInstance = {
+    ...base,
+    acceptanceCriteria: base.acceptanceCriteria.map(criterionEntry => criterionEntry.criterionId === 'root-map'
+      ? { ...criterionEntry, childEvidence: map as never }
+      : criterionEntry),
+    contract: {
+      ...base.contract!,
+      acceptanceCriteria: base.contract!.acceptanceCriteria.map(criterionEntry => criterionEntry.criterionId === 'root-map'
+        ? { ...criterionEntry, childEvidence: map as never }
+        : criterionEntry),
+    },
+  }
+  await h.task.createStore(STORE)
+  await h.task.createTaskIn(STORE, root, 'test')
+  await h.task.admitTaskIn(STORE, 'root', 'test', { manifest: MANIFEST })
+  for (const member of plan) {
+    const sibling = passedSibling(member.childId, member.verdict, member.criterionId)
+    await h.task.createTaskIn(STORE, sibling.task, 'test')
+    await h.task.admitTaskIn(STORE, member.childId, 'test', { manifest: MANIFEST })
+    await h.task.startRunIn(STORE, sibling.run, 'test')
+    await h.task.recordEvidenceIn(STORE, sibling.bundle, 'test')
+    if (member.outcome === 'verified') {
+      await h.task.markRunStatusIn(STORE, member.childId, sibling.run.runId, 'verifying', 'test')
+      await h.task.markRunStatusIn(STORE, member.childId, sibling.run.runId, 'verified', 'test')
+    } else {
+      await h.task.markRunStatusIn(STORE, member.childId, sibling.run.runId, 'failed', 'test', { reason: `${member.childId} did not hold` })
+    }
+  }
+  await h.task.startRunIn(STORE, run('r-first', 'root'), 'test')
+  await admitMembers(h, 'r-first', plan.map(member => member.childId))
+  await h.task.markRunStatusIn(STORE, 'root', 'r-first', 'failed', 'test', { reason: 'the map did not hold' })
+  await h.task.recordDiagnosisIn(STORE, diagnosis('d-1'), 'test')
 }
 
 function diagnosis(diagnosisId: string, taskId = 'root'): Diagnosis {
@@ -357,6 +467,15 @@ async function recover(h: Harness, overrides: Partial<RootRecoveryRequest> = {},
 /** The runs one store holds for a task, in start order. */
 async function runsOf(h: Harness, taskId: string): Promise<TaskRun[]> {
   return (await h.task.snapshotIn(STORE)).runs.filter(item => item.taskId === taskId)
+}
+
+/** Every file under one directory, or none when the directory was never created. */
+function filesUnder(dir: string): string[] {
+  try {
+    return readdirSync(dir, { recursive: true }).map(String).sort()
+  } catch {
+    return []
+  }
 }
 
 describe('A6 recovery entry: the attempt it opens', () => {
@@ -570,11 +689,21 @@ describe('A6 recovery entry: what it refuses, with no run started', () => {
     expect(await runsOf(h, 'root')).toHaveLength(2)
   })
 
-  test('refuses a reuse whose position does not match the failed run', async () => {
+  test('refuses a reuse whose position the failed run reads no member at', async () => {
     const h = harness()
     const { sibling } = await storeWithFailedRoot(h)
     const message = await refusal(() => recover(h, { reuses: [reuse(sibling, { childIndex: 1 }) as never] }))
-    expect(message).toContain('childIndex')
+    expect(message).toContain('reads no member at position 1')
+    expect(await runsOf(h, 'root')).toHaveLength(1)
+  })
+
+  test('refuses two entries that claim one position', async () => {
+    const h = harness()
+    const { sibling } = await storeWithFailedRoot(h)
+    const message = await refusal(() => recover(h, {
+      reuses: [reuse(sibling) as never, reuse(sibling) as never],
+    }))
+    expect(message).toContain('is claimed by another entry')
     expect(await runsOf(h, 'root')).toHaveLength(1)
   })
 
@@ -779,5 +908,196 @@ describe('A6 recovery entry: a cancelled attempt is terminal, and the next admis
     expect(again.attempt).toBe('existing')
     expect(again.runId).toBe(started.runId)
     expect((await h.task.snapshotIn(STORE)).runs).toHaveLength(3)
+  })
+})
+
+describe('A6 recovery entry: the binding is derived from the failed run\'s own facts', () => {
+  test('binds a passed sibling that stands after the failed member, at the position the map names', async () => {
+    const h = harness()
+    // The failed attempt read two members: position 0 failed, position 1 passed.
+    // The driver really does start a member after a failed one (a failed member is
+    // terminal and leaves the round's pending list), so this is a shape a real run
+    // reaches — and the passed sibling at position 1 must not be re-run.
+    await storeWithSourceRun(h, [
+      { childId: 'child-0', criterionId: 'member-0', outcome: 'failed', verdict: 'fail' },
+      { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'pass' },
+    ], [{ childIndex: 0, criterionId: 'member-0' }, { childIndex: 1, criterionId: 'member-1' }])
+    const before = await h.task.snapshotIn(STORE)
+
+    // No `reuses` in the request: the two-field chain's shape, where the caller
+    // states nothing about evidence and the store's facts decide.
+    const outcome = await recover(h)
+    expect(outcome.attempt).toBe('started')
+    expect(outcome.reusedMembers).toEqual([{
+      childIndex: 1,
+      taskId: 'child-1',
+      sourceRunId: 'r-child-1',
+      evidenceId: 'e-child-1',
+      criterionId: 'member-1',
+      artifactRefs: ['a-child-1', 'report'],
+      inputRefs: [],
+    }])
+    expect(outcome.unboundMembers).toEqual([])
+
+    // The attempt's record carries the same citation, and its member sequence
+    // reads the sibling at position 1: position 0 is left for the member the
+    // attempt's own batch will admit.
+    const attemptRun = (await h.task.snapshotIn(STORE)).runs.find(item => item.runId === outcome.runId)!
+    expect(attemptRun.recovery?.reusedMembers).toEqual(outcome.reusedMembers)
+    expect(runMemberSlots(attemptRun)).toEqual([undefined, 'child-1'])
+    expect(runMemberTaskIds(attemptRun)).toEqual(['child-1'])
+
+    // The passed sibling was not re-run: one run before, one run after.
+    const after = await h.task.snapshotIn(STORE)
+    expect(before.runs.filter(item => item.taskId === 'child-1')).toHaveLength(1)
+    expect(after.runs.filter(item => item.taskId === 'child-1')).toHaveLength(1)
+    expect(after.evidence.find(item => item.evidenceId === 'e-child-1')).toEqual(before.evidence.find(item => item.evidenceId === 'e-child-1'))
+  })
+
+  test('reports a passed sibling it cannot bind, with the reasons, and leaves the position open', async () => {
+    const h = harness()
+    // The map narrows position 1 to criterion "member-1", and the sibling's own
+    // bundle carries a *failing* verdict for it: the sibling verified (its
+    // mandatory criterion held) but the evidence the map asks for is not there, so
+    // the citation cannot be bound and the position has to be done again.
+    await storeWithSourceRun(h, [
+      { childId: 'child-0', criterionId: 'member-0', outcome: 'failed', verdict: 'fail' },
+      { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'fail' },
+    ], [{ childIndex: 0, criterionId: 'member-0' }, { childIndex: 1, criterionId: 'member-1' }])
+
+    const outcome = await recover(h)
+    expect(outcome.reusedMembers).toEqual([])
+    expect(outcome.unboundMembers).toHaveLength(1)
+    const [unbound] = outcome.unboundMembers
+    expect(unbound?.childIndex).toBe(1)
+    expect(unbound?.taskId).toBe('child-1')
+    expect(unbound?.criterionId).toBe('member-1')
+    expect(unbound?.reasons.join('\n')).toContain('carries a "fail" verdict')
+    // The label names the position, not a request field: this binding came from
+    // the store, and a reader is not told to look at a request that had none.
+    expect(unbound?.reasons.join('\n')).toContain('position 1')
+
+    // The finding is durable: the attempt's own record names the position and the
+    // reasons, so a reader that never saw this answer can still tell why the
+    // position is being done again.
+    const attemptRun = (await h.task.snapshotIn(STORE)).runs.find(item => item.runId === outcome.runId)!
+    expect(attemptRun.recovery?.reusedMembers).toEqual([])
+    expect(attemptRun.recovery?.unboundMembers).toEqual(outcome.unboundMembers)
+    expect(runMemberSlots(attemptRun)).toEqual([])
+  })
+
+  test('binds the sibling the map asks for and reports only the position it cannot, in one attempt', async () => {
+    const h = harness()
+    await storeWithSourceRun(h, [
+      { childId: 'child-0', criterionId: 'member-0', outcome: 'verified', verdict: 'pass' },
+      { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'fail' },
+      { childId: 'child-2', criterionId: 'member-2', outcome: 'failed', verdict: 'fail' },
+    ], [
+      { childIndex: 0, criterionId: 'member-0' },
+      { childIndex: 1, criterionId: 'member-1' },
+      { childIndex: 2, criterionId: 'member-2' },
+    ])
+    const outcome = await recover(h)
+    expect(outcome.reusedMembers.map(member => member.childIndex)).toEqual([0])
+    expect(outcome.unboundMembers.map(entry => entry.childIndex)).toEqual([1])
+    // Position 0 reads the sibling the map named for it, and the sequence ends
+    // there: positions 1 and 2 are not filled yet — the attempt's own batches
+    // will fill them, and a judgement made before that reads them as positions
+    // the run does not hold.
+    expect(runMemberSlots((await h.task.snapshotIn(STORE)).runs.find(item => item.runId === outcome.runId)!))
+      .toEqual(['child-0'])
+  })
+
+  test('an explicit declaration of the same unresolvable citation refuses the whole recovery', async () => {
+    const h = harness()
+    await storeWithSourceRun(h, [
+      { childId: 'child-0', criterionId: 'member-0', outcome: 'verified', verdict: 'pass' },
+    ], [{ childIndex: 0, criterionId: 'member-0' }])
+    const message = await refusal(() => recover(h, {
+      reuses: [{
+        childIndex: 0,
+        taskId: 'child-0',
+        sourceRunId: 'r-child-0',
+        evidenceId: 'e-child-0',
+        criterionId: 'member-1',
+      } as never],
+    }))
+    expect(message).toContain('the declared reuse does not resolve')
+    expect(await runsOf(h, 'root')).toHaveLength(1)
+  })
+
+  test('an explicit declaration at a position after a failed member is accepted', async () => {
+    const h = harness()
+    await storeWithSourceRun(h, [
+      { childId: 'child-0', criterionId: 'member-0', outcome: 'failed', verdict: 'fail' },
+      { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'pass' },
+    ], [{ childIndex: 0, criterionId: 'member-0' }, { childIndex: 1, criterionId: 'member-1' }])
+    const outcome = await recover(h, {
+      reuses: [{
+        childIndex: 1,
+        taskId: 'child-1',
+        sourceRunId: 'r-child-1',
+        evidenceId: 'e-child-1',
+        criterionId: 'member-1',
+      } as never],
+    })
+    expect(outcome.attempt).toBe('started')
+    expect(outcome.reusedMembers.map(member => member.childIndex)).toEqual([1])
+    expect(runMemberSlots((await h.task.snapshotIn(STORE)).runs.find(item => item.runId === outcome.runId)!))
+      .toEqual([undefined, 'child-1'])
+  })
+})
+
+describe('A6 recovery entry: the caller must own the store it asks for', () => {
+  test('refuses a live session of another graph, with no new run, no spawn and no write', async () => {
+    const bindingRoot = mkdtempSync(join(tmpdir(), 'a6-recovery-bindings-'))
+    directories.push(bindingRoot)
+    const h = harness({ live: [OTHER_SUPERVISOR], config: { runBindingRoot: bindingRoot } })
+    await storeWithFailedRoot(h)
+    const before = await h.task.snapshotIn(STORE)
+    const eventsBefore = h.sessions.get(STORE)!.events.length
+
+    const message = await refusal(() => recover(h, {}, OTHER_SUPERVISOR))
+    // The refusal names the caller, its own graph's root and store, and the store
+    // it asked for — and says what a refused call leaves behind: nothing.
+    expect(message).toContain(`session "${OTHER_SUPERVISOR}"`)
+    expect(message).toContain(`"${OTHER_ROOT}"`)
+    expect(message).toContain(`"${OTHER_STORE}"`)
+    expect(message).toContain(`"${STORE}"`)
+    expect(message).toContain('nothing was written')
+
+    // Zero new Run, zero new batch, zero writes: the store's own snapshot and its
+    // own event log are what they were, nothing was spawned, and no run binding
+    // (or workspace marker) was materialized.
+    expect(await h.task.snapshotIn(STORE)).toEqual(before)
+    expect(await runsOf(h, 'root')).toHaveLength(1)
+    expect(h.sessions.get(STORE)!.events.length).toBe(eventsBefore)
+    expect(h.spawns).toHaveLength(0)
+    expect(filesUnder(bindingRoot)).toEqual([])
+  })
+
+  test('refuses a live caller no graph publishes, fail-closed', async () => {
+    const h = harness({ live: ['ghost-session'] })
+    await storeWithFailedRoot(h)
+    const before = await h.task.snapshotIn(STORE)
+
+    const message = await refusal(() => recover(h, {}, 'ghost-session'))
+    expect(message).toContain('session "ghost-session"')
+    expect(message).toContain('could not be resolved')
+    expect(message).toContain('ownership')
+    expect(message).toContain('nothing was written')
+
+    expect(await h.task.snapshotIn(STORE)).toEqual(before)
+    expect(await runsOf(h, 'root')).toHaveLength(1)
+    expect(h.spawns).toHaveLength(0)
+  })
+
+  test('serves the store\'s own graph — the positive control', async () => {
+    const h = harness({ live: [ROOT_SESSION] })
+    await storeWithFailedRoot(h)
+    const outcome = await recover(h, {}, ROOT_SESSION)
+    expect(outcome.attempt).toBe('started')
+    expect(await runsOf(h, 'root')).toHaveLength(2)
+    expect(h.spawns).toHaveLength(1)
   })
 })

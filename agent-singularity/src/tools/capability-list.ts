@@ -60,9 +60,18 @@ function renderProvider(verdict: SkillProviderVerdict): string {
  * The provider line under one capability row: every skill's verdict, or the
  * fact that the row grants none. `rows` is the pre-check's own output, so an
  * error message or a missing skill cannot be papered over here.
+ *
+ * A row the pre-check refused *as a row* — the capability an open evolution
+ * commit intent moves (A6) — has no verdicts to show: it was not resolved, and
+ * that refusal is what the model has to see before it picks this name for a
+ * batch admission will reject.
  */
 function renderProviders(row: CapabilityProviderPrecheck | undefined): string {
   if (row === undefined) return 'providers: (not checked)'
+  const refusals = row.refusals ?? []
+  if (refusals.length > 0) {
+    return `providers: (refused — ${refusals.map(item => `${item.code}: ${item.detail}`).join('; ')})`
+  }
   if (row.skills.length === 0) return 'providers: (none — the capability grants no skill)'
   return `providers: ${row.skills.map(renderProvider).join(' · ')}`
 }

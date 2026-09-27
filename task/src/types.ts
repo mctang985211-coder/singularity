@@ -436,19 +436,24 @@ export interface TaskRunBatch {
  * own verified run's evidence) resolves exactly as it does for a member this run
  * did produce.
  *
- * **The slots are the run's leading positions.** {@link childIndex} must be the
- * entry's own position in {@link RunRecovery.reusedMembers}
- * (`0, 1, … reusedMembers.length - 1`), so the sequence this run reads is the
- * pinned siblings first, then the members its own batches admit, in admission
- * order — a stable sequence with no unfilled slot inside it. An attempt that
- * wants a created member *before* a reused one cannot be expressed and is
- * refused by name rather than silently reordered.
+ * **Slots are claimed, not ordered.** {@link childIndex} is an absolute position
+ * in the run's member sequence — the same `childIndex` a parent criterion's
+ * `childEvidence` map names — and the members the run's own batches admit fill
+ * the positions no entry claims, in ascending order. So a passed sibling *after*
+ * a failed member keeps the position the original acceptance map names for it
+ * (the batch driver really does start a member after a failed one: a failed
+ * member is terminal and leaves the round's pending list, `orchestrate.ts`'s
+ * `driveRounds`), and a position the attempt chooses not to reuse is filled by
+ * the replacement an agent's next batch proposes. A position nothing has filled
+ * *yet* is a slot the run has not reached; a reader that needs positions asks
+ * for the slots ({@link runMemberSlots}) rather than for the ids alone.
  */
 export interface RunMemberReuse {
   /**
-   * The position in this run's member sequence the entry pins — the
-   * `childIndex` a parent criterion's `childEvidence` map names. Must equal the
-   * entry's own index in {@link RunRecovery.reusedMembers}.
+   * The absolute position in this run's member sequence the entry claims — the
+   * `childIndex` a parent criterion's `childEvidence` map names. Two entries may
+   * not claim one position, and a claimed position must be the position the
+   * failed run read the cited sibling at.
    */
   childIndex: number
   /** The already verified sibling task the slot reads as: a child task of this run's own task. */
@@ -507,8 +512,47 @@ export interface RunRecovery {
   sourceRunId?: RunId
   /** When the attempt was opened. */
   requestedAt: string
-  /** The already verified siblings this attempt reads at its leading positions, in position order. Empty when it re-runs everything. */
+  /**
+   * The identity of the **request** this attempt answers: the source run it names
+   * and the citations its caller declared, over their canonical form
+   * (`requestAttemptDigest`). Absent on a record written before the field
+   * existed, whose request is compared by its citations instead.
+   *
+   * Why it is not derived from {@link reusedMembers}: those are the *binding* —
+   * what the attempt actually reads — and a request that names no reuse (the
+   * two-field chain) has its citations derived from the store, so the binding is
+   * not a function of the request. "One key names one request" is the rule the
+   * retry has to be answered by, and this is the request it names.
+   */
+  requestDigest?: string
+  /** The already verified siblings this attempt reads, by the positions they claim. Empty when it re-runs everything. */
   reusedMembers: RunMemberReuse[]
+  /**
+   * The positions of the failed run that read a **passed sibling the attempt
+   * could not bind**, with the reasons it could not: an unresolved evidence,
+   * product or input identity, or a criterion the original acceptance map
+   * narrows the position to with no passing verdict behind it. The slot is left
+   * for the members the attempt's own batches admit — the position is done
+   * again — and this list is what makes that visible instead of silent
+   * (plan §F.4: 无效引用拒绝并列出受影响项).
+   *
+   * Empty or absent when nothing was left unbound, which includes every attempt
+   * that was asked for with declarations of its own: a caller's citation that
+   * does not resolve is refused outright and opens no attempt at all.
+   */
+  unboundMembers?: RunMemberReuseRefusal[]
+}
+
+/** One position of a failed run the attempt did not bind, and why (see {@link RunRecovery.unboundMembers}). */
+export interface RunMemberReuseRefusal {
+  /** The position in the run's member sequence the failed run read the member at. */
+  childIndex: number
+  /** The passed sibling the failed run read there, when it read one. */
+  taskId?: TaskId
+  /** The criterion the original acceptance map narrows that position to, when it names one. */
+  criterionId?: string
+  /** Every reason the sibling's evidence could not be bound to this position, each naming the identity that did not resolve. */
+  reasons: string[]
 }
 
 export interface TaskRun {                          // (§5.3)
@@ -601,28 +645,50 @@ export interface TaskRun {                          // (§5.3)
 }
 
 /**
- * The member task ids one run reads, in the sequence a parent criterion's
- * `childIndex` names: the verified siblings its {@link TaskRun.recovery} pins,
- * in position order, and then the `memberTaskIds` of its batches concatenated in
- * admission order ({@link TaskRun.batches}).
+ * The member **slots** one run reads, in the sequence a parent criterion's
+ * `childIndex` names: the verified siblings its {@link TaskRun.recovery} claims
+ * at the positions they name, and the `memberTaskIds` of its batches — in
+ * admission order — filling the positions no entry claims, ascending
+ * ({@link TaskRun.batches}).
  *
- * The accumulation is append-only and the pinned slots are the leading
- * positions, so position `i` of the result is stable: a later batch never moves
- * an earlier member, and a reused sibling keeps the position the original
- * acceptance map names for it. One derivation, shared by the runtime read
- * (`TaskService.runMembersIn`) and by any reader that needs the ids alone, so
- * "the run's members" cannot mean two different orders.
+ * The sequence is stable: a later batch never moves a member an earlier one
+ * contributed, a claimed position is never handed to a created member, and a
+ * position the run has not reached yet answers `undefined` — a slot, not a
+ * missing member. One derivation, shared by the positional reader
+ * (`TaskService.runMemberSlotsIn`, what the composite judge reads) and by the
+ * id-only reader ({@link runMemberTaskIds}), so "the run's members" cannot mean
+ * two different orders.
  *
- * A run with no batches and no pinned members has no members here — an empty
- * list, never its task's children: those belong to whichever batch admitted
+ * A run with no batches and no claimed positions has no members here — an empty
+ * sequence, never its task's children: those belong to whichever batch admitted
  * them, and a run that admitted no batch of this shape is not given one by
  * guessing.
  */
+export function runMemberSlots(run: TaskRun): (TaskId | undefined)[] {
+  const claimed = [...(run.recovery?.reusedMembers ?? [])].sort((left, right) => left.childIndex - right.childIndex)
+  if (claimed.length === 0) return (run.batches ?? []).flatMap(batch => batch.memberTaskIds)
+  const slots: (TaskId | undefined)[] = []
+  for (const entry of claimed) {
+    while (slots.length < entry.childIndex) slots.push(undefined)
+    slots[entry.childIndex] = entry.taskId
+  }
+  for (const memberTaskId of (run.batches ?? []).flatMap(batch => batch.memberTaskIds)) {
+    const free = slots.indexOf(undefined)
+    if (free === -1) slots.push(memberTaskId)
+    else slots[free] = memberTaskId
+  }
+  return slots
+}
+
+/**
+ * The member task ids one run reads, in slot order, with the slots it has not
+ * filled left out: what a reader that needs *which* tasks are members — not
+ * where each one sits — asks for. A reader that needs positions (the composite
+ * judge, which indexes them by a criterion's `childIndex`) reads
+ * {@link runMemberSlots}, whose holes are the not-yet-filled positions.
+ */
 export function runMemberTaskIds(run: TaskRun): TaskId[] {
-  return [
-    ...(run.recovery?.reusedMembers ?? []).map(member => member.taskId),
-    ...(run.batches ?? []).flatMap(batch => batch.memberTaskIds),
-  ]
+  return runMemberSlots(run).filter((taskId): taskId is TaskId => taskId !== undefined)
 }
 
 export interface VerificationResult {

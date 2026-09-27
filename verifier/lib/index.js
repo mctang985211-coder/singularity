@@ -182,7 +182,7 @@ function describeEntry(entry) {
 */
 function entryDefect(entry, children, snapshot) {
 	const child = children[entry.childIndex];
-	if (child === void 0) return `child #${entry.childIndex} does not exist (the run's batches have admitted ${children.length} members)`;
+	if (child === void 0) return `child #${entry.childIndex} does not exist (the run's member sequence holds ${children.filter((item) => item !== void 0).length} filled position(s))`;
 	if (child.status !== "verified") return `child #${entry.childIndex} (${child.taskId}) is ${child.status}, not verified`;
 	const verifiedRun = snapshot.runs.find((run) => run.taskId === child.taskId && run.status === "verified");
 	const bundles = snapshot.evidence.filter((item) => item.taskRunId === verifiedRun?.runId);
@@ -211,8 +211,9 @@ function entryDefect(entry, children, snapshot) {
 * carries the explicit heuristic label in its details, so a natural-language
 * coverage signal is never mistaken for a mechanical proof (KISS §5.1).
 *
-* `members` is the judged run's accumulative membership, in admission order
-* (`TaskService.runMembersIn`) — the sequence `childIndex` names. It is not the
+* `members` is the judged run's member sequence **by position**
+* (`TaskService.runMemberSlotsIn`) — the sequence `childIndex` names, where an
+* unfilled position is `undefined` rather than a missing entry. It is not the
 * judged task's children: a parent's later batch appends and never renumbers an
 * earlier one's members, and a run that admitted no batch has none.
 *
@@ -242,11 +243,11 @@ async function judgeCompositeCriterion(criterion, members, snapshot) {
 			details: `incomplete childEvidence map: the run has admitted no members to satisfy ${map.map(describeEntry).join("; ")}`
 		};
 	}
-	const unverified = members.filter((child) => child.status !== "verified");
+	const unverified = members.flatMap((child, index) => child?.status === "verified" ? [] : [child === void 0 ? `#${index} (unfilled)` : `${child.taskId}(${child.status})`]);
 	if (unverified.length > 0) return {
 		...base,
 		status: "fail",
-		details: `unverified children: ${unverified.map((child) => `${child.taskId}(${child.status})`).join(", ")}`
+		details: `unverified children: ${unverified.join(", ")}`
 	};
 	if (map.length === 0) return {
 		...base,
@@ -398,7 +399,7 @@ var CompositeVerifier = class {
 		}));
 	}
 	async verifyIn(storeId, req) {
-		const members = await this.task.runMembersIn(storeId, req.runId);
+		const members = await this.task.runMemberSlotsIn(storeId, req.runId);
 		const results = [];
 		for (const criterion of req.criteria) results.push(await judgeCompositeCriterion(criterion, members, () => this.task.snapshotIn(storeId)));
 		return results;

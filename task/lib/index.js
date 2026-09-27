@@ -17,25 +17,49 @@ function reaches(edges, start, target) {
 	return false;
 }
 /**
-* The member task ids one run reads, in the sequence a parent criterion's
-* `childIndex` names: the verified siblings its {@link TaskRun.recovery} pins,
-* in position order, and then the `memberTaskIds` of its batches concatenated in
-* admission order ({@link TaskRun.batches}).
+* The member **slots** one run reads, in the sequence a parent criterion's
+* `childIndex` names: the verified siblings its {@link TaskRun.recovery} claims
+* at the positions they name, and the `memberTaskIds` of its batches — in
+* admission order — filling the positions no entry claims, ascending
+* ({@link TaskRun.batches}).
 *
-* The accumulation is append-only and the pinned slots are the leading
-* positions, so position `i` of the result is stable: a later batch never moves
-* an earlier member, and a reused sibling keeps the position the original
-* acceptance map names for it. One derivation, shared by the runtime read
-* (`TaskService.runMembersIn`) and by any reader that needs the ids alone, so
-* "the run's members" cannot mean two different orders.
+* The sequence is stable: a later batch never moves a member an earlier one
+* contributed, a claimed position is never handed to a created member, and a
+* position the run has not reached yet answers `undefined` — a slot, not a
+* missing member. One derivation, shared by the positional reader
+* (`TaskService.runMemberSlotsIn`, what the composite judge reads) and by the
+* id-only reader ({@link runMemberTaskIds}), so "the run's members" cannot mean
+* two different orders.
 *
-* A run with no batches and no pinned members has no members here — an empty
-* list, never its task's children: those belong to whichever batch admitted
+* A run with no batches and no claimed positions has no members here — an empty
+* sequence, never its task's children: those belong to whichever batch admitted
 * them, and a run that admitted no batch of this shape is not given one by
 * guessing.
 */
+function runMemberSlots(run) {
+	const claimed = [...run.recovery?.reusedMembers ?? []].sort((left, right) => left.childIndex - right.childIndex);
+	if (claimed.length === 0) return (run.batches ?? []).flatMap((batch) => batch.memberTaskIds);
+	const slots = [];
+	for (const entry of claimed) {
+		while (slots.length < entry.childIndex) slots.push(void 0);
+		slots[entry.childIndex] = entry.taskId;
+	}
+	for (const memberTaskId of (run.batches ?? []).flatMap((batch) => batch.memberTaskIds)) {
+		const free = slots.indexOf(void 0);
+		if (free === -1) slots.push(memberTaskId);
+		else slots[free] = memberTaskId;
+	}
+	return slots;
+}
+/**
+* The member task ids one run reads, in slot order, with the slots it has not
+* filled left out: what a reader that needs *which* tasks are members — not
+* where each one sits — asks for. A reader that needs positions (the composite
+* judge, which indexes them by a criterion's `childIndex`) reads
+* {@link runMemberSlots}, whose holes are the not-yet-filled positions.
+*/
 function runMemberTaskIds(run) {
-	return [...(run.recovery?.reusedMembers ?? []).map((member) => member.taskId), ...(run.batches ?? []).flatMap((batch) => batch.memberTaskIds)];
+	return runMemberSlots(run).filter((taskId) => taskId !== void 0);
 }
 /** Every judged dimension, in the order a report reads them. */
 const JUDGED_DIMENSIONS = [
@@ -1033,19 +1057,26 @@ var TaskState = class TaskState {
 			["requested at", recovery.requestedAt]
 		]) if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${where} requires a non-empty ${name}`);
 		if (recovery.sourceRunId !== void 0 && (typeof recovery.sourceRunId !== "string" || recovery.sourceRunId.length === 0)) throw new Error(`${where} source run id must be a non-empty string when present`);
-		if (this.task(taskId).parentTaskId !== void 0) throw new Error(`${where} names task "${taskId}", which has a parent; a recovery attempt is opened for the store's own root task`);
+		if (recovery.requestDigest !== void 0 && (typeof recovery.requestDigest !== "string" || recovery.requestDigest.trim().length === 0)) throw new Error(`${where} request digest must be a non-empty string when present`);
+		const task = this.task(taskId);
+		if (task.parentTaskId !== void 0) throw new Error(`${where} names task "${taskId}", which has a parent; a recovery attempt is opened for the store's own root task`);
 		if (!this.value.diagnoses.some((diagnosis) => diagnosis.diagnosisId === recovery.sourceDiagnosisId && diagnosis.taskId === taskId)) throw new Error(`${where} cites diagnosis "${recovery.sourceDiagnosisId}", which this store holds no record of for task "${taskId}"; a recovery is asked for by a diagnosis of the failing task and by nothing else`);
+		let sourceRun;
 		if (recovery.sourceRunId !== void 0) {
-			const source = this.value.runs.find((run) => run.runId === recovery.sourceRunId);
-			if (source === void 0) throw new Error(`${where} cites unknown run "${recovery.sourceRunId}"`);
-			if (source.taskId !== taskId) throw new Error(`${where} cites run "${recovery.sourceRunId}", which belongs to task "${source.taskId}", not "${taskId}"`);
+			sourceRun = this.value.runs.find((run) => run.runId === recovery.sourceRunId);
+			if (sourceRun === void 0) throw new Error(`${where} cites unknown run "${recovery.sourceRunId}"`);
+			if (sourceRun.taskId !== taskId) throw new Error(`${where} cites run "${recovery.sourceRunId}", which belongs to task "${sourceRun.taskId}", not "${taskId}"`);
 		}
 		const reused = recovery.reusedMembers;
 		if (!Array.isArray(reused)) throw new Error(`${where} reused members must be an array`);
+		const claimed = /* @__PURE__ */ new Set();
 		reused.forEach((member, position) => {
 			const at = `${where} reused member ${position}`;
 			if (!isRecord(member)) throw new Error(`${at} must be an object`);
-			if (member.childIndex !== position) throw new Error(`${at} declares childIndex ${JSON.stringify(member.childIndex)}; a reused member occupies its own position in the sequence (${position}), because the store reads the pinned siblings first and the admitted members after them`);
+			if (!Number.isInteger(member.childIndex) || member.childIndex < 0) throw new Error(`${at} childIndex ${JSON.stringify(member.childIndex)} must be a non-negative integer`);
+			if (claimed.has(member.childIndex)) throw new Error(`${at} claims position ${member.childIndex}, which another entry of this record already claims; one position reads one member`);
+			claimed.add(member.childIndex);
+			if (sourceRun !== void 0 && runMemberSlots(sourceRun)[member.childIndex] !== member.taskId) throw new Error(`${at} claims position ${member.childIndex} for "${String(member.taskId)}", but the failed run "${sourceRun.runId}" reads ${runMemberSlots(sourceRun)[member.childIndex] === void 0 ? "no member" : `"${runMemberSlots(sourceRun)[member.childIndex]}"`} there`);
 			const sibling = this.value.tasks.find((candidate) => candidate.taskId === member.taskId);
 			if (sibling === void 0) throw new Error(`${at} cites unknown task "${String(member.taskId)}"`);
 			if (sibling.parentTaskId !== taskId) throw new Error(`${at} cites task "${sibling.taskId}", which is not a child of "${taskId}"; only a sibling of the failed attempt can be reused`);
@@ -1070,7 +1101,23 @@ var TaskState = class TaskState {
 				...(criterion.protectedInputs ?? []).map((input) => input.path)
 			]));
 			for (const reference of member.inputRefs ?? []) if (!declaredInputs.has(reference)) throw new Error(`${at} cites input "${String(reference)}", which the sibling "${sibling.taskId}" does not declare (requiresArtifact, acceptsArtifact or protectedInputs)`);
+			const mapEntry = task.acceptanceCriteria.flatMap((criterion) => criterion.childEvidence ?? []).find((entry) => entry.childIndex === member.childIndex);
+			if (mapEntry !== void 0) {
+				if (mapEntry.criterionId !== void 0 && mapEntry.criterionId !== member.criterionId) throw new Error(`${at} claims position ${member.childIndex}, which the original acceptance map narrows to criterion "${mapEntry.criterionId}"; this record ${member.criterionId === void 0 ? "names no criterion" : `names "${member.criterionId}"`}`);
+				if (mapEntry.evidenceRef !== void 0 && member.evidenceId !== mapEntry.evidenceRef && !(member.artifactRefs ?? []).includes(mapEntry.evidenceRef)) throw new Error(`${at} claims position ${member.childIndex}, which the original acceptance map narrows to evidence "${mapEntry.evidenceRef}"; the cited bundle does not carry that identity (evidence id, artifact id or artifact kind)`);
+			}
 		});
+		const unbound = recovery.unboundMembers;
+		if (unbound !== void 0) {
+			if (!Array.isArray(unbound)) throw new Error(`${where} unbound members must be an array`);
+			for (const [position, entry] of unbound.entries()) {
+				const at = `${where} unbound member ${position}`;
+				if (!isRecord(entry)) throw new Error(`${at} must be an object`);
+				if (!Number.isInteger(entry.childIndex) || entry.childIndex < 0) throw new Error(`${at} childIndex ${JSON.stringify(entry.childIndex)} must be a non-negative integer`);
+				if (!Array.isArray(entry.reasons) || entry.reasons.length === 0 || entry.reasons.some((reason) => typeof reason !== "string" || reason.trim().length === 0)) throw new Error(`${at} must carry at least one non-empty reason; a position left unbound is a finding, never a silent omission`);
+				if (claimed.has(entry.childIndex)) throw new Error(`${at} names position ${entry.childIndex}, which this record also claims; a position is either bound or left open`);
+			}
+		}
 	}
 	block(taskId, runId) {
 		this.assertTransition(taskId, [
@@ -2332,13 +2379,32 @@ var TaskService = class extends Service {
 	*/
 	async runMembersIn(storeId, runId) {
 		const snapshot = await this.snapshotIn(storeId);
+		return runMemberTaskIds(this.requireRun(snapshot, runId)).map((memberTaskId) => this.requireMember(snapshot, memberTaskId));
+	}
+	/**
+	* The tasks one run reads **by position** — the sequence a parent criterion's
+	* `childIndex` indexes, with a not-yet-filled slot left `undefined`
+	* ({@link runMemberSlots}). This is the read a judge needs: a recovery
+	* attempt's sequence can carry a claimed position the attempt has not filled a
+	* member for yet, and a judgement about such a position is "the member does not
+	* exist", never a shift of the positions behind it.
+	*
+	* {@link runMembersIn} is the same sequence without the holes, for readers that
+	* only ask which tasks are members.
+	*/
+	async runMemberSlotsIn(storeId, runId) {
+		const snapshot = await this.snapshotIn(storeId);
+		return runMemberSlots(this.requireRun(snapshot, runId)).map((taskId) => taskId === void 0 ? void 0 : this.requireMember(snapshot, taskId));
+	}
+	requireRun(snapshot, runId) {
 		const run = snapshot.runs.find((item) => item.runId === runId);
 		if (run === void 0) throw new Error(`task: unknown run "${runId}"`);
-		return runMemberTaskIds(run).map((memberTaskId) => {
-			const task = snapshot.tasks.find((item) => item.taskId === memberTaskId);
-			if (task === void 0) throw new Error(`task: unknown task "${memberTaskId}"`);
-			return task;
-		});
+		return run;
+	}
+	requireMember(snapshot, memberTaskId) {
+		const task = snapshot.tasks.find((item) => item.taskId === memberTaskId);
+		if (task === void 0) throw new Error(`task: unknown task "${memberTaskId}"`);
+		return task;
 	}
 	async createTaskIn(storeId, task, actor) {
 		await this.commitIn(storeId, [event("TaskCreated", {
@@ -3104,4 +3170,4 @@ var TaskService = class extends Service {
 var src_default = TaskService;
 
 //#endregion
-export { BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskService, TaskState, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, describeBudgetExtension, describeBudgetReading, emptyBudgetExtensionIndex, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberTaskIds, sha256Hex, taskProposalId };
+export { BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskService, TaskState, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, describeBudgetExtension, describeBudgetReading, emptyBudgetExtensionIndex, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskProposalId };

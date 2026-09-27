@@ -90,6 +90,25 @@ const ROOT_CONTRACT = {
   ],
 }
 
+/**
+ * The contract the sibling-reuse case runs under: the same goal, with the map
+ * naming **both** members — position 0 (the member that fails) and position 1
+ * (the member that passes and must not be re-run).
+ */
+const REUSE_CONTRACT = {
+  objective: 'ship the release',
+  acceptanceCriteria: [
+    { criterionId: 'root-goal', description: 'the release is shipped', command: 'true' },
+    {
+      criterionId: 'root-map',
+      description: 'the members the map names passed',
+      mode: 'composite',
+      mandatory: true,
+      childEvidence: [{ childIndex: 0, criterionId: 'member-0' }, { childIndex: 1, criterionId: 'member-1' }],
+    },
+  ],
+}
+
 /** The reviewer's answer: a diagnosis about the failed source, carrying one capability suggestion. */
 const REVIEW_REPLY = '```json\n'
   + '{"observation":"the member failed its own criterion","conclusion":"the deployment grants no capability for the member",'
@@ -288,6 +307,12 @@ interface ScriptContext {
   readonly review: string
   /** The successful-source case: the coordinator only asks for the recovery, which is refused. */
   readonly optimize: boolean
+  /**
+   * The sibling-reuse case: the first batch has two members — position 0 fails and
+   * position 1 passes — and the coordinator asks for the recovery with the plan's
+   * own two fields, so the binding has to come from the store.
+   */
+  readonly reuseCase: boolean
 }
 
 /**
@@ -316,6 +341,17 @@ function script(context: ScriptContext): (sessionId: string, index: number) => r
     }
     if (name.startsWith('supervisor for')) {
       const diagnosisId = name.slice('supervisor for '.length)
+      if (context.reuseCase) {
+        // The plan's whole request surface: the diagnosis and a key, nothing
+        // else. Whatever the attempt reads has to come out of the store.
+        return [
+          { tool: 'task_recover', args: { sourceDiagnosisId: diagnosisId, requestKey: 'k-reuse' } },
+          // The same key again, in the same turn: a retry answers with the attempt
+          // it already named instead of starting another.
+          { tool: 'task_recover', args: { sourceDiagnosisId: diagnosisId, requestKey: 'k-reuse' } },
+          { text: 'supervisor: the attempt is open, and the same key names it' },
+        ]
+      }
       if (context.optimize) {
         // A hand-off whose source succeeded: the coordinator studies the
         // suggestion and asks for a recovery, which this build refuses by name.
@@ -379,6 +415,27 @@ function script(context: ScriptContext): (sessionId: string, index: number) => r
     }
     if (name.startsWith('review ')) return [{ text: context.review }]
     if (name.startsWith('recovery of')) {
+      if (context.reuseCase) {
+        // Only the failed position is redone. Position 1 is already answered by the
+        // passed sibling the attempt bound, so the batch's one member lands at
+        // position 0 — the slot the binding left open.
+        return [
+          {
+            tool: 'task_decompose',
+            args: {
+              reason: 're-run the position that failed',
+              children: [{
+                objective: 'the member, again',
+                acceptanceCriteria: [{ criterionId: 'member-0', description: 'it holds', command: 'true' }],
+              }],
+            },
+          },
+          { text: 'attempt: the replacement is running' },
+          { waitFor: () => cells.attemptSubmit },
+          { tool: 'task_submit_result', args: { summary: 'the attempt is handed in' } },
+          { text: 'attempt: handed in' },
+        ]
+      }
       // The attempt re-runs the failed position: its member needs the row the
       // promotion just applied, so the batch is admissible only because the
       // capability is really in force.
@@ -415,6 +472,35 @@ function script(context: ScriptContext): (sessionId: string, index: number) => r
       ]
     }
     if (index === 0) {
+      if (context.reuseCase) {
+        return [
+          {
+            tool: 'task_decompose',
+            args: {
+              reason: 'split the work into two members',
+              children: [
+                // Position 0 fails. Position 1 is independent of it, so the driver
+                // really does start it after the failure — a failed member is
+                // terminal and leaves the round's pending list.
+                {
+                  objective: 'the member that fails',
+                  acceptanceCriteria: [{ criterionId: 'member-0', description: 'it holds', command: 'false' }],
+                },
+                {
+                  objective: 'the member that passes',
+                  acceptanceCriteria: [{ criterionId: 'member-1', description: 'it holds', command: 'true' }],
+                },
+              ],
+            },
+          },
+          { text: 'root: the batch is running' },
+          { waitFor: () => cells.batchDone },
+          { tool: 'task_submit_result', args: { summary: 'root: handed in' } },
+          { text: 'root: handed in' },
+          { tool: 'task_review_agent', args: { taskId: cells.rootTaskId!, runId: cells.rootRunId!, reason: 'what happened in that run?' } },
+          { text: 'root: asked for the postmortem' },
+        ]
+      }
       return [
         {
           tool: 'task_decompose',
@@ -451,7 +537,7 @@ function sandboxAnswerFile(ledgerRoot: string): string | undefined {
   }
 }
 
-async function startCase(options: { memberFails?: boolean; review?: string; optimize?: boolean } = {}): Promise<{ h: ScriptedLoop; cells: Cells; ledgerRoot: string; configFile: string }> {
+async function startCase(options: { memberFails?: boolean; review?: string; optimize?: boolean; reuse?: boolean } = {}): Promise<{ h: ScriptedLoop; cells: Cells; ledgerRoot: string; configFile: string }> {
   const batchDone = Promise.withResolvers<void>()
   const decided = Promise.withResolvers<void>()
   const attemptSubmit = Promise.withResolvers<void>()
@@ -474,6 +560,7 @@ async function startCase(options: { memberFails?: boolean; review?: string; opti
     memberFails: options.memberFails ?? true,
     review: options.review ?? REVIEW_REPLY,
     optimize: options.optimize ?? false,
+    reuseCase: options.reuse ?? false,
   }
   h = await startScriptedLoop({
     roots: [String(ROOT), String(OPERATOR)],
@@ -488,9 +575,18 @@ async function startCase(options: { memberFails?: boolean; review?: string; opti
   return { h, cells, ledgerRoot, configFile }
 }
 
-/** Drive the root's own failure and the review this case's chain starts from. */
-async function failRoot(h: ScriptedLoop, cells: Cells, memberFails: boolean): Promise<void> {
-  const root = await h.begin(ROOT_CONTRACT)
+/**
+ * Drive the root's own failure and the review this case's chain starts from.
+ * `twoMembers` is the sibling-reuse case's shape: the first batch has a member
+ * that fails at position 0 and a member that passes at position 1.
+ */
+async function failRoot(
+  h: ScriptedLoop,
+  cells: Cells,
+  memberFails: boolean,
+  options: { contract?: unknown; twoMembers?: boolean } = {},
+): Promise<void> {
+  const root = await h.begin((options.contract ?? ROOT_CONTRACT) as never)
   cells.rootTaskId = root.taskId
   cells.rootRunId = root.runId
   const member = await vi.waitFor(async () => {
@@ -498,10 +594,28 @@ async function failRoot(h: ScriptedLoop, cells: Cells, memberFails: boolean): Pr
     expect(found).toBeDefined()
     return found!
   }, { timeout: 30_000, interval: 25 })
+  if (options.twoMembers === true) {
+    await vi.waitFor(async () => expect((await h.snapshot(STORE)).tasks.filter(task => task.parentTaskId === root.taskId)).toHaveLength(2), {
+      timeout: 30_000,
+      interval: 25,
+    })
+  }
   const batchId = (await runOf(h, root.runId)).batchId!
   await h.runtime.awaitBatch(STORE, batchId)
+  // `awaitBatch` may answer from the store in the window between the admission
+  // commit and the driver's registration, so the member's own terminal state is
+  // the fact this waits for — the batch is over when its members are.
+  await vi.waitFor(async () => {
+    expect(['verified', 'failed', 'blocked', 'cancelled']).toContain((await h.task.taskIn(STORE, member.taskId)).status)
+  }, { timeout: 60_000, interval: 25 })
   expect((await h.task.taskIn(STORE, member.taskId)).status).toBe(memberFails ? 'failed' : 'verified')
-  await writeSamples(h)
+  if (options.twoMembers === true) {
+    const members = (await h.task.runMembersIn(STORE, root.runId)).map(task => task.taskId)
+    expect(members).toHaveLength(2)
+    expect((await h.task.taskIn(STORE, members[1]!)).status).toBe('verified')
+  } else {
+    await writeSamples(h)
+  }
   cells.resolveBatch()
   await vi.waitFor(async () => {
     expect((await h.snapshot(STORE)).reviews.some(review => review.taskId === root.taskId && review.outcome === (memberFails ? 'failed' : 'verified'))).toBe(true)
@@ -635,6 +749,82 @@ describe('A6 EVO-3: the capability chain, from the failing source to the recover
     expect(final.runs.find(run => run.runId === cells.rootRunId!)?.status).toBe('failed')
     expect(final.reviews.some(review => review.runId === cells.rootRunId! && review.outcome === 'failed')).toBe(true)
     expect(final.diagnoses.find(item => item.diagnosisId === diagnosis.diagnosisId)?.proposals).toHaveLength(1)
+    expect(final.runs.filter(run => run.taskId === cells.rootTaskId!)).toHaveLength(2)
+  }, 120_000)
+
+  it('binds the passed sibling at its own position from the store\'s facts, through the two-field tool alone', async () => {
+    // The failure shape the ticket names: the first attempt read two members —
+    // position 0 failed, position 1 passed. The coordinator's request carries the
+    // plan's two fields and nothing else, so the attempt can only read the passed
+    // sibling if the binding is derived from the failed run's own facts.
+    const { h, cells } = await startCase({ reuse: true })
+    await failRoot(h, cells, true, { contract: REUSE_CONTRACT, twoMembers: true })
+    const members = await membersOf(h, cells.rootRunId!)
+    expect(members).toHaveLength(2)
+    const [failedMember, passedMember] = members as [string, string]
+    const passedRun = (await h.snapshot(STORE)).runs.find(run => run.taskId === passedMember && run.status === 'verified')!
+    const passedEvidence = (await h.snapshot(STORE)).evidence.find(item => item.taskRunId === passedRun.runId)!
+    const failedRunsBefore = (await h.snapshot(STORE)).runs.filter(run => run.taskId === passedMember).length
+
+    const supervisor = await supervisorSession(h, cells.diagnosisId!)
+    const attempt = await vi.waitFor(async () => {
+      const found = (await h.snapshot(STORE)).runs.find(run => run.recovery !== undefined)
+      expect(found).toBeDefined()
+      return found!
+    }, { timeout: 60_000, interval: 25 })
+
+    // ── the binding, from the store's own facts ──────────────────────────────
+    const reused = attempt.recovery!.reusedMembers
+    expect(reused).toHaveLength(1)
+    expect(reused[0]).toMatchObject({
+      childIndex: 1,
+      taskId: passedMember,
+      sourceRunId: passedRun.runId,
+      evidenceId: passedEvidence.evidenceId,
+      criterionId: 'member-1',
+    })
+    expect(attempt.recovery!.unboundMembers ?? []).toEqual([])
+    // The two tool calls the supervisor made, and what they answered: the binding
+    // is visible in the answer the model read, not only in the store.
+    const recoverCalls = h.calls.filter(call => call.name === 'task_recover' && call.sessionId === supervisor)
+    // The second call is the supervisor's own next turn; wait for it rather than
+    // reading a moment that happens to be before it.
+    await vi.waitFor(() => {
+      expect(h.calls.filter(call => call.name === 'task_recover' && call.sessionId === supervisor && call.result !== undefined)).toHaveLength(2)
+    }, { timeout: 30_000, interval: 25 })
+    expect(recoverCalls[0]?.result?.isError).toBe(false)
+    expect(recoverCalls[0]?.result?.text).toContain(`position(s) 1`)
+    expect(recoverCalls[1]?.result?.text).toContain('this key already named an attempt')
+    // The same key answered with the same attempt: no second run was opened.
+    expect((await h.snapshot(STORE)).runs.filter(run => run.recovery !== undefined)).toHaveLength(1)
+
+    // ── the attempt re-runs only the failed position ─────────────────────────
+    await vi.waitFor(async () => expect((await runOf(h, attempt.runId)).batchId).toBeDefined(), { timeout: 60_000, interval: 25 })
+    await h.runtime.awaitBatch(STORE, (await runOf(h, attempt.runId)).batchId!)
+    const slots = (await h.task.runMemberSlotsIn(STORE, attempt.runId)).map(task => task?.taskId)
+    expect(slots).toEqual([expect.any(String), passedMember])
+    const replacement = slots[0]!
+    expect(replacement).not.toBe(failedMember)
+    // `awaitBatch` can answer from the store between the admission commit and the
+    // driver's registration, so the member's own terminal state is the fact this
+    // waits for — and the batch handed the attempt its execution back meanwhile.
+    await vi.waitFor(async () => expect((await h.task.taskIn(STORE, replacement)).status).toBe('verified'), { timeout: 60_000, interval: 25 })
+
+    // ── the original acceptance criteria judge the attempt, by position ──────
+    cells.resolveAttemptSubmit()
+    await vi.waitFor(async () => expect((await runOf(h, attempt.runId)).status).toBe('verified'), { timeout: 60_000, interval: 25 })
+    const mapVerdict = await verdict(h, attempt.runId, 'root-map')
+    expect(mapVerdict?.status).toBe('pass')
+    expect(mapVerdict?.details).toContain('childEvidence satisfied')
+    expect(mapVerdict?.details).toContain(`child #0 (${replacement}) criterion "member-0" passed`)
+    // Position 1 was satisfied by the *old* run's evidence: the sibling kept the
+    // one run it had, and its bundle is untouched.
+    expect(mapVerdict?.details).toContain(`child #1 (${passedMember}) criterion "member-1" passed`)
+    expect((await h.snapshot(STORE)).runs.filter(run => run.taskId === passedMember)).toHaveLength(failedRunsBefore)
+    expect((await h.snapshot(STORE)).evidence.find(item => item.evidenceId === passedEvidence.evidenceId)).toEqual(passedEvidence)
+    // The old failure stays readable beside the recovered attempt.
+    const final = await h.snapshot(STORE)
+    expect(final.runs.find(run => run.runId === cells.rootRunId!)?.status).toBe('failed')
     expect(final.runs.filter(run => run.taskId === cells.rootTaskId!)).toHaveLength(2)
   }, 120_000)
 

@@ -46,9 +46,19 @@
  * file — or any other path in it — refuses the whole directory rather than
  * admitting a mixed version. The read is
  * `EvolutionService.openIntentTargets`: pure, so an admission question never
- * settles a commit as a side effect. A ledger that cannot be read at all refuses
- * every skill candidate (fail-closed), because "no commit is open" is exactly
- * the claim such a ledger cannot be trusted to make.
+ * settles a commit as a side effect.
+ *
+ * Its sibling, added by A6, is the **row**-keyed gate: the capability row an open
+ * commit intent moves (`EvolutionService.openIntentCapabilities`) is refused
+ * whole, because a capability commit can move a row and no file at all — an L1
+ * candidate composing the deployment's existing providers — and even a candidate
+ * that carries a new skill installs its row in the process *before* the table
+ * file the next restart loads, so a commit stopped in between leaves a row the
+ * deployment would lose. Nothing of such a row is resolved: no skill verdict is
+ * taken for it, and it contributes nothing to the revision. A ledger that cannot
+ * be read at all — including one that answers only the file half — refuses every
+ * skill candidate (fail-closed), because "no commit is open" is exactly the claim
+ * such a ledger cannot be trusted to make.
  * @module @dangosys/dsh-singularity-task-runtime/provider-precheck
  */
 
@@ -207,15 +217,32 @@ export interface EvolutionCommitLedger {
    * (`commit-ledger-unreadable`, fail-closed).
    */
   openIntentTargets?(): Promise<readonly string[]>
+  /**
+   * The capability rows every open commit intent moves, in ledger order
+   * (`EvolutionService.openIntentCapabilities`) — the half of a capability
+   * commit that is not a file (A6). A row-only candidate has no file set at all,
+   * and a candidate that also carries a new skill moves its row *last*, so a
+   * commit stopped between the two leaves a row in the effective table that no
+   * directory can name; this is what ordinary admission keys the refusal on
+   * (a row name, not a path). The same fold reads both projections, and both are
+   * pure. **Required like the read above**: a service that answers only the file
+   * read cannot be trusted to say "no capability intent is open either", and the
+   * half-answered ledger is exactly the one a half-product row comes from — so it
+   * is refused by name (fail-closed).
+   */
+  openIntentCapabilities?(): Promise<readonly string[]>
 }
 
 /**
  * What one pre-check read from the evolution ledger: the directory each open
- * commit target lies in, or why that read could not be made.
+ * commit target lies in, the rows the open intents move, or why that read could
+ * not be made.
  */
 interface CommitGate {
   /** The absolute directory every open commit target resolved into; empty when the read failed. */
   readonly openTargets: ReadonlySet<string>
+  /** Every capability row an open commit intent moves, exactly as the ledger spells it. */
+  readonly openCapabilities: ReadonlySet<string>
   /**
    * Why the ledger could not be read at all, or absent when it was. Every skill
    * candidate is then refused by name: a ledger nobody can read cannot be
@@ -238,14 +265,25 @@ interface CommitGate {
 async function readCommitGate(ledger: EvolutionCommitLedger | undefined): Promise<CommitGate | undefined> {
   if (ledger === undefined) return undefined
   if (ledger.openIntentTargets === undefined) {
-    return { openTargets: new Set(), unreadable: 'the evolution service offers no openIntentTargets() read' }
+    return { openTargets: new Set(), openCapabilities: new Set(), unreadable: 'the evolution service offers no openIntentTargets() read' }
+  }
+  if (ledger.openIntentCapabilities === undefined) {
+    return {
+      openTargets: new Set(),
+      openCapabilities: new Set(),
+      unreadable: 'the evolution service offers no openIntentCapabilities() read',
+    }
   }
   try {
-    const targets = await ledger.openIntentTargets()
-    return { openTargets: new Set(targets.map(target => dirname(resolve(target)))) }
+    const [targets, capabilities] = await Promise.all([ledger.openIntentTargets(), ledger.openIntentCapabilities()])
+    return {
+      openTargets: new Set(targets.map(target => dirname(resolve(target)))),
+      openCapabilities: new Set(capabilities),
+    }
   } catch (error) {
     return {
       openTargets: new Set(),
+      openCapabilities: new Set(),
       unreadable: `reading it failed (${error instanceof Error ? error.message : String(error)})`,
     }
   }
@@ -279,6 +317,28 @@ function openCommitRefusal(name: string, directory: string): RejectedProviderVer
       ),
     ],
   }
+}
+
+/**
+ * The refusal of one capability **row** an open evolution commit intent moves
+ * (A6): row-keyed, not directory-keyed, because a row-only capability commit has
+ * no file at all and nothing discovery finds can stand for it. The row's grant is
+ * not the deployment's yet — the commit that would make it so has not recorded
+ * its completion, and for a capability commit the row is installed *before* the
+ * table file the next restart loads, so the in-process table can hold a row the
+ * deployment would lose. Nothing of that row is resolved here: a row that may not
+ * be admitted is not a provider question, and reading its skills would report
+ * verdicts for a grant that is not in force.
+ */
+function openCapabilityRowRefusal(name: string): SkillDefect {
+  return defect(
+    'commit-intent-open',
+    `capability "${name}" is the target of an open evolution commit intent: an apply or rollback persisted that intent and never recorded ` +
+    'its completion, so the row the deployment\'s table reads now may not be the row it keeps — a capability commit installs the row in ' +
+    'the process before it writes the deployment\'s own table file, and the completion is what claims both halves landed. The row is ' +
+    'refused whole rather than admitted as a half-product: it stays refused until a reconciliation settles that commit (the deployment ' +
+    'reconciles at startup, or an apply/rollback retry settles it)',
+  )
 }
 
 /**
@@ -331,8 +391,17 @@ export async function skillSearchRoots(view: SkillDiscoveryView = {}): Promise<s
 export interface CapabilityProviderPrecheck {
   /** The capability row the skills were read from. */
   readonly capability: string
-  /** One verdict per distinct skill the row declares, in declaration order. */
+  /** One verdict per distinct skill the row declares, in declaration order; empty for a row that was refused before it was resolved. */
   readonly skills: readonly SkillProviderVerdict[]
+  /**
+   * The named reasons this **row** — not a skill of it — may not be admitted,
+   * empty or absent when it may. Row-keyed refusals exist because a capability
+   * commit can move a row alone (A6): there is no skill and no directory to hang
+   * such a stop on, and a row that is under an open intent is not resolved at
+   * all ({@link openCapabilityRowRefusal}), so its `skills` are empty and this is
+   * the only thing about it a reader has to go on.
+   */
+  readonly refusals?: readonly SkillDefect[]
 }
 
 /**
@@ -435,6 +504,20 @@ function commitRefusalFor(gate: CommitGate | undefined, name: string, directory:
   return openCommitRefusal(name, directory)
 }
 
+/**
+ * The row-keyed half of that same gate (A6): the defects one capability row owes
+ * because an open commit intent moves it, or `[]` when none does. It is asked
+ * once per row the pre-check was handed — before discovery, because the row is
+ * what is refused and not any skill of it — and it answers only for that row.
+ * A row the ledger names and the request never asked about is none of this
+ * pre-check's business.
+ */
+function capabilityRowRefusals(gate: CommitGate | undefined, capability: string): SkillDefect[] {
+  if (gate === undefined) return []
+  if (!gate.openCapabilities.has(capability)) return []
+  return [openCapabilityRowRefusal(capability)]
+}
+
 /** The search-failure refusal: the skill name and the roots, which no phase-1 validator can know. */
 function undiscovered(name: string, roots: readonly string[]): RejectedProviderVerdict {
   return {
@@ -486,6 +569,11 @@ export function providerContentIdentities(capabilities: readonly CapabilityProvi
  * unknown (`verifierRefs` absent) — the one case the phase-1 validator cannot
  * judge, because it would read an empty list as "nothing is registered".
  *
+ * One rule is applied per **row** and before any of that: a row an open commit
+ * intent moves is refused whole and not resolved at all
+ * ({@link openCapabilityRowRefusal}), so a row-only capability commit — which no
+ * directory can name — is admitted by nothing.
+ *
  * Nothing is written and nothing is thrown: every refusal is a verdict, and
  * {@link providerRefusals} turns the refusals into the lines a caller reports
  * before it refuses the whole batch. The commit gate is read once per call and
@@ -499,6 +587,15 @@ export async function precheckProviders(request: ProviderPrecheckRequest): Promi
   const commitGate = await readCommitGate(request.commitLedger)
   const capabilities: CapabilityProviderPrecheck[] = []
   for (const capability of request.capabilities) {
+    // A6, and first: a row an open commit intent moves is refused whole. It is
+    // not resolved — no skill verdict is taken, no revision absorbs it — because
+    // the row's grant is not the deployment's yet, and for a row-only commit
+    // there is no file for the directory half of this gate to match either.
+    const rowRefusals = capabilityRowRefusals(commitGate, capability)
+    if (rowRefusals.length > 0) {
+      capabilities.push({ capability, skills: [], refusals: rowRefusals })
+      continue
+    }
     const declared = request.table[capability]?.skills ?? []
     const skills: SkillProviderVerdict[] = []
     for (const name of [...new Set(declared)]) {
@@ -554,7 +651,10 @@ export async function precheckProviders(request: ProviderPrecheckRequest): Promi
  * promotion gate (`EvolutionService.checkPromotion`) asked before the row
  * reached `config.yml`: one composition, one vocabulary of refusals, no entry
  * that can be replaced without being judged. `refusals` is empty for a row that
- * grants no skill or only loadable providers.
+ * grants no skill or only loadable providers — and for the commit that is
+ * installing its own row, whose open intent the caller exempts by name
+ * (`applyCapabilityRow`'s `commitRow`); a row another open intent moves is
+ * refused as a row (A6).
  */
 export async function precheckReplacedCapabilityRow(request: {
   /** The capability row being written. */
@@ -600,11 +700,14 @@ function refusalHead(capability: string, verdict: RejectedProviderVerdict): stri
  * without being execution providers.
  */
 export function providerRefusals(precheck: ProviderPrecheck): string[] {
-  return precheck.capabilities.flatMap(row =>
-    row.skills
+  return precheck.capabilities.flatMap(row => [
+    // The row's own refusals come first: they are about the whole row, and a row
+    // refused at that level was never resolved into skills (A6).
+    ...(row.refusals ?? []).map(item => `capability ${JSON.stringify(row.capability)}: ${item.code}: ${item.detail}`),
+    ...row.skills
       .filter((verdict): verdict is RejectedProviderVerdict => !verdict.valid)
       .map(verdict => `${refusalHead(row.capability, verdict)}: ${verdict.defects.map(item => `${item.code}: ${item.detail}`).join('; ')}`),
-  )
+  ])
 }
 
 /**
@@ -615,9 +718,10 @@ export function providerRefusals(precheck: ProviderPrecheck): string[] {
  * refuses a batch on {@link providerRefusals}.
  */
 export function providerDefectLines(precheck: ProviderPrecheck): string[] {
-  return precheck.capabilities.flatMap(row =>
-    row.skills
+  return precheck.capabilities.flatMap(row => [
+    ...(row.refusals ?? []).map(item => `capability ${JSON.stringify(row.capability)}: ${item.code}: ${item.detail}`),
+    ...row.skills
       .filter((verdict): verdict is RejectedProviderVerdict => !verdict.valid)
       .flatMap(verdict => verdict.defects.map(item => `${refusalHead(row.capability, verdict)}: ${item.code}: ${item.detail}`)),
-  )
+  ])
 }

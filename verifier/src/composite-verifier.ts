@@ -24,6 +24,16 @@ import type { Verifier, VerifierSelftest, VerifyRequest } from './types.ts'
 export interface CompositeTaskSource {
   runMembersIn(storeId: string, runId: RunId): Promise<TaskInstance[]>
   /**
+   * The judged run's members **by position** (`TaskService.runMemberSlotsIn`):
+   * `members[i]` is the task a criterion's `childIndex: i` names, and
+   * `undefined` is a position the run has not filled — a recovery attempt can
+   * claim a position (a passed sibling's evidence) and admit the members that
+   * fill the others in later batches, so a judgement made before it is complete
+   * reads the unfilled slots as "no member there" rather than shifting the
+   * positions behind them.
+   */
+  runMemberSlotsIn(storeId: string, runId: RunId): Promise<(TaskInstance | undefined)[]>
+  /**
    * The full store snapshot. The plain conjunction needs only members, but a
    * parent's {@link AcceptanceCriterion.childEvidence} map is judged against
    * child evidence and run states, so the source exposes the snapshot too.
@@ -60,12 +70,12 @@ function describeEntry(entry: ChildEvidenceRef): string {
  */
 function entryDefect(
   entry: ChildEvidenceRef,
-  children: readonly TaskInstance[],
+  children: readonly (TaskInstance | undefined)[],
   snapshot: TaskSnapshot,
 ): string | undefined {
   const child = children[entry.childIndex]
   if (child === undefined) {
-    return `child #${entry.childIndex} does not exist (the run's batches have admitted ${children.length} members)`
+    return `child #${entry.childIndex} does not exist (the run's member sequence holds ${children.filter(item => item !== undefined).length} filled position(s))`
   }
   if (child.status !== 'verified') {
     return `child #${entry.childIndex} (${child.taskId}) is ${child.status}, not verified`
@@ -114,8 +124,9 @@ function entryDefect(
  * carries the explicit heuristic label in its details, so a natural-language
  * coverage signal is never mistaken for a mechanical proof (KISS §5.1).
  *
- * `members` is the judged run's accumulative membership, in admission order
- * (`TaskService.runMembersIn`) — the sequence `childIndex` names. It is not the
+ * `members` is the judged run's member sequence **by position**
+ * (`TaskService.runMemberSlotsIn`) — the sequence `childIndex` names, where an
+ * unfilled position is `undefined` rather than a missing entry. It is not the
  * judged task's children: a parent's later batch appends and never renumbers an
  * earlier one's members, and a run that admitted no batch has none.
  *
@@ -129,7 +140,7 @@ function entryDefect(
  */
 export async function judgeCompositeCriterion(
   criterion: AcceptanceCriterion,
-  members: readonly TaskInstance[],
+  members: readonly (TaskInstance | undefined)[],
   snapshot: () => Promise<TaskSnapshot>,
 ): Promise<VerificationResult> {
   const map = criterion.childEvidence ?? []
@@ -148,12 +159,17 @@ export async function judgeCompositeCriterion(
     }
   }
 
-  const unverified = members.filter(child => child.status !== 'verified')
+  // A position the run has not filled is not verified either: the criterion is
+  // judged over the run's whole member sequence, so an unfilled slot fails it by
+  // name instead of being skipped.
+  const unverified = members.flatMap((child, index) => child?.status === 'verified'
+    ? []
+    : [child === undefined ? `#${index} (unfilled)` : `${child.taskId}(${child.status})`])
   if (unverified.length > 0) {
     return {
       ...base,
       status: 'fail',
-      details: `unverified children: ${unverified.map(child => `${child.taskId}(${child.status})`).join(', ')}`,
+      details: `unverified children: ${unverified.join(', ')}`,
     }
   }
 
@@ -310,7 +326,7 @@ export class CompositeVerifier implements Verifier {
   }
 
   async verifyIn(storeId: string, req: VerifyRequest): Promise<VerificationResult[]> {
-    const members = await this.task.runMembersIn(storeId, req.runId)
+    const members = await this.task.runMemberSlotsIn(storeId, req.runId)
     const results: VerificationResult[] = []
     for (const criterion of req.criteria) {
       results.push(await judgeCompositeCriterion(criterion, members, () => this.task.snapshotIn(storeId)))

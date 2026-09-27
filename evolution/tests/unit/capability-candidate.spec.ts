@@ -11,7 +11,7 @@
 
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -248,11 +248,15 @@ async function ledgerLines(root: string): Promise<Record<string, unknown>[]> {
  * candidate, prepare, record the two-sided experiment the candidate was
  * evaluated by, gate, decide. The experiment is recorded between prepare and
  * gate because that is the order a live flow produces — evidence first, then the
- * human answers over it.
+ * human answers over it. `evidence` fixes the sides the fixture's store records
+ * (a candidate that replaces a row the production table already holds must have
+ * its baseline side reproduce the observed failure, so its case passes
+ * `{ baseline: 'reproduce' }`).
  */
 async function capabilityDecided(
   fixture: CapabilityFixture,
   mutation: unknown = capabilityMutation(),
+  evidence: { baseline?: 'not-admitted' | 'reproduce' | 'verified' | 'failed'; candidate?: 'verified' | 'failed' } = {},
 ): Promise<void> {
   const { svc, skillRoot } = fixture
   await svc.propose(capabilityProposal, 'root-1')
@@ -260,7 +264,7 @@ async function capabilityDecided(
   await svc.prepare('cap1', 'root-1')
   // The gate's answers rest on the experiment the candidate was evaluated by,
   // so the report it cites is the evidence the human answers over.
-  const experiment = await recordEvidence(fixture)
+  const experiment = await recordEvidence(fixture, evidence)
   await svc.gate('cap1', gateAnswers([skillRoot, experiment.reportPath]), 'root-1')
   await svc.decide('cap1', 'PROMOTE', 'root-1', 'approval:decide')
 }
@@ -649,78 +653,163 @@ describe('capability candidate: third-party change and half-products', () => {
   })
 })
 
-describe('capability candidate: the table file is the commit\'s last durable step', () => {
-  it('stops between the registry row and the table file, and only the reconciliation completes it', async () => {
+/**
+ * EVO-2, the table file's own side (缺陷 A6-修正①): the file a capability commit
+ * writes its row into is the *deployment's* configuration, and its composed
+ * identity is frozen at prepare. The commit refuses — by name, with nothing
+ * written into that file and no completion recorded — unless the file still reads
+ * as a state prepare froze (or as this commit's own write, so a retry after a
+ * crash still settles). The in-process registry is not a substitute for this
+ * check: a hand edit of the file moves bytes the registry never saw.
+ */
+describe('capability candidate: the table file a third party moved', () => {
+  it('refuses apply with no side effect at all when the table\'s own row moved since prepare', async () => {
+    // The candidate replaces a row the production table already holds, so the
+    // file carries a row of that name at prepare — the row a hand edit can move
+    // while the registry prepare compared (the same in-process table) stays put.
+    const previous: CapabilityConfig = { skills: [STORE_SKILL], tools: ['filesystem'] }
+    const f = await fixture({ registry: { [STORE_ROW]: STORE_ENTRY, [NEW_ROW]: previous } })
+    const { svc, root, skillRoot, registry, config } = f
+    await capabilityDecided(f, capabilityMutation(), { baseline: 'reproduce' })
+    const table = config.capabilityConfig!
+    const before = await readFile(table, 'utf8')
+    const thirdParty = before.replace(
+      `      ${NEW_ROW}: { skills: [${STORE_SKILL}], tools: [filesystem] }`,
+      `      ${NEW_ROW}: { skills: [a6-third-party], tools: [bash] }`,
+    )
+    expect(thirdParty).not.toBe(before)
+    await writeFile(table, thirdParty, 'utf8')
+
+    const message = await refusalOf(svc.apply('cap1', 'root-1', 'approval:apply'))
+    expect(message).toContain('capability-table-changed')
+    expect(message).toContain(NEW_ROW)
+    expect(message).toContain(table)
+    // The third party's row is exactly what survives, and nothing of this commit
+    // ran: no skill file, no registry row, no completion. Its commit intent is
+    // recorded and stays open — the row it was to write is not settled.
+    expect(await readFile(table, 'utf8')).toBe(thirdParty)
+    expect(registry[NEW_ROW]).toEqual(previous)
+    expect(registry[STORE_ROW]).toEqual(STORE_ENTRY)
+    expect(existsSync(join(skillRoot, NEW_SKILL))).toBe(false)
+    const lines = await ledgerLines(root)
+    expect(lines.filter(line => line.kind === 'applied')).toHaveLength(0)
+    const proposal = await svc.get('cap1')
+    expect(proposal.openIntent?.intentId).toBe('cap1/apply')
+    expect(proposal.status).toBe('decided')
+  })
+
+  it('refuses rollback the same way when the table moved after the apply, and writes nothing back', async () => {
+    const f = await fixture()
+    const { svc, root, registry, config } = f
+    await capabilityDecided(f)
+    await svc.apply('cap1', 'root-1', 'approval:apply')
+    const table = config.capabilityConfig!
+    const applied = await readFile(table, 'utf8')
+    const thirdParty = applied.replace(
+      `"${NEW_ROW}": {"skills":["${NEW_SKILL}"],"tools":["filesystem"]}`,
+      `"${NEW_ROW}": {"skills":["a6-third-party"],"tools":["filesystem"]}`,
+    )
+    expect(thirdParty).not.toBe(applied)
+    await writeFile(table, thirdParty, 'utf8')
+
+    const message = await refusalOf(svc.rollback('cap1', 'root-1', 'approval:rollback'))
+    expect(message).toContain('capability-table-changed')
+    expect(await readFile(table, 'utf8')).toBe(thirdParty)
+    // The row this proposal applied is still the registry's: a rollback that
+    // cannot prove the table writes nothing, not even the row's reversal.
+    expect(registry[NEW_ROW]).toEqual({ skills: [NEW_SKILL], tools: ['filesystem'] })
+    expect((await ledgerLines(root)).filter(line => line.kind === 'rolledback')).toHaveLength(0)
+    expect((await svc.get('cap1')).openIntent?.intentId).toBe('cap1/rollback')
+  })
+
+  it('refuses a table a third party rewrote at the write seam, and never overwrites it', async () => {
+    let table = ''
+    let thirdParty = ''
+    let rewritten = false
+    const f = await fixture({
+      capabilityConfigProbe: stage => {
+        if (stage !== 'before-write' || rewritten) return
+        rewritten = true
+        writeFileSync(table, thirdParty, 'utf8')
+      },
+    })
+    const { svc, root, config, registry } = f
+    await capabilityDecided(f)
+    table = config.capabilityConfig!
+    const before = await readFile(table, 'utf8')
+    thirdParty = before.replace(
+      `      ${STORE_ROW}: { skills: [${STORE_SKILL}], tools: [filesystem, bash] }`,
+      `      ${STORE_ROW}: { skills: [${STORE_SKILL}], tools: [filesystem, bash] }\n` +
+        `      a6-third-party-row: { skills: [${STORE_SKILL}] }`,
+    )
+    expect(thirdParty).not.toBe(before)
+
+    const message = await refusalOf(svc.apply('cap1', 'root-1', 'approval:apply'))
+    expect(message).toContain('capability-table-changed')
+    expect(rewritten).toBe(true)
+    // The write never landed: what the third party wrote is what the file holds,
+    // the row this commit installed never reached it, and no completion closed
+    // the intent (the commit's earlier steps did install the registry row — the
+    // half-product the open intent is the record of).
+    const held = await readFile(table, 'utf8')
+    expect(held).toBe(thirdParty)
+    expect(held).not.toContain(`"${NEW_ROW}"`)
+    expect(registry[NEW_ROW]).toEqual({ skills: [NEW_SKILL], tools: ['filesystem'] })
+    expect((await ledgerLines(root)).some(line => line.kind === 'applied')).toBe(false)
+    expect((await svc.get('cap1')).openIntent?.intentId).toBe('cap1/apply')
+  })
+
+  it('reports a reconciliation blocked by the moved table, and settles nothing over it', async () => {
     let stopped = false
     const f = await fixture({
-      capabilityConfigProbe: (stage) => {
+      capabilityConfigProbe: stage => {
         if (stage === 'before-write' && !stopped) {
           stopped = true
           throw new Error('fixture: interrupted before the table file was written')
         }
       },
     })
-    const { svc, root, registry, config } = f
+    const { svc, root, config, registry } = f
     await capabilityDecided(f)
-    const message = await refusalOf(svc.apply('cap1', 'root-1', 'approval:apply'))
-    expect(message).toContain('fixture: interrupted before the table file was written')
-    // Where the commit really stopped: the in-process registry already holds the
-    // row (the mirror is written before the file), the table file does not, and no
-    // completion was recorded. A restart reads the *file*, so the row is not yet
-    // one the deployment keeps.
-    expect(registry[NEW_ROW]).toEqual({ skills: [NEW_SKILL], tools: ['filesystem'] })
-    const stoppedFile = await readFile(config.capabilityConfig!, 'utf8')
-    expect(stoppedFile).not.toContain(`"${NEW_ROW}"`)
-    const open = await ledgerLines(root)
-    expect(open.some(line => line.kind === 'commit_intent')).toBe(true)
-    expect(open.some(line => line.kind === 'applied')).toBe(false)
-    expect(await svc.openIntentTargets()).toEqual([
-      join(f.skillRoot, NEW_SKILL, 'SKILL.md'),
-      join(f.skillRoot, NEW_SKILL, SKILL_SIDECAR_FILE),
-    ])
+    const table = config.capabilityConfig!
+    expect(await refusalOf(svc.apply('cap1', 'root-1', 'approval:apply'))).toContain('fixture: interrupted')
+    const thirdParty = (await readFile(table, 'utf8')).replace(
+      `      ${STORE_ROW}: { skills: [${STORE_SKILL}], tools: [filesystem, bash] }`,
+      `      ${STORE_ROW}: { skills: [${STORE_SKILL}], tools: [filesystem, bash] }\n` +
+        `      a6-third-party-row: { skills: [${STORE_SKILL}] }`,
+    )
+    await writeFile(table, thirdParty, 'utf8')
 
-    // A second service image over the same ledger root settles it: the row is
-    // written into the table file, and only then is the completion recorded.
-    const reopened = new EvolutionService(f.ctx, { ...config, capabilityConfigProbe: undefined })
-    const outcomes = await reopened.reconcile()
+    const outcomes = await svc.reconcile()
     expect(outcomes).toHaveLength(1)
-    expect(outcomes[0]!.result, outcomes[0]!.detail ?? '').toContain('completed')
-    const settled = await readFile(config.capabilityConfig!, 'utf8')
-    expect(settled).toContain(`"${NEW_ROW}": {"skills":["${NEW_SKILL}"],"tools":["filesystem"]}`)
-    expect(settled).toContain(`${STORE_ROW}: { skills: [${STORE_SKILL}], tools: [filesystem, bash] }`)
-    expect((await ledgerLines(root)).filter(line => line.kind === 'applied')).toHaveLength(1)
-    expect(await reopened.openIntentTargets()).toEqual([])
+    expect(outcomes[0]!.result).toBe('blocked')
+    expect(outcomes[0]!.detail ?? '').toContain('capability-table-changed')
+    // A recovery settles nothing over a table a third party moved: the intent is
+    // still open, no completion was recorded, and the file keeps its bytes.
+    expect(await readFile(table, 'utf8')).toBe(thirdParty)
+    expect((await ledgerLines(root)).some(line => line.kind === 'applied')).toBe(false)
+    expect((await svc.get('cap1')).openIntent?.intentId).toBe('cap1/apply')
+    expect(registry[NEW_ROW]).toEqual({ skills: [NEW_SKILL], tools: ['filesystem'] })
   })
 
-  it('records the completion over a table file already written, without writing production a second time', async () => {
-    let stopped = false
-    const f = await fixture({
-      capabilityConfigProbe: (stage) => {
-        if (stage === 'written' && !stopped) {
-          stopped = true
-          throw new Error('fixture: interrupted after the table file was written')
-        }
-      },
-    })
+  it('lands on exactly the states prepare froze when nothing moves: apply, then rollback', async () => {
+    const f = await fixture()
     const { svc, root, config } = f
     await capabilityDecided(f)
-    const message = await refusalOf(svc.apply('cap1', 'root-1', 'approval:apply'))
-    expect(message).toContain('fixture: interrupted after the table file was written')
-    // The file holds the row and production holds the object; what the dead
-    // process never wrote is the completion.
-    const writtenFile = await readFile(config.capabilityConfig!, 'utf8')
-    expect(writtenFile).toContain(`"${NEW_ROW}": {"skills":["${NEW_SKILL}"],"tools":["filesystem"]}`)
-    expect(await readFile(join(f.skillRoot, NEW_SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE_TEXT)
-    expect((await ledgerLines(root)).some(line => line.kind === 'applied')).toBe(false)
+    const table = config.capabilityConfig!
+    const frozen = (await svc.get('cap1')).prepared!.capabilityTable!
+    const before = await readFile(table, 'utf8')
+    expect(sha256Hex(before)).toBe(frozen.baselineSha256)
 
-    const reopened = new EvolutionService(f.ctx, { ...config, capabilityConfigProbe: undefined })
-    const outcomes = await reopened.reconcile()
-    expect(outcomes).toHaveLength(1)
-    expect(outcomes[0]!.result).toBe('completed-written')
-    // Exactly one completion, the same file bytes, and the same object on disk.
-    expect((await ledgerLines(root)).filter(line => line.kind === 'applied')).toHaveLength(1)
-    expect(await readFile(config.capabilityConfig!, 'utf8')).toBe(writtenFile)
-    expect(await readFile(join(f.skillRoot, NEW_SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE_TEXT)
-    expect(await reopened.openIntentTargets()).toEqual([])
+    await svc.apply('cap1', 'root-1', 'approval:apply')
+    expect(sha256Hex(await readFile(table, 'utf8'))).toBe(frozen.applySha256)
+
+    await svc.rollback('cap1', 'root-1', 'approval:rollback')
+    const rolled = await readFile(table, 'utf8')
+    expect(sha256Hex(rolled)).toBe(frozen.rollbackSha256)
+    // This candidate added the row, so its rollback removes it and the file the
+    // deployment had is byte for byte the file it has again.
+    expect(rolled).toBe(before)
+    expect((await ledgerLines(root)).filter(line => line.kind === 'rolledback')).toHaveLength(1)
   })
 })

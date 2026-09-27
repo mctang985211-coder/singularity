@@ -16,6 +16,7 @@ import type {} from '@dangosys/dsh-singularity-agent-runtime'
 import type { AgentMessageIntent } from '@dangosys/dsh-singularity-agent-runtime'
 import type { AgentOptions, GraphScope } from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-graphs'
+import type { GraphRecord } from '@dangosys/dsh-singularity-graphs'
 import type {
   AcceptanceCriterion,
   AdmissionContext,
@@ -31,6 +32,7 @@ import type {
   RootProposalIdentity,
   RunId,
   RunMemberReuse,
+  RunMemberReuseRefusal,
   RunProviderBinding,
   RunRecovery,
   RunStatus,
@@ -70,6 +72,7 @@ import {
   rootProposalDigest,
   rootProposalId,
   rootTaskStoreId,
+  runMemberSlots,
   runMemberTaskIds,
   taskProposalId,
 } from '@dangosys/dsh-singularity-task'
@@ -139,6 +142,7 @@ import {
   type QuestionReconcileReport,
 } from './question.ts'
 import {
+  deriveReuse,
   inFlightRecoveryAttempt,
   recoveryAttemptDigest,
   recoveryAttemptWithKey,
@@ -271,6 +275,7 @@ export type {
   RootRecoveryRequest,
 } from './recovery.ts'
 export {
+  deriveReuse,
   inFlightRecoveryAttempt,
   recoveryAttemptDigest,
   recoveryAttemptsOf,
@@ -280,6 +285,7 @@ export {
   reuseDefects,
   storedReuse,
 } from './recovery.ts'
+export type { ReuseDerivation } from './recovery.ts'
 export { readVerifiedFile, walkVerified } from './verified-read.ts'
 export type {
   RunBindingRead,
@@ -1663,8 +1669,16 @@ export interface RootRecoveryOutcome {
   readonly runId: RunId
   readonly sessionId: string
   readonly status: RunStatus
-  /** The verified siblings the attempt reads at its leading positions, in position order. */
+  /** The verified siblings the attempt reads, by the positions they claim. */
   readonly reusedMembers: readonly RunMemberReuse[]
+  /**
+   * The positions of the failed run that read a passed sibling the attempt could
+   * not bind, with every reason — the "affected items" a reader can act on. The
+   * slots are left for the members the attempt's own batches admit, so every one
+   * of them is done again; each is also on the attempt's own record
+   * (`TaskRun.recovery.unboundMembers`).
+   */
+  readonly unboundMembers: readonly RunMemberReuseRefusal[]
   readonly detail: string
 }
 
@@ -2068,22 +2082,23 @@ export class TaskRuntime extends Service {
    * nothing, and refusing a rollback would strand a deployment on a row it is
    * trying to undo.
    *
-   * `options.commitTargets` is for the one caller that is itself the commit
-   * installing the row (A6): a capability commit writes a **new** skill's files
-   * and then registers the row that grants them, while its own `commit_intent`
-   * is still open — and the pre-check above refuses any provider whose directory
-   * an open intent touches, which would be the very provider this call is
-   * registering. The caller therefore names its own in-flight file set, and only
-   * the directories those targets live in are exempt from that one refusal:
-   * every *other* open intent still refuses the row by name, and the row is
-   * still judged by the whole admission pre-check, so a caller that named a
-   * foreign target would only weaken its own gate. A production deployment never
-   * passes it.
+   * `options.commitTargets` and `options.commitRow` are for the one caller that
+   * is itself the commit installing the row (A6): a capability commit writes a
+   * **new** skill's files and then registers the row that grants them, while its
+   * own `commit_intent` is still open — and the pre-check above refuses any
+   * provider whose directory an open intent touches, *and* any row an open intent
+   * moves, which would be the very provider and the very row this call is
+   * registering. The caller therefore names its own in-flight file set and the
+   * row it is installing, and only those are exempt from those one-or-two
+   * refusals: every *other* open intent still refuses the row by name, and the
+   * row is still judged by the whole admission pre-check, so a caller that named
+   * a foreign target or a foreign row would only weaken its own gate. A
+   * production deployment never passes either.
    */
   async applyCapabilityRow(
     name: string,
     entry: CapabilityConfig | null,
-    options: { commitTargets?: readonly string[] } = {},
+    options: { commitTargets?: readonly string[]; commitRow?: string } = {},
   ): Promise<void> {
     if (entry === null) {
       const rest = { ...this.config.capabilities }
@@ -2101,24 +2116,38 @@ export class TaskRuntime extends Service {
    * every refusal named (capability, skill, defect code, detail) — and writes
    * nothing, which is what makes the caller's table unchanged.
    *
-   * `options.commitTargets` exempts the in-flight files of the commit this call
-   * belongs to from the pre-check's open-intent gate only (see
-   * {@link applyCapabilityRow}); the ledger view handed to the pre-check is the
-   * deployment's own, with exactly those targets' directories filtered out.
+   * `options.commitTargets` and `options.commitRow` exempt the in-flight files
+   * and the row of the commit this call belongs to from the pre-check's
+   * open-intent gate only (see {@link applyCapabilityRow}); the ledger view
+   * handed to the pre-check is the deployment's own, with exactly those targets'
+   * directories and that row filtered out. A read the service does not offer is
+   * left absent rather than answered empty, so the pre-check's fail-closed rule
+   * keeps holding through the wrapper.
    */
   private async assertReplacementRow(
     name: string,
     entry: CapabilityConfig,
-    options: { commitTargets?: readonly string[] } = {},
+    options: { commitTargets?: readonly string[]; commitRow?: string } = {},
   ): Promise<void> {
     const verifierRefs = await this.registeredVerifierIds()
     const ledger = this.softService<EvolutionCommitLedger>('evolution')
     const owned = new Set((options.commitTargets ?? []).map(target => dirname(resolve(target))))
-    const commitLedger = ledger === undefined || owned.size === 0
+    const exemptRow = options.commitRow
+    const commitLedger = ledger === undefined || (owned.size === 0 && exemptRow === undefined)
       ? ledger
       : {
-          openIntentTargets: async () => (await ledger.openIntentTargets?.() ?? [])
-            .filter(target => !owned.has(dirname(resolve(target)))),
+          ...(ledger.openIntentTargets === undefined
+            ? {}
+            : {
+                openIntentTargets: async () => (await ledger.openIntentTargets!())
+                  .filter(target => !owned.has(dirname(resolve(target)))),
+              }),
+          ...(ledger.openIntentCapabilities === undefined
+            ? {}
+            : {
+                openIntentCapabilities: async () => (await ledger.openIntentCapabilities!())
+                  .filter(row => row !== exemptRow),
+              }),
         }
     const { refusals } = await precheckReplacedCapabilityRow({
       name,
@@ -3159,9 +3188,12 @@ export class TaskRuntime extends Service {
    *
    * 1. **the request's closed shape**, before the store is opened: an unknown
    *    field is refused by name, so a caller cannot smuggle a decision in.
-   * 2. **the caller**: a live coordination session, because the new attempt's
-   *    Session is spawned from it. A caller without one is refused before
-   *    anything is written.
+   * 2. **the caller**: a live coordination session *of this store's own graph*,
+   *    because the new attempt's Session is spawned from it and a recovery is
+   *    asked of the tree that failed. A caller without a live agent, a session
+   *    of another graph and a session whose graph cannot be resolved are one
+   *    refusal family, each named, and all of them before anything is written
+   *    ({@link assertRecoveryCallerOwnsStore}).
    * 3. **the store's facts, re-checked here**: the source task is this store's
    *    own root; the named source run is a failed run of it (or the failure had
    *    no run); its contract and acceptance criteria are the ones the store
@@ -3215,8 +3247,64 @@ export class TaskRuntime extends Service {
         'nothing was written and no run was started',
       )
     }
+    await this.assertRecoveryCallerOwnsStore(storeId, caller)
     await this.assertRecoveryReady(storeId, 'a recovery attempt')
     return await this.serializeRootIntake(storeId, () => this.recoverRootTaskOnce(storeId, request, caller))
+  }
+
+  /**
+   * The caller's own graph, and the store of the root session that graph names:
+   * the one rule that decides whether a recovery may be asked of this store at
+   * all.
+   *
+   * **Why the service entry owns this.** The tool adapter and the evolution
+   * coordinator each check the membership they are responsible for, but a caller
+   * can reach `recoverRootTask` directly — the host composition layer does — and
+   * a rule only the tool checks is a rule a direct caller skips. What this check
+   * rests on is the deployment's own record, never the caller's word: the
+   * session's graph is the registry's fact, and the store id derives from the
+   * root session that graph names (`rootTaskStoreId`). So a session of another
+   * graph, a session no graph publishes, and a graph whose root names somebody
+   * else's store are one refusal family, each named. Deliberately absent: any
+   * read of the evolution ledger, any caller-supplied approval, and any
+   * distinction of *which* session inside the graph is asking — that a recovery
+   * is asked for by the graph's trusted supervisor is the coordinator's own
+   * rule, and this entry re-checks only the ownership that is its own (plan
+   * §F.4: 两层的直接调用入口各自重检所属规则).
+   *
+   * **Fail-closed, and before every write.** A graph that cannot be resolved is
+   * "ownership cannot be established", not "some other graph owns this store":
+   * the refusal names the caller, the graph's root session and store when they
+   * are known, and this store, and says that nothing was written. The check is
+   * two reads at most, so both call sites — the public entry and the serialized
+   * section — can afford it, and a refusal leaves the store, its batches and
+   * its files exactly as they were.
+   */
+  private async assertRecoveryCallerOwnsStore(storeId: string, caller: RootRecoveryCaller): Promise<void> {
+    const sessionId = caller.sessionId
+    const graphs: { graphForSession(sessionId: SessionId): Promise<GraphRecord> } | undefined = this.ctx.graphs
+    if (graphs === undefined) {
+      throw new Error(
+        `task-runtime: session "${sessionId}" cannot open a recovery of store "${storeId}": this deployment has no graph registry, ` +
+        'so its ownership of this store cannot be established; nothing was written',
+      )
+    }
+    let graph: GraphRecord
+    try {
+      graph = await graphs.graphForSession(SessionId(sessionId))
+    } catch (error) {
+      throw new Error(
+        `task-runtime: session "${sessionId}" cannot open a recovery of store "${storeId}": its graph could not be resolved ` +
+        `(${error instanceof Error ? error.message : String(error)}), so its ownership of this store cannot be established; nothing was written`,
+      )
+    }
+    const ownStoreId = rootTaskStoreId(graph.rootSessionId)
+    if (ownStoreId !== storeId) {
+      throw new Error(
+        `task-runtime: session "${sessionId}" cannot open a recovery of store "${storeId}": its graph's root session is "${graph.rootSessionId}", ` +
+        `whose store is "${ownStoreId}" — a recovery attempt is opened in the store of the caller's own graph, and nothing was written`,
+      )
+    }
   }
 
   /** One recovery attempt, inside the store's own serialization — see {@link recoverRootTask} for the order. */
@@ -3225,6 +3313,9 @@ export class TaskRuntime extends Service {
     request: RootRecoveryRequest,
     caller: RootRecoveryCaller,
   ): Promise<RootRecoveryOutcome> {
+    // The serialized section carries the same ownership rule as the public
+    // entry above: whatever reaches this function meets it.
+    await this.assertRecoveryCallerOwnsStore(storeId, caller)
     const sourceTaskId = request.sourceTaskId
     const snapshot = await this.ctx.task.snapshotIn(storeId)
     const source = snapshot.tasks.find(task => task.taskId === sourceTaskId)
@@ -3282,18 +3373,29 @@ export class TaskRuntime extends Service {
     }
     const sourceRun = this.recoverySourceRun(source, request, snapshot)
     this.assertRecoveryContract(source)
-    const declarations = request.reuses ?? []
-    const reuseReasons = reuseDefects(declarations, {
+    // The binding comes from the store, not from the caller: a request that names
+    // no reuse gets the citations the failed run's own facts support, and the
+    // positions whose passed siblings cannot be bound are *reported*, never
+    // dropped silently (plan §F.4). A caller that declares its own reuse is held
+    // to every rule instead — one citation that does not resolve refuses the
+    // whole recovery, before anything is written — because a declaration is a
+    // promise the store can check and an omission here would be a bypass.
+    const reuseContext: ReuseContext = {
       source,
       ...(sourceRun === undefined ? {} : { sourceRun }),
-      sourceMembers: sourceRun === undefined ? [] : runMemberTaskIds(sourceRun),
+      sourceMembers: sourceRun === undefined ? [] : runMemberSlots(sourceRun),
       snapshot,
-    })
+    }
+    const declared = request.reuses
+    const derived = declared === undefined ? deriveReuse(reuseContext) : undefined
+    const declarations = declared ?? derived?.bound ?? []
+    const reuseReasons = reuseDefects(declarations, reuseContext)
     if (reuseReasons.length > 0) {
       throw new Error(
         `task-runtime: the recovery of "${sourceTaskId}" was refused; the declared reuse does not resolve:\n- ${reuseReasons.join('\n- ')}`,
       );
     }
+    const unbound: RunMemberReuseRefusal[] = derived?.unbound ?? []
     const manifest = this.resolveCapabilities(source.requestedCapabilities)
     if (manifest.missing.length > 0) {
       throw new Error(
@@ -3332,6 +3434,7 @@ export class TaskRuntime extends Service {
       source,
       request,
       declarations,
+      unbound,
       manifest,
       precheck,
       rootSessionId,
@@ -3355,13 +3458,19 @@ export class TaskRuntime extends Service {
     const existing = recoveryAttemptWithKey(snapshot, request.sourceTaskId, request.requestKey)
     if (existing === undefined) return undefined
     const stored = existing.recovery as RunRecovery
-    const digest = recoveryAttemptDigest(stored)
+    // The key is bound to the *request*, not to the binding it produced: a
+    // request that names no reuse has its citations derived from the store (a
+    // retry must answer with the same attempt however the store's evidence moved
+    // since), while a request that declares them is compared by what it declared.
+    // A record written before `requestDigest` existed is compared by the binding
+    // it carries — exactly what its caller's request stated.
+    const digest = stored.requestDigest ?? recoveryAttemptDigest(stored)
     const wanted = requestAttemptDigest(request)
     if (digest !== wanted) {
       throw new Error(
         `task-runtime: request key "${request.requestKey}" already names a recovery attempt of "${request.sourceTaskId}" ` +
-        `(run "${existing.runId}", session "${existing.sessionId}", content ${digest}); this request's content is ${wanted} — ` +
-        'one key names one attempt, and a different request is a different key',
+        `(run "${existing.runId}", session "${existing.sessionId}", request ${digest}); this request's content is ${wanted} — ` +
+        'one key names one request, and a different request is a different key',
       )
     }
     return {
@@ -3374,6 +3483,7 @@ export class TaskRuntime extends Service {
       sessionId: existing.sessionId,
       status: existing.status,
       reusedMembers: stored.reusedMembers.map(member => ({ ...member, artifactRefs: [...member.artifactRefs], inputRefs: [...member.inputRefs] })),
+      unboundMembers: (stored.unboundMembers ?? []).map(entry => ({ ...entry, reasons: [...entry.reasons] })),
       detail:
         `request key "${stored.requestKey}" already named this recovery attempt: run "${existing.runId}" is ${existing.status}` +
         `${existing.finishedAt === undefined ? '' : ` (finished ${existing.finishedAt})`}; nothing was written`,
@@ -3466,6 +3576,7 @@ export class TaskRuntime extends Service {
     source: TaskInstance
     request: RootRecoveryRequest
     declarations: readonly RootRecoveryReuse[]
+    unbound: readonly RunMemberReuseRefusal[]
     manifest: CapabilityManifest
     precheck: ProviderPrecheck
     rootSessionId: string
@@ -3482,7 +3593,9 @@ export class TaskRuntime extends Service {
       requestKey: request.requestKey,
       ...(request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId }),
       requestedAt: now(),
+      requestDigest: requestAttemptDigest(request),
       reusedMembers,
+      ...(input.unbound.length === 0 ? {} : { unboundMembers: input.unbound.map(entry => ({ ...entry, reasons: [...entry.reasons] })) }),
     }
     // The preset the worker will be mounted on, resolved once: the run records it
     // so a resume rebuilds the same composition rather than the deployment's
@@ -3580,10 +3693,12 @@ export class TaskRuntime extends Service {
       sessionId,
       status: stored?.status ?? 'running',
       reusedMembers,
+      unboundMembers: input.unbound.map(entry => ({ ...entry, reasons: [...entry.reasons] })),
       detail:
         `a recovery attempt of "${source.taskId}" was opened: run "${runId}" in session "${sessionId}" under diagnosis ` +
         `"${request.sourceDiagnosisId}", key "${request.requestKey}"` +
-        `${reusedMembers.length === 0 ? '' : `, reading ${reusedMembers.length} already verified sibling member(s) at its leading positions`}; ` +
+        `${reusedMembers.length === 0 ? '' : `, reading ${reusedMembers.length} already verified sibling member(s) at the position(s) ${reusedMembers.map(member => member.childIndex).join(', ')}`}` +
+        `${input.unbound.length === 0 ? '' : `; ${input.unbound.length} position(s) whose passed sibling could not be bound (${input.unbound.map(entry => `#${entry.childIndex}`).join(', ')}) are done again and the reasons are on the record`}; ` +
         'the original acceptance criteria judge it, and the store total it spends is the same one',
     }
   }

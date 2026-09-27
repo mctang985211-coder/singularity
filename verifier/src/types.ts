@@ -64,10 +64,11 @@ export interface VerifierSelftestSample {
  */
 export interface VerifierSelftestStore {
   /**
-   * The run's accumulated members, in admission order — exactly the sequence
-   * `TaskService.runMembersIn` returns for a run, and therefore exactly what a
-   * store-reading judge's member lookup hands it. A criterion's `childIndex`
-   * resolves against this list.
+   * The run's members, in admission order — exactly the sequence
+   * `TaskService.runMemberSlotsIn` hands a store-reading judge, every position
+   * filled. A criterion's `childIndex` resolves against this list. A real run can
+   * hold a position its attempt has not filled yet; a sample lists members, so it
+   * has none.
    */
   children: TaskInstance[]
   /** Runs the sample judge reads (a child's verified run); `[]` when the sample needs none. */

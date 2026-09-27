@@ -46,6 +46,7 @@ import { supervisorDelegationSource } from '../../agent-singularity/src/review-a
 import { readSupervisorHandoff } from '../../agent-singularity/src/review-agent-ledger.ts'
 import { startSupervisorHandoff } from '../../agent-singularity/src/evolution-handoff.ts'
 import { defineTaskRecoverTool } from '../../agent-singularity/src/tools/task-recover.ts'
+import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
 import { readFile as readConfig } from 'node:fs/promises'
 import { writeCapabilityConfig } from '../support/capability-config.ts'
 import { disposeRunStacks, ScriptedBudgetApproval, startRunStack, type RunStack } from '../support/run-stack.ts'
@@ -736,6 +737,16 @@ describe('A6 EVO-3/EVO-4: a rolled-back capability is not in force for a recover
     expect(refused).toContain('rolled back')
     expect(refused).toContain('nothing was started')
     expect((await f.h.snapshot(f.storeId)).runs).toHaveLength(runsBefore)
+    // The model-facing adapter refuses the same call in the same words: the rule
+    // lives below the tool, and the tool adds no way around it.
+    const viaTool = (await defineTaskRecoverTool(f.h.ctx).execute(
+      { sourceDiagnosisId: 'd-cap', requestKey: 'k-rolled-back' },
+      { agent: { id: supervisor }, callId: 'call-rolled-back', signal: new AbortController().signal } as never,
+    )) as string
+    expect(viaTool).toContain('task_recover rejected')
+    expect(viaTool).toContain('rolled back')
+    expect(viaTool).toContain('no run was opened')
+    expect((await f.h.snapshot(f.storeId)).runs).toHaveLength(runsBefore)
   }, 120_000)
 })
 
@@ -797,5 +808,168 @@ describe('A6 EVO-5: the experiment\'s business runs count against the store\'s o
       if (cost.status === 'unknown') expect(typeof cost.reason).toBe('string')
     }
     expect(samples.filter(sample => sample.side === 'baseline').every(sample => (sample.cost as { status: string }).status === 'unknown')).toBe(true)
+  }, 120_000)
+})
+
+/** The promotion both entries are measured through once it is in force: evidence, gate, decide, apply. */
+async function promoteAndApply(f: Fixture): Promise<void> {
+  const result = await f.evolution.runExperiment(experimentSpec(f), ROOT, ROOT)
+  await f.evolution.gate(PROPOSAL, gateAnswers([result.reportPath]), ROOT)
+  await f.evolution.decide(PROPOSAL, 'PROMOTE', ROOT, 'approval:decide')
+  await f.evolution.apply(PROPOSAL, ROOT, 'approval:apply')
+  expect(f.h.runtime.listCapabilities()[ROW]).toEqual({ skills: [SKILL], tools: ['filesystem'] })
+}
+
+/** The diagnosis both entries are asked about: the failed sample the fixture recorded. */
+function recoveryDiagnosis() {
+  return {
+    diagnosisId: 'd-cap',
+    taskId: 't-cap-fix',
+    observedFailure: 'the case never ran: no provider could settle its criterion',
+    scope: 'the failed case in this store',
+    localizedCause: `the deployment grants no capability for ${ROW}`,
+    evidenceRefs: ['e-r-cap-fix-history'],
+    reviewRefs: ['t-cap-fix#r-cap-fix-history'],
+    confidence: 'high' as const,
+    proposals: [{ targetType: 'capability', targetId: ROW, rationale: `the case needs the ${ROW} capability` }],
+  }
+}
+
+/** One recovery call through the model-facing adapter, as the live loop dispatches it. */
+async function recoverViaTool(f: Fixture, supervisor: string, requestKey: string): Promise<string> {
+  return (await defineTaskRecoverTool(f.h.ctx).execute(
+    { sourceDiagnosisId: 'd-cap', requestKey },
+    { agent: { id: supervisor }, callId: `call-${requestKey}`, signal: new AbortController().signal } as never,
+  )) as string
+}
+
+/** One recovery call through the evolution plane's own coordination entry, bypassing the tool. */
+async function recoverViaEntry(f: Fixture, supervisor: string, requestKey: string): Promise<Record<string, unknown> | string> {
+  return await f.evolution
+    .coordinateRecovery({ sourceDiagnosisId: 'd-cap', requestKey }, { sessionId: supervisor })
+    .then(outcome => outcome as unknown as Record<string, unknown>, error => String(error))
+}
+
+/** What the store holds for the budget account: the one place a ceiling lives. */
+async function budgetFacts(f: Fixture): Promise<{ extensions: unknown; runs: number; extended: number }> {
+  const snapshot = await f.h.snapshot(f.storeId)
+  return {
+    extensions: snapshot.budgetExtensions,
+    runs: snapshot.runs.length,
+    extended: f.h.events(f.storeId).filter(event => event.kind === 'TaskBudgetExtended').length,
+  }
+}
+
+/**
+ * No line of the evolution ledger keeps an *execution* budget account: the
+ * deployment has one run count and one ceiling, and they are the store's
+ * (`resolveRootBudget` over the store's own runs and extensions). The experiment's
+ * own frozen `budget`/`cost` records are a different thing — the ticket requires
+ * them to stay here — so this looks for the store's vocabulary (a run count, a
+ * ceiling, a quota) on a ledger line, which is what a second account would be.
+ */
+function ledgerKeepsNoRunAccount(lines: readonly Record<string, unknown>[]): void {
+  const forbidden = ['maxRuns', 'runsUsed', 'runCount', 'ceiling', 'quota']
+  for (const line of lines) {
+    for (const key of forbidden) {
+      expect(Object.keys(line), `${String(line.kind)} carries a second run/budget account (${key})`).not.toContain(key)
+    }
+  }
+}
+
+describe('A6 EVO-5: both recovery entries at the states a deployment refuses in', () => {
+  it('refuses at an exhausted ceiling through the tool and through the entry, with one budget account untouched', async () => {
+    // The ceiling is exactly what the promotion spends: the root's own run, the two
+    // historical samples and the two candidate sides. Nothing is left for an attempt.
+    const f = await fixture({ rootBudget: { maxRuns: 5 } })
+    await promoteAndApply(f)
+    expect((await f.h.snapshot(f.storeId)).runs).toHaveLength(5)
+    await f.h.task.recordDiagnosisIn(f.storeId, recoveryDiagnosis(), 'tester')
+    const supervisor = await supervisorFor(f, recoveryDiagnosis() as unknown as Record<string, unknown>)
+    await releaseFixtureCheckout(f)
+    const before = await budgetFacts(f)
+
+    // The plane's own entry: refused by the store's rule, naming the count.
+    const viaEntry = await recoverViaEntry(f, supervisor, 'k-ceiling')
+    expect(typeof viaEntry).toBe('string')
+    expect(String(viaEntry)).toContain('the root budget allows 5 run(s)')
+    expect(String(viaEntry)).toContain('already holds 5')
+    // …and the adapter renders the same refusal rather than hiding it.
+    const viaTool = await recoverViaTool(f, supervisor, 'k-ceiling')
+    expect(viaTool).toContain('task_recover rejected')
+    expect(viaTool).toContain('the root budget allows 5 run(s)')
+
+    // Zero admission, one account: no run, no ceiling, no extension.
+    expect(await budgetFacts(f)).toEqual(before)
+    expect((await f.h.snapshot(f.storeId)).runs.filter(run => run.recovery !== undefined)).toHaveLength(0)
+    ledgerKeepsNoRunAccount(await ledgerLines(f))
+  }, 120_000)
+
+  it('answers a cancelled attempt under its own key through both entries, and refuses a new key in both', async () => {
+    const f = await fixture()
+    await promoteAndApply(f)
+    await f.h.task.recordDiagnosisIn(f.storeId, recoveryDiagnosis(), 'tester')
+    const supervisor = await supervisorFor(f, recoveryDiagnosis() as unknown as Record<string, unknown>)
+    await releaseFixtureCheckout(f)
+
+    // The attempt the coordinator opens, and the person who cancels it.
+    expect(await recoverViaTool(f, supervisor, 'k-cancel')).toContain('a new attempt was opened')
+    const attempt = (await f.h.snapshot(f.storeId)).runs.find(run => run.recovery !== undefined)!
+    await f.h.task.markRunStatusIn(f.storeId, attempt.taskId, attempt.runId, 'cancelled', ROOT, { reason: 'a person cancelled the attempt' })
+    const runsBefore = (await f.h.snapshot(f.storeId)).runs.length
+
+    // The same key is answered from the record the runtime wrote — by the adapter…
+    const again = await recoverViaTool(f, supervisor, 'k-cancel')
+    expect(again).toContain('this key already named an attempt')
+    expect(again).toContain(attempt.runId)
+    // …and by the entry below it, which never re-decides a key it already knows.
+    const viaEntry = await recoverViaEntry(f, supervisor, 'k-cancel')
+    expect(viaEntry).toMatchObject({ attempt: 'existing', runId: attempt.runId, status: 'cancelled' })
+
+    // A *new* key is refused in both: the source a recovery is opened for is not a
+    // failed task any more, and nothing is opened.
+    const freshTool = await recoverViaTool(f, supervisor, 'k-cancel-2')
+    expect(freshTool).toContain('task_recover rejected')
+    expect(freshTool).toContain('is cancelled')
+    const freshEntry = await recoverViaEntry(f, supervisor, 'k-cancel-2')
+    expect(String(freshEntry)).toContain('is cancelled')
+    expect((await f.h.snapshot(f.storeId)).runs).toHaveLength(runsBefore)
+    ledgerKeepsNoRunAccount(await ledgerLines(f))
+  }, 120_000)
+
+  it('refuses both entries after a person refused the promotion, with nothing applied', async () => {
+    const f = await fixture()
+    const result = await f.evolution.runExperiment(experimentSpec(f), ROOT, ROOT)
+    await f.evolution.gate(PROPOSAL, gateAnswers([result.reportPath]), ROOT)
+    const before = await budgetFacts(f)
+
+    // The person refuses, through the deployment's own tool and its approval seam:
+    // no decision is recorded and the proposal stays gated.
+    const approval = f.h.ctx.get('approval') as unknown as { request: (...args: never[]) => Promise<string> }
+    const answered = approval.request
+    approval.request = async () => 'rejected'
+    const decision = (await defineEvolutionDecideTool(f.h.ctx).execute(
+      { proposalId: PROPOSAL, decision: 'PROMOTE' },
+      { agent: { id: String(ROOT) }, callId: 'call-refuse', signal: new AbortController().signal } as never,
+    )) as string
+    approval.request = answered
+    expect(decision).toContain('no decision recorded')
+    expect(decision).toContain('stays gated')
+    expect((await f.evolution.get(PROPOSAL)).status).toBe('gated')
+    expect(f.h.runtime.listCapabilities()[ROW]).toBeUndefined()
+
+    // Both recovery entries refuse the hand-off: its capability is not in force, and
+    // the refusal names the state rather than opening a run.
+    await f.h.task.recordDiagnosisIn(f.storeId, recoveryDiagnosis(), 'tester')
+    const supervisor = await supervisorFor(f, recoveryDiagnosis() as unknown as Record<string, unknown>)
+    const viaEntry = await recoverViaEntry(f, supervisor, 'k-refused')
+    expect(String(viaEntry)).toContain('is gated')
+    expect(String(viaEntry)).toContain('nothing was started')
+    const viaTool = await recoverViaTool(f, supervisor, 'k-refused')
+    expect(viaTool).toContain('task_recover rejected')
+    expect(viaTool).toContain('is gated')
+    expect((await f.h.snapshot(f.storeId)).runs.filter(run => run.recovery !== undefined)).toHaveLength(0)
+    expect(await budgetFacts(f)).toEqual(before)
+    ledgerKeepsNoRunAccount(await ledgerLines(f))
   }, 120_000)
 })

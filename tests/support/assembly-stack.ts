@@ -74,6 +74,14 @@ export interface AssemblyStackOptions {
   readonly worker?: (sessionId: string) => Promise<void> | void
   /** The review policy this store runs under. Defaults to the runtime's own (`off`). */
   readonly review?: 'off' | 'all'
+  /**
+   * The tree-wide root budget this deployment enforces (`Config.rootBudget`): the
+   * run count and the deadline a store's whole tree is measured against. A case
+   * that measures what a killed process's runs still count is booted with the
+   * ceiling those runs leave, so the next admission is refused by the store's own
+   * count rather than by a reading the case computed for itself.
+   */
+  readonly rootBudget?: Readonly<{ wallTimeMs?: number; maxRuns?: number; maxConcurrentWrites?: number }>
   /** Reuse a workspace (a restart). Absent = a fresh directory. */
   readonly dir?: string
 }
@@ -170,6 +178,7 @@ export class AssemblyStack {
     this.agentRuntime = new AgentRuntime(this.ctx)
     this.runtime = new TaskRuntime(this.ctx, {
       ...(options.review === undefined ? {} : { generatedTaskReview: options.review }),
+      ...(options.rootBudget === undefined ? {} : { rootBudget: { ...options.rootBudget } }),
       runBindingRoot: join(this.home, 'run-bindings'),
     } as Config)
   }
@@ -214,6 +223,10 @@ export class AssemblyStack {
     for (const graph of this.graphs) {
       for (const to of graph.spawned ?? []) {
         graphEdges.push({ kind: 'spawn', from: graph.rootSessionId, to })
+        // The node the spawning process's own commit published for that session: a
+        // resume reads the graph store for the session *and* its spawn edge, so a
+        // boot handed the edges has to be handed the nodes beside them.
+        graphAgents.push({ id: to, name: 'Singularity', status: 'idle' })
       }
     }
     this.committedEdges.length = 0
@@ -272,16 +285,30 @@ export class AssemblyStack {
         await handle.close()
       }
     }
+    /**
+     * The one read the whole-log fold and a worker resume share: the log, and the
+     * header the persistence itself holds. The header is not a fixture invention —
+     * a resume rebuilds the composition a run was spawned in from it
+     * (`agentPreset`), and the real engine's `readSession` returns the stored
+     * header, so this one does too (a session whose header cannot be read fails the
+     * read, exactly as the real engine's absent-log condition does).
+     */
+    const readSession = async (sessionId: string): Promise<{ session: unknown; inheritedEventCount: number; events: readonly SessionEvent[] }> => {
+      const handle = await (this.persistence as unknown as {
+        open: (id: SessionId, access: 'read') => Promise<{ header: unknown; read: () => Promise<{ events: readonly SessionEvent[] }>; close: () => Promise<void> }>
+      }).open(SessionId(sessionId), 'read')
+      try {
+        return { session: handle.header, inheritedEventCount: 0, events: (await handle.read()).events }
+      } finally {
+        await handle.close()
+      }
+    }
     ctx.provide('sessionQuery', {
       readSurface: async (sessionId: string) => ({ capturedThroughSeq: (await readLog(sessionId)).at(-1)?.seq ?? null }),
       // The whole-log fold a consumption proof is read off (A4 §7.3). A session
       // this fixture holds no log for fails the read, exactly as the real
       // engine's absent-log condition does.
-      readSession: async (sessionId: string) => ({
-        session: { id: String(sessionId) },
-        inheritedEventCount: 0,
-        events: await readLog(String(sessionId)),
-      }),
+      readSession,
       readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
         const events = await readLog(String(request.sessionId))
         const target = events.find(event => event.seq === request.seq)
@@ -496,16 +523,20 @@ export class AssemblyStack {
   }
 
   /** Seed one session's durable log, the way a person's own request gets there. */
-  async seedLog(sessionId: string, texts: readonly string[]): Promise<void> {
+  async seedLog(sessionId: string, texts: readonly string[], options: { parentSession?: string; agentPreset?: string } = {}): Promise<void> {
     const handle = await (this.persistence as unknown as {
-      create: (header: { id: SessionId; version: number; createdAt: number; isSeeded: boolean; cwd: string; agentPreset: string }) => Promise<{ append: (events: readonly unknown[]) => Promise<void>; close: () => Promise<void> }>
+      create: (header: { id: SessionId; version: number; createdAt: number; isSeeded: boolean; cwd: string; agentPreset: string; parentSession?: SessionId }) => Promise<{ append: (events: readonly unknown[]) => Promise<void>; close: () => Promise<void> }>
     }).create({
       id: SessionId(sessionId),
       version: 3,
       createdAt: Date.now(),
       isSeeded: false,
       cwd: this.checkout,
-      agentPreset: 'standard',
+      agentPreset: options.agentPreset ?? 'standard',
+      // The header a *spawn* writes: the session's parent is the session that
+      // spawned it, which is what a worker resume re-reads against the graph's own
+      // spawn edge.
+      ...(options.parentSession === undefined ? {} : { parentSession: SessionId(options.parentSession) }),
     } as never)
     try {
       await handle.append(texts.map((text, seq) => ({

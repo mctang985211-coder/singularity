@@ -96,6 +96,7 @@ function harness(options: { task: TaskInstance; run?: TaskRun; members?: TaskIns
     runIn: vi.fn(async (_storeId: string, runId: string) => ({ ...(options.run ?? run()), runId })),
     taskIn: vi.fn(async () => options.task),
     runMembersIn: vi.fn(async () => options.members ?? []),
+    runMemberSlotsIn: vi.fn(async () => options.members ?? []),
     snapshotIn: vi.fn(async () => emptySnapshot(options.evidence ?? [...recorded])),
     recordEvidenceIn: vi.fn(async (_storeId: string, bundle: EvidenceBundle, _actor: string) => {
       recorded.push(bundle)

@@ -121,10 +121,16 @@ async function precheck(options: PrecheckOptions = {}): Promise<ProviderPrecheck
   })
 }
 
-/** One skill's verdict inside one capability row; a name the pre-check never reached is a test failure. */
-function verdict(report: ProviderPrecheck, capability: string, name: string): SkillProviderVerdict {
+/** One capability row of one pre-check; a row the pre-check never reached is a test failure. */
+function rowOf(report: ProviderPrecheck, capability: string): CapabilityProviderPrecheck {
   const row: CapabilityProviderPrecheck | undefined = report.capabilities.find(item => item.capability === capability)
   if (row === undefined) throw new Error(`the pre-check holds no row for capability "${capability}"`)
+  return row
+}
+
+/** One skill's verdict inside one capability row; a name the pre-check never reached is a test failure. */
+function verdict(report: ProviderPrecheck, capability: string, name: string): SkillProviderVerdict {
+  const row = rowOf(report, capability)
   const found = row.skills.find(item => item.name === name)
   if (found === undefined) throw new Error(`row "${capability}" holds no verdict for skill "${name}"`)
   return found
@@ -444,9 +450,12 @@ describe('the frontmatter name a discovered SKILL.md declares', () => {
  * it refuses the whole directory — a mixed version is not admissible either.
  */
 describe('the evolution commit gate', () => {
-  /** A ledger that answers the one thing the pre-check asks it. */
-  function ledger(openIntentTargets: () => Promise<readonly string[]>): EvolutionCommitLedger {
-    return { openIntentTargets }
+  /** A ledger that answers the two things the pre-check asks it: the files an open intent names, and the rows. */
+  function ledger(
+    openIntentTargets: () => Promise<readonly string[]>,
+    openIntentCapabilities: () => Promise<readonly string[]> = async () => [],
+  ): EvolutionCommitLedger {
+    return { openIntentTargets, openIntentCapabilities }
   }
 
   test('a skill whose directory an open intent targets is refused, and only that skill is affected', async () => {
@@ -610,8 +619,69 @@ describe('the evolution commit gate', () => {
     expect(refused.defects[0]!.detail).toContain('openIntentTargets()')
   })
 
-  test('no ledger write is ever performed: the gate reads the open targets and nothing else', async () => {
-    // The one method the pre-check may call, with everything else on the service
+  test('a service that offers only the file read is refused too (A6: the row read is required, fail-closed)', async () => {
+    // A ledger whose rows cannot be read cannot be trusted to say "no capability
+    // intent is open either": the version that half-answers is exactly the one a
+    // half-product row would come from.
+    await install('verify')
+    const report = await precheck({
+      capabilities: ['verify-ball-functional'],
+      commitLedger: { openIntentTargets: async () => [] },
+    })
+
+    const refused = rejected(verdict(report, 'verify-ball-functional', 'verify'))
+    expect(codes(refused)).toEqual(['commit-ledger-unreadable'])
+    expect(refused.defects[0]!.detail).toContain('openIntentCapabilities()')
+    expect(refused.defects[0]!.detail).toContain('fail-closed')
+  })
+
+  test('a capability row an open intent moves is refused by name, and only that row is affected', async () => {
+    const directory = await install('verify')
+    await install('ball-align')
+    const read = vi.fn(async () => [join(directory, 'SKILL.md')])
+    const rows = vi.fn(async () => ['verify-ball-functional'])
+    const report = await precheck({
+      capabilities: ['verify-ball-functional', 'design-ball'],
+      commitLedger: ledger(read, rows),
+    })
+
+    // The refusal is keyed on the *row*: a row-only commit has no file to match
+    // by directory, and nothing discovers a provider to hang a skill verdict on —
+    // the row is what an open capability intent moves.
+    const row = rowOf(report, 'verify-ball-functional')
+    expect(row.refusals.map(defect => defect.code)).toEqual(['commit-intent-open'])
+    expect(row.refusals[0]!.detail).toContain('verify-ball-functional')
+    expect(row.refusals[0]!.detail).toContain('reconciliation')
+    // The row is not resolved at all: nothing of a row that may not be admitted
+    // is judged, and nothing of it can be recorded as something a run resolved.
+    expect(row.skills).toEqual([])
+    expect(providerRefusals(report)).toEqual([expect.stringContaining('capability "verify-ball-functional"')])
+    expect(providerRefusals(report)[0]).toContain('commit-intent-open:')
+
+    // Every other row is judged exactly as it is without a ledger at all.
+    const withoutLedger = await precheck({ capabilities: ['design-ball'] })
+    expect(verdict(report, 'design-ball', 'ball-align')).toEqual(verdict(withoutLedger, 'design-ball', 'ball-align'))
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(rows).toHaveBeenCalledTimes(1)
+  })
+
+  test('a file target and a row of the same pre-check are two refusals, each in its own words', async () => {
+    await install('verify')
+    const report = await precheck({
+      capabilities: ['verify-ball-functional'],
+      commitLedger: ledger(
+        async () => [join(checkout, '.agents', 'skills', 'verify', 'SKILL.md')],
+        async () => ['verify-ball-functional'],
+      ),
+    })
+
+    const row = rowOf(report, 'verify-ball-functional')
+    expect(row.refusals.map(defect => defect.code)).toEqual(['commit-intent-open'])
+    expect(row.skills).toEqual([])
+  })
+
+  test('no ledger write is ever performed: the gate reads the open targets and rows and nothing else', async () => {
+    // The two methods the pre-check may call, with everything else on the service
     // a trap: a pre-check that reconciled, appended, or closed an intent would
     // fail here rather than pass silently.
     const directory = await install('verify')
@@ -620,6 +690,7 @@ describe('the evolution commit gate', () => {
       get: (_target, property) => {
         calls.push(String(property))
         if (property === 'openIntentTargets') return async () => [join(directory, 'SKILL.md')]
+        if (property === 'openIntentCapabilities') return async () => []
         return () => {
           throw new Error(`the pre-check called ${String(property)}`)
         }
@@ -628,6 +699,6 @@ describe('the evolution commit gate', () => {
 
     const report = await precheck({ capabilities: ['verify-ball-functional'], commitLedger: service })
     expect(codes(rejected(verdict(report, 'verify-ball-functional', 'verify')))).toEqual(['commit-intent-open'])
-    expect([...new Set(calls)]).toEqual(['openIntentTargets'])
+    expect([...new Set(calls)].sort()).toEqual(['openIntentCapabilities', 'openIntentTargets'])
   })
 })

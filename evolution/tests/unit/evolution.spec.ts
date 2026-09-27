@@ -2935,6 +2935,45 @@ describe('production baseline check (P3)', () => {
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
     await expect(new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list()).rejects.toThrow('no valid skillBaseline identity')
   })
+
+  /**
+   * A6/EVO-2: the composed identity a capability prepare freezes is three whole-file
+   * digests of the deployment's table file — and nothing else of it, because that
+   * file carries the deployment's credentials. A hand-forged line that gets one of
+   * the three wrong is refused at the fold exactly as a live append would be.
+   */
+  it('A6: a malformed capabilityTable on a capability prepared record fails the fold', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evolution-forge-'))
+    const svc = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root })
+    await svc.propose(capabilityProposal, 'root-1')
+    const entry = { preset: 'standard', skills: [CAPABILITY_FIXTURE_SKILL] }
+    await svc.candidate('c1', VERSION_SET, 'root-1', { rows: { research: entry } })
+    const forged = {
+      formatVersion: 4, kind: 'prepared', proposalId: 'c1', sandbox: 'sandbox/c1', mechanical: true, champion: 'absent',
+      capabilityRow: { name: 'research', entry, digest: digestOf(entry) },
+      capabilityBaseline: null,
+      capabilityTable: { baselineSha256: 'a'.repeat(64), applySha256: 'not-a-digest', rollbackSha256: 'b'.repeat(64) },
+      files: ['x'], actor: 'x', at: 'now',
+    }
+    await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
+    await expect(new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list()).rejects.toThrow('no valid capabilityTable.applySha256')
+  })
+
+  it('A6: a capabilityTable on a skill prepared record fails the fold', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evolution-forge-'))
+    const svc = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root })
+    await svc.propose(skillProposal, 'root-1')
+    await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
+    const forged = {
+      formatVersion: 4, kind: 'prepared', proposalId: 's1', sandbox: 'sandbox/s1', mechanical: true, champion: 'captured',
+      skillContent: { name: 'verify', sha256: 'a'.repeat(64) },
+      skillBaseline: { name: 'verify', sha256: 'b'.repeat(64) },
+      capabilityTable: { baselineSha256: 'a'.repeat(64), applySha256: 'a'.repeat(64), rollbackSha256: 'a'.repeat(64) },
+      files: ['x'], actor: 'x', at: 'now',
+    }
+    await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
+    await expect(new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list()).rejects.toThrow('capability table identity')
+  })
 })
 
 describe('evolution_apply / evolution_rollback tools', () => {
