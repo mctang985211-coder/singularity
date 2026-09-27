@@ -1,5 +1,7 @@
 # Singularity Harness 工作指南
 
+当前审核结论（2026-09-27）：**K4 返工，A5 未派发**。服务审批来源、完整预算基线竞态、同 key 重复事件与 reviewer 并发额度未闭合；独立 integration 一例超时待核实。详见 [K4 独立审核](history/2026-09-27-k4-review.md)。下述 K4 交付行为均保持待验证，不据实现者全绿报告宣称已验收。
+
 当前进度（2026-09-27）：R1/R2/R3、A2+A1、A4、S4-E 的原范围验收记录保留。整体复盘确认四处架构问题，依次派 K1 → K2 → K3 → K4，再继续 A5 → A6。**K1 已验收**（[交付记录](history/2026-09-27-k1-delivery-record.md) + [返工记录](history/2026-09-27-k1-rework-record.md)，§5.18；2026-09-27 返工闭合交还顺序、批次成员事实与跨 graph/接管失败两条真实入口证据），[独立审核](history/2026-09-27-k1-review.md)已通过。**K2 已验收**（§5.19；[交付记录](history/2026-09-27-k2-delivery-record.md) + [独立审核](history/2026-09-27-k2-review.md)）。**K3 已验收**（§5.20；[交付记录](history/2026-09-27-k3-delivery-record.md) + [返工记录](history/2026-09-27-k3-rework-record.md)）：Skill 改进单位扩为完整对象——指导型仅 SKILL.md，执行型带 sidecar 时为 SKILL.md + SKILL.contract.json 两个固定文件（resources=[]）；候选 sidecar 由生产派生、只重算 `content.skillMdSha256`，不借内容更新提权；冻结/报告/晋升门/apply 复检比较同一完整身份；apply/rollback 经同一提交协议逐文件原子替换、记完成前做完整对象可加载复检；ledger 切换 formatVersion 4，实验报告 formatVersion 3。**K4 已交付，待验收**（§5.21；[交付记录](history/2026-09-27-k4-delivery-record.md)）：复盘与执行预算分离——终态/截止根可经 gate 窄入口调 `task_review_agent` 复盘（reviewer 只受自身每 store 额度与单次 watchdog 约束），唯一扩额工具 `task_budget_extend` 经 DSH 人审追加已配置维度的总上限，Task store 持久 `TaskBudgetExtended` 事实（store+requestKey 幂等、串行重检基线），有效限额由唯一解析器供准入/driver/watchdog/replay 全路径消费，旧用量不清零。A5/A6 未实施。状态以[唯一执行表](2026-09-20-vrtc-code-change-plan.md)为准。
 
 | 已确认的问题 | 修正合同与唯一所有者 |
