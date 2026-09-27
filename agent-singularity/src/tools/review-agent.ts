@@ -34,7 +34,7 @@ import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-task'
 import type { Diagnosis, DiagnosisConfidence, JudgementVerdict, ReviewJudgement, TaskId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import { appendReviewAgentRun, countReviewAgentRuns, pendingReviewAgentRuns, readReviewerDelegation, reserveReviewAgentRun, reviewAgentBudget } from '../review-agent-ledger.ts'
+import { appendReviewAgentRun, countReviewAgentRuns, effectiveReviewAgentRuns, readReviewerDelegation, reserveReviewAgentRun, reviewAgentBudget } from '../review-agent-ledger.ts'
 import { computeEscalation } from './review-escalation.ts'
 import { buildReviewPack, latestReview, reviewRef } from './task-review-pack.ts'
 
@@ -214,7 +214,9 @@ export function defineTaskReviewAgentTool(ctx: Context) {
       // row gives the claim back.
       const reservation = reserveReviewAgentRun(storeId, max, used)
       if (reservation === undefined) {
-        const spent = used + pendingReviewAgentRuns(storeId)
+        // The same effective usage the claim refused on — the count read above
+        // may be older than the row a concurrent run has appended since.
+        const spent = effectiveReviewAgentRuns(storeId, used)
         const escalation = computeEscalation(snapshot, args.taskId, { used: spent, max })
         const withheld = escalation.suppressed.length > 0 ? `; suppressed ${escalation.suppressed.join(', ')}` : ''
         return `task_review_agent: budget exhausted (${spent}/${max}) for store ${storeId}${withheld} — no review agent spawned`

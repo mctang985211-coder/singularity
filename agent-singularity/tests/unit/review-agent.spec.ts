@@ -6,7 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { resolveGrant } from '../../../agent-runtime/src/grants.ts'
-import { appendReviewAgentRun, countReviewAgentRuns, readReviewerDelegation } from '../../src/review-agent-ledger.ts'
+import { appendReviewAgentRun, countReviewAgentRuns, readReviewerDelegation, reserveReviewAgentRun } from '../../src/review-agent-ledger.ts'
 import {
   REVIEWER_BASELINE,
   REVIEWER_PRESET,
@@ -463,6 +463,24 @@ describe('task_review_agent', () => {
     expect(refused).toHaveLength(1)
     expect(refused[0]).toContain('no review agent spawned')
     expect(refused[0]).toContain('2/2')
+  })
+
+  test('a count overtaken by a concurrent append admits no second reviewer', async () => {
+    // The other end of the same window: the *read* is overtaken. This call read
+    // the count while the ledger was empty, and another run claimed, spawned,
+    // appended its row and retired its claim before the allowance was asked for
+    // — the zero the caller carries is a snapshot of a file that no longer says
+    // that. `task_review_agent` hands exactly this count to this call, so the
+    // decision cannot rest on it: what this process knows the ledger holds
+    // refuses the second reviewer.
+    const stale = await countReviewAgentRuns('sg-t-root-1')
+    expect(stale).toBe(0)
+    await appendReviewAgentRun({ rootStoreId: 'sg-t-root-1', taskId: 't1', sessionId: 's-other', actor: 'root-1' })
+    expect(reserveReviewAgentRun('sg-t-root-1', 1, stale)).toBeUndefined()
+    // Not a blanket refusal: the allowance that is really left is spendable.
+    const second = reserveReviewAgentRun('sg-t-root-1', 2, stale)
+    expect(second).toBeDefined()
+    second!.release()
   })
 
   test('a spawn that wrote no row gives the claim back', async () => {

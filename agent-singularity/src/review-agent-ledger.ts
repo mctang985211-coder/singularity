@@ -85,8 +85,23 @@ export async function countReviewAgentRuns(rootStoreId: string): Promise<number>
     }
     if (record.rootStoreId === rootStoreId) count += 1
   })
+  // A count is a snapshot: seed this process's knowledge upward with it, never
+  // downward — an append that lands between the read and this line must not be
+  // undone by the older number.
+  const key = budgetKey(rootStoreId)
+  persistedRows.set(key, Math.max(knownRows(key), count))
   return count
 }
+
+/**
+ * Rows this process knows the ledger holds, per budget — a ledger file and a
+ * root store. A count is a snapshot of the file taken before the claim that
+ * follows it, and a run that appends in between leaves that snapshot claiming
+ * the allowance of a row that now exists. This map is raised by every append
+ * this process writes and seeded upward by every count, so it never runs
+ * backwards and a snapshot that lost that race cannot spend a row twice (K4-1).
+ */
+const persistedRows = new Map<string, number>()
 
 /**
  * Admitted review agents whose row is not in the ledger yet, per budget — a
@@ -98,13 +113,26 @@ export async function countReviewAgentRuns(rootStoreId: string): Promise<number>
  */
 const claims = new Map<string, number>()
 
-function claimKey(rootStoreId: string): string {
+/** The budget one count, claim, or append belongs to. */
+function budgetKey(rootStoreId: string): string {
   return `${reviewAgentLedgerFile()}\u0000${rootStoreId}`
 }
 
-/** Review agents admitted for this store in this process that have no ledger row yet. */
-export function pendingReviewAgentRuns(rootStoreId: string): number {
-  return claims.get(claimKey(rootStoreId)) ?? 0
+/** The rows known for one budget key, without resolving the key again. */
+function knownRows(key: string): number {
+  return persistedRows.get(key) ?? 0
+}
+
+/**
+ * The allowance one root store has spent, as of right now: the rows this process
+ * knows the ledger holds — the higher of the count a caller read and the appends
+ * written since — plus the runs admitted with no row yet. It is never below the
+ * persisted rows, which is what keeps a count that a concurrent append overtook
+ * from spending the same row's allowance twice.
+ */
+export function effectiveReviewAgentRuns(rootStoreId: string, used: number): number {
+  const key = budgetKey(rootStoreId)
+  return Math.max(used, knownRows(key)) + (claims.get(key) ?? 0)
 }
 
 /** One admitted review agent's claim on its store's allowance, until a row replaces it. */
@@ -118,22 +146,23 @@ export interface ReviewAgentReservation {
 /**
  * Claim one review agent against a root store's allowance — the check and the
  * claim in one synchronous step, so two executions cannot both pass it. The
- * effective usage is `used`, which the caller has just read from the ledger,
- * plus the claims already in flight; it must stay below `max`.
+ * effective usage is {@link effectiveReviewAgentRuns}: what this process knows
+ * the ledger holds plus the claims in flight, so neither a second execution that
+ * read the same count nor a count overtaken by a concurrent append can admit a
+ * reviewer the allowance has no room for.
  *
- * A caller must not await between reading the count and calling this: an await
- * in that gap is exactly the race this closes, because the second execution
- * reads the same count while the first is still spawning.
+ * A caller must not await between reading the count and calling this, or the
+ * second execution reads the same count while the first is still spawning.
  *
  * @param rootStoreId - the root task store the allowance belongs to.
  * @param max - the per-store cap (see {@link reviewAgentBudget}).
- * @param used - the rows the ledger holds for this store.
+ * @param used - the count the caller just read from the ledger.
  * @returns the claim, or `undefined` when the allowance is spent.
  */
 export function reserveReviewAgentRun(rootStoreId: string, max: number, used: number): ReviewAgentReservation | undefined {
-  const key = claimKey(rootStoreId)
+  const key = budgetKey(rootStoreId)
+  if (effectiveReviewAgentRuns(rootStoreId, used) >= max) return undefined
   const inFlight = claims.get(key) ?? 0
-  if (used + inFlight >= max) return undefined
   claims.set(key, inFlight + 1)
   let settled = false
   const retire = () => {
@@ -152,6 +181,10 @@ export async function appendReviewAgentRun(record: Omit<ReviewAgentLedgerRecord,
   await mkdir(dirname(file), { recursive: true })
   const line = { formatVersion: 1 as const, ...record, at: new Date().toISOString() }
   await appendFile(file, `${JSON.stringify(line)}\n`, 'utf8')
+  // The row is durable: this process now knows the ledger holds one more for that
+  // store, so a count read before this instant cannot spend its allowance again.
+  const key = budgetKey(record.rootStoreId)
+  persistedRows.set(key, knownRows(key) + 1)
 }
 
 /** Every ledger row, or `undefined` when the ledger has never been written (zero rows is a state, not a failure). */
