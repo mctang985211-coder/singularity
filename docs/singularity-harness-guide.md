@@ -1,12 +1,12 @@
 # Singularity Harness 工作指南
 
-当前进度（2026-09-27）：R1/R2/R3、A2+A1、A4、S4-E 的原范围验收记录保留。整体复盘确认四处架构问题，依次派 K1 → K2 → K3 → K4，再继续 A5 → A6。**K1 已验收**（[交付记录](history/2026-09-27-k1-delivery-record.md) + [返工记录](history/2026-09-27-k1-rework-record.md)，§5.18；2026-09-27 返工闭合交还顺序、批次成员事实与跨 graph/接管失败两条真实入口证据），[独立审核](history/2026-09-27-k1-review.md)已通过。**K2 已验收**（§5.19；[交付记录](history/2026-09-27-k2-delivery-record.md) + [独立审核](history/2026-09-27-k2-review.md)）。**K3 已交付，待验收**（§5.20；[交付记录](history/2026-09-27-k3-delivery-record.md) + [返工记录](history/2026-09-27-k3-rework-record.md)）：Skill 改进单位扩为完整对象——指导型仅 SKILL.md，执行型带 sidecar 时为 SKILL.md + SKILL.contract.json 两个固定文件（resources=[]）；候选 sidecar 由生产派生、只重算 `content.skillMdSha256`，不借内容更新提权；冻结/报告/晋升门/apply 复检比较同一完整身份；apply/rollback 经同一提交协议逐文件原子替换、记完成前做完整对象可加载复检；ledger 切换 formatVersion 4，实验报告 formatVersion 3。K4 未实施，不将文档变更写成代码已修复。状态以[唯一执行表](2026-09-20-vrtc-code-change-plan.md)为准。
+当前进度（2026-09-27）：R1/R2/R3、A2+A1、A4、S4-E 的原范围验收记录保留。整体复盘确认四处架构问题，依次派 K1 → K2 → K3 → K4，再继续 A5 → A6。**K1 已验收**（[交付记录](history/2026-09-27-k1-delivery-record.md) + [返工记录](history/2026-09-27-k1-rework-record.md)，§5.18；2026-09-27 返工闭合交还顺序、批次成员事实与跨 graph/接管失败两条真实入口证据），[独立审核](history/2026-09-27-k1-review.md)已通过。**K2 已验收**（§5.19；[交付记录](history/2026-09-27-k2-delivery-record.md) + [独立审核](history/2026-09-27-k2-review.md)）。**K3 已验收**（§5.20；[交付记录](history/2026-09-27-k3-delivery-record.md) + [返工记录](history/2026-09-27-k3-rework-record.md)）：Skill 改进单位扩为完整对象——指导型仅 SKILL.md，执行型带 sidecar 时为 SKILL.md + SKILL.contract.json 两个固定文件（resources=[]）；候选 sidecar 由生产派生、只重算 `content.skillMdSha256`，不借内容更新提权；冻结/报告/晋升门/apply 复检比较同一完整身份；apply/rollback 经同一提交协议逐文件原子替换、记完成前做完整对象可加载复检；ledger 切换 formatVersion 4，实验报告 formatVersion 3。K4 未实施，不将文档变更写成代码已修复。状态以[唯一执行表](2026-09-20-vrtc-code-change-plan.md)为准。
 
 | 已确认的问题 | 修正合同与唯一所有者 |
 |---|---|
 | ~~分解一次、子全终态即自动提交父，限制正常探索~~（K1 已验收） | [K1](execution-prompts/12a-k1-exploration.md)：runtime 交还父执行权，Run 内多批次、父主动提交；Task 保留事实（§5.18） |
 | ~~生产写入先于应用账本，崩溃后无正常对账路径~~（K2 已验收） | [K2](execution-prompts/12b-k2-evolution-commit.md)：evolution 持久意图、原子替换、恢复与准入阻断（§5.19；同日返工补账本/来源持久化与真实进程退出证据；复审返工补同目标未结意图闸） |
-| ~~执行型 Skill 带 sidecar，但候选只能改正文~~（K3 已交付，待验收） | [K3](execution-prompts/12c-k3-skill-unit.md)：evolution 按完整支持对象评估/应用，runtime 复用校验（§5.20） |
+| ~~执行型 Skill 带 sidecar，但候选只能改正文~~（K3 已验收） | [K3](execution-prompts/12c-k3-skill-unit.md)：evolution 按完整支持对象评估/应用，runtime 复用校验（§5.20） |
 | 原根截止同时封死事后学习与下一次尝试 | [K4](execution-prompts/12d-k4-review-budget.md)：reviewer 用自身额度/超时，runtime 支持经人审追加执行总上限，旧用量不重置 |
 
 A5 保持**失败自动、成功按需，共用诊断链**，待 K4 验收才派发。允许无需改进、证据不足、空建议；不做成功价值分类器。具体入口与 REV-1～REV-5 见[计划 F.3](2026-09-20-vrtc-code-change-plan.md)。正常任务内调整方法归 K1，修改共享能力才进入 Evolution；旧记录和下文落地事实不能作为保留已判错误规则的理由。
@@ -249,7 +249,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 运行可行性已由 A3 统一落地（2026-09-22，§5.9）：状态迁移、效果交接、恢复和根预算归属集中在 Task runtime；普通/replay/恢复共用规则，工作区写入归属覆盖跨批次/跨根冲突。新建子任务、候选或 Run 不重置总预算；反复同一失败、改写计划不能自动计为进展。硬限额必须可执行，未知费用不记零。
 
-迭代有效性由 S1-C/S4-E/S2-R 衔接：S1-C 已固定 Run 实际加载的版本，apply 不热换在途实现；双侧比较已有 S4-E 基线；提交恢复已由 K2 验收（§5.19），完整 Skill 更新已由 K3 交付（待验收，§5.20），应用后的任务新尝试待 A6。后续比较须从相同初始输入在隔离工作区执行，证据适用性决定能否复用成功兄弟结果；任务内经验不自动晋升共享能力。模型成功率与成本改善需真实实验，协议通过不等于已证明进步。
+迭代有效性由 S1-C/S4-E/S2-R 衔接：S1-C 已固定 Run 实际加载的版本，apply 不热换在途实现；双侧比较已有 S4-E 基线；提交恢复已由 K2 验收（§5.19），完整 Skill 更新已由 K3 验收（§5.20），应用后的任务新尝试待 A6。后续比较须从相同初始输入在隔离工作区执行，证据适用性决定能否复用成功兄弟结果；任务内经验不自动晋升共享能力。模型成功率与成本改善需真实实验，协议通过不等于已证明进步。
 
 ## 4. 当前实现与缺口
 
@@ -275,7 +275,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | 预算 | A3 已建根预算（§5.9）：`Config.rootBudget`（wallTimeMs/maxRuns/maxConcurrentWrites=1，闭合 schema，未知成员具名拒启）；run 期限 = min（配置 wallTimeMs，根剩余），从持久化 run.startedAt 起算、重启不重计时；maxRuns 按 runId 记账、崩溃重数不退款不重置；replay 经 rootTaskStoreId 根绑定共享 store 根总额；无进展相位机（标记→一次提醒→到限停止）已接线。tools/tokens 仍仅终态软统计（unknown 不记零）；attempts 仅声明 | `root-budget.ts:resolveRootBudget/checkRunStart/hasRootLimits`；`orchestrate.ts:observeWorkerRun`、`budgetBreaches`；`task-runtime/src/index.ts:Config` |
 | L4 上报 | root 的 `escalate` 工具与台账已有；模型主动调用，批准后才记 raised；运行时只输出提示，无自动触发、无处理结果/恢复闭环 | `agent-singularity/src/tools/escalate.ts`；`orchestrate.ts:escalationHint` |
 | blocked 恢复 | blocked 无恢复出边；TaskRetried 只接受 failed；补能力后不会自动续跑原图 | `task/src/service/state.ts`；`task-runtime/src/index.ts:decomposeAndRun` |
-| Review / Evolution | **S4-E 已验收（§5.17）**：生命周期与 ledger 主体在 `evolution`，九个工具接线；双侧新 Run、报告回读、两次人审、显式版本化裁判、写边界版本闸、当前形状 fold、Skill candidate/prepare 写前拒绝及 replayTask 闭集拒绝已验证；gate 只记录回答/证据，晋升检查在 PROMOTE/apply。**K2 已验收（§5.19）**：apply/rollback 经唯一提交入口——意图（`commit_intent`，绑定批准来源/目标/前后内容身份/可恢复来源）先经唯一 durable append 落盘、同目录临时文件 fsync+rename 原子替换、回读校验后才记完成；启动/恢复屏障先对账开放意图；意图未结目标在 provider 准入选址具名拒绝；ledger 单格式升为 `formatVersion: 3`；同日返工补齐来源在意图前稳定、目录 fsync 失败具名抛错不记完成、staging 残留清理与真实子进程 SIGKILL 证据。**K3 已交付（待验收，§5.20）**：改进单位扩为完整对象——指导型仅 SKILL.md；执行型为 SKILL.md + SKILL.contract.json 两固定文件（resources=[]），候选 sidecar 由生产派生只重算 `content.skillMdSha256`；commit_intent 携带固定文件集（逐文件前后身份与来源）、逐文件原子替换、记完成前经统一校验做完整对象可加载复检；准入闸按目录阻断开放意图；ledger 升 formatVersion 4，实验报告升 formatVersion 3 | `evolution/src/{evolution,commit,experiment,promotion,replay}.ts`；`agent-singularity/src/tools/evolution-*.ts`；`task-runtime/src/{provider-precheck.ts,index.ts:replayTask}` |
+| Review / Evolution | **S4-E 已验收（§5.17）**：生命周期与 ledger 主体在 `evolution`，九个工具接线；双侧新 Run、报告回读、两次人审、显式版本化裁判、写边界版本闸、当前形状 fold、Skill candidate/prepare 写前拒绝及 replayTask 闭集拒绝已验证；gate 只记录回答/证据，晋升检查在 PROMOTE/apply。**K2 已验收（§5.19）**：apply/rollback 经唯一提交入口——意图（`commit_intent`，绑定批准来源/目标/前后内容身份/可恢复来源）先经唯一 durable append 落盘、同目录临时文件 fsync+rename 原子替换、回读校验后才记完成；启动/恢复屏障先对账开放意图；意图未结目标在 provider 准入选址具名拒绝；ledger 单格式升为 `formatVersion: 3`；同日返工补齐来源在意图前稳定、目录 fsync 失败具名抛错不记完成、staging 残留清理与真实子进程 SIGKILL 证据。**K3 已验收（§5.20）**：改进单位扩为完整对象——指导型仅 SKILL.md；执行型为 SKILL.md + SKILL.contract.json 两固定文件（resources=[]），候选 sidecar 由生产派生只重算 `content.skillMdSha256`；commit_intent 携带固定文件集（逐文件前后身份与来源）、逐文件原子替换、记完成前经统一校验做完整对象可加载复检；准入闸按目录阻断开放意图；ledger 升 formatVersion 4，实验报告升 formatVersion 3 | `evolution/src/{evolution,commit,experiment,promotion,replay}.ts`；`agent-singularity/src/tools/evolution-*.ts`；`task-runtime/src/{provider-precheck.ts,index.ts:replayTask}` |
 | root-agent 构建类型闸 | `agent-singularity` 的 `build` 为 `tsc --noEmit && tsdown`，类型错误即构建失败；工作区根 `pnpm build`（`pnpm -r run build`）经过同一检查。2026-09-21 前该包 `pnpm build` 只有 tsdown，不保证严格类型检查通过 | `agent-singularity/package.json` scripts.build |
 | 身份与枚举的类型来源 | 工具侧 `sessionId(exec)` 直接返回上游 `Agent.id` 的 `SessionId`，不再降级为 `string`；`DiagnosisProposal.targetType` 与 `evolution_propose` 的 targetType 由 `@dangosys/dsh-singularity-task` 的 `ProposalTargetType` 标注并经运行时校验，不是任意字符串断言 | `agent-singularity/src/tools/task-diagnose.ts:toProposals`；`src/tools/evolution-propose.ts:isProposalTargetType`；`src/evolution.ts:validateMutation` |
 
@@ -361,7 +361,7 @@ S4-E 已接线报告身份与 observed/holdout 非退化检查及可比较执行
 
 ### 5.8 能力预检与版本绑定（2026-09-22 S1-C）
 
-provider 预检、侧车契约、统一校验和 Run 级内容绑定已交付。R3 将侧车规则迁至 `task-runtime/src/skill-contract.ts`；已有 Skill 的完整对象同名改进（含执行型 sidecar）已由 K3 交付（§5.20，待验收），效率优势未由实验确认。
+provider 预检、侧车契约、统一校验和 Run 级内容绑定已交付。R3 将侧车规则迁至 `task-runtime/src/skill-contract.ts`；已有 Skill 的完整对象同名改进（含执行型 sidecar）已由 K3 验收（§5.20），效率优势未由实验确认。
 
 ### 5.9 非阻塞运行与恢复（2026-09-22 A3）
 
@@ -425,7 +425,7 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 
 ### 5.17 S4-E：双侧评估基线（原范围已验收）
 
-生产替换后记账的崩溃缺口已由 K2 修复并验收（§5.19）；完整执行型 Skill 更新已由 K3 交付（§5.20，待验收）。以下保留基线交付事实，其中"格式"一段已被 K2 的 formatVersion 3 切换取代（并被 K3 的 formatVersion 4 再取代，见 §5.20），其余不能作为这两项已完成的证据。
+生产替换后记账的崩溃缺口已由 K2 修复并验收（§5.19）；完整执行型 Skill 更新已由 K3 验收（§5.20）。以下保留基线交付事实，其中"格式"一段已被 K2 的 formatVersion 3 切换取代（并被 K3 的 formatVersion 4 再取代，见 §5.20），其余不能作为这两项已完成的证据。
 
 [首次进度审核](history/2026-09-26-s4-e-progress-review.md)指出 Q1～Q4；[返工交付](history/2026-09-26-s4-e-rework-record.md)修复了部分路径及一处批次受理截止竞态。[返工复审](history/2026-09-26-s4-e-rework-review.md)列出四处问题；[收尾交付](history/2026-09-26-s4-e-final-closure-record.md)删除 v1 replay 主体、实验时限并补显式裁判。[独立审核](history/2026-09-26-s4-e-final-closure-review.md)以七条红反例发现边界未闭合；[定点返工交付](history/2026-09-26-s4-e-final-closure-rework-record.md)关闭七条反例；[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)修正模型可见拒绝文案和 champion 字节快照后验收 EVAL-1～EVAL-5。
 
@@ -466,7 +466,7 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 - **测试锚**：`evolution/tests/unit/evolution.spec.ts`（K2 段：fold 不变式、四个崩溃窗口 ×apply/rollback 经 `Config.commitProbe` 注入后重开对账、篡改/来源丢失具名停止、只读目录真实写失败与恢复、恰好一次、竞争零写、复审返工两例：同一目标两个 proposal 同基线时第二个 apply 具名拒绝 + 结算后恢复提交 + 陈旧者仍被基线拒绝，以及 rollback 方向同拒绝且零行零写）；`evolution/tests/unit/commit-durability.spec.ts`（返工新增 21 例：来源→意图→rename 的持久化操作顺序（apply/rollback，含来源目录链与账本新建目录链的整组 fsync）、账本 fsync 失败/生产目录 fsync 失败/来源 fsync 失败/来源链某目录 fsync 失败/来源漂移/来源越界/目标越界/结算时清理失败各自具名零写、staging 残留清理（提交与"仅补账"结算两处，其他文件不动）、写失败截回与"截回也失败"具名、短写不落半行；fs 操作注入只替换 `node:fs/promises` 调用）；`evolution/tests/unit/ledger-version.spec.ts`（v1/v2 拒绝）；`agent-singularity/tests/unit/{evolution-commit-tools,startup-reconcile}.spec.ts`；`task-runtime/tests/unit/{provider-precheck,proposal-lifecycle}.spec.ts`（准入闸与屏障）；`tests/integration/k2-evolution-commit.spec.ts`（二十例：原十例崩溃窗口端到端/真实准入阻断恢复/工具 off 不旁路/篡改具名停止/竞争回滚/v3 重开后回滚 + 六例真实 SIGKILL 子进程在各窗口被杀的端到端恢复 + 一例"普通异常不是进程退出"对照 + 一例 env 门控的嵌套子进程用例 + 复审返工两例：第二个 proposal 在第一个未结意图下 apply/rollback 均具名拒绝（含真实 `evolution_apply` 工具入口同拒绝）、不同目标不误挡、结算后同目标恢复提交且陈旧候选仍被基线拒绝）。
 - **边界**：保障只覆盖当前单文件 Skill 候选；K3 在同一提交机制上扩对象范围。故障证据分两层且互不冒充：**真实进程退出**＝嵌套 vitest（`--pool=threads`，env 门控）在指定窗口 `process.kill(pid,'SIGKILL')`，父测试看到 signal 与已死 pid（`ESRCH`），工作区留下只有真实死亡才有的 staging 残留；**进程内异常注入**＝`Config.commitProbe` 抛普通异常（`throwingProbe`），可 catch、`finally` 会跑、同一实例可继续对账，只作廉价窗口注入，不称进程退出。fsync 语义用确定性 fs 操作注入断言（只替换 `node:fs/promises` 调用，服务/账本/fold/驱动都是真的）；它不模拟断电与页缓存，模拟边界见交付记录。服务不可读时的准入 fail-closed 会影响该部署全部带目录的 skill 候选（具名 `commit-ledger-unreadable`），这是被要求的语义，不是缺陷。同目标提交闸本身是**按目标、进程内、单写者前提**下的判定：跨进程不排除（与既有单写者部署约束一致，`new EvolutionService` 在装配中只有一处）；**修复前已写入**的"同一目标两个未结意图"账本仍被 fold 接受并按序对账（先者按生产状态 redone/written，后者具名 `blocked` 并保留意图；第三方恢复写前字节后仍可再 redone）——本票只阻止新提交造成该状态，未改旧账读入规则。工具层不在人审前另设第二闸：`evolution_apply`/`evolution_rollback` 照常先问人审，拒绝由服务在提交门口给出（工具答案文本带 `rejected:`），零写零行。
 
-### 5.20 K3：完整 Skill 改进单位（2026-09-27 已交付，待验收）
+### 5.20 K3：完整 Skill 改进单位（2026-09-27 已验收）
 
 修正「执行型 Skill 带 sidecar，但候选只能改正文」。完整合同 [K3 prompt](execution-prompts/12c-k3-skill-unit.md)，逐项验收证据与删除清单见[交付记录](history/2026-09-27-k3-delivery-record.md)。交付前独立复核发现一处真实缺陷（task-runtime 恢复屏障的告警读取已删除的 `outcome.target` 字段，日志丢失目标路径）与两处覆盖缺口（屏障告警断言只验证 K2 形状替身、champion sidecar 篡改无直测），均已在票内闭合并补红绿证据。**2026-09-27 审查返工**（[返工记录](history/2026-09-27-k3-rework-record.md)）闭合两项可达缺陷：无 sidecar 的指导型生产目录里对象自身文件之外的文件（未声明资源、词表外条目）此前被 prepare 放过，现具名拒绝零写；rollback 与恢复入口此前只查意图所列文件，外部新增 `SKILL.contract.json`（角色漂移）或未声明资源时会先写正文、到写后复检才失败（留下开放意图与已改生产），现新增**提交前整对象写前闸**（1 文件 intent 用 loader 判定、2 文件 intent 要求目录条目恰为对象自身文件），新鲜提交写前抛错零行、恢复返回 blocked 零写。
 

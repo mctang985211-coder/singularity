@@ -29,12 +29,12 @@
 | 12 | S4-E：评估基础 | 原范围已验收；生产提交崩溃缺口已由 K2 修复（待验收，含同日返工与复审返工），完整 Skill 改进单位由 K3 修正 | 实现主代理 | 本文 F.2、[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md) | 保留原证据，不能据原验收宣称应用崩溃已闭合 |
 | 12a | K1：子批次结束后继续探索 | **已验收（2026-09-27，含同日返工与独立审核）**：K1-1～K1-5 与公共检查全绿；返工闭合交还顺序（先确认子停止再交还工作区）、批次成员缺记录/读失败具名失败，以及跨 graph 引用拒绝与写入接管失败的替代证据缺口 | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12a-k1-exploration.md)、[交付记录](history/2026-09-27-k1-delivery-record.md)、[返工记录](history/2026-09-27-k1-rework-record.md)、[独立审核](history/2026-09-27-k1-review.md) | K1-1～K1-5：多批、父主动提交、问答/取消/恢复与唯一 driver；进度审核通过后才派 K2 |
 | 12b | K2：应用与回滚可恢复 | **已验收（2026-09-27 交付，同日返工与复审返工闭合，独立审核通过）**：K2-1～K2-5 与公共检查全绿；ledger 单版本切换 formatVersion 3（commit_intent 意图 + 完成行 intentId），意图与可恢复来源经唯一 durable append/fsync 先于生产替换，原子替换与启动/恢复对账，准入阻断开放意图目标；现场 v1 旧账按原字节归档；返工补齐：来源在意图前重验并 fsync、rename 后目录 fsync 失败具名且不记完成、真实死亡遗留的 staging 残留被清理、真实子进程 SIGKILL（三窗口 ×apply/rollback）端到端恢复证据；复审返工补：新 apply/rollback 在写入前按生产目标阻断其他 proposal 的未结意图（配合旧 rollback 覆盖保护，两个 proposal 竞争同一目标时只有匹配当前基线者可写） | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12b-k2-evolution-commit.md)、[交付记录](history/2026-09-27-k2-delivery-record.md)、[独立审核](history/2026-09-27-k2-review.md) | K2-1～K2-5：意图、原子替换、对账与真实准入阻断；进度审核通过后才派 K3 |
-| 12c | K3：完整 Skill 改进单位 | **待验收（2026-09-27 交付，同日审查返工闭合）**：K3-1～K3-5 与公共检查全绿；改进单位=完整对象（指导型仅 SKILL.md；执行型 SKILL.md+SKILL.contract.json 两固定文件、resources=[]），候选 sidecar 由生产派生只重算 content.skillMdSha256、不借内容更新提权；commit_intent 携带固定文件集、逐文件原子写、记完成前完整对象可加载复检；准入闸按目录阻断开放意图；ledger formatVersion 4、实验报告 formatVersion 3；独立复核发现的一处真实缺陷（恢复屏障告警读已删字段）与两处覆盖缺口已同票闭合；**返工**闭合两项可达缺陷——指导型生产目录的未声明文件/词表外条目在 prepare 具名拒绝零写；提交前新增整对象写前闸（1 文件用 loader 判定角色与未声明资源、2 文件要求目录条目恰为对象自身文件，混合态放行；新鲜提交零行零写、恢复 blocked 批次不中断），rollback 与恢复重试不再"先写后验" | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12c-k3-skill-unit.md)、[交付记录](history/2026-09-27-k3-delivery-record.md)、[返工记录](history/2026-09-27-k3-rework-record.md) | K3-1～K3-5：已有执行型 Skill 同名更新、双侧评估与整组回滚；进度审核通过后才派 K4 |
-| 12d | K4：复盘与执行预算分离 | 待 K3 验收 | 待填 | [完整合同 prompt](execution-prompts/12d-k4-review-budget.md) | K4-1～K4-5：过期任务可复盘，人审扩额、不重置累计用量 |
+| 12c | K3：完整 Skill 改进单位 | **已验收（2026-09-27，含审查返工）**：K3-1～K3-5 与公共检查全绿；改进单位=完整对象（指导型仅 SKILL.md；执行型 SKILL.md+SKILL.contract.json 两固定文件、resources=[]），候选 sidecar 由生产派生只重算 content.skillMdSha256、不借内容更新提权；commit_intent 携带固定文件集、逐文件原子写、记完成前完整对象可加载复检；准入闸按目录阻断开放意图；ledger formatVersion 4、实验报告 formatVersion 3；独立复核发现的一处真实缺陷（恢复屏障告警读已删字段）与两处覆盖缺口已同票闭合；**返工**闭合两项可达缺陷——指导型生产目录的未声明文件/词表外条目在 prepare 具名拒绝零写；提交前新增整对象写前闸（1 文件用 loader 判定角色与未声明资源、2 文件要求目录条目恰为对象自身文件，混合态放行；新鲜提交零行零写、恢复 blocked 批次不中断），rollback 与恢复重试不再"先写后验" | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12c-k3-skill-unit.md)、[交付记录](history/2026-09-27-k3-delivery-record.md)、[返工记录](history/2026-09-27-k3-rework-record.md)、[独立审核](history/2026-09-27-k3-review.md) | K3-1～K3-5：已有执行型 Skill 同名更新、双侧评估与整组回滚；进度审核通过后才派 K4 |
+| 12d | K4：复盘与执行预算分离 | 待派发（K3 已验收） | 待填 | [完整合同 prompt](execution-prompts/12d-k4-review-budget.md) | K4-1～K4-5：过期任务可复盘，人审扩额、不重置累计用量 |
 | 13 | A5 + S2-E：诊断与缺口交接 | 待 K1～K4 验收；未实施 | 待填 | 本文 F.3、[派发 prompt](execution-prompts/13-a5-s2-e-diagnosis.md) | REV-1～REV-5；消费 K4 预算规则，不重复实现 |
 | 14 | A6 + S2-R + S3：自主改进与恢复 | 待 A5 验收；未实施 | 待填 | 本文 F.4 | EVO-1～EVO-5；复用 K1 批次、K2/K3 提交与 K4 有效预算 |
 
-K1～K4 修正已确认的架构反例；K1 已验收，K2 已验收（含 2026-09-27 同日返工与复审返工，见 12b 行），K3 已交付待验收（见 12c 行），K4 未实施；不是全仓整理或提前开放一个残缺版本。四份 prompt 是各票唯一详细合同，本文不复制它们的施工步骤。顺序为 K1 → K2 → K3 → K4 → A5 → A6，每票独立审核后再派下一票。只有 K2 → K3 有直接提交协议依赖，其余串行用于避免共享 runtime/工具合同同时迁移。历史已验收记录不改写，受影响保证按这四票重新验证。
+K1～K4 修正已确认的架构反例；K1 已验收，K2 已验收（含 2026-09-27 同日返工与复审返工，见 12b 行），K3 已验收（见 12c 行），K4 未实施；不是全仓整理或提前开放一个残缺版本。四份 prompt 是各票唯一详细合同，本文不复制它们的施工步骤。顺序为 K1 → K2 → K3 → K4 → A5 → A6，每票独立审核后再派下一票。只有 K2 → K3 有直接提交协议依赖，其余串行用于避免共享 runtime/工具合同同时迁移。历史已验收记录不改写，受影响保证按这四票重新验证。
 
 ### 五问复核：保留领域差异，直接用现成底座
 
@@ -88,7 +88,7 @@ K1～K4 修正已确认的架构反例；K1 已验收，K2 已验收（含 2026-
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。K1 已验收（交付记录见文首表），K2 已验收（[交付记录](history/2026-09-27-k2-delivery-record.md)；同日返工与复审返工均已闭合，见 12b 行），K3 已交付待验收（[交付记录](history/2026-09-27-k3-delivery-record.md)，见 12c 行），审核后派 K4；K4 合同已备好，前置未验收不能启动；A5 暂不派发。历史验收证据保持原样。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。K1 已验收（交付记录见文首表），K2 已验收（[交付记录](history/2026-09-27-k2-delivery-record.md)；同日返工与复审返工均已闭合，见 12b 行），K3 已验收（[交付记录](history/2026-09-27-k3-delivery-record.md)，见 12c 行），审核后派 K4；K4 合同已备好，前置未验收不能启动；A5 暂不派发。历史验收证据保持原样。
 
 ## 当前施工合同（D/E/F）
 
@@ -235,7 +235,7 @@ agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush
 
 #### F.2 S4-E：单文件 Skill 的真实双侧评估
 
-S4-E 原实现只支持已有单文件 SKILL.md；K2 修复其提交崩溃缺口（已验收），K3 已把候选单位改为完整支持对象（正文及执行型 sidecar）同名更新（2026-09-27 交付待验收，见 12c 行），详细验收见对应 prompt。下列比较与权限保证继续有效，不把旧单文件范围当作未来限制。现有 Evolution 主体与真实消费者已迁入 evolution 包，Task runtime 的 Run 执行不迁。S4-E 完成时删除非 Skill 候选的旧 candidate→v1 replay→gate→apply 执行路径及仅服务它的生产代码；Diagnosis/`evolution_propose` 可以记录其他改进建议，但建议不得自动取得 candidate、replay、apply 权限。新 PROMOTE 必须具备本票可验证证据；历史报告不自动升级为新证据。普通 Task replay 和仍在使用的 `SKILL.contract.json` v1 侧车协议不属于删除范围。
+S4-E 原实现只支持已有单文件 SKILL.md；K2 修复其提交崩溃缺口（已验收），K3 已把候选单位改为完整支持对象（正文及执行型 sidecar）同名更新（2026-09-27 已验收，见 12c 行），详细验收见对应 prompt。下列比较与权限保证继续有效，不把旧单文件范围当作未来限制。现有 Evolution 主体与真实消费者已迁入 evolution 包，Task runtime 的 Run 执行不迁。S4-E 完成时删除非 Skill 候选的旧 candidate→v1 replay→gate→apply 执行路径及仅服务它的生产代码；Diagnosis/`evolution_propose` 可以记录其他改进建议，但建议不得自动取得 candidate、replay、apply 权限。新 PROMOTE 必须具备本票可验证证据；历史报告不自动升级为新证据。普通 Task replay 和仍在使用的 `SKILL.contract.json` v1 侧车协议不属于删除范围。
 
 固定比较目标为“原失败案例修复且冻结的回归/holdout 不退化”；不做多目标打分或自动阈值学习。至少一条失败复现和一条未参与候选选择的 holdout，使用同一预先冻结的客观 verifier/AC，observed/holdout 各自非空。**进入实验的每条 AC 必须显式给出已注册且声明版本的 `verifierRef`；无锚的 mode 派发直接拒绝该实验，普通 Task 判决仍可按 mode 派发。**每个样本两侧各执行一次新的 Run，确定性测试精确断言结果；真实模型需统计推断时另定重复次数与预算，不能拿一次随机成功声称普遍改进。样本、输入、裁判、模型/工具、预算、候选身份和比较规则在运行前冻结，沿现有 replay manifest/report 增补必要身份，不另建实验管理服务。
 
