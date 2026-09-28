@@ -1,7 +1,7 @@
-# A6 + S2-R + S3 交付记录：候选闭环与原目标新尝试（待验收）
+# A6 + S2-R + S3 交付与验收记录：候选闭环与原目标新尝试（已验收）
 
 - 合同：[execution-prompts/14-a6-autonomous-evolution.md](../execution-prompts/14-a6-autonomous-evolution.md)、[计划 F.4](../2026-09-20-vrtc-code-change-plan.md)、公共合同 [execution-prompts/README.md](../execution-prompts/README.md)。日期 2026-09-28。
-- 状态：**待验收**，不是已验收。EVO-2～EVO-5 的机制与拒绝副作用已实现并在收尾中修掉三条假绿/断路；EVO-1 真实 Agent 冻结案例判定 **FAIL**，所以整票不能 PASS。
+- 当前状态：**已验收（2026-09-28）**。原交付时 EVO-1 失败并待验收；其后修复公开候选入口，原冻结 L2 第三轮与新授权冻结 L1 第一轮均取得真实 Agent 合格证据。原失败轨迹及当时判决保留，最终依据见文末「A6 最终验收」。
 - 派发基线：Singularity `58a290e` / 外层 `b2815b272a`（A6 合同冻结）；实施基线：Singularity `02b4d00` / 外层 `75908eebe3`（补齐同源单在途合同后的最终派发点）。中断检查点：`117df061` / `0763852b`；发现闭合检查点：`fcc0d076` / `86d33ad7`。
 - 交付版本：收尾代码提交 `9e4f7e988fa9908333e69a59fabd404e2834b38d`；文档提交与最终外层 SHA 由最终交接读取（提交不能自指自己的 SHA）。外层只允许更新 `packages/singularity` 指针。既有 `thirdparty/deepseek-harness/{.tmpscan/,bad.txt}` 未跟踪文件属于用户现场，保留不动、不提交。
 - 未推送、未部署、未运行 BB 仿真；生产 `/home/ROXY/code/bb_work/harness/config.yml` 与生产 Skill 未被实验修改。
@@ -10,7 +10,7 @@
 
 | 编号 | 公开入口与事实所有者 | 正反例、拒绝副作用与证据 | 结论 |
 |---|---|---|---|
-| EVO-1 | 临时 fixture `/home/ROXY/code/bb_work/a6-evo1-2026-09-28`；Harness 被测 Agent 使用 `config.yml` 的免费 `step-5-preview`，与子代理模型及 K3 账分离 | L1/1 真实运行 180.131s，源根未形成冻结预期；L1/2 900.220s，proposal 已写但 typed `mutation` 被当作字符串；L1/3 取消中断且仍计第三次。L2/1 870.875s、25/25 请求响应、47523 输入/26142 输出/437504 cache-read token，模型生成 Skill/sidecar 文本，但 7 次 candidate 均因字符串参数拒绝；无物化、verifier、holdout、人审或应用。`l1-run-9` 与 `wiring-*` 明确为 scripted，不计真实通过。证据：[EVO-1-assessment.md](/home/ROXY/code/bb_work/a6-evo1-2026-09-28/evidence/EVO-1-assessment.md)、[manifest.json](/home/ROXY/code/bb_work/a6-evo1-2026-09-28/evidence/manifest.json) 及逐轮原始 requests/responses/tool-calls/usage。生产零应用；未打印凭据，196 个证据文件扫描 API key 命中 0。 | **FAIL**；整票保持待验收 |
+| EVO-1 | 原冻结 L2 fixture `/home/ROXY/code/bb_work/a6-evo1-2026-09-28`；新授权 L1 fixture `/home/ROXY/code/bb_work/a6-evo1-l1-recheck-2026-09-28`；Harness 被测模型均为免费 `step-5-preview` | 原 L1/1–3 与 L2/1–2 失败轨迹保留；L2/3 由 Agent 生成新 execution Skill，L1 新组第 1 次由 Agent 组合已有授权能力。两例 fix/holdout 均独立 `command@1` verified、基线均 `not-admitted` 且无 Run；受控 decide/apply 各先拒后允，仅临时部署应用，六个生产保护文件摘要不变。原始请求/回复、工具、冻结输入、用量与判决见各自 evidence；详见文末最终验收。 | **PASS**（两个有限冻结案例；受控审批） |
 | EVO-2 | `EvolutionService.propose/candidate/prepare/runExperiment/checkPromotion/gate/decide/apply/rollback`；`capability-candidate.ts`、`capability-config.ts`、普通 provider precheck 与 K2/K3 commit intent | `capability-experiment.spec.ts`：缺 provider 基线走真实准入 `not-admitted`、无伪 Run，candidate 走原 driver/verifier，回归和 holdout；`a6-capability-row-gate.spec.ts`、`a6-joint-commit-death.spec.ts`：table 三摘要、提交门+写缝重检、半成品行零准入、第三方漂移/拒绝零写。收尾新增成功 Diagnosis/verified Run 在 experiment/resume/promotion/apply 前重读并拒绝，零实验/应用/新业务 Run；`evolution_list` row-only 与 row+Skill 公开查询不再 TypeError，所有模型可见工具和 root evolution protocol 不再声称 capability 只能记录。 | PASS（机制） |
 | EVO-3 | `task_recover({sourceDiagnosisId, requestKey})` → evolution `coordinateRecovery` → task-runtime `recoverTask`；事实落在原 task store | `a6-evolution-chain.spec.ts`、`a6-recovery*.spec.ts`、`task-runtime/tests/unit/recovery.spec.ts` 覆盖能力缺口和纯产物缺口、同 key 幂等、同源在途换 key、跨 graph/错 diagnosis/成功源/未批准应用/超额零新 Run；`deriveReuse` 从 store 自动绑定两字段调用，允许通过成员位于失败成员之后；坏引用列位置并重做，消费者依赖闸和根提交再次查 artifact/evidence，旧失败可读。 | PASS |
 | EVO-4 | K2/K3 联合提交恢复；task-runtime adopt/reconcile；`tests/support/process-death.ts` 的真子进程 `SIGKILL` + 新进程 | `a6-joint-commit-death.spec.ts` 覆盖联合提交 5 个持久边界；`a6-process-restart.spec.ts` 覆盖新 Run 后/批次准入前、准入后/spawn 前、新根结算前。收尾 RED 证明结算窗口旧测试把 workspace 未接管造成的假 `failed` 当绿；GREEN 改为 verifier 前安全接管，同一 Run 经原 AC `verified`、一次 Review、map pass、同 key 零重复、预算不归零；活跃/第三方 owner 保持具名拒绝。 | PASS |
@@ -23,7 +23,7 @@
 3. **capability prepared 的公开查询断路**：`evolution_list.execute` 对 row-only 读 `undefined.contract`，对 row+Skill 读合法 `skillBaseline:null.name`。两个公开工具用例先 RED，按 targetType 渲染后 GREEN；同时修正 propose/prepare/replay/gate/decide/apply/rollback 与 root prompt 的 skill-only 陈述，并允许 row-only rollback 进入真实人审门。
 4. **拒绝顺序回归**：来源门禁一度把通用 S4-E 的占位 `diagnosis:d1` 当成必须存在，抢先覆盖既有“候选内容漂移”反例；integration RED 显示错误拒绝。门禁收窄为只从当前 store 中实际可解析的 Diagnosis 推导成功/失败，重新 build 后原漂移拒绝恢复，四份关键 integration 30 通过+1 跳过。
 
-## 真实 Agent 实验详情
+## 原交付时的真实 Agent 实验详情（历史失败记录）
 
 - 冻结输入、原 AC、command verifier、holdout 与预计工具权限分别在 `cases/L1.frozen.json`、`cases/L2.frozen.json`；生产 config 冻结 SHA-256 `8dec0095667b84245b7b30251f8a5aedf8de8df6ca3c7fdac1c27e801af13d9e`，实验后相同。
 - 已知真实墙钟合计 1951.226s；L1/3 只有至少 108.336s 的产物跨度，无完整 run/usage，不能伪造精确合计。已知值低于 90 分钟总限；L1 已达每例 3 次上限，绝不再跑。L2 虽形式上还有次数，但无法补回 L1 双案例 PASS，故停止。
@@ -61,7 +61,7 @@
 
 定向收尾已实跑：evolution unit 446/446；agent-runtime/agent-singularity/task-runtime 定向 unit 100/100；EVO-4 相关 integration 29 通过+1 跳过；四份关键 integration 最终 30 通过+1 跳过；多次 `pnpm build` 与 `git diff --check` 通过。最终全量数字以上表为准；公共检查全绿不覆盖 EVO-1 的真实效果失败。
 
-## 模拟、未覆盖与解除条件
+## 原交付时的模拟、未覆盖与解除条件（历史状态）
 
 1. **阻塞整票验收的唯一效果证据**：EVO-1 L1+L2 均未取得合格真实 Agent 候选/独立验证/holdout/受控人审结果。解除需要用户重新明确授权一组符合第 14 项次数/时间约束的冻结案例；不得在本轮已耗尽的 L1 上追加第 4 次，也不得用 scripted 或手工候选替代。
 2. 确定性测试只替代模型输出；Task store、Session、runtime、provider precheck、verifier、commit ledger、SIGKILL/重开均走真实模块。受控 approval 是自动化门测试，不称真人批准。
@@ -78,7 +78,7 @@
 6. `a6_success_source_gate`（GPT-6 Sol xhigh）：只修成功来源在实验/晋升/apply 的服务重检及真实 store 反例；未提交。
 7. 主代理：冻结范围、处理代理间交叉回归、汇总 guide/计划/记录、最终公共检查与内外层提交；不重跑超额模型实验。
 
-## 最终结论与停止点
+## 原交付时的结论与停止点（已被后续验收取代）
 
 EVO-2～EVO-5 机制交付进入待验收；EVO-1 明确 FAIL，所以 A6 整票最高填**待验收**。不推送、不部署、不派下一票；完成内层提交和外层仅子模块指针提交后停止。
 
@@ -94,6 +94,16 @@ EVO-2～EVO-5 机制交付进入待验收；EVO-1 明确 FAIL，所以 A6 整票
 
 本轮最终树的 `pnpm build`、agent-singularity `pnpm exec tsc --noEmit`、两仓 `git diff --check` 均 exit 0；受影响定向测试见上述 GREEN，不重复全量测试。GPT-6 Sol 独立只读复核候选入口与 L2/2：工具单次解析并派生身份后仍进入既有服务校验，未发现校验绕过；缺 token 投影的预算拒绝保持。Sol 又独立核对 L2/3：原始 gateway candidate 参数与沙盒正文逐字一致，冻结 command@1 双样本 pass，账本只在两个 allow 审批引用后记录决定/应用，六个保护文件重算摘要一致，原始请求未出现旧催促文本；L2 子项 PASS，整项仍因 L1 未通过。证据汇总重新生成到 `evidence/manifest.json`，原汇总另存 `original-a6-manifest.json`，逐轮原始轨迹未改。
 
-## 修复版 L1 新冻结验证授权（进行中）
+## 修复版 L1 新冻结验证授权（已完成）
 
-用户已明确授权 GPT-6 Sol 子代理在新目录 `/home/ROXY/code/bb_work/a6-evo1-l1-recheck-2026-09-28` 重新冻结修复版 L1，使用免费 `step-5-preview`，最多三次、每次十五分钟；取得合格结果即停止剩余尝试。只补 L1 真实 Agent 组合现成授权能力的效果证据，不改原失败记录、不改生产 Skill/config、不弱化晋升闸。原目录的 L2/3 PASS 保留。子代理负责临时夹具与证据，主代理复核结果后同步 guide 与唯一计划；当前仍待验收。
+用户已明确授权 GPT-6 Sol 子代理在新目录 `/home/ROXY/code/bb_work/a6-evo1-l1-recheck-2026-09-28` 重新冻结修复版 L1，使用免费 `step-5-preview`，最多三次、每次十五分钟；取得合格结果即停止剩余尝试。只补 L1 真实 Agent 组合现成授权能力的效果证据，不改原失败记录、不改生产 Skill/config、不弱化晋升闸。原目录的 L2/3 PASS 保留。子代理负责临时夹具与证据；新组第一轮已合格，剩余两次停止，最终复核结果见下节。
+
+## A6 最终验收（2026-09-28）
+
+**EVO-1～EVO-5 均 PASS，A6 已验收。** EVO-1 的 L2 证据来自原冻结组 `evidence/l2-run-3`；L1 证据来自重新授权、重新冻结的 [L1 实跑判决](/home/ROXY/code/bb_work/a6-evo1-l1-recheck-2026-09-28/evidence/L1-assessment.md)、[manifest](/home/ROXY/code/bb_work/a6-evo1-l1-recheck-2026-09-28/evidence/manifest.json) 与 `evidence/l1-run-1/`。旧 L1 三次失败/中断不改写，新组首轮合格后停止剩余两次。
+
+新 L1 冻结文件与 driver 的摘要在首次运行前落盘，导入的 Singularity 源与当时生产源逐文件相同。真实 supervisor 用公开 `mutationJson` 提出一条 `{skills:[a6-case-kit],tools:[filesystem]}` 整行候选，复用现成授权能力，无人手写候选。真实 source Run 留 failed Review/Diagnosis；实验 fix/holdout 的基线均因 capability 缺口 `not-admitted` 且无 Run，候选均由真实模型 worker 执行并经冻结 `command@1` verifier 判 `verified`。受控 DSH operator 先拒后允 decide，再先拒后允 apply；账本仅在允许后记决定/应用，临时 config 仅新增该行，生产六个保护文件前后摘要相同。墙钟 153.024s；33 请求/32 回复含脚本源链，其中 25 个完成的真实 gateway 回复报告 input 62636、output 9531、cache-read 217344 token；一个未配对请求无报告用量，金额 unknown。一次非法 replay 请求与 worker 不可见工具请求均原样保留，模型自行修正，权限未扩大。
+
+GPT-6 Sol 对新 L1 原始模型响应、工具调用、候选账本和沙盒逐项对照，确认参数及内容身份一致、冻结早于实跑、双侧 verifier 与审批写入顺序正确；对 L2/3 已独立对照正文 SHA、报告、审批与生产摘要。另一 GPT-6 Sol 对 EVO-2～EVO-5 的服务入口、反例与真实进程死亡测试做只读复核，均 PASS，未发现阻断；本次只读复核没有重跑全量测试，已有交付检查见上表，本轮入口修复的定向测试、build、tsc 结果见前节。
+
+验收范围为两个有限冻结案例和现有机制；受控审批不是一位真实人类在生产部署中批准，不据此推断开放任务的成功率。没有生产应用或部署。唯一计划第 14 行与主 guide 已同步；当前建设表无待派的下一票。
