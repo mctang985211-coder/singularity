@@ -1,6 +1,6 @@
 # Singularity Harness 工作指南
 
-当前状态（2026-09-28）：**K1～K4、A5 已验收；A6 已实现并处于待验收。** A6 的 capability 行/可选新 execution Skill 候选、同一双侧评估与联合提交、可信 supervisor `task_recover`、原 AC 新尝试、证据位置复用、累计预算与真 SIGKILL 重开均已接入；源码与测试锚见 §5.23 和 [A6 交付记录](history/2026-09-28-a6-delivery-record.md)。真实 Agent 实验没有通过：L1 三次额度用尽，L2 首轮在 typed-tool 参数边界停住，不能宣称自主生长有效，也不能填已验收。
+当前状态（2026-09-28）：**K1～K4、A5 已验收；A6 已实现并处于待验收。** A6 的 capability 行/可选新 execution Skill 候选、同一双侧评估与联合提交、可信 supervisor `task_recover`、原 AC 新尝试、证据位置复用、累计预算与真 SIGKILL 重开均已接入；源码与测试锚见 §5.23 和 [A6 交付记录](history/2026-09-28-a6-delivery-record.md)。EVO-1 候选入口已修，L2 第三次真实 Agent 生成新 Skill，独立 fix/holdout 与受控人审两道闸通过，批准后仅临时部署应用；L1 三次额度用尽且无合格结果，因此整票不能填已验收。
 
 | 已确认的问题 | 修正合同与唯一所有者 |
 |---|---|

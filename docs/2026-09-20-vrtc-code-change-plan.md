@@ -88,7 +88,7 @@ K1～K4 修正已确认的架构反例；K1 已验收，K2 已验收（含 2026-
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。K1 已验收（交付记录见文首表），K2 已验收（[交付记录](history/2026-09-27-k2-delivery-record.md)；同日返工与复审返工均已闭合，见 12b 行），K3 已验收（[交付记录](history/2026-09-27-k3-delivery-record.md)，见 12c 行），K4 已验收（[重做交付记录](history/2026-09-27-k4-rework-delivery-record.md)与[最终审核](history/2026-09-27-k4-review.md)，见 12d 行）；A5 已验收（[独立审核](history/2026-09-27-a5-review.md)，见 13 行），A6 合同已备，可按第 14 行派发。历史验收证据保持原样。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。K1 已验收（交付记录见文首表），K2 已验收（[交付记录](history/2026-09-27-k2-delivery-record.md)；同日返工与复审返工均已闭合，见 12b 行），K3 已验收（[交付记录](history/2026-09-27-k3-delivery-record.md)，见 12c 行），K4 已验收（[重做交付记录](history/2026-09-27-k4-rework-delivery-record.md)与[最终审核](history/2026-09-27-k4-review.md)，见 12d 行）；A5 已验收（[独立审核](history/2026-09-27-a5-review.md)，见 13 行），A6 已交付待验收，剩余 EVO-1 的 L1 效果证据按第 14 行补齐，不重派整票。历史验收证据保持原样。
 
 ## 当前施工合同（D/E/F）
 
