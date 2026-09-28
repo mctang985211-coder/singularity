@@ -301,10 +301,10 @@ export function defineEvolutionReplayTool(ctx: Context) {
           },
           note: { type: 'string', description: 'What the budget was derived from and why it is judged enough' },
         },
-        description: 'The budget frozen with the experiment. The one ceiling is the optional whole-experiment maxTokens total ' +
-          '(defaults to none stated): a declared total also becomes a promotion condition, and the gate re-adds the sides\' reported ' +
-          'tokens and refuses the promotion when they pass it. Runs are bounded by the deployment\'s own runtime limits, never by a ' +
-          'budget this call names',
+        description: 'The budget frozen with the experiment. maxTokens is optional; omit it when this deployment does not report ' +
+          'token counts for business Runs. If you declare it, promotion requires a measured token total for every executed ' +
+          'side; tool-call counts and model guesses cannot satisfy that check. A declared total also stops further sides once ' +
+          'reported usage reaches it. Runs retain the deployment\'s own runtime limits.',
       },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },

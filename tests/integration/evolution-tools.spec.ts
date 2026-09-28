@@ -267,16 +267,13 @@ it('refuses a capability mutation of the shape this build does not write, at the
       sourceRefs: ['diagnosis:d1'],
     }, exec('root-1'))
 
-    // A6 admits a capability candidate through the model surface — and only the
-    // one whole row its own lifecycle records: the schema names the two shapes
-    // ({ name, content } for a skill, { rows, skill? } for a capability), so the
-    // old `{ name, entry }` mutation is refused at the call, before the ledger is
-    // reached, and the proposal stays a suggestion with nothing written beside it.
-    await expect(candidate.execute({
+    // The tool accepts JSON text, then the service checks the whole mutation.
+    const refused = await candidate.execute({
       proposalId: 'p-cap-1',
       versionSet: { capabilityTable: 'config.yml#doc1' },
-      mutation: { name: 'research', entry: { preset: 'standard', skills: ['verify'] } },
-    }, exec('root-1'))).rejects.toThrow(/mutation.*must match exactly one oneOf branch/)
+      mutationJson: JSON.stringify({ name: 'research', entry: { preset: 'standard', skills: ['verify'] } }),
+    }, exec('root-1')) as string
+    expect(refused).toContain('evolution_candidate rejected:')
     expect((await list.execute({}, exec('root-1'))) as string).toContain('p-cap-1 [proposed]')
 
     const prepared = await prepare.execute({ proposalId: 'p-cap-1' }, exec('root-1'))
@@ -306,6 +303,54 @@ it('refuses a capability mutation of the shape this build does not write, at the
     vi.unstubAllEnvs()
   }
 })
+
+it('accepts model-authored JSON text as one capability candidate and binds a new skill to its exact content', async () => {
+  const { tools, home } = await mountAgent()
+  try {
+    const propose = tools.get('evolution_propose')!
+    const candidate = tools.get('evolution_candidate')!
+    await propose.execute({
+      proposalId: 'p-cap-json', level: 'L2', baseVersion: 'v1', targetType: 'capability',
+      targetId: 'research', rationale: 'add the missing provider', sourceRefs: ['diagnosis:d1'],
+    }, exec('root-1'))
+    const content = '---\nname: release-provider\ndescription: Produce the release artifact.\n---\n\n# Release provider\n'
+    const mutationJson = JSON.stringify({
+      rows: { research: { skills: ['release-provider'] } },
+      skill: {
+        name: 'release-provider', content,
+        sidecar: {
+          precondition: 'a release task is present', inputs: [], outputs: [],
+          requiredTools: [], verifier: { ref: 'command' },
+        },
+      },
+    })
+    const malformed = await candidate.execute({
+      proposalId: 'p-cap-json', versionSet: { capabilityTable: 'v1' }, mutationJson: '{"rows":',
+    }, exec('root-1')) as string
+    expect(malformed).toContain('evolution_candidate rejected:')
+    const forged = await candidate.execute({
+      proposalId: 'p-cap-json', versionSet: { capabilityTable: 'v1' },
+      mutationJson: JSON.stringify({
+        ...JSON.parse(mutationJson),
+        skill: { ...JSON.parse(mutationJson).skill, sidecar: { content: { skillMdSha256: '0'.repeat(64), resources: [] } } },
+      }),
+    }, exec('root-1')) as string
+    expect(forged).toContain('sidecar.content is not an authorable field')
+    expect((await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')).toHaveLength(1)
+    const result = await candidate.execute({
+      proposalId: 'p-cap-json', versionSet: { capabilityTable: 'v1' }, mutationJson,
+    }, exec('root-1')) as string
+    expect(result).toContain('proposal p-cap-json [candidate]')
+    const lines = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
+    expect(lines).toHaveLength(2)
+    const recorded = JSON.parse(lines[1]!) as { mutation: { skill: { sidecar: { content: { skillMdSha256: string, resources: unknown[] } } } } }
+    expect(recorded.mutation.skill.sidecar.content).toEqual({
+      skillMdSha256: createHash('sha256').update(content).digest('hex'), resources: [],
+    })
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})
 it('refuses a tampered skill candidate through the plugin, leaving production and the ledger untouched', async () => {
   const { tools, home, replayTask } = await mountAgent()
   try {
@@ -329,7 +374,7 @@ it('refuses a tampered skill candidate through the plugin, leaving production an
     const candidateOut = (await candidate.execute({
       proposalId: 'p-skill-2',
       versionSet: { skill: 'v2' },
-      mutation: { name: 'verify', content: skillText('# new verify skill') },
+      mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new verify skill') }),
     }, exec('root-1'))) as string
     expect(candidateOut).toContain('proposal p-skill-2 [candidate] version set: skill=v2')
     expect(candidateOut).toContain('mutation recorded — next: evolution_prepare')
@@ -380,7 +425,7 @@ it('refuses a skill call the two-sided experiment cannot honour, without running
     await candidate.execute({
       proposalId: 'p-skill-3',
       versionSet: { skill: 'v2' },
-      mutation: { name: 'verify', content: skillText('# new verify skill') },
+      mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new verify skill') }),
     }, exec('root-1'))
     // P3: prepare records the production baseline digest on the ledger line
     const prepared = await prepare.execute({ proposalId: 'p-skill-3' }, exec('root-1'))
@@ -438,7 +483,7 @@ it('refuses a skill gate without an experiment through the tools, leaving the le
     await candidate.execute({
       proposalId: 'p-skill-eval4',
       versionSet: { skill: 'v2' },
-      mutation: { name: 'verify', content: skillText('# new verify skill') },
+      mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new verify skill') }),
     }, exec('root-1'))
     const prepared = await prepare.execute({ proposalId: 'p-skill-eval4' }, exec('root-1'))
     expect(prepared).toContain('production baseline: verify sha256:')

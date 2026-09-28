@@ -260,30 +260,18 @@ describe('SingularityAgent assembly', () => {
         required: string[]
         properties: Record<string, {
           description?: string
-          oneOf?: readonly {
-            required?: readonly string[]
-            properties?: Record<string, { description?: string }>
-          }[]
+          type?: string
         }>
       }
     }
-    expect(candidate.parameters.required).toContain('mutation')
+    expect(candidate.parameters.required).toContain('mutationJson')
     expect(candidate.parameters.required).toContain('versionSet')
-    const mutation = candidate.parameters.properties.mutation!
-    expect(mutation.description).toContain('{ name, content }')
-    expect(mutation.description).toContain('{ rows, skill? }')
-    const branches = mutation.oneOf ?? []
-    expect(branches).toHaveLength(2)
-    const skillBranch = branches[0]!
-    expect(skillBranch.required).toEqual(['name', 'content'])
-    expect(skillBranch.properties!.content!.description).toContain('SKILL.md')
-    const capabilityBranch = branches[1]!
-    expect(capabilityBranch.required).toEqual(['rows'])
-    expect(capabilityBranch.properties!.rows!.description).toContain('Exactly one entry')
-    expect(capabilityBranch.properties!.skill!.description).toContain('SKILL.contract.json')
-    expect(candidate.description).toContain('two candidate lifecycles')
-    expect(candidate.description).toContain('it stays a record')
-    expect(candidate.description).toContain('Unknown mutation fields are refused by name')
+    const mutation = candidate.parameters.properties.mutationJson!
+    expect(mutation.type).toBe('string')
+    expect(mutation.description).toContain('{rows,skill?}')
+    expect(candidate.description).toContain('ONE JSON string')
+    expect(candidate.description).toContain('SKILL.contract.json')
+    expect(candidate.description).toContain('resources:[]')
   })
 
   it('describes all nine evolution tools in whole-object terms, with no single-file claim left', async () => {

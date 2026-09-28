@@ -696,7 +696,7 @@ async function walkToGated(s: UnitStack, input: {
       rationale: 'the fixture skill should carry the newer wording',
       sourceRefs: ['diagnosis:k3'],
     }],
-    ['evolution_candidate', { proposalId: input.proposalId, versionSet: { skill: 'v2' }, mutation: { name, content: input.content } }],
+    ['evolution_candidate', { proposalId: input.proposalId, versionSet: { skill: 'v2' }, mutationJson: JSON.stringify({ name, content: input.content }) }],
     ['evolution_prepare', { proposalId: input.proposalId }],
     ['evolution_replay', {
       proposalId: input.proposalId,
@@ -1181,7 +1181,7 @@ describe('K3-2: the refusals that come before any write', () => {
     await writeSkillObject(join(h.home, 'skills'), { body: skillBody(SKILL, ['keep.txt']), sidecar: 'knowledge' })
     const proposal = { proposalId: P1, level: 'L2', baseVersion: 'v1', targetType: 'skill', targetId: SKILL, rationale: 'improve it', sourceRefs: ['diagnosis:k3'] }
     expect((await s.call('evolution_propose', proposal)).isError).toBe(false)
-    expect((await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutation: { name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt']) } })).isError).toBe(false)
+    expect((await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutationJson: JSON.stringify({ name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt']) }) })).isError).toBe(false)
 
     const refused = await s.call('evolution_prepare', { proposalId: P1 })
     expect(refused.text).toContain('evolution_prepare rejected:')
@@ -1201,7 +1201,7 @@ describe('K3-2: the refusals that come before any write', () => {
       resources: [{ path: 'references/notes.md', bytes: 'the declared notes\n' }],
     })
     await s.call('evolution_propose', { proposalId: P1, level: 'L2', baseVersion: 'v1', targetType: 'skill', targetId: SKILL, rationale: 'improve it', sourceRefs: ['diagnosis:k3'] })
-    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutation: { name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt']) } })
+    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutationJson: JSON.stringify({ name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt']) }) })
 
     const refused = await s.call('evolution_prepare', { proposalId: P1 })
     expect(refused.text).toContain('evolution_prepare rejected:')
@@ -1225,7 +1225,7 @@ describe('K3-2: the refusals that come before any write', () => {
       resources: [{ path: file, bytes: 'a file nobody declared\n' }],
     })
     await s.call('evolution_propose', { proposalId: P1, level: 'L2', baseVersion: 'v1', targetType: 'skill', targetId: SKILL, rationale: 'improve it', sourceRefs: ['diagnosis:k3'] })
-    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutation: { name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt']) } })
+    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutationJson: JSON.stringify({ name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt']) }) })
 
     const refused = await s.call('evolution_prepare', { proposalId: P1 })
     expect(refused.text).toContain('evolution_prepare rejected:')
@@ -1255,7 +1255,7 @@ describe('K3-2: the refusals that come before any write', () => {
       declaredSkillMdSha256: 'f'.repeat(64),
     })
     await s.call('evolution_propose', { proposalId: P1, level: 'L2', baseVersion: 'v1', targetType: 'skill', targetId: SKILL, rationale: 'improve it', sourceRefs: ['diagnosis:k3'] })
-    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutation: { name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt']) } })
+    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutationJson: JSON.stringify({ name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt']) }) })
 
     const refused = await s.call('evolution_prepare', { proposalId: P1 })
     expect(refused.text).toContain('evolution_prepare rejected:')
@@ -1311,7 +1311,7 @@ describe('K3-2: the refusals that come before any write', () => {
     // bytes it was handed, so the object the candidate side would load declares a
     // name the row does not grant.
     const renamed = skillBody('k3-a-different-skill-name', ['fix.txt', 'keep.txt', 'holdout.txt'])
-    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutation: { name: SKILL, content: renamed } })
+    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutationJson: JSON.stringify({ name: SKILL, content: renamed }) })
     expect((await s.call('evolution_prepare', { proposalId: P1 })).text).toContain('[prepared]')
 
     const spawnsBefore = h.spawns.length
@@ -1406,7 +1406,7 @@ describe('K3-2: the refusals that come before any write', () => {
     await writeHistory(h, root.storeId)
     await mkdir(join(h.checkout, 'nested'), { recursive: true })
     await s.call('evolution_propose', { proposalId: P1, level: 'L2', baseVersion: 'v1', targetType: 'skill', targetId: SKILL, rationale: 'improve it', sourceRefs: ['diagnosis:k3'] })
-    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutation: { name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt', 'holdout.txt']) } })
+    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutationJson: JSON.stringify({ name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt', 'holdout.txt']) }) })
     expect((await s.call('evolution_prepare', { proposalId: P1 })).isError).toBe(false)
 
     const spawnsBefore = h.spawns.length
@@ -1475,7 +1475,7 @@ describe('K3-3: a file that moves after the freeze refuses by name, and the two 
     await writeHistory(h, root.storeId)
     await mkdir(join(h.checkout, 'nested'), { recursive: true })
     await s.call('evolution_propose', { proposalId: P1, level: 'L2', baseVersion: 'v1', targetType: 'skill', targetId: SKILL, rationale: 'improve it', sourceRefs: ['diagnosis:k3'] })
-    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutation: { name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt', 'holdout.txt']) } })
+    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutationJson: JSON.stringify({ name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt', 'holdout.txt']) }) })
     expect((await s.call('evolution_prepare', { proposalId: P1 })).text).toContain('[prepared]')
 
     // The sandbox file moves after the prepare recorded its identity — the state

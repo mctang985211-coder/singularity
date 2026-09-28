@@ -125,13 +125,13 @@ export function defineEvolutionProposeTool(ctx: Context) {
           caller,
         )
         const skillReplacement =
-          'ledger entry only — nothing was executed or changed; next: evolution_candidate, carrying the full replacement ' +
+          'ledger entry only — nothing was executed or changed; next: evolution_candidate with mutationJson as JSON text carrying the full replacement ' +
           "text of the existing skill's SKILL.md — the only input a candidate submits, because an execution skill's " +
           'SKILL.contract.json is derived from production at evolution_prepare (only its content.skillMdSha256 is ' +
           'recomputed, so a content update cannot move a capability, a required tool or a verifier)'
         const capabilityReplacement =
-          'ledger entry only — nothing was executed or changed; next: evolution_candidate, carrying exactly one whole ' +
-          'capability row { rows } and optionally a NEW execution skill { name, content, sidecar }; the row may use only ' +
+          'ledger entry only — nothing was executed or changed; next: evolution_candidate with mutationJson as JSON text carrying exactly one whole ' +
+          'capability row { rows } and optionally a NEW execution skill { name, content, sidecar semantic fields }; the row may use only ' +
           'already authorized tools and may not change permission or preset'
         const recordedSuggestion =
           `ledger entry only — nothing was executed or changed; this build promotes an existing skill or one capability row ` +

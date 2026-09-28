@@ -81,3 +81,13 @@
 ## 最终结论与停止点
 
 EVO-2～EVO-5 机制交付进入待验收；EVO-1 明确 FAIL，所以 A6 整票最高填**待验收**。不推送、不部署、不派下一票；完成内层提交和外层仅子模块指针提交后停止。
+
+## EVO-1 候选入口定向修复与续验（2026-09-28）
+
+原始四次实验及上文判决不改写。独立审计确认 L1/2 与 L2/1 的模型调用把 `mutation` 双重编码成字符串，typed-tool 在进入 Evolution 前拒绝；L2 原始侧车还缺必填字段与精确摘要，Skill 写死 fix 文件名。L1/1 是源根未形成预期失败，属于独立的实验来源问题。当前候选工具改为单一 `mutationJson` JSON 文本入口；新 Skill 仅提交语义声明，工具由正文计算 `content.skillMdSha256` 并固定版本、能力归属及 `resources: []`，再交现有 Evolution 校验，非法 JSON/自填派生字段零 ledger 写。旧 `mutation` 参数不再接收，K3 同名 Skill 调用者已同步。
+
+定向 RED：新文本入口在交付版工具上因缺必填 `mutation` 被拒；GREEN：工具集成 8/8、A6 链集成 4/4、K3 集成 41 通过+1 跳过、装配单测 10/10。临时快照的 scripted L2 全链通过。原始 22G 快照搬到 `stack/harness-original-a6-20260928` 保留；新快照来自当前工作树，未覆盖旧 evidence。
+
+同一冻结 L2 的第二次真实尝试 `evidence/l2-run-2` 使用免费 `step-5-preview`，墙钟 186.319s，42 请求/41 响应。真实 supervisor 先提交一份被现有 provider 校验拒绝的候选，随后自行提出新方案；第二份完成 candidate、prepare、双侧 experiment、gate。报告 `ledger/sandbox/sup-a6-l2-release-row-002/exp-d419fafac61fb49b/experiment-report.json` 中 fix/holdout 的基线均为 `not-admitted`，候选均为 `verified`；冻结判据 `ac-a6-l2-fix` 和 `ac-a6-l2-holdout` 均 pass，产物分别在该实验目录。模型声明 `maxTokens:400000`，但业务 Run 成本只有 toolCalls 等指标，没有 token 投影；`decide(PROMOTE)` 按既有 promotion 闸拒绝，零人审请求、零应用。模型可见预算说明已收紧：无 token 投影时不声明该可选上限。L2 第二轮证明候选与双侧验证已能实跑，**没有证明批准、应用与原目标恢复**；EVO-1 和 A6 仍待验收。L1 原三次不追加，不用脚本结果冒充真实通过。
+
+同一冻结 L2 的第三次也是最后一次真实尝试 `evidence/l2-run-3` **通过 L2 效果验收**：`step-5-preview` 运行 267.799s，39 请求/38 响应，输入 88422、输出 18058、缓存读 348672 token。Agent 自行提交一条 capability 整行与新 execution Skill；沙盒 `SKILL.md` 的 SHA-256 `ecead6ef142cd86e0fd0b8360c6340d8edaa0793297854c036ee6fe89fc39d5a` 与其派生 sidecar 一致，正文按任务目标决定产物名，未写死 fix 文件名。`experiment.json` 的 fix/holdout 基线均为真实 `not-admitted`，候选均为 `verified`，冻结 command 判据分别 pass；本轮未声明无法核算的 `maxTokens`。受控 DSH 审批依次拒绝/允许 decide、拒绝/允许 apply；拒绝时无应用，最终只向临时部署写入行与 Skill。`run.json` 证明受保护生产文件前后摘要一致，`watchdogNudges: []`，所以夹具中发现的旧接口催促文案没有影响本次结果；该催促文案已为未来实验改成 `mutationJson`。受控 desk 是人审门的测试替身，不称真人批准。L1 原三次仍无合格证据，EVO-1 与 A6 整票仍 **FAIL / 待验收**；新 L1 冻结案例须另按合同明确授权，不能把 L2 成功或 scripted 接线替代为双案例通过。

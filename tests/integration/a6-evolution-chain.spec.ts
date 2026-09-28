@@ -132,17 +132,13 @@ function sha256Hex(bytes: Buffer | string): string {
 }
 
 /** The new skill's execution declaration: the row grants it and the registered `command` verifier judges it. */
-function sidecar(content: string): unknown {
+function sidecar(): unknown {
   return {
-    contractVersion: 1,
-    type: 'execution',
-    capabilities: [ROW],
     precondition: 'the fixture gap is present',
     inputs: [],
     outputs: [],
     requiredTools: ['read', 'write'],
     verifier: { ref: 'command' },
-    content: { skillMdSha256: sha256Hex(content), resources: [] },
   }
 }
 
@@ -378,10 +374,10 @@ function script(context: ScriptContext): (sessionId: string, index: number) => r
           args: {
             proposalId: PROPOSAL,
             versionSet: { capabilityTable: 'config.yml#doc' },
-            mutation: {
+            mutationJson: JSON.stringify({
               rows: { [ROW]: { skills: [SKILL], tools: ['filesystem'] } },
-              skill: { name: SKILL, content: CANDIDATE_TEXT, sidecar: sidecar(CANDIDATE_TEXT) },
-            },
+              skill: { name: SKILL, content: CANDIDATE_TEXT, sidecar: sidecar() },
+            }),
           },
         },
         { tool: 'evolution_prepare', args: { proposalId: PROPOSAL } },

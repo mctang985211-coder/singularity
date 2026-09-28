@@ -4,7 +4,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, optionalService, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
 import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EvolutionService, applyTargets, modelSelectionOf, renderProviderRoles } from "@dangosys/dsh-singularity-evolution";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, canonicalize, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
 import { CONTEXT_OUTPUT_LIMIT_BYTES, ReviewerBindingError, openRootProposals } from "@dangosys/dsh-singularity-context";
@@ -3546,7 +3546,7 @@ function sessionId$17(exec) {
 function defineEvolutionCandidateTool(ctx) {
 	return defineTool({
 		name: "evolution_candidate",
-		description: "Claim a proposed EvolutionProposal into validation (status: candidate) by recording the complete version set it aligns to (e.g. taskDefinition / skill / capabilityTable / agentPreset / verifier / runtimePolicy versions). Bookkeeping for the branch model only: no branch is created and nothing is executed or changed. This build admits two candidate lifecycles, both shaped by the proposal's target type: (1) a same-name improvement of an existing skill as a whole loadable object — the mutation { name, content } carries the full replacement SKILL.md text and nothing else, because `content` is the whole new body rather than a diff, no sidecar patch and no resource is accepted; evolution_prepare derives the SKILL.contract.json from the production declaration with only content.skillMdSha256 recomputed, so a content update can never move a capability, a required tool, a verifier or a port. (2) one whole capability row, with an optional new execution skill — the mutation { rows, skill? }, where `rows` holds exactly one row ({ skills, tools?, preset?, permission?, mcpServers? }: no field is inherited from the row it replaces) and `skill`, when given, is { name, content, sidecar } for a NEW execution object (SKILL.md plus the existing SKILL.contract.json protocol, resources: [], granting that row, judged by a registered verifier). The new row may not grant a tool or mount a server this deployment has not already authorized, and may not move the preset or permission a worker runs under; improving an existing skill is the same-name path, never a new name. Unknown mutation fields are refused by name, and so is a proposal of any other target type — it stays a record, because evolution_propose may record a suggestion no executor exists for. Either candidate must then pass evolution_prepare (sandbox materialization) and evolution_replay (the two-sided experiment) before evolution_gate.",
+		description: "Record a proposed change as a candidate. mutationJson is ONE JSON string, not a nested tool argument: for an existing skill use {\"name\":\"existing-name\",\"content\":\"the whole SKILL.md\"}; for a capability use {\"rows\":{\"row-name\":{\"skills\":[\"skill-name\"],\"tools\":[]}},\"skill\":optionalNewSkill}. A new skill is {name,content,sidecar}; sidecar becomes SKILL.contract.json and supplies only semantic fields: {\"precondition\":\"task is present\",\"inputs\":[],\"outputs\":[],\"requiredTools\":[\"read\",\"write\"],\"verifier\":{\"ref\":\"command\"}}. The tool derives contractVersion:1, type:\"execution\", capabilities:[the sole row name], content.skillMdSha256 from the exact SKILL.md text, and resources:[]. Do not submit those derived fields. The row may grant only existing authorized tools; a new skill must use a registered verifier. No production write occurs here. Next: evolution_prepare, evolution_replay, evolution_gate.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -3559,43 +3559,10 @@ function defineEvolutionCandidateTool(ctx) {
 				required: true,
 				description: "Complete version set the candidate aligns to: name → version string, at least one entry"
 			},
-			mutation: {
-				oneOf: [{
-					type: "object",
-					additionalProperties: false,
-					description: "A skill candidate: the existing skill's name and the full replacement SKILL.md text this candidate is materialized from and evaluated on. The object's SKILL.contract.json, when it has one, is derived from production at evolution_prepare with only content.skillMdSha256 recomputed.",
-					properties: {
-						name: {
-							type: "string",
-							required: true,
-							description: "The existing skill's name (a single safe path segment)"
-						},
-						content: {
-							type: "string",
-							required: true,
-							description: "The whole replacement SKILL.md text (frontmatter included)"
-						}
-					}
-				}, {
-					type: "object",
-					additionalProperties: false,
-					description: "A capability candidate: exactly one capability row, whole, plus optionally one NEW execution skill the row grants.",
-					properties: {
-						rows: {
-							type: "object",
-							additionalProperties: true,
-							required: true,
-							description: "Exactly one entry — the row name mapped to its whole configuration { skills: [names, at least one], tools?: [labels], preset?, permission?, mcpServers?: [names] }. No field is inherited from the row it replaces: a tool or server the table does not already authorize, and a preset or permission different from the row being replaced, are refused by name."
-						},
-						skill: {
-							type: "object",
-							additionalProperties: true,
-							description: "The optional new execution skill this row grants: { name, content, sidecar } — a name no discovery finds, the whole SKILL.md text, and its SKILL.contract.json declaration (type \"execution\", resources: [], capabilities including this row, a registered verifier). A renamed copy of an existing production object is refused."
-						}
-					}
-				}],
+			mutationJson: {
+				type: "string",
 				required: true,
-				description: "The structured patch, required, shaped by the proposal's target type: { name, content } for a skill proposal, or { rows, skill? } for a capability proposal. An unknown mutation field is refused by name."
+				description: "JSON text of exactly one complete mutation: {name,content} or {rows,skill?}. If skill is present, its sidecar is an object, not quoted JSON; supply only precondition, inputs, outputs, requiredTools and verifier:{ref}."
 			}
 		},
 		output: {
@@ -3606,7 +3573,35 @@ function defineEvolutionCandidateTool(ctx) {
 			const caller = sessionId$17(exec);
 			const versions = args.versionSet;
 			try {
-				const proposal = await ctx.evolution.candidate(args.proposalId, versions, caller, args.mutation);
+				const mutation = JSON.parse(args.mutationJson);
+				if (mutation === null || typeof mutation !== "object" || Array.isArray(mutation)) throw new Error("mutationJson must contain a JSON object");
+				const candidate = mutation;
+				if (candidate.skill !== void 0) {
+					const skill = candidate.skill;
+					if (skill === null || typeof skill !== "object" || Array.isArray(skill) || typeof skill.content !== "string") throw new Error("mutationJson.skill must carry the whole SKILL.md content");
+					const sidecar = skill.sidecar;
+					if (sidecar === null || typeof sidecar !== "object" || Array.isArray(sidecar)) throw new Error("mutationJson.skill.sidecar must be an object");
+					for (const key of Object.keys(sidecar)) if (![
+						"precondition",
+						"inputs",
+						"outputs",
+						"requiredTools",
+						"verifier"
+					].includes(key)) throw new Error(`mutationJson.skill.sidecar.${key} is not an authorable field`);
+					const rows = candidate.rows;
+					if (rows === null || typeof rows !== "object" || Array.isArray(rows) || Object.keys(rows).length !== 1) throw new Error("mutationJson.rows must hold exactly one capability row");
+					skill.sidecar = {
+						contractVersion: 1,
+						type: "execution",
+						capabilities: Object.keys(rows),
+						...sidecar,
+						content: {
+							skillMdSha256: createHash("sha256").update(skill.content).digest("hex"),
+							resources: []
+						}
+					};
+				}
+				const proposal = await ctx.evolution.candidate(args.proposalId, versions, caller, candidate);
 				const versionsText = Object.entries(proposal.versionSet).map(([key, value]) => `${key}=${value}`).join(", ");
 				return [`proposal ${proposal.proposalId} [candidate] version set: ${versionsText}`, "ledger entry only — no branch created, nothing executed; mutation recorded — next: evolution_prepare (sandbox materialization), then evolution_replay (the two-sided experiment), then evolution_gate"].join("\n");
 			} catch (error) {
@@ -4070,8 +4065,8 @@ function defineEvolutionProposeTool(ctx) {
 					rationale,
 					sourceRefs
 				}, caller);
-				const skillReplacement = "ledger entry only — nothing was executed or changed; next: evolution_candidate, carrying the full replacement text of the existing skill's SKILL.md — the only input a candidate submits, because an execution skill's SKILL.contract.json is derived from production at evolution_prepare (only its content.skillMdSha256 is recomputed, so a content update cannot move a capability, a required tool or a verifier)";
-				const capabilityReplacement = "ledger entry only — nothing was executed or changed; next: evolution_candidate, carrying exactly one whole capability row { rows } and optionally a NEW execution skill { name, content, sidecar }; the row may use only already authorized tools and may not change permission or preset";
+				const skillReplacement = "ledger entry only — nothing was executed or changed; next: evolution_candidate with mutationJson as JSON text carrying the full replacement text of the existing skill's SKILL.md — the only input a candidate submits, because an execution skill's SKILL.contract.json is derived from production at evolution_prepare (only its content.skillMdSha256 is recomputed, so a content update cannot move a capability, a required tool or a verifier)";
+				const capabilityReplacement = "ledger entry only — nothing was executed or changed; next: evolution_candidate with mutationJson as JSON text carrying exactly one whole capability row { rows } and optionally a NEW execution skill { name, content, sidecar semantic fields }; the row may use only already authorized tools and may not change permission or preset";
 				const recordedSuggestion = `ledger entry only — nothing was executed or changed; this build promotes an existing skill or one capability row with an optional new execution skill, so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become a candidate, is never evaluated, and is never promoted`;
 				return [
 					`proposal ${proposal.proposalId} registered [proposed] ${proposal.level} ${proposal.targetType} ${proposal.targetId} (base ${proposal.baseVersion})`,
@@ -4262,7 +4257,7 @@ function defineEvolutionReplayTool(ctx) {
 						description: "What the budget was derived from and why it is judged enough"
 					}
 				},
-				description: "The budget frozen with the experiment. The one ceiling is the optional whole-experiment maxTokens total (defaults to none stated): a declared total also becomes a promotion condition, and the gate re-adds the sides' reported tokens and refuses the promotion when they pass it. Runs are bounded by the deployment's own runtime limits, never by a budget this call names"
+				description: "The budget frozen with the experiment. maxTokens is optional; omit it when this deployment does not report token counts for business Runs. If you declare it, promotion requires a measured token total for every executed side; tool-call counts and model guesses cannot satisfy that check. A declared total also stops further sides once reported usage reaches it. Runs retain the deployment's own runtime limits."
 			}
 		},
 		output: {
