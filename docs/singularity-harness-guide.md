@@ -6,6 +6,8 @@
 
 当前建设目标是 **BB 通用领域适配**，按[唯一计划第 16～17 项](2026-09-20-vrtc-code-change-plan.md)将已有方法拆成通用 Task 参考、Skill 与必要 MCP 接线。Task 参考正本在 Harness [bb-pipeline](../../../.agents/skills/bb-pipeline/references/tasks.md)，方法正本在 Buckyball `.agents/skills`，能力表在部署配置；执行者按实际目标取用，节点图由运行中的 Agent 根据证据生成。具体模型版本、张量、权重和 checker 留在实验实例。CosyVoice 的最终硬件验收仍需真实 Verilator RTL 与同一算子参考对照，不能因此在共享资产里预设模型专用工序。
 
+BB-1 已验收：通用模型接入 Skill 与 chip/Ball/验证方法完成，模型 importer 支持范围及波形时钟解释经审核修正，见[审核记录](history/2026-09-28-bb1-review.md)。BB-2 正在派发，只做项目 Skill、部署能力表和 bbdev/waveform MCP 接线；工具可达与 Run binding 未验收前，不宣称通用适配已接通。
+
 | 已确认的问题 | 修正合同与唯一所有者 |
 |---|---|
 | ~~分解一次、子全终态即自动提交父，限制正常探索~~（K1 已验收） | [K1](execution-prompts/12a-k1-exploration.md)：runtime 交还父执行权，Run 内多批次、父主动提交；Task 保留事实（§5.18） |
