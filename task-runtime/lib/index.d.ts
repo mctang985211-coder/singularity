@@ -3281,7 +3281,7 @@ declare function parseObligationTemplates(text: string, source: string): Obligat
  */
 declare function findRepoRoot(start: string, maxLevels?: number): Promise<string | undefined>;
 /**
- * Load every `<repoRoot>/.agents/skills/<name>/obligations.yml`, in directory
+ * Load every `<repoRoot>/.agents/skills/<name>/references/obligations.yml`, in directory
  * order. A pack without the file contributes nothing; an absent skills root
  * yields an empty list. A malformed file throws — see parseObligationTemplates.
  */

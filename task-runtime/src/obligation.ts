@@ -11,7 +11,7 @@
  * prompt — "satisfied, or forgotten?" — never a block: the check has no
  * scheduler and no gate.
  *
- * Template files live at `<repoRoot>/.agents/skills/<name>/obligations.yml`
+ * Template files live at `<repoRoot>/.agents/skills/<name>/references/obligations.yml`
  * and are scanned wholesale, so any domain pack can carry one. The file is
  * JSON-compatible YAML (YAML 1.2 accepts JSON), parsed with `JSON.parse` —
  * the same dependency-free trick the evolution package's sandbox artifacts use.
@@ -105,7 +105,7 @@ export async function findRepoRoot(start: string, maxLevels = 8): Promise<string
 }
 
 /**
- * Load every `<repoRoot>/.agents/skills/<name>/obligations.yml`, in directory
+ * Load every `<repoRoot>/.agents/skills/<name>/references/obligations.yml`, in directory
  * order. A pack without the file contributes nothing; an absent skills root
  * yields an empty list. A malformed file throws — see parseObligationTemplates.
  */
@@ -120,7 +120,7 @@ export async function loadObligationTemplates(repoRoot: string): Promise<Obligat
   const files: ObligationTemplateFile[] = []
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     if (!entry.isDirectory()) continue
-    const file = join(skillsRoot, entry.name, 'obligations.yml')
+    const file = join(skillsRoot, entry.name, 'references', 'obligations.yml')
     let text: string
     try {
       text = await readFile(file, 'utf8')

@@ -256,14 +256,12 @@ describe('BB2-2: the installed layout is what discovery, the run binding and adm
     expect(verdict.directory).toBe(installed[OBLIGATIONS_SKILL])
     expect(verdict.contentDigest).toBe(await guidanceDigest(installed[OBLIGATIONS_SKILL]!))
     expect(verdict.contentDigest).not.toBe(await guidanceDigest(decoy))
-    // The identity covers `SKILL.md` alone; the template file beside it is named,
-    // not silently included — and it is the file the runtime's obligation loader
-    // reads, so the uncovered entry is content, not noise.
-    expect(verdict.uncovered).toEqual(['obligations.yml'])
+    // The machine template is a bound resource, not an uncovered side file.
+    expect(verdict.uncovered).toEqual([])
     expect(
       parseObligationTemplates(
-        await readFile(join(installed[OBLIGATIONS_SKILL]!, 'obligations.yml'), 'utf8'),
-        `${OBLIGATIONS_SKILL}/obligations.yml`,
+        await readFile(join(installed[OBLIGATIONS_SKILL]!, 'references', 'obligations.yml'), 'utf8'),
+        `${OBLIGATIONS_SKILL}/references/obligations.yml`,
       ).length,
     ).toBeGreaterThan(0)
 
@@ -284,7 +282,7 @@ describe('BB2-2: the installed layout is what discovery, the run binding and adm
     expect(skill.role).toBe('guidance')
     expect(skill.contractDigest).toBeNull()
     expect(skill.capabilities).toEqual([UNLISTED])
-    expect(skill.uncovered).toEqual(['obligations.yml'])
+    expect(skill.uncovered).toEqual([])
     expect(skill.contentDigest).toBe(await guidanceDigest(installed[OBLIGATIONS_SKILL]!))
     expect(skill.contentDigest).not.toBe(await guidanceDigest(decoy))
 
@@ -296,6 +294,22 @@ describe('BB2-2: the installed layout is what discovery, the run binding and adm
       await readFile(join(installed[OBLIGATIONS_SKILL]!, 'SKILL.md'), 'utf8'),
     )
     expect(await readFile(join(snapshotRoot, OBLIGATIONS_SKILL, 'SKILL.md'), 'utf8')).not.toContain(DECOY_MARK)
+    const snapshotTemplate = join(snapshotRoot, OBLIGATIONS_SKILL, 'references', 'obligations.yml')
+    const installedTemplate = join(installed[OBLIGATIONS_SKILL]!, 'references', 'obligations.yml')
+    const originalTemplate = await readFile(installedTemplate, 'utf8')
+    expect(await readFile(snapshotTemplate, 'utf8')).toBe(originalTemplate)
+    expect((await h.runtime.readRunBinding(binding))?.defects).toEqual([])
+
+    await writeFile(installedTemplate, `${originalTemplate}\n`)
+    const changed = await precheckProviders({
+      capabilities: Object.keys(table),
+      table,
+      view: { cwd: h.checkout },
+      verifierRefs: h.verifier.verifierIds(),
+    })
+    const changedVerdict = accepted(changed.capabilities[0]!.skills[0]!, OBLIGATIONS_SKILL)
+    expect(changedVerdict.contentDigest).not.toBe(skill.contentDigest)
+    expect(await readFile(snapshotTemplate, 'utf8')).toBe(originalTemplate)
     expect((await h.runtime.readRunBinding(binding))?.defects).toEqual([])
 
     // The worker's own layer registers the snapshot, not the catalog: the grant

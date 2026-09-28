@@ -6943,7 +6943,7 @@ async function findRepoRoot(start, maxLevels = 8) {
 	}
 }
 /**
-* Load every `<repoRoot>/.agents/skills/<name>/obligations.yml`, in directory
+* Load every `<repoRoot>/.agents/skills/<name>/references/obligations.yml`, in directory
 * order. A pack without the file contributes nothing; an absent skills root
 * yields an empty list. A malformed file throws — see parseObligationTemplates.
 */
@@ -6958,7 +6958,7 @@ async function loadObligationTemplates(repoRoot) {
 	const files = [];
 	for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
 		if (!entry.isDirectory()) continue;
-		const file = join(skillsRoot, entry.name, "obligations.yml");
+		const file = join(skillsRoot, entry.name, "references", "obligations.yml");
 		let text$1;
 		try {
 			text$1 = await readFile(file, "utf8");

@@ -4,7 +4,7 @@
 
 ## 所有者与范围
 
-- 通用 Task 参考正本是 Harness `.agents/skills/bb-pipeline/references/tasks.md`；方法正本是 Buckyball `.agents/skills`（Skill 子模块）。使用已有 loader 将所需目录安装到 graph 运行 cwd 可发现的 `.agents/skills`；安装沿用现有环境 setup 的文件操作，不新增搜索服务、全局 Skill 回退、包装 Skill 或模板数据库。保留来源 commit/内容身份；不能把用户全局同名 Skill 当作本票领域资源。
+- 通用 Task 参考正本是 Harness `.agents/skills/bb-pipeline/references/tasks.md`；方法正本是 Buckyball `.agents/skills`（Skill 子模块）。每个长图的环境 setup 将所需 Skill 安装到该图运行 cwd 的 `.agents/skills`；已有 loader 先读取该目录，Run binding 冻结实际选中的文件及内容身份。不新增搜索服务、包装 Skill 或模板数据库；不要用全局同名 Skill 冒充已安装的本图资源。
 - 能力映射归 Harness 部署配置 `config.yml.example` 和本机忽略的 `config.yml`。`integrate-model` 使用 `model-integration`；设计 Skill 只给方法，构建/验证由目标需要的能力取得工具。设计节点不必为了读取构建事实直接获得所有 MCP，也可派具备对应能力的子 Task。
 - 删除 `task-runtime/src/index.ts` 内置的 BB 能力表：核心无 BB 默认能力，部署未配置能力时保留空表并对请求显式报缺口。更新实际消费者与必要测试夹具，不把领域表搬到另一个核心文件，不留旧导出/兼容别名。不重写能力解析或 provider 规则。
 - 删除 BB 回归能力对未安装的 `bb-verify` preset 的强依赖，复用已存在的部署默认/standard preset 和 per-Run 工具授权；不把 legacy verify-runner 搬回来。若本机显式 defaultPreset 有现场配置，保留它，不能由本票偷偷替换。

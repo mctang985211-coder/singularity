@@ -1062,7 +1062,7 @@ function truncate(value: number): number {
 
 /**
  * Best-effort obligation coverage (KISS §5.1, guide §4.2 #21): templates from
- * `<repoRoot>/.agents/skills/<name>/obligations.yml` against the graph's
+ * `<repoRoot>/.agents/skills/<name>/references/obligations.yml` against the graph's
  * obligations and requested capabilities. Every step may be absent — no env
  * builder, no repo root within reach, no template files — and an absent source
  * omits the coverage line rather than reporting zero coverage. Uncovered entries

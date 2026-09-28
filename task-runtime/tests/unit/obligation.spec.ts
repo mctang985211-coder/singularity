@@ -44,7 +44,7 @@ describe('parseObligationTemplates', () => {
   // The shipped template ships at the repository root, next to the bb-pipeline
   // skill that points at it as the canonical obligation template.
   test('the shipped bb-obligations template parses into the seven known obligations', async () => {
-    const file = fileURLToPath(new URL('../../../../../.agents/skills/bb-obligations/obligations.yml', import.meta.url))
+    const file = fileURLToPath(new URL('../../../../../.agents/skills/bb-obligations/references/obligations.yml', import.meta.url))
     const templates = parseObligationTemplates(await readFile(file, 'utf8'), file)
     expect(templates.map(item => item.id)).toEqual([
       'algorithm-correctness',
@@ -154,9 +154,9 @@ describe('template discovery on disk', () => {
 
   test('loadObligationTemplates scans every skill dir, skipping packs without the file', async () => {
     mkdirSync(join(root, 'repo', '.git'), { recursive: true })
-    mkdirSync(join(root, 'repo', '.agents', 'skills', 'bb-obligations'), { recursive: true })
+    mkdirSync(join(root, 'repo', '.agents', 'skills', 'bb-obligations', 'references'), { recursive: true })
     writeFileSync(
-      join(root, 'repo', '.agents', 'skills', 'bb-obligations', 'obligations.yml'),
+      join(root, 'repo', '.agents', 'skills', 'bb-obligations', 'references', 'obligations.yml'),
       JSON.stringify([template()]),
     )
     mkdirSync(join(root, 'repo', '.agents', 'skills', 'bb-pipeline'), { recursive: true })
@@ -172,8 +172,8 @@ describe('template discovery on disk', () => {
   })
 
   test('a malformed template file fails the load loudly', async () => {
-    mkdirSync(join(root, 'repo', '.agents', 'skills', 'broken'), { recursive: true })
-    writeFileSync(join(root, 'repo', '.agents', 'skills', 'broken', 'obligations.yml'), 'not: json')
+    mkdirSync(join(root, 'repo', '.agents', 'skills', 'broken', 'references'), { recursive: true })
+    writeFileSync(join(root, 'repo', '.agents', 'skills', 'broken', 'references', 'obligations.yml'), 'not: json')
     await expect(loadObligationTemplates(join(root, 'repo'))).rejects.toThrow(/not JSON-compatible YAML/)
   })
 })
