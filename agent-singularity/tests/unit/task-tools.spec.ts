@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { DEFAULT_CAPABILITIES, WorkspaceBusyError } from '../../../task-runtime/src/index.ts'
+import { WorkspaceBusyError, type CapabilityConfig } from '../../../task-runtime/src/index.ts'
 import { graphRegistry, mountContextReadCore, sessionQueryReads } from '../../../tests/support/context-plane.ts'
 import { defineCapabilityListTool } from '../../src/tools/capability-list.ts'
 import { defineTaskDecomposeTool } from '../../src/tools/task-decompose.ts'
@@ -171,8 +171,8 @@ function providerReport() {
         capability: 'integrate-model',
         skills: [{
           valid: false,
-          name: 'workload-tests',
-          directory: '/skills/workload-tests',
+          name: 'model-integration',
+          directory: '/skills/model-integration',
           defects: [{ code: 'content-mismatch', detail: 'SKILL.md is not the declared content' }],
         }],
       },
@@ -182,11 +182,13 @@ function providerReport() {
   }
 }
 
-/** The table the rendering test checks: the three verdict shapes above plus a row that grants no skill. */
-const RENDER_TABLE = {
+/** The table the capability_list cases check: the three verdict shapes above plus a row that grants no skill. */
+const RENDER_TABLE: Readonly<Record<string, CapabilityConfig>> = {
+  'design-chip': { skills: ['chip-designer'] },
   'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'] },
-  'verify-ball-functional': { skills: ['verify'], preset: 'bb-verify', mcpServers: ['bbdev'] },
-  'integrate-model': { skills: ['workload-tests'] },
+  'verify-ball-functional': { skills: ['verify'], mcpServers: ['bbdev'] },
+  'analyze-waveform': { skills: ['waveform'], mcpServers: ['waveform'] },
+  'integrate-model': { skills: ['model-integration'] },
   research: { preset: 'standard' },
 }
 
@@ -261,7 +263,7 @@ async function fixture(options: { storeError?: Error; sessions?: Map<string, Ses
       continueProposal: vi.fn(),
       proposalIn: vi.fn(),
       cancelProposal: vi.fn(),
-      listCapabilities: vi.fn(() => structuredClone(DEFAULT_CAPABILITIES)),
+      listCapabilities: vi.fn(() => structuredClone(RENDER_TABLE)),
       capabilityProviderReport: vi.fn(async (_sessionId: string) => providerReport()),
       verifyTimeoutMs: 1234,
     },
@@ -935,11 +937,11 @@ describe('capability_list', () => {
     const tool = defineCapabilityListTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(ctx.taskRuntime.listCapabilities).toHaveBeenCalledOnce()
-    expect(result).toContain(`capabilities (${Object.keys(DEFAULT_CAPABILITIES).length}):`)
+    expect(result).toContain(`capabilities (${Object.keys(RENDER_TABLE).length}):`)
     expect(result).toContain('- design-ball — tools: [filesystem → read, write, edit; bash → bash] skills: [ball-align]')
-    expect(result).toContain('- verify-ball-functional — tools: [] skills: [verify] preset: bb-verify mcpServers: [bbdev]')
+    expect(result).toContain('- verify-ball-functional — tools: [] skills: [verify] mcpServers: [bbdev]')
     expect(result).toContain('- research — tools: [] skills: [] preset: standard')
-    expect(result).toContain('- analyze-waveform — tools: [] skills: [waveform]')
+    expect(result).toContain('- analyze-waveform — tools: [] skills: [waveform] mcpServers: [waveform]')
   })
 
   it('states the baseline, the fail-closed tool rule, the skill boundary, and the permission posture', async () => {
@@ -990,7 +992,7 @@ describe('capability_list', () => {
     // An execution provider names the verifier that judges it and the tools it needs.
     expect(result).toContain('verify → execution-provider (verifier: command; requires: bash; content: eeeeeeeeeeee)')
     // A refused provider is not hidden: the defect code and its reason are shown.
-    expect(result).toContain('workload-tests → invalid (content-mismatch: SKILL.md is not the declared content)')
+    expect(result).toContain('model-integration → invalid (content-mismatch: SKILL.md is not the declared content)')
     // A row that grants no skill says that too, instead of rendering nothing.
     expect(result).toContain('    providers: (none — the capability grants no skill)')
     // The roots the verdicts were discovered from travel with them.

@@ -1,12 +1,12 @@
 # Singularity Harness 工作指南
 
-当前状态（2026-09-28）：**K1～K4、A5、A6 均按各自合同验收；前端以外的真实模型全链纵向验收仍为 INCONCLUSIVE。** A6 的 EVO-2～EVO-5 机制经定向反例与独立复核，EVO-1 在授权的两个冻结案例中由真实 Agent 分别组合现有能力（L1）和生成新 execution Skill（L2），双侧独立验收通过，再经受控 DSH 拒绝/允许门只应用到临时部署。最终纵向试验未形成失败源 Review，因此未观察到同一真实模型链上的 Diagnosis → 候选 → 应用 → `task_recover` → 原 AC 通过；见[纵向验收记录](history/2026-09-28-final-backend-vertical-review.md)。A6 证据见 §5.23、[交付记录](history/2026-09-28-a6-delivery-record.md)及[唯一计划](2026-09-20-vrtc-code-change-plan.md)。两例成功不代表任意目标均能自进化，也不代表真人审批或生产部署。
+当前状态（2026-09-29）：**K1～K4、A5、A6 均按各自合同验收；前端以外的真实模型全链纵向验收仍为 INCONCLUSIVE。** A6 的 EVO-2～EVO-5 机制经定向反例与独立复核，EVO-1 在授权的两个冻结案例中由真实 Agent 分别组合现有能力（L1）和生成新 execution Skill（L2），双侧独立验收通过，再经受控 DSH 拒绝/允许门只应用到临时部署。最终纵向试验未形成失败源 Review，因此未观察到同一真实模型链上的 Diagnosis → 候选 → 应用 → `task_recover` → 原 AC 通过；见[纵向验收记录](history/2026-09-28-final-backend-vertical-review.md)。A6 证据见 §5.23、[交付记录](history/2026-09-28-a6-delivery-record.md)及[唯一计划](2026-09-20-vrtc-code-change-plan.md)。两例成功不代表任意目标均能自进化，也不代表真人审批或生产部署。
 
 真实工作负载实验见 [Buckyball × CosyVoice2 自由生长合同](execution-prompts/15-buckyball-cosyvoice2-free-growth.md)与 [project3 独立复核](history/2026-09-28-cosyvoice2-project3-review.md)。隔离图的根通过冻结的 `PreLookaheadLayer` BEMU CPU 切片验收，运行时创建 3 个子 Task（深度 1、有人审）；模型接入文件由夹具预置，Ball 加速为零，Verilator RTL 未运行。
 
 当前建设目标是 **BB 通用领域适配**，按[唯一计划第 16～17 项](2026-09-20-vrtc-code-change-plan.md)将已有方法拆成通用 Task 参考、Skill 与必要 MCP 接线。Task 参考正本在 Harness [bb-pipeline](../../../.agents/skills/bb-pipeline/references/tasks.md)，方法正本在 Buckyball `.agents/skills`，能力表在部署配置；执行者按实际目标取用，节点图由运行中的 Agent 根据证据生成。具体模型版本、张量、权重和 checker 留在实验实例。CosyVoice 的最终硬件验收仍需真实 Verilator RTL 与同一算子参考对照，不能因此在共享资产里预设模型专用工序。
 
-BB-1 已验收：通用模型接入 Skill 与 chip/Ball/验证方法完成，模型 importer 支持范围及波形时钟解释经审核修正，见[审核记录](history/2026-09-28-bb1-review.md)。BB-2 正在派发，只做项目 Skill、部署能力表和 bbdev/waveform MCP 接线；工具可达与 Run binding 未验收前，不宣称通用适配已接通。
+BB-1 已验收：通用模型接入 Skill 与 chip/Ball/验证方法完成，模型 importer 支持范围及波形时钟解释经审核修正，见[审核记录](history/2026-09-28-bb1-review.md)。BB-2 已交付待验收（2026-09-29）：核心不再内置 BB 能力表（能力表归部署配置，未配置即空表并按名报缺口），BB-1 Skill 与 Task 参考装入 env 检出根 `.agents/skills` 并由真实 loader 发现、Run binding 记录内容身份，两个通用子契约与一个目录外合法契约经现有准入通过；`bbdev` 与 `waveform` 经同一 env 绑定实际 initialize/list_tools 成功，显式 chip `validate` 与临时 VCD 读操作取得真实结果；实现方自检全部通过，独立审核完成前不写已验收。见[交付记录](history/2026-09-29-bb2-delivery-record.md)。
 
 | 已确认的问题 | 修正合同与唯一所有者 |
 |---|---|

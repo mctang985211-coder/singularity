@@ -4,7 +4,8 @@
  * concrete stdio server specs.
  *
  * A capability declares server NAMES (registry keys), never paths: the bbdev
- * server ships inside the per-env buckyball checkout
+ * server and the waveform server both ship inside the per-env buckyball
+ * checkout
  * (`environment/projectN/<owner>/<repo>`, owner included — forks included), so
  * a global preset file cannot name it. Resolution happens at spawn time: the
  * task runtime binds `{envRoot}` / `{repoRoot:<repo>}` placeholders from the
@@ -57,15 +58,23 @@ export interface McpServerTemplate {
 /**
  * The servers a capability may name. `bbdev` is the buckyball checkout's own
  * FastMCP server (45 tools, submit/poll-shaped to stay under the per-call
- * timeout). It binds `{repoRoot:buckyball}`: the worker's env must contain a
- * buckyball checkout, and a capability that names it on an env without one
- * fails the spawn loudly.
+ * timeout); `waveform` is that checkout's waveform-mcp build (VCD/FST reads,
+ * stdio, seven signal/event tools). Both bind `{repoRoot:buckyball}`: the
+ * worker's env must contain a buckyball checkout, and a capability that names
+ * one on an env without it fails the spawn loudly.
  */
 export const MCP_SERVER_REGISTRY: Readonly<Record<string, McpServerTemplate>> = {
   bbdev: {
     serverName: 'bbdev',
     description: 'buckyball bbdev MCP server (build/simulate/validate; submit + task_status poll) from the env checkout',
     command: '{repoRoot:buckyball}/scripts/claude/run_mcp_server.sh',
+    args: [],
+    cwd: '{repoRoot:buckyball}',
+  },
+  waveform: {
+    serverName: 'waveform',
+    description: 'buckyball waveform-mcp server (VCD/FST open/read, signal hierarchy, event search) from the env checkout',
+    command: '{repoRoot:buckyball}/thirdparty/waveform-mcp/target/release/waveform-mcp',
     args: [],
     cwd: '{repoRoot:buckyball}',
   },

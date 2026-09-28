@@ -543,6 +543,7 @@ describe('review dimensions and metrics (P4)', () => {
   test('a session observation fills the token, tool, skill and intervention facts with observed numbers', async () => {
     pinSkillHome('ball-align')
     const h = harness({
+      config: { capabilities: { 'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'] } } },
       session: {
         tokens: { uncachedInputTokens: 1000, outputTokens: 200, cacheReadTokens: 50, cacheWriteTokens: 10 },
         events: [

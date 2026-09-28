@@ -798,7 +798,12 @@ export interface ReplayTaskOptions {
 }
 
 export interface Config {
-  /** Capability registry: name → skills/tool labels/agent preset/permission preset granted when a task requires it. */
+  /**
+   * Capability registry: name → skills/tool labels/agent preset/permission
+   * preset granted when a task requires it. The core ships no table of its
+   * own: a deployment that configures none gets the empty registry, and every
+   * required name is refused as a named gap.
+   */
   capabilities: Record<string, CapabilityConfig>
   /** Agent preset used when no matched capability names one. */
   defaultPreset?: string
@@ -992,48 +997,6 @@ export const DEFAULT_MAX_CHILDREN = 8
  */
 export const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true
 
-/**
- * The shipped capability table, kept verbatim in step with `config.yml`
- * (document 1, the `task-runtime` row). `tools` holds LABELS from
- * {@link TOOL_LABELS}, expanded to real DSH tool names when a manifest is
- * resolved, and every worker also keeps {@link workerBaseline} whatever its
- * capabilities declare. `mcpServers` holds names from {@link MCP_SERVER_REGISTRY},
- * mounted per worker at spawn with the run's env binding (`./mcp-servers.ts`).
- *
- * No entry declares `permission`: flipping a worker to an approval-gated preset
- * (`workspace-write` asks) is blocked until approvals reliably reach the canvas
- * on a real deployment — the known issue recorded as #17 in
- * `docs/singularity-harness-guide.md:365` (fix landed 2026-09-17, real-topology
- * re-run still outstanding). An unattended worker on `ask` simply hangs.
- *
- * The four BB execution families read: the three `verify`/`run-*-regression`
- * entries ride the `bb-verify` composition (persona + fs + skill + a compaction
- * ratio tuned for long poll loops) plus the env's own bbdev MCP server;
- * `run-verilator-regression` adds the `waveform` skill because RTL failures are
- * settled cycle-level. `build-*` entries need no preset — one submit/poll MCP
- * round fits the default composition; `build-chip-config`'s install step itself
- * is bash-driven (the bbdev API's `/config/install` has no MCP wrapper), the
- * server covers the follow-up `validate`. Verification never rides the CI
- * dispatch channel: per the 2026-09-18 human ruling, dispatch/CI scripts are
- * reference material for writing MCP servers only — verification runs locally
- * (verify node + bbdev MCP + the local toolchain).
- */
-export const DEFAULT_CAPABILITIES: Readonly<Record<string, CapabilityConfig>> = {
-  'design-chip': { skills: ['chip-designer'] },
-  'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'] },
-  'check-ball-registration': { skills: ['check'], mcpServers: ['bbdev'] },
-  'verify-ball-functional': { skills: ['verify'], preset: 'bb-verify', mcpServers: ['bbdev'] },
-  'run-bemu-regression': { skills: ['verify'], preset: 'bb-verify', mcpServers: ['bbdev'] },
-  'run-verilator-regression': { skills: ['verify', 'waveform'], preset: 'bb-verify', mcpServers: ['bbdev'] },
-  'build-chip-config': { mcpServers: ['bbdev'] },
-  'build-compiler': { mcpServers: ['bbdev'] },
-  'build-workload': { mcpServers: ['bbdev'] },
-  'build-kernel': { mcpServers: ['bbdev'] },
-  'integrate-model': { skills: ['workload-tests'] },
-  'analyze-waveform': { skills: ['waveform'] },
-  'research': { preset: 'standard' },
-}
-
 const Capability: z<CapabilityConfig> = z.object({
   skills: z.array(z.string()),
   tools: z.array(z.string()),
@@ -1049,7 +1012,7 @@ const RootBudget: z<RootBudgetConfig> = z.object({
 })
 
 const ConfigSchema: z<Config> = z.object({
-  capabilities: z.dict(Capability).default({ ...DEFAULT_CAPABILITIES }),
+  capabilities: z.dict(Capability).default({}),
   defaultPreset: z.string(),
   verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),
   maxDepth: z.number().default(DEFAULT_MAX_DEPTH),
@@ -1805,7 +1768,7 @@ export class TaskRuntime extends Service {
     assertRootBudgetConfig(rootBudget ?? {})
     this.assertGeneratedTaskReview(config?.generatedTaskReview)
     this.config = {
-      capabilities: structuredClone(config?.capabilities ?? DEFAULT_CAPABILITIES),
+      capabilities: structuredClone(config?.capabilities ?? {}),
       ...(config?.defaultPreset !== undefined ? { defaultPreset: config.defaultPreset } : {}),
       verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
       maxDepth: config?.maxDepth ?? DEFAULT_MAX_DEPTH,

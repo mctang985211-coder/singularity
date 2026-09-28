@@ -55,7 +55,7 @@ describe('parseObligationTemplates', () => {
       'ppa-reachability',
       'model-integration',
     ])
-    expect(templates.find(item => item.id === 'ppa-reachability')!.typicalCapabilities).toEqual([])
+    expect(templates.find(item => item.id === 'ppa-reachability')!.typicalCapabilities).toEqual(['measure-ppa'])
   })
 
   test('parses a JSON-compatible YAML template file', () => {

@@ -13,17 +13,27 @@ import { homedir } from "node:os";
 /**
 * The servers a capability may name. `bbdev` is the buckyball checkout's own
 * FastMCP server (45 tools, submit/poll-shaped to stay under the per-call
-* timeout). It binds `{repoRoot:buckyball}`: the worker's env must contain a
-* buckyball checkout, and a capability that names it on an env without one
-* fails the spawn loudly.
+* timeout); `waveform` is that checkout's waveform-mcp build (VCD/FST reads,
+* stdio, seven signal/event tools). Both bind `{repoRoot:buckyball}`: the
+* worker's env must contain a buckyball checkout, and a capability that names
+* one on an env without it fails the spawn loudly.
 */
-const MCP_SERVER_REGISTRY = { bbdev: {
-	serverName: "bbdev",
-	description: "buckyball bbdev MCP server (build/simulate/validate; submit + task_status poll) from the env checkout",
-	command: "{repoRoot:buckyball}/scripts/claude/run_mcp_server.sh",
-	args: [],
-	cwd: "{repoRoot:buckyball}"
-} };
+const MCP_SERVER_REGISTRY = {
+	bbdev: {
+		serverName: "bbdev",
+		description: "buckyball bbdev MCP server (build/simulate/validate; submit + task_status poll) from the env checkout",
+		command: "{repoRoot:buckyball}/scripts/claude/run_mcp_server.sh",
+		args: [],
+		cwd: "{repoRoot:buckyball}"
+	},
+	waveform: {
+		serverName: "waveform",
+		description: "buckyball waveform-mcp server (VCD/FST open/read, signal hierarchy, event search) from the env checkout",
+		command: "{repoRoot:buckyball}/thirdparty/waveform-mcp/target/release/waveform-mcp",
+		args: [],
+		cwd: "{repoRoot:buckyball}"
+	}
+};
 /** Every MCP server name one resolved manifest grants, first-declaration order, duplicates dropped. */
 function manifestMcpServers(manifest) {
 	const names = [];
@@ -7140,65 +7150,6 @@ const DEFAULT_MAX_CHILDREN = 8;
 * and keeps the pre-switch refusal, named message included.
 */
 const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true;
-/**
-* The shipped capability table, kept verbatim in step with `config.yml`
-* (document 1, the `task-runtime` row). `tools` holds LABELS from
-* {@link TOOL_LABELS}, expanded to real DSH tool names when a manifest is
-* resolved, and every worker also keeps {@link workerBaseline} whatever its
-* capabilities declare. `mcpServers` holds names from {@link MCP_SERVER_REGISTRY},
-* mounted per worker at spawn with the run's env binding (`./mcp-servers.ts`).
-*
-* No entry declares `permission`: flipping a worker to an approval-gated preset
-* (`workspace-write` asks) is blocked until approvals reliably reach the canvas
-* on a real deployment — the known issue recorded as #17 in
-* `docs/singularity-harness-guide.md:365` (fix landed 2026-09-17, real-topology
-* re-run still outstanding). An unattended worker on `ask` simply hangs.
-*
-* The four BB execution families read: the three `verify`/`run-*-regression`
-* entries ride the `bb-verify` composition (persona + fs + skill + a compaction
-* ratio tuned for long poll loops) plus the env's own bbdev MCP server;
-* `run-verilator-regression` adds the `waveform` skill because RTL failures are
-* settled cycle-level. `build-*` entries need no preset — one submit/poll MCP
-* round fits the default composition; `build-chip-config`'s install step itself
-* is bash-driven (the bbdev API's `/config/install` has no MCP wrapper), the
-* server covers the follow-up `validate`. Verification never rides the CI
-* dispatch channel: per the 2026-09-18 human ruling, dispatch/CI scripts are
-* reference material for writing MCP servers only — verification runs locally
-* (verify node + bbdev MCP + the local toolchain).
-*/
-const DEFAULT_CAPABILITIES = {
-	"design-chip": { skills: ["chip-designer"] },
-	"design-ball": {
-		skills: ["ball-align"],
-		tools: ["filesystem", "bash"]
-	},
-	"check-ball-registration": {
-		skills: ["check"],
-		mcpServers: ["bbdev"]
-	},
-	"verify-ball-functional": {
-		skills: ["verify"],
-		preset: "bb-verify",
-		mcpServers: ["bbdev"]
-	},
-	"run-bemu-regression": {
-		skills: ["verify"],
-		preset: "bb-verify",
-		mcpServers: ["bbdev"]
-	},
-	"run-verilator-regression": {
-		skills: ["verify", "waveform"],
-		preset: "bb-verify",
-		mcpServers: ["bbdev"]
-	},
-	"build-chip-config": { mcpServers: ["bbdev"] },
-	"build-compiler": { mcpServers: ["bbdev"] },
-	"build-workload": { mcpServers: ["bbdev"] },
-	"build-kernel": { mcpServers: ["bbdev"] },
-	"integrate-model": { skills: ["workload-tests"] },
-	"analyze-waveform": { skills: ["waveform"] },
-	"research": { preset: "standard" }
-};
 const Capability = z.object({
 	skills: z.array(z.string()),
 	tools: z.array(z.string()),
@@ -7212,7 +7163,7 @@ const RootBudget = z.object({
 	maxConcurrentWrites: z.number()
 });
 const ConfigSchema = z.object({
-	capabilities: z.dict(Capability).default({ ...DEFAULT_CAPABILITIES }),
+	capabilities: z.dict(Capability).default({}),
 	defaultPreset: z.string(),
 	verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),
 	maxDepth: z.number().default(DEFAULT_MAX_DEPTH),
@@ -7372,7 +7323,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 		assertRootBudgetConfig(rootBudget ?? {});
 		this.assertGeneratedTaskReview(config?.generatedTaskReview);
 		this.config = {
-			capabilities: structuredClone(config?.capabilities ?? DEFAULT_CAPABILITIES),
+			capabilities: structuredClone(config?.capabilities ?? {}),
 			...config?.defaultPreset !== void 0 ? { defaultPreset: config.defaultPreset } : {},
 			verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
 			maxDepth: config?.maxDepth ?? DEFAULT_MAX_DEPTH,
@@ -12745,4 +12696,4 @@ var TaskRuntime = class TaskRuntime extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, deriveReuse, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, deriveReuse, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

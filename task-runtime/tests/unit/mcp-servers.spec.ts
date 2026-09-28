@@ -50,7 +50,7 @@ describe('resolveMcpServerSpecs against the shipped registry', () => {
 
   test('an unknown server name throws, naming the registry vocabulary', () => {
     expect(() => resolveMcpServerSpecs(manifest('ghost'), BINDING)).toThrow(
-      'unknown MCP server "ghost"; known servers: bbdev',
+      'unknown MCP server "ghost"; known servers: bbdev, waveform',
     )
   })
 

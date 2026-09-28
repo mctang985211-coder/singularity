@@ -67,7 +67,7 @@ describe('parseSkillFile', () => {
     expect(parsed.name).toBe('bb-pipeline')
     expect(parsed.description.length).toBeGreaterThan(0)
     expect(parsed.invocation).toEqual({ modelInvocable: true, userInvocable: true })
-    expect(parsed.content).toContain('# BB')
+    expect(parsed.content).toContain('# Buckyball 任务参考')
   })
 })
 

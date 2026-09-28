@@ -17,7 +17,6 @@ import type { WorkspaceOwner, WorkspaceRegistry } from '../../src/index.ts'
 import {
   DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
   DEFAULT_BUDGET,
-  DEFAULT_CAPABILITIES,
   DEFAULT_MAX_CHILDREN,
   DEFAULT_MAX_DEPTH,
   DEFAULT_NO_PROGRESS_ROUNDS,
@@ -740,15 +739,15 @@ describe('TaskRuntime.adoptRoot', () => {
 })
 
 describe('TaskRuntime.listCapabilities', () => {
-  test('defaults to the built-in registry and hands out a copy', () => {
+  test('ships no table of its own: an unconfigured runtime lists none, and hands out a copy', () => {
     const h = harness()
     const listed = h.runtime.listCapabilities()
-    expect(listed).toEqual(DEFAULT_CAPABILITIES)
+    expect(listed).toEqual({})
     ;(listed as Record<string, unknown>)['design-chip'] = {}
-    expect(h.runtime.listCapabilities()).toEqual(DEFAULT_CAPABILITIES)
+    expect(h.runtime.listCapabilities()).toEqual({})
   })
 
-  test('reflects a configured registry instead of the code default', () => {
+  test('reflects a configured registry instead of any code default', () => {
     const h = harness({ config: { capabilities: { research: { skills: ['web'] } } } })
     expect(h.runtime.listCapabilities()).toEqual({ research: { skills: ['web'] } })
   })
@@ -1708,7 +1707,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
 
   test('a capability without MCP servers never consults the env binding', async () => {
     pinSkillHome('ball-align')
-    const h = harness()
+    const h = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'] } } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
@@ -3105,7 +3104,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
 
 describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
   test('a batch admitted with contracts persists them, with the batch identity and limits on the parent event', async () => {
-    const h = harness()
+    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const spec: DecomposeSpec = {
       reason: 'split the work',
