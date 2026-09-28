@@ -324,6 +324,46 @@ afterEach(async () => {
 })
 
 describe('A6: the two-sided capability experiment on the real deployment', () => {
+  it('keeps a verified source suggestion without starting an experiment or a new business Run', async () => {
+    const f = await fixture()
+    await f.h.task.recordDiagnosisIn(f.storeId, {
+      diagnosisId: 'd-cap',
+      taskId: 't-cap-holdout',
+      observedFailure: 'the result is correct but could be faster',
+      scope: 'the completed case',
+      localizedCause: 'an optimization suggestion',
+      evidenceRefs: ['e-r-cap-holdout-history'],
+      reviewRefs: ['t-cap-holdout#r-cap-holdout-history'],
+      confidence: 'high',
+      proposals: [{ targetType: 'capability', targetId: ROW, rationale: 'faster' }],
+    }, 'tester')
+    const before = await f.h.snapshot(f.storeId)
+    const result = await f.evolution.runExperiment(experimentSpec(f), ROOT, ROOT).then(() => '', error => String(error))
+    expect(result).toMatch(/successful source.*frozen.*comparator/i)
+    expect((await f.h.snapshot(f.storeId)).runs).toEqual(before.runs)
+    expect(await f.evolution.experiments(PROPOSAL)).toEqual([])
+  })
+
+  it('rechecks the source before resuming an experiment recorded before its diagnosis succeeded', async () => {
+    const f = await fixture()
+    const experiment = await f.evolution.runExperiment(experimentSpec(f), ROOT, ROOT)
+    await f.h.task.recordDiagnosisIn(f.storeId, {
+      diagnosisId: 'd-cap',
+      taskId: 't-cap-holdout',
+      observedFailure: 'the result is correct but could be faster',
+      scope: 'the completed case',
+      localizedCause: 'an optimization suggestion',
+      evidenceRefs: ['e-r-cap-holdout-history'],
+      reviewRefs: ['t-cap-holdout#r-cap-holdout-history'],
+      confidence: 'high',
+      proposals: [{ targetType: 'capability', targetId: ROW, rationale: 'faster' }],
+    }, 'tester')
+    const before = (await f.h.snapshot(f.storeId)).runs
+    const result = await f.evolution.resumeExperiment(experiment.experimentId, ROOT, ROOT).then(() => '', error => String(error))
+    expect(result).toMatch(/successful source.*frozen.*comparator/i)
+    expect((await f.h.snapshot(f.storeId)).runs).toEqual(before)
+  })
+
   it('refuses the missing-provider baseline at admission, runs the candidate for real, and gates on that evidence', async () => {
     const f = await fixture()
     const before = await f.h.snapshot(f.storeId)

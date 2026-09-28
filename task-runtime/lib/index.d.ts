@@ -4608,9 +4608,10 @@ declare class TaskRuntime extends Service {
    *   content binding (S1-C: a snapshot that is no longer readable refuses the
    *   re-entry by name rather than resuming against whatever stands at that path
    *   now), bind the session in this process, derive the session's gate phase
-   *   from the store's own run record, settle or restart whatever the store left
-   *   in flight (`reconcileStore`) and rebuild this process's workspace
-   *   ownership — the same recovery a reopen performs;
+   *   from the store's own run record, rebuild this process's workspace
+   *   ownership before any submitted run is verified, and settle or restart
+   *   whatever the store left in flight (`reconcileStore`) — the same recovery
+   *   a reopen performs;
    * - **a root task without a run for this session**: refuse by name. That state
    *   is a store whose root was created for a different session or whose run
    *   record is gone, and neither is something to guess a binding for.

@@ -191,7 +191,7 @@ it('drives evolution_propose and evolution_list through the plugin context onto 
   }
 })
 
-it('points a skill proposal at the candidate lifecycle and leaves a suggestion without a next step', async () => {
+it('points skill and capability proposals at candidate lifecycles without changing production', async () => {
   const { tools, home } = await mountAgent()
   try {
     const propose = tools.get('evolution_propose')!
@@ -205,11 +205,10 @@ it('points a skill proposal at the candidate lifecycle and leaves a suggestion w
       sourceRefs: ['diagnosis:d1'],
     }, exec('root-1'))) as string
     expect(suggestion).toContain('proposal p-cap-suggestion registered [proposed] L2 capability research (base v1)')
-    expect(suggestion).toContain('stays a recorded suggestion')
-    expect(suggestion).not.toContain('next: evolution_candidate')
+    expect(suggestion).toContain('next: evolution_candidate')
+    expect(suggestion).toContain('exactly one whole capability row')
 
-    // The one target type this build promotes is a replacement of an existing
-    // SKILL.md, and only there does the answer name a next step.
+    // The skill branch still asks for a same-name replacement object.
     const replacement = (await propose.execute({
       proposalId: 'p-skill-1',
       level: 'L2',

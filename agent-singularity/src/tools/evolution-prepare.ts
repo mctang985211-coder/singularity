@@ -19,18 +19,18 @@ export function defineEvolutionPrepareTool(ctx: Context) {
       '`SKILL.md` plus the `SKILL.contract.json` beside it, derived from the production declaration with only ' +
       'content.skillMdSha256 recomputed — the model never submits a sidecar. A capability candidate (A6) is prepared as its whole ' +
       'row, plus the new execution skill that row grants when it carries one; the baseline a later apply compares against is then ' +
-      'the row the registry held. One verified read of the production target ' +
+      'the row the registry held, or its recorded absence. For an existing skill, one verified read of the production target ' +
       'comes first — it yields both the champion/ snapshot and the baseline identity a later apply compares against — and a ' +
       'target that is not there, or is not the loadable object its files claim (a defective declaration, an undeclared ' +
       'file), is refused by name before any sandbox or ledger write, never prepared against nothing. A knowledge sidecar, an ' +
-      'object declaring resources and a proposal of any other kind are refused by name too, and production fixes the shape: this ' +
+      'object declaring resources and a proposal of any other kind are refused by name too; for an existing skill, production fixes the shape: this ' +
       'path cannot add a `SKILL.contract.json` to a skill that has none, and it never changes the object\'s role. Writes go ' +
       'only to the proposal sandbox ' +
       '(<ledger root>/sandbox/<proposalId>/: `skills/<name>/SKILL.md` — plus `skills/<name>/SKILL.contract.json` for an ' +
       'execution object — and the same paths under `champion/` for the production bytes the snapshot captures). Nothing ' +
       'here touches production; the next step is evolution_replay, the two-sided experiment.',
     parameters: {
-      proposalId: { type: 'string', required: true, description: 'Skill candidate carrying a mutation, to materialize into its sandbox' },
+      proposalId: { type: 'string', required: true, description: 'Skill or capability candidate carrying a mutation, to materialize into its sandbox' },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {

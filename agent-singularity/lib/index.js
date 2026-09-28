@@ -3435,21 +3435,22 @@ function sessionId$18(exec) {
 }
 /**
 * Why a decided PROMOTE proposal still cannot be applied: L4 harness evolution
-* and every target type this build has no executor for.
+* and target types this build has no executor for.
 */
 function manualGuidance(proposal) {
 	if (proposal.level === "L4") return "L4 harness evolution has no executor in evolution_apply: supervisor implementation and validation must precede human review through the harness change workflow";
-	if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) return `this build writes and restores the fixed file set of one skill object only (SKILL.md, plus the SKILL.contract.json of a skill that declares an execution provider), so a decided "${proposal.targetType}" proposal has no executor here — its ledger record stays readable and nothing writes it; the capability evaluation such a proposal would need belongs to A6, not to this build`;
+	if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) return `this build writes an existing skill object or one capability row with an optional new execution skill, so a decided "${proposal.targetType}" proposal has no executor here — its ledger record stays readable and nothing writes it`;
 	return null;
 }
-/** How an applied skill takes effect, stated honestly in the output. */
-function effectNote() {
+/** How the approved production write takes effect. */
+function effectNote(proposal) {
+	if (proposal.targetType === "capability") return "effective for new admissions — the committed capability row and optional new execution skill are available to the runtime; a run already bound to the previous capability snapshot keeps that snapshot";
 	return "effective immediately — the skill filesystem watches the skill root, so the write is live; the skill directory is admitted again now that its commit intent is closed, and a run already bound to the previous version keeps loading the snapshot it was bound to";
 }
 function defineEvolutionApplyTool(ctx) {
 	return defineTool({
 		name: "evolution_apply",
-		description: "Apply a PROMOTE-decided EvolutionProposal to production (status: applied). One target type: a same-name improvement of an existing skill object at L1–L3 with a materialized sandbox — the commit writes that object's fixed file set, the `SKILL.md` and, for an execution skill, the `SKILL.contract.json` beside it. Every other target type and L4 lack executors and are refused with instructions. Always asks a human through the native approval seam first — a second gate after evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. A skill apply additionally re-verifies before the human is asked, and again after the grant, the candidate's whole content identity and the production baseline recorded at prepare (the production file set must still be those exact bytes — a sidecar that appeared where the baseline had none, changed or disappeared refuses — so a stale candidate never overwrites a production skill that changed). The candidate sidecar is never the model's text: it must equal the production declaration with only content.skillMdSha256 rewritten, so a promotion cannot escalate requiredTools, swap a verifier, move capabilities or change the object's role; a candidate directory carrying any other entry (a resource, a stray file) is refused by name rather than reported as a provider production never received. The write is one commit: a durable commit intent — proposal, direction, this approval, every production file with the content identity each must hold before and after the write, and the bytes to write again — is recorded before production changes, then each file is replaced atomically (a temp file in the same directory, fsynced and renamed over the target; never truncated, never half-written), and only after every rename has been read back and the whole directory verified as one loadable object is the completion recorded. A failure at any stage leaves exactly one open intent rather than a half-committed object (a directory holding the new `SKILL.md` beside the old sidecar included), and the skill directory stays closed to new admission until that intent is settled; calling this tool again while an intent is open settles it instead of starting a second write: no approval is asked again (the intent already binds the grant it was authorised by, and the promotion gate is not re-run because the recorded intent already names the approved content), and the answer reports the intent id and whether the commit was redone (production still held the pre-commit state) or only completed (production already held the committed content). A source that is gone or changed, a target a third party rewrote, or a directory holding an entry the committed object does not name, refuses by name with the intent left open. evolution_rollback restores the champion snapshot.",
+		description: "Apply a PROMOTE-decided EvolutionProposal to production (status: applied). At L1–L3 it commits either a same-name improvement of an existing skill object (the `SKILL.md` and, for an execution skill, the `SKILL.contract.json` beside it) or one whole capability row with an optional new execution skill (both skill files). Other target types and L4 lack executors and are refused with instructions. Always asks a human through the native approval seam first — a second gate after evolution_decide — naming the capability row and each skill file path it will write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. A skill apply additionally re-verifies before the human is asked, and again after the grant, the candidate's whole content identity and the production baseline recorded at prepare (the production file set must still be those exact bytes — a sidecar that appeared where the baseline had none, changed or disappeared refuses — so a stale candidate never overwrites a production skill that changed). The candidate sidecar is never the model's text: it must equal the production declaration with only content.skillMdSha256 rewritten, so a skill promotion cannot escalate requiredTools, swap a verifier, move capabilities or change the object's role; a candidate directory carrying any other entry (a resource, a stray file) is refused by name rather than reported as a provider production never received. A capability apply checks the frozen row and whole table identity before writing the row. The write is one commit: a durable commit intent — proposal, direction, this approval, every production file with the content identity each must hold before and after the write, and the bytes to write again — is recorded before production changes, then each file is replaced atomically (a temp file in the same directory, fsynced and renamed over the target; never truncated, never half-written), and only after every rename has been read back and the committed row and optional skill verified is the completion recorded. A failure at any stage leaves exactly one open intent rather than a half-committed object (a directory holding the new `SKILL.md` beside the old sidecar included), and the skill directory stays closed to new admission until that intent is settled; calling this tool again while an intent is open settles it instead of starting a second write: no approval is asked again (the intent already binds the grant it was authorised by, and the promotion gate is not re-run because the recorded intent already names the approved content), and the answer reports the intent id and whether the commit was redone (production still held the pre-commit state) or only completed (production already held the committed content). A source that is gone or changed, a target a third party rewrote, or a directory holding an entry the committed object does not name, refuses by name with the intent left open. evolution_rollback restores the champion snapshot.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
@@ -3475,8 +3476,9 @@ function defineEvolutionApplyTool(ctx) {
 					`proposal ${recovered.proposal.proposalId} [applied] ${recovered.proposal.level} ${recovered.proposal.targetType} ${recovered.proposal.targetId} — PROMOTE in effect`,
 					...renderOpenIntentRecovery(proposal.openIntent, recovered.recovered),
 					"wrote production targets:",
+					...recovered.proposal.targetType === "capability" ? [`  - capability row ${recovered.proposal.targetId} in the production table`] : [],
 					...recovered.targets.map((target) => `  - ${target}`),
-					effectNote()
+					effectNote(recovered.proposal)
 				].join("\n");
 			} catch (error) {
 				return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`;
@@ -3498,10 +3500,11 @@ function defineEvolutionApplyTool(ctx) {
 				`rationale: ${proposal.rationale}`,
 				"recorded decision: PROMOTE",
 				"this writes production targets:",
+				...proposal.targetType === "capability" ? [`  - capability row ${proposal.targetId} in the production table`] : [],
 				...targets.map((target) => `  - ${target}`),
 				...renderProviderRoles(promotion.providers),
-				effectNote(),
-				"rollback: evolution_rollback restores the champion snapshot from the sandbox"
+				effectNote(proposal),
+				proposal.targetType === "capability" ? "rollback: evolution_rollback restores the prepared row baseline and removes any new skill" : "rollback: evolution_rollback restores the champion snapshot from the sandbox"
 			].join("\n");
 			const outcome = await ctx.approval.request({
 				agent,
@@ -3516,9 +3519,10 @@ function defineEvolutionApplyTool(ctx) {
 				return [
 					`proposal ${applied.proposal.proposalId} [applied] ${applied.proposal.level} ${applied.proposal.targetType} ${applied.proposal.targetId} — PROMOTE in effect`,
 					"wrote production targets:",
+					...applied.proposal.targetType === "capability" ? [`  - capability row ${applied.proposal.targetId} in the production table`] : [],
 					...applied.targets.map((target) => `  - ${target}`),
 					...renderProviderRoles(applied.providers ?? []),
-					effectNote(),
+					effectNote(applied.proposal),
 					`human approval: approval:${exec.callId} — rollback with evolution_rollback`
 				].join("\n");
 			} catch (error) {
@@ -3626,7 +3630,7 @@ function sessionId$16(exec) {
 function defineEvolutionDecideTool(ctx) {
 	return defineTool({
 		name: "evolution_decide",
-		description: "Close a gated EvolutionProposal with a human decision (status: decided). Always asks a human through the native approval seam first — every level L1–L4, no exemption — and records the decision (PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH) only after an explicit approve. A reject, cancel, or unavailable answerer records nothing and leaves the proposal gated. A PROMOTE is checked before the human is asked: the candidate's whole content identity (the `SKILL.md` bytes, plus the derived sidecar and its declaration digest when the object declares an execution provider), its provider verdict (role, registered verifier, granted tools) and the completed two-sided experiment must still hold, and a skill object is the only target type this build can promote — the object may not change role, weaken its verifier or grow a capability through a content update. A recorded PROMOTE still applies nothing by itself: the change takes effect only through evolution_apply, which asks the human a second time, names every production file it writes, and leaves a run already bound to the previous version on its own snapshot.",
+		description: "Close a gated EvolutionProposal with a human decision (status: decided). Always asks a human through the native approval seam first — every level L1–L4, no exemption — and records the decision (PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH) only after an explicit approve. A reject, cancel, or unavailable answerer records nothing and leaves the proposal gated. A PROMOTE is checked before the human is asked: the candidate's whole content identity (the `SKILL.md` bytes, plus the derived sidecar and its declaration digest when the object declares an execution provider), its provider verdict (role, registered verifier, granted tools) and the completed two-sided experiment must still hold. An existing skill may not change role, weaken its verifier or grow a capability through a content update; a capability promotion moves exactly one whole row, optionally with a new execution skill, and cannot add unauthorized tools or change permission or preset. A recorded PROMOTE still applies nothing by itself: the change takes effect only through evolution_apply, which asks the human a second time, names every production file it writes, and leaves a run already bound to the previous version on its own snapshot.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -3711,7 +3715,7 @@ function sessionId$15(exec) {
 function defineEvolutionGateTool(ctx) {
 	return defineTool({
 		name: "evolution_gate",
-		description: "Answer the minimal Validation Gate for a candidate (status: gated). The six questions (细化想法4 §32): 1. Target failure fixed? 2. Original acceptance maintained? 3. Existing regression maintained? 4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? All six answers are required, and the regression side must cite evidence ids (from this graph's task store) or file paths whose existence is checked — cited evidence is never executed. A skill candidate must pass evolution_prepare (sandbox materialization) and then evolution_replay (the two-sided experiment: a new baseline run and a new candidate run per frozen sample, the production object and the prepared object each loaded whole), and its report path must be one of the regressionEvidenceRefs — the gate refuses a skill candidate whose experiment is not complete. A proposal of any other target type cannot become a candidate and has no gate to answer. Records the ledger entry only; nothing is promoted or changed, and evolution_decide re-checks the candidate's whole content identity and its provider verdict before a PROMOTE can be recorded. Next step is evolution_decide, which always asks a human.",
+		description: "Answer the minimal Validation Gate for a candidate (status: gated). The six questions (细化想法4 §32): 1. Target failure fixed? 2. Original acceptance maintained? 3. Existing regression maintained? 4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? All six answers are required, and the regression side must cite evidence ids (from this graph's task store) or file paths whose existence is checked — cited evidence is never executed. A skill or capability candidate must pass evolution_prepare (sandbox materialization) and then evolution_replay (the two-sided experiment: a new baseline run and a new candidate run per frozen sample, the production object and the prepared object each loaded whole), and its report path must be one of the regressionEvidenceRefs — the gate refuses either candidate whose experiment is not complete. A capability sample without a provider records the runtime's real not-admitted baseline. Other target types cannot become candidates and have no gate to answer. Records the ledger entry only; nothing is promoted or changed, and evolution_decide re-checks the candidate's whole content identity and its provider verdict before a PROMOTE can be recorded. Next step is evolution_decide, which always asks a human.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -3807,7 +3811,7 @@ const TARGET_TYPES = [
 function defineEvolutionListTool(ctx) {
 	return defineTool({
 		name: "evolution_list",
-		description: "Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an applied skill object — one file for a guidance skill, `SKILL.md` plus `SKILL.contract.json` for an execution one; a non-skill proposal stays proposed — this build admits a skill candidate only). The ledger records proposals, sandbox materializations, human decisions, human-approved applies/rollbacks, and the commit intent behind each production write: a proposal whose commit was interrupted reports that intent — its id, direction, every production file it commits and when it was recorded — and stays in the status its lifecycle had reached, until a reconciliation or a retry of the apply/rollback settles it.",
+		description: "Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an applied skill object or capability row, optionally with a new execution skill; other target types stay proposed). A skill object has `SKILL.md` plus `SKILL.contract.json` when it is an execution provider. The ledger records proposals, sandbox materializations, human decisions, human-approved applies/rollbacks, and the commit intent behind each production write: a proposal whose commit was interrupted reports that intent — its id, direction, every production file it commits and when it was recorded — and stays in the status its lifecycle had reached, until a reconciliation or a retry of the apply/rollback settles it.",
 		parameters: {
 			status: {
 				type: "string",
@@ -3853,13 +3857,23 @@ function defineEvolutionListTool(ctx) {
 				if (proposal.mutation !== void 0) lines.push(`  mutation: ${proposal.targetType} mutation recorded`);
 				if (proposal.prepared !== void 0) {
 					const view = proposal.prepared;
-					const shape = view.skillContent.contract === void 0 ? "guidance (SKILL.md)" : "execution provider (SKILL.md + SKILL.contract.json)";
-					lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${shape}, champion snapshot captured, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…, production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…)`);
+					if (proposal.targetType === "capability") {
+						const row = view.capabilityRow;
+						const baseline = view.capabilityBaseline;
+						lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, capability row${view.skillContent === void 0 ? "" : " + new execution skill"})`);
+						lines.push(`  candidate row: ${row.name} sha256:${row.digest.slice(0, 12)}…`);
+						lines.push(`  production row baseline: ${baseline === null ? "absent" : `${baseline.name} sha256:${baseline.digest.slice(0, 12)}…`}`);
+						lines.push(view.skillContent === void 0 ? "  no new skill object" : `  new execution skill: ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}… (SKILL.md + SKILL.contract.json)`);
+						if (view.skillContent !== void 0) lines.push("  production skill baseline: absent");
+					} else {
+						const shape = view.skillContent.contract === void 0 ? "guidance (SKILL.md)" : "execution provider (SKILL.md + SKILL.contract.json)";
+						lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${shape}, champion snapshot captured, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…, production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…)`);
+					}
 				}
 				if (proposal.gate !== void 0) lines.push(`  gate regression evidence: [${proposal.gate.regressionEvidenceRefs.join(", ")}]`);
 				if (proposal.openIntent !== void 0) {
 					const intent = proposal.openIntent;
-					lines.push(`  open commit intent: ${intent.intentId} (${intent.direction}) recorded ${intent.at} — production targets [${intent.files.map((file) => file.target).join(", ")}]`, "  a production write is underway and its completion has not been recorded: the skill directory stays closed to new admission until a reconciliation (a restart, or a retry of the apply/rollback) settles it");
+					lines.push(`  open commit intent: ${intent.intentId} (${intent.direction}) recorded ${intent.at} — production targets [${intent.files.map((file) => file.target).join(", ")}]`, `  a production write is underway and its completion has not been recorded: ${proposal.targetType === "capability" ? "the capability table and optional new skill directory stay" : "the skill directory stays"} closed to new admission until a reconciliation (a restart, or a retry of the apply/rollback) settles it`);
 				}
 				if (proposal.applied !== void 0) lines.push(`  applied: [${proposal.applied.targets.join(", ")}] (approval ${proposal.applied.approvalRef})`);
 				if (proposal.rolledback !== void 0) lines.push(`  rolled back: [${proposal.rolledback.targets.join(", ")}] (approval ${proposal.rolledback.approvalRef})`);
@@ -3884,11 +3898,11 @@ function sessionId$14(exec) {
 function defineEvolutionPrepareTool(ctx) {
 	return defineTool({
 		name: "evolution_prepare",
-		description: "Materialize a candidate's structured mutation into the proposal sandbox (status: prepared). A skill candidate is prepared as the complete object it improves: a guidance skill is its `SKILL.md` alone, and an execution skill is `SKILL.md` plus the `SKILL.contract.json` beside it, derived from the production declaration with only content.skillMdSha256 recomputed — the model never submits a sidecar. A capability candidate (A6) is prepared as its whole row, plus the new execution skill that row grants when it carries one; the baseline a later apply compares against is then the row the registry held. One verified read of the production target comes first — it yields both the champion/ snapshot and the baseline identity a later apply compares against — and a target that is not there, or is not the loadable object its files claim (a defective declaration, an undeclared file), is refused by name before any sandbox or ledger write, never prepared against nothing. A knowledge sidecar, an object declaring resources and a proposal of any other kind are refused by name too, and production fixes the shape: this path cannot add a `SKILL.contract.json` to a skill that has none, and it never changes the object's role. Writes go only to the proposal sandbox (<ledger root>/sandbox/<proposalId>/: `skills/<name>/SKILL.md` — plus `skills/<name>/SKILL.contract.json` for an execution object — and the same paths under `champion/` for the production bytes the snapshot captures). Nothing here touches production; the next step is evolution_replay, the two-sided experiment.",
+		description: "Materialize a candidate's structured mutation into the proposal sandbox (status: prepared). A skill candidate is prepared as the complete object it improves: a guidance skill is its `SKILL.md` alone, and an execution skill is `SKILL.md` plus the `SKILL.contract.json` beside it, derived from the production declaration with only content.skillMdSha256 recomputed — the model never submits a sidecar. A capability candidate (A6) is prepared as its whole row, plus the new execution skill that row grants when it carries one; the baseline a later apply compares against is then the row the registry held, or its recorded absence. For an existing skill, one verified read of the production target comes first — it yields both the champion/ snapshot and the baseline identity a later apply compares against — and a target that is not there, or is not the loadable object its files claim (a defective declaration, an undeclared file), is refused by name before any sandbox or ledger write, never prepared against nothing. A knowledge sidecar, an object declaring resources and a proposal of any other kind are refused by name too; for an existing skill, production fixes the shape: this path cannot add a `SKILL.contract.json` to a skill that has none, and it never changes the object's role. Writes go only to the proposal sandbox (<ledger root>/sandbox/<proposalId>/: `skills/<name>/SKILL.md` — plus `skills/<name>/SKILL.contract.json` for an execution object — and the same paths under `champion/` for the production bytes the snapshot captures). Nothing here touches production; the next step is evolution_replay, the two-sided experiment.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
-			description: "Skill candidate carrying a mutation, to materialize into its sandbox"
+			description: "Skill or capability candidate carrying a mutation, to materialize into its sandbox"
 		} },
 		output: {
 			schema: { type: "string" },
@@ -3963,7 +3977,7 @@ function sessionId$13(exec) {
 function defineEvolutionProposeTool(ctx) {
 	return defineTool({
 		name: "evolution_propose",
-		description: "Register an EvolutionProposal in the evolution ledger (status: proposed). Pure bookkeeping: nothing here executes or changes production. This build has one promotion path — a proposal that improves an existing skill under its own name (the whole loadable object: `SKILL.md`, plus the `SKILL.contract.json` beside it when the skill declares an execution provider) goes through evolution_candidate (carrying the full replacement text), evolution_prepare, evolution_replay (the two-sided experiment), evolution_gate, and a human-approved evolution_decide plus evolution_apply. Every other target type stays a recorded suggestion and is never opened as a candidate, so it is never evaluated and never promoted. Fill targetType/targetId/rationale manually, or pass fromDiagnosis to transcribe one proposal out of a recorded diagnosis (task_diagnose). baseVersion, level, and at least one sourceRef (diagnosisId / reviewRef / evidenceId) are required.",
+		description: "Register an EvolutionProposal in the evolution ledger (status: proposed). Pure bookkeeping: nothing here executes or changes production. This build admits an existing skill under its own name (the whole loadable object) or one whole capability row with an optional NEW execution skill. Both go through evolution_candidate, evolution_prepare, evolution_replay (the two-sided experiment), evolution_gate, and a human-approved evolution_decide plus evolution_apply. Other target types stay recorded suggestions and are never opened as candidates, so they are never evaluated and never promoted. Fill targetType/targetId/rationale manually, or pass fromDiagnosis to transcribe one proposal out of a recorded diagnosis (task_diagnose). baseVersion, level, and at least one sourceRef (diagnosisId / reviewRef / evidenceId) are required.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -4057,12 +4071,13 @@ function defineEvolutionProposeTool(ctx) {
 					sourceRefs
 				}, caller);
 				const skillReplacement = "ledger entry only — nothing was executed or changed; next: evolution_candidate, carrying the full replacement text of the existing skill's SKILL.md — the only input a candidate submits, because an execution skill's SKILL.contract.json is derived from production at evolution_prepare (only its content.skillMdSha256 is recomputed, so a content update cannot move a capability, a required tool or a verifier)";
-				const recordedSuggestion = `ledger entry only — nothing was executed or changed; this build executes one promotion path only — replacing an existing skill object under its own name — so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become a candidate, is never evaluated, and is never promoted`;
+				const capabilityReplacement = "ledger entry only — nothing was executed or changed; next: evolution_candidate, carrying exactly one whole capability row { rows } and optionally a NEW execution skill { name, content, sidecar }; the row may use only already authorized tools and may not change permission or preset";
+				const recordedSuggestion = `ledger entry only — nothing was executed or changed; this build promotes an existing skill or one capability row with an optional new execution skill, so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become a candidate, is never evaluated, and is never promoted`;
 				return [
 					`proposal ${proposal.proposalId} registered [proposed] ${proposal.level} ${proposal.targetType} ${proposal.targetId} (base ${proposal.baseVersion})`,
 					`rationale: ${proposal.rationale}`,
 					`sourceRefs: [${proposal.sourceRefs.join(", ")}]`,
-					proposal.targetType === "skill" ? skillReplacement : recordedSuggestion
+					proposal.targetType === "skill" ? skillReplacement : proposal.targetType === "capability" ? capabilityReplacement : recordedSuggestion
 				].join("\n");
 			} catch (error) {
 				return `evolution_propose rejected: ${error instanceof Error ? error.message : String(error)}`;
@@ -4103,7 +4118,7 @@ async function callerWorkspace(ctx, caller) {
 	} catch (error) {
 		throw new Error(`cannot resolve the caller session's workspace: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	if (typeof path !== "string" || path.length === 0) throw new Error(`this deployment cannot name the workspace of session "${caller}", which the experiment would freeze as its input snapshot — name the caller's env workspace (S4-E item 2) before evaluating a skill candidate`);
+	if (typeof path !== "string" || path.length === 0) throw new Error(`this deployment cannot name the workspace of session "${caller}", which the experiment would freeze as its input snapshot — name the caller's env workspace (S4-E item 2) before evaluating a skill or capability candidate`);
 	return path;
 }
 /** The task's latest review record — the record a sample's role is read from. */
@@ -4292,13 +4307,14 @@ function sessionId$11(exec) {
 * loads, the directory is admitted again once its commit intent is closed, and a
 * run already bound to the applied version keeps its own snapshot.
 */
-function restoreNote() {
+function restoreNote(targetType) {
+	if (targetType === "capability") return "the production capability row was restored or removed to its prepared baseline, and any new skill was removed; new admissions read that state while runs already bound to the applied snapshot keep their snapshot";
 	return "the restored object is what the skill filesystem now serves and what the next admission loads, and the skill directory is admitted again now that its commit intent is closed; a run already bound to the applied version keeps loading the snapshot it was bound to";
 }
 function defineEvolutionRollbackTool(ctx) {
 	return defineTool({
 		name: "evolution_rollback",
-		description: "Roll back an applied EvolutionProposal (status: rolledback). Restores the champion snapshot taken at prepare — the production file set of the applied skill object (the `SKILL.md`, plus the `SKILL.contract.json` when it declares an execution provider), put back byte for byte. An applied record of any other target type has no executor here and is refused. Always asks a human through the native approval seam first — reject / cancel / unavailable writes nothing and the proposal stays applied. Only an applied proposal can be rolled back; a rolled-back proposal keeps its full ledger history. The restore is one commit, in the same order as apply: a durable commit intent (proposal, direction, this approval, every production file with the content identity each must hold before and after the restore, and the champion snapshot as the recoverable bytes for each file) is recorded before production changes, each file is then replaced atomically, and only after every file has been read back and the whole directory verified as one loadable object is the completion recorded — so a failure at any stage leaves one open intent and the skill directory closed to new admission rather than a half-commit. A rollback restores this proposal's own baseline and refuses by name, with nothing written, a target that a later proposal (or any other writer) has changed since this version was applied (both files must still hold what this proposal applied, and the directory must hold that object's own files with no entry the object does not name), and a champion snapshot that no longer hashes to the baseline recorded at prepare. Calling this tool again while an intent is open settles it instead of asking for a second approval: the answer reports the intent id and whether the write was redone or only its completion recorded.",
+		description: "Roll back an applied EvolutionProposal (status: rolledback). Restores the production baseline fixed at prepare — the production file set of the applied skill object (the `SKILL.md`, plus the `SKILL.contract.json` when it declares an execution provider), put back byte for byte, or restores a committed capability row and removes its optional new execution skill. An applied record of any other target type has no executor here and is refused. Always asks a human through the native approval seam first — reject / cancel / unavailable writes nothing and the proposal stays applied. Only an applied proposal can be rolled back; a rolled-back proposal keeps its full ledger history. The restore is one commit, in the same order as apply: a durable commit intent (proposal, direction, this approval, every production file with the content identity each must hold before and after the restore, and the champion snapshot as the recoverable bytes for each file) is recorded before production changes, each file is then replaced atomically, and only after every target has been read back and the committed row and optional skill verified is the completion recorded — so a failure at any stage leaves one open intent and affected production closed to new admission rather than a half-commit. A rollback restores this proposal's own baseline and refuses by name, with nothing written, a target that a later proposal (or any other writer) has changed since this version was applied (both files must still hold what this proposal applied, and the directory must hold that object's own files with no entry the object does not name), and a champion snapshot that no longer hashes to the baseline recorded at prepare. Calling this tool again while an intent is open settles it instead of asking for a second approval: the answer reports the intent id and whether the write was redone or only its completion recorded.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
@@ -4321,23 +4337,25 @@ function defineEvolutionRollbackTool(ctx) {
 			if (proposal.openIntent !== void 0) try {
 				const recovered = await ctx.evolution.rollback(args.proposalId, caller, proposal.openIntent.approvalRef);
 				return [
-					`proposal ${recovered.proposal.proposalId} [rolledback] ${recovered.proposal.level} ${recovered.proposal.targetType} ${recovered.proposal.targetId} — champion restored`,
+					`proposal ${recovered.proposal.proposalId} [rolledback] ${recovered.proposal.level} ${recovered.proposal.targetType} ${recovered.proposal.targetId} — ${recovered.proposal.targetType === "capability" ? "production baseline restored" : "champion restored"}`,
 					...renderOpenIntentRecovery(proposal.openIntent, recovered.recovered),
 					"wrote production targets:",
+					...recovered.proposal.targetType === "capability" ? [`  - capability row ${recovered.proposal.targetId} restored in the production table`] : [],
 					...recovered.targets.map((target) => `  - ${target}`),
-					restoreNote()
+					restoreNote(recovered.proposal.targetType)
 				].join("\n");
 			} catch (error) {
 				return `evolution_rollback rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
 			if (proposal.status !== "applied") return `evolution_rollback rejected: proposal ${proposal.proposalId} is ${proposal.status}; only an applied proposal can be rolled back`;
 			const targets = applyTargets(proposal, ctx.evolution);
-			if (targets.length === 0) return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build writes and restores the fixed file set of one skill object only (SKILL.md, plus the SKILL.contract.json of a skill that declares an execution provider), so there is no executor to roll back an applied record of another type`;
+			if (targets.length === 0 && proposal.targetType !== "capability") return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build restores an existing skill object or a capability row with an optional new execution skill, so there is no executor for this target type`;
 			const reason = [
 				`Evolution rollback for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
 				`rationale: ${proposal.rationale}`,
-				`applied at: ${proposal.applied.targets.join(", ")} (approval ${proposal.applied.approvalRef})`,
-				"this restores the champion snapshot over production targets:",
+				`applied at: ${[...proposal.targetType === "capability" ? [`capability row ${proposal.targetId}`] : [], ...proposal.applied.targets].join(", ")} (approval ${proposal.applied.approvalRef})`,
+				proposal.targetType === "capability" ? "this restores the prepared capability row baseline and removes any new skill from production targets:" : "this restores the champion snapshot over production targets:",
+				...proposal.targetType === "capability" ? [`  - capability row ${proposal.targetId} in the production table`] : [],
 				...targets.map((target) => `  - ${target}`)
 			].join("\n");
 			const outcome = await ctx.approval.request({
@@ -4351,10 +4369,11 @@ function defineEvolutionRollbackTool(ctx) {
 			try {
 				const rolledback = await ctx.evolution.rollback(args.proposalId, caller, `approval:${exec.callId}`);
 				return [
-					`proposal ${rolledback.proposal.proposalId} [rolledback] ${rolledback.proposal.level} ${rolledback.proposal.targetType} ${rolledback.proposal.targetId} — champion restored`,
+					`proposal ${rolledback.proposal.proposalId} [rolledback] ${rolledback.proposal.level} ${rolledback.proposal.targetType} ${rolledback.proposal.targetId} — ${rolledback.proposal.targetType === "capability" ? "production baseline restored" : "champion restored"}`,
 					"wrote production targets:",
+					...rolledback.proposal.targetType === "capability" ? [`  - capability row ${rolledback.proposal.targetId} restored in the production table`] : [],
 					...rolledback.targets.map((target) => `  - ${target}`),
-					restoreNote(),
+					restoreNote(rolledback.proposal.targetType),
 					`human approval: approval:${exec.callId}`
 				].join("\n");
 			} catch (error) {

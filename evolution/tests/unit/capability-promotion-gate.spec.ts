@@ -102,6 +102,7 @@ interface Fixture {
   skillRoot: string
   registry: Record<string, CapabilityConfig>
   rows: CapabilityExperimentStore
+  sourceTask?: Record<string, unknown>
   sessions: Map<string, SessionEvent[]>
   workspace: string
   experiment: Awaited<ReturnType<typeof recordCapabilityExperiment>>
@@ -116,6 +117,7 @@ interface Fixture {
 async function fixture(options: {
   registry?: Record<string, CapabilityConfig>
   experiment?: CapabilityExperimentOptions
+  sourceStatus?: 'failed' | 'verified'
   /** Runs after the experiment is recorded and before any gate: the case that changes one fact. */
   tamper?: (parts: Fixture) => Promise<void>
 } = {}): Promise<Fixture> {
@@ -144,7 +146,14 @@ async function fixture(options: {
         else registry[name] = structuredClone(entry)
       },
     },
-    task: { openStore: async () => ({ ...rows, diagnoses: [], obligations: [] }) },
+    task: { openStore: async () => ({
+      ...rows,
+      diagnoses: options.sourceStatus ? [{
+        diagnosisId: 'd1', taskId: 't-success', reviewRefs: ['t-success#r-success'],
+        proposals: [{ targetType: 'capability', targetId: NEW_ROW, rationale: 'faster' }],
+      }] : [],
+      obligations: [],
+    }) },
     sessionQuery: {
       readSession: async (sessionId: string) => {
         const events = sessions.get(sessionId)
@@ -179,7 +188,13 @@ async function fixture(options: {
     workspace,
     selection: SELECTION,
   }, await svc.get('cap1'), options.experiment ?? {})
-  const parts: Fixture = { svc, root, skillRoot, registry, rows, sessions, workspace, experiment }
+  let sourceTask: Record<string, unknown> | undefined
+  if (options.sourceStatus) {
+    sourceTask = { taskId: 't-success', objective: 'a source', status: options.sourceStatus, runIds: ['r-success'] }
+    rows.tasks.push(sourceTask)
+    rows.runs.push({ runId: 'r-success', taskId: 't-success', status: options.sourceStatus })
+  }
+  const parts: Fixture = { svc, root, skillRoot, registry, rows, sessions, workspace, experiment, sourceTask }
   // The tamper case runs between the evidence and the gate: everything the gate
   // reads is already recorded, and the case changes exactly one of those facts.
   if (options.tamper !== undefined) await options.tamper(parts)
@@ -293,6 +308,30 @@ describe('capability promotion: the evidence the gate reads', () => {
 })
 
 describe('capability promotion: every missing piece is a named refusal with zero writes', () => {
+  it('keeps a successful source suggestion but refuses promotion and application without a frozen comparator', async () => {
+    const f = await fixture({ sourceStatus: 'verified' })
+    expect((await f.svc.get('cap1')).sourceRefs).toEqual(['diagnosis:d1'])
+    const promotion = await refusalOf(f.svc.checkPromotion('cap1'))
+    expect(promotion).toMatch(/successful source.*frozen.*comparator/i)
+    await f.svc.gate('cap1', gateAnswers([f.experiment.reportPath]), 'root-1')
+    expect(await refusalOf(f.svc.decide('cap1', 'PROMOTE', 'root-1', 'approval:decide')))
+      .toMatch(/successful source.*frozen.*comparator/i)
+    await assertZeroWrites(f)
+  })
+
+  it('rechecks a source that becomes verified after the decision and before apply writes production', async () => {
+    const f = await fixture({ sourceStatus: 'failed' })
+    await f.svc.gate('cap1', gateAnswers([f.experiment.reportPath]), 'root-1')
+    await f.svc.decide('cap1', 'PROMOTE', 'root-1', 'approval:decide')
+    f.sourceTask!.status = 'verified'
+    expect(await refusalOf(f.svc.apply('cap1', 'root-1', 'approval:apply')))
+      .toMatch(/successful source.*frozen.*comparator/i)
+    const lines = await ledgerLines(f.root)
+    expect(lines.some(line => line.kind === 'commit_intent' || line.kind === 'applied')).toBe(false)
+    expect(f.registry[NEW_ROW]).toBeUndefined()
+    expect(existsSync(join(f.skillRoot, NEW_SKILL))).toBe(false)
+  })
+
   it('refuses a gate with no experiment at all — the baseline preflight cannot be skipped', async () => {
     const f = await fixture()
     // A second proposal of its own, prepared but never evaluated: the shape a

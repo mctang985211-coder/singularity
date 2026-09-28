@@ -15,8 +15,8 @@ export function defineEvolutionListTool(ctx: Context) {
     description:
       'Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, ' +
       'each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an ' +
-      'applied skill object — one file for a guidance skill, `SKILL.md` plus `SKILL.contract.json` for an execution one; a ' +
-      'non-skill proposal stays proposed — this build admits a skill candidate only). The ledger records proposals, sandbox ' +
+      'applied skill object or capability row, optionally with a new execution skill; other target types stay proposed). ' +
+      'A skill object has `SKILL.md` plus `SKILL.contract.json` when it is an execution provider. The ledger records proposals, sandbox ' +
       'materializations, human decisions, human-approved ' +
       'applies/rollbacks, and the commit intent behind each production write: a proposal whose commit was interrupted ' +
       'reports that intent — its id, direction, every production file it commits and when it was recorded — and stays in ' +
@@ -48,15 +48,26 @@ export function defineEvolutionListTool(ctx: Context) {
         }
         if (proposal.prepared !== undefined) {
           const view = proposal.prepared
-          // The fold admits only a materialized skill prepare with both identities.
-          const shape = view.skillContent!.contract === undefined
-            ? 'guidance (SKILL.md)'
-            : 'execution provider (SKILL.md + SKILL.contract.json)'
-          lines.push(
-            `  sandbox: ${ctx.evolution.root}/${view.sandbox!} (${view.files.length} files, ${shape}, champion snapshot captured, ` +
-            `candidate content ${view.skillContent!.name} sha256:${view.skillContent!.sha256.slice(0, 12)}…, ` +
-            `production baseline ${view.skillBaseline!.name} sha256:${view.skillBaseline!.sha256.slice(0, 12)}…)`,
-          )
+          if (proposal.targetType === 'capability') {
+            const row = view.capabilityRow!
+            const baseline = view.capabilityBaseline
+            lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox!} (${view.files.length} files, capability row${view.skillContent === undefined ? '' : ' + new execution skill'})`)
+            lines.push(`  candidate row: ${row.name} sha256:${row.digest.slice(0, 12)}…`)
+            lines.push(`  production row baseline: ${baseline === null ? 'absent' : `${baseline!.name} sha256:${baseline!.digest.slice(0, 12)}…`}`)
+            lines.push(view.skillContent === undefined
+              ? '  no new skill object'
+              : `  new execution skill: ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}… (SKILL.md + SKILL.contract.json)`)
+            if (view.skillContent !== undefined) lines.push('  production skill baseline: absent')
+          } else {
+            const shape = view.skillContent!.contract === undefined
+              ? 'guidance (SKILL.md)'
+              : 'execution provider (SKILL.md + SKILL.contract.json)'
+            lines.push(
+              `  sandbox: ${ctx.evolution.root}/${view.sandbox!} (${view.files.length} files, ${shape}, champion snapshot captured, ` +
+              `candidate content ${view.skillContent!.name} sha256:${view.skillContent!.sha256.slice(0, 12)}…, ` +
+              `production baseline ${view.skillBaseline!.name} sha256:${view.skillBaseline!.sha256.slice(0, 12)}…)`,
+            )
+          }
         }
         if (proposal.gate !== undefined) {
           lines.push(`  gate regression evidence: [${proposal.gate.regressionEvidenceRefs.join(', ')}]`)
@@ -66,8 +77,9 @@ export function defineEvolutionListTool(ctx: Context) {
           lines.push(
             `  open commit intent: ${intent.intentId} (${intent.direction}) recorded ${intent.at} — production targets ` +
             `[${intent.files.map(file => file.target).join(', ')}]`,
-            '  a production write is underway and its completion has not been recorded: the skill directory stays closed to new ' +
-            'admission until a reconciliation (a restart, or a retry of the apply/rollback) settles it',
+            '  a production write is underway and its completion has not been recorded: ' +
+            `${proposal.targetType === 'capability' ? 'the capability table and optional new skill directory stay' : 'the skill directory stays'} ` +
+            'closed to new admission until a reconciliation (a restart, or a retry of the apply/rollback) settles it',
           )
         }
         if (proposal.applied !== undefined) {

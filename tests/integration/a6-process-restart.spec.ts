@@ -6,27 +6,30 @@
  * The deployment here is the whole one: the real JSONL session log, the real
  * store and runtime, the real agent runtime, the real verifier. The child process
  * boots it over the shared directory, drives the failed root's recovery to one of
- * three windows, and lets `process.kill(process.pid, 'SIGKILL')` end it there — no
+ * four windows, and lets `process.kill(process.pid, 'SIGKILL')` end it there — no
  * `catch`, no `finally`, no flush, no descriptor closed by a handler, no memory
  * left (see `tests/support/process-death.ts`). What the parent then boots is a
  * second process image over the same directory: it reads the log and the store
  * off disk, and nothing of the dead image is available to it.
  *
- * The three windows, and what each leaves for the new process:
+ * The four windows, and what each leaves for the new process:
  *
  * 1. **A new Run created, no batch admitted** — the attempt's run and Session are
  *    durable and the worker never decomposed. The new process resumes that
  *    Session, the same key answers with the same Run, and the attempt is still
  *    drivable: driven here, it finishes and the **original** criteria accept it.
- * 2. **A batch admitted, its member's worker never started** — the batch and its
+ * 2. **A new Run created before its Session was written** — the new process
+ *    cannot resume a Session the log never held, and settles that Run by name.
+ *    The same key still answers with the same Run and the budget stays spent.
+ * 3. **A batch admitted, its member's worker never started** — the batch and its
  *    member's Run are durable and the child's spawn never happened. The new
  *    process drives the batch to its end and settles the member by name (its
  *    Session never existed, so no worker can be invented for it): one Run per
  *    position, one batch, no second attempt.
- * 3. **The attempt submitted, its verdict not written** — the submission is
+ * 4. **The attempt submitted, its verdict not written** — the submission is
  *    durable and the process died inside the verification. The new process's
- *    store pass completes that settlement once, on the same Run, without a second
- *    submission or a second Run.
+ *    store pass completes the original AC's independent verification once, on the
+ *    same Run, without a second submission or a second Run.
  *
  * Each case then reads the ceiling off a **real admission**: with `maxRuns` set to
  * the run count the dead image left, a replay in the new process is refused by
@@ -542,32 +545,32 @@ describe.skipIf(BOUNDARY !== undefined)('A6 EVO-4 (real death): a killed recover
     }
     if (boundary === 'root-settlement') {
       // The submission the dead process made is the durable fact this process reads,
-      // and it is *this Run* that settles — once, with one review. What the verdict
-      // is here is the deployment's own answer for a bound checkout, and it is a
-      // named one: the store pass settles a `submitted` run before the tree's
-      // checkout is taken over, so the verifier refuses to judge a workspace this
-      // process does not hold yet and the run is settled `failed` with that reason
-      // (see the finding recorded in this file's own report). No second Run is
-      // opened, no second submission is made, and the count a restart reads is the
-      // dead image's.
+      // and it is *this Run* that settles — once, with one review. The independent
+      // verifier judges the original criteria after the new process takes over the
+      // checkout. No second Run or submission is made, and the count a restart
+      // reads is the dead image's.
       const settled = await vi.waitFor(async () => {
         const current = (await stack.snapshot(STORE)).runs.find(run => run.runId === attempt.runId)!
         expect(current.status).not.toBe('running')
         return current
       }, { timeout: 30_000, interval: 25 })
-      expect(settled.status).toBe('failed')
+      expect(settled.status).toBe('verified')
       const after = await stack.snapshot(STORE)
       expect(after.runs).toHaveLength(marker.runs)
       expect(after.runs.filter(run => run.taskId === attempt.taskId)).toHaveLength(2)
       expect(after.runs.filter(run => run.recovery !== undefined)).toHaveLength(1)
       const verdicts = after.reviews.filter(item => item.runId === attempt.runId)
       expect(verdicts).toHaveLength(1)
-      expect(verdicts[0]!.localizedCause).toContain('cannot be verified')
-      expect(verdicts[0]!.localizedCause).toContain("a verifier runs only while the run's own store holds the workspace it judges")
+      expect(verdicts[0]!.outcome).toBe('verified')
+      const mapVerdict = after.evidence
+        .filter(item => item.taskRunId === attempt.runId)
+        .flatMap(item => item.verifierResults)
+        .find(item => item.criterionId === 'root-map')
+      expect(mapVerdict?.status).toBe('pass')
       // The submission itself is preserved on the run the dead process made.
       expect(settled.executionPhase).toBe('submitted')
       expect(settled.submission?.summary).toBe('the attempt is handed in')
-      expect(after.tasks.find(task => task.taskId === attempt.taskId)?.status).toBe('failed')
+      expect(after.tasks.find(task => task.taskId === attempt.taskId)?.status).toBe('verified')
     }
 
     // ── the old failure is exactly what it was ────────────────────────────────

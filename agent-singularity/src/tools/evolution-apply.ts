@@ -16,23 +16,25 @@ function sessionId(exec: ToolRunContext): string {
 
 /**
  * Why a decided PROMOTE proposal still cannot be applied: L4 harness evolution
- * and every target type this build has no executor for.
+ * and target types this build has no executor for.
  */
 function manualGuidance(proposal: EvolutionProposal): string | null {
   if (proposal.level === 'L4') {
     return 'L4 harness evolution has no executor in evolution_apply: supervisor implementation and validation must precede human review through the harness change workflow'
   }
   if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) {
-    return `this build writes and restores the fixed file set of one skill object only (` +
-      `SKILL.md, plus the SKILL.contract.json of a skill that declares an execution provider), so a decided "${proposal.targetType}" ` +
-      'proposal has no executor here — its ledger record stays readable and nothing writes it; the capability evaluation such a ' +
-      'proposal would need belongs to A6, not to this build'
+    return `this build writes an existing skill object or one capability row with an optional new execution skill, so a decided ` +
+      `"${proposal.targetType}" proposal has no executor here — its ledger record stays readable and nothing writes it`
   }
   return null
 }
 
-/** How an applied skill takes effect, stated honestly in the output. */
-function effectNote(): string {
+/** How the approved production write takes effect. */
+function effectNote(proposal: EvolutionProposal): string {
+  if (proposal.targetType === 'capability') {
+    return 'effective for new admissions — the committed capability row and optional new execution skill are available to ' +
+      'the runtime; a run already bound to the previous capability snapshot keeps that snapshot'
+  }
   return 'effective immediately — the skill filesystem watches the skill root, so the write is live; the skill directory is ' +
     'admitted again now that its commit intent is closed, and a run already bound to the previous version keeps loading the ' +
     'snapshot it was bound to'
@@ -42,23 +44,24 @@ export function defineEvolutionApplyTool(ctx: Context) {
   return defineTool({
     name: 'evolution_apply',
     description:
-      'Apply a PROMOTE-decided EvolutionProposal to production (status: applied). One target type: a same-name improvement ' +
-      'of an existing skill object at L1–L3 with a materialized sandbox — the commit writes that object\'s fixed file set, ' +
-      'the `SKILL.md` and, for an execution skill, the `SKILL.contract.json` beside it. Every other target type and L4 lack ' +
+      'Apply a PROMOTE-decided EvolutionProposal to production (status: applied). At L1–L3 it commits either a same-name ' +
+      'improvement of an existing skill object (the `SKILL.md` and, for an execution skill, the `SKILL.contract.json` beside it) ' +
+      'or one whole capability row with an optional new execution skill (both skill files). Other target types and L4 lack ' +
       'executors and are refused with instructions. Always asks a human through the native approval seam first — a second ' +
-      'gate after evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer ' +
+      'gate after evolution_decide — naming the capability row and each skill file path it will write; a reject, cancel, or unavailable answerer ' +
       'writes nothing and leaves the proposal decided. A skill apply additionally re-verifies before the human is asked, and ' +
       'again after the grant, the candidate\'s whole content identity and the production baseline recorded at prepare (the ' +
       'production file set must still be those exact bytes — a sidecar that appeared where the baseline had none, changed or ' +
       'disappeared refuses — so a stale candidate never overwrites a production skill that changed). The candidate sidecar ' +
       'is never the model\'s text: it must equal the production declaration with only content.skillMdSha256 rewritten, so a ' +
-      'promotion cannot escalate requiredTools, swap a verifier, move capabilities or change the object\'s role; a candidate ' +
+      'skill promotion cannot escalate requiredTools, swap a verifier, move capabilities or change the object\'s role; a candidate ' +
       'directory carrying any other entry (a resource, a stray file) is refused by name rather than reported as a provider ' +
-      'production never received. The write is one commit: a durable commit intent — proposal, direction, this approval, ' +
+      'production never received. A capability apply checks the frozen row and whole table identity before writing the row. ' +
+      'The write is one commit: a durable commit intent — proposal, direction, this approval, ' +
       'every production file with the content identity each must hold before and after the write, and the bytes to write ' +
       'again — is recorded before production changes, then each file is replaced atomically (a temp file in the same ' +
       'directory, fsynced and renamed over the target; never truncated, never half-written), and only after every rename ' +
-      'has been read back and the whole directory verified as one loadable object is the completion recorded. A failure ' +
+      'has been read back and the committed row and optional skill verified is the completion recorded. A failure ' +
       'at any stage leaves exactly one open intent rather than a half-committed object (a directory holding the new ' +
       '`SKILL.md` beside the old sidecar included), and the skill directory stays closed to new admission until that intent ' +
       'is settled; calling this tool again while ' +
@@ -97,8 +100,9 @@ export function defineEvolutionApplyTool(ctx: Context) {
             `proposal ${recovered.proposal.proposalId} [applied] ${recovered.proposal.level} ${recovered.proposal.targetType} ${recovered.proposal.targetId} — PROMOTE in effect`,
             ...renderOpenIntentRecovery(proposal.openIntent, recovered.recovered),
             'wrote production targets:',
+            ...(recovered.proposal.targetType === 'capability' ? [`  - capability row ${recovered.proposal.targetId} in the production table`] : []),
             ...recovered.targets.map(target => `  - ${target}`),
-            effectNote(),
+            effectNote(recovered.proposal),
           ].join('\n')
         } catch (error) {
           return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`
@@ -130,10 +134,13 @@ export function defineEvolutionApplyTool(ctx: Context) {
         `rationale: ${proposal.rationale}`,
         'recorded decision: PROMOTE',
         'this writes production targets:',
+        ...(proposal.targetType === 'capability' ? [`  - capability row ${proposal.targetId} in the production table`] : []),
         ...targets.map(target => `  - ${target}`),
         ...renderProviderRoles(promotion.providers),
-        effectNote(),
-        'rollback: evolution_rollback restores the champion snapshot from the sandbox',
+        effectNote(proposal),
+        proposal.targetType === 'capability'
+          ? 'rollback: evolution_rollback restores the prepared row baseline and removes any new skill'
+          : 'rollback: evolution_rollback restores the champion snapshot from the sandbox',
       ].join('\n')
       const outcome = await ctx.approval.request({
         agent,
@@ -155,9 +162,10 @@ export function defineEvolutionApplyTool(ctx: Context) {
         return [
           `proposal ${applied.proposal.proposalId} [applied] ${applied.proposal.level} ${applied.proposal.targetType} ${applied.proposal.targetId} — PROMOTE in effect`,
           'wrote production targets:',
+          ...(applied.proposal.targetType === 'capability' ? [`  - capability row ${applied.proposal.targetId} in the production table`] : []),
           ...applied.targets.map(target => `  - ${target}`),
           ...renderProviderRoles(applied.providers ?? []),
-          effectNote(),
+          effectNote(applied.proposal),
           `human approval: approval:${exec.callId} — rollback with evolution_rollback`,
         ].join('\n')
       } catch (error) {

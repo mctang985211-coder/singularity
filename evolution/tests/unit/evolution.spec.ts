@@ -478,13 +478,8 @@ describe('evolution tools', () => {
     expect((await svc.get('p1')).status).toBe('proposed')
   })
 
-  /**
-   * The review's suggestion-only counterexample: the next-step line follows the
-   * target type. A skill proposal is the one this build promotes, so it points
-   * at evolution_candidate; any other target type is a recorded suggestion with
-   * no next step at all, and no lifecycle entry is written for it.
-   */
-  it('evolution_propose points a skill replacement at evolution_candidate and no other proposal anywhere', async () => {
+  /** The next-step line follows the two candidate kinds this build supports. */
+  it('evolution_propose points skill and capability proposals at evolution_candidate', async () => {
     const svc = await service()
     const { ctx } = toolCtx(svc)
     const tool = defineEvolutionProposeTool(ctx)
@@ -501,16 +496,16 @@ describe('evolution tools', () => {
       exec('root-1'),
     )) as string
     expect(suggestion).toContain('proposal cap-suggestion registered [proposed] L2 capability research (base 1)')
-    expect(suggestion).toContain('stays a recorded suggestion')
-    expect(suggestion).not.toContain('next: evolution_candidate')
+    expect(suggestion).toContain('next: evolution_candidate')
+    expect(suggestion).toContain('exactly one whole capability row')
     expect(suggestion).not.toContain('next: evolution_prepare')
     expect((await svc.get('cap-suggestion')).status).toBe('proposed')
 
     const replacement = (await tool.execute({ ...skillProposal }, exec('root-1'))) as string
     expect(replacement).toContain('next: evolution_candidate')
 
-    // The next-step line is wording, not a lifecycle: either proposal's ledger
-    // holds its own `proposed` line and nothing else.
+    // The next-step line is wording, not a lifecycle: both proposals still hold
+    // only their own `proposed` line until evolution_candidate is called.
     const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
       .map(line => (JSON.parse(line) as { kind: string }).kind)
     expect(kinds).toEqual(['proposed', 'proposed'])

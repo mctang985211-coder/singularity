@@ -39,11 +39,10 @@ export function defineEvolutionProposeTool(ctx: Context) {
     name: 'evolution_propose',
     description:
       'Register an EvolutionProposal in the evolution ledger (status: proposed). Pure bookkeeping: nothing here executes ' +
-      'or changes production. This build has one promotion path — a proposal that improves an existing skill under its own ' +
-      'name (the whole loadable object: `SKILL.md`, plus the `SKILL.contract.json` beside it when the skill declares an ' +
-      'execution provider) goes through evolution_candidate (carrying the full replacement text), evolution_prepare, ' +
+      'or changes production. This build admits an existing skill under its own name (the whole loadable object) or one ' +
+      'whole capability row with an optional NEW execution skill. Both go through evolution_candidate, evolution_prepare, ' +
       'evolution_replay (the two-sided experiment), evolution_gate, and a human-approved evolution_decide plus ' +
-      'evolution_apply. Every other target type stays a recorded suggestion and is never opened as a candidate, so it is ' +
+      'evolution_apply. Other target types stay recorded suggestions and are never opened as candidates, so they are ' +
       'never evaluated and never promoted. ' +
       'Fill targetType/targetId/rationale manually, or pass fromDiagnosis to transcribe one proposal out of a recorded ' +
       'diagnosis (task_diagnose). baseVersion, level, and at least one sourceRef (diagnosisId / reviewRef / evidenceId) are required.',
@@ -130,15 +129,20 @@ export function defineEvolutionProposeTool(ctx: Context) {
           "text of the existing skill's SKILL.md — the only input a candidate submits, because an execution skill's " +
           'SKILL.contract.json is derived from production at evolution_prepare (only its content.skillMdSha256 is ' +
           'recomputed, so a content update cannot move a capability, a required tool or a verifier)'
+        const capabilityReplacement =
+          'ledger entry only — nothing was executed or changed; next: evolution_candidate, carrying exactly one whole ' +
+          'capability row { rows } and optionally a NEW execution skill { name, content, sidecar }; the row may use only ' +
+          'already authorized tools and may not change permission or preset'
         const recordedSuggestion =
-          `ledger entry only — nothing was executed or changed; this build executes one promotion path only — replacing an ` +
-          `existing skill object under its own name — so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become ` +
+          `ledger entry only — nothing was executed or changed; this build promotes an existing skill or one capability row ` +
+          `with an optional new execution skill, so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become ` +
           'a candidate, is never evaluated, and is never promoted'
         return [
           `proposal ${proposal.proposalId} registered [proposed] ${proposal.level} ${proposal.targetType} ${proposal.targetId} (base ${proposal.baseVersion})`,
           `rationale: ${proposal.rationale}`,
           `sourceRefs: [${proposal.sourceRefs.join(', ')}]`,
-          proposal.targetType === 'skill' ? skillReplacement : recordedSuggestion,
+          proposal.targetType === 'skill' ? skillReplacement
+            : proposal.targetType === 'capability' ? capabilityReplacement : recordedSuggestion,
         ].join('\n')
       } catch (error) {
         return `evolution_propose rejected: ${error instanceof Error ? error.message : String(error)}`

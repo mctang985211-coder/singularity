@@ -2198,9 +2198,10 @@ export class TaskRuntime extends Service {
    *   content binding (S1-C: a snapshot that is no longer readable refuses the
    *   re-entry by name rather than resuming against whatever stands at that path
    *   now), bind the session in this process, derive the session's gate phase
-   *   from the store's own run record, settle or restart whatever the store left
-   *   in flight (`reconcileStore`) and rebuild this process's workspace
-   *   ownership — the same recovery a reopen performs;
+   *   from the store's own run record, rebuild this process's workspace
+   *   ownership before any submitted run is verified, and settle or restart
+   *   whatever the store left in flight (`reconcileStore`) — the same recovery
+   *   a reopen performs;
    * - **a root task without a run for this session**: refuse by name. That state
    *   is a store whose root was created for a different session or whose run
    *   record is gone, and neither is something to guess a binding for.
@@ -2408,9 +2409,17 @@ export class TaskRuntime extends Service {
     this.startedSessions.add(rootSessionId)
     if (phase === 'terminal') this.executionGate.setTerminal(rootSessionId)
     else if (phase !== undefined) this.executionGate.setPhase(rootSessionId, phase)
+    // A submitted run left by a dead process is independently verified by the
+    // recovery pass. Take over this tree's checkout first so that verification
+    // sees the store's own workspace claim; a live or foreign holder remains a
+    // named refusal through the existing ownership checks. Other recovery
+    // paths keep their existing ownership order.
+    if (snapshot.runs.some(item => item.status === 'running' && item.executionPhase === 'submitted')) {
+      await this.rebuildWorkspaceOwnership(storeId, true)
+    }
     // Adoption is the recovery entry (§3.6): runs this process is not driving
-    // are settled or restarted, and the workspace this tree holds is rebuilt
-    // from its own batch chain.
+    // are settled or restarted, then the workspace layers are rebuilt from the
+    // batch chain the pass left behind.
     await this.reconcileStore(storeId)
     await this.rebuildWorkspaceOwnership(storeId)
     return {
@@ -7673,7 +7682,7 @@ export class TaskRuntime extends Service {
    * whose runs all reached terminal states releases the claim instead, which is
    * what makes a finished tree leave no marker behind.
    */
-  private async rebuildWorkspaceOwnership(storeId: string): Promise<void> {
+  private async rebuildWorkspaceOwnership(storeId: string, requireOwnership = false): Promise<void> {
     let snapshot: TaskSnapshot
     try {
       snapshot = await this.ctx.task.snapshotIn(storeId)
@@ -7694,6 +7703,9 @@ export class TaskRuntime extends Service {
     if (held === undefined) {
       const adoption = await this.workspaces.reconcileAdopt(workspace)
       if (!adoption.adopted) {
+        if (requireOwnership) {
+          throw new Error(`task-runtime: store ${storeId} cannot take over workspace ${workspace} before verifying submitted runs: ${adoption.reason}`)
+        }
         this.warn(`store ${storeId}: the workspace cannot be taken over (${adoption.reason})`)
         return
       }
@@ -7707,6 +7719,13 @@ export class TaskRuntime extends Service {
       held = this.workspaces.ownerOf(workspace)
     }
     if (held === undefined || held.kind !== 'run' || held.storeId !== storeId || held.runId !== rootRun.runId) {
+      if (requireOwnership) {
+        throw new Error(
+          `task-runtime: store ${storeId} cannot verify submitted runs in workspace ${workspace}: ` +
+          `it is held by ${held === undefined ? 'nobody in this process' : `${held.kind} ${held.storeId}/${held.runId ?? held.batchId ?? ''}`}, ` +
+          `not by its root run ${rootRun.runId}`,
+        )
+      }
       this.warn(
         `store ${storeId}: the workspace ${workspace} is held by ` +
         `${held === undefined ? 'nobody in this process' : `${held.kind} ${held.storeId}/${held.runId ?? held.batchId ?? ''}`}, ` +

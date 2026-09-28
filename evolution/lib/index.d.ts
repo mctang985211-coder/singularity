@@ -2966,6 +2966,8 @@ declare class EvolutionService extends Service {
   resumeExperiment(experimentId: string, caller: SessionId, actor: string, options?: {
     signal?: AbortSignal;
   }): Promise<ExperimentResult>;
+  /** Re-read the proposal's Diagnosis against the experiment's own task store before any executable step. */
+  private assertSupportedSource;
   /**
    * The services one experiment runs on, resolved softly: an experiment needs
    * the graph (for this graph's task store), the task store's reads, and the

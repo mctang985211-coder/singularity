@@ -87,7 +87,7 @@ async function callerWorkspace(ctx: Context, caller: SessionId): Promise<string>
   if (typeof path !== 'string' || path.length === 0) {
     throw new Error(
       `this deployment cannot name the workspace of session "${caller}", which the experiment would freeze as its input ` +
-      'snapshot — name the caller\'s env workspace (S4-E item 2) before evaluating a skill candidate',
+      'snapshot — name the caller\'s env workspace (S4-E item 2) before evaluating a skill or capability candidate',
     )
   }
   return path

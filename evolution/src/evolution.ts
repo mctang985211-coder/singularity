@@ -2259,6 +2259,7 @@ export class EvolutionService extends Service {
     nonEmpty(approvalRef, 'approvalRef')
     return this.commitExclusive(async () => {
       const proposal = await this.get(proposalId)
+      await this.assertSupportedSource(proposal)
       const open = proposal.openIntent
       if (open !== undefined) {
         if (open.direction !== 'apply') {
@@ -2358,6 +2359,7 @@ export class EvolutionService extends Service {
    */
   async checkPromotion(proposalId: string): Promise<PromotionCheck> {
     const proposal = await this.get(proposalId)
+    await this.assertSupportedSource(proposal)
     if (proposal.targetType === 'capability') return this.checkCapabilityPromotion(proposal)
     if (proposal.targetType !== 'skill') throw noEvaluatorRefusal(proposal)
     if (proposal.prepared?.mechanical !== true || proposal.prepared.sandbox == null) {
@@ -4797,6 +4799,7 @@ export class EvolutionService extends Service {
    * later stage's question.
    */
   async runExperiment(spec: ExperimentSpec, caller: SessionId, actor: string, options: { signal?: AbortSignal } = {}): Promise<ExperimentResult> {
+    await this.assertSupportedSource(await this.get(spec.proposalId), await this.storeOfSession(String(caller)))
     return runExperiment(this.experimentSources(), {
       spec,
       caller,
@@ -4813,12 +4816,49 @@ export class EvolutionService extends Service {
    * snapshot that moved is refused rather than run under a new identity.
    */
   async resumeExperiment(experimentId: string, caller: SessionId, actor: string, options: { signal?: AbortSignal } = {}): Promise<ExperimentResult> {
+    const experiment = await this.experiment(experimentId)
+    await this.assertSupportedSource(await this.get(experiment.proposalId), experiment.storeId ?? await this.storeOfSession(String(caller)))
     return resumeExperiment(this.experimentSources(), {
       experimentId,
       caller,
       actor,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })
+  }
+
+  /** Re-read the proposal's Diagnosis against the experiment's own task store before any executable step. */
+  private async assertSupportedSource(proposal: EvolutionProposal, storeId?: string): Promise<void> {
+    const diagnosisIds = proposal.sourceRefs.filter(ref => ref.startsWith('diagnosis:')).map(ref => ref.slice('diagnosis:'.length))
+    if (diagnosisIds.length === 0) return
+    const experimentStoreId = storeId ?? (await this.experiments(proposal.proposalId))[0]?.storeId
+    if (experimentStoreId === undefined) return
+    const task = optionalService<{ openStore(storeId: string): Promise<TaskSnapshot> }>(this.ctx, 'task')
+    if (task === undefined) return
+    const snapshot = await task.openStore(experimentStoreId)
+    for (const diagnosisId of diagnosisIds) {
+      const diagnosis = snapshot.diagnoses?.find(item => item.diagnosisId === diagnosisId)
+      // Generic S4-E proposals historically carry opaque sourceRefs; only a
+      // Diagnosis that this store can actually resolve supplies source outcome
+      // facts. The A6 hand-off/tool path validates concrete diagnosis identity
+      // before it reaches this service.
+      if (diagnosis === undefined) continue
+      const source = snapshot.tasks.find(item => item.taskId === diagnosis.taskId)
+      if (source === undefined) {
+        throw new Error(`evolution: diagnosis "${diagnosisId}" names a task absent from store "${experimentStoreId}"; no experiment, promotion or application was started`)
+      }
+      const successfulRun = diagnosis.reviewRefs.some(ref => {
+        const separator = ref.lastIndexOf('#')
+        if (separator < 0 || ref.slice(0, separator) !== source.taskId) return false
+        const runId = ref.slice(separator + 1)
+        return snapshot.runs.some(run => run.runId === runId && run.taskId === source.taskId && run.status === 'verified')
+      })
+      if (source.status === 'verified' || successfulRun) {
+        throw new Error(
+          `evolution: diagnosis "${diagnosisId}" names a successful source task/run, and this build has no frozen metric or comparator ` +
+          'for "faster or cheaper"; its suggestion remains recorded, with zero experiment, promotion, application or new business Run',
+        )
+      }
+    }
   }
 
   /**

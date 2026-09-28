@@ -22,11 +22,12 @@ export function defineEvolutionGateTool(ctx: Context) {
       '1. Target failure fixed? 2. Original acceptance maintained? 3. Existing regression maintained? ' +
       '4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? ' +
       'All six answers are required, and the regression side must cite evidence ids (from this graph\'s task store) or ' +
-      'file paths whose existence is checked — cited evidence is never executed. A skill candidate must pass ' +
+      'file paths whose existence is checked — cited evidence is never executed. A skill or capability candidate must pass ' +
       'evolution_prepare (sandbox materialization) and then evolution_replay (the two-sided experiment: a new baseline run ' +
       'and a new candidate run per frozen sample, the production object and the prepared object each loaded whole), and its ' +
-      'report path must be one of the regressionEvidenceRefs — the gate refuses a skill candidate whose experiment is not ' +
-      'complete. A proposal of any other target type cannot become a candidate and has no gate to answer. Records the ' +
+      'report path must be one of the regressionEvidenceRefs — the gate refuses either candidate whose experiment is not ' +
+      'complete. A capability sample without a provider records the runtime\'s real not-admitted baseline. Other target types ' +
+      'cannot become candidates and have no gate to answer. Records the ' +
       'ledger entry only; nothing is promoted or changed, and evolution_decide re-checks the candidate\'s whole content ' +
       'identity and its provider verdict before a PROMOTE can be recorded. ' +
       'Next step is evolution_decide, which always asks a human.',

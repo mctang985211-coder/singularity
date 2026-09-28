@@ -5020,6 +5020,7 @@ var EvolutionService = class extends Service {
 		nonEmpty(approvalRef, "approvalRef");
 		return this.commitExclusive(async () => {
 			const proposal = await this.get(proposalId);
+			await this.assertSupportedSource(proposal);
 			const open$1 = proposal.openIntent;
 			if (open$1 !== void 0) {
 				if (open$1.direction !== "apply") throw new Error(`evolution: proposal "${proposalId}" has an open rollback commit intent ("${open$1.intentId}") — apply cannot complete a rollback; settle that intent (reconcile, or evolution_rollback) before applying anything`);
@@ -5105,6 +5106,7 @@ var EvolutionService = class extends Service {
 	*/
 	async checkPromotion(proposalId) {
 		const proposal = await this.get(proposalId);
+		await this.assertSupportedSource(proposal);
 		if (proposal.targetType === "capability") return this.checkCapabilityPromotion(proposal);
 		if (proposal.targetType !== "skill") throw noEvaluatorRefusal(proposal);
 		if (proposal.prepared?.mechanical !== true || proposal.prepared.sandbox == null) throw new Error(`evolution: skill proposal "${proposal.proposalId}" has no materialized candidate — nothing this proposal names was ever evaluated; record a structured candidate and prepare it (evolution_candidate / evolution_prepare) before promoting it`);
@@ -6747,6 +6749,7 @@ var EvolutionService = class extends Service {
 	* later stage's question.
 	*/
 	async runExperiment(spec, caller, actor, options = {}) {
+		await this.assertSupportedSource(await this.get(spec.proposalId), await this.storeOfSession(String(caller)));
 		return runExperiment(this.experimentSources(), {
 			spec,
 			caller,
@@ -6762,12 +6765,37 @@ var EvolutionService = class extends Service {
 	* snapshot that moved is refused rather than run under a new identity.
 	*/
 	async resumeExperiment(experimentId, caller, actor, options = {}) {
+		const experiment = await this.experiment(experimentId);
+		await this.assertSupportedSource(await this.get(experiment.proposalId), experiment.storeId ?? await this.storeOfSession(String(caller)));
 		return resumeExperiment(this.experimentSources(), {
 			experimentId,
 			caller,
 			actor,
 			...options.signal === void 0 ? {} : { signal: options.signal }
 		});
+	}
+	/** Re-read the proposal's Diagnosis against the experiment's own task store before any executable step. */
+	async assertSupportedSource(proposal, storeId) {
+		const diagnosisIds = proposal.sourceRefs.filter((ref) => ref.startsWith("diagnosis:")).map((ref) => ref.slice(10));
+		if (diagnosisIds.length === 0) return;
+		const experimentStoreId = storeId ?? (await this.experiments(proposal.proposalId))[0]?.storeId;
+		if (experimentStoreId === void 0) return;
+		const task = optionalService(this.ctx, "task");
+		if (task === void 0) return;
+		const snapshot = await task.openStore(experimentStoreId);
+		for (const diagnosisId of diagnosisIds) {
+			const diagnosis = snapshot.diagnoses?.find((item) => item.diagnosisId === diagnosisId);
+			if (diagnosis === void 0) continue;
+			const source = snapshot.tasks.find((item) => item.taskId === diagnosis.taskId);
+			if (source === void 0) throw new Error(`evolution: diagnosis "${diagnosisId}" names a task absent from store "${experimentStoreId}"; no experiment, promotion or application was started`);
+			const successfulRun = diagnosis.reviewRefs.some((ref) => {
+				const separator = ref.lastIndexOf("#");
+				if (separator < 0 || ref.slice(0, separator) !== source.taskId) return false;
+				const runId = ref.slice(separator + 1);
+				return snapshot.runs.some((run) => run.runId === runId && run.taskId === source.taskId && run.status === "verified");
+			});
+			if (source.status === "verified" || successfulRun) throw new Error(`evolution: diagnosis "${diagnosisId}" names a successful source task/run, and this build has no frozen metric or comparator for "faster or cheaper"; its suggestion remains recorded, with zero experiment, promotion, application or new business Run`);
+		}
 	}
 	/**
 	* The services one experiment runs on, resolved softly: an experiment needs

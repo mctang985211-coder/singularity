@@ -25,6 +25,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EvolutionService } from '../../../evolution/src/index.ts'
 import type { Config } from '../../../evolution/src/index.ts'
+import { capabilityRowIdentity } from '../../../evolution/src/capability-candidate.ts'
 import { defineEvolutionApplyTool } from '../../src/tools/evolution-apply.ts'
 import { defineEvolutionListTool } from '../../src/tools/evolution-list.ts'
 import { defineEvolutionRollbackTool } from '../../src/tools/evolution-rollback.ts'
@@ -422,6 +423,66 @@ describe('the tools without an open commit intent', () => {
 })
 
 describe('evolution_list', () => {
+  function capabilityLines(withSkill: boolean): Record<string, unknown>[] {
+    const row = { skills: [withSkill ? 'research-new' : SKILL] }
+    const capability = capabilityRowIdentity({ name: 'research', entry: row })
+    const common = { formatVersion: 4, proposalId: 'c1', actor: 'root-1' }
+    return [
+      {
+        ...common, kind: 'proposed', targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2',
+        rationale: 'research has no usable provider', sourceRefs: ['diagnosis:d1'], at: AT(0),
+      },
+      {
+        ...common, kind: 'candidate', versionSet: { capabilityTable: 'v2' },
+        mutation: { rows: { research: row }, ...(withSkill ? { skill: {
+          name: 'research-new', content: CANDIDATE,
+          sidecar: {
+            contractVersion: 1, type: 'execution', capabilities: ['research'], precondition: 'input exists',
+            inputs: [], outputs: [], requiredTools: [], verifier: { ref: 'command' },
+            content: { skillMdSha256: sha256Of(CANDIDATE), resources: [] },
+          },
+        } } : {}) },
+        at: AT(1),
+      },
+      {
+        ...common, kind: 'prepared', sandbox: 'sandbox/c1', mechanical: true, champion: 'absent',
+        capabilityRow: capability, capabilityBaseline: null,
+        ...(withSkill ? {
+          skillContent: {
+            name: 'research-new', sha256: sha256Of(CANDIDATE),
+            contract: { sha256: SIDECAR_SHA256, contractDigest: SIDECAR_CONTRACT_DIGEST },
+          },
+          skillBaseline: null,
+        } : {}),
+        files: withSkill
+          ? ['capability/research.json', 'skills/research-new/SKILL.md', 'skills/research-new/SKILL.contract.json']
+          : ['capability/research.json'],
+        at: AT(2),
+      },
+    ]
+  }
+
+  it('renders a prepared capability row without a new skill', async () => {
+    const h = await fixture({ lines: capabilityLines(false) })
+    const listed = (await defineEvolutionListTool(h.ctx).execute({ targetType: 'capability' })) as string
+
+    expect(listed).toContain('c1 [prepared] L2 capability research (base v1)')
+    expect(listed).toContain('candidate row: research sha256:3520b89bb04d')
+    expect(listed).toContain('production row baseline: absent')
+    expect(listed).toContain('no new skill object')
+  })
+
+  it('renders a prepared capability row with its new execution skill and absent production baselines', async () => {
+    const h = await fixture({ lines: capabilityLines(true) })
+    const listed = (await defineEvolutionListTool(h.ctx).execute({ targetType: 'capability' })) as string
+
+    expect(listed).toContain('c1 [prepared] L2 capability research (base v1)')
+    expect(listed).toContain('candidate row: research sha256:e4cef40c66dc')
+    expect(listed).toContain('production row baseline: absent')
+    expect(listed).toContain(`new execution skill: research-new sha256:${sha256Of(CANDIDATE).slice(0, 12)}`)
+    expect(listed).toContain('production skill baseline: absent')
+  })
+
   it('shows the open intent and stays a pure read', async () => {
     const h = await fixture({ lines: openApplyIntent() })
     const before = await readFile(join(h.root, 'proposals.jsonl'), 'utf8')
