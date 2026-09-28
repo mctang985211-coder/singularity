@@ -2,6 +2,8 @@
 
 当前状态（2026-09-28）：**K1～K4、A5、A6 均按各自合同验收；前端以外的真实模型全链纵向验收仍为 INCONCLUSIVE。** A6 的 EVO-2～EVO-5 机制经定向反例与独立复核，EVO-1 在授权的两个冻结案例中由真实 Agent 分别组合现有能力（L1）和生成新 execution Skill（L2），双侧独立验收通过，再经受控 DSH 拒绝/允许门只应用到临时部署。最终纵向试验未形成失败源 Review，因此未观察到同一真实模型链上的 Diagnosis → 候选 → 应用 → `task_recover` → 原 AC 通过；见[纵向验收记录](history/2026-09-28-final-backend-vertical-review.md)。A6 证据见 §5.23、[交付记录](history/2026-09-28-a6-delivery-record.md)及[唯一计划](2026-09-20-vrtc-code-change-plan.md)。两例成功不代表任意目标均能自进化，也不代表真人审批或生产部署。
 
+下一项真实工作负载实验见 [Buckyball × CosyVoice2 自由生长合同](execution-prompts/15-buckyball-cosyvoice2-free-growth.md)。它只冻结一个模型切片的根目标、外部判据与环境身份；Task 图由运行中的节点根据证据生成，不预填旧 workflow。该实验尚未执行，不能计入当前验收状态。
+
 | 已确认的问题 | 修正合同与唯一所有者 |
 |---|---|
 | ~~分解一次、子全终态即自动提交父，限制正常探索~~（K1 已验收） | [K1](execution-prompts/12a-k1-exploration.md)：runtime 交还父执行权，Run 内多批次、父主动提交；Task 保留事实（§5.18） |
