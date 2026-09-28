@@ -1,6 +1,6 @@
 # BB-1：把已有 Buckyball 方法改为通用 Skill
 
-工作区：`/home/ROXY/code/bb_work/buckyball/.agents/skills`（独立 Skill 子模块），上层 Buckyball：`/home/ROXY/code/bb_work/buckyball`。修改前基线已保存在本仓库 `backup/bb-general-adaptation-20260928`。本票只交付领域方法；通用 Task 参考在 Harness `.agents/skills/bb-pipeline/references/tasks.md`，能力和 MCP 接线另属 BB-2。不要改 CosyVoice 实验、Singularity runtime、Harness 配置或其他 BB 工作树。
+工作区：`/home/ROXY/code/bb_work/buckyball/.agents/skills`（独立 Skill 子模块），上层 Buckyball：`/home/ROXY/code/bb_work/buckyball`。旧方法来源在 `/home/ROXY/code/bb_work/legacy-harness-plugins`，只读参考；通用 Task 参考在 `/home/ROXY/code/bb_work/harness/.agents/skills/bb-pipeline/references/tasks.md`。修改前基线已保存在本仓库 `backup/bb-general-adaptation-20260928`。本票只交付领域方法，能力和 MCP 接线另属 BB-2。不要改 CosyVoice 实验、Singularity runtime、Harness 配置或其他 BB 工作树。
 
 ## 改动范围
 
