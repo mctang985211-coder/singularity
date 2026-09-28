@@ -93,3 +93,7 @@ EVO-2～EVO-5 机制交付进入待验收；EVO-1 明确 FAIL，所以 A6 整票
 同一冻结 L2 的第三次也是最后一次真实尝试 `evidence/l2-run-3` **通过 L2 效果验收**：`step-5-preview` 运行 267.799s，39 请求/38 响应，输入 88422、输出 18058、缓存读 348672 token。Agent 自行提交一条 capability 整行与新 execution Skill；沙盒 `SKILL.md` 的 SHA-256 `ecead6ef142cd86e0fd0b8360c6340d8edaa0793297854c036ee6fe89fc39d5a` 与其派生 sidecar 一致，正文按任务目标决定产物名，未写死 fix 文件名。`experiment.json` 的 fix/holdout 基线均为真实 `not-admitted`，候选均为 `verified`，冻结 command 判据分别 pass；本轮未声明无法核算的 `maxTokens`。受控 DSH 审批依次拒绝/允许 decide、拒绝/允许 apply；拒绝时无应用，最终只向临时部署写入行与 Skill。`run.json` 证明受保护生产文件前后摘要一致，`watchdogNudges: []`，所以夹具中发现的旧接口催促文案没有影响本次结果；该催促文案已为未来实验改成 `mutationJson`。受控 desk 是人审门的测试替身，不称真人批准。L1 原三次仍无合格证据，EVO-1 与 A6 整票仍 **FAIL / 待验收**；新 L1 冻结案例须另按合同明确授权，不能把 L2 成功或 scripted 接线替代为双案例通过。
 
 本轮最终树的 `pnpm build`、agent-singularity `pnpm exec tsc --noEmit`、两仓 `git diff --check` 均 exit 0；受影响定向测试见上述 GREEN，不重复全量测试。GPT-6 Sol 独立只读复核候选入口与 L2/2：工具单次解析并派生身份后仍进入既有服务校验，未发现校验绕过；缺 token 投影的预算拒绝保持。Sol 又独立核对 L2/3：原始 gateway candidate 参数与沙盒正文逐字一致，冻结 command@1 双样本 pass，账本只在两个 allow 审批引用后记录决定/应用，六个保护文件重算摘要一致，原始请求未出现旧催促文本；L2 子项 PASS，整项仍因 L1 未通过。证据汇总重新生成到 `evidence/manifest.json`，原汇总另存 `original-a6-manifest.json`，逐轮原始轨迹未改。
+
+## 修复版 L1 新冻结验证授权（进行中）
+
+用户已明确授权 GPT-6 Sol 子代理在新目录 `/home/ROXY/code/bb_work/a6-evo1-l1-recheck-2026-09-28` 重新冻结修复版 L1，使用免费 `step-5-preview`，最多三次、每次十五分钟；取得合格结果即停止剩余尝试。只补 L1 真实 Agent 组合现成授权能力的效果证据，不改原失败记录、不改生产 Skill/config、不弱化晋升闸。原目录的 L2/3 PASS 保留。子代理负责临时夹具与证据，主代理复核结果后同步 guide 与唯一计划；当前仍待验收。
