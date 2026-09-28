@@ -34,6 +34,8 @@
 | 13 | A5 + S2-E：诊断与缺口交接 | **已验收（2026-09-27，含 REV-3 定向返工）**：实现方自审 REV-1～REV-5 PASS；外部复核 REV-3 发现两条扫描交错（首判 REV-3 started 孤儿恢复一项 FAIL，同票返工闭合并复审通过；另收紧 settle 窗口竞态；第二轮复核发现显式关注点的在途默认尝试被误报冲突、较早 settled 遮住后来 open 尝试，已定向返工：扫描按源选最新未 settled 尝试并以该尝试自身身份受理，红→绿 + 独立复核 PASS）；最终树公共检查见[独立审核](history/2026-09-27-a5-review.md) | 实现主代理 + 子代理 | 本文 F.3、[派发 prompt](execution-prompts/13-a5-s2-e-diagnosis.md)、[交付记录](history/2026-09-27-a5-delivery-record.md)、[独立审核](history/2026-09-27-a5-review.md)、[持久化记录](persistence-changes/2026-09-27-a5-diagnosis-open-target.md) | REV-1～REV-5；消费 K4 预算规则，不重复实现 |
 | 14 | A6 + S2-R + S3：自主改进与恢复 | **已验收（2026-09-28）**：EVO-2～EVO-5 机制及关键反例完成；EVO-1 原失败轨迹保留，修复公开候选入口后，L2 原冻结第 3 次和新冻结 L1 第 1 次由真实 Agent 各自生成候选，fix/holdout 独立验证及受控审批拒绝/允许通过，生产保护文件未变。两组案例成功不外推普遍成功率 | 实现主代理 + 分段 Sol/xhigh 子代理 | 本文 F.4、[派发 prompt](execution-prompts/14-a6-autonomous-evolution.md)、[交付记录](history/2026-09-28-a6-delivery-record.md) | EVO-1～EVO-5 已验收；当前表无待派下一票，后续新目标须另定合同 |
 
+**A6 合同外最终纵向核查（2026-09-28）**：[验收记录](history/2026-09-28-final-backend-vertical-review.md)为 INCONCLUSIVE。真实模型通过用户消息调用 `task_intake`，但冻结源案例在分解准入时因缺 capability 被拒，未产生失败 Review；三次额度内未观察到同一真实模型链的 Diagnosis、候选、应用、`task_recover` 与原 AC 通过。这不撤销第 14 项的分项验收，也不能声称前端以外已全线实跑贯通。若以全链实跑为下一目标，应另立窄合同，先冻结可准入但会被独立 verifier 判失败的源任务，再运行完整链；不以脚本测试或拼接不同案例的证据代替。
+
 K1～K4 修正已确认的架构反例；K1 已验收，K2 已验收（含 2026-09-27 同日返工与复审返工，见 12b 行），K3 已验收（见 12c 行），K4 已验收（见 12d 行）；不是全仓整理或提前开放一个残缺版本。四份 prompt 是各票唯一详细合同，本文不复制它们的施工步骤。顺序为 K1 → K2 → K3 → K4 → A5 → A6，每票独立审核后再派下一票。只有 K2 → K3 有直接提交协议依赖，其余串行用于避免共享 runtime/工具合同同时迁移。历史已验收记录不改写，受影响保证按这四票重新验证。
 
 ### 五问复核：保留领域差异，直接用现成底座

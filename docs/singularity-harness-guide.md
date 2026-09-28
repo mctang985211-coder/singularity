@@ -1,6 +1,6 @@
 # Singularity Harness 工作指南
 
-当前状态（2026-09-28）：**K1～K4、A5、A6 均已验收。** A6 的 EVO-2～EVO-5 机制经定向反例与独立复核，EVO-1 在授权的两个冻结案例中由真实 Agent 分别组合现有能力（L1）和生成新 execution Skill（L2），双侧独立验收通过，再经受控 DSH 拒绝/允许门只应用到临时部署。证据见 §5.23、[交付记录](history/2026-09-28-a6-delivery-record.md)及[唯一计划](2026-09-20-vrtc-code-change-plan.md)。两例成功不代表任意目标均能自进化，也不代表真人审批或生产部署。
+当前状态（2026-09-28）：**K1～K4、A5、A6 均按各自合同验收；前端以外的真实模型全链纵向验收仍为 INCONCLUSIVE。** A6 的 EVO-2～EVO-5 机制经定向反例与独立复核，EVO-1 在授权的两个冻结案例中由真实 Agent 分别组合现有能力（L1）和生成新 execution Skill（L2），双侧独立验收通过，再经受控 DSH 拒绝/允许门只应用到临时部署。最终纵向试验未形成失败源 Review，因此未观察到同一真实模型链上的 Diagnosis → 候选 → 应用 → `task_recover` → 原 AC 通过；见[纵向验收记录](history/2026-09-28-final-backend-vertical-review.md)。A6 证据见 §5.23、[交付记录](history/2026-09-28-a6-delivery-record.md)及[唯一计划](2026-09-20-vrtc-code-change-plan.md)。两例成功不代表任意目标均能自进化，也不代表真人审批或生产部署。
 
 | 已确认的问题 | 修正合同与唯一所有者 |
 |---|---|
@@ -503,6 +503,8 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 ### 5.23 A6 + S2-R + S3：候选闭环与原目标新尝试（2026-09-28 已验收）
 
 完整合同见 [A6 prompt](execution-prompts/14-a6-autonomous-evolution.md) 与[计划 F.4](2026-09-20-vrtc-code-change-plan.md)，逐项入口、拒绝副作用、公共检查及真实 Agent 轨迹见[A6 交付记录](history/2026-09-28-a6-delivery-record.md)。EVO-2～EVO-5 机制已闭合并经独立静态复核；EVO-1 的 L1/L2 冻结案例分别取得真实模型效果证据，整票已验收。
+
+**最终纵向验收边界**：A6 分项结果不能合成为“一条真实模型全链已跑通”。[独立试验](history/2026-09-28-final-backend-vertical-review.md)中，真实模型经 `task_intake` 接受用户目标，但冻结案例要求尚不存在的 capability，分解在准入前被拒，不能产生失败源 Review；三次额度内也没有 Diagnosis、候选、应用或恢复。该试验结论为 INCONCLUSIVE，未证明产品缺陷。再验时先冻结**可准入且独立 verifier 会失败**的源任务，保留原根 AC，随后核对同一 graph/store 的 Review → Diagnosis → 候选与双侧验证 → 受控审批 → `task_recover` → 新根原 AC；脚本化链路仅作接线证据。
 
 - **有限候选与同一提交协议**：`EvolutionService` 支持已有 Skill 同名更新，以及恰好一条 capability 整行变更和可选新 execution Skill（`SKILL.md` + `SKILL.contract.json`，`resources=[]`）；新工具、verifier、权限、preset/runtime policy 与资源包具名拒绝。candidate/prepare/experiment/promotion/apply/rollback 都绑定行、table 文件和可选 Skill 的内容身份，复用 formatVersion 4 的 commit intent、逐目标原子替换与重开对账；开放 intent 的行和目录在普通准入中拒绝。
 - **双侧真实评估与成功源拒绝**：capability 基线沿普通准入产生真实 `not-admitted`，候选使用 override + extra skill roots 沿原 driver、独立 verifier、回归及 holdout；成功 Diagnosis 指向 verified Task/Run 且没有冻结比较器时，实验启动/续跑、promotion 和 apply 都重读 store 并具名拒绝，零实验、零应用、零新业务 Run。`evolution_list`、root evolution protocol 与 propose/prepare/replay/gate/decide/apply/rollback 文案现能正确呈现 row-only 与 row+Skill，不再空值崩溃或声称 capability 只可记录。
