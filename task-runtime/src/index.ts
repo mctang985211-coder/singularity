@@ -1646,7 +1646,7 @@ export interface RootRecoveryOutcome {
 }
 
 export class TaskRuntime extends Service {
-  static inject = ['task', 'agentRuntime', 'graphs']
+  static inject = ['task', 'agentRuntime', 'graphs', 'sessionQuery']
   static Config: z<Config> = ConfigSchema
 
   private readonly config: Config

@@ -584,6 +584,8 @@ describe('AgentRuntime root lifecycle', () => {
     // criteria to a review that returned inconclusive).
     expect(prompt).toContain('The contract carries only what the user\'s own words and answers support')
     expect(prompt).toContain('do not make a mandatory criterion depend on a review that may never happen')
+    expect(prompt).toContain('Reuse that checker where it covers the child, keep only criteria for distinct requirements')
+    expect(prompt).toContain('use known artifact paths rather than recursively searching a workspace')
     // The budget raise (K4) rides every root prompt — `task_budget_extend` is on
     // every root's allow-list — and it states the facts the model has to act on:
     // a tree that ran out is still reviewable on the reviewer's own allowance,
@@ -765,7 +767,8 @@ describe('the spawn request contract (A2)', () => {
     // The stable, unconditional rules migrated from the old spawn prompt...
     for (const rule of [
       'never declare completion yourself',
-      'make that command exit 0 in the checkout',
+      'use `task_verify`: it runs the contracted criteria under the verifier deadline',
+      'Do not copy an acceptance command into bash or a background job',
       'protected inputs must not be modified',
       'hand it in with `task_submit_result`',
       'Going idle is not a submission',

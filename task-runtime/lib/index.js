@@ -7206,7 +7206,8 @@ var TaskRuntime = class TaskRuntime extends Service {
 	static inject = [
 		"task",
 		"agentRuntime",
-		"graphs"
+		"graphs",
+		"sessionQuery"
 	];
 	static Config = ConfigSchema;
 	config;

@@ -18,7 +18,7 @@ export function defineTaskDecomposeTool(ctx: Context) {
     description:
       'Decompose the caller\'s current task into child tasks. The batch is admitted atomically and the runtime then runs them ' +
       'one at a time in dependency order; this call returns at admission and does not wait. Each child is verified ' +
-      'independently; only verified children count as done. Where this deployment reviews generated tasks, the batch may instead ' +
+      'against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead ' +
       'come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.',
     parameters: {
       reason: { type: 'string', required: true, description: 'Why this delegation is needed; recorded in each child handoff' },
@@ -69,7 +69,7 @@ export function defineTaskDecomposeTool(ctx: Context) {
                       'A parent-level childEvidence.criterionId must name an id the child it points to actually declared, ' +
                       'which only holds when that child declares the id explicitly here',
                   },
-                  command: { type: 'string', description: 'Shell command; exit code 0 proves the criterion (deterministic modes)' },
+                  command: { type: 'string', description: 'Shell command; exit code 0 proves the criterion (deterministic modes). Reuse an authoritative checker that already covers this result; do not duplicate its assertions' },
                   mode: {
                     type: 'string',
                     enum: ['deterministic', 'simulation', 'formal', 'measurement', 'review', 'composite'],
@@ -141,7 +141,7 @@ export function defineTaskDecomposeTool(ctx: Context) {
             },
             decomposable: {
               type: 'boolean',
-              description: 'Declare that this child should split further instead of doing the work: its worker is told to call task_decompose. Together with a capability gap this decides whether the child is admitted as decomposable.',
+              description: 'Mark true when the child spans separate, independently checkable results or capability boundaries worth delegating. Its worker decides from evidence whether to decompose or complete the work; do not prewrite its descendants. A capability gap also uses this marker for admission, but it grants no missing capability.',
             },
             requiresIndependentAcceptance: {
               type: 'boolean',

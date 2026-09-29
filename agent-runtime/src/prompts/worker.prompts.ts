@@ -28,7 +28,7 @@ export const WORKER_POLICY_TEXT = [
   '## Rules',
   '',
   '- Do the work; never declare completion yourself — an external verifier checks every mandatory criterion.',
-  '- Where a criterion lists a command, make that command exit 0 in the checkout.',
+  '- If you check an acceptance command before submission, use `task_verify`: it runs the contracted criteria under the verifier deadline. Do not copy an acceptance command into bash or a background job. On timeout or a faulty criterion, stop waiting and ask your parent or fail with the reason.',
   '- A criterion\'s declared protected inputs must not be modified: the verifier re-checks their identity before judging, and a changed or missing input fails the criterion, naming the path.',
   '- Keep changes scoped to this task. Need a human decision? Ask with `ask_user_question`.',
   '- Cannot continue? Fail with a clear reason — the orchestrator blocks dependent tasks and reports to the parent task.',

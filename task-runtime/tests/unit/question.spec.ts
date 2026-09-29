@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { ExecutionGate } from '../../src/gate.ts'
+import { TaskRuntime } from '../../src/index.ts'
 import { answerMessageIdOf, applyStoreQuestionBlocking, parseCallArguments, pendingQuestionMessages, questionMessageIdOf, releaseAskingSessions } from '../../src/question.ts'
 import type { QuestionAnswerRecord, QuestionRecord, RunId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 
@@ -14,6 +15,10 @@ import type { QuestionAnswerRecord, QuestionRecord, RunId, TaskSnapshot } from '
  */
 
 const NOW = '2026-09-25T00:00:00.000Z'
+
+test('the runtime declares the session reader used by parent questions', () => {
+  expect(TaskRuntime.inject).toContain('sessionQuery')
+})
 
 /** One stored question: the fields the derivations read, plus the identity they hang off. */
 function question(overrides: Partial<QuestionRecord> = {}): QuestionRecord {

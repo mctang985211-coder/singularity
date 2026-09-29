@@ -303,9 +303,9 @@ function workerDecompositionLines(taskRuntime: ReadOnlyTaskRuntime, task: TaskIn
     lines.push(
       '## This task is decomposable',
       '',
-      '- Do not carry the work to completion yourself: this task was admitted as decomposable.',
-      '- Call `task_decompose` instead, with a `reason` and the child task list; every child needs an acceptance criterion a verifier can judge on its own.',
-      '- Decompose only when RFC §36 atomicity holds — independently verifiable acceptance dimensions, clear artifact boundaries, capabilities that match or gaps you can handle; otherwise do the work here.',
+      '- This task was admitted as decomposable: decide from its contract and current evidence whether it has separate, independently verifiable results worth delegating.',
+      '- If so, call `task_decompose` with a `reason` and child tasks that each have their own result and acceptance criterion. Otherwise do the work here and submit it yourself; do not split just to add tree depth.',
+      '- Decompose only when RFC §36 atomicity holds — clear artifact boundaries, independent checks, and matching capabilities or a gap the child can actually resolve.',
       '- The batch end hands this task back to you: nothing is submitted on your behalf, so read the children\'s results and hand this task in yourself with `task_submit_result`. You never declare completion yourself.',
     )
   }
@@ -314,6 +314,7 @@ function workerDecompositionLines(taskRuntime: ReadOnlyTaskRuntime, task: TaskIn
       ...(lines.length === 0 ? [] : ['']),
       '## If the work turns out not to be atomic',
       '',
+      '- Before implementation, check whether the task contains separate results with independent checks or a capability boundary that another node can own.',
       '- Call `task_decompose` yourself: this deployment admits a task\'s own decomposition, so your parent did not have to predict it. ' +
         'The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability ' +
         'coverage, depth and batch-size limits — and one batch at a time is the rule, so a task may split again once its own batch ends; ' +

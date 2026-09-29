@@ -1046,6 +1046,8 @@ describe('the decomposition guidance in the contract projection', () => {
     expect(text).toContain('was admitted as decomposable')
     expect(text).toContain('`task_decompose`')
     expect(text).toContain('RFC §36')
+    expect(text).toContain('Otherwise do the work here and submit it yourself')
+    expect(text).not.toContain('Do not carry the work to completion yourself')
     expect(text).toContain('The batch end hands this task back to you')
     expect(text).toContain('hand this task in yourself with `task_submit_result`')
     // K1 §2: nothing is submitted on a parent's behalf, so no guidance block may

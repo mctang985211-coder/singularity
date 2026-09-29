@@ -8,6 +8,8 @@
 
 BB-1 已验收：通用模型接入 Skill 与 chip/Ball/验证方法完成，模型 importer 支持范围及波形时钟解释经审核修正，见[审核记录](history/2026-09-28-bb1-review.md)。BB-2 待复验（2026-09-29）：核心能力配置与真实 `bbdev`/`waveform` MCP 接线已有定向证据；每个长图的环境 setup 指定本图 Skill 目录，Run binding 冻结实际选中的内容。新图 `graph1` 的 BEMU CPU 切片与浅层 Task 生长通过，但 `bb-obligations` 资源绑定、waveform、Ball 加速和 RTL 未在图中使用；失败后发生诊断与普通重分解，未发生 `task_recover` 原根新尝试或自进化。实验使用共享预构建检出与未提交运行时代码，不能当作纯净基线复现。见[实验独立复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md)和[BB-2 交付记录](history/2026-09-29-bb2-delivery-record.md)。
 
+`graph1` 的根四次分解得到五个直接子 Task，所有子 Task 都按 `leaf` 交付且没有再分解；因此尚未观察到递归树。`allowRuntimeDecomposition=true` 已允许 leaf 节点自行分解，问题主要在派发粒度与提示：调查、资产生成、注册加构建等被打包成较大叶子。通用粒度规则已收在 [Task 参考](../../../.agents/skills/bb-pipeline/references/tasks.md)；`decomposable` 是父节点的预测，子节点应按现场证据决定执行或继续分解。BB-1 的若干 Skill 仍覆盖多个方法，尚不能称为原子方法库；它们归 Buckyball `.agents/skills` 按实际复用证据收窄，Harness 只维护能力索引。Skill 方法层级不等于 Task 图，不能按 Skill 目录生成 Task 树。下一次实跑须独立记录每个节点的分解或不分解理由、父子各自的验收，以及是否自然出现子节点分解；业务 PASS 仍由冻结的硬件结果判据决定，不以图深度充当正确性。
+
 | 已确认的问题 | 修正合同与唯一所有者 |
 |---|---|
 | ~~分解一次、子全终态即自动提交父，限制正常探索~~（K1 已验收） | [K1](execution-prompts/12a-k1-exploration.md)：runtime 交还父执行权，Run 内多批次、父主动提交；Task 保留事实（§5.18） |

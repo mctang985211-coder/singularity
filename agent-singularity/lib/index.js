@@ -4726,7 +4726,7 @@ function sessionId$9(exec) {
 function defineTaskDecomposeTool(ctx) {
 	return defineTool({
 		name: "task_decompose",
-		description: "Decompose the caller's current task into child tasks. The batch is admitted atomically and the runtime then runs them one at a time in dependency order; this call returns at admission and does not wait. Each child is verified independently; only verified children count as done. Where this deployment reviews generated tasks, the batch may instead come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.",
+		description: "Decompose the caller's current task into child tasks. The batch is admitted atomically and the runtime then runs them one at a time in dependency order; this call returns at admission and does not wait. Each child is verified against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.",
 		parameters: {
 			reason: {
 				type: "string",
@@ -4777,7 +4777,7 @@ function defineTaskDecomposeTool(ctx) {
 									},
 									command: {
 										type: "string",
-										description: "Shell command; exit code 0 proves the criterion (deterministic modes)"
+										description: "Shell command; exit code 0 proves the criterion (deterministic modes). Reuse an authoritative checker that already covers this result; do not duplicate its assertions"
 									},
 									mode: {
 										type: "string",
