@@ -35,11 +35,14 @@
 | 14 | A6 + S2-R + S3：自主改进与恢复 | **已验收（2026-09-28）**：EVO-2～EVO-5 机制及关键反例完成；EVO-1 原失败轨迹保留，修复公开候选入口后，L2 原冻结第 3 次和新冻结 L1 第 1 次由真实 Agent 各自生成候选，fix/holdout 独立验证及受控审批拒绝/允许通过，生产保护文件未变。两组案例成功不外推普遍成功率 | 实现主代理 + 分段 Sol/xhigh 子代理 | 本文 F.4、[派发 prompt](execution-prompts/14-a6-autonomous-evolution.md)、[交付记录](history/2026-09-28-a6-delivery-record.md) | EVO-1～EVO-5 已验收；下一项是第 15 项真实工作负载实验 |
 | 15 | Buckyball × CosyVoice2 首轮自由生长实跑 | **已验收，限 BEMU CPU 切片**：project3 根判据通过；运行时创建 3 个子 Task，深度 1、有人审；模型接入由夹具预置，Ball 加速为零，RTL 未运行；一次绕过 MCP 的直接 CMake 操作违反流程约束 | 实验主代理 + 独立验收子代理 | [实跑合同](execution-prompts/15-buckyball-cosyvoice2-free-growth.md)、[独立复核](history/2026-09-28-cosyvoice2-project3-review.md) | 仅证明冻结切片数值和有限节点生长；不能宣称完整模型接入、芯片设计或 RTL 通过 |
 | 16 | BB-1：已有 BB 方法拆为通用 Skill | **已验收（2026-09-28）**：六份 Skill 解析、两场景内容审核、实际工具声明与范围核对通过；审核修正模型 importer 支持范围及波形索引/周期解释。Skill `ef89fa7`，Buckyball `3d9ad0b9` | Flash 实现主代理 + Sol 独立复核 | [BB-1 合同](execution-prompts/16-bb-domain-skills.md)、[审核记录](history/2026-09-28-bb1-review.md) | BB1-1～4 通过；方法已验收，不宣称 MCP 可达或模型/RTL 实跑 |
-| 17 | BB-2：通用 Task / Skill / MCP 接线 | **待复验（2026-09-29）**：BB2-1/3 已有独立审核与真实 MCP 证据；每个长图的环境 setup 安装指定 Skill 目录，既有发现顺序优先取本图目录，Run 冻结实际内容；`bb-obligations` 模板移入绑定资源目录；类型检查基线归因未证实 | 定向修复 + Luna 全流程测试 | [BB-2 合同](execution-prompts/17-bb-capability-mcp-wiring.md)、[交付记录](history/2026-09-29-bb2-delivery-record.md)、[通用 Task 参考](../../../.agents/skills/bb-pipeline/references/tasks.md) | 本图 Skill 优先与绑定身份、合法 Task 准入、两个 MCP 的真实工具调用、完整图运行逐项核对；不以全局同名文件作为本图安装证据 |
+| 17 | BB-2：通用 Task / Skill / MCP 接线 | **待复验（2026-09-29）**：BB2-1/3 有独立审核与真实 MCP 证据，模板资源有定向测试；新图只实跑 BEMU CPU 与浅层 Task 生长，未触发 `bb-obligations` 绑定、waveform 或 RTL；类型检查基线归因未证实 | 实验执行者 + 独立审核 | [BB-2 合同](execution-prompts/17-bb-capability-mcp-wiring.md)、[实验复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md)、[交付记录](history/2026-09-29-bb2-delivery-record.md) | 按 BB2 原合同收口接线；图运行只对实际用到的能力判定，不把未触发项记通过或失败 |
+| 18 | CosyVoice2 硬件路径实跑 | **待启动**：选择官方来源的可验证算子边界，冻结权重、输入、参考和 checker；由 Agent 自行生长图，交付真实 Ball 运算的 BEMU 与同算子/输入的 Verilator 数值对照 | 实验执行者 + 独立审核 | 本文下一段；前轮[独立复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md) | 指令轨迹及禁用/扰动负控证明 Ball 实际参与；BEMU、RTL 均对冻结参考通过；缺 RTL 则保留真实阻塞，不能以 CPU 或无关 smoke 替代 |
 
 第 16～17 项建设 **Singularity 对 Buckyball 的通用领域适配**。Task 参考提供可实例化的目标/输入/产物/验收；BB Skill 提供方法；已有 MCP 提供工程事实。Task 不限定为目录内条目，方法和工具不固定任务图。领域 Skill 正本归 Buckyball 的 Skill 子模块，Task 参考与能力部署归 Harness；不为模型实验增加核心类型、工具队列、模板数据库或领域规划器。
 
 CosyVoice 是适配完成后的一个真实使用案例：具体版本、shape、权重、独立参考和最终 Verilator RTL 对照都归实例合同。当前已有 CPU 切片成功不能代替硬件验收，已有转置回归也不能冒充卷积加速。后续用户目标决定验证范围，通用资产不写固定的 CosyVoice 建设链。
+
+第 18 项把**业务结果**写进根判据，不写图的节点数、层数或必须调用的功能。模型接入、Ball/chip 设计、构建与验证由运行节点按证据取用。父子问答、失败复盘、Evolution、预算扩额和冷恢复只在其适用条件出现时核查原始事件、解决效果与额外成本；未启用/未触发记未验证，不能据此判无用。对可选策略，比较实际适用任务的成功率、错误修复、耗时与用量；若反复无独立收益且既有 DSH/Task 基元可直接承担，再删策略、配置和测试，不为保留功能预造失败或扩大根任务。
 
 **A6 合同外最终纵向核查（2026-09-28）**：[验收记录](history/2026-09-28-final-backend-vertical-review.md)为 INCONCLUSIVE。真实模型通过用户消息调用 `task_intake`，但冻结源案例在分解准入时因缺 capability 被拒，未产生失败 Review；三次额度内未观察到同一真实模型链的 Diagnosis、候选、应用、`task_recover` 与原 AC 通过。这不撤销第 14 项的分项验收，也不能声称前端以外已全线实跑贯通。若以全链实跑为下一目标，应另立窄合同，先冻结可准入但会被独立 verifier 判失败的源任务，再运行完整链；不以脚本测试或拼接不同案例的证据代替。
 

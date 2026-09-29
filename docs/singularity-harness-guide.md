@@ -6,7 +6,7 @@
 
 当前建设目标是 **BB 通用领域适配**，按[唯一计划第 16～17 项](2026-09-20-vrtc-code-change-plan.md)将已有方法拆成通用 Task 参考、Skill 与必要 MCP 接线。Task 参考正本在 Harness [bb-pipeline](../../../.agents/skills/bb-pipeline/references/tasks.md)，方法正本在 Buckyball `.agents/skills`，能力表在部署配置；执行者按实际目标取用，节点图由运行中的 Agent 根据证据生成。具体模型版本、张量、权重和 checker 留在实验实例。CosyVoice 的最终硬件验收仍需真实 Verilator RTL 与同一算子参考对照，不能因此在共享资产里预设模型专用工序。
 
-BB-1 已验收：通用模型接入 Skill 与 chip/Ball/验证方法完成，模型 importer 支持范围及波形时钟解释经审核修正，见[审核记录](history/2026-09-28-bb1-review.md)。BB-2 待复验（2026-09-29）：核心能力配置与真实 `bbdev`/`waveform` MCP 接线已有证据；每个长图的环境 setup 指定本图 Skill 目录，现有发现顺序优先取该目录，Run binding 冻结实际选中的内容。`bb-obligations` 机器模板已移入受绑定的资源目录；此改动及端到端图仍待测试。见[交付记录](history/2026-09-29-bb2-delivery-record.md)。
+BB-1 已验收：通用模型接入 Skill 与 chip/Ball/验证方法完成，模型 importer 支持范围及波形时钟解释经审核修正，见[审核记录](history/2026-09-28-bb1-review.md)。BB-2 待复验（2026-09-29）：核心能力配置与真实 `bbdev`/`waveform` MCP 接线已有定向证据；每个长图的环境 setup 指定本图 Skill 目录，Run binding 冻结实际选中的内容。新图 `graph1` 的 BEMU CPU 切片与浅层 Task 生长通过，但 `bb-obligations` 资源绑定、waveform、Ball 加速和 RTL 未在图中使用；失败后发生诊断与普通重分解，未发生 `task_recover` 原根新尝试或自进化。实验使用共享预构建检出与未提交运行时代码，不能当作纯净基线复现。见[实验独立复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md)和[BB-2 交付记录](history/2026-09-29-bb2-delivery-record.md)。
 
 | 已确认的问题 | 修正合同与唯一所有者 |
 |---|---|
