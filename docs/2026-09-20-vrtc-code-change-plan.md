@@ -1,6 +1,6 @@
 # VRTC-KISS 建设计划
 
-更新：2026-09-28。保留原文件名作为稳定入口；原临时计划在 [历史快照](history/2026-09-21-vrtc-plan-snapshot.md)。
+更新：2026-09-29。保留原文件名作为稳定入口；原临时计划在 [历史快照](history/2026-09-21-vrtc-plan-snapshot.md)。
 方向与实现事实以 [工作指南](singularity-harness-guide.md)为准；本文仅描述建设顺序、代码落点与可验收结果。
 本轮架构修正前基线：Singularity `eeac427`，外层 harness `600d169`。旧建设基线见历史执行记录。
 
@@ -38,7 +38,9 @@
 | 17 | BB-2：通用 Task / Skill / MCP 接线 | **待复验（2026-09-29）**：BB2-1/3 有独立审核与真实 MCP 证据，模板资源有定向测试；新图只实跑 BEMU CPU 与浅层 Task 生长，未触发 `bb-obligations` 绑定、waveform 或 RTL；类型检查基线归因未证实 | 实验执行者 + 独立审核 | [BB-2 合同](execution-prompts/17-bb-capability-mcp-wiring.md)、[实验复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md)、[交付记录](history/2026-09-29-bb2-delivery-record.md) | 按 BB2 原合同收口接线；图运行只对实际用到的能力判定，不把未触发项记通过或失败 |
 | 18 | CosyVoice2 硬件路径实跑 | **待启动**：选择官方来源的可验证算子边界，冻结权重、输入、参考和 checker；由 Agent 自行生长图，交付真实 Ball 运算的 BEMU 与同算子/输入的 Verilator 数值对照 | 实验执行者 + 独立审核 | 本文下一段；前轮[独立复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md) | 指令轨迹及禁用/扰动负控证明 Ball 实际参与；BEMU、RTL 均对冻结参考通过；缺 RTL 则保留真实阻塞，不能以 CPU 或无关 smoke 替代 |
 
-第 16～17 项建设 **Singularity 对 Buckyball 的通用领域适配**。Task 参考提供可实例化的目标/输入/产物/验收；BB Skill 提供方法；已有 MCP 提供工程事实。Task 不限定为目录内条目，方法和工具不固定任务图。领域 Skill 正本归 Buckyball 的 Skill 子模块，Task 参考与能力部署归 Harness；不为模型实验增加核心类型、工具队列、模板数据库或领域规划器。
+第 16～17 项建设 **Singularity 对 Buckyball 的通用领域适配**。预设 Task 库和 Skill 库必须按 `1 → 1.1 → 1.1.1` 表示内容树：简介概括本层职责和直接下层，范围逐层收窄，末层给出原子结果或局部方法。Task 每层提供目标/输入/产物/验收；Skill 提供方法及下钻入口；已有 MCP 提供工程事实。领域 Skill 树正本归 Buckyball 的 Skill 子模块，Task 树、库入口与能力部署归 Harness。先用既有 Markdown 标题、链接和 Skill description 完成组织，不增加核心类型、树服务、模板数据库或领域规划器。
+
+第 17 项收口时同时核对 [BB2-5](execution-prompts/17-bb-capability-mcp-wiring.md#验收派发时原样交给实现方)的库结构：两棵树的编号、简介与实际正文一致；抽取一个模型接入问题和一个 Ball 局部问题，能从简介找到对应末层条目及判据；实际 capability/Skill 仍可由原 loader 读取。库条目允许跨分支按证据组合，Task 不限于目录内条目；节点自行决定执行或继续分解，不要求把预设库完整实例化为运行图。第 18 项实跑消费整理后的目录，再按原始事件观察递归效果。
 
 CosyVoice 是适配完成后的一个真实使用案例：具体版本、shape、权重、独立参考和最终 Verilator RTL 对照都归实例合同。当前已有 CPU 切片成功不能代替硬件验收，已有转置回归也不能冒充卷积加速。后续用户目标决定验证范围，通用资产不写固定的 CosyVoice 建设链。
 

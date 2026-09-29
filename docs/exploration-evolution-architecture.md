@@ -135,7 +135,9 @@ scoped system section 只放可信 runtime 生成的结构与合同。引用的�
 
 ## 6. Task 列表与“可用”的含义
 
-三个目录不能混用：实例视图列正在进行/历史任务；模板视图（尚未建）列可选契约模式；capability_list 列能力实现。首版不建模板库，不增加 Task 搜索向量数据库。
+三个目录各有用途：实例视图列正在进行/历史任务；预设 Task/Skill 库列可选目标和方法；capability_list 列当前授权能力。预设库按 `1 → 1.1 → 1.1.1` 组织，上层简介简述职责与直接下层，末层收敛到原子结果或方法。Task 每层保留输入、产物与本层验收，父结果直接检验；Skill 每层提供方法与下钻入口。库层级支持发现和复用，当前节点根据证据决定继续分解或完成，允许选择相关分支或生成库中未列的任务。
+
+首版直接维护 Markdown 标题、链接及 Skill 的 `description`，BB 正本是 Harness [Task 树与库入口](../../../.agents/skills/bb-pipeline/SKILL.md)和 Buckyball 的领域 Skill；沿用现有 loader、能力绑定与 Task 准入。编号是库内容位置，运行时 Task/Run 身份和 `dependsOn` 仍按现有协议；不增加模板数据库、搜索服务、树调度器或第二份目录状态。
 
 第 9 项 A2+A1 合同见[唯一计划 D 节](2026-09-20-vrtc-code-change-plan.md)：context 提供根/当前目标、贡献、依赖状态与来源；默认视图少推相关信息，Agent 可主动请求同 graph 概览和按引用读 Task/Evidence/Session 细节。入口固定为 task_read、task_status(scope=related|graph)、context_read(kind/ref)，schema/长度/续读单位以 D 节读取表为准；不新建搜索语言或 catalog。无 Run reviewer 用既有 ledger，由 spawn 的 beforePrompt 在图发布后、首输入前确认绑定；解析器由装配层注入，context 不反向依赖工具包。单纯禁止兄弟读取会破坏真实 dependsOn 消费，不再采用。
 

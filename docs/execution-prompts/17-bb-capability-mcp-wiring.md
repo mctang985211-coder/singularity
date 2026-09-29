@@ -4,7 +4,7 @@
 
 ## 所有者与范围
 
-- 通用 Task 参考正本是 Harness `.agents/skills/bb-pipeline/references/tasks.md`；方法正本是 Buckyball `.agents/skills`（Skill 子模块）。每个长图的环境 setup 将所需 Skill 安装到该图运行 cwd 的 `.agents/skills`；已有 loader 先读取该目录，Run binding 冻结实际选中的文件及内容身份。不新增搜索服务、包装 Skill 或模板数据库；不要用全局同名 Skill 冒充已安装的本图资源。
+- 通用 Task 树正本是 Harness `.agents/skills/bb-pipeline/references/tasks.md`，库入口是 `bb-pipeline/SKILL.md`；方法树正本是 Buckyball `.agents/skills`（Skill 子模块）。两棵预设库按 `1 → 1.1 → 1.1.1` 编号，上层简介概括下层内容，末层是原子结果或方法，Task 每层有本层验收。复用现有标题与链接，方法正文仅在 Buckyball 的 Skill 子模块修改。每个长图的环境 setup 将所需 Skill 安装到该图运行 cwd 的 `.agents/skills`；已有 loader 先读取该目录，Run binding 冻结实际选中的文件及内容身份。不新增搜索服务、包装 Skill 或模板数据库；不要用全局同名 Skill 冒充已安装的本图资源。
 - 能力映射归 Harness 部署配置 `config.yml.example` 和本机忽略的 `config.yml`。`integrate-model` 使用 `model-integration`；设计 Skill 只给方法，构建/验证由目标需要的能力取得工具。设计节点不必为了读取构建事实直接获得所有 MCP，也可派具备对应能力的子 Task。
 - 删除 `task-runtime/src/index.ts` 内置的 BB 能力表：核心无 BB 默认能力，部署未配置能力时保留空表并对请求显式报缺口。更新实际消费者与必要测试夹具，不把领域表搬到另一个核心文件，不留旧导出/兼容别名。不重写能力解析或 provider 规则。
 - 删除 BB 回归能力对未安装的 `bb-verify` preset 的强依赖，复用已存在的部署默认/standard preset 和 per-Run 工具授权；不把 legacy verify-runner 搬回来。若本机显式 defaultPreset 有现场配置，保留它，不能由本票偷偷替换。
@@ -20,3 +20,5 @@ BB2-2：在无用户全局 Skill 的隔离 cwd 中安装 BB-1 Skill 和 BB Task 
 BB2-3：同一 env 绑定将 `bbdev` 与 `waveform` 解析到该 env 的真实 Buckyball 路径；实际 MCP `initialize/list_tools` 成功。用 `validate` 对显式 chip 取得真实结果，再用一个临时 VCD 做 waveform 的最小读操作，证明工具可达；缺 binary/server 必须失败，不能只拿 mock 或工具名列表填通过。不要求构建模型、跑 RTL/UVM/PPA；这里验的是已有工具装配，实际任务功能验收另由实例承担。
 
 BB2-4：只跑能力、Skill 发现、MCP env 绑定的定向检查及必要的受影响包构建/类型检查；不跑全量单测/集成或下载模型。交付各项真实命令、结果、文件/符号及删除清单；本机 `config.yml` 不提交。同步主 guide 与唯一计划最多标待验收，提交内层和外层对应指针，完成后停止。
+
+BB2-5（2026-09-29 内容修正）：两棵库树的 `1`、`1.1`、`1.1.1` 编号及引用与实际条目一致；每个父条目的简介能概括直接下层，末层范围局部且 Task 每层有自己的结果判据。以模型子图接入、已有 Ball 局部修正两个场景检查能否按简介下钻找到方法和验收；不要求运行整支、固定图深度或逐条派发，不新增未授权能力。只做内容/路径核对和已有 Skill 解析，不跑硬件构建。该项通过只证明目录组织，真实递归效果另由第 18 项实跑观察。
