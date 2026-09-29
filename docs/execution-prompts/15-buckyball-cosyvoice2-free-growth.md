@@ -1,5 +1,7 @@
 # Buckyball × CosyVoice2：自由生长实跑合同
 
+本文件是已执行的首轮切片合同，保留其验收范围供证据复核。当前完整工程实跑使用[第 18 项 root 与盯梢 prompt](18-buckyball-cosyvoice-full-stack.md)。
+
 本票的目的，是用真实 Buckyball 设计任务检验 Singularity 的 **Task 固定目标与验收、节点自行生长、Skill 按需读取、工具给出事实**。不要预先创建“模型→chip→Ball→验证”的节点图，不指定子任务数量、层数、顺序或角色。旧插件只供查已有代码和判据，不能把其 CI/PR 工作流搬进本图。
 
 ## 固定的目标，不固定做法

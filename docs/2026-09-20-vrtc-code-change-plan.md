@@ -36,7 +36,7 @@
 | 15 | Buckyball × CosyVoice2 首轮自由生长实跑 | **已验收，限 BEMU CPU 切片**：project3 根判据通过；运行时创建 3 个子 Task，深度 1、有人审；模型接入由夹具预置，Ball 加速为零，RTL 未运行；一次绕过 MCP 的直接 CMake 操作违反流程约束 | 实验主代理 + 独立验收子代理 | [实跑合同](execution-prompts/15-buckyball-cosyvoice2-free-growth.md)、[独立复核](history/2026-09-28-cosyvoice2-project3-review.md) | 仅证明冻结切片数值和有限节点生长；不能宣称完整模型接入、芯片设计或 RTL 通过 |
 | 16 | BB-1：已有 BB 方法拆为通用 Skill | **已验收（2026-09-28）**：六份 Skill 解析、两场景内容审核、实际工具声明与范围核对通过；审核修正模型 importer 支持范围及波形索引/周期解释。Skill `ef89fa7`，Buckyball `3d9ad0b9` | Flash 实现主代理 + Sol 独立复核 | [BB-1 合同](execution-prompts/16-bb-domain-skills.md)、[审核记录](history/2026-09-28-bb1-review.md) | BB1-1～4 通过；方法已验收，不宣称 MCP 可达或模型/RTL 实跑 |
 | 17 | BB-2：通用 Task / Skill / MCP 接线 | **待复验（2026-09-29）**：BB2-1/3 有独立审核与真实 MCP 证据，模板资源有定向测试；新图只实跑 BEMU CPU 与浅层 Task 生长，未触发 `bb-obligations` 绑定、waveform 或 RTL；类型检查基线归因未证实 | 实验执行者 + 独立审核 | [BB-2 合同](execution-prompts/17-bb-capability-mcp-wiring.md)、[实验复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md)、[交付记录](history/2026-09-29-bb2-delivery-record.md) | 按 BB2 原合同收口接线；图运行只对实际用到的能力判定，不把未触发项记通过或失败 |
-| 18 | CosyVoice2 硬件路径实跑 | **待启动**：选择官方来源的可验证算子边界，冻结权重、输入、参考和 checker；由 Agent 自行生长图，交付真实 Ball 运算的 BEMU 与同算子/输入的 Verilator 数值对照 | 实验执行者 + 独立审核 | 本文下一段；前轮[独立复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md) | 指令轨迹及禁用/扰动负控证明 Ball 实际参与；BEMU、RTL 均对冻结参考通过；缺 RTL 则保留真实阻塞，不能以 CPU 或无关 smoke 替代 |
+| 18 | CosyVoice2 完整工程实跑 | **待启动**：把完整 workload 构建、Ball 编写与集成、BEMU/Verilator RTL 对照和全量测试交给 root；由各节点决定工程方案与递归分解 | 部署盯梢模型 + 真实 Singularity 节点 + 独立审核 | [完整工程 root 与盯梢 prompt](execution-prompts/18-buckyball-cosyvoice-full-stack.md)；前轮[独立复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md) | FS-1～FS-4：完整工程、实际 Ball 的模型输出对照、完整适用测试集和提交复现；递归与其他机制另列实际效果，缺结果保留未完成 |
 
 第 16～17 项建设 **Singularity 对 Buckyball 的通用领域适配**。预设 Task 库和 Skill 库必须按 `1 → 1.1 → 1.1.1` 表示内容树：简介概括本层职责和直接下层，范围逐层收窄，末层给出原子结果或局部方法。Task 每层提供目标/输入/产物/验收；Skill 提供方法及下钻入口；已有 MCP 提供工程事实。领域 Skill 树正本归 Buckyball 的 Skill 子模块，Task 树、库入口与能力部署归 Harness。先用既有 Markdown 标题、链接和 Skill description 完成组织，不增加核心类型、树服务、模板数据库或领域规划器。
 
@@ -44,7 +44,7 @@
 
 CosyVoice 是适配完成后的一个真实使用案例：具体版本、shape、权重、独立参考和最终 Verilator RTL 对照都归实例合同。当前已有 CPU 切片成功不能代替硬件验收，已有转置回归也不能冒充卷积加速。后续用户目标决定验证范围，通用资产不写固定的 CosyVoice 建设链。
 
-第 18 项把**业务结果**写进根判据，不写图的节点数、层数或必须调用的功能。模型接入、Ball/chip 设计、构建与验证由运行节点按证据取用。父子问答、失败复盘、Evolution、预算扩额和冷恢复只在其适用条件出现时核查原始事件、解决效果与额外成本；未启用/未触发记未验证，不能据此判无用。对可选策略，比较实际适用任务的成功率、错误修复、耗时与用量；若反复无独立收益且既有 DSH/Task 基元可直接承担，再删策略、配置和测试，不为保留功能预造失败或扩大根任务。
+第 18 项的 root 目标是**完整 CosyVoice2 workload 到 Ball 实现、集成与全量测试**，工程方案和推进方式由 root 及子节点决定；部署者提供固定输入与独立根验收。阶段结果不能替代完整交付。根判据检查完整模型结果和测试事实，图的节点数、层数及工具调用次数另作观察。父子问答、失败复盘、Evolution、预算扩额和冷恢复在其适用条件出现时核查原始事件、解决效果与额外成本；未启用/未触发记未验证，不能据此判无用。对可选策略，比较实际适用任务的成功率、错误修复、耗时与用量；若反复无独立收益且既有 DSH/Task 基元可直接承担，再删策略、配置和测试，不为保留功能预造失败。
 
 第 18 项另作**递归机制观察**：根不预置完整树；任何节点在派发或执行前，用[通用 Task 粒度规则](../../../.agents/skills/bb-pipeline/references/tasks.md#粒度与继续生长)判断独立结果边界，记录为什么亲自完成或继续分解。原始 Task store 必须能区分 root 分解和子节点分解，并核对各层验收与 Skill/能力绑定。若没有子节点继续分解，硬件结果仍按根判据裁决，但递归能力的真实模型效果记未验证；不能用强制深度、无意义子任务或预写孙节点来制造通过。若确有复杂中间结果而节点仍一律不分解，应针对派发粒度、上下文提示和实际拒绝原因复盘，再判断是否有 runtime 缺陷。
 
