@@ -273,8 +273,7 @@ class Boot {
       readonly script: (sessionId: string, index: number) => readonly ScriptEntry[]
       /** The graph store the restart re-reads; absent for a first boot. */
       readonly graph?: GraphRecords
-      readonly budget?: Readonly<{ wallTimeMs?: number }>
-      readonly rootBudget?: Readonly<{ wallTimeMs?: number; maxRuns?: number }>
+      readonly rootBudget?: Readonly<{ maxRuns?: number }>
       /** The review policy a root contract is intaken under; the default is this runtime's own. */
       readonly generatedTaskReview?: 'off' | 'all'
       /**
@@ -1384,88 +1383,6 @@ describe('what a recovered wait refuses and what ends it (A4 §F.1)', () => {
     await second.dispose()
   }, 60_000)
 
-  it('ends a recovered wait at the deadline it started with, and a late answer does not revive it', async () => {
-    const dir = workspace()
-    const childGo = Promise.withResolvers<void>()
-    // The first process's window is long on purpose: the deadline this case is
-    // about is the *recovered* process's, computed from the run's own persisted
-    // `startedAt` — so the wait the dead process left cannot end it first.
-    const first = await Boot.open(dir, {
-      budget: { wallTimeMs: 60_000 },
-      script: (_sessionId, index) => index === 0
-        ? [{ tool: 'task_decompose', args: { reason: 'split the release work', children: children('child work') } }, { text: 'root: waiting' }]
-        : [{ waitFor: () => childGo.promise }, { tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'which contract holds?' } }, { hang: true }],
-    })
-    await first.begin()
-    await vi.waitFor(() => expect(first.spawns).toHaveLength(1), { timeout: 20_000 })
-    const childSession = first.spawns[0] as string
-    const childRun = (await first.runOf(childSession)).runId
-    const questionId = questionIdOf({ childRunId: childRun, requestKey: 'k1' })
-    const startedAt = (await first.runOf(childSession)).startedAt
-    childGo.resolve()
-    await vi.waitFor(async () => expect((await first.question(questionId))?.blocking).toBe(true), { timeout: 20_000 })
-    await first.crash()
-
-    // The store is reopened under a budget whose window the run's own `startedAt`
-    // has already used up: the recovered wait has nothing left to wait for.
-    const second = await Boot.open(dir, {
-      graph: first.commits(),
-      budget: { wallTimeMs: 1 },
-      script: sessionId => sessionId === ROOT
-        ? [{ text: 'root: my child is stopped' }]
-        : [{ text: 'child: never woken' }],
-    })
-    await vi.waitFor(() => expect(Date.now()).toBeGreaterThan(Date.parse(startedAt) + 1), { timeout: 20_000 })
-    await second.root()
-    await second.adopt()
-    const settled = await vi.waitFor(async () => {
-      const snapshot = await second.snapshot()
-      const run = snapshot.runs.find(candidate => candidate.runId === childRun)
-      expect(run?.status, JSON.stringify(snapshot.reviews.find(review => review.runId === childRun) ?? null)).toBe('failed')
-      return snapshot
-    }, { timeout: 20_000 })
-    const review = settled.reviews.find(candidate => candidate.runId === childRun)
-    // The existing budget rule, applied to a wait nobody in this process started:
-    // a budget stop with the wall time named, never a criteria failure.
-    expect(review?.localizedCause).toContain('budget exhausted')
-    expect(review?.localizedCause).toContain('wallTimeMs')
-    // The question's derived effects lapse with the run, and nothing is owed any
-    // more: the message the parent would have written has no address.
-    expect(settled.questions?.all.map(question => question.questionId)).toEqual([questionId])
-    expect(settled.questions?.byId[questionId]?.answers ?? []).toEqual([])
-    expect(await second.runtime.reconcileStore(STORE)).toMatchObject({
-      questionDeliveries: [],
-    })
-    // A late answer is refused by the store and revives nothing.
-    await expect(second.task.answerParentQuestionIn(STORE, {
-      questionId,
-      parentRunId: (await second.runOf(ROOT)).runId,
-      requestKey: 'a1',
-      answerDigest: 'a'.repeat(64),
-      resolves: true,
-      answerRef: { sessionId: ROOT, seq: 0 },
-      messageId: `m-a-${questionId}`,
-    }, ROOT)).rejects.toThrow(/is not open/)
-    expect((await second.snapshot()).runs.find(candidate => candidate.runId === childRun)?.status).toBe('failed')
-    await second.dispose()
-  }, 60_000)
-})
-
-/**
- * The replay combination this ticket can honestly cover (A4 §F.1 + A4-3's
- * replay half): a replay worker that really decomposes through the shipped tool,
- * a child of that batch that asks the replay — and a restart in between.
- *
- * What is *not* claimed here, and why: the replay **driver's** own continuation.
- * `runReplayTask` is a call-scoped experiment (it awaits one worker and reports
- * its outcome to the evolution ticket), and the rework's boundary is explicit —
- * a replay tree's cross-restart continuation belongs to A6/S2-R, which owns the
- * experiment's record and budget. What this case proves is the part that *is*
- * this ticket's: the replay run is a waiting parent like any other, so its
- * Session is resumed, the question addressed to it is delivered once, and the
- * answer reaches the child — the batch then settles by the ordinary rules.
- */
-describe('a question inside a replay tree across the restart (A4-3, replay half)', () => {
   it('resumes the replay parent and carries its child’s question across the restart', async () => {
     const dir = workspace()
     const childGo = Promise.withResolvers<void>()

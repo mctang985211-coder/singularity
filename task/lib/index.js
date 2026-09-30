@@ -1614,7 +1614,6 @@ var TaskState = class TaskState {
 		}
 		const inForce = approvedBudgetCeilings(index.all);
 		if (inForce.maxRuns !== void 0 && reading.maxRuns !== inForce.maxRuns) throw new Error(`task: budget extension "${requestKey}" ${describeBudgetReading("maxRuns", reading.maxRuns)}, but the ceiling in force here is ${inForce.maxRuns}; the tree's ceiling moved since this request was read, so committing it would re-base an approval on a value nobody approved — read the whole ceiling again and ask for the difference`);
-		if (inForce.deadlineAt !== void 0 && reading.deadlineAt !== inForce.deadlineAt) throw new Error(`task: budget extension "${requestKey}" ${describeBudgetReading("deadlineAt", reading.deadlineAt)}, but the deadline in force here is ${inForce.deadlineAt}; the tree's deadline moved since this request was read, so committing it would re-base an approval on a value nobody approved — read the whole ceiling again and ask for the difference`);
 		if (!nonEmpty(timestamp)) throw new Error(`task: budget extension "${requestKey}" has no recorded time on its event`);
 		const record = {
 			requestKey,
@@ -3008,6 +3007,7 @@ var TaskService = class extends Service {
 	* task the claim names and the whole-reading re-check.
 	*/
 	async recordBudgetExtensionIn(storeId, rootTaskId, claim, actor) {
+		if (claim.deadlineAt !== void 0 || claim.baseline.deadlineAt !== void 0 || claim.maxRuns === void 0) throw new Error("task: new budget extensions require maxRuns and accept no deadlineAt");
 		await this.serialIn(storeId, async (state) => {
 			const stored = state.snapshot().budgetExtensions?.byRequestKey[claim.requestKey];
 			if (stored !== void 0) {

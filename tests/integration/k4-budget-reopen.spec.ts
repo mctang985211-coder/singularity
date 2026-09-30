@@ -133,7 +133,7 @@ async function runFirstBatch(h: RunStack, root: { taskId: string; runId: string 
 
 describe('K4-3: the approved ceiling is the store’s fact, across a reopen', () => {
   it('records the raise a person approved, survives two restarts, and answers the retry from the record without a second approval', async () => {
-    const limits: Config['rootBudget'] = { wallTimeMs: 60_000, maxRuns: 4 }
+    const limits: Config['rootBudget'] = { maxRuns: 4 }
     const directory = sharedDirectory()
     const h1 = await startRunStack({ workspace: directory, roots: [ROOT], rootBudget: limits })
     const root = await h1.root(ROOT, ROOT_CONTRACT)
@@ -148,19 +148,18 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
     // extension, and its log is what it was.
     const person = new ScriptedBudgetApproval(true)
     person.install(h1)
-    const approved = { requestKey: 'k-more-room', maxRuns: 6, deadlineAt: new Date(Date.now() + 1_800_000).toISOString() }
+    const approved = { requestKey: 'k-more-room', maxRuns: 6 }
     const pending = h1.runtime.extendRootBudget(String(ROOT), HOST, approved)
     await vi.waitFor(() => expect(person.asks).toHaveLength(1))
     const ask = person.asks[0]!
     expect(ask.storeId).toBe(STORE)
     expect(ask.rootSessionId).toBe(String(ROOT))
-    expect(ask.effective).toEqual({ maxRuns: 4, deadlineAt: effectiveCeiling(openedWith, limits).deadlineAt })
-    expect(ask.configured).toEqual({ maxRuns: 4, deadlineAt: effectiveCeiling(openedWith, limits).deadlineAt })
+    expect(ask.effective).toEqual({ maxRuns: 4 })
+    expect(ask.configured).toEqual({ maxRuns: 4 })
     expect(ask.runsUsed).toBe(2)
     expect(ask.proposal).toMatchObject({
       requestKey: 'k-more-room',
       maxRuns: { previous: 4, next: 6 },
-      deadlineAt: { previous: effectiveCeiling(openedWith, limits).deadlineAt, next: approved.deadlineAt },
     })
     expect(ask.host.callId).toBe(HOST.callId)
     expect((await h1.snapshot(STORE)).budgetExtensions?.all).toEqual([])
@@ -175,7 +174,6 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
     expect(committed.rootTaskId).toBe(root.taskId)
     expect(committed.answeredFromRecord).toBe(false)
     expect(committed.record.maxRuns).toEqual({ previous: 4, next: 6 })
-    expect(committed.record.deadlineAt).toEqual({ previous: effectiveCeiling(openedWith, limits).deadlineAt, next: approved.deadlineAt })
     expect(committed.record.approvalRef).toBe(`approval:${HOST.callId}`)
     expect(eventKinds(h1).slice(beforeCommit.length)).toEqual(['TaskBudgetExtended'])
     expect((await h1.snapshot(STORE)).runs.map(run => run.runId)).toEqual(openedWith.runs.map(run => run.runId))
@@ -198,16 +196,12 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
     expect(eventKinds(h2)).toEqual(beforeRetry)
     expect(await h2.snapshot(STORE)).toEqual(reopened)
 
-    // The usage and the tree's own start are untouched, and the approved
-    // deadline is the instant that was approved — not a window re-measured from
-    // the restart, and not the deployment's number recomputed.
+    // The approved run ceiling and the original usage survive the restart.
     const granted = await h2.snapshot(STORE)
     expect(granted.runs.map(run => run.runId)).toEqual(openedWith.runs.map(run => run.runId))
     const raised = effectiveCeiling(granted, limits)
     expect(raised.maxRuns).toBe(6)
-    expect(raised.deadlineAt).toBe(approved.deadlineAt)
-    expect(raised.acceptedAt).toBe(openedWith.runs.find(run => run.sessionId === String(ROOT))!.startedAt)
-    expect(raised.configured).toEqual({ maxRuns: 4, deadlineAt: effectiveCeiling(openedWith, limits).deadlineAt })
+    expect(raised.configured).toEqual({ maxRuns: 4 })
 
     // One restart later the same request is still answered from the record: no
     // second approval, no second event, and the ceiling is where the person left
@@ -225,7 +219,6 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
     expect(await h3.snapshot(STORE)).toEqual(afterRestart)
     const stillRaised = effectiveCeiling(await h3.snapshot(STORE), limits)
     expect(stillRaised.maxRuns).toBe(6)
-    expect(stillRaised.deadlineAt).toBe(approved.deadlineAt)
   }, 60_000)
 
   it('lets a reopened store’s replay run on the approved total the configured one had spent', async () => {

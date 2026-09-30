@@ -1232,8 +1232,6 @@ declare function providerDefectLines(precheck: ProviderPrecheck): string[];
  * what is enforced and must be read as one.
  */
 interface RootBudgetConfig {
-  /** Wall-clock the whole tree may take, measured from the root run's own `startedAt`. */
-  wallTimeMs?: number;
   /** How many runs the tree may start, counted over the store's whole run list. */
   maxRuns?: number;
   /**
@@ -1244,37 +1242,20 @@ interface RootBudgetConfig {
   maxConcurrentWrites?: number;
 }
 /**
- * The two ceilings a root budget is measured in. Every member is optional, and
+ * The run ceiling a root budget is measured in. Every member is optional, and
  * absent means the deployment sets no such limit — which is a statement about
  * what is enforced and has to be read as one.
  */
 interface RootBudgetCeilings {
   /** The run count the tree may reach. */
   readonly maxRuns?: number;
-  /** The instant the tree must stop by. */
-  readonly deadlineAt?: string;
 }
-/**
- * A resolved root budget: the tree it belongs to, the instant it started, and
- * the limits in force — with the deployment's own ceilings kept beside them.
- *
- * Two ceilings per dimension, deliberately: `configured` is what this
- * deployment's `rootBudget` resolves to against the root's start, and the
- * top-level members are what is *in force*. They differ exactly when a person
- * has raised a ceiling (K4, `TaskSnapshot.budgetExtensions`), and a reader that
- * has to show "the total the deployment set" beside "the total now approved"
- * needs both rather than one derived from the other.
- */
+/** Persisted budget owner, observed start time, and run ceilings. */
 interface ResolvedRootBudget {
   /** The store's root task (`parentTaskId === undefined`) — the tree the budget belongs to. */
   readonly rootTaskId: TaskId;
   /** The root run's persisted start, read from the store: the instant the budget was accepted. */
   readonly acceptedAt: string;
-  /**
-   * The deadline in force: the approved absolute deadline when the store holds
-   * one, else `acceptedAt + wallTimeMs` when a wall time is configured.
-   */
-  readonly deadlineAt?: string;
   /** The run ceiling in force: the approved absolute count when the store holds one, else the configured count. */
   readonly maxRuns?: number;
   /** What the deployment itself configures, resolved against the same root start: the values before any approved raise. */
@@ -1315,15 +1296,8 @@ type BudgetVerdict = {
  * fresh allowance. No run naming a root session of this store means no owner,
  * and the store keeps the honest recovery diagnostic rather than a guess.
  *
- * The ceilings that come back are the ones in force: per dimension, the value the
- * last approved extension left when the store holds one (K4), and the configured
- * value otherwise. An approved ceiling is *not* re-derived from the wall time the
- * deployment configures today — a person's decision is not a function of the
- * configuration file — and a deployment that stops configuring a dimension does
- * not revoke one; what `configured` reports is what the deployment alone would
- * allow, for a reader that has to show both numbers. The root's own
- * `acceptedAt` is unchanged by any of this: an approved deadline is an absolute
- * instant, never a longer window measured from a fresh "now".
+ * Run ceilings come from the latest approved extension or the configuration.
+ * Historical deadline fields are read by the Task store and have no execution effect.
  *
  * `reason` texts are recovery diagnostics: they say what is missing (no root,
  * no run bound to this store as its root, several such tasks, a root run with
@@ -1332,11 +1306,9 @@ type BudgetVerdict = {
  */
 declare function resolveRootBudget(snapshot: TaskSnapshot, config: RootBudgetConfig): RootBudgetResolution;
 /**
- * Whether a run may start under the budget. Two refusals, in this order: the run
- * count has reached `maxRuns` (the limit is a count of what the store already
- * holds, so a restart cannot refund it), or the root deadline has arrived.
+ * Whether the persisted run count leaves room for another run.
  */
-declare function checkRunStart(snapshot: TaskSnapshot, budget: ResolvedRootBudget, nowMs?: number): BudgetVerdict;
+declare function checkRunStart(snapshot: TaskSnapshot, budget: ResolvedRootBudget): BudgetVerdict;
 /**
  * Whether a decomposition batch of `childCount` children may be admitted. The
  * check is a reservation, not a forecast: the children will each start a run, so
@@ -1345,20 +1317,6 @@ declare function checkRunStart(snapshot: TaskSnapshot, budget: ResolvedRootBudge
  * the budget runs out mid-batch.
  */
 declare function checkBatchAdmission(snapshot: TaskSnapshot, budget: ResolvedRootBudget, childCount: number): BudgetVerdict;
-/**
- * What is left of the tightest deadline that applies to a run, in milliseconds.
- *
- * `min` semantics over the bounds that can be in force: the run's own wall time
- * measured from its persisted `startedAt` (so a resumed run keeps the clock it
- * started with) and what is left of the root's deadline. A bound that has passed
- * returns 0 rather than a negative number, and `Infinity` means no bound at all
- * is configured.
- *
- * A bound whose instant cannot be read is treated as *reached* (`0`): a start
- * time nobody can parse is not a licence to run without a deadline, which is the
- * same discipline `resolveRootBudget` applies to a missing root start.
- */
-declare function runDeadlineMs(runStartedAt: string, perRunWallTimeMs: number | undefined, rootDeadlineAt: string | undefined, nowMs: number): number;
 /**
  * Refuse a root budget this deployment cannot execute. The one such limit is
  * `maxConcurrentWrites`: the workspace registry enforces exactly one writer, so
@@ -1840,40 +1798,10 @@ interface SpawnChildRequest {
   agentOptions?: AgentOptions;
   signal?: AbortSignal;
 }
-/**
- * One task run's resource budget (KISS §5 "预算即法律": any exhaustion forces
- * the exit, never a silent degradation). Every member is optional; the runtime
- * resolves its shipped defaults per key.
- *
- * What the orchestrator can honestly enforce is bounded by what it can observe
- * of an in-flight run — and that is only the wall clock (it awaits the
- * worker's idle) plus, at terminal time, one best-effort read of the run's
- * session log and token projection ({@link OrchestrateEnv.observeSession}):
- *
- * - `wallTimeMs` — **enforced in flight**: the worker wait races the deadline;
- *   on exhaustion the agent is cancelled and the run settles failed with
- *   `budget exhausted: wallTimeMs (...)`, named as a budget exhaustion, not a
- *   criteria failure. The same clock bounds the run a batch settles on its worker's
- *   behalf: a parent whose deadline has already passed is cancelled instead of
- *   ended (`finishBatch`), so no run is reported `verified` after the
- *   clock that was supposed to stop it.
- * - `maxToolCalls` — **post-hoc check only**: the session log is readable only
- *   once the run has settled, so a breach lands as an anomaly on the terminal
- *   review record (the verdict stands — the evidence is real). It is never
- *   presented as in-flight enforcement.
- * - `tokens` — **post-hoc check only**: same terminal seam, and the runtime
- *   ships no default for it — the only observation is the whole-session
- *   cumulative projection, systematically high for a long-lived root session,
- *   so no honest constant exists. Configured, a breach is annotated the same
- *   way.
- * - `attempts` — **declared, not enforced**: the orchestrator has no retry
- *   branch (guide §3.1 Non-Goals), so a run-count cap has nothing to gate; the
- *   field ships with the rest so the retry branch has its knob when it lands.
- */
+/** Per-run usage annotations, measured from the persisted Session. */
 interface BudgetConfig {
   maxToolCalls?: number;
   tokens?: number;
-  wallTimeMs?: number;
   attempts?: number;
 }
 /** Per-call overrides the cascade forwards on every verifier call (ticket C2's `VerifyRunOptions`). */
@@ -2062,9 +1990,8 @@ interface OrchestrateEnv {
    * module rebuilds it from the store with the same helpers the spawn used
    * ({@link resumeAdoptedWorker}), because a driver has nothing to add to it.
    *
-   * Absent means this deployment cannot bring a worker back, and a
-   * question-waiting run nobody can reach fails by name rather than waiting
-   * forever (see {@link resumeAdoptedWorker}).
+   * Absent means this deployment cannot bring a worker back, so activation
+   * fails by name (see {@link resumeAdoptedWorker}).
    */
   resumeWorkerSession?(request: AdoptedWorkerResumeRequest): Promise<AdoptedWorkerResume>;
 }
@@ -2090,13 +2017,11 @@ interface AdoptedWorkerResumeRequest {
  * - `live` — the same Session is live in this process now (or already was), so
  *   what is owed it can be delivered and its wait can be observed;
  * - `retry` — another owner holds the Session (`ownership-conflict`). Nothing is
- *   taken over, the run keeps its identity, and the wait stays bounded by the
- *   deadline; the next activation retries;
+ *   taken over and activation fails with the ownership conflict;
  * - `refused` — the resume could not be established under this identity
  *   (`session-missing`, `session-unreadable`, `binding-mismatch`,
  *   `not-in-graph`, `member-facts-missing`, `takeover-refused`, or a refusal of
- *   the managed-work reconciliation). The caller must walk the run to a terminal
- *   state: an in-flight run nobody can bring back is a dead wait, not a wait.
+ *   the managed-work reconciliation). Activation fails without altering the Run.
  */
 type AdoptedWorkerResume = {
   readonly status: 'live';
@@ -2224,7 +2149,7 @@ declare function escalationHint(what: string, tried: string, suggested: string):
  * caller's signal; from the atomic commit on, the batch belongs to the
  * runtime's per-batch controller (§3.7), so a tool call that returns — or a
  * caller that aborts its own call after the batch was admitted — cannot stop
- * work that is already persisted. Only a cancellation (batch, graph, deadline,
+ * work that is already persisted. Only a cancellation (batch, graph,
  * unload) reaches this signal.
  */
 interface BatchContext {
@@ -2475,7 +2400,7 @@ interface ReplayRunOutcome {
  *
  * A spawning replay is a worker like any other and follows the same rules: it
  * is born `active` and it *submits* — an idle worker is not a completion, the
- * wall-clock budget still applies, and verification comes from the one entry every
+ * usage accounting still applies, and verification comes from the one entry every
  * run shares ({@link settleSubmittedRun}). A workerless replay is born
  * `submitted` (origin `runtime`) because there is nobody to submit: its
  * criteria are judged by the verifier and the run settles on the verdict.
@@ -2486,7 +2411,7 @@ interface ReplayRunOutcome {
  * sub-execution a replayed worker decomposes into inherits exactly the same
  * binding; it is absent for an ordinary replay, whose run and spawn are what they
  * always were. The run's clock is not this entry's: its time is bounded by the
- * runtime's own per-run budget and the root tree's deadline alone.
+ * runtime's persisted run count and observed usage.
  */
 declare function runReplayTask(env: OrchestrateEnv, storeId: string, init: ReplayRunInit, signals?: ReplayRunSignals): Promise<ReplayRunOutcome>;
 /**
@@ -3711,8 +3636,7 @@ interface Config {
    */
   runBindingRoot?: string;
   /**
-   * What the whole tree may spend (A3 §3.5): a wall-clock limit measured from
-   * the root run's own persisted `startedAt`, a cap on the runs the tree may
+   * What the whole tree may spend (A3 §3.5): a cap on the runs the tree may
    * start, and the concurrent-writer count — which this deployment can only
    * honor as `1`. A limit that cannot be executed is refused at construction
    * ({@link assertRootBudgetConfig}) instead of accepted and quietly ignored.
@@ -3756,17 +3680,7 @@ interface ProviderLoadReport {
   readonly failed?: string;
 }
 declare const DEFAULT_VERIFY_TIMEOUT_MS: number;
-/**
- * The shipped per-run budget (KISS §8.6: granularity knobs live in config, not
- * in definitions). `wallTimeMs` is a backstop far above the longest legitimate
- * worker run this deployment has measured (a workload build takes 18–20 min,
- * so two hours kills only a genuinely stuck worker); `maxToolCalls` sits an
- * order above KISS's max_tool_calls 15 reference because this deployment's
- * submit/poll workers legitimately make dozens of calls — and it is a
- * post-hoc annotation, so a tight value would be noise, not a guardrail.
- * `attempts` matches the current reality: one run per task, no retry branch.
- * `tokens` carries no default on purpose — see {@link BudgetConfig}.
- */
+/** Per-run usage annotations; execution has no total wall-clock cutoff. */
 declare const DEFAULT_BUDGET: Readonly<BudgetConfig>;
 /**
  * The shipped review policy (T2/T3 §5): `off`. Every decomposition this
@@ -4143,30 +4057,10 @@ type StoreRecoveryStatus = {
   status: 'recovery-failed';
   reason: string;
 };
-/**
- * What a budget extension is asked for (K4): the request key the answer is
- * addressed by, and the totals wanted in force.
- *
- * The two totals are *absolute and final*, and there are deliberately no other
- * shapes: `maxRuns` is the whole run count the tree may reach once approved
- * (never "add five"), `deadlineAt` is the instant it must stop by (never "two
- * more hours", never a window measured from now), and there is no token
- * account, no per-run time and no `approved` flag — a request states what it
- * wants, and the *approval* is the one fact the caller cannot supply: it comes
- * from the approval channel the deployment installed, which this entry consults
- * itself.
- *
- * At least one of the two must be named. A dimension this deployment leaves
- * unset is unlimited, so naming it is refused rather than granted: an unset
- * ceiling is not a number to raise, and inventing one here would turn "no limit"
- * into a limit nobody asked for.
- */
+/** An approved extension raises the persisted run count ceiling. */
 interface RootBudgetExtensionRequest {
   readonly requestKey: string;
-  /** The run count asked for as the whole approved total: a positive whole number above the ceiling in force. */
-  readonly maxRuns?: number;
-  /** The absolute instant asked for as the deadline, later than the one in force (an explicit zone, e.g. `2026-09-27T12:00:00.000Z`). */
-  readonly deadlineAt?: string;
+  readonly maxRuns: number;
 }
 /**
  * The host execution one request came from: what the tool hands the runtime, and
@@ -4195,7 +4089,7 @@ interface RootBudgetApprovalAsk {
   /** The complete reading in force, frozen by the runtime right now and re-checked inside the store's write queue. */
   readonly effective: RootBudgetCeilings;
   readonly runsUsed: number;
-  readonly proposal: BudgetExtensionProposal;
+  readonly proposal: Omit<BudgetExtensionProposal, 'deadlineAt'>;
   readonly host: RootBudgetExtensionHost;
 }
 type RootBudgetApproval = (ask: RootBudgetApprovalAsk) => Promise<RootBudgetApprovalDecision>;
@@ -4268,7 +4162,7 @@ declare class TaskRuntime extends Service {
    * The batches and replays this process owns, keyed `<storeId>/<batchId>`
    * (`replay/<runId>` for a replay). The map is the registration the recovery
    * path consults, and the controller in each entry is what a cancellation,
-   * the root deadline or the unload path aborts.
+   * the unload path aborts.
    */
   private readonly drivers;
   /**
@@ -5142,26 +5036,6 @@ declare class TaskRuntime extends Service {
    */
   private judgeBudgetExtension;
   /**
-   * One dimension, judged from the two things that matter to this entry: what
-   * the request asks for (when it names the dimension at all) and what ceiling is
-   * in force. `requested` is already canonical for an instant, and `inForce` is
-   * the ceiling the store is under now.
-   *
-   * A dimension the request does not name is not judged here at all, and that is
-   * the point: the reading is the runtime's own frozen one and the store
-   * re-checks *all* of it inside its serial region
-   * (`TaskService.recordBudgetExtensionIn`, untouched), so a request read when
-   * another dimension was at a value that has since moved is refused there —
-   * where the decision between two racing grants is really made — rather than
-   * here, where a caller could have supplied the reading.
-   *
-   * The refusals, in the order a reading of them deserves: a named dimension the
-   * deployment leaves unbounded (an unset ceiling is unlimited, and naming it
-   * would invent a limit) and a named total that does not raise the value in
-   * force.
-   */
-  private judgeBudgetDimension;
-  /**
    * The first half of the pure pre-check (T2/T3 §2): the caller's declared
    * batch becomes a normalized one — protected acceptance inputs fixed against
    * the caller's own checkout (S1-V slice 2), the one normalization entry over
@@ -5710,8 +5584,7 @@ declare class TaskRuntime extends Service {
    * sub-execution are created under, forwarded verbatim to the orchestration —
    * this entry does not resolve the model, because what a run really ran under is
    * the caller's frozen fact, and the runtime's job is to make it true. The run's
-   * clock is this runtime's own (the per-run `Config.budget.wallTimeMs` and the
-   * root tree's deadline); a replay places no separate one. The options are a
+   * execution has no total wall-clock cutoff. The options are a
    * closed set: a key this build does not read — the deleted experiment clock
    * above all — refuses the replay by name here, before anything else runs.
    */
@@ -5795,20 +5668,6 @@ declare class TaskRuntime extends Service {
    * which proposal, or which members a second batch of that parent would have.
    */
   private batchHeldByRun;
-  /**
-   * Stop a `waiting_children` run whose batch this build cannot name (K1 §5, and
-   * the persistence decision that fixes it: an in-flight batch admitted before
-   * `(parentRunId, proposalId)` identified one is a **stopped old state**).
-   *
-   * The stop is by name and by nothing else: the run is settled `cancelled` with
-   * the fact recorded — no driver is registered, no child is started, and no batch
-   * is attributed to a run or a proposal the store does not name. The children the
-   * old admission created are left exactly as they are: which of them belonged to
-   * that batch is the very thing this build cannot read, so blocking them would be
-   * the guess this stop exists to avoid. The run's Session is reconciled like any
-   * other settlement's, and the warn is the operator's half of the refusal.
-   */
-  private stopUnidentifiedBatch;
   /**
    * The narrow capabilities one runtime-level settlement holds — the store, the
    * actor, the notification seam and the gate/workspace bookkeeping — for the one
@@ -5999,65 +5858,8 @@ declare class TaskRuntime extends Service {
    * answered with another batch's children.
    */
   awaitBatch(storeId: string, batchId: string): Promise<ChildOutcome[]>;
-  /**
-   * The recovery entry (A3 §3.6): settle or restart what a store left in flight.
-   * Idempotent, and safe to call on a store this process is already driving —
-   * the registered batches are skipped, and runs this process started are left
-   * to their own drivers.
-   *
-   * The order is depth-descending (a child before its parent), so a restarted
-   * parent batch reads its children already settled:
-   *
-   * - a run with no phase is an old record: it is left exactly as it is, and the
-   *   read side derives `needs-recovery` from the missing phase — inventing a
-   *   phase here would admit a run nobody knows the state of;
-   * - a run whose content binding no longer re-reads is failed by name (S1-C's
-   *   refusal, never a silent fallback);
-   * - `submitted` runs are verified (the phase is the whole recovery evidence);
-   * - `active` runs that are not a root are in-flight workers: nothing can
-   *   confirm the writes they may have made, so they are cancelled with the
-   *   diagnostic — a root run is left alone, because a root legitimately sits
-   *   `active` between its own decisions;
-   * - `waiting_children` runs are restarted, unless the workspace is held by
-   *   another live process, in which case they fail by name rather than writing
-   *   into a checkout somebody else owns.
-   *
-   * The run pass is followed by the proposal pass (T2/T3 §5–§6,
-   * {@link reconcileProposals}): a proposal that is `ready` or `approved` is
-   * continued — the re-check decides whether its approval still covers the batch,
-   * and §5's tightening catches a batch that was born under `off` — while a
-   * proposal waiting for a review is only re-offered to the review channel, never
-   * advanced, because only a persisted decision moves it. The order is the
-   * point: the run pass settles and restarts what a previous process left in
-   * flight, the workspace question ("is this checkout ours?") is answered before
-   * anything is admitted into it, and a batch the proposal pass admits is driven
-   * by the driver *it* starts — there is nothing left for the run pass to see.
-   * The report says what could not be finished and why, so a caller (the boot
-   * path, an adoption) can see the proposals recovery left for a person instead
-   * of reading a silent void.
-   */
+  /** Restore running Sessions from their persisted execution phase. */
   reconcileStore(storeId: string): Promise<ReconcileReport>;
-  /**
-   * The refusal code one resume failure names — read structurally (the stable
-   * class name and its `code`) rather than by `instanceof`, because the runtime
-   * that raises it and this package can be two modules of one contract in a
-   * source-built deployment, and a duplicate class object must not turn a named
-   * refusal into an unnamed failure.
-   */
-  private static resumeRefusalCodeOf;
-  /**
-   * Record one worker-recovery attempt in the pass's report *and* on the
-   * deployment's log (A4 §F.1): a `live` resume is the pass's own success and
-   * needs no warn, while a `retry` and a `refused` are exactly what an operator
-   * has to see — the first because the run keeps waiting on an owner that is not
-   * this process, the second because the run is about to be settled terminal for
-   * it. The report is the machine-readable half; this is the one adoption drops.
-   *
-   * `fact` names what makes the Session one the pass has to reach — an unresolved
-   * blocking question (A4 §F.1), or a batch that ended and whose result the run has
-   * not been told about (K1 §2, §5) — so a warn says which wait it is about.
-   */
-  private recordWorkerResume;
   /**
    * Wake a Session that was brought back with coordination input its own inbox
    * still holds unread (A4 §F.1's wake contract).
@@ -6068,7 +5870,7 @@ declare class TaskRuntime extends Service {
    * message that was durable *before* the crash (spliced and flushed, never
    * claimed) wakes nothing after the restart. The resumed driver stays idle with
    * the question or the answer sitting in its restored inbox, and the wait would
-   * only end at the deadline. So the pass looks at the deliveries that came back
+   * remain idle indefinitely. So the pass looks at the deliveries that came back
    * `already-present`, checks the *live* inbox of the session each one addressed
    * (the public `inbox.nextTurn`/`nextStep` read), and — only when that identity
    * is still pending there — wakes the session with the runtime's own voice: a
@@ -6091,8 +5893,7 @@ declare class TaskRuntime extends Service {
    * never have been claimed (spliced and flushed, then the process died), so the
    * pass's re-delivery answers `already-present` **without steering** — right,
    * because a second copy would be a duplicate — and a resumed parent with the
-   * message sitting in its restored inbox would otherwise stay idle until its
-   * deadline. The check is the same live-inbox read, and the wake is the same
+   * message sitting in its restored inbox would otherwise stay idle. The check is the same live-inbox read, and the wake is the same
    * runtime-voice notice: never a second copy of the message.
    */
   private wakeUnclaimedBatchResults;
@@ -6130,10 +5931,8 @@ declare class TaskRuntime extends Service {
    *    name: a resumed worker whose predecessor's jobs nobody could confirm
    *    stopped must not be allowed to run as if nothing of the sort happened.
    *
-   * A refusal of the resume itself is named and never worked around: an
-   * `ownership-conflict` is the retryable one (another owner holds the Session;
-   * this process must not take it over) and everything else means the identity
-   * cannot be established, which the caller settles as a terminal state.
+   * A refused resume fails activation by name; the original Run stays intact
+   * and no replacement Session is created.
    */
   private resumeAdoptedWorkerSession;
   /**
@@ -6149,13 +5948,7 @@ declare class TaskRuntime extends Service {
   private drainAdoptedSession;
   /** Let one resumed Session go again — the runtime's own stop path, never a private dispose. */
   private stopAdoptedSession;
-  /**
-   * Rebuild this process's workspace ownership for one store from the store's
-   * own state: the root run's own hold, and — when that run is waiting on
-   * children — the batch layer its driver hands to each child in turn. A tree
-   * whose runs all reached terminal states releases the claim instead, which is
-   * what makes a finished tree leave no marker behind.
-   */
+  /** Restore the persisted root → batch → worker ownership chain once. */
   private rebuildWorkspaceOwnership;
   /** Release every layer this process holds for one store's workspace, naming any layer that is not the store's. */
   private releaseStoreWorkspace;
@@ -6326,7 +6119,7 @@ declare class TaskRuntime extends Service {
    * Best-effort owner notification through the live agent (A3 §3.1, DSH's
    * tool-jobs precedent: a `plugin`-sourced `notice`). A session with no live
    * agent — a worker that already left, a headless test context — is skipped,
-   * and a failing follow-up never fails the settlement that reports it.
+   * and a failing follow-up reports its error to the caller.
    */
   private notify;
   /**
@@ -6338,7 +6131,7 @@ declare class TaskRuntime extends Service {
    * the recovery door with nothing to wake the Session again. The notices the
    * barrier's own pass raises are therefore raised here rather than sent: the
    * ready handle sends them in the order they were raised, and a failed or
-   * invalidated barrier drops them — a notice is best-effort by contract, and
+   * invalidated barrier drops them — a failed wake propagates its error, and
    * the next explicit activation raises the same one from the record again. With
    * no barrier in flight this is {@link notify}, unchanged.
    */
@@ -6374,7 +6167,7 @@ declare class TaskRuntime extends Service {
    * path shares — the live batch end, a delivery a barrier deferred, the recovery
    * pass and a re-delivery a caller asked for. The message's whole content is "you
    * are active again"; a run that settled while the delivery was on its way (a
-   * cancellation or a deadline that arrived first, a verdict somebody else made)
+   * cancellation that arrived first, a verdict somebody else made)
    * must not be woken by it, so a run that is no longer `running` is answered
    * `skipped` with zero side effects (K1 §2: 绝不唤活终态).
    */
@@ -6409,11 +6202,7 @@ declare class TaskRuntime extends Service {
    * contract's own text has no field that can raise a limit, and every value
    * here is resolved from this runtime's configuration at admission time.
    *
-   * Only the keys the deployment actually defined are included. `wallTimeMs`
-   * and the `auditOnly` trio are one record apart on purpose — a reader has to
-   * be able to tell which ceiling would have stopped the run — and an absent
-   * `tokens` (this deployment ships no default for it, see {@link BudgetConfig})
-   * means there is no token ceiling to record at all.
+   * Only configured usage annotations are recorded.
    */
   private admissionContext;
   /**
@@ -6583,4 +6372,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, CommitReconcileOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, type EvolutionCommitLedger, ExecutionGate, type ExecutionProviderVerdict, type ExecutionSkillSidecar, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type KnowledgeSkillSidecar, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type OwedBatchResult, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReuseContext, type ReuseDerivation, type ReviewContextInput, RootAdoption, RootBudgetApproval, RootBudgetApprovalAsk, RootBudgetApprovalDecision, type RootBudgetCeilings, type RootBudgetConfig, RootBudgetExtensionHost, RootBudgetExtensionRequest, RootBudgetExtensionResult, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, RootRecoveryCaller, RootRecoveryOutcome, type RootRecoveryRequest, type RootRecoveryReuse, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type RuntimeSettlementEnv, SKILL_SIDECAR_FILE, type SessionObservation, type SkillContentIdentity, type SkillContractDefect, type SkillContractDefectCode, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillResourceIdentity, type SkillSidecar, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type TerminalReviewFact, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, deriveReuse, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, CommitReconcileOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, type EvolutionCommitLedger, ExecutionGate, type ExecutionProviderVerdict, type ExecutionSkillSidecar, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type KnowledgeSkillSidecar, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type OwedBatchResult, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReuseContext, type ReuseDerivation, type ReviewContextInput, RootAdoption, RootBudgetApproval, RootBudgetApprovalAsk, RootBudgetApprovalDecision, type RootBudgetCeilings, type RootBudgetConfig, RootBudgetExtensionHost, RootBudgetExtensionRequest, RootBudgetExtensionResult, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, RootRecoveryCaller, RootRecoveryOutcome, type RootRecoveryRequest, type RootRecoveryReuse, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type RuntimeSettlementEnv, SKILL_SIDECAR_FILE, type SessionObservation, type SkillContentIdentity, type SkillContractDefect, type SkillContractDefectCode, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillResourceIdentity, type SkillSidecar, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type TerminalReviewFact, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, deriveReuse, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

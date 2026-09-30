@@ -187,74 +187,9 @@ describe('the coordination protocol on the real loop (A3)', () => {
     expect(parentRun.submission?.origin).toBe('worker')
   })
 
-  it('stops an idle worker that never submits at its deadline, after exactly one reminder', async () => {
-    const h = await startScriptedLoop({
-      budget: { wallTimeMs: 500 },
-      // The worker never submits: every turn it gets, it answers and ends. The
-      // root decomposes and then has nothing left to say.
-      script: (_sessionId, index): readonly ScriptEntry[] => index === 0
-        ? [{ tool: 'task_decompose', args: { reason: 'split the work', children: children('stuck child') } }]
-        : [{ text: 'working on it' }, { text: 'still working on it' }, { text: 'looking at it' }, { text: 'nearly there' }],
-    })
-    const root = await h.begin(ROOT_CONTRACT)
-    const batchId = await batchIdOf(h)
-
-    const outcomes = await h.runtime.awaitBatch(root.storeId, batchId)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
-    const child = childSession(h)
-    const childRun = (await h.runForSession(child)).run
-
-    // The run is bounded even when neither work nor a submission follows its idle.
-    expect(childRun.status).toBe('failed')
-    const snapshot = await h.snapshot(root.storeId)
-    const review = snapshot.reviews.find(item => item.runId === childRun.runId)!
-    expect(review.outcome).toBe('failed')
-    expect(review.localizedCause).toContain('budget exhausted: wallTimeMs')
-    expect(review.localizedCause).toContain('not a criteria failure')
-    // Idle checks do not count as work rounds.
-    const marks = h.eventsOf(root.storeId)
-      .filter((event): event is typeof event & { data: { kind: string; payload: { rounds: number } } } => event.type === 'task/event' && (event.data as { kind?: string }).kind === 'RunProgressMarked')
-    expect(marks).toHaveLength(0)
-    expect(childRun.noProgress).toBeUndefined()
-
-    // Exactly one reminder, and it is what opened the worker's second turn: turn
-    // one answered the prompt, the reminder answered nothing new.
-    const workerRequests = h.requestsOf(child)
-    expect(workerRequests).toHaveLength(2)
-    const reminded = workerRequests.filter(request => request.texts.some(text => text.includes('went idle without submitting')))
-    expect(reminded).toHaveLength(1)
-    expect(reminded[0]).toBe(workerRequests[1])
-    expect(reminded[0]!.texts.join('\n')).toContain('task_submit_result')
-
-    // The verifier never saw the run: no bundle, and no verifying transition.
-    expect(snapshot.evidence.some(item => item.taskRunId === childRun.runId)).toBe(false)
-    const verifying = h.eventsOf(root.storeId).filter(event => event.type === 'task/event' && (event.data as { kind?: string; runId?: string }).kind === 'TaskVerifying' && (event.data as { runId?: string }).runId === childRun.runId)
-    expect(verifying).toHaveLength(0)
-  })
-
-  it('cancels a continuous worker turn at its configured wall-clock deadline', async () => {
-    const h = await startScriptedLoop({
-      budget: { wallTimeMs: 250 },
-      script: (_sessionId, index): readonly ScriptEntry[] => index === 0
-        ? [{ tool: 'task_decompose', args: { reason: 'split the work', children: children('long turn') } }]
-        : [{ hang: true }],
-    })
-    const root = await h.begin(ROOT_CONTRACT)
-    const outcomes = await h.runtime.awaitBatch(root.storeId, await batchIdOf(h))
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
-    const child = childSession(h)
-    await h.agent(child).whenIdle()
-    expect(h.requestsOf(child)).toHaveLength(1)
-    const childRun = (await h.runForSession(child)).run
-    const review = (await h.snapshot(root.storeId)).reviews.find(item => item.runId === childRun.runId)!
-    expect(review.localizedCause).toContain('budget exhausted: wallTimeMs')
-    expect(childRun.submission).toBeUndefined()
-  })
-
   it('keeps a staged result active through four idle turns, then accepts the worker submission', async () => {
     let h!: ScriptedLoop
     h = await startScriptedLoop({
-      budget: { wallTimeMs: 10_000 },
       script: (_sessionId, index): readonly ScriptEntry[] => index === 0
         ? [{ tool: 'task_decompose', args: { reason: 'split the work', children: children('staged child') } }]
         : [

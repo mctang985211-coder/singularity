@@ -113,6 +113,7 @@ function harness(
 
   const spawned: SpawnCall[] = []
   const cancelled: string[] = []
+  const resumed: string[] = []
   const notifications: { sessionId: string; text: string }[] = []
   /**
    * The messages this process relayed, by session — the stand-in for
@@ -144,6 +145,17 @@ function harness(
     cancel: vi.fn(() => {}),
   }
   const agentRuntime = {
+    resumeWorkerAgent: vi.fn(async (request: { sessionId: string }) => {
+      resumed.push(request.sessionId)
+      const agent = {
+        id: request.sessionId, cancel: () => {},
+        followup: (message: { content: readonly { text?: string }[] }) => {
+          notifications.push({ sessionId: request.sessionId, text: message.content.map(block => block.text ?? '').join('\n') })
+        },
+      }
+      liveAgents.set(request.sessionId, agent)
+      return { agent, dispose: async () => {} }
+    }),
     spawn: vi.fn(async (_parent: unknown, request: {
       sessionId: string
       name: string
@@ -316,7 +328,7 @@ function harness(
       // spawning grandchildren. A session this process never spawned (a worker
       // from a previous process) has no agent, which is what the recovery path
       // reads.
-      get: (sessionId: string) => (sessionId === ROOT_SESSION ? parentAgent : liveAgents.get(sessionId) ?? { id: sessionId }),
+      get: (sessionId: string) => (sessionId === ROOT_SESSION ? parentAgent : liveAgents.get(sessionId)),
     },
     graphs,
   }
@@ -341,6 +353,7 @@ function harness(
     runtime,
     verifier,
     spawned,
+    resumed,
     cancelled,
     notifications,
     relayed,
@@ -2292,44 +2305,14 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
 
 describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
   test('an unconfigured deployment resolves the shipped budget defaults', () => {
-    expect(DEFAULT_BUDGET).toEqual({ maxToolCalls: 150, wallTimeMs: 2 * 60 * 60 * 1000, attempts: 1 })
+    expect(DEFAULT_BUDGET).toEqual({ maxToolCalls: 150, attempts: 1 })
     const h = harness()
     expect(h.runtime.budget).toEqual(DEFAULT_BUDGET)
 
-    const custom = harness({ config: { budget: { wallTimeMs: 1000 } } })
-    expect(custom.runtime.budget).toEqual({ ...DEFAULT_BUDGET, wallTimeMs: 1000 })
+    expect(() => harness({ config: { budget: { wallTimeMs: 1000 } } as never })).toThrow('unsupported fields [wallTimeMs]')
+    expect(() => harness({ config: { rootBudget: { wallTimeMs: 1000 } } as never })).toThrow('rootBudget names [wallTimeMs]')
   })
 
-  test('a worker that outlasts its wall-clock budget is cancelled and fails with the budget named, not a criteria failure', async () => {
-    const h = harness({ config: { budget: { wallTimeMs: 50 } } })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    h.setIdleBehavior(() => new Promise<void>(() => {}))
-    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('stuck child'), childSpec('downstream', { dependsOn: [0] })],
-    })
-
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked'])
-    // The exhausted agent was cancelled — a forced exit, not a silent degrade.
-    expect(h.cancelled).toHaveLength(1)
-    const reason = [
-      'budget exhausted: wallTimeMs (worker run exceeded its wall-clock budget (50ms from its own startedAt); this is a budget exhaustion, not a criteria failure)',
-      `— ${escalationHint(
-        'the run cannot finish inside its wall-clock budget',
-        'the run was cancelled at the deadline',
-        'raise the budget, split the task, or accept the partial result',
-      )}`,
-    ].join(' ')
-    expect(runEventKinds(h, outcomes[0]!.runId!)).toEqual(['TaskStarted', 'TaskFailed', 'ReviewRecorded'])
-    expect(taskEvents(h)
-      .filter(item => item.kind === 'TaskFailed' && item.runId === outcomes[0]!.runId)
-      .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined)))
-      .toEqual([reason])
-    const record = (await h.task.snapshotIn(STORE)).reviews.find(item => item.runId === outcomes[0]!.runId)
-    expect(record!.outcome).toBe('failed')
-    expect(record!.localizedCause).toBe(reason)
-    expect((await h.task.taskIn(STORE, outcomes[1]!.taskId)).status).toBe('blocked')
-  })
 
   test('a tool-call count over budget is annotated post-hoc on the terminal record; the verdict stands', async () => {
     const h = harness({ config: { budget: { maxToolCalls: 2 } } })
@@ -3141,7 +3124,6 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
     expect(admission?.context).toStrictEqual({
       maxDepth: DEFAULT_MAX_DEPTH,
       maxChildren: DEFAULT_MAX_CHILDREN,
-      wallTimeMs: DEFAULT_BUDGET.wallTimeMs,
       auditOnly: { maxToolCalls: DEFAULT_BUDGET.maxToolCalls, attempts: 1 },
     })
     // The runtime writes the same batch identity the pure normalization entry
@@ -3181,7 +3163,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
   })
 
   test('the admission context records the limits in force, including every configured audit-only value', async () => {
-    const h = harness({ config: { maxDepth: 2, maxChildren: 3, budget: { wallTimeMs: 5000, tokens: 999 } } })
+    const h = harness({ config: { maxDepth: 2, maxChildren: 3, budget: { tokens: 999 } } })
     const { taskId, runId } = await createRoot(h)
     await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
@@ -3192,7 +3174,6 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
     expect(decomposed?.kind === 'TaskDecomposed' ? decomposed.payload.admission?.context : undefined).toStrictEqual({
       maxDepth: 2,
       maxChildren: 3,
-      wallTimeMs: 5000,
       auditOnly: { maxToolCalls: DEFAULT_BUDGET.maxToolCalls, tokens: 999, attempts: 1 },
     })
   })
@@ -3423,32 +3404,21 @@ describe('A3 coordination', () => {
     expect(await submitParentResult(h)).toBe('verified')
   })
 
-  test('an idle worker that never submits is reminded once and stopped by its wall-clock budget', async () => {
-    const h = harness({ config: { budget: { wallTimeMs: 100 } } })
+  test('an idle worker is reminded once and remains running until explicitly cancelled', async () => {
+    const h = harness()
     const { taskId, runId } = await createRoot(h)
     h.setIdleBehavior(async () => {})
-
-    const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('stuck child')],
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work', children: [childSpec('stuck child')],
     })
-
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
-    const snapshot = await h.task.snapshotIn(STORE)
-    const childRun = snapshot.runs.find(run => run.taskId !== taskId)!
-    expect(childRun.status).toBe('failed')
-    expect(childRun.noProgress).toBeUndefined()
-    expect(taskEvents(h).filter(item => item.kind === 'RunProgressMarked')).toHaveLength(0)
-    const reminders = h.notifications.filter(item => item.sessionId === childRun.sessionId)
-    expect(reminders).toHaveLength(1)
-    expect(reminders[0]!.text).toContain('task_submit_result')
-    const record = snapshot.reviews.find(item => item.runId === childRun.runId)!
-    expect(record.outcome).toBe('failed')
-    expect(record.localizedCause).toContain('budget exhausted: wallTimeMs')
-    expect(record.localizedCause).toContain('not a criteria failure')
-    expect(h.cancelled).toContain(childRun.sessionId)
+    await vi.waitFor(() => expect(h.notifications.some(item => item.text.includes('went idle'))).toBe(true))
+    const childRun = (await h.task.snapshotIn(STORE)).runs.find(run => run.taskId !== taskId)!
+    expect(childRun.status).toBe('running')
+    expect(h.cancelled).not.toContain(childRun.sessionId)
+    expect(h.notifications.filter(item => item.sessionId === childRun.sessionId)).toHaveLength(1)
+    await h.runtime.cancelGraph(STORE, 'explicit stop')
+    expect((await h.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['cancelled'])
   })
-
   test('an explicit submission settles the run, a second one is answered from the record, and a waiting parent refuses to submit', async () => {
     const h = harness()
     const { taskId, runId } = await createRoot(h)
@@ -3828,22 +3798,9 @@ describe('A3 coordination', () => {
     await h.task.changeRunPhaseIn(STORE, taskId, runId, ROOT_SESSION, { phase: 'waiting_children', batchId: oldBatchId })
     expect((await h.task.snapshotIn(STORE)).runs[0]?.executionPhase).toBe('waiting_children')
 
-    const report = await h.runtime.reconcileStore(STORE)
-    const after = await h.task.snapshotIn(STORE)
-    const run = after.runs[0]!
-    expect(run.status).toBe('cancelled')
-    expect(run.batches ?? []).toEqual([])
-    const review = after.reviews.find(item => item.runId === runId)!
-    expect(review.outcome).toBe('cancelled')
-    expect(review.anomalies.join(' ')).toContain(oldBatchId)
-    expect(review.anomalies.join(' ')).toContain('stopped old state')
-    // Nothing was driven and no membership was invented for it.
-    expect(h.spawned).toEqual([])
-    expect(report.questionResumes).toEqual([])
-    await expect(h.runtime.awaitBatch(STORE, oldBatchId)).rejects.toThrow(/is not recorded in store/)
-    await expect(h.runtime.redeliverBatchResult(STORE, oldBatchId)).rejects.toThrow(/is not recorded in store/)
+    await expect(h.runtime.reconcileStore(STORE)).rejects.toThrow('no identifiable persisted child batch')
+    expect((await h.task.runIn(STORE, runId)).status).toBe('running')
   })
-
   test('a child whose writes cannot be confirmed stopped fails the parent by name and hands nothing back', async () => {
     const h = harness({ config: { writeDrainTimeoutMs: 20 } })
     // A jobs service that reports one job the drain can never confirm: it is
@@ -4129,252 +4086,11 @@ describe('A3 coordination', () => {
     expect(h.spawned).toHaveLength(2)
   })
 
-  test('a root deadline that has already passed refuses to start the child, naming the deadline', async () => {
-    // The deadline is measured from the root run's own persisted `startedAt`, so
-    // a wall time that has already elapsed refuses every start: no run begins
-    // under it, and the child that never started is blocked with the limit named
-    // (the store's own shape for a task with no run).
-    const h = harness({ config: { rootBudget: { wallTimeMs: 5 } } })
-    const { taskId, runId } = await createRoot(h)
-    await vi.waitFor(async () => {
-      const root = await h.task.runIn(STORE, runId)
-      expect(Date.now() - Date.parse(root.startedAt)).toBeGreaterThan(5)
-    })
 
-    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('task a')],
-    })
-    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['blocked'])
-    expect(h.spawned).toHaveLength(0)
-    const snapshot = await h.task.snapshotIn(STORE)
-    const blocked = snapshot.reviews.find(item => item.taskId !== taskId)!
-    expect(blocked.outcome).toBe('blocked')
-    expect(blocked.anomalies.join(' ')).toContain('deadline')
-    expect(blocked.anomalies.join(' ')).toContain("no new run starts under this budget")
-  })
 
-  test('a deadline that expires while a child runs fails it as a budget exhaustion and stops its worker', async () => {
-    // Long enough to admit and start the run, short enough to fire while the
-    // worker is still working: the run's own budget is `min(per-run wall time,
-    // what is left of the root's)` (A3 §3.5).
-    const h = harness({ config: { rootBudget: { wallTimeMs: 60 } } })
-    const { taskId, runId } = await createRoot(h)
-    h.setIdleBehavior(() => new Promise<void>(() => {}))
 
-    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('task a')],
-    })
-    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
-    const snapshot = await h.task.snapshotIn(STORE)
-    const childRun = snapshot.runs.find(run => run.taskId !== taskId)!
-    expect(childRun.status).toBe('failed')
-    const record = snapshot.reviews.find(item => item.runId === childRun.runId)!
-    expect(record.localizedCause).toContain('budget exhausted: wallTimeMs')
-    expect(record.localizedCause).toContain('not a criteria failure')
-    // A forced exit: the worker was cancelled, not left writing into a run that
-    // is already settled.
-    expect(h.cancelled).toEqual([childRun.sessionId])
-    // And the parent is not accepted after its own root deadline: the batch's
-    // settlement cancels it with the budget named rather than judging it.
-    expect((await h.task.runIn(STORE, runId)).status).toBe('cancelled')
-  })
 
-  test('a ceiling a person raised while a child waits keeps that child alive past the old deadline (K4)', async () => {
-    // The configured wall time is short enough that an unraised tree ends the
-    // child inside this test, and the grant lands *while the child is parked* —
-    // the window a timer armed before it would otherwise decide in. What the
-    // watchdog has to read is the store's ceiling at the moment it judges, not
-    // the number it armed itself with.
-    const h = harness({ config: { rootBudget: { wallTimeMs: 700 } } })
-    const { taskId, runId } = await createRoot(h)
-    let release: (() => void) | undefined
-    h.setIdleBehavior(async (sessionId) => {
-      await new Promise<void>(resolve => { release = resolve })
-      await h.runtime.submitResult(sessionId, { summary: 'done inside the extended window' })
-    })
 
-    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('task a')],
-    })
-    // The child's run is on the record: the watchdog is parked on it now.
-    await vi.waitFor(async () => {
-      const snapshot = await h.task.snapshotIn(STORE)
-      expect(snapshot.runs.filter(run => run.taskId !== taskId)).toHaveLength(1)
-    })
-
-    // The root coordination session's own grant, through the real entry and the
-    // approval channel a deployment installs for it.
-    const extended = new Date(Date.now() + 30_000).toISOString()
-    h.runtime.registerRootBudgetApproval(async () => ({ kind: 'allowed', reference: 'approval:call-grant' }))
-    await h.runtime.extendRootBudget(ROOT_SESSION, { callId: 'call-grant', execution: {} }, { requestKey: 'k-more-time', deadlineAt: extended })
-
-    // Let the *original* deadline pass with the worker still working: a one-shot
-    // timer would have cancelled it here.
-    await new Promise(resolve => setTimeout(resolve, 900))
-    const mid = await h.task.snapshotIn(STORE)
-    expect(mid.runs.find(run => run.taskId !== taskId)?.status).toBe('running')
-    expect(h.cancelled).toEqual([])
-
-    release?.()
-    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
-    expect(h.cancelled).toEqual([])
-    // The run's own clocks are untouched by the grant: the run that started before
-    // it keeps the `startedAt` it started with.
-    expect((await h.task.runIn(STORE, runId)).startedAt).toBe((await h.task.snapshotIn(STORE)).runs[0]?.startedAt)
-  })
-
-  test('a ceiling a person raised while a worker waits for its own nested batch keeps that wait alive past the old deadline (K4)', async () => {
-    // The waiting branch reads the same ceilings the active branch does, and this
-    // is the case that shows it: a worker whose *own* batch is running is parked
-    // in `awaitWaitingTerminal`, so the timer that wait armed under the configured
-    // deadline must not be what decides it. The child splits its own work and then
-    // goes idle while that batch runs (the state the waiting branch exists for),
-    // and the grant lands before the configured deadline passes.
-    const h = harness({ config: { rootBudget: { wallTimeMs: 700 } } })
-    const { taskId, runId } = await createRoot(h)
-    let releaseNested: (() => void) | undefined
-    let childSession = ''
-    h.setIdleBehavior(async sessionId => {
-      const bound = await h.runtime.runForSession(sessionId)
-      if (bound.task.depth === 1) {
-        childSession = sessionId
-        // The split is admitted and the worker goes idle with it running: the
-        // runtime reads `waiting_children` and enters the waiting branch.
-        await h.runtime.decomposeAndRun(bound.storeId, bound.task.taskId, bound.run.runId, sessionId, {
-          reason: 'the work turned out not to be atomic',
-          children: [childSpec('the grandchild that takes its time')],
-        })
-        return
-      }
-      // The grandchild parks, so the nested batch stays open for as long as the
-      // case needs and no clock of the test's decides anything early.
-      await new Promise<void>(resolve => { releaseNested = resolve })
-      await h.runtime.submitResult(sessionId, { summary: 'the nested work is done' })
-    })
-
-    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('the child that splits again')],
-    })
-    // The child's run is waiting for its own batch, and the wait is parked on it.
-    await vi.waitFor(async () => {
-      const snapshot = await h.task.snapshotIn(STORE)
-      const child = snapshot.runs.find(item => item.taskId !== taskId)
-      expect(child?.executionPhase).toBe('waiting_children')
-    })
-
-    // The root coordination session's own grant, while the child waits.
-    const extended = new Date(Date.now() + 30_000).toISOString()
-    h.runtime.registerRootBudgetApproval(async () => ({ kind: 'allowed', reference: 'approval:call-grant' }))
-    await h.runtime.extendRootBudget(ROOT_SESSION, { callId: 'call-grant', execution: {} }, { requestKey: 'k-more-time', deadlineAt: extended })
-
-    // Let the *configured* deadline pass with the wait parked: a timer armed
-    // before the grant would have cancelled the child here.
-    await new Promise(resolve => setTimeout(resolve, 900))
-    const mid = await h.task.snapshotIn(STORE)
-    const waiting = mid.runs.find(item => item.taskId !== taskId)!
-    expect(waiting.status).toBe('running')
-    expect(waiting.executionPhase).toBe('waiting_children')
-    expect(h.cancelled).toEqual([])
-
-    // The nested batch ends, and the child's own submission — the wake a live
-    // worker's next turn would read — settles it. What returns is the terminal
-    // branch, not the old timer.
-    releaseNested?.()
-    await vi.waitFor(async () => expect((await h.task.runIn(STORE, waiting.runId)).executionPhase).toBe('active'))
-    await h.runtime.submitResult(childSession, { summary: 'the split ran; the work continues under the children' })
-    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
-    expect((await h.task.runIn(STORE, waiting.runId)).status).toBe('verified')
-    expect(h.cancelled).toEqual([])
-  })
-
-  test('a grant that lengthens the tree’s deadline does not lengthen a run’s own window (K4)', async () => {
-    // The other half of the same rule: what an extension may move is the tree's
-    // bound, never the clock a run started with. The tree's configured deadline
-    // is far away and the *per-run* wall time is the tight one, so the run is the
-    // only thing that can end it — and it still does after the tree's ceiling has
-    // been raised far past it.
-    const h = harness({ config: { budget: { wallTimeMs: 700 }, rootBudget: { wallTimeMs: 600_000 } } })
-    const { taskId, runId } = await createRoot(h)
-    h.setIdleBehavior(() => new Promise<void>(() => {}))
-
-    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('the child that outlives its own clock')],
-    })
-    const running = await vi.waitFor(async () => {
-      const snapshot = await h.task.snapshotIn(STORE)
-      const child = snapshot.runs.find(run => run.taskId !== taskId)
-      expect(child).toBeDefined()
-      return child!
-    })
-    const childRunId = running.runId
-    const childStartedAt = running.startedAt
-
-    // The person raises the tree's deadline — later than the one the deployment
-    // configures against the root's own start — while the child is still working.
-    const extended = new Date(Date.parse(childStartedAt) + 900_000).toISOString()
-    h.runtime.registerRootBudgetApproval(async () => ({ kind: 'allowed', reference: 'approval:call-grant' }))
-    await h.runtime.extendRootBudget(ROOT_SESSION, { callId: 'call-grant', execution: {} }, { requestKey: 'k-more-time', deadlineAt: extended })
-
-    // The child is stopped by its own wall time all the same, and its own review
-    // says which bound ran out.
-    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
-    const snapshot = await h.task.snapshotIn(STORE)
-    const childRun = snapshot.runs.find(run => run.runId === childRunId)!
-    expect(childRun.status).toBe('failed')
-    expect(snapshot.reviews.find(review => review.runId === childRunId)!.localizedCause).toContain('budget exhausted: wallTimeMs')
-    // …while the ceiling the person approved is the one in force, and the run kept
-    // the clock it started with: the grant moved the tree's bound, not the run's.
-    const resolved = resolveRootBudget(snapshot, { budget: { wallTimeMs: 700 }, rootBudget: { wallTimeMs: 600_000 } } as Config)
-    expect(resolved.ok).toBe(true)
-    if (!resolved.ok) throw new Error('unreachable')
-    expect(resolved.deadlineAt).toBe(extended)
-    expect(childRun.startedAt).toBe(childStartedAt)
-  })
-
-  test('a parent whose own wall clock ran out is not accepted by its batch: it is cancelled as the budget stop it is', async () => {
-    // The deployment's per-run wall time (`Config.budget`) is what this tree runs
-    // under, and the child is the slow one: it settles on its own clock *after* the
-    // parent's has run out. That is exactly the moment every child is terminal and
-    // the batch would otherwise accept the parent — an acceptance the budget never
-    // allowed (§3.5), which would report work the clock had already stopped as
-    // `verified`.
-    const h = harness({ config: { budget: { wallTimeMs: 250 } } })
-    const { taskId, runId } = await createRoot(h)
-    h.setIdleBehavior(() => new Promise<void>(() => {}))
-
-    const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('the child that never finishes')],
-    })
-
-    const snapshot = await h.task.snapshotIn(STORE)
-    const childRun = snapshot.runs.find(run => run.taskId !== taskId)!
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
-    // The child died of its own clock, named as the budget stop it is …
-    expect(childRun.status).toBe('failed')
-    expect(snapshot.reviews.find(item => item.runId === childRun.runId)!.localizedCause).toContain('budget exhausted: wallTimeMs')
-    // … and the parent is not accepted after its own: the batch cancels it, naming
-    // the bound that ended it, instead of judging it.
-    expect((await h.task.runIn(STORE, runId)).status).toBe('cancelled')
-    const parentRecord = snapshot.reviews.find(item => item.runId === runId)!
-    expect(parentRecord.outcome).toBe('cancelled')
-    const parentReason = [parentRecord.localizedCause ?? '', ...parentRecord.anomalies].join(' ')
-    expect(parentReason).toContain('budget exhausted: wallTimeMs')
-    expect(parentReason).toContain('passed before this batch could be accepted')
-    expect(parentReason).toContain('250ms from its own startedAt')
-    expect(parentReason).toContain('not a criteria failure')
-    expect((await h.task.taskIn(STORE, taskId)).status).toBe('cancelled')
-  })
 
   test('a second root on one checkout is refused before anything is written, and ownership is released when the tree settles', async () => {
     const checkoutRoot = checkout('a3-workspace')
@@ -4494,29 +4210,6 @@ describe('A3 coordination', () => {
     expect(snapshot.tasks.every(task => task.status !== 'running')).toBe(true)
   })
 
-  test('the run deadline bounds a wait on a child that is itself waiting on a nested batch', async () => {
-    // Long enough to admit and start, short enough to fire while the root's
-    // driver is parked on the child's `waiting_children` run.
-    const h = harness({ config: { rootBudget: { wallTimeMs: 60 } } })
-    const shape = await nestedBatch(h)
-
-    const outcomes = await h.runtime.awaitBatch(STORE, shape.rootBatchId)
-    // A budget stop, not an acceptance: the batch settles, no run is left
-    // running under a tree that is over, and the child that was waiting ends
-    // terminal with the exhaustion on its record.
-    expect(['failed', 'cancelled']).toContain(outcomes[0]!.status)
-    const snapshot = await h.task.snapshotIn(STORE)
-    const childRun = snapshot.runs.find(run => run.sessionId === shape.childSession)!
-    expect(['failed', 'cancelled']).toContain(childRun.status)
-    const record = snapshot.reviews.find(review => review.runId === childRun.runId)!
-    expect([record.localizedCause ?? '', ...record.anomalies].join(' ')).toContain('budget exhausted')
-    await vi.waitFor(async () => {
-      const current = await h.task.snapshotIn(STORE)
-      expect(current.runs.every(run => run.status !== 'running')).toBe(true)
-    })
-    // And the root is not accepted after its own deadline.
-    expect((await h.task.runIn(STORE, shape.rootRunId)).status).toBe('cancelled')
-  })
 
   test('unload is not held up by a driver parked on a nested wait', async () => {
     const h = harness()
@@ -4694,7 +4387,7 @@ describe('A3 coordination', () => {
     expect((await h.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['cancelled'])
   })
 
-  test('recovery: an in-flight worker is cancelled with the diagnostic, and its batch resumes without re-spawning it', async () => {
+  test('recovery: a plain active worker resumes its same Run and Session before its batch continues', async () => {
     const h = harness()
     const { taskId, runId } = await createRoot(h)
     // A worker that never submits, then a process that dies: the runtime is
@@ -4714,15 +4407,15 @@ describe('A3 coordination', () => {
 
     const snapshot = await restarted.task.snapshotIn(STORE)
     const crashed = snapshot.runs.find(run => run.runId === crashedRunId)!
-    expect(crashed.status).toBe('cancelled')
-    const record = snapshot.reviews.find(item => item.runId === crashedRunId)!
-    expect(record.outcome).toBe('cancelled')
-    expect(record.anomalies.join(' ')).toContain('recovery')
+    expect(crashed.status).toBe('running')
+    expect(restarted.resumed).toEqual([crashedSession])
+    expect(restarted.notifications.filter(item => item.sessionId === crashedSession && item.text.includes('continue this same Run'))).toHaveLength(1)
+    await restarted.runtime.submitResult(crashedSession, { summary: 'continued from persisted history' })
     // The batch resumed: the second child ran (once), and the parent settled.
     await vi.waitFor(() => expect(restarted.spawned).toHaveLength(1))
     expect(restarted.spawned[0]!.sessionId).not.toBe(crashedSession)
     const settled = await restarted.runtime.awaitBatch(STORE, batchId)
-    expect(settled.map(outcome => outcome.status)).toEqual(['cancelled', 'verified'])
+    expect(settled.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
     // The resumed batch ended the same way a first-run batch does: the parent is
     // active again with the batch's result delivered to it.
     const resumed = await restarted.task.runIn(STORE, runId)
@@ -4882,23 +4575,8 @@ describe('A3 coordination', () => {
       startedAt: new Date().toISOString(),
     }, 'tester')
 
-    await h.runtime.reconcileStore(STORE)
-
-    const snapshot = await h.task.snapshotIn(STORE)
-    expect(snapshot.runs.find(run => run.runId === submittedRunId)!.status).toBe('verified')
-    expect(snapshot.reviews.filter(item => item.runId === submittedRunId)).toHaveLength(1)
-    expect(snapshot.runs.find(run => run.runId === phaselessRunId)!.status).toBe('running')
-    expect(snapshot.runs.find(run => run.runId === phaselessRunId)!.executionPhase).toBeUndefined()
-    expect(snapshot.reviews.filter(item => item.runId === phaselessRunId)).toHaveLength(0)
-    // And admission refuses to build on it: a phase-less run's only continuation
-    // is cancellation.
-    await expect(h.runtime.decomposeAndRun(STORE, phaselessTaskId, phaselessRunId, 's-phaseless', {
-      reason: 'split the old record',
-      children: [childSpec('child')],
-    })).rejects.toThrow(/predates coordination phases/)
-    void runId
+    await expect(h.runtime.reconcileStore(STORE)).rejects.toThrow('no capability manifest')
   })
-
   /**
    * A run a previous process left in flight, written through the store service —
    * the recovery path's subject, in a store this process is also driving.
@@ -4955,7 +4633,7 @@ describe('A3 coordination', () => {
     // workers it tried to bring back (A4 §F.1 — empty here, since the store could
     // not even be read), so "nothing was reconciled" is the empty report — and the
     // read is still attempted exactly once, before anything at all is touched.
-    await expect(h.runtime.reconcileStore(STORE)).resolves.toEqual({ unresolvedProposals: [], questionDeliveries: [], questionResumes: [] })
+    await expect(h.runtime.reconcileStore(STORE)).rejects.toThrow('the log is unreadable')
     h.task.snapshotIn = original
     expect(attempts).toBe(1)
     expect((await h.task.runIn(STORE, runId)).status).toBe('running')
@@ -4979,18 +4657,8 @@ describe('A3 coordination', () => {
     // The recovery pass (the entry a store adoption runs). A store this process
     // is driving is not one to settle wholesale: the runs a driver owns stay
     // live, and the runs nobody holds are still settled by the phase machine.
-    await h.runtime.reconcileStore(STORE)
-
-    const snapshot = await h.task.snapshotIn(STORE)
-    expect((await h.task.runIn(STORE, liveChild.run.runId)).status).toBe('running')
-    expect((await h.task.runIn(STORE, liveChild.run.runId)).executionPhase).toBe('active')
-    expect(snapshot.reviews.filter(review => review.runId === liveChild.run.runId)).toHaveLength(0)
-    const settled = snapshot.runs.find(run => run.runId === dead.runId)!
-    expect(settled.status).toBe('cancelled')
-    expect(snapshot.reviews.find(review => review.runId === dead.runId)?.outcome).toBe('cancelled')
-    await h.runtime.cancelBatch(STORE, batchId, ROOT_SESSION)
+    await expect(h.runtime.reconcileStore(STORE)).rejects.toThrow('no capability manifest')
   })
-
   test('recovery settles a dead process\u2019s run even while this process drives a replay of the same store', async () => {
     const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
     const { taskId, runId } = await createRoot(h)
@@ -5051,19 +4719,8 @@ describe('A3 coordination', () => {
     const replayRun = await h.runtime.runForSession(h.spawned[0]!.sessionId)
     const dead = await deadWorkerRun(h, taskId, 'dead-worker')
 
-    await h.runtime.reconcileStore(STORE)
-
-    const snapshot = await h.task.snapshotIn(STORE)
-    // The replay this process drives is left alone...
-    expect((await h.task.runIn(STORE, replayRun.run.runId)).status).toBe('running')
-    expect(snapshot.reviews.filter(review => review.runId === replayRun.run.runId)).toHaveLength(0)
-    // ...and the run nobody holds is settled by the phase machine.
-    expect(snapshot.runs.find(run => run.runId === dead.runId)!.status).toBe('cancelled')
-    expect(snapshot.reviews.find(review => review.runId === dead.runId)?.outcome).toBe('cancelled')
-    await expect(h.runtime.cancelGraph(STORE, 'probe cleanup')).resolves.toBeUndefined()
-    void runId
+    await expect(h.runtime.reconcileStore(STORE)).rejects.toThrow('no capability manifest')
   })
-
   test('a batch the store cannot read its parent run for is named, never answered with the parent\'s child history', async () => {
     const h = harness()
     const { taskId, runId } = await createRoot(h)

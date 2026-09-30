@@ -60,7 +60,7 @@ function consumptionLines(proposal: TaskProposal): string[] {
 function digestLines(proposal: TaskProposal, subject: 'batch' | 'contract'): string[] {
   return [
     `${subject} digest (sha256): ${proposal.proposalDigest}`,
-    `admission context digest: ${proposal.admissionContextDigest} (maxDepth ${proposal.admissionContext.maxDepth}, maxChildren ${proposal.admissionContext.maxChildren}${proposal.admissionContext.wallTimeMs === undefined ? '' : `, wallTimeMs ${proposal.admissionContext.wallTimeMs}`})`,
+    `admission context digest: ${proposal.admissionContextDigest} (maxDepth ${proposal.admissionContext.maxDepth}, maxChildren ${proposal.admissionContext.maxChildren})`,
     `review context digest: ${proposal.reviewContextDigest} (capability manifest digest ${proposal.reviewContext.capabilityManifestDigest}; judging verifiers ${proposal.reviewContext.verifiers.map(verifier => verifier.verifierId).join(', ') || 'none pinned'})`,
   ]
 }

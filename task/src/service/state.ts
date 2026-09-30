@@ -1462,13 +1462,7 @@ export class TaskState {
         'read the whole ceiling again and ask for the difference',
       )
     }
-    if (inForce.deadlineAt !== undefined && reading.deadlineAt !== inForce.deadlineAt) {
-      throw new Error(
-        `task: budget extension "${requestKey}" ${describeBudgetReading('deadlineAt', reading.deadlineAt)}, but the deadline in force here is ${inForce.deadlineAt}; ` +
-        "the tree's deadline moved since this request was read, so committing it would re-base an approval on a value nobody approved — " +
-        'read the whole ceiling again and ask for the difference',
-      )
-    }
+
     if (!nonEmpty(timestamp)) throw new Error(`task: budget extension "${requestKey}" has no recorded time on its event`)
     const record: TaskBudgetExtension = {
       requestKey,

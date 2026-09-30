@@ -792,6 +792,9 @@ export class TaskService extends Service {
    * task the claim names and the whole-reading re-check.
    */
   async recordBudgetExtensionIn(storeId: string, rootTaskId: TaskId, claim: TaskBudgetExtensionClaim, actor: string): Promise<void> {
+    if (claim.deadlineAt !== undefined || claim.baseline.deadlineAt !== undefined || claim.maxRuns === undefined) {
+      throw new Error('task: new budget extensions require maxRuns and accept no deadlineAt')
+    }
     await this.serialIn(storeId, async state => {
       const stored = state.snapshot().budgetExtensions?.byRequestKey[claim.requestKey]
       if (stored !== undefined) {

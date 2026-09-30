@@ -10,7 +10,7 @@ import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type Scripte
  *
  * What each case pins:
  *
- * 1. **The entry survives the phase.** A tree stopped by its own deadline and
+ * 1. **The entry survives the phase.** A stopped tree with its run allowance spent and
  *    run allowance is terminal in every sense, and the gate closes writes for
  *    exactly that reason. `task_budget_extend` has to run anyway: the root
  *    session that spent its budget is the caller K4 exists for. The call is not
@@ -60,15 +60,9 @@ const ROOT_CONTRACT = {
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
 
-/**
- * The tree's whole wall clock and run allowance: short enough that the child's
- * run is stopped by it and that the spending batch's end cancels the parent run
- * at the same instant, and a run ceiling the two runs of that tree exhaust —
- * the state whose owner has to be able to ask for a raise.
- */
-const TREE_WALL_TIME_MS = 1_500
+/** The root and one child spend the entire run allowance. */
 const TREE_RUNS = 2
-const ROOT_BUDGET = { wallTimeMs: TREE_WALL_TIME_MS, maxRuns: TREE_RUNS }
+const ROOT_BUDGET = { maxRuns: TREE_RUNS }
 
 /** One stopped tree, with the ids the cases assert on. */
 interface StoppedTree {
@@ -97,17 +91,15 @@ afterEach(async () => {
 })
 
 /**
- * Drive a tree into the state K4 is about: the root decomposes into one child,
- * that child's run hangs until the tree's wall time stops it, and the batch end
- * cancels the parent run at the same instant — both runs terminal, the run
- * allowance spent, and the root session still live with its own turn parked.
+ * Drive root and child Runs into explicit cancellation with the run allowance
+ * spent. The root Session keeps its parked turn so the approval tool can be used.
  *
  * `tail` names what the root's model does once the tree has stopped. It is asked
  * for those entries *before* the child exists, so anything it reads off `state`
  * has to be read lazily — inside an `args` function, which the adapter calls
  * when the request is really streamed.
  */
-async function stopTreeAtItsDeadline(
+async function stopSpentTree(
   tail: (state: StoppedTree) => readonly ScriptEntry[],
   options: { readonly probes?: readonly string[] } = {},
 ): Promise<StoppedTree> {
@@ -127,7 +119,7 @@ async function stopTreeAtItsDeadline(
       ? [
         {
           tool: 'task_decompose',
-          args: { reason: 'split the work', children: children('child: the work the clock stops') },
+          args: { reason: 'split the work', children: children('child: explicitly stopped work') },
         },
         { waitFor: () => parked.promise },
         ...tail(state),
@@ -143,13 +135,14 @@ async function stopTreeAtItsDeadline(
   state.childSession = h.spawns[0]!.sessionId
   await vi.waitFor(async () => expect((await h.runForSession(state.childSession)).run.status).toBe('running'))
 
+  await h.runtime.cancelGraph(state.storeId, 'explicit stop with the run allowance spent')
   const stopped = await vi.waitFor(async () => {
     const snapshot = await h.snapshot(state.storeId)
     const child = snapshot.tasks.find(task => task.parentTaskId === root.taskId)
     const rootRun = snapshot.runs.find(run => run.runId === root.runId)
     const childRun = child === undefined ? undefined : snapshot.runs.find(run => run.taskId === child.taskId)
     expect(rootRun?.status).toBe('cancelled')
-    expect(childRun?.status).toBe('failed')
+    expect(childRun?.status).toBe('cancelled')
     return snapshot
   }, { timeout: 30_000, interval: 25 })
   const childTask = stopped.tasks.find(task => task.parentTaskId === root.taskId)!
@@ -208,9 +201,9 @@ async function extensionCall(h: ScriptedLoop, ordinal: number) {
   return h.calls.filter(call => call.name === 'task_budget_extend')[ordinal]!
 }
 
-describe('a tree stopped at its budget can still be extended by a person (K4)', () => {
+describe('a stopped tree with a spent run allowance can still be extended by a person (K4)', () => {
   it('extends the ceiling from the terminal root, records the approved fact, and answers a retry from the record', async () => {
-    const stop = await stopTreeAtItsDeadline(state => [
+    const stop = await stopSpentTree(state => [
       { tool: 'task_budget_extend', args: { requestKey: 'k-more-runs', maxRuns: 4 } },
       { tool: 'task_budget_extend', args: { requestKey: 'k-more-runs', maxRuns: 4 } },
       // A write the root's own composition offers, in the same phase: the entry
@@ -243,8 +236,7 @@ describe('a tree stopped at its budget can still be extended by a person (K4)', 
     expect(ask.reason).toContain('request key "k-more-runs"')
     expect(ask.reason).toContain(`runs the store already holds: ${TREE_RUNS}`)
     expect(ask.reason).toContain(`maxRuns: ${TREE_RUNS} in force (deployment configures ${TREE_RUNS}) → approves a total of 4`)
-    expect(ask.reason).toContain('deadlineAt: ')
-    expect(ask.reason).toContain('— this request does not name it')
+    expect(ask.reason).not.toContain('deadlineAt: ')
     expect(ask.reason).not.toContain('approval binding')
     expect(ask.reason).toContain('approving records ONE budget-extension event')
     expect(ask.reason).toContain('no run starts or resumes')
@@ -311,7 +303,7 @@ describe('a tree stopped at its budget can still be extended by a person (K4)', 
     expect(after.runs).toHaveLength(before.runs.length)
     expect(after.tasks).toHaveLength(before.tasks.length)
     expect(after.runs.find(run => run.runId === stop.rootRunId)!.status).toBe('cancelled')
-    expect(after.runs.find(run => run.runId === stop.childRunId)!.status).toBe('failed')
+    expect(after.runs.find(run => run.runId === stop.childRunId)!.status).toBe('cancelled')
     expect(h.spawns).toHaveLength(spawnsBefore)
     expect(h.graphCommits).toHaveLength(graphBefore)
     // Field by field, on a tree the gate has already closed: every run, task,
@@ -337,7 +329,7 @@ describe('a tree stopped at its budget can still be extended by a person (K4)', 
   it.each(['rejected', 'cancelled'] as const)(
     'writes nothing when the person answers %s, and keeps the tree where it was',
     async outcome => {
-      const stop = await stopTreeAtItsDeadline(() => [
+      const stop = await stopSpentTree(() => [
         { tool: 'task_budget_extend', args: { requestKey: 'k-more-runs', maxRuns: 4 } },
         { text: 'root: the raise was not approved' },
       ])

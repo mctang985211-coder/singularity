@@ -1630,7 +1630,7 @@ describe('TaskRuntime root contract intake (A0 §1–§2)', () => {
     expect(before.runs).toHaveLength(0)
     // The root budget's honest diagnostic before anything was accepted: there is
     // no root task, so there is no owner to measure a tree against.
-    const unowned = resolveRootBudget(before, { wallTimeMs: 60_000 })
+    const unowned = resolveRootBudget(before, { maxRuns: 10 })
     expect(unowned.ok).toBe(false)
     if (unowned.ok) throw new Error('unreachable')
     expect(unowned.reason).toContain('holds no root task')
@@ -1671,7 +1671,7 @@ describe('TaskRuntime root contract intake (A0 §1–§2)', () => {
     // The budget now has its owner: the accepted instant is the root run's own
     // `startedAt`, which is what "the root run's `startedAt` is the acceptance
     // instant" means when a reader has only the store (A3 §3.5, A0 §1.7).
-    const owned = resolveRootBudget(after, { wallTimeMs: 60_000 })
+    const owned = resolveRootBudget(after, { maxRuns: 10 })
     expect(owned.ok).toBe(true)
     if (!owned.ok) throw new Error('unreachable')
     expect(owned.rootTaskId).toBe(activated.taskId)
@@ -2250,6 +2250,7 @@ describe('the root contract\'s origin (A0 §1.10)', () => {
       objective: 'the name of some old graph',
     })
 
+    const noticesBefore = h.notifications.length
     await expect(h.runtime.continueProposal(STORE, cross.proposalId, BETA))
       .rejects.toThrow(
         /the root contract of session "s-beta" was refused: store "sg-t-root-session" is not this session's own store \("sg-t-s-beta"\)/,
@@ -2266,7 +2267,7 @@ describe('the root contract\'s origin (A0 §1.10)', () => {
     expect(snapshot.runs).toHaveLength(1)
     expect(snapshot.tasks[0]?.objective).toBe('the name of some old graph')
     expect(h.spawned).toHaveLength(0)
-    expect(h.notifications).toHaveLength(0)
+    expect(h.notifications).toHaveLength(noticesBefore)
   })
 
   test('does not ask a person about a waiting contract whose origin is not established', async () => {

@@ -202,7 +202,8 @@ describe('renderProposalReview (§5 display list)', () => {
   it('states the limits the batch is admitted under, and which of them are audited only', () => {
     expect(text).toContain('maxDepth 2')
     expect(text).toContain('maxChildren 4')
-    expect(text).toContain('600000')
+    expect(text).not.toContain('wallTimeMs')
+    expect(text).not.toContain('- enforced in flight:')
     expect(text).toContain('audited after the run')
     expect(text).toContain('40')
   })
@@ -583,7 +584,8 @@ describe('renderProposalReview for a root contract', () => {
 
   it('states the limits, the digests a decision would bind, and what nothing here can promise', () => {
     expect(text).toContain('maxDepth 2')
-    expect(text).toContain('wallTimeMs 600000')
+    expect(text).not.toContain('wallTimeMs')
+    expect(text).not.toContain('- enforced in flight:')
     expect(text).toContain('audited after the run')
     expect(text).toContain("judging verifiers (the ids this contract's criteria pin): command")
     expect(text).toContain('registered verifiers now: command, review')

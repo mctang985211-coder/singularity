@@ -124,11 +124,11 @@ export interface RunStackOptions {
   /** Depth ceiling for a cascade; defaults to the runtime's own. */
   readonly maxDepth?: number
   /**
-   * The tree-wide root budget (`Config.rootBudget`): the deadline and run count
+   * The tree-wide root budget (`Config.rootBudget`): the run count
    * a store's whole tree — replays included, since a replay's parentless task
    * shares the root's total — is measured against.
    */
-  readonly rootBudget?: Readonly<{ wallTimeMs?: number; maxRuns?: number; maxConcurrentWrites?: number }>
+  readonly rootBudget?: Readonly<{ maxRuns?: number; maxConcurrentWrites?: number }>
   /**
    * The scripted worker: what one spawned agent does before it goes idle. The
    * runtime awaits it through `whenIdle` — after the spawn resolved, so a worker
@@ -139,8 +139,7 @@ export interface RunStackOptions {
   /**
    * Whether the fixture worker submits its own result once the scripted body
    * returns (default `true`). A live worker has to: an idle session is not a
-   * completion, and a run that never submits is stopped under the no-progress
-   * budget. `false` is the un-submitted path — the run stays `active` where a
+   * completion; a run that never submits waits for coordination or cancellation. `false` is the un-submitted path — the run stays `active` where a
    * submission was due — and is for the specs that are about idle meaning no
    * completion. A worker whose body decomposed is skipped by the `false` path
    * either way: its run is `waiting_children` and only comes back to `active`

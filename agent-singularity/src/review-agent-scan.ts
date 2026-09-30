@@ -37,7 +37,7 @@
  *    claim and zero spawn — and a later scan may retry the same source once there
  *    is room, because nothing was written for it.
  * 3. **Then the reviewer.** The attempt is one and the same as an explicit
- *    call's (`review-agent-run.ts`): the pack, the spawn, the watchdog and the
+ *    call's (`review-agent-run.ts`): the pack, the spawn and the
  *    one terminal fact. Its parent is the graph's root session — a review agent
  *    is a runtime act of the root agent — so a store whose root session is not
  *    live is skipped by name rather than spawned from somewhere invented.

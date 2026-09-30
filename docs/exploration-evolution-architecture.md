@@ -16,12 +16,12 @@
 | --- | --- | --- |
 | 全局观与原始事实 | context 投影本人契约、根约束/贡献及相关依赖，context_read 按引用读取；压缩/恢复从事实源重建 | 模型是否正确使用，而非重复读全史 |
 | 递归生长与协调 | task-runtime 准入/批次/写闸；节点自己 task_decompose；批次结束交还父继续工作 | 多结果目标是否自然由子节点再分解 |
-| 父子问答 | agent-runtime + DSH 持久消息；task_ask_parent/task_answer；runtime 阻塞与原截止 | 回答是否有来源、是否解决实际缺失信息 |
+| 父子问答 | agent-runtime + DSH 持久消息；task_ask_parent/task_answer；runtime 阻塞与取消 | 回答是否有来源、是否解决实际缺失信息 |
 | 失败诊断 | agent-singularity 失败自动、成功按需；存 Diagnosis 并投递实际负责父节点 | 收到建议后的行动与结果；未输出不能算有效 |
 | 共享能力改进 | evolution 的 sandbox、双侧评估、批准、apply/rollback；授权 supervisor 恢复失败根的新尝试 | 启用且触发时的工程收益；off/未触发只记未验证 |
 | 根协调职责 | agent-runtime 的角色政策与工具闸；root 仅派本层、答复和综合验收 | 完整目标持续推进，无图外业务执行链 |
 | 工作记忆 | Task/Evidence 事实 + DSH Session 历史 + context 读取投影；无独立 memory/无向知识图 | 报告记载查询使用，未证明可归因工程收益；不预建语义关系网 |
-| 原图冷续跑 | graphs.select/activate → adoptRoot；目前仅部分 worker 状态可续 | 普通 active worker 会被取消，整图杀进程续跑未证明；研究合同见计划 G 节 |
+| 原 Task 图冷续跑 | graphs.select/activate → adoptRoot；按持久相位续原 Run/Session/批次/验收 | 真实 SIGKILL 7 项通过；辅助协调会话与模型工程效果边界见计划 G 节 |
 
 权限与状态由实际代码保证；自然语言理解、分解选择与诊断效果靠工程证据。本文不重列历史缺口或构造未来字段，部署者须核对实际 profile、加载产物与工具面。
 
@@ -170,9 +170,9 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 
 保留 Task 的结果状态；Run 主相位为 active、waiting_children、submitted，问答等待从单一问答事件事实派生。active 且有阻塞问题时，对外显示 waiting_answer；waiting_children 同时可有阻塞问题，不能覆盖原 batchId 或把主相位改成 active。waiting 不是 PASS/FAIL，也不重用 capability blocked 原因。事件与 reducer 变更需按持久化规则记录。（A3 已落地 2026-09-22：`executionPhase` 三相位与 `batchId`/`submission` 已持久化；旧 `noProgress` 事件保留读取，本轮不再计轮判停；`pendingQuestionIds`/`blockingQuestionIds` 作为 A4 挂载点字段已预留但无非空生产写入。现行计划 F.1 决定不启用这两份索引，新事件不写入，旧空字段保持可读。）
 
-新增提交验收动作（工作名 task_submit_result）：worker 提交 artifact refs 与证据引用，runtime 进入 submitted→verifying，verifier 决定结果。task_verify 仍只是自检。session idle 无提交时只能是等待或异常停顿，不能直接做“完成”证据；祖先 waiting_children 的 idle 不触发父验收。子全部终态之后仍必须执行独立父 AC。（A3 已落地 2026-09-22：`task_submit_result` 工具 + `submitResult`（身份/相位重检 → RunPhaseChanged(submitted) 落库 → drainSession 排空 → verifier 排他执行）；首次未提交 idle 提醒一次，之后等待提交/取消/原时间截止；原实现子全终态后由 runtime 自动提交父，该路径已由 K1 删除；修正后批次结束只交还执行权，父主动提交才做独立验收。）
+新增提交验收动作（工作名 task_submit_result）：worker 提交 artifact refs 与证据引用，runtime 进入 submitted→verifying，verifier 决定结果。task_verify 仍只是自检。session idle 无提交时只能是等待或异常停顿，不能直接做“完成”证据；祖先 waiting_children 的 idle 不触发父验收。子全部终态之后仍必须执行独立父 AC。（A3 已落地 2026-09-22：`task_submit_result` 工具 + `submitResult`（身份/相位重检 → RunPhaseChanged(submitted) 落库 → drainSession 排空 → verifier 排他执行）；首次未提交 idle 提醒一次，之后等待提交/取消；原实现子全终态后由 runtime 自动提交父，该路径已由 K1 删除；修正后批次结束只交还执行权，父主动提交才做独立验收。）
 
-上游 agent/turn-stopping、pre-step 和原生 inbox 用于抑制空转/接收唤醒，不修改 agent-loop。当前 DSH 在 pre-step hook 之前已 claim 并持久化移除 inbox 项；不得用“正在等待”一律 reject，否则会吞掉尚未交给模型的问答。有效协调输入必须放行；claim 后 reject/crash 时从未处理领域记录重新投影或恢复投递，保留相同消息身份。active idle 无提交且无阻塞问题时保持非终态并只提醒一次，之后等待提交、取消或原时间截止；不按 idle 轮数或子树条目数推断工程进展。旧终态记录原样读取，不把旧 session idle 重新解释为新提交事件。
+上游 agent/turn-stopping、pre-step 和原生 inbox 用于抑制空转/接收唤醒，不修改 agent-loop。当前 DSH 在 pre-step hook 之前已 claim 并持久化移除 inbox 项；不得用“正在等待”一律 reject，否则会吞掉尚未交给模型的问答。有效协调输入必须放行；claim 后 reject/crash 时从未处理领域记录重新投影或恢复投递，保留相同消息身份。active idle 无提交且无阻塞问题时保持非终态并只提醒一次，之后等待提交或取消；不按 idle 轮数或子树条目数推断工程进展。旧终态记录原样读取，不把旧 session idle 重新解释为新提交事件。
 
 最小迁移矩阵（事件名为工作名，实施前与 TaskEvent 类型统一）：
 
@@ -190,7 +190,7 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 
 历史非终态 Run 缺相位时不能默认认定 active 并自动重跑；恢复入口先从旧事件确认可安全继续的路径，否则显示 needs-recovery 诊断，不新增伪造终态。（A3 已落地：旧无相位 run 不改状态、不重跑，`task_read`/`task_status` 派生 needs-recovery，唯一合法动作是取消。）迁移模式不得绕过原预算、重复已产生的外部副作用。
 
-**原图续跑的后续收敛（研究，尚未实施）**：用户只选同一图继续，不需说明中断原因；复用现有 select/activate 入口。运行时从持久相位恢复原 Run/Session、批次或验收，不按“曾提问/曾进化”等业务来源枚举可恢复对象。当前普通 active worker 会被取消的分支须改；`task_recover` 保持失败后的新尝试语义。机械绑定/单 writer 保留，业务事实的理解交模型。自由探索长图不默认计总墙钟截止，显式截止及已发生用量继续有效；单次 watchdog 保留。施工与唯一验收以[计划 G 节](2026-09-20-vrtc-code-change-plan.md#g-原图续跑与角色装配)为准，不从本段另派一套恢复系统。
+**原 Task 图续跑（G 节已验收）**：用户选同一图继续，启动自动激活和显式 select 使用同一入口；从持久相位恢复原 Run/Session、批次或验收，删除按问答/进化来源决定能否恢复的分支。身份绑定、单 writer、终态不重做及已提交继续验收保留。业务 Agent、根图和 reviewer 不设总时长截止，历史时间值不判停，次数与实际用量累计；单次 verifier/工具/drain 超时保留。`task_recover` 仍是失败后的新尝试。独立杀进程夹具 7 项通过；辅助协调尝试不泛化为业务 Run，具体证据与边界见[计划 G 节](2026-09-20-vrtc-code-change-plan.md#g-原图续跑与角色装配)。
 
 ### 7.3 问答归属与持久交接
 
@@ -206,25 +206,21 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 
 阻塞性问题写入与 Run 关联的问答事实，worker 停止受阻执行并等待唤醒；不阻塞父 loop、不轮询。已有子批次时仍保留 waiting_children，可处理协调消息并逐级提问。非阻塞问题仅在确有无依赖工作时允许继续。父从全局 brief/决定/证据回答，无足够依据明确说明未知，可逐级询问，不默认找人。涉及用户目标/新增权限/残余风险，root 使用已有 human 工具。
 
-answer 校验真实父身份、question 状态、对应 run 和契约；回答进入两端可追溯历史。resolves:true 是父声明可解决当前问题，仅在绑定仍适用时解除该项；false 保持 open，未知或需要改契约均如此，不再建立回答类别枚举。runtime 不声称证明自然语言答案正确。所有阻塞解除后仍遵守原主相位，不能改为 active；已解除但尚未被模型读取的回答必须进入下一请求。父/子 Run 终态、问题取消或契约失效时拒绝迟到执行效果，保留审计。同 requestKey 同内容幂等、冲突拒绝；parent 不可用记录 unavailable 并等待恢复/期限，不隐式新建替代父节点。
+answer 校验真实父身份、question 状态、对应 run 和契约；回答进入两端可追溯历史。resolves:true 是父声明可解决当前问题，仅在绑定仍适用时解除该项；false 保持 open，未知或需要改契约均如此，不再建立回答类别枚举。runtime 不声称证明自然语言答案正确。所有阻塞解除后仍遵守原主相位，不能改为 active；已解除但尚未被模型读取的回答必须进入下一请求。父/子 Run 终态、问题取消或契约失效时拒绝迟到执行效果，保留审计。同 requestKey 同内容幂等、冲突拒绝；parent 不可用记录 unavailable 并等待恢复或用户取消，不隐式新建替代父节点。
 
 回答不能改变权限或验收。若要求改 AC，保留问题并回到契约变更渠道，不能据此私改契约继续。父明确作出的决定沿现有消息保存来源、适用范围并由 context 按需呈现，不为所有回答新建 Decision ledger；普通聊天不自动成为全局政策。
 
-### 7.4 时间、循环与故障
+### 7.4 执行额度、等待与故障
 
-K4 已验收（2026-09-27 精简重做及定向返工）：根协调会话经人审追加现有执行总上限（`task_budget_extend` → `extendRootBudget(sessionId, host, request)`，runtime 自冻整份读数并调用装配期装入的 DSH 审批回调，只升已配置维度），旧用量/起点不重置；reviewer 用自身次数/watchdog，不继承业务根截止，额度只读持久 started（`admitReviewAgent` 每 store 串行受理）。普通/replay/恢复消费同一有效根限额（`resolveRootBudget` 叠加持久 `TaskBudgetExtended` 批准值），完整合同见 [K4](execution-prompts/12d-k4-review-budget.md)。
+业务 Run、子任务、replay 和失败恢复共用原 store 的根 `maxRuns`，按稳定 runId 累计；重启不重复计数、不退款、不清零。`task_budget_extend({requestKey,maxRuns})` 由可信根协调会话经现有 DSH 人审提高已配置的总上限，runtime 冻结有效基线、Task 串行重检并记批准事实。所有执行入口消费同一有效限额。扩额不唤活终态、不自动派发、不改变权限，完整合同见 [K4](execution-prompts/12d-k4-review-budget.md)。
 
-问答复用原 Run wallTime 和根截止，不新增提问次数预算；重复按 requestKey 幂等，不以字符串相似度合并。已知阻塞不计空转提醒。未回答不是失败答案，wallTime 按原 startedAt 继续计入等待，截止取消协调并保留问题。已知问答等待的 Run 在重启后须能恢复同一 Session/阻塞，不能沿“在途未提交全部取消”分支处理；无法确认写入已停止时具名失败。
+reviewer 使用自身每 store 的持久 started 次数，不占业务 Run，也不受业务根终态影响。删除业务 Agent、根图和 reviewer 的运行时长限制，以及 `wallTimeMs`、有效 `deadlineAt` 和扩时请求；历史事件可读，旧时间值不用于判停。verifier、工具和排空过程的单次超时保留。新配置/请求必须删除旧字段并重建实际部署产物。
 
-A3 同时建立根目标预算归属：子任务、重试、诊断、候选和评估各有明细但共用根总额，replay 的 parentless Task 通过明确的资助根引用记账，不因 Task 无父亲获得新预算。独立评估请求必须有自己的显式预算 owner。时间从根接受时计，Run 期限不得晚于根期限；次数在准入时按稳定操作 id 预留/记账，崩溃恢复不重复计数，也不重置额度。A5/S2-R/S3/S4-E 接入该入口，不能新增各自独立的总预算。（A3 已落地 2026-09-22：`root-budget.ts`；owner = store 根任务（其 run 经 `rootTaskStoreId` 绑定回本 store），replay 的 parentless task 共享该根总额；maxRuns 按 runId 记账、崩溃重数不退款不重置。）
+问答按 requestKey 幂等，不增提问次数预算，不以字符串相似度合并。未回答不是失败答案；阻塞时保留协调闸，同一 Session 从持久事实补投。缺父记录或写入归属不能确认时具名失败，不生成替代父。
 
-A3 先使用现有 root binding 和可追溯的创建/接受事件确定预算 owner；A0 后续只接入真实根契约接受事件，不改变预算语义。旧记录缺少可确定起点时走明确恢复诊断，不用重启时间伪造新预算，也不要求 A3 依赖尚未实现的 A0。（A3 已按此实现：缺起点（无根/无 run/startedAt 不可读）走具名恢复诊断，未依赖 A0。）
+根身份、递归深度、maxRuns 与单工作区写入者由运行时执行；token/工具费用按真实可用指标观测，unknown 不记零，不把终态统计称为运行中硬封顶。已移除 idle 计轮、`noProgressRounds` 和子树事实计数：首次无提交 idle 提醒一次，之后等待提交、协调消息或用户取消，不以回合结束推断工程失败。
 
-硬限制先覆盖可观察的截止时间、Run/实验启动次数、递归深度和并发写入数；达到上限拒绝新副作用并取消受影响执行。token/工具费用只有在实际 provider/工具入口提供运行中计数时才可标硬限制，事后观测必须标软统计，unknown 不记零。调用方要求无法执行的硬限制时明确拒绝启动，不悄悄降为软统计。（A3 已落地：硬限制 = 根截止/maxRuns/maxDepth/并发写=1；token/工具费用只有终态软统计（budgetBreaches）；闭合 schema，未知成员或并发写 ≠ 1 在构造期具名拒启。）
-
-2026-10-01 根据完整工程反例删除 idle 计轮、`noProgressRounds` 与子树事实计数：文件/工具产物不必写成 Task 事实，单长回合也不经过 idle，原判停既误杀分段推进又无法识别长回合。保留已有持久起点的时间截止、取消与一次提交提醒，不另造进展分类器；旧事件只读，当前部署移除旧配置并重建产物。
-
-非阻塞批次的工具 signal 只控制请求准入；工具正常返回不取消已接受的批次。批次之后由 graph/run 生命周期 signal 拥有，用户停止图或运行超时才取消。该 signal 转移须有测试，不能让“工具调用结束”意外杀掉所有子节点。（A3 已落地并有测试：工具返回/abort 后批次继续（`orchestrate.spec.ts` + `a3-coordination-loop.spec.ts`），graph 取消才停止。）
+批次由 graph/run 生命周期 signal 持有；分解工具返回或调用 signal 结束不取消已接受批次。用户取消图才停止其业务执行。原图中断按 G 节复用 select/activate 从持久相位继续；失败后开新尝试仍属于 `task_recover`，不把两者合并。
 
 ## 8. Supervisor 沿图 debug 的办法
 
@@ -236,7 +232,7 @@ A3 先使用现有 root binding 和可追溯的创建/接受事件确定预算 o
 
 ### 8.2 由 Agent 选择查因路径
 
-A5 的主体为 `agent-singularity/src/review/` 中的事后读包与 reviewer 协调，context 提供同域原始事实。Agent 自主选择沿依赖、父子验收、产物或 Session 深入，再提出可证伪实验；不把六步调试脚本、visited/frontier 算法或错误类型全集写进 task-runtime。跨边界须有来源，缺证据明确 unknown，诊断受 reviewer 自身次数/watchdog 与读取长度限制，业务实验受 K4 有效根限额；业务截止不禁止事后复盘。
+A5 的主体为 `agent-singularity/src/review/` 中的事后读包与 reviewer 协调，context 提供同域原始事实。Agent 自主选择沿依赖、父子验收、产物或 Session 深入，再提出可证伪实验；不把六步调试脚本、visited/frontier 算法或错误类型全集写进 task-runtime。跨边界须有来源，缺证据明确 unknown，诊断受 reviewer 自身次数额度与读取长度限制，业务实验受 K4 有效根 maxRuns；业务终态不禁止事后复盘。
 
 `orchestrate.reviewEnrichment` 中随终态生成的基础事实及唯一 ReviewRecord 提交保留 runtime；通用 Session 指标读取可复用 agent-runtime/DSH。昂贵推理和候选建议放到终态之后，失败或未装配时不得阻止结算。验证目标是一次真实失败能被 Agent 取证、提出实验并交接候选，不要求预先列出所有未来故障。
 
@@ -246,7 +242,7 @@ A5 的主体为 `agent-singularity/src/review/` 中的事后读包与 reviewer �
 
 保留现有 reviewer 只读工具集。它产生 Diagnosis/实验建议，不写生产、不修改其正在评价的判据。Supervisor orchestrator 消费 Diagnosis，给一个有范围的候选实现节点分配 sandbox 写权限；候选构建者、验证执行器、人类晋升决定分别有记录。逻辑角色可复用 preset/工具组合，不要求新增三个常驻服务或三种模型。
 
-A5 已删除 escalation 准入和强制六维输出；默认自动/显式调用去重到同一来源尝试。已有尝试终结后可用新 requestKey 再复盘，同源在途不另起；reviewer 用自身持久次数/watchdog，不继承业务根截止，新键不重置额度。允许无需改进、证据不足或空建议；执行失败/超时只记 interrupted，不制造 unknown Diagnosis。2026-10-01 失败扫描增加原始 Diagnosis 到实际负责父 Run 的消息交接；复用既有投递与消息身份，不新增建议状态或修复队列。建议被送达与建议有效分别验证。
+A5 已删除 escalation 准入和强制六维输出；默认自动/显式调用去重到同一来源尝试。已有尝试终结后可用新 requestKey 再复盘，同源在途不另起；reviewer 用自身持久次数额度，新键不重置额度。允许无需改进、证据不足或空建议；执行失败/取消只记 interrupted，不制造 unknown Diagnosis。2026-10-01 失败扫描增加原始 Diagnosis 到实际负责父 Run 的消息交接；复用既有投递与消息身份，不新增建议状态或修复队列。建议被送达与建议有效分别验证。
 
 ### 8.4 从建议到可用改进
 
@@ -284,7 +280,7 @@ root 保留完整用户目标，工程调查/实现/测试归真实 Task 节点�
 |---|---|---|
 | A0 真实根契约入口 | T1、S1-V 切片 2、T2/T3 组；graphs/adoptRoot、root 角色 | setup 不消费根分解；无契约时 task_read 返回未激活；graph name 不冒充目标；新根有独立 AC；子全通过但根错误仍拒绝；off/all 与激活崩溃恢复完整；拒绝草案零派发；旧图不改历史；来源归属（store↔session、顶层会话、本人消息）与 `adoptRoot` 公共恢复入口的零副作用拒绝。**2026-09-23 实现事实（来源/恢复返工已关闭）**：`graphs.create` → `adoptRoot` 不再建根任务；`task_intake` + `assertRootContractOrigin` + `rootIndependenceDefects` + 同套审核/激活/幂等恢复 + 具名未激活视图；每条验收的测试位置见历史执行记录「A0 + R0 执行与验收记录」与「A0 返工（Q2/Q3）执行与验收记录」。仍未建：根契约修订服务和模板 catalog（无需为此预建）；A1 投影已验收；边界如实记录：归因纪律非来源真实性证明、服务层不校验顶层会话属某 graph 的 root、日志不可读时不能激活/恢复（fail-closed）、每次 `adoptRoot` 会重发等待中提案的审核请求；R1 完成轮 3 已补充固定场景的澄清与有限目标验证，不提供通用语义保证 |
 | A2 + A1 状态上下文（同组） | A0/A3、S1-C，R1/R3 验收后；新 context、现有工具与 DSH 装配 | 显式恢复与读取分离；三层根约束/本人贡献进入实际请求；依赖兄弟证据和同 graph 详情按引用可读，无关历史默认不推；跨 graph 包括原始 Session 入口均拒绝；压缩/重启可重建、replay 不串根；普通/replay 消费者及旧渲染迁移闭合 |
-| A3 非阻塞批次与协调相位（已交付，2026-09-22；验收见历史执行记录「A3 执行与验收记录」，落地事实已回写 §7.1/§7.2/§7.4） | T1、S1-V 切片 2、S1-C；Task runtime/reducer、agent-runtime | 分解立即返回且父可继续；waiting idle 不验收；显式提交/父独立验收；依赖串行、取消/恢复/卸载完整；提交/派发去重；迟到写入、跨批次/跨根工作区冲突被阻挡；普通/replay 同守状态规则；根预算不因新 Run/重启重置，原截止/取消持续有效 |
+| A3 非阻塞批次与协调相位（已交付，2026-09-22；验收见历史执行记录「A3 执行与验收记录」，落地事实已回写 §7.1/§7.2/§7.4） | T1、S1-V 切片 2、S1-C；Task runtime/reducer、agent-runtime | 分解立即返回且父可继续；waiting idle 不验收；显式提交/父独立验收；依赖串行、取消/恢复/卸载完整；提交/派发去重；迟到写入、跨批次/跨根工作区冲突被阻挡；普通/replay 同守状态规则；根预算不因新 Run/重启重置，用户取消持续有效 |
 | A4 父子问题/回答 | A2/A1、A3；agent-runtime + DSH 通信，context 呈现，runtime 执行阻塞 | 父子/三层问答无同步死锁；batch/写闸保留，一个答案不清空其他阻塞；未答不算同意，迟到不复活 Run；入箱及 claim 后 crash 可恢复，不重复领域副作用；正文不在 task 再存一份 |
 | S4-E 评估基础 | 原范围已验收；修正票次序见唯一计划 | K2 修复提交崩溃，K3 对齐完整 Skill 单位，K4 允许授权扩额；复用既有实验与执行底座 |
 | A5 + S2-E 诊断与交接 | K1～K4 验收后；agent-singularity/review 消费 context | 失败自动、成功按需，共用精确源与尝试身份；Agent 自主取证，可无建议；终态不依赖诊断，重启不重复副作用 |

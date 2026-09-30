@@ -2,7 +2,7 @@
 
 本票把完整适配结果交给真实 Singularity root。workload 组织、算子映射、Ball 设计、chip 集成及任务图由节点依据现场事实决定；预设 Task/Skill 树提供目标与方法，编号表达内容归属。每个节点决定执行还是继续分解，每层都有自己的结果验收。
 
-运行边界：当前代码不能保证普通活跃 worker 在机器重启后保持原 Run 续跑；原图继续方案见[计划 G 节](../2026-09-20-vrtc-code-change-plan.md#g-原图续跑与角色装配)，尚未实施。发生中断先保留原始状态并如实报告，不用 `task_recover` 或新建替代图冒充原样恢复；完整业务目标及 FS-1～FS-4 保持。
+运行边界：原 Task 图中断后经现有选图按钮/API 续原 Run/Session，真实进程验收已通过，见[计划 G 节](../2026-09-20-vrtc-code-change-plan.md#g-原图续跑与角色装配)。部署须重建最新产物并删除旧 Agent 时间配置；旧服务不会自动加载新代码。发生中断选择原图继续，具体绑定/读取错误直接修正，不用 task_recover 或替代图冒充原样恢复；辅助协调会话按 G 节边界如实记录，完整业务目标及 FS-1～FS-4 保持。
 
 ## 给真实 root 的用户 prompt
 
@@ -37,11 +37,11 @@
 工作区：/home/ROXY/code/bb_work/harness。
 先读主 guide 文首、唯一建设计划第 18 项、本合同的 root prompt 与 FS-1～FS-4 验收，以及 Harness .agents/skills/bb-pipeline/SKILL.md 的编号库入口。只读本次验收与必要接口；源码阅读、构建、测试交给子代理。业务实现、构建与测试须由真实 Singularity 图中的节点执行，原始轨迹是证据。
 
-旧图和证据保持归档；保存已有工作，锁定已提交版本（Buckyball Skill 至少含本轮 cdf482f），从锁定源码构建必要运行产物并建立全新隔离 graph/env。把编号 Task/Skill 库安装到本图 Skill 目录，核对最新节点提示实际加载、root 使用 native 工具模式且普通执行旁路关闭、ready 图不能再用 graph_spawn、worker 能分解及取得授权 MCP、bbdev/waveform 与所需仿真依赖。Harness 模型使用现有 config.yml 中的免费 step5。部署完整目标所需的运行预算，并核对运行实例读取的实际值；删除部署里已移除的 noProgressRounds 配置，旧 patch 不作为生效证据。长图显式设置 SINGULARITY_REVIEW_AGENT_BUDGET（本轮取与 rootBudget.maxRuns 相同的有限上限），核对实际读数；默认每 store 仅 1 次复盘不适合本次长图，interrupted 也消耗已启动次数。额度不足沿已有入口处理，不缩小目标。
+旧图和证据保持归档；保存已有工作，锁定已提交版本（Buckyball Skill 至少含本轮 cdf482f），从锁定源码构建必要运行产物并建立全新隔离 graph/env。把编号 Task/Skill 库安装到本图 Skill 目录，核对最新节点提示实际加载、root 使用 native 工具模式且普通执行旁路关闭、ready 图不能再用 graph_spawn、worker 能分解及取得授权 MCP、bbdev/waveform 与所需仿真依赖。Harness 模型使用现有 config.yml 中的免费 step5。部署完整目标所需的次数额度，并核对运行实例读取的实际值；删除已移除的 noProgressRounds、budget.wallTimeMs 和 rootBudget.wallTimeMs 配置。业务 Agent、根图和 reviewer 无总时长截止；verifier/工具单次超时保留。旧 patch 不作为生效证据。长图显式设置 SINGULARITY_REVIEW_AGENT_BUDGET（本轮取与 rootBudget.maxRuns 相同的有限上限），核对实际读数；默认每 store 仅 1 次复盘不适合本次长图，interrupted 也消耗已启动次数。额度不足沿已有入口处理，不缩小目标。
 
 准备并独立审核完整模型的输入、推理模式/随机种子、官方完整参考、容差和根 checker；随真实用户消息将它们与本合同的 root prompt 一并交给 root。完整目标包括 workload 构建、Ball 编写及集成、BEMU/RTL 对照和全量测试。让 root 决定工程方案和推进方式；不要另派一个小阶段替代根目标，不给预制运行图，不替节点完成业务代码或预填成功产物。
 
-跟进完成/失败/阻塞通知，每 30 分钟做一次进度检查并简记实际变化。遇到具体运行时或接线缺陷，派窄任务直接修复、记录修改与介入，再继续原目标；运行正常时让图自行推进。审批由现有真实审批渠道处理，不能替用户批准。仅在代码/输入变化或定位具体失败时重跑受影响测试；最终完整测试集须有真实结果，不重复跑无关 Harness 全量测试。
+跟进完成/失败/阻塞通知，每 30 分钟做一次进度检查并简记实际变化。进程/服务中断后用原图 select 继续，保留 graph/store/Task/Run/Session 身份，不重新派发已完成节点。遇到具体运行时或接线缺陷，派窄任务直接修复、记录修改与介入，再继续原目标；运行正常时让图自行推进。审批由现有真实审批渠道处理，不能替用户批准。仅在代码/输入变化或定位具体失败时重跑受影响测试；最终完整测试集须有真实结果，不重复跑无关 Harness 全量测试。
 
 完成后按 FS-1～FS-4 逐项给 PASS/FAIL/INCONCLUSIVE，另列递归及其他机制是否实际触发、是否有帮助。交付 final-report.md，附版本/环境、root prompt 和不可变契约、graph/store/Run 身份、原始会话、全部 Task 及父子关系/验收、Skill/能力绑定、源码提交、MCP trace、完整测试清单和独立 checker 结果、所有人工介入。同步主 guide 与唯一计划的实际状态，停在待审核，把报告路径交回。
 ```

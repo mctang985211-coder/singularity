@@ -223,16 +223,18 @@ describe('reviewer grant', () => {
 })
 
 function handle(reply: string | undefined, options: { hang?: boolean } = {}) {
-  const cancel = vi.fn()
+  const idle = Promise.withResolvers<void>()
+  const cancel = vi.fn(() => idle.resolve())
   const events = reply === undefined
     ? []
     : [{ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: reply }] } } }]
   return {
     agent: {
       cancel,
-      whenIdle: options.hang === true ? () => new Promise<void>(() => {}) : async () => {},
+      whenIdle: vi.fn(options.hang === true ? () => idle.promise : async () => {}),
       session: { snapshotEvents: () => events },
     },
+    complete: () => idle.resolve(),
   }
 }
 
@@ -241,6 +243,7 @@ function fixture(handleValue: unknown, spawnImpl?: () => Promise<unknown>) {
   const recordDiagnosisIn = vi.fn(async () => {})
   const snapshot = structuredClone(store)
   const ctx = {
+    effect: (install: () => () => Promise<void>) => install(),
     graphs: { graphForSession: async (_sessionId: string) => graph },
     task: {
       openStore: async (_storeId: string) => structuredClone(snapshot),
@@ -309,6 +312,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   if (previousLedger === undefined) delete process.env.SINGULARITY_REVIEW_LEDGER_DIR
   else process.env.SINGULARITY_REVIEW_LEDGER_DIR = previousLedger
   if (previousBudget === undefined) delete process.env.SINGULARITY_REVIEW_AGENT_BUDGET
@@ -782,18 +786,99 @@ describe('task_review_agent', () => {
    * into six `unknown` judgements, which reads as something the agent concluded
    * and is exactly the kind of invented record A5 forbids.
    */
-  test('a timed-out reviewer is cancelled, and the attempt is interrupted with no diagnosis', async () => {
-    const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(undefined, { hang: true }))
-    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN, timeoutMs: 5 }, exec as never)) as string
+  test('a reviewer can pass the former ten-minute deadline and then produce its own diagnosis', async () => {
+    const reviewer = handle(REPLY, { hang: true })
+    const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(reviewer)
+    const tool = defineTaskReviewAgentTool(ctx)
+    let finished = false
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const running = tool.execute({ taskId: 't1', runId: RUN }, exec as never) as Promise<string>
+    void running.then(() => { finished = true })
+    await vi.waitFor(() => expect(reviewer.agent.whenIdle).toHaveBeenCalledOnce())
 
-    expect(spawn).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(600_001)
+    expect(finished).toBe(false)
+    expect(reviewer.agent.cancel).not.toHaveBeenCalled()
     expect(recordDiagnosisIn).not.toHaveBeenCalled()
-    expect(result).toContain('timed out')
+    expect(rowsOfKind('settled')).toEqual([])
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    vi.useRealTimers()
+
+    const repeated = await tool.execute({ taskId: 't1', runId: RUN }, exec as never) as string
+    expect(repeated).toContain('already has this attempt')
+    expect(spawn).toHaveBeenCalledOnce()
+    reviewer.complete()
+    expect(await running).toContain('judged task t1')
+    expect(recordDiagnosisIn).toHaveBeenCalledOnce()
+    expect(rowsOfKind('settled')).toHaveLength(1)
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded' })
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+  })
+
+  test('an explicit cancellation ends a silent reviewer with no diagnosis and removes its listener', async () => {
+    const reviewer = handle(undefined, { hang: true })
+    const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(reviewer)
+    const controller = new AbortController()
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener')
+    const running = defineTaskReviewAgentTool(ctx).execute(
+      { taskId: 't1', runId: RUN }, { ...exec, signal: controller.signal } as never,
+    ) as Promise<string>
+    await vi.waitFor(() => expect(reviewer.agent.whenIdle).toHaveBeenCalledOnce())
+    controller.abort()
+    const result = await running
+
+    expect(reviewer.agent.cancel).toHaveBeenCalledExactlyOnceWith({ kind: 'parent' })
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function))
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    expect(result).toContain('cancelled')
     expect(result).toContain('no diagnosis')
-    // The attempt is settled, and the timeout is named on the fact.
     expect(rowsOfKind('settled')).toHaveLength(1)
     expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
-    expect(String(rowsOfKind('settled')[0]!.note)).toContain('timed out')
+    expect(String(rowsOfKind('settled')[0]!.note)).toContain('cancelled')
+  })
+
+  test('unloading the owning plugin cancels and drains a silent review attempt', async () => {
+    const reviewer = handle(undefined, { hang: true })
+    const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(reviewer)
+    let unload: (() => Promise<void>) | undefined
+    ctx.effect = ((install: () => () => Promise<void>) => {
+      unload = install()
+      return unload
+    }) as Context['effect']
+    const running = defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never) as Promise<string>
+    await vi.waitFor(() => expect(reviewer.agent.whenIdle).toHaveBeenCalledOnce())
+    await unload!()
+    expect(await running).toContain('plugin was unloaded')
+    expect(reviewer.agent.cancel).toHaveBeenCalledExactlyOnceWith({ kind: 'parent' })
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    expect(rowsOfKind('settled')).toHaveLength(1)
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+  })
+
+  test('a failed reviewer ends its attempt without accepting output from the failed turn', async () => {
+    const reviewer = handle(REPLY)
+    reviewer.agent.whenIdle.mockRejectedValue(new Error('reviewer loop failed'))
+    const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(reviewer)
+    await expect(defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never))
+      .rejects.toThrow('reviewer loop failed')
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
+    expect(String(rowsOfKind('settled')[0]!.note)).toContain('reviewer loop failed')
+  })
+
+  test('the tool advertises no timeout and rejects a stale timeout parameter before reading the store', async () => {
+    const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(REPLY))
+    const readStore = vi.spyOn(ctx.task, 'openStore')
+    const tool = defineTaskReviewAgentTool(ctx)
+    expect(JSON.stringify(tool.parameters)).not.toContain('timeoutMs')
+    expect(tool.description).not.toMatch(/timeout|watchdog|times out/)
+    const result = await tool.execute({ taskId: 't1', runId: RUN, timeoutMs: 5 }, exec as never) as string
+    expect(result).toContain('undeclared parameter "timeoutMs"')
+    expect(readStore).not.toHaveBeenCalled()
+    expect(spawn).not.toHaveBeenCalled()
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    expect(ledgerText()).toBe('')
   })
 
   test('a reviewer that returns no parseable answer leaves an interrupted attempt, not a Diagnosis', async () => {
@@ -818,6 +903,7 @@ describe('task_review_agent', () => {
     }]
     const spawn = vi.fn(async () => handle(REPLY))
     const ctx = {
+      effect: (install: () => () => Promise<void>) => install(),
       graphs: { graphForSession: async () => graph },
       task: {
         openStore: async () => structuredClone(clean),
@@ -901,23 +987,23 @@ describe('task_review_agent', () => {
     expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
   })
 
-  test('a reviewer that timed out spends one run, and nothing refunds or restarts it', async () => {
-    let attempts = 0
-    const { ctx, spawn } = fixture(handle(REPLY), async (...args: unknown[]) => {
-      attempts += 1
-      await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
-      return attempts === 1 ? handle(undefined, { hang: true }) : handle(REPLY)
-    })
+  test('a cancelled reviewer spends one run, and nothing refunds or restarts it', async () => {
+    const reviewer = handle(undefined, { hang: true })
+    const { ctx, spawn } = fixtureWithBeforePrompt(reviewer)
     const tool = defineTaskReviewAgentTool(ctx)
-
-    const first = (await tool.execute({ taskId: 't1', runId: RUN, timeoutMs: 5 }, exec as never)) as string
-    expect(first).toContain('timed out')
+    const controller = new AbortController()
+    const running = tool.execute(
+      { taskId: 't1', runId: RUN }, { ...exec, signal: controller.signal } as never,
+    ) as Promise<string>
+    await vi.waitFor(() => expect(reviewer.agent.whenIdle).toHaveBeenCalledOnce())
+    controller.abort()
+    expect(await running).toContain('cancelled')
     expect(rowsOfKind('started')).toHaveLength(1)
 
-    const second = (await tool.execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+    const second = await tool.execute({ taskId: 't1', runId: RUN }, exec as never) as string
     expect(second).toContain('already has this attempt')
     expect(spawn).toHaveBeenCalledOnce()
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
   })
 
   /**
@@ -996,6 +1082,7 @@ describe('task_review_agent', () => {
       return handle(REPLY)
     })
     const ctx = {
+      effect: (install: () => () => Promise<void>) => install(),
       graphs: { graphForSession: async () => graph },
       task: {
         openStore: async () => structuredClone(state.snapshot),

@@ -141,6 +141,7 @@ function fixture(
   const events: { event: string; listener: (payload: never) => void }[] = []
   const off = vi.fn()
   const ctx = {
+    effect: (install: () => () => Promise<void>) => install(),
     task: {
       openStore: async (_storeId: string) => structuredClone(state.snapshot),
       snapshotIn: async (_storeId: string) => structuredClone(state.snapshot),

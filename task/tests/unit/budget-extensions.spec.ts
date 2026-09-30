@@ -254,11 +254,11 @@ describe('TaskBudgetExtended reducer', () => {
     await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
       { requestKey: 'k-deadline', deadlineAt: '2026-09-16T04:00:00' },
       { deadlineAt: CONFIGURED_DEADLINE },
-    ), ROOT_SESSION)).rejects.toThrow(/absolute instants in canonical UTC form/)
+    ), ROOT_SESSION)).rejects.toThrow(/accept no deadlineAt/)
     await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
       { requestKey: 'k-deadline', deadlineAt: '2026-09-16T00:30:00.000Z' },
       { deadlineAt: CONFIGURED_DEADLINE },
-    ), ROOT_SESSION)).rejects.toThrow(/a deadline only ever moves later/)
+    ), ROOT_SESSION)).rejects.toThrow(/accept no deadlineAt/)
     await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor({ requestKey: 'k-same', maxRuns: 10 }, { maxRuns: 10 }), ROOT_SESSION))
       .rejects.toThrow(/only ever moves up/)
     expect((await h.service.snapshotIn(STORE)).budgetExtensions?.all).toEqual([])
@@ -273,7 +273,7 @@ describe('TaskBudgetExtended reducer', () => {
       maxRuns: undefined,
     }
     await expect(h.service.recordBudgetExtensionIn(STORE, 'root', withoutDimension, ROOT_SESSION))
-      .rejects.toThrow(/raises nothing/)
+      .rejects.toThrow(/require maxRuns/)
     await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(MORE_RUNS, { maxRuns: 10 }, { requestDigest: 'f'.repeat(64) }), ROOT_SESSION))
       .rejects.toThrow(/which is not the identity of the request it carries/)
     await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(MORE_RUNS, { maxRuns: 10 }, { extra: { tokenBudget: 1000 } }), ROOT_SESSION))
@@ -315,39 +315,21 @@ describe('TaskBudgetExtended reducer', () => {
     expect((await h.service.snapshotIn(STORE)).budgetExtensions?.all).toEqual([])
   })
 
-  test('refuses a grant read before another one moved a dimension it does not raise, writing nothing', async () => {
+  test('a historical deadline remains readable and does not block a new maxRuns grant', async () => {
     const h = await storeWithRoot()
-    // One reading, two requests: the first raises maxRuns, the second moves the
-    // deadline, and each was approved against {maxRuns: 10, deadlineAt: T}. A
-    // person who approved the second never saw the run ceiling the first left.
-    const reading = { maxRuns: 10, deadlineAt: CONFIGURED_DEADLINE }
-    await h.service.recordBudgetExtensionIn(STORE, 'root', claimFor({ requestKey: 'k-runs', maxRuns: 20 }, reading), ROOT_SESSION)
-    const before = await h.service.snapshotIn(STORE)
-    const persisted = storeEvents(h).length
-
-    await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
-      { requestKey: 'k-time', deadlineAt: APPROVED_DEADLINE },
-      reading,
-    ), ROOT_SESSION)).rejects.toThrow(/was read at maxRuns 10, but the ceiling in force here is 20/)
-    // A reading that leaves the dimension the tree has already moved out is
-    // refused too: the store can measure maxRuns from its own record, and a
-    // request read without it was read before that record.
-    await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
-      { requestKey: 'k-time-2', deadlineAt: APPROVED_DEADLINE },
-      { deadlineAt: CONFIGURED_DEADLINE },
-    ), ROOT_SESSION)).rejects.toThrow(/was read without a maxRuns reading, but the ceiling in force here is 20/)
-    expect(storeEvents(h).length).toBe(persisted)
-    expect(await h.service.snapshotIn(STORE)).toEqual(before)
-
-    // The same request re-read at the whole ceiling the first grant left is a
-    // new request, and it lands as its own fact.
-    await h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
-      { requestKey: 'k-time', deadlineAt: APPROVED_DEADLINE },
-      { ...reading, maxRuns: 20 },
-    ), ROOT_SESSION)
-    expect((await h.service.snapshotIn(STORE)).budgetExtensions?.all.map(entry => entry.requestKey)).toEqual(['k-runs', 'k-time'])
+    const historical = claimFor({ requestKey: 'k-old-time', deadlineAt: APPROVED_DEADLINE }, { deadlineAt: CONFIGURED_DEADLINE })
+    await h.service.commitIn(STORE, [{
+      kind: 'TaskBudgetExtended', taskId: 'root', sessionId: ROOT_SESSION, timestamp: NOW, actor: 'test',
+      payload: { extension: historical }, schemaVersion: 1,
+    }])
+    await h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(MORE_RUNS, { maxRuns: 10 }), ROOT_SESSION)
+    const snapshot = await h.service.snapshotIn(STORE)
+    expect(snapshot.budgetExtensions?.all).toHaveLength(2)
+    expect(snapshot.budgetExtensions?.all[0]?.deadlineAt?.next).toBe(APPROVED_DEADLINE)
+    expect(snapshot.budgetExtensions?.all[1]?.maxRuns?.next).toBe(20)
+    const reopened = harness(h.sessions)
+    expect(await new TaskService(reopened.ctx as never).openStore(STORE)).toEqual(snapshot)
   })
-
   test('refuses a raise whose reading disagrees with the ceiling it moves from, writing nothing', async () => {
     const h = await storeWithRoot()
     await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
@@ -387,12 +369,12 @@ describe('TaskBudgetExtended reducer', () => {
     const h = await storeWithRoot()
     await h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(MORE_RUNS, { maxRuns: 10 }), ROOT_SESSION)
     await h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
-      { requestKey: 'k-later-deadline', deadlineAt: APPROVED_DEADLINE },
-      { maxRuns: 20, deadlineAt: CONFIGURED_DEADLINE },
+      { requestKey: 'k-next-runs', maxRuns: 30 },
+      { maxRuns: 20 },
     ), ROOT_SESSION)
 
     const live = await h.service.snapshotIn(STORE)
-    expect(live.budgetExtensions?.all.map(entry => entry.requestKey)).toEqual(['k-more-runs', 'k-later-deadline'])
+    expect(live.budgetExtensions?.all.map(entry => entry.requestKey)).toEqual(['k-more-runs', 'k-next-runs'])
 
     // A fresh state, built from the events alone, agrees with the live one …
     const replayed = new TaskState(STORE)

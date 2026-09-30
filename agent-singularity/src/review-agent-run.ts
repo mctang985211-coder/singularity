@@ -6,7 +6,7 @@
  * names one source. The automatic scan (`review-agent-scan.ts`) is the other:
  * a review that settled `failed` is accepted under the store's own allowance.
  * Both run *the same attempt* — the admission's serial region, the claim written
- * before the reviewer exists, the pack, the spawn, the watchdog, the diagnosis
+ * before the reviewer exists, the pack, the spawn, the diagnosis
  * and the one terminal fact — so the two doors cannot drift into two review
  * implementations.
  *
@@ -35,8 +35,7 @@
  * dimensions are a vocabulary, not a form: a reply that judges two of them is
  * complete, and no dimension is ever padded with `unknown`.
  *
- * Nothing here invents a record. A watchdog that fires, a cancellation, a
- * reply that is not a diagnosis, and a judgement that cites nothing are all
+ * Nothing here invents a record. A cancellation, a reply that is not a diagnosis, and a judgement that cites nothing are all
  * **interrupted attempts with a named reason** — the ledger holds that fact,
  * and the store holds no Diagnosis, because an `unknown` an agent never wrote
  * is not a conclusion it reached.
@@ -110,9 +109,6 @@ export const REVIEWER_BASELINE: readonly string[] = [
 export function reviewerGrant(): WorkerGrant {
   return { capabilities: [], baseline: REVIEWER_BASELINE, keepPresetTools: false }
 }
-
-/** Default watchdog deadline for one review agent (10 minutes). */
-export const REVIEW_AGENT_TIMEOUT_MS = 600_000
 
 /** The source one attempt reviews, as a ref a reader reads back (`t1#r1`, `t2#no-run`). */
 export function sourceRef(source: ReviewAgentSource): string {
@@ -317,8 +313,6 @@ export interface ReviewAttemptInput {
   readonly requestKey: string | null
   /** The review focus the caller named, or `null` when it named none. */
   readonly reason: string | null
-  /** The watchdog deadline; the default when absent. */
-  readonly timeoutMs?: number
   /** The caller's signal, when the attempt should end with it. */
   readonly signal?: AbortSignal
 }
@@ -336,7 +330,7 @@ export type ReviewAttemptOutcome =
   /** The diagnosis was produced and the store refused it: the attempt is interrupted, the reviewer did run. */
   | { readonly kind: 'unrecorded'; readonly failure: string; readonly sessionId: string }
   /**
-   * The reviewer ended without a diagnosis: it timed out, it was cancelled, or
+   * The reviewer ended without a diagnosis: it was cancelled, or
    * what it returned carries none (see {@link parseReviewerDiagnosis}). The
    * attempt is settled `interrupted` with the reason named — no Diagnosis is
    * invented out of silence (A5).
@@ -358,8 +352,8 @@ export type ReviewAttemptOutcome =
 
 /**
  * Run one review attempt for one source: the admission's serial region (plan,
- * claim, spawn) and then, outside it, the reviewer's own time — its watchdog,
- * its reply, the diagnosis it carries and the one terminal fact.
+ * claim, spawn) and then, outside it, the reviewer's reply, the diagnosis it
+ * carries and the one terminal fact.
  *
  * Waiting for the reviewer never runs inside the region: only the decision, the
  * claim and the spawn do, so the claim is durable before any handle exists and a
@@ -377,9 +371,6 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
     actor,
     sessionId: reviewerSessionId,
   }
-  const timeoutMs = Number.isFinite(input.timeoutMs) && (input.timeoutMs as number) > 0
-    ? Math.floor(input.timeoutMs as number)
-    : REVIEW_AGENT_TIMEOUT_MS
   const outcome = await admitReviewAgent(storeId, async admission => {
     // The store, read inside the region: the pack the reviewer judges from, and
     // the one fact the ledger cannot see — whether an attempt whose row is open
@@ -493,34 +484,29 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
   }
   const cancel = () => handle.agent.cancel({ kind: 'parent' })
   input.signal?.addEventListener('abort', cancel, { once: true })
-  let timer: ReturnType<typeof setTimeout> | undefined
+  let waiting = true
+  let unloaded = false
+  let resolveCompleted!: () => void
+  const completed = new Promise<void>(resolve => { resolveCompleted = resolve })
+  let disposeWait: (() => void | Promise<void>) | undefined
   try {
-    let timedOut = false
-    const deadline = new Promise<'timeout'>(resolve => {
-      timer = setTimeout(() => {
-        timedOut = true
-        resolve('timeout')
-      }, timeoutMs)
-    })
-    // A rejecting `whenIdle` is treated like a silent reviewer: the reply is
-    // read (likely absent) and the attempt ends without a diagnosis rather
-    // than throwing out of the entry.
-    const idle = handle.agent.whenIdle().then(() => 'idle' as const).catch(() => 'failed' as const)
-    const reviewOutcome = await Promise.race([idle, deadline])
-    if (timer !== undefined) clearTimeout(timer)
-    input.signal?.removeEventListener('abort', cancel)
-    if (reviewOutcome === 'timeout') handle.agent.cancel({ kind: 'parent' })
-
-    const cancelled = input.signal?.aborted === true
-    const reply = timedOut ? undefined : lastAssistantText(handle.agent.session.snapshotEvents())
-    const parsed = timedOut || cancelled
+    // The plugin owns this wait. Unload cancels its reviewer and waits for the
+    // attempt's terminal fact; no elapsed-time limit ends the model's work.
+    disposeWait = ctx.effect(() => async () => {
+      if (!waiting) return
+      unloaded = true
+      cancel()
+      await completed
+    }, 'singularityAgent: review agent wait')
+    await handle.agent.whenIdle()
+    const parsed = input.signal?.aborted === true || unloaded
       ? {
         ok: false as const,
-        refusal: timedOut
-          ? `the reviewer timed out after ${timeoutMs}ms with no diagnosis`
+        refusal: unloaded
+          ? 'the plugin was unloaded before the reviewer produced a diagnosis'
           : 'the attempt was cancelled before the reviewer produced a diagnosis',
       }
-      : parseReviewerDiagnosis(reply)
+      : parseReviewerDiagnosis(lastAssistantText(handle.agent.session.snapshotEvents()))
     if (!parsed.ok) {
       // Nothing is invented out of silence: the attempt's terminal fact says
       // what ended it, and the store holds no Diagnosis for it.
@@ -579,9 +565,13 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
       proposals,
     }
   } catch (error) {
-    if (timer !== undefined) clearTimeout(timer)
-    input.signal?.removeEventListener('abort', cancel)
+    cancel()
     await settleAttempt('interrupted', `the review attempt failed: ${error instanceof Error ? error.message : String(error)}`)
     throw error
+  } finally {
+    waiting = false
+    resolveCompleted()
+    input.signal?.removeEventListener('abort', cancel)
+    if (!unloaded) await disposeWait?.()
   }
 }

@@ -298,7 +298,6 @@ function limitLines(proposal: TaskProposal): string[] {
   ]
   return [
     `- enforced at admission: maxDepth ${context.maxDepth}, maxChildren ${context.maxChildren}`,
-    `- enforced in flight: ${context.wallTimeMs === undefined ? 'no wall-clock ceiling was configured' : `wallTimeMs ${context.wallTimeMs}`}`,
     `- audited after the run (never enforced in flight): ${audited.length === 0 ? 'none configured' : audited.join(', ')}`,
   ]
 }

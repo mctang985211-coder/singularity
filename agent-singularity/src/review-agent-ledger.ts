@@ -668,7 +668,7 @@ const liveAttempts = new Set<string>()
  * read, this store's attempts and its started count are derived, and `work` runs
  * with the decision door (`plan`), the claim door and the started door. The
  * region ends when `work` returns or throws. Nothing else is serialized: waiting
- * for the reviewer's output, its watchdog, and recording its Diagnosis happen
+ * for the reviewer's output and recording its Diagnosis happen
  * after `work` returned, outside the region, in the caller.
  *
  * The consequence to rely on: two admissions for one store cannot interleave

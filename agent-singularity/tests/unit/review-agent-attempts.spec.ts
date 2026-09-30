@@ -128,6 +128,7 @@ function fixture(spawnImpl: (args: unknown[]) => Promise<unknown>, snapshot = ba
   const state = { snapshot }
   const spawn = vi.fn(async (...args: unknown[]) => spawnImpl(args))
   const ctx = {
+    effect: (install: () => () => Promise<void>) => install(),
     graphs: { graphForSession: async (_sessionId: string) => graph },
     task: {
       openStore: async (_storeId: string) => structuredClone(state.snapshot),

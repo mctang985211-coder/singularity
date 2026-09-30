@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { rootTaskStoreId } from '../../task/src/index.ts'
@@ -23,7 +23,7 @@ import { disposeRunStacks, startRunStack, type RunStack, type ToolCallResult } f
  *    checkout too, so a replay from a second root into a checkout the first root
  *    holds is refused with nothing persisted; and a spawning replay's worker is
  *    held to the same completion protocol as any worker — an idle session
- *    without a submission is stopped by its wall-clock budget.
+ *    without a submission remains active until the user cancels it.
  * 3. **The layer a replay holds is its own run's.** §3.4 compares a holder by
  *    task, so the layer a spawning replay takes names the replayed task beside
  *    its lineage label — otherwise the replayed worker's own `task_decompose`
@@ -161,7 +161,7 @@ describe('workspace ownership across entries (A3)', () => {
   })
 
   it('holds a spawning replay to the completion protocol, and refuses a replay from a root that does not hold the checkout', async () => {
-    const h = await startRunStack({ roots: [ROOT1, ROOT2], rootBudget: { wallTimeMs: 1000 }, submit: false, worker: () => {} })
+    const h = await startRunStack({ roots: [ROOT1, ROOT2], submit: false, worker: () => {} })
     const first = await h.root(ROOT1, rootContract('the first tree'))
     const champion = await writeChampion(h, first.storeId)
 
@@ -177,16 +177,18 @@ describe('workspace ownership across entries (A3)', () => {
 
     // (b) The same replay from the holding root runs, and its worker is held to
     // the protocol every worker is: an idle session without a submission is
-    // stopped by its wall-clock budget, not accepted.
-    const outcome = await h.runtime.replayTask(first.storeId, champion.taskId, { lineage: 'evolution-replay:p1' }, ROOT1)
-    expect(outcome.status).toBe('failed')
+    // kept active without evidence, then explicitly cancelled by the user.
+    const pending = h.runtime.replayTask(first.storeId, champion.taskId, { lineage: 'evolution-replay:p1' }, ROOT1)
+    await vi.waitFor(() => expect(h.spawns).toHaveLength(1))
+    await h.runtime.cancelGraph(first.storeId, 'the user stopped the unsubmitted replay')
+    const outcome = await pending
+    expect(outcome.status).toBe('cancelled')
     const after = await h.snapshot(first.storeId)
     const replayRun = after.runs.find(run => run.taskId !== first.taskId && run.taskId !== champion.taskId)!
-    expect(replayRun.status).toBe('failed')
+    expect(replayRun.status).toBe('cancelled')
     expect(replayRun.noProgress).toBeUndefined()
     const review = after.reviews.find(item => item.runId === replayRun.runId)!
-    expect(review.localizedCause).toContain('budget exhausted: wallTimeMs')
-    expect(review.localizedCause).toContain('not a criteria failure')
+    expect(review.outcome).toBe('cancelled')
     // The replay's run was started once and verified by nobody: no evidence was
     // recorded for a run that never submitted.
     expect(after.runs.filter(run => run.taskId === replayRun.taskId)).toHaveLength(1)

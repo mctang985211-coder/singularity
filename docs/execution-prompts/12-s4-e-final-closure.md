@@ -1,5 +1,7 @@
 # 第 12 项 S4-E 收尾：删除余下旧路径，闭合写前拒绝
 
+现行变更（2026-10-01）：[计划 G 节](../2026-09-20-vrtc-code-change-plan.md#g-原图续跑与角色装配)覆盖本票早期的 Agent 截止、reviewer watchdog 和按问答来源恢复的限制；当前无 Agent 总时长上限，业务 worker 按持久相位恢复原身份。原交付证据仍作历史事实。
+
 你是实现主代理。工作区 `/home/ROXY/code/bb_work/harness/packages/singularity`，外层 `/home/ROXY/code/bb_work/harness`。本轮被审交付 `e8c0799` / 外层 `882d3ffefb` 已被[收尾审核](../history/2026-09-26-s4-e-final-closure-review.md)判返工；核对实际 HEAD，按[公共合同](README.md)保存基线。读主 guide §5.17、[计划 F.2](../2026-09-20-vrtc-code-change-plan.md)及本次审核即可，历史 prompt 不作当前指令。完成本票并经独立审核后才可进入 A5。
 
 ## 固定合同
@@ -34,7 +36,7 @@ fold 也只接受本阶段可写的生命周期：非 Skill 只能 proposed；ca
 
 落点仅 `task-runtime/src/index.ts:replayTask` 的公开 options 边界。现状带 `wallTimeMs` 会静默忽略并 spawn；在任何 Task/Run/工作区写前按当前 options 字段集拒绝未知键，复用现有就地校验，不加旧字段适配器、第二计时器或通用校验框架。
 
-验收：真实 runtime 直调带旧 `wallTimeMs` 具名拒绝，Task/Run/spawn/工作区均无新增；合法 replay（包括 model/workspace 绑定）仍通过，配置根时限的 Run 仍按现有规则取消。Evolution 实验 budget 的旧字段拒绝保持。
+验收：真实 runtime 直调带旧 `wallTimeMs` 具名拒绝，Task/Run/spawn/工作区均无新增；合法 replay（包括 model/workspace 绑定）仍通过，单次 verifier 超时与用户取消仍有效。Evolution 实验 budget 的旧字段拒绝保持。
 
 ## 执行与交付
 

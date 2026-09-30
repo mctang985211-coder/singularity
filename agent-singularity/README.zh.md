@@ -35,7 +35,7 @@
 19. task_review_pack：面向一个精确 review 源（taskId + 待复盘的 run，或 runId=null 表示无 Run 的 Review）的只读证据包：本任务 reviews 全文、父/子摘要、依赖边、该源在 ledger 中的复盘尝试；每条带建议的 Diagnosis 标注其 A6 交接状态——已委派给的 supervisor、正在启动的协调者，或具名未启动原因（evolution 开关关闭、目标不支持、store 额度用尽、尚未有人消费）。只报事实——是否启动 reviewer 由别处决定（失败 Review 自动受理；成功源只有显式调用才会被复盘）。
 20. task_review_agent：为一个精确 review 源（taskId、runId、可选 reason 与 requestKey）spawn 一个只读评审 agent；同一源只有一个默认尝试，重复调用返回该尝试而不是再起一个，尝试终结后再次复盘必须给出新的 requestKey，新尝试受每 store 额度约束；reviewer 自己落一条 Diagnosis——复盘观察、结论（有据建议/无需改进/证据不足）与置信度，judgements 与 proposals 均可省；超时或不可解析的答复把尝试记为 interrupted，不伪造 Diagnosis。终态为 `failed` 的 Review 会被自动受理（插件在记录落盘时和 graph 激活时扫描 store），成功源只有显式调用才会被复盘。
 21. task_diagnose：持久化一条 Diagnosis（proposals 只是建议，绝不自动执行）。
-22. task_budget_extend：经原生人审（卡片展示 store、当前生效上限、已计用量与拟改后的总上限）申请提高一个已配置的根上限——新的 `maxRuns` 总额和/或绝对 UTC 的 `deadlineAt`，以 `requestKey` 为键；落一条 `TaskBudgetExtended` 事实，同键重试直接读回已有记录不再发问；不唤活任何终态、不自行启动任何工作、已计用量继续累计。
+22. task_budget_extend：经原生人审（卡片展示 store、当前生效上限、已计用量与拟改后的总上限）申请提高一个已配置的根上限——新的 `maxRuns` 总额（Agent 无运行时长截止），以 `requestKey` 为键；落一条 `TaskBudgetExtended` 事实，同键重试直接读回已有记录不再发问；不唤活任何终态、不自行启动任何工作、已计用量继续累计。
 23. task_recover：为一个已记录 Diagnosis（sourceDiagnosisId + requestKey）开启失败根目标的新尝试——runtime 在同一 store 开一个全新 Run/Session，由原不可变验收判据判定；工具之下每层各自重检（调用者必须是该交接委派的可信 supervisor、诊断所依赖的能力变更必须已获批且已应用，store 自身事实/上限/幂等由 runtime 重查）。绝不出现于 root 面。
 24. evolution_propose：登记一条 evolution 提案（可从 Diagnosis 转录）。
 25. evolution_candidate：记录 candidate 的完整版本集合与可选的结构化 mutation。

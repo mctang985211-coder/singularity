@@ -1,5 +1,7 @@
 # 第 11 项 A4：直属父子澄清
 
+现行变更（2026-10-01）：[计划 G 节](../2026-09-20-vrtc-code-change-plan.md#g-原图续跑与角色装配)覆盖本票早期的 Agent 截止、reviewer watchdog 和按问答来源恢复的限制；当前无 Agent 总时长上限，业务 worker 按持久相位恢复原身份。原交付证据仍作历史事实。
+
 你是 Singularity A4 的实现主代理。工作区为 `/home/ROXY/code/bb_work/harness/packages/singularity`，外层仓库为 `/home/ROXY/code/bb_work/harness`。**只交付第 11 项 A4，整票停在进度审核；不开始 S4-E/A5/A6。**
 
 前置第 9 项 A2+A1 已于 2026-09-25 验收，证据见[最终进度审核](../history/2026-09-25-a2-a1-progress-review.md)；当时 Singularity 为 `2ec39d1`、外层为 `aa23e6c`。施工时重新核对实际 HEAD、两仓状态及适用 AGENTS.md。先读[公共执行合同](README.md)、[唯一计划 F.1](../2026-09-20-vrtc-code-change-plan.md)、[深入架构 §7](../exploration-evolution-architecture.md)与[主 guide §1.4–1.5](../singularity-harness-guide.md)。F.1 是行为与所有权正本；本 prompt 只固定交付顺序、验收证据和停止点。修改前按公共合同保存 Git 基线。

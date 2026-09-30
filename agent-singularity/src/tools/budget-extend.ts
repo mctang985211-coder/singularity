@@ -49,12 +49,8 @@ import { undeclaredParameters } from './proposal-parameters.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
-/** The whole argument surface: the request key and the two totals. There is deliberately no third member. */
-const DECLARED_PARAMETERS = ['requestKey', 'maxRuns', 'deadlineAt'] as const
-
-/** The two ceilings a tree's budget is measured in, in the order the card and the record print them. */
-type Dimension = 'maxRuns' | 'deadlineAt'
-const DIMENSIONS: readonly Dimension[] = ['maxRuns', 'deadlineAt']
+/** The whole argument surface: the request key and the approved run total. */
+const DECLARED_PARAMETERS = ['requestKey', 'maxRuns'] as const
 
 function sessionId(exec: ToolRunContext): string {
   const id = exec.agent?.id
@@ -63,33 +59,25 @@ function sessionId(exec: ToolRunContext): string {
 }
 
 /**
- * The value one dimension is under, or the words that say there is none. An
+ * The run ceiling in force, or the words that say there is none. An
  * absent ceiling is not zero and not infinity: this deployment sets no limit
  * there, and a card that printed a number would be inventing one.
  */
-function inForce(value: number | string | undefined): string {
+function inForce(value: number | undefined): string {
   return value === undefined ? 'none' : String(value)
 }
 
-/** The raise this request asks of one dimension, when it names that dimension at all. */
-function raiseOf(proposal: BudgetExtensionProposal, dimension: Dimension): { readonly previous: number | string; readonly next: number | string } | undefined {
-  return dimension === 'maxRuns' ? proposal.maxRuns : proposal.deadlineAt
-}
-
-/** One dimension's raise as a line, in the order the dimensions are printed. */
+/** The run-count raise this request names, as a recorded answer prints it. */
 function raiseLines(proposal: BudgetExtensionProposal): string[] {
-  return DIMENSIONS.flatMap(dimension => {
-    const raise = raiseOf(proposal, dimension)
-    return raise === undefined ? [] : [`- ${dimension}: ${String(raise.previous)} → ${String(raise.next)}`]
-  })
+  const raise = proposal.maxRuns
+  return raise === undefined ? [] : [`- maxRuns: ${raise.previous} → ${raise.next}`]
 }
 
 /**
  * The card a person decides from (K4): the store and the tree the raise belongs
- * to, the request's own key and identity, the runs the store already holds, each
- * of the two ceilings as it stands now — the approved total in force first, the
- * ceiling this deployment configures beside it in parentheses — and, for the
- * dimensions this request names, the total approving would put in place.
+ * to, the request's own key and identity, the runs the store already holds, the
+ * run ceiling in force beside the deployment's configured ceiling, and the
+ * total approving would put in place.
  *
  * The usage is on the card because the ceiling is what is being moved and the
  * count is what it is measured against: a raise from 10 to 20 when 18 runs exist
@@ -104,14 +92,8 @@ function renderAsk(ask: RootBudgetApprovalAsk): string {
     `Budget extension of the tree in store "${ask.storeId}" — root task ${ask.rootTaskId}, asked by its root coordination session ${ask.rootSessionId}.`,
     `request key "${proposal.requestKey}" (identity ${proposal.requestDigest})`,
     `runs the store already holds: ${ask.runsUsed} — an approved total replaces the ceiling, never this count`,
-    'ceilings now (the approved total in force first, the ceiling this deployment configures in parentheses):',
-    ...DIMENSIONS.map(dimension => {
-      const raise = raiseOf(proposal, dimension)
-      const now = `${dimension}: ${inForce(ask.effective[dimension])} in force (deployment configures ${inForce(ask.configured[dimension])})`
-      return raise === undefined
-        ? `- ${now} — this request does not name it`
-        : `- ${now} → approves a total of ${String(raise.next)}`
-    }),
+    'run ceiling now (the approved total in force first, the ceiling this deployment configures in parentheses):',
+    `- maxRuns: ${inForce(ask.effective.maxRuns)} in force (deployment configures ${inForce(ask.configured.maxRuns)}) → approves a total of ${proposal.maxRuns!.next}`,
     'approving records ONE budget-extension event on this store: the tree keeps its runs, its tasks and its history, no run starts or resumes, nothing is re-opened, and the approved total becomes the ceiling every later admission reads.',
     'rejecting or cancelling records nothing and changes no ceiling.',
   ].join('\n')
@@ -129,11 +111,10 @@ export function defineTaskBudgetExtendTool(ctx: Context) {
   return defineTool({
     name: 'task_budget_extend',
     description:
-      'Ask a human to raise the ceiling(s) bounding this tree\'s execution, and record the raise they approve. State the ' +
+      'Ask a human to raise the run ceiling bounding this tree\'s execution, and record the raise they approve. State the ' +
       'total you want in force, never a difference: maxRuns is the WHOLE approved run count (a positive whole number, not "add five"), ' +
-      'deadlineAt is the absolute instant the tree must stop by (for example 2026-09-28T09:00:00.000Z, never "two more hours"). ' +
-      'At least one of the two is required; a dimension this deployment leaves unlimited is refused, as is any total that is not ' +
-      'above the ceiling in force. The request is shown to a human with the store, both ceilings and the runs already used, and ' +
+      'maxRuns is required; a run ceiling this deployment leaves unlimited is refused, as is any total that is not ' +
+      'above the ceiling in force. The request is shown to a human with the store, the run ceiling and the runs already used, and ' +
       'only their explicit approval records anything — a rejection, a cancellation or an unavailable answerer writes nothing. ' +
       'A request key already recorded with the same totals is answered from the record without asking again; the same key at ' +
       'different totals is refused. A raise starts no run, resumes none, re-opens nothing and does not clear the runs already ' +
@@ -148,11 +129,8 @@ export function defineTaskBudgetExtendTool(ctx: Context) {
       },
       maxRuns: {
         type: 'number',
+        required: true,
         description: 'The whole approved run count once the human approves — a positive whole number above the ceiling in force, never an increment',
-      },
-      deadlineAt: {
-        type: 'string',
-        description: 'The approved deadline as an absolute instant in UTC (e.g. 2026-09-28T09:00:00.000Z), later than the one in force — never a duration',
       },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
@@ -173,8 +151,7 @@ export function defineTaskBudgetExtendTool(ctx: Context) {
       try {
         result = await ctx.taskRuntime.extendRootBudget(caller, { callId: exec.callId, execution: exec }, {
           requestKey: args.requestKey,
-          ...(args.maxRuns === undefined ? {} : { maxRuns: args.maxRuns }),
-          ...(args.deadlineAt === undefined ? {} : { deadlineAt: args.deadlineAt }),
+          maxRuns: args.maxRuns,
         })
       } catch (error) {
         return `task_budget_extend rejected: ${error instanceof Error ? error.message : String(error)}`

@@ -20,7 +20,7 @@ import { defineRootBudgetApproval, defineTaskBudgetExtendTool } from '../../src/
  * `defineRootBudgetApproval` builds, which is where the native DSH
  * `approval.request()` really happens. What each case pins is therefore the two
  * halves of that seam: the card the answerer was handed (the store, the root
- * task and session, the key and its identity, the usage, both ceilings with the
+ * task and session, the key and its identity, the usage, the run ceiling with the
  * configured value beside them, and the totals approving would put in place); and
  * what the store ends up holding — the raises, the `approval:<callId>` audit
  * reference, and nothing at all when the person says anything but
@@ -38,9 +38,7 @@ const NOW = '2026-09-16T00:00:00.000Z'
 const ROOT_SESSION = 'root-session'
 const WORKER_SESSION = 'worker-session'
 const STORE = rootTaskStoreId(ROOT_SESSION)
-/** The configured wall time (one hour) resolved against the root run's own start. */
-const CONFIGURED_DEADLINE = '2026-09-16T01:00:00.000Z'
-const ROOT_BUDGET: Config['rootBudget'] = { wallTimeMs: 3_600_000, maxRuns: 10 }
+const ROOT_BUDGET: Config['rootBudget'] = { maxRuns: 10 }
 /** The channel's own identity for one ask: a fresh uuid. Nothing this path persists may claim one any more. */
 const CHANNEL_ID = /approval:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/
 
@@ -257,7 +255,7 @@ function recordOf(overrides: Partial<TaskBudgetExtension> = {}): TaskBudgetExten
     requestKey: 'k-runs',
     requestDigest: 'd'.repeat(64),
     maxRuns: { previous: 10, next: 20 },
-    baseline: { maxRuns: 10, deadlineAt: CONFIGURED_DEADLINE },
+    baseline: { maxRuns: 10 },
     approvalRef: 'approval:call-7',
     requestedBy: ROOT_SESSION,
     recordedAt: '2026-09-16T00:00:05.000Z',
@@ -266,7 +264,7 @@ function recordOf(overrides: Partial<TaskBudgetExtension> = {}): TaskBudgetExten
 }
 
 describe('task_budget_extend', () => {
-  it('asks one person once, hands them the store, both ceilings, the usage and the totals, and records what they approved', async () => {
+  it('asks one person once, hands them the store, the run ceiling, the usage and the total, and records what they approved', async () => {
     const h = await harness()
     await storeWithRoot(h, 3)
     const before = await snapshot(h)
@@ -275,8 +273,8 @@ describe('task_budget_extend', () => {
     const result = (await tool.execute({ requestKey: 'k-runs', maxRuns: 20 }, exec(h, ROOT_SESSION))) as string
 
     // The card is what a person decides from: which store, which tree asked, the
-    // request's own key and identity, the usage that is never reset, both
-    // ceilings with the deployment's configured value beside them, and the total
+    // request's own key and identity, the usage that is never reset, the run
+    // ceiling with the deployment's configured value beside them, and the total
     // this approval would put in place — and no binding, digest-token or other
     // credential standing in for the decision.
     const asked = card(h)
@@ -286,7 +284,7 @@ describe('task_budget_extend', () => {
     expect(asked).toMatch(/request key "k-runs" \(identity [0-9a-f]{64}\)/)
     expect(asked).toContain('runs the store already holds: 3 — an approved total replaces the ceiling, never this count')
     expect(asked).toContain('maxRuns: 10 in force (deployment configures 10) → approves a total of 20')
-    expect(asked).toContain(`deadlineAt: ${CONFIGURED_DEADLINE} in force (deployment configures ${CONFIGURED_DEADLINE}) — this request does not name it`)
+    expect(asked).not.toContain('deadlineAt')
     expect(asked).toContain('approving records ONE budget-extension event')
     expect(asked).toContain('rejecting or cancelling records nothing and changes no ceiling.')
     expect(asked).not.toContain('approval binding')
@@ -334,21 +332,24 @@ describe('task_budget_extend', () => {
     expect(recorded.tasks).toEqual(before.tasks)
   })
 
-  it('records an approved deadline as the absolute instant the person was shown', async () => {
+  it('refuses a stale deadlineAt request before asking or writing, including a request that also raises runs', async () => {
     const h = await harness()
     await storeWithRoot(h)
     const tool = defineTaskBudgetExtendTool(h.ctx as never)
-
-    // The request may spell the instant with any legal zone designator: what the
-    // card shows and what the store keeps is the canonical one.
-    const result = (await tool.execute({ requestKey: 'k-time', deadlineAt: '2026-09-16T12:00:00+08:00' }, exec(h, ROOT_SESSION))) as string
-
-    expect(card(h)).toContain(`deadlineAt: ${CONFIGURED_DEADLINE} in force (deployment configures ${CONFIGURED_DEADLINE}) → approves a total of 2026-09-16T04:00:00.000Z`)
-    expect(result).toContain('- deadlineAt: 2026-09-16T01:00:00.000Z → 2026-09-16T04:00:00.000Z')
-    expect((await snapshot(h)).budgetExtensions?.byRequestKey['k-time']).toMatchObject({
-      deadlineAt: { previous: CONFIGURED_DEADLINE, next: '2026-09-16T04:00:00.000Z' },
-      approvalRef: 'approval:call-1',
-    })
+    const before = await snapshot(h)
+    const committed = JSON.stringify(storeEvents(h))
+    const extend = vi.spyOn(h.runtime, 'extendRootBudget')
+    const result = await tool.execute({
+      requestKey: 'k-time', maxRuns: 20, deadlineAt: '2026-09-16T12:00:00+08:00',
+    }, exec(h, ROOT_SESSION)) as string
+    expect(result).toContain('undeclared parameter "deadlineAt"')
+    await expect(tool.execute({ requestKey: 'k-time', deadlineAt: '2026-09-16T12:00:00+08:00' }, exec(h, ROOT_SESSION)))
+      .rejects.toThrow(/invalid arguments/)
+    expect(extend).not.toHaveBeenCalled()
+    expect(h.asks).toEqual([])
+    expect(budgetEvents(h)).toEqual([])
+    expect(JSON.stringify(storeEvents(h))).toBe(committed)
+    expect(await snapshot(h)).toEqual(before)
   })
 
   it.each(['rejected', 'cancelled', 'unavailable'])(
@@ -457,16 +458,13 @@ describe('task_budget_extend', () => {
     await storeWithRoot(h, 3)
     const tool = defineTaskBudgetExtendTool(h.ctx as never)
 
-    const noDimension = (await tool.execute({ requestKey: 'k-none' }, exec(h, ROOT_SESSION))) as string
-    expect(noDimension).toContain('names neither maxRuns nor deadlineAt')
+    await expect(tool.execute({ requestKey: 'k-none' }, exec(h, ROOT_SESSION)))
+      .rejects.toThrow(/invalid arguments/)
 
     // A total below the ceiling is the increment this tool never accepts, and a
-    // duration in words is not an instant: both are the runtime's refusals,
-    // passed through by name rather than re-judged here.
+    // invalid run total is refused by the runtime and passed through by name.
     const increment = (await tool.execute({ requestKey: 'k-inc', maxRuns: 5 }, exec(h, ROOT_SESSION))) as string
-    expect(increment).toContain('never an increment')
-    const duration = (await tool.execute({ requestKey: 'k-time', deadlineAt: 'two more hours' }, exec(h, ROOT_SESSION))) as string
-    expect(duration).toContain('is not an absolute instant')
+    expect(increment).toContain('maxRuns 5 does not raise the 10 in force')
 
     expect(h.asks).toEqual([])
     expect(budgetEvents(h)).toEqual([])
@@ -500,12 +498,13 @@ describe('task_budget_extend', () => {
     await storeWithRoot(h)
     const tool = defineTaskBudgetExtendTool(h.ctx as never)
 
-    // The whole declared surface: the request key and the two totals. No
+    // The whole declared surface: the request key and the run total. No
     // `approved`, no `baseline`, no `callId`, no `approvalRef`, no note a model
     // could turn into a decision.
     const parameters = tool.parameters as { properties: Record<string, unknown>; required?: string[] }
-    expect(Object.keys(parameters.properties)).toEqual(['requestKey', 'maxRuns', 'deadlineAt'])
-    expect(parameters.required).toEqual(['requestKey'])
+    expect(Object.keys(parameters.properties)).toEqual(['requestKey', 'maxRuns'])
+    expect(parameters.required).toEqual(['requestKey', 'maxRuns'])
+    expect(tool.description).not.toContain('deadlineAt')
 
     for (const forged of ['baseline', 'callId', 'approvalRef', 'outcome', 'approved']) {
       const refused = (await tool.execute(
@@ -532,7 +531,7 @@ describe('task_budget_extend', () => {
     const calls: Array<{ sessionId: string; host: unknown; request: unknown }> = []
     const extendRootBudget = vi.fn(async (sessionId: string, host: unknown, request: unknown): Promise<RootBudgetExtensionResult> => {
       calls.push({ sessionId, host, request })
-      return { storeId: STORE, rootTaskId: 'root', answeredFromRecord: false, record: recordOf() }
+      return { storeId: STORE, rootTaskId: 'root', answeredFromRecord: false, record: recordOf({ deadlineAt: { previous: '2026-09-16T00:00:00.000Z', next: '2026-09-16T01:00:00.000Z' } }) }
     })
     const request = vi.fn(async () => 'allowed-once' as ApprovalOutcome)
     const ctx = new Context()
@@ -543,6 +542,7 @@ describe('task_budget_extend', () => {
     const call = { agent: { id: ROOT_SESSION }, callId: 'call-7', signal: new AbortController().signal }
     const result = (await tool.execute({ requestKey: 'k-runs', maxRuns: 20 }, call as never)) as string
 
+    expect(result).not.toContain('deadlineAt')
     expect(calls).toHaveLength(1)
     expect(calls[0]?.sessionId).toBe(ROOT_SESSION)
     // The second argument is the host: the execution's own call id and the

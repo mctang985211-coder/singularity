@@ -715,7 +715,7 @@ describe('T1-E: a declared field cannot widen the admission context or touch the
   const NARROWED: Partial<Config> = {
     maxDepth: 3,
     maxChildren: 2,
-    budget: { wallTimeMs: 5_000, maxToolCalls: 150, attempts: 1 },
+    budget: { maxToolCalls: 150, attempts: 1 },
   }
 
   it('records the configured limits as the batch context and leaves the parent untouched', async () => {
@@ -745,7 +745,6 @@ describe('T1-E: a declared field cannot widen the admission context or touch the
     expect(admission.context).toEqual({
       maxDepth: 3,
       maxChildren: 2,
-      wallTimeMs: 5_000,
       auditOnly: { maxToolCalls: 150, attempts: 1 },
     })
     // This deployment configures no token ceiling, so none is recorded.

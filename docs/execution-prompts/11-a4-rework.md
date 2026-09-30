@@ -1,5 +1,7 @@
 # 第 11 项 A4 定向返工：非根冷恢复与故障闭环
 
+现行变更（2026-10-01）：[计划 G 节](../2026-09-20-vrtc-code-change-plan.md#g-原图续跑与角色装配)覆盖本票早期的 Agent 截止、reviewer watchdog 和按问答来源恢复的限制；当前无 Agent 总时长上限，业务 worker 按持久相位恢复原身份。原交付证据仍作历史事实。
+
 你是 A4 返工实现主代理。工作区为 `/home/ROXY/code/bb_work/harness/packages/singularity`，外层为 `/home/ROXY/code/bb_work/harness`。只完成当前第 11 项；重验后停在进度审核，不开始 S4-E。先读[公共执行合同](README.md)、[计划 F.1](../2026-09-20-vrtc-code-change-plan.md#f1-a4有持久来源的直属父子问答)、[A4 原 prompt](11-a4-parent-child-clarification.md)与[进度审核](../history/2026-09-25-a4-progress-review.md)。确认实际 HEAD、工作树与适用 AGENTS.md；修改前记录并保存 Git 基线。
 
 ## 要修的可达断点

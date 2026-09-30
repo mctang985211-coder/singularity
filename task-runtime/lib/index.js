@@ -4,7 +4,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskProposalId } from "@dangosys/dsh-singularity-task";
+import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskProposalId } from "@dangosys/dsh-singularity-task";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { answerMessageText, findSkillFileIn, parseSkillFile, questionMessageText, skillRootsFor, toolCallRefIn } from "@dangosys/dsh-singularity-agent-runtime";
 import { homedir } from "node:os";
@@ -2478,7 +2478,7 @@ function providerDefectLines(precheck) {
 * is "a configured limit cannot be measured" asks this first.
 */
 function hasRootLimits(config) {
-	return config !== void 0 && (config.wallTimeMs !== void 0 || config.maxRuns !== void 0 || config.maxConcurrentWrites !== void 0);
+	return config !== void 0 && (config.maxRuns !== void 0 || config.maxConcurrentWrites !== void 0);
 }
 function instant(value) {
 	if (typeof value !== "string" || value.length === 0) return void 0;
@@ -2498,15 +2498,8 @@ function instant(value) {
 * fresh allowance. No run naming a root session of this store means no owner,
 * and the store keeps the honest recovery diagnostic rather than a guess.
 *
-* The ceilings that come back are the ones in force: per dimension, the value the
-* last approved extension left when the store holds one (K4), and the configured
-* value otherwise. An approved ceiling is *not* re-derived from the wall time the
-* deployment configures today — a person's decision is not a function of the
-* configuration file — and a deployment that stops configuring a dimension does
-* not revoke one; what `configured` reports is what the deployment alone would
-* allow, for a reader that has to show both numbers. The root's own
-* `acceptedAt` is unchanged by any of this: an approved deadline is an absolute
-* instant, never a longer window measured from a fresh "now".
+* Run ceilings come from the latest approved extension or the configuration.
+* Historical deadline fields are read by the Task store and have no execution effect.
 *
 * `reason` texts are recovery diagnostics: they say what is missing (no root,
 * no run bound to this store as its root, several such tasks, a root run with
@@ -2544,23 +2537,16 @@ function resolveRootBudget(snapshot, config) {
 		ok: false,
 		reason: `root task ${root.taskId} has no run recorded, so its budget has no start instant; a restart time is not a substitute for the run that accepted it`
 	};
-	const acceptedAtMs = instant(first.startedAt);
-	if (acceptedAtMs === void 0) return {
+	if (instant(first.startedAt) === void 0) return {
 		ok: false,
 		reason: `root task ${root.taskId}'s first run ${first.runId} records no readable startedAt (${JSON.stringify(first.startedAt)}), so the tree has no honest start instant and is not given a fresh one`
 	};
-	const configured = {
-		...config.wallTimeMs === void 0 ? {} : { deadlineAt: new Date(acceptedAtMs + config.wallTimeMs).toISOString() },
-		...config.maxRuns === void 0 ? {} : { maxRuns: config.maxRuns }
-	};
-	const approved = approvedBudgetCeilings(snapshot.budgetExtensions?.all ?? []);
-	const maxRuns = approved.maxRuns ?? configured.maxRuns;
-	const deadlineAt = approved.deadlineAt ?? configured.deadlineAt;
+	const configured = { ...config.maxRuns === void 0 ? {} : { maxRuns: config.maxRuns } };
+	const maxRuns = approvedBudgetCeilings(snapshot.budgetExtensions?.all ?? []).maxRuns ?? configured.maxRuns;
 	return {
 		ok: true,
 		rootTaskId: root.taskId,
 		acceptedAt: first.startedAt,
-		...deadlineAt === void 0 ? {} : { deadlineAt },
 		...maxRuns === void 0 ? {} : { maxRuns },
 		configured
 	};
@@ -2579,19 +2565,12 @@ function firstRun(snapshot, task, storeId) {
 	};
 }
 /**
-* Whether a run may start under the budget. Two refusals, in this order: the run
-* count has reached `maxRuns` (the limit is a count of what the store already
-* holds, so a restart cannot refund it), or the root deadline has arrived.
+* Whether the persisted run count leaves room for another run.
 */
-function checkRunStart(snapshot, budget, nowMs = Date.now()) {
+function checkRunStart(snapshot, budget) {
 	if (budget.maxRuns !== void 0 && snapshot.runs.length >= budget.maxRuns) return {
 		allowed: false,
 		reason: `the root budget allows ${budget.maxRuns} run(s) for root ${budget.rootTaskId} and the store already holds ${snapshot.runs.length}; the limit counts recorded runs so it cannot be reset by a restart`
-	};
-	const deadline = instant(budget.deadlineAt);
-	if (deadline !== void 0 && nowMs >= deadline) return {
-		allowed: false,
-		reason: `root ${budget.rootTaskId}'s deadline ${budget.deadlineAt} has passed (accepted at ${budget.acceptedAt}), so no new run starts under this budget`
 	};
 	return { allowed: true };
 }
@@ -2610,31 +2589,6 @@ function checkBatchAdmission(snapshot, budget, childCount) {
 		reason: `a batch of ${childCount} child task(s) would need ${childCount} run slot(s) and the root budget allows ${budget.maxRuns} run(s) in total, of which ${snapshot.runs.length} are already recorded (${total} > ${budget.maxRuns}); the batch is refused whole, with no side effects`
 	};
 	return { allowed: true };
-}
-/**
-* What is left of the tightest deadline that applies to a run, in milliseconds.
-*
-* `min` semantics over the bounds that can be in force: the run's own wall time
-* measured from its persisted `startedAt` (so a resumed run keeps the clock it
-* started with) and what is left of the root's deadline. A bound that has passed
-* returns 0 rather than a negative number, and `Infinity` means no bound at all
-* is configured.
-*
-* A bound whose instant cannot be read is treated as *reached* (`0`): a start
-* time nobody can parse is not a licence to run without a deadline, which is the
-* same discipline `resolveRootBudget` applies to a missing root start.
-*/
-function runDeadlineMs(runStartedAt, perRunWallTimeMs, rootDeadlineAt, nowMs) {
-	const parts = [];
-	if (perRunWallTimeMs !== void 0) {
-		const started = instant(runStartedAt);
-		parts.push(started === void 0 ? 0 : Math.max(0, started + perRunWallTimeMs - nowMs));
-	}
-	if (rootDeadlineAt !== void 0) {
-		const deadline = instant(rootDeadlineAt);
-		parts.push(deadline === void 0 ? 0 : Math.max(0, deadline - nowMs));
-	}
-	return parts.length === 0 ? Number.POSITIVE_INFINITY : Math.min(...parts);
 }
 /**
 * Refuse a root budget this deployment cannot execute. The one such limit is
@@ -3805,20 +3759,6 @@ function pendingQuestionMessages(snapshot) {
 	};
 }
 /**
-* The question messages one store still owes **one Session** — the same
-* derivation as {@link pendingQuestionMessages}, narrowed to a target.
-*
-* It exists for the recovery pass's own question (A4 §F.1): an unsubmitted run
-* whose Session is owed a delivery is *not* an abandoned run. The clearest case
-* is an answered question whose answer has not been read — the asking run's
-* block is already gone (the answer resolved it), so the blocking derivation
-* cannot see the wait, while the store still owes that run the answer it waited
-* for. Cancelling it there would throw away exactly what the exchange produced.
-*/
-function owedQuestionMessagesTo(snapshot, sessionId) {
-	return pendingQuestionMessages(snapshot).messages.filter((message$8) => message$8.targetSessionId === sessionId);
-}
-/**
 * Reconcile the deliveries one store's question facts still owe (§F.1's crash
 * recovery): read each pending body from its *recorded* citation, then hand the
 * composed intents to agent-runtime's reconcile — which delivers only what the
@@ -4689,10 +4629,6 @@ function verifyWithDeadline(env, storeId, runId) {
 function escalationHint(what, tried, suggested) {
 	return `L4 exit (KISS §7): report this to a human with the escalate tool — what: ${what}; tried: ${tried}; suggested: ${suggested}`;
 }
-/** The forced-exit reason for an in-flight budget exhaustion (KISS §5: named as a budget exhaustion, never as a criteria failure). */
-function budgetExhaustedReason(which, detail) {
-	return `budget exhausted: ${which} (${detail}; this is a budget exhaustion, not a criteria failure) — ${escalationHint("the run cannot finish inside its wall-clock budget", "the run was cancelled at the deadline", "raise the budget, split the task, or accept the partial result")}`;
-}
 /**
 * The post-hoc half of the budget (see {@link BudgetConfig}): the members the
 * orchestrator cannot observe in flight are checked once, at terminal time,
@@ -4719,55 +4655,19 @@ async function budgetBreaches(env, run) {
 	}
 	return breaches;
 }
-/**
-* Await a spawned worker's idle under the caller's abort signal and the run's
-* wall-clock budget. The budget is the one member the orchestrator can enforce
-* in flight: on exhaustion it cancels the agent and reports
-* `budget-exhausted`, and the caller settles the run failed with a budget
-* reason — never a criteria failure (KISS §5: no silent degradation). The
-* losing branch of the race keeps its handlers attached, so a worker that
-* settles after its budget already fired never surfaces an unhandled
-* rejection.
-*
-* The budget is a *reading*, not a number: `remaining` is called for the wait it
-* arms and again whenever that wait elapses, so a timer set under a ceiling a
-* person has since raised cannot cancel a worker the store still allows (K4).
-* A timer that fires under a ceiling that did *not* move reads the same bound
-* again, and that second reading is what cancels — one implementation, so the
-* in-flight stop and the settled-run judgement can never disagree about which
-* limit ran out.
-*/
-async function awaitWorker(handle, signal, remaining) {
+/** Wait for the worker to go idle or fail; explicit cancellation stops its loop. */
+async function awaitWorker(handle, signal) {
 	const cancel = () => handle.agent.cancel({ kind: "parent" });
 	signal?.addEventListener("abort", cancel, { once: true });
-	let timer;
 	try {
-		const idle = handle.agent.whenIdle().then(() => ({ kind: "idle" })).catch((error) => isAborted(signal) ? { kind: "aborted" } : {
+		await handle.agent.whenIdle();
+		return isAborted(signal) ? { kind: "aborted" } : { kind: "idle" };
+	} catch (error) {
+		return isAborted(signal) ? { kind: "aborted" } : {
 			kind: "failed",
 			reason: message(error)
-		});
-		for (;;) {
-			const budgetMs = await remaining();
-			if (Number.isFinite(budgetMs) && budgetMs <= 0) {
-				cancel();
-				return { kind: "budget-exhausted" };
-			}
-			const branches = [idle];
-			if (Number.isFinite(budgetMs)) branches.push(new Promise((resolve$1) => {
-				timer = setTimeout(() => resolve$1({ kind: "wake" }), budgetMs);
-				if (typeof timer.unref === "function") timer.unref();
-			}));
-			const settled = await Promise.race(branches);
-			if (timer !== void 0) {
-				clearTimeout(timer);
-				timer = void 0;
-			}
-			if (settled.kind === "wake") continue;
-			if (settled.kind === "idle" && isAborted(signal)) return { kind: "aborted" };
-			return settled;
-		}
+		};
 	} finally {
-		if (timer !== void 0) clearTimeout(timer);
 		signal?.removeEventListener("abort", cancel);
 	}
 }
@@ -5110,13 +5010,12 @@ async function waitRunSettled(env, storeId, runId, sessionId) {
 }
 /** The reminder a worker that went idle without submitting gets once. */
 function idleReminderText(run) {
-	return `task-runtime: session ${run.sessionId} went idle without submitting its result. If the work is done, call task_submit_result with a summary and the evidence you produced — an idle session is not a completion. This run remains subject to its wall-clock budget.`;
+	return `task-runtime: session ${run.sessionId} went idle without submitting its result. If the work is done, call task_submit_result with a summary and the evidence you produced — an idle session is not a completion. Continue the same run until you submit or it is explicitly cancelled.`;
 }
 /**
-* Wait for the run's terminal state, its original deadline, or batch cancellation.
+* Wait for the run's terminal state or batch cancellation.
 * An active worker that goes idle gets one submission reminder; a worker waiting
-* for children, verification, a proposal, or an answer gets none. Every wait keeps
-* the deadline measured from the persisted `startedAt`.
+* for children, verification, a proposal, or an answer gets none.
 */
 async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 	const recorded = waitRunSettled(env, storeId, run.runId, run.sessionId);
@@ -5125,13 +5024,8 @@ async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 		kind: "terminal",
 		status
 	}));
-	const remainingNow = () => remainingRunMsFromStore(env, storeId, run);
 	for (;;) {
-		if (await remainingNow() <= 0) {
-			handle.agent.cancel({ kind: "parent" });
-			return { kind: "budget-exhausted" };
-		}
-		const settled = await Promise.race([terminal, awaitWorker(handle, signal, remainingNow)]);
+		const settled = await Promise.race([terminal, awaitWorker(handle, signal)]);
 		if (settled.kind !== "idle") return settled;
 		const current = await env.task.runIn(storeId, run.runId);
 		if (isTerminalRun(current.status)) return {
@@ -5139,61 +5033,39 @@ async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 			status: current.status
 		};
 		const phase = current.executionPhase;
-		if (phase === "waiting_children" || phase === "submitted") return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: "parent" }), signal, remainingNow, terminal);
+		if (phase === "waiting_children" || phase === "submitted") return await awaitWaitingTerminal(() => handle.agent.cancel({ kind: "parent" }), signal, terminal);
 		if (agentIsRunning(handle)) continue;
 		const snapshot = await env.task.snapshotIn(storeId);
-		if (openProposalOf(snapshot, task.taskId, run.runId) !== void 0 || blockingQuestionsOf(snapshot, run.runId).length > 0) return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: "parent" }), signal, remainingNow, terminal);
+		if (openProposalOf(snapshot, task.taskId, run.runId) !== void 0 || blockingQuestionsOf(snapshot, run.runId).length > 0) return await awaitWaitingTerminal(() => handle.agent.cancel({ kind: "parent" }), signal, terminal);
 		notifyOwner(env, run.sessionId, idleReminderText(run));
-		return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: "parent" }), signal, remainingNow, terminal);
+		return await awaitWaitingTerminal(() => handle.agent.cancel({ kind: "parent" }), signal, terminal);
 	}
 }
-/**
-* Wait for the recorded terminal state without observing more idle events.
-* Deadline exhaustion and batch cancellation still cancel the worker. Re-read the
-* root ceiling when a timer fires so an approved extension is respected.
-*/
-async function awaitWaitingTerminal(env, run, cancel, signal, remainingRun, terminal) {
-	const stop = () => {
-		cancel?.();
-	};
+/** Wait for the persisted terminal state or explicit cancellation. */
+async function awaitWaitingTerminal(cancel, signal, terminal) {
 	if (isAborted(signal)) {
-		stop();
+		cancel?.();
 		return { kind: "aborted" };
 	}
-	signal?.addEventListener("abort", stop, { once: true });
-	const aborted = signal === void 0 ? void 0 : new Promise((resolve$1) => {
-		signal.addEventListener("abort", () => resolve$1({ kind: "aborted" }), { once: true });
+	if (signal === void 0) return await terminal;
+	let stop;
+	const aborted = new Promise((resolve$1) => {
+		stop = () => {
+			cancel?.();
+			resolve$1({ kind: "aborted" });
+		};
+		signal.addEventListener("abort", stop, { once: true });
 	});
-	let timer;
 	try {
-		for (;;) {
-			const remaining = await remainingRun();
-			if (remaining <= 0) {
-				stop();
-				return { kind: "budget-exhausted" };
-			}
-			const branches = aborted === void 0 ? [terminal] : [terminal, aborted];
-			if (Number.isFinite(remaining)) branches.push(new Promise((resolve$1) => {
-				timer = setTimeout(() => resolve$1({ kind: "wake" }), remaining);
-				if (typeof timer.unref === "function") timer.unref();
-			}));
-			const settled = await Promise.race(branches);
-			if (timer !== void 0) {
-				clearTimeout(timer);
-				timer = void 0;
-			}
-			if (settled.kind !== "wake") return settled;
-		}
+		return await Promise.race([terminal, aborted]);
 	} finally {
-		if (timer !== void 0) clearTimeout(timer);
-		signal?.removeEventListener("abort", stop);
+		signal.removeEventListener("abort", stop);
 	}
 }
 /**
 * The cancellation one session's own agent exposes, when this deployment can
 * resolve it — what the driver needs to end a wait it did not start (A4 §F.1).
-* A deployment that cannot name the agent has no cancellation to hand over, and
-* the wait is still bounded by the deadline that settles the run.
+* A deployment that cannot name the agent has no cancellation to hand over.
 */
 function cancelAgentOf(env, sessionId) {
 	const agent = env.agentFor?.(sessionId);
@@ -5203,84 +5075,6 @@ function cancelAgentOf(env, sessionId) {
 	return () => {
 		cancel.call(agent, { kind: "parent" });
 	};
-}
-/**
-* The root's own deadline for the store, when the budget resolves; a missing
-* root start is a refusal to invent one.
-*
-* Every call reads the store: the ceiling is what the store says *now*, and a
-* caller that held one from earlier would keep enforcing a bound a person has
-* since raised (K4). A resolution that fails answers "no deadline", which is the
-* conservative reading for a ceiling nobody can measure — the paths that have to
-* refuse over that case ask the resolver themselves
-* ({@link resolveRootBudget}), rather than reading it out of a missing instant.
-*/
-async function rootDeadlineOf(env, storeId) {
-	const resolved = resolveRootBudget(await env.task.snapshotIn(storeId), env.rootBudget ?? {});
-	return resolved.ok ? resolved.deadlineAt : void 0;
-}
-/**
-* What is left of the tightest deadline that applies to one run of this
-* orchestration — the one call site of `runDeadlineMs` inside the orchestration,
-* so the rule reads the same everywhere a worker is awaited: the run's own
-* per-run wall time (measured from its persisted `startedAt`, never reset) and
-* what is left of the root's deadline as the store holds it *now*. Either
-* reaching zero is the budget stop {@link observeWorkerRun} acts on.
-*/
-function remainingRunMs(env, run, rootDeadline, nowMs) {
-	return runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, nowMs);
-}
-/**
-* The same window, resolved from the store at the moment of the question: the
-* reading a wait arms itself with, and the reading it takes again when that wait
-* elapses. One function, so "how long may this run still go" has one answer
-* whether it is asked before a race, inside a parked wait, or when a timer fires.
-*/
-async function remainingRunMsFromStore(env, storeId, run) {
-	return remainingRunMs(env, run, await rootDeadlineOf(env, storeId), Date.now());
-}
-/**
-* The wall-clock bound(s) this orchestration's runs are under, as a terminal
-* record names them: what the deployment's per-run budget allows and — when the
-* caller could resolve it, which only the batch settlement can, `resolveRootBudget`
-* being a store read — the tree's own deadline. Naming every bound in force is
-* deliberate: the record says which limits applied, so a reader knows what to
-* change, while the tightest of them is the one that ended the run
-* (`runDeadlineMs`).
-*/
-function wallClockBoundsText(env, rootDeadlineAt) {
-	const perRun = env.budget?.wallTimeMs;
-	const bounds = [...perRun === void 0 ? [] : [`${perRun}ms from its own startedAt`], ...rootDeadlineAt === void 0 ? [] : [`the root tree's deadline ${rootDeadlineAt}`]];
-	return bounds.length === 0 ? "the root tree’s own deadline" : bounds.join(", or ");
-}
-/**
-* The wall-clock exhaustion a worker observation is recorded as: the reason
-* shape every budget stop carries (KISS §5 — a budget stop is never reported as
-* a criteria failure), naming the bound(s) this orchestration's runs are under so
-* a reader knows which number to change. A deployment with only its own per-run
-* wall time configured gets exactly the text it always had; one whose run was
-* placed under a caller's deadline sees that instant named, which is the value
-* that actually ended the run.
-*/
-function wallClockExhaustedReason(env) {
-	return budgetExhaustedReason("wallTimeMs", `worker run exceeded its wall-clock budget (${wallClockBoundsText(env)})`);
-}
-/**
-* The reason a batch's parent is cancelled instead of accepted: its run's own
-* deadline had already been reached when every child had settled, and an
-* acceptance after the deadline is one the budget never allowed (§3.5) — the run
-* would be reported `verified` for work the clock had already stopped.
-*
-* The bound is the run's own (`remainingRunMs`: its per-run wall time, what is left
-* of the root's, and any instant its caller placed on it). Every child settling is
-* exactly the moment such a deadline can arrive unnoticed by the parent's own
-* driver — a replayed worker's sub-execution inherits the parent's instant, so the
-* child failing on it is what brings the batch here with the parent's clock already
-* run out — and reading it here is the last moment before the acceptance that would
-* judge the run. Named as a budget stop, never as a criteria failure.
-*/
-function parentDeadlinePassedReason(env, rootDeadlineAt) {
-	return budgetExhaustedReason("wallTimeMs", `${wallClockBoundsText(env, rootDeadlineAt)} passed before this batch could be accepted, so the parent is cancelled without verification`);
 }
 /**
 * The evidence one child's own submission, verification, or failure left in the
@@ -5345,7 +5139,7 @@ async function settleChildRun(env, storeId, child, verdict) {
 * per-child half of {@link driveBatch}.
 *
 * Every ending here is named as what it is — a batch abort cancels the child,
-* a deadline is a budget stop, a worker error is a failure. The submission path
+* a worker error is a failure. The submission path
 * does not appear as a branch:
 * a run that submitted is settled by {@link settleSubmittedRun} (via the worker
 * whose tool call it was), and this only waits for the terminal state that
@@ -5375,14 +5169,6 @@ async function driveChildRound(env, batch, child) {
 		}, {
 			status: "cancelled",
 			anomalies: [`the batch was cancelled while this child ran: ${batch.reason}`]
-		});
-		case "budget-exhausted": return await settleChildRun(env, batch.storeId, {
-			item,
-			run,
-			dependencyTaskIds
-		}, {
-			status: "failed",
-			localizedCause: wallClockExhaustedReason(env)
 		});
 		case "failed": return await settleChildRun(env, batch.storeId, {
 			item,
@@ -5698,23 +5484,8 @@ async function driveRounds(env, batch) {
 		const item = ready[0];
 		const started = latestRun(snapshot, item.taskId);
 		if (started !== void 0) {
-			const questionWait = started.executionPhase === "active" && (blockingQuestionsOf(snapshot, started.runId).length > 0 || owedQuestionMessagesTo(snapshot, started.sessionId).length > 0);
-			const returnedParent = started.executionPhase === "active" && (started.batches?.length ?? 0) > 0;
-			if (questionWait || returnedParent) {
-				await awaitAdoptedWorkerWait(env, batch, item, started, item.dependsOn.map((dependency) => items[dependency].taskId));
-				continue;
-			}
 			if (started.executionPhase === "active") {
-				const reason = `recovery: run "${started.runId}" was in flight when batch ${batch.batchId} resumed and never submitted; the writes it may already have made cannot be confirmed, so it is settled cancelled rather than resumed`;
-				const dependencyTaskIds = item.dependsOn.map((dependency) => items[dependency].taskId);
-				await env.task.markRunStatusIn(batch.storeId, item.taskId, started.runId, "cancelled", env.actor, { reason });
-				await recordTerminalReview(env, batch.storeId, item.taskId, "cancelled", {
-					run: started,
-					anomalies: [reason],
-					relatedTaskIds: dependencyTaskIds
-				});
-				env.onRunSettled?.(batch.storeId, item.taskId, started.runId, "cancelled");
-				await releaseWorkspaceLayer(env, runOwner(batch.storeId, item.taskId, started.runId), started.sessionId);
+				await awaitAdoptedWorkerWait(env, batch, item, started, item.dependsOn.map((dependency) => items[dependency].taskId));
 				continue;
 			}
 			const status = await waitRunSettled(env, batch.storeId, started.runId, started.sessionId);
@@ -5727,66 +5498,17 @@ async function driveRounds(env, batch) {
 		await driveChildRound(env, batch, attempt.child);
 	}
 }
-/**
-* Bring one adopted worker back and wait for its settlement — the batch driver's
-* half of the worker recovery (A4 §F.1, K1 §5).
-*
-* The child this runs for is a run the driver did **not** start, and one of two
-* durable facts makes it a *wait* rather than an abandoned worker:
-*
-* - it has an unresolved blocking question of its own (or an answer it is still
-*   owed), which is where the protocol parked it (A4 §F.1);
-* - it is a delegated parent whose own batches all ended — `active` with an
-*   accumulated `batches` — so the decision the batch handed back is what it is
-*   waiting on, and the recovery pass is telling it so (K1 §2, §5).
-*
-* Its Run identity is untouched; what the dead process could not leave behind is
-* its Session, so the runtime's resume door ({@link OrchestrateEnv.resumeWorkerSession})
-* is asked to bring it back under that same identity. Three answers are
-* possible, and each has a different consequence:
-*
-* - `live` — the Session is reachable again, so what the child waits for (its
-*   parent's answer, or the news that its batch ended) can be delivered to it and
-*   the wait can be observed;
-* - `retry` — another owner holds the Session. Nothing is taken over and the run
-*   keeps its identity; the wait continues (bounded by the deadline) and the
-*   next activation retries;
-* - `refused` — the identity cannot be established. The child is settled
-*   `failed` with the refusal named, because a run in flight that nobody can
-*   bring back is a wait with no end, and leaving it `running` would be a lie
-*   the store keeps telling.
-*
-* The wait itself is {@link awaitWaitingTerminal}: the same deadline (the run's
-* own `wallTime` and what is left of the root's, both measured from the run's
-* persisted `startedAt`) and the same batch abort that every other worker wait
-* runs under — the gap this closes is "a recovered wait with no deadline", not a
-* new rule about deadlines. The deadline ending here is a budget stop, exactly
-* as it is for a run whose worker this process started, and it takes the
-* question's derived effects with it: a settled asking run owes no delivery, so
-* a late answer is audit rather than a revival.
-*/
+/** Restore the same active Run/Session and observe its persisted settlement. */
 async function awaitAdoptedWorkerWait(env, batch, item, run, dependencyTaskIds) {
 	const resumed = await resumeAdoptedWorker(env, batch.storeId, run);
-	if (resumed.status === "refused") {
-		const reason = `recovery refused to continue this run: the Session "${run.sessionId}" could not be brought back (${resumed.reason})`;
-		return await settleChildRun(env, batch.storeId, {
-			item,
-			run,
-			dependencyTaskIds
-		}, {
-			status: "failed",
-			localizedCause: reason,
-			anomalies: [reason]
-		});
-	}
-	if (resumed.status === "retry") notifyOwner(env, run.sessionId, `task-runtime: run "${run.runId}" is waiting on coordination this process cannot hand to it, and its Session "${run.sessionId}" is held by another owner (${resumed.reason}); nothing is taken over, and the wait stays bounded by the run's own deadline`);
+	if (resumed.status !== "live") throw new Error(`task-runtime: cannot continue run "${run.runId}" in Session "${run.sessionId}" : ${resumed.reason}`);
 	env.gate.setQuestionsBlocked(run.sessionId, blockingQuestionsOf(await env.task.snapshotIn(batch.storeId), run.runId).length > 0);
 	if (resumed.status === "live" && env.gate.phaseOf(run.sessionId) === void 0) env.gate.setPhase(run.sessionId, "active");
 	const terminal = waitRunSettled(env, batch.storeId, run.runId, run.sessionId).then((status) => ({
 		kind: "terminal",
 		status
 	}));
-	const observation = await awaitWaitingTerminal(env, run, cancelAgentOf(env, run.sessionId), batch.signal, () => remainingRunMsFromStore(env, batch.storeId, run), terminal);
+	const observation = await awaitWaitingTerminal(cancelAgentOf(env, run.sessionId), batch.signal, terminal);
 	switch (observation.kind) {
 		case "terminal": {
 			const snapshot = await env.task.snapshotIn(batch.storeId);
@@ -5801,14 +5523,6 @@ async function awaitAdoptedWorkerWait(env, batch, item, run, dependencyTaskIds) 
 				...evidenceId === void 0 ? {} : { evidenceId }
 			};
 		}
-		case "budget-exhausted": return await settleChildRun(env, batch.storeId, {
-			item,
-			run,
-			dependencyTaskIds
-		}, {
-			status: "failed",
-			localizedCause: wallClockExhaustedReason(env)
-		});
 		case "aborted": return await settleChildRun(env, batch.storeId, {
 			item,
 			run,
@@ -5964,9 +5678,8 @@ async function deliverBatchResult(env, result) {
 * verdict about the parent, and only the parent's own `task_submit_result`
 * starts its verification (`settleSubmittedRun`, the one verification entry).
 *
-* Two gates can still end the batch without judging it, both budget stops rather
-* than verdicts: a cancellation (§3.6) and the parent's own deadline (§3.5).
-* Their release is the terminal cleanup it always was, taken before the run is
+* Explicit cancellation can end the batch without judging it (§3.6).
+* Its release is the terminal cleanup it always was, taken before the run is
 * settled: a stopped run is not revived by its children's drains, and its own
 * checkout is still handed back. A parent whose run already settled was settled
 * by somebody else, and its batch end is the store's record alone.
@@ -5992,20 +5705,6 @@ async function finishBatch(env, batch) {
 		});
 		env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, "cancelled");
 		notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}. Children: ${batchSummary(batch.batchId, outcomes)}`);
-		return outcomes;
-	}
-	const rootDeadline = await rootDeadlineOf(env, batch.storeId);
-	if (remainingRunMs(env, parentRun, rootDeadline, Date.now()) <= 0) {
-		await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId);
-		const reason = parentDeadlinePassedReason(env, rootDeadline);
-		await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, "cancelled", env.actor, { reason });
-		await recordTerminalReview(env, batch.storeId, batch.parentTaskId, "cancelled", {
-			run: parentRun,
-			anomalies: [reason],
-			relatedTaskIds: childTaskIds
-		});
-		env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, "cancelled");
-		notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}`);
 		return outcomes;
 	}
 	const blocked = blockingQuestionsOf(snapshot, batch.parentRunId).length > 0;
@@ -6273,7 +5972,7 @@ async function parentBatchOf(env, storeId, task, run) {
 *
 * A spawning replay is a worker like any other and follows the same rules: it
 * is born `active` and it *submits* — an idle worker is not a completion, the
-* wall-clock budget still applies, and verification comes from the one entry every
+* usage accounting still applies, and verification comes from the one entry every
 * run shares ({@link settleSubmittedRun}). A workerless replay is born
 * `submitted` (origin `runtime`) because there is nobody to submit: its
 * criteria are judged by the verifier and the run settles on the verdict.
@@ -6284,7 +5983,7 @@ async function parentBatchOf(env, storeId, task, run) {
 * sub-execution a replayed worker decomposes into inherits exactly the same
 * binding; it is absent for an ordinary replay, whose run and spawn are what they
 * always were. The run's clock is not this entry's: its time is bounded by the
-* runtime's own per-run budget and the root tree's deadline alone.
+* runtime's persisted run count and observed usage.
 */
 async function runReplayTask(env, storeId, init, signals = {}) {
 	const task = init.task;
@@ -6391,15 +6090,6 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 			reason: "cancelled while the replayed worker ran",
 			anomalies
 		});
-		case "budget-exhausted": {
-			const reason = wallClockExhaustedReason(bound);
-			return await settleReplayRun(env, storeId, task, run, {
-				status: "failed",
-				reason,
-				localizedCause: reason,
-				anomalies
-			});
-		}
 		case "failed": return await settleReplayRun(env, storeId, task, run, {
 			status: "failed",
 			reason: observation.reason,
@@ -6410,14 +6100,13 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 }
 /**
 * Settle one replay run the replay's own observation decided — a cancellation, a
-* deadline, a worker error — and report what the run settled
+* worker error — and report what the run settled
 * as.
 *
 * Two settlement paths can reach one run at once, and this is not hypothetical for
 * a replay: a replayed worker that decomposed is settled by its own batch (the
 * ordinary parent acceptance submits and verifies the parent run) while this path
-* is deciding, and a run whose own deadline expires is exactly when both are in
-* flight. The arbitration is the one the batch's per-child settlement already
+* is deciding. The arbitration is the one the batch's per-child settlement already
 * applies ({@link settleChildRun}, `settleRunFromRuntime` beside it): the store is
 * the arbiter — a run it now holds terminal stands, this settlement adds nothing,
 * and the outcome reports the state the store holds rather than the one this wait
@@ -6986,20 +6675,9 @@ function tokenUsageOf(value) {
 	};
 }
 const DEFAULT_VERIFY_TIMEOUT_MS = 600 * 1e3;
-/**
-* The shipped per-run budget (KISS §8.6: granularity knobs live in config, not
-* in definitions). `wallTimeMs` is a backstop far above the longest legitimate
-* worker run this deployment has measured (a workload build takes 18–20 min,
-* so two hours kills only a genuinely stuck worker); `maxToolCalls` sits an
-* order above KISS's max_tool_calls 15 reference because this deployment's
-* submit/poll workers legitimately make dozens of calls — and it is a
-* post-hoc annotation, so a tight value would be noise, not a guardrail.
-* `attempts` matches the current reality: one run per task, no retry branch.
-* `tokens` carries no default on purpose — see {@link BudgetConfig}.
-*/
+/** Per-run usage annotations; execution has no total wall-clock cutoff. */
 const DEFAULT_BUDGET = {
 	maxToolCalls: 150,
-	wallTimeMs: 7200 * 1e3,
 	attempts: 1
 };
 /**
@@ -7082,7 +6760,6 @@ const Capability = z.object({
 	mcpServers: z.array(z.string())
 });
 const RootBudget = z.object({
-	wallTimeMs: z.number(),
 	maxRuns: z.number(),
 	maxConcurrentWrites: z.number()
 });
@@ -7095,7 +6772,6 @@ const ConfigSchema = z.object({
 	budget: z.object({
 		maxToolCalls: z.number(),
 		tokens: z.number(),
-		wallTimeMs: z.number(),
 		attempts: z.number()
 	}).default({ ...DEFAULT_BUDGET }),
 	allowRuntimeDecomposition: z.boolean().default(DEFAULT_ALLOW_RUNTIME_DECOMPOSITION),
@@ -7103,29 +6779,15 @@ const ConfigSchema = z.object({
 	rootBudget: RootBudget,
 	writeDrainTimeoutMs: z.number().default(DEFAULT_WRITE_DRAIN_TIMEOUT_MS)
 });
-/**
-* The closed field set of a request: the only keys the entry reads, and the
-* only ones a caller may carry. Everything the old two-call relay needed the
-* caller to hand back — a reading, a tool-call identity, an approval reference,
-* an outcome — is refused by name for that reason: those are the fields that
-* let a caller past the person.
-*/
-const BUDGET_EXTENSION_REQUEST_FIELDS = [
-	"requestKey",
-	"maxRuns",
-	"deadlineAt"
-];
+const BUDGET_EXTENSION_REQUEST_FIELDS = ["requestKey", "maxRuns"];
 function now() {
 	return (/* @__PURE__ */ new Date()).toISOString();
 }
 /** The ceilings one resolved root budget is under: what is in force, per dimension. */
 function ceilingsOf(budget) {
-	return {
-		...budget.maxRuns === void 0 ? {} : { maxRuns: budget.maxRuns },
-		...budget.deadlineAt === void 0 ? {} : { deadlineAt: budget.deadlineAt }
-	};
+	return { ...budget.maxRuns === void 0 ? {} : { maxRuns: budget.maxRuns } };
 }
-var TaskRuntime = class TaskRuntime extends Service {
+var TaskRuntime = class extends Service {
 	static inject = [
 		"task",
 		"agentRuntime",
@@ -7148,7 +6810,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* The batches and replays this process owns, keyed `<storeId>/<batchId>`
 	* (`replay/<runId>` for a replay). The map is the registration the recovery
 	* path consults, and the controller in each entry is what a cancellation,
-	* the root deadline or the unload path aborts.
+	* the unload path aborts.
 	*/
 	drivers = /* @__PURE__ */ new Map();
 	/**
@@ -7243,6 +6905,14 @@ var TaskRuntime = class TaskRuntime extends Service {
 	constructor(ctx, config) {
 		super(ctx, "taskRuntime");
 		const rootBudget = config?.rootBudget === void 0 ? void 0 : { ...config.rootBudget };
+		if (config?.budget !== void 0) {
+			const unknown = Object.keys(config.budget).filter((key) => ![
+				"maxToolCalls",
+				"tokens",
+				"attempts"
+			].includes(key));
+			if (unknown.length > 0) throw new Error(`task-runtime: budget names unsupported fields [${unknown.join(", ")}]`);
+		}
 		this.assertClosedRootBudget(rootBudget);
 		assertRootBudgetConfig(rootBudget ?? {});
 		this.assertGeneratedTaskReview(config?.generatedTaskReview);
@@ -7274,11 +6944,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 	*/
 	assertClosedRootBudget(budget) {
 		if (budget === void 0) return;
-		const known = new Set([
-			"wallTimeMs",
-			"maxRuns",
-			"maxConcurrentWrites"
-		]);
+		const known = new Set(["maxRuns", "maxConcurrentWrites"]);
 		const unknown = Object.keys(budget).filter((key) => !known.has(key));
 		if (unknown.length === 0) return;
 		throw new Error(`task-runtime: rootBudget names [${unknown.join(", ")}], which this deployment does not enforce; a hard limit that cannot be executed refuses to start rather than running under a promise nobody keeps`);
@@ -7612,19 +7278,23 @@ var TaskRuntime = class TaskRuntime extends Service {
 	*/
 	async adoptRoot(storeId, rootSessionId) {
 		const inflight = this.storeRecovery.get(storeId);
-		if (inflight !== void 0 && inflight.status === "recovering") {
+		if (inflight !== void 0 && (inflight.status === "recovering" || inflight.status === "ready")) {
 			await inflight.promise;
 			const settledStatus = (state$1) => state$1.status;
 			if (this.storeRecovery.get(storeId) === inflight && settledStatus(inflight) === "failed") throw inflight.failure;
+			return inflight.adoption;
 		}
-		const barrier = this.adoptRootThroughBarrier(storeId, rootSessionId);
+		let complete;
+		const completed = new Promise((resolve$1) => {
+			complete = resolve$1;
+		});
 		let release;
 		const released = new Promise((resolve$1) => {
 			release = resolve$1;
 		});
 		const state = {
 			status: "recovering",
-			promise: barrier.then(() => void 0, () => void 0),
+			promise: completed,
 			release,
 			released,
 			pendingDrivers: [],
@@ -7633,20 +7303,23 @@ var TaskRuntime = class TaskRuntime extends Service {
 		};
 		this.storeRecovery.set(storeId, state);
 		try {
-			const adoption = await barrier;
+			const adoption = await this.adoptRootThroughBarrier(storeId, rootSessionId);
+			state.adoption = adoption;
 			await this.initializeStoreGates(storeId);
 			if (state.cancelled) this.storeRecovery.delete(storeId);
-			else {
-				state.status = "ready";
-				state.pendingDrivers.length = 0;
-			}
+			else state.status = "ready";
 			const deferred = state.pendingQuestionDelivery;
 			state.pendingQuestionDelivery = void 0;
 			if (!state.cancelled) {
-				for (const notice of state.pendingNotices.splice(0)) this.notify(notice.sessionId, notice.text);
+				while (state.pendingNotices.length > 0) {
+					const notice = state.pendingNotices[0];
+					this.notify(notice.sessionId, notice.text);
+					state.pendingNotices.shift();
+				}
 				for (const result of state.pendingBatchResults.splice(0)) await this.deliverBatchResultNow(result);
 				if (deferred !== void 0) await deferred();
 			}
+			state.pendingDrivers.length = 0;
 			release(!state.cancelled);
 			return adoption;
 		} catch (error) {
@@ -7654,6 +7327,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 			state.reason = error instanceof Error ? error.message : String(error);
 			state.failure = error;
 			state.pendingQuestionDelivery = void 0;
+			for (const notice of state.pendingNotices) this.startedSessions.delete(notice.sessionId);
 			state.pendingNotices.length = 0;
 			state.pendingBatchResults.length = 0;
 			this.standDownPendingDrivers(state);
@@ -7664,6 +7338,8 @@ var TaskRuntime = class TaskRuntime extends Service {
 				this.warn(`store ${storeId}: its workspace could not be released after a failed recovery (${cleanup instanceof Error ? cleanup.message : String(cleanup)})`);
 			}
 			throw error;
+		} finally {
+			complete();
 		}
 	}
 	/**
@@ -7720,15 +7396,17 @@ var TaskRuntime = class TaskRuntime extends Service {
 			if (read !== void 0 && read.defects.length > 0) throw new Error(`task-runtime: run "${run.runId}" cannot be re-entered: the content it is bound to is not readable:\n- ${read.defects.join("\n- ")}`);
 		}
 		const phase = this.runGatePhase(run);
+		const rootWasStarted = this.startedSessions.has(rootSessionId);
 		this.sessions.set(rootSessionId, {
 			storeId,
 			taskId: root.taskId,
 			runId: run.runId
 		});
 		this.startedSessions.add(rootSessionId);
+		if (!rootWasStarted && (phase === "active" || phase === "waiting_children" && pendingCoordinationOf(snapshot, run.runId).length > 0)) this.notifyWhenReady(rootSessionId, "task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.");
 		if (phase === "terminal") this.executionGate.setTerminal(rootSessionId);
 		else if (phase !== void 0) this.executionGate.setPhase(rootSessionId, phase);
-		if (snapshot.runs.some((item) => item.status === "running" && item.executionPhase === "submitted")) await this.rebuildWorkspaceOwnership(storeId, true);
+		if (snapshot.runs.some((item) => item.status === "running" && item.executionPhase === "submitted")) await this.rebuildWorkspaceOwnership(storeId);
 		await this.reconcileStore(storeId);
 		await this.rebuildWorkspaceOwnership(storeId);
 		return {
@@ -8741,21 +8419,16 @@ var TaskRuntime = class TaskRuntime extends Service {
 	judgeBudgetExtension(request, budget, existing) {
 		if (typeof request !== "object" || request === null) return {
 			kind: "refused",
-			reason: "the request is not an object with a request key and at least one of maxRuns, deadlineAt"
+			reason: "the request is not an object with a request key and maxRuns"
 		};
 		const requestKey = request.requestKey;
 		if (typeof requestKey !== "string" || requestKey.length === 0) return {
 			kind: "refused",
 			reason: "the request needs a non-empty request key: it is how a retry after a restart is recognised as the same request"
 		};
-		if (request.maxRuns === void 0 && request.deadlineAt === void 0) return {
+		if (request.maxRuns === void 0) return {
 			kind: "refused",
-			reason: "the request names neither maxRuns nor deadlineAt, and a raise that raises nothing is not an extension"
-		};
-		const deadline = request.deadlineAt === void 0 ? void 0 : canonicalBudgetInstant(request.deadlineAt);
-		if (request.deadlineAt !== void 0 && deadline === void 0) return {
-			kind: "refused",
-			reason: `deadlineAt ${JSON.stringify(request.deadlineAt)} is not an absolute instant: a deadline is the moment the tree stops at, written in UTC (for example 2026-09-28T09:00:00.000Z) — a local time, a duration or an unreadable value is not one`
+			reason: "the request names no maxRuns ceiling to raise"
 		};
 		if (request.maxRuns !== void 0 && (!Number.isInteger(request.maxRuns) || request.maxRuns <= 0)) return {
 			kind: "refused",
@@ -8763,8 +8436,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 		};
 		const proposalDigest = budgetExtensionRequestDigest({
 			requestKey,
-			...request.maxRuns === void 0 ? {} : { maxRuns: request.maxRuns },
-			...deadline === void 0 ? {} : { deadlineAt: deadline }
+			...request.maxRuns === void 0 ? {} : { maxRuns: request.maxRuns }
 		});
 		if (existing !== void 0) {
 			if (existing.requestDigest === proposalDigest) return {
@@ -8776,80 +8448,24 @@ var TaskRuntime = class TaskRuntime extends Service {
 				reason: `request key "${requestKey}" is already bound to ${describeBudgetExtension(existing)} (identity ${existing.requestDigest}); one key names one request, and different totals under it are a new request under a new key`
 			};
 		}
-		const maxRuns = this.judgeBudgetDimension("maxRuns", request.maxRuns, budget.maxRuns);
-		if (!maxRuns.ok) return {
+		if (budget.maxRuns === void 0) return {
 			kind: "refused",
-			reason: maxRuns.reason
+			reason: "this tree sets no maxRuns ceiling, so there is nothing to raise"
 		};
-		const deadlineAt = this.judgeBudgetDimension("deadlineAt", deadline, budget.deadlineAt);
-		if (!deadlineAt.ok) return {
+		if (request.maxRuns <= budget.maxRuns) return {
 			kind: "refused",
-			reason: deadlineAt.reason
+			reason: `maxRuns ${request.maxRuns} does not raise the ${budget.maxRuns} in force`
 		};
 		return {
 			kind: "proposed",
 			proposal: {
 				requestKey,
 				requestDigest: proposalDigest,
-				...maxRuns.raise === void 0 ? {} : { maxRuns: maxRuns.raise },
-				...deadlineAt.raise === void 0 ? {} : { deadlineAt: deadlineAt.raise }
+				maxRuns: {
+					previous: budget.maxRuns,
+					next: request.maxRuns
+				}
 			}
-		};
-	}
-	/**
-	* One dimension, judged from the two things that matter to this entry: what
-	* the request asks for (when it names the dimension at all) and what ceiling is
-	* in force. `requested` is already canonical for an instant, and `inForce` is
-	* the ceiling the store is under now.
-	*
-	* A dimension the request does not name is not judged here at all, and that is
-	* the point: the reading is the runtime's own frozen one and the store
-	* re-checks *all* of it inside its serial region
-	* (`TaskService.recordBudgetExtensionIn`, untouched), so a request read when
-	* another dimension was at a value that has since moved is refused there —
-	* where the decision between two racing grants is really made — rather than
-	* here, where a caller could have supplied the reading.
-	*
-	* The refusals, in the order a reading of them deserves: a named dimension the
-	* deployment leaves unbounded (an unset ceiling is unlimited, and naming it
-	* would invent a limit) and a named total that does not raise the value in
-	* force.
-	*/
-	judgeBudgetDimension(dimension, requested, inForce) {
-		if (requested === void 0) return { ok: true };
-		if (inForce === void 0) return {
-			ok: false,
-			reason: `this tree sets no ${dimension} ceiling (the deployment configures none, and no extension has raised one), so there is nothing to raise: an unbounded dimension needs no grant, and a grant for it would turn an unlimited tree into a limited one`
-		};
-		if (typeof inForce === "number" && typeof requested === "number") {
-			if (requested <= inForce) return {
-				ok: false,
-				reason: `maxRuns ${requested} does not raise the ${inForce} in force; an approved value is the whole total the tree may reach, and it only ever moves up (the request states the total it wants, never an increment)`
-			};
-			return {
-				ok: true,
-				raise: {
-					previous: inForce,
-					next: requested
-				}
-			};
-		}
-		if (typeof inForce === "string" && typeof requested === "string") {
-			if (Date.parse(requested) <= Date.parse(inForce)) return {
-				ok: false,
-				reason: `deadlineAt ${requested} is not later than the ${inForce} in force; an approved deadline is an absolute instant the tree stops at, and it only ever moves later`
-			};
-			return {
-				ok: true,
-				raise: {
-					previous: inForce,
-					next: requested
-				}
-			};
-		}
-		return {
-			ok: false,
-			reason: `the request and the ${dimension} in force are not the same kind of value, so no raise can be read from them`
 		};
 	}
 	/**
@@ -10482,8 +10098,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* sub-execution are created under, forwarded verbatim to the orchestration —
 	* this entry does not resolve the model, because what a run really ran under is
 	* the caller's frozen fact, and the runtime's job is to make it true. The run's
-	* clock is this runtime's own (the per-run `Config.budget.wallTimeMs` and the
-	* root tree's deadline); a replay places no separate one. The options are a
+	* execution has no total wall-clock cutoff. The options are a
 	* closed set: a key this build does not read — the deleted experiment clock
 	* above all — refuses the replay by name here, before anything else runs.
 	*/
@@ -10736,25 +10351,6 @@ var TaskRuntime = class TaskRuntime extends Service {
 	*/
 	batchHeldByRun(run, batchId) {
 		return run.batches?.some((batch) => batch.batchId === batchId) === true;
-	}
-	/**
-	* Stop a `waiting_children` run whose batch this build cannot name (K1 §5, and
-	* the persistence decision that fixes it: an in-flight batch admitted before
-	* `(parentRunId, proposalId)` identified one is a **stopped old state**).
-	*
-	* The stop is by name and by nothing else: the run is settled `cancelled` with
-	* the fact recorded — no driver is registered, no child is started, and no batch
-	* is attributed to a run or a proposal the store does not name. The children the
-	* old admission created are left exactly as they are: which of them belonged to
-	* that batch is the very thing this build cannot read, so blocking them would be
-	* the guess this stop exists to avoid. The run's Session is reconciled like any
-	* other settlement's, and the warn is the operator's half of the refusal.
-	*/
-	async stopUnidentifiedBatch(env, storeId, run) {
-		const reason = run.batchId === void 0 ? `recovery: run "${run.runId}" waits on its children but records no batch id, and a batch this build cannot name is not restarted` : `recovery: run "${run.runId}" waits on batch "${run.batchId}", which the run's own accumulation does not hold. A batch admitted before batches were identified by (parent run, proposal) is a stopped old state: this build cannot tell which run or which proposal admitted it, so it is not restarted and its ownership is not guessed at — the run is settled cancelled`;
-		this.warn(`store ${storeId}: ${reason}`);
-		await settleRunFromRuntime(env, storeId, run, "cancelled", reason);
-		await this.reconcileSessionJobs(run.sessionId);
 	}
 	/**
 	* The narrow capabilities one runtime-level settlement holds — the store, the
@@ -11162,195 +10758,56 @@ var TaskRuntime = class TaskRuntime extends Service {
 		if (found === void 0) throw new Error(`task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; a batch is read from the run that admitted it, never derived from its id`);
 		return await deriveChildOutcomes(this.ctx.task, storeId, found.taskId, found.memberTaskIds);
 	}
-	/**
-	* The recovery entry (A3 §3.6): settle or restart what a store left in flight.
-	* Idempotent, and safe to call on a store this process is already driving —
-	* the registered batches are skipped, and runs this process started are left
-	* to their own drivers.
-	*
-	* The order is depth-descending (a child before its parent), so a restarted
-	* parent batch reads its children already settled:
-	*
-	* - a run with no phase is an old record: it is left exactly as it is, and the
-	*   read side derives `needs-recovery` from the missing phase — inventing a
-	*   phase here would admit a run nobody knows the state of;
-	* - a run whose content binding no longer re-reads is failed by name (S1-C's
-	*   refusal, never a silent fallback);
-	* - `submitted` runs are verified (the phase is the whole recovery evidence);
-	* - `active` runs that are not a root are in-flight workers: nothing can
-	*   confirm the writes they may have made, so they are cancelled with the
-	*   diagnostic — a root run is left alone, because a root legitimately sits
-	*   `active` between its own decisions;
-	* - `waiting_children` runs are restarted, unless the workspace is held by
-	*   another live process, in which case they fail by name rather than writing
-	*   into a checkout somebody else owns.
-	*
-	* The run pass is followed by the proposal pass (T2/T3 §5–§6,
-	* {@link reconcileProposals}): a proposal that is `ready` or `approved` is
-	* continued — the re-check decides whether its approval still covers the batch,
-	* and §5's tightening catches a batch that was born under `off` — while a
-	* proposal waiting for a review is only re-offered to the review channel, never
-	* advanced, because only a persisted decision moves it. The order is the
-	* point: the run pass settles and restarts what a previous process left in
-	* flight, the workspace question ("is this checkout ours?") is answered before
-	* anything is admitted into it, and a batch the proposal pass admits is driven
-	* by the driver *it* starts — there is nothing left for the run pass to see.
-	* The report says what could not be finished and why, so a caller (the boot
-	* path, an adoption) can see the proposals recovery left for a person instead
-	* of reading a silent void.
-	*/
+	/** Restore running Sessions from their persisted execution phase. */
 	async reconcileStore(storeId) {
-		let snapshot;
-		try {
-			snapshot = await this.ctx.task.snapshotIn(storeId);
-		} catch (error) {
-			this.warn(`store ${storeId}: recovery could not read the store (${error instanceof Error ? error.message : String(error)}), so nothing was reconciled`);
-			return {
-				unresolvedProposals: [],
-				questionDeliveries: [],
-				questionResumes: []
-			};
-		}
+		const snapshot = await this.ctx.task.snapshotIn(storeId);
 		this.reindex(storeId, snapshot);
 		const depthOf = (taskId) => snapshot.tasks.find((task) => task.taskId === taskId)?.depth ?? 0;
 		const ordered = snapshot.runs.filter((run) => run.status === "running").sort((left, right) => depthOf(right.taskId) - depthOf(left.taskId));
 		const env = await this.orchestrateEnv(this.recoverySessionFor(snapshot, storeId), `recovery:${storeId}`);
-		const waiting = [];
-		/** The delegated parents whose batches ended before the crash (K1 §2, §5): `active` non-root runs holding accumulated batches. */
-		const returnedParents = [];
-		/** The recovery attempts nobody in this process holds (A6 §F.4): `active` runs carrying a `recovery` record. */
-		const recoveryAttempts = [];
 		const questionResumes = [];
+		const waiting = [];
+		const submitted = [];
+		await this.rebuildWorkspaceOwnership(storeId);
 		for (const run of ordered) {
-			if (rootTaskStoreId(run.sessionId) !== storeId && this.startedSessions.has(run.sessionId)) continue;
-			if (run.batchId !== void 0 && this.drivers.has(`${storeId}/${run.batchId}`)) continue;
-			if (run.executionPhase === void 0) continue;
+			if (run.executionPhase === void 0) throw new Error(`task-runtime: run "${run.runId}" has no persisted executionPhase and cannot be continued`);
 			if (run.providerBinding !== void 0) {
 				const read = await this.readRunBinding(run.providerBinding);
-				if (read !== void 0 && read.defects.length > 0) {
-					await settleRunFromRuntime(env, storeId, run, "failed", `recovery re-check rejected this run's content binding:\n- ${read.defects.join("\n- ")}`);
-					continue;
-				}
+				if (read !== void 0 && read.defects.length > 0) throw new Error(`task-runtime: run "${run.runId}" content binding changed:\n- ${read.defects.join("\n- ")}`);
 			}
-			if (run.executionPhase === "submitted") {
-				const lineage = this.replayLineage.get(run.taskId);
-				await settleSubmittedRun(env, storeId, run.taskId, run.runId, lineage === void 0 ? {} : { anomalies: [lineage] });
-				continue;
+			if (rootTaskStoreId(run.sessionId) !== storeId && !this.startedSessions.has(run.sessionId)) {
+				const attempt = await resumeAdoptedWorker(env, storeId, run);
+				if (attempt.status !== "live") throw new Error(`task-runtime: cannot continue run "${run.runId}" in Session "${run.sessionId}": ${attempt.reason}`);
+				questionResumes.push({
+					subject: `run "${run.runId}" (session "${run.sessionId}")`,
+					status: "live"
+				});
 			}
 			if (run.executionPhase === "waiting_children") {
-				if (run.batchId !== void 0 && this.batchHeldByRun(run, run.batchId)) {
-					waiting.push(run);
-					continue;
-				}
-				await this.stopUnidentifiedBatch(env, storeId, run);
-				continue;
-			}
-			if (rootTaskStoreId(run.sessionId) === storeId) continue;
-			if (run.recovery !== void 0) {
-				recoveryAttempts.push(run);
-				continue;
-			}
-			if ((run.batches?.length ?? 0) > 0) {
-				returnedParents.push(run);
-				continue;
-			}
-			const pendingQuestions = blockingQuestionsOf(snapshot, run.runId);
-			const owed = owedQuestionMessagesTo(snapshot, run.sessionId);
-			if (pendingQuestions.length > 0 || owed.length > 0) {
-				const attempt = await resumeAdoptedWorker(env, storeId, run);
-				this.recordWorkerResume(storeId, run, attempt, questionResumes, "an unresolved blocking question");
-				if (attempt.status === "refused") {
-					await settleRunFromRuntime(env, storeId, run, "failed", `recovery refused to continue run "${run.runId}": it was waiting on ${pendingQuestions.length === 1 ? "an unresolved blocking question" : `${pendingQuestions.length} unresolved blocking questions`} (${pendingQuestions.map((question) => question.questionId).join(", ")})${owed.length === 0 ? "" : ` and is owed ${owed.length} question message${owed.length === 1 ? "" : "s"} it has not been given`}, but its Session "${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`);
-					await this.reconcileSessionJobs(run.sessionId);
-				}
-				continue;
-			}
-			await settleRunFromRuntime(env, storeId, run, "cancelled", `recovery: run "${run.runId}" was in flight when this store was reopened and never submitted; the writes it may already have made cannot be confirmed, so it is settled cancelled and its managed jobs are reconciled`);
-			await this.reconcileSessionJobs(run.sessionId);
+				if (run.batchId === void 0 || !this.batchHeldByRun(run, run.batchId)) throw new Error(`task-runtime: run "${run.runId}" has no identifiable persisted child batch`);
+				waiting.push(run);
+			} else if (run.executionPhase === "submitted") submitted.push(run);
 		}
-		if (waiting.length > 0 || returnedParents.length > 0 || recoveryAttempts.length > 0) {
-			const sessionId = this.recoverySessionFor(snapshot, storeId);
-			const workspace = await this.workspacePathForSession(sessionId);
-			let adoptable = true;
-			if (workspace !== void 0 && this.workspaces !== void 0) {
-				const adoption = await this.workspaces.ownerOf(workspace) === void 0 ? await this.workspaces.reconcileAdopt(workspace) : { adopted: true };
-				if (!adoption.adopted) {
-					for (const run of waiting) await settleRunFromRuntime(env, storeId, run, "failed", `the workspace cannot be taken over for recovery: ${adoption.reason}`);
-					for (const run of returnedParents) {
-						await settleRunFromRuntime(env, storeId, run, "failed", `recovery refused to bring run "${run.runId}" back into its checkout: its child batches ended and it has to be told so, but the workspace cannot be taken over for recovery: ${adoption.reason}`);
-						await this.reconcileSessionJobs(run.sessionId);
-					}
-					for (const run of recoveryAttempts) {
-						await settleRunFromRuntime(env, storeId, run, "failed", `recovery refused to bring the attempt of "${run.taskId}" ("${run.runId}") back into its checkout: the workspace cannot be taken over for recovery: ${adoption.reason}`);
-						await this.reconcileSessionJobs(run.sessionId);
-					}
-					adoptable = false;
-				} else await this.rebuildWorkspaceOwnership(storeId);
-			}
-			if (adoptable) {
-				for (const run of returnedParents) {
-					const attempt = await resumeAdoptedWorker(env, storeId, run);
-					const batches = (run.batches ?? []).map((batch) => batch.batchId).join(", ");
-					this.recordWorkerResume(storeId, run, attempt, questionResumes, `ended child batches it has not been told about (${batches})`);
-					if (attempt.status === "refused") {
-						await settleRunFromRuntime(env, storeId, run, "failed", `recovery refused to continue run "${run.runId}": its child batches ended (${batches}) and its Session "${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`);
-						await this.reconcileSessionJobs(run.sessionId);
-					}
-				}
-				for (const run of recoveryAttempts) {
-					const attempt = await resumeAdoptedWorker(env, storeId, run);
-					this.recordWorkerResume(storeId, run, attempt, questionResumes, `an attempt of "${run.taskId}" has not been brought back yet`);
-					if (attempt.status === "refused") {
-						await settleRunFromRuntime(env, storeId, run, "failed", `recovery refused to continue the attempt of "${run.taskId}" ("${run.runId}"): its Session "${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`);
-						await this.reconcileSessionJobs(run.sessionId);
-					}
-				}
-				const settled = /* @__PURE__ */ new Set();
-				for (const run of waiting) {
-					if (rootTaskStoreId(run.sessionId) === storeId) continue;
-					if (!(pendingCoordinationOf(snapshot, run.runId).length > 0 || owedQuestionMessagesTo(snapshot, run.sessionId).length > 0)) continue;
-					const attempt = await resumeAdoptedWorker(env, storeId, run);
-					this.recordWorkerResume(storeId, run, attempt, questionResumes, "coordination its own batch is waiting on");
-					if (attempt.status === "refused") {
-						await settleRunFromRuntime(env, storeId, run, "failed", `recovery refused to continue run "${run.runId}": it is a waiting parent with open coordination, but its Session "${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`);
-						await this.reconcileSessionJobs(run.sessionId);
-						settled.add(run.runId);
-					}
-				}
-				for (const run of waiting) {
-					if (run.batchId === void 0) continue;
-					if (settled.has(run.runId)) continue;
-					this.startBatchDriver({
-						storeId,
-						parentTaskId: run.taskId,
-						parentRunId: run.runId,
-						batchId: run.batchId,
-						callerSessionId: run.sessionId,
-						reason: `recovered batch ${run.batchId} after a restart`
-					});
-				}
-			}
+		for (const run of submitted) {
+			const lineage = this.replayLineage.get(run.taskId);
+			await settleSubmittedRun(env, storeId, run.taskId, run.runId, lineage === void 0 ? {} : { anomalies: [lineage] });
 		}
+		for (const run of waiting) this.startBatchDriver({
+			storeId,
+			parentTaskId: run.taskId,
+			parentRunId: run.runId,
+			batchId: run.batchId,
+			callerSessionId: run.sessionId,
+			reason: `continued batch ${run.batchId} after a restart`
+		});
 		const deliverQuestions = async () => {
-			try {
-				const deliveries = await reconcileQuestionDeliveries(this.questionCoordination(), storeId);
-				this.reportUnsettledQuestionDeliveries(storeId, deliveries);
-				await this.wakeUnclaimedQuestionMessages(storeId, deliveries);
-				return deliveries;
-			} catch (error) {
-				this.warn(`store ${storeId}: its pending question deliveries could not be reconciled (${error instanceof Error ? error.message : String(error)}); the Task records still hold the intents, and the next activation retries`);
-				return [];
-			}
+			const deliveries = await reconcileQuestionDeliveries(this.questionCoordination(), storeId);
+			this.reportUnsettledQuestionDeliveries(storeId, deliveries);
+			await this.wakeUnclaimedQuestionMessages(storeId, deliveries);
+			return deliveries;
 		};
 		const deliverBatches = async () => {
-			let current;
-			try {
-				current = await this.ctx.task.snapshotIn(storeId);
-			} catch (error) {
-				this.warn(`store ${storeId}: the batches it may still owe its Sessions could not be read back (${error instanceof Error ? error.message : String(error)}); the runs' own records hold the fact, and the next activation retries`);
-				return;
-			}
-			const owed = owedBatchResults(current);
+			const owed = owedBatchResults(await this.ctx.task.snapshotIn(storeId));
 			if (owed.length === 0) return;
 			const unread = [];
 			for (const entry of owed) try {
@@ -11379,43 +10836,6 @@ var TaskRuntime = class TaskRuntime extends Service {
 		};
 	}
 	/**
-	* The refusal code one resume failure names — read structurally (the stable
-	* class name and its `code`) rather than by `instanceof`, because the runtime
-	* that raises it and this package can be two modules of one contract in a
-	* source-built deployment, and a duplicate class object must not turn a named
-	* refusal into an unnamed failure.
-	*/
-	static resumeRefusalCodeOf(error) {
-		if (!(error instanceof Error) || error.name !== "WorkerResumeRefusal") return void 0;
-		const code = error.code;
-		return typeof code === "string" ? code : void 0;
-	}
-	/**
-	* Record one worker-recovery attempt in the pass's report *and* on the
-	* deployment's log (A4 §F.1): a `live` resume is the pass's own success and
-	* needs no warn, while a `retry` and a `refused` are exactly what an operator
-	* has to see — the first because the run keeps waiting on an owner that is not
-	* this process, the second because the run is about to be settled terminal for
-	* it. The report is the machine-readable half; this is the one adoption drops.
-	*
-	* `fact` names what makes the Session one the pass has to reach — an unresolved
-	* blocking question (A4 §F.1), or a batch that ended and whose result the run has
-	* not been told about (K1 §2, §5) — so a warn says which wait it is about.
-	*/
-	recordWorkerResume(storeId, run, attempt, into, fact) {
-		const subject = `run "${run.runId}" (session "${run.sessionId}")`;
-		into.push(attempt.status === "live" ? {
-			subject,
-			status: "live"
-		} : {
-			subject,
-			status: attempt.status,
-			reason: attempt.reason
-		});
-		if (attempt.status === "retry") this.warn(`store ${storeId}: ${subject} has to be reachable for ${fact}, but its Session is held by another owner (${attempt.reason}); nothing is taken over and the next activation retries`);
-		if (attempt.status === "refused") this.warn(`store ${storeId}: ${subject} has to be reachable for ${fact} and its Session could not be brought back under its own identity (${attempt.reason}); the run is settled failed rather than left running with that fact unreported`);
-	}
-	/**
 	* Wake a Session that was brought back with coordination input its own inbox
 	* still holds unread (A4 §F.1's wake contract).
 	*
@@ -11425,7 +10845,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* message that was durable *before* the crash (spliced and flushed, never
 	* claimed) wakes nothing after the restart. The resumed driver stays idle with
 	* the question or the answer sitting in its restored inbox, and the wait would
-	* only end at the deadline. So the pass looks at the deliveries that came back
+	* remain idle indefinitely. So the pass looks at the deliveries that came back
 	* `already-present`, checks the *live* inbox of the session each one addressed
 	* (the public `inbox.nextTurn`/`nextStep` read), and — only when that identity
 	* is still pending there — wakes the session with the runtime's own voice: a
@@ -11441,13 +10861,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 	async wakeUnclaimedQuestionMessages(storeId, deliveries) {
 		const unread = new Set(deliveries.filter((delivery) => delivery.status === "already-present").map((delivery) => delivery.messageId));
 		if (unread.size === 0) return;
-		let snapshot;
-		try {
-			snapshot = await this.ctx.task.snapshotIn(storeId);
-		} catch (error) {
-			this.warn(`store ${storeId}: the sessions holding already-present question messages could not be read back (${error instanceof Error ? error.message : String(error)}); the next activation retries`);
-			return;
-		}
+		const snapshot = await this.ctx.task.snapshotIn(storeId);
 		const targets = /* @__PURE__ */ new Map();
 		for (const message$8 of pendingQuestionMessages(snapshot).messages) if (unread.has(message$8.messageId)) targets.set(message$8.targetSessionId, message$8.messageId);
 		for (const [sessionId, messageId] of targets) {
@@ -11464,8 +10878,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* never have been claimed (spliced and flushed, then the process died), so the
 	* pass's re-delivery answers `already-present` **without steering** — right,
 	* because a second copy would be a duplicate — and a resumed parent with the
-	* message sitting in its restored inbox would otherwise stay idle until its
-	* deadline. The check is the same live-inbox read, and the wake is the same
+	* message sitting in its restored inbox would otherwise stay idle. The check is the same live-inbox read, and the wake is the same
 	* runtime-voice notice: never a second copy of the message.
 	*/
 	wakeUnclaimedBatchResults(unread) {
@@ -11512,59 +10925,35 @@ var TaskRuntime = class TaskRuntime extends Service {
 	*    name: a resumed worker whose predecessor's jobs nobody could confirm
 	*    stopped must not be allowed to run as if nothing of the sort happened.
 	*
-	* A refusal of the resume itself is named and never worked around: an
-	* `ownership-conflict` is the retryable one (another owner holds the Session;
-	* this process must not take it over) and everything else means the identity
-	* cannot be established, which the caller settles as a terminal state.
+	* A refused resume fails activation by name; the original Run stays intact
+	* and no replacement Session is created.
 	*/
 	async resumeAdoptedWorkerSession(request) {
 		const sessionId = request.run.sessionId;
+		const continuing = this.startedSessions.has(sessionId);
 		const live = this.agentOrUndefined(sessionId) !== void 0;
+		const bound = this.sessions.get(sessionId);
+		if (live && (bound === void 0 || bound.storeId !== request.storeId || bound.runId !== request.run.runId)) throw new Error(`task-runtime: Session "${sessionId}" is live under another owner or Run binding`);
 		if (!live) {
-			let scope;
-			try {
-				const graph = await this.ctx.graphs.graphForSession(SessionId(sessionId));
-				scope = {
+			const graph = await this.ctx.graphs.graphForSession(SessionId(sessionId));
+			await this.ctx.agentRuntime.resumeWorkerAgent({
+				sessionId: SessionId(sessionId),
+				scope: {
 					graphStoreId: graph.graphStoreId,
 					layoutStoreId: graph.layoutStoreId
-				};
-			} catch (error) {
-				return {
-					status: "refused",
-					reason: `the graph of session "${sessionId}" could not be resolved (${error instanceof Error ? error.message : String(error)})`
-				};
-			}
-			try {
-				await this.ctx.agentRuntime.resumeWorkerAgent({
+				},
+				run: {
+					storeId: request.storeId,
+					taskId: request.run.taskId,
+					runId: request.run.runId,
 					sessionId: SessionId(sessionId),
-					scope,
-					run: {
-						storeId: request.storeId,
-						taskId: request.run.taskId,
-						runId: request.run.runId,
-						sessionId: SessionId(sessionId),
-						...request.run.agentPreset === void 0 ? {} : { agentPreset: request.run.agentPreset },
-						capabilitySnapshot: request.run.capabilitySnapshot
-					},
-					grant: request.grant,
-					...request.permissionPreset === void 0 ? {} : { permissionPreset: request.permissionPreset },
-					taskWorker: request.taskWorker
-				});
-			} catch (error) {
-				const code = TaskRuntime.resumeRefusalCodeOf(error);
-				if (code === "ownership-conflict") return {
-					status: "retry",
-					reason: error instanceof Error ? error.message : String(error)
-				};
-				if (code !== void 0) return {
-					status: "refused",
-					reason: `${code}: ${error instanceof Error ? error.message : String(error)}`
-				};
-				return {
-					status: "refused",
-					reason: error instanceof Error ? error.message : String(error)
-				};
-			}
+					...request.run.agentPreset === void 0 ? {} : { agentPreset: request.run.agentPreset },
+					capabilitySnapshot: request.run.capabilitySnapshot
+				},
+				grant: request.grant,
+				...request.permissionPreset === void 0 ? {} : { permissionPreset: request.permissionPreset },
+				taskWorker: request.taskWorker
+			});
 		}
 		this.sessions.set(sessionId, {
 			storeId: request.storeId,
@@ -11577,12 +10966,11 @@ var TaskRuntime = class TaskRuntime extends Service {
 			const drained = await this.drainAdoptedSession(sessionId);
 			if (!drained.confirmed) {
 				await this.stopAdoptedSession(sessionId);
-				return {
-					status: "refused",
-					reason: `the managed work of session "${sessionId}" could not be confirmed stopped: ${drained.pending.join("; ")}`
-				};
+				throw new Error(`task-runtime: managed work of Session "${sessionId}" could not be confirmed stopped: ${drained.pending.join("; ")}`);
 			}
 		}
+		const coordinationPending = request.run.executionPhase === "waiting_children" && pendingCoordinationOf(await this.ctx.task.snapshotIn(request.storeId), request.run.runId).length > 0;
+		if (!continuing && (request.run.executionPhase === "active" || coordinationPending)) this.notifyWhenReady(sessionId, "task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.");
 		return { status: "live" };
 	}
 	/**
@@ -11595,15 +10983,9 @@ var TaskRuntime = class TaskRuntime extends Service {
 	*/
 	async applyResumedSessionGate(storeId, sessionId, runId) {
 		const token = this.executionGate.decisionToken(sessionId);
-		let snapshot;
-		try {
-			snapshot = await this.ctx.task.snapshotIn(storeId);
-		} catch (error) {
-			this.warn(`store ${storeId}: the facts of session "${sessionId}" could not be read back after its resume (${error instanceof Error ? error.message : String(error)}); its gate is left as the store-derived pass finds it`);
-			return;
-		}
+		const snapshot = await this.ctx.task.snapshotIn(storeId);
 		const run = snapshot.runs.find((candidate) => candidate.runId === runId);
-		if (run === void 0) return;
+		if (run === void 0) throw new Error(`task-runtime: resumed Run "${runId}" is absent from store "${storeId}"`);
 		this.gatePhaseFromStore(sessionId, run, storeId, token);
 		this.executionGate.applyStoreQuestionsBlocked(sessionId, blockingQuestionsOf(snapshot, runId).length > 0, token);
 	}
@@ -11623,60 +11005,58 @@ var TaskRuntime = class TaskRuntime extends Service {
 			this.warn(`session ${sessionId}: the resumed worker could not be stopped again (${error instanceof Error ? error.message : String(error)})`);
 		}
 	}
-	/**
-	* Rebuild this process's workspace ownership for one store from the store's
-	* own state: the root run's own hold, and — when that run is waiting on
-	* children — the batch layer its driver hands to each child in turn. A tree
-	* whose runs all reached terminal states releases the claim instead, which is
-	* what makes a finished tree leave no marker behind.
-	*/
-	async rebuildWorkspaceOwnership(storeId, requireOwnership = false) {
-		let snapshot;
-		try {
-			snapshot = await this.ctx.task.snapshotIn(storeId);
-		} catch (error) {
-			this.warn(`store ${storeId}: its snapshot could not be read (${error instanceof Error ? error.message : String(error)}), so its workspace ownership was left as it is`);
-			return;
-		}
-		const rootTask = snapshot.tasks.find((task) => task.parentTaskId === void 0);
-		if (rootTask === void 0) return;
-		const rootRun = [...snapshot.runs].reverse().find((run) => run.taskId === rootTask.taskId && run.status === "running");
-		const workspace = rootRun === void 0 ? void 0 : await this.workspacePathForSession(rootRun.sessionId);
-		if (workspace === void 0 || this.workspaces === void 0) return;
+	/** Restore the persisted root → batch → worker ownership chain once. */
+	async rebuildWorkspaceOwnership(storeId) {
+		const snapshot = await this.ctx.task.snapshotIn(storeId);
+		const rootRun = snapshot.runs.find((run$1) => run$1.status === "running" && rootTaskStoreId(run$1.sessionId) === storeId);
 		if (rootRun === void 0) {
 			await this.releaseStoreWorkspace(storeId);
 			return;
 		}
-		let held = this.workspaces.ownerOf(workspace);
-		if (held === void 0) {
-			const adoption = await this.workspaces.reconcileAdopt(workspace);
-			if (!adoption.adopted) {
-				if (requireOwnership) throw new Error(`task-runtime: store ${storeId} cannot take over workspace ${workspace} before verifying submitted runs: ${adoption.reason}`);
-				this.warn(`store ${storeId}: the workspace cannot be taken over (${adoption.reason})`);
-				return;
-			}
-			await this.workspaces.claim(workspace, {
-				kind: "run",
-				storeId,
-				taskId: rootTask.taskId,
-				runId: rootRun.runId,
-				since: now()
-			});
-			held = this.workspaces.ownerOf(workspace);
-		}
-		if (held === void 0 || held.kind !== "run" || held.storeId !== storeId || held.runId !== rootRun.runId) {
-			if (requireOwnership) throw new Error(`task-runtime: store ${storeId} cannot verify submitted runs in workspace ${workspace}: it is held by ${held === void 0 ? "nobody in this process" : `${held.kind} ${held.storeId}/${held.runId ?? held.batchId ?? ""}`}, not by its root run ${rootRun.runId}`);
-			this.warn(`store ${storeId}: the workspace ${workspace} is held by ${held === void 0 ? "nobody in this process" : `${held.kind} ${held.storeId}/${held.runId ?? held.batchId ?? ""}`}, not by its root run ${rootRun.runId}; ownership is left as it is`);
+		const workspace = await this.workspacePathForSession(rootRun.sessionId);
+		if (workspace === void 0) return;
+		const held = this.workspaces.ownerOf(workspace);
+		if (held !== void 0) {
+			if (held.storeId !== storeId) throw new Error(`task-runtime: workspace ${workspace} is held by ${describeOwner(held)}`);
 			return;
 		}
-		if (rootRun.executionPhase !== "waiting_children" || rootRun.batchId === void 0) return;
-		await this.workspaces.push(workspace, held, {
-			kind: "batch",
+		const adoption = await this.workspaces.reconcileAdopt(workspace);
+		if (!adoption.adopted) throw new Error(`task-runtime: cannot take over workspace ${workspace}: ${adoption.reason}`);
+		let owner = {
+			kind: "run",
 			storeId,
-			taskId: rootTask.taskId,
-			batchId: rootRun.batchId,
+			taskId: rootRun.taskId,
+			runId: rootRun.runId,
 			since: now()
-		});
+		};
+		await this.workspaces.claim(workspace, owner);
+		let run = rootRun;
+		while (run.executionPhase === "waiting_children") {
+			const batch = run.batches?.find((batch$1) => batch$1.batchId === run.batchId);
+			if (batch === void 0) throw new Error(`task-runtime: Run "${run.runId}" has no identifiable persisted child batch`);
+			const next = {
+				kind: "batch",
+				storeId,
+				taskId: run.taskId,
+				batchId: batch.batchId,
+				since: now()
+			};
+			await this.workspaces.push(workspace, owner, next);
+			owner = next;
+			const children = snapshot.runs.filter((child) => child.status === "running" && batch.memberTaskIds.includes(child.taskId));
+			if (children.length > 1) throw new Error(`task-runtime: batch "${batch.batchId}" holds multiple running workspace writers`);
+			if (children.length === 0) break;
+			run = children[0];
+			const childOwner = {
+				kind: "run",
+				storeId,
+				taskId: run.taskId,
+				runId: run.runId,
+				since: now()
+			};
+			await this.workspaces.push(workspace, owner, childOwner);
+			owner = childOwner;
+		}
 	}
 	/** Release every layer this process holds for one store's workspace, naming any layer that is not the store's. */
 	async releaseStoreWorkspace(storeId) {
@@ -12022,27 +11402,23 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* Best-effort owner notification through the live agent (A3 §3.1, DSH's
 	* tool-jobs precedent: a `plugin`-sourced `notice`). A session with no live
 	* agent — a worker that already left, a headless test context — is skipped,
-	* and a failing follow-up never fails the settlement that reports it.
+	* and a failing follow-up reports its error to the caller.
 	*/
 	notify(sessionId, text$1) {
 		const agent = this.agentOrUndefined(sessionId);
 		if (agent === void 0 || typeof agent.followup !== "function") return;
-		try {
-			agent.followup(createUserMessage({
-				content: [{
-					type: "text",
-					text: text$1
-				}],
-				source: {
-					kind: "plugin",
-					plugin: "task-runtime",
-					form: "notice",
-					summary: boundContextSummary(text$1)
-				}
-			}));
-		} catch (error) {
-			this.warn(`could not notify session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
-		}
+		agent.followup(createUserMessage({
+			content: [{
+				type: "text",
+				text: text$1
+			}],
+			source: {
+				kind: "plugin",
+				plugin: "task-runtime",
+				form: "notice",
+				summary: boundContextSummary(text$1)
+			}
+		}));
 	}
 	/**
 	* Send one owner notice through the live Session when its store is ready, and
@@ -12053,7 +11429,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* the recovery door with nothing to wake the Session again. The notices the
 	* barrier's own pass raises are therefore raised here rather than sent: the
 	* ready handle sends them in the order they were raised, and a failed or
-	* invalidated barrier drops them — a notice is best-effort by contract, and
+	* invalidated barrier drops them — a failed wake propagates its error, and
 	* the next explicit activation raises the same one from the record again. With
 	* no barrier in flight this is {@link notify}, unchanged.
 	*/
@@ -12107,7 +11483,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* path shares — the live batch end, a delivery a barrier deferred, the recovery
 	* pass and a re-delivery a caller asked for. The message's whole content is "you
 	* are active again"; a run that settled while the delivery was on its way (a
-	* cancellation or a deadline that arrived first, a verdict somebody else made)
+	* cancellation that arrived first, a verdict somebody else made)
 	* must not be woken by it, so a run that is no longer `running` is answered
 	* `skipped` with zero side effects (K1 §2: 绝不唤活终态).
 	*/
@@ -12192,18 +11568,13 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* contract's own text has no field that can raise a limit, and every value
 	* here is resolved from this runtime's configuration at admission time.
 	*
-	* Only the keys the deployment actually defined are included. `wallTimeMs`
-	* and the `auditOnly` trio are one record apart on purpose — a reader has to
-	* be able to tell which ceiling would have stopped the run — and an absent
-	* `tokens` (this deployment ships no default for it, see {@link BudgetConfig})
-	* means there is no token ceiling to record at all.
+	* Only configured usage annotations are recorded.
 	*/
 	admissionContext() {
 		const budget = this.config.budget;
 		return {
 			maxDepth: this.config.maxDepth,
 			maxChildren: this.config.maxChildren,
-			...budget.wallTimeMs === void 0 ? {} : { wallTimeMs: budget.wallTimeMs },
 			auditOnly: {
 				...budget.maxToolCalls === void 0 ? {} : { maxToolCalls: budget.maxToolCalls },
 				...budget.tokens === void 0 ? {} : { tokens: budget.tokens },
@@ -12614,4 +11985,4 @@ var TaskRuntime = class TaskRuntime extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, deriveReuse, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, deriveReuse, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

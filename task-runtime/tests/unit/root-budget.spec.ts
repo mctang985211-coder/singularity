@@ -1,117 +1,41 @@
 import { describe, expect, test } from 'vitest'
-import { assertRootBudgetConfig, checkBatchAdmission, checkRunStart, hasRootLimits, resolveRootBudget, runDeadlineMs } from '../../src/root-budget.ts'
-import type { ResolvedRootBudget } from '../../src/root-budget.ts'
-import { rootTaskStoreId } from '../../../task/src/index.ts'
-import type {
-  Diagnosis,
-  EvidenceBundle,
-  Obligation,
-  ReviewRecord,
-  TaskBudgetExtension,
-  TaskHandoff,
-  TaskInstance,
-  TaskRun,
-  TaskSnapshot,
-} from '../../../task/src/index.ts'
+import {
+  assertRootBudgetConfig,
+  checkBatchAdmission,
+  checkRunStart,
+  hasRootLimits,
+  resolveRootBudget,
+} from '../../src/root-budget.ts'
+import type { TaskBudgetExtension, TaskSnapshot } from '../../../task/src/index.ts'
 
-/**
- * The root budget and the progress count, as pure functions of a hand-built
- * snapshot. Every case here is a recovery case as much as a live one: a run that
- * is refused because the store already holds its runs, a deadline measured from
- * an instant that was persisted rather than from "now", and a root whose start
- * cannot be read refusing instead of being given a fresh clock.
- */
-
-const STORE = 'sg-t-root'
-
-/**
- * The root session this store id derives from (`rootTaskStoreId`), and its
- * counterpart: the session a replay's own run carries, which names no root of
- * this store. The distinction is what makes a parentless *replay* task share
- * the tree's budget instead of claiming one of its own (A3 §3.5).
- */
-const ROOT_SESSION = 'root'
-const REPLAY_SESSION = 's-replay-1'
-
-/** One parentless task whose run is bound to this store as its root: the budget owner in the simple cases. */
-function rootTaskSnapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
-  return snapshot({
-    tasks: [task('root', undefined)],
-    runs: [run('r-root', 'root', '2026-09-22T00:00:00.000Z', ROOT_SESSION)],
-    ...overrides,
-  })
-}
-
-function task(taskId: string, parentTaskId: string | undefined, childTaskIds: string[] = []): TaskInstance {
-  return {
-    taskId,
-    definitionRef: { taskType: 'root', version: 1 },
-    ...(parentTaskId === undefined ? {} : { parentTaskId }),
-    objective: taskId,
-    depth: parentTaskId === undefined ? 0 : 1,
-    acceptanceCriteria: [],
-    requestedCapabilities: [],
-    decompositionStatus: childTaskIds.length > 0 ? 'decomposed' : 'leaf',
-    status: 'running',
-    runIds: [`r-${taskId}`],
-    childTaskIds,
-  }
-}
-
-function run(runId: string, taskId: string, startedAt = '2026-09-22T00:00:00.000Z', sessionId = `s-${runId}`): TaskRun {
-  return { runId, taskId, sessionId, capabilitySnapshot: [], artifacts: [], verifierResults: [], status: 'running', startedAt }
-}
-
-function evidence(evidenceId: string, taskId: string): EvidenceBundle {
-  return { evidenceId, taskRunId: `r-${taskId}`, taskId, artifacts: [], verifierResults: [], claims: [], generatedAt: '2026-09-22T00:00:10.000Z' }
-}
-
-function handoff(handoffId: string, parentTaskId: string, childTaskId: string): TaskHandoff {
-  return {
-    handoffId,
-    parentTaskId,
-    parentRunId: `r-${parentTaskId}`,
-    childTaskId,
-    parentObjective: parentTaskId,
-    reasonForDelegation: 'because',
-    constraints: [],
-    decisions: [],
-    relevantArtifacts: [],
-    relevantEvidence: [],
-    assumptions: [],
-    openQuestions: [],
-    createdAt: '2026-09-22T00:00:05.000Z',
-  }
-}
-
-function review(taskId: string): ReviewRecord {
-  return { taskId, outcome: 'verified', evidenceRefs: [], anomalies: [] }
-}
-
-function diagnosis(diagnosisId: string, taskId: string): Diagnosis {
-  return {
-    diagnosisId,
-    taskId,
-    observedFailure: 'none',
-    scope: taskId,
-    localizedCause: 'none',
-    evidenceRefs: [],
-    reviewRefs: [],
-    confidence: 'high',
-    proposals: [],
-  }
-}
-
-function obligation(obligationId: string, sourceTaskId: string): Obligation {
-  return { obligationId, goal: obligationId, criterion: 'it is done', sourceTaskId }
-}
-
-function snapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
+function tree(runs = 1): TaskSnapshot {
   return {
     version: 1,
-    id: STORE,
-    tasks: [],
-    runs: [],
+    id: 'sg-t-root',
+    tasks: [
+      {
+        taskId: 'root',
+        definitionRef: { taskType: 'root', version: 1 },
+        objective: 'root',
+        depth: 0,
+        acceptanceCriteria: [],
+        requestedCapabilities: [],
+        decompositionStatus: 'leaf',
+        status: 'running',
+        runIds: ['r-root'],
+        childTaskIds: [],
+      },
+    ],
+    runs: Array.from({ length: runs }, (_, i) => ({
+      runId: i === 0 ? 'r-root' : `r-${i}`,
+      taskId: i === 0 ? 'root' : `child-${i}`,
+      sessionId: i === 0 ? 'root' : `s-${i}`,
+      capabilitySnapshot: [],
+      artifacts: [],
+      verifierResults: [],
+      status: 'running',
+      startedAt: '2026-09-22T00:00:00.000Z',
+    })),
     edges: [],
     evidence: [],
     handoffs: [],
@@ -119,428 +43,105 @@ function snapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
     diagnoses: [],
     obligations: [],
     capabilities: {},
+  }
+}
+
+function extension(overrides: Partial<TaskBudgetExtension>): TaskBudgetExtension {
+  return {
+    requestKey: 'raise',
+    requestDigest: 'historical-identity',
+    approvalRef: 'approval:1',
+    requestedBy: 'root',
+    baseline: { maxRuns: 3 },
+    recordedAt: '2026-09-22T00:00:00.000Z',
     ...overrides,
   }
 }
 
-/**
- * The three-level tree the count tests use: root → child-a → grandchild, with child-b beside it,
- * plus a parentless task that is not this store's root (the shape a replay leaves behind).
- */
-function threeLevelTree(): TaskSnapshot {
-  return snapshot({
-    tasks: [
-      task('root', undefined, ['child-a', 'child-b']),
-      task('child-a', 'root', ['grandchild']),
-      task('grandchild', 'child-a'),
-      task('child-b', 'root'),
-      task('outsider', undefined),
-    ],
-    runs: [
-      run('r-root', 'root', '2026-09-22T00:00:00.000Z', ROOT_SESSION),
-      run('r-child-a', 'child-a'),
-      run('r-grandchild', 'grandchild'),
-      run('r-child-b', 'child-b'),
-      run('r-outsider', 'outsider', '2026-09-22T00:00:00.000Z', REPLAY_SESSION),
-    ],
-    edges: [
-      { from: 'child-a', to: 'child-b' },
-      { from: 'grandchild', to: 'root' },
-      { from: 'outsider', to: 'outsider' },
-    ],
-    evidence: [evidence('e-1', 'root'), evidence('e-2', 'grandchild'), evidence('e-3', 'child-b'), evidence('e-4', 'outsider')],
-    handoffs: [handoff('h-1', 'root', 'child-a'), handoff('h-2', 'root', 'child-b'), handoff('h-3', 'outsider', 'outsider')],
-    reviews: [review('root'), review('grandchild'), review('child-b'), review('outsider')],
-    diagnoses: [diagnosis('d-1', 'root'), diagnosis('d-2', 'child-a'), diagnosis('d-3', 'outsider')],
-    obligations: [obligation('o-1', 'grandchild'), obligation('o-2', 'child-b'), obligation('o-3', 'outsider')],
-  })
+function resolve(snapshot: TaskSnapshot, maxRuns?: number) {
+  const result = resolveRootBudget(snapshot, maxRuns === undefined ? {} : { maxRuns })
+  if (!result.ok) throw new Error(result.reason)
+  return result
 }
 
-describe('resolveRootBudget', () => {
-  test('reads the budget from the root run that is already recorded', () => {
-    const tree = snapshot({
-      tasks: [task('root', undefined, ['child-a']), task('child-a', 'root')],
-      runs: [run('r-root', 'root', '2026-09-22T00:00:00.000Z', ROOT_SESSION), run('r-child-a', 'child-a')],
-    })
-    const resolved = resolveRootBudget(tree, { wallTimeMs: 60_000, maxRuns: 8 })
-    expect(resolved).toEqual({
+describe('persisted root budget', () => {
+  test('keeps observed acceptance time and run ceiling across reopening', () => {
+    expect(resolve(tree(3), 8)).toEqual({
       ok: true,
       rootTaskId: 'root',
       acceptedAt: '2026-09-22T00:00:00.000Z',
-      deadlineAt: '2026-09-22T00:01:00.000Z',
       maxRuns: 8,
-      configured: { deadlineAt: '2026-09-22T00:01:00.000Z', maxRuns: 8 },
+      configured: { maxRuns: 8 },
     })
   })
 
-  test('measures from the root task\u2019s own first run when it has several', () => {
-    const tree = snapshot({
-      tasks: [{ ...task('root', undefined), runIds: ['r-root-2', 'r-root-1'] }],
-      runs: [run('r-root-1', 'root', '2026-09-22T00:00:00.000Z', ROOT_SESSION), run('r-root-2', 'root', '2026-09-22T00:05:00.000Z', ROOT_SESSION)],
+  test('uses the store root while a parentless replay shares its run count', () => {
+    const snapshot = tree(2)
+    const withReplay: TaskSnapshot = {
+      ...snapshot,
+      tasks: [...snapshot.tasks, { ...snapshot.tasks[0]!, taskId: 'replay', runIds: ['r-replay'] }],
+      runs: [...snapshot.runs, { ...snapshot.runs[0]!, taskId: 'replay', runId: 'r-replay', sessionId: 's-replay' }],
+    }
+    expect(resolve(withReplay, 3).rootTaskId).toBe('root')
+    expect(checkRunStart(withReplay, resolve(withReplay, 3)).allowed).toBe(false)
+  })
+
+  test('does not refund recorded runs after a restart', () => {
+    const snapshot = tree(3)
+    expect(checkRunStart(snapshot, resolve(snapshot, 3))).toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('already holds 3'),
     })
-    const resolved = resolveRootBudget(tree, { wallTimeMs: 60_000 })
-    expect(resolved.ok).toBe(true)
-    if (!resolved.ok) throw new Error('unreachable')
-    expect(resolved.acceptedAt).toBe('2026-09-22T00:05:00.000Z')
-    expect(resolved.deadlineAt).toBe('2026-09-22T00:06:00.000Z')
+    expect(checkRunStart(snapshot, resolve(snapshot, 4))).toEqual({ allowed: true })
   })
 
-  test('leaves the deadline absent when no wall time is configured', () => {
-    const resolved = resolveRootBudget(snapshot({ tasks: [task('root', undefined)], runs: [run('r-root', 'root', '2026-09-22T00:00:00.000Z', ROOT_SESSION)] }), {})
-    expect(resolved).toEqual({ ok: true, rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', configured: {} })
+  test('reserves every child run before admitting the batch', () => {
+    const snapshot = tree(3)
+    expect(checkBatchAdmission(snapshot, resolve(snapshot, 5), 2)).toEqual({ allowed: true })
+    expect(checkBatchAdmission(snapshot, resolve(snapshot, 5), 3)).toMatchObject({ allowed: false })
+    expect(checkBatchAdmission(snapshot, resolve(snapshot), 100)).toEqual({ allowed: true })
   })
 
-  test('refuses a store with no root, naming the store', () => {
-    const resolved = resolveRootBudget(snapshot({ tasks: [task('child', 'someone')], runs: [run('r-child', 'child')] }), {})
-    expect(resolved.ok).toBe(false)
-    if (resolved.ok) throw new Error('unreachable')
-    expect(resolved.reason).toContain(STORE)
-    expect(resolved.reason).toContain('no root task')
-  })
-
-  test('resolves the store\u2019s own root out of several parentless tasks, with a replay\u2019s task beside it', () => {
-    // The store's root is the parentless task whose run is bound to the root
-    // session the store id derives from; a replay's parentless task carries no
-    // such binding and shares the root's total instead of splitting it (§3.5).
-    const resolved = resolveRootBudget(threeLevelTree(), {})
-    expect(resolved.ok).toBe(true)
-    if (!resolved.ok) throw new Error('unreachable')
-    expect(resolved.rootTaskId).toBe('root')
-    expect(resolved.acceptedAt).toBe('2026-09-22T00:00:00.000Z')
-    expect(rootTaskStoreId(ROOT_SESSION)).toBe(STORE)
-    expect(rootTaskStoreId(REPLAY_SESSION)).not.toBe(STORE)
-  })
-
-  test('refuses a store whose parentless tasks are all unbound: no run names a root session of this store', () => {
-    const tree = snapshot({
-      tasks: [task('replayed', undefined)],
-      runs: [run('r-replayed', 'replayed', '2026-09-22T00:00:00.000Z', REPLAY_SESSION)],
+  test('approved maxRuns remains in force while old approved deadlines are only historical data', () => {
+    const snapshot = tree(3)
+    const legacy = extension({
+      maxRuns: { previous: 3, next: 7 },
+      deadlineAt: { previous: '2026-09-22T00:01:00.000Z', next: '2026-09-22T00:02:00.000Z' },
+      baseline: { maxRuns: 3, deadlineAt: '2026-09-22T00:01:00.000Z' },
     })
-    const resolved = resolveRootBudget(tree, {})
-    expect(resolved.ok).toBe(false)
-    if (resolved.ok) throw new Error('unreachable')
-    expect(resolved.reason).toContain('replayed')
-    expect(resolved.reason).toContain(REPLAY_SESSION)
-    expect(resolved.reason).toContain('no budget owner')
-  })
-
-  test('refuses a store with two tasks both bound to this store as its root, naming them', () => {
-    const tree = snapshot({
-      tasks: [task('root', undefined), task('root-again', undefined)],
-      runs: [
-        run('r-root', 'root', '2026-09-22T00:00:00.000Z', ROOT_SESSION),
-        run('r-root-again', 'root-again', '2026-09-22T00:01:00.000Z', ROOT_SESSION),
-      ],
+    const extended: TaskSnapshot = { ...snapshot, budgetExtensions: { all: [legacy], byRequestKey: { raise: legacy } } }
+    const budget = resolve(extended, 3)
+    expect(budget).toEqual({
+      ok: true,
+      rootTaskId: 'root',
+      acceptedAt: snapshot.runs[0]!.startedAt,
+      maxRuns: 7,
+      configured: { maxRuns: 3 },
     })
-    const resolved = resolveRootBudget(tree, {})
-    expect(resolved.ok).toBe(false)
-    if (resolved.ok) throw new Error('unreachable')
-    expect(resolved.reason).toContain('root')
-    expect(resolved.reason).toContain('root-again')
-    expect(resolved.reason).toContain('no single budget owner')
+    expect(checkRunStart(snapshot, budget)).toEqual({ allowed: true })
+    expect(resolve(extended).maxRuns).toBe(7)
+    expect(extended.budgetExtensions!.all[0]!.deadlineAt).toEqual(legacy.deadlineAt)
   })
 
-  test('refuses a root with no run at all', () => {
-    const resolved = resolveRootBudget(snapshot({ tasks: [task('root', undefined)] }), { wallTimeMs: 1000 })
-    expect(resolved.ok).toBe(false)
-    if (resolved.ok) throw new Error('unreachable')
-    expect(resolved.reason).toContain('has no run recorded')
-    expect(resolved.reason).toContain('restart time is not a substitute')
+  test('rejects missing budget owner and unreadable observed start', () => {
+    const snapshot = tree()
+    expect(resolveRootBudget({ ...snapshot, tasks: [] }, {}).ok).toBe(false)
+    const missingRun = tree()
+    expect(resolveRootBudget({ ...missingRun, runs: [] }, { maxRuns: 3 }).ok).toBe(false)
+    const unreadable = tree()
+    unreadable.runs[0]!.startedAt = 'unreadable'
+    expect(resolveRootBudget(unreadable, {}).ok).toBe(false)
   })
 
-  test('refuses a root run whose startedAt is missing or unreadable, without inventing one', () => {
-    const missing = resolveRootBudget(rootTaskSnapshot({ runs: [run('r-root', 'root', '', ROOT_SESSION)] }), { wallTimeMs: 1000 })
-    expect(missing.ok).toBe(false)
-    if (missing.ok) throw new Error('unreachable')
-    expect(missing.reason).toContain('no readable startedAt')
-    const unreadable = resolveRootBudget(rootTaskSnapshot({ runs: [run('r-root', 'root', 'yesterday', ROOT_SESSION)] }), {})
-    expect(unreadable.ok).toBe(false)
-    if (unreadable.ok) throw new Error('unreachable')
-    expect(unreadable.reason).toContain('no honest start instant')
-  })
-
-  test('a root whose own run is unbound is not a budget owner', () => {
-    const resolved = resolveRootBudget(snapshot({ tasks: [task('root', undefined)], runs: [run('r-root', 'root')] }), { wallTimeMs: 1000 })
-    expect(resolved.ok).toBe(false)
-    if (resolved.ok) throw new Error('unreachable')
-    expect(resolved.reason).toContain('no budget owner')
-  })
-})
-
-/** One approved raise of the run ceiling, as the store records it (`TaskBudgetExtension`). */
-function raisedMaxRuns(previous: number, next: number, requestKey = `k-maxRuns-${previous}-${next}`): TaskBudgetExtension {
-  return {
-    requestKey,
-    requestDigest: `digest-${requestKey}`,
-    maxRuns: { previous, next },
-    approvalRef: 'approval:call-1',
-    requestedBy: ROOT_SESSION,
-    recordedAt: '2026-09-22T00:05:00.000Z',
-  }
-}
-
-/** One approved raise of the tree's deadline, as the store records it. */
-function raisedDeadline(previous: string, next: string, requestKey = `k-deadline-${next}`): TaskBudgetExtension {
-  return {
-    requestKey,
-    requestDigest: `digest-${requestKey}`,
-    deadlineAt: { previous, next },
-    approvalRef: 'approval:call-1',
-    requestedBy: ROOT_SESSION,
-    recordedAt: '2026-09-22T00:05:00.000Z',
-  }
-}
-
-/** The root's simple tree with those extensions approved on it — the store's own facts, no configuration involved. */
-function withExtensions(tree: TaskSnapshot, ...extensions: TaskBudgetExtension[]): TaskSnapshot {
-  return {
-    ...tree,
-    budgetExtensions: {
-      all: extensions,
-      byRequestKey: Object.fromEntries(extensions.map(extension => [extension.requestKey, extension])),
-    },
-  }
-}
-
-describe('resolveRootBudget under approved extensions (K4)', () => {
-  const rootOnly = (): TaskSnapshot => rootTaskSnapshot()
-
-  test('an approved run ceiling is the one in force, and the configured value stays readable beside it', () => {
-    const tree = withExtensions(rootOnly(), raisedMaxRuns(8, 12))
-    const resolved = resolveRootBudget(tree, { wallTimeMs: 60_000, maxRuns: 8 })
-    expect(resolved.ok).toBe(true)
-    if (!resolved.ok) throw new Error('unreachable')
-    // The ceiling in force is the approved one …
-    expect(resolved.maxRuns).toBe(12)
-    // … while the deployment's own total — what a reader has to show beside it —
-    // is still the configured 8, resolved against the same root start.
-    expect(resolved.configured).toEqual({ deadlineAt: '2026-09-22T00:01:00.000Z', maxRuns: 8 })
-    expect(resolved.deadlineAt).toBe('2026-09-22T00:01:00.000Z')
-  })
-
-  test('only the dimension an extension moved changes: the other keeps its configured value', () => {
-    const tree = withExtensions(rootOnly(), raisedMaxRuns(4, 6))
-    const resolved = resolveRootBudget(tree, { wallTimeMs: 30_000, maxRuns: 4 })
-    expect(resolved.ok).toBe(true)
-    if (!resolved.ok) throw new Error('unreachable')
-    expect(resolved.maxRuns).toBe(6)
-    // Untouched by the extension: still the configured wall time from the run's own start.
-    expect(resolved.deadlineAt).toBe('2026-09-22T00:00:30.000Z')
-    expect(resolved.configured).toEqual({ deadlineAt: '2026-09-22T00:00:30.000Z', maxRuns: 4 })
-  })
-
-  test('an approved deadline is the stored absolute instant, not a window measured again', () => {
-    const extended = '2026-09-23T00:00:00.000Z'
-    const tree = withExtensions(rootOnly(), raisedDeadline('2026-09-22T00:01:00.000Z', extended))
-    const resolved = resolveRootBudget(tree, { wallTimeMs: 60_000 })
-    expect(resolved.ok).toBe(true)
-    if (!resolved.ok) throw new Error('unreachable')
-    expect(resolved.deadlineAt).toBe(extended)
-    expect(resolved.acceptedAt).toBe('2026-09-22T00:00:00.000Z')
-    // A deployment that stopped configuring the wall time does not revoke an
-    // approved deadline: the decision is a fact of the store, not of the config.
-    const reconfigured = resolveRootBudget(tree, {})
-    expect(reconfigured.ok).toBe(true)
-    if (!reconfigured.ok) throw new Error('unreachable')
-    expect(reconfigured.deadlineAt).toBe(extended)
-    expect(reconfigured.configured).toEqual({})
-  })
-
-  test('the last extension of a dimension is the one in force', () => {
-    const tree = withExtensions(rootOnly(), raisedMaxRuns(8, 12, 'k-1'), raisedMaxRuns(12, 20, 'k-2'))
-    const resolved = resolveRootBudget(tree, { maxRuns: 8 })
-    expect(resolved.ok).toBe(true)
-    if (!resolved.ok) throw new Error('unreachable')
-    expect(resolved.maxRuns).toBe(20)
-    expect(resolved.configured).toEqual({ maxRuns: 8 })
-  })
-
-  test('a store without extensions resolves exactly as it did before the ceiling existed', () => {
-    const resolved = resolveRootBudget(rootOnly(), { maxRuns: 3 })
-    expect(resolved.ok).toBe(true)
-    if (!resolved.ok) throw new Error('unreachable')
-    expect(resolved.maxRuns).toBe(3)
-    expect(resolved.configured.maxRuns).toBe(3)
-  })
-})
-
-describe('checkRunStart and checkBatchAdmission under an approved ceiling (K4)', () => {
-  test('a start refused by the configured total is allowed by the approved one, and the old count is not refunded', () => {
-    const now = Date.parse('2026-09-22T00:00:01.000Z')
-    // Five runs are already recorded and the deployment allows five: the tree
-    // without a grant is at its ceiling.
-    const plain = threeLevelTree()
-    const configured = resolveRootBudget(plain, { maxRuns: 5 })
-    expect(configured.ok).toBe(true)
-    if (!configured.ok) throw new Error('unreachable')
-    expect(checkRunStart(plain, configured, now).allowed).toBe(false)
-
-    // The same tree with one approved raise: the whole total is 7, so one more
-    // run starts — counted from the store's five, never from zero.
-    const tree = withExtensions(threeLevelTree(), raisedMaxRuns(5, 7))
-    const approved = resolveRootBudget(tree, { maxRuns: 5 })
-    expect(approved.ok).toBe(true)
-    if (!approved.ok) throw new Error('unreachable')
-    expect(approved.maxRuns).toBe(7)
-    expect(approved.configured.maxRuns).toBe(5)
-    expect(checkRunStart(tree, approved, now)).toEqual({ allowed: true })
-
-    // At seven recorded runs the approved total is spent, and the refusal counts
-    // what the store holds — a restart or a re-open refunds nothing.
-    const spent = withExtensions(
-      snapshot({
-        tasks: [task('root', undefined)],
-        runs: [1, 2, 3, 4, 5, 6, 7].map(index => run(`r-${index}`, 'root', '2026-09-22T00:00:00.000Z', ROOT_SESSION)),
-      }),
-      raisedMaxRuns(5, 7),
-    )
-    const verdict = checkRunStart(spent, approved, now)
-    expect(verdict.allowed).toBe(false)
-    if (verdict.allowed) throw new Error('unreachable')
-    expect(verdict.reason).toContain('allows 7 run(s)')
-    expect(verdict.reason).toContain('already holds 7')
-  })
-
-  test('a batch reserved against the approved total is refused whole only when it would exceed it', () => {
-    const tree = withExtensions(threeLevelTree(), raisedMaxRuns(5, 8))
-    const approved = resolveRootBudget(tree, { maxRuns: 5 })
-    expect(approved.ok).toBe(true)
-    if (!approved.ok) throw new Error('unreachable')
-    // 5 recorded + 3 children = 8, which the approved ceiling allows exactly.
-    expect(checkBatchAdmission(tree, approved, 3)).toEqual({ allowed: true })
-    const refused = checkBatchAdmission(tree, approved, 4)
-    expect(refused.allowed).toBe(false)
-    if (refused.allowed) throw new Error('unreachable')
-    expect(refused.reason).toContain('allows 8 run(s)')
-    expect(refused.reason).toContain('5 are already recorded')
-  })
-})
-
-describe('hasRootLimits', () => {
-  test('a budget with no member in force enforces nothing, whatever its object presence says', () => {
+  test('has no limit without a run count or concurrent writer setting', () => {
     expect(hasRootLimits(undefined)).toBe(false)
-    // The configuration schema materializes an absent `rootBudget` as `{}`, so a
-    // refusal may not key off the object's presence: only a member in force is a
-    // limit this deployment asked for.
     expect(hasRootLimits({})).toBe(false)
-    expect(hasRootLimits({ maxRuns: 1 })).toBe(true)
-    expect(hasRootLimits({ wallTimeMs: 1000 })).toBe(true)
+    expect(hasRootLimits({ maxRuns: 3 })).toBe(true)
     expect(hasRootLimits({ maxConcurrentWrites: 1 })).toBe(true)
   })
-})
 
-describe('checkRunStart', () => {
-  const budget: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', maxRuns: 5, configured: { maxRuns: 5 } }
-
-  test('refuses a start once the store holds maxRuns runs, and allows one below it', () => {
-    const tree = threeLevelTree()
-    expect(tree.runs).toHaveLength(5)
-    const refused = checkRunStart(tree, budget, Date.parse('2026-09-22T00:00:01.000Z'))
-    expect(refused.allowed).toBe(false)
-    if (refused.allowed) throw new Error('unreachable')
-    expect(refused.reason).toContain('allows 5 run(s)')
-    expect(refused.reason).toContain('already holds 5')
-    const under: ResolvedRootBudget = { ...budget, maxRuns: 6 }
-    expect(checkRunStart(tree, under, Date.parse('2026-09-22T00:00:01.000Z'))).toEqual({ allowed: true })
-  })
-
-  test('refuses a start past the deadline, and allows one before it', () => {
-    const tree = snapshot({ tasks: [task('root', undefined)], runs: [run('r-root', 'root')] })
-    const withDeadline: ResolvedRootBudget = {
-      rootTaskId: 'root',
-      acceptedAt: '2026-09-22T00:00:00.000Z',
-      deadlineAt: '2026-09-22T00:01:00.000Z',
-      configured: { deadlineAt: '2026-09-22T00:01:00.000Z' },
-    }
-    expect(checkRunStart(tree, withDeadline, Date.parse('2026-09-22T00:00:59.999Z'))).toEqual({ allowed: true })
-    const refused = checkRunStart(tree, withDeadline, Date.parse('2026-09-22T00:01:00.000Z'))
-    expect(refused.allowed).toBe(false)
-    if (refused.allowed) throw new Error('unreachable')
-    expect(refused.reason).toContain('deadline 2026-09-22T00:01:00.000Z has passed')
-    expect(refused.reason).toContain('accepted at 2026-09-22T00:00:00.000Z')
-  })
-
-  test('never counts a start as free just because a restart happened: the count comes from the store', () => {
-    const tree = threeLevelTree()
-    const tight: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', maxRuns: 1, configured: { maxRuns: 1 } }
-    expect(checkRunStart(tree, tight, Date.parse('2026-09-22T00:00:01.000Z')).allowed).toBe(false)
-  })
-})
-
-describe('checkBatchAdmission', () => {
-  test('reserves a run slot per child and refuses the whole batch when they do not fit', () => {
-    const tree = threeLevelTree()
-    const budget: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', maxRuns: 7, configured: { maxRuns: 7 } }
-    // 5 runs + 2 children fit exactly.
-    expect(checkBatchAdmission(tree, budget, 2)).toEqual({ allowed: true })
-    const refused = checkBatchAdmission(tree, budget, 3)
-    expect(refused.allowed).toBe(false)
-    if (refused.allowed) throw new Error('unreachable')
-    expect(refused.reason).toContain('batch of 3 child task(s)')
-    expect(refused.reason).toContain('allows 7 run(s)')
-    expect(refused.reason).toContain('5 are already recorded')
-    expect(refused.reason).toContain('refused whole, with no side effects')
-  })
-
-  test('allows any batch when no run limit is configured', () => {
-    const budget: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', configured: {} }
-    expect(checkBatchAdmission(threeLevelTree(), budget, 100)).toEqual({ allowed: true })
-  })
-})
-
-describe('runDeadlineMs', () => {
-  test('takes the tighter of the run wall time and the root remainder', () => {
-    const now = Date.parse('2026-09-22T00:10:00.000Z')
-    // Run wall time has 5 minutes left; the root has 30.
-    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 15 * 60_000, '2026-09-22T00:40:00.000Z', now)).toBe(5 * 60_000)
-    // The root's remainder is the tighter one.
-    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 60 * 60_000, '2026-09-22T00:20:00.000Z', now)).toBe(10 * 60_000)
-  })
-
-  test('measures the run wall time from its persisted start, so a resume does not restart the clock', () => {
-    const start = '2026-09-22T00:00:00.000Z'
-    const midRun = Date.parse('2026-09-22T00:09:00.000Z')
-    const later = Date.parse('2026-09-22T00:09:30.000Z')
-    expect(runDeadlineMs(start, 10 * 60_000, undefined, midRun)).toBe(60_000)
-    // The same run observed later has less left — never a fresh window.
-    expect(runDeadlineMs(start, 10 * 60_000, undefined, later)).toBe(30_000)
-    // And once the run's own wall time has passed, nothing is left.
-    expect(runDeadlineMs(start, 10 * 60_000, undefined, Date.parse('2026-09-22T00:11:00.000Z'))).toBe(0)
-  })
-
-  test('returns 0 once a bound has passed and 0 for a bound nobody can read', () => {
-    const now = Date.parse('2026-09-22T00:20:00.000Z')
-    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 60_000, '2026-09-22T00:30:00.000Z', now)).toBe(0)
-    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 60 * 60_000, '2026-09-22T00:10:00.000Z', now)).toBe(0)
-    expect(runDeadlineMs('never', 60_000, undefined, now)).toBe(0)
-    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 60_000, 'never', now)).toBe(0)
-  })
-
-  test('an approved raise moves the tree\u2019s bound and never resets a run\u2019s own clock', () => {
-    const now = Date.parse('2026-09-22T00:10:00.000Z')
-    const extendedTreeDeadline = '2026-09-23T00:00:00.000Z'
-    // The run keeps the window it started with: what is left of its own wall time.
-    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 15 * 60_000, extendedTreeDeadline, now)).toBe(5 * 60_000)
-    // And a run whose own time is up is not revived by any tree deadline.
-    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 5 * 60_000, extendedTreeDeadline, now)).toBe(0)
-  })
-
-  test('reports no bound at all when neither is configured', () => {
-    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', undefined, undefined, Date.parse('2026-09-22T00:20:00.000Z'))).toBe(Number.POSITIVE_INFINITY)
-  })
-
-})
-
-describe('assertRootBudgetConfig', () => {
-  test('accepts the only concurrent-write limit this deployment can enforce', () => {
-    expect(() => assertRootBudgetConfig({})).not.toThrow()
-    expect(() => assertRootBudgetConfig({ maxConcurrentWrites: 1 })).not.toThrow()
-    expect(() => assertRootBudgetConfig({ wallTimeMs: 1000, maxRuns: 3 })).not.toThrow()
-  })
-
-  test('refuses a concurrent-write limit it cannot execute, naming the value', () => {
-    expect(() => assertRootBudgetConfig({ maxConcurrentWrites: 2 })).toThrow(/maxConcurrentWrites is 2/)
-    expect(() => assertRootBudgetConfig({ maxConcurrentWrites: 2 })).toThrow(/enforces exactly 1 concurrent writer/)
-    expect(() => assertRootBudgetConfig({ maxConcurrentWrites: 0 })).toThrow(/maxConcurrentWrites is 0/)
+  test('enforces exactly one workspace writer', () => {
+    expect(() => assertRootBudgetConfig({ maxRuns: 3, maxConcurrentWrites: 1 })).not.toThrow()
+    expect(() => assertRootBudgetConfig({ maxConcurrentWrites: 2 })).toThrow('exactly 1')
   })
 })

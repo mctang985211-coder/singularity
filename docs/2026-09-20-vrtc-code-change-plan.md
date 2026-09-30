@@ -35,8 +35,8 @@
 | 14 | A6 + S2-R + S3：自主改进与恢复 | **已验收（2026-09-28）**：EVO-2～EVO-5 机制及关键反例完成；EVO-1 原失败轨迹保留，修复公开候选入口后，L2 原冻结第 3 次和新冻结 L1 第 1 次由真实 Agent 各自生成候选，fix/holdout 独立验证及受控审批拒绝/允许通过，生产保护文件未变。两组案例成功不外推普遍成功率 | 实现主代理 + 分段 Sol/xhigh 子代理 | 本文 F.4、[派发 prompt](execution-prompts/14-a6-autonomous-evolution.md)、[交付记录](history/2026-09-28-a6-delivery-record.md) | EVO-1～EVO-5 已验收；下一项是第 15 项真实工作负载实验 |
 | 15 | Buckyball × CosyVoice2 首轮自由生长实跑 | **已验收，限 BEMU CPU 切片**：project3 根判据通过；运行时创建 3 个子 Task，深度 1、有人审；模型接入由夹具预置，Ball 加速为零，RTL 未运行；一次绕过 MCP 的直接 CMake 操作违反流程约束 | 实验主代理 + 独立验收子代理 | [实跑合同](execution-prompts/15-buckyball-cosyvoice2-free-growth.md)、[独立复核](history/2026-09-28-cosyvoice2-project3-review.md) | 仅证明冻结切片数值和有限节点生长；不能宣称完整模型接入、芯片设计或 RTL 通过 |
 | 16 | BB-1：已有 BB 方法拆为通用 Skill | **已验收（2026-09-28）**：六份 Skill 解析、两场景内容审核、实际工具声明与范围核对通过；审核修正模型 importer 支持范围及波形索引/周期解释。Skill `ef89fa7`，Buckyball `3d9ad0b9` | Flash 实现主代理 + Sol 独立复核 | [BB-1 合同](execution-prompts/16-bb-domain-skills.md)、[审核记录](history/2026-09-28-bb1-review.md) | BB1-1～4 通过；方法已验收，不宣称 MCP 可达或模型/RTL 实跑 |
-| 17 | BB-2：通用 Task / Skill / MCP 接线 | **待复验（2026-09-29）**：BB2-1/3 有独立审核与真实 MCP 证据，模板资源有定向测试；新图只实跑 BEMU CPU 与浅层 Task 生长，未触发 `bb-obligations` 绑定、waveform 或 RTL；类型检查基线归因未证实 | 实验执行者 + 独立审核 | [BB-2 合同](execution-prompts/17-bb-capability-mcp-wiring.md)、[实验复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md)、[交付记录](history/2026-09-29-bb2-delivery-record.md) | 按 BB2 原合同收口接线；图运行只对实际用到的能力判定，不把未触发项记通过或失败 |
-| 18 | CosyVoice2 完整工程实跑 | **部分运行，未完成，修复后待重跑**：完整目标与 FS-1～FS-4 保持；本轮删除 idle 计轮判停、封 root 工具旁路、接通诊断到实际父节点并精简分解指导 | 部署盯梢模型 + 真实 Singularity 节点 + 独立审核 | [完整工程 root 与盯梢 prompt](execution-prompts/18-buckyball-cosyvoice-full-stack.md)；前轮[独立复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md) | FS-1～FS-4：完整工程、实际 Ball 的模型输出对照、完整适用测试集和提交复现；递归与其他机制另列实际效果，缺结果保留未完成 |
+| 17 | BB-2：通用 Task / Skill / MCP 接线 | **待复验（2026-09-29）**：BB2-1/3 有独立审核与真实 MCP 证据，模板资源有定向测试；新图只实跑 BEMU CPU 与浅层 Task 生长，未触发 `bb-obligations` 绑定、waveform 或 RTL；类型检查基线归因未证实 | 实验执行者 + 独立审核 | [BB-2 合同](execution-prompts/17-bb-capability-mcp-wiring.md)、实验复核（历史实验路径：`../../../../cv2-fg-2026-09-29/evidence/independent-review.md`）、[交付记录](history/2026-09-29-bb2-delivery-record.md) | 按 BB2 原合同收口接线；图运行只对实际用到的能力判定，不把未触发项记通过或失败 |
+| 18 | CosyVoice2 完整工程实跑 | **部分运行，未完成，修复后待重跑**：完整目标与 FS-1～FS-4 保持；本轮删除 idle 计轮判停、封 root 工具旁路、接通诊断到实际父节点、精简分解指导；G 原 Task 图续跑及 Agent 总时长删除已定向验收 | 部署盯梢模型 + 真实 Singularity 节点 + 独立审核 | [完整工程 root 与盯梢 prompt](execution-prompts/18-buckyball-cosyvoice-full-stack.md)；前轮独立复核（历史实验路径：`../../../../cv2-fg-2026-09-29/evidence/independent-review.md`） | FS-1～FS-4：完整工程、实际 Ball 的模型输出对照、完整适用测试集和提交复现；递归与其他机制另列实际效果，缺结果保留未完成 |
 
 第 16～17 项建设 **Singularity 对 Buckyball 的通用领域适配**。预设 Task 库和 Skill 库必须按 `1 → 1.1 → 1.1.1` 表示内容树：简介概括本层职责和直接下层，范围逐层收窄，末层给出原子结果或局部方法。Task 每层提供目标/输入/产物/验收；Skill 提供方法及下钻入口；已有 MCP 提供工程事实。领域 Skill 树正本归 Buckyball 的 Skill 子模块，Task 树、库入口与能力部署归 Harness。先用既有 Markdown 标题、链接和 Skill description 完成组织，不增加核心类型、树服务、模板数据库或领域规划器。
 
@@ -48,9 +48,9 @@ CosyVoice 是适配完成后的一个真实使用案例：具体版本、shape�
 
 第 18 项另作**递归机制观察**：根不预置完整树；任何节点在派发或执行前，用[通用 Task 粒度规则](../../../.agents/skills/bb-pipeline/references/tasks.md#粒度与继续生长)判断独立结果边界，优先委派可独立验收的结果，局部单一结果直接实现。原始 Task store 必须能区分 root 分解和子节点分解，并核对各层验收与 Skill/能力绑定。若没有子节点继续分解，硬件结果仍按根判据裁决，但递归能力的真实模型效果记未验证；不能用强制深度、无意义子任务或预写孙节点来制造通过。若确有复杂中间结果而节点仍一律不分解，应针对派发粒度、上下文提示和实际拒绝原因复盘，再判断是否有 runtime 缺陷。
 
-2026-10-01 修正依据：[阶段报告](../../../../cv2-full-2026-09-29/evidence/stage-report-2026-09-30.md)显示子节点分解稀少、巨型单回合及分段节点被 idle 计轮误杀；自动 Diagnosis 曾未投给负责父节点。修正与定向证据见主 guide §5.24；派发仍用第 18 项，不另开缩小目标的测试阶段。新部署重建源码产物、安装最新库、删除 noProgressRounds，并核对实际预算和 root/worker 工具面。模型递归积极性与诊断收益待下一轮原始轨迹验证。已关闭或未触发的 Evolution 不据此删除；已证实误导/重复/无消费者的规则直接删除，不增加自动分解器、建议评分器或修复队列。
+2026-10-01 修正依据：阶段报告（历史实验路径：`../../../../cv2-full-2026-09-29/evidence/stage-report-2026-09-30.md`）显示子节点分解稀少、巨型单回合及分段节点被 idle 计轮误杀；自动 Diagnosis 曾未投给负责父节点。修正与定向证据见主 guide §5.24；派发仍用第 18 项，不另开缩小目标的测试阶段。新部署重建源码产物、安装最新库、删除 noProgressRounds，并核对实际预算和 root/worker 工具面。模型递归积极性与诊断收益待下一轮原始轨迹验证。已关闭或未触发的 Evolution 不据此删除；已证实误导/重复/无消费者的规则直接删除，不增加自动分解器、建议评分器或修复队列。
 
-本轮只读研究确认原图冷续跑的具体缺口，见 G 节。第 18 项仍是完整业务目标；尚未实施 G 节时，部署者不得承诺机器重启后全部原 Run 自动继续，也不能用 `task_recover` 或新建替代节点掩盖中断。memory/无向经验图不增加建设票；当前无该实现或可归因收益证据。
+G 节原 Task 图冷续跑和 Agent 总时长限制删除已实现并通过定向故障验收；续跑保持原身份，不用 `task_recover` 或替代节点掩盖中断。第 18 项保持完整业务目标。memory/无向经验图不增加建设票，当前无该实现或可归因收益证据。
 
 所有子任务的确定性命令以运行时 cwd 为基准使用相对路径，或从 cwd 读取环境绑定；禁止把一次部署目录名硬编码进验收命令。这样环境命名变化只会产生明确的 setup 错误，不会把正确交付误判为失败。
 
@@ -247,11 +247,11 @@ replay 的 parentRunId 仅是实验血缘：parentless replay Task 调 ask 必�
 
 顺序固定为：持久正文来源 → Task 原子提交问题/阻塞或答案/解除 → agent-runtime 按同 messageId 投递 DSH inbox → flush 收件 Session 后报告 delivered。ask/answer 不等对方 loop 或回复。Task 意图后崩溃由显式恢复补投递；目标 inbox/history 已有同 id 就不重复入箱。无 inbox 条目不表示已消费：claim 在 pre-step 前可能已移除；context 从未处理问答事实重投影来源，只有实际模型 step 输入才能证明看过，工具领域效果仍以 Task 记录判定。回答已解除阻塞而尚未被模型读取时，下一请求必须包含该回答引用/正文后才能执行；不得仅因 answered 就从上下文删除。没有消费证明就保留引用，不另建 consumed 账本或第二套通信库。
 
-agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush，持有唯一 handle；不使用要求 continuable activation 的 subagents.sendMessage，也不挂载会带来另一套 roster/Task board 的实验性 Agent Team mailbox。暂不可达记 unavailable，保留意图，恢复入口重试；不自动造替代父。active 有阻塞时停止受阻写入/分解/提交与未提交 idle 提醒，允许协调输入；waiting_children 的批次写闸始终保持，问答不直接改相位。K1 已验收：批次结束持久化父回 active、写闸解除，未决阻塞问答仍单独阻塞写入与提交；父主动提交才启动验收。问答继续受已有 Run wallTime 和根截止约束；不新增 `maxQuestionsPerRun`、问答重试预算或独立计费账。终态取消未答项，迟到答案只留审计、不解除终态闸。
+agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush，持有唯一 handle；不使用要求 continuable activation 的 subagents.sendMessage，也不挂载会带来另一套 roster/Task board 的实验性 Agent Team mailbox。暂不可达记 unavailable，保留意图，恢复入口重试；不自动造替代父。active 有阻塞时停止受阻写入/分解/提交与未提交 idle 提醒，允许协调输入；waiting_children 的批次写闸始终保持，问答不直接改相位。K1 已验收：批次结束持久化父回 active、写闸解除，未决阻塞问答仍单独阻塞写入与提交；父主动提交才启动验收。问答等待不受 Agent 总时长限制；不新增 `maxQuestionsPerRun`、问答重试预算或独立计费账。终态取消未答项，迟到答案只留审计、不解除终态闸。
 
 已知问答等待的 worker 重启后恢复同一 Session/Run，并从持久问答重建阻塞；不能沿用“所有在途未提交 Run 均取消”的旧恢复分支。先对账受管理写入/进程，无法安全接管就具名失败，不能重复不明外部副作用。归拢只限问答触及的普通/replay/恢复结算规则，不要求先重写全部 orchestrate。
 
-验收 A4-1：子→等待中的父→子及三层转问，经真实 inbox/Task/gate 无同步死锁。A4-2：两个阻塞乱序作答，只解除对应项；未解决/契约变更、错父、重复/冲突 key、终态晚到与已有截止/预算耗尽均有拒绝副作用断言，waiting_children 永不获写权。A4-3：分别在 Task 意图已持久但未投递、目标入箱未 flush、入箱已 flush、claim 后未请求模型时终止并重开，最终同一问答身份、一次领域效果；两种主相位和 ordinary/replay 均覆盖。A4-4：父离线恢复、截止取消、源不可读具名失败；正文只在 Session，零新 Graph 边，消息来源非 human；旧空 question-id 预留字段可读，新事件不再写它们。A4-5（结算归属）：本票触及的普通、replay、取消/恢复 Run 结算均经过同一所有者；`index.ts` 在这些路径只作配置、handle 与装配，不保留另一份同名结算逻辑或薄转发。以调用链及 A4-1～A4-4 的结果核对，不要求顺手拆完 `index.ts` 的无关职责。
+验收 A4-1：子→等待中的父→子及三层转问，经真实 inbox/Task/gate 无同步死锁。A4-2：两个阻塞乱序作答，只解除对应项；未解决/契约变更、错父、重复/冲突 key、终态晚到与预算耗尽均有拒绝副作用断言，waiting_children 永不获写权。A4-3：分别在 Task 意图已持久但未投递、目标入箱未 flush、入箱已 flush、claim 后未请求模型时终止并重开，最终同一问答身份、一次领域效果；两种主相位和 ordinary/replay 均覆盖。A4-4：父离线恢复、显式取消、源不可读具名失败；正文只在 Session，零新 Graph 边，消息来源非 human；旧空 question-id 预留字段可读，新事件不再写它们。A4-5（结算归属）：本票触及的普通、replay、取消/恢复 Run 结算均经过同一所有者；`index.ts` 在这些路径只作配置、handle 与装配，不保留另一份同名结算逻辑或薄转发。以调用链及 A4-1～A4-4 的结果核对，不要求顺手拆完 `index.ts` 的无关职责。
 
 内部交接顺序：问答事实/reducer与身份 → agent-runtime 投递/恢复 → runtime 阻塞/观测与 context/工具接线 → 独立故障验收。每次子代理仅领其中一个目标，整票验收不拆开。
 
@@ -267,7 +267,7 @@ S4-E 原实现只支持已有单文件 SKILL.md；K2 修复其提交崩溃缺口
 
 S4-E 的[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)保留原交付证据。现行基线已删除实验级 wallTimeMs、旧 Evolution v1 replay 和旧候选执行入口；gate 只记事实，PROMOTE/apply 检查资格；Evolution ledger 基线为 formatVersion 2。K2/K3 如需格式升级就一次切换，旧账原字节归档，未闭合生产应用先由对应版本处置，不混写、不加兼容 reader、不自动迁移用户数据。新格式的重开/回滚由本次修改票重新验收。（2026-09-27 K2 已按此规则执行切换：ledger 现行 formatVersion 3，含 `commit_intent` 意图行与完成行 `intentId`；现场 v1 旧账按原字节归档，详见 [K2 持久化记录](persistence-changes/2026-09-27-k2-evolution-commit-intent.md)与[交付记录](history/2026-09-27-k2-delivery-record.md)，已验收。）
 
-验收 EVAL-1：双侧真实 runtime/verifier 执行且互不污染，报告可回溯所有身份。EVAL-2：历史基线冒充、输入/裁判/模型漂移、伪造证据、双侧同失败、回归/holdout 退化在 PROMOTE/apply 拒绝且无应用副作用；gate 可记录失败证据但不等于晋升通过；合法修复允许进入原人审；实验无显式版本化裁判在首个持久写前拒绝。EVAL-3：重复调用、取消/重启不重计已完成样本、不替换失败记录；内容/报告/生产基线变化拒绝应用；旧调用传实验级 wallTimeMs 立即拒绝，根运行时限仍有效。EVAL-4：新包真实接管全部现行工具消费者；formatVersion 2 当前账可重开且其 applied 可回滚，formatVersion 1 旧账在写前具名拒绝，不混写或自动迁移；非 Skill 旧请求直调零副作用。EVAL-5（迁移闭合）：`evolution` 是候选、实验、决定、应用与回滚的唯一实现；模型可见 root prompt、九个工具 schema/说明/成功返回只引导当前 Skill 路径，旧 Evolution v1 replay 的生产导出、调用方、状态分支和报告/fixture 删除，`agent-singularity` 仅保留薄工具适配；以真实调用链核对，不以搬走的行数判定。验收在 fixture 中完成，不作模型效果声明。
+验收 EVAL-1：双侧真实 runtime/verifier 执行且互不污染，报告可回溯所有身份。EVAL-2：历史基线冒充、输入/裁判/模型漂移、伪造证据、双侧同失败、回归/holdout 退化在 PROMOTE/apply 拒绝且无应用副作用；gate 可记录失败证据但不等于晋升通过；合法修复允许进入原人审；实验无显式版本化裁判在首个持久写前拒绝。EVAL-3：重复调用、取消/重启不重计已完成样本、不替换失败记录；内容/报告/生产基线变化拒绝应用；旧调用传实验级 wallTimeMs 立即拒绝，Agent 总时长限制按 G 节删除。EVAL-4：新包真实接管全部现行工具消费者；formatVersion 2 当前账可重开且其 applied 可回滚，formatVersion 1 旧账在写前具名拒绝，不混写或自动迁移；非 Skill 旧请求直调零副作用。EVAL-5（迁移闭合）：`evolution` 是候选、实验、决定、应用与回滚的唯一实现；模型可见 root prompt、九个工具 schema/说明/成功返回只引导当前 Skill 路径，旧 Evolution v1 replay 的生产导出、调用方、状态分支和报告/fixture 删除，`agent-singularity` 仅保留薄工具适配；以真实调用链核对，不以搬走的行数判定。验收在 fixture 中完成，不作模型效果声明。
 
 内部交接顺序：旧请求入口及 v1 replay 消费者清理 → 实验预算/裁判合同收紧 → 新账版本及切换拒绝 → 独立组合验收。主代理承担模型可见入口与服务直调的集成，不让单个子代理接整票。
 
@@ -285,7 +285,7 @@ S4-E 的[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)�
 
 自动扫描遇到该源已有尝试即只读取，不拿空 reason 覆盖显式关注点或反复报冲突。新键在已有在途时只返回其身份并明确新请求未受理，不持久化另一个排队任务；以后确需再复盘由调用者重新请求。去重查询先于新启动的预算检查，额度用尽仍可返回已完成结果。
 
-A5 在 K4 验收后消费其每 store 次数额度（默认 1）和单次 watchdog，不继承业务根截止/maxRuns；显式请求不豁免自身限额。额度不足/未装配显示具名未启动原因，不写 claim 或假 Diagnosis。需要更多复盘次数时部署方调整已有额度，旧计数不清零。业务执行追加限额只走 K4 人审入口；不建成功专属配额或假业务 Run。
+A5 在 K4 验收后消费其每 store 次数额度（默认 1），不继承业务根 maxRuns；reviewer 总时长 watchdog 按 G 节删除；显式请求不豁免自身限额。额度不足/未装配显示具名未启动原因，不写 claim 或假 Diagnosis。需要更多复盘次数时部署方调整已有额度，旧计数不清零。业务执行追加限额只走 K4 人审入口；不建成功专属配额或假业务 Run。
 
 reviewer 经 context/DSH 自主取证，按需要查看相关任务和 Session，不能限定“pack and nothing else”。Diagnosis 允许有据的改进建议、无需改进、证据不足三类自然语言结论，不为这三类新增 enum；proposals 可为空，六维 judgements 可省略，不强制逐项凑解释。既有 `observedFailure` 是持久化文本槽，成功复盘填真实观察/诉求，工具与 prompt 称“复盘观察”，不伪造失败或改 Review.outcome；本票不为改字段名重写历史账本。超时、取消、解析失败记录 interrupted/具名错误，不冒充 Agent 主动得出的 unknown Diagnosis。成功复盘也不自动获得候选权限。
 
@@ -311,7 +311,7 @@ Diagnosis.targetType 为非空开放字符串，执行转换仍由 evolution 拒
 
 恢复复用 K1 的 `(parentRunId, proposalId)` 批次身份及 Run 内稳定成员序列，旧事实不覆写。A6 只补新尝试中的替代 Task/已通过兄弟证据复用：引用具体 Run/Evidence/输入及产物身份，按原 AC 的 childEvidence 位置建立本次绑定，不修改 AC；无效引用拒绝并列出受影响项，由 Agent 新提案安排执行。恢复请求和提案消费各按既有 key 幂等，重启续同一身份；旧 Review/Evidence 保留。
 
-能力候选应用与产物修复不是同一件事：缺产物沿已有 producer/dependsOn/Obligation 来源新建或执行合法的生产任务，只有产物与 evidence 真满足条件才解除；无需共享能力变更时不强迫先造 EvolutionProposal。task_recover 对能力变更要求已批准应用，对待生产的产物只要求缺口与来源可核对、生产所需能力可用，不能要求产物已经存在才允许启动其生产恢复。该协调节点先读事实/提新批次，受缺产物影响的业务消费者仍须通过原依赖闸；root 最终提交必须检查产物已满足。坏裁判不能由候选改写以通过，保留诊断；连续失败使用既有根预算和时间截止，不为每种缺口增加修复分类或重试控制器。候选构建和实验的业务 Run 都计原 store 累计总额；采用 K4 持久的人审追加上限，不自动续额、不重置旧账；reviewer 使用自身次数与 watchdog。
+能力候选应用与产物修复不是同一件事：缺产物沿已有 producer/dependsOn/Obligation 来源新建或执行合法的生产任务，只有产物与 evidence 真满足条件才解除；无需共享能力变更时不强迫先造 EvolutionProposal。task_recover 对能力变更要求已批准应用，对待生产的产物只要求缺口与来源可核对、生产所需能力可用，不能要求产物已经存在才允许启动其生产恢复。该协调节点先读事实/提新批次，受缺产物影响的业务消费者仍须通过原依赖闸；root 最终提交必须检查产物已满足。坏裁判不能由候选改写以通过，保留诊断；连续失败使用既有根 maxRuns 预算，不为每种缺口增加修复分类或重试控制器。候选构建和实验的业务 Run 都计原 store 累计总额；采用 K4 持久的人审追加上限，不自动续额、不重置旧账；reviewer 使用自身持久次数额度。
 
 验收 EVO-1：L1 用现成能力组合解决一个真实缺口；另一例由 Agent 生成 L2 执行型 Skill/sidecar、独立验证后仅由人批准；人工编写候选不合格。确定性 scripted 验收只证明接线，真实 Agent 生成效果须另有明确授权与预算的实跑记录，不能混称；没有该记录只交付机制、不宣称自主生长有效。EVO-2：缺 provider 基线真实拒绝、候选真实通过；错误候选、弱化 verifier、越权工具、内容漂移、人工拒绝均不应用、不恢复为成功。EVO-3：能力及产物缺口分别经真实 source→Diagnosis→处置→task_recover→新根独立验收；有效兄弟不重跑，无效引用拒复用并显式重建，旧失败可读。EVO-4：在联合应用每个持久边界、恢复 Run 创建后/批次准入前、准入后/spawn 前及新根结算前重开，provider 无半成品可用、同 requestKey 无重复 Run/批次、预算不归零；重复批准、取消、rollback 后的新准入全部重检，旧在途 Run 不热换版本。EVO-5（修复路径复用执行链）：`task_recover` 与新根/新批次沿用已有规范化、准入、执行闸、driver、结算和 Task 预算事实；evolution 只协调候选与已批准的应用，不复制第二套执行状态机、终态提交或 Task 预算账。以能力缺口与产物缺口的真实调用链、取消/重启反例核对；实验费用记录仍由 evolution 保留，不与 Task 执行预算混为一账。
 
@@ -321,18 +321,18 @@ EVO-1 的真实运行证据是第 14 项整组已验收的必要条件，不是�
 
 ### G. 原图续跑与角色装配
 
-2026-10-01 研究合同，尚未实施。
+2026-10-01 已实现并完成 CONT-1～CONT-5 定向验收；修改前备份为 Singularity `a046e95` / Harness `33a7727`。证明范围为原 Task 业务图，真实模型工程效果另由第 18 项验收。
 
 目标：机器重启、进程退出、服务重载均从最后持久事实继续同一图，不按中断原因分支，不要求先诊断、生成候选或重新审批。模型读取已有契约、状态、产物和未完成工具记录，决定业务下一步。
 
-**已确认的缺口**（源码审计，未执行整图杀进程实验）：`task-runtime/src/index.ts` 的 `reconcileStore` 仅对等待子批次、问答、已返还父节点和 A6 恢复尝试等特定情况恢复 worker；普通非根 `running/active`、尚未提交、无这些标记的 Run 落入取消分支（当前基线 `ec11621`，约 6960–7120 行）。现有 A4 冷恢复证据不能证明任意活跃 worker 可续跑。原绝对截止及 Run wall-time 把离线时间计入，恢复后可能立即超时。
+**修正前的缺口**（已由本节关闭）：`task-runtime/src/index.ts` 的 `reconcileStore` 仅对等待子批次、问答、已返还父节点和 A6 恢复尝试等特定情况恢复 worker；普通非根 `running/active`、尚未提交、无这些标记的 Run 落入取消分支（当前基线 `ec11621`，约 6960–7120 行）。现有 A4 冷恢复证据不能证明任意活跃 worker 可续跑。原绝对截止及 Run wall-time 把离线时间计入，恢复后可能立即超时。
 
 **最小实现路径与归属**：
 
-1. 外部复用 `POST /graphs/:id/select` → `graphs.select/activate` → `taskRuntime.adoptRoot`；它已在 canvas 使用。按钮文案可为“继续运行”，不新增同义 resume API、helper 或恢复服务。启动时已选图也走同一激活链，按钮是显式选择/重试，不再起第二份运行。`graphs` 负责选择和激活屏障，`task-runtime` 负责对账与推进，`agent-runtime` 持有唯一 live handle，DSH `agents.resume` 恢复原 Session。所有待恢复绑定先建立，再开放模型执行。
+1. 外部复用 `POST /singularity/graphs/:id/select` → `graphs.select/activate` → `taskRuntime.adoptRoot`；canvas 左侧原图卡片就是此按钮，当前已选图也可再次点击。不新增同义 resume API、helper 或恢复服务。启动时已选图也走同一激活链，按钮是显式选择/重试，不再起第二份运行。`graphs` 负责选择和激活屏障，`task-runtime` 负责对账与推进，`agent-runtime` 持有唯一 live handle，DSH `agents.resume` 恢复原 Session。所有待恢复绑定先建立，再开放模型执行。
 2. 在现有 `reconcileStore` 删除“普通 active worker 一律取消”及按提问/恢复来源决定能否续跑的例外枚举。按持久相位直接处理：active 恢复原 Run/Session，并经已有消息/唤醒接口继续原 loop；waiting_children 恢复原批次；submitted 继续原验收；terminal 只读取。DSH resume 本身只恢复 idle 身份，不能把 handle 存在当作已经续跑。问答、提案和 Diagnosis 由各自已有恢复入口补齐；不另造续跑状态机，不重置 Run 次数/用量，不创建替代 Task/Session。
 3. 保留身份绑定、单执行者/工作区归属、已结束不重做、已提交不退回执行及未结应用意图对账。这些由脚本落实事实，不替模型解释业务。续跑不要求业务 Diagnosis、候选批准或重新审批；它们属于失败后开新尝试的 `task_recover`，其原验收不撤销。跨 Task/Session 的不同绑定检查不能仅因读了相同文件就判重复；本轮未证明存在重复模型判断。删除当前 `snapshotIn` 读取失败后 warn 并返回空成功的分支，使激活入口直接具名报错；缺原 Session 或无法接管的 live writer 同样报错，不补造旧数据。
-4. 自由探索长图的新默认不设总墙钟截止，删除默认 per-Run `wallTimeMs`；用户显式配置的截止继续有效。次数/实际用量累计，保留 verifier、工具及排空过程已有的单次 watchdog。当前 runtime 会合并两小时默认值，**只在 YAML 省略 wallTimeMs 还不能关闭它**；须在原配置所有者改默认及消费者，不新增无限时长标记、离线扣时账或暂停分类器。既有明确截止不能被恢复按钮偷偷延长；此类旧图不承诺任意时长离线后无感续跑。
+4. 删除业务 Agent、根图和 reviewer 的运行时长限制，包括默认两小时、可配置 `budget.wallTimeMs` / `rootBudget.wallTimeMs`、有效 `deadlineAt`、扩时请求和 reviewer 十分钟 watchdog。新配置/请求不再接受这些字段；历史预算事件保留可读，时间值不再用于取消或阻止续跑。次数/实际用量累计，`task_budget_extend` 只做人审追加 `maxRuns`。保留 verifier、工具及排空过程的单次超时，不新增无限时长标记、离线扣时账、暂停分类器或计时器。
 5. 同一部署的续跑使用原有 Run 内容绑定、Session 和工作区，运行方锁定原部署版本。Run 尚未持久化完整 preset/grant 内容，不宣称能在任意换配置后原样续跑或检测所有正文变化；已持久的绑定不匹配直接报错。工具效果可能已发生但回执未持久时，把缺失回执及已有 trace/产物引用交给原节点查证；不让脚本按业务猜成功或盲目重放，也不因此卡住整图。非幂等外部副作用不承诺跨崩溃严格一次。
 6. 保持 DSH PTC/native 的调用协议，角色政策只改现有 Singularity root/worker/reviewer section，事实仍归 context。已核查正式 Task worker 的普通 spawn、batch、replay、resume 都带 grant；默认 grant 不保留普通 subagent，显式能力/preset 可授权保留。按实际授权核查装配，不为低层无 grant 的可选接口造防御分支。业务责任与验收仍走 Task；无新万能 prompt、工具说明复制层或上游 preset 分叉。
 
@@ -340,12 +340,16 @@ EVO-1 的真实运行证据是第 14 项整组已验收的必要条件，不是�
 
 - **CONT-1 同图同身份**：用真实独立进程启动 root、一个未提问/未分解的 active worker、等待子节点的父、阻塞问答及已完成兄弟；杀进程后从同一目录启动，经现有 select 入口继续。graph/store/Task/Run/Session 身份不变，active worker 被唤醒且推进到提交/原最终 AC 裁决，已完成兄弟不重做。分别记录启动自动激活和随后按钮调用；补测未选图经按钮激活，不能仅观察启动恢复就称按钮通过。仅服务重建或 Session hydration 单测不算本项通过。
 - **CONT-2 重复和交接**：重复点击/并发激活只拥有一个 live 执行者，不叠加重复继续消息；waiting_children 保留原 batch，问题/回答补投不重复领域效果；在 submitted→verifier→terminal 的持久边界中断后，由原结算所有者继续。既有 Run 数和累计用量不因重启归零。
-- **CONT-3 时间**：新默认实际装配不含总墙钟截止，跨默认旧两小时时长继续不因离线失败；显式截止仍生效，单次 verifier/工具/排空 watchdog 仍能停止卡住的调用。测试可推进时钟，不实等两小时；不伪造生产 startedAt、不自动退款/扩额。
+- **CONT-3 时间**：实际装配不含 Agent 总墙钟截止；旧两小时和 reviewer 十分钟之后仍可执行/提交，历史 deadlineAt 越过不阻止续跑，新配置和扩额请求的旧时间字段具名拒绝且零副作用。历史扩时账不妨碍新的 `maxRuns` 扩额；次数/用量不退款、不归零。单次 verifier/工具/排空超时仍有效。测试可推进时钟，不实等两小时、不伪造生产 startedAt。
 - **CONT-4 可解释失败**：不可读 Task log、缺 Session、已持久绑定漂移、活着的工作区 owner 各给激活入口具体错误，零替代节点/新 Run；检查无工具回执的案例，原节点能读到待查证事实并继续处理，脚本不宣称已通过或重复不明业务写入。不以可见工具数量声称严格一次。
 - **CONT-5 真实角色装配**：从真实 assemble 检查 root/普通 worker/恢复 worker 的角色、契约与当前相位，reviewer 的审阅来源和只读角色上下文，以及各自最终工具面；worker spawn/resume 一致，默认 worker 的 Task 委派可用且普通 subagent 不在工具面，显式授权该能力时按 grant 展示；root 无 run_code，PTC worker SDK 与授权一致。已有正确 section 复用；无需改动的模块以证据说明，不为“每节点新 prompt”增层。
 
 依次交接运行时归一化、角色/工具面核查、独立故障验收；整体验收不切开。子代理各领一个窄目标，只跑上述受影响检查及必需构建，不反复跑无关 Harness 全量测试。交付更新主 guide、唯一计划和当前入口，列删除位置与仍未证明的边界；没有 CONT-1 不宣称全图续跑完成。
 
+**最终证据**：`tests/integration/g-graph-continuation.spec.ts` 使用正式 lib 和真实独立进程 SIGKILL，7/7 通过：原四个 Run 到原 AC、已完成兄弟不重做、启动/显式/并发选择、问答与提交、缺回执查证、具名拒绝、同进程修复重试；新增唤醒抛错不能假报激活成功，重试仍续原图。运行时定向单测 332、reviewer 255 通过；最终恢复/问答复验 45、直接消费者及复盘集成 50 通过；单次 verifier/drain/tool 超时保留检查通过。所有改动包正式 build 与 persistence inventory 检查通过。
+
+**证据边界**：本次没有浏览器端到端或真实模型长图重跑；选择按钮/HTTP 路由复用既有接线，故障夹具直接调用 GraphsService.select。reviewer/supervisor 自身中断仍按各自既有尝试规则处理，本节不宣称其协调会话原样热恢复。外部非幂等副作用不承诺严格一次。独立 tsc 仍有既有诊断，历史 A3/A4/提案恢复夹具缺完整 SessionQuery 接口，不把它们称为全量绿，也不用放宽生产恢复规则适配这些 mock；G 的真实 Session 夹具是本次原图续跑依据。
+
 ## 历史执行与验收记录
 
-P1–R3 的原始合同、失败轨迹、复核与测试结果已移至[2026-09-24 执行记录](history/2026-09-24-vrtc-execution-records.md)。其中当时的“当前状态”和“下一项”只作历史证据；本页文首唯一表及 D/E/F 是现行派发依据，G 节是尚未实施的研究合同，不表示已经启动续跑改造。
+P1–R3 的原始合同、失败轨迹、复核与测试结果已移至[2026-09-24 执行记录](history/2026-09-24-vrtc-execution-records.md)。其中当时的“当前状态”和“下一项”只作历史证据；本页文首唯一表及 D/E/F/G 是现行派发依据。G 节覆盖早期合同中的 Agent 截止、reviewer watchdog 与按来源选择 worker 的恢复限制；旧验收记录保留原事实。

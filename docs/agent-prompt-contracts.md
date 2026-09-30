@@ -43,7 +43,7 @@ resolves=false 或待答不算同意，回答不能修改契约、验收或权�
 批次结束后根据实际结果继续实现或提出下一批，最后 task_submit_result。
 ```
 
-worker 稳定政策在 `agent-runtime/src/prompts/worker.prompts.ts`；任务投影与当前可分解说明在 `context/src/projections.ts`。等待子批次/阻塞问答时，运行时写闸保持；自然语言“完成”和 Session idle 都不是 Task PASS。首次无提交 idle 只提醒一次，之后等待提交、取消或已有时间截止，不计 idle 轮数判失败。
+worker 稳定政策在 `agent-runtime/src/prompts/worker.prompts.ts`；任务投影与当前可分解说明在 `context/src/projections.ts`。等待子批次/阻塞问答时，运行时写闸保持；自然语言“完成”和 Session idle 都不是 Task PASS。首次无提交 idle 只提醒一次，之后等待提交或取消，不计 idle 轮数判失败。
 
 ## 4. 父节点 / Root Coordinator 模板
 
@@ -97,7 +97,7 @@ judgements 和 proposals 只在确有内容时提供；允许无需改进、空�
 | 本人目标及全局约束可见 | 实际模型请求含 session→run→task 绑定后的契约、根简报与本人贡献；压缩/恢复可重建 |
 | 当前节点能继续分解 | 授权节点实际取得 task_decompose，工具准入与批次结束续跑可用；子节点实跑分解另作效果证据 |
 | root 专注协调 | create/resume 后 own/preset 执行工具不能绕过闸；没有图外业务 subagent |
-| 问答与验收可靠 | 未答不算同意，等待不放开写权；显式提交、父独立验收、取消和截止仍有效 |
+| 问答与验收可靠 | 未答不算同意，等待不放开写权；显式提交、父独立验收和取消仍有效 |
 | 诊断可被处理 | 原始 Diagnosis 送到实际负责父节点，重扫不重复消息；是否改进其下一步须实跑核对 |
 | 复杂度有收益 | 未启用/未触发记未验证；已证实重复、误导或无消费者的规则直接删除 |
 

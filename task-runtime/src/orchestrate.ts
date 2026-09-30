@@ -32,7 +32,7 @@ import type { ExecutionGate, JobsView } from './gate.ts'
 import { owedQuestionMessagesTo, releaseAskingSessions } from './question.ts'
 import type { ProviderPrecheck } from './provider-precheck.ts'
 import { providerRefusals } from './provider-precheck.ts'
-import { checkRunStart, hasRootLimits, resolveRootBudget, runDeadlineMs } from './root-budget.ts'
+import { checkRunStart, hasRootLimits, resolveRootBudget } from './root-budget.ts'
 import type { RootBudgetConfig } from './root-budget.ts'
 import { describeOwner, releaseLayer } from './workspace.ts'
 import type { WorkspaceOwner, WorkspaceRegistry } from './workspace.ts'
@@ -126,40 +126,10 @@ export interface SpawnChildRequest {
   signal?: AbortSignal
 }
 
-/**
- * One task run's resource budget (KISS §5 "预算即法律": any exhaustion forces
- * the exit, never a silent degradation). Every member is optional; the runtime
- * resolves its shipped defaults per key.
- *
- * What the orchestrator can honestly enforce is bounded by what it can observe
- * of an in-flight run — and that is only the wall clock (it awaits the
- * worker's idle) plus, at terminal time, one best-effort read of the run's
- * session log and token projection ({@link OrchestrateEnv.observeSession}):
- *
- * - `wallTimeMs` — **enforced in flight**: the worker wait races the deadline;
- *   on exhaustion the agent is cancelled and the run settles failed with
- *   `budget exhausted: wallTimeMs (...)`, named as a budget exhaustion, not a
- *   criteria failure. The same clock bounds the run a batch settles on its worker's
- *   behalf: a parent whose deadline has already passed is cancelled instead of
- *   ended (`finishBatch`), so no run is reported `verified` after the
- *   clock that was supposed to stop it.
- * - `maxToolCalls` — **post-hoc check only**: the session log is readable only
- *   once the run has settled, so a breach lands as an anomaly on the terminal
- *   review record (the verdict stands — the evidence is real). It is never
- *   presented as in-flight enforcement.
- * - `tokens` — **post-hoc check only**: same terminal seam, and the runtime
- *   ships no default for it — the only observation is the whole-session
- *   cumulative projection, systematically high for a long-lived root session,
- *   so no honest constant exists. Configured, a breach is annotated the same
- *   way.
- * - `attempts` — **declared, not enforced**: the orchestrator has no retry
- *   branch (guide §3.1 Non-Goals), so a run-count cap has nothing to gate; the
- *   field ships with the rest so the retry branch has its knob when it lands.
- */
+/** Per-run usage annotations, measured from the persisted Session. */
 export interface BudgetConfig {
   maxToolCalls?: number
   tokens?: number
-  wallTimeMs?: number
   attempts?: number
 }
 
@@ -359,9 +329,8 @@ export interface OrchestrateEnv {
    * module rebuilds it from the store with the same helpers the spawn used
    * ({@link resumeAdoptedWorker}), because a driver has nothing to add to it.
    *
-   * Absent means this deployment cannot bring a worker back, and a
-   * question-waiting run nobody can reach fails by name rather than waiting
-   * forever (see {@link resumeAdoptedWorker}).
+   * Absent means this deployment cannot bring a worker back, so activation
+   * fails by name (see {@link resumeAdoptedWorker}).
    */
   resumeWorkerSession?(request: AdoptedWorkerResumeRequest): Promise<AdoptedWorkerResume>
 }
@@ -389,13 +358,11 @@ export interface AdoptedWorkerResumeRequest {
  * - `live` — the same Session is live in this process now (or already was), so
  *   what is owed it can be delivered and its wait can be observed;
  * - `retry` — another owner holds the Session (`ownership-conflict`). Nothing is
- *   taken over, the run keeps its identity, and the wait stays bounded by the
- *   deadline; the next activation retries;
+ *   taken over and activation fails with the ownership conflict;
  * - `refused` — the resume could not be established under this identity
  *   (`session-missing`, `session-unreadable`, `binding-mismatch`,
  *   `not-in-graph`, `member-facts-missing`, `takeover-refused`, or a refusal of
- *   the managed-work reconciliation). The caller must walk the run to a terminal
- *   state: an in-flight run nobody can bring back is a dead wait, not a wait.
+ *   the managed-work reconciliation). Activation fails without altering the Run.
  */
 export type AdoptedWorkerResume =
   | { readonly status: 'live' }
@@ -957,15 +924,6 @@ export function escalationHint(what: string, tried: string, suggested: string): 
   return `L4 exit (KISS §7): report this to a human with the escalate tool — what: ${what}; tried: ${tried}; suggested: ${suggested}`
 }
 
-/** The forced-exit reason for an in-flight budget exhaustion (KISS §5: named as a budget exhaustion, never as a criteria failure). */
-function budgetExhaustedReason(which: string, detail: string): string {
-  return `budget exhausted: ${which} (${detail}; this is a budget exhaustion, not a criteria failure) — ${escalationHint(
-    'the run cannot finish inside its wall-clock budget',
-    'the run was cancelled at the deadline',
-    'raise the budget, split the task, or accept the partial result',
-  )}`
-}
-
 /**
  * The post-hoc half of the budget (see {@link BudgetConfig}): the members the
  * orchestrator cannot observe in flight are checked once, at terminal time,
@@ -1006,66 +964,18 @@ async function budgetBreaches(env: RuntimeSettlementEnv, run: TaskRun): Promise<
 }
 
 /** How a spawned worker's wait settled. */
-type WorkerSettlement =
-  | { kind: 'idle' }
-  | { kind: 'aborted' }
-  | { kind: 'failed'; reason: string }
-  | { kind: 'budget-exhausted' }
+type WorkerSettlement = { kind: 'idle' } | { kind: 'aborted' } | { kind: 'failed'; reason: string }
 
-/**
- * Await a spawned worker's idle under the caller's abort signal and the run's
- * wall-clock budget. The budget is the one member the orchestrator can enforce
- * in flight: on exhaustion it cancels the agent and reports
- * `budget-exhausted`, and the caller settles the run failed with a budget
- * reason — never a criteria failure (KISS §5: no silent degradation). The
- * losing branch of the race keeps its handlers attached, so a worker that
- * settles after its budget already fired never surfaces an unhandled
- * rejection.
- *
- * The budget is a *reading*, not a number: `remaining` is called for the wait it
- * arms and again whenever that wait elapses, so a timer set under a ceiling a
- * person has since raised cannot cancel a worker the store still allows (K4).
- * A timer that fires under a ceiling that did *not* move reads the same bound
- * again, and that second reading is what cancels — one implementation, so the
- * in-flight stop and the settled-run judgement can never disagree about which
- * limit ran out.
- */
-async function awaitWorker(handle: AgentHandle, signal: AbortSignal | undefined, remaining: () => Promise<number>): Promise<WorkerSettlement> {
+/** Wait for the worker to go idle or fail; explicit cancellation stops its loop. */
+async function awaitWorker(handle: AgentHandle, signal: AbortSignal | undefined): Promise<WorkerSettlement> {
   const cancel = () => handle.agent.cancel({ kind: 'parent' })
   signal?.addEventListener('abort', cancel, { once: true })
-  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const idle: Promise<WorkerSettlement> = handle.agent.whenIdle()
-      .then((): WorkerSettlement => ({ kind: 'idle' }))
-      .catch((error): WorkerSettlement => isAborted(signal) ? { kind: 'aborted' } : { kind: 'failed', reason: message(error) })
-    for (;;) {
-      const budgetMs = await remaining()
-      if (Number.isFinite(budgetMs) && budgetMs <= 0) {
-        cancel()
-        return { kind: 'budget-exhausted' }
-      }
-      // `Infinity` is a budget with no bound in force at all: nothing can elapse,
-      // so the only two endings are the worker's own behaviour and the abort.
-      const branches: Promise<WorkerSettlement | { kind: 'wake' }>[] = [idle]
-      if (Number.isFinite(budgetMs)) {
-        branches.push(new Promise<{ kind: 'wake' }>(resolve => {
-          timer = setTimeout(() => resolve({ kind: 'wake' }), budgetMs)
-          if (typeof timer.unref === 'function') timer.unref()
-        }))
-      }
-      const settled = await Promise.race(branches)
-      if (timer !== undefined) {
-        clearTimeout(timer)
-        timer = undefined
-      }
-      if (settled.kind === 'wake') continue
-      // An abort that lands as the worker goes idle wins over the idle itself,
-      // as it did before the budget branch existed.
-      if (settled.kind === 'idle' && isAborted(signal)) return { kind: 'aborted' }
-      return settled
-    }
+    await handle.agent.whenIdle()
+    return isAborted(signal) ? { kind: 'aborted' } : { kind: 'idle' }
+  } catch (error) {
+    return isAborted(signal) ? { kind: 'aborted' } : { kind: 'failed', reason: message(error) }
   } finally {
-    if (timer !== undefined) clearTimeout(timer)
     signal?.removeEventListener('abort', cancel)
   }
 }
@@ -1214,7 +1124,7 @@ const TERMINAL_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set(['verified', 'fa
  * caller's signal; from the atomic commit on, the batch belongs to the
  * runtime's per-batch controller (§3.7), so a tool call that returns — or a
  * caller that aborts its own call after the batch was admitted — cannot stop
- * work that is already persisted. Only a cancellation (batch, graph, deadline,
+ * work that is already persisted. Only a cancellation (batch, graph,
  * unload) reaches this signal.
  */
 export interface BatchContext {
@@ -1258,23 +1168,17 @@ interface BlockReason {
 /** How a spawned worker's wait ended, before the caller settles the run. */
 type WorkerObservation =
   /** The run itself reached a terminal state (its own submission, a nested batch, a cancellation written elsewhere). */
-  | { kind: 'terminal'; status: RunStatus }
-  | { kind: 'aborted' }
-  | { kind: 'budget-exhausted' }
-  | { kind: 'failed'; reason: string }
+  { kind: 'terminal'; status: RunStatus } | { kind: 'aborted' } | { kind: 'failed'; reason: string }
 
 /**
- * What a wait that only watches the store and the deadline can end as: the
- * three endings {@link awaitWaitingTerminal} decides. Its own type because two
+ * What a wait watching the store and cancellation can end as: the
+ * two endings {@link awaitWaitingTerminal} decides. Its own type because two
  * callers hand it a different "already terminal" observation — a round's
  * `waitRunSettled` and a batch driver adopting a recovered child's — and both
  * need the same narrowed answer, not the report of a worker whose idle the round
  * was watching.
  */
-type WaitingObservation =
-  | { kind: 'terminal'; status: RunStatus }
-  | { kind: 'aborted' }
-  | { kind: 'budget-exhausted' }
+type WaitingObservation = { kind: 'terminal'; status: RunStatus } | { kind: 'aborted' }
 
 /**
  * One batch's children in the batch's own order, with each child's dependencies
@@ -1567,15 +1471,14 @@ function idleReminderText(run: TaskRun): string {
   return (
     `task-runtime: session ${run.sessionId} went idle without submitting its result. If the work is done, call ` +
     `task_submit_result with a summary and the evidence you produced — an idle session is not a completion. ` +
-    `This run remains subject to its wall-clock budget.`
+    `Continue the same run until you submit or it is explicitly cancelled.`
   )
 }
 
 /**
- * Wait for the run's terminal state, its original deadline, or batch cancellation.
+ * Wait for the run's terminal state or batch cancellation.
  * An active worker that goes idle gets one submission reminder; a worker waiting
- * for children, verification, a proposal, or an answer gets none. Every wait keeps
- * the deadline measured from the persisted `startedAt`.
+ * for children, verification, a proposal, or an answer gets none.
  */
 async function observeWorkerRun(
   env: OrchestrateEnv,
@@ -1589,99 +1492,59 @@ async function observeWorkerRun(
   // Keep a losing watcher's rejection handled.
   recorded.catch(() => {})
   const terminal = recorded.then((status): WaitingObservation => ({ kind: 'terminal', status }))
-  // Read approved root-budget extensions without resetting the run's own clock.
-  const remainingNow = (): Promise<number> => remainingRunMsFromStore(env, storeId, run)
   for (;;) {
-    const remaining = await remainingNow()
-    if (remaining <= 0) {
-      handle.agent.cancel({ kind: 'parent' })
-      return { kind: 'budget-exhausted' }
-    }
-    const settled = await Promise.race([terminal, awaitWorker(handle, signal, remainingNow)])
+    const settled = await Promise.race([terminal, awaitWorker(handle, signal)])
     if (settled.kind !== 'idle') return settled
     const current = await env.task.runIn(storeId, run.runId)
     if (isTerminalRun(current.status)) return { kind: 'terminal', status: current.status }
     const phase = current.executionPhase
     if (phase === 'waiting_children' || phase === 'submitted') {
-      return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, remainingNow, terminal)
+      return await awaitWaitingTerminal(() => handle.agent.cancel({ kind: 'parent' }), signal, terminal)
     }
     if (agentIsRunning(handle)) continue
     const snapshot = await env.task.snapshotIn(storeId)
     // Proposal and answer waits need no submission reminder.
-    const knownWait = openProposalOf(snapshot, task.taskId, run.runId) !== undefined
-      || blockingQuestionsOf(snapshot, run.runId).length > 0
+    const knownWait =
+      openProposalOf(snapshot, task.taskId, run.runId) !== undefined ||
+      blockingQuestionsOf(snapshot, run.runId).length > 0
     if (knownWait) {
-      return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, remainingNow, terminal)
+      return await awaitWaitingTerminal(() => handle.agent.cancel({ kind: 'parent' }), signal, terminal)
     }
     notifyOwner(env, run.sessionId, idleReminderText(run))
-    return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, remainingNow, terminal)
+    return await awaitWaitingTerminal(() => handle.agent.cancel({ kind: 'parent' }), signal, terminal)
   }
 }
 
-/** One run's remaining window, resolved afresh: what a judgement made now is based on. */
-type RemainingRun = () => Promise<number>
-
-/**
- * Wait for the recorded terminal state without observing more idle events.
- * Deadline exhaustion and batch cancellation still cancel the worker. Re-read the
- * root ceiling when a timer fires so an approved extension is respected.
- */
+/** Wait for the persisted terminal state or explicit cancellation. */
 async function awaitWaitingTerminal(
-  env: OrchestrateEnv,
-  run: TaskRun,
   cancel: (() => void) | undefined,
   signal: AbortSignal | undefined,
-  remainingRun: RemainingRun,
   terminal: Promise<WaitingObservation>,
 ): Promise<WaitingObservation> {
-  const stop = (): void => {
-    cancel?.()
-  }
   if (isAborted(signal)) {
-    stop()
+    cancel?.()
     return { kind: 'aborted' }
   }
-  signal?.addEventListener('abort', stop, { once: true })
-  // Share one abort promise when the deadline is re-armed.
-  const aborted = signal === undefined
-    ? undefined
-    : new Promise<WaitingObservation>(resolve => {
-      signal.addEventListener('abort', () => resolve({ kind: 'aborted' }), { once: true })
-    })
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    for (;;) {
-      const remaining = await remainingRun()
-      if (remaining <= 0) {
-        stop()
-        return { kind: 'budget-exhausted' }
-      }
-      const branches: Promise<WaitingObservation | { kind: 'wake' }>[] = aborted === undefined ? [terminal] : [terminal, aborted]
-      if (Number.isFinite(remaining)) {
-        branches.push(new Promise<{ kind: 'wake' }>(resolve => {
-          timer = setTimeout(() => resolve({ kind: 'wake' }), remaining)
-          if (typeof timer.unref === 'function') timer.unref()
-        }))
-      }
-      const settled = await Promise.race(branches)
-      if (timer !== undefined) {
-        clearTimeout(timer)
-        timer = undefined
-      }
-      // A timer wake re-reads the current deadline.
-      if (settled.kind !== 'wake') return settled
+  if (signal === undefined) return await terminal
+  let stop!: () => void
+  const aborted = new Promise<WaitingObservation>(resolve => {
+    stop = () => {
+      cancel?.()
+      resolve({ kind: 'aborted' })
     }
+    signal.addEventListener('abort', stop, { once: true })
+  })
+  try {
+    return await Promise.race([terminal, aborted])
   } finally {
-    if (timer !== undefined) clearTimeout(timer)
-    signal?.removeEventListener('abort', stop)
+    signal.removeEventListener('abort', stop)
   }
 }
 
 /**
  * The cancellation one session's own agent exposes, when this deployment can
  * resolve it — what the driver needs to end a wait it did not start (A4 §F.1).
- * A deployment that cannot name the agent has no cancellation to hand over, and
- * the wait is still bounded by the deadline that settles the run.
+ * A deployment that cannot name the agent has no cancellation to hand over.
  */
 function cancelAgentOf(env: OrchestrateEnv, sessionId: string): (() => void) | undefined {
   const agent = env.agentFor?.(sessionId) as { cancel?: (reason: { kind: 'parent' }) => void } | undefined
@@ -1691,100 +1554,6 @@ function cancelAgentOf(env: OrchestrateEnv, sessionId: string): (() => void) | u
   return () => {
     cancel.call(agent, { kind: 'parent' })
   }
-}
-
-/**
- * The root's own deadline for the store, when the budget resolves; a missing
- * root start is a refusal to invent one.
- *
- * Every call reads the store: the ceiling is what the store says *now*, and a
- * caller that held one from earlier would keep enforcing a bound a person has
- * since raised (K4). A resolution that fails answers "no deadline", which is the
- * conservative reading for a ceiling nobody can measure — the paths that have to
- * refuse over that case ask the resolver themselves
- * ({@link resolveRootBudget}), rather than reading it out of a missing instant.
- */
-async function rootDeadlineOf(env: OrchestrateEnv, storeId: string): Promise<string | undefined> {
-  const snapshot = await env.task.snapshotIn(storeId)
-  const resolved = resolveRootBudget(snapshot, env.rootBudget ?? {})
-  return resolved.ok ? resolved.deadlineAt : undefined
-}
-
-/**
- * What is left of the tightest deadline that applies to one run of this
- * orchestration — the one call site of `runDeadlineMs` inside the orchestration,
- * so the rule reads the same everywhere a worker is awaited: the run's own
- * per-run wall time (measured from its persisted `startedAt`, never reset) and
- * what is left of the root's deadline as the store holds it *now*. Either
- * reaching zero is the budget stop {@link observeWorkerRun} acts on.
- */
-function remainingRunMs(env: OrchestrateEnv, run: TaskRun, rootDeadline: string | undefined, nowMs: number): number {
-  return runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, nowMs)
-}
-
-/**
- * The same window, resolved from the store at the moment of the question: the
- * reading a wait arms itself with, and the reading it takes again when that wait
- * elapses. One function, so "how long may this run still go" has one answer
- * whether it is asked before a race, inside a parked wait, or when a timer fires.
- */
-async function remainingRunMsFromStore(env: OrchestrateEnv, storeId: string, run: TaskRun): Promise<number> {
-  return remainingRunMs(env, run, await rootDeadlineOf(env, storeId), Date.now())
-}
-
-/**
- * The wall-clock bound(s) this orchestration's runs are under, as a terminal
- * record names them: what the deployment's per-run budget allows and — when the
- * caller could resolve it, which only the batch settlement can, `resolveRootBudget`
- * being a store read — the tree's own deadline. Naming every bound in force is
- * deliberate: the record says which limits applied, so a reader knows what to
- * change, while the tightest of them is the one that ended the run
- * (`runDeadlineMs`).
- */
-function wallClockBoundsText(env: OrchestrateEnv, rootDeadlineAt?: string): string {
-  const perRun = env.budget?.wallTimeMs
-  const bounds = [
-    ...(perRun === undefined ? [] : [`${perRun}ms from its own startedAt`]),
-    ...(rootDeadlineAt === undefined ? [] : [`the root tree's deadline ${rootDeadlineAt}`]),
-  ]
-  // With nothing else configured, the only bound that can have ended a wait is the
-  // root tree's own deadline — read where the reason is built only by the batch
-  // settlement, so a worker stop says so without naming the instant.
-  return bounds.length === 0 ? 'the root tree\u2019s own deadline' : bounds.join(', or ')
-}
-
-/**
- * The wall-clock exhaustion a worker observation is recorded as: the reason
- * shape every budget stop carries (KISS §5 — a budget stop is never reported as
- * a criteria failure), naming the bound(s) this orchestration's runs are under so
- * a reader knows which number to change. A deployment with only its own per-run
- * wall time configured gets exactly the text it always had; one whose run was
- * placed under a caller's deadline sees that instant named, which is the value
- * that actually ended the run.
- */
-function wallClockExhaustedReason(env: OrchestrateEnv): string {
-  return budgetExhaustedReason('wallTimeMs', `worker run exceeded its wall-clock budget (${wallClockBoundsText(env)})`)
-}
-
-/**
- * The reason a batch's parent is cancelled instead of accepted: its run's own
- * deadline had already been reached when every child had settled, and an
- * acceptance after the deadline is one the budget never allowed (§3.5) — the run
- * would be reported `verified` for work the clock had already stopped.
- *
- * The bound is the run's own (`remainingRunMs`: its per-run wall time, what is left
- * of the root's, and any instant its caller placed on it). Every child settling is
- * exactly the moment such a deadline can arrive unnoticed by the parent's own
- * driver — a replayed worker's sub-execution inherits the parent's instant, so the
- * child failing on it is what brings the batch here with the parent's clock already
- * run out — and reading it here is the last moment before the acceptance that would
- * judge the run. Named as a budget stop, never as a criteria failure.
- */
-function parentDeadlinePassedReason(env: OrchestrateEnv, rootDeadlineAt: string | undefined): string {
-  return budgetExhaustedReason(
-    'wallTimeMs',
-    `${wallClockBoundsText(env, rootDeadlineAt)} passed before this batch could be accepted, so the parent is cancelled without verification`,
-  )
 }
 
 /* --- one child, one round (A3 §3.1) --------------------------------------- */
@@ -1880,7 +1649,7 @@ async function settleChildRun(
  * per-child half of {@link driveBatch}.
  *
  * Every ending here is named as what it is — a batch abort cancels the child,
- * a deadline is a budget stop, a worker error is a failure. The submission path
+ * a worker error is a failure. The submission path
  * does not appear as a branch:
  * a run that submitted is settled by {@link settleSubmittedRun} (via the worker
  * whose tool call it was), and this only waits for the terminal state that
@@ -1892,7 +1661,8 @@ async function driveChildRound(env: OrchestrateEnv, batch: BatchContext, child: 
   switch (observation.kind) {
     case 'terminal': {
       const snapshot = await env.task.snapshotIn(batch.storeId)
-      const status: RunStatus = snapshot.runs.find(candidate => candidate.runId === run.runId)?.status ?? observation.status
+      const status: RunStatus =
+        snapshot.runs.find(candidate => candidate.runId === run.runId)?.status ?? observation.status
       env.onRunSettled?.(batch.storeId, item.taskId, run.runId, status)
       await releaseWorkspaceLayer(env, runOwner(batch.storeId, item.taskId, run.runId), run.sessionId)
       const evidenceId = childEvidenceId(snapshot, run.runId)
@@ -1904,22 +1674,26 @@ async function driveChildRound(env: OrchestrateEnv, batch: BatchContext, child: 
       }
     }
     case 'aborted': {
-      return await settleChildRun(env, batch.storeId, { item, run, dependencyTaskIds }, {
-        status: 'cancelled',
-        anomalies: [`the batch was cancelled while this child ran: ${batch.reason}`],
-      })
-    }
-    case 'budget-exhausted': {
-      return await settleChildRun(env, batch.storeId, { item, run, dependencyTaskIds }, {
-        status: 'failed',
-        localizedCause: wallClockExhaustedReason(env),
-      })
+      return await settleChildRun(
+        env,
+        batch.storeId,
+        { item, run, dependencyTaskIds },
+        {
+          status: 'cancelled',
+          anomalies: [`the batch was cancelled while this child ran: ${batch.reason}`],
+        },
+      )
     }
     case 'failed': {
-      return await settleChildRun(env, batch.storeId, { item, run, dependencyTaskIds }, {
-        status: 'failed',
-        localizedCause: observation.reason,
-      })
+      return await settleChildRun(
+        env,
+        batch.storeId,
+        { item, run, dependencyTaskIds },
+        {
+          status: 'failed',
+          localizedCause: observation.reason,
+        },
+      )
     }
   }
 }
@@ -2223,11 +1997,16 @@ async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
     if (pending.length === 0) return await finishBatch(env, batch)
 
     if (batch.signal.aborted) {
-      await blockUnstarted(env, batch.storeId, snapshot, items, () => ({ reason: CANCELLED_BEFORE_START, blockers: startedBlocker(snapshot, items) }))
+      await blockUnstarted(env, batch.storeId, snapshot, items, () => ({
+        reason: CANCELLED_BEFORE_START,
+        blockers: startedBlocker(snapshot, items),
+      }))
       return await finishBatch(env, batch)
     }
 
-    const verified = new Set(items.filter(item => taskOf(snapshot, item.taskId)?.status === 'verified').map(item => item.index))
+    const verified = new Set(
+      items.filter(item => taskOf(snapshot, item.taskId)?.status === 'verified').map(item => item.index),
+    )
     const ready = pending
       .filter(item => item.dependsOn.every(dependency => verified.has(dependency)))
       .sort((left, right) => left.index - right.index)
@@ -2247,59 +2026,9 @@ async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
     const item = ready[0] as BatchItem
     const started = latestRun(snapshot, item.taskId)
     if (started !== undefined) {
-      // A run this driver did not start in this process: the child is either
-      // legitimately in flight — its own nested batch, or a submission inside
-      // verification, both of which settle themselves — or it was still in
-      // flight when the batch was resumed. In that second case nothing can
-      // confirm the writes it may already have made, so it is settled cancelled
-      // with the recovery named (§3.6) instead of being resumed. A normally
-      // driven child never reaches this branch: the driver waits for its
-      // terminal state inside the round that started it.
-      //
-      // The known question wait (A4 §F.1) is the third case, and the one that
-      // must not be cancelled: a child whose unresolved blocking question is on
-      // the record was idle *because the protocol held it*, not because it
-      // abandoned its work. Its answer is still coming, so the run keeps its
-      // identity, its Session is brought back live (the one thing a dead process
-      // cannot leave behind), and the driver waits for the terminal state that
-      // Session will produce once it can read the answer — under the same two
-      // bounds every other worker wait runs under. The block is rebuilt from the
-      // store in the same step, so a write from that session is refused for the
-      // reason that is true.
-      // The wait is one of two durable facts: an unresolved blocking question, or
-      // a delivery the store still owes this session (the answered-but-unread
-      // case — the block is gone, the answer is owed, and cancelling the run
-      // would throw away what the exchange produced).
-      const questionWait = started.executionPhase === 'active'
-        && (blockingQuestionsOf(snapshot, started.runId).length > 0 || owedQuestionMessagesTo(snapshot, started.sessionId).length > 0)
-      // The other wait that must not become a cancellation (K1 §2, §5): the child
-      // **got its own batch back**. A run that is `active` and accumulated batches
-      // has ended every one of them — `waiting_children → active` clears the current
-      // batch id and keeps the history — so it is a delegated parent the dead
-      // process could not finish telling, not a worker that abandoned its work. The
-      // recovery pass brings that same Session back and re-derives its batch-end
-      // message; cancelling it here would throw away the decision the batch just
-      // handed it, which is exactly the rule "an unsubmitted worker is cancelled"
-      // is not for.
-      const returnedParent = started.executionPhase === 'active' && (started.batches?.length ?? 0) > 0
-      if (questionWait || returnedParent) {
+      if (started.executionPhase === 'active') {
         const dependencyTaskIds = item.dependsOn.map(dependency => (items[dependency] as BatchItem).taskId)
         await awaitAdoptedWorkerWait(env, batch, item, started, dependencyTaskIds)
-        continue
-      }
-      if (started.executionPhase === 'active') {
-        const reason =
-          `recovery: run "${started.runId}" was in flight when batch ${batch.batchId} resumed and never submitted; ` +
-          'the writes it may already have made cannot be confirmed, so it is settled cancelled rather than resumed'
-        const dependencyTaskIds = item.dependsOn.map(dependency => (items[dependency] as BatchItem).taskId)
-        await env.task.markRunStatusIn(batch.storeId, item.taskId, started.runId, 'cancelled', env.actor, { reason })
-        await recordTerminalReview(env, batch.storeId, item.taskId, 'cancelled', {
-          run: started,
-          anomalies: [reason],
-          relatedTaskIds: dependencyTaskIds,
-        })
-        env.onRunSettled?.(batch.storeId, item.taskId, started.runId, 'cancelled')
-        await releaseWorkspaceLayer(env, runOwner(batch.storeId, item.taskId, started.runId), started.sessionId)
         continue
       }
       const status = await waitRunSettled(env, batch.storeId, started.runId, started.sessionId)
@@ -2314,44 +2043,7 @@ async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
   }
 }
 
-/**
- * Bring one adopted worker back and wait for its settlement — the batch driver's
- * half of the worker recovery (A4 §F.1, K1 §5).
- *
- * The child this runs for is a run the driver did **not** start, and one of two
- * durable facts makes it a *wait* rather than an abandoned worker:
- *
- * - it has an unresolved blocking question of its own (or an answer it is still
- *   owed), which is where the protocol parked it (A4 §F.1);
- * - it is a delegated parent whose own batches all ended — `active` with an
- *   accumulated `batches` — so the decision the batch handed back is what it is
- *   waiting on, and the recovery pass is telling it so (K1 §2, §5).
- *
- * Its Run identity is untouched; what the dead process could not leave behind is
- * its Session, so the runtime's resume door ({@link OrchestrateEnv.resumeWorkerSession})
- * is asked to bring it back under that same identity. Three answers are
- * possible, and each has a different consequence:
- *
- * - `live` — the Session is reachable again, so what the child waits for (its
- *   parent's answer, or the news that its batch ended) can be delivered to it and
- *   the wait can be observed;
- * - `retry` — another owner holds the Session. Nothing is taken over and the run
- *   keeps its identity; the wait continues (bounded by the deadline) and the
- *   next activation retries;
- * - `refused` — the identity cannot be established. The child is settled
- *   `failed` with the refusal named, because a run in flight that nobody can
- *   bring back is a wait with no end, and leaving it `running` would be a lie
- *   the store keeps telling.
- *
- * The wait itself is {@link awaitWaitingTerminal}: the same deadline (the run's
- * own `wallTime` and what is left of the root's, both measured from the run's
- * persisted `startedAt`) and the same batch abort that every other worker wait
- * runs under — the gap this closes is "a recovered wait with no deadline", not a
- * new rule about deadlines. The deadline ending here is a budget stop, exactly
- * as it is for a run whose worker this process started, and it takes the
- * question's derived effects with it: a settled asking run owes no delivery, so
- * a late answer is audit rather than a revival.
- */
+/** Restore the same active Run/Session and observe its persisted settlement. */
 async function awaitAdoptedWorkerWait(
   env: OrchestrateEnv,
   batch: BatchContext,
@@ -2360,20 +2052,9 @@ async function awaitAdoptedWorkerWait(
   dependencyTaskIds: readonly TaskId[],
 ): Promise<ChildOutcome> {
   const resumed = await resumeAdoptedWorker(env, batch.storeId, run)
-  if (resumed.status === 'refused') {
-    const reason = `recovery refused to continue this run: the Session "${run.sessionId}" could not be brought back (${resumed.reason})`
-    return await settleChildRun(env, batch.storeId, { item, run, dependencyTaskIds }, {
-      status: 'failed',
-      localizedCause: reason,
-      anomalies: [reason],
-    })
-  }
-  if (resumed.status === 'retry') {
-    notifyOwner(
-      env,
-      run.sessionId,
-      `task-runtime: run "${run.runId}" is waiting on coordination this process cannot hand to it, and its Session "${run.sessionId}" is held by ` +
-      `another owner (${resumed.reason}); nothing is taken over, and the wait stays bounded by the run's own deadline`,
+  if (resumed.status !== 'live') {
+    throw new Error(
+      `task-runtime: cannot continue run "${run.runId}" in Session "${run.sessionId}" : ${resumed.reason}`,
     )
   }
   // The block is *derived* from the store here, never assumed — this process wrote
@@ -2382,22 +2063,22 @@ async function awaitAdoptedWorkerWait(
   // brought live (an already-live session keeps the phase its own binding
   // derived). Both are pushed before the wait, so the first request the answer
   // wakes is decided under the facts the store holds.
-  env.gate.setQuestionsBlocked(run.sessionId, blockingQuestionsOf(await env.task.snapshotIn(batch.storeId), run.runId).length > 0)
-  if (resumed.status === 'live' && env.gate.phaseOf(run.sessionId) === undefined) env.gate.setPhase(run.sessionId, 'active')
-  const terminal = waitRunSettled(env, batch.storeId, run.runId, run.sessionId)
-    .then((status): WaitingObservation => ({ kind: 'terminal', status }))
-  const observation = await awaitWaitingTerminal(
-    env,
-    run,
-    cancelAgentOf(env, run.sessionId),
-    batch.signal,
-    () => remainingRunMsFromStore(env, batch.storeId, run),
-    terminal,
+  env.gate.setQuestionsBlocked(
+    run.sessionId,
+    blockingQuestionsOf(await env.task.snapshotIn(batch.storeId), run.runId).length > 0,
   )
+  if (resumed.status === 'live' && env.gate.phaseOf(run.sessionId) === undefined)
+    env.gate.setPhase(run.sessionId, 'active')
+  const terminal = waitRunSettled(env, batch.storeId, run.runId, run.sessionId).then((status): WaitingObservation => ({
+    kind: 'terminal',
+    status,
+  }))
+  const observation = await awaitWaitingTerminal(cancelAgentOf(env, run.sessionId), batch.signal, terminal)
   switch (observation.kind) {
     case 'terminal': {
       const snapshot = await env.task.snapshotIn(batch.storeId)
-      const status: RunStatus = snapshot.runs.find(candidate => candidate.runId === run.runId)?.status ?? observation.status
+      const status: RunStatus =
+        snapshot.runs.find(candidate => candidate.runId === run.runId)?.status ?? observation.status
       env.onRunSettled?.(batch.storeId, item.taskId, run.runId, status)
       await releaseWorkspaceLayer(env, runOwner(batch.storeId, item.taskId, run.runId), run.sessionId)
       const evidenceId = childEvidenceId(snapshot, run.runId)
@@ -2408,16 +2089,16 @@ async function awaitAdoptedWorkerWait(
         ...(evidenceId === undefined ? {} : { evidenceId }),
       }
     }
-    case 'budget-exhausted':
-      return await settleChildRun(env, batch.storeId, { item, run, dependencyTaskIds }, {
-        status: 'failed',
-        localizedCause: wallClockExhaustedReason(env),
-      })
     case 'aborted':
-      return await settleChildRun(env, batch.storeId, { item, run, dependencyTaskIds }, {
-        status: 'cancelled',
-        anomalies: [`the batch was cancelled while this recovered child waited: ${batch.reason}`],
-      })
+      return await settleChildRun(
+        env,
+        batch.storeId,
+        { item, run, dependencyTaskIds },
+        {
+          status: 'cancelled',
+          anomalies: [`the batch was cancelled while this recovered child waited: ${batch.reason}`],
+        },
+      )
   }
 }
 
@@ -2468,16 +2149,17 @@ export function batchEndMessageId(batchId: string): string {
  * `task_submit_result` starts its acceptance.
  */
 export function batchEndMessageText(batchId: string, outcomes: readonly ChildOutcome[]): string {
-  const children = outcomes.length === 0
-    ? 'It admitted no children.'
-    : `Its children settled: ${outcomeTally(outcomes)}.`
-  const lines = outcomes.map(outcome =>
-    `- ${outcome.taskId} (run ${outcome.runId ?? 'none'}): ${outcome.status}${outcome.evidenceId === undefined ? '' : `, evidence ${outcome.evidenceId}`}`)
+  const children =
+    outcomes.length === 0 ? 'It admitted no children.' : `Its children settled: ${outcomeTally(outcomes)}.`
+  const lines = outcomes.map(
+    outcome =>
+      `- ${outcome.taskId} (run ${outcome.runId ?? 'none'}): ${outcome.status}${outcome.evidenceId === undefined ? '' : `, evidence ${outcome.evidenceId}`}`,
+  )
   return [
     `[task-batch-end ${batchId}] the child batch has ended and the workspace is handed back to you; nothing was submitted on your behalf.`,
     children,
     ...lines,
-    'You are active again: read the children\'s results, continue your own work, delegate another batch (task_decompose), or hand in your own result (task_submit_result) — only that submission starts your acceptance.',
+    "You are active again: read the children's results, continue your own work, delegate another batch (task_decompose), or hand in your own result (task_submit_result) — only that submission starts your acceptance.",
   ].join('\n')
 }
 
@@ -2492,7 +2174,7 @@ function batchMembers(run: TaskRun, batchId: string): TaskId[] {
   if (batch === undefined) {
     throw new Error(
       `task-runtime: run "${run.runId}" records no batch "${batchId}", so the store does not name its members; ` +
-      'a batch is read from the run that admitted it, never derived from the task\'s children',
+        "a batch is read from the run that admitted it, never derived from the task's children",
     )
   }
   return [...batch.memberTaskIds]
@@ -2595,9 +2277,8 @@ async function deliverBatchResult(env: OrchestrateEnv, result: BatchResultMessag
  * verdict about the parent, and only the parent's own `task_submit_result`
  * starts its verification (`settleSubmittedRun`, the one verification entry).
  *
- * Two gates can still end the batch without judging it, both budget stops rather
- * than verdicts: a cancellation (§3.6) and the parent's own deadline (§3.5).
- * Their release is the terminal cleanup it always was, taken before the run is
+ * Explicit cancellation can end the batch without judging it (§3.6).
+ * Its release is the terminal cleanup it always was, taken before the run is
  * settled: a stopped run is not revived by its children's drains, and its own
  * checkout is still handed back. A parent whose run already settled was settled
  * by somebody else, and its batch end is the store's record alone.
@@ -2616,7 +2297,11 @@ async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
   // every child handed back as it settled — comes off here, the same release the
   // ordinary handback performs further down (§3.4).
   if (parentRun.status !== 'running') {
-    await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId)
+    await releaseWorkspaceLayer(
+      env,
+      batchOwner(batch.storeId, batch.parentTaskId, batch.batchId),
+      batch.callerSessionId,
+    )
     return outcomes
   }
   const childTaskIds = [...members]
@@ -2625,39 +2310,26 @@ async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
     // The cancellation is the batch's terminal cleanup, taken as it always was:
     // the run ends `cancelled` — never failed by a drain it was stopped before —
     // and the workspace it was holding goes back with that settlement.
-    await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId)
+    await releaseWorkspaceLayer(
+      env,
+      batchOwner(batch.storeId, batch.parentTaskId, batch.batchId),
+      batch.callerSessionId,
+    )
     const reason = `cancelled by the caller while the batch settled: ${batch.reason}`
-    await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'cancelled', env.actor, { reason })
-    await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'cancelled', { run: parentRun, anomalies: [reason], relatedTaskIds: childTaskIds })
+    await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'cancelled', env.actor, {
+      reason,
+    })
+    await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'cancelled', {
+      run: parentRun,
+      anomalies: [reason],
+      relatedTaskIds: childTaskIds,
+    })
     env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, 'cancelled')
-    notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}. Children: ${batchSummary(batch.batchId, outcomes)}`)
-    return outcomes
-  }
-
-  // The deadline ends the batch without judging it: a parent accepted after its own
-  // deadline would be an acceptance the budget never allowed (§3.5) — a run reported
-  // `verified` for work the clock had already stopped. The bound is the run's own
-  // (`remainingRunMs`: its per-run wall time, what is left of the root's, and any
-  // instant its caller placed on it), read here because this is the last moment
-  // before that acceptance — every child has settled, and a run's deadline can arrive
-  // exactly then: a sub-execution inherits the parent's instant, so the child failing
-  // on the budget is what brings the batch here with the parent's clock already out.
-  // A watched run's own wait stops it the same way (`observeWorkerRun`); this is that
-  // rule reaching the run whose settlement the batch performs. The ceilings are
-  // read here, at the judgement itself and not from the settlement's earlier reads
-  // (K4): an acceptance refused over a ceiling a person raised while the batch
-  // drained would be a refusal the store no longer supports.
-  const rootDeadline = await rootDeadlineOf(env, batch.storeId)
-  if (remainingRunMs(env, parentRun, rootDeadline, Date.now()) <= 0) {
-    // The deadline is the other terminal cleanup, released exactly as the
-    // cancellation's is: the clock stopped this run, and its checkout goes back
-    // with the settlement rather than waiting on a drain nobody will confirm.
-    await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId)
-    const reason = parentDeadlinePassedReason(env, rootDeadline)
-    await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'cancelled', env.actor, { reason })
-    await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'cancelled', { run: parentRun, anomalies: [reason], relatedTaskIds: childTaskIds })
-    env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, 'cancelled')
-    notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}`)
+    notifyOwner(
+      env,
+      batch.callerSessionId,
+      `task-runtime: ${reason}. Children: ${batchSummary(batch.batchId, outcomes)}`,
+    )
     return outcomes
   }
 
@@ -2691,10 +2363,20 @@ async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
   }
   if (childPending.length > 0) {
     const reason = `write convergence of the batch's children could not be confirmed: ${childPending.join('; ')}`
-    await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed', env.actor, { reason })
-    await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'failed', { run: parentRun, localizedCause: reason, relatedTaskIds: childTaskIds })
+    await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed', env.actor, {
+      reason,
+    })
+    await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'failed', {
+      run: parentRun,
+      localizedCause: reason,
+      relatedTaskIds: childTaskIds,
+    })
     env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed')
-    notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}; the parent run is failed and its batch is not handed back.`)
+    notifyOwner(
+      env,
+      batch.callerSessionId,
+      `task-runtime: ${reason}; the parent run is failed and its batch is not handed back.`,
+    )
     return outcomes
   }
 
@@ -2705,8 +2387,14 @@ async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
   })
   if (!drained.confirmed) {
     const reason = `write convergence could not be confirmed: ${drained.pending.join('; ')}`
-    await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed', env.actor, { reason })
-    await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'failed', { run: parentRun, localizedCause: reason, relatedTaskIds: childTaskIds })
+    await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed', env.actor, {
+      reason,
+    })
+    await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'failed', {
+      run: parentRun,
+      localizedCause: reason,
+      relatedTaskIds: childTaskIds,
+    })
     env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed')
     notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}; the parent run is failed and is not verifiable.`)
     return outcomes
@@ -2726,7 +2414,10 @@ async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
   // questions: `active` is the phase the batch gave back, and whether an
   // unresolved blocking question still refuses this run's writes is recomputed
   // from the store here rather than assumed from what this process remembers.
-  await env.task.changeRunPhaseIn(batch.storeId, batch.parentTaskId, batch.parentRunId, env.actor, { phase: 'active', batchId: batch.batchId })
+  await env.task.changeRunPhaseIn(batch.storeId, batch.parentTaskId, batch.parentRunId, env.actor, {
+    phase: 'active',
+    batchId: batch.batchId,
+  })
   env.gate.setPhase(parentRun.sessionId, 'active')
   env.gate.setQuestionsBlocked(parentRun.sessionId, blocked)
 
@@ -2745,11 +2436,15 @@ async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
     text: message,
   })
   // A `skipped` delivery is not an undelivered one: the parent run ended before
-  // it could be told (a cancellation that won the race, a deadline), and the
+  // it could be told (a cancellation that won the race), and the
   // fallback notice would be a wake addressed to a terminal run — the very thing
   // K1 §2 forbids. Its own terminal transition already told its owner.
   if (delivery !== 'delivered' && delivery !== 'already-present' && delivery !== 'skipped') {
-    notifyOwner(env, batch.callerSessionId, `task-runtime: ${batchSummary(batch.batchId, outcomes)}; ${message} (delivery: ${delivery})`)
+    notifyOwner(
+      env,
+      batch.callerSessionId,
+      `task-runtime: ${batchSummary(batch.batchId, outcomes)}; ${message} (delivery: ${delivery})`,
+    )
   }
   return outcomes
 }
@@ -3104,7 +2799,7 @@ export interface ReplayRunOutcome {
  *
  * A spawning replay is a worker like any other and follows the same rules: it
  * is born `active` and it *submits* — an idle worker is not a completion, the
- * wall-clock budget still applies, and verification comes from the one entry every
+ * usage accounting still applies, and verification comes from the one entry every
  * run shares ({@link settleSubmittedRun}). A workerless replay is born
  * `submitted` (origin `runtime`) because there is nobody to submit: its
  * criteria are judged by the verifier and the run settles on the verdict.
@@ -3115,7 +2810,7 @@ export interface ReplayRunOutcome {
  * sub-execution a replayed worker decomposes into inherits exactly the same
  * binding; it is absent for an ordinary replay, whose run and spawn are what they
  * always were. The run's clock is not this entry's: its time is bounded by the
- * runtime's own per-run budget and the root tree's deadline alone.
+ * runtime's persisted run count and observed usage.
  */
 export async function runReplayTask(
   env: OrchestrateEnv,
@@ -3147,11 +2842,11 @@ export async function runReplayTask(
   const birthSubmission: SubmissionRecord | undefined = init.spawn
     ? undefined
     : {
-      summary: 'criteria replay (no worker spawned)',
-      evidenceRefs: [],
-      submittedAt: new Date().toISOString(),
-      origin: 'runtime',
-    }
+        summary: 'criteria replay (no worker spawned)',
+        evidenceRefs: [],
+        submittedAt: new Date().toISOString(),
+        origin: 'runtime',
+      }
   const startedAt = new Date()
   const run: TaskRun = {
     runId,
@@ -3201,7 +2896,11 @@ export async function runReplayTask(
     await recordTerminalReview(env, storeId, task.taskId, 'failed', { run, localizedCause: reason, anomalies })
     return await finishReplay(env, storeId, run, 'failed')
   }
-  await env.task.startRunIn(storeId, contentBinding === undefined ? run : { ...run, providerBinding: contentBinding }, env.actor)
+  await env.task.startRunIn(
+    storeId,
+    contentBinding === undefined ? run : { ...run, providerBinding: contentBinding },
+    env.actor,
+  )
 
   if (!init.spawn) {
     const status = await settleSubmittedRun(env, storeId, task.taskId, run.runId, { anomalies })
@@ -3252,13 +2951,6 @@ export async function runReplayTask(
         reason: 'cancelled while the replayed worker ran',
         anomalies,
       })
-    case 'budget-exhausted': {
-      // The bound view, because it is the one that carries what this run was placed
-      // under: naming the deployment's own per-run budget here would misreport the
-      // wall clock that actually ended the run.
-      const reason = wallClockExhaustedReason(bound)
-      return await settleReplayRun(env, storeId, task, run, { status: 'failed', reason, localizedCause: reason, anomalies })
-    }
     case 'failed':
       return await settleReplayRun(env, storeId, task, run, {
         status: 'failed',
@@ -3271,14 +2963,13 @@ export async function runReplayTask(
 
 /**
  * Settle one replay run the replay's own observation decided — a cancellation, a
- * deadline, a worker error — and report what the run settled
+ * worker error — and report what the run settled
  * as.
  *
  * Two settlement paths can reach one run at once, and this is not hypothetical for
  * a replay: a replayed worker that decomposed is settled by its own batch (the
  * ordinary parent acceptance submits and verifies the parent run) while this path
- * is deciding, and a run whose own deadline expires is exactly when both are in
- * flight. The arbitration is the one the batch's per-child settlement already
+ * is deciding. The arbitration is the one the batch's per-child settlement already
  * applies ({@link settleChildRun}, `settleRunFromRuntime` beside it): the store is
  * the arbiter — a run it now holds terminal stands, this settlement adds nothing,
  * and the outcome reports the state the store holds rather than the one this wait

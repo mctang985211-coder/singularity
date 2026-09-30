@@ -171,7 +171,7 @@ function rootRun(runId = 'r-root'): TaskRun {
   }
 }
 
-const ROOT_BUDGET: NonNullable<Config['rootBudget']> = { wallTimeMs: 3_600_000, maxRuns: 10 }
+const ROOT_BUDGET: NonNullable<Config['rootBudget']> = { maxRuns: 10 }
 
 /** A store holding the tree's root and one recorded run, built through the service's own entries. */
 async function storeWithRoot(h: Harness, runs = 1): Promise<void> {
@@ -259,12 +259,12 @@ describe('extendRootBudget', () => {
     expect(ask.rootTaskId).toBe('root')
     expect(ask.rootSessionId).toBe(ROOT_SESSION)
     // Two ceilings, both readable on the card: what the deployment alone allows, and the complete reading frozen now.
-    expect(ask.configured).toEqual({ deadlineAt: CONFIGURED_DEADLINE, maxRuns: 10 })
-    expect(ask.effective).toEqual({ deadlineAt: CONFIGURED_DEADLINE, maxRuns: 10 })
+    expect(ask.configured).toEqual({ maxRuns: 10 })
+    expect(ask.effective).toEqual({ maxRuns: 10 })
     expect(ask.runsUsed).toBe(3)
     expect(ask.proposal.requestKey).toBe('k-1')
     expect(ask.proposal.maxRuns).toEqual({ previous: 10, next: 20 })
-    expect(ask.proposal.deadlineAt).toBeUndefined()
+    expect(ask.proposal).not.toHaveProperty('deadlineAt')
     expect(typeof ask.proposal.requestDigest).toBe('string')
     // The host is carried untouched — the same object the tool handed over, with nothing derived from the request.
     expect(ask.host).toBe(passed)
@@ -281,7 +281,7 @@ describe('extendRootBudget', () => {
     const before = await h.task.snapshotIn(STORE)
     installAllowed(h, 'approval:call-1')
 
-    const result = await extend(h, { requestKey: 'k-more-time', deadlineAt: APPROVED_DEADLINE })
+    const result = await extend(h, { requestKey: 'k-more-time', maxRuns: 15 })
 
     const facts = extensionEvents(h)
     expect(facts).toHaveLength(1)
@@ -289,9 +289,9 @@ describe('extendRootBudget', () => {
     expect(facts[0]!.sessionId).toBe(ROOT_SESSION)
     expect(facts[0]!.extension).toMatchObject({
       requestKey: 'k-more-time',
-      deadlineAt: { previous: CONFIGURED_DEADLINE, next: APPROVED_DEADLINE },
+      maxRuns: { previous: 10, next: 15 },
       // The reading the runtime froze, never one a caller handed back: every dimension the tree bounds, at the value in force when the question was put.
-      baseline: { maxRuns: 10, deadlineAt: CONFIGURED_DEADLINE },
+      baseline: { maxRuns: 10 },
       approvalRef: 'approval:call-1',
       requestedBy: ROOT_SESSION,
     })
@@ -310,9 +310,7 @@ describe('extendRootBudget', () => {
     const resolution = resolveRootBudget(after, ROOT_BUDGET)
     expect(resolution.ok).toBe(true)
     if (!resolution.ok) throw new Error('unreachable')
-    expect(resolution.deadlineAt).toBe(APPROVED_DEADLINE)
-    expect(resolution.configured.deadlineAt).toBe(CONFIGURED_DEADLINE)
-    expect(resolution.maxRuns).toBe(10)
+    expect(resolution.maxRuns).toBe(15)
   })
 
   test('answers a repeat from the record, asks nobody and appends nothing; the same key at other totals is refused', async () => {
@@ -349,27 +347,27 @@ describe('extendRootBudget', () => {
     const committed = log(h)
 
     const reasons: Record<string, string> = {
-      'no dimension': await refusal(() => extend(h, { requestKey: 'k-none' })),
+      'no dimension': await refusal(() => extend(h, { requestKey: 'k-none' } as never)),
       'no key': await refusal(() => extend(h, { requestKey: '', maxRuns: 20 })),
       'fractional total': await refusal(() => extend(h, { requestKey: 'k-frac', maxRuns: 12.5 })),
       'zero total': await refusal(() => extend(h, { requestKey: 'k-zero', maxRuns: 0 })),
       'negative total': await refusal(() => extend(h, { requestKey: 'k-negative', maxRuns: -5 })),
       'not above the ceiling': await refusal(() => extend(h, { requestKey: 'k-low', maxRuns: 10 })),
       'increment read as a total': await refusal(() => extend(h, { requestKey: 'k-inc', maxRuns: 5 })),
-      'local time': await refusal(() => extend(h, { requestKey: 'k-local', deadlineAt: '2026-09-16T04:00:00' })),
-      'duration in words': await refusal(() => extend(h, { requestKey: 'k-words', deadlineAt: 'two more hours' })),
-      'deadline not later': await refusal(() => extend(h, { requestKey: 'k-earlier', deadlineAt: '2026-09-16T00:30:00.000Z' })),
+      'local time': await refusal(() => extend(h, { requestKey: 'k-local', deadlineAt: '2026-09-16T04:00:00' } as never)),
+      'duration in words': await refusal(() => extend(h, { requestKey: 'k-words', deadlineAt: 'two more hours' } as never)),
+      'deadline not later': await refusal(() => extend(h, { requestKey: 'k-earlier', deadlineAt: '2026-09-16T00:30:00.000Z' } as never)),
     }
-    expect(reasons['no dimension']).toContain('names neither maxRuns nor deadlineAt')
+    expect(reasons['no dimension']).toContain('names no maxRuns')
     expect(reasons['no key']).toContain('non-empty request key')
     expect(reasons['fractional total']).toContain('not a positive whole number of runs')
     expect(reasons['zero total']).toContain('not a positive whole number of runs')
     expect(reasons['negative total']).toContain('not a positive whole number of runs')
     expect(reasons['not above the ceiling']).toContain('does not raise the 10 in force')
-    expect(reasons['increment read as a total']).toContain('never an increment')
-    expect(reasons['local time']).toContain('is not an absolute instant')
-    expect(reasons['duration in words']).toContain('is not an absolute instant')
-    expect(reasons['deadline not later']).toContain('is not later than the 2026-09-16T01:00:00.000Z in force')
+    expect(reasons['increment read as a total']).toContain('does not raise')
+    expect(reasons['local time']).toContain('not part of a budget-extension request')
+    expect(reasons['duration in words']).toContain('not part of a budget-extension request')
+    expect(reasons['deadline not later']).toContain('not part of a budget-extension request')
 
     // Every one of them: no question was put, nothing was appended, and the store is byte-identical.
     expect(approval).not.toHaveBeenCalled()
@@ -384,13 +382,13 @@ describe('extendRootBudget', () => {
     await storeWithRoot(h)
     const approval = installAllowed(h)
     const committed = log(h)
-    expect(await refusal(() => extend(h, { requestKey: 'k-deadline', deadlineAt: APPROVED_DEADLINE })))
-      .toContain('sets no deadlineAt ceiling')
+    expect(await refusal(() => extend(h, { requestKey: 'k-deadline', deadlineAt: APPROVED_DEADLINE } as never)))
+      .toContain('not part of a budget-extension request')
     expect(approval).not.toHaveBeenCalled()
     expect(log(h)).toBe(committed)
 
     // And the other way round, with no run ceiling configured.
-    const other = harness({ config: { rootBudget: { wallTimeMs: 3_600_000 } } })
+    const other = harness({ config: { rootBudget: {} } })
     await storeWithRoot(other)
     const otherApproval = installAllowed(other)
     expect(await refusal(() => extend(other, { requestKey: 'k-runs', maxRuns: 20 })))
@@ -561,11 +559,11 @@ describe('extendRootBudget', () => {
     // the shape a person approving twice, or a second caller that asked in the
     // same window, produces — and both are approved by the person.
     const moreRuns = extend(h, { requestKey: 'k-runs', maxRuns: 20 }, { host: host('call-runs') })
-    const moreTime = extend(h, { requestKey: 'k-time', deadlineAt: APPROVED_DEADLINE }, { host: host('call-time') })
+    const moreTime = extend(h, { requestKey: 'k-time', maxRuns: 30 }, { host: host('call-time') })
     await vi.waitFor(() => expect(asks).toHaveLength(2))
     expect(asks.map(ask => ask.effective)).toEqual([
-      { deadlineAt: CONFIGURED_DEADLINE, maxRuns: 10 },
-      { deadlineAt: CONFIGURED_DEADLINE, maxRuns: 10 },
+      { maxRuns: 10 },
+      { maxRuns: 10 },
     ])
     for (const release of waiting) release({ kind: 'allowed', reference: 'approval:gated' })
 
@@ -626,7 +624,7 @@ describe('extendRootBudget', () => {
       return { kind: 'allowed', reference: 'approval:outer' }
     })
 
-    const denied = await refusal(() => extend(h, { requestKey: 'k-outer', deadlineAt: APPROVED_DEADLINE }, { host: host('call-outer') }))
+    const denied = await refusal(() => extend(h, { requestKey: 'k-outer', maxRuns: 30 }, { host: host('call-outer') }))
     expect(denied).toContain('moved since this request was read')
     expect(asks).toEqual(['k-outer', 'k-inner'])
 
@@ -674,7 +672,7 @@ describe('extendRootBudget', () => {
     const first = harness({ config: { rootBudget: ROOT_BUDGET } })
     await storeWithRoot(first, 2)
     installAllowed(first, 'approval:call-1')
-    await extend(first, { requestKey: 'k-more-time', deadlineAt: APPROVED_DEADLINE })
+    await extend(first, { requestKey: 'k-more-time', maxRuns: 15 })
     await extend(first, { requestKey: 'k-more-runs', maxRuns: 20 })
     const before = await first.task.snapshotIn(STORE)
     await Promise.all(first.disposers.map(dispose => dispose()))
@@ -685,10 +683,9 @@ describe('extendRootBudget', () => {
     const resolution = resolveRootBudget(snapshot, ROOT_BUDGET)
     expect(resolution.ok).toBe(true)
     if (!resolution.ok) throw new Error('unreachable')
-    expect(resolution.deadlineAt).toBe(APPROVED_DEADLINE)
     expect(resolution.maxRuns).toBe(20)
     expect(resolution.acceptedAt).toBe(before.runs[0]?.startedAt)
-    expect(resolution.configured).toEqual({ deadlineAt: CONFIGURED_DEADLINE, maxRuns: 10 })
+    expect(resolution.configured).toEqual({ maxRuns: 10 })
     expect(snapshot.runs.map(run => run.startedAt)).toEqual(before.runs.map(run => run.startedAt))
     expect(effectiveMaxRuns(snapshot)).toBe(20)
 

@@ -32,7 +32,7 @@
  *
  * This module is the *explicit* door: it validates what a model call names and
  * renders the answer for the model. The attempt itself — the admission, the
- * claim, the pack, the spawn, the watchdog, the diagnosis, the terminal fact —
+ * claim, the pack, the spawn, the diagnosis, the terminal fact —
  * lives in `review-agent-run.ts`, which the automatic scan (A5) runs too, so the
  * two doors cannot drift. Nothing here decides whether a review *should* happen:
  * a failed review and an explicit call are the two triggers, and no threshold
@@ -50,7 +50,6 @@ import type { ReviewRecord, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { ReviewAgentAttempt, ReviewAgentPlan, ReviewAgentSource } from '../review-agent-ledger.ts'
 import {
-  REVIEW_AGENT_TIMEOUT_MS,
   recordedDiagnosis,
   renderJudgements,
   runReviewAgentAttempt,
@@ -58,15 +57,17 @@ import {
 } from '../review-agent-run.ts'
 import type { ReviewAttemptOutcome } from '../review-agent-run.ts'
 import { reviewForSource } from './task-review-pack.ts'
+import { undeclaredParameters } from './proposal-parameters.ts'
 
 export {
-  REVIEW_AGENT_TIMEOUT_MS,
   REVIEWER_BASELINE,
   REVIEWER_PRESET,
   recordedDiagnosis,
   renderJudgements,
   reviewerGrant,
 } from '../review-agent-run.ts'
+
+const DECLARED_PARAMETERS = ['taskId', 'runId', 'reason', 'requestKey'] as const
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -204,14 +205,14 @@ export function defineTaskReviewAgentTool(ctx: Context) {
       'adequate|inadequate|unknown, the refs it rests on and a rationale; judgements are optional and never padded, ' +
       'and a judgement that cites nothing is refused rather than downgraded. A proposal is a suggestion only: it ' +
       'names a target type the diagnosis does not freeze, and nothing here executes it. reason names what the review ' +
-      'should focus on. A reviewer that times out, is cancelled, or answers without a diagnosis leaves an ' +
+      'should focus on. A reviewer that is cancelled or answers without a diagnosis leaves an ' +
       'interrupted attempt with the reason named and records no Diagnosis. One source has one default ' +
       'attempt: a repeat of the same call (an automatic scan and an explicit call share it) returns that attempt and ' +
       'its result instead of starting another, and never spends the budget again. Reviewing the same source again ' +
       'after that attempt ended is an explicit act: pass a new non-empty requestKey, which is persisted with the ' +
       'source and the focus; the same key with a different reason is refused. While an attempt of the source is in ' +
       'flight the call returns its identity and starts nothing. The reviewer has no write, shell, spawn, or ' +
-      'evolution tool, is capped per root store (default 1), and is cancelled by a watchdog if it overruns.',
+      'evolution tool and is capped per root store (default 1).',
     parameters: {
       taskId: { type: 'string', required: true, description: 'Task whose review needs judgement' },
       runId: {
@@ -224,10 +225,11 @@ export function defineTaskReviewAgentTool(ctx: Context) {
         type: 'string',
         description: 'Optional non-empty key for an explicit further review of the same source; omit for the source\'s default attempt',
       },
-      timeoutMs: { type: 'number', description: `Watchdog deadline in milliseconds; defaults to ${REVIEW_AGENT_TIMEOUT_MS}` },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
+      const undeclared = undeclaredParameters(args, DECLARED_PARAMETERS, 'task_review_agent')
+      if (undeclared !== undefined) return undeclared
       const caller = sessionId(exec)
       const graph = await ctx.graphs.graphForSession(caller)
       const storeId = rootTaskStoreId(graph.rootSessionId)
@@ -255,7 +257,6 @@ export function defineTaskReviewAgentTool(ctx: Context) {
         actor: caller,
         requestKey: optionalText(args.requestKey),
         reason: optionalText(args.reason),
-        ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
         signal: exec.signal,
       })
       return renderOutcome(outcome, source, storeId, snapshot, review)

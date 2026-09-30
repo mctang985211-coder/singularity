@@ -456,11 +456,7 @@ function limitLines(proposal) {
 		...context.auditOnly.tokens === void 0 ? [] : [`tokens ${context.auditOnly.tokens}`],
 		...context.auditOnly.attempts === void 0 ? [] : [`attempts ${context.auditOnly.attempts}`]
 	];
-	return [
-		`- enforced at admission: maxDepth ${context.maxDepth}, maxChildren ${context.maxChildren}`,
-		`- enforced in flight: ${context.wallTimeMs === void 0 ? "no wall-clock ceiling was configured" : `wallTimeMs ${context.wallTimeMs}`}`,
-		`- audited after the run (never enforced in flight): ${audited.length === 0 ? "none configured" : audited.join(", ")}`
-	];
+	return [`- enforced at admission: maxDepth ${context.maxDepth}, maxChildren ${context.maxChildren}`, `- audited after the run (never enforced in flight): ${audited.length === 0 ? "none configured" : audited.join(", ")}`];
 }
 /**
 * The review material one person is shown (§5), rendered from the saved facts:
@@ -1082,7 +1078,7 @@ const liveAttempts = /* @__PURE__ */ new Set();
 * read, this store's attempts and its started count are derived, and `work` runs
 * with the decision door (`plan`), the claim door and the started door. The
 * region ends when `work` returns or throws. Nothing else is serialized: waiting
-* for the reviewer's output, its watchdog, and recording its Diagnosis happen
+* for the reviewer's output and recording its Diagnosis happen
 * after `work` returned, outside the region, in the caller.
 *
 * The consequence to rely on: two admissions for one store cannot interleave
@@ -2151,8 +2147,6 @@ function reviewerGrant() {
 		keepPresetTools: false
 	};
 }
-/** Default watchdog deadline for one review agent (10 minutes). */
-const REVIEW_AGENT_TIMEOUT_MS = 6e5;
 /** The source one attempt reviews, as a ref a reader reads back (`t1#r1`, `t2#no-run`). */
 function sourceRef(source) {
 	return reviewRef({
@@ -2309,8 +2303,8 @@ function recordedDiagnosis(snapshot, sessionId$22) {
 }
 /**
 * Run one review attempt for one source: the admission's serial region (plan,
-* claim, spawn) and then, outside it, the reviewer's own time — its watchdog,
-* its reply, the diagnosis it carries and the one terminal fact.
+* claim, spawn) and then, outside it, the reviewer's reply, the diagnosis it
+* carries and the one terminal fact.
 *
 * Waiting for the reviewer never runs inside the region: only the decision, the
 * claim and the spawn do, so the claim is durable before any handle exists and a
@@ -2328,7 +2322,6 @@ async function runReviewAgentAttempt(input) {
 		actor,
 		sessionId: reviewerSessionId
 	};
-	const timeoutMs = Number.isFinite(input.timeoutMs) && input.timeoutMs > 0 ? Math.floor(input.timeoutMs) : REVIEW_AGENT_TIMEOUT_MS;
 	const outcome = await admitReviewAgent(storeId, async (admission) => {
 		const current = await ctx.task.snapshotIn(storeId);
 		const { plan, recovered } = await admission.plan(request, { recorded: (attempt) => recordedDiagnosis(current, attempt.sessionId) !== void 0 });
@@ -2448,26 +2441,25 @@ async function runReviewAgentAttempt(input) {
 	};
 	const cancel = () => handle.agent.cancel({ kind: "parent" });
 	input.signal?.addEventListener("abort", cancel, { once: true });
-	let timer;
+	let waiting = true;
+	let unloaded = false;
+	let resolveCompleted;
+	const completed = new Promise((resolve$1) => {
+		resolveCompleted = resolve$1;
+	});
+	let disposeWait;
 	try {
-		let timedOut = false;
-		const deadline = new Promise((resolve$1) => {
-			timer = setTimeout(() => {
-				timedOut = true;
-				resolve$1("timeout");
-			}, timeoutMs);
-		});
-		const idle = handle.agent.whenIdle().then(() => "idle").catch(() => "failed");
-		const reviewOutcome = await Promise.race([idle, deadline]);
-		if (timer !== void 0) clearTimeout(timer);
-		input.signal?.removeEventListener("abort", cancel);
-		if (reviewOutcome === "timeout") handle.agent.cancel({ kind: "parent" });
-		const cancelled = input.signal?.aborted === true;
-		const reply = timedOut ? void 0 : lastAssistantText(handle.agent.session.snapshotEvents());
-		const parsed = timedOut || cancelled ? {
+		disposeWait = ctx.effect(() => async () => {
+			if (!waiting) return;
+			unloaded = true;
+			cancel();
+			await completed;
+		}, "singularityAgent: review agent wait");
+		await handle.agent.whenIdle();
+		const parsed = input.signal?.aborted === true || unloaded ? {
 			ok: false,
-			refusal: timedOut ? `the reviewer timed out after ${timeoutMs}ms with no diagnosis` : "the attempt was cancelled before the reviewer produced a diagnosis"
-		} : parseReviewerDiagnosis(reply);
+			refusal: unloaded ? "the plugin was unloaded before the reviewer produced a diagnosis" : "the attempt was cancelled before the reviewer produced a diagnosis"
+		} : parseReviewerDiagnosis(lastAssistantText(handle.agent.session.snapshotEvents()));
 		if (!parsed.ok) {
 			await settleAttempt("interrupted", parsed.refusal);
 			return {
@@ -2519,10 +2511,14 @@ async function runReviewAgentAttempt(input) {
 			proposals
 		};
 	} catch (error) {
-		if (timer !== void 0) clearTimeout(timer);
-		input.signal?.removeEventListener("abort", cancel);
+		cancel();
 		await settleAttempt("interrupted", `the review attempt failed: ${error instanceof Error ? error.message : String(error)}`);
 		throw error;
+	} finally {
+		waiting = false;
+		resolveCompleted();
+		input.signal?.removeEventListener("abort", cancel);
+		if (!unloaded) await disposeWait?.();
 	}
 }
 
@@ -2917,43 +2913,31 @@ const text$28 = (value) => [{
 	type: "text",
 	text: value
 }];
-/** The whole argument surface: the request key and the two totals. There is deliberately no third member. */
-const DECLARED_PARAMETERS = [
-	"requestKey",
-	"maxRuns",
-	"deadlineAt"
-];
-const DIMENSIONS = ["maxRuns", "deadlineAt"];
+/** The whole argument surface: the request key and the approved run total. */
+const DECLARED_PARAMETERS$1 = ["requestKey", "maxRuns"];
 function sessionId$20(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_budget_extend: missing agent id");
 	return id;
 }
 /**
-* The value one dimension is under, or the words that say there is none. An
+* The run ceiling in force, or the words that say there is none. An
 * absent ceiling is not zero and not infinity: this deployment sets no limit
 * there, and a card that printed a number would be inventing one.
 */
 function inForce(value) {
 	return value === void 0 ? "none" : String(value);
 }
-/** The raise this request asks of one dimension, when it names that dimension at all. */
-function raiseOf(proposal, dimension) {
-	return dimension === "maxRuns" ? proposal.maxRuns : proposal.deadlineAt;
-}
-/** One dimension's raise as a line, in the order the dimensions are printed. */
+/** The run-count raise this request names, as a recorded answer prints it. */
 function raiseLines(proposal) {
-	return DIMENSIONS.flatMap((dimension) => {
-		const raise = raiseOf(proposal, dimension);
-		return raise === void 0 ? [] : [`- ${dimension}: ${String(raise.previous)} → ${String(raise.next)}`];
-	});
+	const raise = proposal.maxRuns;
+	return raise === void 0 ? [] : [`- maxRuns: ${raise.previous} → ${raise.next}`];
 }
 /**
 * The card a person decides from (K4): the store and the tree the raise belongs
-* to, the request's own key and identity, the runs the store already holds, each
-* of the two ceilings as it stands now — the approved total in force first, the
-* ceiling this deployment configures beside it in parentheses — and, for the
-* dimensions this request names, the total approving would put in place.
+* to, the request's own key and identity, the runs the store already holds, the
+* run ceiling in force beside the deployment's configured ceiling, and the
+* total approving would put in place.
 *
 * The usage is on the card because the ceiling is what is being moved and the
 * count is what it is measured against: a raise from 10 to 20 when 18 runs exist
@@ -2968,12 +2952,8 @@ function renderAsk(ask) {
 		`Budget extension of the tree in store "${ask.storeId}" — root task ${ask.rootTaskId}, asked by its root coordination session ${ask.rootSessionId}.`,
 		`request key "${proposal.requestKey}" (identity ${proposal.requestDigest})`,
 		`runs the store already holds: ${ask.runsUsed} — an approved total replaces the ceiling, never this count`,
-		"ceilings now (the approved total in force first, the ceiling this deployment configures in parentheses):",
-		...DIMENSIONS.map((dimension) => {
-			const raise = raiseOf(proposal, dimension);
-			const now = `${dimension}: ${inForce(ask.effective[dimension])} in force (deployment configures ${inForce(ask.configured[dimension])})`;
-			return raise === void 0 ? `- ${now} — this request does not name it` : `- ${now} → approves a total of ${String(raise.next)}`;
-		}),
+		"run ceiling now (the approved total in force first, the ceiling this deployment configures in parentheses):",
+		`- maxRuns: ${inForce(ask.effective.maxRuns)} in force (deployment configures ${inForce(ask.configured.maxRuns)}) → approves a total of ${proposal.maxRuns.next}`,
 		"approving records ONE budget-extension event on this store: the tree keeps its runs, its tasks and its history, no run starts or resumes, nothing is re-opened, and the approved total becomes the ceiling every later admission reads.",
 		"rejecting or cancelling records nothing and changes no ceiling."
 	].join("\n");
@@ -2985,7 +2965,7 @@ function renderRecord(record) {
 function defineTaskBudgetExtendTool(ctx) {
 	return defineTool({
 		name: "task_budget_extend",
-		description: "Ask a human to raise the ceiling(s) bounding this tree's execution, and record the raise they approve. State the total you want in force, never a difference: maxRuns is the WHOLE approved run count (a positive whole number, not \"add five\"), deadlineAt is the absolute instant the tree must stop by (for example 2026-09-28T09:00:00.000Z, never \"two more hours\"). At least one of the two is required; a dimension this deployment leaves unlimited is refused, as is any total that is not above the ceiling in force. The request is shown to a human with the store, both ceilings and the runs already used, and only their explicit approval records anything — a rejection, a cancellation or an unavailable answerer writes nothing. A request key already recorded with the same totals is answered from the record without asking again; the same key at different totals is refused. A raise starts no run, resumes none, re-opens nothing and does not clear the runs already counted — it moves ceilings only. There is no argument here that approves anything or stands in for somebody's approval, and the store is derived from your session: only a graph's root coordination session can call this, and it may do so after its tree stopped.",
+		description: "Ask a human to raise the run ceiling bounding this tree's execution, and record the raise they approve. State the total you want in force, never a difference: maxRuns is the WHOLE approved run count (a positive whole number, not \"add five\"), maxRuns is required; a run ceiling this deployment leaves unlimited is refused, as is any total that is not above the ceiling in force. The request is shown to a human with the store, the run ceiling and the runs already used, and only their explicit approval records anything — a rejection, a cancellation or an unavailable answerer writes nothing. A request key already recorded with the same totals is answered from the record without asking again; the same key at different totals is refused. A raise starts no run, resumes none, re-opens nothing and does not clear the runs already counted — it moves ceilings only. There is no argument here that approves anything or stands in for somebody's approval, and the store is derived from your session: only a graph's root coordination session can call this, and it may do so after its tree stopped.",
 		parameters: {
 			requestKey: {
 				type: "string",
@@ -2994,11 +2974,8 @@ function defineTaskBudgetExtendTool(ctx) {
 			},
 			maxRuns: {
 				type: "number",
+				required: true,
 				description: "The whole approved run count once the human approves — a positive whole number above the ceiling in force, never an increment"
-			},
-			deadlineAt: {
-				type: "string",
-				description: "The approved deadline as an absolute instant in UTC (e.g. 2026-09-28T09:00:00.000Z), later than the one in force — never a duration"
 			}
 		},
 		output: {
@@ -3006,7 +2983,7 @@ function defineTaskBudgetExtendTool(ctx) {
 			render: (_a, v) => text$28(v)
 		},
 		execute: async (args, exec) => {
-			const undeclared$3 = undeclaredParameters(args, DECLARED_PARAMETERS, "task_budget_extend");
+			const undeclared$3 = undeclaredParameters(args, DECLARED_PARAMETERS$1, "task_budget_extend");
 			if (undeclared$3 !== void 0) return undeclared$3;
 			const caller = sessionId$20(exec);
 			let result;
@@ -3016,8 +2993,7 @@ function defineTaskBudgetExtendTool(ctx) {
 					execution: exec
 				}, {
 					requestKey: args.requestKey,
-					...args.maxRuns === void 0 ? {} : { maxRuns: args.maxRuns },
-					...args.deadlineAt === void 0 ? {} : { deadlineAt: args.deadlineAt }
+					maxRuns: args.maxRuns
 				});
 			} catch (error) {
 				return `task_budget_extend rejected: ${error instanceof Error ? error.message : String(error)}`;
@@ -4668,7 +4644,7 @@ function askedText(outcome) {
 	const lines = [`task_ask_parent: question ${question.questionId} recorded for your direct parent (run ${question.parentRunId}); ${deliveryText(outcome.delivery)}.`];
 	if (!outcome.created) lines.push("This is the question the same request key already recorded, word for word: nothing was written a second time and the same identity stands. Do not re-send it under a new key.");
 	if (question.blocking) {
-		lines.push("This run is now blocked on that answer: writes, shell commands, another decomposition and `task_submit_result` are refused until an answer with `resolves: true` is recorded — a child batch of this run ending does not lift the block, because nothing answers a question on your behalf. Stop the work that would write and end this step — an idle run waiting on this question gets no submission reminder, while the run's own deadline still applies.");
+		lines.push("This run is now blocked on that answer: writes, shell commands, another decomposition and `task_submit_result` are refused until an answer with `resolves: true` is recorded — a child batch of this run ending does not lift the block, because nothing answers a question on your behalf. Stop the work that would write and end this step — an idle run waiting on this question gets no submission reminder.");
 		lines.push("The answer arrives as a message in this session and in your context, where the question stays while it is open; read it before you continue, and keep to what it says.");
 	} else lines.push("This run is not blocked: it may carry on working while the answer is pending, so it may pass you later in this session or in your context — do not treat the silence as an answer.");
 	return lines.join("\n");
@@ -5649,7 +5625,7 @@ function consumptionLines(proposal) {
 function digestLines(proposal, subject) {
 	return [
 		`${subject} digest (sha256): ${proposal.proposalDigest}`,
-		`admission context digest: ${proposal.admissionContextDigest} (maxDepth ${proposal.admissionContext.maxDepth}, maxChildren ${proposal.admissionContext.maxChildren}${proposal.admissionContext.wallTimeMs === void 0 ? "" : `, wallTimeMs ${proposal.admissionContext.wallTimeMs}`})`,
+		`admission context digest: ${proposal.admissionContextDigest} (maxDepth ${proposal.admissionContext.maxDepth}, maxChildren ${proposal.admissionContext.maxChildren})`,
 		`review context digest: ${proposal.reviewContextDigest} (capability manifest digest ${proposal.reviewContext.capabilityManifestDigest}; judging verifiers ${proposal.reviewContext.verifiers.map((verifier) => verifier.verifierId).join(", ") || "none pinned"})`
 	];
 }
@@ -5814,6 +5790,12 @@ function defineTaskRecoverTool(ctx) {
 
 //#endregion
 //#region src/tools/review-agent.ts
+const DECLARED_PARAMETERS = [
+	"taskId",
+	"runId",
+	"reason",
+	"requestKey"
+];
 const text$3 = (value) => [{
 	type: "text",
 	text: value
@@ -5897,7 +5879,7 @@ function renderOutcome(outcome, source, storeId, snapshot, review) {
 function defineTaskReviewAgentTool(ctx) {
 	return defineTool({
 		name: "task_review_agent",
-		description: "Spawn ONE read-only review agent for one exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started) — take the diagnosis it produces, and persist it as a Diagnosis. The reviewer reads the review pack and, beyond it, whatever settles the question through its own context reads. What it returns is an observation (the postmortem observation — what really happened, for a successful source as much as a failed one), a conclusion in its own words (\"no improvement needed\" and \"the evidence does not settle this\" are conclusions), a confidence, and — only when it made them — judgements and proposals. A judgement names one of the dimensions no parser settles (task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency) with verdict adequate|inadequate|unknown, the refs it rests on and a rationale; judgements are optional and never padded, and a judgement that cites nothing is refused rather than downgraded. A proposal is a suggestion only: it names a target type the diagnosis does not freeze, and nothing here executes it. reason names what the review should focus on. A reviewer that times out, is cancelled, or answers without a diagnosis leaves an interrupted attempt with the reason named and records no Diagnosis. One source has one default attempt: a repeat of the same call (an automatic scan and an explicit call share it) returns that attempt and its result instead of starting another, and never spends the budget again. Reviewing the same source again after that attempt ended is an explicit act: pass a new non-empty requestKey, which is persisted with the source and the focus; the same key with a different reason is refused. While an attempt of the source is in flight the call returns its identity and starts nothing. The reviewer has no write, shell, spawn, or evolution tool, is capped per root store (default 1), and is cancelled by a watchdog if it overruns.",
+		description: "Spawn ONE read-only review agent for one exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started) — take the diagnosis it produces, and persist it as a Diagnosis. The reviewer reads the review pack and, beyond it, whatever settles the question through its own context reads. What it returns is an observation (the postmortem observation — what really happened, for a successful source as much as a failed one), a conclusion in its own words (\"no improvement needed\" and \"the evidence does not settle this\" are conclusions), a confidence, and — only when it made them — judgements and proposals. A judgement names one of the dimensions no parser settles (task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency) with verdict adequate|inadequate|unknown, the refs it rests on and a rationale; judgements are optional and never padded, and a judgement that cites nothing is refused rather than downgraded. A proposal is a suggestion only: it names a target type the diagnosis does not freeze, and nothing here executes it. reason names what the review should focus on. A reviewer that is cancelled or answers without a diagnosis leaves an interrupted attempt with the reason named and records no Diagnosis. One source has one default attempt: a repeat of the same call (an automatic scan and an explicit call share it) returns that attempt and its result instead of starting another, and never spends the budget again. Reviewing the same source again after that attempt ended is an explicit act: pass a new non-empty requestKey, which is persisted with the source and the focus; the same key with a different reason is refused. While an attempt of the source is in flight the call returns its identity and starts nothing. The reviewer has no write, shell, spawn, or evolution tool and is capped per root store (default 1).",
 		parameters: {
 			taskId: {
 				type: "string",
@@ -5916,10 +5898,6 @@ function defineTaskReviewAgentTool(ctx) {
 			requestKey: {
 				type: "string",
 				description: "Optional non-empty key for an explicit further review of the same source; omit for the source's default attempt"
-			},
-			timeoutMs: {
-				type: "number",
-				description: `Watchdog deadline in milliseconds; defaults to ${REVIEW_AGENT_TIMEOUT_MS}`
 			}
 		},
 		output: {
@@ -5927,6 +5905,8 @@ function defineTaskReviewAgentTool(ctx) {
 			render: (_a, v) => text$3(v)
 		},
 		execute: async (args, exec) => {
+			const undeclared$3 = undeclaredParameters(args, DECLARED_PARAMETERS, "task_review_agent");
+			if (undeclared$3 !== void 0) return undeclared$3;
 			const caller = sessionId$2(exec);
 			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(caller)).rootSessionId);
 			const source = {
@@ -5947,7 +5927,6 @@ function defineTaskReviewAgentTool(ctx) {
 				actor: caller,
 				requestKey: optionalText(args.requestKey),
 				reason: optionalText(args.reason),
-				...args.timeoutMs === void 0 ? {} : { timeoutMs: args.timeoutMs },
 				signal: exec.signal
 			}), source, storeId, snapshot, review);
 		}
@@ -6008,7 +5987,7 @@ function sessionId$1(exec) {
 function defineTaskSubmitResultTool(ctx) {
 	return defineTool({
 		name: "task_submit_result",
-		description: "Hand in this run's result for acceptance. This is the explicit submission the coordination protocol is built on: it records what was delivered (summary, plus the evidence/artifact references you produced), closes admission for this run — no further write, command or decomposition is admitted — drains the calls still in flight, and hands the run to the verifier. The call returns the verdict. An idle session is not a completion: a worker that goes idle without submitting gets one reminder and remains subject to its existing wall-clock deadline. A run waiting on its own child batch cannot submit; the batch end hands the run back to `active` with nothing submitted for it, and that submission is then yours to make.",
+		description: "Hand in this run's result for acceptance. This is the explicit submission the coordination protocol is built on: it records what was delivered (summary, plus the evidence/artifact references you produced), closes admission for this run — no further write, command or decomposition is admitted — drains the calls still in flight, and hands the run to the verifier. The call returns the verdict. An idle session is not a completion: a worker that goes idle without submitting gets one reminder. A run waiting on its own child batch cannot submit; the batch end hands the run back to `active` with nothing submitted for it, and that submission is then yours to make.",
 		parameters: {
 			summary: {
 				type: "string",
