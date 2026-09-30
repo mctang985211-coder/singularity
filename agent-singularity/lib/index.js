@@ -4871,7 +4871,7 @@ function defineTaskDecomposeTool(ctx) {
 						},
 						decomposable: {
 							type: "boolean",
-							description: "Declare that this child should split further instead of doing the work: its worker is told to call task_decompose. Together with a capability gap this decides whether the child is admitted as decomposable."
+							description: "Mark true when the child spans separate, independently checkable results or capability boundaries worth delegating. Its worker decides from evidence whether to decompose or complete the work; do not prewrite its descendants. A capability gap also uses this marker for admission, but it grants no missing capability."
 						},
 						requiresIndependentAcceptance: {
 							type: "boolean",

@@ -229,7 +229,7 @@ const WORKER_BASELINE_LABELS = [
 * Every entry cites the prompt or tool contract that needs it:
 * - `capability_list`: `task_decompose` asks callers to discover valid capability
 *   names before proposing children, including recursively spawned workers.
-* - `task_decompose` — a worker admitted as decomposable is told to call it with
+* - `task_decompose` — a worker admitted as decomposable is told it may call it with
 *   a `reason` and the child task list, and for a `leaf` worker whose deployment
 *   runs with `Config.allowRuntimeDecomposition` on, the runtime-split rule the
 *   context projection carries opens the same tool to it.
