@@ -20,6 +20,8 @@
 | 失败诊断 | agent-singularity 失败自动、成功按需；存 Diagnosis 并投递实际负责父节点 | 收到建议后的行动与结果；未输出不能算有效 |
 | 共享能力改进 | evolution 的 sandbox、双侧评估、批准、apply/rollback；授权 supervisor 恢复失败根的新尝试 | 启用且触发时的工程收益；off/未触发只记未验证 |
 | 根协调职责 | agent-runtime 的角色政策与工具闸；root 仅派本层、答复和综合验收 | 完整目标持续推进，无图外业务执行链 |
+| 工作记忆 | Task/Evidence 事实 + DSH Session 历史 + context 读取投影；无独立 memory/无向知识图 | 报告记载查询使用，未证明可归因工程收益；不预建语义关系网 |
+| 原图冷续跑 | graphs.select/activate → adoptRoot；目前仅部分 worker 状态可续 | 普通 active worker 会被取消，整图杀进程续跑未证明；研究合同见计划 G 节 |
 
 权限与状态由实际代码保证；自然语言理解、分解选择与诊断效果靠工程证据。本文不重列历史缺口或构造未来字段，部署者须核对实际 profile、加载产物与工具面。
 
@@ -187,6 +189,8 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 （A3 已落地 2026-09-22：reducer 迁移闸与 K1 批次结束共同支持 active→waiting_children、active→submitted、waiting_children→active；取消行与终态拒绝行已接线；含问答阻塞的两行属 A4，已交付（2026-09-25）：阻塞派生自问答事实、resolves:true 只解除对应项、主相位不变。）
 
 历史非终态 Run 缺相位时不能默认认定 active 并自动重跑；恢复入口先从旧事件确认可安全继续的路径，否则显示 needs-recovery 诊断，不新增伪造终态。（A3 已落地：旧无相位 run 不改状态、不重跑，`task_read`/`task_status` 派生 needs-recovery，唯一合法动作是取消。）迁移模式不得绕过原预算、重复已产生的外部副作用。
+
+**原图续跑的后续收敛（研究，尚未实施）**：用户只选同一图继续，不需说明中断原因；复用现有 select/activate 入口。运行时从持久相位恢复原 Run/Session、批次或验收，不按“曾提问/曾进化”等业务来源枚举可恢复对象。当前普通 active worker 会被取消的分支须改；`task_recover` 保持失败后的新尝试语义。机械绑定/单 writer 保留，业务事实的理解交模型。自由探索长图不默认计总墙钟截止，显式截止及已发生用量继续有效；单次 watchdog 保留。施工与唯一验收以[计划 G 节](2026-09-20-vrtc-code-change-plan.md#g-原图续跑与角色装配)为准，不从本段另派一套恢复系统。
 
 ### 7.3 问答归属与持久交接
 
