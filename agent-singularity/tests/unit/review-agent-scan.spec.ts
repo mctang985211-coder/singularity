@@ -131,6 +131,12 @@ function fixture(
 ) {
   const state = { snapshot }
   const spawn = vi.fn(async (...args: unknown[]) => spawnImpl(args))
+  const delivered = new Map<string, { messageId: string; targetSessionId: string; text: string }>()
+  const relay = vi.fn(async (intent: { messageId: string; targetSessionId: string; text: string }) => {
+    if (delivered.has(intent.messageId)) return { messageId: intent.messageId, status: 'already-present' as const }
+    delivered.set(intent.messageId, intent)
+    return { messageId: intent.messageId, status: 'delivered' as const }
+  })
   const listeners: ((fact: TerminalReviewFact) => void)[] = []
   const events: { event: string; listener: (payload: never) => void }[] = []
   const off = vi.fn()
@@ -142,7 +148,7 @@ function fixture(
         state.snapshot.diagnoses.push(structuredClone(diagnosis) as never)
       },
     },
-    agentRuntime: { spawn },
+    agentRuntime: { spawn, ensureAgentMessageDelivered: relay },
     agents: { get: (id: string) => (liveParent ? { id } : undefined) },
     taskRuntime: {
       registerTerminalReviewListener: (listener: (fact: TerminalReviewFact) => void) => {
@@ -155,7 +161,7 @@ function fixture(
       return vi.fn()
     },
   }
-  return { ctx: ctx as unknown as Context, spawn, state, listeners, events, off }
+  return { ctx: ctx as unknown as Context, spawn, relay, delivered, state, listeners, events, off }
 }
 
 function ledgerRows(): Record<string, unknown>[] {
@@ -194,6 +200,63 @@ afterEach(() => {
 })
 
 describe('the scan of a store\'s failed reviews', () => {
+  it('routes a blocked source without a run through the batch that admitted it', async () => {
+    const snapshot = baseSnapshot()
+    snapshot.tasks[0] = { ...snapshot.tasks[0], parentTaskId: 't-parent', runIds: [] } as never
+    snapshot.tasks.push({ ...snapshot.tasks[1], taskId: 't-parent', runIds: ['r-parent'] } as never)
+    snapshot.runs = [{ runId: 'r-parent', taskId: 't-parent', sessionId: 's-parent', batches: [{ memberTaskIds: ['t1'] }] }] as never
+    snapshot.reviews = [failedReview({ runId: undefined })]
+    const { ctx, delivered } = fixture(undefined, snapshot)
+    await scanFailedReviewSources(ctx, STORE)
+    expect([...delivered.values()]).toEqual([expect.objectContaining({ targetSessionId: 's-parent', text: expect.stringContaining('t1#no-run') })])
+  })
+
+  it('refuses a missing delegating run instead of delivering to the root', async () => {
+    const snapshot = baseSnapshot()
+    snapshot.tasks[0] = { ...snapshot.tasks[0], parentTaskId: 't-parent' } as never
+    const { ctx, relay } = fixture(undefined, snapshot)
+    const report = await scanFailedReviewSources(ctx, STORE)
+    expect(report.entries[0]!.reason).toContain('delegating run for parent task t-parent is not recorded')
+    expect(relay).not.toHaveBeenCalled()
+  })
+
+  it('reports a failed delivery and retries the stored diagnosis without reviewing again', async () => {
+    const { ctx, spawn, relay, delivered } = fixture()
+    relay.mockRejectedValueOnce(new Error('target session cannot be flushed'))
+    const first = await scanFailedReviewSources(ctx, STORE)
+    expect(first.entries[0]!.reason).toContain('diagnosis recorded but not delivered (target session cannot be flushed)')
+    expect(delivered.size).toBe(0)
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded' })
+
+    const second = await scanFailedReviewSources(ctx, STORE)
+    expect(second.entries[0]).toMatchObject({ result: 'existing' })
+    expect(second.entries[0]).not.toHaveProperty('reason')
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(delivered.size).toBe(1)
+    expect(relay.mock.calls[1]![0]).toEqual(relay.mock.calls[0]![0])
+    await scanFailedReviewSources(ctx, STORE)
+    expect(delivered.size).toBe(1)
+  })
+
+  it('reports an unavailable coordinator and never turns an interrupted review into a message', async () => {
+    const { ctx, relay, delivered } = fixture()
+    relay.mockResolvedValueOnce({ messageId: 'unused', status: 'unavailable' } as never)
+    const report = await scanFailedReviewSources(ctx, STORE)
+    expect(report.entries[0]!.reason).toContain('coordinator session root-1 is unavailable')
+    expect(delivered.size).toBe(0)
+    await scanFailedReviewSources(ctx, STORE)
+    expect(delivered.size).toBe(1)
+
+    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
+    const silent = fixture(async args => {
+      await (args[1] as { beforePrompt: () => Promise<void> }).beforePrompt()
+      return handle(undefined)
+    }, { ...baseSnapshot(), id: 'sg-t-silent' } as never)
+    const failed = await scanFailedReviewSources(silent.ctx, 'sg-t-silent')
+    expect(failed.entries[0]).toMatchObject({ result: 'failed', reason: 'the reviewer returned no output' })
+    expect(silent.relay).not.toHaveBeenCalled()
+  })
+
   it('accepts a failed review on its own: claim, session, one reviewer whose first request names the source and its outcome', async () => {
     const { ctx, spawn } = fixture()
     const report = await scanFailedReviewSources(ctx, STORE)

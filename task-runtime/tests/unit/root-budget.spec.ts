@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { assertRootBudgetConfig, checkBatchAdmission, checkRunStart, countSubtreeFacts, hasRootLimits, resolveRootBudget, runDeadlineMs } from '../../src/root-budget.ts'
+import { assertRootBudgetConfig, checkBatchAdmission, checkRunStart, hasRootLimits, resolveRootBudget, runDeadlineMs } from '../../src/root-budget.ts'
 import type { ResolvedRootBudget } from '../../src/root-budget.ts'
 import { rootTaskStoreId } from '../../../task/src/index.ts'
 import type {
@@ -529,44 +529,6 @@ describe('runDeadlineMs', () => {
     expect(runDeadlineMs('2026-09-22T00:00:00.000Z', undefined, undefined, Date.parse('2026-09-22T00:20:00.000Z'))).toBe(Number.POSITIVE_INFINITY)
   })
 
-})
-
-describe('countSubtreeFacts', () => {
-  test('counts every entry of a three-level subtree and nothing outside it', () => {
-    const tree = threeLevelTree()
-    // root subtree: tasks root/child-a/child-b/grandchild = 4, runs = 4,
-    // edges: child-a→child-b and grandchild→root (the outsider self-edge is
-    // outside) = 2, evidence = 3, handoffs = 2, reviews = 3, diagnoses = 2,
-    // obligations = 2.
-    expect(countSubtreeFacts(tree, 'root')).toBe(4 + 4 + 2 + 3 + 2 + 3 + 2 + 2)
-    // child-a subtree: child-a + grandchild = 2 tasks, 2 runs, 2 edges (both
-    // edges out of the subtree have their `from` inside), 1 evidence, 1 handoff
-    // (root→child-a has its `childTaskId` inside), 1 review, 1 diagnosis, 1
-    // obligation.
-    expect(countSubtreeFacts(tree, 'child-a')).toBe(2 + 2 + 2 + 1 + 1 + 1 + 1 + 1)
-    // A leaf counts itself and what names it.
-    expect(countSubtreeFacts(tree, 'child-b')).toBe(1 + 1 + 1 + 1 + 1 + 1 + 0 + 1)
-  })
-
-  test('does not count a sibling tree living in the same store', () => {
-    const tree = threeLevelTree()
-    const sibling = countSubtreeFacts(tree, 'outsider')
-    const rooted = countSubtreeFacts(tree, 'root')
-    // Work recorded against the outsider sub-tree moves its own count and leaves
-    // the root's alone: the filter is the subtree, not the store.
-    const withMore = { ...tree, diagnoses: [...tree.diagnoses, diagnosis('d-9', 'outsider')] }
-    expect(countSubtreeFacts(withMore, 'root')).toBe(rooted)
-    expect(countSubtreeFacts(withMore, 'outsider')).toBe(sibling + 1)
-  })
-
-  test('is stable for an unknown task and does not loop on a cycle', () => {
-    expect(countSubtreeFacts(threeLevelTree(), 'no-such-task')).toBe(0)
-    const cyclic = snapshot({
-      tasks: [task('a', undefined, ['b']), task('b', 'a', ['a'])],
-      runs: [run('r-a', 'a'), run('r-b', 'b')],
-    })
-    expect(countSubtreeFacts(cyclic, 'a')).toBe(2 + 2)
-  })
 })
 
 describe('assertRootBudgetConfig', () => {

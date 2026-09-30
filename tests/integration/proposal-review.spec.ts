@@ -713,13 +713,11 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
   })
 
-  it('keeps a worker whose own batch waits for a review idle on purpose, without a no-progress stop', async () => {
+  it('keeps a worker whose own batch waits for a review idle without a submission reminder', async () => {
     // The known wait (§6/§7.4): a worker that proposed a batch and is waiting for
-    // its review is idle by protocol. Under a one-round budget the no-progress
-    // rule would stop it immediately if that idle counted as stagnation.
+    // its review is idle by protocol and needs no submission reminder.
     const h = await startScriptedLoop({
       generatedTaskReview: 'all',
-      noProgressRounds: 1,
       script: (_sessionId, index) => [
         { tool: 'task_decompose', args: batch(index === 0 ? 'the outer child' : 'a nested child') },
         { text: 'batch proposed' },
@@ -738,12 +736,12 @@ describe('the review policy on the real loop (T2 §5)', () => {
     await vi.waitFor(async () => expect((await h.runForSession(child)).run.executionPhase).toBe('active'))
 
     // The cancellation is the deterministic release: the driver settles the
-    // outer batch only here, so everything the no-progress rule did (or did not
-    // do) about the waiting child is on the record by the time this returns.
+    // outer batch only here, so the waiting child's terminal state is on the record.
     const outcomes = await h.runtime.cancelBatch(root.storeId, await rootBatchId(h), ROOT)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])
     const childRun = (await h.runForSession(child)).run
     expect(taskEvents(h, root.storeId).filter(event => event.kind === 'RunProgressMarked' && event.runId === childRun.runId)).toHaveLength(0)
+    expect(h.requestsOf(child).some(request => request.texts.some(text => text.includes('went idle without submitting')))).toBe(false)
     expect((await h.task.runIn(root.storeId, childRun.runId)).status).toBe('cancelled')
     const review = (await h.snapshot(root.storeId)).reviews.find(item => item.runId === childRun.runId)
     expect(review?.localizedCause ?? '').not.toContain('no progress')

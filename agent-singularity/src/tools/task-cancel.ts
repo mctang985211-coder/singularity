@@ -23,7 +23,7 @@ export function defineTaskCancelTool(ctx: Context) {
   return defineTool({
     name: 'task_cancel',
     description:
-      'Cancel the batch of child tasks this run is waiting on. The children still in flight are cancelled, the ones that never ' +
+      'Cancel your current run together with its in-flight child batch. The children still in flight are cancelled, the ones that never ' +
       'started are blocked before start, and this run is cancelled with them — a batch that cannot finish is ended here, never ' +
       'left hanging. Only the run whose own batch it is may cancel it, and only while the batch is in flight: a run that already ' +
       'got its execution back holds no batch to cancel, and a run with no batch open is told so and nothing changes. To end work ' +

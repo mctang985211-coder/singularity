@@ -74,6 +74,8 @@ export interface AssemblyStackOptions {
   readonly worker?: (sessionId: string) => Promise<void> | void
   /** The review policy this store runs under. Defaults to the runtime's own (`off`). */
   readonly review?: 'off' | 'all'
+  /** Inherited deployment presentation; root setup may override it. */
+  readonly toolsMode?: 'native' | 'ptc' | 'both'
   /**
    * The tree-wide root budget this deployment enforces (`Config.rootBudget`): the
    * run count and the deadline a store's whole tree is measured against. A case
@@ -186,7 +188,7 @@ export class AssemblyStack {
   async start(): Promise<this> {
     const ctx = this.ctx
     await ctx.plugin(SystemPrompt, {})
-    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(ToolRuntime, this.options.toolsMode === undefined ? {} : { mode: this.options.toolsMode })
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(SessionStore)
     await ctx.plugin(SkillRegistry, {})

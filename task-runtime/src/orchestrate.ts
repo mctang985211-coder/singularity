@@ -32,7 +32,7 @@ import type { ExecutionGate, JobsView } from './gate.ts'
 import { owedQuestionMessagesTo, releaseAskingSessions } from './question.ts'
 import type { ProviderPrecheck } from './provider-precheck.ts'
 import { providerRefusals } from './provider-precheck.ts'
-import { checkRunStart, countSubtreeFacts, hasRootLimits, resolveRootBudget, runDeadlineMs } from './root-budget.ts'
+import { checkRunStart, hasRootLimits, resolveRootBudget, runDeadlineMs } from './root-budget.ts'
 import type { RootBudgetConfig } from './root-budget.ts'
 import { describeOwner, releaseLayer } from './workspace.ts'
 import type { WorkspaceOwner, WorkspaceRegistry } from './workspace.ts'
@@ -330,12 +330,6 @@ export interface OrchestrateEnv {
   watchRun?(storeId: string, runId: RunId, cb: (status: RunStatus) => void): () => void
   /** The root budget in force (`Config.rootBudget`); absent means this deployment sets no root limits. */
   rootBudget?: RootBudgetConfig
-  /**
-   * No-progress rounds before a worker that went idle without submitting is
-   * stopped (`Config.noProgressRounds`). The count is consecutive and derived
-   * from the store's own last marking, so it survives a resume.
-   */
-  noProgressRounds: number
   /** How long a write drain may take before it is reported as unconfirmed (`Config.writeDrainTimeoutMs`). */
   writeDrainTimeoutMs: number
   /** The jobs service the drain kills and waits on; absent means this deployment has no managed jobs. */
@@ -1267,7 +1261,6 @@ type WorkerObservation =
   | { kind: 'terminal'; status: RunStatus }
   | { kind: 'aborted' }
   | { kind: 'budget-exhausted' }
-  | { kind: 'no-progress'; rounds: number; reason: string }
   | { kind: 'failed'; reason: string }
 
 /**
@@ -1569,48 +1562,20 @@ async function waitRunSettled(env: OrchestrateEnv, storeId: string, runId: RunId
   }
 }
 
-/** The reminder a worker that went idle without submitting gets, once per no-progress streak. */
-function idleReminderText(run: TaskRun, rounds: number, limit: number): string {
+/** The reminder a worker that went idle without submitting gets once. */
+function idleReminderText(run: TaskRun): string {
   return (
     `task-runtime: session ${run.sessionId} went idle without submitting its result. If the work is done, call ` +
-    `task_submit_result with a summary and the evidence you produced — an idle session is not a completion, and the ` +
-    `runtime is counting no-progress rounds (${rounds} of ${limit} before this run is stopped).`
-  )
-}
-
-/** The stop reason for a worker that never submitted: a budget stop on the no-progress rule, never a criteria verdict. */
-function noProgressReason(rounds: number, factCount: number, limit: number): string {
-  return (
-    `no progress: the worker went idle without submitting ${rounds} time(s) in a row and its subtree gained no new facts ` +
-    `(last count ${factCount}); stopped at the no-progress limit of ${limit} round(s) — this is a budget stop on the ` +
-    'no-progress rule, not a criteria failure — ' +
-    escalationHint(
-      'the run stopped producing facts and never called task_submit_result',
-      `${rounds} idle round(s) with an unchanged subtree fact count`,
-      'split the task further, make the acceptance criteria explicit, or accept the partial result',
-    )
+    `task_submit_result with a summary and the evidence you produced — an idle session is not a completion. ` +
+    `This run remains subject to its wall-clock budget.`
   )
 }
 
 /**
- * Watch one spawned worker until its run settles, its budget runs out, or its
- * batch is cancelled — the one wait every worker path shares (`runReplayTask`
- * and the batch driver).
- *
- * The three inputs are raced, not sequenced: the store's own terminal state
- * (the submission path, a nested batch, a cancellation written elsewhere), the
- * worker's idle, and the deadline. Idle is *not* completion (A3's core
- * correction): the loop reads the run's phase before deciding what idle means.
- * `waiting_children` and `submitted` mean the run is legitimately waiting, so
- * the idle observation stops and only the terminal state is awaited — marking
- * progress there would count a wait as stagnation. `active` means a submission
- * was due: if the agent is mid-turn the runtime waits (a reminded worker needs a
- * turn to react), otherwise the round is marked and, at the limit, the run is
- * stopped with the no-progress reason.
- *
- * The deadline comes from the run's own persisted `startedAt` through
- * {@link remainingRunMs}: a run resumed in a new process keeps the clock it
- * started with (§3.5, §7.4).
+ * Wait for the run's terminal state, its original deadline, or batch cancellation.
+ * An active worker that goes idle gets one submission reminder; a worker waiting
+ * for children, verification, a proposal, or an answer gets none. Every wait keeps
+ * the deadline measured from the persisted `startedAt`.
  */
 async function observeWorkerRun(
   env: OrchestrateEnv,
@@ -1621,24 +1586,14 @@ async function observeWorkerRun(
   signal: AbortSignal | undefined,
 ): Promise<WorkerObservation> {
   const recorded = waitRunSettled(env, storeId, run.runId, run.sessionId)
-  // The race below may take another branch, and a watcher this deployment cannot
-  // wire rejects rather than resolving: that rejection is the *other* branch's
-  // business (the store read), never an unhandled one.
+  // Keep a losing watcher's rejection handled.
   recorded.catch(() => {})
   const terminal = recorded.then((status): WaitingObservation => ({ kind: 'terminal', status }))
-  // The root's deadline is a store fact and is read *per judgement*, never once
-  // per wait (K4): a person who raises the tree's ceiling while this worker is
-  // parked must be seen by the very reading that would otherwise end the run, so
-  // every bound below comes from a resolution taken at the moment it is applied —
-  // and the run's own wall time, which no extension resets, is part of the same
-  // reading (`remainingRunMs`).
+  // Read approved root-budget extensions without resetting the run's own clock.
   const remainingNow = (): Promise<number> => remainingRunMsFromStore(env, storeId, run)
   for (;;) {
     const remaining = await remainingNow()
     if (remaining <= 0) {
-      // The deadline had already passed when this wait began, so no waiter will
-      // cancel the worker: this does, the same forced exit `awaitWorker` performs
-      // when the deadline fires while it is waiting.
       handle.agent.cancel({ kind: 'parent' })
       return { kind: 'budget-exhausted' }
     }
@@ -1648,96 +1603,29 @@ async function observeWorkerRun(
     if (isTerminalRun(current.status)) return { kind: 'terminal', status: current.status }
     const phase = current.executionPhase
     if (phase === 'waiting_children' || phase === 'submitted') {
-      // The worker is not the one who will settle this run: its own batch is
-      // running, or its submission is inside verification. So idle observations
-      // stop here and no round is marked — but the wait stays bounded the same way
-      // the active case is: the run's own deadline and the batch's abort both end
-      // it (A3 §3.1's race), because a run that is waiting is still work the tree
-      // has to be able to stop.
       return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, remainingNow, terminal)
     }
     if (agentIsRunning(handle)) continue
     const snapshot = await env.task.snapshotIn(storeId)
-    // The known wait (T2/T3 §6, §7.4): a run whose own batch is waiting for a
-    // review — or for the admission its approval authorizes — is idle on
-    // purpose. Counting that idle as stagnation would stop a worker for
-    // waiting exactly where the protocol told it to wait, so the wait is
-    // treated like `waiting_children`: no round is marked, and the run stays
-    // bounded by the same limits it always was — its own deadline (what is left
-    // of the root's, and any instant its caller placed on it) and the batch's
-    // abort. Neither is paused or reset
-    // for the review; a review that outlives them ends the run as the budget
-    // stop it is, and the proposal is left where it stands.
-    //
-    // The question wait (A4 §F.1) is the same shape one level down: a worker
-    // that asked its parent something unanswered has gone idle *because the
-    // protocol is holding it*, so an idle observation is not stagnation and no
-    // round is marked. It is bounded by exactly the same limits — the
-    // deadline still cancels the run (a block is not a stay of execution), and a
-    // batch abort still reaches it — and the question stays on the record as the
-    // audit of what was asked. Nothing here opens the write gate: while the
-    // question is open the session's own gate refuses everything but
-    // coordination, and only the answer's `resolves` recomputes that.
+    // Proposal and answer waits need no submission reminder.
     const knownWait = openProposalOf(snapshot, task.taskId, run.runId) !== undefined
       || blockingQuestionsOf(snapshot, run.runId).length > 0
     if (knownWait) {
       return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, remainingNow, terminal)
     }
-    const factCount = countSubtreeFacts(snapshot, task.taskId)
-    const previous = current.noProgress
-    const rounds = (previous?.factCount === factCount ? previous.rounds : 0) + 1
-    const note =
-      `the worker session went idle without submitting; the subtree holds ${factCount} fact(s), ` +
-      `${previous?.factCount === factCount ? `unchanged since round ${previous?.rounds}` : 'a change since the last marking'} ` +
-      `(round ${rounds} of ${env.noProgressRounds})`
-    await env.task.markRunProgressIn(storeId, task.taskId, run.runId, env.actor, {
-      kind: 'unsubmitted-idle',
-      rounds,
-      factCount,
-      note,
-    })
-    if (rounds >= env.noProgressRounds) {
-      return { kind: 'no-progress', rounds, reason: noProgressReason(rounds, factCount, env.noProgressRounds) }
-    }
-    if (rounds === 1) notifyOwner(env, run.sessionId, idleReminderText(run, rounds, env.noProgressRounds))
+    notifyOwner(env, run.sessionId, idleReminderText(run))
+    return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, remainingNow, terminal)
   }
 }
 
-/**
- * Wait for one run that is *waiting* — its own batch is running, or its
- * submission is inside verification — under the two bounds the active case also
- * runs under: the run's own deadline (`min` of its wall time, what is left of the
- * root's, and the instant a caller placed on it — all measured from its persisted
- * `startedAt`, {@link remainingRunMs}) and the batch's abort. Idle is the one
- * input that stops here, because an idle worker in these phases is expected
- * rather than progress: waiting on the store's terminal state is the only honest
- * observation left, and marking a round would count a legitimate wait as
- * stagnation.
- *
- * The abort is what a batch cancellation rides: a driver parked here without it
- * would leave `cancelBatch` waiting for a settlement nobody produces — the
- * children it never started stay unblocked and the workspace layer stays held —
- * and the unload path would hang behind the same promise.
- *
- * The cancellation is handed in as a callback rather than an `AgentHandle`
- * because the two callers hold different things: the round that started a
- * worker has its handle, while the batch driver adopting a question-waiting
- * child out of a store has only the session id and asks the deployment to
- * resolve the agent (A4 §F.1 — the deadline ends a recovered wait exactly as it
- * ends a live one, so this is one implementation, not two).
- *
- * The deadline is a *reading* ({@link RemainingRun}, resolved from the store at
- * the moment it is applied), and that is what a wait armed here has to keep:
- * when the timer elapses the wait does not conclude that the budget ran out — it
- * reads the ceilings again and only stops the run if the new reading is still
- * exhausted (K4). A ceiling a person raised while the wait was parked therefore
- * lengthens the wait instead of being overridden by a timer armed before it,
- * while the run's own per-run wall time — part of the same reading, and never
- * reset by an extension — ends it exactly as it did.
- */
 /** One run's remaining window, resolved afresh: what a judgement made now is based on. */
 type RemainingRun = () => Promise<number>
 
+/**
+ * Wait for the recorded terminal state without observing more idle events.
+ * Deadline exhaustion and batch cancellation still cancel the worker. Re-read the
+ * root ceiling when a timer fires so an approved extension is respected.
+ */
 async function awaitWaitingTerminal(
   env: OrchestrateEnv,
   run: TaskRun,
@@ -1754,9 +1642,7 @@ async function awaitWaitingTerminal(
     return { kind: 'aborted' }
   }
   signal?.addEventListener('abort', stop, { once: true })
-  // The abort is one promise for the whole wait, not one per reading: the wait
-  // re-arms itself when a ceiling moves, and a listener per round would pile up
-  // against a signal that may never fire.
+  // Share one abort promise when the deadline is re-armed.
   const aborted = signal === undefined
     ? undefined
     : new Promise<WaitingObservation>(resolve => {
@@ -1767,9 +1653,6 @@ async function awaitWaitingTerminal(
     for (;;) {
       const remaining = await remainingRun()
       if (remaining <= 0) {
-        // The deadline had already passed when this judgement was made, so no
-        // waiter will cancel the worker: this does, exactly as the active branch
-        // does.
         stop()
         return { kind: 'budget-exhausted' }
       }
@@ -1785,8 +1668,7 @@ async function awaitWaitingTerminal(
         clearTimeout(timer)
         timer = undefined
       }
-      // A wake is not a verdict: the ceilings are read again at the top of the
-      // loop, and only that reading ends the wait.
+      // A timer wake re-reads the current deadline.
       if (settled.kind !== 'wake') return settled
     }
   } finally {
@@ -1998,8 +1880,8 @@ async function settleChildRun(
  * per-child half of {@link driveBatch}.
  *
  * Every ending here is named as what it is — a batch abort cancels the child,
- * a deadline is a budget stop, an unsubmitted idle is a no-progress stop, a
- * worker error is a failure. The submission path does not appear as a branch:
+ * a deadline is a budget stop, a worker error is a failure. The submission path
+ * does not appear as a branch:
  * a run that submitted is settled by {@link settleSubmittedRun} (via the worker
  * whose tool call it was), and this only waits for the terminal state that
  * settlement writes.
@@ -2031,14 +1913,6 @@ async function driveChildRound(env: OrchestrateEnv, batch: BatchContext, child: 
       return await settleChildRun(env, batch.storeId, { item, run, dependencyTaskIds }, {
         status: 'failed',
         localizedCause: wallClockExhaustedReason(env),
-      })
-    }
-    case 'no-progress': {
-      handle.agent.cancel({ kind: 'parent' })
-      return await settleChildRun(env, batch.storeId, { item, run, dependencyTaskIds }, {
-        status: 'failed',
-        localizedCause: observation.reason,
-        anomalies: [`no-progress round ${observation.rounds} of ${env.noProgressRounds}`],
       })
     }
     case 'failed': {
@@ -3230,7 +3104,7 @@ export interface ReplayRunOutcome {
  *
  * A spawning replay is a worker like any other and follows the same rules: it
  * is born `active` and it *submits* — an idle worker is not a completion, the
- * no-progress counter runs, and the verification comes from the one entry every
+ * wall-clock budget still applies, and verification comes from the one entry every
  * run shares ({@link settleSubmittedRun}). A workerless replay is born
  * `submitted` (origin `runtime`) because there is nobody to submit: its
  * criteria are judged by the verifier and the run settles on the verdict.
@@ -3385,14 +3259,6 @@ export async function runReplayTask(
       const reason = wallClockExhaustedReason(bound)
       return await settleReplayRun(env, storeId, task, run, { status: 'failed', reason, localizedCause: reason, anomalies })
     }
-    case 'no-progress':
-      handle.agent.cancel({ kind: 'parent' })
-      return await settleReplayRun(env, storeId, task, run, {
-        status: 'failed',
-        reason: observation.reason,
-        localizedCause: observation.reason,
-        anomalies: [...anomalies, `no-progress round ${observation.rounds} of ${env.noProgressRounds}`],
-      })
     case 'failed':
       return await settleReplayRun(env, storeId, task, run, {
         status: 'failed',
@@ -3405,7 +3271,7 @@ export async function runReplayTask(
 
 /**
  * Settle one replay run the replay's own observation decided — a cancellation, a
- * deadline, an unsubmitted idle, a worker error — and report what the run settled
+ * deadline, a worker error — and report what the run settled
  * as.
  *
  * Two settlement paths can reach one run at once, and this is not hypothetical for

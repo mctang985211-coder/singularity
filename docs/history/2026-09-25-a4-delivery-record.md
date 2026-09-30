@@ -80,7 +80,7 @@ scripted provider 只替代模型输出；Task store、DSH inbox/Session、执�
 
 ## 未解决缺陷 / 已知限制（核实后如实记录，无阻断项）
 
-1. **重启后非根父不复活**：三层转问的中间层（waiting_children worker）在进程重启后不会被拉回 live，该跳投递 `unavailable`、意图保留、激活入口重试；被收养的问答等待 run 的等待无独立 deadline watcher。依据：A3 已把 worker 会话续跑划给 S2-R（`docs/2026-09-22-a3-coordination-design.md:201`），F.1 本票字面为「暂不可达记 unavailable，保留意图，恢复入口重试；不自动造替代父」——按合同判合规；解除条件：S2-R（第 14 项）。
+1. **重启后非根父不复活**：三层转问的中间层（waiting_children worker）在进程重启后不会被拉回 live，该跳投递 `unavailable`、意图保留、激活入口重试；被收养的问答等待 run 的等待无独立 deadline watcher。依据：A3 已把 worker 会话续跑划给 S2-R（`docs/history/2026-09-22-a3-coordination-design.md:201`），F.1 本票字面为「暂不可达记 unavailable，保留意图，恢复入口重试；不自动造替代父」——按合同判合规；解除条件：S2-R（第 14 项）。
 2. **阻塞确立不 drain 同 step 已放行的在途写**：与 A3 相位语义一致（先放行即在途、下一 barrier 收敛）；F.1 未要求 ask 处 drain。
 3. **store 层 reducer 不拒未知键**（`commitIn` 原始事件门为既有设计）；生产写入仅 `task-runtime` 编排入口逐字段重建，伪造事实的投递会被正文重读校验具名拒绝。
 4. **`orchestrate.ts` replay 异常分支约 6 处内联终态序列**：同一所有者内、index.ts 已清零，不违 A4-5；触发票：S4-E/A5 结算路径整理。

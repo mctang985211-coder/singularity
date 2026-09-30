@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { disposeScriptedLoops, startScriptedLoop, type ScriptedLoop, type ScriptEntry } from '../support/scripted-loop.ts'
@@ -16,9 +18,9 @@ import { disposeScriptedLoops, startScriptedLoop, type ScriptedLoop, type Script
  *    that waits for the batch) fails this, and §4.3's "分解立即返回且父可继续" is
  *    exactly this ordering.
  * 2. A worker that goes idle without submitting is reminded once and stopped by
- *    the no-progress budget, and the verifier never sees it: idle is not
+ *    the wall-clock budget, and the verifier never sees it: idle is not
  *    completion. The evidence is the two requests the adapter served for that
- *    session (turn one, the reminder), the store's own marking sequence, and the
+ *    session (turn one, the reminder), the store's deadline verdict, and the
  *    absence of any evidence bundle for the run.
  * 3. The execution gate is a real waterfall over the real tool registry: a write
  *    a closed phase does not admit is denied *before its body runs* (the fixture
@@ -185,9 +187,9 @@ describe('the coordination protocol on the real loop (A3)', () => {
     expect(parentRun.submission?.origin).toBe('worker')
   })
 
-  it('stops a worker that goes idle without submitting, after exactly one reminder', async () => {
+  it('stops an idle worker that never submits at its deadline, after exactly one reminder', async () => {
     const h = await startScriptedLoop({
-      noProgressRounds: 3,
+      budget: { wallTimeMs: 500 },
       // The worker never submits: every turn it gets, it answers and ends. The
       // root decomposes and then has nothing left to say.
       script: (_sessionId, index): readonly ScriptEntry[] => index === 0
@@ -202,18 +204,18 @@ describe('the coordination protocol on the real loop (A3)', () => {
     const child = childSession(h)
     const childRun = (await h.runForSession(child)).run
 
-    // The stop is a budget stop on the no-progress rule, and the store says so.
+    // The run is bounded even when neither work nor a submission follows its idle.
     expect(childRun.status).toBe('failed')
     const snapshot = await h.snapshot(root.storeId)
     const review = snapshot.reviews.find(item => item.runId === childRun.runId)!
     expect(review.outcome).toBe('failed')
-    expect(review.localizedCause).toContain('no progress')
+    expect(review.localizedCause).toContain('budget exhausted: wallTimeMs')
     expect(review.localizedCause).toContain('not a criteria failure')
-    // Every round was marked, in order, up to the configured limit.
+    // Idle checks do not count as work rounds.
     const marks = h.eventsOf(root.storeId)
       .filter((event): event is typeof event & { data: { kind: string; payload: { rounds: number } } } => event.type === 'task/event' && (event.data as { kind?: string }).kind === 'RunProgressMarked')
-    expect(marks.map(event => event.data.payload.rounds)).toEqual([1, 2, 3])
-    expect(childRun.noProgress?.rounds).toBe(3)
+    expect(marks).toHaveLength(0)
+    expect(childRun.noProgress).toBeUndefined()
 
     // Exactly one reminder, and it is what opened the worker's second turn: turn
     // one answered the prompt, the reminder answered nothing new.
@@ -228,6 +230,61 @@ describe('the coordination protocol on the real loop (A3)', () => {
     expect(snapshot.evidence.some(item => item.taskRunId === childRun.runId)).toBe(false)
     const verifying = h.eventsOf(root.storeId).filter(event => event.type === 'task/event' && (event.data as { kind?: string; runId?: string }).kind === 'TaskVerifying' && (event.data as { runId?: string }).runId === childRun.runId)
     expect(verifying).toHaveLength(0)
+  })
+
+  it('cancels a continuous worker turn at its configured wall-clock deadline', async () => {
+    const h = await startScriptedLoop({
+      budget: { wallTimeMs: 250 },
+      script: (_sessionId, index): readonly ScriptEntry[] => index === 0
+        ? [{ tool: 'task_decompose', args: { reason: 'split the work', children: children('long turn') } }]
+        : [{ hang: true }],
+    })
+    const root = await h.begin(ROOT_CONTRACT)
+    const outcomes = await h.runtime.awaitBatch(root.storeId, await batchIdOf(h))
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
+    const child = childSession(h)
+    await h.agent(child).whenIdle()
+    expect(h.requestsOf(child)).toHaveLength(1)
+    const childRun = (await h.runForSession(child)).run
+    const review = (await h.snapshot(root.storeId)).reviews.find(item => item.runId === childRun.runId)!
+    expect(review.localizedCause).toContain('budget exhausted: wallTimeMs')
+    expect(childRun.submission).toBeUndefined()
+  })
+
+  it('keeps a staged result active through four idle turns, then accepts the worker submission', async () => {
+    let h!: ScriptedLoop
+    h = await startScriptedLoop({
+      budget: { wallTimeMs: 10_000 },
+      script: (_sessionId, index): readonly ScriptEntry[] => index === 0
+        ? [{ tool: 'task_decompose', args: { reason: 'split the work', children: children('staged child') } }]
+        : [
+          { waitFor: () => writeFile(join(h.checkout, 'stage.txt'), 'first stage complete') },
+          { text: 'first stage complete' },
+          { text: 'checkpoint acknowledged' },
+          { text: 'next stage checked' },
+          { text: 'another stage checked' },
+          { tool: 'task_submit_result', args: { summary: 'completed the staged work', evidenceRefs: ['stage.txt'] } },
+        ],
+    })
+    const root = await h.begin(ROOT_CONTRACT)
+    const batchId = await batchIdOf(h)
+    await vi.waitFor(() => expect(h.spawns).toHaveLength(1))
+    const child = childSession(h)
+    await vi.waitFor(() => expect(h.requestsOf(child)).toHaveLength(2))
+    await h.agent(child).whenIdle()
+    expect(await readFile(join(h.checkout, 'stage.txt'), 'utf8')).toBe('first stage complete')
+
+    for (let turns = 3; turns <= 4; turns += 1) {
+      h.pluginSays('continue with the next stage', child)
+      await vi.waitFor(() => expect(h.requestsOf(child)).toHaveLength(turns))
+      await h.agent(child).whenIdle()
+      expect((await h.runForSession(child)).run.status).toBe('running')
+    }
+    expect(h.eventsOf(root.storeId).filter(event => event.type === 'task/event' && (event.data as { kind?: string }).kind === 'RunProgressMarked')).toHaveLength(0)
+    h.pluginSays('submit the completed result', child)
+    const outcomes = await h.runtime.awaitBatch(root.storeId, batchId)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    expect((await h.runForSession(child)).run.submission?.evidenceRefs).toEqual(['stage.txt'])
   })
 
   it('denies a write a closed phase does not admit, on the real tool waterfall, while the reads still answer', async () => {

@@ -8,7 +8,7 @@ import {
   readReviewAgentAttempts,
   reviewAgentLedgerFile,
 } from '../../agent-singularity/src/review-agent-ledger.ts'
-import { installReviewAgentAutoTrigger } from '../../agent-singularity/src/review-agent-scan.ts'
+import { installReviewAgentAutoTrigger, scanFailedReviewSources } from '../../agent-singularity/src/review-agent-scan.ts'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
 import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type ScriptedLoop } from '../support/scripted-loop.ts'
 
@@ -58,7 +58,7 @@ function child(objective: string, command: string): Record<string, unknown> {
 /** The reviewer's answer: the observation and conclusion it reached, plus the one dimension it judged. */
 const REVIEW_REPLY = '```json\n'
   + '{"observation":"the child failed its mandatory criterion",'
-  + '"conclusion":"the objective did not name the environment the work had to run in",'
+  + '"conclusion":"ev-1: the objective omitted the environment; use task_decompose after the batch settles for one child with a pinned environment",'
   + '"confidence":"medium",'
   + '"judgements":[{"dimension":"task_specification","verdict":"inadequate","evidenceRefs":["ev-1"],'
   + '"rationale":"the objective did not name the environment the work had to run in"}]}'
@@ -275,6 +275,45 @@ describe('a failed review is accepted on its own (A5)', () => {
       const settled = (await readReviewAgentAttempts(root.storeId))[0]!
       expect(settled.settlement?.status).toBe('recorded')
     })
+    await vi.waitFor(() => {
+      expect(h.requestsOf(String(ROOT)).flatMap(request => request.texts).join('\n')).toContain(`Review diagnosis review-agent-${reviewer} for failed source`)
+    })
+    const insertions = () => h.agent(ROOT).session.snapshotEvents().filter(event => event.type === 'agent/inbox/spliced')
+      .flatMap(event => (event.data as { inserted: { id: string }[] }).inserted)
+      .filter(message => message.id === `m-diagnosis-review-agent-${reviewer}`)
+    expect(insertions()).toHaveLength(1)
+    await scanFailedReviewSources(h.ctx, root.storeId)
+    expect(insertions()).toHaveLength(1)
+    expect(h.visible(h.agent(ROOT))).not.toContain('task_recover')
+    expect(input).toContain('Never tell the business coordinator to call task_recover')
+    expect(input).toContain('most failures need no evolution proposal')
+  }, 60_000)
+
+  it('delivers a nested failure diagnosis to its delegating parent run', async () => {
+    const h = await startScriptedLoop({
+      script: (_session, index) => index === 0
+        ? [{ tool: 'task_decompose', args: { reason: 'delegate subsystem', children: [child('parent subsystem', 'true')] } }]
+        : index === 1
+          ? [{ tool: 'task_decompose', args: { reason: 'isolate result', children: [child('leaf result', 'false')] } }]
+          : index === 2
+            ? [{ tool: 'task_submit_result', args: { summary: 'leaf handed in' } }]
+            : [{ text: REVIEW_REPLY }],
+    })
+    installReviewAgentAutoTrigger(h.ctx)
+    const root = await h.begin(ROOT_CONTRACT)
+    const { parent, leaf } = await vi.waitFor(async () => {
+      const snapshot = await h.snapshot(root.storeId)
+      const parent = snapshot.runs.find(run => run.parentRunId === root.runId)
+      const leaf = snapshot.runs.find(run => run.parentRunId === parent?.runId)
+      expect(leaf?.status).toBe('failed')
+      return { parent: parent!, leaf: leaf! }
+    })
+    await vi.waitFor(() => {
+      expect(h.requestsOf(parent.sessionId).flatMap(request => request.texts).join('\n'))
+        .toContain(`for failed source ${leaf.taskId}#${leaf.runId}`)
+    })
+    expect(h.requestsOf(String(ROOT)).flatMap(request => request.texts).join('\n')).not.toContain('Review diagnosis review-agent-')
+    expect((await h.snapshot(root.storeId)).diagnoses).toHaveLength(1)
   }, 60_000)
 
   it('spawns nothing at all for a review that settled verified', async () => {    const { h, tree, root } = await oneChild('true')

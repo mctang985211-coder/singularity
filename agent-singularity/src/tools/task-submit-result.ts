@@ -19,8 +19,8 @@ export function defineTaskSubmitResultTool(ctx: Context) {
       'Hand in this run\'s result for acceptance. This is the explicit submission the coordination protocol is built on: it records ' +
       'what was delivered (summary, plus the evidence/artifact references you produced), closes admission for this run — no further ' +
       'write, command or decomposition is admitted — drains the calls still in flight, and hands the run to the verifier. The call ' +
-      'returns the verdict. An idle session is not a completion: a worker that goes idle without submitting gets one reminder and is ' +
-      'stopped by the no-progress budget if it still has not submitted. A run waiting on its own child batch cannot submit; the batch ' +
+      'returns the verdict. An idle session is not a completion: a worker that goes idle without submitting gets one reminder and ' +
+      'remains subject to its existing wall-clock deadline. A run waiting on its own child batch cannot submit; the batch ' +
       'end hands the run back to `active` with nothing submitted for it, and that submission is then yours to make.',
     parameters: {
       summary: {

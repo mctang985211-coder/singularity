@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createUserMessage } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
 import { RuntimeContextProjection, SystemPromptProjection } from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/lib/types/runtime-context.js'
 import { joinContextSections, renderContextSections } from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
+import { bindScopeParent, createScope } from '../../../../thirdparty/deepseek-harness/packages/core/scope/lib/index.js'
 import { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
@@ -51,7 +52,8 @@ async function chain(stack: AssemblyStack): Promise<{ storeId: string; workerSes
     reason: 'split the work',
     children: [{
       objective: 'implement the feature',
-      acceptanceCriteria: [{ description: 'unit tests pass', command: 'pnpm test' }],
+      // This fixture settles a contract for prompt/permission assertions; it tests no engineering result.
+      acceptanceCriteria: [{ description: 'fixture acceptance passes', command: 'true' }],
     }],
   } as never)
   await stack.runtime.awaitBatch(storeId, batch.batchId)
@@ -96,6 +98,9 @@ describe('the assembled request a worker receives', () => {
     // The stable role policy is the agent runtime's section, ahead of the contract,
     // and it is not a second copy of it.
     expect(prompt).toContain('You are a Singularity task worker.')
+    expect(prompt).toContain('Before implementation, assess whether it contains multiple independently checkable results')
+    expect(prompt).toContain('Your parent does not have to plan your descendants')
+    expect(prompt).toContain('retain this task\'s full acceptance')
     expect(prompt.indexOf('You are a Singularity task worker.')).toBeLessThan(prompt.indexOf('# Immutable context (contract)'))
     // The stable policy names no raw cross-session reader (A2): history is read
     // with `context_read`.
@@ -112,8 +117,93 @@ describe('the assembled request a worker receives', () => {
     const rootPrompt = await stack.prompt('s-root')
     expect(rootPrompt).toContain('## Your contract (graph root)')
     expect(rootPrompt).toContain('objective: ship the release')
+    expect(rootPrompt).toContain('Keep the full user objective in the root contract')
+    expect(rootPrompt).toContain('does not mean dispatching every engineering step from the root')
+    expect(rootPrompt).toContain('task_cancel cancels your own run together')
     expect(rootPrompt).not.toContain('role: worker')
     expect(rootPrompt).not.toContain('You are a Singularity task worker.')
+  })
+
+  it('denies root-local execution tools while workers keep their granted tools', async () => {
+    const stack = await boot()
+    const root = stack.root()
+    const invoked = vi.fn(async () => 'fixture result')
+    for (const name of ['subagent', 'subagent_fork', 'read', 'grep', 'write', 'edit', 'bash']) {
+      // Preset-generated definitions can live on the agent's own plane, where
+      // tools.restrict does not apply. The execution guard must still deny them.
+      root.ctx.tools.register({
+        name,
+        description: 'agent-owned fixture',
+        parameters: { type: 'object', properties: {} },
+        output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value as string }] },
+        execute: invoked,
+      })
+      expect(stack.ctx.tools.get(name, root), name).toBeDefined()
+      const answer = await stack.call(root.id, name)
+      expect(answer.isError, name).toBe(true)
+      expect(answer.text, name).toContain('delegate engineering work with task_decompose')
+    }
+    expect(invoked).not.toHaveBeenCalled()
+    const { workerSession } = await chain(stack)
+    expect((await stack.call(workerSession, 'read')).isError).toBe(false)
+    expect((await stack.call(workerSession, 'bash')).isError).toBe(false)
+    expect(stack.executed()).toContain('read')
+    expect(stack.executed()).toContain('bash')
+  })
+
+  it.each(['ptc', 'both'] as const)(
+    'keeps roots native under %s while workers retain the deployment transport',
+    async mode => {
+      const stack = await startAssemblyStack({ worker: async () => {}, toolsMode: mode })
+      stacks.push(stack)
+      const run = vi.fn(async () => {
+        throw new Error('the fixture must never execute a program')
+      })
+      stack.ctx.provide('ptcRuntime', { language: 'typescript', isolation: 'process', run } as never)
+      const root = stack.root()
+      const rootSchemas = (await stack.assemble(root.id)).tools.map(tool => tool.name)
+      expect(rootSchemas).toContain('task_read')
+      expect(rootSchemas).not.toContain('run_code')
+      expect(stack.ctx.tools.get('run_code', root)).toBeUndefined()
+      expect(stack.ctx.tools.schemas(root).map(tool => tool.name)).not.toContain('run_code')
+      const denied = await stack.call(root.id, 'run_code', { program: "console.log('never executed')" })
+      expect(denied.isError).toBe(true)
+      expect(run).not.toHaveBeenCalled()
+      expect((await stack.call(root.id, 'task_read')).isError).toBe(false)
+
+      const { workerSession } = await chain(stack)
+      const worker = stack.agent(workerSession)!
+      expect(stack.ctx.tools.get('run_code', worker)).toBeDefined()
+      expect((await stack.assemble(workerSession)).tools.map(tool => tool.name)).toContain('run_code')
+      expect(stack.ctx.tools.get('read', worker)).toBeDefined()
+      expect(stack.ctx.tools.get('bash', worker)).toBeDefined()
+      expect(run).not.toHaveBeenCalled()
+    },
+  )
+
+  it('root native presentation wins over a parent preset PTC presentation', async () => {
+    const stack = await boot()
+    const run = vi.fn(async () => {
+      throw new Error('the fixture must never execute a program')
+    })
+    stack.ctx.provide('ptcRuntime', { language: 'typescript', isolation: 'process', run } as never)
+    const presetKey = {}
+    await stack.ctx.plugin(
+      Object.assign(
+        (ctx: typeof stack.ctx) => {
+          const preset = createScope(ctx, presetKey)
+          preset.ctx.tools.presentAs('ptc')
+        },
+        { inject: ['tools', 'systemPrompt'] },
+      ),
+    )
+    const root = stack.root()
+    bindScopeParent(root, presetKey)
+    expect((await stack.assemble(root.id)).tools.map(tool => tool.name)).not.toContain('run_code')
+    expect(stack.ctx.tools.get('run_code', root)).toBeUndefined()
+    expect((await stack.call(root.id, 'run_code', { program: "console.log('never executed')" })).isError).toBe(true)
+    expect((await stack.call(root.id, 'task_read')).isError).toBe(false)
+    expect(run).not.toHaveBeenCalled()
   })
 
   it('injects nothing for a session that is no part of this deployment', async () => {

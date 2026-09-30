@@ -185,7 +185,6 @@ export {
   assertRootBudgetConfig,
   checkBatchAdmission,
   checkRunStart,
-  countSubtreeFacts,
   hasRootLimits,
   resolveRootBudget,
   runDeadlineMs,
@@ -816,16 +815,6 @@ export interface Config {
   /** Per-run resource budget; see {@link BudgetConfig} for which member is enforced, checked post-hoc, or declared only. */
   budget: BudgetConfig
   /**
-   * No-progress rounds before a worker that went idle without submitting is
-   * stopped (KISS §5: `no_progress(3轮)`). **Enforced** since A3: the batch
-   * driver observes every idle of a run whose phase is still `active`, marks one
-   * round per unsubmitted idle (the store's own last marking supplies the
-   * consecutive count), reminds the worker once per streak, and stops the run
-   * with the no-progress reason at this limit. A run waiting on its children or
-   * on verification is expected to be idle and is never marked.
-   */
-  noProgressRounds: number
-  /**
    * Whether a task admitted `leaf` may still decompose at runtime: the node
    * itself decides it is not atomic, instead of its parent having predicted it
    * ({@link DEFAULT_ALLOW_RUNTIME_DECOMPOSITION} carries the shipped value and
@@ -920,9 +909,6 @@ export const DEFAULT_BUDGET: Readonly<BudgetConfig> = {
   wallTimeMs: 2 * 60 * 60 * 1000,
   attempts: 1,
 }
-
-/** The shipped no-progress round count (KISS §5's `no_progress(3轮)`); enforced since A3 — see {@link Config.noProgressRounds}. */
-export const DEFAULT_NO_PROGRESS_ROUNDS = 3
 
 /**
  * The proposal statuses that hold a run (K1 §1: at most one proposal in flight
@@ -1023,7 +1009,6 @@ const ConfigSchema: z<Config> = z.object({
     wallTimeMs: z.number(),
     attempts: z.number(),
   }).default({ ...DEFAULT_BUDGET }),
-  noProgressRounds: z.number().default(DEFAULT_NO_PROGRESS_ROUNDS),
   allowRuntimeDecomposition: z.boolean().default(DEFAULT_ALLOW_RUNTIME_DECOMPOSITION),
   generatedTaskReview: z.union([z.const('off'), z.const('all')]).default(DEFAULT_GENERATED_TASK_REVIEW),
   rootBudget: RootBudget,
@@ -1774,7 +1759,6 @@ export class TaskRuntime extends Service {
       maxDepth: config?.maxDepth ?? DEFAULT_MAX_DEPTH,
       maxChildren: config?.maxChildren ?? DEFAULT_MAX_CHILDREN,
       budget: { ...DEFAULT_BUDGET, ...(config?.budget ?? {}) },
-      noProgressRounds: config?.noProgressRounds ?? DEFAULT_NO_PROGRESS_ROUNDS,
       allowRuntimeDecomposition: config?.allowRuntimeDecomposition ?? DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
       generatedTaskReview: config?.generatedTaskReview ?? DEFAULT_GENERATED_TASK_REVIEW,
       runBindingRoot: config?.runBindingRoot ?? defaultRunBindingRoot(),
@@ -1984,11 +1968,6 @@ export class TaskRuntime extends Service {
   /** The resolved per-run budget ({@link Config.budget}); which member is enforced, checked post-hoc, or declared only is documented on {@link BudgetConfig}. */
   get budget(): Readonly<BudgetConfig> {
     return { ...this.config.budget }
-  }
-
-  /** The resolved no-progress round count ({@link Config.noProgressRounds}); the batch driver's stop limit. */
-  get noProgressRounds(): number {
-    return this.config.noProgressRounds
   }
 
   /**
@@ -8420,7 +8399,6 @@ export class TaskRuntime extends Service {
       ...(workspacePath === undefined ? {} : { workspacePath }),
       ...(named === undefined ? {} : { workerCwd: named }),
       ...(binding?.agentOptions === undefined ? {} : { agentOptions: binding.agentOptions }),
-      noProgressRounds: this.config.noProgressRounds,
       writeDrainTimeoutMs: this.config.writeDrainTimeoutMs,
       ...(this.config.rootBudget === undefined ? {} : { rootBudget: { ...this.config.rootBudget } }),
       precheck: (capabilities, cwd) =>

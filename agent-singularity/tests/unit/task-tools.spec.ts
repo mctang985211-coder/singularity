@@ -631,7 +631,7 @@ describe('task_decompose', () => {
     // not write into the children's checkout and to know the submission is its own.
     expect(result).toContain('The runtime owns batch b-r-root-p-1 now')
     expect(result).toContain('You are in phase waiting_children')
-    expect(result).toContain('`task_cancel`')
+    expect(result).toContain('run together with its batch with `task_cancel` if abandoning this run')
     expect(result).toContain('Writes, shell commands, another decomposition and a submission of your own are refused')
     expect(result).toContain('The batch end reaches you as a message')
     expect(result).toContain('nothing is submitted on your behalf')

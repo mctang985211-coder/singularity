@@ -1388,17 +1388,16 @@ describe('TaskRuntime recovery (§6 restart and idempotency)', () => {
   })
 })
 
-describe('TaskRuntime no-progress rule and known waits (§7.4)', () => {
+describe('TaskRuntime known waits (§7.4)', () => {
   test('a worker whose own batch is waiting for a review is a known wait: no round is marked and nothing is stopped', async () => {
-    const h = harness({ config: { generatedTaskReview: 'all', noProgressRounds: 1 } })
+    const h = harness({ config: { generatedTaskReview: 'all' } })
     const { taskId, runId } = await createRoot(h)
     const submitted = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, batchSpec([childSpec('task a')]))
     if (submitted.status !== 'pending_review') throw new Error('unreachable')
     await h.runtime.decideProposal(STORE, submitted.proposalId, { outcome: 'approved' }, REVIEWER)
 
     // The spawned worker proposes its own split (policy `all`, so it waits) and
-    // then goes idle without submitting: exactly the state a no-progress rule
-    // must not read as stagnation.
+    // then goes idle without submitting: an expected protocol wait.
     let firstIdle = true
     h.setIdleBehavior(async sessionId => {
       if (!firstIdle) return
@@ -1416,10 +1415,11 @@ describe('TaskRuntime no-progress rule and known waits (§7.4)', () => {
     const workerRun = (await h.task.snapshotIn(STORE)).runs.find(run => run.taskId === child.taskId) as { runId: string }
 
     // The cancellation is the deterministic release: the driver settles the batch
-    // only here, so everything the no-progress rule did (or did not do) is on the
+    // only here, so the waiting child's terminal state is on the
     // record by the time this returns.
     const outcomes = await h.runtime.cancelBatch(STORE, (await h.task.runIn(STORE, runId)).batchId!, ROOT_SESSION)
     expect(taskEvents(h).filter(event => event.kind === 'RunProgressMarked' && event.runId === workerRun.runId)).toHaveLength(0)
+    expect(h.notifications.some(item => item.sessionId === h.spawned[0]?.sessionId && item.text.includes('went idle without submitting'))).toBe(false)
     expect((await h.task.runIn(STORE, workerRun.runId)).status).toBe('cancelled')
     expect(h.cancelled).toContain(h.spawned[0]?.sessionId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])

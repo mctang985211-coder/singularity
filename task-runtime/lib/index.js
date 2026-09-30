@@ -2637,34 +2637,6 @@ function runDeadlineMs(runStartedAt, perRunWallTimeMs, rootDeadlineAt, nowMs) {
 	return parts.length === 0 ? Number.POSITIVE_INFINITY : Math.min(...parts);
 }
 /**
-* How many entries one task's subtree holds — the progress measure the
-* no-progress rule counts. The subtree is the task itself plus everything
-* reachable through `childTaskIds` (a cycle is walked once), and each collection
-* is filtered by the side of the relation that names a task in it: runs by their
-* `taskId`, edges by either end, evidence/reviews/diagnoses by `taskId`,
-* handoffs by either `parentTaskId` or `childTaskId`, obligations by
-* `sourceTaskId`. The count is of *entries*: an id in the subtree with no task
-* record contributes no task entry, while its runs, edges and evidence still
-* count, because those entries exist and name it.
-*
-* Pure: the same snapshot always yields the same count, so a reviewer can
-* recompute it without replaying anything.
-*/
-function countSubtreeFacts(snapshot, taskId) {
-	const subtree = new Set([taskId]);
-	const pending = [taskId];
-	while (pending.length > 0) {
-		const current = pending.pop();
-		for (const child of snapshot.tasks.find((task) => task.taskId === current)?.childTaskIds ?? []) {
-			if (subtree.has(child)) continue;
-			subtree.add(child);
-			pending.push(child);
-		}
-	}
-	const inSubtree = (id) => subtree.has(id);
-	return snapshot.tasks.filter((task) => inSubtree(task.taskId)).length + snapshot.runs.filter((run) => inSubtree(run.taskId)).length + snapshot.edges.filter((edge) => inSubtree(edge.from) || inSubtree(edge.to)).length + snapshot.evidence.filter((bundle) => inSubtree(bundle.taskId)).length + snapshot.handoffs.filter((handoff) => inSubtree(handoff.parentTaskId) || inSubtree(handoff.childTaskId)).length + snapshot.reviews.filter((review) => inSubtree(review.taskId)).length + snapshot.diagnoses.filter((diagnosis) => inSubtree(diagnosis.taskId)).length + snapshot.obligations.filter((obligation) => inSubtree(obligation.sourceTaskId)).length;
-}
-/**
 * Refuse a root budget this deployment cannot execute. The one such limit is
 * `maxConcurrentWrites`: the workspace registry enforces exactly one writer, so
 * a configuration asking for any other number is a hard limit nobody can honor —
@@ -5136,33 +5108,15 @@ async function waitRunSettled(env, storeId, runId, sessionId) {
 		await sleep(SETTLEMENT_POLL_MS);
 	}
 }
-/** The reminder a worker that went idle without submitting gets, once per no-progress streak. */
-function idleReminderText(run, rounds, limit) {
-	return `task-runtime: session ${run.sessionId} went idle without submitting its result. If the work is done, call task_submit_result with a summary and the evidence you produced — an idle session is not a completion, and the runtime is counting no-progress rounds (${rounds} of ${limit} before this run is stopped).`;
-}
-/** The stop reason for a worker that never submitted: a budget stop on the no-progress rule, never a criteria verdict. */
-function noProgressReason(rounds, factCount, limit) {
-	return `no progress: the worker went idle without submitting ${rounds} time(s) in a row and its subtree gained no new facts (last count ${factCount}); stopped at the no-progress limit of ${limit} round(s) — this is a budget stop on the no-progress rule, not a criteria failure — ` + escalationHint("the run stopped producing facts and never called task_submit_result", `${rounds} idle round(s) with an unchanged subtree fact count`, "split the task further, make the acceptance criteria explicit, or accept the partial result");
+/** The reminder a worker that went idle without submitting gets once. */
+function idleReminderText(run) {
+	return `task-runtime: session ${run.sessionId} went idle without submitting its result. If the work is done, call task_submit_result with a summary and the evidence you produced — an idle session is not a completion. This run remains subject to its wall-clock budget.`;
 }
 /**
-* Watch one spawned worker until its run settles, its budget runs out, or its
-* batch is cancelled — the one wait every worker path shares (`runReplayTask`
-* and the batch driver).
-*
-* The three inputs are raced, not sequenced: the store's own terminal state
-* (the submission path, a nested batch, a cancellation written elsewhere), the
-* worker's idle, and the deadline. Idle is *not* completion (A3's core
-* correction): the loop reads the run's phase before deciding what idle means.
-* `waiting_children` and `submitted` mean the run is legitimately waiting, so
-* the idle observation stops and only the terminal state is awaited — marking
-* progress there would count a wait as stagnation. `active` means a submission
-* was due: if the agent is mid-turn the runtime waits (a reminded worker needs a
-* turn to react), otherwise the round is marked and, at the limit, the run is
-* stopped with the no-progress reason.
-*
-* The deadline comes from the run's own persisted `startedAt` through
-* {@link remainingRunMs}: a run resumed in a new process keeps the clock it
-* started with (§3.5, §7.4).
+* Wait for the run's terminal state, its original deadline, or batch cancellation.
+* An active worker that goes idle gets one submission reminder; a worker waiting
+* for children, verification, a proposal, or an answer gets none. Every wait keeps
+* the deadline measured from the persisted `startedAt`.
 */
 async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 	const recorded = waitRunSettled(env, storeId, run.runId, run.sessionId);
@@ -5189,24 +5143,15 @@ async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 		if (agentIsRunning(handle)) continue;
 		const snapshot = await env.task.snapshotIn(storeId);
 		if (openProposalOf(snapshot, task.taskId, run.runId) !== void 0 || blockingQuestionsOf(snapshot, run.runId).length > 0) return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: "parent" }), signal, remainingNow, terminal);
-		const factCount = countSubtreeFacts(snapshot, task.taskId);
-		const previous = current.noProgress;
-		const rounds = (previous?.factCount === factCount ? previous.rounds : 0) + 1;
-		const note = `the worker session went idle without submitting; the subtree holds ${factCount} fact(s), ${previous?.factCount === factCount ? `unchanged since round ${previous?.rounds}` : "a change since the last marking"} (round ${rounds} of ${env.noProgressRounds})`;
-		await env.task.markRunProgressIn(storeId, task.taskId, run.runId, env.actor, {
-			kind: "unsubmitted-idle",
-			rounds,
-			factCount,
-			note
-		});
-		if (rounds >= env.noProgressRounds) return {
-			kind: "no-progress",
-			rounds,
-			reason: noProgressReason(rounds, factCount, env.noProgressRounds)
-		};
-		if (rounds === 1) notifyOwner(env, run.sessionId, idleReminderText(run, rounds, env.noProgressRounds));
+		notifyOwner(env, run.sessionId, idleReminderText(run));
+		return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: "parent" }), signal, remainingNow, terminal);
 	}
 }
+/**
+* Wait for the recorded terminal state without observing more idle events.
+* Deadline exhaustion and batch cancellation still cancel the worker. Re-read the
+* root ceiling when a timer fires so an approved extension is respected.
+*/
 async function awaitWaitingTerminal(env, run, cancel, signal, remainingRun, terminal) {
 	const stop = () => {
 		cancel?.();
@@ -5400,8 +5345,8 @@ async function settleChildRun(env, storeId, child, verdict) {
 * per-child half of {@link driveBatch}.
 *
 * Every ending here is named as what it is — a batch abort cancels the child,
-* a deadline is a budget stop, an unsubmitted idle is a no-progress stop, a
-* worker error is a failure. The submission path does not appear as a branch:
+* a deadline is a budget stop, a worker error is a failure. The submission path
+* does not appear as a branch:
 * a run that submitted is settled by {@link settleSubmittedRun} (via the worker
 * whose tool call it was), and this only waits for the terminal state that
 * settlement writes.
@@ -5439,17 +5384,6 @@ async function driveChildRound(env, batch, child) {
 			status: "failed",
 			localizedCause: wallClockExhaustedReason(env)
 		});
-		case "no-progress":
-			handle.agent.cancel({ kind: "parent" });
-			return await settleChildRun(env, batch.storeId, {
-				item,
-				run,
-				dependencyTaskIds
-			}, {
-				status: "failed",
-				localizedCause: observation.reason,
-				anomalies: [`no-progress round ${observation.rounds} of ${env.noProgressRounds}`]
-			});
 		case "failed": return await settleChildRun(env, batch.storeId, {
 			item,
 			run,
@@ -6339,7 +6273,7 @@ async function parentBatchOf(env, storeId, task, run) {
 *
 * A spawning replay is a worker like any other and follows the same rules: it
 * is born `active` and it *submits* — an idle worker is not a completion, the
-* no-progress counter runs, and the verification comes from the one entry every
+* wall-clock budget still applies, and verification comes from the one entry every
 * run shares ({@link settleSubmittedRun}). A workerless replay is born
 * `submitted` (origin `runtime`) because there is nobody to submit: its
 * criteria are judged by the verifier and the run settles on the verdict.
@@ -6466,14 +6400,6 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 				anomalies
 			});
 		}
-		case "no-progress":
-			handle.agent.cancel({ kind: "parent" });
-			return await settleReplayRun(env, storeId, task, run, {
-				status: "failed",
-				reason: observation.reason,
-				localizedCause: observation.reason,
-				anomalies: [...anomalies, `no-progress round ${observation.rounds} of ${env.noProgressRounds}`]
-			});
 		case "failed": return await settleReplayRun(env, storeId, task, run, {
 			status: "failed",
 			reason: observation.reason,
@@ -6484,7 +6410,7 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 }
 /**
 * Settle one replay run the replay's own observation decided — a cancellation, a
-* deadline, an unsubmitted idle, a worker error — and report what the run settled
+* deadline, a worker error — and report what the run settled
 * as.
 *
 * Two settlement paths can reach one run at once, and this is not hypothetical for
@@ -7076,8 +7002,6 @@ const DEFAULT_BUDGET = {
 	wallTimeMs: 7200 * 1e3,
 	attempts: 1
 };
-/** The shipped no-progress round count (KISS §5's `no_progress(3轮)`); enforced since A3 — see {@link Config.noProgressRounds}. */
-const DEFAULT_NO_PROGRESS_ROUNDS = 3;
 /**
 * The proposal statuses that hold a run (K1 §1: at most one proposal in flight
 * per run): a batch that is waiting for its review, ready to be admitted, or
@@ -7174,7 +7098,6 @@ const ConfigSchema = z.object({
 		wallTimeMs: z.number(),
 		attempts: z.number()
 	}).default({ ...DEFAULT_BUDGET }),
-	noProgressRounds: z.number().default(DEFAULT_NO_PROGRESS_ROUNDS),
 	allowRuntimeDecomposition: z.boolean().default(DEFAULT_ALLOW_RUNTIME_DECOMPOSITION),
 	generatedTaskReview: z.union([z.const("off"), z.const("all")]).default(DEFAULT_GENERATED_TASK_REVIEW),
 	rootBudget: RootBudget,
@@ -7333,7 +7256,6 @@ var TaskRuntime = class TaskRuntime extends Service {
 				...DEFAULT_BUDGET,
 				...config?.budget ?? {}
 			},
-			noProgressRounds: config?.noProgressRounds ?? DEFAULT_NO_PROGRESS_ROUNDS,
 			allowRuntimeDecomposition: config?.allowRuntimeDecomposition ?? DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
 			generatedTaskReview: config?.generatedTaskReview ?? DEFAULT_GENERATED_TASK_REVIEW,
 			runBindingRoot: config?.runBindingRoot ?? defaultRunBindingRoot(),
@@ -7514,10 +7436,6 @@ var TaskRuntime = class TaskRuntime extends Service {
 	/** The resolved per-run budget ({@link Config.budget}); which member is enforced, checked post-hoc, or declared only is documented on {@link BudgetConfig}. */
 	get budget() {
 		return { ...this.config.budget };
-	}
-	/** The resolved no-progress round count ({@link Config.noProgressRounds}); the batch driver's stop limit. */
-	get noProgressRounds() {
-		return this.config.noProgressRounds;
 	}
 	/**
 	* The review policy in force for batches that have not been admitted yet
@@ -12376,7 +12294,6 @@ var TaskRuntime = class TaskRuntime extends Service {
 			...workspacePath === void 0 ? {} : { workspacePath },
 			...named === void 0 ? {} : { workerCwd: named },
 			...binding?.agentOptions === void 0 ? {} : { agentOptions: binding.agentOptions },
-			noProgressRounds: this.config.noProgressRounds,
 			writeDrainTimeoutMs: this.config.writeDrainTimeoutMs,
 			...this.config.rootBudget === void 0 ? {} : { rootBudget: { ...this.config.rootBudget } },
 			precheck: (capabilities, cwd) => this.providerPrecheck(capabilities, { ...cwd === void 0 ? {} : { cwd } }),
@@ -12697,4 +12614,4 @@ var TaskRuntime = class TaskRuntime extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, deriveReuse, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, deriveReuse, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

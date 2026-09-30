@@ -129,6 +129,17 @@ function rootToolsFor(enabled: boolean): readonly string[] {
   return enabled ? [...ROOT_CORE_TOOLS, ...EVOLUTION_TOOLS, 'escalate'] : [...ROOT_CORE_TOOLS, 'escalate']
 }
 
+/** Root-local registrations also obey the coordination allow-list. */
+function sealRootTools(agentCtx: Context, enabled: boolean): void {
+  agentCtx.tools.presentAs('native')
+  const allowed = new Set(rootToolsFor(enabled))
+  agentCtx.tools.guard(execution =>
+    allowed.has(execution.name)
+      ? undefined
+      : 'singularity: the root coordinates through task tools; delegate engineering work with task_decompose',
+  )
+}
+
 /**
  * `hitl_approve` asks through `ctx.approval`, whose 'never' policy (bundled into
  * danger-full-access) auto-rejects before any answerer sees the request. Root
@@ -290,6 +301,7 @@ export class AgentRuntime extends Service {
           // allow-list already leaves them off the surface; this is the backstop
           // a preset or MCP merge cannot lift.
           sealRawSessionReads(agentCtx)
+          sealRootTools(agentCtx, evolution)
         },
       })
       this.handles.set(sessionId, handle)
@@ -321,6 +333,7 @@ export class AgentRuntime extends Service {
             agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
             agentCtx.tools.restrict({ allow: rootToolsFor(evolution) })
             sealRawSessionReads(agentCtx)
+            sealRootTools(agentCtx, evolution)
           },
         })
       } catch (error) {

@@ -1,7 +1,6 @@
 /**
  * What the whole tree is allowed to spend (A3 §3.5): the root's deadline, the
- * number of runs it may start, and the subtree fact count the no-progress rule
- * measures against.
+ * number of runs it may start.
  *
  * Why the root, and why the *start* of the root: a budget that is re-read from
  * the process that happens to be running can always be reset — restart the
@@ -29,14 +28,6 @@
  * Substituting "now" would silently grant a fresh full budget — exactly the
  * failure this module exists to prevent — so {@link resolveRootBudget} reports
  * the gap and the caller refuses to start.
- *
- * The fact count is deliberately a *snapshot* measure: `TaskSnapshot` carries no
- * event log (the review of this design fixed that assumption), so progress is
- * counted as the entries a subtree holds — tasks, runs, edges, evidence,
- * handoffs, reviews, diagnoses, obligations. Marking progress or changing a
- * run's phase rewrites a field and adds no entry, which is right: those are
- * bookkeeping, not work. A new child, a new dependency edge, a new evidence
- * bundle, a review record — those are work, and they move the count.
  *
  * Everything here is a pure function of the snapshot and the config. The
  * configuration's *shape* is one more guard: a hard limit this deployment cannot
@@ -309,44 +300,6 @@ export function runDeadlineMs(
     parts.push(deadline === undefined ? 0 : Math.max(0, deadline - nowMs))
   }
   return parts.length === 0 ? Number.POSITIVE_INFINITY : Math.min(...parts)
-}
-
-/**
- * How many entries one task's subtree holds — the progress measure the
- * no-progress rule counts. The subtree is the task itself plus everything
- * reachable through `childTaskIds` (a cycle is walked once), and each collection
- * is filtered by the side of the relation that names a task in it: runs by their
- * `taskId`, edges by either end, evidence/reviews/diagnoses by `taskId`,
- * handoffs by either `parentTaskId` or `childTaskId`, obligations by
- * `sourceTaskId`. The count is of *entries*: an id in the subtree with no task
- * record contributes no task entry, while its runs, edges and evidence still
- * count, because those entries exist and name it.
- *
- * Pure: the same snapshot always yields the same count, so a reviewer can
- * recompute it without replaying anything.
- */
-export function countSubtreeFacts(snapshot: TaskSnapshot, taskId: TaskId): number {
-  const subtree = new Set<TaskId>([taskId])
-  const pending: TaskId[] = [taskId]
-  while (pending.length > 0) {
-    const current = pending.pop() as TaskId
-    for (const child of snapshot.tasks.find(task => task.taskId === current)?.childTaskIds ?? []) {
-      if (subtree.has(child)) continue
-      subtree.add(child)
-      pending.push(child)
-    }
-  }
-  const inSubtree = (id: TaskId): boolean => subtree.has(id)
-  return (
-    snapshot.tasks.filter(task => inSubtree(task.taskId)).length +
-    snapshot.runs.filter(run => inSubtree(run.taskId)).length +
-    snapshot.edges.filter(edge => inSubtree(edge.from) || inSubtree(edge.to)).length +
-    snapshot.evidence.filter(bundle => inSubtree(bundle.taskId)).length +
-    snapshot.handoffs.filter(handoff => inSubtree(handoff.parentTaskId) || inSubtree(handoff.childTaskId)).length +
-    snapshot.reviews.filter(review => inSubtree(review.taskId)).length +
-    snapshot.diagnoses.filter(diagnosis => inSubtree(diagnosis.taskId)).length +
-    snapshot.obligations.filter(obligation => inSubtree(obligation.sourceTaskId)).length
-  )
 }
 
 /**

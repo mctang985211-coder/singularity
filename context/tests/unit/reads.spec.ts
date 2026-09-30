@@ -1042,11 +1042,14 @@ describe('the decomposition guidance in the contract projection', () => {
       decomposable: true,
     })
     const text = expectOk(await stack.service.contractProjection('s-xw')).text
-    expect(text).toContain('## This task is decomposable')
+    expect(text).toContain("## Own this task's decomposition")
     expect(text).toContain('was admitted as decomposable')
     expect(text).toContain('`task_decompose`')
-    expect(text).toContain('RFC §36')
-    expect(text).toContain('Otherwise do the work here and submit it yourself')
+    expect(text).toContain('multiple independently checkable results or distinct responsibilities')
+    expect(text).toContain('call `task_decompose` before implementing them')
+    expect(text).toContain('retain this task\'s full acceptance')
+    expect(text).toContain('let each child decide its descendants')
+    expect(text).toContain('Complete a genuinely local result here')
     expect(text).not.toContain('Do not carry the work to completion yourself')
     expect(text).toContain('The batch end hands this task back to you')
     expect(text).toContain('hand this task in yourself with `task_submit_result`')
@@ -1056,7 +1059,7 @@ describe('the decomposition guidance in the contract projection', () => {
     expect(text).toContain('waiting for a human review')
     expect(text).toContain('`task_proposal_read`')
     expect(text).toContain('a revision is a new proposal')
-    expect(text).not.toContain('## If the work turns out not to be atomic')
+    expect(text).not.toContain('even when its parent did not mark it decomposable')
     expect(text).not.toContain('admits a task\'s own decomposition')
   })
 
@@ -1065,16 +1068,16 @@ describe('the decomposition guidance in the contract projection', () => {
     const chain = await seedChain(stack)
 
     const on = expectOk(await stack.service.contractProjection('s-c1')).text
-    expect(on).toContain('## If the work turns out not to be atomic')
+    expect(on).toContain('## Own this task\'s decomposition')
     expect(on).toContain('admits a task\'s own decomposition')
-    expect(on).toContain('a refusal names the rule that blocked it')
-    expect(on).toContain('one batch at a time is the rule')
+    expect(on).toContain('Use its refusal to fix the violated rule, not to weaken acceptance')
+    expect(on).toContain('One batch at a time is the rule')
     expect(on).toContain('may split again once its own batch ends')
     // K1 §2: the once-per-task decomposition limit is gone; the guidance must not
     // carry it forward.
     expect(on).not.toContain('split only once')
     expect(on).toContain('waiting for a human review')
-    expect(on).not.toContain('## This task is decomposable')
+    expect(on).not.toContain('was admitted as decomposable')
 
     stack.runtimeDecomposition = false
     const off = expectOk(await stack.service.contractProjection('s-c1')).text
@@ -1086,8 +1089,7 @@ describe('the decomposition guidance in the contract projection', () => {
     // whatever the switch says.
     stack.runtimeDecomposition = true
     const replay = expectOk(await stack.service.contractProjection(chain.replaySession)).text
-    expect(replay).not.toContain('## This task is decomposable')
-    expect(replay).not.toContain('## If the work turns out not to be atomic')
+    expect(replay).not.toContain("## Own this task's decomposition")
     expect(replay).not.toContain('waiting for a human review')
   })
 

@@ -1526,8 +1526,8 @@ function supervisorPrompt(input) {
 		"",
 		"Your job, in this order:",
 		"1. Read the facts yourself: task_review_pack for the exact source, task_read/task_status for the task and its siblings, context_read for the sessions and evidence the pack cites.",
-		"2. Decide what kind of gap this is. A capability or skill gap is closed by a candidate: evolution_propose (when no proposal names it yet), then evolution_candidate — ONE whole capability row plus an optional new execution skill, or a same-name update of an existing skill — evolution_prepare, evolution_replay for the two-sided experiment, and evolution_gate. A person decides and applies; you never call evolution_decide, evolution_apply or evolution_rollback, for yourself or for anyone.",
-		`3. A pure artifact gap — a product that was never produced — needs no proposal and no approval: it needs a new attempt at the failed goal. Once the capability a recovery depends on is in the applied table, call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "<a key of yours>" } and the runtime opens one new root run, judged by the original acceptance criteria. One key names one attempt, and a repeat of the same key returns that attempt instead of starting another.`,
+		"2. Create a candidate only if the original evidence establishes a capability or skill gap: evolution_propose (when no proposal names it yet), evolution_candidate for ONE whole capability row plus an optional new execution skill or a same-name update of an existing skill, then evolution_prepare, evolution_replay, and evolution_gate. A missing artifact alone does not establish such a gap. A person decides and applies; you never call evolution_decide, evolution_apply or evolution_rollback.",
+		`3. Only you, as the delegated supervisor, may call task_recover for a failed root goal; a failed child needs a new batch from its business parent. Associated capability changes must already be applied. A pure artifact gap needs no candidate when the source's required capability rows already resolve. Call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "<a key of yours>" }; the new attempt retains the original acceptance criteria, and repeating the key returns the same attempt. If a precondition is unmet, name it and stop; do not invent a capability proposal to unlock a retry.`,
 		"4. Not every suggestion is executable: a successful source is not recoverable, and a target type this build has no candidate for stays a recorded suggestion. Say what stopped you in your own words — nothing you write changes production, and no candidate executes anything by itself.",
 		"",
 		"You have no shell, no file write and no spawn, and no tool outside the list you were granted."
@@ -2368,14 +2368,16 @@ async function runReviewAgentAttempt(input) {
 			"Do not score, and do not modify anything.",
 			"Return EXACTLY one fenced json block, no prose around it:",
 			"```json",
-			"{\"observation\":\"...\",\"conclusion\":\"...\",\"confidence\":\"high|medium|low\",\"judgements\":[{\"dimension\":\"...\",\"verdict\":\"adequate|inadequate|unknown\",\"evidenceRefs\":[\"...\"],\"rationale\":\"...\"}],\"proposals\":[{\"targetType\":\"...\",\"targetId\":\"...\",\"rationale\":\"...\"}]}",
+			"{\"observation\":\"...\",\"conclusion\":\"...\",\"confidence\":\"high|medium|low\"}",
 			"```",
 			"- observation (required): the postmortem observation (复盘观察) — what was actually observed in the source, whether it failed or succeeded.",
-			"- conclusion (required): the explanation in your own words. \"no improvement needed\" and \"the evidence does not settle this\" are legitimate conclusions.",
+			"- Keep observation and conclusion concise; cite the failure command, log or session ref rather than restating the whole pack.",
+			"- conclusion (required): explain the cause and cite the original failure evidence. For a failed source, name one concrete next action for its business coordinator, such as a smaller independently verifiable child result after the batch settles. Check its task/run state first: task_decompose needs an active run; a terminal run needs a named stop and escalation, not another retry. If the evidence does not settle the cause, say what fact is missing and stop there.",
 			"- confidence (required): high, medium or low.",
-			"- judgements (optional): only the dimensions you can settle from the evidence, each citing the refs it rests on. Omit the ones you cannot settle; never pad them with \"unknown\".",
-			`  The dimensions no parser settles: ${JUDGED_DIMENSIONS.join(", ")}.`,
-			"- proposals (optional): suggestions only, each grounded in the evidence. An empty list is a normal answer, and nothing here executes by itself.",
+			"- A successful source may conclude \"no improvement needed\"; do not invent a failure or a next action.",
+			`- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}], only when useful and supported. Dimensions: ${JUDGED_DIMENSIONS.join(", ")}; verdict: adequate|inadequate|unknown. Do not fill every dimension.`,
+			"- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. Suggest a skill or capability change only when the evidence establishes that gap; most failures need no evolution proposal. Nothing here executes a proposal.",
+			"- Never tell the business coordinator to call task_recover: only a separately delegated supervisor has it. Recommend evolution tools only to a coordinator whose current tools authorize them, for an established skill/capability gap; they are not general task recovery.",
 			"A reply without an observation, a conclusion or a confidence is not a diagnosis: the attempt is recorded interrupted and nothing is stored.",
 			"",
 			`--- source under review ---`,
@@ -2565,6 +2567,42 @@ function rootAgentOf(ctx, storeId) {
 		agent
 	};
 }
+/** Relay the stored diagnosis to the run that delegated this source; the Session deduplicates its identity. */
+async function deliverDiagnosis(ctx, storeId, source, reviewerSessionId, log) {
+	try {
+		const snapshot = await ctx.task.snapshotIn(storeId);
+		const diagnosis = recordedDiagnosis(snapshot, reviewerSessionId);
+		if (diagnosis === void 0) return;
+		const task = snapshot.tasks.find((item) => item.taskId === source.taskId);
+		let targetSessionId;
+		if (task.parentTaskId === void 0) targetSessionId = rootSessionOfStore(storeId);
+		else {
+			const sourceRun = snapshot.runs.find((run) => run.runId === source.runId);
+			const parent = source.runId === null ? snapshot.runs.find((run) => run.taskId === task.parentTaskId && run.batches?.some((batch) => batch.memberTaskIds.includes(task.taskId))) : snapshot.runs.find((run) => run.runId === sourceRun?.parentRunId);
+			if (parent === void 0 || parent.taskId !== task.parentTaskId) throw new Error(`the source's delegating run for parent task ${task.parentTaskId} is not recorded`);
+			targetSessionId = parent.sessionId;
+		}
+		const text$32 = [
+			`Review diagnosis ${diagnosis.diagnosisId} for failed source ${sourceRef(source)} [${diagnosis.confidence}].`,
+			`Observed failure: ${diagnosis.observedFailure}`,
+			`Conclusion / next action: ${diagnosis.localizedCause}`,
+			`Original review: ${diagnosis.reviewRefs.join(", ")}; evidence: ${diagnosis.evidenceRefs.join(", ") || "none recorded"}.`,
+			"Read your current task/run state before acting. A diagnosis changes no task state or authority; it grants no task_recover or evolution tool."
+		].join("\n");
+		const delivery = await ctx.agentRuntime.ensureAgentMessageDelivered({
+			messageId: `m-diagnosis-${diagnosis.diagnosisId}`,
+			senderSessionId: SessionId(reviewerSessionId),
+			targetSessionId: SessionId(targetSessionId),
+			text: text$32
+		});
+		log?.(`review agent: diagnosis ${diagnosis.diagnosisId} to coordinator session ${targetSessionId}: ${delivery.status}`);
+		if (delivery.status === "unavailable") return `diagnosis ${diagnosis.diagnosisId} recorded but coordinator session ${targetSessionId} is unavailable; the next activation retries delivery`;
+	} catch (error) {
+		const reason = `diagnosis recorded but not delivered (${error instanceof Error ? error.message : String(error)}); the next activation retries delivery`;
+		log?.(`review agent: source ${sourceRef(source)} ${reason}`);
+		return reason;
+	}
+}
 /**
 * Scan one root task store for failed review sources and accept each under the
 * store's allowance (see the module header for the order).
@@ -2598,10 +2636,12 @@ async function scanFailedReviewSources(ctx, storeId, options = {}) {
 		const open = mine.filter((attempt) => attempt.settlement === void 0).at(-1);
 		const existing = open ?? mine.at(-1);
 		if (existing !== void 0 && open === void 0) {
+			const reason = await deliverDiagnosis(ctx, storeId, source, existing.sessionId, log);
 			entries.push({
 				source,
 				result: "existing",
-				sessionId: existing.sessionId
+				sessionId: existing.sessionId,
+				...reason === void 0 ? {} : { reason }
 			});
 			log?.(`review agent: source ${sourceRef(source)} already has an attempt (session ${existing.sessionId}, ${existing.settlement.status}) — read, nothing started`);
 			continue;
@@ -2650,17 +2690,21 @@ async function scanFailedReviewSources(ctx, storeId, options = {}) {
 			continue;
 		}
 		switch (outcome.kind) {
-			case "recorded":
+			case "recorded": {
+				const reason = await deliverDiagnosis(ctx, storeId, source, outcome.sessionId, log);
 				entries.push({
 					source,
 					result: "started",
-					sessionId: outcome.sessionId
+					sessionId: outcome.sessionId,
+					...reason === void 0 ? {} : { reason }
 				});
 				log?.(`review agent: source ${sourceRef(source)} accepted — reviewer session ${outcome.sessionId} started`);
 				break;
+			}
 			case "reuse":
 			case "in-flight": {
-				const reason = recoveryReason(outcome.recovered);
+				const deliveryReason = outcome.kind === "reuse" ? await deliverDiagnosis(ctx, storeId, source, outcome.attempt.sessionId, log) : void 0;
+				const reason = [recoveryReason(outcome.recovered), deliveryReason].filter((part) => part !== void 0).join("; ") || void 0;
 				entries.push({
 					source,
 					result: "existing",
@@ -4408,7 +4452,7 @@ function defineMarkReadyTool(ctx) {
 function defineSpawnTool(ctx) {
 	return defineTool({
 		name: "graph_spawn",
-		description: "Delegate one task to a new Singularity worker node and wait for its final response.",
+		description: "Delegate environment setup only, before the graph is ready, to a new Singularity worker and wait for its final response. Use task_decompose for objective work after setup.",
 		parameters: {
 			name: {
 				type: "string",
@@ -4429,6 +4473,10 @@ function defineSpawnTool(ctx) {
 			}]
 		},
 		execute: async (args, exec) => {
+			const sessionId$22 = exec.agent?.id;
+			if (sessionId$22 === void 0) throw new Error("graph_spawn: missing agent id");
+			const graph = await ctx.graphs.graphForSession(sessionId$22);
+			if (graph.ready) throw new Error(`graph_spawn: graph ${graph.id} is ready; delegate objective work with task_decompose`);
 			const handle = await ctx.agentRuntime.spawn(exec.agent, {
 				sessionId: SessionId(randomUUID()),
 				name: args.name,
@@ -4620,7 +4668,7 @@ function askedText(outcome) {
 	const lines = [`task_ask_parent: question ${question.questionId} recorded for your direct parent (run ${question.parentRunId}); ${deliveryText(outcome.delivery)}.`];
 	if (!outcome.created) lines.push("This is the question the same request key already recorded, word for word: nothing was written a second time and the same identity stands. Do not re-send it under a new key.");
 	if (question.blocking) {
-		lines.push("This run is now blocked on that answer: writes, shell commands, another decomposition and `task_submit_result` are refused until an answer with `resolves: true` is recorded — a child batch of this run ending does not lift the block, because nothing answers a question on your behalf. Stop the work that would write and end this step — an idle run waiting on this question is not counted as no progress, while the run's own deadline still applies.");
+		lines.push("This run is now blocked on that answer: writes, shell commands, another decomposition and `task_submit_result` are refused until an answer with `resolves: true` is recorded — a child batch of this run ending does not lift the block, because nothing answers a question on your behalf. Stop the work that would write and end this step — an idle run waiting on this question gets no submission reminder, while the run's own deadline still applies.");
 		lines.push("The answer arrives as a message in this session and in your context, where the question stays while it is open; read it before you continue, and keep to what it says.");
 	} else lines.push("This run is not blocked: it may carry on working while the answer is pending, so it may pass you later in this session or in your context — do not treat the silence as an answer.");
 	return lines.join("\n");
@@ -4687,7 +4735,7 @@ function renderOutcome$2(outcome) {
 function defineTaskCancelTool(ctx) {
 	return defineTool({
 		name: "task_cancel",
-		description: "Cancel the batch of child tasks this run is waiting on. The children still in flight are cancelled, the ones that never started are blocked before start, and this run is cancelled with them — a batch that cannot finish is ended here, never left hanging. Only the run whose own batch it is may cancel it, and only while the batch is in flight: a run that already got its execution back holds no batch to cancel, and a run with no batch open is told so and nothing changes. To end work that is not a batch of yours, remove the graph instead.",
+		description: "Cancel your current run together with its in-flight child batch. The children still in flight are cancelled, the ones that never started are blocked before start, and this run is cancelled with them — a batch that cannot finish is ended here, never left hanging. Only the run whose own batch it is may cancel it, and only while the batch is in flight: a run that already got its execution back holds no batch to cancel, and a run with no batch open is told so and nothing changes. To end work that is not a batch of yours, remove the graph instead.",
 		parameters: { reason: {
 			type: "string",
 			description: "Why the batch is being cancelled; the settlement answer echoes it back to you"
@@ -4726,7 +4774,7 @@ function sessionId$9(exec) {
 function defineTaskDecomposeTool(ctx) {
 	return defineTool({
 		name: "task_decompose",
-		description: "Decompose the caller's current task into child tasks. The batch is admitted atomically and the runtime then runs them one at a time in dependency order; this call returns at admission and does not wait. Each child is verified against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.",
+		description: "Delegate the caller's current task's independently checkable results or distinct responsibilities to child tasks. Each caller owns its full result and may coordinate children that decompose again; define only this level and let each child decide its descendants. The batch is admitted atomically and the runtime then runs them one at a time in dependency order; this call returns at admission and does not wait. Each child is verified against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.",
 		parameters: {
 			reason: {
 				type: "string",
@@ -4871,7 +4919,7 @@ function defineTaskDecomposeTool(ctx) {
 						},
 						decomposable: {
 							type: "boolean",
-							description: "Mark true when the child spans separate, independently checkable results or capability boundaries worth delegating. Its worker decides from evidence whether to decompose or complete the work; do not prewrite its descendants. A capability gap also uses this marker for admission, but it grants no missing capability."
+							description: "Mark true when the child owns multiple independently checkable results or distinct responsibilities. Its worker coordinates those results and decides its own decomposition before implementation; do not prewrite descendants or reduce its full acceptance. A genuinely local result can be completed directly. A capability gap also uses this marker for admission, but it grants no missing capability."
 						},
 						requiresIndependentAcceptance: {
 							type: "boolean",
@@ -4934,7 +4982,7 @@ function admittedText(taskId, batchId, childTaskIds) {
 		...childTaskIds.map((childTaskId, index) => `- child ${index + 1}: ${childTaskId}`),
 		"",
 		`The runtime owns batch ${batchId} now: it starts the children one at a time in dependency order and drives the batch to its end. This call returns at admission and does not wait for the batch.`,
-		"You are in phase waiting_children: read and query with `task_read`/`task_status` (and diagnose or inspect), or end the batch with `task_cancel`. Writes, shell commands, another decomposition and a submission of your own are refused while the children run — do not start work that would collide with theirs in the shared checkout.",
+		"You are in phase waiting_children: read and query with `task_read`/`task_status` (and diagnose or inspect), or end the run together with its batch with `task_cancel` if abandoning this run. Writes, shell commands, another decomposition and a submission of your own are refused while the children run — do not start work that would collide with theirs in the shared checkout.",
 		"The batch end reaches you as a message naming each child's terminal state and evidence, and it hands your execution back: nothing is submitted on your behalf. Back in phase active you continue your own work, admit another batch with `task_decompose`, or hand this task in yourself with `task_submit_result` — only that submission starts its acceptance."
 	].join("\n");
 }
@@ -5960,7 +6008,7 @@ function sessionId$1(exec) {
 function defineTaskSubmitResultTool(ctx) {
 	return defineTool({
 		name: "task_submit_result",
-		description: "Hand in this run's result for acceptance. This is the explicit submission the coordination protocol is built on: it records what was delivered (summary, plus the evidence/artifact references you produced), closes admission for this run — no further write, command or decomposition is admitted — drains the calls still in flight, and hands the run to the verifier. The call returns the verdict. An idle session is not a completion: a worker that goes idle without submitting gets one reminder and is stopped by the no-progress budget if it still has not submitted. A run waiting on its own child batch cannot submit; the batch end hands the run back to `active` with nothing submitted for it, and that submission is then yours to make.",
+		description: "Hand in this run's result for acceptance. This is the explicit submission the coordination protocol is built on: it records what was delivered (summary, plus the evidence/artifact references you produced), closes admission for this run — no further write, command or decomposition is admitted — drains the calls still in flight, and hands the run to the verifier. The call returns the verdict. An idle session is not a completion: a worker that goes idle without submitting gets one reminder and remains subject to its existing wall-clock deadline. A run waiting on its own child batch cannot submit; the batch end hands the run back to `active` with nothing submitted for it, and that submission is then yours to make.",
 		parameters: {
 			summary: {
 				type: "string",

@@ -235,8 +235,6 @@ export interface ScriptedLoopOptions {
   readonly capabilities?: Readonly<Record<string, CapabilityConfig>>
   /** Root sessions of this deployment, in order; the first is the primary. Defaults to `['s-root']`. */
   readonly roots?: readonly string[]
-  /** No-progress rounds before an unsubmitted worker is stopped. Defaults to the runtime's own (3). */
-  readonly noProgressRounds?: number
   readonly verifyTimeoutMs?: number
   readonly writeDrainTimeoutMs?: number
   /** The per-run budget this deployment enforces (`Config.budget`) — the deadline a spec drives a blocked wait into. */
@@ -986,7 +984,6 @@ class ScriptedLoopImpl implements ScriptedLoop {
     this.verifier = ctx.get('verifier') as VerifierRegistry
     await ctx.plugin(TaskRuntime, {
       capabilities: { ...(this.options.capabilities ?? {}) },
-      ...(this.options.noProgressRounds === undefined ? {} : { noProgressRounds: this.options.noProgressRounds }),
       ...(this.options.verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs: this.options.verifyTimeoutMs }),
       ...(this.options.writeDrainTimeoutMs === undefined ? {} : { writeDrainTimeoutMs: this.options.writeDrainTimeoutMs }),
       ...(this.options.budget === undefined ? {} : { budget: { ...this.options.budget } }),

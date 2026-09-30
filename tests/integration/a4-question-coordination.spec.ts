@@ -625,7 +625,7 @@ describe('the budget still ends a blocked wait (A4 §F.1)', () => {
     expect(reconciled.questionDeliveries).toEqual([])
   }, 30_000)
 
-  it('counts a blocked idle worker as the protocol\'s wait, not as no progress, under a one-round limit', async () => {
+  it('bounds a blocked idle worker by its deadline while preserving the question wait', async () => {
     const asked = Promise.withResolvers<void>()
     const h = await startScriptedLoop({
       // These cases drive the runtime entries themselves: the question tools stay
@@ -633,9 +633,6 @@ describe('the budget still ends a blocked wait (A4 §F.1)', () => {
       // `tool/call` citation the entry is handed (the shipped definitions are
       // ③c's, and its own spec runs them).
       questionTools: 'stand-in',
-      // One unsubmitted idle round stops a worker — unless the idle *is* the wait
-      // the protocol put it in, which is what this case turns on.
-      noProgressRounds: 1,
       // The run's own wall time is what ends the parked wait: the deadline is not a
       // stay of execution, and it is the only thing this wait ended by.
       budget: { wallTimeMs: 250 },
@@ -675,13 +672,12 @@ describe('the budget still ends a blocked wait (A4 §F.1)', () => {
       expect(current.status).toBe('running')
       return current
     })
-    // No no-progress round was marked for the wait — neither on the run nor in the
-    // store's own event log (which this read is shown to see by the fact above).
+    // The known wait gets no submission reminder or idle marking.
     expect(taskEventsOf(h, root.storeId).some(event => event.kind === 'QuestionAsked' && event.runId === childRun.runId)).toBe(true)
     expect(parked.noProgress).toBeUndefined()
     expect(taskEventsOf(h, root.storeId).filter(event => event.kind === 'RunProgressMarked' && event.runId === childRun.runId)).toEqual([])
-    // The wait ends the way a wait does: the run's own wall time, not the
-    // no-progress rule, and the question stays on the record as its audit.
+    expect(h.requestsOf(child).some(request => request.texts.some(text => text.includes('went idle without submitting')))).toBe(false)
+    // The wait ends at the run's own wall time, and the question stays on the record.
     const ended = await vi.waitFor(async () => {
       const current = (await h.runForSession(child)).run
       expect(current.status).toBe('failed')

@@ -4,7 +4,7 @@
  * (`task/src/proposal.ts`); what lives here is what only the runtime can
  * compute: the idempotency key a caller's request is addressed by, the review
  * context a batch actually resolved against, and the question "is this run
- * waiting on a proposal?" the no-progress rule has to ask.
+ * waiting on a proposal?" the coordination loop needs.
  *
  * **The request key.** §6 requires a stable key per request, derived from the
  * calling context: the same key with the same content is answered from the

@@ -154,7 +154,7 @@ function context(
 
 interface Assembly {
   /** The scoped context the agent factory hands `setup`, with the restrictions and the prompt section it wrote. */
-  readonly agentCtx: { tools: { restrict: Spy; guard: Spy }; systemPrompt: { section: Spy } }
+  readonly agentCtx: { tools: { restrict: Spy; guard: Spy; presentAs: Spy }; systemPrompt: { section: Spy } }
   readonly session: { append: Spy }
   /** What `tools.restrict` was called with: the root's actual allow-list. */
   readonly restrict: Spy
@@ -162,6 +162,7 @@ interface Assembly {
   readonly section: Spy
   /** What `tools.guard` was called with: the sealed raw-session readers' execution guard. */
   readonly guard: Spy
+  readonly presentAs: Spy
 }
 
 /** Runs one root assembly's `setup` the way the agent factory does — after the preset mount, before the first prompt. */
@@ -170,9 +171,10 @@ async function assemble(options: unknown): Promise<Assembly> {
   const section = vi.fn()
   const guard = vi.fn()
   const session = { append: vi.fn() }
-  const agentCtx = { tools: { restrict, guard }, systemPrompt: { section } }
+  const presentAs = vi.fn()
+  const agentCtx = { tools: { restrict, guard, presentAs }, systemPrompt: { section } }
   await (options as { setup: (ctx: unknown, agent: unknown) => Promise<void> }).setup(agentCtx, { session })
-  return { agentCtx, session, restrict, section, guard }
+  return { agentCtx, session, restrict, section, guard, presentAs }
 }
 
 /** The prompt text one assembly registered, read back off the section call. */
@@ -241,9 +243,12 @@ async function runSetup(options: { setup?: (ctx: unknown, agent: unknown) => Pro
 
 /** The denial a registered guard returns for one tool name, or `undefined` when the call is left alone. */
 function denialOf(guard: Spy, name: string): string | undefined {
-  const fn = guard.mock.calls[0]?.[0] as ((execution: { name: string }) => string | undefined) | undefined
-  if (fn === undefined) throw new Error('no guard was registered')
-  return fn({ name })
+  if (guard.mock.calls.length === 0) throw new Error('no guard was registered')
+  for (const [fn] of guard.mock.calls) {
+    const reason = (fn as (execution: { name: string }) => string | undefined)({ name })
+    if (reason !== undefined) return reason
+  }
+  return undefined
 }
 
 describe('AgentRuntime root lifecycle', () => {
@@ -464,7 +469,10 @@ describe('AgentRuntime root lifecycle', () => {
       session: { header: { id: id('root'), cwd: '/environment', agentPreset: 'standard' } },
     })
     const child = { id: id('child'), followup: vi.fn() }
-    const create = vi.fn(async () => ({ agent: child, dispose: async () => {} }))
+    const create = vi.fn(async (_options: { setup: (ctx: unknown, agent: unknown) => Promise<void> }) => ({
+      agent: child,
+      dispose: async () => {},
+    }))
     Object.assign(state.ctx.agents, { get: () => state.root, create })
     Object.assign(state.ctx.graph, { commitIn: async () => {} })
     Object.assign(state.ctx, { parallel: async () => {} })
@@ -477,8 +485,10 @@ describe('AgentRuntime root lifecycle', () => {
     })
 
     const childSession = {}
-    await (create.mock.calls[0][0] as { setup: (ctx: unknown, agent: unknown) => Promise<void> })
-      .setup({ tools: { guard: vi.fn() }, systemPrompt: { section: vi.fn() } }, { session: childSession })
+    await create.mock.calls[0]![0].setup(
+      { tools: { guard: vi.fn() }, systemPrompt: { section: vi.fn() } },
+      { session: childSession },
+    )
     expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(childSession, 'workspace-write')
   })
 
@@ -563,7 +573,7 @@ describe('AgentRuntime root lifecycle', () => {
     expect(section).toHaveBeenCalledWith({
       name: 'singularity:root',
       order: 70,
-      text: expect.stringContaining('connect workers, not to implement tasks'),
+      text: expect.stringContaining("coordinate the user's complete objective through task workers"),
     })
     expect(prompt).not.toContain('evolution')
     expect(prompt).not.toContain('stay manual')
@@ -576,23 +586,23 @@ describe('AgentRuntime root lifecycle', () => {
     // …and the question goes to the user, not to the environment (R1 S3
     // evidence: the second attempt normalized a checkout-only source and a
     // quarter rule it never asked about, and delivered nothing).
-    expect(prompt).toContain('put the question to the user through the channels you have before you accept the contract')
-    expect(prompt).toContain('do not let the environment answer it for you')
+    expect(prompt).toContain('put the question to the user before accepting the contract')
+    expect(prompt).toContain('the environment cannot answer for the user')
     // …the contract is bounded by what the user supported and by what the
     // deployment's verifiers can settle (R1 S3 evidence: the third attempt kept
     // a full-summary goal the answer never supported and left two mandatory
     // criteria to a review that returned inconclusive).
-    expect(prompt).toContain('The contract carries only what the user\'s own words and answers support')
+    expect(prompt).toContain('Include only requirements supported by the user\'s words and answers')
     expect(prompt).toContain('do not make a mandatory criterion depend on a review that may never happen')
-    expect(prompt).toContain('Reuse that checker where it covers the child, keep only criteria for distinct requirements')
-    expect(prompt).toContain('use known artifact paths rather than recursively searching a workspace')
+    expect(prompt).toContain('Reuse an authoritative checker where it covers the result, keep only criteria for distinct requirements')
+    expect(prompt).toContain('use known artifact paths')
     // The budget raise (K4) rides every root prompt — `task_budget_extend` is on
     // every root's allow-list — and it states the facts the model has to act on:
     // a tree that ran out is still reviewable on the reviewer's own allowance,
     // and the ceiling moves only because a person moved it.
-    expect(prompt).toContain('call task_budget_extend (permitted even with your tree stopped)')
-    expect(prompt).toContain("that review still runs on the reviewer's own allowance")
-    expect(prompt).toContain('it re-opens no task, starts nothing by itself, and the runs already counted go on counting')
+    expect(prompt).toContain('call task_budget_extend for a higher whole-total ceiling')
+    expect(prompt).toContain("A stopped tree is still reviewable on the reviewer's own allowance")
+    expect(prompt).toContain('It re-opens no task, starts nothing by itself, and the runs already counted go on counting')
     // A6 recovery belongs only to the separately granted supervisor hand-off;
     // an ordinary root neither receives the tool nor gets prompted to call it.
     expect(prompt).not.toContain('task_recover')
@@ -606,29 +616,17 @@ describe('AgentRuntime root lifecycle', () => {
     const { restrict, section } = await assemble(state.resumeOptions[0])
     expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
     const prompt = promptTextOf(section)
-    expect(prompt).toContain('To carry a diagnosed fix into the evolution track')
-    // S4-E §F.2 and A6: both candidate kinds use the two-sided experiment;
-    // capability candidates may carry one whole row and an optional new skill.
-    expect(prompt).toContain('a new baseline run under the production configuration and a new candidate run on the prepared bytes')
+    expect(prompt).toContain('Use evolution_propose and evolution_candidate')
+    expect(prompt).toContain('new baseline and candidate runs on frozen inputs, judges, model and budget')
     expect(prompt).toContain('one whole capability row with an optional new execution skill')
-    expect(prompt).toContain('a missing provider is a real not-admitted baseline')
-    expect(prompt).toContain('an existing skill object may be promoted only with its role, verifier and capability set unchanged')
-    expect(prompt).toContain('using only already authorized tools and no permission or preset change')
-    expect(prompt).not.toContain('a capability, agent_preset, task_definition or bookkeeping-only proposal is refused')
-    expect(prompt).toContain('evolution_list reads the ledger')
-    // K3 收尾 (K3-5): the protocol names the whole skill object this build
-    // improves — the model submits the replacement `SKILL.md` text and the
-    // execution sidecar is derived at prepare — together with the boundaries
-    // that still hold, and no reader of it may think a single file is all this
-    // build can update. The v1 candidate-vs-champion chain is not a request this
-    // prompt may send — an agent that cannot see it cannot keep asking for it.
-    expect(prompt).toContain('evolution_candidate for a same-name improvement of an existing skill object')
-    expect(prompt).toContain("an execution skill's SKILL.contract.json is derived from production at evolution_prepare")
-    expect(prompt).toContain('A new execution provider is allowed only with the capability row that grants it')
-    expect(prompt).not.toMatch(/single-file|single file/i)
-    expect(prompt).not.toContain('candidate vs champion')
-    expect(prompt).not.toContain('candidate-vs-champion')
-    expect(prompt).not.toContain('v1 replay')
+    expect(prompt).toContain('Keep the existing role, verifier and capabilities of a skill')
+    expect(prompt).toContain('use only authorized tools without changing permissions or presets')
+    expect(prompt).toContain('Decisions require human approval')
+    expect(prompt).toContain('evolution_apply with a second approval')
+    expect(prompt).toContain('Read the ledger with evolution_list')
+    expect(prompt).toContain("an existing execution contract is derived at prepare")
+    expect(prompt).toContain('A new execution provider needs the capability row that grants it')
+    expect(prompt).not.toMatch(/single-file|single file|candidate.vs.champion|v1 replay/i)
     // The domain reference map is a deployed skill, not part of the general root prompt.
     expect(prompt).not.toContain('Buckyball')
   })
@@ -666,7 +664,7 @@ describe('AgentRuntime root lifecycle', () => {
     expect(closedPrompt).toContain('call task_intake')
     expect(closedPrompt).toContain('there is no root task')
     expect(closedPrompt).toContain('not activated')
-    expect(closedPrompt).toContain('Do not guess your way past that')
+    expect(closedPrompt).toContain('Normalize clear requests yourself')
     expect(closedPrompt).toContain('Nothing you can call approves a contract')
     expect(closedPrompt).not.toContain('evolution')
 
@@ -678,7 +676,7 @@ describe('AgentRuntime root lifecycle', () => {
 
     expect(openAllow).toContain('task_intake')
     expect(promptTextOf(openAssembly.section)).toContain('call task_intake')
-    expect(promptTextOf(openAssembly.section)).toContain('To carry a diagnosed fix into the evolution track')
+    expect(promptTextOf(openAssembly.section)).toContain('Use evolution_propose and evolution_candidate')
   })
 
   test('ensureRoot returns an interrupted running root to idle before resuming it', async () => {
@@ -714,7 +712,7 @@ describe('AgentRuntime root lifecycle', () => {
     // no exposure mounted, the nine names and the protocol behind them are absent.
     expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_CLOSED })
     const prompt = promptTextOf(section)
-    expect(prompt).toContain('connect workers, not to implement tasks')
+    expect(prompt).toContain("coordinate the user's complete objective through task workers")
     expect(prompt).not.toContain('evolution')
     expect(prompt).not.toContain('Buckyball')
     expect(state.added).toEqual([['graph', { id: id('root'), name: 'Singularity', status: 'idle' }, true]])
@@ -732,9 +730,9 @@ describe('AgentRuntime root lifecycle', () => {
     const { restrict, section } = await assemble(state.createOptions[0])
     expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
     const prompt = promptTextOf(section)
-    expect(prompt).toContain('To carry a diagnosed fix into the evolution track')
+    expect(prompt).toContain('Use evolution_propose and evolution_candidate')
     expect(prompt).toContain('evolution_propose')
-    expect(prompt).toContain('evolution_list reads the ledger')
+    expect(prompt).toContain('Read the ledger with evolution_list')
     expect(prompt).not.toContain('Buckyball')
   })
 })
@@ -766,7 +764,7 @@ describe('the spawn request contract (A2)', () => {
     })
     // The stable, unconditional rules migrated from the old spawn prompt...
     for (const rule of [
-      'never declare completion yourself',
+      'Never declare completion yourself',
       'use `task_verify`: it runs the contracted criteria under the verifier deadline',
       'Do not copy an acceptance command into bash or a background job',
       'protected inputs must not be modified',
@@ -862,6 +860,26 @@ describe('the spawn request contract (A2)', () => {
     expect(RAW_SESSION_READ_DENIAL).toContain('context_read')
     for (const other of ['context_read', 'session_history_export', 'task_read', 'bash']) {
       expect(denialOf(guard, other)).toBeUndefined()
+    }
+  })
+
+  test.each([false, true])('root-local tools obey the coordination allow-list (evolution=%s)', async enabled => {
+    const created = context([], 'idle', { evolution: { enabled } })
+    const runtime = new AgentRuntime(created.ctx as never)
+    await runtime.createRoot({ sessionId: id('root'), cwd: '/workspace', scope: { graphStoreId: 'graph', layoutStoreId: 'layout' } })
+    const resumed = context([id('root')], 'idle', { evolution: { enabled } })
+    await new AgentRuntime(resumed.ctx as never).ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
+    for (const assembly of [await assemble(created.createOptions[0]), await assemble(resumed.resumeOptions[0])]) {
+      const allowed = enabled ? ROOT_TOOLS_OPEN : ROOT_TOOLS_CLOSED
+      expect(assembly.presentAs).toHaveBeenCalledExactlyOnceWith('native')
+      for (const name of allowed) expect(denialOf(assembly.guard, name), name).toBeUndefined()
+      for (const name of ['run_code', 'subagent', 'subagent_fork', 'read', 'grep', 'glob', 'write', 'edit', 'bash', 'jobs', 'mcp_custom']) {
+        expect(denialOf(assembly.guard, name), name).toContain('delegate engineering work with task_decompose')
+      }
+      for (const name of EVOLUTION_TOOLS) {
+        if (enabled) expect(denialOf(assembly.guard, name), name).toBeUndefined()
+        else expect(denialOf(assembly.guard, name), name).toBeDefined()
+      }
     }
   })
 

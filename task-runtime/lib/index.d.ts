@@ -1360,21 +1360,6 @@ declare function checkBatchAdmission(snapshot: TaskSnapshot, budget: ResolvedRoo
  */
 declare function runDeadlineMs(runStartedAt: string, perRunWallTimeMs: number | undefined, rootDeadlineAt: string | undefined, nowMs: number): number;
 /**
- * How many entries one task's subtree holds — the progress measure the
- * no-progress rule counts. The subtree is the task itself plus everything
- * reachable through `childTaskIds` (a cycle is walked once), and each collection
- * is filtered by the side of the relation that names a task in it: runs by their
- * `taskId`, edges by either end, evidence/reviews/diagnoses by `taskId`,
- * handoffs by either `parentTaskId` or `childTaskId`, obligations by
- * `sourceTaskId`. The count is of *entries*: an id in the subtree with no task
- * record contributes no task entry, while its runs, edges and evidence still
- * count, because those entries exist and name it.
- *
- * Pure: the same snapshot always yields the same count, so a reviewer can
- * recompute it without replaying anything.
- */
-declare function countSubtreeFacts(snapshot: TaskSnapshot, taskId: TaskId): number;
-/**
  * Refuse a root budget this deployment cannot execute. The one such limit is
  * `maxConcurrentWrites`: the workspace registry enforces exactly one writer, so
  * a configuration asking for any other number is a hard limit nobody can honor —
@@ -2048,12 +2033,6 @@ interface OrchestrateEnv {
   watchRun?(storeId: string, runId: RunId, cb: (status: RunStatus) => void): () => void;
   /** The root budget in force (`Config.rootBudget`); absent means this deployment sets no root limits. */
   rootBudget?: RootBudgetConfig;
-  /**
-   * No-progress rounds before a worker that went idle without submitting is
-   * stopped (`Config.noProgressRounds`). The count is consecutive and derived
-   * from the store's own last marking, so it survives a resume.
-   */
-  noProgressRounds: number;
   /** How long a write drain may take before it is reported as unconfirmed (`Config.writeDrainTimeoutMs`). */
   writeDrainTimeoutMs: number;
   /** The jobs service the drain kills and waits on; absent means this deployment has no managed jobs. */
@@ -2496,7 +2475,7 @@ interface ReplayRunOutcome {
  *
  * A spawning replay is a worker like any other and follows the same rules: it
  * is born `active` and it *submits* — an idle worker is not a completion, the
- * no-progress counter runs, and the verification comes from the one entry every
+ * wall-clock budget still applies, and verification comes from the one entry every
  * run shares ({@link settleSubmittedRun}). A workerless replay is born
  * `submitted` (origin `runtime`) because there is nobody to submit: its
  * criteria are judged by the verifier and the run settles on the verdict.
@@ -3702,16 +3681,6 @@ interface Config {
   /** Per-run resource budget; see {@link BudgetConfig} for which member is enforced, checked post-hoc, or declared only. */
   budget: BudgetConfig;
   /**
-   * No-progress rounds before a worker that went idle without submitting is
-   * stopped (KISS §5: `no_progress(3轮)`). **Enforced** since A3: the batch
-   * driver observes every idle of a run whose phase is still `active`, marks one
-   * round per unsubmitted idle (the store's own last marking supplies the
-   * consecutive count), reminds the worker once per streak, and stops the run
-   * with the no-progress reason at this limit. A run waiting on its children or
-   * on verification is expected to be idle and is never marked.
-   */
-  noProgressRounds: number;
-  /**
    * Whether a task admitted `leaf` may still decompose at runtime: the node
    * itself decides it is not atomic, instead of its parent having predicted it
    * ({@link DEFAULT_ALLOW_RUNTIME_DECOMPOSITION} carries the shipped value and
@@ -3799,8 +3768,6 @@ declare const DEFAULT_VERIFY_TIMEOUT_MS: number;
  * `tokens` carries no default on purpose — see {@link BudgetConfig}.
  */
 declare const DEFAULT_BUDGET: Readonly<BudgetConfig>;
-/** The shipped no-progress round count (KISS §5's `no_progress(3轮)`); enforced since A3 — see {@link Config.noProgressRounds}. */
-declare const DEFAULT_NO_PROGRESS_ROUNDS = 3;
 /**
  * The shipped review policy (T2/T3 §5): `off`. Every decomposition this
  * deployment has ever run was admitted on the machine rules alone, and the
@@ -4479,8 +4446,6 @@ declare class TaskRuntime extends Service {
   get verifyTimeoutMs(): number;
   /** The resolved per-run budget ({@link Config.budget}); which member is enforced, checked post-hoc, or declared only is documented on {@link BudgetConfig}. */
   get budget(): Readonly<BudgetConfig>;
-  /** The resolved no-progress round count ({@link Config.noProgressRounds}); the batch driver's stop limit. */
-  get noProgressRounds(): number;
   /**
    * The review policy in force for batches that have not been admitted yet
    * ({@link Config.generatedTaskReview}), exposed read-only: a deployment's own
@@ -6618,4 +6583,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, CommitReconcileOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, type EvolutionCommitLedger, ExecutionGate, type ExecutionProviderVerdict, type ExecutionSkillSidecar, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type KnowledgeSkillSidecar, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type OwedBatchResult, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReuseContext, type ReuseDerivation, type ReviewContextInput, RootAdoption, RootBudgetApproval, RootBudgetApprovalAsk, RootBudgetApprovalDecision, type RootBudgetCeilings, type RootBudgetConfig, RootBudgetExtensionHost, RootBudgetExtensionRequest, RootBudgetExtensionResult, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, RootRecoveryCaller, RootRecoveryOutcome, type RootRecoveryRequest, type RootRecoveryReuse, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type RuntimeSettlementEnv, SKILL_SIDECAR_FILE, type SessionObservation, type SkillContentIdentity, type SkillContractDefect, type SkillContractDefectCode, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillResourceIdentity, type SkillSidecar, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type TerminalReviewFact, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, deriveReuse, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, CommitReconcileOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, type EvolutionCommitLedger, ExecutionGate, type ExecutionProviderVerdict, type ExecutionSkillSidecar, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type KnowledgeSkillSidecar, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type OwedBatchResult, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReuseContext, type ReuseDerivation, type ReviewContextInput, RootAdoption, RootBudgetApproval, RootBudgetApprovalAsk, RootBudgetApprovalDecision, type RootBudgetCeilings, type RootBudgetConfig, RootBudgetExtensionHost, RootBudgetExtensionRequest, RootBudgetExtensionResult, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, RootRecoveryCaller, RootRecoveryOutcome, type RootRecoveryRequest, type RootRecoveryReuse, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type RuntimeSettlementEnv, SKILL_SIDECAR_FILE, type SessionObservation, type SkillContentIdentity, type SkillContractDefect, type SkillContractDefectCode, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillResourceIdentity, type SkillSidecar, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type TerminalReviewFact, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, deriveReuse, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

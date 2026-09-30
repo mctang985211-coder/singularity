@@ -66,7 +66,7 @@ T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事�
 
 ### 5.9 非阻塞运行与恢复（2026-09-22 A3）
 
-范围（建设计划文首表第 4 行完成闸：非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性；问答工具 task_ask_parent/task_answer 属 A4，本票只留持久化字段挂载点；设计合同与验收映射见 `docs/2026-09-22-a3-coordination-design.md`）：
+范围（建设计划文首表第 4 行完成闸：非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性；问答工具 task_ask_parent/task_answer 属 A4，本票只留持久化字段挂载点；设计合同与验收映射见 `docs/history/2026-09-22-a3-coordination-design.md`）：
 
 - **准入与推进分离**：`decomposeAndRun` 两阶段（`task-runtime/src/index.ts`）——既有准入链（受保护输入固定→规范化→结构准入→能力缺口→provider 预检→verifierRef）顺序不变，新增父 run 相位必须 active、根预算预留、工作区归属检查，任何拒绝零副作用；原子提交（`admitBatchIn` 单次 commit）后工具 signal 失效（所有权转移给 per-batch AbortController），立即返回 `{ batchId, childTaskIds }`。推进函数 `driveBatch`（`orchestrate.ts`）可重入：每轮从 store 重读子状态，内存只缓存 handle/watcher；验证/依赖规则沿用原 cascade（`runChildrenCascade` 已删除，无第二套状态分支）。driver 失败经 `failBatchFromRuntime`：父 run failed + 诊断 + 通知 owner，不 fire-and-forget。`awaitBatch` 供服务/测试消费。
 - **协调相位与显式提交**：TaskRun 持久化 `executionPhase`（active/waiting_children/submitted）+ `batchId`/`submission`/`noProgress`，及 A4 挂载点字段（`pendingQuestionIds`/`blockingQuestionIds`，无消费者）；新事件 `RunPhaseChanged`/`RunProgressMarked`（same-version；reducer 迁移闸只放行 active→waiting_children、active→submitted、waiting_children→submitted）。`task_submit_result`（新工具，ROOT_TOOLS 与 worker baseline 同步）：runtime `submitResult` 身份/状态重检 → 先落相位事件 → drain → verifier 排他执行 → 既有 unmetMandatory/终态 review；迟到提交读回已记录结果（去重靠相位唯一性）。session idle 不再是完成证据：active idle 无提交 → RunProgressMarked 计数 → 一次 followup 提醒 → 到限停止（诊断保留）；根 run 不挂无进展相位机（用户输入间合法 idle）。

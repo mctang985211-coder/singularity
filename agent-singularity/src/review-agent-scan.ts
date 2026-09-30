@@ -28,7 +28,8 @@
  *    decision and not this pre-read's: the admission records the terminal fact
  *    such an attempt never got (A5's crash recovery), or answers with an identity
  *    that really is running. Either way the recovery is named in this scan's own
- *    line. A source whose every attempt settled is only read.
+ *    line. A settled attempt is not reviewed again; its stored diagnosis is
+ *    relayed to the source's business coordinator with the same message id.
  * 2. **Then the allowance.** A source with no attempt behind it goes through the
  *    ledger's own admission: the serial region decides, the claim lands before
  *    any reviewer exists, and the store's allowance is read only when an attempt
@@ -47,12 +48,13 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import { rootTaskStoreId, type ReviewRecord, type TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { TerminalReviewFact } from '@dangosys/dsh-singularity-task-runtime'
 import { optionalService } from '@dangosys/dsh-singularity-task-runtime'
 import { readReviewAgentAttempts, type ReviewAgentAttempt, type ReviewAgentSource } from './review-agent-ledger.ts'
-import { runReviewAgentAttempt, sourceRef, type ReviewParentAgent } from './review-agent-run.ts'
+import { recordedDiagnosis, runReviewAgentAttempt, sourceRef, type ReviewParentAgent } from './review-agent-run.ts'
 import { reviewForSource } from './tools/task-review-pack.ts'
 
 /** The prefix `rootTaskStoreId` writes; see {@link rootSessionOfStore}. */
@@ -75,14 +77,14 @@ export interface ReviewScanEntry {
   readonly source: ReviewAgentSource
   /**
    * `started` — this scan admitted and spawned the source's attempt;
-   * `existing` — the source already had an attempt, read and left alone;
+   * `existing` — the source already had an attempt; no reviewer was started;
    * `skipped` — nothing was claimed or spawned, and {@link reason} says why;
    * `failed` — the attempt was admitted and its reviewer did not finish it.
    */
   readonly result: 'started' | 'existing' | 'skipped' | 'failed'
   /** The attempt's reviewer session, when the source has one. */
   readonly sessionId?: string
-  /** Why nothing was started, or what ended the attempt, when there is something to say. */
+  /** Why nothing was started, what ended the attempt, or why its diagnosis could not be delivered. */
   readonly reason?: string
 }
 
@@ -123,6 +125,57 @@ function rootAgentOf(ctx: Context, storeId: string): { sessionId: string; agent:
   const registry = optionalService<{ get(id: string): ReviewParentAgent | undefined }>(ctx, 'agents')
   const agent = registry?.get(sessionId)
   return agent === undefined ? undefined : { sessionId, agent }
+}
+
+/** Relay the stored diagnosis to the run that delegated this source; the Session deduplicates its identity. */
+async function deliverDiagnosis(
+  ctx: Context,
+  storeId: string,
+  source: ReviewAgentSource,
+  reviewerSessionId: string,
+  log?: (line: string) => void,
+): Promise<string | undefined> {
+  try {
+    const snapshot: TaskSnapshot = await ctx.task.snapshotIn(storeId)
+    const diagnosis = recordedDiagnosis(snapshot, reviewerSessionId)
+    if (diagnosis === undefined) return
+    const task = snapshot.tasks.find(item => item.taskId === source.taskId)!
+    let targetSessionId: string
+    if (task.parentTaskId === undefined) {
+      targetSessionId = rootSessionOfStore(storeId)!
+    } else {
+      const sourceRun = snapshot.runs.find(run => run.runId === source.runId)
+      const parent = source.runId === null
+        ? snapshot.runs.find(run => run.taskId === task.parentTaskId
+          && run.batches?.some(batch => batch.memberTaskIds.includes(task.taskId)))
+        : snapshot.runs.find(run => run.runId === sourceRun?.parentRunId)
+      if (parent === undefined || parent.taskId !== task.parentTaskId) {
+        throw new Error(`the source's delegating run for parent task ${task.parentTaskId} is not recorded`)
+      }
+      targetSessionId = parent.sessionId
+    }
+    const text = [
+      `Review diagnosis ${diagnosis.diagnosisId} for failed source ${sourceRef(source)} [${diagnosis.confidence}].`,
+      `Observed failure: ${diagnosis.observedFailure}`,
+      `Conclusion / next action: ${diagnosis.localizedCause}`,
+      `Original review: ${diagnosis.reviewRefs.join(', ')}; evidence: ${diagnosis.evidenceRefs.join(', ') || 'none recorded'}.`,
+      'Read your current task/run state before acting. A diagnosis changes no task state or authority; it grants no task_recover or evolution tool.',
+    ].join('\n')
+    const delivery = await ctx.agentRuntime.ensureAgentMessageDelivered({
+      messageId: `m-diagnosis-${diagnosis.diagnosisId}`,
+      senderSessionId: SessionId(reviewerSessionId),
+      targetSessionId: SessionId(targetSessionId),
+      text,
+    })
+    log?.(`review agent: diagnosis ${diagnosis.diagnosisId} to coordinator session ${targetSessionId}: ${delivery.status}`)
+    if (delivery.status === 'unavailable') {
+      return `diagnosis ${diagnosis.diagnosisId} recorded but coordinator session ${targetSessionId} is unavailable; the next activation retries delivery`
+    }
+  } catch (error) {
+    const reason = `diagnosis recorded but not delivered (${error instanceof Error ? error.message : String(error)}); the next activation retries delivery`
+    log?.(`review agent: source ${sourceRef(source)} ${reason}`)
+    return reason
+  }
 }
 
 /**
@@ -168,7 +221,8 @@ export async function scanFailedReviewSources(
     // process is gone) or really in flight is the ledger's decision, not this
     // pre-read's.
     if (existing !== undefined && open === undefined) {
-      entries.push({ source, result: 'existing', sessionId: existing.sessionId })
+      const reason = await deliverDiagnosis(ctx, storeId, source, existing.sessionId, log)
+      entries.push({ source, result: 'existing', sessionId: existing.sessionId, ...(reason === undefined ? {} : { reason }) })
       log?.(`review agent: source ${sourceRef(source)} already has an attempt (session ${existing.sessionId}, ${existing.settlement!.status}) — read, nothing started`)
       continue
     }
@@ -209,17 +263,22 @@ export async function scanFailedReviewSources(
       continue
     }
     switch (outcome.kind) {
-      case 'recorded':
-        entries.push({ source, result: 'started', sessionId: outcome.sessionId })
+      case 'recorded': {
+        const reason = await deliverDiagnosis(ctx, storeId, source, outcome.sessionId, log)
+        entries.push({ source, result: 'started', sessionId: outcome.sessionId, ...(reason === undefined ? {} : { reason }) })
         log?.(`review agent: source ${sourceRef(source)} accepted — reviewer session ${outcome.sessionId} started`)
         break
+      }
       case 'reuse':
       case 'in-flight': {
         // Another admission owns this source's attempt: the ledgers' decision is
         // what stands, and nothing was spawned here. What it decided is named —
         // including the recovery of an attempt whose process is gone, which is a
         // fact an operator reading this line has to see.
-        const reason = recoveryReason(outcome.recovered)
+        const deliveryReason = outcome.kind === 'reuse'
+          ? await deliverDiagnosis(ctx, storeId, source, outcome.attempt.sessionId, log)
+          : undefined
+        const reason = [recoveryReason(outcome.recovered), deliveryReason].filter(part => part !== undefined).join('; ') || undefined
         entries.push({
           source,
           result: 'existing',

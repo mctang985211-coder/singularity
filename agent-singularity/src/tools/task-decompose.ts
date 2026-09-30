@@ -16,7 +16,9 @@ export function defineTaskDecomposeTool(ctx: Context) {
   return defineTool({
     name: 'task_decompose',
     description:
-      'Decompose the caller\'s current task into child tasks. The batch is admitted atomically and the runtime then runs them ' +
+      'Delegate the caller\'s current task\'s independently checkable results or distinct responsibilities to child tasks. ' +
+      'Each caller owns its full result and may coordinate children that decompose again; define only this level and let each child decide its descendants. ' +
+      'The batch is admitted atomically and the runtime then runs them ' +
       'one at a time in dependency order; this call returns at admission and does not wait. Each child is verified ' +
       'against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead ' +
       'come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.',
@@ -141,7 +143,7 @@ export function defineTaskDecomposeTool(ctx: Context) {
             },
             decomposable: {
               type: 'boolean',
-              description: 'Mark true when the child spans separate, independently checkable results or capability boundaries worth delegating. Its worker decides from evidence whether to decompose or complete the work; do not prewrite its descendants. A capability gap also uses this marker for admission, but it grants no missing capability.',
+              description: 'Mark true when the child owns multiple independently checkable results or distinct responsibilities. Its worker coordinates those results and decides its own decomposition before implementation; do not prewrite descendants or reduce its full acceptance. A genuinely local result can be completed directly. A capability gap also uses this marker for admission, but it grants no missing capability.',
             },
             requiresIndependentAcceptance: {
               type: 'boolean',
@@ -253,7 +255,8 @@ function admittedText(taskId: string, batchId: string, childTaskIds: readonly st
     `The runtime owns batch ${batchId} now: it starts the children one at a time in dependency order and drives the batch to ` +
     'its end. This call returns at admission and does not wait for the batch.',
     `You are in phase waiting_children: read and query with \`task_read\`/\`task_status\` (and diagnose or inspect), or end the ` +
-    'batch with `task_cancel`. Writes, shell commands, another decomposition and a submission of your own are refused while the ' +
+    'run together with its batch with `task_cancel` if abandoning this run. ' +
+    'Writes, shell commands, another decomposition and a submission of your own are refused while the ' +
     'children run — do not start work that would collide with theirs in the shared checkout.',
     'The batch end reaches you as a message naming each child\'s terminal state and evidence, and it hands your execution back: ' +
     'nothing is submitted on your behalf. Back in phase active you continue your own work, admit another batch with ' +

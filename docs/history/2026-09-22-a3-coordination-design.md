@@ -1,10 +1,12 @@
-# A3 非阻塞运行与恢复：事件/状态迁移矩阵与受控模型 fixture 合同
+# 历史：A3 非阻塞运行与恢复：事件/状态迁移矩阵与受控模型 fixture 合同
 
-日期：2026-09-22。状态：A3 已交付，本文保留实现前合同与评审理由供回归参考；实际落点、偏差及验证以[历史执行记录](history/2026-09-24-vrtc-execution-records.md)中的 A3 记录和主 guide §5.9 为准，不重新派发 A3。
+**归档说明（2026-10-01）**：这是 A3 当时的施工合同，不是现行派发依据。K1 已删除子全部终态后自动提交父；本轮已删除 idle 计轮、fact-count 和 noProgressRounds。旧持久事件仍可读，当前行为及定向证据见[主 guide §5.24](../singularity-harness-guide.md)；不要据下文恢复已删除的策略。
 
-后续更正（2026-09-26）：第 11 项 A4 已交付并闭合冷恢复返工——`task_ask_parent`/`task_answer` 已建并挂载，闸放行表现行 20 项；已知问答等待的 worker 与有问答参与的 waiting_children 非根父在重启后恢复同一 Session/Run 续跑，本文 §2 矩阵与 §5 边界中「worker session 续跑属 S2-R」的表述自此仅对**非问答**的在途 worker 成立。当前事实以主 guide §5.16 与[返工交付记录](history/2026-09-26-a4-rework-record.md)为准。
+日期：2026-09-22。状态：A3 已交付，本文保留实现前合同与评审理由供回归参考；实际落点、偏差及验证以[历史执行记录](2026-09-24-vrtc-execution-records.md)中的 A3 记录和主 guide §5.9 为准，不重新派发 A3。
+
+后续更正（2026-09-26）：第 11 项 A4 已交付并闭合冷恢复返工——`task_ask_parent`/`task_answer` 已建并挂载，闸放行表现行 20 项；已知问答等待的 worker 与有问答参与的 waiting_children 非根父在重启后恢复同一 Session/Run 续跑，本文 §2 矩阵与 §5 边界中「worker session 续跑属 S2-R」的表述自此仅对**非问答**的在途 worker 成立。当前事实以主 guide §5.16 与[返工交付记录](2026-09-26-a4-rework-record.md)为准。
 前置：T1（`741dcb2`）、S1-V 切片 2（`c2912af`）、S1-C（`eaa024f`）均已验收；前置接口已逐项源码核对。
-依据：[深入架构](exploration-evolution-architecture.md) §7.1/§7.2/§7.4 与 §10 A3 行；[建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一顺序第 4 行完成闸。
+依据：[深入架构](../exploration-evolution-architecture.md) §7.1/§7.2/§7.4 与 §10 A3 行；[建设计划](../2026-09-20-vrtc-code-change-plan.md)文首唯一顺序第 4 行完成闸。
 
 本票只做 A3：T2/T3、A0、A4、A5 均不实现；问答等待字段仅作为持久化挂载点出现（`task_ask_parent`/`task_answer` 工具不建）。
 

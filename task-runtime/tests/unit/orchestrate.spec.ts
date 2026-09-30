@@ -19,7 +19,6 @@ import {
   DEFAULT_BUDGET,
   DEFAULT_MAX_CHILDREN,
   DEFAULT_MAX_DEPTH,
-  DEFAULT_NO_PROGRESS_ROUNDS,
   DEFAULT_VERIFY_TIMEOUT_MS,
   TaskRuntime,
   VerifierUnavailableError,
@@ -329,7 +328,7 @@ function harness(
    * The shipped worker behaviour under A3: a worker hands its result in through
    * the explicit submission entry and *then* goes idle. An idle session is not a
    * completion (§3.1), so a harness whose workers merely went idle would be
-   * testing the no-progress stop on every ordinary-path case instead.
+   * waiting for a deadline on every ordinary-path case instead.
    */
   const defaultIdle = async (sessionId: string): Promise<void> => {
     await runtime.submitResult(sessionId, { summary: `done: ${sessionId}` })
@@ -582,7 +581,7 @@ async function createAcceptanceParent(
  * Only the root's direct children (depth 1) act, or the grandchildren a granted
  * call creates would split again and the harness would recurse to the depth cap.
  * A deeper session still has to follow the worker protocol — an idle without a
- * submission is a no-progress stop — so it submits and goes idle like the
+ * submission stays active until its deadline — so it submits and goes idle like the
  * default behaviour does.
  */
 function leafWorkerDecomposition(h: Harness, children: DecomposeSpec['children']) {
@@ -601,14 +600,14 @@ function leafWorkerDecomposition(h: Harness, children: DecomposeSpec['children']
       // The nested batch ended and handed the run back `active` (K1 §2): the
       // worker's own result is what settles it now — the runtime no longer
       // submits on its behalf, so a worker that stopped here without submitting
-      // would be stopped by the no-progress rule instead.
+      // would remain active until its deadline instead.
       await h.runtime.submitResult(sessionId, { summary: 'the split ran; the work continues under the children' })
       return
     } catch (error) {
       captured.refusal = error instanceof Error ? error.message : String(error)
     }
     // The refusal is what the test is about; the worker still owes the protocol
-    // a result, or its run would stop on the no-progress rule instead of
+    // a result, or its run would remain active until its deadline instead of
     // settling the way the test is describing.
     await h.runtime.submitResult(sessionId, { summary: 'the split was refused; the work was done here' })
   })
@@ -2030,7 +2029,7 @@ describe('the content a run is bound to (S1-C)', () => {
         await writeFile(productionSkill(home), '---\nname: ball-align\ndescription: rewritten during the batch\n---\n\nreplaced\n')
       }
       // Whatever the override does, the worker protocol still applies: the run
-      // has to be submitted or it would stop on the no-progress rule.
+      // has to be submitted to reach a terminal state.
       await h.runtime.submitResult(sessionId, { summary: 'done' })
     })
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
@@ -2292,16 +2291,13 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
 })
 
 describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
-  test('an unconfigured deployment resolves the shipped budget and no-progress defaults', () => {
+  test('an unconfigured deployment resolves the shipped budget defaults', () => {
     expect(DEFAULT_BUDGET).toEqual({ maxToolCalls: 150, wallTimeMs: 2 * 60 * 60 * 1000, attempts: 1 })
-    expect(DEFAULT_NO_PROGRESS_ROUNDS).toBe(3)
     const h = harness()
     expect(h.runtime.budget).toEqual(DEFAULT_BUDGET)
-    expect(h.runtime.noProgressRounds).toBe(3)
 
-    const custom = harness({ config: { budget: { wallTimeMs: 1000 }, noProgressRounds: 5 } })
+    const custom = harness({ config: { budget: { wallTimeMs: 1000 } } })
     expect(custom.runtime.budget).toEqual({ ...DEFAULT_BUDGET, wallTimeMs: 1000 })
-    expect(custom.runtime.noProgressRounds).toBe(5)
   })
 
   test('a worker that outlasts its wall-clock budget is cancelled and fails with the budget named, not a criteria failure', async () => {
@@ -3427,40 +3423,30 @@ describe('A3 coordination', () => {
     expect(await submitParentResult(h)).toBe('verified')
   })
 
-  test('an idle without a submission is marked, reminded once, and stopped at the no-progress limit', async () => {
-    const h = harness({ config: { noProgressRounds: 2 } })
+  test('an idle worker that never submits is reminded once and stopped by its wall-clock budget', async () => {
+    const h = harness({ config: { budget: { wallTimeMs: 100 } } })
     const { taskId, runId } = await createRoot(h)
-    // A worker that goes idle instead of submitting: the store must show the
-    // marking, the owner must be reminded once, and the run must stop at the
-    // configured limit — a budget stop, not a criteria verdict.
     h.setIdleBehavior(async () => {})
 
-    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('stuck child')],
     })
-    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
     const snapshot = await h.task.snapshotIn(STORE)
     const childRun = snapshot.runs.find(run => run.taskId !== taskId)!
     expect(childRun.status).toBe('failed')
-    expect(childRun.noProgress?.rounds).toBe(2)
-    const marks = taskEvents(h).filter(item => item.kind === 'RunProgressMarked')
-    expect(marks.map(item => (item.kind === 'RunProgressMarked' ? item.payload.rounds : 0))).toEqual([1, 2])
+    expect(childRun.noProgress).toBeUndefined()
+    expect(taskEvents(h).filter(item => item.kind === 'RunProgressMarked')).toHaveLength(0)
     const reminders = h.notifications.filter(item => item.sessionId === childRun.sessionId)
     expect(reminders).toHaveLength(1)
     expect(reminders[0]!.text).toContain('task_submit_result')
     const record = snapshot.reviews.find(item => item.runId === childRun.runId)!
     expect(record.outcome).toBe('failed')
-    expect(record.localizedCause).toContain('no progress')
-    expect(record.localizedCause).toContain('budget stop on the no-progress rule')
-    // The parent's own run is not judged by its child's stop: the batch ended and
-    // handed it back `active`, and the parent's own submission is what would be
-    // judged (K1 §2).
-    const parentRun = await h.task.runIn(STORE, runId)
-    expect(parentRun.status).toBe('running')
-    expect(parentRun.executionPhase).toBe('active')
+    expect(record.localizedCause).toContain('budget exhausted: wallTimeMs')
+    expect(record.localizedCause).toContain('not a criteria failure')
+    expect(h.cancelled).toContain(childRun.sessionId)
   })
 
   test('an explicit submission settles the run, a second one is answered from the record, and a waiting parent refuses to submit', async () => {
@@ -3591,48 +3577,33 @@ describe('A3 coordination', () => {
     expect(late.allow === false ? late.reason : '').toContain('late call')
   })
 
-  test('a batch end counts as progress: the no-progress marker does not carry a pre-split round to the limit', async () => {
-    const h = harness({ config: { noProgressRounds: 2 } })
+  test("an idle checkpoint can be followed by a nested batch and the worker's own submission", async () => {
+    const h = harness()
     const { taskId, runId } = await createRoot(h)
-    let idleRounds = 0
     h.setIdleBehavior(async sessionId => {
       const bound = await h.runtime.runForSession(sessionId)
-      if (bound.task.depth !== 1) {
+      if (bound.task.depth === 2) {
         await h.runtime.submitResult(sessionId, { summary: 'the grandchild is done' })
-        return
       }
-      idleRounds += 1
-      if (idleRounds !== 2) return
-      // The worker splits its own work instead of submitting: the nested batch
-      // runs to its end inside this idle, so the next observation finds the run
-      // `active` again with the facts the batch produced on the record.
-      await decomposeAndSettle(h, STORE, bound.task.taskId, bound.run.runId, sessionId, {
-        reason: 'the work is not atomic',
-        children: [childSpec('grandchild')],
-      })
     })
 
-    const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+    const outer = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('splittable child', { decomposable: true })],
     })
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
-
-    const middleRun = (await h.task.snapshotIn(STORE)).runs.find(run => run.taskId !== taskId)!
-    const marks = taskEvents(h)
-      .filter(item => item.kind === 'RunProgressMarked' && item.runId === middleRun.runId)
-      .map(item => (item.kind === 'RunProgressMarked' ? item.payload : undefined))
-    // round 1 (idle) → round 1 again (the batch's facts are new progress, so the
-    // counter restarts) → round 2 (the limit). A marker that carried the
-    // pre-split count would have stopped the run one round earlier, at the round
-    // the batch end never answered.
-    expect(marks.map(mark => mark?.rounds)).toEqual([1, 1, 2])
-    expect(marks[1]!.factCount).toBeGreaterThan(marks[0]!.factCount)
-    expect(marks[2]!.factCount).toBe(marks[1]!.factCount)
-    expect(middleRun.status).toBe('failed')
-    const record = (await h.task.snapshotIn(STORE)).reviews.find(review => review.runId === middleRun.runId)!
-    expect(record.localizedCause).toContain('no progress')
-    expect(record.localizedCause).toContain('no-progress rule')
+    await vi.waitFor(() => expect(h.notifications.some(item => item.text.includes('went idle without submitting'))).toBe(true))
+    const middle = await h.runtime.runForSession(h.spawned[0]!.sessionId)
+    expect(middle.run.status).toBe('running')
+    const nested = await decomposeAndSettle(h, STORE, middle.task.taskId, middle.run.runId, middle.run.sessionId, {
+      reason: 'the next stage is independent',
+      children: [childSpec('grandchild')],
+    })
+    expect(nested.map(outcome => outcome.status)).toEqual(['verified'])
+    expect((await h.task.runIn(STORE, middle.run.runId)).status).toBe('running')
+    await h.runtime.submitResult(middle.run.sessionId, { summary: 'combined the staged result' })
+    const outcomes = await h.runtime.awaitBatch(STORE, outer.batchId)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    expect(taskEvents(h).filter(item => item.kind === 'RunProgressMarked')).toHaveLength(0)
   })
 
   test('the batch end opens the gate again: writing, delegating and submitting are the parent\'s own decisions', async () => {
@@ -4782,7 +4753,7 @@ describe('A3 coordination', () => {
         children: [childSpec('grandchild work')],
       })
       // The worker never goes idle again: the crash lands with it holding the
-      // decision its own batch handed back, before the no-progress rule could read
+      // decision its own batch handed back, before the driver could read
       // that as stagnation (a killed process observes nothing).
       return await new Promise<void>(() => {})
     })

@@ -98,7 +98,7 @@ function askedText(outcome: AskedQuestionOutcome): string {
       'This run is now blocked on that answer: writes, shell commands, another decomposition and `task_submit_result` are ' +
       'refused until an answer with `resolves: true` is recorded — a child batch of this run ending does not lift the block, ' +
       'because nothing answers a question on your behalf. Stop the work that would write and end this step — an idle ' +
-      'run waiting on this question is not counted as no progress, while the run\'s own deadline still applies.',
+      'run waiting on this question gets no submission reminder, while the run\'s own deadline still applies.',
     )
     lines.push(
       'The answer arrives as a message in this session and in your context, where the question stays while it is open; read it ' +

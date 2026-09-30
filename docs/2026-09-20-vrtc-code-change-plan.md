@@ -36,7 +36,7 @@
 | 15 | Buckyball × CosyVoice2 首轮自由生长实跑 | **已验收，限 BEMU CPU 切片**：project3 根判据通过；运行时创建 3 个子 Task，深度 1、有人审；模型接入由夹具预置，Ball 加速为零，RTL 未运行；一次绕过 MCP 的直接 CMake 操作违反流程约束 | 实验主代理 + 独立验收子代理 | [实跑合同](execution-prompts/15-buckyball-cosyvoice2-free-growth.md)、[独立复核](history/2026-09-28-cosyvoice2-project3-review.md) | 仅证明冻结切片数值和有限节点生长；不能宣称完整模型接入、芯片设计或 RTL 通过 |
 | 16 | BB-1：已有 BB 方法拆为通用 Skill | **已验收（2026-09-28）**：六份 Skill 解析、两场景内容审核、实际工具声明与范围核对通过；审核修正模型 importer 支持范围及波形索引/周期解释。Skill `ef89fa7`，Buckyball `3d9ad0b9` | Flash 实现主代理 + Sol 独立复核 | [BB-1 合同](execution-prompts/16-bb-domain-skills.md)、[审核记录](history/2026-09-28-bb1-review.md) | BB1-1～4 通过；方法已验收，不宣称 MCP 可达或模型/RTL 实跑 |
 | 17 | BB-2：通用 Task / Skill / MCP 接线 | **待复验（2026-09-29）**：BB2-1/3 有独立审核与真实 MCP 证据，模板资源有定向测试；新图只实跑 BEMU CPU 与浅层 Task 生长，未触发 `bb-obligations` 绑定、waveform 或 RTL；类型检查基线归因未证实 | 实验执行者 + 独立审核 | [BB-2 合同](execution-prompts/17-bb-capability-mcp-wiring.md)、[实验复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md)、[交付记录](history/2026-09-29-bb2-delivery-record.md) | 按 BB2 原合同收口接线；图运行只对实际用到的能力判定，不把未触发项记通过或失败 |
-| 18 | CosyVoice2 完整工程实跑 | **待启动**：把完整 workload 构建、Ball 编写与集成、BEMU/Verilator RTL 对照和全量测试交给 root；由各节点决定工程方案与递归分解 | 部署盯梢模型 + 真实 Singularity 节点 + 独立审核 | [完整工程 root 与盯梢 prompt](execution-prompts/18-buckyball-cosyvoice-full-stack.md)；前轮[独立复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md) | FS-1～FS-4：完整工程、实际 Ball 的模型输出对照、完整适用测试集和提交复现；递归与其他机制另列实际效果，缺结果保留未完成 |
+| 18 | CosyVoice2 完整工程实跑 | **部分运行，未完成，修复后待重跑**：完整目标与 FS-1～FS-4 保持；本轮删除 idle 计轮判停、封 root 工具旁路、接通诊断到实际父节点并精简分解指导 | 部署盯梢模型 + 真实 Singularity 节点 + 独立审核 | [完整工程 root 与盯梢 prompt](execution-prompts/18-buckyball-cosyvoice-full-stack.md)；前轮[独立复核](../../../../cv2-fg-2026-09-29/evidence/independent-review.md) | FS-1～FS-4：完整工程、实际 Ball 的模型输出对照、完整适用测试集和提交复现；递归与其他机制另列实际效果，缺结果保留未完成 |
 
 第 16～17 项建设 **Singularity 对 Buckyball 的通用领域适配**。预设 Task 库和 Skill 库必须按 `1 → 1.1 → 1.1.1` 表示内容树：简介概括本层职责和直接下层，范围逐层收窄，末层给出原子结果或局部方法。Task 每层提供目标/输入/产物/验收；Skill 提供方法及下钻入口；已有 MCP 提供工程事实。领域 Skill 树正本归 Buckyball 的 Skill 子模块，Task 树、库入口与能力部署归 Harness。先用既有 Markdown 标题、链接和 Skill description 完成组织，不增加核心类型、树服务、模板数据库或领域规划器。
 
@@ -46,7 +46,9 @@ CosyVoice 是适配完成后的一个真实使用案例：具体版本、shape�
 
 第 18 项的 root 目标是**完整 CosyVoice2 workload 到 Ball 实现、集成与全量测试**，工程方案和推进方式由 root 及子节点决定；部署者提供固定输入与独立根验收。阶段结果不能替代完整交付。根判据检查完整模型结果和测试事实，图的节点数、层数及工具调用次数另作观察。父子问答、失败复盘、Evolution、预算扩额和冷恢复在其适用条件出现时核查原始事件、解决效果与额外成本；未启用/未触发记未验证，不能据此判无用。对可选策略，比较实际适用任务的成功率、错误修复、耗时与用量；若反复无独立收益且既有 DSH/Task 基元可直接承担，再删策略、配置和测试，不为保留功能预造失败。
 
-第 18 项另作**递归机制观察**：根不预置完整树；任何节点在派发或执行前，用[通用 Task 粒度规则](../../../.agents/skills/bb-pipeline/references/tasks.md#粒度与继续生长)判断独立结果边界，记录为什么亲自完成或继续分解。原始 Task store 必须能区分 root 分解和子节点分解，并核对各层验收与 Skill/能力绑定。若没有子节点继续分解，硬件结果仍按根判据裁决，但递归能力的真实模型效果记未验证；不能用强制深度、无意义子任务或预写孙节点来制造通过。若确有复杂中间结果而节点仍一律不分解，应针对派发粒度、上下文提示和实际拒绝原因复盘，再判断是否有 runtime 缺陷。
+第 18 项另作**递归机制观察**：根不预置完整树；任何节点在派发或执行前，用[通用 Task 粒度规则](../../../.agents/skills/bb-pipeline/references/tasks.md#粒度与继续生长)判断独立结果边界，优先委派可独立验收的结果，局部单一结果直接实现。原始 Task store 必须能区分 root 分解和子节点分解，并核对各层验收与 Skill/能力绑定。若没有子节点继续分解，硬件结果仍按根判据裁决，但递归能力的真实模型效果记未验证；不能用强制深度、无意义子任务或预写孙节点来制造通过。若确有复杂中间结果而节点仍一律不分解，应针对派发粒度、上下文提示和实际拒绝原因复盘，再判断是否有 runtime 缺陷。
+
+2026-10-01 修正依据：[阶段报告](../../../../cv2-full-2026-09-29/evidence/stage-report-2026-09-30.md)显示子节点分解稀少、巨型单回合及分段节点被 idle 计轮误杀；自动 Diagnosis 曾未投给负责父节点。修正与定向证据见主 guide §5.24；派发仍用第 18 项，不另开缩小目标的测试阶段。新部署重建源码产物、安装最新库、删除 noProgressRounds，并核对实际预算和 root/worker 工具面。模型递归积极性与诊断收益待下一轮原始轨迹验证。已关闭或未触发的 Evolution 不据此删除；已证实误导/重复/无消费者的规则直接删除，不增加自动分解器、建议评分器或修复队列。
 
 所有子任务的确定性命令以运行时 cwd 为基准使用相对路径，或从 cwd 读取环境绑定；禁止把一次部署目录名硬编码进验收命令。这样环境命名变化只会产生明确的 setup 错误，不会把正确交付误判为失败。
 
@@ -243,7 +245,7 @@ replay 的 parentRunId 仅是实验血缘：parentless replay Task 调 ask 必�
 
 顺序固定为：持久正文来源 → Task 原子提交问题/阻塞或答案/解除 → agent-runtime 按同 messageId 投递 DSH inbox → flush 收件 Session 后报告 delivered。ask/answer 不等对方 loop 或回复。Task 意图后崩溃由显式恢复补投递；目标 inbox/history 已有同 id 就不重复入箱。无 inbox 条目不表示已消费：claim 在 pre-step 前可能已移除；context 从未处理问答事实重投影来源，只有实际模型 step 输入才能证明看过，工具领域效果仍以 Task 记录判定。回答已解除阻塞而尚未被模型读取时，下一请求必须包含该回答引用/正文后才能执行；不得仅因 answered 就从上下文删除。没有消费证明就保留引用，不另建 consumed 账本或第二套通信库。
 
-agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush，持有唯一 handle；不使用要求 continuable activation 的 subagents.sendMessage，也不挂载会带来另一套 roster/Task board 的实验性 Agent Team mailbox。暂不可达记 unavailable，保留意图，恢复入口重试；不自动造替代父。active 有阻塞时停止受阻写入/分解/提交与无进展提醒，允许协调输入；waiting_children 的批次写闸始终保持，问答不直接改相位。K1 已验收：批次结束持久化父回 active、写闸解除，未决阻塞问答仍单独阻塞写入与提交；父主动提交才启动验收。问答继续受已有 Run wallTime、根截止和无进展停止规则约束；不新增 `maxQuestionsPerRun`、问答重试预算或独立计费账。终态取消未答项，迟到答案只留审计、不解除终态闸。
+agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush，持有唯一 handle；不使用要求 continuable activation 的 subagents.sendMessage，也不挂载会带来另一套 roster/Task board 的实验性 Agent Team mailbox。暂不可达记 unavailable，保留意图，恢复入口重试；不自动造替代父。active 有阻塞时停止受阻写入/分解/提交与未提交 idle 提醒，允许协调输入；waiting_children 的批次写闸始终保持，问答不直接改相位。K1 已验收：批次结束持久化父回 active、写闸解除，未决阻塞问答仍单独阻塞写入与提交；父主动提交才启动验收。问答继续受已有 Run wallTime 和根截止约束；不新增 `maxQuestionsPerRun`、问答重试预算或独立计费账。终态取消未答项，迟到答案只留审计、不解除终态闸。
 
 已知问答等待的 worker 重启后恢复同一 Session/Run，并从持久问答重建阻塞；不能沿用“所有在途未提交 Run 均取消”的旧恢复分支。先对账受管理写入/进程，无法安全接管就具名失败，不能重复不明外部副作用。归拢只限问答触及的普通/replay/恢复结算规则，不要求先重写全部 orchestrate。
 
@@ -307,7 +309,7 @@ Diagnosis.targetType 为非空开放字符串，执行转换仍由 evolution 拒
 
 恢复复用 K1 的 `(parentRunId, proposalId)` 批次身份及 Run 内稳定成员序列，旧事实不覆写。A6 只补新尝试中的替代 Task/已通过兄弟证据复用：引用具体 Run/Evidence/输入及产物身份，按原 AC 的 childEvidence 位置建立本次绑定，不修改 AC；无效引用拒绝并列出受影响项，由 Agent 新提案安排执行。恢复请求和提案消费各按既有 key 幂等，重启续同一身份；旧 Review/Evidence 保留。
 
-能力候选应用与产物修复不是同一件事：缺产物沿已有 producer/dependsOn/Obligation 来源新建或执行合法的生产任务，只有产物与 evidence 真满足条件才解除；无需共享能力变更时不强迫先造 EvolutionProposal。task_recover 对能力变更要求已批准应用，对待生产的产物只要求缺口与来源可核对、生产所需能力可用，不能要求产物已经存在才允许启动其生产恢复。该协调节点先读事实/提新批次，受缺产物影响的业务消费者仍须通过原依赖闸；root 最终提交必须检查产物已满足。坏裁判不能由候选改写以通过，保留诊断；连续失败使用既有根预算/无进展停止，不为每种缺口增加修复分类或重试控制器。候选构建和实验的业务 Run 都计原 store 累计总额；采用 K4 持久的人审追加上限，不自动续额、不重置旧账；reviewer 使用自身次数与 watchdog。
+能力候选应用与产物修复不是同一件事：缺产物沿已有 producer/dependsOn/Obligation 来源新建或执行合法的生产任务，只有产物与 evidence 真满足条件才解除；无需共享能力变更时不强迫先造 EvolutionProposal。task_recover 对能力变更要求已批准应用，对待生产的产物只要求缺口与来源可核对、生产所需能力可用，不能要求产物已经存在才允许启动其生产恢复。该协调节点先读事实/提新批次，受缺产物影响的业务消费者仍须通过原依赖闸；root 最终提交必须检查产物已满足。坏裁判不能由候选改写以通过，保留诊断；连续失败使用既有根预算和时间截止，不为每种缺口增加修复分类或重试控制器。候选构建和实验的业务 Run 都计原 store 累计总额；采用 K4 持久的人审追加上限，不自动续额、不重置旧账；reviewer 使用自身次数与 watchdog。
 
 验收 EVO-1：L1 用现成能力组合解决一个真实缺口；另一例由 Agent 生成 L2 执行型 Skill/sidecar、独立验证后仅由人批准；人工编写候选不合格。确定性 scripted 验收只证明接线，真实 Agent 生成效果须另有明确授权与预算的实跑记录，不能混称；没有该记录只交付机制、不宣称自主生长有效。EVO-2：缺 provider 基线真实拒绝、候选真实通过；错误候选、弱化 verifier、越权工具、内容漂移、人工拒绝均不应用、不恢复为成功。EVO-3：能力及产物缺口分别经真实 source→Diagnosis→处置→task_recover→新根独立验收；有效兄弟不重跑，无效引用拒复用并显式重建，旧失败可读。EVO-4：在联合应用每个持久边界、恢复 Run 创建后/批次准入前、准入后/spawn 前及新根结算前重开，provider 无半成品可用、同 requestKey 无重复 Run/批次、预算不归零；重复批准、取消、rollback 后的新准入全部重检，旧在途 Run 不热换版本。EVO-5（修复路径复用执行链）：`task_recover` 与新根/新批次沿用已有规范化、准入、执行闸、driver、结算和 Task 预算事实；evolution 只协调候选与已批准的应用，不复制第二套执行状态机、终态提交或 Task 预算账。以能力缺口与产物缺口的真实调用链、取消/重启反例核对；实验费用记录仍由 evolution 保留，不与 Task 执行预算混为一账。
 

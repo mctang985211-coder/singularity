@@ -1,4 +1,6 @@
 ---
+
+Current note (2026-10-01): this records the original persistence change. The idle-round/fact-count stop policy is deleted; existing RunProgressMarked events remain readable. Current runtime uses one submission reminder and its existing time deadline (guide §5.24).
 description: "Records a persistence type transition and its compatibility acknowledgement."
 kind: persistence-change
 ---
@@ -52,7 +54,7 @@ Reducer discipline (`task/src/service/state.ts`):
 - `TaskStarted` (`assertBirthPhase`): a run with no phase is a pre-protocol record and stays legal; born `active` carries neither submission nor batchId; born `submitted` (a workerless replay) requires a well-shaped submission and no batchId; `waiting_children` is not a birth phase.
 - `TaskCancelled` (`cancel`): the source status may be `running` or `verifying` — see the fix note below.
 
-Service entries (`task/src/index.ts`): `changeRunPhaseIn` and `markRunProgressIn` each write one event with the `taskId`/`runId` envelope; `admitBatchIn` writes a whole batch as one commit (per child `TaskCreated` + `TaskAdmitted`, all `DependencyAdded`, `TaskDecomposed` with the admission record, per child `CapabilityResolved` plus `CapabilityGapDetected` when the manifest has a gap, then the parent's `RunPhaseChanged(active → waiting_children, batchId: b-<parentTaskId>)`), so a batch whose last event cannot apply persists nothing. This change lands the store-side surface only; the runtime that writes these events (drain, execution gate, batch driver) arrives in a later stage of the A3 ticket, so no production caller exists yet. A3 §1 of `docs/2026-09-22-a3-coordination-design.md` is the design source.
+Service entries (`task/src/index.ts`): `changeRunPhaseIn` and `markRunProgressIn` each write one event with the `taskId`/`runId` envelope; `admitBatchIn` writes a whole batch as one commit (per child `TaskCreated` + `TaskAdmitted`, all `DependencyAdded`, `TaskDecomposed` with the admission record, per child `CapabilityResolved` plus `CapabilityGapDetected` when the manifest has a gap, then the parent's `RunPhaseChanged(active → waiting_children, batchId: b-<parentTaskId>)`), so a batch whose last event cannot apply persists nothing. This change lands the store-side surface only; the runtime that writes these events (drain, execution gate, batch driver) arrives in a later stage of the A3 ticket, so no production caller exists yet. A3 §1 of `docs/history/2026-09-22-a3-coordination-design.md` is the design source.
 
 The declaration-level fingerprint does not move: digests cover event name + payload type text (`TaskEvent`), and the new kinds live inside the transitively referenced `TaskEventPayloads` union. Per this directory's README, such changes are acknowledged by record alone; the sibling `.schema.json` therefore repeats the unchanged after digest — the same situation as `2026-09-22-run-provider-binding`, `2026-09-21-verifier-selftest-protected-inputs` and `2026-09-20-obligation-recorded`.
 
