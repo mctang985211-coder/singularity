@@ -10,7 +10,7 @@ BB-1 已验收：通用模型接入 Skill 与 chip/Ball/验证方法完成，模
 
 第 18 项已部分实跑，**完整业务仍未完成**；见[阶段报告](../../../../cv2-full-2026-09-29/evidence/stage-report-2026-09-30.md)。报告附录按六个 Task store 统计为 44 个 Task、仅一次子节点分解，最大深度 2，与正文“深度 3”不一致，本指南采用附录来源而不据正文宣称递归充分。已定位 idle 误杀、root 工具旁路及失败诊断未交给负责父节点三处缺陷，本轮作最小修复（§5.24）。完整 workload、Ball 参与、BEMU/RTL 完整输出及全量测试保持原验收；运行时接线和新提示已检查，模型分解积极性及建议效果待重跑。
 
-2026-10-01 架构研究：**没有独立 memory 包或无向记忆图；没有证明普通活跃 worker 的全图原样冷续跑。** 当前激活会取消部分尚未提交的普通 worker，`task_recover` 是失败后创建新尝试，不能当成进程重启入口。收敛方向与定向验收见[计划 G 节](2026-09-20-vrtc-code-change-plan.md#g-原图续跑与角色装配)。本轮只更新指导，不把研究方案记为已实现。
+2026-10-01 架构研究：**上下文层级与父子继承已由 A2+A1 实现并验收（§5.15）；未另建独立 memory 包或无向语义记忆图。** 子节点通过 Task 父子关系获得根目标/硬约束、自身契约及结构化 handoff，上游历史按引用读取，不复制父节点全部聊天。**普通活跃 worker 的全图原样冷续跑仍未证明**：当前激活会取消部分尚未提交的普通 worker，`task_recover` 是失败后创建新尝试，不能当成进程重启入口。收敛方向与定向验收见[计划 G 节](2026-09-20-vrtc-code-change-plan.md#g-原图续跑与角色装配)。本轮只更新指导，不把研究方案记为已实现。
 
 | 已确认的问题 | 修正合同与唯一所有者 |
 |---|---|
@@ -103,13 +103,13 @@ R1 的 [专项 prompt 与 V1–V6 验收指标](execution-prompts/07-r1-suppleme
 | 准入、批次、提交、取消、恢复、执行预算与写闸 | 现有 `task-runtime` | 唯一执行状态与副作用仲裁；提供已存在事实及必要只读执行观测，不维护第二套上下文/记忆库，不承载 supervisor 推理 |
 | 目标/约束/依赖/产物/历史的相关性组织、来源引用、按需读取与上下文装配 | **`context` 包**（A2+A1 已提交实现，Q1–Q4 定向返工与 [Q3 收尾](history/2026-09-25-a2-a1-q3-closure-record.md)完成，2026-09-25 已验收） | 读既有来源，供模型工具和 prompt 两个实际消费者共用；不复制任务真相、不改变相位，不默认调用 LLM 生成摘要。这里承担当前所谓“工作记忆”的读取组织 |
 | 长期经验与共享知识 | 现有 Skill/文件、DSH 历史与 Evolution 记录；**暂不另建 memory 包** | 当前项目状态从权威记录重建；经验带来源、适用范围及验证状态。只有出现明确跨任务写入/检索消费者，才定独立 memory 持久合同，不让 memory 变成第二个 Task store |
-
-2026-10-01 复核：`graph` 保存 Agent 的有向 spawn/handoff 拓扑，`graphs` 保存 graph/env/root/store 绑定；二者都不是无向记忆图。Task 依赖和上下文相关性由现有事实生成，不另存关系网。实验报告记载 `context_read` 等真实调用，但本轮未逐条核验原会话日志，也没有移除 context 的对照实验；现有测试证明来源/装配/读域，不能据此宣称记忆机制改善了工程成功率。保留原始 Session、Task/Evidence、有限投影和按引用读取；语义索引或经验图须有实际检索需求再考虑。
 | Agent 创建、身份与消息投递 | 现有 `agent-runtime` + DSH Session/inbox | A4 已接线（恢复期唤醒只在屏障 ready 后，收尾返工）：通信主体在 agent-runtime（`messages.ts` 投递对账、`worker-resume.ts` 受控恢复）；问题/答案正文沿 Session 持久记录，context 负责呈现，task-runtime 只管阻塞执行效果与取消恢复；不把消息收发器搬进 task |
 | 判据执行与 Evidence 生成 | 现有 `verifier` | 独立产物判断；不决定候选是否值得晋升 |
 | 复盘事实、诊断读包及 reviewer 协调 | A5 已交付（§5.22）：事后扫描/reviewer 协调/交接读包归 `agent-singularity/src/review-agent-{ledger,run,scan}.ts`；终态基础派生留 runtime | context 提供授权事实读取，Agent 产生解释/实验建议；task 保留原历史记录，runtime 保留终态唯一写入与基础派生，不依赖可选 reviewer 装配。Session 历史/指标直接取 DSH；只有真实重复的领域提取才抽共用函数。未出现独立装配需求不新增 review 包 |
 | 候选、对照实验、晋升/回滚 | **`evolution` 包**（S4-E 已迁入并扩展：双侧实验、晋升闸、ledger 唯一实现；§5.17） | 已有完整生命周期及账本独立归属；Agent 构建候选，evolution 组织验证/批准后的应用。task-runtime 只接执行/恢复，不实现候选策略或评估平台 |
 | 模型工具 schema、工具绑定与组合装配 | 现有 `agent-singularity` | 薄适配到上述所有者；业务职责不能因为工具名含 task 就归入 task 包 |
+
+2026-10-01 复核：上下文树是 Task/Session 层级的逻辑投影，工作记忆由现有事实、会话历史和 context 装配/读取共同提供，已实现。`graph` 保存 Agent 的有向 spawn/handoff 拓扑，`graphs` 保存 graph/env/root/store 绑定；二者都不是无向语义记忆图。实验报告记载 `context_read` 等真实调用，但本轮未逐条核验原会话日志，也没有移除 context 的对照实验；现有测试证明上下文继承、来源/装配/读域，不能据此宣称其改善工程成功率的幅度。保留原始 Session、Task/Evidence、有限投影和按引用读取；另建语义索引或经验图须有实际检索需求再考虑。
 
 新 `context` 是 Singularity 的领域读取模块，复用 DSH 基础；不改上游 DSH 来承载 Singularity 任务语义。依赖方向：`agent-singularity → context → task / graphs / task-runtime 的只读观测 / DSH 查询与装配`；`task-runtime → task / agent-runtime`。**task、task-runtime、agent-runtime 不反向导入 context/evolution。** context 经 DSH 装配扩展接入模型请求；runtime 只提供事实，不能为让旧调用通过保留一份旧上下文实现。
 
@@ -403,7 +403,7 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 
 ### 5.15 A2+A1：Agent 状态上下文（2026-09-25，审核返工 + 定向返工 + Q3 收尾，现已验收）
 
-实现方提交了 `4a510ed`（显式恢复屏障/纯读拆分）、`f90d05b`（`context` 包读取核心）、`0f41d91`（装配接线/工具适配/迁移删除/旁路封闭）、`6e0f651`（其独立复核缺口闭合）。下列为已提交代码的范围，**不表示 A2-1～A2-6 已验收**；[进度审核](history/2026-09-25-a2-a1-progress-review.md)的可达反例覆盖了原交付声明。
+原交付为 `4a510ed`（显式恢复屏障/纯读拆分）、`f90d05b`（`context` 包读取核心）、`0f41d91`（装配接线/工具适配/迁移删除/旁路封闭）、`6e0f651`（其独立复核缺口闭合）；随后[进度审核](history/2026-09-25-a2-a1-progress-review.md)发现反例，经下述定向返工与 Q3 收尾复验，**A2-1～A2-6 整组现已验收**。
 
 **定向返工（`bee6a96` + 复核响应 `6ae5aa0`）**：Q1/Q2/Q4 关闭、Q3 的“中途失败不得伪装成功”关闭，逐项红/绿证据与最小合同冲突见[返工记录](history/2026-09-25-a2-a1-rework-record.md)。修复后的当前事实：
 
