@@ -1526,7 +1526,7 @@ function renderMetrics(metrics) {
 	if (metrics.tokens !== void 0) parts.push(`tokens in ${metrics.tokens.uncachedInputTokens}/out ${metrics.tokens.outputTokens}/cache ${metrics.tokens.cacheReadTokens}+${metrics.tokens.cacheWriteTokens} (session-cumulative)`);
 	if (metrics.toolCalls !== void 0) parts.push(`toolCalls ${metrics.toolCalls.calls} (${metrics.toolCalls.failures} failed)`);
 	if (metrics.humanInterventions !== void 0) parts.push(`humanInterventions ${metrics.humanInterventions} (session-scoped)`);
-	if (metrics.retries !== void 0) parts.push(`retries ${metrics.retries} (no retry branch exists yet; always 0)`);
+	if (metrics.retries !== void 0) parts.push(`retries ${metrics.retries} (runs beyond the first; a recovery attempt is one)`);
 	if (metrics.evidenceLogs !== void 0) parts.push(`evidenceLogs ${metrics.evidenceLogs}`);
 	return parts.join(" — ");
 }

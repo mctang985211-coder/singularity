@@ -532,7 +532,7 @@ export interface ReviewMetrics {
   toolCalls?: ReviewToolCallTotals
   /** Count of human-intervention events in the session log: `approval/asked` plus calls to `hitl_ask` / `hitl_approve` / `ask_user_question`. */
   humanInterventions?: number
-  /** `TaskStarted` count minus one for this task (`TaskInstance.runIds.length - 1`). Limitation: the current orchestrator has no retry branch, so this is structurally always 0 — a reader must not conclude "it was tried again and did not need to … */
+  /** Runs this task has started beyond its first (`TaskInstance.runIds.length - 1`): a recovery attempt opens a new run like any other, so this counts attempts, not failures. */
   retries?: number
   /** Criteria on this record that carry a `logRef` — where the evidence for a verdict was written. */
   evidenceLogs?: number

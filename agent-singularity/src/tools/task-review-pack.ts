@@ -58,7 +58,7 @@ function renderMetrics(metrics: ReviewMetrics): string {
   }
   if (metrics.toolCalls !== undefined) parts.push(`toolCalls ${metrics.toolCalls.calls} (${metrics.toolCalls.failures} failed)`)
   if (metrics.humanInterventions !== undefined) parts.push(`humanInterventions ${metrics.humanInterventions} (session-scoped)`)
-  if (metrics.retries !== undefined) parts.push(`retries ${metrics.retries} (no retry branch exists yet; always 0)`)
+  if (metrics.retries !== undefined) parts.push(`retries ${metrics.retries} (runs beyond the first; a recovery attempt is one)`)
   if (metrics.evidenceLogs !== undefined) parts.push(`evidenceLogs ${metrics.evidenceLogs}`)
   return parts.join(' — ')
 }

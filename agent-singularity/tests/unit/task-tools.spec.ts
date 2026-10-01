@@ -1333,7 +1333,7 @@ describe('task_review_pack', () => {
 
     expect(pack).toContain(
       'metrics: tokens in 1000/out 200/cache 50+10 (session-cumulative) — toolCalls 5 (1 failed) — '
-      + 'humanInterventions 2 (session-scoped) — retries 0 (no retry branch exists yet; always 0) — evidenceLogs 1',
+      + 'humanInterventions 2 (session-scoped) — retries 0 (runs beyond the first; a recovery attempt is one) — evidenceLogs 1',
     )
     expect(pack).toContain('dim outcome correctness: failed, criteria 1, unmet [ac1-1]')
     expect(pack).toContain('dim task specification: objective present, criteria 1, with command 1')
