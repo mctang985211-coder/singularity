@@ -7,11 +7,12 @@
  * execution-recovery entry, and each layer re-checks its own rules. What is
  * checked *here*: the caller is the supervisor the ledger recorded for this
  * diagnosis and the hand-off's store is the caller's own; the diagnosis exists in
- * that store and names the store's root task; the source is in a failing state (a
- * success is not recovered, and this build has no comparator for "faster"); a
- * capability change the diagnosis stands on is approved and applied; a pure
- * artifact gap needs no proposal but the rows it uses must resolve; and the
- * diagnosis never has two attempts at once.
+ * that store and names the store's root task; a live source is never hot-swapped,
+ * and a verified source is forwarded as an improvement round — the runtime owns
+ * the per-source cap and the judgement; while the deployment declares the chain
+ * on, a capability change the diagnosis stands on must be approved and applied;
+ * a pure artifact gap needs no proposal but the rows it uses must resolve; and
+ * the diagnosis never has two attempts at once.
  *
  * What is *not* claimed here: the store's own facts (the failed run, the contract,
  * the providers, the ceilings, the idempotency of the key) are the runtime's
@@ -65,6 +66,8 @@ interface FixtureOptions {
   readonly table?: Record<string, CapabilityConfig>
   /** Whether the delegation source is wired at all. */
   readonly wireDelegation?: boolean
+  /** The deployment's evolution switch (`ctx.singularityEvolution`); absent reads as on. */
+  readonly evolutionEnabled?: boolean
   /** Ledger lines written through the service's own entries before the call. */
   readonly ledger?: (svc: EvolutionService) => Promise<void>
 }
@@ -157,6 +160,9 @@ async function fixture(options: FixtureOptions = {}) {
       }
       if (name === 'taskRuntime' && services.runtime !== false) {
         return { listCapabilities: () => structuredClone(options.table ?? {}), recoverRootTask }
+      }
+      if (name === 'singularityEvolution' && options.evolutionEnabled !== undefined) {
+        return { enabled: options.evolutionEnabled }
       }
       return undefined
     },
@@ -312,7 +318,7 @@ describe('the recovery coordination entry', () => {
     expect(recoverRootTask).not.toHaveBeenCalled()
   })
 
-  it('refuses an unknown diagnosis, a diagnosis naming a child task, and a source that already succeeded', async () => {
+  it('refuses an unknown diagnosis, a diagnosis naming a child task, and a live source', async () => {
     // The hand-off names a diagnosis of this store — the ledger says so — and the
     // store does not hold it: an id nothing recorded is not a hand-off.
     const unknown = await fixture({
@@ -335,22 +341,6 @@ describe('the recovery coordination entry', () => {
       child.svc.coordinateRecovery({ sourceDiagnosisId: DIAGNOSIS, requestKey: 'k-1' }, { sessionId: SUPERVISOR }),
     ).rejects.toThrow(/is a child of "t-root"/)
 
-    // A successful source: not recoverable, and the suggestion it carries has no
-    // frozen comparator this build could judge it by.
-    const verified = await fixture({
-      sourceStatus: 'verified',
-      runs: [{ runId: 'r-1', taskId: 't-root', status: 'verified' }],
-    })
-    const refusal = await verified.svc
-      .coordinateRecovery({ sourceDiagnosisId: DIAGNOSIS, requestKey: 'k-1' }, { sessionId: SUPERVISOR })
-      .then(
-        () => '',
-        error => String(error),
-      )
-    expect(refusal).toContain('a successful source is not recovered')
-    expect(refusal).toContain('faster or cheaper')
-    expect(verified.recoverRootTask).not.toHaveBeenCalled()
-
     const running = await fixture({
       sourceStatus: 'running',
       runs: [{ runId: 'r-1', taskId: 't-root', status: 'running' }],
@@ -361,12 +351,96 @@ describe('the recovery coordination entry', () => {
     expect(running.recoverRootTask).not.toHaveBeenCalled()
   })
 
+  it('forwards a verified source as an improvement round instead of refusing it', async () => {
+    const f = await fixture({
+      sourceStatus: 'verified',
+      runs: [{ runId: 'r-1', taskId: 't-root', status: 'verified' }],
+    })
+    const outcome = await f.svc.coordinateRecovery(
+      { sourceDiagnosisId: DIAGNOSIS, requestKey: 'k-improve' },
+      { sessionId: SUPERVISOR },
+    )
+    expect(outcome.attempt).toBe('started')
+    expect(outcome.coordination.join('\n')).toContain('improvement round')
+    // The runtime owns the per-source cap and the judgement: this plane forwards
+    // the request every recovery carries (a verified source has no failed run).
+    expect(f.recoverRootTask).toHaveBeenCalledTimes(1)
+    expect(f.recoverRootTask.mock.calls[0]![1]).toEqual({
+      sourceTaskId: 't-root',
+      sourceRunId: null,
+      sourceDiagnosisId: DIAGNOSIS,
+      requestKey: 'k-improve',
+    })
+  })
+
+  it('forwards an explicit mode verbatim into the runtime request', async () => {
+    const f = await fixture({
+      sourceStatus: 'verified',
+      runs: [{ runId: 'r-1', taskId: 't-root', status: 'verified' }],
+    })
+    await f.svc.coordinateRecovery({ sourceDiagnosisId: DIAGNOSIS, requestKey: 'k-mode', mode: 'improve' }, { sessionId: SUPERVISOR })
+    expect(f.recoverRootTask.mock.calls[0]![1]).toEqual({
+      sourceTaskId: 't-root',
+      sourceRunId: null,
+      sourceDiagnosisId: DIAGNOSIS,
+      requestKey: 'k-mode',
+      mode: 'improve',
+    })
+  })
+
+  it('names no run for a verified source even when failed attempts crowd the history', async () => {
+    const f = await fixture({
+      sourceStatus: 'verified',
+      runs: [
+        { runId: 'r-1', taskId: 't-root', status: 'failed' },
+        { runId: 'r-2', taskId: 't-root', status: 'verified' },
+      ],
+    })
+    await f.svc.coordinateRecovery({ sourceDiagnosisId: DIAGNOSIS, requestKey: 'k-crowd', mode: 'improve' }, { sessionId: SUPERVISOR })
+    expect(f.recoverRootTask.mock.calls[0]![1]).toMatchObject({ sourceRunId: null, mode: 'improve' })
+  })
+
+  it('refuses a mode that is not recovery or improve, and carries no mode when none is given', async () => {
+    const f = await fixture({})
+    await expect(
+      f.svc.coordinateRecovery({ sourceDiagnosisId: DIAGNOSIS, requestKey: 'k-bad', mode: 'sideways' as never }, { sessionId: SUPERVISOR }),
+    ).rejects.toThrow(/mode must be "recovery" or "improve"/)
+    expect(f.recoverRootTask).not.toHaveBeenCalled()
+    await f.svc.coordinateRecovery({ sourceDiagnosisId: DIAGNOSIS, requestKey: 'k-plain' }, { sessionId: SUPERVISOR })
+    expect(f.recoverRootTask.mock.calls[0]![1]).toEqual({
+      sourceTaskId: 't-root',
+      sourceRunId: 'r-1',
+      sourceDiagnosisId: DIAGNOSIS,
+      requestKey: 'k-plain',
+    })
+  })
+
+  it('forwards past an unapplied capability change when the deployment declares the chain off', async () => {
+    const f = await fixture({
+      requestedCapabilities: ['new-row'],
+      evolutionEnabled: false,
+      ledger: svc => capabilityProposal(svc, 'decided'),
+    })
+    const outcome = await f.svc.coordinateRecovery(
+      { sourceDiagnosisId: DIAGNOSIS, requestKey: 'k-off' },
+      { sessionId: SUPERVISOR },
+    )
+    expect(outcome.attempt).toBe('started')
+    expect(outcome.coordination.join('\n')).toContain('evolution chain is off')
+    expect(f.recoverRootTask).toHaveBeenCalledTimes(1)
+    expect(f.recoverRootTask.mock.calls[0]![1]).toMatchObject({ sourceDiagnosisId: DIAGNOSIS, requestKey: 'k-off' })
+  })
+
   it('refuses a recovery whose capability change is not in force, naming the state', async () => {
     for (const [state, expected] of [
       ['proposed', 'is proposed'],
       ['decided', 'PROMOTE-decided but not applied'],
     ] as const) {
-      const f = await fixture({ requestedCapabilities: ['new-row'], ledger: svc => capabilityProposal(svc, state) })
+      const f = await fixture({
+        requestedCapabilities: ['new-row'],
+        evolutionEnabled: true,
+        ledger: svc => capabilityProposal(svc, state),
+      })
       const refusal = await f.svc
         .coordinateRecovery({ sourceDiagnosisId: DIAGNOSIS, requestKey: 'k-1' }, { sessionId: SUPERVISOR })
         .then(

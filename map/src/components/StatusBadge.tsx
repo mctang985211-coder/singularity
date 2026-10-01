@@ -51,6 +51,8 @@ const TONES: Record<string, string> = {
   retry: 'warn',
   skipped: 'muted',
   live: 'ok',
+  recovery: 'warm',
+  improvement: 'accent',
 }
 
 export function statusTone(status: string): string {

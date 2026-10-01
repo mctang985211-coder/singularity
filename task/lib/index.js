@@ -488,6 +488,7 @@ function assertMessageRef(where, ref) {
 /** The recovery attempt a run carries (A6, plan §F.4), judged by the reducer as the last gate — the entry re-checks the same facts against policy (the source's failure, the diagnosis, the limits, the capability rows), and this accepts only a … */
 function assertRunRecovery(snapshot, taskId, recovery) {
 	const where = `task: run recovery of "${taskId}"`;
+	if (recovery.kind !== "recovery" && recovery.kind !== "improvement") throw new Error(`${where} requires kind "recovery" or "improvement" (an attempt without one cannot be counted against the cap it spends)`);
 	for (const [name, value] of [
 		["source diagnosis id", recovery.sourceDiagnosisId],
 		["request key", recovery.requestKey],
@@ -513,7 +514,7 @@ function assertRunRecovery(snapshot, taskId, recovery) {
 		if (!Number.isInteger(member.childIndex) || member.childIndex < 0) throw new Error(`${at} childIndex ${JSON.stringify(member.childIndex)} must be a non-negative integer`);
 		if (claimed.has(member.childIndex)) throw new Error(`${at} claims position ${member.childIndex}, which another entry of this record already claims; one position reads one member`);
 		claimed.add(member.childIndex);
-		if (sourceRun !== void 0 && runMemberSlots(sourceRun)[member.childIndex] !== member.taskId) throw new Error(`${at} claims position ${member.childIndex} for "${String(member.taskId)}", but the failed run "${sourceRun.runId}" reads ${runMemberSlots(sourceRun)[member.childIndex] === void 0 ? "no member" : `"${runMemberSlots(sourceRun)[member.childIndex]}"`} there`);
+		if (sourceRun !== void 0 && runMemberSlots(sourceRun)[member.childIndex] !== member.taskId) throw new Error(`${at} claims position ${member.childIndex} for "${String(member.taskId)}", but ${recovery.kind === "improvement" ? "the verified" : "the failed"} run "${sourceRun.runId}" reads ${runMemberSlots(sourceRun)[member.childIndex] === void 0 ? "no member" : `"${runMemberSlots(sourceRun)[member.childIndex]}"`} there`);
 		const sibling = snapshot.tasks.find((candidate) => candidate.taskId === member.taskId);
 		if (sibling === void 0) throw new Error(`${at} cites unknown task "${String(member.taskId)}"`);
 		if (sibling.parentTaskId !== taskId) throw new Error(`${at} cites task "${sibling.taskId}", which is not a child of "${taskId}"; only a sibling of the failed attempt can be reused`);
@@ -1349,7 +1350,12 @@ function start(snapshot, taskId, envelopeRunId, run) {
 	if (run.recovery !== void 0) assertRunRecovery(snapshot, taskId, run.recovery);
 	assertBirthPhase(run);
 	if (run.parentRunId !== void 0) runIn(snapshot, run.parentRunId);
-	assertTransition(snapshot, taskId, ["admitted", "ready"], "running");
+	const from = run.recovery?.kind === "improvement" ? [
+		"admitted",
+		"ready",
+		"verified"
+	] : ["admitted", "ready"];
+	assertTransition(snapshot, taskId, from, "running");
 	snapshot = {
 		...snapshot,
 		runs: [...snapshot.runs, copy(run)]

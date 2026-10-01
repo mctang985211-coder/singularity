@@ -149,7 +149,7 @@ export function defineTaskReviewAgentTool(ctx: Context) {
       'after that attempt ended is an explicit act: pass a new non-empty requestKey, which is persisted with the ' +
       'source and the focus; the same key with a different reason is refused. While an attempt of the source is in ' +
       'flight the call returns its identity and starts nothing. The reviewer has no write, shell, spawn, or ' +
-      'evolution tool and is capped per root store (default 1).',
+      'evolution tool and is capped per root store (default 8).',
     parameters: {
       taskId: { type: 'string', required: true, description: 'Task whose review needs judgement' },
       runId: {

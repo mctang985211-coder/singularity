@@ -146,6 +146,11 @@ export function assertMessageRef(where: string, ref: QuestionMessageRef): void {
 /** The recovery attempt a run carries (A6, plan §F.4), judged by the reducer as the last gate — the entry re-checks the same facts against policy (the source's failure, the diagnosis, the limits, the capability rows), and this accepts only a … */
 export function assertRunRecovery(snapshot: TaskSnapshot, taskId: TaskId, recovery: RunRecovery): void {
   const where = `task: run recovery of "${taskId}"`
+  if (recovery.kind !== 'recovery' && recovery.kind !== 'improvement') {
+    throw new Error(
+      `${where} requires kind "recovery" or "improvement" (an attempt without one cannot be counted against the cap it spends)`,
+    )
+  }
   for (const [name, value] of [
     ['source diagnosis id', recovery.sourceDiagnosisId],
     ['request key', recovery.requestKey],
@@ -208,7 +213,8 @@ export function assertRunRecovery(snapshot: TaskSnapshot, taskId: TaskId, recove
     claimed.add(member.childIndex as number)
     if (sourceRun !== undefined && runMemberSlots(sourceRun)[member.childIndex as number] !== member.taskId) {
       throw new Error(
-        `${at} claims position ${member.childIndex} for "${String(member.taskId)}", but the failed run "${sourceRun.runId}" reads ` +
+        `${at} claims position ${member.childIndex} for "${String(member.taskId)}", but ` +
+          `${recovery.kind === 'improvement' ? 'the verified' : 'the failed'} run "${sourceRun.runId}" reads ` +
           `${runMemberSlots(sourceRun)[member.childIndex as number] === undefined ? 'no member' : `"${runMemberSlots(sourceRun)[member.childIndex as number]}"`} there`,
       )
     }

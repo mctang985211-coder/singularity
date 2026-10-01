@@ -18,6 +18,7 @@ import { ProposalReviewService } from './services/proposal-review.ts'
 import { reviewerBindingSource, supervisorDelegationSource } from './coordination/ledger.ts'
 import { installReviewAgentAutoTrigger } from './coordination/review-scan.ts'
 import { installSupervisorHandoffTrigger } from './coordination/evolution-handoff.ts'
+import { configureSupervision, DEFAULT_SUPERVISION, type SupervisionConfig } from './coordination/supervision.ts'
 import { logOf } from './log.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
@@ -57,18 +58,30 @@ export { HitlService } from './services/hitl.ts'
 export type { HitlAnswer } from './services/hitl.ts'
 export { EscalationService } from './services/escalation.ts'
 export { ProposalReviewService } from './services/proposal-review.ts'
+export { DEFAULT_SUPERVISION } from './coordination/supervision.ts'
+export type { AutoReviewMode, SupervisionConfig } from './coordination/supervision.ts'
 
 /** Plugin configuration — the deployment's composition, not a model's choice. */
 export interface Config {
   /** Whether this composition registers the nine `evolution_*` tools on the global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} — registers none of them: no model surface (root, granted worker, or the */
   evolution: 'off' | 'on'
+  /** The review/supervision policy: which terminal reviews are diagnosed on their own, the per-source round caps, and the coordination allowance (see {@link SupervisionConfig}). */
+  supervision?: SupervisionConfig
 }
 
 /** The shipped switch position: `off`. */
 export const DEFAULT_EVOLUTION: 'off' = 'off'
 
+const Supervision: z<SupervisionConfig> = z.object({
+  autoReview: z.union([z.const('all'), z.const('failed'), z.const('off')]).default(DEFAULT_SUPERVISION.autoReview),
+  maxRecoveryRounds: z.number().default(DEFAULT_SUPERVISION.maxRecoveryRounds),
+  maxImprovementRounds: z.number().default(DEFAULT_SUPERVISION.maxImprovementRounds),
+  coordinationBudget: z.number().default(DEFAULT_SUPERVISION.coordinationBudget),
+})
+
 const ConfigSchema: z<Config> = z.object({
   evolution: z.union([z.const('off'), z.const('on')]).default(DEFAULT_EVOLUTION),
+  supervision: Supervision.default({ ...DEFAULT_SUPERVISION }),
 })
 
 /** The evolution exposure this composition resolved, provided on the agent's own fiber as `ctx.singularityEvolution`. */
@@ -82,9 +95,26 @@ class EvolutionExposure extends Service {
   }
 }
 
+/** The supervision policy this composition resolved, provided on the agent's own fiber as `ctx.singularitySupervision` — what the task runtime's per-source round caps read. */
+class SupervisionExposure extends Service {
+  readonly autoReview: SupervisionConfig['autoReview']
+  readonly maxRecoveryRounds: number
+  readonly maxImprovementRounds: number
+  readonly coordinationBudget: number
+
+  constructor(ctx: Context, policy: SupervisionConfig) {
+    super(ctx, 'singularitySupervision')
+    this.autoReview = policy.autoReview
+    this.maxRecoveryRounds = policy.maxRecoveryRounds
+    this.maxImprovementRounds = policy.maxImprovementRounds
+    this.coordinationBudget = policy.coordinationBudget
+  }
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     singularityEvolution: EvolutionExposure
+    singularitySupervision: SupervisionExposure
   }
 }
 
@@ -115,6 +145,7 @@ export class SingularityAgent extends Service {
   constructor(ctx: Context, config?: Config) {
     super(ctx, 'singularityAgent')
     this.assertClosedConfig(config)
+    const supervision = configureSupervision(config?.supervision)
     const evolution = config?.evolution ?? DEFAULT_EVOLUTION
     ctx.plugin(HitlService)
     // The evolution tools read `ctx.evolution`, and a service a child fiber
@@ -136,6 +167,9 @@ export class SingularityAgent extends Service {
     // What this assembly did, said where a sibling can read it (the root agent's
     // tool allow-list is the consumer) — see {@link EvolutionExposure}.
     new EvolutionExposure(ctx, evolution === 'on')
+    // The supervision policy, said where the task runtime reads it: the round
+    // caps and the coordination allowance are one policy, declared once here.
+    new SupervisionExposure(ctx, supervision)
     // The reviewer ledger is the one delegation source this deployment has (A2
     // §D): the context read core resolves a reviewer's read domain from it, and
     ctx.effect(
@@ -231,11 +265,21 @@ export class SingularityAgent extends Service {
   /** Refuse a configuration member this plugin does not read. The schema keeps unknown keys on the object it validates, so this is where a caller's typo is caught: */
   private assertClosedConfig(config: Config | undefined): void {
     if (config === undefined) return
-    const known = new Set(['evolution'])
+    const known = new Set(['evolution', 'supervision'])
     const unknown = Object.keys(config).filter(key => !known.has(key))
-    if (unknown.length === 0) return
+    if (unknown.length > 0) {
+      throw new Error(
+        `singularity-agent: the configuration names [${unknown.join(', ')}], which this plugin does not read; ` +
+        'a member nobody reads refuses to start rather than being silently ignored',
+      )
+    }
+    const supervision = config.supervision
+    if (supervision === undefined) return
+    const knownSupervision = new Set(['autoReview', 'maxRecoveryRounds', 'maxImprovementRounds', 'coordinationBudget'])
+    const unknownSupervision = Object.keys(supervision).filter(key => !knownSupervision.has(key))
+    if (unknownSupervision.length === 0) return
     throw new Error(
-      `singularity-agent: the configuration names [${unknown.join(', ')}], which this plugin does not read; ` +
+      `singularity-agent: the supervision configuration names [${unknownSupervision.join(', ')}], which this plugin does not read; ` +
       'a member nobody reads refuses to start rather than being silently ignored',
     )
   }

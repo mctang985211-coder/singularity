@@ -620,13 +620,18 @@ interface RunMemberReuse {
   /** Input references the citation names, from the sibling's own declared input vocabulary (`requiresArtifact`, `acceptsArtifact`, `protectedInputs`). Empty when the citation rests on the run/evidence/product identity alone. */
   inputRefs: string[];
 }
-/** The recovery attempt a run **is** (A6, plan §F.4): a failed root task's new attempt, opened by the runtime's recovery entry in the same store, with the diagnosis and request that asked for it and the sibling evidence it reads instead of … */
+/** The recovery attempt a run **is** (A6, plan §F.4): a root task's new attempt, opened by the runtime's recovery entry in the same store, with the diagnosis and request that asked for it and the sibling evidence it reads instead of … */
 interface RunRecovery {
+  /**
+   * Which round of iteration this attempt is: `recovery` re-runs a failed source, `improvement` re-runs a verified one,
+   * judged by the same original criteria and required to stay green. The two count against separate per-source caps.
+   */
+  kind: 'recovery' | 'improvement';
   /** The diagnosis the attempt was requested for: the id of a `Diagnosis` record this store holds for this task. */
   sourceDiagnosisId: string;
   /** The caller's request key. One key names one attempt of one diagnosis, and the same key answers with the same run. */
   requestKey: string;
-  /** The failed run the source task's previous attempt was, when it had one. A task that failed without a run (a rejected admission, a blocked task) names none, and nothing is invented for it. */
+  /** The source run the task's previous attempt was, when it had one: the failed run a `recovery` recovers, the verified run an `improvement` re-earns the criteria from. A task that failed without a run (a rejected admission, a blocked task) names none, and nothing is invented for it. */
   sourceRunId?: RunId;
   /** When the attempt was opened. */
   requestedAt: string;
@@ -663,7 +668,7 @@ interface TaskRun {
   batchId?: string;
   /** Every batch this run admitted, in admission order, with the member task ids each created — the run's accumulative membership. */
   batches?: TaskRunBatch[];
-  /** The recovery attempt this run *is* (A6). Absent on every run that is not one: a first attempt, a child, a replay — an ordinary run is not a recovery of anything, and nothing is inferred for it. */
+  /** The recovery/improvement attempt this run *is* (A6/A7). Absent on every run that is not one: a first attempt, a child, a replay — an ordinary run is not an attempt of anything, and nothing is inferred for it. */
   recovery?: RunRecovery;
   /** What this run handed in, written by the transition into `submitted`. Absent on a run that has not submitted; its presence is what makes a second submission a refusal rather than an overwrite. */
   submission?: SubmissionRecord;

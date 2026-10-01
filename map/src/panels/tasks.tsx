@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react'
-import StatusBadge from '../components/StatusBadge'
+import StatusBadge, { statusTone } from '../components/StatusBadge'
 import { asArray, runsOf, shortId, taskTree, type TaskNode } from '../lib/task-data'
 import { useStore } from '../store'
 import type { EvidenceWire, ReviewWire, TaskRunWire, TaskSnapshotWire } from '../types'
@@ -217,7 +217,28 @@ function RunDetail({ run, review, evidence }: { run: TaskRunWire; review?: Revie
   )
 }
 
-function RunRow({ run, review, evidence }: { run: TaskRunWire; review?: ReviewWire; evidence: EvidenceWire[] }) {
+/** The iteration round a recovery run is: the kind its `RunRecovery` records and its position in the task's `runIds`. */
+function RoundBadge({ recovery, round }: { recovery: NonNullable<TaskRunWire['recovery']>; round?: number }) {
+  const improvement = recovery.kind === 'improvement'
+  return (
+    <span className="sg-badge" data-tone={statusTone(improvement ? 'improvement' : 'recovery')}>
+      {improvement ? '↻ improve' : '↻ recovery'}
+      {round === undefined ? '' : ` · round ${round}`}
+    </span>
+  )
+}
+
+function RunRow({
+  run,
+  review,
+  evidence,
+  round,
+}: {
+  run: TaskRunWire
+  review?: ReviewWire
+  evidence: EvidenceWire[]
+  round?: number
+}) {
   const selectedRunId = useStore(s => s.selectedRunId)
   const setSelectedRun = useStore(s => s.setSelectedRun)
   const setTab = useStore(s => s.setTab)
@@ -233,6 +254,7 @@ function RunRow({ run, review, evidence }: { run: TaskRunWire; review?: ReviewWi
         >
           <span className="sg-caret">{open ? '▾' : '▸'}</span>
           <StatusBadge status={run.status} />
+          {run.recovery !== undefined && <RoundBadge recovery={run.recovery} round={round} />}
           <code className="sg-run-id">{shortId(run.runId, 16)}</code>
           {run.executionPhase !== undefined && <span className="sg-run-phase">{run.executionPhase}</span>}
           {run.batchId !== undefined && <code className="sg-run-batch">{shortId(run.batchId, 18)}</code>}
@@ -257,6 +279,7 @@ function RunRow({ run, review, evidence }: { run: TaskRunWire; review?: ReviewWi
 function TaskRow({ node, view }: { node: TaskNode; view: Pick<TaskView, 'runs' | 'reviews' | 'evidence' | 'deps'> }) {
   const task = node.task
   const taskRuns = runsOf(task, view.runs)
+  const runIds = task.runIds ?? []
   const incoming = view.deps.get(task.taskId) ?? []
   return (
     <div className="sg-task" style={{ marginLeft: node.depth * 18 }}>
@@ -275,14 +298,18 @@ function TaskRow({ node, view }: { node: TaskNode; view: Pick<TaskView, 'runs' |
         <div className="sg-muted sg-task-empty">No runs recorded</div>
       ) : (
         <div className="sg-runs">
-          {taskRuns.map(run => (
-            <RunRow
-              key={run.runId}
-              run={run}
-              review={view.reviews.get(run.runId)}
-              evidence={view.evidence.get(run.runId) ?? []}
-            />
-          ))}
+          {taskRuns.map(run => {
+            const index = runIds.indexOf(run.runId)
+            return (
+              <RunRow
+                key={run.runId}
+                run={run}
+                round={index < 0 ? undefined : index + 1}
+                review={view.reviews.get(run.runId)}
+                evidence={view.evidence.get(run.runId) ?? []}
+              />
+            )
+          })}
         </div>
       )}
       {node.children.map(child => (

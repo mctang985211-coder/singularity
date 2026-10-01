@@ -12,7 +12,7 @@ import { precheckReplacedCapabilityRow, providerDefectLines } from '../provider-
 import type { EvolutionCommitLedger } from '../provider-precheck.ts'
 import type { RootBudgetConfig } from '../root-budget.ts'
 import type { BudgetConfig } from '../orchestration/types.ts'
-import type { ProviderLoadReport } from '../config.ts'
+import { DEFAULT_SUPERVISION, type ProviderLoadReport, type SupervisionConfig } from '../config.ts'
 
 export function assertClosedRootBudget(budget: RootBudgetConfig | undefined): void {
   if (budget === undefined) return
@@ -31,6 +31,69 @@ export function assertGeneratedTaskReview(policy: unknown): void {
     `task-runtime: generatedTaskReview is ${JSON.stringify(policy)}; the review policy is "off" or "all" ` +
       '(§5 defines no other mode, and a policy this build cannot execute refuses to start rather than admitting unreviewed batches)',
   )
+}
+
+/** Refuse a supervision policy this build cannot read: an unread member is a typo, and a cap is a whole count at or above zero. */
+export function assertSupervisionConfig(policy: unknown): void {
+  if (policy === undefined) return
+  if (policy === null || typeof policy !== 'object' || Array.isArray(policy)) {
+    throw new Error('task-runtime: supervision must be an object with the review policy\'s members')
+  }
+  const known = new Set(['autoReview', 'maxRecoveryRounds', 'maxImprovementRounds', 'coordinationBudget'])
+  const unknown = Object.keys(policy).filter(key => !known.has(key))
+  if (unknown.length > 0) {
+    throw new Error(
+      `task-runtime: supervision names [${unknown.join(', ')}], which this policy does not declare; ` +
+        'a member nobody reads refuses to start rather than being silently ignored',
+    )
+  }
+  const record = policy as Record<string, unknown>
+  if (record.autoReview !== undefined && !['all', 'failed', 'off'].includes(record.autoReview as string)) {
+    throw new Error(`task-runtime: supervision.autoReview is ${JSON.stringify(record.autoReview)}; it is "all", "failed" or "off"`)
+  }
+  for (const name of ['maxRecoveryRounds', 'maxImprovementRounds', 'coordinationBudget'] as const) {
+    const value = record[name]
+    if (value === undefined) continue
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < (name === 'coordinationBudget' ? 1 : 0)) {
+      throw new Error(
+        `task-runtime: supervision.${name} is ${JSON.stringify(value)}; it must be a whole ${name === 'coordinationBudget' ? 'count of at least 1' : 'count of at least 0'}`,
+      )
+    }
+  }
+}
+
+/**
+ * The policy in force: the `singularitySupervision` service a deployment exposes (the way `singularityEvolution` carries
+ * the chain switch) over this plugin's own config, per member; a value that is not a usable count reads as its default.
+ */
+export function supervisionSettings(self: TaskRuntime): SupervisionConfig {
+  const provided = self.softService<Partial<SupervisionConfig>>('singularitySupervision')
+  const configured = self.config.supervision
+  const whole = (value: number | undefined, fallback: number, floor: number): number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= floor ? Math.floor(value) : fallback
+  const autoReview = (value: unknown): SupervisionConfig['autoReview'] | undefined =>
+    value === 'all' || value === 'failed' || value === 'off' ? value : undefined
+  return {
+    autoReview:
+      autoReview(provided?.autoReview) ??
+      autoReview(configured?.autoReview) ??
+      DEFAULT_SUPERVISION.autoReview,
+    maxRecoveryRounds: whole(
+      provided?.maxRecoveryRounds,
+      whole(configured?.maxRecoveryRounds, DEFAULT_SUPERVISION.maxRecoveryRounds, 0),
+      0,
+    ),
+    maxImprovementRounds: whole(
+      provided?.maxImprovementRounds,
+      whole(configured?.maxImprovementRounds, DEFAULT_SUPERVISION.maxImprovementRounds, 0),
+      0,
+    ),
+    coordinationBudget: whole(
+      provided?.coordinationBudget,
+      whole(configured?.coordinationBudget, DEFAULT_SUPERVISION.coordinationBudget, 1),
+      1,
+    ),
+  }
 }
 
 export async function unload(self: TaskRuntime): Promise<void> {

@@ -1200,6 +1200,8 @@ interface RecoveryCoordinationRequest {
   sourceDiagnosisId: string;
   /** The caller's key: one key names one attempt of one diagnosis. */
   requestKey: string;
+  /** Recovery retries a failed source; improve opens an improvement round on a verified one (runtime default: recovery). */
+  mode?: 'recovery' | 'improve';
 }
 /** Who asks for a recovery: the **supervisor** session of that hand-off, as a live session with an abort signal. */
 interface RecoveryCoordinationCaller {
@@ -1298,7 +1300,9 @@ declare class EvolutionServiceCore extends Service {
   protected storeOfSession(sessionId: string): Promise<string>;
   /** The one runtime call this entry makes, with the answer every path carries: the runtime's own recovery outcome. */
   protected recoverThroughRuntime(storeId: string, recovery: RootRecoveryRequest, caller: RecoveryCoordinationCaller, delegation: SupervisorDelegation, coordination: readonly string[]): Promise<RecoveryCoordinationOutcome>;
-  /** The root task store of one live session, derived from its own graph — never from an id the caller passed. */
+  /** Whether this deployment declares the evolution chain on. Read softly, and read as on when the
+   * switch is absent: only a deployment that says `enabled: false` relaxes the ledger's own gates. */
+  protected evolutionChainOn(): boolean;
   /** The **recovery coordination** entry (A6, plan §F.4): take one recorded delegation and open the runtime's own recovery. */
   coordinateRecovery(request: RecoveryCoordinationRequest, caller: RecoveryCoordinationCaller): Promise<RecoveryCoordinationOutcome>;
   /** The commit request one apply/rollback binds, read off the prepared record. */

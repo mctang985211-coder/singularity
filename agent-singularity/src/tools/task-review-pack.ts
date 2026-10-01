@@ -6,7 +6,7 @@ import type { Diagnosis, ReviewDimensions, ReviewMetrics, ReviewRecord, TaskId, 
 import { JUDGED_DIMENSIONS, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import { readReviewAgentAttempts } from '../coordination/ledger.ts'
 import type { ReviewAgentAttempt, ReviewAgentSource } from '../coordination/ledger.ts'
-import { handoffFactsOf, handoffStateLine } from '../coordination/handoff-rules.ts'
+import { handoffFactsOf, handoffStateLine, roundsForDiagnosis } from '../coordination/handoff-rules.ts'
 import type { HandoffFacts } from '../coordination/handoff-rules.ts'
 import { reviewRef } from '../coordination/identity.ts'
 import { sessionId, text } from '../shared.ts'
@@ -143,17 +143,17 @@ function renderReview(review: ReviewRecord): string[] {
   return lines
 }
 
-/** How far one diagnosis's suggestions have been taken up (A5 §3, plan F.4): */
-function handoffMark(diagnosis: Diagnosis, handoff: HandoffFacts): string | undefined {
+/** How far one diagnosis's hand-off has gone (A5 §3, plan F.4): what the ledger, the allowance and the source's rounds answer for it. */
+function handoffMark(diagnosis: Diagnosis, handoff: HandoffFacts, snapshot: TaskSnapshot): string {
   return handoffStateLine({
-    enabled: handoff.enabled,
     diagnosis,
     attempts: handoff.attempts,
     budget: handoff.budget,
+    rounds: roundsForDiagnosis(snapshot, diagnosis),
   })
 }
 
-function renderDiagnosis(diagnosis: Diagnosis, handoff: HandoffFacts): string[] {
+function renderDiagnosis(diagnosis: Diagnosis, handoff: HandoffFacts, snapshot: TaskSnapshot): string[] {
   const producer = diagnosis.producedBy === undefined
     ? ''
     : diagnosis.producedBy.kind === 'agent' && diagnosis.producedBy.sessionId !== undefined
@@ -170,8 +170,7 @@ function renderDiagnosis(diagnosis: Diagnosis, handoff: HandoffFacts): string[] 
     }
   }
   for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`)
-  const handoffText = handoffMark(diagnosis, handoff)
-  if (handoffText !== undefined) lines.push(`  handoff: ${handoffText}`)
+  lines.push(`  handoff: ${handoffMark(diagnosis, handoff, snapshot)}`)
   return lines
 }
 
@@ -239,7 +238,7 @@ export function buildReviewPack(input: ReviewPackInput): string {
     lines.push(`- ${child.taskId} [${child.status}]: ${reviewSummary(snapshot, child.taskId)}`)
   }
   lines.push(`diagnoses (${diagnoses.length}):`)
-  for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis, handoff))
+  for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis, handoff, snapshot))
   return lines.join('\n')
 }
 
@@ -252,10 +251,10 @@ export function defineTaskReviewPackTool(ctx: Context) {
       'itself, all its review records in full (criteria, log tail, blockers, the session each review came from), the ' +
       'review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the ' +
       'fact table does not carry, one-line review summaries of its children and parent, the dependency edges touching ' +
-      'it, and its diagnoses with any agent judgements — each diagnosis that carries suggestions marked with its ' +
-      'hand-off state (the supervisor it was delegated to, the coordinator being started, or the named reason nothing ' +
-      'was opened: the chain off, an unsupported target, or the allowance spent). It reports the facts only: whether a review agent runs is ' +
-      'decided elsewhere (a failed review is accepted on its own; an explicit call names its source). ' +
+      'it, and its diagnoses with any agent judgements — every diagnosis marked with its ' +
+      'hand-off state (the supervisor it was delegated to, the outcome that settled it, or the named reason nothing ' +
+      'was opened: no live root session, the source\'s round cap, or the allowance spent). It reports the facts only: whether a review agent runs is ' +
+      'decided elsewhere (a terminal review is accepted on its own under the deployment\'s autoReview mode; an explicit call names its source). ' +
       'Local evidence plus parent/children summaries — no ancestry replay (guide §2.7.5). Feed this to task_diagnose, or ' +
       'to task_review_agent when a judgement is needed.',
     parameters: {
@@ -286,7 +285,7 @@ export function defineTaskReviewPackTool(ctx: Context) {
         snapshot,
         source,
         attempts,
-        handoff: await handoffFactsOf(ctx, storeId, attempts),
+        handoff: await handoffFactsOf(storeId, attempts),
       })
     },
   })

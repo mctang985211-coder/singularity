@@ -2,7 +2,25 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest } from "@dangosys/dsh-singularity-task-runtime";
 import { ModelSelection } from "@dangosys/dsh-singularity-evolution";
+import "@dangosys/dsh-singularity-task";
 
+//#region src/coordination/supervision.d.ts
+/** When the automatic trigger accepts a terminal review for diagnosis. */
+type AutoReviewMode = 'all' | 'failed' | 'off';
+/** The `supervision` block of agent-singularity's configuration, with every member resolved. */
+interface SupervisionConfig {
+  /** `all` accepts every terminal review (failed and verified), `failed` only failures, `off` none. */
+  readonly autoReview: AutoReviewMode;
+  /** Recovery attempts one failed source accepts before `iteration-cap`. */
+  readonly maxRecoveryRounds: number;
+  /** Improvement attempts one verified source accepts before `iteration-cap`. */
+  readonly maxImprovementRounds: number;
+  /** Review-agent runs (reviewers and supervisors together) one root store may start. */
+  readonly coordinationBudget: number;
+}
+/** The shipped defaults: every terminal review is diagnosed, three recovery rounds, two improvement rounds, eight coordination runs per store. */
+declare const DEFAULT_SUPERVISION: SupervisionConfig;
+//#endregion
 //#region src/services/hitl.d.ts
 type HitlKind = 'ask' | 'approve';
 interface HitlPending {
@@ -145,6 +163,8 @@ declare class ProposalReviewService extends Service implements ProposalReviewCha
 interface Config {
   /** Whether this composition registers the nine `evolution_*` tools on the global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} — registers none of them: no model surface (root, granted worker, or the */
   evolution: 'off' | 'on';
+  /** The review/supervision policy: which terminal reviews are diagnosed on their own, the per-source round caps, and the coordination allowance (see {@link SupervisionConfig}). */
+  supervision?: SupervisionConfig;
 }
 /** The shipped switch position: `off`. */
 declare const DEFAULT_EVOLUTION: 'off';
@@ -154,9 +174,18 @@ declare class EvolutionExposure extends Service {
   readonly enabled: boolean;
   constructor(ctx: Context, enabled: boolean);
 }
+/** The supervision policy this composition resolved, provided on the agent's own fiber as `ctx.singularitySupervision` — what the task runtime's per-source round caps read. */
+declare class SupervisionExposure extends Service {
+  readonly autoReview: SupervisionConfig['autoReview'];
+  readonly maxRecoveryRounds: number;
+  readonly maxImprovementRounds: number;
+  readonly coordinationBudget: number;
+  constructor(ctx: Context, policy: SupervisionConfig);
+}
 declare module '@deepseek-ai/cordis' {
   interface Context {
     singularityEvolution: EvolutionExposure;
+    singularitySupervision: SupervisionExposure;
   }
 }
 /** The model selection the evolution plane freezes with an experiment and re-reads before a promotion (see `Config.modelSelection` of the evolution service). */
@@ -175,4 +204,4 @@ declare class SingularityAgent extends Service {
   private warn;
 }
 //#endregion
-export { Config, DEFAULT_EVOLUTION, EscalationService, type HitlAnswer, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, deploymentModelSelection };
+export { type AutoReviewMode, Config, DEFAULT_EVOLUTION, DEFAULT_SUPERVISION, EscalationService, type HitlAnswer, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, type SupervisionConfig, deploymentModelSelection };

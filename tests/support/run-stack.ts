@@ -69,7 +69,9 @@ import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
 import type { CapabilityConfig, Config, RootBudgetApproval, RootBudgetApprovalAsk, RootBudgetApprovalDecision, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
+import { configureSupervision } from '../../agent-singularity/src/coordination/supervision.ts'
 import { graphRegistry, sessionQueryReads } from './context-plane.ts'
+import type { SupervisionOptions } from './scripted-loop.ts'
 
 /** The fixture skills the deployment's own pre-check fixtures install. */
 const FIXTURE_SKILLS = fileURLToPath(new URL('../../task-runtime/tests/fixtures/skills/', import.meta.url))
@@ -121,6 +123,14 @@ export interface RunStackOptions {
   readonly tools?: boolean
   /** Declare the evolution chain on (`ctx.singularityEvolution`), the switch the root reads. Defaults off. */
   readonly evolution?: boolean
+  /**
+   * The deployment's supervision policy (A5/A6/A7), provided on the deployment's
+   * own `singularitySupervision` service exactly as named: which terminal reviews
+   * the automatic trigger accepts, how many recovery/improvement rounds a source
+   * accepts, and the store's coordination allowance. Absent leaves the shipped
+   * defaults in force.
+   */
+  readonly supervision?: SupervisionOptions
   /** Where run bindings are materialized. Defaults to `<home>/singularity/run-bindings`. */
   readonly runBindingRoot?: string
   /** Depth ceiling for a cascade; defaults to the runtime's own. */
@@ -381,6 +391,12 @@ class RunStackImpl implements RunStack {
     ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
     // The deployment's evolution switch: read by the root assembly before any root exists.
     if (this.options.evolution === true) ctx.provide('singularityEvolution', { enabled: true })
+    // The supervision policy a spec asked for (A5/A6/A7): this stack mounts no
+    // singularity plugin, so the policy travels as the deployment's own service,
+    // exactly as the evolution switch does above — and the plugin-global
+    // settings (the trigger and the ledger) are reset to the same policy.
+    configureSupervision(this.options.supervision)
+    if (this.options.supervision !== undefined) ctx.provide('singularitySupervision', { ...this.options.supervision })
 
     for (const root of this.roots) {
       this.headers.set(root, { id: root, cwd: this.checkout, agentPreset: 'standard' } as unknown as SessionHeader)

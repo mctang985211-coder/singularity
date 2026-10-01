@@ -475,6 +475,8 @@ export interface StartRecoveryAttemptInput {
   readonly storeId: string
   readonly source: TaskInstance
   readonly request: RootRecoveryRequest
+  /** The round's source run, when the store resolved one: the facts the new attempt's kickoff notice is read from. */
+  readonly sourceRun?: TaskRun
   readonly declarations: readonly RootRecoveryReuse[]
   readonly unbound: readonly RunMemberReuseRefusal[]
   readonly manifest: CapabilityManifest

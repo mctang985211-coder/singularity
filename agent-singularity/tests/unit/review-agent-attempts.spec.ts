@@ -423,6 +423,8 @@ describe('the source attempt: claim, started, settled', () => {
   })
 
   test('the allowance spent still answers a repeat, and refuses a new source with zero claim and zero spawn', async () => {
+    // The env override pins the allowance to the one run this case spends.
+    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '1'
     const { ctx, spawn } = fixture(spawning(handle(REPLY)))
     const tool = defineTaskReviewAgentTool(ctx)
 

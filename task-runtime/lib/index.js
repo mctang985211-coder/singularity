@@ -2301,6 +2301,13 @@ const DEFAULT_WRITE_DRAIN_TIMEOUT_MS = 3e4;
 const DEFAULT_MAX_DEPTH = 4;
 const DEFAULT_MAX_CHILDREN = 8;
 const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true;
+/** The shipped supervision policy (A7 §1): every terminal review diagnosed, three recovery rounds, two improvement rounds, eight coordination runs. */
+const DEFAULT_SUPERVISION = {
+	autoReview: "all",
+	maxRecoveryRounds: 3,
+	maxImprovementRounds: 2,
+	coordinationBudget: 8
+};
 const Capability = z.object({
 	skills: z.array(z.string()),
 	tools: z.array(z.string()),
@@ -2311,6 +2318,16 @@ const Capability = z.object({
 const RootBudget = z.object({
 	maxRuns: z.number(),
 	maxConcurrentWrites: z.number()
+});
+const Supervision = z.object({
+	autoReview: z.union([
+		z.const("all"),
+		z.const("failed"),
+		z.const("off")
+	]).default(DEFAULT_SUPERVISION.autoReview),
+	maxRecoveryRounds: z.number().default(DEFAULT_SUPERVISION.maxRecoveryRounds),
+	maxImprovementRounds: z.number().default(DEFAULT_SUPERVISION.maxImprovementRounds),
+	coordinationBudget: z.number().default(DEFAULT_SUPERVISION.coordinationBudget)
 });
 const ConfigSchema = z.object({
 	capabilities: z.dict(Capability).default({}),
@@ -2325,6 +2342,7 @@ const ConfigSchema = z.object({
 	}).default({ ...DEFAULT_BUDGET }),
 	allowRuntimeDecomposition: z.boolean().default(DEFAULT_ALLOW_RUNTIME_DECOMPOSITION),
 	generatedTaskReview: z.union([z.const("off"), z.const("all")]).default(DEFAULT_GENERATED_TASK_REVIEW),
+	supervision: Supervision.default({ ...DEFAULT_SUPERVISION }),
 	rootBudget: RootBudget,
 	writeDrainTimeoutMs: z.number().default(DEFAULT_WRITE_DRAIN_TIMEOUT_MS)
 });
@@ -2643,6 +2661,50 @@ function assertClosedRootBudget(budget$1) {
 function assertGeneratedTaskReview(policy) {
 	if (policy === void 0 || policy === "off" || policy === "all") return;
 	throw new Error(`task-runtime: generatedTaskReview is ${JSON.stringify(policy)}; the review policy is "off" or "all" (§5 defines no other mode, and a policy this build cannot execute refuses to start rather than admitting unreviewed batches)`);
+}
+/** Refuse a supervision policy this build cannot read: an unread member is a typo, and a cap is a whole count at or above zero. */
+function assertSupervisionConfig(policy) {
+	if (policy === void 0) return;
+	if (policy === null || typeof policy !== "object" || Array.isArray(policy)) throw new Error("task-runtime: supervision must be an object with the review policy's members");
+	const known = new Set([
+		"autoReview",
+		"maxRecoveryRounds",
+		"maxImprovementRounds",
+		"coordinationBudget"
+	]);
+	const unknown = Object.keys(policy).filter((key) => !known.has(key));
+	if (unknown.length > 0) throw new Error(`task-runtime: supervision names [${unknown.join(", ")}], which this policy does not declare; a member nobody reads refuses to start rather than being silently ignored`);
+	const record = policy;
+	if (record.autoReview !== void 0 && ![
+		"all",
+		"failed",
+		"off"
+	].includes(record.autoReview)) throw new Error(`task-runtime: supervision.autoReview is ${JSON.stringify(record.autoReview)}; it is "all", "failed" or "off"`);
+	for (const name of [
+		"maxRecoveryRounds",
+		"maxImprovementRounds",
+		"coordinationBudget"
+	]) {
+		const value = record[name];
+		if (value === void 0) continue;
+		if (typeof value !== "number" || !Number.isInteger(value) || value < (name === "coordinationBudget" ? 1 : 0)) throw new Error(`task-runtime: supervision.${name} is ${JSON.stringify(value)}; it must be a whole ${name === "coordinationBudget" ? "count of at least 1" : "count of at least 0"}`);
+	}
+}
+/**
+* The policy in force: the `singularitySupervision` service a deployment exposes (the way `singularityEvolution` carries
+* the chain switch) over this plugin's own config, per member; a value that is not a usable count reads as its default.
+*/
+function supervisionSettings(self) {
+	const provided = self.softService("singularitySupervision");
+	const configured = self.config.supervision;
+	const whole = (value, fallback, floor) => typeof value === "number" && Number.isFinite(value) && value >= floor ? Math.floor(value) : fallback;
+	const autoReview = (value) => value === "all" || value === "failed" || value === "off" ? value : void 0;
+	return {
+		autoReview: autoReview(provided?.autoReview) ?? autoReview(configured?.autoReview) ?? DEFAULT_SUPERVISION.autoReview,
+		maxRecoveryRounds: whole(provided?.maxRecoveryRounds, whole(configured?.maxRecoveryRounds, DEFAULT_SUPERVISION.maxRecoveryRounds, 0), 0),
+		maxImprovementRounds: whole(provided?.maxImprovementRounds, whole(configured?.maxImprovementRounds, DEFAULT_SUPERVISION.maxImprovementRounds, 0), 0),
+		coordinationBudget: whole(provided?.coordinationBudget, whole(configured?.coordinationBudget, DEFAULT_SUPERVISION.coordinationBudget, 1), 1)
+	};
 }
 async function unload(self) {
 	/**
@@ -5884,12 +5946,21 @@ function permissionFor(env, manifest) {
 
 //#endregion
 //#region src/recovery.ts
+/** The stored kind one mode writes into {@link RunRecovery.kind}. */
+function recoveryKindOf(mode) {
+	return mode === "improve" ? "improvement" : "recovery";
+}
+/** The mode one stored kind was asked under; a record written before the field existed reads as a recovery. */
+function recoveryModeOf(kind) {
+	return kind === "improvement" ? "improve" : "recovery";
+}
 /** The fields one request may carry: anything else is refused by name rather than ignored. */
 const REQUEST_FIELDS = [
 	"sourceTaskId",
 	"sourceRunId",
 	"sourceDiagnosisId",
 	"requestKey",
+	"mode",
 	"reuses"
 ];
 /** The fields one reuse declaration may carry. */
@@ -5914,6 +5985,7 @@ function recoveryRequestDefects(request) {
 	if (request.sourceRunId !== null && !nonBlank(request.sourceRunId)) defects.push("sourceRunId must be a non-empty run id or null (a failure that had no run)");
 	if (!nonBlank(request.sourceDiagnosisId)) defects.push("sourceDiagnosisId must be a non-empty diagnosis id");
 	if (!nonBlank(request.requestKey)) defects.push("requestKey must be a non-empty string");
+	if (request.mode !== void 0 && request.mode !== "recovery" && request.mode !== "improve") defects.push("mode must be \"recovery\" (the default) or \"improve\"");
 	if (request.reuses !== void 0) if (!Array.isArray(request.reuses)) defects.push("reuses must be an array of declarations");
 	else {
 		const claimed = /* @__PURE__ */ new Set();
@@ -5959,10 +6031,11 @@ function inFlightRecoveryAttempt(snapshot, sourceTaskId, sourceDiagnosisId) {
 }
 /**
 * What makes two attempts under one key the *same* attempt: the content the key
-* is bound to — the source run it recovers and the reuse it declares. A retry
+* is bound to — the kind of round, the source run it reads and the reuse it declares. A retry
 */
 function recoveryAttemptDigest(recovery) {
 	return sha256Hex(canonicalize({
+		kind: recovery.kind ?? "recovery",
 		sourceRunId: recovery.sourceRunId ?? null,
 		reusedMembers: recovery.reusedMembers.map((member) => ({
 			childIndex: member.childIndex,
@@ -5975,9 +6048,30 @@ function recoveryAttemptDigest(recovery) {
 		}))
 	}));
 }
+/**
+* The source run one attempt reads, or `undefined` when the failure had none: a
+* `recovery` names a run that settled `failed`, an `improve` a verified one — and
+* an `improve` that names none reads the task's newest verified run.
+*/
+function recoverySourceRun(source, request, snapshot, kind) {
+	const wanted = kind === "improvement" ? "verified" : "failed";
+	const which = kind === "improvement" ? "a verified" : "a *failed*";
+	if (request.sourceRunId !== null) {
+		const run = snapshot.runs.find((candidate) => candidate.runId === request.sourceRunId);
+		if (run === void 0) throw new Error(`task-runtime: store "${snapshot.id}" holds no run "${request.sourceRunId}"; the named source attempt does not exist`);
+		if (run.taskId !== source.taskId) throw new Error(`task-runtime: run "${run.runId}" belongs to task "${run.taskId}", not to the named source "${source.taskId}"; nothing was written`);
+		if (run.status !== wanted) throw new Error(`task-runtime: source run "${run.runId}" is ${run.status}; ${kind === "improvement" ? "an improvement round reads" : "a recovery recovers"} ${which} attempt (its run settled \`${wanted}\`), and this run is not one`);
+		return run;
+	}
+	const running = snapshot.runs.filter((run) => run.taskId === source.taskId && run.status === "running");
+	if (running.length > 0) throw new Error(`task-runtime: the request names no source run, but task "${source.taskId}" holds a run in flight (${running.map((run) => run.runId).join(", ")}); a failure without a run is a task that never started, not one an attempt is running for`);
+	if (kind !== "improvement") return void 0;
+	return [...snapshot.runs].reverse().find((run) => run.taskId === source.taskId && run.status === "verified");
+}
 /** The request's own content identity, derived from the same fields the stored attempt carries. */
 function requestAttemptDigest(request) {
 	return recoveryAttemptDigest({
+		kind: recoveryKindOf(request.mode),
 		...request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId },
 		reusedMembers: (request.reuses ?? []).map((declaration) => ({
 			childIndex: declaration.childIndex,
@@ -5990,6 +6084,22 @@ function requestAttemptDigest(request) {
 		}))
 	});
 }
+/** Count one source task's attempt runs by kind; a row written before `kind` existed is a recovery. */
+function recoveryRoundsOf(snapshot, sourceTaskId) {
+	const attempts = snapshot.runs.filter((run) => run.taskId === sourceTaskId && run.recovery !== void 0);
+	return {
+		recovery: attempts.filter((run) => run.recovery.kind !== "improvement").length,
+		improvement: attempts.filter((run) => run.recovery.kind === "improvement").length
+	};
+}
+/** The coded refusal one exhausted per-source cap answers with (A7 §3): the caller's next move is to stop, not to retry. */
+var IterationCapRefusal = class extends Error {
+	code = "iteration-cap";
+	constructor(message$1) {
+		super(message$1);
+		this.name = "IterationCapRefusal";
+	}
+};
 /** The input references one sibling task declares, across its criteria (`requiresArtifact`, `acceptsArtifact`, `protectedInputs`). */
 function declaredInputsOf(task) {
 	return new Set(task.acceptanceCriteria.flatMap((criterion) => [
@@ -6157,6 +6267,20 @@ async function assertRecoveryCallerOwnsStore(self, storeId, caller) {
 	const ownStoreId = rootTaskStoreId(graph.rootSessionId);
 	if (ownStoreId !== storeId) throw new Error(`task-runtime: session "${sessionId}" cannot open a recovery of store "${storeId}": its graph's root session is "${graph.rootSessionId}", whose store is "${ownStoreId}" — a recovery attempt is opened in the store of the caller's own graph, and nothing was written`);
 }
+/** The coded cap refusal (A7 §3): this source has spent its rounds of this kind — nothing is opened and nothing is written. */
+function assertRoundCap(supervision, rounds, kind, sourceTaskId) {
+	const [spent, cap, what] = kind === "improvement" ? [
+		rounds.improvement,
+		supervision.maxImprovementRounds,
+		"improvement rounds"
+	] : [
+		rounds.recovery,
+		supervision.maxRecoveryRounds,
+		"recovery rounds"
+	];
+	if (spent < cap) return;
+	throw new IterationCapRefusal(`task-runtime: the ${kind === "improvement" ? "improvement round" : "recovery"} of "${sourceTaskId}" was refused (iteration-cap): the source's ${what} are spent (${spent}/${cap}); no run was opened and the store's own facts stay as they are — a deployment raises the cap, no count is reset`);
+}
 async function recoverRootTaskOnce(self, storeId, request, caller) {
 	await assertRecoveryCallerOwnsStore(self, storeId, caller);
 	const sourceTaskId = request.sourceTaskId;
@@ -6171,10 +6295,14 @@ async function recoverRootTaskOnce(self, storeId, request, caller) {
 	if (diagnosis.taskId !== sourceTaskId) throw new Error(`task-runtime: diagnosis "${request.sourceDiagnosisId}" is about task "${diagnosis.taskId}", not the named source "${sourceTaskId}"; the hand-off and the store disagree about which task failed, and nothing was written`);
 	const inFlight = inFlightRecoveryAttempt(snapshot, sourceTaskId, request.sourceDiagnosisId);
 	if (inFlight !== void 0) throw new Error(`task-runtime: diagnosis "${request.sourceDiagnosisId}" already has a recovery attempt in flight (run "${inFlight.runId}", session "${inFlight.sessionId}", key "${inFlight.recovery?.requestKey ?? "unknown"}"); key "${request.requestKey}" starts nothing — an attempt ends when its run settles, and a new key may be asked for after that`);
-	if (source.status === "verified") throw new Error(`task-runtime: root task "${sourceTaskId}" is verified — a successful source is not recoverable, and nothing was written; an improvement on a succeeded goal needs a new intake under its own contract, not a recovery of this one`);
-	if (source.status === "running" || source.status === "verifying") throw new Error(`task-runtime: root task "${sourceTaskId}" is ${source.status}: an attempt is in flight, and a recovery does not hot-swap a live run`);
-	if (source.status !== "failed" && source.status !== "blocked") throw new Error(`task-runtime: root task "${sourceTaskId}" is ${source.status}; a recovery attempt is opened for a failed task (a \`failed\` task, or a \`blocked\` one that never ran), and this is not one`);
-	const sourceRun = recoverySourceRun(source, request, snapshot);
+	const kind = recoveryKindOf(request.mode);
+	if (kind === "improvement") {
+		if (source.status !== "verified") throw new Error(`task-runtime: root task "${sourceTaskId}" is ${source.status}; an improvement round is opened for a verified source (one whose own attempt settled \`verified\`), and this is not one — a failed source is recovered without mode, or with mode "recovery"`);
+	} else if (source.status === "verified") throw new Error(`task-runtime: root task "${sourceTaskId}" is verified — a successful source is not recovered by the recovery door, and nothing was written; a verified source accepts an improvement round, judged by the same original criteria: ask again with mode "improve"`);
+	else if (source.status === "running" || source.status === "verifying") throw new Error(`task-runtime: root task "${sourceTaskId}" is ${source.status}: an attempt is in flight, and a recovery does not hot-swap a live run`);
+	else if (source.status !== "failed" && source.status !== "blocked") throw new Error(`task-runtime: root task "${sourceTaskId}" is ${source.status}; a recovery attempt is opened for a failed task (a \`failed\` task, or a \`blocked\` one that never ran), and this is not one`);
+	assertRoundCap(supervisionSettings(self), recoveryRoundsOf(snapshot, sourceTaskId), kind, sourceTaskId);
+	const sourceRun = recoverySourceRun(source, request, snapshot, kind);
 	assertRecoveryContract(source);
 	/**
 	* The binding comes from the store, not from the caller: a request that names
@@ -6210,6 +6338,7 @@ async function recoverRootTaskOnce(self, storeId, request, caller) {
 		storeId,
 		source,
 		request,
+		...sourceRun === void 0 ? {} : { sourceRun },
 		declarations,
 		unbound,
 		manifest,
@@ -6251,17 +6380,6 @@ function recoveryAttemptForRequest(snapshot, request) {
 		detail: `request key "${stored.requestKey}" already named this recovery attempt: run "${existing.runId}" is ${existing.status}${existing.finishedAt === void 0 ? "" : ` (finished ${existing.finishedAt})`}; nothing was written`
 	};
 }
-function recoverySourceRun(source, request, snapshot) {
-	if (request.sourceRunId !== null) {
-		const run = snapshot.runs.find((candidate) => candidate.runId === request.sourceRunId);
-		if (run === void 0) throw new Error(`task-runtime: store "${snapshot.id}" holds no run "${request.sourceRunId}"; the named source attempt does not exist`);
-		if (run.taskId !== source.taskId) throw new Error(`task-runtime: run "${run.runId}" belongs to task "${run.taskId}", not to the named source "${source.taskId}"; nothing was written`);
-		if (run.status !== "failed") throw new Error(`task-runtime: source run "${run.runId}" is ${run.status}; a recovery recovers a *failed* attempt (its run settled \`failed\`), and this run is not one`);
-		return run;
-	}
-	const running = snapshot.runs.filter((run) => run.taskId === source.taskId && run.status === "running");
-	if (running.length > 0) throw new Error(`task-runtime: the request names no source run, but task "${source.taskId}" holds a run in flight (${running.map((run) => run.runId).join(", ")}); a failure without a run is a task that never started, not one an attempt is running for`);
-}
 function assertRecoveryContract(source) {
 	const contract = source.contract;
 	if (contract === void 0) throw new Error(`task-runtime: task "${source.taskId}" carries no contract, so its original acceptance cannot be read; a recovery binds its reuse to that acceptance, and nothing is guessed for a task that has none`);
@@ -6269,15 +6387,53 @@ function assertRecoveryContract(source) {
 	if (disagreement !== void 0) throw new Error(`task-runtime: task "${source.taskId}"'s contract and its projection disagree on ${disagreement}; the original contract and acceptance criteria have to be one record before an attempt can be bound to them`);
 	if (source.acceptanceCriteria.length === 0) throw new Error(`task-runtime: task "${source.taskId}" declares no acceptance criterion, so there is nothing the new attempt could be judged by`);
 }
+/** One compact metrics line from a review record: exactly the numbers it stored, or an explicit "none". */
+function reviewMetricsLine(review) {
+	const parts = [];
+	const tokens = review.metrics?.tokens;
+	if (tokens !== void 0) {
+		const total = tokens.uncachedInputTokens + tokens.outputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens;
+		parts.push(`tokens ${total} (uncached input ${tokens.uncachedInputTokens}, output ${tokens.outputTokens}, cache read ${tokens.cacheReadTokens}, cache write ${tokens.cacheWriteTokens})`);
+	}
+	const toolCalls = review.metrics?.toolCalls;
+	if (toolCalls !== void 0) parts.push(`tool calls ${toolCalls.calls} (${toolCalls.failures} reported failures)`);
+	if (review.metrics?.retries !== void 0) parts.push(`retries ${review.metrics.retries}`);
+	if (review.durationMs !== void 0) parts.push(`durationMs ${review.durationMs}`);
+	return parts.length === 0 ? "metrics: none recorded on the review." : `metrics: ${parts.join("; ")}.`;
+}
+/** The round before one attempt as a notice for the new attempt's own session: criterion verdicts and effort facts, read from the store. */
+function priorRoundNotice(snapshot, source, sourceRun) {
+	const review = snapshot.reviews.find((item) => item.taskId === source.taskId && item.runId === sourceRun.runId);
+	if (review === void 0) return void 0;
+	const criteria = review.criteria ?? [];
+	const passed = criteria.filter((criterion) => criterion.verdict === "pass").length;
+	const verdicts = criteria.length === 0 ? "no criterion verdict is stored on it" : `criteria passed ${passed}/${criteria.length} (${criteria.map((criterion) => `${criterion.criterionId} ${criterion.verdict}`).join(", ")})`;
+	return [
+		`task-runtime: the round before this attempt, read from the store — review of run "${review.runId}" (outcome ${review.outcome}): ${verdicts}.`,
+		reviewMetricsLine(review),
+		"The original acceptance criteria judge this attempt unchanged."
+	].join("\n");
+}
+/** The same notice for a run the store resumed: the attempt's own recovery record names the round before it. */
+function priorRoundNoticeForRun(snapshot, run) {
+	if (run.recovery === void 0) return void 0;
+	const source = snapshot.tasks.find((task) => task.taskId === run.taskId);
+	if (source === void 0) return void 0;
+	const cited = run.recovery.sourceRunId;
+	const sourceRun = cited !== void 0 ? snapshot.runs.find((candidate) => candidate.runId === cited) : run.recovery.kind === "improvement" ? [...snapshot.runs].reverse().find((candidate) => candidate.taskId === run.taskId && candidate.status === "verified" && candidate.runId !== run.runId) : void 0;
+	return sourceRun === void 0 ? void 0 : priorRoundNotice(snapshot, source, sourceRun);
+}
 async function startRecoveryAttempt(self, input) {
 	const { storeId, source, request, declarations, manifest, rootSessionId, actor } = input;
 	const runId = `r-${randomUUID()}`;
 	const sessionId = `s-${randomUUID()}`;
+	const kind = recoveryKindOf(request.mode);
 	const reusedMembers = declarations.map(storedReuse);
 	const recovery = {
+		kind,
 		sourceDiagnosisId: request.sourceDiagnosisId,
 		requestKey: request.requestKey,
-		...request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId },
+		...input.sourceRun === void 0 ? {} : { sourceRunId: input.sourceRun.runId },
 		requestedAt: now(),
 		requestDigest: requestAttemptDigest(request),
 		reusedMembers,
@@ -6366,7 +6522,12 @@ async function startRecoveryAttempt(self, input) {
 		});
 		throw new Error(`task-runtime: the recovery attempt of "${source.taskId}" was opened (run "${runId}", session "${sessionId}") but its worker could not be spawned: ${reason}; the attempt's run was settled failed with this cause, and a new attempt needs a new request key`);
 	}
-	const stored = (await self.context.task.snapshotIn(storeId)).runs.find((item) => item.runId === runId);
+	const after = await self.context.task.snapshotIn(storeId);
+	const stored = after.runs.find((item) => item.runId === runId);
+	if (input.sourceRun !== void 0) {
+		const notice = priorRoundNotice(after, source, input.sourceRun);
+		if (notice !== void 0) self.notify(sessionId, notice);
+	}
 	return {
 		attempt: "started",
 		storeId,
@@ -6381,7 +6542,7 @@ async function startRecoveryAttempt(self, input) {
 			...entry,
 			reasons: [...entry.reasons]
 		})),
-		detail: `a recovery attempt of "${source.taskId}" was opened: run "${runId}" in session "${sessionId}" under diagnosis "${request.sourceDiagnosisId}", key "${request.requestKey}"${reusedMembers.length === 0 ? "" : `, reading ${reusedMembers.length} already verified sibling member(s) at the position(s) ${reusedMembers.map((member) => member.childIndex).join(", ")}`}${input.unbound.length === 0 ? "" : `; ${input.unbound.length} position(s) whose passed sibling could not be bound (${input.unbound.map((entry) => `#${entry.childIndex}`).join(", ")}) are done again and the reasons are on the record`}; the original acceptance criteria judge it, and the store total it spends is the same one`
+		detail: `a${kind === "improvement" ? "n improvement round" : " recovery attempt"} of "${source.taskId}" was opened: run "${runId}" in session "${sessionId}" under diagnosis "${request.sourceDiagnosisId}", key "${request.requestKey}"${reusedMembers.length === 0 ? "" : `, reading ${reusedMembers.length} already verified sibling member(s) at the position(s) ${reusedMembers.map((member) => member.childIndex).join(", ")}`}${input.unbound.length === 0 ? "" : `; ${input.unbound.length} position(s) whose passed sibling could not be bound (${input.unbound.map((entry) => `#${entry.childIndex}`).join(", ")}) are done again and the reasons are on the record`}; the original acceptance criteria judge it, and the store total it spends is the same one`
 	};
 }
 function invalidateStoreRecovery(self, storeId) {
@@ -8486,7 +8647,8 @@ async function resumeAdoptedWorkerSession(self, request) {
 	const blockedOnOwnQuestion = blockingQuestionsOf(snapshot, request.run.runId).length > 0;
 	const coordinationPending = request.run.executionPhase === "waiting_children" && pendingCoordinationOf(snapshot, request.run.runId).length > 0;
 	if (!continuing && (request.run.executionPhase === "active" || coordinationPending)) {
-		const notice = "task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.";
+		const prior = priorRoundNoticeForRun(snapshot, request.run);
+		const notice = "task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready." + (prior === void 0 ? "" : `\n${prior}`);
 		if (blockedOnOwnQuestion) appendNotice(self, sessionId, notice);
 		else self.notifyWhenReady(sessionId, notice);
 	}
@@ -9062,6 +9224,7 @@ var TaskRuntime = class extends Service {
 		assertClosedRootBudget(rootBudget);
 		assertRootBudgetConfig(rootBudget ?? {});
 		assertGeneratedTaskReview(config?.generatedTaskReview);
+		assertSupervisionConfig(config?.supervision);
 		this.config = {
 			capabilities: structuredClone(config?.capabilities ?? {}),
 			...config?.defaultPreset !== void 0 ? { defaultPreset: config.defaultPreset } : {},
@@ -9074,6 +9237,7 @@ var TaskRuntime = class extends Service {
 			},
 			allowRuntimeDecomposition: config?.allowRuntimeDecomposition ?? DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
 			generatedTaskReview: config?.generatedTaskReview ?? DEFAULT_GENERATED_TASK_REVIEW,
+			...config?.supervision === void 0 ? {} : { supervision: { ...config.supervision } },
 			runBindingRoot: config?.runBindingRoot ?? defaultRunBindingRoot(),
 			...rootBudget === void 0 ? {} : { rootBudget },
 			writeDrainTimeoutMs: config?.writeDrainTimeoutMs ?? DEFAULT_WRITE_DRAIN_TIMEOUT_MS
@@ -9528,4 +9692,4 @@ function checkObligationCoverage(templates, snapshot) {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, driveBatch, escalationHint, executionProviders, findRepoRoot, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, normalizeDecomposition, openProposalOf, optionalService, owedBatchResults, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, driveBatch, escalationHint, executionProviders, findRepoRoot, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, normalizeDecomposition, openProposalOf, optionalService, owedBatchResults, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

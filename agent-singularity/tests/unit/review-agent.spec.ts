@@ -920,7 +920,9 @@ describe('task_review_agent', () => {
   })
 
   test('the store\'s allowance stops a new source, with zero claim and zero spawn', async () => {
-    // A row an earlier call (this process's or another's) wrote is the whole count.
+    // The env override pins the allowance to one for this case; a row an earlier
+    // call (this process's or another's) wrote is the whole count.
+    vi.stubEnv('SINGULARITY_REVIEW_AGENT_BUDGET', '1')
     await admitReviewAgent(ROOT_STORE, admission => admission.start(row('s-old')))
     const { ctx, spawn } = fixture(handle(REPLY))
     const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string

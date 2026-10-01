@@ -48,7 +48,7 @@ import type { Config } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import { graphRegistry, mountContextReadCore } from './context-plane.ts'
-import { OTHER_TOOLS, ROOT_TOOLS } from './scripted-loop.ts'
+import { OTHER_TOOLS, ROOT_TOOLS, type SupervisionOptions } from './scripted-loop.ts'
 
 /** One graph this deployment publishes: its root session and the sessions it holds. */
 export interface GraphSpec {
@@ -84,6 +84,13 @@ export interface AssemblyStackOptions {
    * count rather than by a reading the case computed for itself.
    */
   readonly rootBudget?: Readonly<{ wallTimeMs?: number; maxRuns?: number; maxConcurrentWrites?: number }>
+  /**
+   * The deployment's supervision policy (A5/A6/A7), passed into the plugin's own
+   * configuration exactly as a deployment's `config.yml` states it. Absent leaves
+   * the shipped defaults in force: every terminal review is accepted, and the
+   * iteration caps are the deployment's own.
+   */
+  readonly supervision?: SupervisionOptions
   /** Reuse a workspace (a restart). Absent = a fresh directory. */
   readonly dir?: string
 }
@@ -336,7 +343,10 @@ export class AssemblyStack {
     // the adapter the deployment ships. Every other name a surface resolves against
     // is a stand-in, and a stand-in records that its body ran.
     await mountContextReadCore(ctx)
-    await ctx.plugin(SingularityAgent, { evolution: 'off' })
+    await ctx.plugin(SingularityAgent, {
+      evolution: 'off',
+      ...(this.options.supervision === undefined ? {} : { supervision: this.options.supervision }),
+    })
     for (const name of [...ROOT_TOOLS, ...OTHER_TOOLS]) {
       if (ctx.tools.get(name) !== undefined) continue
       ctx.tools.register(standIn(name, this.ran))

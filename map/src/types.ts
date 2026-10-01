@@ -169,7 +169,12 @@ export interface TaskRunWire {
   readonly artifacts?: readonly ArtifactRefWire[]
   readonly batches?: readonly RunBatchWire[]
   readonly providerBinding?: { readonly capabilities?: readonly string[] }
-  readonly recovery?: { readonly sourceRunId?: string; readonly requestKey?: string }
+  readonly recovery?: {
+    readonly sourceRunId?: string
+    readonly requestKey?: string
+    /** Iteration round kind: a retry opened from a failed source (`recovery`) or a follow-up opened from a verified one (`improvement`). */
+    readonly kind?: 'recovery' | 'improvement'
+  }
 }
 
 export interface ReviewCriterionWire {

@@ -14,9 +14,9 @@ import {
   runMemberTaskIds,
 } from '../../../task/src/index.ts'
 import { VerifierRegistry } from '../../../verifier/src/index.ts'
-import type { CapabilityConfig, Config, RootRecoveryRequest } from '../../src/index.ts'
+import type { CapabilityConfig, Config, RootRecoveryRequest, SupervisionConfig } from '../../src/index.ts'
 import type { StoreRecoveryState } from '../../src/config.ts'
-import { TaskRuntime } from '../../src/index.ts'
+import { IterationCapRefusal, TaskRuntime } from '../../src/index.ts'
 
 /** The temporary evidence roots this file minted, removed after each test. */
 const directories: string[] = []
@@ -73,12 +73,16 @@ function harness(
     sessions?: Map<string, StoredSession>
     verifier?: boolean
     live?: readonly string[]
+    /** The supervision policy this deployment exposes on `singularitySupervision`, exactly as a fixture names it. */
+    supervision?: Partial<SupervisionConfig>
   } = {},
 ) {
   const sessions = options.sessions ?? new Map<string, StoredSession>()
   const disposers: Array<() => unknown> = []
   const spawns: SpawnCall[] = []
   const resumed: string[] = []
+  /** Every notice a live session was handed, in order — what a wake (`followup`) would have carried. */
+  const notices: { sessionId: string; text: string }[] = []
   const persistence = {
     list: vi.fn(async () => [...sessions.values()].map(item => ({ header: item.header }))),
     create: vi.fn(async (header: SessionHeader) => {
@@ -146,7 +150,16 @@ function harness(
    */
   const liveSessions = new Set<string>([SUPERVISOR, ...(options.live ?? [])])
   const agents = {
-    get: (id: string) => (liveSessions.has(id) ? { id, followup: () => {} } : undefined),
+    get: (id: string) =>
+      liveSessions.has(id)
+        ? {
+            id,
+            followup: (message: unknown) => {
+              const content = (message as { content?: readonly { text?: string }[] }).content
+              notices.push({ sessionId: id, text: content?.map(block => block.text ?? '').join('') ?? '' })
+            },
+          }
+        : undefined,
   }
   const agentRuntime = {
     spawn: vi.fn(async (parent: unknown, request: SpawnCall['request']) => {
@@ -194,8 +207,11 @@ function harness(
     directories.push(evidenceRoot)
     ctx.verifier = new VerifierRegistry(ctx as never, { evidenceRoot })
   }
+  // The deployment's supervision policy travels as its own service (A7), exactly
+  // as a fixture names it; the config path is what a mounted plugin would read.
+  if (options.supervision !== undefined) ctx.singularitySupervision = { ...options.supervision }
   const runtime = new TaskRuntime(ctx as never, options.config as Config | undefined)
-  return { ctx, task, runtime, sessions, disposers, spawns, resumed }
+  return { ctx, task, runtime, sessions, disposers, spawns, resumed, notices }
 }
 
 type Harness = ReturnType<typeof harness>
@@ -208,6 +224,16 @@ async function refusal(call: () => Promise<unknown>): Promise<string> {
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
   }
+}
+
+/** The error one call threw, for an assertion that needs the recorded code as well as the message. */
+async function failure(call: () => Promise<unknown>): Promise<Error> {
+  try {
+    await call()
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error))
+  }
+  throw new Error('the call was accepted')
 }
 
 function criterion(criterionId: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -490,6 +516,57 @@ async function storeWithVerifiedRoot(h: Harness): Promise<void> {
   await h.task.recordDiagnosisIn(STORE, diagnosis('d-1'), 'test')
 }
 
+/**
+ * The store whose root goal verified with one verified member: the shape an
+ * improvement round is opened for (A7 §3). The member sits at position 0 of the
+ * root run's own batch, and its bundle carries the passing verdict the map asks
+ * for, so an improvement attempt binds the position instead of re-running it.
+ */
+async function storeWithVerifiedGoal(h: Harness): Promise<void> {
+  const base = rootTask()
+  const map = [{ childIndex: 0, criterionId: 'member-0' }] as never
+  const remap = (task: TaskInstance): TaskInstance => ({
+    ...task,
+    acceptanceCriteria: task.acceptanceCriteria.map(criterion =>
+      criterion.criterionId === 'root-map' ? { ...criterion, childEvidence: map } : criterion,
+    ),
+    contract: {
+      ...task.contract!,
+      acceptanceCriteria: task.contract!.acceptanceCriteria.map(criterion =>
+        criterion.criterionId === 'root-map' ? { ...criterion, childEvidence: map } : criterion,
+      ),
+    },
+  })
+  const member = passedSibling('child-0', 'pass', 'member-0')
+  await h.task.createStore(STORE)
+  await h.task.createTaskIn(STORE, remap(base), 'test')
+  await h.task.admitTaskIn(STORE, 'root', 'test', { manifest: MANIFEST })
+  await h.task.createTaskIn(STORE, member.task, 'test')
+  await h.task.admitTaskIn(STORE, 'child-0', 'test', { manifest: MANIFEST })
+  await h.task.startRunIn(STORE, member.run, 'test')
+  await h.task.recordEvidenceIn(STORE, member.bundle, 'test')
+  await h.task.markRunStatusIn(STORE, 'child-0', member.run.runId, 'verifying', 'test')
+  await h.task.markRunStatusIn(STORE, 'child-0', member.run.runId, 'verified', 'test')
+  await h.task.startRunIn(STORE, run('r-first', 'root'), 'test')
+  await admitMembers(h, 'r-first', ['child-0'])
+  await h.task.recordEvidenceIn(
+    STORE,
+    {
+      evidenceId: 'e-root',
+      taskRunId: 'r-first',
+      taskId: 'root',
+      artifacts: [],
+      verifierResults: [{ criterionId: 'root-goal', status: 'pass', verifierId: 'command' }],
+      claims: [],
+      generatedAt: NOW,
+    },
+    'test',
+  )
+  await h.task.markRunStatusIn(STORE, 'root', 'r-first', 'verifying', 'test')
+  await h.task.markRunStatusIn(STORE, 'root', 'r-first', 'verified', 'test')
+  await h.task.recordDiagnosisIn(STORE, diagnosis('d-1'), 'test')
+}
+
 /** The reuse declaration a case declares: position 0, the passed sibling, its own run and bundle. */
 function reuse(
   sibling: ReturnType<typeof passedSibling>,
@@ -666,12 +743,29 @@ describe('A6 recovery entry: what it refuses, with no run started', () => {
     expect(await runsOf(h, 'root')).toHaveLength(1)
   })
 
-  test('refuses a successful source', async () => {
+  test('refuses a verified source that names no mode, pointing at the improvement round', async () => {
     const h = harness()
     await storeWithVerifiedRoot(h)
     const message = await refusal(() => recover(h))
     expect(message).toContain('is verified')
-    expect(message).toContain('a successful source is not recoverable')
+    expect(message).toContain('a successful source is not recovered')
+    expect(message).toContain('mode "improve"')
+    expect(await runsOf(h, 'root')).toHaveLength(1)
+  })
+
+  test('refuses an improvement round of a source that is not verified', async () => {
+    const h = harness()
+    await storeWithFailedRoot(h)
+    const message = await refusal(() => recover(h, { mode: 'improve' }))
+    expect(message).toContain('an improvement round is opened for a verified source')
+    expect(await runsOf(h, 'root')).toHaveLength(1)
+  })
+
+  test('refuses a mode that is neither recovery nor improve', async () => {
+    const h = harness()
+    await storeWithFailedRoot(h)
+    const message = await refusal(() => recover(h, { mode: 'faster' } as never))
+    expect(message).toContain('mode must be "recovery" (the default) or "improve"')
     expect(await runsOf(h, 'root')).toHaveLength(1)
   })
 
@@ -873,6 +967,20 @@ describe('A6 recovery entry: the persistent boundaries across a restart', () => 
     const sessions = new Map<string, StoredSession>()
     const first = harness({ sessions, config: { rootBudget: { maxRuns: 3 } } })
     await storeWithFailedRoot(first)
+    // The source round's review, so the resumed attempt's notice has facts to carry.
+    await first.task.recordReviewIn(
+      STORE,
+      {
+        taskId: 'root',
+        runId: 'r-first',
+        outcome: 'failed',
+        evidenceRefs: [],
+        anomalies: [],
+        localizedCause: 'the second member never verified',
+        criteria: [{ criterionId: 'root-map', verdict: 'fail' }],
+      },
+      'test',
+    )
     const started = await recover(first)
     const afterStart = await first.task.snapshotIn(STORE)
     expect(afterStart.runs).toHaveLength(3)
@@ -892,6 +1000,13 @@ describe('A6 recovery entry: the persistent boundaries across a restart', () => 
     expect(afterReopen.runs.find(item => item.runId === started.runId)?.status).toBe('running')
     expect(second.resumed).toEqual([started.sessionId])
     expect(second.spawns).toHaveLength(0)
+    // The resumed attempt is told the round before it, with the source round's
+    // facts read from the store (A7 §5) — the same notice a fresh spawn gets.
+    const resumedNotice = second.notices.find(entry => entry.sessionId === started.sessionId)
+    expect(resumedNotice).toBeDefined()
+    expect(resumedNotice!.text).toContain('the round before this attempt')
+    expect(resumedNotice!.text).toContain('review of run "r-first" (outcome failed)')
+    expect(resumedNotice!.text).toContain('root-map fail')
     const answered = await recover(second)
     expect(answered.attempt).toBe('existing')
     expect(answered.runId).toBe(started.runId)
@@ -1174,6 +1289,180 @@ describe("A6 recovery entry: the binding is derived from the failed run's own fa
       undefined,
       'child-1',
     ])
+  })
+})
+
+describe('A7: improvement rounds and the per-source caps', () => {
+  test('accepts an improvement round of a verified source, records its kind, and reads the verified positions', async () => {
+    const h = harness()
+    await storeWithVerifiedGoal(h)
+    const outcome = await recover(h, { mode: 'improve' })
+    expect(outcome.attempt).toBe('started')
+    const after = await h.task.snapshotIn(STORE)
+    const attempt = after.runs.find(item => item.runId === outcome.runId)!
+    expect(attempt.recovery).toMatchObject({
+      kind: 'improvement',
+      sourceDiagnosisId: 'd-1',
+      requestKey: 'k-1',
+      sourceRunId: 'r-first',
+    })
+    // The verified position is read, not re-run: the member keeps its one run.
+    expect(attempt.recovery!.reusedMembers).toEqual([
+      expect.objectContaining({ childIndex: 0, taskId: 'child-0', sourceRunId: 'r-child-0', criterionId: 'member-0' }),
+    ])
+    expect(runMemberSlots(attempt)).toEqual(['child-0'])
+    expect(after.runs.filter(item => item.taskId === 'child-0')).toHaveLength(1)
+    // The goal moved verified → running, and its old verified facts stay readable.
+    expect(after.tasks.find(item => item.taskId === 'root')?.status).toBe('running')
+    expect(after.runs.find(item => item.runId === 'r-first')?.status).toBe('verified')
+    expect(h.spawns).toHaveLength(1)
+    expect(h.spawns[0]?.request.sessionId).toBe(outcome.sessionId)
+  })
+
+  test('an improvement round that names no source run reads the task’s newest verified run', async () => {
+    const h = harness()
+    await storeWithVerifiedGoal(h)
+    const outcome = await recover(h, { mode: 'improve', sourceRunId: null, requestKey: 'k-derived' })
+    expect(outcome.attempt).toBe('started')
+    const attempt = (await h.task.snapshotIn(STORE)).runs.find(item => item.runId === outcome.runId)!
+    // The record names the round it really reads, and the binding follows it.
+    expect(attempt.recovery?.sourceRunId).toBe('r-first')
+    expect(attempt.recovery?.reusedMembers.map(member => member.childIndex)).toEqual([0])
+    expect(outcome.reusedMembers.map(member => member.childIndex)).toEqual([0])
+  })
+
+  test('counts the two kinds separately, and refuses the recovery round past maxRecoveryRounds with the coded refusal', async () => {
+    const h = harness({ supervision: { maxRecoveryRounds: 1 } })
+    await storeWithFailedRoot(h)
+    const first = await recover(h, { requestKey: 'k-1' })
+    expect(first.attempt).toBe('started')
+    await h.task.markRunStatusIn(STORE, 'root', first.runId, 'failed', 'test', { reason: 'the attempt failed too' })
+    const error = await failure(() => recover(h, { requestKey: 'k-2' }))
+    expect(error).toBeInstanceOf(IterationCapRefusal)
+    expect((error as IterationCapRefusal).code).toBe('iteration-cap')
+    expect(error.message).toContain('iteration-cap')
+    expect(error.message).toContain('no run was opened')
+    expect(error.message).toContain('(1/1)')
+    expect(await runsOf(h, 'root')).toHaveLength(2)
+    expect(h.spawns).toHaveLength(1)
+  })
+
+  test('refuses the improvement round past maxImprovementRounds with the coded refusal', async () => {
+    const h = harness({ supervision: { maxImprovementRounds: 1 } })
+    await storeWithVerifiedGoal(h)
+    const first = await recover(h, { mode: 'improve', requestKey: 'k-1' })
+    expect(first.attempt).toBe('started')
+    // The improvement round verifies: the source is verified again and the cap is spent.
+    await h.task.recordEvidenceIn(
+      STORE,
+      {
+        evidenceId: 'e-improvement',
+        taskRunId: first.runId,
+        taskId: 'root',
+        artifacts: [],
+        verifierResults: [{ criterionId: 'root-goal', status: 'pass', verifierId: 'command' }],
+        claims: [],
+        generatedAt: NOW,
+      },
+      'test',
+    )
+    await h.task.markRunStatusIn(STORE, 'root', first.runId, 'verifying', 'test')
+    await h.task.markRunStatusIn(STORE, 'root', first.runId, 'verified', 'test')
+    const error = await failure(() => recover(h, { mode: 'improve', requestKey: 'k-2' }))
+    expect((error as IterationCapRefusal).code).toBe('iteration-cap')
+    expect(error.message).toContain('improvement rounds are spent')
+    expect(error.message).toContain('(1/1)')
+    expect(await runsOf(h, 'root')).toHaveLength(2)
+  })
+
+  test('a failed improvement round returns the source to the failed path, and later rounds spend the recovery cap', async () => {
+    const h = harness({ supervision: { maxRecoveryRounds: 1, maxImprovementRounds: 1 } })
+    await storeWithVerifiedGoal(h)
+    const improved = await recover(h, { mode: 'improve', requestKey: 'k-improve' })
+    expect((await h.task.snapshotIn(STORE)).runs.find(item => item.runId === improved.runId)?.recovery?.kind).toBe(
+      'improvement',
+    )
+    await h.task.markRunStatusIn(STORE, 'root', improved.runId, 'failed', 'test', {
+      reason: 'the improvement did not hold',
+    })
+    expect((await h.task.snapshotIn(STORE)).tasks.find(item => item.taskId === 'root')?.status).toBe('failed')
+    // The improvement attempt spends the improvement cap, not the recovery one:
+    // the source accepts one recovery round, and that round is a `recovery` of
+    // the attempt that just failed.
+    const recovered = await recover(h, { requestKey: 'k-recover', sourceRunId: improved.runId })
+    expect(recovered.attempt).toBe('started')
+    expect((await h.task.snapshotIn(STORE)).runs.find(item => item.runId === recovered.runId)?.recovery?.kind).toBe(
+      'recovery',
+    )
+    await h.task.markRunStatusIn(STORE, 'root', recovered.runId, 'failed', 'test', { reason: 'again' })
+    const error = await failure(() => recover(h, { requestKey: 'k-recover-2', sourceRunId: recovered.runId }))
+    expect((error as IterationCapRefusal).code).toBe('iteration-cap')
+    expect(error.message).toContain('recovery rounds are spent')
+    expect(await runsOf(h, 'root')).toHaveLength(3)
+  })
+
+  test('reads the caps from its own plugin config when no supervision service is exposed', async () => {
+    const h = harness({
+      config: { supervision: { autoReview: 'all', maxRecoveryRounds: 0, maxImprovementRounds: 0, coordinationBudget: 8 } },
+    })
+    await storeWithFailedRoot(h)
+    const error = await failure(() => recover(h))
+    expect((error as IterationCapRefusal).code).toBe('iteration-cap')
+    expect(await runsOf(h, 'root')).toHaveLength(1)
+  })
+
+  test('one key names one request: the same key under another mode is refused as different content', async () => {
+    const h = harness()
+    await storeWithVerifiedGoal(h)
+    const improvement = await recover(h, { mode: 'improve', requestKey: 'k-1' })
+    const message = await refusal(() => recover(h, { requestKey: 'k-1' }))
+    expect(message).toContain('already names a recovery attempt')
+    expect(message).toContain('one key names one request')
+    expect(await runsOf(h, 'root')).toHaveLength(2)
+    expect((await h.task.snapshotIn(STORE)).runs.find(item => item.runId === improvement.runId)?.recovery?.kind).toBe(
+      'improvement',
+    )
+  })
+
+  test("tells the new attempt the prior round's review facts, read from the store", async () => {
+    const h = harness()
+    await storeWithFailedRoot(h)
+    await h.task.recordReviewIn(
+      STORE,
+      {
+        taskId: 'root',
+        runId: 'r-first',
+        outcome: 'failed',
+        evidenceRefs: [],
+        anomalies: [],
+        localizedCause: 'the second member never verified',
+        durationMs: 42_000,
+        criteria: [
+          { criterionId: 'root-goal', verdict: 'pass' },
+          { criterionId: 'root-map', verdict: 'fail' },
+        ],
+        metrics: {
+          tokens: { uncachedInputTokens: 1_000, outputTokens: 200, cacheReadTokens: 30, cacheWriteTokens: 4 },
+          toolCalls: { calls: 14, failures: 2 },
+          retries: 0,
+        },
+      },
+      'test',
+    )
+    const outcome = await recover(h)
+    const notice = h.notices.find(entry => entry.sessionId === outcome.sessionId)
+    expect(notice).toBeDefined()
+    expect(notice!.text).toContain('the round before this attempt')
+    expect(notice!.text).toContain('review of run "r-first" (outcome failed)')
+    expect(notice!.text).toContain('criteria passed 1/2')
+    expect(notice!.text).toContain('root-goal pass')
+    expect(notice!.text).toContain('root-map fail')
+    expect(notice!.text).toContain('tokens 1234')
+    expect(notice!.text).toContain('tool calls 14 (2 reported failures)')
+    expect(notice!.text).toContain('durationMs 42000')
+    expect(notice!.text).toContain('The original acceptance criteria judge this attempt unchanged')
+    // The context is observation text: the facts, and no score (Review ≠ Judge).
+    expect(notice!.text).not.toContain('score')
   })
 })
 

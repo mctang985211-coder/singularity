@@ -49,8 +49,17 @@ export {
   skillContractDigest,
   skillContentDigest,
 } from './skill-contract.ts'
-export type { RootRecoveryRequest } from './recovery.ts'
-export { inFlightRecoveryAttempt, recoveryAttemptWithKey } from './recovery.ts'
+export type { RecoveryMode, RecoveryRounds, RootRecoveryRequest } from './recovery.ts'
+export {
+  IterationCapRefusal,
+  inFlightRecoveryAttempt,
+  recoveryAttemptWithKey,
+  recoveryKindOf,
+  recoveryModeOf,
+  recoveryRoundsOf,
+  recoverySourceRun,
+} from './recovery.ts'
+export { priorRoundNotice, priorRoundNoticeForRun } from './service/root-recovery.ts'
 export { readVerifiedFile, walkVerified } from './verified-read.ts'
 export type { RunBindingRead } from './run-binding.ts'
 export { bindRunProviders } from './run-binding.ts'
@@ -78,12 +87,13 @@ export { escalationHint } from './orchestration/verify.ts'
 export { owedBatchResults } from './orchestration/observe.ts'
 export { settleRunFromRuntime } from './orchestration/settlement.ts'
 export type { AnsweredQuestionOutcome, AskedQuestionOutcome } from './question.ts'
-export type { Config } from './config.ts'
+export type { Config, SupervisionConfig } from './config.ts'
 export {
   DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
   DEFAULT_BUDGET,
   DEFAULT_MAX_CHILDREN,
   DEFAULT_MAX_DEPTH,
+  DEFAULT_SUPERVISION,
   DEFAULT_VERIFY_TIMEOUT_MS,
 } from './config.ts'
 export type {

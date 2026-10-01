@@ -17,7 +17,7 @@ import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS } from '@dangosys/dsh-singularity
 import { logOf } from '../log.ts'
 import { message } from '../shared.ts'
 import { consumeHandoffDiagnosis } from './evolution-handoff.ts'
-import { handoffFactsOf } from './handoff-rules.ts'
+import { handoffFactsOf, lastAssistantText } from './handoff-rules.ts'
 import { reviewRef, type ReviewParentAgent } from './identity.ts'
 import {
   admitReviewAgent,
@@ -179,14 +179,6 @@ export function renderJudgements(judgements: readonly ReviewJudgement[]): string
   return judgements.map(item => `  ${item.dimension}: ${item.verdict} — ${item.rationale} refs [${item.evidenceRefs.join(', ')}]`)
 }
 
-function lastAssistantText(events: readonly { type: string; data?: unknown }[]): string | undefined {
-  const event = [...events].reverse().find(item => item.type === 'assistant/message')
-  if (event === undefined) return undefined
-  const message = (event.data as { message?: { content?: readonly { type: string; text?: string }[] } } | undefined)?.message
-  const content = (message?.content ?? []).filter(block => block.type === 'text').map(block => block.text ?? '').join('\n')
-  return content.length === 0 ? undefined : content
-}
-
 /** The diagnosis one attempt recorded, as the store holds it (the id is the attempt's session). */
 export function recordedDiagnosis(snapshot: TaskSnapshot, sessionId: string): Diagnosis | undefined {
   return snapshot.diagnoses.find(diagnosis => diagnosis.diagnosisId === `review-agent-${sessionId}`)
@@ -283,13 +275,16 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
           snapshot: current,
           source,
           attempts,
-          handoff: await handoffFactsOf(ctx, storeId, attempts),
+          handoff: await handoffFactsOf(storeId, attempts),
         })
         return [
           'You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.',
           'Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and ' +
           'context_read reach the sibling tasks, their sessions and their evidence. Cite what you rest on.',
           'Do not score, and do not modify anything.',
+          ...(review.outcome === 'verified'
+            ? ['The run passed its review; look for improvement opportunities — what could be better, and whether an improvement round is worth it.']
+            : []),
           'Return EXACTLY one fenced json block, no prose around it:',
           '```json',
           '{"observation":"...","conclusion":"...","confidence":"high|medium|low"}',
@@ -387,15 +382,13 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
       }
     }
     await settleAttempt('recorded')
-    // The hand-off (A6): a diagnosis that carries suggestions is what the
-    // evolution plane consumes, and this is the one place that knows the record
-    if (diagnosis.proposals.length > 0) {
-      void consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error: unknown) => {
-        logOf(ctx, 'singularity-agent')?.warn(
-          `evolution hand-off: ${diagnosis.diagnosisId} could not be consumed (${message(error)})`,
-        )
-      })
-    }
+    // The hand-off (A6): every recorded diagnosis is one — suggestions or not —
+    // and this is the one place that knows the record just became durable.
+    void consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error: unknown) => {
+      logOf(ctx, 'singularity-agent')?.warn(
+        `evolution hand-off: ${diagnosis.diagnosisId} could not be consumed (${message(error)})`,
+      )
+    })
     return {
       kind: 'recorded' as const,
       sessionId: reviewerSessionId,

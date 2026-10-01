@@ -304,8 +304,11 @@ export function preparedIdentity(value: unknown, field: string, proposalId: stri
   }
 }
 
+/** The required ids of a recovery-coordination request; `mode` is the one optional member. */
+const RECOVERY_COORDINATION_REQUIRED: readonly string[] = ['sourceDiagnosisId', 'requestKey']
+
 /** The fields a recovery-coordination request may carry: anything else is refused by name rather than ignored. */
-export const RECOVERY_COORDINATION_FIELDS: readonly string[] = ['sourceDiagnosisId', 'requestKey']
+export const RECOVERY_COORDINATION_FIELDS: readonly string[] = [...RECOVERY_COORDINATION_REQUIRED, 'mode']
 
 /** Every reason a coordination request cannot be a recovery request at all: an unknown field or an empty value, named. */
 export function recoveryCoordinationDefects(request: unknown): string[] {
@@ -322,19 +325,23 @@ export function recoveryCoordinationDefects(request: unknown): string[] {
     }
   }
   const fields = request as Record<string, unknown>
-  for (const name of RECOVERY_COORDINATION_FIELDS) {
+  for (const name of RECOVERY_COORDINATION_REQUIRED) {
     const value = fields[name]
     if (typeof value !== 'string' || value.trim().length === 0) defects.push(`${name} must be a non-empty string`)
+  }
+  if (fields.mode !== undefined && fields.mode !== 'recovery' && fields.mode !== 'improve') {
+    defects.push(`mode must be "recovery" or "improve" when present`)
   }
   return defects
 }
 
-/** The failed run one diagnosis is about, as the store holds it: the run its own review ref names, else the source task's newest failed run. */
+/** The failed run one diagnosis is about: the run its own review ref names, else the source task's newest failed run. A verified source names no run — the runtime resolves its newest verified attempt. */
 export function recoverySourceRunId(
   diagnosis: { readonly reviewRefs: readonly string[]; readonly taskId: string },
-  source: { readonly taskId: string; readonly runIds: readonly string[] },
+  source: { readonly taskId: string; readonly runIds: readonly string[]; readonly status: string },
   snapshot: TaskSnapshot,
 ): string | null {
+  if (source.status === 'verified') return null
   for (const ref of diagnosis.reviewRefs) {
     const separator = ref.lastIndexOf('#')
     if (separator < 0 || ref.slice(0, separator) !== diagnosis.taskId) continue
@@ -363,6 +370,8 @@ export interface RecoveryCoordinationRequest {
   sourceDiagnosisId: string
   /** The caller's key: one key names one attempt of one diagnosis. */
   requestKey: string
+  /** Recovery retries a failed source; improve opens an improvement round on a verified one (runtime default: recovery). */
+  mode?: 'recovery' | 'improve'
 }
 
 /** Who asks for a recovery: the **supervisor** session of that hand-off, as a live session with an abort signal. */

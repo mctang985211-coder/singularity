@@ -6,9 +6,10 @@ import { ReviewerBindingError } from '@dangosys/dsh-singularity-context'
 import type { ReviewerBindingRecord } from '@dangosys/dsh-singularity-context'
 import { appendJsonlRow, readJsonlFile } from '../jsonl-ledger.ts'
 import { sameSource } from './identity.ts'
+import { DEFAULT_SUPERVISION, roundCapRefusal, supervisionSettings, type SupervisionRounds } from './supervision.ts'
 
-/** How many review agents this store has started, as this region's read of the ledger holds them. */
-export const REVIEW_AGENT_BUDGET_DEFAULT = 1
+/** How many review agents this store has started, as this region's read of the ledger holds them — the shipped default of `supervision.coordinationBudget`. */
+export const REVIEW_AGENT_BUDGET_DEFAULT = DEFAULT_SUPERVISION.coordinationBudget
 
 /** The exact source of one review: the task, and the Run it reviews — or `null` for a review that carries no Run (a task blocked before it ever started). */
 export interface ReviewAgentSource {
@@ -55,8 +56,8 @@ export interface ReviewAgentStartedRecord {
   at: string
 }
 
-/** How one attempt ended. */
-export type ReviewAgentSettlementStatus = 'recorded' | 'interrupted'
+/** How one attempt ended. `closed` is the supervisor's own outcome: it decided against further iteration and said so. */
+export type ReviewAgentSettlementStatus = 'recorded' | 'interrupted' | 'closed'
 
 /** One attempt's terminal fact. */
 export interface ReviewAgentSettledRecord {
@@ -143,7 +144,7 @@ export interface ReviewAgentAttempt {
 }
 
 /** Why an admission refuses to start an attempt by name. */
-export type ReviewAgentRefusalCode = 'request-key-conflict' | 'request-key-required' | 'budget-exhausted'
+export type ReviewAgentRefusalCode = 'request-key-conflict' | 'request-key-required' | 'budget-exhausted' | 'iteration-cap'
 
 /** The store's review-agent allowance as the admission read it. */
 export interface ReviewAgentBudget {
@@ -158,7 +159,7 @@ export type ReviewAgentPlan =
   /** Another attempt of the same source is not settled: the request is not accepted, nothing is written for it. */
   | { readonly kind: 'in-flight'; readonly attempt: ReviewAgentAttempt }
   /** Refused by name before any claim or spawn. */
-  | { readonly kind: 'refused'; readonly code: ReviewAgentRefusalCode; readonly attempt: ReviewAgentAttempt | undefined; readonly attempts: readonly ReviewAgentAttempt[]; readonly budget: ReviewAgentBudget }
+  | { readonly kind: 'refused'; readonly code: ReviewAgentRefusalCode; readonly attempt: ReviewAgentAttempt | undefined; readonly attempts: readonly ReviewAgentAttempt[]; readonly budget: ReviewAgentBudget; readonly reason?: string }
   /** A new attempt: claim it, then spawn. */
   | { readonly kind: 'start'; readonly budget: ReviewAgentBudget }
 
@@ -166,6 +167,8 @@ export type ReviewAgentPlan =
 export interface ReviewAgentPlanHooks {
   /** Whether the store already holds this attempt's diagnosis. An attempt whose diagnosis is on the record ended `recorded`, whatever terminal row the ledger is missing — the store is the record of the judgement. */
   readonly recorded?: (attempt: ReviewAgentAttempt) => boolean | Promise<boolean>
+  /** The hand-off source's round facts, when the caller read them: a capped source plans nothing (see {@link planSupervisorAttempt}). */
+  readonly supervisionRounds?: SupervisionRounds
 }
 
 /** One decision, and the dead attempts it recovered on the way (see {@link ReviewAgentAdmission.plan}). */
@@ -203,11 +206,12 @@ export function reviewAgentLedgerFile(): string {
   return join(reviewAgentLedgerDir(), 'agents.jsonl')
 }
 
-/** The per-root-store cap; `SINGULARITY_REVIEW_AGENT_BUDGET` when it parses to a positive integer. */
+/** The per-root-store cap: env `SINGULARITY_REVIEW_AGENT_BUDGET` wins, then the deployment's `supervision.coordinationBudget`, then {@link REVIEW_AGENT_BUDGET_DEFAULT}. */
 export function reviewAgentBudget(): number {
   const raw = process.env.SINGULARITY_REVIEW_AGENT_BUDGET
   const parsed = raw === undefined || raw.length === 0 ? Number.NaN : Number(raw)
-  return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : REVIEW_AGENT_BUDGET_DEFAULT
+  if (Number.isFinite(parsed) && parsed >= 1) return Math.floor(parsed)
+  return supervisionSettings().coordinationBudget
 }
 
 /** One parsed row. An unrecognized row throws by name rather than being read as something it is not. */
@@ -308,11 +312,12 @@ export function planReviewAttempt(input: {
   return { kind: 'start', budget }
 }
 
-/** Decide one hand-off's supervisor request (A6) against one store's attempts. */
+/** Decide one hand-off's supervisor request (A6) against one store's attempts: a concluded hand-off is answered with the supervisor it already had; an interrupted one is a failure and does not block a fresh attempt. */
 export function planSupervisorAttempt(input: {
   readonly attempts: readonly ReviewAgentAttempt[]
   readonly request: ReviewAgentAttemptRequest
   readonly budget: ReviewAgentBudget
+  readonly rounds?: SupervisionRounds
 }): ReviewAgentPlan {
   const { request, budget } = input
   const mine = attemptsOfRole(input.attempts, 'supervisor').filter(attempt => attempt.diagnosisId === request.diagnosisId)
@@ -324,6 +329,13 @@ export function planSupervisorAttempt(input: {
   if (takenUp !== undefined) return { kind: 'reuse', attempt: takenUp }
   const open = mine.find(attempt => attempt.settlement === undefined)
   if (open !== undefined) return { kind: 'in-flight', attempt: open }
+  // The hand-off reached its outcome: the supervisor that owns it stays its identity, and nothing is started again.
+  const concluded = mine.filter(attempt => attempt.settlement !== undefined && attempt.settlement.status !== 'interrupted').at(-1)
+  if (concluded !== undefined) return { kind: 'reuse', attempt: concluded }
+  const cap = input.rounds === undefined ? undefined : roundCapRefusal(input.rounds)
+  if (cap !== undefined) {
+    return { kind: 'refused', code: 'iteration-cap', reason: cap.reason, attempt: undefined, attempts: mine, budget }
+  }
   if (budget.used >= budget.max) return { kind: 'refused', code: 'budget-exhausted', attempt: undefined, attempts: mine, budget }
   return { kind: 'start', budget }
 }
@@ -340,12 +352,12 @@ export async function readReviewAgentAttempts(rootStoreId: string): Promise<Revi
   return attemptsOf(rows ?? [], rootStoreId)
 }
 
-/** The supervisor one hand-off is delegated to, as the ledger holds it: */
+/** The supervisor one hand-off is delegated to, as the ledger holds it: the newest started attempt that is still open or ended with an outcome; an interrupted attempt is a failure, not the hand-off's owner. */
 export async function readSupervisorHandoff(rootStoreId: string, diagnosisId: string): Promise<ReviewAgentAttempt | undefined> {
   const attempts = await readReviewAgentAttempts(rootStoreId)
   return attempts
     .filter(attempt => attempt.role === 'supervisor' && attempt.diagnosisId === diagnosisId && attempt.started)
-    .filter(attempt => attempt.settlement === undefined)
+    .filter(attempt => attempt.settlement === undefined || attempt.settlement.status !== 'interrupted')
     .at(-1)
 }
 
@@ -435,6 +447,8 @@ export async function admitReviewAgent<T>(
       plan: async (request, hooks) => {
         // The recovery, before anything is decided: every open attempt of this
         // request's subject that no process is running — one that never reached
+        // model input, or one a process started and no longer holds (a dead
+        // supervisor is re-delegable, exactly as a dead reviewer is re-readable).
         const requestRole = roleOf(request.role)
         const recovered: ReviewAgentAttempt[] = []
         for (const attempt of attempts) {
@@ -443,7 +457,6 @@ export async function admitReviewAgent<T>(
             if (!sameSource(attempt.source, request.source)) continue
           } else {
             if (attempt.diagnosisId !== request.diagnosisId) continue
-            if (attempt.started) continue
           }
           if (attempt.settlement !== undefined) continue
           if (liveAttempts.has(attempt.sessionId) || claimedHere.has(attempt.sessionId)) continue
@@ -463,8 +476,14 @@ export async function admitReviewAgent<T>(
           Object.assign(attempt, { settlement })
           recovered.push(attempt)
         }
-        const planner = requestRole === 'supervisor' ? planSupervisorAttempt : planReviewAttempt
-        const plan = planner({ attempts, request, budget: { used, max: reviewAgentBudget() } })
+        const plan = requestRole === 'supervisor'
+          ? planSupervisorAttempt({
+            attempts,
+            request,
+            budget: { used, max: reviewAgentBudget() },
+            ...(hooks?.supervisionRounds === undefined ? {} : { rounds: hooks.supervisionRounds }),
+          })
+          : planReviewAttempt({ attempts, request, budget: { used, max: reviewAgentBudget() } })
         return { plan, recovered }
       },
       claim: async request => {

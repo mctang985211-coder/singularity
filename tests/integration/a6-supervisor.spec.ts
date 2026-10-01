@@ -11,7 +11,7 @@
  * 1. the root's own goal fails its map over the member that failed, and its
  *    review settles `failed`;
  * 2. the root asks `task_review_agent` for that exact source, and the reviewer
- *    records a diagnosis with a suggestion — the A6 hand-off;
+ *    records a diagnosis — the A6 hand-off;
  * 3. the consumption takes the hand-off up: one supervisor session, delegated
  *    through the coordination ledger, idempotently;
  * 4. the supervisor's scripted request calls `task_recover`, and the runtime
@@ -20,8 +20,9 @@
  * 5. a repeat returns that attempt (and that supervisor), never a second one.
  *
  * The refusals are here too, each with the side effect it must not have: no root
- * surface carries `task_recover`, a suggestion with no executor is never taken
- * up, and a source that succeeded is never recovered.
+ * surface carries `task_recover`, a suggestion with no executor is still handed
+ * to a coordinator (the diagnosis is the hand-off, not the suggestion), and a
+ * source that succeeded accepts improvement rounds up to the configured cap.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -43,7 +44,7 @@ import {
 import { buildReviewPack } from '../../agent-singularity/src/tools/task-review-pack.ts'
 import { rootTaskStoreId } from '../../task/src/index.ts'
 import type { TaskRun } from '../../task/src/index.ts'
-import { startScriptedLoop, disposeScriptedLoops, type ScriptEntry, type ScriptedLoop } from '../support/scripted-loop.ts'
+import { startScriptedLoop, disposeScriptedLoops, type ScriptEntry, type ScriptedLoop, type SupervisionOptions } from '../support/scripted-loop.ts'
 
 const ROOT = 's-root' as SessionId
 const STORE = rootTaskStoreId(String(ROOT))
@@ -120,6 +121,20 @@ async function supervisorSession(h: ScriptedLoop, diagnosisId: string): Promise<
 }
 
 /**
+ * Wait until the batch this session admitted has ended and handed the run back
+ * (`waiting_children → active`) — the wake a live attempt's submission waits for.
+ */
+async function waitForHandback(loop: ScriptedLoop, sessionId: string): Promise<void> {
+  const deadline = Date.now() + 60_000
+  for (;;) {
+    const run = (await loop.snapshot(STORE)).runs.find(candidate => candidate.sessionId === sessionId)
+    if (run !== undefined && (run.batches?.length ?? 0) > 0 && run.executionPhase === 'active') return
+    if (Date.now() > deadline) throw new Error(`the run of session ${sessionId} never came back from its batch`)
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+}
+
+/**
  * The script every case in this file runs: one failed member, one review of the
  * root's own failed run, one supervisor, one recovery attempt. The root's own
  * turn waits for its batch before it hands its result in, so the review the case
@@ -128,13 +143,14 @@ async function supervisorSession(h: ScriptedLoop, diagnosisId: string): Promise<
 function script(
   h: () => ScriptedLoop,
   cells: Cells,
-  options: { recover?: boolean; review?: boolean } = {},
+  options: { recover?: boolean; review?: boolean; reviewReply?: string; supervisorReply?: string; supervisor?: readonly ScriptEntry[] } = {},
 ): (sessionId: string, index: number) => readonly ScriptEntry[] {
   return (sessionId, index) => {
     const loop = h()
     const name = loop.spawns.find(spawn => String(spawn.sessionId) === sessionId)?.name ?? ''
     if (name.startsWith('supervisor for')) {
-      if (options.recover === false) return [{ text: 'supervisor: nothing to do' }]
+      if (options.supervisor !== undefined) return [...options.supervisor]
+      if (options.recover === false) return [{ text: options.supervisorReply ?? 'supervisor: nothing to do' }]
       // The diagnosis the hand-off is about: the reviewer's own record id, which
       // is `<its session>` (review-agent-run.ts). A live model reads it from its
       // first request; the scripted one derives it from the spawn the same way.
@@ -145,11 +161,23 @@ function script(
         { text: 'supervisor: the attempt is open' },
       ]
     }
-    if (name.startsWith('review ')) return [{ text: REVIEW_REPLY }]
+    if (name.startsWith('review ')) return [{ text: options.reviewReply ?? REVIEW_REPLY }]
     if (name.startsWith('recovery of')) {
+      // A second `recovery of` session is an improvement round of an
+      // already-verified source: every position is bound, so the attempt has no
+      // position of its own to run and hands its result in directly.
+      const ordinal = loop.spawns.filter(spawn => spawn.name.startsWith('recovery of')).length
+      if (ordinal >= 2) {
+        return [
+          { tool: 'task_submit_result', args: { summary: 'the improvement is handed in' } },
+          { text: 'improvement: handed in' },
+        ]
+      }
       // The attempt re-runs the position the map names: it delegates a member of
       // its own and hands its result in once that batch has ended (the runtime's
-      // own message starts that second half of the turn).
+      // own message starts that second half of the turn). The wait is explicit:
+      // the attempt's prior-round notice may open that turn before the batch
+      // settles, and a submission while children run is denied.
       return [
         {
           tool: 'task_decompose',
@@ -159,6 +187,7 @@ function script(
           },
         },
         { text: 'attempt: the replacement is running' },
+        { waitFor: () => waitForHandback(loop, sessionId) },
         { tool: 'task_submit_result', args: { summary: 'the attempt is handed in' } },
         { text: 'attempt: handed in' },
       ]
@@ -195,7 +224,18 @@ function script(
 }
 
 /** Start one case's deployment, with the cells its script reads. */
-async function startCase(options: { recover?: boolean; review?: boolean } = {}): Promise<{ h: ScriptedLoop; cells: Cells }> {
+async function startCase(
+  options: {
+    recover?: boolean
+    review?: boolean
+    reviewReply?: string
+    supervisorReply?: string
+    /** The supervisor's script when the case needs a different shape (a hang that keeps the hand-off owned, a close). */
+    supervisor?: readonly ScriptEntry[]
+    supervision?: SupervisionOptions
+    evolution?: boolean
+  } = {},
+): Promise<{ h: ScriptedLoop; cells: Cells }> {
   let resolve = (): void => {}
   const batchDone = new Promise<void>(done => { resolve = done })
   const cells: Cells = { batchDone, resolveBatch: resolve }
@@ -203,7 +243,8 @@ async function startCase(options: { recover?: boolean; review?: boolean } = {}):
   h = await startScriptedLoop({
     roots: [ROOT],
     script: script(() => h, cells, options),
-    evolution: { ledgerRoot: ledgerDir() },
+    ...(options.evolution === false ? {} : { evolution: { ledgerRoot: ledgerDir() } }),
+    ...(options.supervision === undefined ? {} : { supervision: options.supervision }),
   })
   return { h, cells }
 }
@@ -317,9 +358,9 @@ describe('A6: the hand-off a diagnosis becomes, and the supervisor it is delegat
   })
 
   it('never puts task_recover on a root\'s surface, and refuses a recovery asked for by a session that is not the supervisor', async () => {
-    // The supervisor does nothing here, so the only attempt that could exist is
-    // the one the root itself tries to open.
-    const { h, cells } = await startCase({ recover: false })
+    // The supervisor takes nothing up and holds its turn open, so the only
+    // attempt that could exist is the one the root itself tries to open.
+    const { h, cells } = await startCase({ recover: false, supervisor: [{ hang: true }] })
     const root = await failRootAndReview(h, cells)
     const diagnosis = (await h.snapshot(STORE)).diagnoses.find(item => item.taskId === root.taskId)!
     await supervisorSession(h, diagnosis.diagnosisId)
@@ -341,9 +382,11 @@ describe('A6: the hand-off a diagnosis becomes, and the supervisor it is delegat
   })
 
   it('answers an activation scan with the same supervisor, spawning nothing', async () => {
-    // The supervisor takes nothing up here, so the only spawns this case can see
-    // are the member's, the reviewer's and the supervisor's own.
-    const { h, cells } = await startCase({ recover: false })
+    // The supervisor is still working here (it holds its turn open), so the only
+    // spawns this case can see are the member's, the reviewer's and the
+    // supervisor's own, and the scan answers with the supervisor the hand-off
+    // already has.
+    const { h, cells } = await startCase({ recover: false, supervisor: [{ hang: true }] })
     const root = await failRootAndReview(h, cells)
     const diagnosis = (await h.snapshot(STORE)).diagnoses.find(item => item.taskId === root.taskId)!
     const supervisor = await supervisorSession(h, diagnosis.diagnosisId)
@@ -366,11 +409,45 @@ describe('A6: the hand-off a diagnosis becomes, and the supervisor it is delegat
     expect(after[0]!.sessionId).toBe(supervisor)
     expect(await readSupervisorHandoff(STORE, diagnosis.diagnosisId)).toMatchObject({ sessionId: supervisor })
   })
+
+  it('settles a hand-off closed when its supervisor explicitly declines further iteration', async () => {
+    // The supervisor's own outcome: a reply that ends with the structured close
+    // settles the hand-off — no further round, and no second supervisor for it.
+    const closeReply = 'The evidence justifies no further round.\n'
+      + '```json\n{"outcome":"closed","reason":"the member was already re-run and nothing else is worth changing"}\n```'
+    const { h, cells } = await startCase({ recover: false, supervisorReply: closeReply })
+    const root = await failRootAndReview(h, cells, { recover: false })
+    const diagnosis = (await h.snapshot(STORE)).diagnoses.find(item => item.taskId === root.taskId)!
+    // The recorded diagnosis is consumed on the record's own tick: the
+    // deployment starts its supervisor without the spec asking.
+    const supervisor = await supervisorSession(h, diagnosis.diagnosisId)
+
+    // The attempt's terminal fact is the close it declared, with the reason on it.
+    const attempt = await vi.waitFor(async () => {
+      const found = (await readReviewAgentAttempts(STORE)).find(
+        item => item.role === 'supervisor' && item.diagnosisId === diagnosis.diagnosisId,
+      )
+      expect(found?.settlement?.status).toBe('closed')
+      return found!
+    }, { timeout: 30_000, interval: 25 })
+    expect(String(attempt.settlement?.note)).toContain('nothing else is worth changing')
+    expect(attempt.sessionId).toBe(supervisor)
+    // Nothing was opened: no recovery/improvement run exists.
+    expect((await h.snapshot(STORE)).runs.filter(run => run.recovery !== undefined)).toEqual([])
+
+    // A further consumption answers with the concluded supervisor: a closed
+    // hand-off is settled, not re-delegated.
+    const again = await consumePendingHandoffs(h.ctx, STORE)
+    expect(again.consumptions).toMatchObject([{ diagnosisId: diagnosis.diagnosisId, result: 'existing', sessionId: supervisor }])
+    expect(h.spawns.filter(spawn => spawn.name === `supervisor for ${diagnosis.diagnosisId}`)).toHaveLength(1)
+  })
 })
 
 describe('A6: what the pack and the consumption say about a hand-off', () => {
   it('reports the hand-off as taken up, with the supervisor that owns it, and keeps the review list to reviews', async () => {
-    const { h, cells } = await startCase()
+    // The supervisor holds its turn open, so the hand-off is still owned by a
+    // live attempt when the pack is built.
+    const { h, cells } = await startCase({ supervisor: [{ hang: true }] })
     const root = await failRootAndReview(h, cells)
     const diagnosis = (await h.snapshot(STORE)).diagnoses.find(item => item.taskId === root.taskId)!
     const supervisor = await supervisorSession(h, diagnosis.diagnosisId)
@@ -381,7 +458,7 @@ describe('A6: what the pack and the consumption say about a hand-off', () => {
       snapshot,
       source: { taskId: root.taskId, runId: root.runId },
       attempts,
-      handoff: { enabled: true, attempts, budget: { used: attempts.filter(attempt => attempt.started).length, max: 3 } },
+      handoff: { attempts, budget: { used: attempts.filter(attempt => attempt.started).length, max: 3 } },
     })
     expect(pack).toContain(`handoff: taken up — this hand-off is delegated to supervisor session ${supervisor}`)
     expect(pack).toContain('the member needs a capability the deployment does not grant')
@@ -391,13 +468,15 @@ describe('A6: what the pack and the consumption say about a hand-off', () => {
     expect(pack).not.toContain(`review attempts (2):`)
   })
 
-  it('reports a suggestion this build has no executor for by name, with nothing started', async () => {
-    const { h, cells } = await startCase({ recover: false })
+  it('takes up a suggestion this build has no executor for, and keeps the suggestion a record', async () => {
+    const { h, cells } = await startCase({ recover: false, supervisor: [{ hang: true }] })
     const root = await failRootAndReview(h, cells, { recover: false })
     const diagnosis = (await h.snapshot(STORE)).diagnoses.find(item => item.taskId === root.taskId)!
 
-    // A verifier implementation would need an authorization nobody granted, so
-    // the hand-off is not taken up at all.
+    // A verifier implementation is a target type this build records but has no
+    // candidate surface for: the hand-off is the diagnosis, so it proceeds to
+    // its supervisor exactly as any other does, and the suggestion stays what
+    // it was — the coordinator studies it and can execute nothing for it.
     const unsupported = {
       ...diagnosis,
       diagnosisId: 'd-verifier',
@@ -410,9 +489,9 @@ describe('A6: what the pack and the consumption say about a hand-off', () => {
       sourceRef: `${root.taskId}#${root.runId}`,
       sourceOutcome: 'failed',
     })
-    expect(consumption).toMatchObject({ result: 'stopped', code: 'requires-new-authority' })
-    expect(await readSupervisorHandoff(STORE, 'd-verifier')).toBeUndefined()
-    expect(h.spawns.some(spawn => spawn.name === 'supervisor for d-verifier')).toBe(false)
+    expect(consumption).toMatchObject({ result: 'started' })
+    expect(h.spawns.some(spawn => spawn.name === 'supervisor for d-verifier')).toBe(true)
+    expect(await readSupervisorHandoff(STORE, 'd-verifier')).toBeDefined()
     // Recorded, so the pack has the hand-off to report (a diagnosis the store does
     // not hold is not one a reader could see).
     await h.task.recordDiagnosisIn(STORE, unsupported, 'test')
@@ -423,14 +502,53 @@ describe('A6: what the pack and the consumption say about a hand-off', () => {
       snapshot,
       source: { taskId: root.taskId, runId: root.runId },
       attempts,
-      handoff: { enabled: true, attempts, budget: { used: attempts.filter(attempt => attempt.started).length, max: 3 } },
+      handoff: { attempts, budget: { used: attempts.filter(attempt => attempt.started).length, max: 3 } },
     })
-    expect(pack).toContain('a verifier implementation')
-    expect(pack).toContain('the Diagnosis keeps its suggestion')
+    expect(pack).toContain('proposal verifier a-new-judge: write one')
+    expect(pack).toContain('handoff: taken up — this hand-off is delegated to supervisor session')
   })
 
-  it('refuses to recover a source that succeeded: the suggestion stays a record, and no run is opened', async () => {
-    const { h, cells } = await startCase()
+  it('takes up a diagnosis that carries no proposals: any diagnosis proceeds to its supervisor', async () => {
+    // The hand-off is the diagnosis itself: the preflight no longer asks for a
+    // skill or capability suggestion, so a conclusion-only postmortem still
+    // reaches a coordinator — the deployment's own consumption starts it.
+    const conclusionOnly = '```json\n'
+      + '{"observation":"the root goal failed its own map","conclusion":"the member never held its criterion","confidence":"high"}'
+      + '\n```'
+    const { h, cells } = await startCase({ recover: false, reviewReply: conclusionOnly, supervisor: [{ hang: true }] })
+    const root = await failRootAndReview(h, cells, { recover: false })
+    const diagnosis = (await h.snapshot(STORE)).diagnoses.find(item => item.taskId === root.taskId)!
+    expect(diagnosis.proposals).toEqual([])
+
+    const sessionId = await supervisorSession(h, diagnosis.diagnosisId)
+    expect(await readSupervisorHandoff(STORE, diagnosis.diagnosisId)).toMatchObject({
+      sessionId,
+      source: { taskId: root.taskId, runId: root.runId },
+    })
+    // A further consumption answers with the supervisor already delegated.
+    const consumption = await consumePendingHandoffs(h.ctx, STORE)
+    expect(consumption.consumptions).toEqual([
+      expect.objectContaining({ diagnosisId: diagnosis.diagnosisId, result: 'existing', sessionId }),
+    ])
+  })
+
+  it('starts the supervisor in a deployment that never mounted the evolution plane', async () => {
+    // The evolution chain is not a precondition of the hand-off: a deployment
+    // that never mounted it still delegates a recorded diagnosis to a
+    // coordinator, which is where the chain would be opened if it existed.
+    const { h, cells } = await startCase({ recover: false, evolution: false, supervisor: [{ hang: true }] })
+    const root = await failRootAndReview(h, cells, { recover: false })
+    const diagnosis = (await h.snapshot(STORE)).diagnoses.find(item => item.taskId === root.taskId)!
+
+    const sessionId = await supervisorSession(h, diagnosis.diagnosisId)
+    expect(await readSupervisorHandoff(STORE, diagnosis.diagnosisId)).toMatchObject({ sessionId })
+  })
+
+  it('accepts an improvement round for a source that succeeded, up to the configured cap', async () => {
+    // One improvement round is the allowance this deployment names, so the cap's
+    // own refusal is the second attempt's answer — no third or fourth run and no
+    // second attempt record.
+    const { h, cells } = await startCase({ supervision: { maxImprovementRounds: 1 } })
     const root = await failRootAndReview(h, cells)
     const diagnosis = (await h.snapshot(STORE)).diagnoses.find(item => item.taskId === root.taskId)!
     const supervisor = await supervisorSession(h, diagnosis.diagnosisId)
@@ -441,14 +559,46 @@ describe('A6: what the pack and the consumption say about a hand-off', () => {
     }, { timeout: 30_000, interval: 25 })
     await vi.waitFor(async () => expect((await runOf(h, attempt.runId)).status).toBe('verified'), { timeout: 30_000, interval: 25 })
 
-    // The goal succeeded again, and a recovery of a successful source is refused
-    // by name under a new key — with no third run and no second attempt record.
+    // The source's review settled `verified` now, so the default mode is not the
+    // door: an attempt that names no mode is refused by name.
     const runsBefore = (await h.snapshot(STORE)).runs.length
-    const refusal = await h.ctx.evolution.coordinateRecovery(
-      { sourceDiagnosisId: diagnosis.diagnosisId, requestKey: 'k-after-success' },
+    const plain = await h.ctx.evolution.coordinateRecovery(
+      { sourceDiagnosisId: diagnosis.diagnosisId, requestKey: 'k-plain-after-success' },
       { sessionId: supervisor },
     ).then(() => '', error => String(error))
-    expect(refusal).toContain('a successful source is not recovered')
+    expect(plain).toContain('improve')
     expect((await h.snapshot(STORE)).runs).toHaveLength(runsBefore)
+
+    // An improvement round of the verified source is accepted, and the attempt's
+    // own record says which kind of round it is.
+    const improvement = await h.ctx.evolution.coordinateRecovery(
+      { sourceDiagnosisId: diagnosis.diagnosisId, requestKey: 'k-improve', mode: 'improve' },
+      { sessionId: supervisor },
+    )
+    expect(improvement.attempt).toBe('started')
+    const improvementRun = await vi.waitFor(async () => {
+      const found = (await h.snapshot(STORE)).runs.find(run => run.runId === improvement.runId)
+      expect(found).toBeDefined()
+      return found!
+    }, { timeout: 30_000, interval: 25 })
+    expect(improvementRun.recovery).toMatchObject({
+      kind: 'improvement',
+      sourceDiagnosisId: diagnosis.diagnosisId,
+      sourceRunId: attempt.runId,
+    })
+    // The improvement is judged by the original criteria and the source's old
+    // facts stay readable beside it.
+    await vi.waitFor(async () => expect((await runOf(h, improvement.runId)).status).toBe('verified'), { timeout: 30_000, interval: 25 })
+    expect((await runOf(h, attempt.runId)).status).toBe('verified')
+    expect((await h.snapshot(STORE)).runs.filter(run => run.taskId === root.taskId)).toHaveLength(3)
+
+    // The second improvement is the cap's business: refused by name, with no run.
+    const middle = (await h.snapshot(STORE)).runs.length
+    const capped = await h.ctx.evolution.coordinateRecovery(
+      { sourceDiagnosisId: diagnosis.diagnosisId, requestKey: 'k-improve-2', mode: 'improve' },
+      { sessionId: supervisor },
+    ).then(() => '', error => String(error))
+    expect(capped).toContain('iteration-cap')
+    expect((await h.snapshot(STORE)).runs).toHaveLength(middle)
   })
 })

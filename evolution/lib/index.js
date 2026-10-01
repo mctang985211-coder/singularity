@@ -3264,22 +3264,26 @@ function preparedIdentity(value, field, proposalId) {
 		}
 	};
 }
+/** The required ids of a recovery-coordination request; `mode` is the one optional member. */
+const RECOVERY_COORDINATION_REQUIRED = ["sourceDiagnosisId", "requestKey"];
 /** The fields a recovery-coordination request may carry: anything else is refused by name rather than ignored. */
-const RECOVERY_COORDINATION_FIELDS = ["sourceDiagnosisId", "requestKey"];
+const RECOVERY_COORDINATION_FIELDS = [...RECOVERY_COORDINATION_REQUIRED, "mode"];
 /** Every reason a coordination request cannot be a recovery request at all: an unknown field or an empty value, named. */
 function recoveryCoordinationDefects(request) {
 	if (request === null || typeof request !== "object" || Array.isArray(request)) return ["the request must be an object carrying sourceDiagnosisId and requestKey"];
 	const defects = [];
 	for (const key of Object.keys(request)) if (!RECOVERY_COORDINATION_FIELDS.includes(key)) defects.push(`unknown field "${key}": a recovery request carries ${RECOVERY_COORDINATION_FIELDS.join(", ")} and nothing else — an approval, a decision or a permission is never part of what a caller passes`);
 	const fields = request;
-	for (const name of RECOVERY_COORDINATION_FIELDS) {
+	for (const name of RECOVERY_COORDINATION_REQUIRED) {
 		const value = fields[name];
 		if (typeof value !== "string" || value.trim().length === 0) defects.push(`${name} must be a non-empty string`);
 	}
+	if (fields.mode !== void 0 && fields.mode !== "recovery" && fields.mode !== "improve") defects.push(`mode must be "recovery" or "improve" when present`);
 	return defects;
 }
-/** The failed run one diagnosis is about, as the store holds it: the run its own review ref names, else the source task's newest failed run. */
+/** The failed run one diagnosis is about: the run its own review ref names, else the source task's newest failed run. A verified source names no run — the runtime resolves its newest verified attempt. */
 function recoverySourceRunId(diagnosis, source, snapshot) {
+	if (source.status === "verified") return null;
 	for (const ref of diagnosis.reviewRefs) {
 		const separator = ref.lastIndexOf("#");
 		if (separator < 0 || ref.slice(0, separator) !== diagnosis.taskId) continue;
@@ -4066,7 +4070,12 @@ var EvolutionServiceCore = class extends Service {
 			coordination
 		};
 	}
-	/** The root task store of one live session, derived from its own graph — never from an id the caller passed. */
+	/** Whether this deployment declares the evolution chain on. Read softly, and read as on when the
+	* switch is absent: only a deployment that says `enabled: false` relaxes the ledger's own gates. */
+	evolutionChainOn() {
+		const exposure = optionalService(this.ctx, "singularityEvolution");
+		return exposure === void 0 || exposure.enabled !== false;
+	}
 	/** The **recovery coordination** entry (A6, plan §F.4): take one recorded delegation and open the runtime's own recovery. */
 	async coordinateRecovery(request, caller) {
 		const defects = recoveryCoordinationDefects(request);
@@ -4091,8 +4100,8 @@ var EvolutionServiceCore = class extends Service {
 		const source = snapshot.tasks.find((item) => item.taskId === diagnosis.taskId);
 		if (source === void 0) throw new Error(`evolution: diagnosis "${diagnosis.diagnosisId}" names task "${diagnosis.taskId}", which store "${storeId}" does not hold; nothing was started`);
 		if (source.parentTaskId !== void 0) throw new Error(`evolution: task "${source.taskId}" is a child of "${source.parentTaskId}"; a recovery attempt is opened for the store's own root task, and a child is re-run by a batch of its parent — nothing was started`);
-		if (source.status === "verified") throw new Error(`evolution: root task "${source.taskId}" is verified, and a successful source is not recovered: the goal was met and this build has no frozen metric or comparator that could judge "faster or cheaper" against it, so the diagnosis's suggestions stay records — no promotion, no application and no new run`);
 		const coordination = [`the hand-off was delegated by session "${delegation.actor}" into store "${delegation.rootStoreId}"`, `the diagnosis names root task "${source.taskId}" [${source.status}]`];
+		if (source.status === "verified") coordination.push(`root task "${source.taskId}" is verified, so the attempt is an improvement round — the runtime decides whether its cap admits it`);
 		const sourceRunId = recoverySourceRunId(diagnosis, source, snapshot);
 		const answered = recoveryAttemptWithKey(snapshot, source.taskId, request.requestKey);
 		if (answered !== void 0) {
@@ -4101,18 +4110,22 @@ var EvolutionServiceCore = class extends Service {
 				sourceTaskId: source.taskId,
 				sourceRunId,
 				sourceDiagnosisId: request.sourceDiagnosisId,
-				requestKey: request.requestKey
+				requestKey: request.requestKey,
+				...request.mode !== void 0 ? { mode: request.mode } : {}
 			}, caller, delegation, coordination);
 		}
 		if (source.status === "running" || source.status === "verifying") throw new Error(`evolution: root task "${source.taskId}" is ${source.status}; a recovery opens a new attempt after the old one settled and never hot-swaps a live run — nothing was started`);
+		const chainOn = this.evolutionChainOn();
 		const associated = (await this.list()).filter((proposal) => proposal.sourceRefs.includes(`diagnosis:${diagnosis.diagnosisId}`));
-		for (const proposal of associated.filter((item) => item.targetType === "capability")) {
-			if (proposal.status === "applied" && proposal.applied !== void 0 && proposal.rolledback === void 0) continue;
-			const state = proposal.status === "decided" && proposal.decision === "PROMOTE" ? "PROMOTE-decided but not applied" : proposal.status === "rolledback" ? "rolled back" : proposal.status;
-			throw new Error(`evolution: the capability change this hand-off depends on (proposal "${proposal.proposalId}" → row "${proposal.targetId}") is ${state}; a recovery whose gap is that capability is opened only after a person approves it and the apply commits it into the registry — nothing was started, and no run was opened`);
-		}
-		if (associated.length > 0) coordination.push(`this ledger holds ${associated.length} proposal(s) for the diagnosis, ${associated.filter((item) => item.targetType === "capability").length} of them capability changes, all in force`);
-		else {
+		if (chainOn) {
+			for (const proposal of associated.filter((item) => item.targetType === "capability")) {
+				if (proposal.status === "applied" && proposal.applied !== void 0 && proposal.rolledback === void 0) continue;
+				const state = proposal.status === "decided" && proposal.decision === "PROMOTE" ? "PROMOTE-decided but not applied" : proposal.status === "rolledback" ? "rolled back" : proposal.status;
+				throw new Error(`evolution: the capability change this hand-off depends on (proposal "${proposal.proposalId}" → row "${proposal.targetId}") is ${state}; a recovery whose gap is that capability is opened only after a person approves it and the apply commits it into the registry — nothing was started, and no run was opened`);
+			}
+			if (associated.length > 0) coordination.push(`this ledger holds ${associated.length} proposal(s) for the diagnosis, ${associated.filter((item) => item.targetType === "capability").length} of them capability changes, all in force`);
+		} else if (associated.length > 0) coordination.push(`the evolution chain is off in this deployment, so the ${associated.length} proposal(s) this ledger holds for the diagnosis are not consulted`);
+		if (associated.length === 0) {
 			const requested = source.requestedCapabilities ?? [];
 			if (requested.length === 0) coordination.push("this ledger holds no proposal for the diagnosis; the source requires no capability row of its own");
 			else {
@@ -4136,7 +4149,8 @@ var EvolutionServiceCore = class extends Service {
 			sourceTaskId: source.taskId,
 			sourceRunId,
 			sourceDiagnosisId: request.sourceDiagnosisId,
-			requestKey: request.requestKey
+			requestKey: request.requestKey,
+			...request.mode !== void 0 ? { mode: request.mode } : {}
 		}, caller, delegation, coordination);
 	}
 	/** The commit request one apply/rollback binds, read off the prepared record. */

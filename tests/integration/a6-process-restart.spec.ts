@@ -42,8 +42,9 @@
  *
  * One more thing a hand-off owns: the **supervisor a diagnosis was delegated to**
  * is a row in the coordination ledger. The last case kills the process that
- * started it and shows the new process answering the same hand-off with the same
- * supervisor, spawning nothing and refunding nothing of the store's allowance.
+ * started it and shows the new process settling that attempt as interrupted and
+ * re-delegating the same hand-off to a new supervisor — the allowance is not
+ * refunded and the dead session is not the hand-off's owner any more.
  */
 
 import { readFileSync, rmSync } from 'node:fs'
@@ -58,7 +59,7 @@ import {
   readSupervisorDelegation,
   reviewAgentLedgerFile,
 } from '../../agent-singularity/src/coordination/ledger.ts'
-import { consumePendingHandoffs, startSupervisorHandoff } from '../../agent-singularity/src/coordination/evolution-handoff.ts'
+import { startSupervisorHandoff } from '../../agent-singularity/src/coordination/evolution-handoff.ts'
 import { defineRootBudgetApproval } from '../../agent-singularity/src/tools/budget-extend.ts'
 import { rootTaskStoreId } from '../../task/src/index.ts'
 import type { Diagnosis, TaskRun, TaskSnapshot } from '../../task/src/index.ts'
@@ -599,7 +600,7 @@ describe.skipIf(BOUNDARY !== undefined)('A6 EVO-4 (real death): a killed recover
     expect(final.diagnoses.find(item => item.diagnosisId === 'd-restart')?.proposals).toHaveLength(1)
   }, 120_000)
 
-  it('answers the hand-off from the ledger the dead process wrote, and starts no second supervisor', async () => {
+  it('re-delegates the hand-off the dead process left, and starts exactly one new supervisor', async () => {
     const directory = await sharedDirectory()
     // The child starts the hand-off in its own process image and dies there: its
     // ledger rows (the claim and the started row) are the durable fact.
@@ -621,8 +622,10 @@ describe.skipIf(BOUNDARY !== undefined)('A6 EVO-4 (real death): a killed recover
     expect(stack.spawns).toEqual([])
     await stack.runtime.adoptRoot(STORE, ROOT)
 
-    // The same hand-off answers with the supervisor the ledger already holds — the
-    // delegation a recovery entry checks its caller against — and nothing starts.
+    // The dead image's started supervisor is a failure this process finds: the
+    // same hand-off is re-delegated to a new supervisor session, and the dead
+    // attempt gets its own terminal fact — an interrupted supervisor is not the
+    // hand-off's owner.
     const repeat = await startSupervisorHandoff(stack.ctx, {
       storeId: STORE,
       diagnosis: diagnosis({ taskId: (await stack.snapshot(STORE)).tasks.find(task => task.parentTaskId === undefined)!.taskId, runId: marker.sourceRunId! }),
@@ -630,28 +633,30 @@ describe.skipIf(BOUNDARY !== undefined)('A6 EVO-4 (real death): a killed recover
       sourceRef: `${(await stack.snapshot(STORE)).tasks.find(task => task.parentTaskId === undefined)!.taskId}#${marker.sourceRunId}`,
       sourceOutcome: 'failed',
     })
-    expect(repeat).toMatchObject({ result: 'existing', sessionId: supervisor })
-    expect(stack.spawns).toEqual([])
-    // The activation scan a rebuilt process runs takes nothing up either: this
-    // hand-off is not pending any more, it already has its coordinator.
-    const scan = await consumePendingHandoffs(stack.ctx, STORE)
-    expect(scan.consumptions).toMatchObject([{ diagnosisId: 'd-restart', result: 'existing', sessionId: supervisor }])
-    expect(stack.spawns).toEqual([])
-
-    // One claim and one started row on the file, the allowance not refunded, and
-    // the delegation still readable — the three facts the recovery entry rests on.
-    expect(ledgerRows().filter(row => row.kind === 'claim' && row.role === 'supervisor')).toHaveLength(1)
-    expect(ledgerRows().filter(row => row.kind === 'started' && row.sessionId === supervisor)).toHaveLength(1)
-    expect(await countReviewAgentRuns(STORE)).toBe(spent)
-    expect(await readSupervisorDelegation(supervisor, 'd-restart')).toMatchObject({
+    expect(repeat).toMatchObject({ result: 'started' })
+    const replacement = (repeat as { sessionId: string }).sessionId
+    expect(replacement).not.toBe(supervisor)
+    expect(stack.spawns).toHaveLength(1)
+    const settled = ledgerRows().filter(row => row.kind === 'settled' && row.sessionId === supervisor)
+    expect(settled).toHaveLength(1)
+    expect(settled[0]).toMatchObject({ status: 'interrupted' })
+    // The dead attempt's spent run is not refunded: one claim and one started row
+    // per supervisor, and the store's count is the dead image's plus the new one.
+    expect(ledgerRows().filter(row => row.kind === 'claim' && row.role === 'supervisor')).toHaveLength(2)
+    // A started row carries the session, not the role: the two supervisors' rows
+    // are read by their sessions.
+    expect(ledgerRows().filter(row => row.kind === 'started' && [supervisor, replacement].includes(String(row.sessionId)))).toHaveLength(2)
+    expect(await countReviewAgentRuns(STORE)).toBe(spent + 1)
+    expect(await readSupervisorDelegation(replacement, 'd-restart')).toMatchObject({
       rootStoreId: STORE,
       taskId: marker.sourceRunId === undefined ? undefined : (await stack.snapshot(STORE)).tasks.find(task => task.parentTaskId === undefined)!.taskId,
       actor: ROOT,
       diagnosisId: 'd-restart',
     })
     // A *new* hand-off is answered from the count the dead process wrote: with the
-    // ceiling set to exactly what it spent, nothing more starts.
-    vi.stubEnv('SINGULARITY_REVIEW_AGENT_BUDGET', String(spent))
+    // ceiling set to exactly what has been spent by now, nothing more starts.
+    const ceiling = spent + 1
+    vi.stubEnv('SINGULARITY_REVIEW_AGENT_BUDGET', String(ceiling))
     const rootTaskId = (await stack.snapshot(STORE)).tasks.find(task => task.parentTaskId === undefined)!.taskId
     const pressed = await startSupervisorHandoff(stack.ctx, {
       storeId: STORE,
@@ -661,8 +666,8 @@ describe.skipIf(BOUNDARY !== undefined)('A6 EVO-4 (real death): a killed recover
       sourceOutcome: 'failed',
     })
     expect(pressed).toMatchObject({ result: 'stopped', code: 'budget-exhausted' })
-    expect((pressed as { reason: string }).reason).toContain(`${spent}/${spent}`)
-    expect(stack.spawns).toEqual([])
+    expect((pressed as { reason: string }).reason).toContain(`${ceiling}/${ceiling}`)
+    expect(stack.spawns).toHaveLength(1)
   }, 120_000)
 })
 

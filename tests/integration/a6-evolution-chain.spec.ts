@@ -32,12 +32,14 @@
  * the apply, the recovery is refused by name with no run opened (asked of the
  * direct service entry, below the tool); while the attempt is in flight, another
  * key is refused by name; and a **successful** source's "faster or cheaper"
- * suggestion stays a readable record — named as unsupported for lack of a frozen
- * comparator — with no promotion, no application and no new run.
+ * suggestion stays a readable record — the improvement door is closed by the
+ * deployment's configured cap (`iteration-cap`) with no promotion, no application
+ * and no new run.
  *
  * `task_recover`'s schema is asserted to be exactly the two fields the plan
- * fixes: an adapter that quietly grew a field would be a second way to carry an
- * authorization, and the plan says the request carries none.
+ * fixes plus the optional `mode`: an adapter that quietly grew another field
+ * would be a second way to carry an authorization, and the plan says the request
+ * carries none.
  */
 
 import { createHash } from 'node:crypto'
@@ -55,7 +57,7 @@ import { buildExperimentReport } from '../../evolution/src/index.ts'
 import { rootTaskStoreId } from '../../task/src/index.ts'
 import type { AcceptanceCriterion, TaskRun } from '../../task/src/index.ts'
 import { writeCapabilityConfig } from '../support/capability-config.ts'
-import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type ScriptedLoop } from '../support/scripted-loop.ts'
+import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type ScriptedLoop, type SupervisionOptions } from '../support/scripted-loop.ts'
 
 const ROOT = 's-root' as SessionId
 /** The deployment's operator session: a live root whose model puts the person's two questions. */
@@ -350,9 +352,10 @@ function script(context: ScriptContext): (sessionId: string, index: number) => r
       }
       if (context.optimize) {
         // A hand-off whose source succeeded: the coordinator studies the
-        // suggestion and asks for a recovery, which this build refuses by name.
+        // suggestion and asks for an improvement round, which the deployment's
+        // own cap closes by name.
         return [
-          { tool: 'task_recover', args: { sourceDiagnosisId: diagnosisId, requestKey: 'k-optimize' } },
+          { tool: 'task_recover', args: { sourceDiagnosisId: diagnosisId, requestKey: 'k-optimize', mode: 'improve' } },
           { text: 'supervisor: the suggestion stays a record' },
         ]
       }
@@ -533,7 +536,9 @@ function sandboxAnswerFile(ledgerRoot: string): string | undefined {
   }
 }
 
-async function startCase(options: { memberFails?: boolean; review?: string; optimize?: boolean; reuse?: boolean } = {}): Promise<{ h: ScriptedLoop; cells: Cells; ledgerRoot: string; configFile: string }> {
+async function startCase(
+  options: { memberFails?: boolean; review?: string; optimize?: boolean; reuse?: boolean; supervision?: SupervisionOptions } = {},
+): Promise<{ h: ScriptedLoop; cells: Cells; ledgerRoot: string; configFile: string }> {
   const batchDone = Promise.withResolvers<void>()
   const decided = Promise.withResolvers<void>()
   const attemptSubmit = Promise.withResolvers<void>()
@@ -563,6 +568,7 @@ async function startCase(options: { memberFails?: boolean; review?: string; opti
     capabilities: { [STORE_ROW]: STORE_ENTRY },
     script: script(context),
     evolution: { ledgerRoot, capabilityConfig: configFile },
+    ...(options.supervision === undefined ? {} : { supervision: options.supervision }),
   })
   // The production skill: a loadable object the deployment already grants under
   // its own row — the plane the new row's declarations are judged against.
@@ -729,9 +735,15 @@ describe('A6 EVO-3: the capability chain, from the failing source to the recover
     const replacement = attemptMembers[0]!
     const replacementTask = await h.task.taskIn(STORE, replacement)
     expect(replacementTask.requestedCapabilities).toEqual([ROW])
-    const replacementRun = (await h.snapshot(STORE)).runs.find(run => run.taskId === replacement)!
+    // The member's own run is durable once the driver started it — `awaitBatch`
+    // can answer from the store before that registration.
+    const replacementRun = await vi.waitFor(async () => {
+      const found = (await h.snapshot(STORE)).runs.find(run => run.taskId === replacement)
+      expect(found).toBeDefined()
+      return found!
+    }, { timeout: 30_000, interval: 25 })
     expect(replacementRun.capabilitySnapshot).toContain(SKILL)
-    expect(replacementTask.status).toBe('verified')
+    await vi.waitFor(async () => expect((await h.task.taskIn(STORE, replacement)).status).toBe('verified'), { timeout: 30_000, interval: 25 })
 
     // ── the original acceptance criteria judge the attempt ───────────────────
     cells.resolveAttemptSubmit()
@@ -824,26 +836,25 @@ describe('A6 EVO-3: the capability chain, from the failing source to the recover
     expect(final.runs.filter(run => run.taskId === cells.rootTaskId!)).toHaveLength(2)
   }, 120_000)
 
-  it('keeps a successful source\'s "faster or cheaper" suggestion readable, names the missing comparator, and opens nothing', async () => {
-    const { h, cells } = await startCase({ memberFails: false, review: OPTIMIZE_REPLY, optimize: true })
+  it('keeps a successful source\'s suggestion readable, and closes the improvement door at the configured cap', async () => {
+    const { h, cells } = await startCase({ memberFails: false, review: OPTIMIZE_REPLY, optimize: true, supervision: { maxImprovementRounds: 0 } })
     await failRoot(h, cells, false)
     const root = (await h.snapshot(STORE)).tasks.find(task => task.taskId === cells.rootTaskId!)!
     expect(root.status).toBe('verified')
     const diagnosis = (await h.snapshot(STORE)).diagnoses.find(item => item.taskId === root.taskId)!
     expect(diagnosis.proposals.map(proposal => proposal.targetId)).toEqual(['a6-chain-faster-row'])
 
-    // The hand-off is taken up (the suggestion stays readable and a coordinator
-    // may study it), and the recovery it asks for is refused by name: this build
-    // has no frozen metric or comparator that could judge "faster or cheaper".
-    await consumePendingHandoffs(h.ctx, STORE)
-    const supervisor = await supervisorSession(h, diagnosis.diagnosisId)
+    // The hand-off is the diagnosis, and the improvement it wants is closed by
+    // the cap this deployment names: a verified source accepts `mode: 'improve'`
+    // rounds only until `maxImprovementRounds`, and this deployment allows none —
+    // so no supervisor is delegated for it and nothing is opened.
     const runsBefore = (await h.snapshot(STORE)).runs.length
-    await vi.waitFor(() => expect(h.calls.some(call => call.name === 'task_recover' && call.result !== undefined)).toBe(true), { timeout: 60_000, interval: 25 })
-    const answer = h.calls.find(call => call.name === 'task_recover' && call.result !== undefined)!.result!
-    expect(answer.text).toContain('rejected')
-    expect(answer.text).toContain('a successful source is not recovered')
-    expect(answer.text).toContain('no frozen metric or comparator that could judge "faster or cheaper"')
-    expect(answer.text).toContain('no promotion, no application and no new run')
+    const consumption = await consumePendingHandoffs(h.ctx, STORE)
+    expect(consumption.consumptions).toEqual([
+      expect.objectContaining({ diagnosisId: diagnosis.diagnosisId, result: 'stopped', code: 'iteration-cap' }),
+    ])
+    expect(consumption.consumptions[0]!.reason).toContain('0/0')
+    expect(h.spawns.filter(spawn => String(spawn.name ?? '').startsWith('supervisor for '))).toEqual([])
 
     // Zero new runs, zero promotions, zero production writes — and the record the
     // suggestion lives in is untouched.
@@ -853,27 +864,31 @@ describe('A6 EVO-3: the capability chain, from the failing source to the recover
     expect(await h.ctx.evolution.list()).toEqual([])
     expect(h.runtime.listCapabilities()[STORE_ROW]).toMatchObject({ skills: [STORE_SKILL], tools: ['filesystem'] })
     expect(h.runtime.listCapabilities()['a6-chain-faster-row']).toBeUndefined()
-    // A reader still sees the suggestion, and the hand-off that was delegated.
+    // A reader still sees the suggestion, and the pack names the cap as the
+    // reason nothing was opened.
     const attempts = await readReviewAgentAttempts(STORE)
     const pack = buildReviewPack({
       snapshot: after,
       source: { taskId: root.taskId, runId: cells.rootRunId! },
       attempts,
-      handoff: { enabled: true, attempts, budget: { used: attempts.filter(attempt => attempt.started).length, max: 4 } },
+      handoff: { attempts, budget: { used: attempts.filter(attempt => attempt.started).length, max: 4 } },
     })
     expect(pack).toContain('a leaner capability would make this case faster and cheaper')
-    expect(pack).toContain(supervisor)
+    expect(pack).toContain('handoff: pending — the source\'s improvement rounds are spent (0/0)')
   }, 120_000)
 })
 
 describe('A6 EVO-5: the recovery adapter carries no authorization of its own', () => {
-  it('declares exactly the two fields the plan fixes, and no approved flag, store or reuse list', () => {
+  it('declares exactly the two request fields plus the optional mode, and no approved flag, store or reuse list', () => {
     const tool = defineTaskRecoverTool({ get: () => ({}) } as never)
     const schema = tool.parameters as { properties: Record<string, { type?: string }>; required?: readonly string[] }
-    expect(Object.keys(schema.properties).sort()).toEqual(['requestKey', 'sourceDiagnosisId'])
+    expect(Object.keys(schema.properties).sort()).toEqual(['mode', 'requestKey', 'sourceDiagnosisId'])
     expect([...(schema.required ?? [])].sort()).toEqual(['requestKey', 'sourceDiagnosisId'])
     expect(schema.properties.sourceDiagnosisId!.type).toBe('string')
     expect(schema.properties.requestKey!.type).toBe('string')
+    // The mode is the one optional field the plan adds: a verified source accepts
+    // `improve` rounds, a failed one the default `recovery` round.
+    expect(schema.properties.mode!.type).toBe('string')
     // …and the definition carries no other field: an `approved` flag, a store id
     // or a reuse list would be an authorization the plan says the request has none of.
     for (const forbidden of ['approved', 'storeId', 'reuses', 'sourceTaskId', 'sourceRunId']) {

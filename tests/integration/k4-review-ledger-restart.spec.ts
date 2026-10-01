@@ -1,7 +1,9 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { countReviewAgentRuns, readReviewerDelegation } from '../../agent-singularity/src/coordination/ledger.ts'
+import { countReviewAgentRuns, readReviewerDelegation, readSupervisorHandoff } from '../../agent-singularity/src/coordination/ledger.ts'
+import { consumePendingHandoffs } from '../../agent-singularity/src/coordination/evolution-handoff.ts'
+import { supervisorHandoffDigest } from '../../agent-singularity/src/coordination/handoff-rules.ts'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
 
 /**
@@ -78,6 +80,9 @@ async function failedTask(stack: AssemblyStack): Promise<{ storeId: string; task
 
 describe('the review allowance survives a restart (K4)', () => {
   it('answers the repeated source from the ledger the first process wrote, and still refuses a new source', async () => {
+    // The deployment's shipped allowance is eight attempts per store; this case
+    // names one so the second key meets a spent ceiling deterministically.
+    vi.stubEnv('SINGULARITY_REVIEW_AGENT_BUDGET', '1')
     const first = await boot({ worker: async () => {} })
     const failed = await failedTask(first)
     const answer = await first.call(ROOT_SESSION, 'task_review_agent', { taskId: failed.taskId, runId: failed.runId })
@@ -181,6 +186,69 @@ describe('the review allowance survives a restart (K4)', () => {
     expect(readback.text).not.toContain('in flight')
     expect(readback.text).toContain('no review agent started')
     expect(second.spawns.filter(spawn => String(spawn.name ?? '').startsWith('review '))).toHaveLength(1)
+    expect(await countReviewAgentRuns(failed.storeId)).toBe(2)
+  }, 60_000)
+})
+
+describe('the hand-off survives a restart (A6 + K4)', () => {
+  it('re-delegates a hand-off whose supervisor died with its attempt still open', async () => {
+    // The ledger a dead process left: a started supervisor attempt with no
+    // terminal fact — the rows written before it was killed while its worker was
+    // still running. Nothing in this process ever held that session, which is
+    // exactly what the new process reads.
+    const first = await boot({ supervision: { autoReview: 'off' }, worker: async () => {} })
+    const failed = await failedTask(first)
+    const snapshot = await first.snapshot(failed.storeId)
+    const rootTask = snapshot.tasks.find(task => task.parentTaskId === undefined)!
+    const rootRun = snapshot.runs.find(run => run.taskId === rootTask.taskId)!
+    const diagnosis = {
+      diagnosisId: 'd-dead',
+      taskId: rootTask.taskId,
+      observedFailure: 'the member failed its own criterion',
+      scope: 'the root goal of this store',
+      localizedCause: 'the deployment grants no capability for the member',
+      evidenceRefs: [],
+      reviewRefs: [`${rootTask.taskId}#${rootRun.runId}`],
+      confidence: 'high' as const,
+      proposals: [],
+    }
+    await first.task.recordDiagnosisIn(failed.storeId, diagnosis, ROOT_SESSION)
+
+    await first.crash()
+    await first.dispose({ remove: false })
+    const second = await boot({ dir: first.dir, supervision: { autoReview: 'off' }, worker: async () => {} })
+    await second.task.openStore(failed.storeId)
+    const ledger = join(second.home, 'review-agents', 'agents.jsonl')
+    mkdirSync(dirname(ledger), { recursive: true })
+    writeFileSync(ledger, [
+      JSON.stringify({
+        formatVersion: 2, kind: 'claim', role: 'supervisor', rootStoreId: failed.storeId,
+        taskId: rootTask.taskId, runId: rootRun.runId, requestKey: null, reason: null,
+        diagnosisId: 'd-dead', handoffDigest: supervisorHandoffDigest(failed.storeId, diagnosis),
+        sessionId: 's-dead-supervisor', actor: ROOT_SESSION, at: '2026-09-27T00:00:00.000Z',
+      }),
+      JSON.stringify({
+        formatVersion: 2, kind: 'started', role: 'supervisor', rootStoreId: failed.storeId,
+        taskId: rootTask.taskId, diagnosisId: 'd-dead', sessionId: 's-dead-supervisor', actor: ROOT_SESSION,
+        at: '2026-09-27T00:00:01.000Z',
+      }),
+      '',
+    ].join('\n'), 'utf8')
+
+    // The new process finds the started supervisor dead (no process holds it and
+    // no terminal fact exists) and re-delegates the same hand-off to a new
+    // session — a dead supervisor is a failure, not the hand-off's owner.
+    const again = await consumePendingHandoffs(second.ctx, failed.storeId)
+    expect(again.consumptions).toMatchObject([{ diagnosisId: 'd-dead', result: 'started' }])
+    const replacement = (again.consumptions[0] as { sessionId: string }).sessionId
+    expect(replacement).not.toBe('s-dead-supervisor')
+    const rows = readFileSync(ledger, 'utf8').split('\n').filter(line => line.trim().length > 0).map(line => JSON.parse(line) as Record<string, unknown>)
+    expect(rows.filter(row => row.kind === 'settled' && row.sessionId === 's-dead-supervisor')).toMatchObject([
+      expect.objectContaining({ status: 'interrupted' }),
+    ])
+    expect(rows.filter(row => row.kind === 'claim' && row.role === 'supervisor')).toHaveLength(2)
+    expect(await readSupervisorHandoff(failed.storeId, 'd-dead')).toMatchObject({ sessionId: replacement })
+    // The dead attempt's spent run is not refunded: two supervisor runs.
     expect(await countReviewAgentRuns(failed.storeId)).toBe(2)
   }, 60_000)
 })

@@ -1,4 +1,4 @@
-/** The automatic trigger (A5): a review that settled **failed** is accepted for diagnosis on its own, under the store's own review-agent allowance. @module @dangosys/dsh-singularity-agent/review-agent-scan */
+/** The automatic trigger (A5): a terminal review — failed, or verified under the deployment's `autoReview: 'all'` — is accepted for diagnosis on its own, under the store's own review-agent allowance. @module @dangosys/dsh-singularity-agent/review-agent-scan */
 
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -7,8 +7,9 @@ import { rootTaskStoreId, type ReviewRecord, type TaskSnapshot } from '@dangosys
 import type { TerminalReviewFact } from '@dangosys/dsh-singularity-task-runtime'
 import { warnLine } from '../log.ts'
 import { liveRootAgentOf, ownerSessionOfStore, sameSource } from './identity.ts'
-import { readReviewAgentAttempts, type ReviewAgentAttempt, type ReviewAgentSource } from './ledger.ts'
+import { readReviewAgentAttempts, type ReviewAgentAttempt, type ReviewAgentRefusalCode, type ReviewAgentSource } from './ledger.ts'
 import { recordedDiagnosis, runReviewAgentAttempt, sourceRef } from './review-run.ts'
+import { supervisionSettings, type AutoReviewMode } from './supervision.ts'
 import { backgroundScan, installGraphSelectedScan } from './trigger.ts'
 import { reviewForSource } from '../tools/task-review-pack.ts'
 
@@ -30,16 +31,19 @@ export interface ReviewScanReport {
 }
 
 export interface ReviewScanOptions {
-  /** Scan only this source (the terminal-review trigger names one); absent scans every failed source of the store. */
+  /** Scan only this source (the terminal-review trigger names one); absent scans every accepted source of the store. */
   readonly source?: ReviewAgentSource
+  /** Which terminal reviews this scan accepts; absent reads the deployment's `supervision.autoReview` (`all` by default). */
+  readonly autoReview?: AutoReviewMode
   /** Where the scan's lines go — named skips included; absent says nothing. */
   readonly log?: (line: string) => void
 }
 
-/** Every source of the store whose review settled `failed`, in the order the records were written — the exact source a review agent exists for, derived from the record's own run (`null` for a review that. */
-function failedSourcesOf(snapshot: TaskSnapshot): ReviewAgentSource[] {
+/** Every source of the store whose review this mode accepts, in the order the records were written — `all` takes failed and verified records, `failed` only failures, `off` none. */
+function acceptedSourcesOf(snapshot: TaskSnapshot, mode: AutoReviewMode): ReviewAgentSource[] {
+  if (mode === 'off') return []
   return snapshot.reviews
-    .filter((review: ReviewRecord) => review.outcome === 'failed')
+    .filter((review: ReviewRecord) => review.outcome === 'failed' || (mode === 'all' && review.outcome === 'verified'))
     .map(review => ({ taskId: review.taskId, runId: review.runId ?? null }))
 }
 
@@ -71,8 +75,8 @@ async function deliverDiagnosis(
       targetSessionId = parent.sessionId
     }
     const text = [
-      `Review diagnosis ${diagnosis.diagnosisId} for failed source ${sourceRef(source)} [${diagnosis.confidence}].`,
-      `Observed failure: ${diagnosis.observedFailure}`,
+      `Review diagnosis ${diagnosis.diagnosisId} for review source ${sourceRef(source)} [${diagnosis.confidence}].`,
+      `Observation: ${diagnosis.observedFailure}`,
       `Conclusion / next action: ${diagnosis.localizedCause}`,
       `Original review: ${diagnosis.reviewRefs.join(', ')}; evidence: ${diagnosis.evidenceRefs.join(', ') || 'none recorded'}.`,
       'Read your current task/run state before acting. A diagnosis changes no task state or authority; it grants no task_recover or evolution tool.',
@@ -94,15 +98,17 @@ async function deliverDiagnosis(
   }
 }
 
-/** Scan one root task store for failed review sources and accept each under the store's allowance (see the module header for the order). */
+/** Scan one root task store for the reviews its `autoReview` mode accepts and admit each under the store's allowance (see the module header for the order). */
 export async function scanFailedReviewSources(
   ctx: Context,
   storeId: string,
   options: ReviewScanOptions = {},
 ): Promise<ReviewScanReport> {
   const { log } = options
+  const mode = options.autoReview ?? supervisionSettings().autoReview
   const entries: ReviewScanEntry[] = []
   const report = (): ReviewScanReport => ({ storeId, entries })
+  if (mode === 'off') return report()
   let snapshot: TaskSnapshot
   try {
     snapshot = await ctx.task.snapshotIn(storeId)
@@ -110,8 +116,8 @@ export async function scanFailedReviewSources(
     log?.(`review agent: store ${storeId} could not be read (${error instanceof Error ? error.message : String(error)}); nothing was scanned`)
     return report()
   }
-  const failed = failedSourcesOf(snapshot)
-  const targets = options.source === undefined ? failed : failed.filter(source => sameSource(source, options.source!))
+  const accepted = acceptedSourcesOf(snapshot, mode)
+  const targets = options.source === undefined ? accepted : accepted.filter(source => sameSource(source, options.source!))
   if (targets.length === 0) return report()
 
   const root = liveRootAgentOf(ctx, storeId)
@@ -215,9 +221,10 @@ export async function scanFailedReviewSources(
 }
 
 /** How one refusal reads in the scan's line, named the way the ledger refused. */
-function refusalReason(code: 'request-key-conflict' | 'request-key-required' | 'budget-exhausted', budget: { used: number; max: number }): string {
+function refusalReason(code: ReviewAgentRefusalCode, budget: { used: number; max: number }): string {
   if (code === 'budget-exhausted') return `budget exhausted: the store's review allowance is spent (${budget.used}/${budget.max})`
   if (code === 'request-key-required') return 'the source was already reviewed and this scan names no key'
+  if (code === 'iteration-cap') return "the source's rounds are spent; the cap ends the iteration"
   return 'the source already has an attempt with a different focus'
 }
 
@@ -230,13 +237,14 @@ function recoveryReason(recovered: readonly ReviewAgentAttempt[]): string | unde
   return `the attempt found open with no process running it (session ${attempt.sessionId}) was recorded ${status}${note}`
 }
 
-/** Install the two triggers of the automatic scan on this deployment's context: */
+/** Install the two triggers of the automatic scan on this deployment's context: one terminal review at a time, and one whole graph activation — each honouring the deployment's `supervision.autoReview`. */
 export function installReviewAgentAutoTrigger(ctx: Context, options: { log?: (line: string) => void } = {}): () => void {
   const log = options.log ?? warnLine(ctx)
   const disposers: (() => void)[] = [
     ctx.taskRuntime.registerTerminalReviewListener((fact: TerminalReviewFact) => {
-      // A success is not a trigger: only a failed review is accepted on its own.
-      if (fact.outcome !== 'failed') return
+      const mode = supervisionSettings().autoReview
+      const accepted = mode !== 'off' && (fact.outcome === 'failed' || (mode === 'all' && fact.outcome === 'verified'))
+      if (!accepted) return
       backgroundScan(log, 'review agent', () => scanFailedReviewSources(ctx, fact.storeId, {
         source: { taskId: fact.taskId, runId: fact.runId },
         log,

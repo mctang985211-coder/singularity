@@ -4,7 +4,7 @@
 
 用几分钟部署一个自包含环境，在**纯软件小项目**上验证 singularity 的多层任务分解：环境里放一个故意留空的 Vite + React 看板应用 `tutorial-kanban`，它的测试即规格；给根节点一句目标后，观察它是否自然拆出多层子任务、各自独立验收、并对最终结果给出可核查的证据。
 
-本教程不需要 nix、不需要 EDA 工具链、不依赖 Buckyball 检出：全部验证都是 Node 侧秒级的测试与构建。
+本教程不需要 nix、不需要 EDA 工具链、不依赖 Buckyball 检出：全部验证都是 Node 侧秒级的测试与构建。迭代默认开启后，目标无论通过与否都会继续产生轮次；教程的观察与 checklist 章节也用它对照轮次徽标与派生得分。
 
 ## 2. 部署
 
@@ -60,18 +60,61 @@ curl -b /tmp/dsh.cookies -H 'content-type: application/json' \
 
 发送后根节点会 `task_intake` 收下根任务，再自行决定分解。
 
-## 5. 观察指南（六个页签）
+## 5. 默认迭代
+
+迭代默认触发，失败与通过都继续，不需要开关或手动调用：
+
+- **每次终态 review 都自动复盘**：失败（failed）与通过（verified）都自动受理 reviewer（`supervision.autoReview` 默认 `all`），不再只在失败时触发。
+- **任何诊断都交给 supervisor**：diagnosis 直接交接给 supervisor 处理，不再先要求 Evolution 提案或进化链已启用。
+- **失败 → recovery 轮**：每个来源最多 3 轮（`supervision.maxRecoveryRounds` 默认 3）。
+- **通过 → improvement 轮**：每个来源最多 2 轮（`supervision.maxImprovementRounds` 默认 2）。来源指一条诊断指向的 task/run。
+- **每一轮都是根任务下的一次新 run**：Tasks 页签里，带 recovery 记录的 run 行显示 ↻ 徽标——`↻ recovery · round N` 或 `↻ improve · round N`，N 是该 run 在 `task.runIds` 里的 1 基序号。每个 run 有自己的一条 review（逐条判据、退出码、证据），展开 run 行即可核对。
+- **`task_recover` 的 `mode:'improve'`**：来源是 verified 时用 improve 模式打开新一轮；失败来源的重试仍是 recovery。
+- **supervisor 拿到上一轮的 review 事实**：上一轮的判据 verdict、metrics 与派生的 passed/total 随交接提供；supervisor 也可以判定 `closed`，结束这一来源的迭代。
+- **ReviewRecord 没有 score 字段**：轮次得分是派生读数——按 `task.runIds` 顺序取每个 run 的终态 review，数 criterion verdict 的 passed/total。
+
+轮次与得分表的三个读取入口（同一份事实，任选）：
+
+| 入口 | 读什么 |
+| --- | --- |
+| Tasks 页签 | 每个 run 的 ↻ 徽标与轮次号；展开看该轮 review 的逐条判据表 |
+| `GET /singularity/task?storeId=sg-t-<rootSessionId>` | 同一个 store 的 tasks/runs/reviews 原始投影，每个 run 一条 review |
+| `$DSH_HOME/review-agents/agents.jsonl` | reviewer/supervisor 的 claim/started/settled 行：每轮谁被启动、协调预算消耗到哪 |
+
+**迭代一定会停**：每来源的 recovery/improvement 轮到硬上限即不再开新轮；协调预算（reviewer+supervisor 的启动计数，默认 8，`SINGULARITY_REVIEW_AGENT_BUDGET` 覆盖）用尽后也不再有新协调 agent；supervisor 判定 `closed` 同样终止来源。三者先到先停，每轮通常消耗 2 次（reviewer + supervisor），默认 8 大约够 4 轮；想一次看满 3+2 的上限可把预算调到 16。
+
+## 6. 观察指南（六个页签）
 
 | 页签 | 看什么 |
 | --- | --- |
 | Canvas | 拓扑：根→子节点的连线、层级深度、节点状态（每个子节点应有自己的目标）。 |
-| Tasks | 任务树与状态徽标：子任务的目标、依赖、运行状态；确认子任务是"可独立核查"的粒度。 |
-| Proposals | 提案与 HITL：如有节点请求人工确认，会出现在这里。 |
-| Evolution | 默认关闭，正常流程应为空，本教程不需要。 |
-| Recovery | 失败重试/接管的记录；一切顺利时为空。 |
-| Verifier | 验收判据与证据（EvidenceBundle）：每个验收点的命令、退出码、结论都在这里核对。 |
+| Tasks | 任务树与运行：子任务目标、依赖、状态；迭代开始后根任务下持续新增 run，带 `↻ recovery · round N` / `↻ improve · round N` 徽标；展开每个 run 核对那一轮的 review 判据与退出码。 |
+| Proposals | 提案与 HITL：如有节点请求人工确认，会出现在这里；迭代 v2 的正常轮次不需要在这里点任何东西。 |
+| Evolution | 诊断已直接交给 supervisor，迭代不再要求先有 Evolution 候选；页签仍可能为空，本教程不需要操作。 |
+| Recovery | store 屏障/接管状态（reconcile），不是轮次列表；轮次看 Tasks 的 ↻ run。一切顺利时为空。 |
+| Verifier | 验收判据与证据（EvidenceBundle）：每个 run（含每一轮）的判据、命令、退出码、结论都在这里核对；定位某轮失败在哪条 criterion。 |
 
-## 6. 预期形态
+## 7. 今晚实战 checklist
+
+前提：环境已按 §2 部署（project1），图还没建。
+
+1. **核对 seed 环境**（已完成）：`environment/project1/tutorial/kanban` 是红灯基线（3 个测试文件、17 个用例 16 个失败）。要重建见 §2。
+2. **UI 建图**：图谱切换器 → New → Name 任意 → Environment 选 `tutorial-kanban (1 components)` → Create。等根节点 setup 完成（组件已 present，直接 ready）；Tasks 页显示"未激活"是正常的。
+3. **粘贴 root prompt**：把 `tutorial/root-prompt.md` 全文以**真人消息**发送（原因见 §4）。根节点 `task_intake` 收下根任务后开始分解。
+4. **盯 Tasks**：第一批子任务出现并运行；根提交后进入验收，然后迭代开始——根任务下持续新增 run 行，读徽标：`↻ recovery · round N`（失败来源重试）或 `↻ improve · round N`（通过来源改进）。点开某轮的 run，复核该轮 review 的判据表（criterion → verdict → exit）与起止时间。
+5. **盯 Proposals**：只有真正的 HITL 请求才需要动作（例如打开生成任务审核或 Evolution 人审）。默认迭代不会在这里产生必须点掉的卡片。
+6. **盯 Verifier**：按 run 看判据与 logTail；用它读每一轮失败/通过在哪条 criterion、退出码多少。
+7. **（可选）盯 Recovery**：看 store 屏障与 reconcile 状态；轮次本身不在这里。
+8. **旋钮**（在部署配置里给 id 为 `singularity-agent` 的条目加 `config.supervision`；条目按 id 覆盖整段 config，仓库根 `config.yml` 当前还没有这一行）：
+   - `supervision.autoReview`：默认 `all`（failed 与 verified 都复盘）；`failed` 回到旧的失败才复盘，`off` 关闭自动复盘；
+   - `supervision.maxRecoveryRounds`（默认 3）、`supervision.maxImprovementRounds`（默认 2）：每来源轮数硬上限；
+   - `supervision.coordinationBudget`：协调预算次数，默认 8；环境变量 `SINGULARITY_REVIEW_AGENT_BUDGET` 优先于它；想一次看满 3+2 轮可调到 16；
+   - `verifyTimeoutMs: 600000`（task-runtime 行）：本教程的验证是秒级测试，10 分钟绰绰有余，不需要调。
+   默认值即上述取值，不改也能跑；改完配置重启部署（部署读取的是 `.dsh/profiles/web/cordis.patch.yml`，由仓库根 `config.yml` 拷贝）；未知键会被 schema 拒绝，以部署实际接受为准。
+9. **终止预期**：迭代在 recovery ≤3、improvement ≤2、协调预算用尽、或 supervisor `closed` 中先到者处停止，一定会停。停止后 Tasks 页不再新增 ↻ run；若最后一轮仍是 failed，那是本轮的最终结果，如实记录 review 与 evidence，不要等它"再试一次"。
+10. **人工复核**：按 §9 直接在环境里跑 `pnpm test` / `pnpm build`，不采信智能体转述。
+
+## 8. 预期形态
 
 根任务目标明确后，自然分解大致是"一个汇总验证节点 + 三块互不阻塞的实现子任务"：
 
@@ -80,9 +123,9 @@ curl -b /tmp/dsh.cookies -H 'content-type: application/json' \
 - localStorage 持久化 hook（`src/hooks/useLocalStorageBoard.ts`，`App.test.tsx` 端到端验收）；
 - 根节点做组合验收：全量测试 + 构建。
 
-具体形状由节点自己决定，上面只是合理的预期；不要因为它和预期不同就判定失败，看的是每层是否有独立可核查的交付。
+具体形状由节点自己决定，上面只是合理的预期；不要因为它和预期不同就判定失败，看的是每层是否有独立可核查的交付。迭代轮次会在这之后继续产生新 run（§5），第一轮无论通过或失败都算预期内。
 
-## 7. 复核验收（自己动手）
+## 9. 复核验收（自己动手）
 
 不采信智能体转述，直接进环境跑原始命令：
 
@@ -94,16 +137,20 @@ pnpm build    # 期望退出码 0
 
 红灯基线时 `pnpm test` 的 16 个失败就是待实现清单；完成后应全绿。
 
-## 8. 退役
+## 10. 退役
 
 本环境的组件是**副本**（`environment/project1/tutorial/kanban` 是一个普通 git 仓库），不是指向真实检出目录的符号链接。因此与 README 中 `bb-local`（project46 的 buckyball 是符号链接）的警告相反：**对这个图执行 UI Delete 是安全的**——env-clean 只会在副本里执行清理，不会碰到任何真实仓库。
 
 删除图（UI 上 Delete → Confirm delete，或 `POST /singularity/graphs/<id>/delete`）会停止会话并清理绑定；此后该 env 会重新出现在可选环境列表里。想彻底清掉，可在图删除后删掉 `environment/project1` 目录与 manifest 条目（或保留它，下次教程直接 `--id project1` 复用）。
 
-## 9. 常见问题
+## 11. 常见问题
 
 - **重复部署**：默认再跑会建 `project2`；想复用原有环境就带 `--id project1`（幂等补齐）。
 - **端口**：本部署 web 在 `127.0.0.1:3080`，以启动日志为准；换端口时 API 示例同步改。
 - **超时**：本教程的验证是秒级测试，默认 `verifyTimeoutMs: 600000`（10 分钟）远远够用，不需要为教程调大。
+- **迭代只跑了一两轮就停**：先看协调预算。默认 8 次，每轮通常 reviewer+supervisor 各一次；用尽后不再开新轮，`$DSH_HOME/review-agents/agents.jsonl` 的 settled 行能看到消耗。要跑满轮数上限就调大 `SINGULARITY_REVIEW_AGENT_BUDGET`。
+- **自动复盘没触发**：确认 singularity-agent 配置行的 `supervision.autoReview` 是 `all`（默认），且改动后已重启部署。
+- **run 行没有 ↻ 徽标**：徽标来自该 run 的 `recovery` 记录（`TaskRun.recovery`）；没有该记录的普通 run 不显示，历史 run 按原样读取。
+- **轮次得分在哪**：`ReviewRecord` 没有 score 字段；轮次得分是派生值，按 `task.runIds` 顺序统计该轮 review 的 criterion verdict（passed/total）与 outcome、metrics。
 - **别改测试**：测试是规格；删测试、跳过或用 mock 绕过都会让验收失去意义。
 - **独立的 pnpm 工程**：`tutorial/kanban` 带自己的 `pnpm-lock.yaml` 和 `pnpm-workspace.yaml`，不会并入 singularity 的 workspace。

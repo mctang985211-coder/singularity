@@ -4,22 +4,23 @@
  *
  * What these cases pin:
  *
- * 1. **The named stops.** A conclusion without suggestions, a deployment with the
- *    evolution chain off, a suggestion naming a target type this build does not
- *    record, and one it refuses by name (a tool, a verifier, a preset, a runtime
- *    policy) all leave the hand-off exactly as it was: no claim, no spawn, no
- *    budget spent — and the pack's line names why.
+ * 1. **Every diagnosis is a hand-off.** A conclusion without suggestions still
+ *    starts a supervisor, no evolution service needs to be mounted, and the only
+ *    named stops left are the store's allowance, the source's round cap and a
+ *    conflicting hand-off content.
  * 2. **One hand-off, one supervisor.** A repeat returns the identity the ledger
- *    already holds (after a "restart" too — a second read of the same file), a
- *    claim that never reached model input is not an identity and is settled
- *    `interrupted`, and a diagnosis asked for under another hand-off content is
- *    refused by name.
- * 3. **The coordinator's plane.** The grant carries the candidate chain,
+ *    already holds (after a "restart" too), a claim that never reached model
+ *    input or a started supervisor no process runs is recovered `interrupted`
+ *    and re-delegable, and a diagnosis asked for under another hand-off content
+ *    is refused by name.
+ * 3. **The attempt settles.** A supervisor that issued a recovery settles
+ *    `recorded` naming the run, one that closed explicitly settles `closed` with
+ *    its reason, and one that ended with neither settles `interrupted`.
+ * 4. **The coordinator's plane.** The grant carries the candidate chain,
  *    `task_recover` and the read tools, and carries no business write, no shell,
- *    no spawn and no decide/apply/rollback — a supervisor prepares evidence for a
- *    person, it never approves or applies a promotion itself.
- * 4. **The first request.** It names the real source, its outcome, the diagnosis
- *    and the hand-off identity, and it says which two candidate surfaces exist.
+ *    no spawn and no decide/apply/rollback.
+ * 5. **The first request.** It names the real source, its outcome, the diagnosis,
+ *    the prior round's review facts as read-only text, and the close path.
  *
  * The ledger here is the real file (`$DSH_HOME/review-agents/agents.jsonl`) and
  * the reviews are driven through the real entry; only the agent plane is a stub,
@@ -27,7 +28,7 @@
  * request.
  * @module tests/unit/evolution-handoff
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -43,23 +44,29 @@ import {
 import {
   consumePendingHandoffs,
   handoffDelegatorOf,
+  renderConsumption,
   startSupervisorHandoff,
-  type HandoffConsumption,
 } from '../../src/coordination/evolution-handoff.ts'
 import {
   COORDINATION_PRESET,
   SUPERVISOR_BASELINE,
+  closeOutcomeOf,
   handoffDecision,
-  handoffPreflight,
   handoffSourceOf,
+  handoffStateLine,
+  renderSupervisorReviewFacts,
   supervisorGrant,
   supervisorHandoffDigest,
   supervisorPrompt,
 } from '../../src/coordination/handoff-rules.ts'
 import { REVIEWER_PRESET } from '../../src/coordination/review-run.ts'
+import { configureSupervision } from '../../src/coordination/supervision.ts'
 
 const ROOT = 's-root'
 const STORE = `sg-t-${ROOT}`
+
+/** The close every stub supervisor's last message carries unless a case says otherwise. */
+const CLOSE_REPLY = 'no further round is justified.\n```json\n{"outcome":"closed","reason":"no further round is justified"}\n```'
 
 function diagnosis(overrides: Partial<Diagnosis> = {}): Diagnosis {
   return {
@@ -76,34 +83,67 @@ function diagnosis(overrides: Partial<Diagnosis> = {}): Diagnosis {
   }
 }
 
-/** The agent plane a consumption needs: the root's live agent, and a spawn that runs `beforePrompt` as the real one does. */
-function fixture(options: { enabled?: boolean; spawnFails?: boolean } = {}) {
+interface StoreSnapshot {
+  diagnoses: Diagnosis[]
+  reviews: unknown[]
+  runs: unknown[]
+  tasks: unknown[]
+}
+
+/**
+ * The agent plane a consumption needs: the root's live agent, and a spawn whose
+ * handle ends with `reply` (`null` = no assistant text at all). No
+ * `singularityEvolution` service is mounted: nothing here may require it.
+ */
+function fixture(options: {
+  spawnFails?: boolean
+  reply?: string | null
+  runs?: readonly unknown[]
+  reviews?: readonly unknown[]
+  tasks?: readonly unknown[]
+} = {}) {
+  const reply = options.reply === null ? undefined : options.reply ?? CLOSE_REPLY
   const spawns: { sessionId: string; name: string; prompt: string; agentPreset: string; grant: unknown }[] = []
-  const snapshots = new Map<string, { diagnoses: Diagnosis[]; reviews: unknown[] }>()
-  snapshots.set(STORE, { diagnoses: [], reviews: [] })
+  const snapshots = new Map<string, StoreSnapshot>()
+  snapshots.set(STORE, {
+    diagnoses: [],
+    reviews: [...(options.reviews ?? [])],
+    runs: [...(options.runs ?? [])],
+    tasks: [...(options.tasks ?? [])],
+  })
   const rootAgent = { id: ROOT }
   const ctx = {
     get(name: string): unknown {
-      if (name === 'singularityEvolution') return { enabled: options.enabled ?? true }
       if (name === 'agents') return { get: (id: string) => (id === ROOT ? rootAgent : undefined) }
       if (name === 'graphs') return { list: async () => [{ rootSessionId: ROOT }] }
       return undefined
     },
     task: {
-      snapshotIn: async (storeId: string) => structuredClone(snapshots.get(storeId) ?? { diagnoses: [], reviews: [] }),
+      snapshotIn: async (storeId: string) => structuredClone(snapshots.get(storeId) ?? { diagnoses: [], reviews: [], runs: [], tasks: [] }),
     },
     agentRuntime: {
       spawn: vi.fn(async (_parent: unknown, request: Record<string, unknown>) => {
+        const name = String(request.name)
         spawns.push({
           sessionId: String(request.sessionId),
-          name: String(request.name),
+          name,
           prompt: ((request.prompt as { text: string }[])[0] ?? { text: '' }).text,
           agentPreset: String(request.agentPreset),
           grant: request.grant,
         })
         await (request.beforePrompt as () => Promise<void>)()
         if (options.spawnFails === true) throw new Error('the deployment cannot spawn a coordinator')
-        return { agent: { id: String(request.sessionId), cancel: () => {}, whenIdle: async () => {}, session: { snapshotEvents: () => [] } } }
+        const events = reply === undefined
+          ? []
+          : [{ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: reply }] } } }]
+        return {
+          agent: {
+            id: String(request.sessionId),
+            cancel: () => {},
+            whenIdle: async () => {},
+            session: { snapshotEvents: () => events },
+          },
+        }
       }),
     },
   }
@@ -120,6 +160,10 @@ function ledgerRows(): Record<string, unknown>[] {
   return text.split('\n').filter(line => line.trim().length > 0).map(line => JSON.parse(line) as Record<string, unknown>)
 }
 
+function rowsOfKind(kind: string): Record<string, unknown>[] {
+  return ledgerRows().filter(row => row.kind === kind)
+}
+
 let ledgerDir: string
 let previousLedger: string | undefined
 let previousBudget: string | undefined
@@ -133,6 +177,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  configureSupervision(undefined)
   if (previousLedger === undefined) delete process.env.SINGULARITY_REVIEW_LEDGER_DIR
   else process.env.SINGULARITY_REVIEW_LEDGER_DIR = previousLedger
   if (previousBudget === undefined) delete process.env.SINGULARITY_REVIEW_AGENT_BUDGET
@@ -142,44 +187,56 @@ afterEach(() => {
 })
 
 describe('the hand-off rules', () => {
-  it('answers a conclusion without suggestions, a switched-off chain, an unknown target and a refused one, each by name', () => {
-    const budget = { used: 0, max: 1 }
+  it('takes every recorded diagnosis as a hand-off, and stops by allowance or round cap by name', () => {
+    const budget = { used: 0, max: 8 }
     const attempts: never[] = []
-    const noSuggestions = diagnosis({ proposals: [] })
-    expect(handoffDecision({ enabled: true, diagnosis: noSuggestions, attempts, budget })).toMatchObject({ kind: 'stopped', code: 'no-suggestions' })
-    expect(handoffDecision({ enabled: false, diagnosis: diagnosis(), attempts, budget })).toMatchObject({ kind: 'stopped', code: 'evolution-off' })
+    // A conclusion without suggestions is a hand-off too; an unsupported target
+    // type no longer stops anything — the supervisor decides what is executable.
+    expect(handoffDecision({ diagnosis: diagnosis({ proposals: [] }), attempts, budget })).toEqual({ kind: 'start' })
+    expect(handoffDecision({
+      diagnosis: diagnosis({ proposals: [{ targetType: 'quantum', targetId: 'x', rationale: 'y' }] }),
+      attempts,
+      budget,
+    })).toEqual({ kind: 'start' })
 
-    // A name outside the recorded vocabulary: the child never reasoned about a
-    // surface this build has.
-    const unknown = diagnosis({ proposals: [{ targetType: 'quantum', targetId: 'x', rationale: 'y' }] })
-    const unknownDecision = handoffDecision({ enabled: true, diagnosis: unknown, attempts, budget })
-    expect(unknownDecision).toMatchObject({ kind: 'stopped', code: 'unsupported-target' })
-    expect((unknownDecision as { reason: string }).reason).toContain('quantum')
+    const spent = handoffDecision({ diagnosis: diagnosis(), attempts, budget: { used: 8, max: 8 } })
+    expect(spent).toMatchObject({ kind: 'stopped', code: 'budget-exhausted' })
+    expect((spent as { reason: string }).reason).toContain('8/8')
 
-    // A recorded surface this build has no executor for: it would need a new
-    // authorization, which the harness refuses to grant itself.
-    for (const targetType of ['tool', 'verifier', 'agent_preset', 'runtime_policy']) {
-      const decision = handoffDecision({
-        enabled: true,
-        diagnosis: diagnosis({ proposals: [{ targetType, targetId: 'x', rationale: 'y' }] }),
-        attempts,
-        budget,
-      })
-      expect(decision, targetType).toMatchObject({ kind: 'stopped', code: 'requires-new-authority' })
-    }
-    // The two surfaces this build does execute open the hand-off.
-    for (const targetType of ['skill', 'capability']) {
-      expect(handoffDecision({
-        enabled: true,
-        diagnosis: diagnosis({ proposals: [{ targetType, targetId: 'x', rationale: 'y' }] }),
-        attempts,
-        budget,
-      })).toEqual({ kind: 'start' })
-    }
-    expect(handoffPreflight({ enabled: true, diagnosis: diagnosis() })).toBeUndefined()
+    const capped = handoffDecision({
+      diagnosis: diagnosis(),
+      attempts,
+      budget,
+      rounds: { outcome: 'failed', recovered: 3, improved: 0, maxRecovery: 3, maxImprovement: 2 },
+    })
+    expect(capped).toMatchObject({ kind: 'stopped', code: 'iteration-cap' })
+    expect((capped as { reason: string }).reason).toContain('3/3')
+
+    const improvementCapped = handoffDecision({
+      diagnosis: diagnosis(),
+      attempts,
+      budget,
+      rounds: { outcome: 'verified', recovered: 0, improved: 2, maxRecovery: 3, maxImprovement: 2 },
+    })
+    expect(improvementCapped).toMatchObject({ kind: 'stopped', code: 'iteration-cap' })
+    expect((improvementCapped as { reason: string }).reason).toContain('2/2')
+
+    // The pack's own line: a conclusion without suggestions is pending, a
+    // recorded outcome reads as taken up, and a close reads as settled.
+    expect(handoffStateLine({ diagnosis: diagnosis({ proposals: [] }), attempts, budget })).toContain('pending')
+    const settledAt = '2026-10-01T00:00:00.000Z'
+    const recorded = [{
+      role: 'supervisor' as const, source: { taskId: 't-root', runId: 'r-1' }, requestKey: null, reason: null,
+      diagnosisId: 'd-1', sessionId: 's-1', actor: ROOT, at: settledAt, started: true,
+      settlement: { status: 'recorded' as const, note: 'task_recover issued: run r-2', at: settledAt },
+    }]
+    expect(handoffStateLine({ diagnosis: diagnosis(), attempts: recorded, budget })).toContain('taken up — this hand-off is delegated to supervisor session s-1')
+    const closed = [{ ...recorded[0]!, settlement: { status: 'closed' as const, note: 'no round is justified', at: settledAt } }]
+    expect(handoffStateLine({ diagnosis: diagnosis(), attempts: closed, budget })).toContain('settled — supervisor session s-1 closed the hand-off: no round is justified')
   })
 
-  it('answers with the supervisor a hand-off already has, before anything else is looked at', () => {
+  it('answers with the supervisor a hand-off already has, its concluded outcome, or the running claim', () => {
+    const at = '2026-09-28T00:00:00.000Z'
     const attempt = {
       role: 'supervisor' as const,
       source: { taskId: 't-root', runId: 'r-1' },
@@ -188,25 +245,46 @@ describe('the hand-off rules', () => {
       diagnosisId: 'd-1',
       sessionId: 's-supervisor',
       actor: ROOT,
-      at: '2026-09-28T00:00:00.000Z',
+      at,
       started: true,
       settlement: undefined,
     }
-    // Even with the chain off and the allowance spent, a started hand-off answers
-    // with its own identity: the fact is durable and nothing re-decides it.
-    expect(handoffDecision({ enabled: false, diagnosis: diagnosis(), attempts: [attempt], budget: { used: 9, max: 1 } }))
-      .toEqual({ kind: 'started', sessionId: 's-supervisor', at: '2026-09-28T00:00:00.000Z' })
+    // Even with the allowance spent, an open started hand-off answers with its
+    // own identity: the fact is durable and nothing re-decides it.
+    expect(handoffDecision({ diagnosis: diagnosis(), attempts: [attempt], budget: { used: 9, max: 8 } }))
+      .toEqual({ kind: 'started', sessionId: 's-supervisor', at })
     // A claim that never reached model input is not an identity — it is in flight.
     expect(handoffDecision({
-      enabled: true,
       diagnosis: diagnosis(),
       attempts: [{ ...attempt, started: false, sessionId: 's-claim' }],
-      budget: { used: 9, max: 1 },
+      budget: { used: 9, max: 8 },
     })).toEqual({ kind: 'in-flight', sessionId: 's-claim' })
-    // The allowance is the same one a reviewer consumes, and its name says so.
-    const spent = handoffDecision({ enabled: true, diagnosis: diagnosis(), attempts: [], budget: { used: 1, max: 1 } })
-    expect(spent).toMatchObject({ kind: 'stopped', code: 'budget-exhausted' })
-    expect((spent as { reason: string }).reason).toContain('1/1')
+    // A settled outcome is the hand-off's own: no new supervisor is started for it.
+    expect(handoffDecision({
+      diagnosis: diagnosis(),
+      attempts: [{ ...attempt, settlement: { status: 'recorded', note: 'task_recover issued: run r-2', at } }],
+      budget: { used: 9, max: 8 },
+    })).toEqual({ kind: 'concluded', sessionId: 's-supervisor', status: 'recorded', note: 'task_recover issued: run r-2', at })
+    expect(handoffDecision({
+      diagnosis: diagnosis(),
+      attempts: [{ ...attempt, settlement: { status: 'closed', note: 'no round is justified', at } }],
+      budget: { used: 9, max: 8 },
+    })).toMatchObject({ kind: 'concluded', status: 'closed' })
+    // An interrupted attempt is a failure, not the hand-off's owner: it never
+    // blocks a fresh start.
+    expect(handoffDecision({
+      diagnosis: diagnosis(),
+      attempts: [{ ...attempt, settlement: { status: 'interrupted', note: 'gone', at } }],
+      budget: { used: 0, max: 8 },
+    })).toEqual({ kind: 'start' })
+  })
+
+  it('reads the close a supervisor declared, or nothing', () => {
+    expect(closeOutcomeOf(CLOSE_REPLY)).toEqual({ reason: 'no further round is justified' })
+    expect(closeOutcomeOf('```json\n{"outcome":"closed"}\n```')).toEqual({ reason: 'the supervisor closed the hand-off' })
+    expect(closeOutcomeOf('prose with no block')).toBeUndefined()
+    expect(closeOutcomeOf('```json\n{"outcome":"recovered"}\n```')).toBeUndefined()
+    expect(closeOutcomeOf(undefined)).toBeUndefined()
   })
 
   it('reads the source a diagnosis names, and its identity changes with its suggestions', () => {
@@ -235,15 +313,43 @@ describe('the hand-off rules', () => {
     expect(COORDINATION_PRESET).toBe(REVIEWER_PRESET)
   })
 
-  it('states the hand-off, the real source and the two executable surfaces in the first request', () => {
-    const prompt = supervisorPrompt({ diagnosis: diagnosis(), sourceRef: 't-root#r-1', sourceOutcome: 'failed' })
+  it('renders the prior round facts read-only: criteria verdicts, derived passed/total and metrics', () => {
+    const facts = renderSupervisorReviewFacts({
+      taskId: 't-root',
+      runId: 'r-1',
+      outcome: 'failed',
+      evidenceRefs: ['ev-1'],
+      anomalies: [],
+      criteria: [
+        { criterionId: 'c1', verdict: 'pass' },
+        { criterionId: 'c2', verdict: 'fail' },
+      ],
+      metrics: { toolCalls: { calls: 4, failures: 1 }, retries: 1 },
+    } as never)
+    expect(facts).toContain('review t-root#r-1 [failed]')
+    expect(facts).toContain('criteria (1/2 passed): c1 pass; c2 fail')
+    expect(facts).toContain('toolCalls 4 (1 failed)')
+    expect(facts).toContain('retries 1')
+  })
+
+  it('states the hand-off, the real source, the prior facts and the close path in the first request', () => {
+    const facts = 'review t-root#r-1 [failed]\ncriteria (1/2 passed): c1 pass; c2 fail'
+    const prompt = supervisorPrompt({ diagnosis: diagnosis(), sourceRef: 't-root#r-1', sourceOutcome: 'failed', reviewFacts: facts })
     expect(prompt).toContain('supervisor')
     expect(prompt).toContain('diagnosis d-1 about task t-root')
     expect(prompt).toContain('source t-root#r-1, whose review settled failed')
     expect(prompt).toContain('capability new-row')
+    expect(prompt).toContain('--- prior round review facts (read-only) ---')
+    expect(prompt).toContain('criteria (1/2 passed)')
+    expect(prompt).toContain('mode "improve"')
+    expect(prompt).toContain('{"outcome":"closed","reason":"..."}')
     expect(prompt).toContain('task_recover')
     expect(prompt).toContain('evolution_replay')
     expect(prompt).toContain('you never call evolution_decide, evolution_apply or evolution_rollback')
+
+    const bare = supervisorPrompt({ diagnosis: diagnosis({ proposals: [] }), sourceRef: 't-root#r-1', sourceOutcome: 'verified' })
+    expect(bare).toContain('Its recorded suggestions: none')
+    expect(bare).toContain('no review record could be read for this source')
   })
 })
 
@@ -318,6 +424,156 @@ describe('the supervisor role in the coordination ledger', () => {
     expect(again).toEqual({ diagnosisId: 'd-1', result: 'existing', sessionId: (started as { sessionId: string }).sessionId })
     expect(ledgerRows().filter(row => row.kind === 'started')).toHaveLength(1)
     expect(ledgerRows().filter(row => row.kind === 'claim')).toHaveLength(1)
+  })
+
+  it('settles a supervisor that issued a recovery as recorded, naming the run, and keeps answering with it', async () => {
+    const recovery = {
+      sourceDiagnosisId: 'd-1', requestKey: 'k-1', sourceRunId: 'r-1', requestedAt: '2026-10-01T00:00:00.000Z',
+    }
+    const f = fixture({ reply: null, runs: [{ runId: 'r-rec', taskId: 't-root', status: 'running', recovery }] })
+    const started = await startSupervisorHandoff(f.ctx, {
+      storeId: STORE,
+      diagnosis: diagnosis(),
+      delegator: { sessionId: ROOT, agent: f.rootAgent as never },
+      sourceRef: 't-root#r-1',
+      sourceOutcome: 'failed',
+    })
+    expect(started).toMatchObject({ result: 'started' })
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(1))
+    const settled = rowsOfKind('settled')[0]!
+    expect(settled).toMatchObject({ status: 'recorded', sessionId: (started as { sessionId: string }).sessionId })
+    expect(String(settled.note)).toContain('task_recover issued: run r-rec')
+
+    // The concluded hand-off still answers with its own supervisor, and never
+    // starts a second one.
+    const again = await startSupervisorHandoff(f.ctx, {
+      storeId: STORE,
+      diagnosis: diagnosis(),
+      delegator: { sessionId: ROOT, agent: f.rootAgent as never },
+      sourceRef: 't-root#r-1',
+      sourceOutcome: 'failed',
+    })
+    expect(again).toEqual({ diagnosisId: 'd-1', result: 'existing', sessionId: (started as { sessionId: string }).sessionId })
+    expect(f.spawns).toHaveLength(1)
+  })
+
+  it('settles a supervisor that closed explicitly with its reason', async () => {
+    const f = fixture()
+    const started = await startSupervisorHandoff(f.ctx, {
+      storeId: STORE,
+      diagnosis: diagnosis(),
+      delegator: { sessionId: ROOT, agent: f.rootAgent as never },
+      sourceRef: 't-root#r-1',
+      sourceOutcome: 'failed',
+    })
+    expect(started).toMatchObject({ result: 'started' })
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(1))
+    const settled = rowsOfKind('settled')[0]!
+    expect(settled).toMatchObject({ status: 'closed', sessionId: (started as { sessionId: string }).sessionId })
+    expect(settled.note).toBe('no further round is justified')
+    // A closed hand-off is concluded: its supervisor stays its identity.
+    expect((await readSupervisorHandoff(STORE, 'd-1'))!.sessionId).toBe((started as { sessionId: string }).sessionId)
+  })
+
+  it('settles a supervisor that ended without an outcome as interrupted, and re-delegates it', async () => {
+    configureSupervision({ coordinationBudget: 2 })
+    const f = fixture({ reply: null })
+    const first = await startSupervisorHandoff(f.ctx, {
+      storeId: STORE,
+      diagnosis: diagnosis(),
+      delegator: { sessionId: ROOT, agent: f.rootAgent as never },
+      sourceRef: 't-root#r-1',
+      sourceOutcome: 'failed',
+    })
+    expect(first).toMatchObject({ result: 'started' })
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(1))
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
+    expect(String(rowsOfKind('settled')[0]!.note)).toContain('without issuing task_recover or closing')
+    expect(await readSupervisorHandoff(STORE, 'd-1')).toBeUndefined()
+
+    // The failure spent one coordination run, and the hand-off is delegable
+    // again: a fresh supervisor is started under the remaining allowance.
+    const second = await startSupervisorHandoff(f.ctx, {
+      storeId: STORE,
+      diagnosis: diagnosis(),
+      delegator: { sessionId: ROOT, agent: f.rootAgent as never },
+      sourceRef: 't-root#r-1',
+      sourceOutcome: 'failed',
+    })
+    expect(second).toMatchObject({ result: 'started' })
+    expect((second as { sessionId: string }).sessionId).not.toBe((first as { sessionId: string }).sessionId)
+    expect(f.spawns).toHaveLength(2)
+  })
+
+  it('re-delegates a started supervisor whose process is gone', async () => {
+    // The state a process killed after model input left: a claim and a started
+    // row nobody is running any more. The old trap skipped it forever.
+    configureSupervision({ coordinationBudget: 2 })
+    writeFileSync(reviewAgentLedgerFile(), [
+      JSON.stringify({
+        formatVersion: 2, kind: 'claim', role: 'supervisor', rootStoreId: STORE, taskId: 't-root', runId: 'r-1',
+        requestKey: null, reason: null, diagnosisId: 'd-1', handoffDigest: supervisorHandoffDigest(STORE, diagnosis()),
+        sessionId: 's-dead', actor: ROOT, at: '2026-09-26T00:00:00.000Z',
+      }),
+      JSON.stringify({
+        formatVersion: 2, kind: 'started', rootStoreId: STORE, taskId: 't-root', sessionId: 's-dead', actor: ROOT, at: '2026-09-26T00:00:01.000Z',
+      }),
+      '',
+    ].join('\n'), 'utf8')
+    const f = fixture()
+    const consumption = await startSupervisorHandoff(f.ctx, {
+      storeId: STORE,
+      diagnosis: diagnosis(),
+      delegator: { sessionId: ROOT, agent: f.rootAgent as never },
+      sourceRef: 't-root#r-1',
+      sourceOutcome: 'failed',
+    })
+    expect(consumption).toMatchObject({ result: 'started' })
+    const attempts = await readReviewAgentAttempts(STORE)
+    const dead = attempts.find(attempt => attempt.sessionId === 's-dead')!
+    expect(dead.settlement).toMatchObject({ status: 'interrupted' })
+    expect(String(dead.settlement!.note)).toContain('is gone')
+    expect(f.spawns.filter(spawn => spawn.name.startsWith('supervisor'))).toHaveLength(1)
+    // The dead attempt's spent run is not refunded, and the new attempt is the
+    // hand-off's own.
+    expect(await readSupervisorHandoff(STORE, 'd-1')).toMatchObject({ sessionId: (consumption as { sessionId: string }).sessionId })
+  })
+
+  it('refuses a capped source before any claim or spawn, for a failed and for a verified source', async () => {
+    const recoveryRun = (index: number, kind: 'recovery' | 'improvement') => ({
+      runId: `r-${kind}-${index}`,
+      taskId: 't-root',
+      status: 'failed',
+      recovery: { kind, sourceDiagnosisId: 'd-1', requestKey: `k-${index}`, sourceRunId: 'r-1', requestedAt: '2026-10-01T00:00:00.000Z' },
+    })
+    const failed = fixture({ runs: [1, 2, 3].map(index => recoveryRun(index, 'recovery')) })
+    const capped = await startSupervisorHandoff(failed.ctx, {
+      storeId: STORE,
+      diagnosis: diagnosis(),
+      delegator: { sessionId: ROOT, agent: failed.rootAgent as never },
+      sourceRef: 't-root#r-1',
+      sourceOutcome: 'failed',
+    })
+    expect(capped).toMatchObject({ result: 'stopped', code: 'iteration-cap' })
+    expect((capped as { reason: string }).reason).toContain('3/3')
+    expect(ledgerRows()).toEqual([])
+    expect(failed.spawns).toEqual([])
+
+    const verified = fixture({
+      runs: [1, 2].map(index => recoveryRun(index, 'improvement')),
+      reviews: [{ taskId: 't-root', runId: 'r-1', outcome: 'verified' }],
+    })
+    const improvementCapped = await startSupervisorHandoff(verified.ctx, {
+      storeId: STORE,
+      diagnosis: diagnosis(),
+      delegator: { sessionId: ROOT, agent: verified.rootAgent as never },
+      sourceRef: 't-root#r-1',
+      sourceOutcome: 'verified',
+    })
+    expect(improvementCapped).toMatchObject({ result: 'stopped', code: 'iteration-cap' })
+    expect((improvementCapped as { reason: string }).reason).toContain('2/2')
+    expect(ledgerRows()).toEqual([])
+    expect(verified.spawns).toEqual([])
   })
 
   it('refuses the same diagnosis under another hand-off content, by name', async () => {
@@ -396,6 +652,7 @@ describe('the supervisor role in the coordination ledger', () => {
   })
 
   it('refuses a new hand-off once the store\'s allowance is spent, with zero claim and zero spawn', async () => {
+    configureSupervision({ coordinationBudget: 1 })
     const f = fixture()
     const first = await startSupervisorHandoff(f.ctx, {
       storeId: STORE,
@@ -405,7 +662,7 @@ describe('the supervisor role in the coordination ledger', () => {
       sourceOutcome: 'failed',
     })
     expect(first.result).toBe('started')
-    // The default allowance is one run for the store, reviewer and supervisor
+    // The configured allowance is one run for the store, reviewer and supervisor
     // alike: the second hand-off is stopped by name, with nothing written.
     const second = await startSupervisorHandoff(f.ctx, {
       storeId: STORE,
@@ -419,25 +676,32 @@ describe('the supervisor role in the coordination ledger', () => {
     expect(f.spawns).toHaveLength(1)
   })
 
-  it('scans a store\'s pending hand-offs: every diagnosis with suggestions is taken up, a conclusion is not', async () => {
+  it('scans a store\'s pending hand-offs: every diagnosis is taken up, suggestions or not', async () => {
     const f = fixture()
+    // Nothing here mounts a `singularityEvolution` service: no hand-off requires
+    // the evolution plane any more.
+    expect((f.ctx as unknown as { get(name: string): unknown }).get('singularityEvolution')).toBeUndefined()
     f.snapshots.set(STORE, {
       diagnoses: [diagnosis(), diagnosis({ diagnosisId: 'd-2', proposals: [] })],
       reviews: [{ taskId: 't-root', runId: 'r-1', outcome: 'failed' }],
+      runs: [],
+      tasks: [],
     })
     expect(await handoffDelegatorOf(f.ctx, STORE)).toMatchObject({ sessionId: ROOT })
     const report = await consumePendingHandoffs(f.ctx, STORE)
-    // Only the diagnosis with suggestions is a hand-off at all: the conclusion
-    // without one is not touched, and no attempt is written for it.
-    expect(report.consumptions).toEqual([expect.objectContaining({ diagnosisId: 'd-1', result: 'started' })])
-    expect(f.spawns).toHaveLength(1)
-    expect((await readReviewAgentAttempts(STORE)).map(attempt => attempt.diagnosisId)).toEqual(['d-1'])
+    // Both diagnoses are hand-offs at all: the conclusion without a suggestion
+    // starts its own supervisor too.
+    expect(report.consumptions).toEqual([
+      expect.objectContaining({ diagnosisId: 'd-1', result: 'started' }),
+      expect.objectContaining({ diagnosisId: 'd-2', result: 'started' }),
+    ])
+    expect(f.spawns.filter(spawn => spawn.name.startsWith('supervisor'))).toHaveLength(2)
+    expect((await readReviewAgentAttempts(STORE)).map(attempt => attempt.diagnosisId)).toEqual(['d-1', 'd-2'])
   })
 
   it('does not fabricate a delegator: a store whose graph session is not live is skipped by name', async () => {
     const ctx = {
       get(name: string): unknown {
-        if (name === 'singularityEvolution') return { enabled: true }
         if (name === 'graphs') return { list: async () => [{ rootSessionId: 's-elsewhere' }] }
         if (name === 'agents') return { get: () => undefined }
         return undefined
@@ -447,22 +711,16 @@ describe('the supervisor role in the coordination ledger', () => {
     } as unknown as Context
     const report = await consumePendingHandoffs(ctx, STORE)
     expect(report.skipped).toContain('root session')
-    expect(report.consumptions).toEqual([expect.objectContaining({ result: 'stopped' })])
+    expect(report.consumptions).toEqual([expect.objectContaining({ result: 'stopped', code: 'no-delegator' })])
   })
 })
 
 describe('the consumption as a caller renders it', () => {
-  it('answers with a named stop before the ledger is touched when the chain is off', async () => {
-    const f = fixture({ enabled: false })
-    const consumption: HandoffConsumption = await startSupervisorHandoff(f.ctx, {
-      storeId: STORE,
-      diagnosis: diagnosis(),
-      delegator: { sessionId: ROOT, agent: f.rootAgent as never },
-      sourceRef: 't-root#r-1',
-      sourceOutcome: 'failed',
-    })
-    expect(consumption).toMatchObject({ result: 'stopped', code: 'evolution-off' })
-    expect(ledgerRows()).toEqual([])
-    expect(f.spawns).toEqual([])
+  it('renders every consumption shape with its named stop', () => {
+    expect(renderConsumption({ diagnosisId: 'd-1', result: 'started', sessionId: 's-1' })).toContain('supervisor session s-1 started')
+    expect(renderConsumption({ diagnosisId: 'd-1', result: 'existing', sessionId: 's-1' })).toContain('already delegated')
+    expect(renderConsumption({ diagnosisId: 'd-1', result: 'stopped', code: 'iteration-cap', reason: 'capped' }))
+      .toBe('diagnosis d-1 pending (iteration-cap) — capped')
+    expect(renderConsumption({ diagnosisId: 'd-1', result: 'failed', reason: 'boom' })).toContain('could not be started: boom')
   })
 })

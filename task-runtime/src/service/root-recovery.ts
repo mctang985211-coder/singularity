@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { GraphRecord } from '@dangosys/dsh-singularity-graphs'
 import type {
+  ReviewRecord,
   RunId,
   RunMemberReuseRefusal,
   RunProviderBinding,
@@ -23,16 +24,21 @@ import { bindRunProviders } from '../run-binding.ts'
 import { settleRunFromRuntime } from '../orchestration/settlement.ts'
 import { spawnTaskWorker } from '../orchestration/spawn.ts'
 import {
+  IterationCapRefusal,
   deriveReuse,
   inFlightRecoveryAttempt,
   recoveryAttemptDigest,
   recoveryAttemptWithKey,
+  recoveryKindOf,
   recoveryRequestDefects,
+  recoveryRoundsOf,
+  recoverySourceRun,
   requestAttemptDigest,
   reuseDefects,
   storedReuse,
 } from '../recovery.ts'
-import type { ReuseContext, RootRecoveryRequest } from '../recovery.ts'
+import type { RecoveryRounds, ReuseContext, RootRecoveryRequest } from '../recovery.ts'
+import { supervisionSettings } from './lifecycle.ts'
 import type { WorkspaceOwner } from '../workspace.ts'
 import type {
   StoreRecoveryStatus,
@@ -99,6 +105,25 @@ export async function assertRecoveryCallerOwnsStore(
   }
 }
 
+/** The coded cap refusal (A7 §3): this source has spent its rounds of this kind — nothing is opened and nothing is written. */
+function assertRoundCap(
+  supervision: { maxRecoveryRounds: number; maxImprovementRounds: number },
+  rounds: RecoveryRounds,
+  kind: 'recovery' | 'improvement',
+  sourceTaskId: string,
+): void {
+  const [spent, cap, what] =
+    kind === 'improvement'
+      ? [rounds.improvement, supervision.maxImprovementRounds, 'improvement rounds'] as const
+      : [rounds.recovery, supervision.maxRecoveryRounds, 'recovery rounds'] as const
+  if (spent < cap) return
+  throw new IterationCapRefusal(
+    `task-runtime: the ${kind === 'improvement' ? 'improvement round' : 'recovery'} of "${sourceTaskId}" was refused (iteration-cap): ` +
+      `the source's ${what} are spent (${spent}/${cap}); no run was opened and the store's own facts stay as they are — a deployment raises ` +
+      'the cap, no count is reset',
+  )
+}
+
 export async function recoverRootTaskOnce(
   self: TaskRuntime,
   storeId: string,
@@ -146,24 +171,31 @@ export async function recoverRootTaskOnce(
         'an attempt ends when its run settles, and a new key may be asked for after that',
     )
   }
-  if (source.status === 'verified') {
+  const kind = recoveryKindOf(request.mode)
+  if (kind === 'improvement') {
+    if (source.status !== 'verified') {
+      throw new Error(
+        `task-runtime: root task "${sourceTaskId}" is ${source.status}; an improvement round is opened for a verified source ` +
+          '(one whose own attempt settled `verified`), and this is not one — a failed source is recovered without mode, or with mode "recovery"',
+      )
+    }
+  } else if (source.status === 'verified') {
     throw new Error(
-      `task-runtime: root task "${sourceTaskId}" is verified — a successful source is not recoverable, and nothing was written; ` +
-        'an improvement on a succeeded goal needs a new intake under its own contract, not a recovery of this one',
+      `task-runtime: root task "${sourceTaskId}" is verified — a successful source is not recovered by the recovery door, and nothing was ` +
+        'written; a verified source accepts an improvement round, judged by the same original criteria: ask again with mode "improve"',
     )
-  }
-  if (source.status === 'running' || source.status === 'verifying') {
+  } else if (source.status === 'running' || source.status === 'verifying') {
     throw new Error(
       `task-runtime: root task "${sourceTaskId}" is ${source.status}: an attempt is in flight, and a recovery does not hot-swap a live run`,
     )
-  }
-  if (source.status !== 'failed' && source.status !== 'blocked') {
+  } else if (source.status !== 'failed' && source.status !== 'blocked') {
     throw new Error(
       `task-runtime: root task "${sourceTaskId}" is ${source.status}; a recovery attempt is opened for a failed task ` +
         '(a `failed` task, or a `blocked` one that never ran), and this is not one',
     )
   }
-  const sourceRun = recoverySourceRun(source, request, snapshot)
+  assertRoundCap(supervisionSettings(self), recoveryRoundsOf(snapshot, sourceTaskId), kind, sourceTaskId)
+  const sourceRun = recoverySourceRun(source, request, snapshot, kind)
   assertRecoveryContract(source)
   /**
    * The binding comes from the store, not from the caller: a request that names
@@ -224,6 +256,7 @@ export async function recoverRootTaskOnce(
     storeId,
     source,
     request,
+    ...(sourceRun === undefined ? {} : { sourceRun }),
     declarations,
     unbound,
     manifest,
@@ -275,41 +308,6 @@ export function recoveryAttemptForRequest(
   }
 }
 
-export function recoverySourceRun(
-  source: TaskInstance,
-  request: RootRecoveryRequest,
-  snapshot: TaskSnapshot,
-): TaskRun | undefined {
-  if (request.sourceRunId !== null) {
-    const run = snapshot.runs.find(candidate => candidate.runId === request.sourceRunId)
-    if (run === undefined) {
-      throw new Error(
-        `task-runtime: store "${snapshot.id}" holds no run "${request.sourceRunId}"; the named source attempt does not exist`,
-      )
-    }
-    if (run.taskId !== source.taskId) {
-      throw new Error(
-        `task-runtime: run "${run.runId}" belongs to task "${run.taskId}", not to the named source "${source.taskId}"; nothing was written`,
-      )
-    }
-    if (run.status !== 'failed') {
-      throw new Error(
-        `task-runtime: source run "${run.runId}" is ${run.status}; a recovery recovers a *failed* attempt ` +
-          '(its run settled `failed`), and this run is not one',
-      )
-    }
-    return run
-  }
-  const running = snapshot.runs.filter(run => run.taskId === source.taskId && run.status === 'running')
-  if (running.length > 0) {
-    throw new Error(
-      `task-runtime: the request names no source run, but task "${source.taskId}" holds a run in flight (${running.map(run => run.runId).join(', ')}); ` +
-        'a failure without a run is a task that never started, not one an attempt is running for',
-    )
-  }
-  return undefined
-}
-
 export function assertRecoveryContract(source: TaskInstance): void {
   const contract = source.contract
   if (contract === undefined) {
@@ -339,6 +337,62 @@ export function assertRecoveryContract(source: TaskInstance): void {
   }
 }
 
+/** One compact metrics line from a review record: exactly the numbers it stored, or an explicit "none". */
+function reviewMetricsLine(review: ReviewRecord): string {
+  const parts: string[] = []
+  const tokens = review.metrics?.tokens
+  if (tokens !== undefined) {
+    const total = tokens.uncachedInputTokens + tokens.outputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens
+    parts.push(
+      `tokens ${total} (uncached input ${tokens.uncachedInputTokens}, output ${tokens.outputTokens}, ` +
+        `cache read ${tokens.cacheReadTokens}, cache write ${tokens.cacheWriteTokens})`,
+    )
+  }
+  const toolCalls = review.metrics?.toolCalls
+  if (toolCalls !== undefined) parts.push(`tool calls ${toolCalls.calls} (${toolCalls.failures} reported failures)`)
+  if (review.metrics?.retries !== undefined) parts.push(`retries ${review.metrics.retries}`)
+  if (review.durationMs !== undefined) parts.push(`durationMs ${review.durationMs}`)
+  return parts.length === 0 ? 'metrics: none recorded on the review.' : `metrics: ${parts.join('; ')}.`
+}
+
+/** The round before one attempt as a notice for the new attempt's own session: criterion verdicts and effort facts, read from the store. */
+export function priorRoundNotice(
+  snapshot: TaskSnapshot,
+  source: TaskInstance,
+  sourceRun: TaskRun,
+): string | undefined {
+  const review = snapshot.reviews.find(item => item.taskId === source.taskId && item.runId === sourceRun.runId)
+  if (review === undefined) return undefined
+  const criteria = review.criteria ?? []
+  const passed = criteria.filter(criterion => criterion.verdict === 'pass').length
+  const verdicts =
+    criteria.length === 0
+      ? 'no criterion verdict is stored on it'
+      : `criteria passed ${passed}/${criteria.length} (${criteria.map(criterion => `${criterion.criterionId} ${criterion.verdict}`).join(', ')})`
+  return [
+    `task-runtime: the round before this attempt, read from the store — review of run "${review.runId}" (outcome ${review.outcome}): ${verdicts}.`,
+    reviewMetricsLine(review),
+    'The original acceptance criteria judge this attempt unchanged.',
+  ].join('\n')
+}
+
+/** The same notice for a run the store resumed: the attempt's own recovery record names the round before it. */
+export function priorRoundNoticeForRun(snapshot: TaskSnapshot, run: TaskRun): string | undefined {
+  if (run.recovery === undefined) return undefined
+  const source = snapshot.tasks.find(task => task.taskId === run.taskId)
+  if (source === undefined) return undefined
+  const cited = run.recovery.sourceRunId
+  const sourceRun =
+    cited !== undefined
+      ? snapshot.runs.find(candidate => candidate.runId === cited)
+      : run.recovery.kind === 'improvement'
+        ? [...snapshot.runs]
+            .reverse()
+            .find(candidate => candidate.taskId === run.taskId && candidate.status === 'verified' && candidate.runId !== run.runId)
+        : undefined
+  return sourceRun === undefined ? undefined : priorRoundNotice(snapshot, source, sourceRun)
+}
+
 export async function startRecoveryAttempt(
   self: TaskRuntime,
   input: StartRecoveryAttemptInput,
@@ -346,11 +400,15 @@ export async function startRecoveryAttempt(
   const { storeId, source, request, declarations, manifest, rootSessionId, actor } = input
   const runId: RunId = `r-${randomUUID()}`
   const sessionId = `s-${randomUUID()}`
+  const kind = recoveryKindOf(request.mode)
   const reusedMembers = declarations.map(storedReuse)
   const recovery: RunRecovery = {
+    kind,
     sourceDiagnosisId: request.sourceDiagnosisId,
     requestKey: request.requestKey,
-    ...(request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId }),
+    // The resolved run, which an improvement that named none derives from the
+    // store: the record names the round it reads, not merely what the caller said.
+    ...(input.sourceRun === undefined ? {} : { sourceRunId: input.sourceRun.runId }),
     requestedAt: now(),
     requestDigest: requestAttemptDigest(request),
     reusedMembers,
@@ -446,7 +504,14 @@ export async function startRecoveryAttempt(
         `spawned: ${reason}; the attempt's run was settled failed with this cause, and a new attempt needs a new request key`,
     )
   }
-  const stored = (await self.context.task.snapshotIn(storeId)).runs.find(item => item.runId === runId)
+  const after = await self.context.task.snapshotIn(storeId)
+  const stored = after.runs.find(item => item.runId === runId)
+  // The new attempt's own context (A7 §5): the round it follows, as the store's
+  // review records it — verdicts and effort, no score, no judgement.
+  if (input.sourceRun !== undefined) {
+    const notice = priorRoundNotice(after, source, input.sourceRun)
+    if (notice !== undefined) self.notify(sessionId, notice)
+  }
   return {
     attempt: 'started',
     storeId,
@@ -459,7 +524,7 @@ export async function startRecoveryAttempt(
     reusedMembers,
     unboundMembers: input.unbound.map(entry => ({ ...entry, reasons: [...entry.reasons] })),
     detail:
-      `a recovery attempt of "${source.taskId}" was opened: run "${runId}" in session "${sessionId}" under diagnosis ` +
+      `a${kind === 'improvement' ? 'n improvement round' : ' recovery attempt'} of "${source.taskId}" was opened: run "${runId}" in session "${sessionId}" under diagnosis ` +
       `"${request.sourceDiagnosisId}", key "${request.requestKey}"` +
       `${reusedMembers.length === 0 ? '' : `, reading ${reusedMembers.length} already verified sibling member(s) at the position(s) ${reusedMembers.map(member => member.childIndex).join(', ')}`}` +
       `${input.unbound.length === 0 ? '' : `; ${input.unbound.length} position(s) whose passed sibling could not be bound (${input.unbound.map(entry => `#${entry.childIndex}`).join(', ')}) are done again and the reasons are on the record`}; ` +

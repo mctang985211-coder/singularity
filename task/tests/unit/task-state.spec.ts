@@ -90,6 +90,33 @@ function evidence(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
   }
 }
 
+/** The recovery record one attempt carries; `assertRunRecovery` requires the diagnosis it names to exist in the store. */
+function recoveryRecord(kind: 'recovery' | 'improvement'): NonNullable<TaskRun['recovery']> {
+  return {
+    kind,
+    sourceDiagnosisId: 'd1',
+    requestKey: 'k1',
+    sourceRunId: 'r1',
+    requestedAt: NOW,
+    reusedMembers: [],
+  }
+}
+
+/** The diagnosis a recovery record is opened for (A6), stored before the attempt's `TaskStarted`. */
+function recoveryDiagnosis(): Diagnosis {
+  return {
+    diagnosisId: 'd1',
+    taskId: 't1',
+    observedFailure: 'the goal can be measured again',
+    scope: 'this task only',
+    localizedCause: 'the round is worth iterating on',
+    evidenceRefs: ['e1'],
+    reviewRefs: ['t1#r1'],
+    confidence: 'medium',
+    proposals: [],
+  }
+}
+
 function handoff(overrides: Partial<TaskHandoff> = {}): TaskHandoff {
   return {
     handoffId: 'h1',
@@ -224,6 +251,39 @@ describe('TaskState state machine', () => {
     expect(snapshot.tasks[0]?.status).toBe('running')
     expect(snapshot.tasks[0]?.runIds).toEqual(['r1', 'r2'])
     expect(snapshot.runs.map(item => item.status)).toEqual(['failed', 'running'])
+  })
+
+  test('an improvement round starts from verified; a recovery record of the same task cannot', () => {
+    const improvement = verifiedState()
+    improvement.apply(ev('DiagnosisRecorded', { diagnosis: recoveryDiagnosis() }))
+    improvement.apply(
+      ev('TaskStarted', { run: run({ runId: 'r2', sessionId: 's2', recovery: recoveryRecord('improvement') }) }, { runId: 'r2' }),
+    )
+    const snapshot = improvement.snapshot()
+    expect(snapshot.tasks[0]?.status).toBe('running')
+    expect(snapshot.tasks[0]?.runIds).toEqual(['r1', 'r2'])
+    // The goal is re-earned, not re-opened: the verified run keeps its own facts.
+    expect(snapshot.runs.map(item => item.status)).toEqual(['verified', 'running'])
+
+    const again = verifiedState()
+    again.apply(ev('DiagnosisRecorded', { diagnosis: recoveryDiagnosis() }))
+    expect(() =>
+      again.apply(
+        ev('TaskStarted', { run: run({ runId: 'r2', sessionId: 's2', recovery: recoveryRecord('recovery') }) }, { runId: 'r2' }),
+      ),
+    ).toThrow('illegal transition "verified" → "running"')
+  })
+
+  test('a recovery record without a kind is refused by name', () => {
+    const state = failedState()
+    state.apply(ev('DiagnosisRecorded', { diagnosis: recoveryDiagnosis() }))
+    const record = recoveryRecord('recovery') as Record<string, unknown>
+    delete record.kind
+    expect(() =>
+      state.apply(
+        ev('TaskStarted', { run: run({ runId: 'r2', sessionId: 's2', recovery: record as never }) }, { runId: 'r2' }),
+      ),
+    ).toThrow('requires kind "recovery" or "improvement"')
   })
 
   test('a running task cancels into a terminal state', () => {

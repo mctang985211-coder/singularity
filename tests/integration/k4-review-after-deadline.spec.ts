@@ -165,7 +165,6 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
     const { h, storeId } = stop
     const before = await h.snapshot(storeId)
     const graphBefore = h.graphCommits.length
-    const spawnsBefore = h.spawns.length
 
     stop.resumeRoot()
     await vi.waitFor(
@@ -190,8 +189,8 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
     expect(review.result?.isError).toBe(false)
     expect(review.result?.text).not.toContain('late call')
     expect(review.result?.text).toContain('judged task')
-    expect(h.spawns).toHaveLength(spawnsBefore + 1)
-    const reviewer = h.spawns.at(-1)!
+    await vi.waitFor(() => expect(reviewerSpawns(h)).toHaveLength(1), { timeout: 30_000, interval: 25 })
+    const reviewer = reviewerSpawns(h)[0]!
     const reviewerSession = String(reviewer.sessionId)
     expect(reviewer.name).toBe(`review ${stop.childTaskId}`)
     expect(reviewer.taskWorker).toBeUndefined()
@@ -214,9 +213,15 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
     const diagnosis = after.diagnoses.find(item => String(item.producedBy.sessionId) === reviewerSession)!
     expect(diagnosis.taskId).toBe(stop.childTaskId)
     expect(diagnosis.judgements.find(judgement => judgement.dimension === 'task_specification')!.verdict).toBe('inadequate')
+    // The recorded diagnosis is a hand-off: its supervisor is delegated too —
+    // one more spawn, one more published node, and still no business Run.
+    await vi.waitFor(
+      () => expect(h.spawns.filter(spawn => String(spawn.name ?? '').startsWith('supervisor for '))).toHaveLength(1),
+      { timeout: 30_000, interval: 25 },
+    )
 
-    // Publishing the node is the spawn's whole graph effect…
-    expect(h.graphCommits.slice(graphBefore).map(commit => commit.kind)).toEqual(['agent/add', 'edge/add'])
+    // Publishing the node is each spawn's whole graph effect…
+    expect(h.graphCommits.slice(graphBefore).map(commit => commit.kind)).toEqual(['agent/add', 'edge/add', 'agent/add', 'edge/add'])
     // …and no business Run follows the review: the store holds the same tree it
     // held before the call, with the stopped root and its failed child.
     expect(after.runs).toHaveLength(before.runs.length)
@@ -300,9 +305,11 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
     expect(reviewerSpawns(h)[0]!.name).toBe(`review ${stop.childTaskId}`)
 
     // The source's one default attempt: claimed, started, and attributed to the
-    // graph's own root — the parent a reviewer is spawned from.
+    // graph's own root — the parent a reviewer is spawned from. (The ledger holds
+    // the diagnosis's own supervisor row beside it: a recorded diagnosis is a
+    // hand-off, and this case is about the review chain.)
     const attempt = await vi.waitFor(async () => {
-      const found = await readReviewAgentAttempts(storeId)
+      const found = (await readReviewAgentAttempts(storeId)).filter(item => item.role === 'reviewer')
       expect(found).toHaveLength(1)
       return found[0]!
     }, { timeout: 30_000, interval: 25 })
@@ -314,7 +321,11 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
       sessionId: reviewer,
       started: true,
     })
-    expect(await countReviewAgentRuns(storeId)).toBe(1)
+    await vi.waitFor(
+      () => expect(h.spawns.filter(spawn => String(spawn.name ?? '').startsWith('supervisor for '))).toHaveLength(1),
+      { timeout: 30_000, interval: 25 },
+    )
+    expect(await countReviewAgentRuns(storeId)).toBe(2)
     // The delegation the assembly would read is durable before the reviewer's
     // first request, exactly as an explicit call's is.
     expect(await readReviewerDelegation(reviewer)).toMatchObject({ rootStoreId: storeId, taskId: stop.childTaskId })
@@ -338,14 +349,17 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
   }, 60_000)
 
   it('spawns no reviewer once the store\'s review allowance is spent, and says so in the same phase', async () => {
+    // The shipped allowance is eight attempts per store; this case names one, so
+    // the tree's own failed review (accepted on its own) leaves the ceiling
+    // spent before the explicit call arrives.
+    vi.stubEnv('SINGULARITY_REVIEW_AGENT_BUDGET', '1')
     const stop = await stopTreeWithFailedChild(state => [
       { tool: 'task_review_agent', args: () => ({ taskId: state.childTaskId, runId: state.childRunId }) },
       { text: 'root: the review was refused' },
     ])
     // The ledger the deployment reads, spent: one review agent already started
     // for this root store (the row an earlier call — this process's or another's
-    // — wrote, through the admission that owns the write). The allowance's
-    // default is one per store.
+    // — wrote, through the admission that owns the write).
     await admitReviewAgent(stop.storeId, admission =>
       admission.start({ taskId: 'an-earlier-task', sessionId: 's-earlier-review', actor: String(ROOT) }))
     const spawnsBefore = stop.h.spawns.length

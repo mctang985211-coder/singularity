@@ -9,7 +9,8 @@ Dependencies: task, agentRuntime, graphs, sessionQuery
 
 config.yaml: `capabilities`, `defaultPreset`, `verifyTimeoutMs` (default 10 min), `maxDepth` (default 4),
 `maxChildren` (default 8), `budget`, `allowRuntimeDecomposition` (default true), `generatedTaskReview`
-(`off` | `all`, default `off`), `runBindingRoot`, `rootBudget`, `writeDrainTimeoutMs` (default 30 s)
+(`off` | `all`, default `off`), `supervision` (the per-source round caps, default 3 recoveries / 2 improvements —
+also read from the `singularitySupervision` service), `runBindingRoot`, `rootBudget`, `writeDrainTimeoutMs` (default 30 s)
 
 ### Tools
 

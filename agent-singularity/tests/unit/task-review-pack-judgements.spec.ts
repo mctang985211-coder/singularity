@@ -129,13 +129,12 @@ describe('task_review_pack as a fact sheet, without a trigger decision', () => {
   })
 
   /**
-   * The handoff mark (A5 §3, F.3): a Diagnosis that carries proposals is A6's
-   * handoff candidate, and with no A6 candidate loop enabled in this build it
-   * is **pending** — recorded, addressed to nobody yet. A conclusion without
-   * proposals is not a handoff and says nothing about one; an interrupted
+   * The handoff mark (A5 §3, F.3): every recorded Diagnosis is A6's handoff, a
+   * conclusion without proposals included, and with no supervisor delegated yet
+   * it is **pending** — recorded, addressed to nobody yet. An interrupted
    * attempt has no Diagnosis at all, so it cannot be shown as pending either.
    */
-  it('marks a diagnosis that carries proposals as a pending handoff, and only that one', async () => {
+  it('marks every recorded diagnosis as a pending handoff, suggestions or not', async () => {
     const full = failingSnapshot()
     full.diagnoses = [
       {
@@ -157,11 +156,11 @@ describe('task_review_pack as a fact sheet, without a trigger decision', () => {
 
     expect(pack).toContain('proposal prompt_template reviewer: name the empty-input case')
     expect(pack).toContain('handoff: pending')
-    // One pending handoff, not two: the conclusion without proposals is a
-    // conclusion, and nothing waiting is invented for it.
-    expect(pack.match(/handoff: pending/g)).toHaveLength(1)
+    // Two handoffs now: a conclusion without proposals is still a hand-off, and
+    // each diagnosis carries its own pending state.
+    expect(pack.match(/handoff: pending/g)).toHaveLength(2)
     expect(pack).toContain('- d-no-suggestion [high] no improvement needed [agent s-rev-2]')
-    expect(pack.slice(pack.indexOf('- d-no-suggestion'))).not.toContain('handoff')
+    expect(pack.slice(pack.indexOf('- d-no-suggestion'))).toContain('handoff: pending')
   })
 
   it('shows an interrupted attempt as interrupted, with no pending handoff invented for it', async () => {

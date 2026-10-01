@@ -672,9 +672,69 @@ var ProposalReviewService = class extends Service {
 };
 
 //#endregion
+//#region src/coordination/supervision.ts
+/** The shipped defaults: every terminal review is diagnosed, three recovery rounds, two improvement rounds, eight coordination runs per store. */
+const DEFAULT_SUPERVISION = {
+	autoReview: "all",
+	maxRecoveryRounds: 3,
+	maxImprovementRounds: 2,
+	coordinationBudget: 8
+};
+let current = DEFAULT_SUPERVISION;
+/** One numeric member: a finite value at or above the floor, floored to a whole count; anything else reads as the default. */
+function whole(value, fallback, floor) {
+	return typeof value === "number" && Number.isFinite(value) && value >= floor ? Math.floor(value) : fallback;
+}
+/** Resolve and install the deployment's settings; absent members read as the shipped defaults. */
+function configureSupervision(config) {
+	current = {
+		autoReview: config?.autoReview ?? DEFAULT_SUPERVISION.autoReview,
+		maxRecoveryRounds: whole(config?.maxRecoveryRounds, DEFAULT_SUPERVISION.maxRecoveryRounds, 0),
+		maxImprovementRounds: whole(config?.maxImprovementRounds, DEFAULT_SUPERVISION.maxImprovementRounds, 0),
+		coordinationBudget: whole(config?.coordinationBudget, DEFAULT_SUPERVISION.coordinationBudget, 1)
+	};
+	return current;
+}
+/** The settings in force: the deployment's own, or the shipped defaults while none was configured. */
+function supervisionSettings() {
+	return current;
+}
+/** `recovery` unless the run carries `improvement`; a row written before the field existed reads as a recovery. */
+function kindOf(run) {
+	return run.recovery?.kind === "improvement" ? "improvement" : "recovery";
+}
+/** The rounds one task has spent, counted from its own runs — the store's `TaskInstance.runIds` holds them all. */
+function sourceRoundsOf(snapshot, taskId, outcome) {
+	const runs = snapshot.runs.filter((run) => run.taskId === taskId && run.recovery !== void 0);
+	const settings = supervisionSettings();
+	return {
+		outcome,
+		recovered: runs.filter((run) => kindOf(run) === "recovery").length,
+		improved: runs.filter((run) => kindOf(run) === "improvement").length,
+		maxRecovery: settings.maxRecoveryRounds,
+		maxImprovement: settings.maxImprovementRounds
+	};
+}
+/** The refusal a source that has spent its rounds gets, or nothing while another round is allowed. */
+function roundCapRefusal(rounds) {
+	if (rounds.outcome === "verified") {
+		if (rounds.improved < rounds.maxImprovement) return void 0;
+		return {
+			code: "iteration-cap",
+			reason: `the source's improvement rounds are spent (${rounds.improved}/${rounds.maxImprovement}) — a verified source accepts improvement attempts only until the cap, so nothing was started and no supervisor is delegated for it`
+		};
+	}
+	if (rounds.recovered < rounds.maxRecovery) return void 0;
+	return {
+		code: "iteration-cap",
+		reason: `the source's recovery rounds are spent (${rounds.recovered}/${rounds.maxRecovery}) — a failed source accepts recovery attempts only until the cap, so nothing was started and no supervisor is delegated for it`
+	};
+}
+
+//#endregion
 //#region src/coordination/ledger.ts
-/** How many review agents this store has started, as this region's read of the ledger holds them. */
-const REVIEW_AGENT_BUDGET_DEFAULT = 1;
+/** How many review agents this store has started, as this region's read of the ledger holds them — the shipped default of `supervision.coordinationBudget`. */
+const REVIEW_AGENT_BUDGET_DEFAULT = DEFAULT_SUPERVISION.coordinationBudget;
 /** Repo root, derived at this file's depth — the same root the agent assembly hands the evolution ledger. */
 const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
 /** Directory holding the ledger; `$DSH_HOME/review-agents` unless overridden. */
@@ -687,11 +747,12 @@ function reviewAgentLedgerDir() {
 function reviewAgentLedgerFile() {
 	return join(reviewAgentLedgerDir(), "agents.jsonl");
 }
-/** The per-root-store cap; `SINGULARITY_REVIEW_AGENT_BUDGET` when it parses to a positive integer. */
+/** The per-root-store cap: env `SINGULARITY_REVIEW_AGENT_BUDGET` wins, then the deployment's `supervision.coordinationBudget`, then {@link REVIEW_AGENT_BUDGET_DEFAULT}. */
 function reviewAgentBudget() {
 	const raw = process.env.SINGULARITY_REVIEW_AGENT_BUDGET;
 	const parsed = raw === void 0 || raw.length === 0 ? NaN : Number(raw);
-	return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : REVIEW_AGENT_BUDGET_DEFAULT;
+	if (Number.isFinite(parsed) && parsed >= 1) return Math.floor(parsed);
+	return supervisionSettings().coordinationBudget;
 }
 /** One parsed row. An unrecognized row throws by name rather than being read as something it is not. */
 function asLedgerRow(parsed, line) {
@@ -799,7 +860,7 @@ function planReviewAttempt(input) {
 		budget
 	};
 }
-/** Decide one hand-off's supervisor request (A6) against one store's attempts. */
+/** Decide one hand-off's supervisor request (A6) against one store's attempts: a concluded hand-off is answered with the supervisor it already had; an interrupted one is a failure and does not block a fresh attempt. */
 function planSupervisorAttempt(input) {
 	const { request, budget } = input;
 	const mine = attemptsOfRole(input.attempts, "supervisor").filter((attempt) => attempt.diagnosisId === request.diagnosisId);
@@ -820,6 +881,20 @@ function planSupervisorAttempt(input) {
 	if (open !== void 0) return {
 		kind: "in-flight",
 		attempt: open
+	};
+	const concluded = mine.filter((attempt) => attempt.settlement !== void 0 && attempt.settlement.status !== "interrupted").at(-1);
+	if (concluded !== void 0) return {
+		kind: "reuse",
+		attempt: concluded
+	};
+	const cap = input.rounds === void 0 ? void 0 : roundCapRefusal(input.rounds);
+	if (cap !== void 0) return {
+		kind: "refused",
+		code: "iteration-cap",
+		reason: cap.reason,
+		attempt: void 0,
+		attempts: mine,
+		budget
 	};
 	if (budget.used >= budget.max) return {
 		kind: "refused",
@@ -916,10 +991,7 @@ async function admitReviewAgent(rootStoreId, work) {
 					if (attempt.role !== requestRole) continue;
 					if (requestRole === "reviewer") {
 						if (!sameSource(attempt.source, request.source)) continue;
-					} else {
-						if (attempt.diagnosisId !== request.diagnosisId) continue;
-						if (attempt.started) continue;
-					}
+					} else if (attempt.diagnosisId !== request.diagnosisId) continue;
 					if (attempt.settlement !== void 0) continue;
 					if (liveAttempts.has(attempt.sessionId) || claimedHere.has(attempt.sessionId)) continue;
 					const recorded = await hooks?.recorded?.(attempt) === true;
@@ -941,7 +1013,15 @@ async function admitReviewAgent(rootStoreId, work) {
 					recovered.push(attempt);
 				}
 				return {
-					plan: (requestRole === "supervisor" ? planSupervisorAttempt : planReviewAttempt)({
+					plan: requestRole === "supervisor" ? planSupervisorAttempt({
+						attempts,
+						request,
+						budget: {
+							used,
+							max: reviewAgentBudget()
+						},
+						...hooks?.supervisionRounds === void 0 ? {} : { rounds: hooks.supervisionRounds }
+					}) : planReviewAttempt({
 						attempts,
 						request,
 						budget: {
@@ -1142,16 +1222,9 @@ function supervisorGrant() {
 		keepPresetTools: false
 	};
 }
-/** The target types whose suggestion this build can take up: a same-name skill update, or one whole capability row. */
-const SUPPORTED_HANDOFF_TARGETS = ["skill", "capability"];
-/** Whether this deployment registered the evolution chain — the switch the whole consumption turns into one question (agent-singularity's own `ctx.singularityEvolution`). Read softly and read as **off** when the service is */
-function evolutionEnabled(ctx) {
-	return optionalService(ctx, "singularityEvolution")?.enabled === true;
-}
-/** The hand-off facts a pack or a reviewer prompt reads: the deployment's switch, the attempts and the allowance in force. */
-async function handoffFactsOf(ctx, storeId, attempts) {
+/** The hand-off facts a pack or a reviewer prompt reads: the attempts and the allowance in force. */
+async function handoffFactsOf(storeId, attempts) {
 	return {
-		enabled: evolutionEnabled(ctx),
 		attempts,
 		budget: {
 			used: await countReviewAgentRuns(storeId),
@@ -1159,46 +1232,7 @@ async function handoffFactsOf(ctx, storeId, attempts) {
 		}
 	};
 }
-/** The recorded mutation surfaces this build's Evolution ledger accepts, as `evolution_propose` validates them. */
-const PROPOSAL_TARGET_TYPES$1 = [
-	"skill",
-	"tool",
-	"capability",
-	"task_definition",
-	"decomposition_policy",
-	"agent_preset",
-	"workflow_policy",
-	"verifier",
-	"runtime_policy"
-];
-/** The target-type rule one diagnosis's suggestions have to pass before a coordinator is started, in the deployment's own words, or nothing when they do. */
-function handoffTargetRefusal(diagnosis) {
-	for (const proposal of diagnosis.proposals) {
-		const targetType = proposal.targetType;
-		if (SUPPORTED_HANDOFF_TARGETS.includes(targetType)) continue;
-		if (!PROPOSAL_TARGET_TYPES$1.includes(targetType)) return {
-			code: "unsupported-target",
-			reason: `the suggestion's target type ${JSON.stringify(targetType)} is not an execution target this build records (recorded: ${PROPOSAL_TARGET_TYPES$1.join(", ")}), so no coordinator was started for it and the Diagnosis keeps its suggestion — an unknown target is refused by name, never guessed into a candidate`
-		};
-		return {
-			code: "requires-new-authority",
-			reason: `the suggestion targets "${targetType}", and this build executes exactly two candidate surfaces — a same-name update of an existing skill object and one whole capability row with an optional new execution skill; a new tool, a verifier implementation, a permission, a preset or a runtime policy would need an authorization this harness refuses by name, so no coordinator was started and the Diagnosis keeps its suggestion`
-		};
-	}
-}
-/** The refusals decided before anything else is read — no suggestions at all, the chain being off, and a suggestion this build cannot execute — as the one `undefined | {code, reason}` both {@link. */
-function handoffPreflight(input) {
-	if (input.diagnosis.proposals.length === 0) return {
-		code: "no-suggestions",
-		reason: "the conclusion carries no suggestion, so there is no hand-off to take up"
-	};
-	if (!input.enabled) return {
-		code: "evolution-off",
-		reason: "the evolution chain is off in this deployment, so no coordinator exists to open a candidate for it — the Diagnosis stays a recorded hand-off, readable here and in the review pack, and turning the chain on is what takes it up"
-	};
-	return handoffTargetRefusal(input.diagnosis);
-}
-/** What the deployment would do with one diagnosis's hand-off right now, from the switch, the diagnosis, the ledger's attempts and the store's allowance. Pure. */
+/** What the deployment would do with one diagnosis's hand-off right now, from the diagnosis, the ledger's attempts, the store's allowance and the source's round facts. Pure. */
 function handoffDecision(input) {
 	const attempts = input.attempts.filter((attempt) => attempt.role === "supervisor" && attempt.diagnosisId === input.diagnosis.diagnosisId);
 	const started = attempts.filter((attempt) => attempt.started && attempt.settlement === void 0).at(-1);
@@ -1207,17 +1241,30 @@ function handoffDecision(input) {
 		sessionId: started.sessionId,
 		at: started.at
 	};
-	const preflight = handoffPreflight(input);
-	if (preflight !== void 0) return {
-		kind: "stopped",
-		code: preflight.code,
-		reason: preflight.reason
-	};
 	const open = attempts.find((attempt) => attempt.settlement === void 0);
 	if (open !== void 0) return {
 		kind: "in-flight",
 		sessionId: open.sessionId
 	};
+	const concluded = attempts.filter((attempt) => attempt.settlement !== void 0 && attempt.settlement.status !== "interrupted").at(-1);
+	if (concluded !== void 0) {
+		const settlement = concluded.settlement;
+		return {
+			kind: "concluded",
+			sessionId: concluded.sessionId,
+			status: settlement.status === "closed" ? "closed" : "recorded",
+			...settlement.note === void 0 ? {} : { note: settlement.note },
+			at: settlement.at
+		};
+	}
+	if (input.rounds !== void 0) {
+		const cap = roundCapRefusal(input.rounds);
+		if (cap !== void 0) return {
+			kind: "stopped",
+			code: cap.code,
+			reason: cap.reason
+		};
+	}
 	if (input.budget.used >= input.budget.max) return {
 		kind: "stopped",
 		code: "budget-exhausted",
@@ -1225,16 +1272,63 @@ function handoffDecision(input) {
 	};
 	return { kind: "start" };
 }
-/** The hand-off state as it is reported to a reader of the review pack, or nothing when the diagnosis carries no suggestions (a normal completion stays a conclusion and gets no mark). */
+/** The hand-off state as it is reported to a reader of the review pack: every recorded diagnosis is a hand-off, a conclusion without suggestions included. */
 function handoffStateLine(input) {
-	if (input.diagnosis.proposals.length === 0) return void 0;
 	const decision = handoffDecision(input);
 	switch (decision.kind) {
 		case "started": return `taken up — this hand-off is delegated to supervisor session ${decision.sessionId} (started ${decision.at}); that coordinator owns the candidate it may open, and a person still decides the promotion`;
 		case "in-flight": return `being taken up right now by supervisor session ${decision.sessionId} — nothing new is started for it`;
+		case "concluded": return decision.status === "closed" ? `settled — supervisor session ${decision.sessionId} closed the hand-off${decision.note === void 0 ? "" : `: ${decision.note}`}; no further supervisor is started for it` : `taken up — this hand-off is delegated to supervisor session ${decision.sessionId}, which ended recorded${decision.note === void 0 ? "" : `: ${decision.note}`}; no further supervisor is started for it`;
 		case "stopped": return `pending — ${decision.reason}`;
 		case "start": return "pending — no supervisor is delegated to this hand-off yet; the deployment takes it up when it consumes it";
 	}
+}
+/** The explicit close a supervisor's reply may carry — the structured outcome that ends a hand-off without further iteration. */
+function closeOutcomeOf(reply) {
+	if (reply === void 0) return void 0;
+	const blocks = [...reply.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((match) => match[1]);
+	for (const block of blocks.reverse()) try {
+		const parsed = JSON.parse(block);
+		if (parsed === null || typeof parsed !== "object") continue;
+		if (parsed.outcome !== "closed") continue;
+		const reason = parsed.reason;
+		return { reason: typeof reason === "string" && reason.trim().length > 0 ? reason : "the supervisor closed the hand-off" };
+	} catch {
+		continue;
+	}
+}
+/** The text of one session's last assistant message — the reply a coordination agent's outcome is read from. */
+function lastAssistantText(events) {
+	const event = [...events].reverse().find((item) => item.type === "assistant/message");
+	if (event === void 0) return void 0;
+	const content = ((event.data?.message)?.content ?? []).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
+	return content.length === 0 ? void 0 : content;
+}
+/** One review record's facts as the compact read-only block a supervisor's first request carries — criteria verdicts, the derived passed/total, and the effort counters. */
+function renderSupervisorReviewFacts(review) {
+	const criteria = review.criteria ?? [];
+	const passed = criteria.filter((criterion) => criterion.verdict === "pass").length;
+	const lines = [`review ${reviewRef({
+		taskId: review.taskId,
+		runId: review.runId ?? null
+	})} [${review.outcome}]`];
+	lines.push(criteria.length === 0 ? "criteria: none recorded" : `criteria (${passed}/${criteria.length} passed): ${criteria.map((criterion) => `${criterion.criterionId} ${criterion.verdict}`).join("; ")}`);
+	const metrics = metricsLine(review);
+	if (metrics !== void 0) lines.push(`metrics: ${metrics}`);
+	if (review.logTail !== void 0) lines.push(`logTail: ${review.logTail}`);
+	return lines.join("\n");
+}
+/** The effort counters of one review record, one clause per counter that exists — an absent field means "not observed". */
+function metricsLine(review) {
+	const metrics = review.metrics;
+	if (metrics === void 0) return void 0;
+	const parts = [];
+	if (metrics.tokens !== void 0) parts.push(`tokens in ${metrics.tokens.uncachedInputTokens}/out ${metrics.tokens.outputTokens}/cache ${metrics.tokens.cacheReadTokens}+${metrics.tokens.cacheWriteTokens}`);
+	if (metrics.toolCalls !== void 0) parts.push(`toolCalls ${metrics.toolCalls.calls} (${metrics.toolCalls.failures} failed)`);
+	if (metrics.humanInterventions !== void 0) parts.push(`humanInterventions ${metrics.humanInterventions}`);
+	if (metrics.retries !== void 0) parts.push(`retries ${metrics.retries}`);
+	if (metrics.evidenceLogs !== void 0) parts.push(`evidenceLogs ${metrics.evidenceLogs}`);
+	return parts.length === 0 ? void 0 : parts.join(" — ");
 }
 /** One hand-off's content identity: what the claim promises about the diagnosis it was started for. */
 function supervisorHandoffDigest(storeId, diagnosis) {
@@ -1249,7 +1343,7 @@ function supervisorHandoffDigest(storeId, diagnosis) {
 		}))
 	}));
 }
-/** The run one diagnosis is about, as its own `reviewRefs` name it (`<taskId>#<runId>`, or `<taskId>#no-run` for the failure that had none). A diagnosis that names no review of its own task leaves the run `null`: which run */
+/** One hand-off's source task and the run its diagnosis is about, or `null` for the no-run case. */
 function diagnosisRunRef(diagnosis) {
 	for (const ref of diagnosis.reviewRefs) {
 		const separator = ref.lastIndexOf("#");
@@ -1269,7 +1363,21 @@ function handoffSourceOf(diagnosis) {
 }
 /** The ref a reader uses for one source (`<taskId>#<runId>`, or `<taskId>#no-run`). */
 const handoffSourceRef = reviewRef;
-/** The supervisor's first request: which hand-off it is taking up, what the source really is, and what it is expected to do with it. */
+/** The prior round's review record, as the store holds it for one diagnosis's source. */
+function sourceReviewOf(snapshot, diagnosis) {
+	const source = handoffSourceOf(diagnosis);
+	return snapshot.reviews.find((item) => item.taskId === source.taskId && (item.runId ?? null) === source.runId);
+}
+/** The source's round facts as the store records them, for the cap checks in this module and the ledger. */
+function roundsForDiagnosis(snapshot, diagnosis) {
+	return sourceRoundsOf(snapshot, diagnosis.taskId, sourceReviewOf(snapshot, diagnosis)?.outcome ?? "unknown");
+}
+/** The prior round's review facts as the read-only text block a supervisor's first request carries, or nothing when the store holds no review for the source. */
+function reviewFactsFor(snapshot, diagnosis) {
+	const review = sourceReviewOf(snapshot, diagnosis);
+	return review === void 0 ? void 0 : renderSupervisorReviewFacts(review);
+}
+/** The supervisor's first request: which hand-off it is taking up, what the source really is, the prior round's review facts, and what it is expected to do with it. */
 function supervisorPrompt(input) {
 	const { diagnosis } = input;
 	return [
@@ -1277,14 +1385,18 @@ function supervisorPrompt(input) {
 		`The hand-off is diagnosis ${diagnosis.diagnosisId} about task ${diagnosis.taskId} (source ${input.sourceRef}, whose review settled ${input.sourceOutcome}).`,
 		`Its recorded observation: ${diagnosis.observedFailure}`,
 		`Its recorded conclusion: ${diagnosis.localizedCause}`,
-		"Its recorded suggestions:",
-		...diagnosis.proposals.map((proposal) => `- ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`),
+		...diagnosis.proposals.length === 0 ? ["Its recorded suggestions: none — a conclusion without a suggestion is still a hand-off."] : ["Its recorded suggestions:", ...diagnosis.proposals.map((proposal) => `- ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`)],
+		"",
+		"--- prior round review facts (read-only) ---",
+		...input.reviewFacts === void 0 ? ["no review record could be read for this source; read the facts yourself with task_review_pack."] : input.reviewFacts.split("\n"),
+		"--- end of prior round review facts ---",
 		"",
 		"Your job, in this order:",
 		"1. Read the facts yourself: task_review_pack for the exact source, task_read/task_status for the task and its siblings, context_read for the sessions and evidence the pack cites.",
-		"2. Create a candidate only if the original evidence establishes a capability or skill gap: evolution_propose (when no proposal names it yet), evolution_candidate for ONE whole capability row plus an optional new execution skill or a same-name update of an existing skill, then evolution_prepare, evolution_replay, and evolution_gate. A missing artifact alone does not establish such a gap. A person decides and applies; you never call evolution_decide, evolution_apply or evolution_rollback.",
-		`3. Only you, as the delegated supervisor, may call task_recover for a failed root goal; a failed child needs a new batch from its business parent. Associated capability changes must already be applied. A pure artifact gap needs no candidate when the source's required capability rows already resolve. Call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "<a key of yours>" }; the new attempt retains the original acceptance criteria, and repeating the key returns the same attempt. If a precondition is unmet, name it and stop; do not invent a capability proposal to unlock a retry.`,
-		"4. Not every suggestion is executable: a successful source is not recoverable, and a target type this build has no candidate for stays a recorded suggestion. Say what stopped you in your own words — nothing you write changes production, and no candidate executes anything by itself.",
+		`2. Decide whether one more round is justified under the original acceptance criteria. If it is, call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "<a key of yours>" }; for a failed source the default mode "recovery" applies, and a verified source accepts only mode "improve". The new attempt keeps the original acceptance criteria, and repeating the key returns the same attempt. A source past its recovery or improvement cap is refused with iteration-cap; there is nothing left to open then, so close instead.`,
+		"3. Create a candidate only if the original evidence establishes a capability or skill gap: evolution_propose (when no proposal names it yet), evolution_candidate for ONE whole capability row plus an optional new execution skill or a same-name update of an existing skill, then evolution_prepare, evolution_replay, and evolution_gate — only when those tools are on your surface. A missing artifact alone does not establish such a gap. A person decides and applies; you never call evolution_decide, evolution_apply or evolution_rollback.",
+		"4. If you decide against further iteration — no justified round, no established gap, or a cap already reached — close the hand-off explicitly: say why in your reply and end it with EXACTLY one fenced json block {\"outcome\":\"closed\",\"reason\":\"...\"}. Closing settles this hand-off and changes no task state.",
+		"5. Not every suggestion is executable: a target type this build has no candidate for stays a recorded suggestion. Nothing you write changes production, and no candidate executes anything by itself.",
 		"",
 		"You have no shell, no file write and no spawn, and no tool outside the list you were granted."
 	].join("\n");
@@ -1296,19 +1408,25 @@ function supervisorPrompt(input) {
 async function handoffDelegatorOf(ctx, storeId) {
 	return liveRootAgentOf(ctx, storeId);
 }
-/** Consume one hand-off: decide (switch, suggestions, allowance), and — when nothing stands in the way — spawn its supervisor, under the same admission region and the same ledger a review attempt uses. */
+/** The store facts a spawn carries: the prior round's review block and the source's rounds, or nothing when the store could not be read (the runtime still caps). */
+async function sourceFactsOf(ctx, storeId, diagnosis) {
+	try {
+		const snapshot = await ctx.task.snapshotIn(storeId);
+		const reviewFacts = reviewFactsFor(snapshot, diagnosis);
+		return {
+			rounds: roundsForDiagnosis(snapshot, diagnosis),
+			...reviewFacts === void 0 ? {} : { reviewFacts }
+		};
+	} catch {
+		return {};
+	}
+}
+/** Consume one hand-off: decide (rounds, ledger, allowance), then spawn its supervisor under the admission region a review attempt uses; the attempt settles when its session ends. */
 async function startSupervisorHandoff(ctx, input) {
 	const { storeId, diagnosis, delegator } = input;
-	const preflight = handoffPreflight({
-		enabled: evolutionEnabled(ctx),
-		diagnosis
-	});
-	if (preflight !== void 0) return {
-		diagnosisId: diagnosis.diagnosisId,
-		result: "stopped",
-		code: preflight.code,
-		reason: preflight.reason
-	};
+	const resolved = input.rounds !== void 0 && input.reviewFacts !== void 0 ? {} : await sourceFactsOf(ctx, storeId, diagnosis);
+	const rounds = input.rounds ?? resolved.rounds;
+	const reviewFacts = input.reviewFacts ?? resolved.reviewFacts;
 	const source = handoffSourceOf(diagnosis);
 	const supervisorSessionId = SessionId(randomUUID());
 	const request = {
@@ -1322,8 +1440,14 @@ async function startSupervisorHandoff(ctx, input) {
 		sessionId: supervisorSessionId
 	};
 	return await admitReviewAgent(storeId, async (admission) => {
-		const { plan } = await admission.plan(request);
+		const { plan } = await admission.plan(request, rounds === void 0 ? void 0 : { supervisionRounds: rounds });
 		if (plan.kind === "refused") {
+			if (plan.code === "iteration-cap") return {
+				diagnosisId: diagnosis.diagnosisId,
+				result: "stopped",
+				code: "iteration-cap",
+				reason: plan.reason ?? "the source's rounds are spent; nothing was started and no supervisor is delegated for it"
+			};
 			const reason = plan.code === "budget-exhausted" ? `the store's coordination allowance is spent (${plan.budget.used}/${plan.budget.max}) — nothing was started and the hand-off stays pending` : `diagnosis ${diagnosis.diagnosisId} already has a supervisor claim with another hand-off content (session ${plan.attempt?.sessionId ?? "unknown"}); one diagnosis is not two hand-offs, so nothing was started`;
 			const code = plan.code === "budget-exhausted" ? "budget-exhausted" : "handoff-conflict";
 			return {
@@ -1361,21 +1485,58 @@ async function startSupervisorHandoff(ctx, input) {
 			prompt: () => supervisorPrompt({
 				diagnosis,
 				sourceOutcome: input.sourceOutcome,
-				sourceRef: input.sourceRef
+				sourceRef: input.sourceRef,
+				...reviewFacts === void 0 ? {} : { reviewFacts }
 			})
 		});
-		return spawned.kind === "spawn-failed" ? {
+		if (spawned.kind === "spawn-failed") return {
 			diagnosisId: diagnosis.diagnosisId,
 			result: "failed",
 			reason: spawned.failure
-		} : {
+		};
+		watchSupervisorCompletion({
+			ctx,
+			storeId,
+			diagnosis,
+			sessionId: supervisorSessionId,
+			agent: spawned.handle.agent
+		});
+		return {
 			diagnosisId: diagnosis.diagnosisId,
 			result: "started",
 			sessionId: supervisorSessionId
 		};
 	});
 }
-/** Every pending hand-off of one store, consumed in the order the diagnoses were written. A diagnosis that carries suggestions is a hand-off; a conclusion without suggestions is not touched. */
+/** What settles one supervisor attempt when its session ends: the recovery/improvement it issued, the close it declared, or a failure with no outcome. Never throws — the ledger write is the settlement. */
+async function watchSupervisorCompletion(input) {
+	let status = "interrupted";
+	let note = "the supervisor ended without issuing task_recover or closing the hand-off";
+	try {
+		await input.agent.whenIdle();
+		const recovery = [...(await input.ctx.task.snapshotIn(input.storeId)).runs].reverse().find((run) => run.recovery !== void 0 && run.recovery.sourceDiagnosisId === input.diagnosis.diagnosisId);
+		if (recovery !== void 0) {
+			status = "recorded";
+			note = `task_recover issued: run ${recovery.runId}`;
+		} else {
+			const close = closeOutcomeOf(lastAssistantText(input.agent.session.snapshotEvents()));
+			if (close !== void 0) {
+				status = "closed";
+				note = close.reason;
+			}
+		}
+	} catch (error) {
+		note = `the supervisor session ended and its outcome could not be read (${error instanceof Error ? error.message : String(error)})`;
+	}
+	await settleReviewAgentAttempt({
+		rootStoreId: input.storeId,
+		taskId: input.diagnosis.taskId,
+		sessionId: input.sessionId,
+		status,
+		note
+	}).catch(() => void 0);
+}
+/** Every pending hand-off of one store, consumed in the order the diagnoses were written: every recorded diagnosis is one, suggestions or not. */
 async function consumePendingHandoffs(ctx, storeId, options = {}) {
 	const { log } = options;
 	let snapshot;
@@ -1390,7 +1551,7 @@ async function consumePendingHandoffs(ctx, storeId, options = {}) {
 			skipped
 		};
 	}
-	const pending = snapshot.diagnoses.filter((diagnosis) => diagnosis.proposals.length > 0);
+	const pending = [...snapshot.diagnoses];
 	if (pending.length === 0) return {
 		storeId,
 		consumptions: []
@@ -1405,31 +1566,14 @@ async function consumePendingHandoffs(ctx, storeId, options = {}) {
 			consumptions: pending.map((diagnosis) => ({
 				diagnosisId: diagnosis.diagnosisId,
 				result: "stopped",
-				code: "evolution-off",
+				code: "no-delegator",
 				reason: skipped
 			}))
 		};
 	}
 	const consumptions = [];
 	for (const diagnosis of pending) {
-		const source = handoffSourceOf(diagnosis);
-		const review = snapshot.reviews.find((item) => item.taskId === source.taskId && (item.runId ?? null) === source.runId);
-		let consumption;
-		try {
-			consumption = await startSupervisorHandoff(ctx, {
-				storeId,
-				diagnosis,
-				delegator,
-				sourceRef: handoffSourceRef(source),
-				sourceOutcome: review?.outcome ?? "no review record"
-			});
-		} catch (error) {
-			consumption = {
-				diagnosisId: diagnosis.diagnosisId,
-				result: "failed",
-				reason: error instanceof Error ? error.message : String(error)
-			};
-		}
+		const consumption = await consumeWithFacts(ctx, snapshot, storeId, diagnosis, delegator);
 		consumptions.push(consumption);
 		log?.(`evolution hand-off: ${renderConsumption(consumption)}`);
 	}
@@ -1437,6 +1581,28 @@ async function consumePendingHandoffs(ctx, storeId, options = {}) {
 		storeId,
 		consumptions
 	};
+}
+/** One diagnosis consumed with the facts the caller already read — the shared path of both scan entries. */
+async function consumeWithFacts(ctx, snapshot, storeId, diagnosis, delegator) {
+	const source = handoffSourceOf(diagnosis);
+	const review = snapshot.reviews.find((item) => item.taskId === source.taskId && (item.runId ?? null) === source.runId);
+	try {
+		return await startSupervisorHandoff(ctx, {
+			storeId,
+			diagnosis,
+			delegator,
+			sourceRef: handoffSourceRef(source),
+			sourceOutcome: review?.outcome ?? "no review record",
+			rounds: roundsForDiagnosis(snapshot, diagnosis),
+			...review === void 0 ? {} : { reviewFacts: renderSupervisorReviewFacts(review) }
+		});
+	} catch (error) {
+		return {
+			diagnosisId: diagnosis.diagnosisId,
+			result: "failed",
+			reason: error instanceof Error ? error.message : String(error)
+		};
+	}
 }
 /** Consume one store's hand-off for one diagnosis, if it is pending — the moment the reviewer that recorded it is the caller (the record just became durable, and no event exists for a store's diagnosis). */
 async function consumeHandoffDiagnosis(ctx, storeId, diagnosisId, options = {}) {
@@ -1457,15 +1623,7 @@ async function consumeHandoffDiagnosis(ctx, storeId, diagnosisId, options = {}) 
 		options.log?.(`evolution hand-off: ${diagnosisId} pending — the graph's root session is not live, so no supervisor was started`);
 		return;
 	}
-	const source = handoffSourceOf(diagnosis);
-	const review = snapshot.reviews.find((item) => item.taskId === source.taskId && (item.runId ?? null) === source.runId);
-	const consumption = await startSupervisorHandoff(ctx, {
-		storeId,
-		diagnosis,
-		delegator,
-		sourceRef: handoffSourceRef(source),
-		sourceOutcome: review?.outcome ?? "no review record"
-	});
+	const consumption = await consumeWithFacts(ctx, snapshot, storeId, diagnosis, delegator);
 	options.log?.(`evolution hand-off: ${renderConsumption(consumption)}`);
 	return consumption;
 }
@@ -1479,7 +1637,7 @@ function renderConsumption(consumption) {
 		case "failed": return `diagnosis ${consumption.diagnosisId} — the supervisor could not be started: ${consumption.reason}`;
 	}
 }
-/** Install the hand-off trigger of this deployment: a graph that is explicitly activated scans its store for pending hand-offs — what a process that booted over a store with a pending hand-off does, and. */
+/** Install the hand-off trigger of this deployment: a graph that is explicitly activated scans its store for pending hand-offs — what a process that booted over a store with a pending hand-off does. */
 function installSupervisorHandoffTrigger(ctx, options = {}) {
 	const log = options.log ?? warnLine(ctx);
 	return installGraphSelectedScan(ctx, {
@@ -1587,16 +1745,16 @@ function renderReview(review) {
 	if (review.logTail !== void 0) lines.push("  logTail:", ...review.logTail.split("\n").map((line) => `    ${line}`));
 	return lines;
 }
-/** How far one diagnosis's suggestions have been taken up (A5 §3, plan F.4): */
-function handoffMark(diagnosis, handoff) {
+/** How far one diagnosis's hand-off has gone (A5 §3, plan F.4): what the ledger, the allowance and the source's rounds answer for it. */
+function handoffMark(diagnosis, handoff, snapshot) {
 	return handoffStateLine({
-		enabled: handoff.enabled,
 		diagnosis,
 		attempts: handoff.attempts,
-		budget: handoff.budget
+		budget: handoff.budget,
+		rounds: roundsForDiagnosis(snapshot, diagnosis)
 	});
 }
-function renderDiagnosis(diagnosis, handoff) {
+function renderDiagnosis(diagnosis, handoff, snapshot) {
 	const producer = diagnosis.producedBy === void 0 ? "" : diagnosis.producedBy.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? ` [agent ${diagnosis.producedBy.sessionId}]` : ` [${diagnosis.producedBy.kind}]`;
 	const lines = [`- ${diagnosis.diagnosisId} [${diagnosis.confidence}] ${diagnosis.localizedCause}${producer}`];
 	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) {
@@ -1605,8 +1763,7 @@ function renderDiagnosis(diagnosis, handoff) {
 		for (const judgement of diagnosis.judgements) lines.push(`    ${judgement.dimension}: ${judgement.verdict} — ${judgement.rationale} refs [${judgement.evidenceRefs.join(", ")}]`);
 	}
 	for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
-	const handoffText = handoffMark(diagnosis, handoff);
-	if (handoffText !== void 0) lines.push(`  handoff: ${handoffText}`);
+	lines.push(`  handoff: ${handoffMark(diagnosis, handoff, snapshot)}`);
 	return lines;
 }
 /** What each of the task's runs was bound to and loaded (S1-C item 4): */
@@ -1653,13 +1810,13 @@ function buildReviewPack(input) {
 		lines.push(`- ${child.taskId} [${child.status}]: ${reviewSummary(snapshot, child.taskId)}`);
 	}
 	lines.push(`diagnoses (${diagnoses.length}):`);
-	for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis, handoff));
+	for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis, handoff, snapshot));
 	return lines.join("\n");
 }
 function defineTaskReviewPackTool(ctx) {
 	return defineTool({
 		name: "task_review_pack",
-		description: "Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started). The pack names the task itself, all its review records in full (criteria, log tail, blockers, the session each review came from), the review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the fact table does not carry, one-line review summaries of its children and parent, the dependency edges touching it, and its diagnoses with any agent judgements — each diagnosis that carries suggestions marked with its hand-off state (the supervisor it was delegated to, the coordinator being started, or the named reason nothing was opened: the chain off, an unsupported target, or the allowance spent). It reports the facts only: whether a review agent runs is decided elsewhere (a failed review is accepted on its own; an explicit call names its source). Local evidence plus parent/children summaries — no ancestry replay (guide §2.7.5). Feed this to task_diagnose, or to task_review_agent when a judgement is needed.",
+		description: "Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started). The pack names the task itself, all its review records in full (criteria, log tail, blockers, the session each review came from), the review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the fact table does not carry, one-line review summaries of its children and parent, the dependency edges touching it, and its diagnoses with any agent judgements — every diagnosis marked with its hand-off state (the supervisor it was delegated to, the outcome that settled it, or the named reason nothing was opened: no live root session, the source's round cap, or the allowance spent). It reports the facts only: whether a review agent runs is decided elsewhere (a terminal review is accepted on its own under the deployment's autoReview mode; an explicit call names its source). Local evidence plus parent/children summaries — no ancestry replay (guide §2.7.5). Feed this to task_diagnose, or to task_review_agent when a judgement is needed.",
 		parameters: {
 			taskId: {
 				type: "string",
@@ -1691,7 +1848,7 @@ function defineTaskReviewPackTool(ctx) {
 				snapshot,
 				source,
 				attempts,
-				handoff: await handoffFactsOf(ctx, storeId, attempts)
+				handoff: await handoffFactsOf(storeId, attempts)
 			});
 		}
 	});
@@ -1832,12 +1989,6 @@ function parseReviewerDiagnosis(reply) {
 function renderJudgements(judgements) {
 	return judgements.map((item) => `  ${item.dimension}: ${item.verdict} — ${item.rationale} refs [${item.evidenceRefs.join(", ")}]`);
 }
-function lastAssistantText(events) {
-	const event = [...events].reverse().find((item) => item.type === "assistant/message");
-	if (event === void 0) return void 0;
-	const content = ((event.data?.message)?.content ?? []).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
-	return content.length === 0 ? void 0 : content;
-}
 /** The diagnosis one attempt recorded, as the store holds it (the id is the attempt's session). */
 function recordedDiagnosis(snapshot, sessionId$1) {
 	return snapshot.diagnoses.find((diagnosis) => diagnosis.diagnosisId === `review-agent-${sessionId$1}`);
@@ -1854,8 +2005,8 @@ async function runReviewAgentAttempt(input) {
 		sessionId: reviewerSessionId
 	};
 	const outcome = await admitReviewAgent(storeId, async (admission) => {
-		const current = await ctx.task.snapshotIn(storeId);
-		const { plan, recovered } = await admission.plan(request, { recorded: (attempt) => recordedDiagnosis(current, attempt.sessionId) !== void 0 });
+		const current$1 = await ctx.task.snapshotIn(storeId);
+		const { plan, recovered } = await admission.plan(request, { recorded: (attempt) => recordedDiagnosis(current$1, attempt.sessionId) !== void 0 });
 		if (plan.kind === "refused") return {
 			kind: "refused",
 			plan,
@@ -1889,15 +2040,16 @@ async function runReviewAgentAttempt(input) {
 			prompt: async () => {
 				const attempts = await readReviewAgentAttempts(storeId);
 				const pack = buildReviewPack({
-					snapshot: current,
+					snapshot: current$1,
 					source,
 					attempts,
-					handoff: await handoffFactsOf(ctx, storeId, attempts)
+					handoff: await handoffFactsOf(storeId, attempts)
 				});
 				return [
 					"You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.",
 					"Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and context_read reach the sibling tasks, their sessions and their evidence. Cite what you rest on.",
 					"Do not score, and do not modify anything.",
+					...review.outcome === "verified" ? ["The run passed its review; look for improvement opportunities — what could be better, and whether an improvement round is worth it."] : [],
 					"Return EXACTLY one fenced json block, no prose around it:",
 					"```json",
 					"{\"observation\":\"...\",\"conclusion\":\"...\",\"confidence\":\"high|medium|low\"}",
@@ -1999,7 +2151,7 @@ async function runReviewAgentAttempt(input) {
 			};
 		}
 		await settleAttempt("recorded");
-		if (diagnosis.proposals.length > 0) consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error) => {
+		consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error) => {
 			logOf(ctx, "singularity-agent")?.warn(`evolution hand-off: ${diagnosis.diagnosisId} could not be consumed (${message(error)})`);
 		});
 		return {
@@ -2026,9 +2178,10 @@ async function runReviewAgentAttempt(input) {
 
 //#endregion
 //#region src/coordination/review-scan.ts
-/** Every source of the store whose review settled `failed`, in the order the records were written — the exact source a review agent exists for, derived from the record's own run (`null` for a review that. */
-function failedSourcesOf(snapshot) {
-	return snapshot.reviews.filter((review) => review.outcome === "failed").map((review) => ({
+/** Every source of the store whose review this mode accepts, in the order the records were written — `all` takes failed and verified records, `failed` only failures, `off` none. */
+function acceptedSourcesOf(snapshot, mode) {
+	if (mode === "off") return [];
+	return snapshot.reviews.filter((review) => review.outcome === "failed" || mode === "all" && review.outcome === "verified").map((review) => ({
 		taskId: review.taskId,
 		runId: review.runId ?? null
 	}));
@@ -2049,8 +2202,8 @@ async function deliverDiagnosis(ctx, storeId, source, reviewerSessionId, log) {
 			targetSessionId = parent.sessionId;
 		}
 		const text$1 = [
-			`Review diagnosis ${diagnosis.diagnosisId} for failed source ${sourceRef(source)} [${diagnosis.confidence}].`,
-			`Observed failure: ${diagnosis.observedFailure}`,
+			`Review diagnosis ${diagnosis.diagnosisId} for review source ${sourceRef(source)} [${diagnosis.confidence}].`,
+			`Observation: ${diagnosis.observedFailure}`,
 			`Conclusion / next action: ${diagnosis.localizedCause}`,
 			`Original review: ${diagnosis.reviewRefs.join(", ")}; evidence: ${diagnosis.evidenceRefs.join(", ") || "none recorded"}.`,
 			"Read your current task/run state before acting. A diagnosis changes no task state or authority; it grants no task_recover or evolution tool."
@@ -2069,14 +2222,16 @@ async function deliverDiagnosis(ctx, storeId, source, reviewerSessionId, log) {
 		return reason;
 	}
 }
-/** Scan one root task store for failed review sources and accept each under the store's allowance (see the module header for the order). */
+/** Scan one root task store for the reviews its `autoReview` mode accepts and admit each under the store's allowance (see the module header for the order). */
 async function scanFailedReviewSources(ctx, storeId, options = {}) {
 	const { log } = options;
+	const mode = options.autoReview ?? supervisionSettings().autoReview;
 	const entries = [];
 	const report = () => ({
 		storeId,
 		entries
 	});
+	if (mode === "off") return report();
 	let snapshot;
 	try {
 		snapshot = await ctx.task.snapshotIn(storeId);
@@ -2084,8 +2239,8 @@ async function scanFailedReviewSources(ctx, storeId, options = {}) {
 		log?.(`review agent: store ${storeId} could not be read (${error instanceof Error ? error.message : String(error)}); nothing was scanned`);
 		return report();
 	}
-	const failed = failedSourcesOf(snapshot);
-	const targets = options.source === void 0 ? failed : failed.filter((source) => sameSource(source, options.source));
+	const accepted = acceptedSourcesOf(snapshot, mode);
+	const targets = options.source === void 0 ? accepted : accepted.filter((source) => sameSource(source, options.source));
 	if (targets.length === 0) return report();
 	const root = liveRootAgentOf(ctx, storeId);
 	const attempts = await readReviewAgentAttempts(storeId);
@@ -2202,6 +2357,7 @@ async function scanFailedReviewSources(ctx, storeId, options = {}) {
 function refusalReason(code, budget) {
 	if (code === "budget-exhausted") return `budget exhausted: the store's review allowance is spent (${budget.used}/${budget.max})`;
 	if (code === "request-key-required") return "the source was already reviewed and this scan names no key";
+	if (code === "iteration-cap") return "the source's rounds are spent; the cap ends the iteration";
 	return "the source already has an attempt with a different focus";
 }
 /** How the recovery one decision performed reads in the scan's own words — the dead attempt the ledger settled on this call — or nothing when this decision recovered none. */
@@ -2212,11 +2368,12 @@ function recoveryReason(recovered) {
 	const note = attempt.settlement?.note === void 0 ? "" : `: ${attempt.settlement.note}`;
 	return `the attempt found open with no process running it (session ${attempt.sessionId}) was recorded ${status}${note}`;
 }
-/** Install the two triggers of the automatic scan on this deployment's context: */
+/** Install the two triggers of the automatic scan on this deployment's context: one terminal review at a time, and one whole graph activation — each honouring the deployment's `supervision.autoReview`. */
 function installReviewAgentAutoTrigger(ctx, options = {}) {
 	const log = options.log ?? warnLine(ctx);
 	const disposers = [ctx.taskRuntime.registerTerminalReviewListener((fact) => {
-		if (fact.outcome !== "failed") return;
+		const mode = supervisionSettings().autoReview;
+		if (!(mode !== "off" && (fact.outcome === "failed" || mode === "all" && fact.outcome === "verified"))) return;
 		backgroundScan(log, "review agent", () => scanFailedReviewSources(ctx, fact.storeId, {
 			source: {
 				taskId: fact.taskId,
@@ -2297,7 +2454,7 @@ function defineAskTool(ctx) {
 //#endregion
 //#region src/tools/budget-extend.ts
 /** The whole argument surface: the request key and the approved run total. */
-const DECLARED_PARAMETERS$1 = ["requestKey", "maxRuns"];
+const DECLARED_PARAMETERS$2 = ["requestKey", "maxRuns"];
 /** The run ceiling in force, or the words that say there is none. An absent ceiling is not zero and not infinity: this deployment sets no limit there, and a card that printed a number would be inventing one. */
 function inForce(value) {
 	return value === void 0 ? "none" : String(value);
@@ -2345,7 +2502,7 @@ function defineTaskBudgetExtendTool(ctx) {
 			render: (_a, v) => text(v)
 		},
 		execute: async (args, exec) => {
-			const undeclared = undeclaredParameters(args, DECLARED_PARAMETERS$1, "task_budget_extend");
+			const undeclared = undeclaredParameters(args, DECLARED_PARAMETERS$2, "task_budget_extend");
 			if (undeclared !== void 0) return undeclared;
 			const caller = sessionId(exec, "task_budget_extend");
 			let result;
@@ -4530,6 +4687,11 @@ function defineTaskReadTool(ctx) {
 
 //#endregion
 //#region src/tools/task-recover.ts
+const DECLARED_PARAMETERS$1 = [
+	"sourceDiagnosisId",
+	"requestKey",
+	"mode"
+];
 /** What one answer says: the attempt, the run it opened or already had, and what the coordination checked. */
 function renderOutcome$1(outcome) {
 	return [
@@ -4544,7 +4706,7 @@ function renderOutcome$1(outcome) {
 function defineTaskRecoverTool(ctx) {
 	return defineTool({
 		name: "task_recover",
-		description: "Open a new attempt at a failed root goal (a new root Run/Session in the same store), for ONE recorded Diagnosis of that same store. Available to the trusted supervisor coordination session a hand-off was delegated to and to no one else: the caller is read from the live session and checked against the delegation the deployment recorded, so a root, a worker, a reviewer or another graph's supervisor cannot use it, and no authorization is ever passed as an argument. Every rule is re-checked below this tool: the evolution plane verifies that a capability change this diagnosis stands on is approved and applied (an unapproved, undecided or rolled-back capability means nothing is opened), and the task runtime re-reads the store's own facts — the failed source, the original contract and criteria, the providers the attempt needs now, the ceilings in force and the attempt's own idempotency — before it writes. A successful source is never recovered (a \"faster or cheaper\" suggestion has no frozen comparator in this build), an in-flight run is never hot-swapped, and a second key while an attempt of the same diagnosis is in flight is refused by name. Repeating the same call returns the attempt that key already names instead of starting another; a pure artifact gap needs no proposal and no approval.",
+		description: "Open a new attempt at a root goal (a new root Run/Session in the same store), for ONE recorded Diagnosis of that same store. Available to the trusted supervisor coordination session a hand-off was delegated to and to no one else: the caller is read from the live session and checked against the delegation the deployment recorded, so a root, a worker, a reviewer or another graph's supervisor cannot use it, and no authorization is ever passed as an argument. mode selects the round: the default \"recovery\" opens the failed source's new attempt; a verified source accepts only \"improve\", one improvement round judged by the same original acceptance criteria. Every rule is re-checked below this tool: the source's recovery/improvement cap and the store's facts are re-read, the evolution plane verifies that a capability change this diagnosis stands on is approved and applied (an unapproved, undecided or rolled-back capability means nothing is opened), and the task runtime re-reads the store's own facts — the failed source, the original contract and criteria, the providers the attempt needs now, the ceilings in force and the attempt's own idempotency — before it writes. An in-flight run is never hot-swapped, and a second key while an attempt of the same diagnosis is in flight is refused by name. Repeating the same call returns the attempt that key already names instead of starting another; a pure artifact gap needs no proposal and no approval.",
 		parameters: {
 			sourceDiagnosisId: {
 				type: "string",
@@ -4555,6 +4717,10 @@ function defineTaskRecoverTool(ctx) {
 				type: "string",
 				required: true,
 				description: "Non-empty key of this attempt: one key names one attempt, and a repeat of it returns that attempt"
+			},
+			mode: {
+				type: "string",
+				description: "The round to open: \"recovery\" (default) for a failed source, \"improve\" for a verified source"
 			}
 		},
 		output: {
@@ -4562,12 +4728,20 @@ function defineTaskRecoverTool(ctx) {
 			render: (_a, v) => text(v)
 		},
 		execute: async (args, exec) => {
+			const undeclared = undeclaredParameters(args, DECLARED_PARAMETERS$1, "task_recover");
+			if (undeclared !== void 0) return undeclared;
+			const mode = args.mode ?? "recovery";
+			if (mode !== "recovery" && mode !== "improve") return `task_recover rejected: mode ${JSON.stringify(args.mode)} is not "recovery" or "improve"; nothing was read and nothing was started`;
 			const caller = sessionId(exec, "task_recover");
 			try {
-				return renderOutcome$1(await ctx.evolution.coordinateRecovery({
+				const refusal = mode === "recovery" ? await verifiedSourceRefusal(ctx, caller, args.sourceDiagnosisId) : void 0;
+				if (refusal !== void 0) return refusal;
+				const request = {
 					sourceDiagnosisId: args.sourceDiagnosisId,
-					requestKey: args.requestKey
-				}, {
+					requestKey: args.requestKey,
+					...mode === "improve" ? { mode: "improve" } : {}
+				};
+				return renderOutcome$1(await ctx.evolution.coordinateRecovery(request, {
 					sessionId: caller,
 					signal: exec.signal
 				}));
@@ -4576,6 +4750,20 @@ function defineTaskRecoverTool(ctx) {
 			}
 		}
 	});
+}
+/** The named refusal a recovery of a verified source gets, telling the caller to ask again with mode "improve"; `undefined` when the source is not verified (the plane decides everything else). */
+async function verifiedSourceRefusal(ctx, caller, diagnosisId) {
+	const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(caller)).rootSessionId);
+	const snapshot = await ctx.task.openStore(storeId);
+	const diagnosis = snapshot.diagnoses.find((item) => item.diagnosisId === diagnosisId);
+	if (diagnosis === void 0) return void 0;
+	const source = handoffSourceOf(diagnosis);
+	if (snapshot.reviews.find((item) => item.taskId === source.taskId && (item.runId ?? null) === source.runId)?.outcome !== "verified") return void 0;
+	return [
+		`task_recover rejected: review source ${source.taskId}#${source.runId ?? "no-run"} passed its review (verified), and a verified`,
+		"source is not recovered — it accepts one improvement round instead. Call task_recover again with mode: \"improve\" to open the",
+		"improvement attempt under the original acceptance criteria, or close the hand-off; nothing was read further and nothing was started."
+	].join(" ");
 }
 
 //#endregion
@@ -4647,7 +4835,7 @@ function renderOutcome(outcome, source, storeId, snapshot, review) {
 function defineTaskReviewAgentTool(ctx) {
 	return defineTool({
 		name: "task_review_agent",
-		description: "Spawn ONE read-only review agent for one exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started) — take the diagnosis it produces, and persist it as a Diagnosis. The reviewer reads the review pack and, beyond it, whatever settles the question through its own context reads. What it returns is an observation (the postmortem observation — what really happened, for a successful source as much as a failed one), a conclusion in its own words (\"no improvement needed\" and \"the evidence does not settle this\" are conclusions), a confidence, and — only when it made them — judgements and proposals. A judgement names one of the dimensions no parser settles (task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency) with verdict adequate|inadequate|unknown, the refs it rests on and a rationale; judgements are optional and never padded, and a judgement that cites nothing is refused rather than downgraded. A proposal is a suggestion only: it names a target type the diagnosis does not freeze, and nothing here executes it. reason names what the review should focus on. A reviewer that is cancelled or answers without a diagnosis leaves an interrupted attempt with the reason named and records no Diagnosis. One source has one default attempt: a repeat of the same call (an automatic scan and an explicit call share it) returns that attempt and its result instead of starting another, and never spends the budget again. Reviewing the same source again after that attempt ended is an explicit act: pass a new non-empty requestKey, which is persisted with the source and the focus; the same key with a different reason is refused. While an attempt of the source is in flight the call returns its identity and starts nothing. The reviewer has no write, shell, spawn, or evolution tool and is capped per root store (default 1).",
+		description: "Spawn ONE read-only review agent for one exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started) — take the diagnosis it produces, and persist it as a Diagnosis. The reviewer reads the review pack and, beyond it, whatever settles the question through its own context reads. What it returns is an observation (the postmortem observation — what really happened, for a successful source as much as a failed one), a conclusion in its own words (\"no improvement needed\" and \"the evidence does not settle this\" are conclusions), a confidence, and — only when it made them — judgements and proposals. A judgement names one of the dimensions no parser settles (task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency) with verdict adequate|inadequate|unknown, the refs it rests on and a rationale; judgements are optional and never padded, and a judgement that cites nothing is refused rather than downgraded. A proposal is a suggestion only: it names a target type the diagnosis does not freeze, and nothing here executes it. reason names what the review should focus on. A reviewer that is cancelled or answers without a diagnosis leaves an interrupted attempt with the reason named and records no Diagnosis. One source has one default attempt: a repeat of the same call (an automatic scan and an explicit call share it) returns that attempt and its result instead of starting another, and never spends the budget again. Reviewing the same source again after that attempt ended is an explicit act: pass a new non-empty requestKey, which is persisted with the source and the focus; the same key with a different reason is refused. While an attempt of the source is in flight the call returns its identity and starts nothing. The reviewer has no write, shell, spawn, or evolution tool and is capped per root store (default 8).",
 		parameters: {
 			taskId: {
 				type: "string",
@@ -4820,7 +5008,20 @@ function defineTaskVerifyTool(ctx) {
 //#region src/index.ts
 /** The shipped switch position: `off`. */
 const DEFAULT_EVOLUTION = "off";
-const ConfigSchema = z.object({ evolution: z.union([z.const("off"), z.const("on")]).default(DEFAULT_EVOLUTION) });
+const Supervision = z.object({
+	autoReview: z.union([
+		z.const("all"),
+		z.const("failed"),
+		z.const("off")
+	]).default(DEFAULT_SUPERVISION.autoReview),
+	maxRecoveryRounds: z.number().default(DEFAULT_SUPERVISION.maxRecoveryRounds),
+	maxImprovementRounds: z.number().default(DEFAULT_SUPERVISION.maxImprovementRounds),
+	coordinationBudget: z.number().default(DEFAULT_SUPERVISION.coordinationBudget)
+});
+const ConfigSchema = z.object({
+	evolution: z.union([z.const("off"), z.const("on")]).default(DEFAULT_EVOLUTION),
+	supervision: Supervision.default({ ...DEFAULT_SUPERVISION })
+});
 /** The evolution exposure this composition resolved, provided on the agent's own fiber as `ctx.singularityEvolution`. */
 var EvolutionExposure = class extends Service {
 	/** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
@@ -4828,6 +5029,20 @@ var EvolutionExposure = class extends Service {
 	constructor(ctx, enabled) {
 		super(ctx, "singularityEvolution");
 		this.enabled = enabled;
+	}
+};
+/** The supervision policy this composition resolved, provided on the agent's own fiber as `ctx.singularitySupervision` — what the task runtime's per-source round caps read. */
+var SupervisionExposure = class extends Service {
+	autoReview;
+	maxRecoveryRounds;
+	maxImprovementRounds;
+	coordinationBudget;
+	constructor(ctx, policy) {
+		super(ctx, "singularitySupervision");
+		this.autoReview = policy.autoReview;
+		this.maxRecoveryRounds = policy.maxRecoveryRounds;
+		this.maxImprovementRounds = policy.maxImprovementRounds;
+		this.coordinationBudget = policy.coordinationBudget;
 	}
 };
 /** The harness repo root this composition passes to the evolution ledger: the base of its `$DSH_HOME` fallback (`<repoRoot>/.dsh`), of the production `config.yml` default, and of relative evidence refs. */
@@ -4853,6 +5068,7 @@ var SingularityAgent = class extends Service {
 	constructor(ctx, config) {
 		super(ctx, "singularityAgent");
 		this.assertClosedConfig(config);
+		const supervision = configureSupervision(config?.supervision);
 		const evolution = config?.evolution ?? DEFAULT_EVOLUTION;
 		ctx.plugin(HitlService);
 		this.evolution = new EvolutionService(ctx, {
@@ -4864,6 +5080,7 @@ var SingularityAgent = class extends Service {
 		new EscalationService(ctx);
 		new ProposalReviewService(ctx);
 		new EvolutionExposure(ctx, evolution === "on");
+		new SupervisionExposure(ctx, supervision);
 		ctx.effect(() => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()), "singularityAgent: reviewer binding source");
 		ctx.effect(() => installReviewAgentAutoTrigger(ctx), "singularityAgent: review agent auto trigger");
 		ctx.effect(() => installSupervisorHandoffTrigger(ctx), "singularityAgent: supervisor hand-off trigger");
@@ -4920,10 +5137,20 @@ var SingularityAgent = class extends Service {
 	/** Refuse a configuration member this plugin does not read. The schema keeps unknown keys on the object it validates, so this is where a caller's typo is caught: */
 	assertClosedConfig(config) {
 		if (config === void 0) return;
-		const known = new Set(["evolution"]);
+		const known = new Set(["evolution", "supervision"]);
 		const unknown = Object.keys(config).filter((key) => !known.has(key));
-		if (unknown.length === 0) return;
-		throw new Error(`singularity-agent: the configuration names [${unknown.join(", ")}], which this plugin does not read; a member nobody reads refuses to start rather than being silently ignored`);
+		if (unknown.length > 0) throw new Error(`singularity-agent: the configuration names [${unknown.join(", ")}], which this plugin does not read; a member nobody reads refuses to start rather than being silently ignored`);
+		const supervision = config.supervision;
+		if (supervision === void 0) return;
+		const knownSupervision = new Set([
+			"autoReview",
+			"maxRecoveryRounds",
+			"maxImprovementRounds",
+			"coordinationBudget"
+		]);
+		const unknownSupervision = Object.keys(supervision).filter((key) => !knownSupervision.has(key));
+		if (unknownSupervision.length === 0) return;
+		throw new Error(`singularity-agent: the supervision configuration names [${unknownSupervision.join(", ")}], which this plugin does not read; a member nobody reads refuses to start rather than being silently ignored`);
 	}
 	/** Report a fact nobody should read as a startup failure — the same soft logger the task runtime uses, so a deployment that mounts no logger still gets the line rather than an exception about it. */
 	warn(message$1) {
@@ -4933,4 +5160,4 @@ var SingularityAgent = class extends Service {
 var src_default = SingularityAgent;
 
 //#endregion
-export { DEFAULT_EVOLUTION, EscalationService, HitlService, ProposalReviewService, SingularityAgent, src_default as default, deploymentModelSelection };
+export { DEFAULT_EVOLUTION, DEFAULT_SUPERVISION, EscalationService, HitlService, ProposalReviewService, SingularityAgent, src_default as default, deploymentModelSelection };

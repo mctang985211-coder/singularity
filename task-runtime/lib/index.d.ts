@@ -1367,18 +1367,29 @@ interface RootRecoveryReuse {
   /** Input references the citation names, from the sibling's own declared input vocabulary. */
   inputRefs?: readonly string[];
 }
+/** Which round a request asks for: `recovery` (the default) re-runs a failed source, `improve` re-runs a verified one. */
+type RecoveryMode = 'recovery' | 'improve';
+/** The stored kind one mode writes into {@link RunRecovery.kind}. */
+declare function recoveryKindOf(mode: RecoveryMode | undefined): 'recovery' | 'improvement';
+/** The mode one stored kind was asked under; a record written before the field existed reads as a recovery. */
+declare function recoveryModeOf(kind: 'recovery' | 'improvement' | undefined): RecoveryMode;
 /**
  * One recovery request, as the host composition layer hands it to the runtime
  * (plan §F.4: the tool and evolution's coordinator call this entry, and each
  */
 interface RootRecoveryRequest {
   sourceTaskId: TaskId;
-  /** The failed run of the source task, or `null` when the failure had no run. */
+  /** The source run of the attempt, or `null` when the source had none; a failed run for `recovery`, a verified one for `improve`. */
   sourceRunId: RunId | null;
   /** The diagnosis this recovery is asked for; it must be a record of this store naming this task. */
   sourceDiagnosisId: string;
   /** The caller's request key: one key names one attempt of one diagnosis. */
   requestKey: string;
+  /**
+   * Which round this is. Absent or `recovery` is the failed-source path; `improve` asks for an improvement round of a
+   * verified source, judged by the same original criteria. The two spend separate per-source caps.
+   */
+  mode?: RecoveryMode;
   /** The verified siblings the new attempt reads at its leading positions, in position order. */
   reuses?: readonly RootRecoveryReuse[];
 }
@@ -1389,6 +1400,26 @@ declare function recoveryAttemptWithKey(snapshot: TaskSnapshot, sourceTaskId: Ta
  * `undefined` — the mutual exclusion one diagnosis's recovery has (plan §F.4:
  */
 declare function inFlightRecoveryAttempt(snapshot: TaskSnapshot, sourceTaskId: TaskId, sourceDiagnosisId: string): TaskRun | undefined;
+/**
+ * The source run one attempt reads, or `undefined` when the failure had none: a
+ * `recovery` names a run that settled `failed`, an `improve` a verified one — and
+ * an `improve` that names none reads the task's newest verified run.
+ */
+declare function recoverySourceRun(source: TaskInstance, request: RootRecoveryRequest, snapshot: TaskSnapshot, kind: 'recovery' | 'improvement'): TaskRun | undefined;
+/** The rounds one source task has spent, counted from the runs its own `runIds` hold: the two kinds spend separate caps. */
+interface RecoveryRounds {
+  /** Runs of the task that are recovery attempts of a failed source. */
+  readonly recovery: number;
+  /** Runs of the task that are improvement attempts of a verified one. */
+  readonly improvement: number;
+}
+/** Count one source task's attempt runs by kind; a row written before `kind` existed is a recovery. */
+declare function recoveryRoundsOf(snapshot: TaskSnapshot, sourceTaskId: TaskId): RecoveryRounds;
+/** The coded refusal one exhausted per-source cap answers with (A7 §3): the caller's next move is to stop, not to retry. */
+declare class IterationCapRefusal extends Error {
+  readonly code = "iteration-cap";
+  constructor(message: string);
+}
 //#endregion
 //#region src/types.d.ts
 interface CriterionSpec {
@@ -1838,7 +1869,26 @@ interface RootRecoveryOutcome {
 }
 //#endregion
 //#region src/config.d.ts
+/**
+ * The review/supervision policy of this deployment, as `singularity-agent` declares it: the two round caps here are what
+ * the recovery entry enforces per source task, counted separately for failed and verified sources.
+ */
+interface SupervisionConfig {
+  /** `all` accepts every terminal review, `failed` only failures, `off` none — read by the review trigger, not here. */
+  autoReview: 'all' | 'failed' | 'off';
+  /** Recovery attempts one failed source accepts; the next request is refused with the coded `iteration-cap`. */
+  maxRecoveryRounds: number;
+  /** Improvement attempts one verified source accepts; the next request is refused with the coded `iteration-cap`. */
+  maxImprovementRounds: number;
+  /** Review-agent runs one root store may start — read by the coordination ledger, not here. */
+  coordinationBudget: number;
+}
 interface Config {
+  /**
+   * The supervision policy in force: declared by `singularity-agent`, read here for the two per-source round caps. A
+   * deployment may state it on this plugin's config, or expose it as the `singularitySupervision` service.
+   */
+  supervision?: SupervisionConfig;
   /**
    * Capability registry: name → skills/tool labels/agent preset/permission
    * preset granted when a task requires it. The core ships no table of its
@@ -1896,6 +1946,8 @@ declare const DEFAULT_BUDGET: Readonly<BudgetConfig>;
 declare const DEFAULT_MAX_DEPTH = 4;
 declare const DEFAULT_MAX_CHILDREN = 8;
 declare const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true;
+/** The shipped supervision policy (A7 §1): every terminal review diagnosed, three recovery rounds, two improvement rounds, eight coordination runs. */
+declare const DEFAULT_SUPERVISION: Readonly<SupervisionConfig>;
 interface RunBinding {
   storeId: string;
   taskId: TaskId;
@@ -2245,6 +2297,12 @@ declare function loadObligationTemplates(repoRoot: string): Promise<ObligationTe
  */
 declare function checkObligationCoverage(templates: readonly ObligationTemplate[], snapshot: TaskSnapshot): ObligationCoverage;
 //#endregion
+//#region src/service/root-recovery.d.ts
+/** The round before one attempt as a notice for the new attempt's own session: criterion verdicts and effort facts, read from the store. */
+declare function priorRoundNotice(snapshot: TaskSnapshot, source: TaskInstance, sourceRun: TaskRun): string | undefined;
+/** The same notice for a run the store resumed: the attempt's own recovery record names the round before it. */
+declare function priorRoundNoticeForRun(snapshot: TaskSnapshot, run: TaskRun): string | undefined;
+//#endregion
 //#region src/verified-read.d.ts
 /**
  * Reading files without following a link: the one implementation of "a path
@@ -2319,4 +2377,4 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 //#endregion
-export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, driveBatch, escalationHint, executionProviders, findRepoRoot, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, normalizeDecomposition, openProposalOf, optionalService, owedBatchResults, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, driveBatch, escalationHint, executionProviders, findRepoRoot, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, normalizeDecomposition, openProposalOf, optionalService, owedBatchResults, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

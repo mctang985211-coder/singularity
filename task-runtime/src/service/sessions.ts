@@ -10,6 +10,7 @@ import type { DrainResult, JobsView } from '../gate.ts'
 import type { AdoptedWorkerResume, AdoptedWorkerResumeRequest } from '../orchestration/types.ts'
 import { pendingCoordinationOf } from '../question.ts'
 import { appendNotice } from './notify.ts'
+import { priorRoundNoticeForRun } from './root-recovery.ts'
 import { WorkspaceBusyError, describeOwner, normalizeWorkspacePath } from '../workspace.ts'
 import { drainSession } from '../gate.ts'
 import type { WorkspaceOwner } from '../workspace.ts'
@@ -66,8 +67,10 @@ export async function resumeAdoptedWorkerSession(
   const coordinationPending =
     request.run.executionPhase === 'waiting_children' && pendingCoordinationOf(snapshot, request.run.runId).length > 0
   if (!continuing && (request.run.executionPhase === 'active' || coordinationPending)) {
+    const prior = priorRoundNoticeForRun(snapshot, request.run)
     const notice =
-      'task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.'
+      'task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.' +
+      (prior === undefined ? '' : `\n${prior}`)
     if (blockedOnOwnQuestion) appendNotice(self, sessionId, notice)
     else self.notifyWhenReady(sessionId, notice)
   }

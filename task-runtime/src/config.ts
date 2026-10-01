@@ -70,7 +70,27 @@ export interface SessionLogReader {
   }>
 }
 
+/**
+ * The review/supervision policy of this deployment, as `singularity-agent` declares it: the two round caps here are what
+ * the recovery entry enforces per source task, counted separately for failed and verified sources.
+ */
+export interface SupervisionConfig {
+  /** `all` accepts every terminal review, `failed` only failures, `off` none — read by the review trigger, not here. */
+  autoReview: 'all' | 'failed' | 'off'
+  /** Recovery attempts one failed source accepts; the next request is refused with the coded `iteration-cap`. */
+  maxRecoveryRounds: number
+  /** Improvement attempts one verified source accepts; the next request is refused with the coded `iteration-cap`. */
+  maxImprovementRounds: number
+  /** Review-agent runs one root store may start — read by the coordination ledger, not here. */
+  coordinationBudget: number
+}
+
 export interface Config {
+  /**
+   * The supervision policy in force: declared by `singularity-agent`, read here for the two per-source round caps. A
+   * deployment may state it on this plugin's config, or expose it as the `singularitySupervision` service.
+   */
+  supervision?: SupervisionConfig
   /**
    * Capability registry: name → skills/tool labels/agent preset/permission
    * preset granted when a task requires it. The core ships no table of its
@@ -142,6 +162,14 @@ export const DEFAULT_MAX_CHILDREN = 8
 
 export const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true
 
+/** The shipped supervision policy (A7 §1): every terminal review diagnosed, three recovery rounds, two improvement rounds, eight coordination runs. */
+export const DEFAULT_SUPERVISION: Readonly<SupervisionConfig> = {
+  autoReview: 'all',
+  maxRecoveryRounds: 3,
+  maxImprovementRounds: 2,
+  coordinationBudget: 8,
+}
+
 const Capability: z<CapabilityConfig> = z.object({
   skills: z.array(z.string()),
   tools: z.array(z.string()),
@@ -153,6 +181,13 @@ const Capability: z<CapabilityConfig> = z.object({
 const RootBudget: z<RootBudgetConfig> = z.object({
   maxRuns: z.number(),
   maxConcurrentWrites: z.number(),
+})
+
+const Supervision: z<SupervisionConfig> = z.object({
+  autoReview: z.union([z.const('all'), z.const('failed'), z.const('off')]).default(DEFAULT_SUPERVISION.autoReview),
+  maxRecoveryRounds: z.number().default(DEFAULT_SUPERVISION.maxRecoveryRounds),
+  maxImprovementRounds: z.number().default(DEFAULT_SUPERVISION.maxImprovementRounds),
+  coordinationBudget: z.number().default(DEFAULT_SUPERVISION.coordinationBudget),
 })
 
 export const ConfigSchema: z<Config> = z.object({
@@ -170,6 +205,7 @@ export const ConfigSchema: z<Config> = z.object({
   ).default({ ...DEFAULT_BUDGET }),
   allowRuntimeDecomposition: z.boolean().default(DEFAULT_ALLOW_RUNTIME_DECOMPOSITION),
   generatedTaskReview: z.union([z.const('off'), z.const('all')]).default(DEFAULT_GENERATED_TASK_REVIEW),
+  supervision: Supervision.default({ ...DEFAULT_SUPERVISION }),
   rootBudget: RootBudget,
   writeDrainTimeoutMs: z.number().default(DEFAULT_WRITE_DRAIN_TIMEOUT_MS),
 })

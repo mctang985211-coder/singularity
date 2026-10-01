@@ -155,6 +155,7 @@ export class TaskRuntime extends Service {
     svcLifecycle.assertClosedRootBudget(rootBudget)
     assertRootBudgetConfig(rootBudget ?? {})
     svcLifecycle.assertGeneratedTaskReview(config?.generatedTaskReview)
+    svcLifecycle.assertSupervisionConfig(config?.supervision)
     this.config = {
       capabilities: structuredClone(config?.capabilities ?? {}),
       ...(config?.defaultPreset !== undefined ? { defaultPreset: config.defaultPreset } : {}),
@@ -164,6 +165,7 @@ export class TaskRuntime extends Service {
       budget: { ...DEFAULT_BUDGET, ...(config?.budget ?? {}) },
       allowRuntimeDecomposition: config?.allowRuntimeDecomposition ?? DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
       generatedTaskReview: config?.generatedTaskReview ?? DEFAULT_GENERATED_TASK_REVIEW,
+      ...(config?.supervision === undefined ? {} : { supervision: { ...config.supervision } }),
       runBindingRoot: config?.runBindingRoot ?? defaultRunBindingRoot(),
       ...(rootBudget === undefined ? {} : { rootBudget }),
       writeDrainTimeoutMs: config?.writeDrainTimeoutMs ?? DEFAULT_WRITE_DRAIN_TIMEOUT_MS,

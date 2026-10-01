@@ -184,7 +184,10 @@ export function start(
   if (run.recovery !== undefined) assertRunRecovery(snapshot, taskId, run.recovery)
   assertBirthPhase(run)
   if (run.parentRunId !== undefined) runIn(snapshot, run.parentRunId)
-  assertTransition(snapshot, taskId, ['admitted', 'ready'], 'running')
+  // An improvement round is the one attempt that starts from `verified` (A7 §3/§4).
+  const from: TaskStatus[] =
+    run.recovery?.kind === 'improvement' ? ['admitted', 'ready', 'verified'] : ['admitted', 'ready']
+  assertTransition(snapshot, taskId, from, 'running')
   snapshot = { ...snapshot, runs: [...snapshot.runs, copy(run)] }
   snapshot = updateTask(snapshot, taskId, {
     status: 'running',

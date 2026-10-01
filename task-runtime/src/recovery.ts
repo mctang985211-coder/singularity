@@ -10,6 +10,7 @@ import type {
   RunMemberReuse,
   RunMemberReuseRefusal,
   RunRecovery,
+  RunStatus,
   TaskId,
   TaskInstance,
   TaskRun,
@@ -39,24 +40,49 @@ export interface RootRecoveryReuse {
   inputRefs?: readonly string[]
 }
 
+/** Which round a request asks for: `recovery` (the default) re-runs a failed source, `improve` re-runs a verified one. */
+export type RecoveryMode = 'recovery' | 'improve'
+
+/** The stored kind one mode writes into {@link RunRecovery.kind}. */
+export function recoveryKindOf(mode: RecoveryMode | undefined): 'recovery' | 'improvement' {
+  return mode === 'improve' ? 'improvement' : 'recovery'
+}
+
+/** The mode one stored kind was asked under; a record written before the field existed reads as a recovery. */
+export function recoveryModeOf(kind: 'recovery' | 'improvement' | undefined): RecoveryMode {
+  return kind === 'improvement' ? 'improve' : 'recovery'
+}
+
 /**
  * One recovery request, as the host composition layer hands it to the runtime
  * (plan §F.4: the tool and evolution's coordinator call this entry, and each
  */
 export interface RootRecoveryRequest {
   sourceTaskId: TaskId
-  /** The failed run of the source task, or `null` when the failure had no run. */
+  /** The source run of the attempt, or `null` when the source had none; a failed run for `recovery`, a verified one for `improve`. */
   sourceRunId: RunId | null
   /** The diagnosis this recovery is asked for; it must be a record of this store naming this task. */
   sourceDiagnosisId: string
   /** The caller's request key: one key names one attempt of one diagnosis. */
   requestKey: string
+  /**
+   * Which round this is. Absent or `recovery` is the failed-source path; `improve` asks for an improvement round of a
+   * verified source, judged by the same original criteria. The two spend separate per-source caps.
+   */
+  mode?: RecoveryMode
   /** The verified siblings the new attempt reads at its leading positions, in position order. */
   reuses?: readonly RootRecoveryReuse[]
 }
 
 /** The fields one request may carry: anything else is refused by name rather than ignored. */
-const REQUEST_FIELDS: readonly string[] = ['sourceTaskId', 'sourceRunId', 'sourceDiagnosisId', 'requestKey', 'reuses']
+const REQUEST_FIELDS: readonly string[] = [
+  'sourceTaskId',
+  'sourceRunId',
+  'sourceDiagnosisId',
+  'requestKey',
+  'mode',
+  'reuses',
+]
 /** The fields one reuse declaration may carry. */
 const REUSE_FIELDS: readonly string[] = [
   'childIndex',
@@ -84,6 +110,9 @@ export function recoveryRequestDefects(request: unknown): string[] {
   }
   if (!nonBlank(request.sourceDiagnosisId)) defects.push('sourceDiagnosisId must be a non-empty diagnosis id')
   if (!nonBlank(request.requestKey)) defects.push('requestKey must be a non-empty string')
+  if (request.mode !== undefined && request.mode !== 'recovery' && request.mode !== 'improve') {
+    defects.push('mode must be "recovery" (the default) or "improve"')
+  }
   if (request.reuses !== undefined) {
     if (!Array.isArray(request.reuses)) defects.push('reuses must be an array of declarations')
     else {
@@ -155,11 +184,14 @@ export function inFlightRecoveryAttempt(
 
 /**
  * What makes two attempts under one key the *same* attempt: the content the key
- * is bound to — the source run it recovers and the reuse it declares. A retry
+ * is bound to — the kind of round, the source run it reads and the reuse it declares. A retry
  */
-export function recoveryAttemptDigest(recovery: Pick<RunRecovery, 'sourceRunId' | 'reusedMembers'>): string {
+export function recoveryAttemptDigest(
+  recovery: Pick<RunRecovery, 'sourceRunId' | 'reusedMembers'> & { readonly kind?: RunRecovery['kind'] },
+): string {
   return sha256Hex(
     canonicalize({
+      kind: recovery.kind ?? 'recovery',
       sourceRunId: recovery.sourceRunId ?? null,
       reusedMembers: recovery.reusedMembers.map(member => ({
         childIndex: member.childIndex,
@@ -174,9 +206,54 @@ export function recoveryAttemptDigest(recovery: Pick<RunRecovery, 'sourceRunId' 
   )
 }
 
+/**
+ * The source run one attempt reads, or `undefined` when the failure had none: a
+ * `recovery` names a run that settled `failed`, an `improve` a verified one — and
+ * an `improve` that names none reads the task's newest verified run.
+ */
+export function recoverySourceRun(
+  source: TaskInstance,
+  request: RootRecoveryRequest,
+  snapshot: TaskSnapshot,
+  kind: 'recovery' | 'improvement',
+): TaskRun | undefined {
+  const wanted: RunStatus = kind === 'improvement' ? 'verified' : 'failed'
+  const which = kind === 'improvement' ? 'a verified' : 'a *failed*'
+  if (request.sourceRunId !== null) {
+    const run = snapshot.runs.find(candidate => candidate.runId === request.sourceRunId)
+    if (run === undefined) {
+      throw new Error(
+        `task-runtime: store "${snapshot.id}" holds no run "${request.sourceRunId}"; the named source attempt does not exist`,
+      )
+    }
+    if (run.taskId !== source.taskId) {
+      throw new Error(
+        `task-runtime: run "${run.runId}" belongs to task "${run.taskId}", not to the named source "${source.taskId}"; nothing was written`,
+      )
+    }
+    if (run.status !== wanted) {
+      throw new Error(
+        `task-runtime: source run "${run.runId}" is ${run.status}; ${kind === 'improvement' ? 'an improvement round reads' : 'a recovery recovers'} ` +
+          `${which} attempt (its run settled \`${wanted}\`), and this run is not one`,
+      )
+    }
+    return run
+  }
+  const running = snapshot.runs.filter(run => run.taskId === source.taskId && run.status === 'running')
+  if (running.length > 0) {
+    throw new Error(
+      `task-runtime: the request names no source run, but task "${source.taskId}" holds a run in flight (${running.map(run => run.runId).join(', ')}); ` +
+        'a failure without a run is a task that never started, not one an attempt is running for',
+    )
+  }
+  if (kind !== 'improvement') return undefined
+  return [...snapshot.runs].reverse().find(run => run.taskId === source.taskId && run.status === 'verified')
+}
+
 /** The request's own content identity, derived from the same fields the stored attempt carries. */
 export function requestAttemptDigest(request: RootRecoveryRequest): string {
   return recoveryAttemptDigest({
+    kind: recoveryKindOf(request.mode),
     ...(request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId }),
     reusedMembers: (request.reuses ?? []).map(declaration => ({
       childIndex: declaration.childIndex,
@@ -188,6 +265,33 @@ export function requestAttemptDigest(request: RootRecoveryRequest): string {
       inputRefs: [...(declaration.inputRefs ?? [])],
     })),
   })
+}
+
+/** The rounds one source task has spent, counted from the runs its own `runIds` hold: the two kinds spend separate caps. */
+export interface RecoveryRounds {
+  /** Runs of the task that are recovery attempts of a failed source. */
+  readonly recovery: number
+  /** Runs of the task that are improvement attempts of a verified one. */
+  readonly improvement: number
+}
+
+/** Count one source task's attempt runs by kind; a row written before `kind` existed is a recovery. */
+export function recoveryRoundsOf(snapshot: TaskSnapshot, sourceTaskId: TaskId): RecoveryRounds {
+  const attempts = snapshot.runs.filter(run => run.taskId === sourceTaskId && run.recovery !== undefined)
+  return {
+    recovery: attempts.filter(run => run.recovery!.kind !== 'improvement').length,
+    improvement: attempts.filter(run => run.recovery!.kind === 'improvement').length,
+  }
+}
+
+/** The coded refusal one exhausted per-source cap answers with (A7 §3): the caller's next move is to stop, not to retry. */
+export class IterationCapRefusal extends Error {
+  readonly code = 'iteration-cap'
+
+  constructor(message: string) {
+    super(message)
+    this.name = 'IterationCapRefusal'
+  }
 }
 
 /** What a reuse declaration is judged against: the source task, its contract's map, and the failed attempt's own members. */

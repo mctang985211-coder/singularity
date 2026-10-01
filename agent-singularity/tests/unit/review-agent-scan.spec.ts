@@ -11,6 +11,7 @@ import {
 } from '../../src/coordination/ledger.ts'
 import { runReviewAgentAttempt } from '../../src/coordination/review-run.ts'
 import { installReviewAgentAutoTrigger, scanFailedReviewSources } from '../../src/coordination/review-scan.ts'
+import { configureSupervision } from '../../src/coordination/supervision.ts'
 import type { TerminalReviewFact } from '@dangosys/dsh-singularity-task-runtime'
 
 /**
@@ -21,8 +22,9 @@ import type { TerminalReviewFact } from '@dangosys/dsh-singularity-task-runtime'
  *
  * - a failed review is accepted on its own: claim, pre-allocated session and one
  *   reviewer spawn, whose first request names the source and its outcome;
- * - a verified review is left alone — the automatic trigger never spawns for a
- *   source that succeeded;
+ * - a verified review is left alone under `autoReview: 'failed'` and accepted
+ *   under `'all'` (its request framed as an improvement question), while
+ *   `'off'` scans nothing at all;
  * - a failed review that carries no run would be accepted on the `runId: null`
  *   source, exactly as an explicit call names it;
  * - a source that already has an attempt is only read: a settled one by this
@@ -190,9 +192,15 @@ beforeEach(() => {
   previousBudget = process.env.SINGULARITY_REVIEW_AGENT_BUDGET
   process.env.SINGULARITY_REVIEW_LEDGER_DIR = ledgerDir
   delete process.env.SINGULARITY_REVIEW_AGENT_BUDGET
+  // These cases are about the failed-source scan of the automatic trigger: pin
+  // the pre-existing behaviour (failures only, one run) unless a case overrides
+  // it — a recorded diagnosis still consumes a hand-off, which the store's one
+  // run then refuses, so no supervisor is spawned beside the reviewer.
+  configureSupervision({ autoReview: 'failed', coordinationBudget: 1 })
 })
 
 afterEach(() => {
+  configureSupervision(undefined)
   if (previousLedger === undefined) delete process.env.SINGULARITY_REVIEW_LEDGER_DIR
   else process.env.SINGULARITY_REVIEW_LEDGER_DIR = previousLedger
   if (previousBudget === undefined) delete process.env.SINGULARITY_REVIEW_AGENT_BUDGET
@@ -284,7 +292,7 @@ describe('the scan of a store\'s failed reviews', () => {
     ])
   })
 
-  it('leaves a verified source alone: no claim, no spawn, nothing spent', async () => {
+  it('leaves a verified source alone under autoReview "failed": no claim, no spawn, nothing spent', async () => {
     const snapshot = baseSnapshot()
     snapshot.reviews = snapshot.reviews.filter(review => review.outcome !== 'failed')
     const { ctx, spawn } = fixture(undefined, snapshot as never)
@@ -294,6 +302,36 @@ describe('the scan of a store\'s failed reviews', () => {
     expect(ledgerRows()).toEqual([])
     expect(await countReviewAgentRuns(STORE)).toBe(0)
     expect(report.entries).toEqual([])
+  })
+
+  it('accepts a verified source under autoReview "all" and frames the review as an improvement question', async () => {
+    configureSupervision({ autoReview: 'all', coordinationBudget: 1 })
+    const snapshot = baseSnapshot()
+    snapshot.reviews = snapshot.reviews.filter(review => review.outcome !== 'failed')
+    const { ctx, spawn } = fixture(undefined, snapshot as never)
+
+    const report = await scanFailedReviewSources(ctx, STORE)
+    expect(spawn).toHaveBeenCalledOnce()
+    const request = spawn.mock.calls[0]![1] as { prompt: { text: string }[] | string }
+    const prompt = Array.isArray(request.prompt) ? request.prompt.map(block => block.text).join('\n') : request.prompt
+    expect(prompt).toContain('review t3#r3 [verified]')
+    expect(prompt).toContain('The run passed its review; look for improvement opportunities')
+    expect(rowsOfKind('claim')[0]).toMatchObject({ taskId: 't3', runId: 'r3', requestKey: null, reason: null })
+    expect(report.entries).toEqual([
+      expect.objectContaining({ result: 'started', source: { taskId: 't3', runId: 'r3' } }),
+    ])
+  })
+
+  it('accepts nothing under autoReview "off": no claim, no spawn, no line', async () => {
+    configureSupervision({ autoReview: 'off' })
+    const { ctx, spawn } = fixture()
+    const lines: string[] = []
+
+    const report = await scanFailedReviewSources(ctx, STORE, { log: line => lines.push(line) })
+    expect(spawn).not.toHaveBeenCalled()
+    expect(ledgerRows()).toEqual([])
+    expect(report.entries).toEqual([])
+    expect(lines).toEqual([])
   })
 
   it('accepts a failed review that carries no run on the runId:null source', async () => {
@@ -606,7 +644,7 @@ describe('the scan of a store\'s failed reviews', () => {
 })
 
 describe('the automatic trigger as the assembly installs it', () => {
-  it('scans on a recorded failed review and on a graph activation, and never for a success', async () => {
+  it('scans on a recorded failed review and on a graph activation, and never for a success under "failed"', async () => {
     const { ctx, spawn, listeners, events, off } = fixture()
     const lines: string[] = []
     const dispose = installReviewAgentAutoTrigger(ctx, { log: line => lines.push(line) })
@@ -622,8 +660,8 @@ describe('the automatic trigger as the assembly installs it', () => {
     expect(claim).toHaveLength(1)
     expect(claim[0]).toMatchObject({ taskId: 't1', runId: 'r1', requestKey: null, reason: null })
 
-    // A success is not a trigger: the verified source of the same store is left
-    // exactly as it was.
+    // Under "failed" a success is not a trigger: the verified source of the same
+    // store is left exactly as it was.
     listeners[0]!({ storeId: STORE, taskId: 't3', runId: 'r3', outcome: 'verified' })
     await vi.waitFor(() => expect(rowsOfKind('claim')).toHaveLength(1))
     expect(spawn).toHaveBeenCalledOnce()
@@ -638,5 +676,35 @@ describe('the automatic trigger as the assembly installs it', () => {
 
     dispose()
     expect(off).toHaveBeenCalledOnce()
+  })
+
+  it('scans on a verified review too under "all"', async () => {
+    configureSupervision({ autoReview: 'all', coordinationBudget: 2 })
+    const all = fixture(async args => {
+      await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
+      return handle(undefined)
+    })
+    const dispose = installReviewAgentAutoTrigger(all.ctx, { log: () => undefined })
+    all.listeners[0]!({ storeId: STORE, taskId: 't1', runId: 'r1', outcome: 'failed' })
+    await vi.waitFor(async () => expect(await countReviewAgentRuns(STORE)).toBe(1))
+    all.listeners[0]!({ storeId: STORE, taskId: 't3', runId: 'r3', outcome: 'verified' })
+    await vi.waitFor(async () => expect(await countReviewAgentRuns(STORE)).toBe(2))
+    expect(rowsOfKind('claim').map(row => `${String(row.taskId)}#${String(row.runId)}`)).toEqual(['t1#r1', 't3#r3'])
+    dispose()
+  })
+
+  it('scans nothing under "off"', async () => {
+    configureSupervision({ autoReview: 'off' })
+    const { ctx, spawn, listeners, events } = fixture()
+    const lines: string[] = []
+    const dispose = installReviewAgentAutoTrigger(ctx, { log: line => lines.push(line) })
+    listeners[0]!({ storeId: STORE, taskId: 't1', runId: 'r1', outcome: 'failed' })
+    listeners[0]!({ storeId: STORE, taskId: 't3', runId: 'r3', outcome: 'verified' })
+    const activation = events[0]!.listener as unknown as (graph: { rootSessionId: string }) => void
+    activation({ rootSessionId: ROOT })
+    await vi.waitFor(() => expect(lines.length).toBe(0))
+    expect(spawn).not.toHaveBeenCalled()
+    expect(ledgerRows()).toEqual([])
+    dispose()
   })
 })

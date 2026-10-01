@@ -734,7 +734,12 @@ export class EvolutionServiceCore extends Service {
     }
   }
 
-  /** The root task store of one live session, derived from its own graph — never from an id the caller passed. */
+  /** Whether this deployment declares the evolution chain on. Read softly, and read as on when the
+   * switch is absent: only a deployment that says `enabled: false` relaxes the ledger's own gates. */
+  protected evolutionChainOn(): boolean {
+    const exposure = optionalService<{ readonly enabled?: boolean }>(this.ctx, 'singularityEvolution')
+    return exposure === undefined || exposure.enabled !== false
+  }
 
   /** The **recovery coordination** entry (A6, plan §F.4): take one recorded delegation and open the runtime's own recovery. */
   async coordinateRecovery(
@@ -812,17 +817,17 @@ export class EvolutionServiceCore extends Service {
           'and a child is re-run by a batch of its parent — nothing was started',
       )
     }
-    if (source.status === 'verified') {
-      throw new Error(
-        `evolution: root task "${source.taskId}" is verified, and a successful source is not recovered: the goal was met and this build has no ` +
-          'frozen metric or comparator that could judge "faster or cheaper" against it, so the diagnosis\'s suggestions stay records — no promotion, ' +
-          'no application and no new run',
-      )
-    }
     const coordination: string[] = [
       `the hand-off was delegated by session "${delegation.actor}" into store "${delegation.rootStoreId}"`,
       `the diagnosis names root task "${source.taskId}" [${source.status}]`,
     ]
+    // A verified source is an improvement round: this plane forwards it and the
+    // runtime, which owns the per-source cap, judges it by the original criteria.
+    if (source.status === 'verified') {
+      coordination.push(
+        `root task "${source.taskId}" is verified, so the attempt is an improvement round — the runtime decides whether its cap admits it`,
+      )
+    }
     const sourceRunId = recoverySourceRunId(diagnosis, source, snapshot)
     // A key that already names an attempt is *answered*, not re-decided: the run's
     const answered = recoveryAttemptWithKey(snapshot, source.taskId, request.requestKey)
@@ -837,6 +842,7 @@ export class EvolutionServiceCore extends Service {
           sourceRunId,
           sourceDiagnosisId: request.sourceDiagnosisId,
           requestKey: request.requestKey,
+          ...(request.mode !== undefined ? { mode: request.mode } : {}),
         },
         caller,
         delegation,
@@ -849,29 +855,45 @@ export class EvolutionServiceCore extends Service {
           'hot-swaps a live run — nothing was started',
       )
     }
+    const chainOn = this.evolutionChainOn()
     const associated = (await this.list()).filter(proposal =>
       proposal.sourceRefs.includes(`diagnosis:${diagnosis.diagnosisId}`),
     )
-    for (const proposal of associated.filter(item => item.targetType === 'capability')) {
-      if (proposal.status === 'applied' && proposal.applied !== undefined && proposal.rolledback === undefined) continue
-      const state =
-        proposal.status === 'decided' && proposal.decision === 'PROMOTE'
-          ? 'PROMOTE-decided but not applied'
-          : proposal.status === 'rolledback'
-            ? 'rolled back'
-            : proposal.status
-      throw new Error(
-        `evolution: the capability change this hand-off depends on (proposal "${proposal.proposalId}" → row "${proposal.targetId}") is ` +
-          `${state}; a recovery whose gap is that capability is opened only after a person approves it and the apply commits it into the ` +
-          'registry — nothing was started, and no run was opened',
+    // The chain's capability gate (A6): a change this hand-off stands on must be
+    // applied; chain off, a proposal can authorize nothing, so none blocks the attempt.
+    if (chainOn) {
+      for (const proposal of associated.filter(item => item.targetType === 'capability')) {
+        if (
+          proposal.status === 'applied' &&
+          proposal.applied !== undefined &&
+          proposal.rolledback === undefined
+        ) {
+          continue
+        }
+        const state =
+          proposal.status === 'decided' && proposal.decision === 'PROMOTE'
+            ? 'PROMOTE-decided but not applied'
+            : proposal.status === 'rolledback'
+              ? 'rolled back'
+              : proposal.status
+        throw new Error(
+          `evolution: the capability change this hand-off depends on (proposal "${proposal.proposalId}" → row "${proposal.targetId}") is ` +
+            `${state}; a recovery whose gap is that capability is opened only after a person approves it and the apply commits it into the ` +
+            'registry — nothing was started, and no run was opened',
+        )
+      }
+      if (associated.length > 0) {
+        coordination.push(
+          `this ledger holds ${associated.length} proposal(s) for the diagnosis, ` +
+            `${associated.filter(item => item.targetType === 'capability').length} of them capability changes, all in force`,
+        )
+      }
+    } else if (associated.length > 0) {
+      coordination.push(
+        `the evolution chain is off in this deployment, so the ${associated.length} proposal(s) this ledger holds for the diagnosis are not consulted`,
       )
     }
-    if (associated.length > 0) {
-      coordination.push(
-        `this ledger holds ${associated.length} proposal(s) for the diagnosis, ` +
-          `${associated.filter(item => item.targetType === 'capability').length} of them capability changes, all in force`,
-      )
-    } else {
+    if (associated.length === 0) {
       // A pure artifact gap: no candidate in this ledger, so the only capability
       const requested = source.requestedCapabilities ?? []
       if (requested.length === 0) {
@@ -924,6 +946,7 @@ export class EvolutionServiceCore extends Service {
         sourceRunId,
         sourceDiagnosisId: request.sourceDiagnosisId,
         requestKey: request.requestKey,
+        ...(request.mode !== undefined ? { mode: request.mode } : {}),
       },
       caller,
       delegation,

@@ -72,6 +72,7 @@ import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
 import { SingularityContextService } from '../../context/src/index.ts'
 import { EvolutionService, modelSelectionOf } from '../../evolution/src/index.ts'
 import { ProposalReviewService } from '../../agent-singularity/src/services/proposal-review.ts'
+import { configureSupervision } from '../../agent-singularity/src/coordination/supervision.ts'
 import { supervisorDelegationSource } from '../../agent-singularity/src/coordination/ledger.ts'
 import { defineTaskRecoverTool } from '../../agent-singularity/src/tools/task-recover.ts'
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
@@ -157,6 +158,27 @@ const REAL_TOOLS = [
 
 /** The two question tools a spec can keep as stand-ins while it drives the runtime entries itself (`questionTools: 'stand-in'`). */
 const QUESTION_TOOLS: readonly string[] = ['task_ask_parent', 'task_answer']
+
+/**
+ * The deployment's supervision policy (A5/A6/A7), as the spec states it: which
+ * terminal reviews the automatic trigger accepts, how many iteration rounds a
+ * source may take, and the coordination allowance a store's reviewers and
+ * supervisors spend. The fixture provides exactly what a spec names, on the
+ * deployment's own `singularitySupervision` service — a spec that names nothing
+ * leaves the deployment's shipped defaults in force, which is what a case about
+ * the defaults must run against. The type is structural: the plugin's own
+ * `Config.supervision` is what a mounted deployment reads.
+ */
+export interface SupervisionOptions {
+  /** Which terminal reviews the automatic scan accepts: `all` (the default), `failed`, or `off`. */
+  readonly autoReview?: 'all' | 'failed' | 'off'
+  /** How many recovery rounds a failed source accepts before the coded `iteration-cap` refusal (default 3). */
+  readonly maxRecoveryRounds?: number
+  /** How many improvement rounds a verified source accepts before the coded `iteration-cap` refusal (default 2). */
+  readonly maxImprovementRounds?: number
+  /** The store's coordination allowance: reviewer + supervisor runs (default 8; `SINGULARITY_REVIEW_AGENT_BUDGET` overrides). */
+  readonly coordinationBudget?: number
+}
 
 /**
  * The evolution plane's model-facing tools. They are stand-ins in a deployment
@@ -290,6 +312,14 @@ export interface ScriptedLoopOptions {
    * never turned the chain on has no candidate surface and consumes no hand-off.
    */
   readonly evolution?: { readonly ledgerRoot: string; readonly capabilityConfig?: string }
+  /**
+   * The deployment's supervision policy (A5/A6/A7): which terminal reviews the
+   * automatic trigger accepts, how far an iteration may run, and the store's
+   * coordination allowance. Absent leaves the deployment's shipped defaults in
+   * force, so a case about the defaults names nothing; a case that needs the old
+   * selective behavior (`autoReview: 'failed'`) or a small cap states it here.
+   */
+  readonly supervision?: SupervisionOptions
   /**
    * How the approval seam answers one review ask. Defaults to answering every
    * ask `allowed-once` — an answerer that decides without a person. Returning
@@ -804,6 +834,15 @@ class ScriptedLoopImpl implements ScriptedLoop {
     }
     ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
     ctx.provide('layout', { setIn: async () => {} })
+    // The supervision policy a spec asked for (A5/A6/A7), two ways: the plugin's
+    // global settings (what the trigger and the ledger read — a mounted
+    // deployment configures them through `SingularityAgent`, and this fixture
+    // sets them here because no plugin is mounted), and the deployment's own
+    // `singularitySupervision` service (what the task runtime's round caps read,
+    // exactly as the evolution switch above). A spec that names nothing gets the
+    // shipped defaults on both planes.
+    configureSupervision(this.options.supervision)
+    if (this.options.supervision !== undefined) ctx.provide('singularitySupervision', { ...this.options.supervision })
     const graphState = {
       version: 1,
       id: 'g1',

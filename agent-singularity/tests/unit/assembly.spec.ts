@@ -23,6 +23,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {} from '@dangosys/dsh-singularity-evolution'
 import { DEFAULT_EVOLUTION, SingularityAgent } from '../../src/index.ts'
 import type { Config } from '../../src/index.ts'
+import { DEFAULT_SUPERVISION, configureSupervision, supervisionSettings } from '../../src/coordination/supervision.ts'
 
 /** The nine tools the switch gates; nothing else on the surface depends on it. */
 const EVOLUTION_TOOLS = [
@@ -122,6 +123,7 @@ async function mount(
 }
 
 afterEach(() => {
+  configureSupervision(undefined)
   vi.unstubAllEnvs()
 })
 
@@ -152,6 +154,39 @@ describe('SingularityAgent assembly', () => {
   it('refuses a configuration member this plugin does not read, naming it', async () => {
     await expect(mount({ evolution: 'off', evolutionEnabled: true } as unknown as Config))
       .rejects.toThrow(/evolutionEnabled/)
+  })
+
+  it('resolves the supervision block over its shipped defaults, and refuses an unknown member of it by name', async () => {
+    // The shipped default composes the shipped supervision policy: every
+    // terminal review is diagnosed on its own, three recovery rounds, two
+    // improvement rounds, eight coordination runs per store.
+    await mount()
+    expect(supervisionSettings()).toEqual(DEFAULT_SUPERVISION)
+    expect(DEFAULT_SUPERVISION).toEqual({
+      autoReview: 'all',
+      maxRecoveryRounds: 3,
+      maxImprovementRounds: 2,
+      coordinationBudget: 8,
+    })
+
+    // A partial block resolves against the defaults rather than blanking them.
+    await mount({ evolution: 'off', supervision: { autoReview: 'failed', coordinationBudget: 3 } } as Config)
+    expect(supervisionSettings()).toEqual({ ...DEFAULT_SUPERVISION, autoReview: 'failed', coordinationBudget: 3 })
+
+    // A member nobody reads refuses to start, exactly as a top-level typo does.
+    await expect(mount({ evolution: 'off', supervision: { autoReview: 'failed', autoReviews: 'all' } } as unknown as Config))
+      .rejects.toThrow(/autoReviews/)
+
+    // The resolved policy is exposed where a sibling reads it: the runtime's
+    // per-source round caps read `singularitySupervision`, member for member.
+    const exposed = await mount({ evolution: 'off', supervision: { autoReview: 'failed', coordinationBudget: 3 } } as Config)
+    expect(exposed.ctx.get('singularitySupervision')).toMatchObject({
+      autoReview: 'failed',
+      maxRecoveryRounds: 3,
+      maxImprovementRounds: 2,
+      coordinationBudget: 3,
+    })
+    await exposed.ctx.fiber.dispose()
   })
 
   it('exposes the parsed switch on the context, for a sibling assembly to read softly', async () => {
