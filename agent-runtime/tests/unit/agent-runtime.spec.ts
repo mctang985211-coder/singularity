@@ -211,11 +211,14 @@ async function spawnContext() {
     live.delete(sessionId)
   })
   const createCalls: { sessionId: string; options: { setup?: (ctx: unknown, agent: unknown) => Promise<void> } }[] = []
+  const childSessions = new Map<string, { append: Spy }>()
   Object.assign(state.ctx.agents, {
     get: (sessionId: string) => live.get(sessionId),
     create: async (options: { sessionId: SessionId; setup?: (ctx: unknown, agent: unknown) => Promise<void> }) => {
       createCalls.push({ sessionId: options.sessionId, options })
-      const child = { id: options.sessionId, followup: vi.fn() } as unknown as Agent
+      const session = { header: { id: options.sessionId }, append: vi.fn() }
+      childSessions.set(options.sessionId, session)
+      const child = { id: options.sessionId, followup: vi.fn(), session } as unknown as Agent
       live.set(options.sessionId, child)
       return { agent: child, dispose: () => dispose(options.sessionId) }
     },
@@ -231,7 +234,7 @@ async function spawnContext() {
   Object.assign(state.ctx, { parallel: async () => {} })
   const spawn = (name: string) =>
     runtime.spawn(state.root, { sessionId: id(name), name, prompt: [{ type: 'text' as const, text: 'work' }] })
-  return { ...state, runtime, scope, live, dispose, spawn, setLayout, nodes, createCalls }
+  return { ...state, runtime, scope, live, dispose, spawn, setLayout, nodes, createCalls, childSessions }
 }
 
 /**
@@ -397,7 +400,7 @@ describe('AgentRuntime root lifecycle', () => {
     })
     const order: string[] = []
     const followup = vi.fn(() => order.push('prompt'))
-    const child = { id: id('child'), followup }
+    const child = { id: id('child'), followup, session: { append: vi.fn() } }
     const create = vi.fn(async (_options: { setup: (ctx: unknown, agent: unknown) => Promise<void> }) => ({
       agent: child,
       dispose: async () => {},
@@ -476,7 +479,7 @@ describe('AgentRuntime root lifecycle', () => {
     Object.assign(state.root, {
       session: { header: { id: id('root'), cwd: '/environment', agentPreset: 'standard' } },
     })
-    const child = { id: id('child'), followup: vi.fn() }
+    const child = { id: id('child'), followup: vi.fn(), session: { append: vi.fn() } }
     const create = vi.fn(async (_options: { setup: (ctx: unknown, agent: unknown) => Promise<void> }) => ({
       agent: child,
       dispose: async () => {},
@@ -500,6 +503,19 @@ describe('AgentRuntime root lifecycle', () => {
     expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(childSession, 'workspace-write')
   })
 
+  test('publishes the durable subagent descriptor a client addresses the child by', async () => {
+    const state = await spawnContext()
+
+    await state.spawn('worker')
+
+    expect(state.childSessions.get('worker')?.append).toHaveBeenCalledWith('subagent/descriptor', {
+      version: 3,
+      mode: 'one-shot',
+      provider: 'singularity-runtime',
+      label: 'worker',
+    })
+  })
+
   test('stamps a spawned child with its parent lineage and one delegation level deeper', async () => {
     const state = context([id('root')])
     const runtime = new AgentRuntime(state.ctx as never)
@@ -507,7 +523,7 @@ describe('AgentRuntime root lifecycle', () => {
     Object.assign(state.root, {
       session: { header: { id: id('root'), cwd: '/environment', agentPreset: 'standard', delegationDepth: 2 } },
     })
-    const child = { id: id('child'), followup: vi.fn() }
+    const child = { id: id('child'), followup: vi.fn(), session: { append: vi.fn() } }
     const create = vi.fn(async () => ({ agent: child, dispose: async () => {} }))
     Object.assign(state.ctx.agents, { get: () => state.root, create })
     Object.assign(state.ctx.graph, { commitIn: async () => {} })
@@ -823,7 +839,7 @@ describe('the spawn request contract (A2)', () => {
         order.push('spawned')
       },
     })
-    const child = { followup: vi.fn(() => order.push('prompt')) }
+    const child = { followup: vi.fn(() => order.push('prompt')), session: { append: vi.fn() } }
     state.ctx.agents.create = async (options: { sessionId: SessionId }) => {
       state.live.set(options.sessionId, { id: options.sessionId, ...child } as unknown as Agent)
       return { agent: state.live.get(options.sessionId)!, dispose: () => state.dispose(options.sessionId) }
@@ -842,7 +858,7 @@ describe('the spawn request contract (A2)', () => {
 
   test('a beforePrompt failure disposes the handle, marks the node failed, and sends zero model input', async () => {
     const state = await spawnContext()
-    const child = { followup: vi.fn() }
+    const child = { followup: vi.fn(), session: { append: vi.fn() } }
     state.ctx.agents.create = async (options: { sessionId: SessionId }) => {
       state.live.set(options.sessionId, { id: options.sessionId, ...child } as unknown as Agent)
       return { agent: state.live.get(options.sessionId)!, dispose: () => state.dispose(options.sessionId) }

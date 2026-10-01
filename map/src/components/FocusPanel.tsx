@@ -12,8 +12,8 @@ function loadWidth(): number {
   const raw = localStorage.getItem(PANEL_KEY)
   if (raw === null) return PANEL_DEFAULT
   const n = Number(raw)
-  if (!Number.isFinite(n) || n < PANEL_MIN) throw new Error(`map: invalid panel width ${raw}`)
-  return n
+  // A stale or narrow stored width is a preference, not a render error: clamp it instead of blanking the page.
+  return Number.isFinite(n) && n >= PANEL_MIN ? n : PANEL_DEFAULT
 }
 
 function MessageList({ rows }: { rows: ChatRow[] }) {
@@ -63,7 +63,8 @@ export default function FocusPanel() {
 
   const sessionHitl = hitl.filter(h => h.sessionId === selectedId)
   const ready = graphMeta?.ready === true
-  const freeLocked = !ready
+  const readOnly = chat.sessionId === selectedId && chat.readOnly
+  const freeLocked = !ready || readOnly
   const rows = chat.sessionId === selectedId ? chat.rows : []
 
   const onResizePointerDown = (e: React.PointerEvent) => {
@@ -73,7 +74,7 @@ export default function FocusPanel() {
   }
   const onResizePointerMove = (e: React.PointerEvent) => {
     if (!resizing) return
-    const maxW = Math.floor(window.innerWidth * 0.7)
+    const maxW = Math.max(PANEL_MIN, Math.floor(window.innerWidth * 0.7))
     setWidth(Math.min(maxW, Math.max(PANEL_MIN, window.innerWidth - 12 - e.clientX)))
   }
   const onResizePointerUp = (e: React.PointerEvent) => {
@@ -123,7 +124,7 @@ export default function FocusPanel() {
         <div className="sg-focus-lock">
           <strong>Free chat to this node is locked.</strong>
           <span>
-            Because <em>(Graph is not ready.)</em>
+            Because <em>{readOnly ? '(This node is read-only outside its runtime.)' : '(Graph is not ready.)'}</em>
           </span>
         </div>
       ) : (

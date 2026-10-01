@@ -9,13 +9,33 @@ type TranscriptRows = (
   session: { pendingSubmissions: unknown[] },
   inbox: Inbox | undefined,
 ) => Rows
+type Target = string | { parentSessionId: string; childSessionId: string; mode: string }
+type SubagentTarget = (sessionId: string, parentSessionId: string | undefined, known: Target | undefined) => Target
+type ReadOnlyChat = (snapshot: {
+  subagent:
+    | { address: { mode: 'one-shot' | 'continuable' | 'unknown' }; parentAvailable?: boolean }
+    | null
+}) => boolean
 
 let transcriptRows!: TranscriptRows
+let subagentTarget!: SubagentTarget
+let readOnlyChat!: ReadOnlyChat
 runInNewContext(readFileSync(new URL('../../src/frontend/client.js', import.meta.url), 'utf8'), {
   window: {
     __ModuleLoader__: {
-      load: ({ factory }: { factory: () => { transcriptRows: TranscriptRows } }) => {
-        transcriptRows = factory().transcriptRows
+      load: ({
+        factory,
+      }: {
+        factory: () => {
+          transcriptRows: TranscriptRows
+          subagentTarget: SubagentTarget
+          readOnlyChat: ReadOnlyChat
+        }
+      }) => {
+        const exports = factory()
+        transcriptRows = exports.transcriptRows
+        subagentTarget = exports.subagentTarget
+        readOnlyChat = exports.readOnlyChat
       },
     },
   },
@@ -124,5 +144,36 @@ describe('canvas transcript projection', () => {
         pendingSubmissions: [],
       }, inbox()),
     ).toEqual([{ role: 'assistant', text: 'Hello **world**' }])
+  })
+})
+
+describe('canvas chat target and composer rules', () => {
+  it('keeps the bare id for a root or plain Session, even with a stray parent', () => {
+    expect(subagentTarget('root-1', undefined, undefined)).toBe('root-1')
+    expect(subagentTarget('plain-1', '', undefined)).toBe('plain-1')
+  })
+
+  it('opens a child under its durable parent address when the client cannot resolve one', () => {
+    expect(subagentTarget('child-1', 'parent-1', undefined)).toEqual({
+      parentSessionId: 'parent-1',
+      childSessionId: 'child-1',
+      mode: 'unknown',
+    })
+  })
+
+  it('prefers the address the client already knows over the graph-edge parent', () => {
+    const known = { parentSessionId: 'parent-2', childSessionId: 'child-1', mode: 'continuable' }
+    expect(subagentTarget('child-1', 'parent-1', known)).toEqual(known)
+  })
+
+  it('locks the composer for one-shot, unknown-mode and parent-offline children only', () => {
+    const snapshot = (mode: 'one-shot' | 'continuable' | 'unknown', parentAvailable?: boolean) => ({
+      subagent: { address: { mode }, ...(parentAvailable === undefined ? {} : { parentAvailable }) },
+    })
+    expect(readOnlyChat({ subagent: null })).toBe(false)
+    expect(readOnlyChat(snapshot('continuable'))).toBe(false)
+    expect(readOnlyChat(snapshot('continuable', false))).toBe(true)
+    expect(readOnlyChat(snapshot('one-shot'))).toBe(true)
+    expect(readOnlyChat(snapshot('unknown'))).toBe(true)
   })
 })

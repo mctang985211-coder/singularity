@@ -67,6 +67,21 @@ window.__ModuleLoader__.load({
 
     module.exports.inject = ['sessions', 'slots', 'locale']
 
+    // The target a chat opens under: a known durable address wins, a graph-edge parent yields the
+    // child's address, and everything else (roots, plain Sessions) keeps its bare id.
+    module.exports.subagentTarget = (sessionId, parentSessionId, known) => {
+      if (known !== undefined) return known
+      if (typeof parentSessionId !== 'string' || parentSessionId.length === 0) return sessionId
+      return { parentSessionId, childSessionId: sessionId, mode: 'unknown' }
+    }
+
+    // Mirrors ui-subagent's composer rule: only a continuable child with an available parent takes input.
+    module.exports.readOnlyChat = snapshot => {
+      const subagent = snapshot.subagent
+      if (subagent === null || subagent === undefined) return false
+      return subagent.address.mode !== 'continuable' || subagent.parentAvailable === false
+    }
+
     module.exports.apply = ctx => {
       // Required lazily: the transcript unit test evaluates the factory without a loader require.
       const React = require('react')
@@ -112,7 +127,7 @@ window.__ModuleLoader__.load({
       let frame = null
       let currentGraphId = null
       let chatGeneration = 0
-      let chat = { sessionId: null, dispose: null }
+      let chat = { sessionId: null, dispose: null, readOnly: false }
 
       const report = error => {
         console.error('singularity-canvas-view:', error instanceof Error ? error.message : String(error))
@@ -136,22 +151,40 @@ window.__ModuleLoader__.load({
       const clearChat = () => {
         chatGeneration += 1
         if (chat.dispose) chat.dispose()
-        chat = { sessionId: null, dispose: null }
+        chat = { sessionId: null, dispose: null, readOnly: false }
       }
 
       const reportSessionError = (sessionId, message) => {
         post({ type: 'singularity:session-error', graphId: currentGraphId, sessionId, message })
       }
 
-      const bindChat = async sessionId => {
+      // The map sends the child's spawn-edge parent; a mode the client cannot confirm stays 'unknown',
+      // which the binding snapshot upgrades from the child's own identity once it is read.
+      const chatTarget = async (sessionId, parentSessionId) => {
+        const known = ctx.sessions.subagentAddress(sessionId)
+        if (known !== undefined) return known
+        if (typeof parentSessionId !== 'string' || parentSessionId.length === 0) {
+          return module.exports.subagentTarget(sessionId, parentSessionId, undefined)
+        }
+        try {
+          await ctx.sessions.refreshProjections(parentSessionId)
+        } catch (error) {
+          report(error)
+        }
+        return module.exports.subagentTarget(sessionId, parentSessionId, ctx.sessions.subagentAddress(sessionId))
+      }
+
+      const bindChat = async (sessionId, parentSessionId) => {
         const generation = ++chatGeneration
         if (chat.dispose) chat.dispose()
-        chat = { sessionId, dispose: null }
+        chat = { sessionId, dispose: null, readOnly: false }
         await ctx.sessions.refresh()
+        if (generation !== chatGeneration) return
+        const target = await chatTarget(sessionId, parentSessionId)
         if (generation !== chatGeneration) return
         // The iframe's reference owns the binding for as long as its chat is
         // displayed; binding(id) alone now only borrows an already-retained one.
-        const reference = ctx.sessions.retain(sessionId, { source: 'canvasView' })
+        const reference = ctx.sessions.retain(target, { source: 'canvasView' })
         chat.dispose = () => { reference.release() }
         let binding
         try {
@@ -172,12 +205,14 @@ window.__ModuleLoader__.load({
             reportSessionError(sessionId, snapshot.openError.message)
             return
           }
+          const readOnly = module.exports.readOnlyChat(snapshot)
+          if (readOnly !== chat.readOnly) chat.readOnly = readOnly
           const rows = module.exports.transcriptRows(
             binding.eventSource.getSnapshot().entries,
             snapshot,
             inbox.getSnapshot(),
           )
-          post({ type: 'singularity:transcript', graphId: currentGraphId, sessionId, rows })
+          post({ type: 'singularity:transcript', graphId: currentGraphId, sessionId, rows, readOnly })
         }
         paint()
         const stopEvents = binding.eventSource.subscribe(paint)
@@ -205,7 +240,7 @@ window.__ModuleLoader__.load({
             report('open message missing sessionId')
             return
           }
-          void bindChat(data.sessionId).catch(report)
+          void bindChat(data.sessionId, data.parentSessionId).catch(report)
           return
         }
         if (data.type === 'singularity:prompt') {
@@ -224,6 +259,7 @@ window.__ModuleLoader__.load({
             const text = data.text.trim()
             if (text.length === 0) throw new Error('singularity: empty prompt')
             if (chat.sessionId !== data.sessionId) throw new Error('singularity: prompt session is not bound')
+            if (chat.readOnly) throw new Error('singularity: this node is read-only here; its runtime owns the inbox')
             const binding = ctx.sessions.binding(data.sessionId)
             if (binding === undefined) throw new Error('singularity: session binding missing')
             const handle = binding.session.beginSubmission({ mode: 'queue', text, attachments: [] })

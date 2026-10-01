@@ -2,6 +2,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { MessageId, createUserMessage, freezeMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId, SessionSeq } from "@deepseek-ai/dsh-session";
 import { setApprovalPolicy } from "@deepseek-ai/dsh-user-approval";
+import { snapshotSubagentDescriptor } from "@deepseek-ai/dsh-subagent";
 import { DEFAULT_ROOT } from "@dangosys/dsh-singularity-graph";
 import { RUN_CODE_NAME } from "@deepseek-ai/dsh-tools";
 import * as McpClient from "@deepseek-ai/dsh-mcp-client";
@@ -593,6 +594,8 @@ function lastPermissionPreset(own) {
 
 //#endregion
 //#region src/index.ts
+/** Descriptor provider name for workers: this runtime establishes them, not a registered `ctx.subagents` provider. */
+const WORKER_DESCRIPTOR_PROVIDER = "singularity-runtime";
 var AgentRuntime = class extends Service {
 	static inject = [
 		"agentDefaultModel",
@@ -753,6 +756,11 @@ var AgentRuntime = class extends Service {
 				await this.releaseSession(request.sessionId);
 				throw error;
 			}
+			handle.agent.session.append("subagent/descriptor", snapshotSubagentDescriptor({
+				mode: "one-shot",
+				provider: WORKER_DESCRIPTOR_PROVIDER,
+				label: request.name
+			}));
 			let published = false;
 			try {
 				const events = [{

@@ -14,6 +14,7 @@ import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
+import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { DEFAULT_ROOT, type GraphEvent } from '@dangosys/dsh-singularity-graph'
 import { applyWorkerGrant } from './grants.ts'
 import { ensureAgentMessageDelivered, readToolCallBody, reconcileAgentMessageDeliveries } from './messages.ts'
@@ -63,6 +64,9 @@ export type {
   ToolCallBody,
   ToolCallRef,
 } from './messages.ts'
+
+/** Descriptor provider name for workers: this runtime establishes them, not a registered `ctx.subagents` provider. */
+const WORKER_DESCRIPTOR_PROVIDER = 'singularity-runtime'
 
 export class AgentRuntime extends Service {
   static inject = [
@@ -232,6 +236,13 @@ export class AgentRuntime extends Service {
         await this.releaseSession(request.sessionId)
         throw error
       }
+      // A subagent-origin Session is readable only under its durable parent address, and only while its own
+      // descriptor exists; Singularity resumes workers itself, so DSH records this child as non-continuable.
+      handle.agent.session.append('subagent/descriptor', snapshotSubagentDescriptor({
+        mode: 'one-shot',
+        provider: WORKER_DESCRIPTOR_PROVIDER,
+        label: request.name,
+      }))
       let published = false
       try {
         const events: GraphEvent[] = [

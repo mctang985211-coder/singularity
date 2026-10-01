@@ -18,6 +18,8 @@ function parseRepos(raw: string): string[] {
 
 export default function GraphSwitcher() {
   const graphId = useStore(s => s.graphId)
+  const graph = useStore(s => s.graph)
+  const bootError = useStore(s => s.bootError)
   const graphs = useStore(s => s.graphs)
   const loading = useStore(s => s.graphsLoading)
   const graphsError = useStore(s => s.graphsError)
@@ -94,7 +96,9 @@ export default function GraphSwitcher() {
   }
 
   const select = (id: string) => {
-    if (id.length === 0 || id === graphId || busy) return
+    if (id.length === 0 || busy) return
+    // Re-choosing the current graph is a retry while its canvas has no snapshot; otherwise it is a no-op.
+    if (id === graphId && graph !== null && bootError === null) return
     setBusy(true)
     setActionError(null)
     void switchGraph(id)

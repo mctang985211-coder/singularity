@@ -35,7 +35,7 @@ export default function App() {
       if (data.type === 'singularity:transcript') {
         if (typeof data.sessionId !== 'string') throw new Error('map: transcript missing sessionId')
         if (!Array.isArray(data.rows)) throw new Error('map: transcript missing rows')
-        applyChat(data.sessionId, data.rows)
+        applyChat(data.sessionId, data.rows, data.readOnly === true)
       }
     }
     window.addEventListener('message', onMessage)

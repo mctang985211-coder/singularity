@@ -47,6 +47,11 @@ export interface ChatRow {
   readonly text: string
 }
 
+/** The spawn edge's parent session: the durable address a subagent child is opened under. */
+export function spawnParent(id: string, edges: FlowEdge[]): string | undefined {
+  return edges.find(edge => edge.data?.kind === 'spawn' && edge.target === id)?.source
+}
+
 export interface HitlPending {
   readonly id: string
   readonly kind: 'ask' | 'approve'
@@ -69,7 +74,7 @@ interface Store {
   empty: boolean
   source: EventSource | null
   generation: number
-  chat: { sessionId: string | null; rows: ChatRow[] }
+  chat: { sessionId: string | null; rows: ChatRow[]; readOnly: boolean }
   hitl: HitlPending[]
   submission: { id: string; resolve: () => void; reject: (error: Error) => void } | null
   tab: string
@@ -89,7 +94,7 @@ interface Store {
   boot: () => Promise<void>
   applySnapshot: (view: ViewSnapshot) => void
   applyHitl: (pending: HitlPending[]) => void
-  applyChat: (sessionId: string, rows: ChatRow[]) => void
+  applyChat: (sessionId: string, rows: ChatRow[], readOnly: boolean) => void
   setSelected: (id: string | null) => void
   setPaper: (p: 'plain' | 'grid') => void
   setTab: (id: string) => void
@@ -196,7 +201,7 @@ export const useStore = create<Store>((set, get) => ({
   empty: false,
   source: null,
   generation: 0,
-  chat: { sessionId: null, rows: [] },
+  chat: { sessionId: null, rows: [], readOnly: false },
   hitl: [],
   submission: null,
   tab: 'canvas',
@@ -214,8 +219,18 @@ export const useStore = create<Store>((set, get) => ({
   evolutionEpoch: 0,
   async boot() {
     get().source?.close()
-    const graphId = get().graphId
     set({ source: null, error: null, bootError: null })
+    let graphId = get().graphId
+    if (graphId === null) {
+      // A fresh page carries no ?graphId: the registry's selection is the graph to open.
+      await get().loadGraphs()
+      const selected = get().graphsSelectedId
+      graphId = selected !== null && get().graphs.some(entry => entry.id === selected) ? selected : null
+      if (graphId !== null) {
+        set({ graphId })
+        syncUrl(graphId)
+      }
+    }
     if (graphId === null) {
       set({
         empty: true,
@@ -294,8 +309,8 @@ export const useStore = create<Store>((set, get) => ({
   applyHitl(pending) {
     set({ hitl: pending })
   },
-  applyChat(sessionId, rows) {
-    set({ chat: { sessionId, rows } })
+  applyChat(sessionId, rows, readOnly) {
+    set({ chat: { sessionId, rows, readOnly } })
   },
   setSelected(id) {
     const graph = get().graph
@@ -303,7 +318,7 @@ export const useStore = create<Store>((set, get) => ({
     if (graph === null || layout === null) throw new Error('map: cannot select before boot')
     const { nodes, edges } = build(graph, layout, id)
     set({ selectedId: id, nodes, edges })
-    if (id !== null) postOpen(get().graphId, id, graph.agents.find(agent => agent.id === id)?.name)
+    if (id !== null) postOpen(get().graphId, id, graph.agents.find(agent => agent.id === id)?.name, spawnParent(id, edges))
   },
   setPaper(paper) {
     document.documentElement.dataset.paper = paper
@@ -435,9 +450,15 @@ export const useStore = create<Store>((set, get) => ({
   },
 }))
 
-function postOpen(graphId: string | null, sessionId: string, title?: string): void {
+function postOpen(graphId: string | null, sessionId: string, title?: string, parentSessionId?: string): void {
   window.parent.postMessage(
-    { type: 'singularity:open', graphId, sessionId, ...(title === undefined ? {} : { title }) },
+    {
+      type: 'singularity:open',
+      graphId,
+      sessionId,
+      ...(title === undefined ? {} : { title }),
+      ...(parentSessionId === undefined ? {} : { parentSessionId }),
+    },
     location.origin,
   )
 }
