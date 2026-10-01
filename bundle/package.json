@@ -52,6 +52,8 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "link:../../../thirdparty/deepseek-harness/vendor/cordis",
+    "@deepseek-ai/dsh-agent-preset": "link:../../../thirdparty/deepseek-harness/packages/preset/agent-preset",
+    "@deepseek-ai/dsh-agent-preset-registry": "link:../../../thirdparty/deepseek-harness/packages/preset/agent-preset-registry",
     "@types/node": "^22.20.0",
     "tsdown": "^0.15.0",
     "typescript": "^5.9.0"
