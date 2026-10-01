@@ -7,7 +7,7 @@ import {
   countReviewAgentRuns,
   readReviewerDelegation,
   reviewAgentLedgerFile,
-} from '../../src/review-agent-ledger.ts'
+} from '../../src/coordination/ledger.ts'
 import { defineTaskReviewAgentTool } from '../../src/tools/review-agent.ts'
 import { defineTaskReviewPackTool } from '../../src/tools/task-review-pack.ts'
 
@@ -36,10 +36,7 @@ import { defineTaskReviewPackTool } from '../../src/tools/task-review-pack.ts'
  *   more — never re-spawned, never re-counted, and never an in-flight dead end
  *   for the source's next explicit request;
  * - an attempt whose diagnosis the store already holds is recovered `recorded`,
- *   whatever the ledger is missing;
- * - formatVersion 1 rows still count and still answer the reviewer delegation
- *   read, but never stand in for a source: they carry no source, run or key, so
- *   they are not guessed into one.
+ *   whatever the ledger is missing.
  */
 
 const graph = { id: 'graph1', name: 'graph1', envId: 'project1', rootSessionId: 'root-1' }
@@ -451,7 +448,7 @@ describe('the source attempt: claim, started, settled', () => {
     let attempts = 0
     const { ctx, spawn } = fixture(async args => {
       attempts += 1
-      if (attempts === 1) throw new Error('agent-presets: preset "singularity-reviewer" not found')
+      if (attempts === 1) throw new Error('Unknown agent preset: singularity-reviewer')
       await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
       return handle(REPLY)
     })
@@ -677,25 +674,6 @@ describe('the ledger as the reviewer binding source, with attempt rows in it', (
     expect(await readReviewerDelegation('s-none')).toBeUndefined()
     await expect(readReviewerDelegation('s-two')).rejects.toMatchObject({ kind: 'binding-conflict' })
     // Two started rows in this store (the third row belongs to another one).
-    expect(await countReviewAgentRuns(STORE)).toBe(2)
-  })
-
-  test('formatVersion 1 rows count and bind, but never stand in for a source', async () => {
-    // A row an earlier deployment wrote: no source, no run, no key.
-    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
-    writeFileSync(reviewAgentLedgerFile(), `${JSON.stringify({
-      formatVersion: 1, rootStoreId: STORE, taskId: 't1', sessionId: 's-legacy', actor: 'root-1', at: '2026-09-24T00:00:00.000Z',
-    })}\n`)
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
-    expect(await readReviewerDelegation('s-legacy')).toMatchObject({ rootStoreId: STORE, taskId: 't1' })
-
-    // The task it names has no attempt: the call starts one instead of reusing a
-    // row whose source the ledger cannot know.
-    const { ctx, spawn } = fixture(spawning(handle(REPLY)))
-    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: 'r1' }, exec as never)) as string
-    expect(result).toContain('judged task t1')
-    expect(spawn).toHaveBeenCalledOnce()
-    expect(rowsOfKind('claim')).toHaveLength(1)
     expect(await countReviewAgentRuns(STORE)).toBe(2)
   })
 })

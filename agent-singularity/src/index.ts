@@ -1,7 +1,4 @@
-/**
- * Singularity root agent extras.
- * @module dsh-singularity-agent
- */
+/** Singularity root agent extras. @module dsh-singularity-agent */
 
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,12 +12,13 @@ import type {} from '@dangosys/dsh-singularity-task'
 import { optionalService } from '@dangosys/dsh-singularity-task-runtime'
 import { EvolutionService, modelSelectionOf } from '@dangosys/dsh-singularity-evolution'
 import type { ModelSelection } from '@dangosys/dsh-singularity-evolution'
-import { HitlService } from './hitl.ts'
-import { EscalationService } from './escalation.ts'
-import { ProposalReviewService } from './proposal-review.ts'
-import { reviewerBindingSource, supervisorDelegationSource } from './review-agent-ledger.ts'
-import { installReviewAgentAutoTrigger } from './review-agent-scan.ts'
-import { installSupervisorHandoffTrigger } from './evolution-handoff.ts'
+import { HitlService } from './services/hitl.ts'
+import { EscalationService } from './services/escalation.ts'
+import { ProposalReviewService } from './services/proposal-review.ts'
+import { reviewerBindingSource, supervisorDelegationSource } from './coordination/ledger.ts'
+import { installReviewAgentAutoTrigger } from './coordination/review-scan.ts'
+import { installSupervisorHandoffTrigger } from './coordination/evolution-handoff.ts'
+import { logOf } from './log.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
 import { defineRootBudgetApproval, defineTaskBudgetExtendTool } from './tools/budget-extend.ts'
@@ -55,71 +53,26 @@ import { defineTaskStatusTool } from './tools/task-status.ts'
 import { defineTaskSubmitResultTool } from './tools/task-submit-result.ts'
 import { defineTaskVerifyTool } from './tools/task-verify.ts'
 
-export { HitlService } from './hitl.ts'
-export type { HitlAnswer, HitlKind, HitlPending } from './hitl.ts'
-export { EscalationService } from './escalation.ts'
-export type { Escalation, EscalationInput, EscalationRecord, EscalationTrigger } from './escalation.ts'
-export { ESCALATION_TRIGGERS } from './escalation.ts'
-export { ProposalReviewService, ownerSessionOfStore, renderProposalReview, reviewDecider } from './proposal-review.ts'
+export { HitlService } from './services/hitl.ts'
+export type { HitlAnswer } from './services/hitl.ts'
+export { EscalationService } from './services/escalation.ts'
+export { ProposalReviewService } from './services/proposal-review.ts'
 
-/**
- * Plugin configuration — the deployment's composition, not a model's choice.
- *
- * R0's contract (§1.3 of the guide, defect G15) is that the default run
- * exposes only what the current role needs, so the evolution chain is something
- * a deployment turns *on*: the tools it is reached through are registered by
- * this plugin, and with the chain off none of them exists on any surface. The
- * switch cannot be a permission check inside a tool for the same reason: a
- * spawned worker keeps the global layer when its grant does not override it, so
- * "who may call this" is not a question this deployment gets to ask at call
- * time — "does this tool exist here" is.
- */
+/** Plugin configuration — the deployment's composition, not a model's choice. */
 export interface Config {
-  /**
-   * Whether this composition registers the nine `evolution_*` tools on the
-   * global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} —
-   * registers none of them: no model surface (root, granted worker, or the
-   * un-granted spawn worker that inherits the global layer) can call one, and
-   * the ledger, its history, its validation and its approvals are left exactly
-   * as they are rather than deleted. `on` registers all nine and changes
-   * nothing else about them: the previous assembly, byte for byte.
-   */
+  /** Whether this composition registers the nine `evolution_*` tools on the global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} — registers none of them: no model surface (root, granted worker, or the */
   evolution: 'off' | 'on'
 }
 
-/**
- * The shipped switch position: `off`.
- *
- * The default run is the one nobody configured, and R0 asks that this run not
- * carry the evolution chain (guide §1.3: "默认运行只提供当前角色需要的能力").
- * `on` is therefore an explicit act by a deployment, and what it resolved to is
- * readable back from the context ({@link EvolutionExposure}) — a switch whose
- * position cannot be read is one nobody can tell from an unwired exposure.
- */
+/** The shipped switch position: `off`. */
 export const DEFAULT_EVOLUTION: 'off' = 'off'
 
 const ConfigSchema: z<Config> = z.object({
   evolution: z.union([z.const('off'), z.const('on')]).default(DEFAULT_EVOLUTION),
 })
 
-/**
- * The evolution exposure this composition resolved, provided on the agent's own
- * fiber as `ctx.singularityEvolution`.
- *
- * The registration gate in {@link SingularityAgent} is the enforcement; this
- * service is the fact a sibling assembly reads to keep its own surface in step
- * — the root agent's tool allow-list names these nine names and has to leave
- * them out when they were never registered. Read it softly:
- *
- * ```ts
- * const evolution = ctx.get('singularityEvolution')?.enabled ?? false
- * ```
- *
- * A composition that does not mount this plugin provides no such service, and
- * that absence reads as the closed state: a deployment that never turned the
- * chain on must not be assembled as if it had.
- */
-export class EvolutionExposure extends Service {
+/** The evolution exposure this composition resolved, provided on the agent's own fiber as `ctx.singularityEvolution`. */
+class EvolutionExposure extends Service {
   /** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
   readonly enabled: boolean
 
@@ -135,16 +88,7 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/**
- * The harness repo root this composition passes to the evolution ledger: the
- * base of its `$DSH_HOME` fallback (`<repoRoot>/.dsh`), of the production
- * `config.yml` default, and of relative evidence refs.
- *
- * It is computed here because the ledger used to sit at this same source depth
- * and derive it (`new URL('../../../../', import.meta.url)` from
- * `agent-singularity/src`); the evolution package does not, so passing the
- * value in keeps every default root byte-for-byte where it was.
- */
+/** The harness repo root this composition passes to the evolution ledger: the base of its `$DSH_HOME` fallback (`<repoRoot>/.dsh`), of the production `config.yml` default, and of relative evidence refs. */
 const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url))
 
 /** The one selection shape this resolver reads: whatever the deployment's default-model service answers with. */
@@ -155,59 +99,31 @@ interface ModelSelectionLike {
   maxTokens?: unknown
 }
 
-/**
- * The model selection the evolution plane freezes with an experiment and
- * re-reads before a promotion (see `Config.modelSelection` of the evolution
- * service).
- *
- * One source for both ends: the deployment's own default selection
- * (`agentDefaultModel.currentSelection()`), which is the configuration a session
- * without an explicit selection runs under — and the selection every replay the
- * runtime spawns for an experiment is now placed under verbatim. The experiment
- * tool freezes exactly this value, so the selection a report is frozen under is
- * the one the gate later re-checks against the runs' own session logs; a
- * deployment that mounts no such service answers `undefined`, and the ledger
- * then refuses to evaluate or promote rather than skipping the check.
- */
+/** The model selection the evolution plane freezes with an experiment and re-reads before a promotion (see `Config.modelSelection` of the evolution service). */
 export function deploymentModelSelection(ctx: Context): ModelSelection | undefined {
   const defaults = optionalService<{ currentSelection(): ModelSelectionLike }>(ctx, 'agentDefaultModel')
-  try {
-    return modelSelectionOf(defaults?.currentSelection())
-  } catch {
-    return undefined
-  }
+  return modelSelectionOf(defaults?.currentSelection())
 }
 
 export class SingularityAgent extends Service {
   static inject = ['tools', 'graphs', 'agentRuntime', 'task', 'taskRuntime', 'singularityContext', 'userQuestions', 'approval']
   static Config: z<Config> = ConfigSchema
 
-  /**
-   * The evolution ledger this assembly owns — kept as a field because the startup
-   * reconciliation (`[Service.init]`, below) settles its open commit intents
-   * before this plugin becomes ready, whether or not the deployment registered the
-   * nine tools.
-   */
+  /** The evolution ledger this assembly owns — kept as a field because the startup reconciliation (`[Service.init]`, below) settles its open commit intents before this plugin becomes ready, whether or not. */
   private readonly evolution: EvolutionService
 
   constructor(ctx: Context, config?: Config) {
     super(ctx, 'singularityAgent')
     this.assertClosedConfig(config)
-    const evolution = this.resolveEvolution(config)
+    const evolution = config?.evolution ?? DEFAULT_EVOLUTION
     ctx.plugin(HitlService)
     // The evolution tools read `ctx.evolution`, and a service a child fiber
     // provides is invisible to the parent that mounted it — so the ledger's
-    // service is provided on this fiber rather than through `ctx.plugin`. The
-    // lifecycle itself is the evolution package's; this assembly says where the
-    // harness root is and which model the deployment's runs share — the one
-    // fact the package cannot derive from a process with no agent of its own.
     this.evolution = new EvolutionService(ctx, {
       repoRoot: REPO_ROOT,
       modelSelection: () => deploymentModelSelection(ctx),
       // The A6 seams, both owned elsewhere: the supervisor delegation is a row of
       // the coordination ledger this plugin owns (the evolution plane must not
-      // import it back), and a capability commit writes the deployment's own
-      // `config.yml`, which is the file this assembly knows the location of.
       supervisorDelegation: supervisorDelegationSource().read,
       capabilityConfig: join(REPO_ROOT, 'config.yml'),
     })
@@ -216,46 +132,30 @@ export class SingularityAgent extends Service {
     new EscalationService(ctx)
     // And for the T2/T3 review channel: the task runtime resolves
     // `ctx.proposalReviewChannel` softly and asks it when a batch waits for a
-    // human, so the channel has to be visible from the runtime's context. It is
-    // provided on this fiber for the same reason the two ledgers are.
     new ProposalReviewService(ctx)
     // What this assembly did, said where a sibling can read it (the root agent's
     // tool allow-list is the consumer) — see {@link EvolutionExposure}.
     new EvolutionExposure(ctx, evolution === 'on')
     // The reviewer ledger is the one delegation source this deployment has (A2
     // §D): the context read core resolves a reviewer's read domain from it, and
-    // this plugin owns the file — so the narrow read door is registered here,
-    // and it leaves with the plugin.
     ctx.effect(
       () => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()),
       'singularityAgent: reviewer binding source',
     )
     // The automatic trigger of the review chain (A5): a review that settled
     // `failed` is accepted for diagnosis on its own — when the record becomes
-    // durable and when a graph is explicitly activated, the two moments that
-    // scan the store. Installed here rather than inside the tool: a trigger that
-    // only exists when a model calls something is not a trigger. It observes and
-    // never decides: nothing it does is awaited by a settlement, and a reviewer
-    // that cannot start changes nothing about the run it was told about.
     ctx.effect(
       () => installReviewAgentAutoTrigger(ctx),
       'singularityAgent: review agent auto trigger',
     )
     // The hand-off trigger (A6): a graph that becomes active scans its store for
     // pending hand-offs — the moment a process that booted over a store with a
-    // recorded Diagnosis-with-suggestions catches up. The other moment (the
-    // record becoming durable) is reported by the review attempt that wrote it,
-    // because no event exists for a store's diagnosis.
     ctx.effect(
       () => installSupervisorHandoffTrigger(ctx),
       'singularityAgent: supervisor hand-off trigger',
     )
     // The one approval a budget extension can be granted through (K4): the
     // runtime asks it alone — for the one request that is not already recorded —
-    // and only an actual `allowed-once` from the DSH approval channel lets a
-    // raise be committed. Installed once for this assembly and removed with it,
-    // so a deployment without this plugin has no approval to answer with and the
-    // runtime refuses a new request by name rather than assuming a decision.
     ctx.effect(
       () => ctx.taskRuntime.registerRootBudgetApproval(defineRootBudgetApproval(ctx)),
       'singularityAgent: root budget approval',
@@ -269,7 +169,6 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineContextReadTool(ctx))
     // The root's own goal is accepted here (A0): it is in ROOT_TOOLS only, and
     // the deployment's evolution switch has nothing to do with it — a graph
-    // whose contract cannot be accepted has no goal to work on at all.
     ctx.tools.register(defineTaskIntakeTool(ctx))
     ctx.tools.register(defineTaskDecomposeTool(ctx))
     ctx.tools.register(defineTaskProposalReadTool(ctx))
@@ -279,10 +178,6 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineTaskSubmitResultTool(ctx))
     // The two halves of the direct parent/child question protocol (A4 §F.1): a
     // worker asks its own direct parent, and a parent answers the child that
-    // asked it. Registered unconditionally, like the rest of the task surface —
-    // who may ask whom, and what a call may say, is decided by the caller's run
-    // binding, the store's parent relation and the write gate, never by a
-    // registration switch; the reviewer's own surface leaves both names out.
     ctx.tools.register(defineTaskAskParentTool(ctx))
     ctx.tools.register(defineTaskAnswerTool(ctx))
     ctx.tools.register(defineTaskCancelTool(ctx))
@@ -291,26 +186,13 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineTaskReviewAgentTool(ctx))
     // The recovery entry (A6): registered like the rest of the task surface —
     // who may reach it is decided by the caller's own live session and the
-    // deployment's ledger (a trusted supervisor coordination session and nobody
-    // else), never by a registration switch. It is deliberately not on the root
-    // agent's allow-list (`ROOT_TOOLS`), so no root prompt names it.
     ctx.tools.register(defineTaskRecoverTool(ctx))
     // Asking a person to raise this tree's ceilings (K4): registered like the
     // rest of the task surface — who may reach it (a graph's root coordination
-    // session, derived from the session in the runtime) and what a call may say
-    // (the totals, never an approval) are decided by the runtime and the store,
-    // and the one decision that grants a raise is the approval channel's, asked
-    // once by the runtime through the callback installed above — not by a
-    // registration switch.
     ctx.tools.register(defineTaskBudgetExtendTool(ctx))
     ctx.tools.register(defineTaskDiagnoseTool(ctx))
     // The evolution chain is the one part of this surface a deployment may
     // withhold (R0). Off, none of the nine is registered, so no agent surface
-    // can call one: the root's allow-list is a restriction over what exists, a
-    // worker's grant is applied to its own layer, and a worker spawned without
-    // one keeps the global layer — the door that only the absence of the tool
-    // closes. The ledger service above stays constructed either way: nothing
-    // here reads it, and its history is not this switch's to delete.
     if (evolution === 'on') {
       ctx.tools.register(defineEvolutionProposeTool(ctx))
       ctx.tools.register(defineEvolutionCandidateTool(ctx))
@@ -325,20 +207,7 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineEscalateTool(ctx))
   }
 
-  /**
-   * The startup reconciliation (K2): before this plugin is ready — and whatever
-   * the tool switch says — every commit intent the ledger left open is settled
-   * against what production actually holds. The switch is a statement about the
-   * model surface, not about recovery: an `off` deployment registers none of the
-   * nine tools, and still keeps production consistent with its own ledger.
-   *
-   * A `blocked` intent is reported by name and does not fail the load: the intent
-   * stays open, the admission gate keeps refusing the provider whose directory it
-   * names, and settling it (a retry of the apply/rollback, the next startup)
-   * remains the way forward. A failure of the reconciliation itself is not
-   * `blocked` and does fail the load, naming the cause: a deployment that cannot
-   * read its ledger cannot promise anything about the production behind it.
-   */
+  /** The startup reconciliation (K2): before this plugin is ready — and whatever the tool switch says — every commit intent the ledger left open is settled against what production actually holds. */
   protected async [Service.init](): Promise<void> {
     let outcomes: Awaited<ReturnType<EvolutionService['reconcile']>>
     try {
@@ -359,12 +228,7 @@ export class SingularityAgent extends Service {
     }
   }
 
-  /**
-   * Refuse a configuration member this plugin does not read. The schema keeps
-   * unknown keys on the object it validates, so this is where a caller's typo
-   * is caught: a misspelled member would otherwise read as a configuration that
-   * took effect while the switch stayed at its default.
-   */
+  /** Refuse a configuration member this plugin does not read. The schema keeps unknown keys on the object it validates, so this is where a caller's typo is caught: */
   private assertClosedConfig(config: Config | undefined): void {
     if (config === undefined) return
     const known = new Set(['evolution'])
@@ -376,31 +240,9 @@ export class SingularityAgent extends Service {
     )
   }
 
-  /**
-   * The switch position this assembly acts on. The schema types the member, but
-   * a deployment that constructs this plugin directly (a test, an embedding
-   * process) bypasses the schema, and a near miss must not be read as "not on,
-   * therefore off": a caller who asked for something this build does not
-   * implement would get the closed composition while believing otherwise.
-   */
-  private resolveEvolution(config: Config | undefined): 'off' | 'on' {
-    const value: unknown = config?.evolution
-    if (value === undefined) return DEFAULT_EVOLUTION
-    if (value === 'off' || value === 'on') return value
-    throw new Error(
-      `singularity-agent: evolution is ${JSON.stringify(value)}; it is "off" or "on" ` +
-      '(a switch this build cannot execute refuses to start rather than assembling an exposure nobody chose)',
-    )
-  }
-
-  /**
-   * Report a fact nobody should read as a startup failure — the same soft logger
-   * the task runtime uses, so a deployment that mounts no logger still gets the
-   * line rather than an exception about it.
-   */
+  /** Report a fact nobody should read as a startup failure — the same soft logger the task runtime uses, so a deployment that mounts no logger still gets the line rather than an exception about it. */
   private warn(message: string): void {
-    const logger = (this.ctx as { logger?: (name: string) => { warn(format: string): void } }).logger
-    logger?.('singularity-agent').warn(message)
+    logOf(this.ctx, 'singularity-agent')?.warn(message)
   }
 }
 

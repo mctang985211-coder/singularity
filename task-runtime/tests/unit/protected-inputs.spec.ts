@@ -66,7 +66,9 @@ function harness(options: { checkout?: string } = {}) {
       sessions.set(header.id, stored)
       return {
         read: async () => ({ events: stored.events }),
-        append: async (events: SessionEvent[]) => { stored.events.push(...events) },
+        append: async (events: SessionEvent[]) => {
+          stored.events.push(...events)
+        },
         flush: async () => {},
         close: async () => {},
       }
@@ -76,7 +78,9 @@ function harness(options: { checkout?: string } = {}) {
       if (stored === undefined) throw new Error('missing session ' + id)
       return {
         read: async () => ({ events: stored.events }),
-        append: async (events: SessionEvent[]) => { stored.events.push(...events) },
+        append: async (events: SessionEvent[]) => {
+          stored.events.push(...events)
+        },
         flush: async () => {},
         close: async () => {},
       }
@@ -87,22 +91,32 @@ function harness(options: { checkout?: string } = {}) {
   const spawned: Array<{ sessionId: string; prompt?: string; contract?: string; taskWorker?: boolean }> = []
   let idleBehavior: ((sessionId: string) => Promise<void>) | undefined
   const agentRuntime = {
-    spawn: vi.fn(async (_parent: unknown, request: { sessionId: string; prompt?: Array<{ type: 'text'; text: string }>; contract?: string; taskWorker?: boolean }) => {
-      spawned.push({
-        sessionId: request.sessionId,
-        ...(request.prompt === undefined ? {} : { prompt: request.prompt.map(block => block.text).join('\n') }),
-        ...(request.contract === undefined ? {} : { contract: request.contract }),
-        ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
-      })
-      return {
-        agent: {
-          id: request.sessionId,
-          cancel: vi.fn(),
-          whenIdle: vi.fn(() => (idleBehavior ?? defaultIdle)(request.sessionId)),
+    spawn: vi.fn(
+      async (
+        _parent: unknown,
+        request: {
+          sessionId: string
+          prompt?: Array<{ type: 'text'; text: string }>
+          contract?: string
+          taskWorker?: boolean
         },
-        dispose: vi.fn(async () => {}),
-      }
-    }),
+      ) => {
+        spawned.push({
+          sessionId: request.sessionId,
+          ...(request.prompt === undefined ? {} : { prompt: request.prompt.map(block => block.text).join('\n') }),
+          ...(request.contract === undefined ? {} : { contract: request.contract }),
+          ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
+        })
+        return {
+          agent: {
+            id: request.sessionId,
+            cancel: vi.fn(),
+            whenIdle: vi.fn(() => (idleBehavior ?? defaultIdle)(request.sessionId)),
+          },
+          dispose: vi.fn(async () => {}),
+        }
+      },
+    ),
   }
   const graphs = {
     graphForSession: vi.fn(async (_sessionId: string) => ({
@@ -178,7 +192,10 @@ function harness(options: { checkout?: string } = {}) {
   ctx.verifier = verifier
   // A temp run-binding root: workspace markers and run snapshots belong to the
   // deployment under test, never to the developer's own `~/.dsh`.
-  const runtime = new TaskRuntime(ctx as never, { runBindingRoot: join(options.checkout ?? tmpdir(), 'run-bindings') } as Config)
+  const runtime = new TaskRuntime(
+    ctx as never,
+    { runBindingRoot: join(options.checkout ?? tmpdir(), 'run-bindings') } as Config,
+  )
   // A3's worker protocol: a worker hands its result in through the explicit
   // submission entry and then goes idle — an idle is not a completion.
   const defaultIdle = async (sessionId: string): Promise<void> => {
@@ -192,7 +209,9 @@ function harness(options: { checkout?: string } = {}) {
     verifier,
     spawned,
     graphs,
-    setIdleBehavior: (behavior: (sessionId: string) => Promise<void>) => { idleBehavior = behavior },
+    setIdleBehavior: (behavior: (sessionId: string) => Promise<void>) => {
+      idleBehavior = behavior
+    },
   }
 }
 
@@ -242,7 +261,13 @@ function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
 
 /** A criterion with one declared protected input, in the authoring (spec) form the tool sends. */
 function declaredCriterion(id: string, path: string): Record<string, unknown> {
-  return { criterionId: id, description: `${id} passes`, command: 'true', mode: 'deterministic', protectedInputs: [path] }
+  return {
+    criterionId: id,
+    description: `${id} passes`,
+    command: 'true',
+    mode: 'deterministic',
+    protectedInputs: [path],
+  }
 }
 
 /**
@@ -380,8 +405,9 @@ describe('fixSpecProtectedInputs', () => {
     const { spec: fixed, reasons } = await fixSpecProtectedInputs(spec, checkout)
 
     expect(reasons).toEqual([])
-    expect(fixed.children[0]!.acceptanceCriteria[0]!.protectedInputs)
-      .toEqual([fixedRef('check.sh', join(checkout, 'check.sh'))])
+    expect(fixed.children[0]!.acceptanceCriteria[0]!.protectedInputs).toEqual([
+      fixedRef('check.sh', join(checkout, 'check.sh')),
+    ])
     // the criterion that declared nothing and the child that declared nothing
     // are carried by reference: only the touched objects are rebuilt
     expect(fixed.children[0]!.acceptanceCriteria[1]).toBe(untouchedCriterion)
@@ -401,7 +427,12 @@ describe('fixSpecProtectedInputs', () => {
     for (const [name, declared] of Object.entries(shapes)) {
       const spec = {
         reason: 'split the work',
-        children: [{ objective: 'child a', acceptanceCriteria: [{ description: 'x', command: 'true', protectedInputs: declared }] }],
+        children: [
+          {
+            objective: 'child a',
+            acceptanceCriteria: [{ description: 'x', command: 'true', protectedInputs: declared }],
+          },
+        ],
       } as unknown as DecomposeSpec
 
       const { spec: fixed, reasons } = await fixSpecProtectedInputs(spec, checkout)
@@ -414,13 +445,15 @@ describe('fixSpecProtectedInputs', () => {
   test('names the criterion the way normalize.ts does: the declared id when present, the position otherwise', async () => {
     const spec = {
       reason: 'split the work',
-      children: [{
-        objective: 'child a',
-        acceptanceCriteria: [
-          declaredCriterion('ac1', 'missing-a.sh'),
-          { description: 'b', command: 'true', protectedInputs: ['missing-b.sh'] },
-        ],
-      }],
+      children: [
+        {
+          objective: 'child a',
+          acceptanceCriteria: [
+            declaredCriterion('ac1', 'missing-a.sh'),
+            { description: 'b', command: 'true', protectedInputs: ['missing-b.sh'] },
+          ],
+        },
+      ],
     } as unknown as DecomposeSpec
 
     const { reasons } = await fixSpecProtectedInputs(spec, checkout)
@@ -452,10 +485,9 @@ describe('protectedInputDefects', () => {
 
     expect(protectedInputDefects([absent], 'child 0 ("t-1")')).toEqual([])
     expect(protectedInputDefects([criterion([])], 'child 0 ("t-1")')).toEqual([])
-    expect(protectedInputDefects(
-      [criterion([{ path: 'check.sh', sha256: '0'.repeat(64) }])],
-      'child 0 ("t-1")',
-    )).toEqual([])
+    expect(
+      protectedInputDefects([criterion([{ path: 'check.sh', sha256: '0'.repeat(64) }])], 'child 0 ("t-1")'),
+    ).toEqual([])
   })
 
   test('refuses every malformed fixed form, naming the label, the criterion and the defect', () => {
@@ -482,23 +514,29 @@ describe('protectedInputDefects', () => {
 describe('the fixed-form rule is shared by normalization and admission', () => {
   test('normalization carries the fixed declaration verbatim into the contract and its digest', () => {
     const fixedForm = [{ path: 'check.sh', sha256: 'c'.repeat(64) }]
-    const result = normalizeDecomposition({
-      reason: 'split the work',
-      children: [{
-        objective: 'child a',
-        acceptanceCriteria: [{ description: 'suite passes', command: 'true', protectedInputs: fixedForm }],
-      }],
-    }, {
-      storeId: STORE,
-      parentTaskId: 't-parent',
-      parentRunId: 'r-parent',
-      callerSessionId: ROOT_SESSION,
-      admissionContext: { maxDepth: 4, maxChildren: 8, auditOnly: {} },
-    })
+    const result = normalizeDecomposition(
+      {
+        reason: 'split the work',
+        children: [
+          {
+            objective: 'child a',
+            acceptanceCriteria: [{ description: 'suite passes', command: 'true', protectedInputs: fixedForm }],
+          },
+        ],
+      },
+      {
+        storeId: STORE,
+        parentTaskId: 't-parent',
+        parentRunId: 'r-parent',
+        callerSessionId: ROOT_SESSION,
+        admissionContext: { maxDepth: 4, maxChildren: 8, auditOnly: {} },
+      },
+    )
 
     expect(result.ok).toBe(true)
-    expect(result.ok ? result.batch.children[0]!.contract.acceptanceCriteria[0]!.protectedInputs : undefined)
-      .toEqual(fixedForm)
+    expect(result.ok ? result.batch.children[0]!.contract.acceptanceCriteria[0]!.protectedInputs : undefined).toEqual(
+      fixedForm,
+    )
   })
 
   test('contractDefects accepts the fixed form and refuses the declared string form', () => {
@@ -555,11 +593,13 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
       admissionContext: { maxDepth: 4, maxChildren: 8, auditOnly: {} },
     })
     expect(expected.ok).toBe(true)
-    expect(expected.ok ? contractDigest(expected.batch.children[0]!.contract) : undefined)
-      .toBe(contractDigest(contract!))
+    expect(expected.ok ? contractDigest(expected.batch.children[0]!.contract) : undefined).toBe(
+      contractDigest(contract!),
+    )
     const decomposed = taskEvents(h).find(item => item.kind === 'TaskDecomposed' && item.taskId === rootTaskId)
-    expect(decomposed?.kind === 'TaskDecomposed' ? decomposed.payload.admission?.proposalDigest : undefined)
-      .toBe(expected.ok ? expected.batch.admission.proposalDigest : undefined)
+    expect(decomposed?.kind === 'TaskDecomposed' ? decomposed.payload.admission?.proposalDigest : undefined).toBe(
+      expected.ok ? expected.batch.admission.proposalDigest : undefined,
+    )
   })
 
   test('the worker is spawned as a task worker with no rendering of its own, and the store holds the fixed input its context is projected from', async () => {
@@ -632,10 +672,11 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const eventsBefore = taskEvents(h).length
 
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('tests/missing.sh')))
-      .rejects.toThrow(
-        /task-runtime: contract rejected decomposition of ".+":\n- child 0 criterion "ac1" protectedInputs path "tests\/missing\.sh" cannot be read/,
-      )
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('tests/missing.sh')),
+    ).rejects.toThrow(
+      /task-runtime: contract rejected decomposition of ".+":\n- child 0 criterion "ac1" protectedInputs path "tests\/missing\.sh" cannot be read/,
+    )
 
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks.map(task => task.taskId)).toEqual([rootTaskId])
@@ -651,8 +692,11 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const tasksBefore = (await h.task.snapshotIn(STORE)).tasks.length
 
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('check.sh')))
-      .rejects.toThrow(/task-runtime: contract rejected decomposition of ".+":\n- child 0 criterion "ac1" protectedInputs cannot be fixed/)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('check.sh')),
+    ).rejects.toThrow(
+      /task-runtime: contract rejected decomposition of ".+":\n- child 0 criterion "ac1" protectedInputs cannot be fixed/,
+    )
 
     expect(h.spawned).toEqual([])
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(tasksBefore)
@@ -680,7 +724,10 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
       [{ reason: 'split the work' }, /decomposition requires at least one child/],
       [{ reason: 'split the work', children: 'child a' }, /decomposition children must be an array/],
       [{ reason: 'split the work', children: [null] }, /child 0 must be an object/],
-      [{ reason: 'split the work', children: [{ objective: 'child a', acceptanceCriteria: 'nope' }] }, /child 0 acceptanceCriteria must be an array/],
+      [
+        { reason: 'split the work', children: [{ objective: 'child a', acceptanceCriteria: 'nope' }] },
+        /child 0 acceptanceCriteria must be an array/,
+      ],
     ]
     for (const [spec, expected] of cases) {
       await expect(
@@ -710,68 +757,84 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
     const { taskId: rootTaskId } = await intakeRoot(h)
     const taskId = 't-broken'
     const runId = 'r-broken'
-    await h.task.createTaskIn(STORE, {
-      taskId,
-      definitionRef: { taskType: 'subtask', version: 1 },
-      objective: 'broken champion',
-      depth: 0,
-      acceptanceCriteria: [criterion as unknown as AcceptanceCriterion],
-      requestedCapabilities: [],
-      decompositionStatus: 'leaf',
-      status: 'created',
-      runIds: [],
-      childTaskIds: [],
-    }, 'tester')
+    await h.task.createTaskIn(
+      STORE,
+      {
+        taskId,
+        definitionRef: { taskType: 'subtask', version: 1 },
+        objective: 'broken champion',
+        depth: 0,
+        acceptanceCriteria: [criterion as unknown as AcceptanceCriterion],
+        requestedCapabilities: [],
+        decompositionStatus: 'leaf',
+        status: 'created',
+        runIds: [],
+        childTaskIds: [],
+      },
+      'tester',
+    )
     await h.task.admitTaskIn(STORE, taskId, 'tester', { decompositionStatus: 'leaf' })
-    await h.task.startRunIn(STORE, {
-      runId,
-      taskId,
-      sessionId: 's-champion',
-      capabilitySnapshot: [],
-      artifacts: [],
-      verifierResults: [],
-      // Born active like every run this build creates (A3 §1.1).
-      executionPhase: 'active',
-      status: 'running',
-      startedAt: new Date().toISOString(),
-    }, 'tester')
+    await h.task.startRunIn(
+      STORE,
+      {
+        runId,
+        taskId,
+        sessionId: 's-champion',
+        capabilitySnapshot: [],
+        artifacts: [],
+        verifierResults: [],
+        // Born active like every run this build creates (A3 §1.1).
+        executionPhase: 'active',
+        status: 'running',
+        startedAt: new Date().toISOString(),
+      },
+      'tester',
+    )
     await h.task.markRunStatusIn(STORE, taskId, runId, 'verifying', 'tester')
-    await h.task.recordEvidenceIn(STORE, {
-      evidenceId: `e-${runId}`,
-      taskRunId: runId,
-      taskId,
-      artifacts: [],
-      verifierResults: [{ criterionId: String(criterion.criterionId), status: 'pass', verifierId: 'fake-verifier' }],
-      claims: [],
-      generatedAt: new Date().toISOString(),
-    }, 'tester')
+    await h.task.recordEvidenceIn(
+      STORE,
+      {
+        evidenceId: `e-${runId}`,
+        taskRunId: runId,
+        taskId,
+        artifacts: [],
+        verifierResults: [{ criterionId: String(criterion.criterionId), status: 'pass', verifierId: 'fake-verifier' }],
+        claims: [],
+        generatedAt: new Date().toISOString(),
+      },
+      'tester',
+    )
     await h.task.markRunStatusIn(STORE, taskId, runId, 'verified', 'tester')
     return taskId
   }
 
-  test('fixes the declared string form of a candidate contract against the replay caller\'s checkout', async () => {
+  test("fixes the declared string form of a candidate contract against the replay caller's checkout", async () => {
     const file = join(checkout, 'candidate-check.sh')
     writeFileSync(file, 'exit 0\n')
     const h = harness({ checkout })
     const { championTaskId } = await champion(h)
 
-    const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:p1',
-      spawn: false,
-      contract: {
-        objective: 'candidate work',
-        acceptanceCriteria: [candidateCriterion('ac1', 'candidate-check.sh') as unknown as AcceptanceCriterion],
-        requiredCapabilities: [],
+    const outcome = await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      {
+        lineage: 'evolution-replay:p1',
+        spawn: false,
+        contract: {
+          objective: 'candidate work',
+          acceptanceCriteria: [candidateCriterion('ac1', 'candidate-check.sh') as unknown as AcceptanceCriterion],
+          requiredCapabilities: [],
+        },
       },
-    }, ROOT_SESSION)
+      ROOT_SESSION,
+    )
 
     expect(outcome.status).toBe('verified')
     const replayTask = await h.task.taskIn(STORE, outcome.taskId)
-    expect(replayTask.contract!.acceptanceCriteria[0]!.protectedInputs)
-      .toEqual([fixedRef('candidate-check.sh', file)])
+    expect(replayTask.contract!.acceptanceCriteria[0]!.protectedInputs).toEqual([fixedRef('candidate-check.sh', file)])
   })
 
-  test('carries a champion\'s stored fixed form verbatim and never re-fixes it', async () => {
+  test("carries a champion's stored fixed form verbatim and never re-fixes it", async () => {
     const file = join(checkout, 'champion-check.sh')
     writeFileSync(file, 'exit 0\n')
     const h = harness({ checkout })
@@ -789,10 +852,15 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
     // as stored rather than re-reading the file
     writeFileSync(file, 'tampered\n')
 
-    const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:p2',
-      spawn: false,
-    }, ROOT_SESSION)
+    const outcome = await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      {
+        lineage: 'evolution-replay:p2',
+        spawn: false,
+      },
+      ROOT_SESSION,
+    )
 
     expect(outcome.status).toBe('verified')
     const replayTask = await h.task.taskIn(STORE, outcome.taskId)
@@ -805,42 +873,59 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
     const { championTaskId } = await champion(h)
     const tasksBefore = (await h.task.snapshotIn(STORE)).tasks.length
 
-    await expect(h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:p3',
-      spawn: false,
-      contract: {
-        objective: 'candidate work',
-        acceptanceCriteria: [declaredCriterion('ac1', 'missing-candidate.sh') as unknown as AcceptanceCriterion],
-        requiredCapabilities: [],
-      },
-    }, ROOT_SESSION)).rejects.toThrow(
+    await expect(
+      h.runtime.replayTask(
+        STORE,
+        championTaskId,
+        {
+          lineage: 'evolution-replay:p3',
+          spawn: false,
+          contract: {
+            objective: 'candidate work',
+            acceptanceCriteria: [declaredCriterion('ac1', 'missing-candidate.sh') as unknown as AcceptanceCriterion],
+            requiredCapabilities: [],
+          },
+        },
+        ROOT_SESSION,
+      ),
+    ).rejects.toThrow(
       /task-runtime: replay of ".+" rejected:\n- replay of ".+" criterion "ac1" protectedInputs path "missing-candidate\.sh" cannot be read/,
     )
 
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(tasksBefore)
   })
 
-  test('refuses a declaration when the replay caller\'s checkout cannot be resolved', async () => {
+  test("refuses a declaration when the replay caller's checkout cannot be resolved", async () => {
     const h = harness()
     const { championTaskId } = await champion(h)
 
-    await expect(h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:p4',
-      spawn: false,
-      contract: {
-        objective: 'candidate work',
-        acceptanceCriteria: [candidateCriterion('ac1', 'candidate-check.sh') as unknown as AcceptanceCriterion],
-        requiredCapabilities: [],
-      },
-    }, ROOT_SESSION)).rejects.toThrow(/replay of ".+" rejected:\n- replay of ".+" criterion "ac1" protectedInputs cannot be fixed/)
+    await expect(
+      h.runtime.replayTask(
+        STORE,
+        championTaskId,
+        {
+          lineage: 'evolution-replay:p4',
+          spawn: false,
+          contract: {
+            objective: 'candidate work',
+            acceptanceCriteria: [candidateCriterion('ac1', 'candidate-check.sh') as unknown as AcceptanceCriterion],
+            requiredCapabilities: [],
+          },
+        },
+        ROOT_SESSION,
+      ),
+    ).rejects.toThrow(/replay of ".+" rejected:\n- replay of ".+" criterion "ac1" protectedInputs cannot be fixed/)
   })
 
   test('refuses a malformed fixed form carried by the champion', async () => {
     const h = harness({ checkout })
     const broken = await storedChampion(h, { ...candidateCriterion('ac1', 'check.sh'), protectedInputs: 'check.sh' })
 
-    await expect(h.runtime.replayTask(STORE, broken, { lineage: 'evolution-replay:p5', spawn: false }, ROOT_SESSION))
-      .rejects.toThrow(/replay of "t-broken" rejected:\n- replay of "t-broken" criterion "ac1" protectedInputs must be an array/)
+    await expect(
+      h.runtime.replayTask(STORE, broken, { lineage: 'evolution-replay:p5', spawn: false }, ROOT_SESSION),
+    ).rejects.toThrow(
+      /replay of "t-broken" rejected:\n- replay of "t-broken" criterion "ac1" protectedInputs must be an array/,
+    )
   })
 
   test('accepts a champion whose stored fixed form is well formed', async () => {
@@ -848,7 +933,12 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
     const refs = [{ path: 'check.sh', sha256: 'f'.repeat(64) }]
     const ok = await storedChampion(h, { ...candidateCriterion('ac1', 'check.sh'), protectedInputs: refs })
 
-    const outcome = await h.runtime.replayTask(STORE, ok, { lineage: 'evolution-replay:p6', spawn: false }, ROOT_SESSION)
+    const outcome = await h.runtime.replayTask(
+      STORE,
+      ok,
+      { lineage: 'evolution-replay:p6', spawn: false },
+      ROOT_SESSION,
+    )
 
     expect(outcome.status).toBe('verified')
     const replayTask = await h.task.taskIn(STORE, outcome.taskId)

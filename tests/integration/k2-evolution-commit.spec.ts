@@ -1156,7 +1156,13 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
 
   it('refuses a fresh apply the target another proposal left open, and admits commits again once that intent is settled', async () => {
     const directory = await sharedDirectory()
-    const h = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
+    const h = await startRunStack({
+      workspace: directory,
+      roots: [ROOT_A],
+      capabilities: { ...TABLE },
+      tools: true,
+      evolution: true,
+    })
     await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V0)
     await writeGuidanceSkill(join(h.home, 'skills'), CLEAN_SKILL, V0)
     const target = productionPath(h)
@@ -1353,7 +1359,13 @@ describe('K2-5: a reopened instance rolls an applied proposal back through the r
 
     // The reopen: a new process image over the same directory. Every line it reads is
     // the one format this build writes, and the proposal is applied with nothing open.
-    const h2 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
+    const h2 = await startRunStack({
+      workspace: directory,
+      roots: [ROOT_A],
+      capabilities: { ...TABLE },
+      tools: true,
+      evolution: true,
+    })
     const reopened = evolutionOf(h2)
     const lines = await ledgerLines(h2)
     expect(lines.length).toBeGreaterThan(0)

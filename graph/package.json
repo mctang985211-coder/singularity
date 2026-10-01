@@ -10,6 +10,10 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./layout": {
+      "types": "./lib/layout.d.ts",
+      "import": "./lib/layout.js"
+    },
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
@@ -30,7 +34,9 @@
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-session-persistence": "*"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@dangosys/dsh-singularity-task": "workspace:*"
+  },
   "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^22.20.0",

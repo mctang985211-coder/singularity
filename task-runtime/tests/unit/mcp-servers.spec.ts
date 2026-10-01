@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'vitest'
-import { MCP_SERVER_REGISTRY, manifestMcpServers, resolveMcpServerSpecs, type McpEnvBinding } from '../../src/mcp-servers.ts'
+import {
+  MCP_SERVER_REGISTRY,
+  manifestMcpServers,
+  resolveMcpServerSpecs,
+  type McpEnvBinding,
+} from '../../src/mcp-servers.ts'
 
 const BINDING: McpEnvBinding = {
   envRoot: '/env/project1',
@@ -31,13 +36,15 @@ describe('manifestMcpServers', () => {
 describe('resolveMcpServerSpecs against the shipped registry', () => {
   test('bbdev binds the env checkout into command and cwd, forks included', () => {
     const specs = resolveMcpServerSpecs(manifest('bbdev'), BINDING)
-    expect(specs).toEqual([{
-      serverName: 'bbdev',
-      command: '/env/project1/mctang985211-coder/buckyball/scripts/claude/run_mcp_server.sh',
-      args: [],
-      env: {},
-      cwd: '/env/project1/mctang985211-coder/buckyball',
-    }])
+    expect(specs).toEqual([
+      {
+        serverName: 'bbdev',
+        command: '/env/project1/mctang985211-coder/buckyball/scripts/claude/run_mcp_server.sh',
+        args: [],
+        env: {},
+        cwd: '/env/project1/mctang985211-coder/buckyball',
+      },
+    ])
   })
 
   test('two capabilities naming the same server mount it once', () => {
@@ -61,7 +68,9 @@ describe('resolveMcpServerSpecs against the shipped registry', () => {
   })
 
   test('a repo the env does not contain fails loudly, naming the repo and the env', () => {
-    expect(() => resolveMcpServerSpecs(manifest('bbdev'), { envRoot: '/env/project9', checkout: () => undefined })).toThrow(
+    expect(() =>
+      resolveMcpServerSpecs(manifest('bbdev'), { envRoot: '/env/project9', checkout: () => undefined }),
+    ).toThrow(
       'MCP server "bbdev" binds {repoRoot:buckyball} but this run\'s env (/env/project9) has no "buckyball" checkout',
     )
   })
@@ -86,7 +95,9 @@ describe('resolveMcpServerSpecs template mechanics', () => {
       cwd: '/env/project1',
     })
     // The command carries no placeholder, but args do: the binding is required.
-    expect(() => resolveMcpServerSpecs(manifest('static'), undefined, { static: envFree })).toThrow(/needs an env binding/)
+    expect(() => resolveMcpServerSpecs(manifest('static'), undefined, { static: envFree })).toThrow(
+      /needs an env binding/,
+    )
   })
 
   test('a fully placeholder-free template mounts with an empty cwd even without a binding', () => {
@@ -116,7 +127,7 @@ describe('the shipped registry', () => {
     }
   })
 
-  test('server names satisfy mcp-client\'s namespace pattern', () => {
+  test("server names satisfy mcp-client's namespace pattern", () => {
     for (const template of Object.values(MCP_SERVER_REGISTRY)) {
       expect(template.serverName).toMatch(/^[A-Za-z0-9_-]{1,32}$/)
     }

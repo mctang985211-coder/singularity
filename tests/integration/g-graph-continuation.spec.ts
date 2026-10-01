@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
+import { SESSION_FORMAT_VERSION } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { TaskSnapshot } from '../../task/src/index.ts'
 
 // This fixture executes Node directly, with only lib imports: no source aliases,
@@ -76,7 +77,7 @@ function leaf(report: Report) {
 
 function artifact(directory: string, id: string): string {
   const paths = readdirSync(join(directory, 'sessions'), { recursive: true }).filter(path =>
-    String(path).endsWith(`${id}/session.v3.jsonl`),
+    String(path).endsWith(`${id}/session.v${SESSION_FORMAT_VERSION}.jsonl`),
   )
   expect(paths).toHaveLength(1)
   return join(directory, 'sessions', String(paths[0]))

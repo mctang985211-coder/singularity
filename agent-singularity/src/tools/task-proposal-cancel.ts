@@ -1,16 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import { undeclaredParameters } from './proposal-parameters.ts'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): string {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('task_proposal_cancel: missing agent id')
-  return id
-}
+import { message, sessionId, text, undeclaredParameters } from '../shared.ts'
 
 export function defineTaskProposalCancelTool(ctx: Context) {
   return defineTool({
@@ -31,7 +22,7 @@ export function defineTaskProposalCancelTool(ctx: Context) {
     execute: async (args, exec) => {
       const undeclared = undeclaredParameters(args, ['proposalId'], 'task_proposal_cancel')
       if (undeclared !== undefined) return undeclared
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'task_proposal_cancel')
       const { storeId } = await ctx.taskRuntime.runForSession(caller)
       try {
         // The service decides who may withdraw what: a session that did not
@@ -42,7 +33,7 @@ export function defineTaskProposalCancelTool(ctx: Context) {
           'The record is kept: a cancelled proposal is a fact, and a revision is a new proposal with its own request key.',
         ].join('\n')
       } catch (error) {
-        return `task_proposal_cancel rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `task_proposal_cancel rejected: ${message(error)}`
       }
     },
   })

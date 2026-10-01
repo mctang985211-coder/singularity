@@ -1,7 +1,7 @@
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import UserQuestionService from '../../../../thirdparty/deepseek-harness/packages/interaction/user-questions/lib/index.js'
 import { expect, it } from 'vitest'
-import { HitlService } from '../../agent-singularity/src/hitl.ts'
+import { HitlService } from '../../agent-singularity/src/services/hitl.ts'
 
 function bridge() {
   const ctx = new Context()

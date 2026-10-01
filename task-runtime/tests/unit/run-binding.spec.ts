@@ -25,7 +25,12 @@ const FIXTURE_SKILLS = fileURLToPath(new URL('../fixtures/skills/', import.meta.
 /** The BB rows the fixtures are built against. */
 const TABLE: Readonly<Record<string, CapabilityConfig>> = {
   'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'] },
-  'verify-ball-functional': { skills: ['verify'], tools: ['filesystem', 'bash', 'jobs'], preset: 'bb-verify', mcpServers: ['bbdev'] },
+  'verify-ball-functional': {
+    skills: ['verify'],
+    tools: ['filesystem', 'bash', 'jobs'],
+    preset: 'bb-verify',
+    mcpServers: ['bbdev'],
+  },
 }
 
 const VERIFIER_REFS = ['command', 'composite', 'review']
@@ -71,11 +76,16 @@ async function precheck(capabilities: readonly string[]): Promise<ProviderPreche
 /** A manifest with the given rows, in the shape `resolveCapabilities` produces for them. */
 function manifest(rows: Record<string, string[]>): CapabilityManifest {
   return {
-    capabilities: Object.fromEntries(Object.entries(rows).map(([name, skills]) => [name, {
-      skills,
-      tools: [],
-      ...(name === 'verify-ball-functional' ? { mcpServers: ['bbdev'] } : {}),
-    }])),
+    capabilities: Object.fromEntries(
+      Object.entries(rows).map(([name, skills]) => [
+        name,
+        {
+          skills,
+          tools: [],
+          ...(name === 'verify-ball-functional' ? { mcpServers: ['bbdev'] } : {}),
+        },
+      ]),
+    ),
     missing: [],
     closure: 'closed',
   }
@@ -106,9 +116,12 @@ async function snapshotFile(binding: RunProviderBinding, relative: string): Prom
 }
 
 describe('bindRunProviders', () => {
-  test('materializes the admitted bytes under the run\'s own directory and records their identity', async () => {
+  test("materializes the admitted bytes under the run's own directory and records their identity", async () => {
     const directory = await install('ball-align')
-    const binding = await bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] } }) as RunProviderBinding
+    const binding = (await bind({
+      capabilities: ['design-ball'],
+      rows: { 'design-ball': ['ball-align'] },
+    })) as RunProviderBinding
 
     expect(binding.snapshotRoot).toBe(join(root, 'sg-t-root', 'r-1', RUN_BINDING_SKILLS_DIR))
     expect(binding.capabilities).toEqual(['design-ball'])
@@ -128,23 +141,39 @@ describe('bindRunProviders', () => {
     // digest of what stands in the snapshot — recomputed here from the copied
     // files, over the canonical form the identity is defined as.
     expect(await snapshotFile(binding, 'ball-align/SKILL.md')).toEqual(await readFile(join(directory, 'SKILL.md')))
-    expect(await snapshotFile(binding, 'ball-align/SKILL.contract.json')).toEqual(await readFile(join(directory, 'SKILL.contract.json')))
-    expect(await snapshotFile(binding, 'ball-align/references/contract-checklist.md'))
-      .toEqual(await readFile(join(directory, 'references', 'contract-checklist.md')))
+    expect(await snapshotFile(binding, 'ball-align/SKILL.contract.json')).toEqual(
+      await readFile(join(directory, 'SKILL.contract.json')),
+    )
+    expect(await snapshotFile(binding, 'ball-align/references/contract-checklist.md')).toEqual(
+      await readFile(join(directory, 'references', 'contract-checklist.md')),
+    )
     const digestOf = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
-    const expected = createHash('sha256').update(JSON.stringify({
-      resources: [
-        { path: 'references/contract-checklist.md', sha256: digestOf(await snapshotFile(binding, 'ball-align/references/contract-checklist.md')) },
-        { path: 'references/illegal-input-table.md', sha256: digestOf(await snapshotFile(binding, 'ball-align/references/illegal-input-table.md')) },
-      ],
-      skillMdSha256: digestOf(await snapshotFile(binding, 'ball-align/SKILL.md')),
-    })).digest('hex')
+    const expected = createHash('sha256')
+      .update(
+        JSON.stringify({
+          resources: [
+            {
+              path: 'references/contract-checklist.md',
+              sha256: digestOf(await snapshotFile(binding, 'ball-align/references/contract-checklist.md')),
+            },
+            {
+              path: 'references/illegal-input-table.md',
+              sha256: digestOf(await snapshotFile(binding, 'ball-align/references/illegal-input-table.md')),
+            },
+          ],
+          skillMdSha256: digestOf(await snapshotFile(binding, 'ball-align/SKILL.md')),
+        }),
+      )
+      .digest('hex')
     expect(skill.contentDigest).toBe(expected)
   })
 
   test('reads the snapshot back clean, and names what changed when it does not', async () => {
     await install('ball-align')
-    const binding = await bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] } }) as RunProviderBinding
+    const binding = (await bind({
+      capabilities: ['design-ball'],
+      rows: { 'design-ball': ['ball-align'] },
+    })) as RunProviderBinding
 
     expect((await readRunBinding(binding))?.defects).toEqual([])
 
@@ -156,13 +185,23 @@ describe('bindRunProviders', () => {
     expect(body!.defects.join('\n')).toContain('content-mismatch')
     expect(body!.defects.join('\n')).toContain('bound ' + binding.skills[0]!.contentDigest)
 
-    const restored = await bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] }, runId: 'r-2' }) as RunProviderBinding
+    const restored = (await bind({
+      capabilities: ['design-ball'],
+      rows: { 'design-ball': ['ball-align'] },
+      runId: 'r-2',
+    })) as RunProviderBinding
     await writeFile(join(restored.snapshotRoot!, 'ball-align', 'references', 'illegal-input-table.md'), 'rewritten\n')
     const resource = await readRunBinding(restored)
     expect(resource!.defects.join('\n')).toContain('references/illegal-input-table.md')
 
-    const declared = await bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] }, runId: 'r-3' }) as RunProviderBinding
-    const sidecar = JSON.parse(await readFile(join(declared.snapshotRoot!, 'ball-align', 'SKILL.contract.json'), 'utf8')) as { scope: string }
+    const declared = (await bind({
+      capabilities: ['design-ball'],
+      rows: { 'design-ball': ['ball-align'] },
+      runId: 'r-3',
+    })) as RunProviderBinding
+    const sidecar = JSON.parse(
+      await readFile(join(declared.snapshotRoot!, 'ball-align', 'SKILL.contract.json'), 'utf8'),
+    ) as { scope: string }
     sidecar.scope = 'rewritten scope'
     await writeFile(join(declared.snapshotRoot!, 'ball-align', 'SKILL.contract.json'), JSON.stringify(sidecar))
     const contract = await readRunBinding(declared)
@@ -170,17 +209,27 @@ describe('bindRunProviders', () => {
 
     // A directory the record does not name would be registered into a worker's
     // layer, so it is reported too.
-    const extra = await bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] }, runId: 'r-4' }) as RunProviderBinding
+    const extra = (await bind({
+      capabilities: ['design-ball'],
+      rows: { 'design-ball': ['ball-align'] },
+      runId: 'r-4',
+    })) as RunProviderBinding
     await mkdir(join(extra.snapshotRoot!, 'smuggled-skill'), { recursive: true })
-    await writeFile(join(extra.snapshotRoot!, 'smuggled-skill', 'SKILL.md'), '---\nname: smuggled-skill\ndescription: not bound\n---\n\nbody\n')
+    await writeFile(
+      join(extra.snapshotRoot!, 'smuggled-skill', 'SKILL.md'),
+      '---\nname: smuggled-skill\ndescription: not bound\n---\n\nbody\n',
+    )
     const smuggled = await readRunBinding(extra)
     expect(smuggled!.defects.join('\n')).toContain('smuggled-skill')
-    expect(smuggled!.defects.join('\n')).toContain('not a skill this run\'s record names')
+    expect(smuggled!.defects.join('\n')).toContain("not a skill this run's record names")
   })
 
   test('a snapshot that is missing is reported, never substituted with the production path', async () => {
     await install('ball-align')
-    const binding = await bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] } }) as RunProviderBinding
+    const binding = (await bind({
+      capabilities: ['design-ball'],
+      rows: { 'design-ball': ['ball-align'] },
+    })) as RunProviderBinding
     await rm(binding.snapshotRoot!, { recursive: true, force: true })
 
     const read = await readRunBinding(binding)
@@ -188,7 +237,9 @@ describe('bindRunProviders', () => {
     expect(read!.defects.join('\n')).toContain(binding.snapshotRoot!)
     // The production skill is still there and still readable — the record does
     // not fall back to it, and nothing in the result mentions it.
-    expect(await readFile(join(checkout, '.agents', 'skills', 'ball-align', 'SKILL.md'), 'utf8')).toContain('ball-align')
+    expect(await readFile(join(checkout, '.agents', 'skills', 'ball-align', 'SKILL.md'), 'utf8')).toContain(
+      'ball-align',
+    )
     expect(read!.defects.join('\n')).not.toContain(join(checkout, '.agents'))
   })
 
@@ -199,26 +250,35 @@ describe('bindRunProviders', () => {
     // the window a long batch leaves open, injected here directly.
     await writeFile(join(directory, 'SKILL.md'), '---\nname: ball-align\ndescription: rewritten\n---\n\nnew body\n')
 
-    await expect(bindRunProviders({
-      storeId: 'sg-t-root',
-      runId: 'r-1',
-      manifest: manifest({ 'design-ball': ['ball-align'] }),
-      providers,
-      table: TABLE,
-      root,
-    })).rejects.toThrow(/SKILL\.md at .* is not the admitted content/)
+    await expect(
+      bindRunProviders({
+        storeId: 'sg-t-root',
+        runId: 'r-1',
+        manifest: manifest({ 'design-ball': ['ball-align'] }),
+        providers,
+        table: TABLE,
+        root,
+      }),
+    ).rejects.toThrow(/SKILL\.md at .* is not the admitted content/)
 
     // Nothing half materialized: the run's directory is gone and no record exists.
-    await expect(readFile(join(root, 'sg-t-root', 'r-1', RUN_BINDING_SKILLS_DIR, 'ball-align', 'SKILL.md'))).rejects.toThrow()
+    await expect(
+      readFile(join(root, 'sg-t-root', 'r-1', RUN_BINDING_SKILLS_DIR, 'ball-align', 'SKILL.md')),
+    ).rejects.toThrow()
   })
 
   test('refuses to bind into a run directory that already exists instead of overwriting it', async () => {
     await install('ball-align')
-    const first = await bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] }, runId: 'r-1' }) as RunProviderBinding
+    const first = (await bind({
+      capabilities: ['design-ball'],
+      rows: { 'design-ball': ['ball-align'] },
+      runId: 'r-1',
+    })) as RunProviderBinding
     const recordBefore = await readFile(join(first.snapshotRoot!, 'ball-align', 'SKILL.md'))
 
-    await expect(bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] }, runId: 'r-1' }))
-      .rejects.toThrow(/already exists/)
+    await expect(
+      bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] }, runId: 'r-1' }),
+    ).rejects.toThrow(/already exists/)
     expect(await readFile(join(first.snapshotRoot!, 'ball-align', 'SKILL.md'))).toEqual(recordBefore)
   })
 
@@ -227,29 +287,39 @@ describe('bindRunProviders', () => {
     // as missing): a run must not start against it.
     const providers = await precheck(['design-ball'])
 
-    await expect(bindRunProviders({
-      storeId: 'sg-t-root',
-      runId: 'r-1',
-      manifest: manifest({ 'design-ball': ['ball-align'] }),
-      providers,
-      table: TABLE,
-      root,
-    })).rejects.toThrow(/no accepted provider for skill "ball-align"/)
+    await expect(
+      bindRunProviders({
+        storeId: 'sg-t-root',
+        runId: 'r-1',
+        manifest: manifest({ 'design-ball': ['ball-align'] }),
+        providers,
+        table: TABLE,
+        root,
+      }),
+    ).rejects.toThrow(/no accepted provider for skill "ball-align"/)
   })
 
   test('binds nothing for a caller that assembled its own plan, and nothing for a run with no rows', async () => {
     await install('ball-align')
     // No pre-check but rows in play: no judged identity, so no binding at all.
-    expect(await bindRunProviders({
-      storeId: 'sg-t-root',
-      runId: 'r-1',
-      manifest: manifest({ 'design-ball': ['ball-align'] }),
-      table: TABLE,
-      root,
-    })).toBeUndefined()
+    expect(
+      await bindRunProviders({
+        storeId: 'sg-t-root',
+        runId: 'r-1',
+        manifest: manifest({ 'design-ball': ['ball-align'] }),
+        table: TABLE,
+        root,
+      }),
+    ).toBeUndefined()
 
     // No rows: the root case — a record with the table's revision and nothing else.
-    const empty = await bindRunProviders({ storeId: 'sg-t-root', runId: 'r-root', manifest: manifest({}), table: TABLE, root })
+    const empty = await bindRunProviders({
+      storeId: 'sg-t-root',
+      runId: 'r-root',
+      manifest: manifest({}),
+      table: TABLE,
+      root,
+    })
     expect(empty!.skills).toEqual([])
     expect(empty!.capabilities).toEqual([])
     expect(empty!.mcpServers).toEqual([])
@@ -261,10 +331,10 @@ describe('bindRunProviders', () => {
 
   test('records the granted MCP servers with the template identity they resolve through', async () => {
     await install('verify')
-    const binding = await bind({
+    const binding = (await bind({
       capabilities: ['verify-ball-functional'],
       rows: { 'verify-ball-functional': ['verify'] },
-    }) as RunProviderBinding
+    })) as RunProviderBinding
     expect(binding.skills[0]!.role).toBe('execution-provider')
     expect(binding.mcpServers[0]!.serverName).toBe('bbdev')
     // The digest tracks the registry template: the same name over an edited
@@ -289,14 +359,16 @@ describe('bindRunProviders', () => {
     await rm(join(directory, 'SKILL.md'))
     await symlink(join(FIXTURE_SKILLS, 'verify', 'SKILL.md'), join(directory, 'SKILL.md'))
 
-    await expect(bindRunProviders({
-      storeId: 'sg-t-root',
-      runId: 'r-1',
-      manifest: manifest({ 'design-ball': ['ball-align'] }),
-      providers,
-      table: TABLE,
-      root,
-    })).rejects.toThrow(/symbolic link/)
+    await expect(
+      bindRunProviders({
+        storeId: 'sg-t-root',
+        runId: 'r-1',
+        manifest: manifest({ 'design-ball': ['ball-align'] }),
+        providers,
+        table: TABLE,
+        root,
+      }),
+    ).rejects.toThrow(/symbolic link/)
     await expect(readFile(join(root, 'sg-t-root', 'r-1'))).rejects.toThrow()
   })
 })
@@ -305,7 +377,10 @@ describe('run binding re-checks', () => {
   test('re-reads what a guidance snapshot leaves uncovered, in both directions', async () => {
     const directory = await install('ball-align', { sidecar: false })
     await writeFile(join(directory, 'notes.md'), 'not covered\n')
-    const binding = await bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] } }) as RunProviderBinding
+    const binding = (await bind({
+      capabilities: ['design-ball'],
+      rows: { 'design-ball': ['ball-align'] },
+    })) as RunProviderBinding
     expect(binding.skills[0]!.uncovered).toEqual(['notes.md'])
     // A snapshot holding exactly what was admitted reads back clean. The source's
     // uncovered entry is deliberately not part of it: a snapshot carries the

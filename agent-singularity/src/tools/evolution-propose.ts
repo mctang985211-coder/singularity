@@ -1,22 +1,12 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
+import { message, sessionId, text } from '../shared.ts'
 
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-/**
- * The mutation surfaces this build records for Evolution — its own vocabulary,
- * not the diagnosis's (A5): a `DiagnosisProposal.targetType` is an open name,
- * and this is where a suggestion is checked before it is transcribed into a
- * proposal. What can actually be *executed* is narrower still
- * (`APPLYABLE_TARGET_TYPES` in the evolution package, and the hand-off
- * consumption in `evolution-handoff.ts`).
- */
+/** The mutation surfaces this build records for Evolution — its own vocabulary, not the diagnosis's (A5): */
 export const PROPOSAL_TARGET_TYPES: readonly ProposalTargetType[] = [
   'skill', 'tool', 'capability', 'task_definition', 'decomposition_policy',
   'agent_preset', 'workflow_policy', 'verifier', 'runtime_policy',
@@ -26,12 +16,6 @@ const TARGET_TYPE_SET: ReadonlySet<string> = new Set<string>(PROPOSAL_TARGET_TYP
 
 function isProposalTargetType(value: unknown): value is ProposalTargetType {
   return typeof value === 'string' && TARGET_TYPE_SET.has(value)
-}
-
-function sessionId(exec: ToolRunContext): SessionId {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('evolution_propose: missing agent id')
-  return id
 }
 
 export function defineEvolutionProposeTool(ctx: Context) {
@@ -71,7 +55,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'evolution_propose')
       // A transcription carries whatever the diagnosis recorded — an open name
       // — so the local is the open type and the check below narrows it.
       let targetType: string | undefined = args.targetType
@@ -95,8 +79,6 @@ export function defineEvolutionProposeTool(ctx: Context) {
         rationale = proposal.rationale
         // The diagnosis's own target type is an open name (A5): this entry is
         // where it is checked against the surfaces *this* build records, and a
-        // suggestion it cannot execute is refused before anything is written —
-        // never transcribed into a proposal no executor can take up.
         if (!isProposalTargetType(targetType)) {
           throw new Error(
             `evolution_propose: diagnosis "${diagnosis.diagnosisId}" proposal #${args.fromDiagnosis.proposalIndex} names ` +
@@ -145,7 +127,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
             : proposal.targetType === 'capability' ? capabilityReplacement : recordedSuggestion,
         ].join('\n')
       } catch (error) {
-        return `evolution_propose rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_propose rejected: ${message(error)}`
       }
     },
   })

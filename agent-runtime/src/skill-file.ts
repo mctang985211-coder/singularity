@@ -1,15 +1,5 @@
-/**
- * Skill files for capability grants: locate the `SKILL.md` a granted skill name
- * refers to and read it into a runtime registration.
- *
- * A capability grant must hold even when the worker's own composition mounts no
- * skill discovery: `skill-filesystem` registers into the preset's layer, so an
- * agent joined to a preset that does not mount it sees no filesystem skills at
- * all — while the SKILL.md sits on disk exactly where the deployment keeps it.
- * This module is that fallback path, and it deliberately covers only the roots
- * the deployment's own discovery covers.
- * @module @dangosys/dsh-singularity-agent-runtime/skill-file
- */
+/** Skill files for capability grants: locate the `SKILL.md` a granted skill name refers to and read it.
+ * @module @dangosys/dsh-singularity-agent-runtime/skill-file */
 
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -18,10 +8,7 @@ import { dirname, join } from 'node:path'
 /** How far up from a worker's cwd project skill roots are looked for. */
 const PROJECT_LOOKUP_DEPTH = 8
 
-/**
- * A runtime registration, structurally typed: this package consumes the skill
- * service through `ctx.get('skills')` and must not depend on its package.
- */
+/** A runtime registration, structurally typed: this package consumes the skill service through `ctx.get`. */
 export interface RuntimeSkill {
   readonly name: string
   readonly description: string
@@ -44,9 +31,27 @@ export interface ParsedSkillFile {
   readonly content: string
 }
 
+/** The one runtime registration both skill paths build: a parsed SKILL.md or a discovered skill to pin. */
+export function toRuntimeSkill(parsed: Omit<RuntimeSkill, 'source'>): RuntimeSkill {
+  return {
+    name: parsed.name,
+    description: parsed.description,
+    ...(parsed.whenToUse === undefined ? {} : { whenToUse: parsed.whenToUse }),
+    ...(parsed.invocation === undefined ? {} : { invocation: parsed.invocation }),
+    source: 'runtime',
+    ...(parsed.path === undefined ? {} : { path: parsed.path }),
+    ...(parsed.resourceBase === undefined ? {} : { resourceBase: parsed.resourceBase }),
+    ...(parsed.metadata === undefined ? {} : { metadata: parsed.metadata }),
+    content: parsed.content,
+  }
+}
+
 function stripQuotes(value: string): string {
   const trimmed = value.trim()
-  if (trimmed.length >= 2 && ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))) {
+  if (
+    trimmed.length >= 2 &&
+    ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) {
     return trimmed.slice(1, -1)
   }
   return trimmed
@@ -60,11 +65,7 @@ function parseBoolean(value: string | undefined, field: string, path: string): b
   throw new Error(`skill file ${path} has a non-boolean "${field}": ${value}`)
 }
 
-/**
- * Split `SKILL.md` text into its frontmatter fields and body. The frontmatter
- * grammar accepted here is the flat `key: value` one every skill in this
- * deployment uses; a nested structure fails loudly rather than being guessed at.
- */
+/** Split `SKILL.md` text into its flat `key: value` frontmatter fields and body; nested lines fail loudly. */
 export function parseSkillFile(text: string, path: string): ParsedSkillFile {
   const lines = text.split(/\r?\n/)
   if (lines[0]?.trim() !== '---') {
@@ -75,14 +76,16 @@ export function parseSkillFile(text: string, path: string): ParsedSkillFile {
   const fields = new Map<string, string>()
   for (const line of lines.slice(1, closing)) {
     if (line.trim().length === 0 || line.trimStart().startsWith('#')) continue
-    if (/^\s/.test(line)) throw new Error(`skill file ${path} has a nested frontmatter line this reader does not support: ${line}`)
+    if (/^\s/.test(line))
+      throw new Error(`skill file ${path} has a nested frontmatter line this reader does not support: ${line}`)
     const separator = line.indexOf(':')
     if (separator <= 0) throw new Error(`skill file ${path} has a frontmatter line without a key: ${line}`)
     fields.set(line.slice(0, separator).trim(), line.slice(separator + 1).trim())
   }
   const name = fields.get('name')
   const description = fields.get('description')
-  if (name === undefined || stripQuotes(name).length === 0) throw new Error(`skill file ${path} frontmatter requires "name"`)
+  if (name === undefined || stripQuotes(name).length === 0)
+    throw new Error(`skill file ${path} frontmatter requires "name"`)
   if (description === undefined || stripQuotes(description).length === 0) {
     throw new Error(`skill file ${path} frontmatter requires "description"`)
   }
@@ -98,7 +101,10 @@ export function parseSkillFile(text: string, path: string): ParsedSkillFile {
       modelInvocable: modelInvocable !== true,
       userInvocable: userInvocable !== false,
     },
-    content: lines.slice(closing + 1).join('\n').replace(/^\n+/, ''),
+    content: lines
+      .slice(closing + 1)
+      .join('\n')
+      .replace(/^\n+/, ''),
   }
 }
 
@@ -110,7 +116,7 @@ async function skillFileIn(root: string, name: string): Promise<string | undefin
 }
 
 /** Skill roots for a worker working in `cwd`: its own project first, then the deployment's user roots. */
-async function skillRoots(cwd: string | undefined): Promise<string[]> {
+export async function skillRootsFor(cwd: string | undefined): Promise<string[]> {
   const roots: string[] = []
   if (cwd !== undefined) {
     let dir = cwd
@@ -127,17 +133,7 @@ async function skillRoots(cwd: string | undefined): Promise<string[]> {
   return roots
 }
 
-/**
- * Locate the `SKILL.md` a granted skill name refers to under an explicit root
- * list, in the order given. The one search loop every discovery path shares:
- * {@link findSkillFile} runs it over a worker's own roots, and the task
- * runtime's provider pre-check runs it over the same roots with the replay
- * overlay's extra roots in front, so admission asks the question the spawn
- * will answer instead of restating the search.
- * @param roots - skill roots, searched in order.
- * @param name - the skill name a capability declares.
- * @returns the absolute path, or undefined when no root holds that skill.
- */
+/** Locate the `SKILL.md` a granted skill name refers to under an explicit root list, in the given order. */
 export async function findSkillFileIn(roots: readonly string[], name: string): Promise<string | undefined> {
   for (const root of roots) {
     const file = await skillFileIn(root, name)
@@ -146,31 +142,12 @@ export async function findSkillFileIn(roots: readonly string[], name: string): P
   return undefined
 }
 
-/**
- * Locate the `SKILL.md` a granted skill name refers to.
- * @param name - the skill name a capability declares.
- * @param cwd - the worker's working directory; project roots are searched upward from it.
- * @returns the absolute path, or undefined when no root holds that skill.
- */
+/** Locate the `SKILL.md` a granted skill name refers to; project roots are searched upward from `cwd`. */
 export async function findSkillFile(name: string, cwd: string | undefined): Promise<string | undefined> {
-  return findSkillFileIn(await skillRoots(cwd), name)
+  return findSkillFileIn(await skillRootsFor(cwd), name)
 }
 
-/**
- * Every root {@link findSkillFile} searches, for an error message that tells the
- * operator where a granted skill should have been.
- */
-export async function skillRootsFor(cwd: string | undefined): Promise<string[]> {
-  return skillRoots(cwd)
-}
-
-/**
- * Every `<root>/<name>/SKILL.md` under one extra skill root (the replay
- * overlay), in directory order. Only the directory-bundle form is scanned —
- * the sandbox materializes skills that way — and a root that cannot be read
- * throws, so a broken overlay path fails the spawn loudly with the cause
- * named instead of silently degrading to production skills.
- */
+/** Every `<root>/<name>/SKILL.md` under one extra skill root, in directory order; an unreadable root throws. */
 export async function listSkillFiles(root: string): Promise<{ name: string; file: string }[]> {
   const entries = await readdir(root, { withFileTypes: true })
   const found: { name: string; file: string }[] = []
@@ -182,27 +159,11 @@ export async function listSkillFiles(root: string): Promise<{ name: string; file
   return found
 }
 
-/**
- * Read one granted skill's `SKILL.md` into a runtime registration. A file whose
- * frontmatter names a different skill than the grant asked for is rejected: the
- * registry would otherwise publish a body under the wrong name.
- * @param file - absolute path from {@link findSkillFile}.
- * @param name - the granted skill name, which the file must declare.
- * @returns the registration to hand to `ctx.skills.register`.
- */
+/** Read one granted skill's `SKILL.md` into a runtime registration, rejecting a mismatched declared name. */
 export async function readSkillFile(file: string, name: string): Promise<RuntimeSkill> {
   const parsed = parseSkillFile(await readFile(file, 'utf8'), file)
   if (parsed.name !== name) {
     throw new Error(`skill file ${file} declares name "${parsed.name}" but the capability grants "${name}"`)
   }
-  return {
-    name: parsed.name,
-    description: parsed.description,
-    ...(parsed.whenToUse === undefined ? {} : { whenToUse: parsed.whenToUse }),
-    invocation: parsed.invocation,
-    source: 'runtime',
-    path: parsed.path,
-    resourceBase: { kind: 'directory', path: dirname(parsed.path) },
-    content: parsed.content,
-  }
+  return toRuntimeSkill({ ...parsed, resourceBase: { kind: 'directory', path: dirname(parsed.path) } })
 }

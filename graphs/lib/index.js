@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { Context, Service } from "@deepseek-ai/cordis";
-import { SESSION_FORMAT_VERSION, SessionId, SessionSeq } from "@deepseek-ai/dsh-session";
+import { SessionId } from "@deepseek-ai/dsh-session";
+import { EventStoreSet, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 import { cleanPromptText } from "@dangosys/dsh-env-builder";
-import { rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 
 //#region src/service/state.ts
+/** Whether an existing environment can be bound by a new graph: it has repositories, no graph, and no sessions. */
+function isReusableEnv(env, boundEnvIds) {
+	return env.components.length > 0 && !boundEnvIds.has(env.id) && env.sessionIds.length === 0;
+}
 function copy(value) {
 	return structuredClone(value);
 }
@@ -31,7 +35,6 @@ var GraphsState = class GraphsState {
 		switch (event.kind) {
 			case "graph/add": {
 				const graph = event.graph;
-				if (typeof graph.ready !== "boolean") throw new Error("graphs: ready must be boolean");
 				if (this.value.graphs.some((g) => g.id === graph.id)) throw new Error(`graphs: duplicate graph id "${graph.id}"`);
 				if (this.value.graphs.some((g) => g.envId === graph.envId)) throw new Error(`graphs: environment "${graph.envId}" already bound`);
 				this.value = {
@@ -96,17 +99,7 @@ var GraphsState = class GraphsState {
 
 //#endregion
 //#region src/prompts/setup.prompts.ts
-/**
-* What the root is told when a graph is created (A0 §1.1): the setup work, and
-* nothing that could pass for the graph's goal.
-*
-* The paragraph used to leave the root's objective implicit by calling
-* `task_decompose` "reserved for the user objective" — but a graph no longer
-* arrives with a task whose objective is the graph's own name, so a root that
-* read that line would go looking for one. Setup is not the goal, and the goal
-* is accepted through `task_intake`: this text says both, and names no
-* decomposition of setup work.
-*/
+/** What the root is told when a graph is created (A0 §1.1): the setup work, not the graph's goal. */
 function setupPromptText(graphId, env) {
 	const pending = env.components.filter((component) => component.status === "installing");
 	const present = env.components.filter((component) => component.status !== "installing");
@@ -125,13 +118,7 @@ function nextGraphId(existing) {
 	while (existing.includes(`graph${n}`)) n += 1;
 	return `graph${n}`;
 }
-/**
-* The registry's own answer when no graph publishes a session, as a
-* distinguishable value: `graphForSession` reports this *fact* as this error,
-* so a reader that has to tell the fact apart from a failed read (the graph
-* registry or one of its stores being unreadable) can do so by code instead of
-* by message, and keeps a read failure a failure.
-*/
+/** The registry's own answer when no graph publishes a session; distinguishable by code from a failed read. */
 const SESSION_NOT_IN_GRAPH = "graph-session-not-found";
 /** See {@link SESSION_NOT_IN_GRAPH}: the one error that means "no graph holds this session". */
 var SessionNotInGraphError = class extends Error {
@@ -149,16 +136,19 @@ var GraphsService = class extends Service {
 		"agentRuntime",
 		"envBuilder"
 	];
-	ready;
+	stores;
 	storeId = SessionId("graphs-registry");
-	handle;
-	state = new GraphsState();
-	nextSeq = 0;
-	writes = Promise.resolve();
+	ready;
 	transitions = Promise.resolve();
 	constructor(ctx) {
 		super(ctx, "graphs");
-		this.ready = this.open(ctx);
+		this.stores = new EventStoreSet(ctx, {
+			namespace: "graphs",
+			eventType: "graphs/event",
+			changeEvent: "graphs/change",
+			createState: () => new GraphsState()
+		});
+		this.ready = this.stores.open(this.storeId, "auto").then(() => void 0);
 		ctx.on("agentRuntime/spawned", async ({ parentId, sessionId }) => {
 			const graph = await this.graphForSession(parentId);
 			ctx.envBuilder.store.attachSession(graph.envId, sessionId);
@@ -166,29 +156,26 @@ var GraphsService = class extends Service {
 		ctx.effect(() => async () => {
 			await this.ready;
 			await this.transitions;
-			await this.writes;
-			await this.handle?.close();
+			await this.stores.close();
 		}, "graphs:persistence");
 		ctx.effect(async () => {
 			await this.ready;
-			const selected = this.state.selected();
+			const selected = (await this.state()).selected();
 			if (selected !== void 0) await this.transition(() => this.activate(selected));
 			return () => {};
 		}, "graphs: boot selected");
 	}
 	async snapshot() {
-		await this.ready;
-		return this.state.snapshot();
+		return (await this.state()).snapshot();
 	}
+	/** The selected graph; throws when no graph is selected. */
 	async current() {
-		await this.ready;
-		const selected = this.state.selected();
+		const selected = (await this.state()).selected();
 		if (selected === void 0) throw new Error("graphs: no graph selected");
 		return selected;
 	}
 	async get(id) {
-		await this.ready;
-		return this.state.get(id);
+		return (await this.state()).get(id);
 	}
 	async view(id) {
 		const meta = await this.get(id);
@@ -199,8 +186,7 @@ var GraphsService = class extends Service {
 		};
 	}
 	async list() {
-		await this.ready;
-		return this.state.snapshot().graphs;
+		return (await this.state()).snapshot().graphs;
 	}
 	async select(id) {
 		return this.transition(async () => {
@@ -220,49 +206,21 @@ var GraphsService = class extends Service {
 			let attached;
 			let rootAgentId;
 			let committed = false;
+			const store = this.ctx.envBuilder.store;
+			const choice = await this.resolveEnv(store, request);
 			try {
-				const store = this.ctx.envBuilder.store;
 				let envId;
 				let reused = false;
-				if (request.envId !== void 0) {
-					if (request.createEnv === true || request.workspace !== void 0 || request.fresh === true) throw new Error("graphs: envId cannot combine with createEnv, workspace, or fresh");
-					if (request.repos !== void 0) throw new Error("graphs: repos only allowed with createEnv");
-					envId = request.envId;
-					this.assertReusable(envId);
+				if ("reuse" in choice) {
+					envId = choice.reuse;
 					reused = true;
-				} else if (request.workspace !== void 0) {
-					const label = request.workspace.trim();
-					if (label.length === 0) throw new Error("graphs: workspace is empty");
-					if (request.fresh !== true) {
-						const matches = store.findByLabel(label);
-						const available = matches.filter((env$1) => this.isReusable(env$1));
-						if (available.length > 0) {
-							envId = available[0].id;
-							this.assertReusable(envId);
-							reused = true;
-						} else if (matches.length > 0) throw new Error(this.workspaceTaken(label, matches));
-					}
-					if (!reused) {
-						if (request.repos === void 0 || request.repos.length === 0) throw new Error("graphs: new environment requires at least one repository");
-						envId = createdEnvId = store.create(label).id;
-						for (const ref of request.repos) store.planComponent(envId, ref);
-					}
-				} else if (request.createEnv === true) {
-					if (request.repos === void 0 || request.repos.length === 0) throw new Error("graphs: new environment requires at least one repository");
-					if (request.fresh !== true) {
-						const match = store.findByRepos(request.repos).find((env$1) => this.isReusable(env$1));
-						if (match !== void 0) {
-							envId = match.id;
-							this.assertReusable(envId);
-							reused = true;
-						}
-					}
-					if (!reused) {
-						envId = createdEnvId = store.create().id;
-						for (const ref of request.repos) store.planComponent(envId, ref);
-					}
-				} else throw new Error("graphs: provide exactly one of createEnv, envId, workspace");
-				const registry = this.state.snapshot();
+				} else {
+					const { label, repos } = choice.create;
+					if (repos.length === 0) throw new Error("graphs: new environment requires at least one repository");
+					envId = createdEnvId = (label === void 0 ? store.create() : store.create(label)).id;
+					for (const ref of repos) store.planComponent(envId, ref);
+				}
+				const registry = (await this.state()).snapshot();
 				const id = nextGraphId([...registry.graphs.map((graph$1) => graph$1.id), ...registry.archives.map((archive) => archive.graph.id)]);
 				const name = request.name === void 0 ? id : request.name.trim();
 				if (name.length === 0) throw new Error("graphs: name is empty");
@@ -271,7 +229,7 @@ var GraphsService = class extends Service {
 				const layoutStoreId = `sg-l-${rootSessionId}`;
 				const handle = await this.ctx.agentRuntime.createRoot({
 					sessionId: rootSessionId,
-					cwd: this.ctx.envBuilder.store.get(envId).path,
+					cwd: store.get(envId).path,
 					scope: {
 						graphStoreId,
 						layoutStoreId
@@ -300,7 +258,7 @@ var GraphsService = class extends Service {
 				}]);
 				committed = true;
 				await this.activate(graph);
-				const env = this.ctx.envBuilder.store.get(envId);
+				const env = store.get(envId);
 				await this.ctx.agentRuntime.prompt(handle.agent, [{
 					type: "text",
 					text: setupPromptText(id, env)
@@ -320,34 +278,70 @@ var GraphsService = class extends Service {
 			}
 		});
 	}
-	isReusable(env) {
-		return env.components.length > 0 && !this.state.boundEnvIds().has(env.id) && env.sessionIds.length === 0;
+	async resolveEnv(store, request) {
+		if (request.envId !== void 0) {
+			if (request.createEnv === true || request.workspace !== void 0 || request.fresh === true) throw new Error("graphs: envId cannot combine with createEnv, workspace, or fresh");
+			if (request.repos !== void 0) throw new Error("graphs: repos only allowed with createEnv");
+			await this.assertReusable(request.envId);
+			return { reuse: request.envId };
+		}
+		if (request.workspace !== void 0) {
+			const label = request.workspace.trim();
+			if (label.length === 0) throw new Error("graphs: workspace is empty");
+			if (request.fresh !== true) {
+				const bound = (await this.state()).boundEnvIds();
+				const matches = store.findByLabel(label);
+				const available = matches.find((env) => isReusableEnv(env, bound));
+				if (available !== void 0) {
+					await this.assertReusable(available.id);
+					return { reuse: available.id };
+				}
+				if (matches.length > 0) throw new Error(await this.workspaceTaken(label, matches));
+			}
+			return { create: {
+				label,
+				repos: request.repos ?? []
+			} };
+		}
+		if (request.createEnv === true) {
+			const repos = request.repos ?? [];
+			if (repos.length === 0) throw new Error("graphs: new environment requires at least one repository");
+			if (request.fresh !== true) {
+				const bound = (await this.state()).boundEnvIds();
+				const match = store.findByRepos(repos).find((env) => isReusableEnv(env, bound));
+				if (match !== void 0) {
+					await this.assertReusable(match.id);
+					return { reuse: match.id };
+				}
+			}
+			return { create: { repos } };
+		}
+		throw new Error("graphs: provide exactly one of createEnv, envId, workspace");
 	}
-	assertReusable(envId) {
-		const occupant = this.state.snapshot().graphs.find((graph) => graph.envId === envId);
+	async assertReusable(envId) {
+		const occupant = (await this.state()).snapshot().graphs.find((graph) => graph.envId === envId);
 		if (occupant !== void 0) throw new Error(`graphs: environment "${envId}" already bound to graph "${occupant.id}" ("${occupant.name}"); release it with POST /singularity/graphs/${occupant.id}/delete or choose another environment`);
 		const env = this.ctx.envBuilder.store.get(envId);
 		if (env.components.length === 0) throw new Error(`graphs: environment "${envId}" has no repositories`);
 		if (env.sessionIds.length > 0) throw new Error(`graphs: environment "${envId}" still has sessions`);
 	}
-	workspaceTaken(label, matches) {
+	async workspaceTaken(label, matches) {
+		const graphs = (await this.state()).snapshot().graphs;
 		return `graphs: workspace "${label}" is taken by ${matches.map((env) => {
-			const occupant = this.state.snapshot().graphs.find((graph) => graph.envId === env.id);
+			const occupant = graphs.find((graph) => graph.envId === env.id);
 			const reason = occupant !== void 0 ? `bound to graph "${occupant.id}"` : env.sessionIds.length > 0 ? `has ${env.sessionIds.length} session(s)` : "has no repositories";
 			return `${env.id} (${reason})`;
 		}).join(", ")}; release the occupying graph with POST /singularity/graphs/<id>/delete or choose another workspace name`;
 	}
 	async markReady(id) {
-		await this.ready;
 		await this.commit([{
 			kind: "graph/ready",
 			id
 		}]);
-		return this.state.get(id);
+		return (await this.state()).get(id);
 	}
 	async graphForSession(sessionId) {
-		await this.ready;
-		for (const graph of this.state.snapshot().graphs) if ((await this.ctx.graph.snapshotIn(graph.graphStoreId)).agents.some((agent) => agent.id === sessionId)) return graph;
+		for (const graph of (await this.state()).snapshot().graphs) if ((await this.ctx.graph.snapshotIn(graph.graphStoreId)).agents.some((agent) => agent.id === sessionId)) return graph;
 		throw new SessionNotInGraphError(sessionId);
 	}
 	async remove(id) {
@@ -357,7 +351,7 @@ var GraphsService = class extends Service {
 				graphStoreId: graph.graphStoreId,
 				layoutStoreId: graph.layoutStoreId
 			};
-			const taskRuntime = this.ctx.get?.("taskRuntime") ?? this.ctx.taskRuntime;
+			const taskRuntime = this.taskRuntime();
 			if (taskRuntime !== void 0) await taskRuntime.cancelGraph(rootTaskStoreId(graph.rootSessionId), "graph removed");
 			await this.ctx.agentRuntime.stopGraph(scope);
 			const root = await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, {
@@ -396,7 +390,7 @@ var GraphsService = class extends Service {
 				id,
 				archive
 			}]);
-			const selected = this.state.selected();
+			const selected = (await this.state()).selected();
 			if (selected !== void 0) await this.activate(selected);
 			else {
 				this.ctx.graph.clearActive();
@@ -404,87 +398,39 @@ var GraphsService = class extends Service {
 			}
 		});
 	}
-	/**
-	* One graph becomes this process's running environment, in the fixed order
-	* (A2 §E): the root session's graph queue is drained by `ensureRoot` first,
-	* then the root store's recovery barrier runs to its end — the fact
-	* reconciliation, every known session's gate initialization and the driver
-	* registrations the pass owes, never the batch execution behind them — and
-	* only then does this process switch its stores and environment and deliver
-	* input. Boot recovery of the selected graph goes through here too, not
-	* through an asynchronous selected-listener.
-	*
-	* A barrier failure leaves the commit to the caller: `select` has not
-	* committed (the previous selection stands), `remove`'s re-activation of the
-	* next graph fails loudly, and `create` keeps the registered graph selected
-	* and shows the failure rather than pretending the old selection stood.
-	*/
+	/** Resolved lazily: task-runtime injects graphs, so a hard inject here would deadlock the plugin loader. */
+	taskRuntime() {
+		return this.ctx.get("taskRuntime");
+	}
+	/** One graph becomes this process's running environment: recovery barrier, then store and env switch (A2 §E). */
 	async activate(graph) {
 		await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, {
 			graphStoreId: graph.graphStoreId,
 			layoutStoreId: graph.layoutStoreId
 		});
-		const taskRuntime = this.ctx.get?.("taskRuntime") ?? this.ctx.taskRuntime;
+		const taskRuntime = this.taskRuntime();
 		if (taskRuntime === void 0) throw new Error("graphs: taskRuntime service is not loaded; cannot recover the root store");
 		await taskRuntime.adoptRoot(rootTaskStoreId(graph.rootSessionId), graph.rootSessionId);
 		await this.ctx.graph.switchStore(graph.graphStoreId);
 		await this.ctx.layout.switchStore(graph.layoutStoreId);
 		this.ctx.envBuilder.store.select(graph.envId);
 		this.ctx.emit("graphs/selected", graph);
-		this.ctx.emit("graph/change", await this.ctx.graph.snapshot());
-		this.ctx.emit("layout/change", await this.ctx.layout.snapshot());
 	}
 	async commit(events) {
-		if (events.length === 0) throw new Error("graphs: cannot commit an empty event batch");
-		const run = this.writes.then(async () => {
-			await this.ready;
-			const next = this.state.clone();
-			for (const event of events) next.apply(event);
-			const records = events.map((event, index) => ({
-				type: "graphs/event",
-				seq: SessionSeq(this.nextSeq + index),
-				time: Date.now(),
-				data: event,
-				ignorable: true
-			}));
-			await this.handle.append(records);
-			this.state = next;
-			this.nextSeq += records.length;
-			this.ctx.emit("graphs/change", this.state.snapshot());
-		});
-		this.writes = run.then(() => void 0, () => void 0);
-		return run;
+		await this.stores.commit(this.storeId, events);
 	}
 	transition(work) {
 		const run = this.transitions.then(work);
 		this.transitions = run.then(() => void 0, () => void 0);
 		return run;
 	}
-	async open(ctx) {
-		const listed = (await ctx.sessionPersistence.list()).filter((item) => item.header.id === this.storeId);
-		if (listed.length > 1) throw new Error(`graphs: duplicate store session "${this.storeId}"`);
-		this.handle = listed.length === 0 ? await ctx.sessionPersistence.create(this.header()) : await ctx.sessionPersistence.open(this.storeId, "write");
-		const { events } = await this.handle.read();
-		for (const event of events) {
-			if (event.type !== "graphs/event" || event.ignorable !== true) throw new Error(`graphs: invalid persisted event at seq ${event.seq}`);
-			const stored = event;
-			const next = this.state.clone();
-			next.apply(stored.data);
-			this.state = next;
-			this.nextSeq = event.seq + 1;
-		}
-		await this.handle.flush();
-	}
-	header() {
-		return {
-			version: SESSION_FORMAT_VERSION,
-			id: this.storeId,
-			createdAt: Date.now(),
-			isSeeded: false
-		};
+	/** The live registry reducer; every read goes through `ready` so a failed constructor open stays caller-visible. */
+	async state() {
+		await this.ready;
+		return this.stores.require(this.storeId).state;
 	}
 };
 var src_default = GraphsService;
 
 //#endregion
-export { GraphsService, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, src_default as default };
+export { GraphsService, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, src_default as default, isReusableEnv };

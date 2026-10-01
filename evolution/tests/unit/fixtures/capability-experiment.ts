@@ -28,8 +28,15 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import { registryRevision, SKILL_SIDECAR_FILE, skillContentDigest } from '@dangosys/dsh-singularity-task-runtime'
 import type { EvolutionProposal, EvolutionService } from '../../../src/evolution.ts'
-import type { ExperimentSampleRecord, ExperimentStartedRecord } from '../../../src/experiment.ts'
-import { buildExperimentReport, directoryDigest, experimentIdOf, experimentLineage, experimentReportPath, preparedContentDigestOf } from '../../../src/experiment.ts'
+import type { ExperimentSampleRecord, ExperimentStartedRecord } from '../../../src/experiment/spec.ts'
+import { preparedContentDigestOf } from '../../../src/experiment/freeze.ts'
+import {
+  buildExperimentReport,
+  directoryDigest,
+  experimentIdOf,
+  experimentLineage,
+  experimentReportPath,
+} from '../../../src/experiment/record.ts'
 import type {
   ExperimentReport,
   FrozenCapability,
@@ -166,25 +173,32 @@ export async function recordCapabilityExperiment(
   const production = proposal.targetId
   const row: FrozenCapability = {
     row: { name: rowIdentity.name, entry: rowIdentity.entry, digest: rowIdentity.digest },
-    baseline: prepared?.capabilityBaseline == null
-      ? null
-      : {
-        name: prepared!.capabilityBaseline!.name,
-        entry: prepared!.capabilityBaseline!.entry,
-        digest: prepared!.capabilityBaseline!.digest,
-      },
+    baseline:
+      prepared?.capabilityBaseline == null
+        ? null
+        : {
+            name: prepared!.capabilityBaseline!.name,
+            entry: prepared!.capabilityBaseline!.entry,
+            digest: prepared!.capabilityBaseline!.digest,
+          },
     sourceRefs: [...proposal.sourceRefs],
   }
   const overlayTable: Record<string, CapabilityConfig> = { ...host.registry, [row.row.name]: row.row.entry }
-  const skills: FrozenCapabilitySide['skills'] = newSkill === undefined
-    ? []
-    : [{
-      name: newSkill.name,
-      role: 'execution-provider',
-      contractDigest: newSkill.contract?.contractDigest ?? null,
-      contentDigest: skillContentDigest({ skillMdSha256: newSkill.sha256, resources: [] }),
-    }]
-  const overlayRevision = registryRevision(overlayTable, skills.map(skill => ({ name: skill.name, contractDigest: skill.contractDigest })))
+  const skills: FrozenCapabilitySide['skills'] =
+    newSkill === undefined
+      ? []
+      : [
+          {
+            name: newSkill.name,
+            role: 'execution-provider',
+            contractDigest: newSkill.contract?.contractDigest ?? null,
+            contentDigest: skillContentDigest({ skillMdSha256: newSkill.sha256, resources: [] }),
+          },
+        ]
+  const overlayRevision = registryRevision(
+    overlayTable,
+    skills.map(skill => ({ name: skill.name, contractDigest: skill.contractDigest })),
+  )
   const requiredRows = [production]
   const candidateProvider: FrozenCapabilitySide = {
     capabilities: requiredRows,
@@ -213,15 +227,17 @@ export async function recordCapabilityExperiment(
   }
   const samples: FrozenSample[] = []
   for (const sample of historical) {
-    const acceptanceCriteria = [{
-      criterionId: sample.criterionId,
-      description: 'works',
-      verificationMode: 'deterministic',
-      requiredEvidence: [],
-      mandatory: true,
-      command: 'true',
-      verifierRef: 'command',
-    }]
+    const acceptanceCriteria = [
+      {
+        criterionId: sample.criterionId,
+        description: 'works',
+        verificationMode: 'deterministic',
+        requiredEvidence: [],
+        mandatory: true,
+        command: 'true',
+        verifierRef: 'command',
+      },
+    ]
     host.rows.tasks.push({
       taskId: sample.taskId,
       definitionRef: { taskType: 'subtask', version: 1 },
@@ -250,27 +266,29 @@ export async function recordCapabilityExperiment(
         acceptanceCriteria,
         requiredCapabilities: requiredRows,
       }),
-      criteria: [{
-        criterionId: sample.criterionId,
-        verificationMode: 'deterministic',
-        command: 'true',
-        protectedInputsDigest: protectedInputsDigest([]),
-        verifierRef: 'command',
-        verifierVersion: VERIFIER_VERSION,
-        verifierAnchor: `registered verifier "command" declares version "${VERIFIER_VERSION}"`,
-      }],
+      criteria: [
+        {
+          criterionId: sample.criterionId,
+          verificationMode: 'deterministic',
+          command: 'true',
+          protectedInputsDigest: protectedInputsDigest([]),
+          verifierRef: 'command',
+          verifierVersion: VERIFIER_VERSION,
+          verifierAnchor: `registered verifier "command" declares version "${VERIFIER_VERSION}"`,
+        },
+      ],
       observed: { outcome: sample.outcome, runId: `r-history-${sample.taskId}` },
       ...(recordsAdmission
         ? {
-          admission: {
-            source: 'capability-gap' as const,
-            required: [...requiredRows],
-            missing: [...requiredRows],
-            reason:
-              `the effective capability table does not hold ${requiredRows.map(name => JSON.stringify(name)).join(', ')}, so the production ` +
-              'configuration cannot admit this sample (the runtime\'s own resolution reports a closure gap)',
-          },
-        }
+            admission: {
+              source: 'capability-gap' as const,
+              required: [...requiredRows],
+              missing: [...requiredRows],
+              reason:
+                `the effective capability table does not hold ${requiredRows.map(name => JSON.stringify(name)).join(', ')}, so the production ` +
+                "configuration cannot admit this sample (the runtime's own resolution reports a closure gap)",
+            },
+          }
         : { provider: { ...productionSide, candidateRegistryRevision: productionSide.registryRevision } }),
       candidateProvider,
     })
@@ -297,9 +315,8 @@ export async function recordCapabilityExperiment(
   const candidateRunIds: Record<string, string> = {}
   const sideJudgeVersion = options.sideVerifierVersion ?? VERIFIER_VERSION
   for (const sample of samples) {
-    const baselineOutcome = baselineMode === 'reproduce'
-      ? (sample.role === 'observed-failure' ? 'failed' : 'verified')
-      : baselineMode
+    const baselineOutcome =
+      baselineMode === 'reproduce' ? (sample.role === 'observed-failure' ? 'failed' : 'verified') : baselineMode
     if (baselineOutcome === 'not-admitted') {
       records.push({
         formatVersion: 4,
@@ -314,7 +331,10 @@ export async function recordCapabilityExperiment(
         evidenceRefs: [],
         criteria: [],
         workspace: join(host.root, 'sandbox', proposal.proposalId, `exp-${experimentId}`, sample.taskId, 'baseline'),
-        cost: { status: 'unknown', reason: 'the runtime refused this side at admission, so no run exists and no cost was reported for it' },
+        cost: {
+          status: 'unknown',
+          reason: 'the runtime refused this side at admission, so no run exists and no cost was reported for it',
+        },
         admission: {
           source: 'capability-gap',
           proposalId: proposal.proposalId,
@@ -339,7 +359,16 @@ export async function recordCapabilityExperiment(
       definitionRef: { taskType: 'subtask', version: 1 },
       objective: `[${experimentLineage(experimentId, sample.taskId, 'baseline')}] ${sample.taskId}`,
       depth: 1,
-      acceptanceCriteria: [{ criterionId, description: 'works', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
+      acceptanceCriteria: [
+        {
+          criterionId,
+          description: 'works',
+          verificationMode: 'deterministic',
+          requiredEvidence: [],
+          mandatory: true,
+          command: 'true',
+        },
+      ],
       requestedCapabilities: [...requiredRows],
       decompositionStatus: 'leaf',
       status: baselineOutcome,
@@ -361,7 +390,15 @@ export async function recordCapabilityExperiment(
       },
     })
     host.sessions.set(`s-${runId}`, [requestHeader(frozen.model, 1)])
-    host.rows.evidence.push({ evidenceId: `e-${runId}`, taskRunId: runId, taskId, artifacts: [], verifierResults: [], claims: [], generatedAt: '2026-09-26T00:00:00.000Z' })
+    host.rows.evidence.push({
+      evidenceId: `e-${runId}`,
+      taskRunId: runId,
+      taskId,
+      artifacts: [],
+      verifierResults: [],
+      claims: [],
+      generatedAt: '2026-09-26T00:00:00.000Z',
+    })
     host.rows.reviews.push({
       taskId,
       runId,
@@ -393,69 +430,95 @@ export async function recordCapabilityExperiment(
     })
   }
   for (const sample of samples) {
-    const candidateOutcome = options.candidateFailures?.includes(sample.taskId) === true
-      ? 'failed'
-      : options.candidate ?? 'verified'
+    const candidateOutcome =
+      options.candidateFailures?.includes(sample.taskId) === true ? 'failed' : (options.candidate ?? 'verified')
     const taskId = `t-${sample.taskId}-candidate`
     const runId = `r-${sample.taskId}-candidate`
     candidateRunIds[sample.taskId] = runId
     const criterionId = sample.criteria[0]!.criterionId
     const verdict = candidateOutcome === 'verified' ? 'pass' : 'fail'
     const writeStore = options.omitCandidateRuns !== true
-    if (writeStore) host.rows.tasks.push({
-      taskId,
-      definitionRef: { taskType: 'subtask', version: 1 },
-      objective: `[${experimentLineage(experimentId, sample.taskId, 'candidate')}] ${sample.taskId}`,
-      depth: 1,
-      acceptanceCriteria: [{ criterionId, description: 'works', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-      requestedCapabilities: [...requiredRows],
-      decompositionStatus: 'leaf',
-      status: candidateOutcome,
-      runIds: [runId],
-      childTaskIds: [],
-    })
+    if (writeStore)
+      host.rows.tasks.push({
+        taskId,
+        definitionRef: { taskType: 'subtask', version: 1 },
+        objective: `[${experimentLineage(experimentId, sample.taskId, 'candidate')}] ${sample.taskId}`,
+        depth: 1,
+        acceptanceCriteria: [
+          {
+            criterionId,
+            description: 'works',
+            verificationMode: 'deterministic',
+            requiredEvidence: [],
+            mandatory: true,
+            command: 'true',
+          },
+        ],
+        requestedCapabilities: [...requiredRows],
+        decompositionStatus: 'leaf',
+        status: candidateOutcome,
+        runIds: [runId],
+        childTaskIds: [],
+      })
     let snapshotRoot: string | undefined = join(host.root, 'run-snapshots', sample.taskId, 'candidate')
     if (newSkill !== undefined) {
       const source = join(host.root, 'sandbox', proposal.proposalId, 'skills', newSkill.name)
       await mkdir(join(snapshotRoot, newSkill.name), { recursive: true })
       await writeFile(join(snapshotRoot, newSkill.name, 'SKILL.md'), await readFile(join(source, 'SKILL.md')))
       if (newSkill.contract !== undefined) {
-        await writeFile(join(snapshotRoot, newSkill.name, SKILL_SIDECAR_FILE), await readFile(join(source, SKILL_SIDECAR_FILE)))
+        await writeFile(
+          join(snapshotRoot, newSkill.name, SKILL_SIDECAR_FILE),
+          await readFile(join(source, SKILL_SIDECAR_FILE)),
+        )
       }
     }
     if (options.omitSnapshotRoot === true) snapshotRoot = undefined
-    if (writeStore) host.rows.runs.push({
-      runId,
-      taskId,
-      sessionId: `s-${runId}`,
-      status: candidateOutcome,
-      startedAt: '2026-09-26T00:00:00.000Z',
-      providerBinding: {
-        registryRevision: options.bindingRevision ?? overlayRevision,
-        capabilities: [...requiredRows],
-        skills: options.dropBoundSkill === true ? [] : skills.map(skill => ({
-          name: skill.name,
-          role: skill.role,
-          capabilities: [row.row.name],
-          description: 'fixture provider',
-          contractDigest: skill.contractDigest,
-          contentDigest: skill.contentDigest,
-          uncovered: [],
-        })),
-        mcpServers: [],
-        ...(snapshotRoot === undefined ? {} : { snapshotRoot }),
-      },
-    })
+    if (writeStore)
+      host.rows.runs.push({
+        runId,
+        taskId,
+        sessionId: `s-${runId}`,
+        status: candidateOutcome,
+        startedAt: '2026-09-26T00:00:00.000Z',
+        providerBinding: {
+          registryRevision: options.bindingRevision ?? overlayRevision,
+          capabilities: [...requiredRows],
+          skills:
+            options.dropBoundSkill === true
+              ? []
+              : skills.map(skill => ({
+                  name: skill.name,
+                  role: skill.role,
+                  capabilities: [row.row.name],
+                  description: 'fixture provider',
+                  contractDigest: skill.contractDigest,
+                  contentDigest: skill.contentDigest,
+                  uncovered: [],
+                })),
+          mcpServers: [],
+          ...(snapshotRoot === undefined ? {} : { snapshotRoot }),
+        },
+      })
     host.sessions.set(`s-${runId}`, [requestHeader(frozen.model, 1)])
-    if (writeStore) host.rows.evidence.push({ evidenceId: `e-${runId}`, taskRunId: runId, taskId, artifacts: [], verifierResults: [], claims: [], generatedAt: '2026-09-26T00:00:00.000Z' })
-    if (writeStore) host.rows.reviews.push({
-      taskId,
-      runId,
-      outcome: candidateOutcome,
-      evidenceRefs: [`e-${runId}`],
-      anomalies: [],
-      criteria: [{ criterionId, verdict, verifierId: 'command', verifierVersion: sideJudgeVersion }],
-    })
+    if (writeStore)
+      host.rows.evidence.push({
+        evidenceId: `e-${runId}`,
+        taskRunId: runId,
+        taskId,
+        artifacts: [],
+        verifierResults: [],
+        claims: [],
+        generatedAt: '2026-09-26T00:00:00.000Z',
+      })
+    if (writeStore)
+      host.rows.reviews.push({
+        taskId,
+        runId,
+        outcome: candidateOutcome,
+        evidenceRefs: [`e-${runId}`],
+        anomalies: [],
+        criteria: [{ criterionId, verdict, verifierId: 'command', verifierVersion: sideJudgeVersion }],
+      })
     records.push({
       formatVersion: 4,
       kind: 'experiment_sample',
@@ -497,5 +560,15 @@ export async function recordCapabilityExperiment(
   const abs = join(host.root, reportPath)
   await mkdir(dirname(abs), { recursive: true })
   await writeFile(abs, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
-  return { experimentId, frozen, report, reportPath, failureSample: FAILURE_SAMPLE, holdoutSample: HOLDOUT_SAMPLE, overlayRevision, candidateRunIds, candidateProvider }
+  return {
+    experimentId,
+    frozen,
+    report,
+    reportPath,
+    failureSample: FAILURE_SAMPLE,
+    holdoutSample: HOLDOUT_SAMPLE,
+    overlayRevision,
+    candidateRunIds,
+    candidateProvider,
+  }
 }

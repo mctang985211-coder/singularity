@@ -80,7 +80,10 @@ describe('the ledger is formatVersion 4 and nothing else', () => {
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     const svc = new EvolutionService(fixtureCtx(), { root })
 
-    const refusal = await svc.list().then(() => undefined, (error: Error) => error)
+    const refusal = await svc.list().then(
+      () => undefined,
+      (error: Error) => error,
+    )
     expect(String((refusal as Error).message)).toMatch(/ledger line 1 in .*proposals\.jsonl declares formatVersion 2/)
     // The refusal names what a v2 ledger cannot offer, and what the operator does
     // with it: archive it, because there is no migration and no dual-format read.
@@ -96,7 +99,10 @@ describe('the ledger is formatVersion 4 and nothing else', () => {
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     const svc = new EvolutionService(fixtureCtx(), { root })
 
-    const refusal = await svc.list().then(() => undefined, (error: Error) => error)
+    const refusal = await svc.list().then(
+      () => undefined,
+      (error: Error) => error,
+    )
     expect(String((refusal as Error).message)).toMatch(/ledger line 1 in .*proposals\.jsonl declares formatVersion 3/)
     // The refusal says which reader a v3 ledger needs and that this build has
     // none: archive it and start a new one.
@@ -117,12 +123,14 @@ describe('the ledger is formatVersion 4 and nothing else', () => {
 
   it('refuses a mixed ledger, naming the first line of another version', async () => {
     const v3Last = await ledgerRoot([proposedLine(4), proposedLine(3)])
-    await expect(new EvolutionService(fixtureCtx(), { root: v3Last }).list())
-      .rejects.toThrow(/ledger line 2 in .*declares formatVersion 3/)
+    await expect(new EvolutionService(fixtureCtx(), { root: v3Last }).list()).rejects.toThrow(
+      /ledger line 2 in .*declares formatVersion 3/,
+    )
 
     const v1First = await ledgerRoot([proposedLine(1), proposedLine(4)])
-    await expect(new EvolutionService(fixtureCtx(), { root: v1First }).list())
-      .rejects.toThrow(/ledger line 1 in .*declares formatVersion 1/)
+    await expect(new EvolutionService(fixtureCtx(), { root: v1First }).list()).rejects.toThrow(
+      /ledger line 1 in .*declares formatVersion 1/,
+    )
 
     // Neither mixed file was rewritten by the attempt.
     for (const root of [v3Last, v1First]) {
@@ -137,10 +145,13 @@ describe('the ledger is formatVersion 4 and nothing else', () => {
     await svc.propose(proposal, 'root-1')
     await svc.candidate('p1', { skill: 'v2' }, 'root-1', { name: 'verify', content: 'candidate bytes' })
 
-    const records = (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+    const records = (await readFile(join(root, 'proposals.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
       .map(line => JSON.parse(line) as { formatVersion: number; kind: string })
     expect(records.map(record => [record.kind, record.formatVersion])).toEqual([
-      ['proposed', 4], ['candidate', 4],
+      ['proposed', 4],
+      ['candidate', 4],
     ])
 
     const reopened = new EvolutionService(fixtureCtx(), { root })

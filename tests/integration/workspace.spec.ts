@@ -8,7 +8,6 @@ const root = resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const cordisPlugins = [
   'graph',
   'graphs',
-  'layout',
   'task',
   'verifier',
   'task-runtime',

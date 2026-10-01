@@ -23,7 +23,7 @@ A5 已验收：**失败自动、成功按需，共用诊断链**（§5.22）。�
 
 本文负责方向、职责与当前事实；[术语表](../CONTEXT.md)定义概念。[历史指南](history/2026-09-21-harness-guide-snapshot.md)保留旧编号和操作经验。深入实施参考：[Task 契约与可选人审](task-contract-construction-guide.md)、[有目标的探索/自进化架构](exploration-evolution-architecture.md)、[角色与 System Prompt 合同](agent-prompt-contracts.md)。[开源机制调研](2026-09-21-open-source-agent-patterns.md)记录一手来源。
 
-设计依据为 `/home/ROXY/code/ref/docs/VRTC-最小架构-KISS版-v2.0.md`（正文 v2.1-KISS）与同目录 `细化想法4.md`。本文区分源码事实、建设目标和设计选择；文档中的设计不代表代码已经实现。
+设计依据为 `/home/ROXY/code/ref/docs/VRTC-最小架构-KISS版-v2.0.md`（正文 v2.1-KISS）与同目录 `细化想法4.md`（2026-09-16 冻结的设计基线，正文在本仓之外、不在本文修订范围）。**本文是当前契约**：术语、包名与完成状态以本文和源码为准；本文区分源码事实、建设目标和设计选择，文档中的设计不代表代码已经实现。
 
 ## 1. 方向与边界
 
@@ -282,7 +282,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | Evidence 依赖 | `requiresArtifact` 只认 verified run 且带 pass 判据的证据；`acceptsArtifact` 只要求存在。普通分解缺失时 blocked + Obligation；replay 的 spawn 开/关路径使用同一检查，缺失时在建任务/Run 前抛错，零派发/零成功记录。不自动生成上游，不验证匹配证据的版本和适用性 | `orchestrate.ts:missingRequiredArtifacts`、`runReplayTask` |
 | Obligation | 记录缺能力/缺产物；模板 coverage 由任务声明 capability 或文字提及匹配；不是义务已被证据满足，更不是防漏的硬闸 | `task-runtime/src/obligation.ts:checkObligationCoverage` |
 | 判决 | `pass/fail/inconclusive`；部分 unknown 有 task/verifier 分类；没有 PARTIAL 状态与剩余义务自动派发；未通过 mandatory 判据仍走失败路径；`heuristic` 标记的判据永远不计入确定性通过 | `task/src/types.ts:VerificationResult`；`orchestrate.ts:unmetMandatory` |
-| Verifier 边界 | 注册即执行可执行自测（`VerifierSelftest.samples` 正负样本；缺样本、描述性样本或漏检样本拒绝注册，唯一例外是调用者显式声明的 `{ testDouble: true }` 并记录警告）。判决与 claim 记录**实际注册实例**的 `version`（插件自报一律被覆盖；版本归属规则见 §5.7：只有实际判决、或由 registry 归因到已解析裁判实例的拒绝才带版本，未知 ref 与不支持 mode 的拒绝不带）。criterion 声明的受保护验收输入在准入时固定 `{ path, sha256 }`（读不到即整批拒绝），判决前复检：缺失或被改 → `fail` 点名路径且不派发；store 里畸形声明（绕过准入口直写）得到点名条目的可读 `fail`，不是崩溃。仍未建：verifier 与执行者的独立性隔离（`owner` 只是元数据）、证据来源真实性认证、自测样本“有意义”的证明；KISS §8.2 的裁决召回未建（R2 已撤回无消费者的 `(verifierRef, version)` 查询入口 `evidenceByVerifier`，§5.12） | `verifier/src/index.ts:register`、`selftestGate`、`verifyCriterion`；`verifier/src/protected-inputs.ts`；`task-runtime/src/protected-inputs.ts` |
+| Verifier 边界 | 注册即执行可执行自测（`VerifierSelftest.samples` 正负样本；缺样本、描述性样本或漏检样本拒绝注册，唯一例外是调用者显式声明的 `{ testDouble: true }` 并记录警告）。判决与 claim 记录**实际注册实例**的 `version`（插件自报一律被覆盖；版本归属规则见 §5.7：只有实际判决、或由 registry 归因到已解析裁判实例的拒绝才带版本，未知 ref 与不支持 mode 的拒绝不带）。criterion 声明的受保护验收输入在准入时固定 `{ path, sha256 }`（读不到即整批拒绝），判决前复检：缺失或被改 → `fail` 点名路径且不派发；store 里畸形声明（绕过准入口直写）得到点名条目的可读 `fail`，不是崩溃。仍未建：verifier 与执行者的独立性隔离（`owner` 字段已删，注册表元数据只剩 `version`/`selftest`；当前独立性只有结构分离——注册自测闸与判决分发独立于执行者，无进程/身份级隔离）、证据来源真实性认证、自测样本“有意义”的证明；KISS §8.2 的裁决召回未建（R2 已撤回无消费者的 `(verifierRef, version)` 查询入口 `evidenceByVerifier`，§5.12） | `verifier/src/index.ts:register`、`selftestGate`、`verifyCriterion`；`verifier/src/protected-inputs.ts`；`task-runtime/src/protected-inputs.ts` |
 | 父验收 | 默认无映射 composite 保持子全 verified；childEvidence 必须存在且来自 verified run，被引用子判据为 heuristic 时拒绝；**K1 起 childIndex 指该 Run 已准入批次累积成员的 0 基稳定位置（跨批累积、不每批从零，§5.18）**。registry 在自定义 verifier 执行前同样检查映射，合法映射仍须通过所选 verifier，插件不能覆盖映射规则。父 mandatory heuristic 不计确定性通过；requiresIndependentAcceptance 缺映射时准入拒绝 | `composite-verifier.ts:entryDefect`（成员源 `runMembersIn`）；`verifier/src/index.ts:verifyCriterion`；`admission.ts:independentAcceptanceDefects` |
 | 预算 | 根预算保留 `maxRuns`、递归深度及 `maxConcurrentWrites=1`，闭合 schema 拒绝未知字段；Run 按原 runId 累计，重启不退款、不归零，replay/恢复共用原 store。G 节删除业务 Agent、根图和 reviewer 的总时长限制及扩时入口，历史时间事件可读但不用于判停。tools/tokens 仍仅终态软统计（unknown 不记零）；attempts 仅声明。`task_budget_extend({requestKey,maxRuns})` 经 DSH 人审追加已配置的总 Run 上限；runtime 冻结基线，Task 串行重检并持久化 `TaskBudgetExtended`，所有消费者只读同一有效 maxRuns。verifier/工具/drain 的单次超时保留 | `root-budget.ts:resolveRootBudget/checkRunStart/hasRootLimits`；`orchestrate.ts:observeWorkerRun/budgetBreaches`；`task-runtime/src/index.ts:Config/registerRootBudgetApproval/extendRootBudget`；`task/src/budget.ts`；`agent-singularity/src/tools/budget-extend.ts` |
 | L4 上报 | root 的 `escalate` 工具与台账已有；模型主动调用，批准后才记 raised；运行时只输出提示，无自动触发、无处理结果/恢复闭环 | `agent-singularity/src/tools/escalate.ts`；`orchestrate.ts:escalationHint` |
@@ -303,17 +303,30 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | G6 | 类型化侧车契约与知识型定位已由 S1-C 交付（§5.8），建设依赖倒置已解除；L1 复用/组合与 L2 生成候选仍待 S3，候选须经同一校验与验证闭包 | S1-C → S3 / 旧 #29 |
 | G7 | **S4-E 已验收**：单文件 Skill 替换的双侧评估、版本化裁判、账本单格式、当前形状 fold 与模型入口已闭合；gate 保持记录语义。分层指标、自动 Retro、多目标打分不纳入；fixture 不宣称统计效果。评估对象范围已由 K3 扩为完整对象（§5.20） | S4 / 旧 #28 |
 | G8 | `task_decompose`/`escalate` 部分拒绝返回普通文本，上层不能可靠用工具错误信号判定 | S2-E / 旧 #33 |
-| G9 | 类型闸只覆盖 `agent-singularity`；其余 Singularity 包的 `build` 仍只有 tsdown，未接 `tsc --noEmit`，其严格类型状态未经本闸保证 | P1 范围外，待独立评估 |
+| G9 | 类型闸只覆盖 `agent-singularity`（`tsc --noEmit && tsdown`）与前端 `map`（`tsc --noEmit && vite build`）；其余 Singularity 包的 `build` 不跑 `tsc --noEmit`（多为纯 tsdown，`canvas-view` 另加客户端构建脚本），其严格类型状态未经本闸保证 | P1 范围外，待独立评估 |
 | G10 | 动态生成已存在，无生成提案审核协议的风险已由 T1+T2/T3 关闭（§5.6、§5.10）：统一可持久化契约、闭合字段集、内容摘要与准入记录（T1）；`generatedTaskReview` 策略、不可变提案与整批内容、决定绑定三个摘要、批准后重检、requestKey 幂等与四个崩溃点恢复（T2/T3，2026-09-23 已验收）。仍未建：Task 模板库（模板不是合法性白名单）、契约修订入口、多进程并发写同一 store 的恰好一次保证 | T1、T2/T3 交付组 / Task 自主构造指导 |
 | G11 | 根 objective/AC 入口过弱；上下文传递缺根目标、祖先决定来源与新鲜度；根目标错了时全局传播不能补救。**A0 已实现、Q2/Q3 返工已关闭（§5.11、§5.13）**：根任务延迟到真实用户目标/AC 被接受后激活，graph name 不再进入 objective，缺独立顶层判据具名拒绝；根契约的来源与归属由统一服务入口机械校验（store↔session、顶层会话、会话自身日志的本人消息；不可读即具名拒绝），本运行时提示词不再冒充人类输入，`adoptRoot` 无根时经既有恢复遍完成恢复；A1 的上下文投影（根目标/硬约束与本人契约/贡献的来源化呈现）已随第 9 项提交实现，Q1–Q4 定向返工与 [Q3 收尾](history/2026-09-25-a2-a1-q3-closure-record.md)完成，整组已验收（§5.15），「模型对用户请求的解读是否正确」的通用语义证明仍未建——机器准入只管结构、判据种类与来源归因；R1 的真实场景证明答复送达，且完成轮 3 在冻结合同下把该场景判为 `pass / path2-limited-goal`（§5.14 完成轮记录）；三条契约边界（假设不得替代确认、缺失条件先问用户、契约只承载答复支持的内容且判据须可裁定）已落在根 prompt / `task_intake` 说明。通用语义证明仍不在机器准入范围内——一次场景通过不等于普遍澄清能力 | A0（返工关闭）→ A1 |
 | G12 | 父同步等子的循环等待已由 A3 解除（§5.9：分解立即返回 batchId、waiting_children 运行时写闸、显式提交、用户取消，idle 不再等同执行结束）。持久 question/answer 与问答等待已接线；A4 的同一 Session/Run 冷恢复、组合故障与恢复期唤醒顺序（屏障 ready 后才投递/唤醒）已验收（§5.16）。未添加 ask_parent 之外的通用消息框架，send_message 仍未开放 | A3（已交付）→ A4（已验收） |
 | G13 | A2 已提交 related/graph 分页视图与原始 Session 工具封闭；分页停滞（Q4）、Session 大事件不可续读（Q3）与绑定失败放行（Q1）的返工均已关闭并有正/反例证据，整组现已验收；动作是否可执行仍由 runtime 重检。reviewer 经 context 在同域授权内取证已由 A5 接线（§5.22，真实链路覆盖兄弟/证据/历史读取） | A2/A5（均已验收） |
 | G14 | root/worker prompt 与当前方向有漂移：L4/manual、直接问人、make command exit 0、分解意图矛盾；未来工具必须随真实协议接线再写入提示。**R0 已关闭工具面的漂移部分（2026-09-23，已验收，§5.11）**：allow-list 与 prompt 由同一开关布尔派生（off 时提示词不含进化协议段、工具面不含九个 `evolution_*`），并新增根 intake 段（`task_intake`、未激活视图、审核策略、激活前不得 `task_decompose`）；其余角色模板（A1–A6）仍逐票同步 | R0（已验收）→ A0–A6 逐票同步 Prompt 合同 |
-| G15 | 根工具无条件暴露进化链、通用 prompt 混入 BB 指导；runtime 职责集中，未使用接口/仅诊断摘要易被误读为完整保证；缺真实模型运行反馈。**R0 部分关闭（2026-09-23，已验收，§5.11）**：进化链改由装配开关决定是否注册（off = 只注册 19 个常驻工具，on = 28 个，与之前逐名相同），BB 句子从通用 root prompt 移除、领域指导归部署的领域 skill；不新增主管、不合并审批。R1 已补真实运行反馈并于 2026-09-24 验收（完成轮 3 为 `pass / path2-limited-goal`，失败轮次保留）；**R2 已关闭「未使用接口/仅诊断摘要」部分与取消写闸返工（Q1，§5.12）**：`evidenceByVerifier` 无消费者已撤回；`templateDigest` 标明仅诊断、无身份保证；三个无消费者导出（`TaskProposalKind`/`TaskProposalDecision`/`TASK_PROPOSAL_ID_PREFIX`）收回；取消进行中的写闸不再被只读查询/协调读解除，跨取消完成点的陈旧读取也被闸的决定计数丢弃（`closingStores` + `applyStorePhase`，两轮交付 `250a04f`/`8f9086e`）。仍待：runtime 职责集中（drivers 推状态模型）按证据保留、不预定 pull 化；§5.12 记的四项既有取消边界（spawn 续跑、另两条 store 派生写相位入口、`closingStores` 非重入计数、`unload` 无 store 记录）未修。R1 的 V5 ledger 将缺失 cache-write/usage 记为未报告，但完成轮 fixture 的 `driver.json/run-meta.json` 历史 `0` 已披露为 caveat，未来轮次须修自己的 driver 副本；三次生产修复落在根 prompt / `task_intake` 说明。一次通过只证明该固定场景，不冒充效果验收或普遍澄清能力 | R0（证据保留）+ R2 Q1（已关闭）+ R1（已验收） |
+| G15 | 根工具无条件暴露进化链、通用 prompt 混入 BB 指导；runtime 职责集中，未使用接口/仅诊断摘要易被误读为完整保证；缺真实模型运行反馈。**R0 部分关闭（2026-09-23，已验收，§5.11）**：进化链改由装配开关决定是否注册（R0 当时 off = 只注册 19 个常驻工具，on = 28 个，与之前逐名相同；现行 root 允许表已随 A4/A5/A6/K4 增为 23 个常驻 + 9 个 `evolution_*`，见 `agent-runtime/src/index.ts:ROOT_CORE_TOOLS`），BB 句子从通用 root prompt 移除、领域指导归部署的领域 skill；不新增主管、不合并审批。R1 已补真实运行反馈并于 2026-09-24 验收（完成轮 3 为 `pass / path2-limited-goal`，失败轮次保留）；**R2 已关闭「未使用接口/仅诊断摘要」部分与取消写闸返工（Q1，§5.12）**：`evidenceByVerifier` 无消费者已撤回；`templateDigest` 标明仅诊断、无身份保证；三个无消费者导出（`TaskProposalKind`/`TaskProposalDecision`/`TASK_PROPOSAL_ID_PREFIX`）收回；取消进行中的写闸不再被只读查询/协调读解除，跨取消完成点的陈旧读取也被闸的决定计数丢弃（`closingStores` + `applyStorePhase`，两轮交付 `250a04f`/`8f9086e`）。仍待：runtime 职责集中（drivers 推状态模型）按证据保留、不预定 pull 化；§5.12 记的四项既有取消边界（spawn 续跑、另两条 store 派生写相位入口、`closingStores` 非重入计数、`unload` 无 store 记录）未修。R1 的 V5 ledger 将缺失 cache-write/usage 记为未报告，但完成轮 fixture 的 `driver.json/run-meta.json` 历史 `0` 已披露为 caveat，未来轮次须修自己的 driver 副本；三次生产修复落在根 prompt / `task_intake` 说明。一次通过只证明该固定场景，不冒充效果验收或普遍澄清能力 | R0（证据保留）+ R2 Q1（已关闭）+ R1（已验收） |
 
 历史记录中的 M1–M9 为此前会话的实跑声明，保留于历史指南。本次回归结果见建设计划 S0；本次没有重跑 LLM、BB 构建仿真或生产 Evolution 链路。旧环境可用性、外部 bbdev 缺陷和部署阈值在使用前需重新读取对应部署，不能从旧日志推断当前状态。
 
-各票的实现范围与剩余边界见上表及 §5；提交、日期和实跑证据查[历史执行记录](history/2026-09-24-vrtc-execution-records.md)。P4 原交付与后续修复须分别读取。当前已接线的机械保障不代表问答语义正确性、自然语言完整性或自主修复已完成；A4 收尾返工（恢复期唤醒在屏障 ready 后）已通过[进度审核](history/2026-09-26-a4-final-review.md)。
+各票的实现范围与剩余边界见上表及 §5；提交、日期和实跑证据查[历史执行记录](history/2026-09-24-vrtc-execution-records.md)。P4 原交付与后续修复须分别读取。当前已接线的机械保障不代表问答语义正确性、自然语言完整性或自主修复已完成；A4 收尾返工（恢复期唤醒在屏障 ready 后）已通过[进度审核](history/2026-09-26-a4-final-review.md)。对照设计文档、尚无票据的静默缺口见 §4.3。
+
+### 4.3 设计文档对照的静默缺口（2026-10-01 审计）
+
+对照 KISS v2.1 与通法教程 v1.1 逐条复核后，以下六项在设计文档中有明确要求或建议，但当前代码、票据与历史记录既无实现也无否决决定，故称“静默缺口”（区别于 §4.2 有票可查的断层）。定性沿用历史快照口径：**目标缺口** = 设计目标零实现；**未采纳** = 设计机制未进入本实现（须补理由）；**后置** = 承认推迟或决策记录待补。六项的实现/记录状态均经源码与测试 grep 复核；本轮只登记并给出决策落点，不预判结论。
+
+| 编号 | 静默缺口 | 定性 / 决策落点 |
+|---|---|---|
+| G16 | 验证逃逸率与度量仪表盘未建（KISS §10 第一指标、教程 §9.5/§13.3）：没有“通过验证但下游失败 / 总 PASS”的采集、读数或报告实现；历史快照 #28（分层接受度量）与 #31（变异测试等先行估计）之后记录链中断，现行只有 §5.17「分层指标不纳入」一句 | **目标缺口** → 决策落点：建设计划新增度量票据（逃逸率口径、采集点、谁读），或显式记录暂不做的理由 |
+| G17 | EXPRESSION_GAP 未实现也无否决记录（教程 §7.7 E1–E4）：契约表达不了目标时没有改写/人工验收/语言扩展/拒绝四条出口，当前静默退化为普通失败或模糊 prompt | **未采纳**（须补理由） → 决策落点：建设计划或架构决策队列明确采纳或具名否决 E1–E4 |
+| G18 | `preferred_skills` 排序先验整体未采纳（教程 §3.2）：契约与能力解析都没有该字段；设计的三条约束（只影响排序、带 precondition/TTL、来源为 Retro 学出的组合模式并保留探索）也无对应记录 | **未采纳** → 决策落点：建设计划补一条采纳/否决记录；若采纳按 §5.8 能力预检设计 |
+| G19 | V0–V4 验证强度分级与能力本体受控词表未采纳（教程 §9.3、附录 D）：verifier 无强度字段，capability 仍按部署配置自由命名，没有 `capabilities.yaml` 式词表与扩展证明 | **未采纳** → 决策落点：建设计划或 §5.8 决定是否引入强度分级与受控词表 |
+| G20 | Task/Review/Evolution 图未建（教程 §11.2 双图）：map/canvas 只呈现 agent 拓扑与画布几何，Task 分解、Review 与 Evolution 链没有视图 | **已关闭（2026-10-01 前端接线波）**：map SPA 扩为 Canvas、Tasks、Proposals、Evolution、Recovery、Verifier 六页签，分别呈现画布几何、任务树与 run、提案队列与全局 HITL、Evolution 账本与实验、屏障状态、判据与 logTail；canvas-view 以 `sidebar.panellist` 左栏条目 + `main` 面板 iframe 托管 `/singularity/map/`。graph-web 新增 `GET /singularity/task`、`POST /singularity/task/proposals/decide`、`GET /singularity/evolution[/:id]`、`GET /singularity/recovery`、`GET /singularity/review`，并把 `task/change`、`evolution/change` 转发为 `task`、`evolution` SSE 帧（evolution 帧在账本行持久化收养后发出）。边界如实记录：`singularityEvolution.enabled` 为 off 或未挂账本时 evolution 路由返回空数组；`/singularity/recovery` 的 `reconcile` 恒为 null（GET 不触发变更性的 `reconcileStore`），`wokenSessions`/`pendingNotices`/`pendingBatchResults`/`cancelled` 只在进程内仍持有该 store 屏障时出现 |
+| G21 | 首域选择无决策记录（KISS §12）：实际直接进入 Buckyball/CosyVoice 全栈，未按“验证成本/生成成本比值”标准记录该偏离与代价 | **后置**（决策记录待补） → 决策落点：建设计划补首域选择与验证成本比值的决策记录 |
 
 ## 5. 实现时的关键约束
 
@@ -429,7 +442,7 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 
 - **事实（task）**：`QuestionAsked`/`QuestionAnswered` 两类事件只持久 question/answer 稳定身份（`q-`/`a-` + 内容哈希）、双方 Run、正文引用 `{sessionId,seq}`、messageId、requestKey、内容 digest 与 blocking/resolves；**不存正文**。`questionId` 按 (childRunId, requestKey) 派生：同 key 同内容返回原记录、异内容具名拒绝零副作用。`TaskSnapshot.questions` 供纯派生（`openQuestionsOf`/`blockingQuestionsOf`/`questionsAwaitingAnswerOf`）；open = 无 resolving 回答且双方 run running。旧空 `pendingQuestionIds/blockingQuestionIds` 声明保留可读、新写入停止（`changeRunPhaseIn` 具名拒绝），决策 `same-version`（[persistence 记录](persistence-changes/2026-09-25-a4-questions.md)）。入口 `task/src/index.ts:askParentQuestionIn/answerParentQuestionIn`、领域模块 `task/src/question.ts`。
 - **投递（agent-runtime）**：`messages.ts` 是唯一主体。正文来源 = 发送 Session 真实且已 flush 的 `tool/call`（先 `ctx.sessions.flush` 再 `sessionQuery` 读回，伪造/他 Session/篡改在 task 意图落库前具名拒绝；digest = sha256(arguments 原文)）。消息自建 `freezeMessage` + `{kind:'agent-message',form:'relay',senderSessionId}`（不伪装 human，零 DSH 改动）；顺序固定：来源 flush → task 原子提交 → `steer` 投递 → 收件 Session flush → 报 delivered。同 messageId 幂等：pending 撞 DSH `already pending` 或 fold 命中 history 即 `already-present`（fold 照 agent-team 算法，不依赖实验包）；目标不 live 记 `unavailable` 零副作用、保留意图由恢复入口重试。delivered ≠ 已消费。
-- **阻塞与恢复（task-runtime）**：编排入口 `askParentQuestion`/`answerParentQuestion`（`index.ts`，身份只取 live caller + run 绑定 + store 父关系）。闸新增 per-session 阻塞态（`setQuestionsBlocked`，非相位）：阻塞会话只放行协调动作；waiting_children 相位规则不因问答改变。闸在 ask、resolving answer、恢复重建和被问方终态后重算（`releaseAskingSessions`）；active+阻塞不发提交提醒。A4 的问答 Session/Run 恢复、gate 重建与持久问答补投继续复用；G 节改为按持久相位恢复所有业务 worker，删除按问答来源选择可恢复对象及原 deadline 限制。**唤醒顺序**：`reconcileStore` 的「投递 + 未 claim notice」块与恢复期根激活 notice 不在屏障 `recovering` 时执行；它们登记为 `StoreRecoveryState` 上的延迟动作（仅进程内），`adoptRoot` 在 gate 初始化与 ready 之后（release 之前）按序发出；屏障 ready 前取消或失败即丢弃。意图始终在 Task 持久事实里，下一次显式激活重跑同一决定。无屏障的直接 `reconcileStore` 调用语义不变。A4-5 的结算所有者保持原实现。
+- **阻塞与恢复（task-runtime）**：编排入口 `askParentQuestion`/`answerParentQuestion`（`index.ts`，身份只取 live caller + run 绑定 + store 父关系）。闸新增 per-session 阻塞态（`setQuestionsBlocked`，非相位）：阻塞会话只放行协调动作；waiting_children 相位规则不因问答改变。闸在 ask、resolving answer、恢复重建和被问方终态后重算（`releaseAskingSessions`）；active+阻塞不发提交提醒。A4 的问答 Session/Run 恢复、gate 重建与持久问答补投继续复用；G 节改为按持久相位恢复所有业务 worker，删除按问答来源选择可恢复对象及原 deadline 限制。**唤醒顺序**：`reconcileStore` 的「投递 + 未 claim notice」块与恢复期根激活 notice 不在屏障 `recovering` 时执行；它们登记为 `StoreRecoveryState` 上的延迟动作（仅进程内），`adoptRoot` 在 gate 初始化与 ready 之后（release 之前）按「欠投问答投递 → 批次结果 → owner notice」发出，本屏障已按欠投事实唤醒过的 Session 跳过通用继续 notice，被自身未决问题阻塞的 Run 的 notice 只追加不唤醒；屏障 ready 前取消或失败即丢弃。意图始终在 Task 持久事实里，下一次显式激活重跑同一决定。无屏障的直接 `reconcileStore` 调用语义不变。A4-5 的结算所有者保持原实现。
 - **呈现（context）**：`singularity:questions` runtime-context（worker 与 root 均接线）：父视角列待答问题（id/子 run/ref/`task_answer` 指引），子视角列未证明看过的回答（消费证明 = 本人 Session history 存在该 messageId 的 `user/message`，无证明保留引用，不建 consumed 账本）；正文经 `context_read` 按 ref 读取。active+阻塞显示 `waiting_answer`（纯派生）。重复装配字节稳定、零写副作用。
 - **工具（agent-singularity）**：`task-ask-parent.ts`/`task-answer.ts` 薄适配（身份 `exec.agent.id` + `exec.callId`，未声明键具名拒绝，schema 无收件人/授权字段）；worker baseline 含两者，root 仅 `task_answer`，reviewer 白名单不含即关闭。
 - **顺带修复**：replay 工作区层补 taskId，使 replay 内真实 `task_decompose` 及「replay 中真实 Task 父子问答」正例走通（前置 A3 缺陷，红绿证据见交付记录）。
@@ -554,8 +567,39 @@ K2 独立审核：[验收记录](history/2026-09-27-k2-review.md)。
 
 ### 5.25 G：原 Task 图一键续跑，无 Agent 总时长限制（2026-10-01）
 
-外部复用 `POST /singularity/graphs/:id/select`；在 canvas 左侧点原图卡片即可，当前已选图也可再次点。启动已选图同样走 select/activate → adoptRoot，不新建 resume API、helper、图或身份。active 续原 Session 并唤醒，waiting_children 续原 batch/问答，submitted 续原验收，terminal 不重做；绑定/闸/工作区链就绪后才执行，并发/重复激活共用一个完成屏障。读取、绑定、外部 live owner 或唤醒失败直接报错；失败后的显式重试重新对账原事实。
+外部复用 `POST /singularity/graphs/:id/select`；在 canvas 左侧点原图卡片即可，当前已选图也可再次点。启动已选图同样走 select/activate → adoptRoot，不新建 resume API、helper、图或身份。active 续原 Session 并唤醒，waiting_children 续原 batch/问答，submitted 续原验收，terminal 不重做；绑定/闸/工作区链就绪后才执行，并发/重复激活共用一个完成屏障。读取、绑定、外部 live owner 或唤醒失败直接报错；失败后的显式重试重新对账原事实。被自身未决问题阻塞的 Run 不即时唤醒：继续 notice 只追加进收件箱，随答案的首个请求一起读到；欠投问答由投递本身唤醒，并跳过通用继续 notice。
 
 删除默认两小时、可配置 Run/root wallTimeMs、有效 deadlineAt/扩时 API 和 reviewer 十分钟 watchdog；新配置及请求拒绝旧字段，历史事件可读但不判停。maxRuns 与实际用量仍累计，扩额只收 `{requestKey,maxRuns}`。保留验证、工具、drain 的单次超时；没有新增离线扣时账、暂停分类器或恢复服务。
 
 真实进程证据在 `tests/integration/g-graph-continuation.spec.ts`（7/7）；定向单测、消费者集成和正式构建通过，详见[计划 G 节](2026-09-20-vrtc-code-change-plan.md#g-原图续跑与角色装配)。本次证明 Task 业务图续跑；reviewer/supervisor 的协调尝试仍用各自既有中断规则，不宣称所有辅助会话热恢复。未执行浏览器或完整 CosyVoice 重跑，旧运行部署未切换；原全量 tsc 与历史不完整 SessionQuery mock 的限制如实保留。新部署从提交重建产物、删除旧时间配置后，再按第 18 项测试完整工程目标。
+
+### 5.26 DSH 0.2.0-rc.2 对齐与复用复核（2026-10-01）
+
+工作区已对齐 `thirdparty/deepseek-harness` 0.2.0-rc.2；`.dsh` 的 web 与 verify-smoke profile 均按新包名重接。本节记录对齐事实与针对 0.2.0 新增包的新一轮复用复核；上一轮按计划交叉点的复核见[复用核查（2026-09-25）](history/2026-09-25-dsh-reuse-audit.md)，其结论未变。
+
+**对齐事实**
+
+- **Preset 从目录发现改为声明行**：`@deepseek-ai/dsh-agent-presets` 已删除，取而代之是 `@deepseek-ai/dsh-agent-preset-registry`（注册表，配置 `default`）加每个预设一条 `@deepseek-ai/dsh-agent-preset` 声明行（`config.plugins` 就是普通 entry list）。注册表不再扫描 `$DSH_HOME/.agent-presets`，目录式预设失去发现路径；`ctx.agentPresets.mount(agentCtx, id)` 与 `defaultId` 接口不变，singularity 的挂载点无需改动。web profile 的 standard/ptc/minimal/cordis 由 web-app bundle 的 `presets/*.patch.yml` 声明；verify-smoke profile 无 web-app，自行声明注册表 + `minimal`（`.dsh/profiles/verify-smoke/cordis.patch.yml`）。
+- **消息来源 kind 归生产者**：DSH 的 `MessageSourceMap` 以声明合并扩展，`kind` 由生产插件自己声明；task-runtime / env-builder 的提示统一 `source: { kind: '<producer>', form: 'notice', summary: <有界摘要> }`（`task-runtime/src/service/notify.ts:54,77`、`env-builder/src/index.ts:102,121`、`task-runtime/src/index.ts:124`、`agent-runtime/src/types.ts:22`）。
+- **工具结果错误在消息层**：tool result 的 `isError` 由 session 事件里的 message 承载（消费者读 `data.message?.isError === true`，`task-runtime/src/service/env.ts:42-45`），不再从执行对象旁路推断。
+- **客户端会话引用**：client 会话 API 改为 `retain()` → `reference.ready` → `release()` 的本地引用计数，inbox 经 session projection `faceOf('inbox')` 读取，取代旧 snapshot.queue（`packages/api/session-controller/src/client/contract/sessions.ts:30-45`）。
+- **Session 格式 v3 → v4**：`SESSION_FORMAT_VERSION = 4`（`packages/core/session/src/types.ts:89`）。本工作区不新增旧版本 API 兼容层；DSH 恢复 v3 store 时发布 v4 后继代，其中未识别的 ignorable 事件被改名为 `plugin:<name>`（`packages/session/session-format-v3-to-v4/src/extension-identities.ts:75-78`），store replay 同时接受裸名与该前缀名（`task/src/service/store.ts:249`），升级后的自家 store（graph26 等）因此可读；写入路径不变仍写裸名，`docs/persistence-schema.json` 不动。
+- **`.dsh-module-fallback` 退役**：0.1.5 link backend 的投影目录由 profile 加载时一次性清理（`removeLinkProjections`），解析期不再识别；`.dsh/profiles/node_modules` 遗留的 22 个悬空链接已清除。
+- **插件兼容闸**：`evaluatePluginCompatibility` 只对 `@deepseek-ai/dsh*` peer 做 semver 检查；singularity 各包 peer 一律 `"*"`，闸通过（`workspace:` 区间按当前运行时版本展开）。
+
+**复用复核（0.2.0 新增插件 vs singularity）**
+
+- **experimental/agent-team（roster + mailbox + task board）——考虑过、不采纳**：其任务模型是 status/blockers/writeScopes，与 singularity 的 contract/criteria/runs/evidence/review/evolution 语义不等价；采纳等于重写核心，且该包处于 experimental、无稳定性承诺。
+- **subagent runtime catalog**：只表达会话谱系与子代理所有权，不含 Task 契约、依赖、Evidence 与 TaskRun 结算，不能替代 graph/task 事实。
+- **jobs + job-controller**：进程内后台作业的 id、所有权、输出环与人工 kill，与 TaskRun 的准入/结算/证据链不同，不替代 task-runtime。
+- **user-questions（askTimed + projection）**：问答服务与持久投影可作底层原语复用，但无 singularity 的问题身份派生、双方 Run 绑定、阻塞语义与消费证明，不替代 A4 链路。
+- **workspace-changes**：呈现工作区变更，不是写入归属与执行闸，不替代 worker 写入策略。
+- **auto-review（experimental）**：工具执行前的一次性模型复审，与判据-证据-结算的 ReviewRecord 无关，不替代 verifier/review。
+- **plugin-manager + config-editor**：改 profile 行与配置，属组合面而非任务面，不替代任何 singularity 切片。
+- **DSH 无 canvas / verifier / evolution-ledger 等价物**：map、verifier、evolution 三个包保留。
+
+**canvas-view 桥接**：`bindChat` 用 `ctx.sessions.retain(sessionId, { source: 'canvasView' })` + `reference.ready` + `release()`，不用 `ctx.uiWorkspace.openSession()`——后者会把宿主面板跳到该会话、抢走当前焦点（`canvas-view/src/frontend/client.js:154`）。
+
+**目录预设迁入 bundle（2026-10-01 补）**：`.dsh/.agent-presets/{bb-verify,singularity-reviewer}/` 失去发现路径后，两个组合按其原有行与元数据（`agent.cordis.yml` + `preset.yml`）同构迁移为声明行，落在工作区自己的 bundle：`packages/singularity/bundle/presets/{bb-verify,singularity-reviewer}.patch.yml`；`@dangosys/dsh-singularity` 的 `dsh.bundle.patch` 扩为「主 patch + 两份 preset patch」的列表，随 web profile 的 bundle 层装载，语义（persona 文本、tool-fs/tool-fs-search/tool-skill、`thresholdRatio: 0.4` 折叠组、order 10/20）未改。旧目录仍在 `.dsh/.agent-presets/` 下但已不被读取（属 DSH home、非本仓范围，未删除）。`singularity-reviewer` 由 `agent-singularity` 的评审/协调路径按 id 挂载；`bb-verify` 只由部署的能力表按需命名，verify-smoke profile 仅声明 `minimal`，两个 id 均不在该 profile 内引用。
+
+验证：`./dsh --profile web --dump-config` 与 `./dsh --profile verify-smoke --dump-config` 均 exit 0 且无跳过/缺失警告；web profile 真实启动后 `agentPresets` roster 为 `[standard, ptc, minimal, cordis, bb-verify, singularity-reviewer]`，两个工作区预设均 `broken=none`（definition 装载与行审查通过）；verify-smoke 的 `minimal` 声明同样经真实 Loader 装配读回 `broken=none`（临时 overlay 禁用已退役的 verify-runner 行）。

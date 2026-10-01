@@ -32,7 +32,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
-import { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
+import { SessionId, SESSION_FORMAT_VERSION } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import JsonlSessionPersistence from '../../../../thirdparty/deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
 import SessionQueryEngine from '../../../../thirdparty/deepseek-harness/packages/session-query/session-query/lib/index.js'
 import { renderPrompt } from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
@@ -313,7 +313,7 @@ class Boot {
 
   /** The durable artifact one Session owns: the bytes a second boot would read. */
   artifact(sessionId: string): string {
-    const suffix = join(sessionId, 'session.v3.jsonl')
+    const suffix = join(sessionId, `session.v${SESSION_FORMAT_VERSION}.jsonl`)
     const found = readdirSync(this.dir, { recursive: true })
       .map(entry => join(this.dir, String(entry)))
       .find(path => path.endsWith(suffix))

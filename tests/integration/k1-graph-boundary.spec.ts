@@ -404,10 +404,10 @@ function otherLivePid(): number {
   throw new Error('no live pid other than this process is available to stand in for the writer')
 }
 
-describe('K1-4: a returned parent whose checkout cannot be taken over is stopped by name', () => {
-  it('settles the delegated parent failed by name, wakes nothing and resurrects nothing', async () => {
+describe('K1-4: a returned parent whose checkout cannot be taken over is refused by name', () => {
+  it('refuses the takeover by name, wakes nothing and resurrects nothing', async () => {
     const state = await returnedParent()
-    const { storeId, middle, middleTaskId, middleSession, middleBatchId, endMessageId, rootTaskId } = state
+    const { storeId, middle, middleTaskId, middleSession, middleBatchId, endMessageId } = state
 
     // ── the next process: the real recovery entry over the same store ─────────
     const second = await recover(state)
@@ -416,80 +416,55 @@ describe('K1-4: a returned parent whose checkout cannot be taken over is stopped
     const held = onlyMarker(second)
     expect(held.owner.storeId).toBe(storeId)
     expect(() => process.kill(held.pid, 0)).not.toThrow()
-    await second.runtime.adoptRoot(storeId, 's-root')
 
-    // The delegated parent is settled failed by name, with the workspace refusal
-    // in its cause — read back off the store, never from the call's return.
-    const after = await second.snapshot(storeId)
-    const failedMiddle = runOf(after, middleTaskId)
-    expect(failedMiddle.status).toBe('failed')
-    expect(failedMiddle.submission).toBeUndefined()
-    expect((await second.task.taskIn(storeId, middleTaskId)).status).toBe('failed')
-    const middleReview = after.reviews.find(review => review.taskId === middleTaskId)!
-    expect(middleReview.outcome).toBe('failed')
-    expect(middleReview.runId).toBe(middle.runId)
-    expect(middleReview.localizedCause).toContain(
-      `recovery refused to bring run "${middle.runId}" back into its checkout: its child batches ended and it has to be told so, ` +
-      'but the workspace cannot be taken over for recovery:',
+    // The activation refuses loudly by name (G §5.25): a checkout this process
+    // cannot take over fails the entry, and it settles no run.
+    const refusal = await second.runtime.adoptRoot(storeId, 's-root').then(
+      () => '',
+      (error: unknown) => String(error),
     )
-    expect(middleReview.localizedCause).toContain(`workspace ${held.path} still has a holder`)
-    expect(middleReview.localizedCause).toContain(`the marker names this process's own pid ${held.pid}`)
+    expect(refusal).toContain(`cannot take over workspace ${held.path}`)
+    expect(refusal).toContain(`the marker names this process's own pid ${held.pid}`)
+    expect(refusal).toContain("settle this process's own claims instead")
+
+    // The delegated parent is exactly the running run the dead process left, with
+    // the ended batch in its accumulation and no review written about it.
+    const after = await second.snapshot(storeId)
+    const leftMiddle = runOf(after, middleTaskId)
+    expect(leftMiddle.runId).toBe(middle.runId)
+    expect(leftMiddle.status).toBe('running')
+    expect(leftMiddle.submission).toBeUndefined()
+    expect(after.reviews.filter(review => review.taskId === middleTaskId)).toEqual([])
+    expect(leftMiddle.batches!.map(batch => batch.batchId)).toEqual([middleBatchId])
     // The refused takeover left the claim exactly as the dead process wrote it:
     // the same bytes the next process read are still on disk.
     expect(onlyMarker(second)).toEqual(state.leaving)
-    // The batch whose result the run cannot be told is on the record it was read
-    // from: the run's accumulation names it, and nothing cleared it.
-    expect(runOf(after, middleTaskId).batches!.map(batch => batch.batchId)).toEqual([middleBatchId])
 
-    // Nothing woke the failed run and no *task worker* was spawned for it: the
-    // deployment never asked the model loop to bring the middle's session back,
-    // the recovery process stated no batch-end message to it at all — the
-    // statement the first process made is the one that stands — and the
-    // re-delivery the runtime can re-derive from the store answers `skipped` (a
-    // terminal run is not woken). The failed review this recovery wrote is
-    // accepted for diagnosis on its own (A5), which publishes one read-only
-    // review node and reaches no run of the store — the two spawns this list
-    // holds are the reviewer's, never a worker's, and the middle's session was
-    // never resumed.
+    // Nothing woke the run and no *task worker* was spawned for it: the deployment
+    // never asked the model loop to bring the middle's session back, and the
+    // statement the first process made is the one that stands.
     expect(second.mintedAgent(middleSession)).toBeUndefined()
     expect(second.spawns.filter(spawn => spawn.taskWorker === true)).toEqual([])
     for (const spawn of second.spawns) expect(spawn.agentPreset).toBe('singularity-reviewer')
     expect(second.relayed.filter(intent => intent.messageId === endMessageId)).toEqual([])
     expect(second.relayed.filter(intent => intent.targetSessionId === middleSession)).toEqual([])
-    await expect(second.runtime.redeliverBatchResult(storeId, middleBatchId)).resolves.toBe('skipped')
 
-    // The terminal run is not resurrected: a second pass over the same store
-    // changes nothing, starts nothing, and leaves the same run failed — the
-    // delegation is not retried and no second run of that task appears.
-    const startEventsBefore = (await second.events(storeId)).filter(event => event.kind === 'TaskStarted').length
-    const reviewSpawnsBefore = second.spawns.filter(spawn => spawn.agentPreset === 'singularity-reviewer').length
-    await second.runtime.reconcileStore(storeId)
-    const settledAgain = await second.snapshot(storeId)
-    expect(settledAgain.runs.filter(run => run.taskId === middleTaskId)).toHaveLength(1)
-    expect(runOf(settledAgain, middleTaskId).runId).toBe(middle.runId)
-    expect(runOf(settledAgain, middleTaskId).status).toBe('failed')
-    expect((await second.events(storeId)).filter(event => event.kind === 'TaskStarted')).toHaveLength(startEventsBefore)
+    // An explicit retry re-reads the same facts and refuses the same way: the
+    // marker is the person's to resolve, and no run is settled on their behalf.
+    const retried = await second.runtime.adoptRoot(storeId, 's-root').then(
+      () => '',
+      (error: unknown) => String(error),
+    )
+    expect(retried).toContain(`the marker names this process's own pid ${held.pid}`)
+    const retriedStore = await second.snapshot(storeId)
+    expect(retriedStore.runs.filter(run => run.taskId === middleTaskId)).toHaveLength(1)
+    expect(runOf(retriedStore, middleTaskId).status).toBe('running')
+    expect(retriedStore.reviews.filter(review => review.taskId === middleTaskId)).toEqual([])
     expect(second.spawns.filter(spawn => spawn.taskWorker === true)).toEqual([])
-    expect(second.spawns.filter(spawn => spawn.agentPreset === 'singularity-reviewer')).toHaveLength(reviewSpawnsBefore)
     expect(second.mintedAgent(middleSession)).toBeUndefined()
-    expect(second.relayed.filter(intent => intent.targetSessionId === middleSession)).toEqual([])
-    // The run's own Session still resolves to that one failed run — no second run
-    // took its place — and a submission for it is answered from the record rather
-    // than reopening it.
-    expect((await second.runtime.runForSession(middleSession)).run.runId).toBe(middle.runId)
-    expect(settledAgain.runs.filter(run => String(run.sessionId) === middleSession)).toHaveLength(1)
-    const late = await second.runtime.submitResult(middleSession, { summary: 'too late to hand this in' })
-    expect(late.status).toBe('failed')
-    expect(late.detail).toContain('already settled as "failed"')
-    // The delegating root was stopped by the same gate, with its own named reason
-    // (a batch of its own is what cannot be restarted into the checkout).
-    const failedRoot = runOf(settledAgain, rootTaskId)
-    expect(failedRoot.status).toBe('failed')
-    const rootReview = settledAgain.reviews.find(review => review.taskId === rootTaskId)!
-    expect(rootReview.localizedCause).toContain('the workspace cannot be taken over for recovery:')
   })
 
-  it('refuses the same takeover when the holder is another live process, and stops the run the same way', async () => {
+  it('refuses the same takeover when the holder is another live process, waking nothing', async () => {
     const state = await returnedParent()
     const { storeId, middle, middleTaskId, middleSession, rootTaskId, rootRunId } = state
     // The deployment's own marker is replaced by the one a *second* process would
@@ -509,60 +484,73 @@ describe('K1-4: a returned parent whose checkout cannot be taken over is stopped
     })
 
     const second = await recover(state)
-    expect(onlyMarker(second).pid).toBe(holder)
-    await second.runtime.adoptRoot(storeId, 's-root')
+    const held = onlyMarker(second)
+    expect(held.pid).toBe(holder)
+
+    // The other live owner's refusal is the same loud, named activation failure:
+    // it settles no run and stays exactly where it was.
+    const refusal = await second.runtime.adoptRoot(storeId, 's-root').then(
+      () => '',
+      (error: unknown) => String(error),
+    )
+    expect(refusal).toContain(`cannot take over workspace ${held.path}`)
+    expect(refusal).toContain(`the marker names pid ${holder}, which is alive`)
+    expect(refusal).toContain('a live owner is never taken over')
 
     const after = await second.snapshot(storeId)
-    const middleReview = after.reviews.find(review => review.taskId === middleTaskId)!
-    expect(runOf(after, middleTaskId).status).toBe('failed')
-    expect(middleReview.localizedCause).toContain(
-      `recovery refused to bring run "${middle.runId}" back into its checkout: its child batches ended and it has to be told so, ` +
-      'but the workspace cannot be taken over for recovery:',
-    )
-    expect(middleReview.localizedCause).toContain(`the marker names pid ${holder}, which is alive`)
-    expect(middleReview.localizedCause).toContain('a live owner is never taken over')
+    const leftMiddle = runOf(after, middleTaskId)
+    expect(leftMiddle.runId).toBe(middle.runId)
+    expect(leftMiddle.status).toBe('running')
+    expect(after.reviews.filter(review => review.taskId === middleTaskId)).toEqual([])
+    expect(onlyMarker(second)).toEqual(held)
 
-    // The same three facts as the case above: no wake, no worker, no
-    // resurrection — the failed review's own node is the only thing published,
-    // and the middle's session is never resumed.
+    // The same three facts as the case above: no wake, no worker, no resurrection.
     expect(second.mintedAgent(middleSession)).toBeUndefined()
     expect(second.spawns.filter(spawn => spawn.taskWorker === true)).toEqual([])
     for (const spawn of second.spawns) expect(spawn.agentPreset).toBe('singularity-reviewer')
     expect(second.relayed.filter(intent => intent.targetSessionId === middleSession)).toEqual([])
-    await second.runtime.reconcileStore(storeId)
-    expect(runOf(await second.snapshot(storeId), middleTaskId).status).toBe('failed')
+
+    // The explicit retry re-reads the same facts and refuses the same way.
+    const retried = await second.runtime.adoptRoot(storeId, 's-root').then(
+      () => '',
+      (error: unknown) => String(error),
+    )
+    expect(retried).toContain(`the marker names pid ${holder}, which is alive`)
+    expect(runOf(await second.snapshot(storeId), middleTaskId).status).toBe('running')
   })
 
-  it('passes the workspace gate when the checkout is free — the marker is what stops the run', async () => {
+  it('refuses the Session\'s own door by name when the checkout is free', async () => {
     const state = await returnedParent()
-    const { storeId, middle, middleTaskId, middleSession } = state
+    const { storeId, middle, middleTaskId, middleSession, endMessageId } = state
     // The same construction with one difference: no marker, so the checkout is
-    // nobody's and the real registry adopts it. Recovery then takes the checkout
-    // over (its own claim lands where the crashed process's was) and the returned
-    // parent is handed to its Session's own door instead of being stopped by the
-    // workspace's. That door refuses in *this* fixture — a spawned worker holds no
-    // durable log here, so the real resume answers `session-unreadable` — and the
-    // case says so rather than pretending the run came back. What it establishes
-    // is the difference between the two stops: with the marker present the
-    // workspace branch fires before that door is even reached.
+    // nobody's and the real registry adopts it. Recovery takes the checkout over
+    // and the returned parent is handed to its Session's own door — which refuses
+    // in *this* fixture, because a spawned worker holds no durable log here — and
+    // that door is a loud, named failure too (G §5.25), not a settlement. What the
+    // case establishes is the difference between the two refusals: with the marker
+    // present the workspace branch fires before that door is even reached.
     for (const file of markers(state.first)) rmSync(join(markerRoot(state.first), file), { force: true })
     const second = await recover(state)
     expect(markers(second)).toEqual([])
 
-    await second.runtime.adoptRoot(storeId, 's-root')
+    const refusal = await second.runtime.adoptRoot(storeId, 's-root').then(
+      () => '',
+      (error: unknown) => String(error),
+    )
+    expect(refusal).not.toContain('cannot take over workspace')
+    expect(refusal).toContain(`session "${middleSession}" could not be read, so it cannot be taken over safely`)
+    expect(refusal).toContain('not found')
 
+    // The failed activation settles nothing and releases the claim it took: the
+    // middle is still the running run the dead process left.
     const after = await second.snapshot(storeId)
-    const cause = after.reviews.find(review => review.taskId === middleTaskId)?.localizedCause ?? ''
     expect(runOf(after, middleTaskId).runId).toBe(middle.runId)
-    expect(runOf(after, middleTaskId).status).toBe('failed')
-    // Not the workspace refusal: this process adopted and claimed the checkout,
-    // which is what the marker it wrote says.
-    expect(cause).not.toContain('the workspace cannot be taken over for recovery')
-    expect(markers(second)).toHaveLength(1)
-    expect(onlyMarker(second)).not.toEqual(state.leaving)
-    expect(onlyMarker(second).owner.storeId).toBe(storeId)
-    // The stop is the Session's own door, named — the fixture boundary above.
-    expect(cause).toContain(`its child batches ended (${state.middleBatchId}) and its Session "${middleSession}" could not be brought back under its own identity:`)
-    expect(cause).toContain('session-unreadable')
+    expect(runOf(after, middleTaskId).status).toBe('running')
+    expect(after.reviews.filter(review => review.taskId === middleTaskId)).toEqual([])
+    expect(markers(second)).toEqual([])
+    expect(second.mintedAgent(middleSession)).toBeUndefined()
+    expect(second.spawns.filter(spawn => spawn.taskWorker === true)).toEqual([])
+    expect(second.relayed.filter(intent => intent.messageId === endMessageId)).toEqual([])
+    expect(second.relayed.filter(intent => intent.targetSessionId === middleSession)).toEqual([])
   })
 })

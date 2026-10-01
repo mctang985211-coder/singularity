@@ -23,7 +23,12 @@ const FIXTURE_SKILLS = fileURLToPath(new URL('../fixtures/skills/', import.meta.
 /** The BB capability rows the fixtures are built against — the real table, narrowed to these skills. */
 const CAPABILITIES = {
   'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'] },
-  'verify-ball-functional': { skills: ['verify'], tools: ['filesystem', 'bash', 'jobs'], preset: 'bb-verify', mcpServers: ['bbdev'] },
+  'verify-ball-functional': {
+    skills: ['verify'],
+    tools: ['filesystem', 'bash', 'jobs'],
+    preset: 'bb-verify',
+    mcpServers: ['bbdev'],
+  },
   'integrate-model': { skills: ['workload-tests'] },
 }
 
@@ -55,7 +60,9 @@ function details(verdict: { defects: readonly { code: string; detail: string }[]
 
 function accepted(verdict: Awaited<ReturnType<typeof validateSkillProvider>>): AcceptedSkillProviderVerdict {
   if (!verdict.valid) {
-    throw new Error(`expected an accepted provider, got: ${verdict.defects.map(d => `${d.code}: ${d.detail}`).join('; ')}`)
+    throw new Error(
+      `expected an accepted provider, got: ${verdict.defects.map(d => `${d.code}: ${d.detail}`).join('; ')}`,
+    )
   }
   return verdict
 }
@@ -79,8 +86,10 @@ describe('loadSkillSidecar', () => {
     const loaded = await loadSkillSidecar(directory)
     expect(loaded.defects).toEqual([])
     expect(loaded.sidecar?.type).toBe('knowledge')
-    expect(loaded.content?.resources.map(resource => resource.path))
-      .toEqual(['references/contract-checklist.md', 'references/illegal-input-table.md'])
+    expect(loaded.content?.resources.map(resource => resource.path)).toEqual([
+      'references/contract-checklist.md',
+      'references/illegal-input-table.md',
+    ])
     // The digest is the declared one, read from the real file bytes — not a re-derivation of the JSON.
     expect(loaded.content).toEqual(loaded.sidecar?.content)
     expect(loaded.content?.skillMdSha256).toMatch(/^[0-9a-f]{64}$/)
@@ -91,10 +100,12 @@ describe('loadSkillSidecar', () => {
     const loaded = await loadSkillSidecar(directory)
     expect(loaded.defects).toEqual([])
     expect(loaded.sidecar?.type).toBe('execution')
-    expect(loaded.content?.resources).toEqual([{
-      path: 'scripts/run_bemu.sh',
-      sha256: '0aec21463951dcdd02a076b6d0fed94118b03d1df4ef90b34d9aa0ee6fac4503',
-    }])
+    expect(loaded.content?.resources).toEqual([
+      {
+        path: 'scripts/run_bemu.sh',
+        sha256: '0aec21463951dcdd02a076b6d0fed94118b03d1df4ef90b34d9aa0ee6fac4503',
+      },
+    ])
   })
 
   test('a skill without a sidecar is a plain guidance load, not a defect', async () => {
@@ -116,7 +127,9 @@ describe('loadSkillSidecar', () => {
 
   test('an unknown contract version is refused by number', async () => {
     const directory = await fixture('ball-align')
-    await patchSidecar(directory, sidecar => { sidecar.contractVersion = 2 })
+    await patchSidecar(directory, sidecar => {
+      sidecar.contractVersion = 2
+    })
     const loaded = await loadSkillSidecar(directory)
     expect(codes(loaded)).toEqual(['sidecar-unknown-version'])
     expect(details(loaded, 'sidecar-unknown-version')[0]).toContain('2')
@@ -124,7 +137,9 @@ describe('loadSkillSidecar', () => {
 
   test('a field outside the closed set is refused by name', async () => {
     const directory = await fixture('verify')
-    await patchSidecar(directory, sidecar => { sidecar.effort = 'high' })
+    await patchSidecar(directory, sidecar => {
+      sidecar.effort = 'high'
+    })
     const loaded = await loadSkillSidecar(directory)
     expect(codes(loaded)).toEqual(['sidecar-unknown-field'])
     expect(details(loaded, 'sidecar-unknown-field')[0]).toContain('"effort"')
@@ -137,7 +152,9 @@ describe('loadSkillSidecar', () => {
     const loaded = await loadSkillSidecar(directory)
     expect(codes(loaded)).toEqual(['content-mismatch'])
     expect(details(loaded, 'content-mismatch')[0]).toContain('SKILL.md')
-    expect(details(loaded, 'content-mismatch')[0]).toContain('5653a0e3563dab23a52eb161b125a7d52da85d5f5138c318826cd31c1be56ef1')
+    expect(details(loaded, 'content-mismatch')[0]).toContain(
+      '5653a0e3563dab23a52eb161b125a7d52da85d5f5138c318826cd31c1be56ef1',
+    )
   })
 
   test('a referenced resource that changed by one byte no longer matches its identity', async () => {
@@ -292,7 +309,9 @@ describe('validateSkillProvider', () => {
     // capability grants. The second is the spawn's own rule, in its own words.
     expect(codes(verdict)).toEqual(['skill-name-mismatch', 'skill-name-mismatch'])
     expect(details(verdict, 'skill-name-mismatch')[0]).toContain('ball-align')
-    expect(details(verdict, 'skill-name-mismatch')[1]).toContain('declares name "ball-align" but the capability grants "something-else"')
+    expect(details(verdict, 'skill-name-mismatch')[1]).toContain(
+      'declares name "ball-align" but the capability grants "something-else"',
+    )
   })
 
   test('a symbolic link standing in for the skill directory is refused', async () => {
@@ -340,9 +359,12 @@ describe('validateSkillProvider', () => {
 
   test('a capability row whose labels do not expand is refused with the config reason', async () => {
     const directory = await fixture('verify')
-    const broken = skillValidationContext({
-      'verify-ball-functional': { skills: ['verify'], tools: ['filesytem'] },
-    }, VERIFIER_REFS)
+    const broken = skillValidationContext(
+      {
+        'verify-ball-functional': { skills: ['verify'], tools: ['filesytem'] },
+      },
+      VERIFIER_REFS,
+    )
     const verdict = rejected(await validateSkillProvider({ name: 'verify', directory }, broken))
     expect(codes(verdict)).toEqual(['capability-unknown'])
     expect(details(verdict, 'capability-unknown')[0]).toContain('unknown tool label "filesytem"')
@@ -359,18 +381,16 @@ describe('validateSkillProvider', () => {
   test('a sidecar the caller already loaded must still describe the directory it is validated against', async () => {
     const directory = await fixture('verify')
     const loaded = await loadSkillSidecar(directory)
-    const matching = accepted(await validateSkillProvider(
-      { name: 'verify', directory, sidecar: loaded.sidecar },
-      CONTEXT,
-    ))
+    const matching = accepted(
+      await validateSkillProvider({ name: 'verify', directory, sidecar: loaded.sidecar }, CONTEXT),
+    )
     expect(matching.role).toBe('execution-provider')
 
     const other = await fixture('ball-align')
     const knowledge = await loadSkillSidecar(other)
-    const mismatched = rejected(await validateSkillProvider(
-      { name: 'verify', directory, sidecar: knowledge.sidecar },
-      CONTEXT,
-    ))
+    const mismatched = rejected(
+      await validateSkillProvider({ name: 'verify', directory, sidecar: knowledge.sidecar }, CONTEXT),
+    )
     expect(codes(mismatched)).toEqual(['sidecar-mismatch'])
     expect(details(mismatched, 'sidecar-mismatch')[0]).toContain('SKILL.contract.json')
   })
@@ -384,13 +404,25 @@ describe('validateSkillProvider', () => {
   })
 
   test('only execution verdicts are execution providers', async () => {
-    const execution = accepted(await validateSkillProvider({ name: 'verify', directory: await fixture('verify') }, CONTEXT))
-    const knowledge = accepted(await validateSkillProvider({ name: 'ball-align', directory: await fixture('ball-align') }, CONTEXT))
-    const guidance = accepted(await validateSkillProvider({ name: 'ball-align', directory: await (async () => {
-      const directory = await fixture('ball-align')
-      await rm(join(directory, 'SKILL.contract.json'))
-      return directory
-    })() }, CONTEXT))
+    const execution = accepted(
+      await validateSkillProvider({ name: 'verify', directory: await fixture('verify') }, CONTEXT),
+    )
+    const knowledge = accepted(
+      await validateSkillProvider({ name: 'ball-align', directory: await fixture('ball-align') }, CONTEXT),
+    )
+    const guidance = accepted(
+      await validateSkillProvider(
+        {
+          name: 'ball-align',
+          directory: await (async () => {
+            const directory = await fixture('ball-align')
+            await rm(join(directory, 'SKILL.contract.json'))
+            return directory
+          })(),
+        },
+        CONTEXT,
+      ),
+    )
     const refused = rejected(await validateSkillProvider({ name: 'verify' }, CONTEXT))
     expect(executionProviders([execution, knowledge, guidance, refused])).toEqual([execution])
   })
@@ -423,7 +455,10 @@ describe('registryRevision', () => {
     const ballAlign = await loadSkillSidecar(await fixture('ball-align'))
     const verify = await loadSkillSidecar(await fixture('verify'))
     return [
-      { name: 'ball-align', contractDigest: ballAlign.sidecar === undefined ? null : skillContractDigest(ballAlign.sidecar) },
+      {
+        name: 'ball-align',
+        contractDigest: ballAlign.sidecar === undefined ? null : skillContractDigest(ballAlign.sidecar),
+      },
       { name: 'verify', contractDigest: verify.sidecar === undefined ? null : skillContractDigest(verify.sidecar) },
     ]
   }
@@ -447,25 +482,70 @@ describe('registryRevision', () => {
     expect(revision).toMatch(/^[0-9a-f]{64}$/)
     expect(registryRevision(reorderedRows, [...providers].reverse())).toBe(revision)
     // declared order inside a row is not part of the grant
-    expect(registryRevision({
-      ...CAPABILITIES,
-      'verify-ball-functional': { skills: ['verify'], tools: ['bash', 'jobs', 'filesystem'], preset: 'bb-verify', mcpServers: ['bbdev'] },
-    }, providers)).toBe(revision)
+    expect(
+      registryRevision(
+        {
+          ...CAPABILITIES,
+          'verify-ball-functional': {
+            skills: ['verify'],
+            tools: ['bash', 'jobs', 'filesystem'],
+            preset: 'bb-verify',
+            mcpServers: ['bbdev'],
+          },
+        },
+        providers,
+      ),
+    ).toBe(revision)
   })
 
   test('declared defaults and their omission are the same entry', () => {
-    expect(registryRevision({ row: { skills: ['a'], tools: [], mcpServers: [] } }, []))
-      .toBe(registryRevision({ row: { skills: ['a'] } }, []))
+    expect(registryRevision({ row: { skills: ['a'], tools: [], mcpServers: [] } }, [])).toBe(
+      registryRevision({ row: { skills: ['a'] } }, []),
+    )
   })
 
   test('a changed capability row moves the revision', () => {
     const providers = [{ name: 'verify', contractDigest: 'aa'.repeat(32) }]
     const base = registryRevision(CAPABILITIES, providers)
-    expect(registryRevision({ ...CAPABILITIES, 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } }, providers)).not.toBe(base)
-    expect(registryRevision({ ...CAPABILITIES, 'design-ball': { skills: ['ball-align', 'check'], tools: ['filesystem', 'bash'] } }, providers)).not.toBe(base)
-    expect(registryRevision({ ...CAPABILITIES, 'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'], preset: 'standard' } }, providers)).not.toBe(base)
-    expect(registryRevision({ ...CAPABILITIES, 'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'], permission: 'read-only' } }, providers)).not.toBe(base)
-    expect(registryRevision({ ...CAPABILITIES, 'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'], mcpServers: ['bbdev'] } }, providers)).not.toBe(base)
+    expect(
+      registryRevision(
+        { ...CAPABILITIES, 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } },
+        providers,
+      ),
+    ).not.toBe(base)
+    expect(
+      registryRevision(
+        { ...CAPABILITIES, 'design-ball': { skills: ['ball-align', 'check'], tools: ['filesystem', 'bash'] } },
+        providers,
+      ),
+    ).not.toBe(base)
+    expect(
+      registryRevision(
+        {
+          ...CAPABILITIES,
+          'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'], preset: 'standard' },
+        },
+        providers,
+      ),
+    ).not.toBe(base)
+    expect(
+      registryRevision(
+        {
+          ...CAPABILITIES,
+          'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'], permission: 'read-only' },
+        },
+        providers,
+      ),
+    ).not.toBe(base)
+    expect(
+      registryRevision(
+        {
+          ...CAPABILITIES,
+          'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'], mcpServers: ['bbdev'] },
+        },
+        providers,
+      ),
+    ).not.toBe(base)
     const { 'design-ball': removed, ...withoutRow } = CAPABILITIES
     expect(removed).toBeDefined()
     expect(registryRevision(withoutRow, providers)).not.toBe(base)
@@ -477,18 +557,20 @@ describe('registryRevision', () => {
       { name: 'verify', contractDigest: 'bb'.repeat(32) },
     ]
     const base = registryRevision(CAPABILITIES, providers)
-    expect(registryRevision(CAPABILITIES, [
-      { name: 'ball-align', contractDigest: 'cc'.repeat(32) },
-      { name: 'verify', contractDigest: 'bb'.repeat(32) },
-    ])).not.toBe(base)
+    expect(
+      registryRevision(CAPABILITIES, [
+        { name: 'ball-align', contractDigest: 'cc'.repeat(32) },
+        { name: 'verify', contractDigest: 'bb'.repeat(32) },
+      ]),
+    ).not.toBe(base)
     expect(registryRevision(CAPABILITIES, [...providers, { name: 'check', contractDigest: null }])).not.toBe(base)
-    expect(registryRevision(CAPABILITIES, [
-      { name: 'ball-align', contractDigest: null },
-      { name: 'verify', contractDigest: 'bb'.repeat(32) },
-    ])).not.toBe(base)
-    expect(registryRevision(CAPABILITIES, [
-      { name: 'verify', contractDigest: 'bb'.repeat(32) },
-    ])).not.toBe(base)
+    expect(
+      registryRevision(CAPABILITIES, [
+        { name: 'ball-align', contractDigest: null },
+        { name: 'verify', contractDigest: 'bb'.repeat(32) },
+      ]),
+    ).not.toBe(base)
+    expect(registryRevision(CAPABILITIES, [{ name: 'verify', contractDigest: 'bb'.repeat(32) }])).not.toBe(base)
   })
 
   test('the fixture sidecars produce a revision from the real load path', async () => {

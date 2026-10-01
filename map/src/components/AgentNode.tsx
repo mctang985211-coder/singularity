@@ -3,7 +3,7 @@ import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 import { useZoomTier } from '../lib/use-map-mode'
 import type { AgentData } from '../types'
 
-type AgentFlowNode = Node<AgentData, 'agent'>
+type AgentFlowNode = Node<AgentData & Record<string, unknown>, 'agent'>
 
 const GLYPH: Record<AgentData['status'], string> = {
   idle: '·',

@@ -119,6 +119,8 @@ export interface RunStackOptions {
   readonly skillTool?: boolean
   /** Register the real singularity tools (`task_read`, `capability_list`, `task_decompose`) on the global plane. */
   readonly tools?: boolean
+  /** Declare the evolution chain on (`ctx.singularityEvolution`), the switch the root reads. Defaults off. */
+  readonly evolution?: boolean
   /** Where run bindings are materialized. Defaults to `<home>/singularity/run-bindings`. */
   readonly runBindingRoot?: string
   /** Depth ceiling for a cascade; defaults to the runtime's own. */
@@ -377,6 +379,8 @@ class RunStackImpl implements RunStack {
     ctx.provide('sessions', {})
     ctx.provide('approval', { request: vi.fn(async () => 'allowed-once') })
     ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
+    // The deployment's evolution switch: read by the root assembly before any root exists.
+    if (this.options.evolution === true) ctx.provide('singularityEvolution', { enabled: true })
 
     for (const root of this.roots) {
       this.headers.set(root, { id: root, cwd: this.checkout, agentPreset: 'standard' } as unknown as SessionHeader)

@@ -114,20 +114,25 @@ interface Fixture {
  * two-sided experiment. The trace runs propose → candidate → prepare → record
  * the experiment, and stops before the gate so each case can tamper first.
  */
-async function fixture(options: {
-  registry?: Record<string, CapabilityConfig>
-  experiment?: CapabilityExperimentOptions
-  sourceStatus?: 'failed' | 'verified'
-  /** Runs after the experiment is recorded and before any gate: the case that changes one fact. */
-  tamper?: (parts: Fixture) => Promise<void>
-} = {}): Promise<Fixture> {
+async function fixture(
+  options: {
+    registry?: Record<string, CapabilityConfig>
+    experiment?: CapabilityExperimentOptions
+    sourceStatus?: 'failed' | 'verified'
+    /** Runs after the experiment is recorded and before any gate: the case that changes one fact. */
+    tamper?: (parts: Fixture) => Promise<void>
+  } = {},
+): Promise<Fixture> {
   const dir = await mkdtemp(join(tmpdir(), 'capability-gate-'))
   const root = join(dir, 'evolution')
   const skillRoot = join(dir, 'skills')
   const home = join(dir, 'home')
   const workspace = join(dir, 'snapshot')
   await mkdir(join(home, 'skills', STORE_SKILL), { recursive: true })
-  await writeFile(join(home, 'skills', STORE_SKILL, 'SKILL.md'), skillText(STORE_SKILL, '# the guidance the store already grants'))
+  await writeFile(
+    join(home, 'skills', STORE_SKILL, 'SKILL.md'),
+    skillText(STORE_SKILL, '# the guidance the store already grants'),
+  )
   await mkdir(skillRoot, { recursive: true })
   await mkdir(workspace, { recursive: true })
   await writeFile(join(workspace, 'input.txt'), 'the frozen input\n')
@@ -146,14 +151,22 @@ async function fixture(options: {
         else registry[name] = structuredClone(entry)
       },
     },
-    task: { openStore: async () => ({
-      ...rows,
-      diagnoses: options.sourceStatus ? [{
-        diagnosisId: 'd1', taskId: 't-success', reviewRefs: ['t-success#r-success'],
-        proposals: [{ targetType: 'capability', targetId: NEW_ROW, rationale: 'faster' }],
-      }] : [],
-      obligations: [],
-    }) },
+    task: {
+      openStore: async () => ({
+        ...rows,
+        diagnoses: options.sourceStatus
+          ? [
+              {
+                diagnosisId: 'd1',
+                taskId: 't-success',
+                reviewRefs: ['t-success#r-success'],
+                proposals: [{ targetType: 'capability', targetId: NEW_ROW, rationale: 'faster' }],
+              },
+            ]
+          : [],
+        obligations: [],
+      }),
+    },
     sessionQuery: {
       readSession: async (sessionId: string) => {
         const events = sessions.get(sessionId)
@@ -179,15 +192,20 @@ async function fixture(options: {
   await svc.propose(proposal, 'root-1')
   await svc.candidate('cap1', VERSION_SET, 'root-1', mutation())
   await svc.prepare('cap1', 'root-1')
-  const experiment = await recordCapabilityExperiment(svc, {
-    root,
-    skillRoot,
-    registry,
-    rows,
-    sessions,
-    workspace,
-    selection: SELECTION,
-  }, await svc.get('cap1'), options.experiment ?? {})
+  const experiment = await recordCapabilityExperiment(
+    svc,
+    {
+      root,
+      skillRoot,
+      registry,
+      rows,
+      sessions,
+      workspace,
+      selection: SELECTION,
+    },
+    await svc.get('cap1'),
+    options.experiment ?? {},
+  )
   let sourceTask: Record<string, unknown> | undefined
   if (options.sourceStatus) {
     sourceTask = { taskId: 't-success', objective: 'a source', status: options.sourceStatus, runIds: ['r-success'] }
@@ -243,7 +261,9 @@ describe('capability promotion: the evidence the gate reads', () => {
   it('records the refused production baseline as not-admitted — no run, no champion — beside a candidate that really ran', async () => {
     const f = await fixture()
     // The evidence itself: what the refused baseline side is.
-    const baselineRecords = (await ledgerLines(f.root)).filter(line => line.kind === 'experiment_sample' && line.side === 'baseline')
+    const baselineRecords = (await ledgerLines(f.root)).filter(
+      line => line.kind === 'experiment_sample' && line.side === 'baseline',
+    )
     expect(baselineRecords).toHaveLength(2)
     for (const record of baselineRecords) {
       expect(record).toMatchObject({
@@ -287,8 +307,9 @@ describe('capability promotion: the evidence the gate reads', () => {
     expect((await f.svc.decide('cap1', 'PROMOTE', 'root-1', 'approval:decide')).status).toBe('decided')
     await f.svc.apply('cap1', 'root-1', 'approval:apply')
     expect(f.registry[NEW_ROW]).toEqual({ skills: [NEW_SKILL], tools: ['filesystem'] })
-    expect(await readFile(join(f.skillRoot, NEW_SKILL, SKILL_SIDECAR_FILE), 'utf8'))
-      .toBe(serializeSkillSidecar(executionSidecar(CANDIDATE_TEXT)))
+    expect(await readFile(join(f.skillRoot, NEW_SKILL, SKILL_SIDECAR_FILE), 'utf8')).toBe(
+      serializeSkillSidecar(executionSidecar(CANDIDATE_TEXT)),
+    )
   })
 
   it('reads a baseline that really ran when production holds the row, and promotes only a clean fix', async () => {
@@ -314,8 +335,9 @@ describe('capability promotion: every missing piece is a named refusal with zero
     const promotion = await refusalOf(f.svc.checkPromotion('cap1'))
     expect(promotion).toMatch(/successful source.*frozen.*comparator/i)
     await f.svc.gate('cap1', gateAnswers([f.experiment.reportPath]), 'root-1')
-    expect(await refusalOf(f.svc.decide('cap1', 'PROMOTE', 'root-1', 'approval:decide')))
-      .toMatch(/successful source.*frozen.*comparator/i)
+    expect(await refusalOf(f.svc.decide('cap1', 'PROMOTE', 'root-1', 'approval:decide'))).toMatch(
+      /successful source.*frozen.*comparator/i,
+    )
     await assertZeroWrites(f)
   })
 
@@ -324,8 +346,9 @@ describe('capability promotion: every missing piece is a named refusal with zero
     await f.svc.gate('cap1', gateAnswers([f.experiment.reportPath]), 'root-1')
     await f.svc.decide('cap1', 'PROMOTE', 'root-1', 'approval:decide')
     f.sourceTask!.status = 'verified'
-    expect(await refusalOf(f.svc.apply('cap1', 'root-1', 'approval:apply')))
-      .toMatch(/successful source.*frozen.*comparator/i)
+    expect(await refusalOf(f.svc.apply('cap1', 'root-1', 'approval:apply'))).toMatch(
+      /successful source.*frozen.*comparator/i,
+    )
     const lines = await ledgerLines(f.root)
     expect(lines.some(line => line.kind === 'commit_intent' || line.kind === 'applied')).toBe(false)
     expect(f.registry[NEW_ROW]).toBeUndefined()
@@ -360,7 +383,9 @@ describe('capability promotion: every missing piece is a named refusal with zero
     // it: admission passing is not the fix the promotion reads.
     const f = await fixture({ experiment: { omitCandidateRuns: true } })
     const message = await refusalOf(f.svc.checkPromotion('cap1'))
-    expect(message).toMatch(/does not cite a replayed task this experiment created|cites run .* which no run of this experiment/)
+    expect(message).toMatch(
+      /does not cite a replayed task this experiment created|cites run .* which no run of this experiment/,
+    )
     await assertZeroWrites(f)
   })
 
@@ -397,15 +422,20 @@ describe('capability promotion: every missing piece is a named refusal with zero
           sha256: 'b'.repeat(64),
           contract: { sha256: 'c'.repeat(64), contractDigest: 'd'.repeat(64) },
         }
-        await recordCapabilityExperiment(parts.svc, {
-          root: parts.root,
-          skillRoot: parts.skillRoot,
-          registry: parts.registry,
-          rows: parts.rows,
-          sessions: parts.sessions,
-          workspace: parts.workspace,
-          selection: SELECTION,
-        }, { ...proposalNow, prepared: { ...proposalNow.prepared!, skillContent: other } }, {} as never)
+        await recordCapabilityExperiment(
+          parts.svc,
+          {
+            root: parts.root,
+            skillRoot: parts.skillRoot,
+            registry: parts.registry,
+            rows: parts.rows,
+            sessions: parts.sessions,
+            workspace: parts.workspace,
+            selection: SELECTION,
+          },
+          { ...proposalNow, prepared: { ...proposalNow.prepared!, skillContent: other } },
+          {} as never,
+        )
       },
     })
     const message = await refusalOf(f.svc.checkPromotion('cap1'))
@@ -450,10 +480,12 @@ describe('capability promotion: every missing piece is a named refusal with zero
     // The frozen block admits the sample (production holds the row); the record
     // claims the runtime refused it. The report's own schema refuses the pair
     // before any gate reads it, so that shape cannot exist in the ledger.
-    await expect(fixture({
-      registry: { [STORE_ROW]: STORE_ENTRY, [NEW_ROW]: previous },
-      experiment: { baseline: 'not-admitted', admission: false },
-    })).rejects.toThrow(/is not-admitted, but the frozen sample records no production refusal/)
+    await expect(
+      fixture({
+        registry: { [STORE_ROW]: STORE_ENTRY, [NEW_ROW]: previous },
+        experiment: { baseline: 'not-admitted', admission: false },
+      }),
+    ).rejects.toThrow(/is not-admitted, but the frozen sample records no production refusal/)
   })
 
   it('refuses an admission refusal that disagrees with the frozen rows', async () => {

@@ -1,50 +1,24 @@
-import type { AcceptanceCriterion, VerificationMode, VerificationResult } from '@dangosys/dsh-singularity-task'
-import type { Verifier, VerifierSelftest, VerifyRequest } from './types.ts'
+import type { VerificationMode, VerificationResult } from '@dangosys/dsh-singularity-task'
+import { sampleCriterion, type Verifier, type VerifierSelftest, type VerifyRequest } from './types.ts'
 
 const REVIEW_MODES: readonly VerificationMode[] = ['review', 'formal']
 
-/** The criterion a selftest sample hands this verifier: a review criterion carries no command, so only its identity and mode matter. */
-function sampleCriterion(criterionId: string, verificationMode: VerificationMode): AcceptanceCriterion {
-  return {
-    criterionId,
-    description: 'a selftest sample',
-    verificationMode,
-    requiredEvidence: [],
-    mandatory: true,
-  }
-}
-
-/**
- * Placeholder for human judgment: never auto-passes.
- *
- * Its selftest takes the equivalent form KISS §4.3 allows a judge that judges
- * nothing: a known-good sample must be demonstrably *not* auto-passed, and a
- * known-bad sample must not be judged `pass` either. Both are executed by the
- * registry before it will register this verifier.
- *
- * What that proves: the judge returns a not-pass verdict instead of silently
- * accepting, on both a criterion that ought to be verifiable by a human and one
- * that ought not to pass. What it does not prove: anything about products —
- * this verifier does not judge products at all, and no sample can make its
- * verdict meaningful. What closes a review criterion is the human review it
- * defers to, outside this verifier.
- */
+/** Placeholder for human judgment: never auto-passes, and its samples prove exactly that on both sides (KISS §4.3). */
 export class ReviewVerifier implements Verifier {
   readonly id = 'review'
   readonly version = '1'
-  readonly owner = 'singularity'
   readonly selftest: VerifierSelftest = {
     samples: [
       {
         role: 'positive',
         name: 'a known-good review criterion is never auto-passed',
-        criterion: sampleCriterion('selftest-review-known-good', 'review'),
+        criterion: sampleCriterion({ criterionId: 'selftest-review-known-good', verificationMode: 'review' }),
         expect: 'not-pass',
       },
       {
         role: 'negative',
         name: 'a known-bad formal criterion is not judged pass',
-        criterion: sampleCriterion('selftest-formal-known-bad', 'formal'),
+        criterion: sampleCriterion({ criterionId: 'selftest-formal-known-bad', verificationMode: 'formal' }),
         expect: 'not-pass',
       },
     ],

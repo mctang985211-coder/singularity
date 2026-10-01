@@ -44,7 +44,9 @@ describe('parseObligationTemplates', () => {
   // The shipped template ships at the repository root, next to the bb-pipeline
   // skill that points at it as the canonical obligation template.
   test('the shipped bb-obligations template parses into the seven known obligations', async () => {
-    const file = fileURLToPath(new URL('../../../../../.agents/skills/bb-obligations/references/obligations.yml', import.meta.url))
+    const file = fileURLToPath(
+      new URL('../../../../../.agents/skills/bb-obligations/references/obligations.yml', import.meta.url),
+    )
     const templates = parseObligationTemplates(await readFile(file, 'utf8'), file)
     expect(templates.map(item => item.id)).toEqual([
       'algorithm-correctness',
@@ -69,9 +71,15 @@ describe('parseObligationTemplates', () => {
   test('refuses malformed files and entries loudly, naming the source', () => {
     expect(() => parseObligationTemplates('not: json', 'a.yml')).toThrow(/a\.yml is not JSON-compatible YAML/)
     expect(() => parseObligationTemplates('{}', 'a.yml')).toThrow(/a\.yml must be an array/)
-    expect(() => parseObligationTemplates('[{"id": "x"}]', 'a.yml')).toThrow(/a\.yml entry 0 requires a non-empty "question"/)
-    expect(() => parseObligationTemplates('[{"id": "x", "question": "q", "evidenceForm": "e", "typicalCapabilities": [""]}]', 'a.yml'))
-      .toThrow(/"typicalCapabilities" must be an array of non-empty strings/)
+    expect(() => parseObligationTemplates('[{"id": "x"}]', 'a.yml')).toThrow(
+      /a\.yml entry 0 requires a non-empty "question"/,
+    )
+    expect(() =>
+      parseObligationTemplates(
+        '[{"id": "x", "question": "q", "evidenceForm": "e", "typicalCapabilities": [""]}]',
+        'a.yml',
+      ),
+    ).toThrow(/"typicalCapabilities" must be an array of non-empty strings/)
   })
 })
 
@@ -112,12 +120,14 @@ describe('checkObligationCoverage', () => {
     const coverage = checkObligationCoverage(
       [ppa],
       snapshot({
-        obligations: [{
-          obligationId: 'o1',
-          goal: 'obligation ppa-reachability is unanswered: no EDA capability in this deployment',
-          criterion: 'a PPA verdict exists or the gap is escalated',
-          sourceTaskId: 't1',
-        }],
+        obligations: [
+          {
+            obligationId: 'o1',
+            goal: 'obligation ppa-reachability is unanswered: no EDA capability in this deployment',
+            criterion: 'a PPA verdict exists or the gap is escalated',
+            sourceTaskId: 't1',
+          },
+        ],
       }),
     )
     expect(coverage.uncovered).toEqual([])

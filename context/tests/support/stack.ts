@@ -161,7 +161,10 @@ export class FixtureStack {
     graphForSession(sessionId: string): Promise<unknown>
     list(): Promise<readonly unknown[]>
     view(id: string): Promise<{
-      graph: { readonly agents: readonly { readonly id: string }[]; readonly edges: readonly { kind: string; from: string; to: string }[] }
+      graph: {
+        readonly agents: readonly { readonly id: string }[]
+        readonly edges: readonly { kind: string; from: string; to: string }[]
+      }
     }>
   }
   /** The session plane's stand-in, kept so one of its reads can be handed back broken. */
@@ -249,22 +252,28 @@ export class FixtureStack {
     const sessionQuery = {
       readSurface: async (sessionId: string) => {
         const log = this.logs.get(String(sessionId))
-        if (log === undefined) throw sessionError(`session "${String(sessionId)}" has no log`, 'SESSION_QUERY_SESSION_NOT_FOUND')
+        if (log === undefined)
+          throw sessionError(`session "${String(sessionId)}" has no log`, 'SESSION_QUERY_SESSION_NOT_FOUND')
         return { capturedThroughSeq: log.events.at(-1)?.seq ?? null }
       },
       readSession: async (sessionId: string) => {
         const log = this.logs.get(String(sessionId))
-        if (log === undefined) throw sessionError(`session "${String(sessionId)}" has no log`, 'SESSION_QUERY_SESSION_NOT_FOUND')
+        if (log === undefined)
+          throw sessionError(`session "${String(sessionId)}" has no log`, 'SESSION_QUERY_SESSION_NOT_FOUND')
         // The fixture's logs are never fork-inherited: the whole log is the
         // session's own suffix, which is what the consumption fold reads.
         return { session: { id: String(sessionId) }, inheritedEventCount: 0, events: log.events }
       },
       readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
         const log = this.logs.get(String(request.sessionId))
-        if (log === undefined) throw sessionError(`session "${String(request.sessionId)}" has no log`, 'SESSION_QUERY_SESSION_NOT_FOUND')
+        if (log === undefined)
+          throw sessionError(`session "${String(request.sessionId)}" has no log`, 'SESSION_QUERY_SESSION_NOT_FOUND')
         const target = log.events.find(event => event.seq === request.seq)
         if (target === undefined) {
-          throw sessionError(`session "${request.sessionId}" has no event at seq ${request.seq}`, 'SESSION_QUERY_EVENT_NOT_FOUND')
+          throw sessionError(
+            `session "${request.sessionId}" has no event at seq ${request.seq}`,
+            'SESSION_QUERY_EVENT_NOT_FOUND',
+          )
         }
         const start = Math.max(0, request.seq - (request.before ?? 0))
         const end = Math.min(log.events.length - 1, request.seq + (request.after ?? 0))
@@ -403,16 +412,18 @@ export class FixtureStack {
   async seed(spec: TaskSpec): Promise<void> {
     const storeId = rootTaskStoreId(this.rootOf(spec.sessionId))
     await this.store(storeId)
-    const criteria: AcceptanceCriterion[] = [...(spec.criteria ?? [
-      {
-        criterionId: `${spec.taskId}-c1`,
-        description: `fixture criterion for ${spec.taskId}`,
-        verificationMode: 'deterministic' as const,
-        requiredEvidence: [],
-        mandatory: true,
-        protectedInputs: [{ path: `spec/${spec.taskId}.json`, sha256: hex(99) }],
-      },
-    ])]
+    const criteria: AcceptanceCriterion[] = [
+      ...(spec.criteria ?? [
+        {
+          criterionId: `${spec.taskId}-c1`,
+          description: `fixture criterion for ${spec.taskId}`,
+          verificationMode: 'deterministic' as const,
+          requiredEvidence: [],
+          mandatory: true,
+          protectedInputs: [{ path: `spec/${spec.taskId}.json`, sha256: hex(99) }],
+        },
+      ]),
+    ]
     const task: TaskInstance = {
       taskId: spec.taskId,
       definitionRef: { taskType: 'subtask', version: 1 },
@@ -470,22 +481,26 @@ export class FixtureStack {
     readonly artifacts?: readonly ArtifactRef[]
     readonly evidence?: readonly string[]
   }): Promise<void> {
-    await this.task.recordHandoffIn(rootTaskStoreId(this.rootOf(init.sessionId)), {
-      handoffId: `h-${init.childTaskId}`,
-      parentTaskId: init.parentTaskId,
-      parentRunId: init.parentRunId,
-      childTaskId: init.childTaskId,
-      parentObjective: init.parentObjective,
-      reasonForDelegation: init.reason,
-      constraints: [...(init.constraints ?? [])],
-      decisions: [...(init.decisions ?? [])],
-      relevantArtifacts: [...(init.artifacts ?? [])],
-      relevantEvidence: [...(init.evidence ?? [])],
-      assumptions: [...(init.assumptions ?? [])],
-      openQuestions: [...(init.openQuestions ?? [])],
-      parentSessionRef: init.sessionId,
-      createdAt: new Date(this.stamp()).toISOString(),
-    }, init.childTaskId)
+    await this.task.recordHandoffIn(
+      rootTaskStoreId(this.rootOf(init.sessionId)),
+      {
+        handoffId: `h-${init.childTaskId}`,
+        parentTaskId: init.parentTaskId,
+        parentRunId: init.parentRunId,
+        childTaskId: init.childTaskId,
+        parentObjective: init.parentObjective,
+        reasonForDelegation: init.reason,
+        constraints: [...(init.constraints ?? [])],
+        decisions: [...(init.decisions ?? [])],
+        relevantArtifacts: [...(init.artifacts ?? [])],
+        relevantEvidence: [...(init.evidence ?? [])],
+        assumptions: [...(init.assumptions ?? [])],
+        openQuestions: [...(init.openQuestions ?? [])],
+        parentSessionRef: init.sessionId,
+        createdAt: new Date(this.stamp()).toISOString(),
+      },
+      init.childTaskId,
+    )
   }
 
   /** Record one evidence bundle on a still-running run. */
@@ -501,7 +516,9 @@ export class FixtureStack {
       taskRunId: spec.runId,
       taskId: spec.taskId,
       artifacts: [...(spec.artifacts ?? [])],
-      verifierResults: [{ criterionId: `${spec.taskId}-c1`, status: 'pass', verifierId: 'fixture-verifier', exitCode: 0 }],
+      verifierResults: [
+        { criterionId: `${spec.taskId}-c1`, status: 'pass', verifierId: 'fixture-verifier', exitCode: 0 },
+      ],
       claims: [
         {
           claimId: `${spec.evidenceId}-claim`,
@@ -517,10 +534,17 @@ export class FixtureStack {
   }
 
   /** Drive one run to `verified` and write the terminal review record that settles it. */
-  async verify(spec: { readonly taskId: string; readonly runId: string; readonly sessionId: string; readonly evidenceRefs?: readonly string[] }): Promise<void> {
+  async verify(spec: {
+    readonly taskId: string
+    readonly runId: string
+    readonly sessionId: string
+    readonly evidenceRefs?: readonly string[]
+  }): Promise<void> {
     const storeId = rootTaskStoreId(this.rootOf(spec.sessionId))
     await this.task.markRunStatusIn(storeId, spec.taskId, spec.runId, 'verifying', spec.sessionId)
-    await this.task.markRunStatusIn(storeId, spec.taskId, spec.runId, 'verified', spec.sessionId, { finishedAt: new Date(this.stamp()).toISOString() })
+    await this.task.markRunStatusIn(storeId, spec.taskId, spec.runId, 'verified', spec.sessionId, {
+      finishedAt: new Date(this.stamp()).toISOString(),
+    })
     const review: ReviewRecord = {
       taskId: spec.taskId,
       runId: spec.runId,
@@ -602,7 +626,11 @@ export class FixtureStack {
   }
 
   /** Record one obligation raised by a task. */
-  async oblige(spec: { readonly obligationId: string; readonly taskId: string; readonly sessionId: string }): Promise<void> {
+  async oblige(spec: {
+    readonly obligationId: string
+    readonly taskId: string
+    readonly sessionId: string
+  }): Promise<void> {
     await this.task.recordObligationIn(
       rootTaskStoreId(this.rootOf(spec.sessionId)),
       { obligationId: spec.obligationId, goal: 'fixture gap', criterion: 'a fixture check', sourceTaskId: spec.taskId },
@@ -800,7 +828,14 @@ export class FixtureStack {
     layoutStoreId: string
   } {
     const { id, name, envId, rootSessionId } = entry.spec
-    return { id, name, envId, rootSessionId, graphStoreId: `sg-g-${rootSessionId}`, layoutStoreId: `sg-l-${rootSessionId}` }
+    return {
+      id,
+      name,
+      envId,
+      rootSessionId,
+      graphStoreId: `sg-g-${rootSessionId}`,
+      layoutStoreId: `sg-l-${rootSessionId}`,
+    }
   }
 
   private handle(id: string) {
@@ -835,7 +870,8 @@ export function expectOk(result: ProjectedRead): ProjectedReadOk {
 /** Assert one read refused by name, and hand back the detail. */
 export function expectRefused(result: ProjectedRead, refusal: NamedRefusal): string {
   if (result.ok) throw new Error(`expected the refusal "${refusal}", got an answer: ${result.text.slice(0, 200)}`)
-  if (result.refusal !== refusal) throw new Error(`expected the refusal "${refusal}", got "${result.refusal}": ${result.detail}`)
+  if (result.refusal !== refusal)
+    throw new Error(`expected the refusal "${refusal}", got "${result.refusal}": ${result.detail}`)
   return result.detail
 }
 

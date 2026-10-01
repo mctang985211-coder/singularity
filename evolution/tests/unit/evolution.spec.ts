@@ -1,18 +1,48 @@
-import { appendFile, chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join, sep } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CapabilityConfig, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
-import { SKILL_SIDECAR_FILE, registryRevision, serializeSkillSidecar, sidecarWithSkillMd, skillContentDigest, skillContractDigest } from '@dangosys/dsh-singularity-task-runtime'
+import {
+  SKILL_SIDECAR_FILE,
+  registryRevision,
+  serializeSkillSidecar,
+  sidecarWithSkillMd,
+  skillContentDigest,
+  skillContractDigest,
+} from '@dangosys/dsh-singularity-task-runtime'
 import { EvolutionService } from '../../src/evolution.ts'
 import type { Config, GateAnswers, ProposeInput } from '../../src/evolution.ts'
 import type { CommitStage, ReconcileOutcome } from '../../src/commit.ts'
-import type { ExperimentSampleRecord } from '../../src/experiment.ts'
-import { buildExperimentReport, directoryDigest, experimentIdOf, experimentLineage, experimentReportPath } from '../../src/experiment.ts'
-import type { FrozenExperiment, FrozenProviderIdentity, FrozenSample, ModelSelection, SkillContentIdentity } from '../../src/replay.ts'
-import { digestOf, EXPERIMENT_COMPARER_VERSION, frozenDigestOf, modelSelectionOf, protectedInputsDigest } from '../../src/replay.ts'
+import {
+  buildExperimentReport,
+  directoryDigest,
+  experimentIdOf,
+  experimentLineage,
+  experimentReportPath,
+} from '../../src/experiment/record.ts'
+import type { FrozenExperiment, FrozenProviderIdentity, FrozenSample, SkillContentIdentity } from '../../src/replay.ts'
+import {
+  digestOf,
+  EXPERIMENT_COMPARER_VERSION,
+  frozenDigestOf,
+  modelSelectionOf,
+  protectedInputsDigest,
+} from '../../src/replay.ts'
 import { defineEvolutionApplyTool } from '../../../agent-singularity/src/tools/evolution-apply.ts'
 import { defineEvolutionCandidateTool } from '../../../agent-singularity/src/tools/evolution-candidate.ts'
 import { defineEvolutionDecideTool } from '../../../agent-singularity/src/tools/evolution-decide.ts'
@@ -70,12 +100,20 @@ function fixtureRequestHeader(seq = 1): Record<string, unknown> {
     type: 'request/header',
     seq,
     time: 0,
-    data: { header: { config: { provider: FIXTURE_SELECTION.provider, model: FIXTURE_SELECTION.model } }, reason: 'initial' },
+    data: {
+      header: { config: { provider: FIXTURE_SELECTION.provider, model: FIXTURE_SELECTION.model } },
+      reason: 'initial',
+    },
   }
 }
 
 /** One side's run row, with the provider binding the gate compares to the frozen identity. */
-function fixtureSideRun(input: { runId: string; taskId: string; outcome: string; at: string }): Record<string, unknown> {
+function fixtureSideRun(input: {
+  runId: string
+  taskId: string
+  outcome: string
+  at: string
+}): Record<string, unknown> {
   return {
     runId: input.runId,
     taskId: input.taskId,
@@ -157,7 +195,8 @@ async function experimentReportPathOf(svc: EvolutionService, proposalId = 's1'):
 /** The mutable store rows behind one fixture service. */
 function promotionRows(svc: EvolutionService): FixtureRows {
   const rows = (svc as unknown as { ctx: { promotionStore?: FixtureRows } }).ctx.promotionStore
-  if (rows === undefined) throw new Error('this service was not built on fixtureCtx(), so it has no promotion store to fill')
+  if (rows === undefined)
+    throw new Error('this service was not built on fixtureCtx(), so it has no promotion store to fill')
   return rows
 }
 
@@ -231,7 +270,7 @@ const candidateReadHooks = vi.hoisted(() => ({
   onCandidateRead: undefined as undefined | ((path: string, readCount: number) => Promise<void> | void),
 }))
 
-vi.mock('node:fs/promises', async (importOriginal) => {
+vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   const read = actual.readFile as (path: unknown, options?: unknown) => Promise<unknown>
   let candidateReads = 0
@@ -293,12 +332,24 @@ describe('EvolutionService ledger', () => {
     await svc.prepare('s1', 'root-1')
     const { reportPath } = await recordSkillExperiment(svc, 's1')
     await svc.gate('s1', gateAnswers([reportPath]), 'root-1')
-    const decided = await svc.decide('s1', 'KEEP_FOR_FURTHER_RESEARCH', 'root-1', 'approval:call-1', 'approved by human')
+    const decided = await svc.decide(
+      's1',
+      'KEEP_FOR_FURTHER_RESEARCH',
+      'root-1',
+      'approval:call-1',
+      'approved by human',
+    )
     expect(decided.status).toBe('decided')
     expect(decided.decision).toBe('KEEP_FOR_FURTHER_RESEARCH')
     expect(decided.decisionNote).toBe('approved by human')
     expect(decided.decisionApprovalRef).toBe('approval:call-1')
-    expect(decided.history.map(entry => entry.status)).toEqual(['proposed', 'candidate', 'prepared', 'gated', 'decided'])
+    expect(decided.history.map(entry => entry.status)).toEqual([
+      'proposed',
+      'candidate',
+      'prepared',
+      'gated',
+      'decided',
+    ])
   })
 
   it('rejects state-machine skips: gate on proposed, decide on candidate, candidate twice', async () => {
@@ -307,17 +358,21 @@ describe('EvolutionService ledger', () => {
     await expect(svc.gate('s1', gateAnswers(['/x']), 'root-1')).rejects.toThrow('cannot record "gated"')
     await expect(svc.decide('s1', 'REJECT', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "decided"')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
-    await expect(svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') }))
-      .rejects.toThrow('cannot record "candidate"')
+    await expect(
+      svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') }),
+    ).rejects.toThrow('cannot record "candidate"')
     await expect(svc.propose(skillProposal, 'root-1')).rejects.toThrow('already exists')
     // and an unprepared candidate cannot gate: prepared is the one next state
-    await expect(svc.gate('s1', gateAnswers(['/x']), 'root-1')).rejects.toThrow(/cannot record "gated".*evolution_prepare/)
+    await expect(svc.gate('s1', gateAnswers(['/x']), 'root-1')).rejects.toThrow(
+      /cannot record "gated".*evolution_prepare/,
+    )
   })
 
   it('rejects moves on an unknown proposal id', async () => {
     const svc = await service()
-    await expect(svc.candidate('ghost', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') }))
-      .rejects.toThrow('unknown proposal "ghost"')
+    await expect(
+      svc.candidate('ghost', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') }),
+    ).rejects.toThrow('unknown proposal "ghost"')
     await expect(svc.get('ghost')).rejects.toThrow('unknown proposal "ghost"')
   })
 
@@ -335,7 +390,9 @@ describe('EvolutionService ledger', () => {
     const mutation = { name: 'verify', content: skillText('x') }
     await expect(svc.candidate('s1', {}, 'root-1', mutation)).rejects.toThrow('at least one version')
     await expect(svc.candidate('s1', { verifier: ' ' }, 'root-1', mutation)).rejects.toThrow('versionSet["verifier"]')
-    await expect(svc.candidate('s1', { verifier: 1 as never }, 'root-1', mutation)).rejects.toThrow('versionSet["verifier"]')
+    await expect(svc.candidate('s1', { verifier: 1 as never }, 'root-1', mutation)).rejects.toThrow(
+      'versionSet["verifier"]',
+    )
   })
 
   it('requires all six gate answers and existence-checked regression evidence refs', async () => {
@@ -346,9 +403,13 @@ describe('EvolutionService ledger', () => {
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
     await svc.prepare('s1', 'root-1')
     const { reportPath } = await recordSkillExperiment(svc, 's1')
-    await expect(svc.gate('s1', { ...gateAnswers([reportPath]), targetFailureFixed: '' }, 'root-1')).rejects.toThrow('Target failure fixed')
+    await expect(svc.gate('s1', { ...gateAnswers([reportPath]), targetFailureFixed: '' }, 'root-1')).rejects.toThrow(
+      'Target failure fixed',
+    )
     await expect(svc.gate('s1', gateAnswers([]), 'root-1')).rejects.toThrow('at least one evidence ref')
-    await expect(svc.gate('s1', gateAnswers([reportPath, 'no/such/path.log']), 'root-1')).rejects.toThrow('no known evidence id and no existing path')
+    await expect(svc.gate('s1', gateAnswers([reportPath, 'no/such/path.log']), 'root-1')).rejects.toThrow(
+      'no known evidence id and no existing path',
+    )
     // a resolver id (task-store evidence) also satisfies existence — checked, never executed
     await svc.gate('s1', gateAnswers([reportPath, 'evidence-r1-abc']), 'root-1', async ref => ref === 'evidence-r1-abc')
     expect((await svc.get('s1')).status).toBe('gated')
@@ -385,12 +446,31 @@ describe('EvolutionService ledger', () => {
     // three lines on disk, one per record, never rewritten
     const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
     expect(lines).toHaveLength(3)
-    expect(lines.map(line => (JSON.parse(line) as { kind: string }).kind)).toEqual(['proposed', 'proposed', 'candidate'])
+    expect(lines.map(line => (JSON.parse(line) as { kind: string }).kind)).toEqual([
+      'proposed',
+      'proposed',
+      'candidate',
+    ])
     // close: drain writes, reopen a fresh service on the same root, replay must fold to the same state
     const reopened = reopenLike(first, { modelSelection: () => FIXTURE_SELECTION, root })
     expect(await reopened.list()).toEqual(live)
     expect((await reopened.get('s1')).status).toBe('candidate')
     expect((await reopened.get('p2')).level).toBe('L4')
+  })
+
+  it('announces each durable append with its proposal, and nothing when the write refuses', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evolution-'))
+    const changes: string[] = []
+    const ctx = fixtureCtx() as unknown as { emit: (name: string, payload: { proposalId: string }) => void }
+    ctx.emit = (name, payload) => {
+      if (name === 'evolution/change') changes.push(payload.proposalId)
+    }
+    const svc = new EvolutionService(ctx as never, { modelSelection: () => FIXTURE_SELECTION, root })
+    await svc.propose(proposal, 'root-1')
+    expect(changes).toEqual(['p1'])
+    // A refused write announced nothing: the duplicate never reached the ledger.
+    await expect(svc.propose(proposal, 'root-1')).rejects.toThrow('already exists')
+    expect(changes).toEqual(['p1'])
   })
 
   it('fails loudly on a corrupt ledger line instead of silently drifting', async () => {
@@ -453,7 +533,9 @@ function toolCtx(svc: EvolutionService, approvalOutcome: string = 'allowed-once'
             evidenceRefs: ['ev-1'],
             reviewRefs: ['t1#r1'],
             confidence: 'low',
-            proposals: [{ targetType: 'prompt_template', targetId: 'reviewer', rationale: 'name the empty-input case' }],
+            proposals: [
+              { targetType: 'prompt_template', targetId: 'reviewer', rationale: 'name the empty-input case' },
+            ],
           },
         ],
         evidence: [{ evidenceId: 'ev-1' }],
@@ -506,7 +588,9 @@ describe('evolution tools', () => {
 
     // The next-step line is wording, not a lifecycle: both proposals still hold
     // only their own `proposed` line until evolution_candidate is called.
-    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
       .map(line => (JSON.parse(line) as { kind: string }).kind)
     expect(kinds).toEqual(['proposed', 'proposed'])
     expect(existsSync(join(svc.root, 'sandbox'))).toBe(false)
@@ -526,14 +610,19 @@ describe('evolution tools', () => {
     expect(saved.sourceRefs).toEqual(['diagnosis:d1'])
     await expect(
       tool.execute(
-        { proposalId: 'p2', level: 'L2', baseVersion: 'v3', targetId: 'x', fromDiagnosis: { diagnosisId: 'd1', proposalIndex: 0 } },
+        {
+          proposalId: 'p2',
+          level: 'L2',
+          baseVersion: 'v3',
+          targetId: 'x',
+          fromDiagnosis: { diagnosisId: 'd1', proposalIndex: 0 },
+        },
         exec('root-1'),
       ),
     ).rejects.toThrow('do not pass both')
-    const missing = (await tool.execute(
-      { proposalId: 'p2', level: 'L2', baseVersion: 'v3' },
-      exec('root-1'),
-    ).catch((error: Error) => String(error))) as string
+    const missing = (await tool
+      .execute({ proposalId: 'p2', level: 'L2', baseVersion: 'v3' }, exec('root-1'))
+      .catch((error: Error) => String(error))) as string
     expect(missing).toContain('required without fromDiagnosis')
   })
 
@@ -550,10 +639,17 @@ describe('evolution tools', () => {
     const tool = defineEvolutionProposeTool(ctx)
     expect(existsSync(join(svc.root, 'proposals.jsonl'))).toBe(false)
 
-    const rejected = (await tool.execute(
-      { proposalId: 'p-unsupported', level: 'L2', baseVersion: 'v3', fromDiagnosis: { diagnosisId: 'd-unknown', proposalIndex: 0 } },
-      exec('root-1'),
-    ).catch((error: Error) => String(error))) as string
+    const rejected = (await tool
+      .execute(
+        {
+          proposalId: 'p-unsupported',
+          level: 'L2',
+          baseVersion: 'v3',
+          fromDiagnosis: { diagnosisId: 'd-unknown', proposalIndex: 0 },
+        },
+        exec('root-1'),
+      )
+      .catch((error: Error) => String(error))) as string
     expect(rejected).toContain('prompt_template')
     expect(rejected).toContain('d-unknown')
     expect(rejected).toContain('targetType')
@@ -568,10 +664,9 @@ describe('evolution tools', () => {
     const svc = await service()
     const { ctx } = toolCtx(svc)
     const tool = defineEvolutionProposeTool(ctx)
-    const rejected = (await tool.execute(
-      { ...proposal, targetType: 'prompt' },
-      exec('root-1'),
-    ).catch((error: Error) => String(error))) as string
+    const rejected = (await tool
+      .execute({ ...proposal, targetType: 'prompt' }, exec('root-1'))
+      .catch((error: Error) => String(error))) as string
     expect(rejected).toContain('targetType')
     expect(await svc.list()).toEqual([])
   })
@@ -579,14 +674,22 @@ describe('evolution tools', () => {
   it('evolution tools reject a call carrying no agent identity', async () => {
     const svc = await service()
     const { ctx } = toolCtx(svc)
-    await expect(defineEvolutionProposeTool(ctx).execute({ ...proposal }, {} as never)).rejects.toThrow('missing agent id')
+    await expect(defineEvolutionProposeTool(ctx).execute({ ...proposal }, {} as never)).rejects.toThrow(
+      'missing agent id',
+    )
     await expect(
       defineEvolutionCandidateTool(ctx).execute(
-        { proposalId: 'p1', versionSet: VERSION_SET, mutation: { name: 'verify', content: skillText('# new') } },
+        {
+          proposalId: 'p1',
+          versionSet: VERSION_SET,
+          mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new') }),
+        },
         {} as never,
       ),
     ).rejects.toThrow('missing agent id')
-    await expect(defineEvolutionPrepareTool(ctx).execute({ proposalId: 'p1' }, {} as never)).rejects.toThrow('missing agent id')
+    await expect(defineEvolutionPrepareTool(ctx).execute({ proposalId: 'p1' }, {} as never)).rejects.toThrow(
+      'missing agent id',
+    )
     expect(await svc.list()).toEqual([])
   })
 
@@ -597,7 +700,11 @@ describe('evolution tools', () => {
     const { ctx } = toolCtx(svc)
     await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
     const candidate = (await defineEvolutionCandidateTool(ctx).execute(
-      { proposalId: 's1', versionSet: VERSION_SET, mutation: { name: 'verify', content: skillText('# new') } },
+      {
+        proposalId: 's1',
+        versionSet: VERSION_SET,
+        mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new') }),
+      },
       exec('root-1'),
     )) as string
     expect(candidate).toContain('[candidate] version set: taskDefinition=v3, verifier=v1')
@@ -610,18 +717,22 @@ describe('evolution tools', () => {
   it('evolution_candidate refuses a mutation of the shape this build does not write, recording nothing', async () => {
     const svc = await service()
     const { ctx } = toolCtx(svc)
-    await defineEvolutionProposeTool(ctx).execute({ ...proposal }, exec('root-1'))
+    await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
     const before = await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')
-    // The model surface names the two candidate mutations this build admits — a
-    // same-name skill replacement ({ name, content }) and a whole capability row
-    // ({ rows, skill? }) — so the old bookkeeping mutation matches neither branch
-    // and is refused at the call, before the ledger is reached.
-    await expect(defineEvolutionCandidateTool(ctx).execute(
-      { proposalId: 'p1', versionSet: VERSION_SET, mutation: { baseVersion: 'v3', definition: { objective: 'x' } } },
+    // The old bookkeeping shape matches neither candidate kind, so the service
+    // refuses it before the ledger is reached.
+    const rejected = (await defineEvolutionCandidateTool(ctx).execute(
+      {
+        proposalId: 's1',
+        versionSet: VERSION_SET,
+        mutationJson: JSON.stringify({ baseVersion: 'v3', definition: { objective: 'x' } }),
+      },
       exec('root-1'),
-    )).rejects.toThrow(/mutation.*must match exactly one oneOf branch/)
+    )) as string
+    expect(rejected).toContain('evolution_candidate rejected:')
+    expect(rejected).toContain('skill mutation has unknown key "baseVersion"')
     expect(await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).toBe(before)
-    expect((await svc.get('p1')).status).toBe('proposed')
+    expect((await svc.get('s1')).status).toBe('proposed')
   })
 
   it('evolution_candidate takes a capability mutation of the one-whole-row shape through the model surface', async () => {
@@ -632,7 +743,7 @@ describe('evolution tools', () => {
       {
         proposalId: 'c1',
         versionSet: { capabilityTable: 'config.yml#doc1' },
-        mutation: { rows: { research: { skills: ['verify'], tools: ['filesystem'] } } },
+        mutationJson: JSON.stringify({ rows: { research: { skills: ['verify'], tools: ['filesystem'] } } }),
       },
       exec('root-1'),
     )) as string
@@ -650,7 +761,11 @@ describe('evolution tools', () => {
     const { ctx } = toolCtx(svc)
     await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
     await defineEvolutionCandidateTool(ctx).execute(
-      { proposalId: 's1', versionSet: VERSION_SET, mutation: { name: 'verify', content: skillText('# new') } },
+      {
+        proposalId: 's1',
+        versionSet: VERSION_SET,
+        mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new') }),
+      },
       exec('root-1'),
     )
     await defineEvolutionPrepareTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))
@@ -672,7 +787,11 @@ describe('evolution tools', () => {
     const { ctx, approval } = toolCtx(svc, 'allowed-once')
     await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
     await defineEvolutionCandidateTool(ctx).execute(
-      { proposalId: 's1', versionSet: VERSION_SET, mutation: { name: 'verify', content: skillText('# new verify skill') } },
+      {
+        proposalId: 's1',
+        versionSet: VERSION_SET,
+        mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new verify skill') }),
+      },
       exec('root-1'),
     )
     await defineEvolutionPrepareTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))
@@ -686,7 +805,9 @@ describe('evolution tools', () => {
     const request = approval.request.mock.calls[0]![0] as { reason: string; toolName: string }
     expect(request.toolName).toBe('evolution_decide')
     expect(request.reason).toContain('proposal s1')
-    expect(request.reason).toContain(`3. Existing regression maintained? full suite replayed green [evidence: ${reportPath}]`)
+    expect(request.reason).toContain(
+      `3. Existing regression maintained? full suite replayed green [evidence: ${reportPath}]`,
+    )
     expect(request.reason).toContain('proposed decision: PROMOTE — looks right')
     expect(result).toContain('proposal s1 [decided] PROMOTE — looks right')
     expect(result).toContain('nothing applied yet; evolution_apply (second human gate) takes it to production')
@@ -705,20 +826,28 @@ describe('evolution tools', () => {
       const { ctx, approval } = toolCtx(svc, outcome)
       await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
       await defineEvolutionCandidateTool(ctx).execute(
-        { proposalId: 's1', versionSet: VERSION_SET, mutation: { name: 'verify', content: skillText('# new') } },
+        {
+          proposalId: 's1',
+          versionSet: VERSION_SET,
+          mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new') }),
+        },
         exec('root-1'),
       )
       await defineEvolutionPrepareTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))
       const { reportPath } = await recordSkillExperiment(svc, 's1')
       await defineEvolutionGateTool(ctx).execute({ proposalId: 's1', ...gateAnswers([reportPath]) }, exec('root-1'))
-      const result = (await defineEvolutionDecideTool(ctx).execute({ proposalId: 's1', decision: 'REJECT' }, exec('root-1'))) as string
+      const result = (await defineEvolutionDecideTool(ctx).execute(
+        { proposalId: 's1', decision: 'REJECT' },
+        exec('root-1'),
+      )) as string
       expect(approval.request).toHaveBeenCalledOnce()
       expect(result).toContain('no decision recorded')
       expect(result).toContain('stays gated')
       expect((await svc.get('s1')).status).toBe('gated')
       const lines = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
-      expect(lines.map(line => (JSON.parse(line) as { kind: string }).kind).filter(kind => !kind.startsWith('experiment_')))
-        .toEqual(['proposed', 'candidate', 'prepared', 'gated'])
+      expect(
+        lines.map(line => (JSON.parse(line) as { kind: string }).kind).filter(kind => !kind.startsWith('experiment_')),
+      ).toEqual(['proposed', 'candidate', 'prepared', 'gated'])
     },
   )
 
@@ -726,7 +855,10 @@ describe('evolution tools', () => {
     const svc = await service()
     const { ctx, approval } = toolCtx(svc)
     await defineEvolutionProposeTool(ctx).execute({ ...proposal }, exec('root-1'))
-    const result = (await defineEvolutionDecideTool(ctx).execute({ proposalId: 'p1', decision: 'REJECT' }, exec('root-1'))) as string
+    const result = (await defineEvolutionDecideTool(ctx).execute(
+      { proposalId: 'p1', decision: 'REJECT' },
+      exec('root-1'),
+    )) as string
     expect(approval.request).not.toHaveBeenCalled()
     expect(result).toContain('is proposed; only a gated proposal can be decided')
   })
@@ -736,10 +868,24 @@ describe('evolution tools', () => {
     const { ctx } = toolCtx(svc, 'rejected')
     await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
     await defineEvolutionProposeTool(ctx).execute(
-      { ...proposal, proposalId: 'p2', targetType: 'verifier', targetId: 'verifier:1', level: 'L4', sourceRefs: ['evidence:ev-1'] },
+      {
+        ...proposal,
+        proposalId: 'p2',
+        targetType: 'verifier',
+        targetId: 'verifier:1',
+        level: 'L4',
+        sourceRefs: ['evidence:ev-1'],
+      },
       exec('root-1'),
     )
-    await defineEvolutionCandidateTool(ctx).execute({ proposalId: 's1', versionSet: VERSION_SET, mutation: { name: 'verify', content: skillText('x') } }, exec('root-1'))
+    await defineEvolutionCandidateTool(ctx).execute(
+      {
+        proposalId: 's1',
+        versionSet: VERSION_SET,
+        mutationJson: JSON.stringify({ name: 'verify', content: skillText('x') }),
+      },
+      exec('root-1'),
+    )
     const list = defineEvolutionListTool(ctx)
     const all = (await list.execute({}, exec('root-1'))) as string
     expect(all).toContain('evolution ledger (2):')
@@ -755,7 +901,6 @@ describe('evolution tools', () => {
     expect(byTarget).toContain('p2')
   })
 })
-
 
 const skillProposal: ProposeInput = {
   proposalId: 's1',
@@ -872,7 +1017,10 @@ describe('EvolutionService candidate admission (S4-E 收尾, A6)', () => {
 
   it('refuses a bookkeeping-only suggestion the same way, recording only the proposal', async () => {
     const svc = await service()
-    await svc.propose({ ...proposal, proposalId: 'w1', targetType: 'workflow_policy', targetId: 'workflow:1' }, 'root-1')
+    await svc.propose(
+      { ...proposal, proposalId: 'w1', targetType: 'workflow_policy', targetId: 'workflow:1' },
+      'root-1',
+    )
     const message = await refusalOf(svc.candidate('w1', VERSION_SET, 'root-1', { sketch: 'free-form' }))
     expect(message).toContain('cannot become a candidate in this build')
     expect((await svc.get('w1')).status).toBe('proposed')
@@ -886,7 +1034,6 @@ describe('EvolutionService candidate admission (S4-E 收尾, A6)', () => {
     expect(recorded.mutation).toEqual({ name: 'verify', content: skillText('x') })
   })
 })
-
 
 describe('EvolutionService prepared state machine', () => {
   it('walks candidate(mutation) → prepared → the recorded experiment → gated → decided for a skill candidate', async () => {
@@ -907,7 +1054,13 @@ describe('EvolutionService prepared state machine', () => {
     await svc.gate('s1', gateAnswers([evidenceFile, reportPath]), 'root-1')
     const decided = await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-1')
     expect(decided.status).toBe('decided')
-    expect(decided.history.map(entry => entry.status)).toEqual(['proposed', 'candidate', 'prepared', 'gated', 'decided'])
+    expect(decided.history.map(entry => entry.status)).toEqual([
+      'proposed',
+      'candidate',
+      'prepared',
+      'gated',
+      'decided',
+    ])
   })
 
   it('rejects gate on a mutation-carrying candidate until it is prepared', async () => {
@@ -949,13 +1102,20 @@ describe('EvolutionService sandbox materialization', () => {
       mechanical: true,
       champion: 'captured',
       // P2: the identity is the SHA-256 of the exact materialized bytes
-      skillContent: { name: 'verify', sha256: createHash('sha256').update(skillText('new skill text'), 'utf8').digest('hex') },
+      skillContent: {
+        name: 'verify',
+        sha256: createHash('sha256').update(skillText('new skill text'), 'utf8').digest('hex'),
+      },
       // P3: the production baseline digest, from the same read as the snapshot
       skillBaseline: { name: 'verify', sha256: createHash('sha256').update(PRODUCTION_OLD, 'utf8').digest('hex') },
       files: ['skills/verify/SKILL.md', 'champion/skills/verify/SKILL.md'],
     })
-    expect(await readFile(join(root, 'sandbox', 's1', 'skills', 'verify', 'SKILL.md'), 'utf8')).toBe(skillText('new skill text'))
-    expect(await readFile(join(root, 'sandbox', 's1', 'champion', 'skills', 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_OLD)
+    expect(await readFile(join(root, 'sandbox', 's1', 'skills', 'verify', 'SKILL.md'), 'utf8')).toBe(
+      skillText('new skill text'),
+    )
+    expect(await readFile(join(root, 'sandbox', 's1', 'champion', 'skills', 'verify', 'SKILL.md'), 'utf8')).toBe(
+      PRODUCTION_OLD,
+    )
   })
 
   it('snapshots the exact production bytes used for the baseline digest', async () => {
@@ -984,9 +1144,7 @@ describe('EvolutionService sandbox materialization', () => {
     // single-file SKILL.md. A target that is not there has nothing to replace,
     // so it is refused before any sandbox or ledger write — the rejection names
     // the missing production file.
-    await expect(svc.prepare('s1', 'root-1')).rejects.toThrow(
-      /production skill .*verify\/SKILL\.md" does not exist/,
-    )
+    await expect(svc.prepare('s1', 'root-1')).rejects.toThrow(/production skill .*verify\/SKILL\.md" does not exist/)
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect((await svc.get('s1')).status).toBe('candidate')
     expect(existsSync(join(root, 'sandbox'))).toBe(false)
@@ -1042,7 +1200,17 @@ describe('EvolutionService fold on read-back', () => {
     const svc = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root })
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
-    const forged = { formatVersion: 4, kind: 'prepared', proposalId: 's1', sandbox: 'sandbox/s1', mechanical: false, champion: 'captured', files: ['x'], actor: 'x', at: 'now' }
+    const forged = {
+      formatVersion: 4,
+      kind: 'prepared',
+      proposalId: 's1',
+      sandbox: 'sandbox/s1',
+      mechanical: false,
+      champion: 'captured',
+      files: ['x'],
+      actor: 'x',
+      at: 'now',
+    }
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root })
     await expect(reopened.list()).rejects.toThrow('mechanical')
@@ -1055,8 +1223,13 @@ describe('EvolutionService fold on read-back', () => {
     const svc = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root })
     await svc.propose(skillProposal, 'root-1')
     const forgedCandidate = {
-      formatVersion: 4, kind: 'candidate', proposalId: 's1', versionSet: {},
-      mutation: { name: 'verify', content: skillText('x') }, actor: 'x', at: 'now',
+      formatVersion: 4,
+      kind: 'candidate',
+      proposalId: 's1',
+      versionSet: {},
+      mutation: { name: 'verify', content: skillText('x') },
+      actor: 'x',
+      at: 'now',
     }
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forgedCandidate)}\n`, { flag: 'a' })
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root })
@@ -1067,15 +1240,30 @@ describe('EvolutionService fold on read-back', () => {
     const skillRoot2 = join(root2, 'skills')
     await mkdir(join(skillRoot2, 'verify'), { recursive: true })
     await writeFile(join(skillRoot2, 'verify', 'SKILL.md'), PRODUCTION_REPLACED)
-    const svc2 = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: root2, skillRoot: skillRoot2 })
+    const svc2 = new EvolutionService(fixtureCtx(), {
+      modelSelection: () => FIXTURE_SELECTION,
+      root: root2,
+      skillRoot: skillRoot2,
+    })
     await svc2.propose(skillProposal, 'root-1')
     await svc2.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
     // A gated record is legal only after the one transition a candidate admits,
     // so the live entries walk to prepared and the forged line lands on top.
     await svc2.prepare('s1', 'root-1')
-    const emptyAnswer = { formatVersion: 4, kind: 'gated', proposalId: 's1', gate: { ...gateAnswers(['ev-1']), targetFailureFixed: '' }, actor: 'x', at: 'now' }
+    const emptyAnswer = {
+      formatVersion: 4,
+      kind: 'gated',
+      proposalId: 's1',
+      gate: { ...gateAnswers(['ev-1']), targetFailureFixed: '' },
+      actor: 'x',
+      at: 'now',
+    }
     await writeFile(join(root2, 'proposals.jsonl'), `${JSON.stringify(emptyAnswer)}\n`, { flag: 'a' })
-    const reopened2 = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: root2, skillRoot: skillRoot2 })
+    const reopened2 = new EvolutionService(fixtureCtx(), {
+      modelSelection: () => FIXTURE_SELECTION,
+      root: root2,
+      skillRoot: skillRoot2,
+    })
     await expect(reopened2.list()).rejects.toThrow('Target failure fixed')
 
     // zero regression evidence refs would never survive gate() either
@@ -1083,17 +1271,31 @@ describe('EvolutionService fold on read-back', () => {
     const skillRoot3 = join(root3, 'skills')
     await mkdir(join(skillRoot3, 'verify'), { recursive: true })
     await writeFile(join(skillRoot3, 'verify', 'SKILL.md'), PRODUCTION_REPLACED)
-    const svc3 = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: root3, skillRoot: skillRoot3 })
+    const svc3 = new EvolutionService(fixtureCtx(), {
+      modelSelection: () => FIXTURE_SELECTION,
+      root: root3,
+      skillRoot: skillRoot3,
+    })
     await svc3.propose(skillProposal, 'root-1')
     await svc3.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
     await svc3.prepare('s1', 'root-1')
-    const noEvidence = { formatVersion: 4, kind: 'gated', proposalId: 's1', gate: gateAnswers([]), actor: 'x', at: 'now' }
+    const noEvidence = {
+      formatVersion: 4,
+      kind: 'gated',
+      proposalId: 's1',
+      gate: gateAnswers([]),
+      actor: 'x',
+      at: 'now',
+    }
     await writeFile(join(root3, 'proposals.jsonl'), `${JSON.stringify(noEvidence)}\n`, { flag: 'a' })
-    const reopened3 = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: root3, skillRoot: skillRoot3 })
+    const reopened3 = new EvolutionService(fixtureCtx(), {
+      modelSelection: () => FIXTURE_SELECTION,
+      root: root3,
+      skillRoot: skillRoot3,
+    })
     await expect(reopened3.list()).rejects.toThrow('at least one evidence ref')
   })
 })
-
 
 describe('evolution_prepare tool', () => {
   it('evolution_candidate accepts a structured skill mutation and points at evolution_prepare', async () => {
@@ -1101,7 +1303,11 @@ describe('evolution_prepare tool', () => {
     const { ctx } = toolCtx(svc)
     await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
     const result = (await defineEvolutionCandidateTool(ctx).execute(
-      { proposalId: 's1', versionSet: { skill: 'v2' }, mutation: { name: 'verify', content: skillText('# new') } },
+      {
+        proposalId: 's1',
+        versionSet: { skill: 'v2' },
+        mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new') }),
+      },
       exec('root-1'),
     )) as string
     expect(result).toContain('[candidate] version set: skill=v2')
@@ -1114,7 +1320,7 @@ describe('evolution_prepare tool', () => {
     const { ctx } = toolCtx(svc)
     await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
     const result = (await defineEvolutionCandidateTool(ctx).execute(
-      { proposalId: 's1', versionSet: VERSION_SET, mutation: { name: 'a/b', content: 'x' } },
+      { proposalId: 's1', versionSet: VERSION_SET, mutationJson: JSON.stringify({ name: 'a/b', content: 'x' }) },
       exec('root-1'),
     )) as string
     expect(result).toContain('evolution_candidate rejected:')
@@ -1129,7 +1335,11 @@ describe('evolution_prepare tool', () => {
     const { ctx } = toolCtx(svc)
     await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
     await defineEvolutionCandidateTool(ctx).execute(
-      { proposalId: 's1', versionSet: VERSION_SET, mutation: { name: 'verify', content: skillText('# new') } },
+      {
+        proposalId: 's1',
+        versionSet: VERSION_SET,
+        mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new') }),
+      },
       exec('root-1'),
     )
     const result = (await defineEvolutionPrepareTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
@@ -1138,8 +1348,12 @@ describe('evolution_prepare tool', () => {
     expect(result).toContain('champion snapshot: captured under champion/')
     expect(result).toContain('production baseline: verify sha256:')
     expect(result).toContain('production was not touched')
-    expect(await readFile(join(svc.root, 'sandbox', 's1', 'skills', 'verify', 'SKILL.md'), 'utf8')).toBe(skillText('# new'))
-    expect(await readFile(join(svc.root, 'sandbox', 's1', 'champion', 'skills', 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_V1)
+    expect(await readFile(join(svc.root, 'sandbox', 's1', 'skills', 'verify', 'SKILL.md'), 'utf8')).toBe(
+      skillText('# new'),
+    )
+    expect(await readFile(join(svc.root, 'sandbox', 's1', 'champion', 'skills', 'verify', 'SKILL.md'), 'utf8')).toBe(
+      PRODUCTION_V1,
+    )
   })
 
   it('evolution_prepare refuses a production skill that does not exist, writing nothing', async () => {
@@ -1147,7 +1361,11 @@ describe('evolution_prepare tool', () => {
     const { ctx } = toolCtx(svc)
     await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
     await defineEvolutionCandidateTool(ctx).execute(
-      { proposalId: 's1', versionSet: VERSION_SET, mutation: { name: 'verify', content: skillText('# new') } },
+      {
+        proposalId: 's1',
+        versionSet: VERSION_SET,
+        mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new') }),
+      },
       exec('root-1'),
     )
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
@@ -1170,12 +1388,11 @@ describe('evolution_prepare tool', () => {
     expect(missing).toContain('evolution_prepare rejected:')
     expect(missing).toContain('unknown proposal "ghost"')
     await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
-    // The candidate tool's schema makes `mutation` required, so a call carrying
-    // none is refused before the tool body runs and never reaches the ledger —
-    // there is no candidate line for prepare to act on.
+    // The candidate tool's schema requires `mutationJson`, so a call carrying none
+    // is refused before the tool body runs and never reaches the ledger.
     await expect(
       defineEvolutionCandidateTool(ctx).execute({ proposalId: 's1', versionSet: VERSION_SET }, exec('root-1')),
-    ).rejects.toThrow('missing required property "mutation"')
+    ).rejects.toThrow('missing required property "mutationJson"')
     expect((await svc.get('s1')).status).toBe('proposed')
     const result = (await tool.execute({ proposalId: 's1' }, exec('root-1'))) as string
     expect(result).toContain('cannot record "prepared"')
@@ -1187,10 +1404,17 @@ describe('evolution_prepare tool', () => {
     const { ctx } = toolCtx(svc)
     await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
     await defineEvolutionCandidateTool(ctx).execute(
-      { proposalId: 's1', versionSet: VERSION_SET, mutation: { name: 'verify', content: skillText('# new') } },
+      {
+        proposalId: 's1',
+        versionSet: VERSION_SET,
+        mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new') }),
+      },
       exec('root-1'),
     )
-    const result = (await defineEvolutionGateTool(ctx).execute({ proposalId: 's1', ...gateAnswers(['ev-1']) }, exec('root-1'))) as string
+    const result = (await defineEvolutionGateTool(ctx).execute(
+      { proposalId: 's1', ...gateAnswers(['ev-1']) },
+      exec('root-1'),
+    )) as string
     expect(result).toContain('cannot record "gated"')
     expect(result).toContain('evolution_prepare')
     expect((await svc.get('s1')).status).toBe('candidate')
@@ -1203,7 +1427,11 @@ describe('evolution_prepare tool', () => {
     const { ctx } = toolCtx(svc)
     await defineEvolutionProposeTool(ctx).execute({ ...skillProposal }, exec('root-1'))
     await defineEvolutionCandidateTool(ctx).execute(
-      { proposalId: 's1', versionSet: VERSION_SET, mutation: { name: 'verify', content: skillText('# new') } },
+      {
+        proposalId: 's1',
+        versionSet: VERSION_SET,
+        mutationJson: JSON.stringify({ name: 'verify', content: skillText('# new') }),
+      },
       exec('root-1'),
     )
     await defineEvolutionPrepareTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))
@@ -1222,7 +1450,6 @@ describe('evolution_prepare tool', () => {
   })
 })
 
-
 describe('EvolutionService: the two-sided experiment is the gate evidence', () => {
   it('requires the gate of a skill candidate to cite its experiment report, and the report to still exist', async () => {
     const { svc, root, skillRoot } = await serviceWithRoots()
@@ -1233,8 +1460,9 @@ describe('EvolutionService: the two-sided experiment is the gate evidence', () =
     const { reportPath } = await recordSkillExperiment(svc, 's1')
     const evidenceFile = join(root, 'regression.log')
     await writeFile(evidenceFile, 'ok')
-    await expect(svc.gate('s1', gateAnswers([evidenceFile]), 'root-1'))
-      .rejects.toThrow(`must cite its experiment report "${reportPath}"`)
+    await expect(svc.gate('s1', gateAnswers([evidenceFile]), 'root-1')).rejects.toThrow(
+      `must cite its experiment report "${reportPath}"`,
+    )
     await svc.gate('s1', gateAnswers([evidenceFile, reportPath]), 'root-1')
     expect((await svc.get('s1')).status).toBe('gated')
   })
@@ -1248,8 +1476,9 @@ describe('EvolutionService: the two-sided experiment is the gate evidence', () =
     await svc.prepare('s1', 'root-1')
     const { reportPath } = await recordSkillExperiment(svc, 's1')
     await rm(join(root, reportPath))
-    await expect(svc.gate('s1', gateAnswers([reportPath]), 'root-1'))
-      .rejects.toThrow('no longer exists under the ledger root')
+    await expect(svc.gate('s1', gateAnswers([reportPath]), 'root-1')).rejects.toThrow(
+      'no longer exists under the ledger root',
+    )
   })
 
   it('gates a skill candidate on a completed experiment only', async () => {
@@ -1258,8 +1487,9 @@ describe('EvolutionService: the two-sided experiment is the gate evidence', () =
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
     await requireProductionSkill(skillRoot)
     await svc.prepare('s1', 'root-1')
-    await expect(svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1'))
-      .rejects.toThrow('has no two-sided experiment')
+    await expect(svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')).rejects.toThrow(
+      'has no two-sided experiment',
+    )
     expect((await svc.get('s1')).status).toBe('prepared')
   })
 
@@ -1279,11 +1509,14 @@ describe('EvolutionService: the two-sided experiment is the gate evidence', () =
     expect((await reopened.get('s1')).status).toBe('prepared')
     expect((await reopened.experiments('s1')).map(view => view.experimentId)).toHaveLength(1)
   })
-
 })
 
 describe('replay comparison', () => {
-  const base = { taskId: 't1', outcome: 'verified' as const, criteria: [{ criterionId: 'ac1', verdict: 'pass' as const }] }
+  const base = {
+    taskId: 't1',
+    outcome: 'verified' as const,
+    criteria: [{ criterionId: 'ac1', verdict: 'pass' as const }],
+  }
 
   it('matching sides compare not-worse with verdictMatch', () => {
     const result = compareReplaySides(base, { ...base })
@@ -1291,7 +1524,11 @@ describe('replay comparison', () => {
   })
 
   it('a failed candidate against a verified champion is worse', () => {
-    const result = compareReplaySides(base, { ...base, outcome: 'failed', criteria: [{ criterionId: 'ac1', verdict: 'fail' }] })
+    const result = compareReplaySides(base, {
+      ...base,
+      outcome: 'failed',
+      criteria: [{ criterionId: 'ac1', verdict: 'fail' }],
+    })
     expect(result.relation).toBe('worse')
     expect(result.verdictMatch).toBe(false)
     expect(result.criteriaDiff).toEqual([{ criterionId: 'ac1', champion: 'pass', candidate: 'fail' }])
@@ -1299,22 +1536,49 @@ describe('replay comparison', () => {
 
   it('a shared criterion flipping pass → fail is a regression even when the outcome holds', () => {
     const result = compareReplaySides(
-      { ...base, criteria: [{ criterionId: 'ac1', verdict: 'pass' }, { criterionId: 'ac2', verdict: 'fail' }] },
-      { ...base, outcome: 'failed', criteria: [{ criterionId: 'ac1', verdict: 'fail' }, { criterionId: 'ac2', verdict: 'fail' }] },
+      {
+        ...base,
+        criteria: [
+          { criterionId: 'ac1', verdict: 'pass' },
+          { criterionId: 'ac2', verdict: 'fail' },
+        ],
+      },
+      {
+        ...base,
+        outcome: 'failed',
+        criteria: [
+          { criterionId: 'ac1', verdict: 'fail' },
+          { criterionId: 'ac2', verdict: 'fail' },
+        ],
+      },
     )
     // failed vs failed ranks equal, but ac1 flipped pass → fail
     expect(result.relation).toBe('worse')
   })
 
   it('a candidate fixing a failed champion is not-worse', () => {
-    const champion = { taskId: 't1', outcome: 'failed' as const, criteria: [{ criterionId: 'ac1', verdict: 'fail' as const }] }
-    const result = compareReplaySides(champion, { taskId: 't1', outcome: 'verified', criteria: [{ criterionId: 'ac1', verdict: 'pass' }] })
+    const champion = {
+      taskId: 't1',
+      outcome: 'failed' as const,
+      criteria: [{ criterionId: 'ac1', verdict: 'fail' as const }],
+    }
+    const result = compareReplaySides(champion, {
+      taskId: 't1',
+      outcome: 'verified',
+      criteria: [{ criterionId: 'ac1', verdict: 'pass' }],
+    })
     expect(result.relation).toBe('not-worse')
     expect(result.verdictMatch).toBe(false)
   })
 
   it('an added criterion makes the contract comparison inconclusive', () => {
-    const result = compareReplaySides(base, { ...base, criteria: [{ criterionId: 'ac1', verdict: 'pass' }, { criterionId: 'ac2', verdict: 'pass' }] })
+    const result = compareReplaySides(base, {
+      ...base,
+      criteria: [
+        { criterionId: 'ac1', verdict: 'pass' },
+        { criterionId: 'ac2', verdict: 'pass' },
+      ],
+    })
     expect(result.relation).toBe('inconclusive')
     expect(result.verdictMatch).toBe(false)
     expect(result.criteriaDiff).toEqual([{ criterionId: 'ac2', candidate: 'pass' }])
@@ -1333,7 +1597,16 @@ const championTask = {
   parentTaskId: 't-parent',
   objective: 'champion objective',
   depth: 1,
-  acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'works', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
+  acceptanceCriteria: [
+    {
+      criterionId: 'ac1-1',
+      description: 'works',
+      verificationMode: 'deterministic',
+      requiredEvidence: [],
+      mandatory: true,
+      command: 'true',
+    },
+  ],
   requestedCapabilities: ['research'],
   decompositionStatus: 'leaf',
   status: 'verified',
@@ -1380,27 +1653,31 @@ async function preparedSkillExperiment(options: { candidate?: string; production
   const workspace = join(root, 'env')
   const store = experimentStore()
   let replayed = 0
-  const replayTask = vi.fn(async (
-    _storeId: string,
-    championTaskId: string,
-    replayOptions: ReplayTaskOptions,
-    _caller: string,
-  ) => {
-    replayed += 1
-    const taskId = `t-replay-${replayed}`
-    const runId = `r-replay-${replayed}`
-    const criterionId = championTaskId === 't-fail' ? 'ac-fix' : 'ac-holdout'
-    const candidateSide = replayOptions.overlay !== undefined
-    const outcome = candidateSide || criterionId !== 'ac-fix' ? 'verified' as const : 'failed' as const
-    store.settle(taskId, runId, criterionId, outcome, String(replayOptions.lineage))
-    return {
-      taskId,
-      runId,
-      status: outcome,
-      durationMs: 3,
-      criteria: [{ criterionId, verdict: outcome === 'verified' ? 'pass' as const : 'fail' as const, verifierId: FIXTURE_JUDGE.ref, verifierVersion: FIXTURE_JUDGE.version }],
-    }
-  })
+  const replayTask = vi.fn(
+    async (_storeId: string, championTaskId: string, replayOptions: ReplayTaskOptions, _caller: string) => {
+      replayed += 1
+      const taskId = `t-replay-${replayed}`
+      const runId = `r-replay-${replayed}`
+      const criterionId = championTaskId === 't-fail' ? 'ac-fix' : 'ac-holdout'
+      const candidateSide = replayOptions.overlay !== undefined
+      const outcome = candidateSide || criterionId !== 'ac-fix' ? ('verified' as const) : ('failed' as const)
+      store.settle(taskId, runId, criterionId, outcome, String(replayOptions.lineage))
+      return {
+        taskId,
+        runId,
+        status: outcome,
+        durationMs: 3,
+        criteria: [
+          {
+            criterionId,
+            verdict: outcome === 'verified' ? ('pass' as const) : ('fail' as const),
+            verifierId: FIXTURE_JUDGE.ref,
+            verifierVersion: FIXTURE_JUDGE.version,
+          },
+        ],
+      }
+    },
+  )
   const ctx = {
     reflect: { provide: () => {} },
     effect: () => {},
@@ -1413,16 +1690,20 @@ async function preparedSkillExperiment(options: { candidate?: string; production
       // the frozen candidate registry revision is defined over.
       listCapabilities: vi.fn(() => ({ research: { skills: ['verify'], preset: 'standard' } })),
       capabilityProviderReport: vi.fn(async () => ({
-        capabilities: [{
-          capability: 'research',
-          skills: [{
-            valid: true,
-            name: 'verify',
-            role: 'guidance',
-            contractDigest: null,
-            contentDigest: FIXTURE_PROVIDER_CONTENT_DIGEST,
-          }],
-        }],
+        capabilities: [
+          {
+            capability: 'research',
+            skills: [
+              {
+                valid: true,
+                name: 'verify',
+                role: 'guidance',
+                contractDigest: null,
+                contentDigest: FIXTURE_PROVIDER_CONTENT_DIGEST,
+              },
+            ],
+          },
+        ],
         revision: registryRevision(FIXTURE_CAPABILITY_TABLE, [{ name: 'verify', contractDigest: null }]),
       })),
       replayTask,
@@ -1450,7 +1731,10 @@ async function preparedSkillExperiment(options: { candidate?: string; production
   await mkdir(workspace, { recursive: true })
   await writeFile(join(workspace, 'input.txt'), 'the frozen input\n')
   await svc.propose(skillProposal, 'root-1')
-  await svc.candidate('s1', { skill: 'v2' }, 'root-1', { name: 'verify', content: options.candidate ?? SKILL_CANDIDATE })
+  await svc.candidate('s1', { skill: 'v2' }, 'root-1', {
+    name: 'verify',
+    content: options.candidate ?? SKILL_CANDIDATE,
+  })
   const identity = (await svc.prepare('s1', 'root-1')).prepared!.skillContent!
   return {
     svc,
@@ -1494,7 +1778,8 @@ function replayToolCtx(svc: EvolutionService, replayTask: ReturnType<typeof vi.f
       openStore: vi.fn(async () => ({
         tasks: [championTask],
         reviews: [championReview],
-        diagnoses: [], obligations: [],
+        diagnoses: [],
+        obligations: [],
         evidence: [{ evidenceId: 'ev-champ' }],
       })),
     },
@@ -1511,15 +1796,17 @@ function sampleCase(taskId: string, runId: string, criterionId: string, outcome:
       parentTaskId: 't-parent',
       objective: `${taskId} objective`,
       depth: 1,
-      acceptanceCriteria: [{
-        criterionId,
-        description: 'works',
-        verificationMode: 'deterministic',
-        requiredEvidence: [],
-        mandatory: true,
-        command: 'true',
-        verifierRef: FIXTURE_JUDGE.ref,
-      }],
+      acceptanceCriteria: [
+        {
+          criterionId,
+          description: 'works',
+          verificationMode: 'deterministic',
+          requiredEvidence: [],
+          mandatory: true,
+          command: 'true',
+          verifierRef: FIXTURE_JUDGE.ref,
+        },
+      ],
       requestedCapabilities: [],
       decompositionStatus: 'leaf',
       status: outcome,
@@ -1535,12 +1822,14 @@ function sampleCase(taskId: string, runId: string, criterionId: string, outcome:
       evidenceRefs: [`ev-${taskId}`],
       anomalies: [],
       ...(outcome === 'failed' ? { localizedCause: 'the fixture case failed' } : {}),
-      criteria: [{
-        criterionId,
-        verdict: outcome === 'verified' ? 'pass' : 'fail',
-        verifierId: FIXTURE_JUDGE.ref,
-        verifierVersion: FIXTURE_JUDGE.version,
-      }],
+      criteria: [
+        {
+          criterionId,
+          verdict: outcome === 'verified' ? 'pass' : 'fail',
+          verifierId: FIXTURE_JUDGE.ref,
+          verifierVersion: FIXTURE_JUDGE.version,
+        },
+      ],
     },
   }
 }
@@ -1557,20 +1846,46 @@ const REGRESSION_SAMPLE = sampleCase('t-regression', 'r-regression', 'ac-keep', 
  */
 function experimentStore() {
   const sessions = new Map<string, unknown[]>()
-  interface Row { [key: string]: unknown }
-  const tasks: Row[] = [championTask, FAILED_SAMPLE.task as Row, HOLDOUT_SAMPLE.task as Row, REGRESSION_SAMPLE.task as Row]
+  interface Row {
+    [key: string]: unknown
+  }
+  const tasks: Row[] = [
+    championTask,
+    FAILED_SAMPLE.task as Row,
+    HOLDOUT_SAMPLE.task as Row,
+    REGRESSION_SAMPLE.task as Row,
+  ]
   const runs: Row[] = [FAILED_SAMPLE.run as Row, HOLDOUT_SAMPLE.run as Row, REGRESSION_SAMPLE.run as Row]
-  const reviews: Row[] = [championReview, FAILED_SAMPLE.review as Row, HOLDOUT_SAMPLE.review as Row, REGRESSION_SAMPLE.review as Row]
+  const reviews: Row[] = [
+    championReview,
+    FAILED_SAMPLE.review as Row,
+    HOLDOUT_SAMPLE.review as Row,
+    REGRESSION_SAMPLE.review as Row,
+  ]
   return {
     sessions,
-    snapshot: () => ({ tasks: [...tasks], runs: [...runs], reviews: [...reviews], diagnoses: [], obligations: [], evidence: [] }),
+    snapshot: () => ({
+      tasks: [...tasks],
+      runs: [...runs],
+      reviews: [...reviews],
+      diagnoses: [],
+      obligations: [],
+      evidence: [],
+    }),
     /**
      * Record one side a replay settled: task, run and the terminal review the
      * report reads, plus the two durable facts the promotion gate re-reads
      * (S4-E §Q3) — the run's provider binding, and the request its session log
      * records.
      */
-    settle(taskId: string, runId: string, criterionId: string, outcome: 'verified' | 'failed', lineage: string, request?: { provider: string; model: string }) {
+    settle(
+      taskId: string,
+      runId: string,
+      criterionId: string,
+      outcome: 'verified' | 'failed',
+      lineage: string,
+      request?: { provider: string; model: string },
+    ) {
       const settled = sampleCase(taskId, runId, criterionId, outcome)
       tasks.push({ ...settled.task, parentTaskId: undefined, objective: `[${lineage}] ${taskId}` })
       runs.push({
@@ -1578,12 +1893,14 @@ function experimentStore() {
         providerBinding: { registryRevision: FIXTURE_REGISTRY_REVISION, capabilities: [], skills: [], mcpServers: [] },
       })
       const selection = request ?? { provider: FIXTURE_SELECTION.provider, model: FIXTURE_SELECTION.model }
-      sessions.set(String((settled.run as { sessionId?: unknown }).sessionId), [{
-        type: 'request/header',
-        seq: 1,
-        time: 0,
-        data: { header: { config: selection }, reason: 'initial' },
-      }])
+      sessions.set(String((settled.run as { sessionId?: unknown }).sessionId), [
+        {
+          type: 'request/header',
+          seq: 1,
+          time: 0,
+          data: { header: { config: selection }, reason: 'initial' },
+        },
+      ])
       reviews.push(settled.review as Row)
     },
   }
@@ -1619,7 +1936,10 @@ describe('evolution_replay tool', () => {
     // A capability candidate is evaluable here since A6 — and only once it is
     // prepared, because the two-sided experiment mounts the row and the new skill
     // prepare froze. An unprepared proposal never reaches a run.
-    const refused = (await tool.execute({ proposalId: 'c1', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))) as string
+    const refused = (await tool.execute(
+      { proposalId: 'c1', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] },
+      exec('root-1'),
+    )) as string
     expect(refused).toContain('evolution_replay rejected:')
     // The capability target type is no longer what this tool refuses: what it
     // refuses here is the sample derivation, which happens before anything is
@@ -1635,15 +1955,24 @@ describe('evolution_replay tool', () => {
   it('walks a skill candidate through the two-sided experiment: four sides, the sandbox overlay only on the candidate side', async () => {
     const { svc, root, replayTask, replayTool, experiment } = await preparedSkillExperiment()
     const result = (await replayTool.execute(
-      { proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'], budget: { maxTokens: 5_000, note: 'the fixture budget' } },
+      {
+        proposalId: 's1',
+        taskIds: ['t-fail'],
+        holdoutTaskIds: ['t-holdout'],
+        budget: { maxTokens: 5_000, note: 'the fixture budget' },
+      },
       exec('root-1'),
     )) as string
 
     // The answer renders the experiment: both sides of every sample, and the
     // baseline named as this experiment's own new run.
     expect(result).toContain('proposal s1 [experiment] skill verify — verdict: fixed')
-    expect(result).toContain('t-fail [observed-failure] baseline failed → candidate verified (ac-fix fail→pass) — fixed')
-    expect(result).toContain('t-holdout [holdout] baseline verified → candidate verified (no criterion diff) — maintained')
+    expect(result).toContain(
+      't-fail [observed-failure] baseline failed → candidate verified (ac-fix fail→pass) — fixed',
+    )
+    expect(result).toContain(
+      't-holdout [holdout] baseline verified → candidate verified (no criterion diff) — maintained',
+    )
     expect(result).toContain('report: sandbox/s1/exp-')
     expect(result).not.toContain('champion')
 
@@ -1652,10 +1981,14 @@ describe('evolution_replay tool', () => {
     expect(replayTask).toHaveBeenCalledTimes(4)
     const sides = replayTask.mock.calls.map(call => [call[1], call[2].overlay === undefined ? 'baseline' : 'candidate'])
     expect(sides).toEqual([
-      ['t-fail', 'baseline'], ['t-fail', 'candidate'],
-      ['t-holdout', 'baseline'], ['t-holdout', 'candidate'],
+      ['t-fail', 'baseline'],
+      ['t-fail', 'candidate'],
+      ['t-holdout', 'baseline'],
+      ['t-holdout', 'candidate'],
     ])
-    for (const [storeId, _sample, options, caller] of replayTask.mock.calls.map(call => call as unknown as [string, string, ReplayTaskOptions, string])) {
+    for (const [storeId, _sample, options, caller] of replayTask.mock.calls.map(
+      call => call as unknown as [string, string, ReplayTaskOptions, string],
+    )) {
       expect(storeId).toBe('sg-t-root-1')
       expect(caller).toBe('root-1')
       expect(options.workspace?.path).toContain(join('sandbox', 's1'))
@@ -1668,15 +2001,22 @@ describe('evolution_replay tool', () => {
     // The frozen block binds what ran: the candidate bytes, the production
     // baseline, the roles, the snapshot both workspaces were built from, the
     // structured model selection and the budget the call named.
-    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line) as Record<string, unknown>)
     const started = lines.find(line => line.kind === 'experiment_started') as { frozen: Record<string, any> }
     expect(started.frozen.candidate).toEqual(experiment.identity)
     expect(started.frozen.productionBaseline).toEqual({
       name: 'verify',
       sha256: createHash('sha256').update(PRODUCTION_V1, 'utf8').digest('hex'),
     })
-    expect(started.frozen.samples.map((sample: { taskId: string; role: string }) => [sample.taskId, sample.role]))
-      .toEqual([['t-fail', 'observed-failure'], ['t-holdout', 'holdout']])
+    expect(
+      started.frozen.samples.map((sample: { taskId: string; role: string }) => [sample.taskId, sample.role]),
+    ).toEqual([
+      ['t-fail', 'observed-failure'],
+      ['t-holdout', 'holdout'],
+    ])
     expect(started.frozen.snapshot.sourceDir).toBe(experiment.workspace)
     expect(started.frozen.snapshot.digest).toBe(snapshotDigest({ 'input.txt': 'the frozen input\n' }))
     expect(started.frozen.model).toEqual(FIXTURE_SELECTION)
@@ -1686,7 +2026,7 @@ describe('evolution_replay tool', () => {
     // from (K3), never a bare root a reader could mistake for one file.
     expect(started.frozen.overlay.candidate).toBe(
       'extraSkillRoots: [sandbox/s1/skills] — the complete candidate object: the guidance object "verify" (SKILL.md alone, no sidecar), ' +
-      "loaded whole through the runtime's own discovery",
+        "loaded whole through the runtime's own discovery",
     )
     expect(lines.filter(line => line.kind === 'experiment_sample')).toHaveLength(4)
 
@@ -1701,29 +2041,40 @@ describe('evolution_replay tool', () => {
 
     // A direct service call carries the removed field: the freeze refuses it by
     // name rather than running the experiment without the window it named.
-    const message = await refusalOf(svc.runExperiment({
-      proposalId: 's1',
-      samples: [
-        { taskId: 't-fail', role: 'observed-failure' },
-        { taskId: 't-holdout', role: 'holdout' },
-      ],
-      snapshot: { sourceDir: workspace },
-      model: FIXTURE_SELECTION,
-      budget: { wallTimeMs: 60_000 } as never,
-      repetition: 0,
-    }, 'root-1' as never, 'root-1'))
+    const message = await refusalOf(
+      svc.runExperiment(
+        {
+          proposalId: 's1',
+          samples: [
+            { taskId: 't-fail', role: 'observed-failure' },
+            { taskId: 't-holdout', role: 'holdout' },
+          ],
+          snapshot: { sourceDir: workspace },
+          model: FIXTURE_SELECTION,
+          budget: { wallTimeMs: 60_000 } as never,
+          repetition: 0,
+        },
+        'root-1' as never,
+        'root-1',
+      ),
+    )
     expect(message).toContain('wallTimeMs')
     expect(message).toMatch(/removed/)
 
     // The model's own entry refuses it at the schema boundary — the field is no
     // longer declared, so the call never reaches the service — and neither call
     // left a ledger line or started a run.
-    const answer = await refusalOf(replayTool.execute({
-      proposalId: 's1',
-      taskIds: ['t-fail'],
-      holdoutTaskIds: ['t-holdout'],
-      budget: { wallTimeMs: 60_000 },
-    }, exec('root-1')))
+    const answer = await refusalOf(
+      replayTool.execute(
+        {
+          proposalId: 's1',
+          taskIds: ['t-fail'],
+          holdoutTaskIds: ['t-holdout'],
+          budget: { wallTimeMs: 60_000 },
+        },
+        exec('root-1'),
+      ),
+    )
     expect(answer).toContain('budget.wallTimeMs')
     expect(answer).toContain('not a declared property')
     expect(replayTask).not.toHaveBeenCalled()
@@ -1732,13 +2083,22 @@ describe('evolution_replay tool', () => {
 
   it('reuses every settled side when the same skill call is repeated: no run, no new ledger line', async () => {
     const { root, replayTask, replayTool, experiment } = await preparedSkillExperiment()
-    const first = (await replayTool.execute({ proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))) as string
+    const first = (await replayTool.execute(
+      { proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] },
+      exec('root-1'),
+    )) as string
     expect(replayTask).toHaveBeenCalledTimes(4)
 
-    const second = (await replayTool.execute({ proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))) as string
+    const second = (await replayTool.execute(
+      { proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] },
+      exec('root-1'),
+    )) as string
     expect(second).toBe(first)
     expect(replayTask).toHaveBeenCalledTimes(4)
-    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { kind: string })
+    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line) as { kind: string })
     expect(lines.filter(line => line.kind === 'experiment_started')).toHaveLength(1)
     expect(lines.filter(line => line.kind === 'experiment_sample')).toHaveLength(4)
 
@@ -1756,7 +2116,10 @@ describe('evolution_replay tool', () => {
 
   it('refuses a skill call with no failed sample or with an empty holdout, running nothing', async () => {
     const { root, replayTask, replayTool } = await preparedSkillExperiment()
-    const noFailure = (await replayTool.execute({ proposalId: 's1', taskIds: ['t-regression'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))) as string
+    const noFailure = (await replayTool.execute(
+      { proposalId: 's1', taskIds: ['t-regression'], holdoutTaskIds: ['t-holdout'] },
+      exec('root-1'),
+    )) as string
     expect(noFailure).toContain('evolution_replay rejected:')
     expect(noFailure).toContain('no observed failure for this candidate to fix')
 
@@ -1764,12 +2127,13 @@ describe('evolution_replay tool', () => {
     expect(noHoldout).toContain('holdoutTaskIds must name at least one task that did not select this candidate')
 
     expect(replayTask).not.toHaveBeenCalled()
-    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { kind: string })
+    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line) as { kind: string })
     expect(lines.map(line => line.kind)).toEqual(['proposed', 'candidate', 'prepared'])
   })
-
 })
-
 
 /* ------------------------------------------------------------------ */
 /* W16: decided(PROMOTE) → applied → rolledback — the apply/rollback   */
@@ -1858,7 +2222,11 @@ async function installCapabilityFixtureSkill(dir: string): Promise<string> {
 async function recordSkillExperiment(
   svc: EvolutionService,
   proposalId = 's1',
-  options: { failure?: { baseline?: string; candidate?: string }; holdout?: { baseline?: string; candidate?: string }; budget?: Record<string, unknown> } = {},
+  options: {
+    failure?: { baseline?: string; candidate?: string }
+    holdout?: { baseline?: string; candidate?: string }
+    budget?: Record<string, unknown>
+  } = {},
 ): Promise<{ reportPath: string; experimentId: string }> {
   const proposal = await svc.get(proposalId)
   const candidate = proposal.prepared!.skillContent!
@@ -1868,16 +2236,24 @@ async function recordSkillExperiment(
   await mkdir(workspace, { recursive: true })
   await writeFile(join(workspace, 'input.txt'), 'the frozen input\n')
   const samples: FrozenSample[] = []
-  const sample = (taskId: string, role: FrozenSample['role'], criterionId: string, command: string, outcome: 'verified' | 'failed') => {
-    const acceptanceCriteria = [{
-      criterionId,
-      description: 'works',
-      verificationMode: 'deterministic',
-      requiredEvidence: [],
-      mandatory: true,
-      command,
-      verifierRef: FIXTURE_JUDGE.ref,
-    }]
+  const sample = (
+    taskId: string,
+    role: FrozenSample['role'],
+    criterionId: string,
+    command: string,
+    outcome: 'verified' | 'failed',
+  ) => {
+    const acceptanceCriteria = [
+      {
+        criterionId,
+        description: 'works',
+        verificationMode: 'deterministic',
+        requiredEvidence: [],
+        mandatory: true,
+        command,
+        verifierRef: FIXTURE_JUDGE.ref,
+      },
+    ]
     rows.tasks.push({
       taskId,
       definitionRef: { taskType: 'subtask', version: 1 },
@@ -1895,15 +2271,17 @@ async function recordSkillExperiment(
       taskId,
       role,
       contractDigest: digestOf({ objective: `${taskId} objective`, acceptanceCriteria, requiredCapabilities: [] }),
-      criteria: [{
-        criterionId,
-        verificationMode: 'deterministic',
-        command,
-        protectedInputsDigest: protectedInputsDigest([]),
-        verifierRef: FIXTURE_JUDGE.ref,
-        verifierVersion: FIXTURE_JUDGE.version,
-        verifierAnchor: `registered verifier "${FIXTURE_JUDGE.ref}" declares version "${FIXTURE_JUDGE.version}"`,
-      }],
+      criteria: [
+        {
+          criterionId,
+          verificationMode: 'deterministic',
+          command,
+          protectedInputsDigest: protectedInputsDigest([]),
+          verifierRef: FIXTURE_JUDGE.ref,
+          verifierVersion: FIXTURE_JUDGE.version,
+          verifierAnchor: `registered verifier "${FIXTURE_JUDGE.ref}" declares version "${FIXTURE_JUDGE.version}"`,
+        },
+      ],
       observed: { outcome, runId: `r-history-${taskId}` },
       provider: fixtureProviderIdentity(),
     })
@@ -1940,21 +2318,25 @@ async function recordSkillExperiment(
     at,
   })
   for (const entry of samples) {
-    const settlements = entry.taskId === 't-fail'
-      ? { baseline: options.failure?.baseline ?? 'failed', candidate: options.failure?.candidate ?? 'verified' }
-      : { baseline: options.holdout?.baseline ?? 'verified', candidate: options.holdout?.candidate ?? 'verified' }
+    const settlements =
+      entry.taskId === 't-fail'
+        ? { baseline: options.failure?.baseline ?? 'failed', candidate: options.failure?.candidate ?? 'verified' }
+        : { baseline: options.holdout?.baseline ?? 'verified', candidate: options.holdout?.candidate ?? 'verified' }
     for (const side of ['baseline', 'candidate'] as const) {
       const settlement = settlements[side] as 'verified' | 'failed' | 'cancelled'
       const lineage = experimentLineage(experimentId, entry.taskId, side)
       const taskId = `t-${entry.taskId}-${side}`
       const runId = `r-${entry.taskId}-${side}`
-      const verdict: 'pass' | 'fail' | 'inconclusive' = settlement === 'verified' ? 'pass' : settlement === 'failed' ? 'fail' : 'inconclusive'
-      const criteria = [{
-        criterionId: entry.criteria[0]!.criterionId,
-        verdict,
-        verifierId: FIXTURE_JUDGE.ref,
-        verifierVersion: FIXTURE_JUDGE.version,
-      }]
+      const verdict: 'pass' | 'fail' | 'inconclusive' =
+        settlement === 'verified' ? 'pass' : settlement === 'failed' ? 'fail' : 'inconclusive'
+      const criteria = [
+        {
+          criterionId: entry.criteria[0]!.criterionId,
+          verdict,
+          verifierId: FIXTURE_JUDGE.ref,
+          verifierVersion: FIXTURE_JUDGE.version,
+        },
+      ]
       rows.tasks.push({
         taskId,
         definitionRef: { taskType: 'subtask', version: 1 },
@@ -1969,7 +2351,15 @@ async function recordSkillExperiment(
       })
       rows.runs.push(fixtureSideRun({ runId, taskId, outcome: settlement, at }))
       rows.sessions.set(`s-${runId}`, [fixtureRequestHeader()])
-      rows.evidence.push({ evidenceId: `e-${runId}`, taskRunId: runId, taskId, artifacts: [], verifierResults: [], claims: [], generatedAt: at })
+      rows.evidence.push({
+        evidenceId: `e-${runId}`,
+        taskRunId: runId,
+        taskId,
+        artifacts: [],
+        verifierResults: [],
+        claims: [],
+        generatedAt: at,
+      })
       rows.reviews.push({
         taskId,
         runId,
@@ -1995,9 +2385,10 @@ async function recordSkillExperiment(
         criteria,
         workspace: join(svc.root, 'sandbox', proposalId, `exp-${experimentId}`, entry.taskId, side),
         initialDigest: frozen.snapshot.digest,
-        cost: settlement === 'verified' || settlement === 'failed'
-          ? { status: 'reported', metrics: { toolCalls: { calls: 1, failures: 0 } } }
-          : { status: 'unknown', reason: 'the run never settled, so it reported no cost' },
+        cost:
+          settlement === 'verified' || settlement === 'failed'
+            ? { status: 'reported', metrics: { toolCalls: { calls: 1, failures: 0 } } }
+            : { status: 'unknown', reason: 'the run never settled, so it reported no cost' },
         ...(settlement === 'cancelled' ? { reason: 'the run settled cancelled' } : {}),
         actor: 'root-1',
         at,
@@ -2028,9 +2419,15 @@ async function walkToDecided(svc: EvolutionService, input: ProposeInput, mutatio
 
 describe('replay evidence integrity and promotion', () => {
   it('holds changed commands and omitted failed criteria inconclusive', () => {
-    const champion = { taskId: 'before', outcome: 'failed' as const, criteria: [{ criterionId: 'a', verdict: 'fail' as const, command: 'test' }] }
+    const champion = {
+      taskId: 'before',
+      outcome: 'failed' as const,
+      criteria: [{ criterionId: 'a', verdict: 'fail' as const, command: 'test' }],
+    }
     expect(compareReplaySides(champion, { ...champion, criteria: [] }).relation).toBe('inconclusive')
-    expect(compareReplaySides(champion, { ...champion, criteria: [{ ...champion.criteria[0]!, command: 'true' }] }).relation).toBe('inconclusive')
+    expect(
+      compareReplaySides(champion, { ...champion, criteria: [{ ...champion.criteria[0]!, command: 'true' }] }).relation,
+    ).toBe('inconclusive')
   })
 
   it('blocks a regressing holdout before human approval while allowing rejection', async () => {
@@ -2046,16 +2443,18 @@ describe('replay evidence integrity and promotion', () => {
     await svc.prepare(id, 'root-1')
     const { reportPath } = await recordSkillExperiment(svc, id, { holdout: { candidate: 'failed' } })
     await svc.gate(id, gateAnswers([reportPath]), 'root-1')
-    expect(await defineEvolutionDecideTool(ctx).execute({ proposalId: id, decision: 'PROMOTE' }, exec('root-1'))).toContain('rejected:')
+    expect(
+      await defineEvolutionDecideTool(ctx).execute({ proposalId: id, decision: 'PROMOTE' }, exec('root-1')),
+    ).toContain('rejected:')
     expect(approval.request).not.toHaveBeenCalled()
     expect((await svc.get(id)).status).toBe('gated')
     await svc.decide(id, 'REJECT', 'root-1', 'approval:reject')
     expect((await svc.get(id)).decision).toBe('REJECT')
-    },
-  )
+  })
 
   it.each(['decide', 'apply'])(
-    'refuses a tampered experiment report at %s, including after service reopen', async stage => {
+    'refuses a tampered experiment report at %s, including after service reopen',
+    async stage => {
       const { svc, root, skillRoot } = await serviceWithProduction()
       await mkdir(join(skillRoot, 'verify'), { recursive: true })
       await writeFile(join(skillRoot, 'verify', 'SKILL.md'), PRODUCTION_CHAMPION)
@@ -2067,9 +2466,10 @@ describe('replay evidence integrity and promotion', () => {
       if (stage === 'apply') await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:decide')
       await appendFile(join(root, reportPath), '\n')
       const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot })
-      const action = stage === 'decide'
-        ? reopened.decide('s1', 'PROMOTE', 'root-1', 'approval:decide')
-        : reopened.apply('s1', 'root-1', 'approval:apply')
+      const action =
+        stage === 'decide'
+          ? reopened.decide('s1', 'PROMOTE', 'root-1', 'approval:decide')
+          : reopened.apply('s1', 'root-1', 'approval:apply')
       await expect(action).rejects.toThrow('is not the report its ledger records recompute to')
       expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_CHAMPION)
     },
@@ -2084,30 +2484,42 @@ describe('EvolutionService apply/rollback state machine', () => {
     await walkToDecided(svc, skillProposal, { name: 'verify', content: skillText('# new verify skill') })
     const applied = await svc.apply('s1', 'root-1', 'approval:call-1')
     expect(applied.proposal.status).toBe('applied')
-    expect(applied.proposal.applied).toEqual({ targets: [join(skillRoot, 'verify', 'SKILL.md')], approvalRef: 'approval:call-1' })
+    expect(applied.proposal.applied).toEqual({
+      targets: [join(skillRoot, 'verify', 'SKILL.md')],
+      approvalRef: 'approval:call-1',
+    })
     const rolledback = await svc.rollback('s1', 'root-1', 'approval:call-2')
     expect(rolledback.proposal.status).toBe('rolledback')
     // A skill candidate's evaluation is the experiment, not a `replayed` line.
     expect(rolledback.proposal.history.map(entry => entry.status)).toEqual([
-      'proposed', 'candidate', 'prepared', 'gated', 'decided', 'applied', 'rolledback',
+      'proposed',
+      'candidate',
+      'prepared',
+      'gated',
+      'decided',
+      'applied',
+      'rolledback',
     ])
   })
 
-  it.each(['REJECT', 'KEEP_FOR_FURTHER_RESEARCH'] as const)('refuses apply on a decided %s proposal', async decision => {
-    const { svc, skillRoot } = await serviceWithProduction()
-    await mkdir(join(skillRoot, 'verify'), { recursive: true })
-    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), PRODUCTION_V1)
-    await svc.propose(skillProposal, 'root-1')
-    await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('# new') })
-    await svc.prepare('s1', 'root-1')
-    await recordSkillExperiment(svc, 's1')
-    await svc.gate('s1', gateAnswers([await experimentReportPathOf(svc)]), 'root-1')
-    await svc.decide('s1', decision, 'root-1', 'approval:call-1')
-    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(
-      `cannot record "applied" — the recorded decision is ${decision}; only a PROMOTE decision can be applied`,
-    )
-    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_V1)
-  })
+  it.each(['REJECT', 'KEEP_FOR_FURTHER_RESEARCH'] as const)(
+    'refuses apply on a decided %s proposal',
+    async decision => {
+      const { svc, skillRoot } = await serviceWithProduction()
+      await mkdir(join(skillRoot, 'verify'), { recursive: true })
+      await writeFile(join(skillRoot, 'verify', 'SKILL.md'), PRODUCTION_V1)
+      await svc.propose(skillProposal, 'root-1')
+      await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('# new') })
+      await svc.prepare('s1', 'root-1')
+      await recordSkillExperiment(svc, 's1')
+      await svc.gate('s1', gateAnswers([await experimentReportPathOf(svc)]), 'root-1')
+      await svc.decide('s1', decision, 'root-1', 'approval:call-1')
+      await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(
+        `cannot record "applied" — the recorded decision is ${decision}; only a PROMOTE decision can be applied`,
+      )
+      expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_V1)
+    },
+  )
 
   it('refuses apply before the decision, a repeated apply, rollback before apply, and a repeated rollback', async () => {
     const { svc, skillRoot } = await serviceWithProduction()
@@ -2124,14 +2536,20 @@ describe('EvolutionService apply/rollback state machine', () => {
     await svc.apply('s1', 'root-1', 'approval:call-1')
     await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('is applied; cannot record "applied"')
     await svc.rollback('s1', 'root-1', 'approval:call-2')
-    await expect(svc.rollback('s1', 'root-1', 'approval:call-3')).rejects.toThrow('is rolledback; cannot record "rolledback"')
+    await expect(svc.rollback('s1', 'root-1', 'approval:call-3')).rejects.toThrow(
+      'is rolledback; cannot record "rolledback"',
+    )
   })
 
   it('refuses apply for an L4 skill candidate, pointing at the manual path', async () => {
     const { svc, skillRoot } = await serviceWithProduction()
     await mkdir(join(skillRoot, 'verify'), { recursive: true })
     await writeFile(join(skillRoot, 'verify', 'SKILL.md'), PRODUCTION_V1)
-    await walkToDecided(svc, { ...skillProposal, proposalId: 's-l4', level: 'L4' }, { name: 'verify', content: skillText('# new') })
+    await walkToDecided(
+      svc,
+      { ...skillProposal, proposalId: 's-l4', level: 'L4' },
+      { name: 'verify', content: skillText('# new') },
+    )
     await expect(svc.apply('s-l4', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "applied"')
   })
 
@@ -2164,10 +2582,21 @@ describe('EvolutionService apply/rollback state machine', () => {
     // Every line this build writes declares the ledger's own format version.
     expect(records.map(record => record.formatVersion)).toEqual(records.map(() => 4))
     // The lifecycle plus the experiment family — and no `replayed` record.
-    expect(records.map(record => record.kind)).toEqual(expect.arrayContaining([
-      'proposed', 'candidate', 'prepared', 'experiment_started', 'experiment_sample', 'gated', 'decided',
-      'commit_intent', 'applied', 'commit_intent', 'rolledback',
-    ]))
+    expect(records.map(record => record.kind)).toEqual(
+      expect.arrayContaining([
+        'proposed',
+        'candidate',
+        'prepared',
+        'experiment_started',
+        'experiment_sample',
+        'gated',
+        'decided',
+        'commit_intent',
+        'applied',
+        'commit_intent',
+        'rolledback',
+      ]),
+    )
     expect(records.map(record => record.kind)).not.toContain('replayed')
     expect(raw.join('\n')).not.toContain('"replayed"')
 
@@ -2175,7 +2604,13 @@ describe('EvolutionService apply/rollback state machine', () => {
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot })
     expect(await reopened.list()).toEqual(await svc.list())
     expect((await reopened.get('s1')).history.map(entry => entry.status)).toEqual([
-      'proposed', 'candidate', 'prepared', 'gated', 'decided', 'applied', 'rolledback',
+      'proposed',
+      'candidate',
+      'prepared',
+      'gated',
+      'decided',
+      'applied',
+      'rolledback',
     ])
     expect(await reopened.experiments('s1')).toHaveLength(1)
   })
@@ -2189,7 +2624,15 @@ describe('EvolutionService apply/rollback state machine', () => {
     await recordSkillExperiment(svc, 's1')
     await svc.gate('s1', gateAnswers([await experimentReportPathOf(svc)]), 'root-1')
     await svc.decide('s1', 'REJECT', 'root-1', 'approval:call-1')
-    const forged = { formatVersion: 4, kind: 'applied', proposalId: 's1', targets: ['/x'], approvalRef: 'approval:call-9', actor: 'x', at: 'now' }
+    const forged = {
+      formatVersion: 4,
+      kind: 'applied',
+      proposalId: 's1',
+      targets: ['/x'],
+      approvalRef: 'approval:call-9',
+      actor: 'x',
+      at: 'now',
+    }
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot })
     await expect(reopened.list()).rejects.toThrow('cannot record "applied"')
@@ -2197,16 +2640,32 @@ describe('EvolutionService apply/rollback state machine', () => {
     const root2 = await mkdtemp(join(tmpdir(), 'evolution-'))
     const skillRoot2 = join(root2, 'skills')
     await productionSkill(skillRoot2, PRODUCTION_OLD)
-    const svc2 = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: join(root2, 'evolution'), skillRoot: skillRoot2 })
+    const svc2 = new EvolutionService(fixtureCtx(), {
+      modelSelection: () => FIXTURE_SELECTION,
+      root: join(root2, 'evolution'),
+      skillRoot: skillRoot2,
+    })
     await svc2.propose(skillProposal, 'root-1')
     await svc2.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('# new') })
     await svc2.prepare('s1', 'root-1')
     const { reportPath: svc2Report } = await recordSkillExperiment(svc2, 's1')
     await svc2.gate('s1', gateAnswers([svc2Report]), 'root-1')
     await svc2.decide('s1', 'PROMOTE', 'root-1', 'approval:call-1')
-    const malformed = { formatVersion: 4, kind: 'applied', proposalId: 's1', targets: [], approvalRef: '', actor: 'x', at: 'now' }
+    const malformed = {
+      formatVersion: 4,
+      kind: 'applied',
+      proposalId: 's1',
+      targets: [],
+      approvalRef: '',
+      actor: 'x',
+      at: 'now',
+    }
     await writeFile(join(svc2.root, 'proposals.jsonl'), `${JSON.stringify(malformed)}\n`, { flag: 'a' })
-    const reopened2 = reopenLike(svc2, { modelSelection: () => FIXTURE_SELECTION, root: svc2.root, skillRoot: skillRoot2 })
+    const reopened2 = reopenLike(svc2, {
+      modelSelection: () => FIXTURE_SELECTION,
+      root: svc2.root,
+      skillRoot: skillRoot2,
+    })
     await expect(reopened2.list()).rejects.toThrow('malformed target list')
   })
 })
@@ -2243,12 +2702,55 @@ describe('EvolutionService apply/rollback production writes', () => {
     await appendFile(
       join(root, 'proposals.jsonl'),
       [
-        { formatVersion: 4, kind: 'candidate', proposalId: 'c1', versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: capabilityMutation, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-        { formatVersion: 4, kind: 'prepared', proposalId: 'c1', sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
-        { formatVersion: 4, kind: 'gated', proposalId: 'c1', gate: gateAnswers(['sandbox/c1/replay-report.json']), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
-        { formatVersion: 4, kind: 'decided', proposalId: 'c1', decision: 'PROMOTE', approvalRef: 'approval:legacy-decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
-        { formatVersion: 4, kind: 'applied', proposalId: 'c1', targets: ['legacy apply'], approvalRef: 'approval:legacy-apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
-      ].map(line => JSON.stringify(line)).join('\n') + '\n',
+        {
+          formatVersion: 4,
+          kind: 'candidate',
+          proposalId: 'c1',
+          versionSet: { capabilityTable: 'config.yml#doc1' },
+          mutation: capabilityMutation,
+          actor: 'root-1',
+          at: '2026-09-20T00:00:01.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'prepared',
+          proposalId: 'c1',
+          sandbox: null,
+          mechanical: false,
+          champion: 'none',
+          files: [],
+          actor: 'root-1',
+          at: '2026-09-20T00:00:02.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'gated',
+          proposalId: 'c1',
+          gate: gateAnswers(['sandbox/c1/replay-report.json']),
+          actor: 'root-1',
+          at: '2026-09-20T00:00:04.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'decided',
+          proposalId: 'c1',
+          decision: 'PROMOTE',
+          approvalRef: 'approval:legacy-decide',
+          actor: 'root-1',
+          at: '2026-09-20T00:00:05.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'applied',
+          proposalId: 'c1',
+          targets: ['legacy apply'],
+          approvalRef: 'approval:legacy-apply',
+          actor: 'root-1',
+          at: '2026-09-20T00:00:06.000Z',
+        },
+      ]
+        .map(line => JSON.stringify(line))
+        .join('\n') + '\n',
     )
     const verbatim = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root })
@@ -2268,7 +2770,8 @@ describe('EvolutionService apply/rollback production writes', () => {
 /* ------------------------------------------------------------------ */
 
 const SKILL_CANDIDATE = skillText('# new verify skill\n\nwith a trailing newline')
-const skillCandidateFile = (root: string, proposalId = 's1') => join(root, 'sandbox', proposalId, 'skills', 'verify', 'SKILL.md')
+const skillCandidateFile = (root: string, proposalId = 's1') =>
+  join(root, 'sandbox', proposalId, 'skills', 'verify', 'SKILL.md')
 
 /** propose → candidate → prepare a skill proposal; returns the recorded content identity. */
 async function prepareSkill(svc: EvolutionService, content: string = SKILL_CANDIDATE) {
@@ -2285,7 +2788,10 @@ describe('skill candidate content binding (P2)', () => {
     await writeFile(join(skillRoot, 'verify', 'SKILL.md'), PRODUCTION_V1)
     const identity = await prepareSkill(svc)
     // the digest is over the exact file bytes — no trim, no newline conversion
-    expect(identity).toEqual({ name: 'verify', sha256: createHash('sha256').update(SKILL_CANDIDATE, 'utf8').digest('hex') })
+    expect(identity).toEqual({
+      name: 'verify',
+      sha256: createHash('sha256').update(SKILL_CANDIDATE, 'utf8').digest('hex'),
+    })
     expect(await readFile(skillCandidateFile(root), 'utf8')).toBe(SKILL_CANDIDATE)
     const { reportPath } = await recordSkillExperiment(svc, 's1')
     const evidenceFile = join(root, 'regression.log')
@@ -2302,7 +2808,12 @@ describe('skill candidate content binding (P2)', () => {
     expect(applied.status).toBe('applied')
     expect(applied.prepared!.skillContent).toEqual(identity)
     expect(applied.history.map(entry => entry.status)).toEqual([
-      'proposed', 'candidate', 'prepared', 'gated', 'decided', 'applied',
+      'proposed',
+      'candidate',
+      'prepared',
+      'gated',
+      'decided',
+      'applied',
     ])
   })
 
@@ -2317,14 +2828,19 @@ describe('skill candidate content binding (P2)', () => {
     )) as string
     expect(result).toContain('proposal s1 [experiment] skill verify — verdict: fixed')
 
-    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line) as Record<string, unknown>)
     const started = lines.find(line => line.kind === 'experiment_started') as { frozen: Record<string, any> }
     expect(started.frozen.candidate).toEqual(experiment.identity)
     expect(started.frozen.productionBaseline).toEqual({
       name: 'verify',
       sha256: createHash('sha256').update(PRODUCTION_V1, 'utf8').digest('hex'),
     })
-    expect(experiment.identity.sha256).not.toBe(createHash('sha256').update('# production rewritten\n', 'utf8').digest('hex'))
+    expect(experiment.identity.sha256).not.toBe(
+      createHash('sha256').update('# production rewritten\n', 'utf8').digest('hex'),
+    )
     // the overlay is the sandbox candidate, never the production skill
     expect(replayTask.mock.calls.filter(call => call[2].overlay !== undefined)).toHaveLength(2)
     expect(replayTask.mock.calls.every(call => call[2].lineage?.startsWith('evolution-experiment:'))).toBe(true)
@@ -2334,14 +2850,19 @@ describe('skill candidate content binding (P2)', () => {
     const { svc, root, replayTask, replayTool, experiment } = await preparedSkillExperiment()
     await writeFile(skillCandidateFile(root), 'tampered after prepare\n')
 
-    const viaTool = (await replayTool.execute({ proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))) as string
+    const viaTool = (await replayTool.execute(
+      { proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] },
+      exec('root-1'),
+    )) as string
     expect(viaTool).toContain('evolution_replay rejected:')
     expect(viaTool).toContain('no longer matches the content identity recorded at prepare')
     expect(replayTask).not.toHaveBeenCalled()
 
     // the same refusal through the service's own candidate read — the shared
     // identity check every promotion stage and the experiment's pre-run check use
-    await expect(svc.readSkillCandidate('s1')).rejects.toThrow('no longer matches the content identity recorded at prepare')
+    await expect(svc.readSkillCandidate('s1')).rejects.toThrow(
+      'no longer matches the content identity recorded at prepare',
+    )
     expect((await svc.get('s1')).status).toBe('prepared')
     expect(existsSync(join(root, 'sandbox', 's1', 'replay-report.json'))).toBe(false)
   })
@@ -2365,11 +2886,15 @@ describe('skill candidate content binding (P2)', () => {
     await svc.gate('s1', gateAnswers([await experimentReportPathOf(svc)]), 'root-1')
     await writeFile(skillCandidateFile(root), 'rewritten after the replay\n')
 
-    await expect(svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow('no longer matches the content identity')
+    await expect(svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow(
+      'no longer matches the content identity',
+    )
     await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "applied"')
     expect((await svc.get('s1')).status).toBe('gated')
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_V1)
-    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
       .map(line => (JSON.parse(line) as { kind: string }).kind)
     expect(kinds).not.toContain('decided')
     expect(kinds).not.toContain('applied')
@@ -2416,7 +2941,7 @@ describe('skill candidate content binding (P2)', () => {
     await expect(svc.readSkillCandidate('s1')).rejects.toThrow('is a symbolic link')
   })
 
-  it('P2-D: a commit stops by name when the source is replaced after the write\'s own read', async () => {
+  it("P2-D: a commit stops by name when the source is replaced after the write's own read", async () => {
     const { svc, root, skillRoot } = await serviceWithProduction()
     await mkdir(join(skillRoot, 'verify'), { recursive: true })
     await writeFile(join(skillRoot, 'verify', 'SKILL.md'), PRODUCTION_V1)
@@ -2487,7 +3012,9 @@ describe('skill candidate content binding (P2)', () => {
     await writeFile(skillCandidateFile(root), 'rewritten across a restart\n')
 
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot })
-    await expect(reopened.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow('no longer matches the content identity')
+    await expect(reopened.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow(
+      'no longer matches the content identity',
+    )
     await expect(reopened.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "applied"')
     expect((await reopened.get('s1')).status).toBe('gated')
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_V1)
@@ -2503,7 +3030,10 @@ describe('skill candidate content binding (P2)', () => {
     await writeFile(skillCandidateFile(root), 'rewritten before the human review\n')
 
     const { ctx, approval } = toolCtx(svc)
-    const result = (await defineEvolutionDecideTool(ctx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec('root-1'))) as string
+    const result = (await defineEvolutionDecideTool(ctx).execute(
+      { proposalId: 's1', decision: 'PROMOTE' },
+      exec('root-1'),
+    )) as string
     expect(result).toContain('evolution_decide rejected:')
     expect(result).toContain('no longer matches the content identity')
     expect(approval.request).not.toHaveBeenCalled()
@@ -2529,12 +3059,17 @@ describe('skill candidate content binding (P2)', () => {
     }
     const base = toolCtx(svc)
     const ctx = { ...(base.ctx as unknown as Record<string, unknown>), approval } as never
-    const result = (await defineEvolutionDecideTool(ctx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec('root-1'))) as string
+    const result = (await defineEvolutionDecideTool(ctx).execute(
+      { proposalId: 's1', decision: 'PROMOTE' },
+      exec('root-1'),
+    )) as string
     expect(approval.request).toHaveBeenCalledOnce()
     expect(result).toContain('evolution_decide rejected:')
     expect(result).toContain('no longer matches the content identity')
     expect((await svc.get('s1')).status).toBe('gated')
-    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
       .map(line => (JSON.parse(line) as { kind: string }).kind)
     expect(kinds).not.toContain('decided')
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_V1)
@@ -2563,11 +3098,12 @@ describe('skill candidate content binding (P2)', () => {
     expect(result).toContain('no longer matches the content identity')
     expect((await svc.get('s1')).status).toBe('decided')
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_V1)
-    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
       .map(line => (JSON.parse(line) as { kind: string }).kind)
     expect(kinds).not.toContain('applied')
   })
-
 })
 
 /* ------------------------------------------------------------------ */
@@ -2591,18 +3127,23 @@ async function walkSkillToDecided(svc: EvolutionService, proposalId: string, con
 }
 
 async function ledgerKinds(root: string): Promise<string[]> {
-  return (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+  return (await readFile(join(root, 'proposals.jsonl'), 'utf8'))
+    .trim()
+    .split('\n')
     .map(line => (JSON.parse(line) as { kind: string }).kind)
 }
 
 /** Rewrite a live ledger as a P2-era one: the prepared line loses `skillBaseline`, the field P3 added. */
 async function dropBaselineField(root: string) {
   const path = join(root, 'proposals.jsonl')
-  const lines = (await readFile(path, 'utf8')).trim().split('\n').map(line => {
-    const record = JSON.parse(line)
-    if (record.kind === 'prepared') delete record.skillBaseline
-    return JSON.stringify(record)
-  })
+  const lines = (await readFile(path, 'utf8'))
+    .trim()
+    .split('\n')
+    .map(line => {
+      const record = JSON.parse(line)
+      if (record.kind === 'prepared') delete record.skillBaseline
+      return JSON.stringify(record)
+    })
   await writeFile(path, `${lines.join('\n')}\n`)
 }
 
@@ -2624,8 +3165,9 @@ describe('production baseline check (P3)', () => {
       name: 'verify',
       sha256: createHash('sha256').update(P3_BASELINE, 'utf8').digest('hex'),
     })
-    expect(await readFile(join(root, 'sandbox', 's1', 'champion', 'skills', 'verify', 'SKILL.md')))
-      .toEqual(Buffer.from(P3_BASELINE, 'utf8'))
+    expect(await readFile(join(root, 'sandbox', 's1', 'champion', 'skills', 'verify', 'SKILL.md'))).toEqual(
+      Buffer.from(P3_BASELINE, 'utf8'),
+    )
 
     await recordSkillExperiment(svc, 's1')
     await svc.gate('s1', gateAnswers([await experimentReportPathOf(svc)]), 'root-1')
@@ -2643,38 +3185,46 @@ describe('production baseline check (P3)', () => {
   it.each([
     ['modified after prepare', 'rewritten in production\n'],
     ['deleted after prepare', null],
-  ])('P3-B: production %s is refused at apply, tool and service alike, and keeps its new state', async (_label, next) => {
-    const { svc, root, skillRoot } = await serviceWithProduction()
-    await productionSkill(skillRoot)
-    const identity = await prepareSkill(svc)
-    await recordSkillExperiment(svc, 's1')
-    await svc.gate('s1', gateAnswers([await experimentReportPathOf(svc)]), 'root-1')
-    await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
-    if (next === null) await rm(skillProductionFile(skillRoot))
-    else await writeFile(skillProductionFile(skillRoot), next)
+  ])(
+    'P3-B: production %s is refused at apply, tool and service alike, and keeps its new state',
+    async (_label, next) => {
+      const { svc, root, skillRoot } = await serviceWithProduction()
+      await productionSkill(skillRoot)
+      const identity = await prepareSkill(svc)
+      await recordSkillExperiment(svc, 's1')
+      await svc.gate('s1', gateAnswers([await experimentReportPathOf(svc)]), 'root-1')
+      await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
+      if (next === null) await rm(skillProductionFile(skillRoot))
+      else await writeFile(skillProductionFile(skillRoot), next)
 
-    // the tool refuses before the human is asked — no approval is burned
-    const { ctx, approval } = toolCtx(svc)
-    const viaTool = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
-    expect(viaTool).toContain('evolution_apply rejected:')
-    expect(viaTool).toContain(P3_CONFLICT_GUIDANCE)
-    expect(approval.request).not.toHaveBeenCalled()
+      // the tool refuses before the human is asked — no approval is burned
+      const { ctx, approval } = toolCtx(svc)
+      const viaTool = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
+      expect(viaTool).toContain('evolution_apply rejected:')
+      expect(viaTool).toContain(P3_CONFLICT_GUIDANCE)
+      expect(approval.request).not.toHaveBeenCalled()
 
-    // and a direct service call cannot bypass the same check
-    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(
-      next === null ? /no longer exists/ : /changed since prepare/,
-    )
-    expect((await svc.get('s1')).status).toBe('decided')
-    expect((await svc.get('s1')).applied).toBeUndefined()
-    expect(await ledgerKinds(root)).not.toContain('applied')
-    // production keeps whatever it now holds: the modified bytes, or the absence
-    expect(existsSync(skillProductionFile(skillRoot))).toBe(next !== null)
-    if (next !== null) expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(next)
-    // the candidate, its report and its history are preserved for a fresh proposal
-    expect((await svc.readSkillCandidate('s1')).skillMd).toEqual(Buffer.from(SKILL_CANDIDATE, 'utf8'))
-    expect((await svc.get('s1')).history.map(entry => entry.status))
-      .toEqual(['proposed', 'candidate', 'prepared', 'gated', 'decided'])
-  })
+      // and a direct service call cannot bypass the same check
+      await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(
+        next === null ? /no longer exists/ : /changed since prepare/,
+      )
+      expect((await svc.get('s1')).status).toBe('decided')
+      expect((await svc.get('s1')).applied).toBeUndefined()
+      expect(await ledgerKinds(root)).not.toContain('applied')
+      // production keeps whatever it now holds: the modified bytes, or the absence
+      expect(existsSync(skillProductionFile(skillRoot))).toBe(next !== null)
+      if (next !== null) expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(next)
+      // the candidate, its report and its history are preserved for a fresh proposal
+      expect((await svc.readSkillCandidate('s1')).skillMd).toEqual(Buffer.from(SKILL_CANDIDATE, 'utf8'))
+      expect((await svc.get('s1')).history.map(entry => entry.status)).toEqual([
+        'proposed',
+        'candidate',
+        'prepared',
+        'gated',
+        'decided',
+      ])
+    },
+  )
 
   it('P3-C: a brand-new skill has no production state to be prepared against, so prepare refuses it and production is preserved', async () => {
     const { svc, root, skillRoot } = await serviceWithProduction()
@@ -2765,8 +3315,7 @@ describe('production baseline check (P3)', () => {
     expect(stale.status).toBe('decided')
     expect(stale.applied).toBeUndefined()
     expect(stale.prepared!.skillBaseline!.sha256).toBe(createHash('sha256').update(P3_BASELINE, 'utf8').digest('hex'))
-    expect(stale.history.map(entry => entry.status))
-      .toEqual(['proposed', 'candidate', 'prepared', 'gated', 'decided'])
+    expect(stale.history.map(entry => entry.status)).toEqual(['proposed', 'candidate', 'prepared', 'gated', 'decided'])
     expect((await svc.readSkillCandidate('s2')).skillMd).toEqual(Buffer.from(P3_CANDIDATE_B, 'utf8'))
     expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
   })
@@ -2794,8 +3343,12 @@ describe('production baseline check (P3)', () => {
     // human is deciding, then waits for the test to release the grant.
     let deciding: () => void = () => {}
     let grant: () => void = () => {}
-    const humanDeciding = new Promise<void>(resolve => { deciding = resolve })
-    const granted = new Promise<void>(resolve => { grant = resolve })
+    const humanDeciding = new Promise<void>(resolve => {
+      deciding = resolve
+    })
+    const granted = new Promise<void>(resolve => {
+      grant = resolve
+    })
     const approval = {
       request: vi.fn(async () => {
         deciding()
@@ -2835,10 +3388,16 @@ describe('production baseline check (P3)', () => {
     expect(reloaded.status).toBe('decided')
     expect(reloaded.applied).toBeUndefined()
     expect(reloaded.prepared!.skillBaseline).toEqual({
-      name: 'verify', sha256: createHash('sha256').update(P3_BASELINE, 'utf8').digest('hex'),
+      name: 'verify',
+      sha256: createHash('sha256').update(P3_BASELINE, 'utf8').digest('hex'),
     })
-    expect(reloaded.history.map(entry => entry.status))
-      .toEqual(['proposed', 'candidate', 'prepared', 'gated', 'decided'])
+    expect(reloaded.history.map(entry => entry.status)).toEqual([
+      'proposed',
+      'candidate',
+      'prepared',
+      'gated',
+      'decided',
+    ])
   })
 
   it('P3-G: a P2 content change is still refused next to the baseline check', async () => {
@@ -2923,12 +3482,22 @@ describe('production baseline check (P3)', () => {
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
     const forged = {
-      formatVersion: 4, kind: 'prepared', proposalId: 's1', sandbox: 'sandbox/s1', mechanical: true, champion: 'captured',
+      formatVersion: 4,
+      kind: 'prepared',
+      proposalId: 's1',
+      sandbox: 'sandbox/s1',
+      mechanical: true,
+      champion: 'captured',
       skillContent: { name: 'verify', sha256: 'a'.repeat(64) },
-      files: ['x'], skillBaseline: { name: 'verify', sha256: 'not-a-digest' }, actor: 'x', at: 'now',
+      files: ['x'],
+      skillBaseline: { name: 'verify', sha256: 'not-a-digest' },
+      actor: 'x',
+      at: 'now',
     }
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
-    await expect(new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list()).rejects.toThrow('no valid skillBaseline identity')
+    await expect(
+      new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list(),
+    ).rejects.toThrow('no valid skillBaseline identity')
   })
 
   /**
@@ -2944,14 +3513,23 @@ describe('production baseline check (P3)', () => {
     const entry = { preset: 'standard', skills: [CAPABILITY_FIXTURE_SKILL] }
     await svc.candidate('c1', VERSION_SET, 'root-1', { rows: { research: entry } })
     const forged = {
-      formatVersion: 4, kind: 'prepared', proposalId: 'c1', sandbox: 'sandbox/c1', mechanical: true, champion: 'absent',
+      formatVersion: 4,
+      kind: 'prepared',
+      proposalId: 'c1',
+      sandbox: 'sandbox/c1',
+      mechanical: true,
+      champion: 'absent',
       capabilityRow: { name: 'research', entry, digest: digestOf(entry) },
       capabilityBaseline: null,
       capabilityTable: { baselineSha256: 'a'.repeat(64), applySha256: 'not-a-digest', rollbackSha256: 'b'.repeat(64) },
-      files: ['x'], actor: 'x', at: 'now',
+      files: ['x'],
+      actor: 'x',
+      at: 'now',
     }
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
-    await expect(new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list()).rejects.toThrow('no valid capabilityTable.applySha256')
+    await expect(
+      new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list(),
+    ).rejects.toThrow('no valid capabilityTable.applySha256')
   })
 
   it('A6: a capabilityTable on a skill prepared record fails the fold', async () => {
@@ -2960,14 +3538,23 @@ describe('production baseline check (P3)', () => {
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
     const forged = {
-      formatVersion: 4, kind: 'prepared', proposalId: 's1', sandbox: 'sandbox/s1', mechanical: true, champion: 'captured',
+      formatVersion: 4,
+      kind: 'prepared',
+      proposalId: 's1',
+      sandbox: 'sandbox/s1',
+      mechanical: true,
+      champion: 'captured',
       skillContent: { name: 'verify', sha256: 'a'.repeat(64) },
       skillBaseline: { name: 'verify', sha256: 'b'.repeat(64) },
       capabilityTable: { baselineSha256: 'a'.repeat(64), applySha256: 'a'.repeat(64), rollbackSha256: 'a'.repeat(64) },
-      files: ['x'], actor: 'x', at: 'now',
+      files: ['x'],
+      actor: 'x',
+      at: 'now',
     }
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
-    await expect(new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list()).rejects.toThrow('capability table identity')
+    await expect(
+      new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list(),
+    ).rejects.toThrow('capability table identity')
   })
 })
 
@@ -2985,12 +3572,50 @@ describe('evolution_apply / evolution_rollback tools', () => {
     proposalId: string,
     roots: ProductionRoots,
   ): Promise<EvolutionService> {
-    await appendFile(join(svc.root, 'proposals.jsonl'), [
-      { formatVersion: 4, kind: 'candidate', proposalId, versionSet: { x: 'v1' }, mutation: { baseVersion: 'v3', definition: { objective: 'the legacy definition' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-      { formatVersion: 4, kind: 'prepared', proposalId, sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
-      { formatVersion: 4, kind: 'gated', proposalId, gate: gateAnswers([`sandbox/${proposalId}/replay-report.json`]), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
-      { formatVersion: 4, kind: 'decided', proposalId, decision: 'PROMOTE', approvalRef: 'approval:legacy-decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
-    ].map(line => JSON.stringify(line)).join('\n') + '\n')
+    await appendFile(
+      join(svc.root, 'proposals.jsonl'),
+      [
+        {
+          formatVersion: 4,
+          kind: 'candidate',
+          proposalId,
+          versionSet: { x: 'v1' },
+          mutation: { baseVersion: 'v3', definition: { objective: 'the legacy definition' } },
+          actor: 'root-1',
+          at: '2026-09-20T00:00:01.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'prepared',
+          proposalId,
+          sandbox: null,
+          mechanical: false,
+          champion: 'none',
+          files: [],
+          actor: 'root-1',
+          at: '2026-09-20T00:00:02.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'gated',
+          proposalId,
+          gate: gateAnswers([`sandbox/${proposalId}/replay-report.json`]),
+          actor: 'root-1',
+          at: '2026-09-20T00:00:04.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'decided',
+          proposalId,
+          decision: 'PROMOTE',
+          approvalRef: 'approval:legacy-decide',
+          actor: 'root-1',
+          at: '2026-09-20T00:00:05.000Z',
+        },
+      ]
+        .map(line => JSON.stringify(line))
+        .join('\n') + '\n',
+    )
     return reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, ...roots })
   }
 
@@ -3075,12 +3700,18 @@ describe('evolution_apply / evolution_rollback tools', () => {
     const applyTool = defineEvolutionApplyTool(ctx)
 
     await svc.propose(skillProposal, 'root-1')
-    expect((await applyTool.execute({ proposalId: 's1' }, exec('root-1'))) as string)
-      .toContain('proposal s1 is proposed; only a decided proposal can be applied')
+    expect((await applyTool.execute({ proposalId: 's1' }, exec('root-1'))) as string).toContain(
+      'proposal s1 is proposed; only a decided proposal can be applied',
+    )
 
-    await walkToDecided(svc, { ...skillProposal, proposalId: 's-l4', level: 'L4' }, { name: 'verify', content: skillText('# new') })
-    expect((await applyTool.execute({ proposalId: 's-l4' }, exec('root-1'))) as string)
-      .toContain('L4 harness evolution has no executor')
+    await walkToDecided(
+      svc,
+      { ...skillProposal, proposalId: 's-l4', level: 'L4' },
+      { name: 'verify', content: skillText('# new') },
+    )
+    expect((await applyTool.execute({ proposalId: 's-l4' }, exec('root-1'))) as string).toContain(
+      'L4 harness evolution has no executor',
+    )
 
     expect(approval.request).not.toHaveBeenCalled()
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_OLD)
@@ -3093,12 +3724,18 @@ describe('evolution_apply / evolution_rollback tools', () => {
     const applyTool = defineEvolutionApplyTool(ctx)
 
     await svc.propose(skillProposal, 'root-1')
-    expect((await applyTool.execute({ proposalId: 's1' }, exec('root-1'))) as string)
-      .toContain('proposal s1 is proposed; only a decided proposal can be applied')
+    expect((await applyTool.execute({ proposalId: 's1' }, exec('root-1'))) as string).toContain(
+      'proposal s1 is proposed; only a decided proposal can be applied',
+    )
 
-    await walkToDecided(svc, { ...skillProposal, proposalId: 's-l4', level: 'L4' }, { name: 'verify', content: skillText('# new') })
-    expect((await applyTool.execute({ proposalId: 's-l4' }, exec('root-1'))) as string)
-      .toContain('L4 harness evolution has no executor')
+    await walkToDecided(
+      svc,
+      { ...skillProposal, proposalId: 's-l4', level: 'L4' },
+      { name: 'verify', content: skillText('# new') },
+    )
+    expect((await applyTool.execute({ proposalId: 's-l4' }, exec('root-1'))) as string).toContain(
+      'L4 harness evolution has no executor',
+    )
 
     // A task_definition PROMOTE can no longer be *recorded* — `candidate`
     // refuses the target type by name and the fold refuses the same hand-written
@@ -3109,7 +3746,10 @@ describe('evolution_apply / evolution_rollback tools', () => {
     await svc.propose(proposal, 'root-1')
     const legacyLedger = await legacyDecidedLedger(svc, 'p1', roots)
     await expect(legacyLedger.list()).rejects.toThrow('targets "task_definition"')
-    const viaTool = (await defineEvolutionApplyTool({ ...(ctx as object), evolution: legacyLedger } as never).execute({ proposalId: 'p1' }, exec('root-1'))) as string
+    const viaTool = (await defineEvolutionApplyTool({ ...(ctx as object), evolution: legacyLedger } as never).execute(
+      { proposalId: 'p1' },
+      exec('root-1'),
+    )) as string
     expect(viaTool).toContain('evolution_apply rejected:')
     expect(viaTool).toContain('targets "task_definition"')
 
@@ -3170,31 +3810,37 @@ function sha256Of(text: string): string {
  * one — a sidecar whose declared content identity is the digest of exactly
  * those bytes.
  */
-async function writeSkillDirectory(directory: string, name: string, content: string, shape: SkillShape = {}): Promise<string> {
+async function writeSkillDirectory(
+  directory: string,
+  name: string,
+  content: string,
+  shape: SkillShape = {},
+): Promise<string> {
   await mkdir(directory, { recursive: true })
   await writeFile(join(directory, 'SKILL.md'), content)
   if (shape.sidecar === undefined) return directory
   const identity = { skillMdSha256: sha256Of(content), resources: [] }
-  const declared = shape.sidecar === 'execution'
-    ? {
-        contractVersion: 1,
-        type: 'execution',
-        capabilities: [...(shape.capabilities ?? [])],
-        precondition: 'the fixture skill is installed where discovery looks',
-        inputs: [],
-        outputs: [],
-        requiredTools: [...(shape.requiredTools ?? [])],
-        verifier: { ref: shape.verifierRef },
-        content: identity,
-      }
-    : {
-        contractVersion: 1,
-        type: 'knowledge',
-        source: 'this test fixture',
-        scope: 'promotion-entry behaviour only',
-        content: identity,
-        contentCheck: { kind: 'command', command: 'true' },
-      }
+  const declared =
+    shape.sidecar === 'execution'
+      ? {
+          contractVersion: 1,
+          type: 'execution',
+          capabilities: [...(shape.capabilities ?? [])],
+          precondition: 'the fixture skill is installed where discovery looks',
+          inputs: [],
+          outputs: [],
+          requiredTools: [...(shape.requiredTools ?? [])],
+          verifier: { ref: shape.verifierRef },
+          content: identity,
+        }
+      : {
+          contractVersion: 1,
+          type: 'knowledge',
+          source: 'this test fixture',
+          scope: 'promotion-entry behaviour only',
+          content: identity,
+          contentCheck: { kind: 'command', command: 'true' },
+        }
   await writeFile(join(directory, 'SKILL.contract.json'), `${JSON.stringify(declared, null, 2)}\n`)
   return directory
 }
@@ -3212,10 +3858,37 @@ async function capabilityGatedLedger(svc: EvolutionService, proposalId: string):
   await appendFile(
     join(svc.root, 'proposals.jsonl'),
     [
-      { formatVersion: 4, kind: 'candidate', proposalId, versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: capabilityMutation, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-      { formatVersion: 4, kind: 'prepared', proposalId, sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
-      { formatVersion: 4, kind: 'gated', proposalId, gate: gateAnswers([`sandbox/${proposalId}/replay-report.json`]), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
-    ].map(line => JSON.stringify(line)).join('\n') + '\n',
+      {
+        formatVersion: 4,
+        kind: 'candidate',
+        proposalId,
+        versionSet: { capabilityTable: 'config.yml#doc1' },
+        mutation: capabilityMutation,
+        actor: 'root-1',
+        at: '2026-09-20T00:00:01.000Z',
+      },
+      {
+        formatVersion: 4,
+        kind: 'prepared',
+        proposalId,
+        sandbox: null,
+        mechanical: false,
+        champion: 'none',
+        files: [],
+        actor: 'root-1',
+        at: '2026-09-20T00:00:02.000Z',
+      },
+      {
+        formatVersion: 4,
+        kind: 'gated',
+        proposalId,
+        gate: gateAnswers([`sandbox/${proposalId}/replay-report.json`]),
+        actor: 'root-1',
+        at: '2026-09-20T00:00:04.000Z',
+      },
+    ]
+      .map(line => JSON.stringify(line))
+      .join('\n') + '\n',
   )
 }
 
@@ -3265,7 +3938,11 @@ describe('a capability lifecycle written in the old shape is refused at the fold
     const { svc, configFile } = await serviceWithProduction()
     const before = await readFile(configFile, 'utf8')
     await capabilityGatedLedger(svc, 'c2')
-    const forged = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root: svc.root, skillRoot: svc.skillRoot })
+    const forged = reopenLike(svc, {
+      modelSelection: () => FIXTURE_SELECTION,
+      root: svc.root,
+      skillRoot: svc.skillRoot,
+    })
 
     // The fold admits what the live entries write: a capability lifecycle in a
     // shape no live entry produces cannot be folded from a file either, so no
@@ -3277,7 +3954,10 @@ describe('a capability lifecycle written in the old shape is refused at the fold
     // Through the tools the same refusal reaches the caller, still without a
     // human being asked for a proposal that cannot be promoted.
     const { ctx, approval } = toolCtx(forged)
-    const viaDecideTool = (await defineEvolutionDecideTool(ctx).execute({ proposalId: 'c2', decision: 'PROMOTE' }, exec('root-1'))) as string
+    const viaDecideTool = (await defineEvolutionDecideTool(ctx).execute(
+      { proposalId: 'c2', decision: 'PROMOTE' },
+      exec('root-1'),
+    )) as string
     expect(viaDecideTool).toContain('evolution_decide rejected:')
     expect(viaDecideTool).toContain('capability-row-invalid')
     const viaApplyTool = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 'c2' }, exec('root-1'))) as string
@@ -3288,7 +3968,9 @@ describe('a capability lifecycle written in the old shape is refused at the fold
     // Nothing was read out of the refused file and config.yml is byte-identical
     // to what it was.
     expect(await readFile(configFile, 'utf8')).toBe(before)
-    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
       .map(line => (JSON.parse(line) as { kind: string }).kind)
     expect(kinds).not.toContain('decided')
     expect(kinds).not.toContain('applied')
@@ -3300,12 +3982,37 @@ describe('a capability lifecycle written in the old shape is refused at the fold
     // The decided and applied lines an older ledger holds sit on top of the same
     // lifecycle; the refusal lands at the candidate line, so no apply entry ever
     // reads the decision or the applied record.
-    await appendFile(join(svc.root, 'proposals.jsonl'), [
-      { formatVersion: 4, kind: 'decided', proposalId: 'c2', decision: 'PROMOTE', approvalRef: 'approval:legacy', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
-      { formatVersion: 4, kind: 'applied', proposalId: 'c2', targets: [`${configFile} — document 1 task-runtime capabilities row "research"`], approvalRef: 'approval:apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
-    ].map(line => JSON.stringify(line)).join('\n') + '\n')
+    await appendFile(
+      join(svc.root, 'proposals.jsonl'),
+      [
+        {
+          formatVersion: 4,
+          kind: 'decided',
+          proposalId: 'c2',
+          decision: 'PROMOTE',
+          approvalRef: 'approval:legacy',
+          actor: 'root-1',
+          at: '2026-09-20T00:00:05.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'applied',
+          proposalId: 'c2',
+          targets: [`${configFile} — document 1 task-runtime capabilities row "research"`],
+          approvalRef: 'approval:apply',
+          actor: 'root-1',
+          at: '2026-09-20T00:00:06.000Z',
+        },
+      ]
+        .map(line => JSON.stringify(line))
+        .join('\n') + '\n',
+    )
     const before = await readFile(configFile, 'utf8')
-    const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root: svc.root, skillRoot: svc.skillRoot })
+    const reopened = reopenLike(svc, {
+      modelSelection: () => FIXTURE_SELECTION,
+      root: svc.root,
+      skillRoot: svc.skillRoot,
+    })
 
     await expect(reopened.list()).rejects.toThrow('capability-row-invalid')
     await expect(reopened.get('c2')).rejects.toThrow('capability-row-invalid')
@@ -3321,15 +4028,17 @@ describe('a capability lifecycle written in the old shape is refused at the fold
 
 describe('skill candidate provider pre-check (S1-C item 3)', () => {
   /** The production execution object a two-file candidate is prepared against. */
-  const executionProduction = (skillRoot: string, content: string, shape: SkillShape = {}) => async (): Promise<void> => {
-    await writeSkillDirectory(join(skillRoot, 'verify'), 'verify', content, {
-      sidecar: 'execution',
-      verifierRef: 'command',
-      capabilities: [PROMOTION_ROW],
-      requiredTools: ['bash'],
-      ...shape,
-    })
-  }
+  const executionProduction =
+    (skillRoot: string, content: string, shape: SkillShape = {}) =>
+    async (): Promise<void> => {
+      await writeSkillDirectory(join(skillRoot, 'verify'), 'verify', content, {
+        sidecar: 'execution',
+        verifierRef: 'command',
+        capabilities: [PROMOTION_ROW],
+        requiredTools: ['bash'],
+        ...shape,
+      })
+    }
 
   it('refuses an execution candidate whose verifier is unregistered, at decide, through the tool and at the service entry', async () => {
     const { svc, skillRoot } = await serviceWithProduction()
@@ -3337,9 +4046,14 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
     // The production object — and therefore the derived candidate — declares a
     // verifier this deployment never registered: the declaration is a valid
     // shape, and only the provider check can refuse it.
-    const identity = await skillCandidateGated(svc, content, 's1', executionProduction(skillRoot, skillText('# production with a ghost verifier'), {
-      verifierRef: 'ghost-verifier',
-    }))
+    const identity = await skillCandidateGated(
+      svc,
+      content,
+      's1',
+      executionProduction(skillRoot, skillText('# production with a ghost verifier'), {
+        verifierRef: 'ghost-verifier',
+      }),
+    )
     expect(identity.contract).toBeDefined()
 
     await expect(svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow(/verifier-unknown/)
@@ -3353,7 +4067,10 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
     expect(identity.sha256).toBe(sha256Of(content))
 
     const { ctx, approval } = toolCtx(svc)
-    const viaDecideTool = (await defineEvolutionDecideTool(ctx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec('root-1'))) as string
+    const viaDecideTool = (await defineEvolutionDecideTool(ctx).execute(
+      { proposalId: 's1', decision: 'PROMOTE' },
+      exec('root-1'),
+    )) as string
     expect(viaDecideTool).toContain('evolution_decide rejected:')
     expect(viaDecideTool).toContain('verifier-unknown')
     expect(approval.request).not.toHaveBeenCalled()
@@ -3367,10 +4084,15 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
   it('refuses a candidate whose provider requires tools its declared capability does not grant', async () => {
     const { svc, skillRoot } = await serviceWithProduction()
     const content = skillText('# candidate needing a shell')
-    await skillCandidateGated(svc, content, 's1', executionProduction(skillRoot, skillText('# production needing a shell'), {
-      // `research` is in the table and grants no tools at all.
-      capabilities: ['research'],
-    }))
+    await skillCandidateGated(
+      svc,
+      content,
+      's1',
+      executionProduction(skillRoot, skillText('# production needing a shell'), {
+        // `research` is in the table and grants no tools at all.
+        capabilities: ['research'],
+      }),
+    )
 
     await expect(svc.checkPromotion('s1')).rejects.toThrow(/tool-not-covered/)
     await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "applied"')
@@ -3378,7 +4100,15 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
   })
 
   it.each([
-    ['an execution sidecar', { sidecar: 'execution', verifierRef: 'command', capabilities: [PROMOTION_ROW], requiredTools: ['bash'] } as SkillShape],
+    [
+      'an execution sidecar',
+      {
+        sidecar: 'execution',
+        verifierRef: 'command',
+        capabilities: [PROMOTION_ROW],
+        requiredTools: ['bash'],
+      } as SkillShape,
+    ],
     ['a knowledge sidecar', { sidecar: 'knowledge' } as SkillShape],
   ])('refuses a sidecar that appears beside a guidance candidate: %s', async (_label, shape) => {
     const { svc, root, skillRoot } = await serviceWithProduction()
@@ -3389,16 +4119,23 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
     // identity: production would receive a pair the experiment never evaluated.
     await writeSkillDirectory(skillCandidateDirectory(root), 'verify', content, shape)
 
-    const refusal = await svc.checkPromotion('s1').catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
+    const refusal = await svc
+      .checkPromotion('s1')
+      .catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
     expect(refusal).toContain('SKILL.contract.json')
     expect(refusal).toContain('the content identity recorded at prepare is guidance')
 
     // decide(PROMOTE), the tool before it asks a human, and the service entry
     // refuse alike: no decision recorded, no approval burned, no production write.
-    await expect(svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow('the content identity recorded at prepare is guidance')
+    await expect(svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow(
+      'the content identity recorded at prepare is guidance',
+    )
     expect((await svc.get('s1')).status).toBe('gated')
     const { ctx, approval } = toolCtx(svc)
-    const viaDecideTool = (await defineEvolutionDecideTool(ctx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec('root-1'))) as string
+    const viaDecideTool = (await defineEvolutionDecideTool(ctx).execute(
+      { proposalId: 's1', decision: 'PROMOTE' },
+      exec('root-1'),
+    )) as string
     expect(viaDecideTool).toContain('evolution_decide rejected:')
     expect(viaDecideTool).toContain('the content identity recorded at prepare is guidance')
     expect(approval.request).not.toHaveBeenCalled()
@@ -3416,7 +4153,9 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
     await mkdir(join(directory, 'references'), { recursive: true })
     await writeFile(join(directory, 'references', 'notes.md'), 'a file this executor would never write\n')
 
-    const refusal = await svc.checkPromotion('s1').catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
+    const refusal = await svc
+      .checkPromotion('s1')
+      .catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
     expect(refusal).toContain('"references/"')
     expect(refusal).toContain('one skill object is a fixed file set')
     await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "applied"')
@@ -3441,13 +4180,22 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
   it('refuses a provider that cannot be judged because the verifier registry is unlistable (fail-closed)', async () => {
     const { svc, root, skillRoot } = await serviceWithProduction()
     const content = skillText('# execution candidate on a deployment with no verifier service')
-    await skillCandidateGated(svc, content, 's1', executionProduction(skillRoot, skillText('# production execution skill')))
+    await skillCandidateGated(
+      svc,
+      content,
+      's1',
+      executionProduction(skillRoot, skillText('# production execution skill')),
+    )
 
     // Same ledger, same sandbox, but a context with no verifier service: the ref
     // cannot be proven registered, so the candidate is refused rather than
     // assumed valid — the same refusal admission gives the same situation.
     const bare = new EvolutionService(
-      { reflect: { provide: () => {} }, effect: () => {}, taskRuntime: { listCapabilities: () => structuredClone(FIXTURE_CAPABILITIES) } } as never,
+      {
+        reflect: { provide: () => {} },
+        effect: () => {},
+        taskRuntime: { listCapabilities: () => structuredClone(FIXTURE_CAPABILITIES) },
+      } as never,
       { root, skillRoot },
     )
     await expect(bare.checkPromotion('s1')).rejects.toThrow(/verifier registry cannot be listed/)
@@ -3569,7 +4317,11 @@ async function decidedSkillFixture(candidate: string = SKILL_CANDIDATE, probe?: 
 }
 
 /** A second service over the same ledger, store rows and roots, with an interrupt window of its own. */
-function reopenWithProbe(svc: EvolutionService, roots: { root: string; skillRoot: string }, probe?: CommitStage): EvolutionService {
+function reopenWithProbe(
+  svc: EvolutionService,
+  roots: { root: string; skillRoot: string },
+  probe?: CommitStage,
+): EvolutionService {
   return reopenLike(svc, {
     modelSelection: () => FIXTURE_SELECTION,
     root: roots.root,
@@ -3580,7 +4332,9 @@ function reopenWithProbe(svc: EvolutionService, roots: { root: string; skillRoot
 
 /** Every ledger line, parsed, oldest first — the file itself, never the service's memory. */
 async function ledgerLinesOf(root: string): Promise<Record<string, any>[]> {
-  return (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+  return (await readFile(join(root, 'proposals.jsonl'), 'utf8'))
+    .trim()
+    .split('\n')
     .map(line => JSON.parse(line) as Record<string, any>)
 }
 
@@ -3593,20 +4347,40 @@ function decidedLines(extra: readonly Record<string, unknown>[] = []): Record<st
   const common = { formatVersion: 4, proposalId: 's1', actor: 'root-1' }
   return [
     {
-      ...common, kind: 'proposed', targetType: 'skill', targetId: 'verify', baseVersion: 'v1', level: 'L2',
-      rationale: 'the fixture row', sourceRefs: ['diagnosis:d1'], at: '2026-09-26T00:00:00.000Z',
+      ...common,
+      kind: 'proposed',
+      targetType: 'skill',
+      targetId: 'verify',
+      baseVersion: 'v1',
+      level: 'L2',
+      rationale: 'the fixture row',
+      sourceRefs: ['diagnosis:d1'],
+      at: '2026-09-26T00:00:00.000Z',
     },
     {
-      ...common, kind: 'candidate', versionSet: { skill: 'v2' }, mutation: { name: 'verify', content: SKILL_CANDIDATE },
+      ...common,
+      kind: 'candidate',
+      versionSet: { skill: 'v2' },
+      mutation: { name: 'verify', content: SKILL_CANDIDATE },
       at: '2026-09-26T00:00:01.000Z',
     },
     {
-      ...common, kind: 'prepared', sandbox: 'sandbox/s1', mechanical: true, champion: 'captured',
+      ...common,
+      kind: 'prepared',
+      sandbox: 'sandbox/s1',
+      mechanical: true,
+      champion: 'captured',
       skillContent: { name: 'verify', sha256: sha256Of(SKILL_CANDIDATE) },
       skillBaseline: { name: 'verify', sha256: sha256Of(P3_BASELINE) },
-      files: ['skills/verify/SKILL.md', 'champion/skills/verify/SKILL.md'], at: '2026-09-26T00:00:02.000Z',
+      files: ['skills/verify/SKILL.md', 'champion/skills/verify/SKILL.md'],
+      at: '2026-09-26T00:00:02.000Z',
     },
-    { ...common, kind: 'gated', gate: gateAnswers(['sandbox/s1/experiment-report.json']), at: '2026-09-26T00:00:03.000Z' },
+    {
+      ...common,
+      kind: 'gated',
+      gate: gateAnswers(['sandbox/s1/experiment-report.json']),
+      at: '2026-09-26T00:00:03.000Z',
+    },
     { ...common, kind: 'decided', decision: 'PROMOTE', approvalRef: 'approval:decide', at: '2026-09-26T00:00:04.000Z' },
     ...extra,
   ]
@@ -3615,15 +4389,22 @@ function decidedLines(extra: readonly Record<string, unknown>[] = []): Record<st
 /** One `commit_intent` line, as an apply commit writes it, with `over` replacing any member. */
 function intentLine(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    formatVersion: 4, kind: 'commit_intent', intentId: FORGED_INTENT, proposalId: 's1', direction: 'apply',
+    formatVersion: 4,
+    kind: 'commit_intent',
+    intentId: FORGED_INTENT,
+    proposalId: 's1',
+    direction: 'apply',
     approvalRef: 'approval:decide',
-    files: [{
-      target: FORGED_TARGET,
-      baselineSha256: sha256Of(P3_BASELINE),
-      contentSha256: sha256Of(SKILL_CANDIDATE),
-      source: CANDIDATE_SOURCE,
-    }],
-    actor: 'root-1', at: '2026-09-26T00:00:05.000Z',
+    files: [
+      {
+        target: FORGED_TARGET,
+        baselineSha256: sha256Of(P3_BASELINE),
+        contentSha256: sha256Of(SKILL_CANDIDATE),
+        source: CANDIDATE_SOURCE,
+      },
+    ],
+    actor: 'root-1',
+    at: '2026-09-26T00:00:05.000Z',
     ...over,
   }
 }
@@ -3641,20 +4422,32 @@ function intentFile(): Record<string, string> {
 /** The `applied` line that closes {@link intentLine}, as the commit writes it. */
 function appliedLine(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    formatVersion: 4, kind: 'applied', proposalId: 's1', targets: [FORGED_TARGET], approvalRef: 'approval:decide',
-    intentId: FORGED_INTENT, actor: 'root-1', at: '2026-09-26T00:00:06.000Z',
+    formatVersion: 4,
+    kind: 'applied',
+    proposalId: 's1',
+    targets: [FORGED_TARGET],
+    approvalRef: 'approval:decide',
+    intentId: FORGED_INTENT,
+    actor: 'root-1',
+    at: '2026-09-26T00:00:06.000Z',
     ...over,
   }
 }
 
 /** A ledger holding exactly `lines`, and a service over it. */
-async function ledgerFixture(lines: readonly Record<string, unknown>[]): Promise<{ svc: EvolutionService; root: string }> {
+async function ledgerFixture(
+  lines: readonly Record<string, unknown>[],
+): Promise<{ svc: EvolutionService; root: string }> {
   const dir = await mkdtemp(join(tmpdir(), 'evolution-commit-fold-'))
   const root = join(dir, 'evolution')
   await mkdir(root, { recursive: true })
   await writeFile(join(root, 'proposals.jsonl'), `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
   return {
-    svc: new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root, skillRoot: join(dir, 'skills') }),
+    svc: new EvolutionService(fixtureCtx(), {
+      modelSelection: () => FIXTURE_SELECTION,
+      root,
+      skillRoot: join(dir, 'skills'),
+    }),
     root,
   }
 }
@@ -3662,13 +4455,17 @@ async function ledgerFixture(lines: readonly Record<string, unknown>[]): Promise
 describe('K2: commit intents in the fold', () => {
   it('refuses a completion that closes no open intent, naming what it would have closed', async () => {
     const { svc, root } = await ledgerFixture(decidedLines([appliedLine()]))
-    const err = await svc.list().then(() => undefined, (error: Error) => error)
+    const err = await svc.list().then(
+      () => undefined,
+      (error: Error) => error,
+    )
     expect(String((err as Error).message)).toMatch(/closes no open commit intent/)
     // Refused at load: the bytes stay exactly as written, and a second instance
     // reaches the same verdict.
     expect((await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n')).toHaveLength(6)
-    await expect(reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot: svc.skillRoot }).list())
-      .rejects.toThrow(/closes no open commit intent/)
+    await expect(
+      reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot: svc.skillRoot }).list(),
+    ).rejects.toThrow(/closes no open commit intent/)
   })
 
   it('refuses a completion that carries no intentId at all', async () => {
@@ -3681,18 +4478,24 @@ describe('K2: commit intents in the fold', () => {
   it.each([
     ['another intent id', appliedLine({ intentId: 's1/apply-again' }), /but the open intent of that proposal is/],
     ['another approval', appliedLine({ approvalRef: 'approval:somebody-else' }), /not the approval the open intent/],
-    ['another target', appliedLine({ targets: ['/production/skills/other/SKILL.md'] }), /but the open intent .* commits/],
+    [
+      'another target',
+      appliedLine({ targets: ['/production/skills/other/SKILL.md'] }),
+      /but the open intent .* commits/,
+    ],
   ])('refuses a completion that closes its intent with %s', async (_label, line, expected) => {
     const { svc } = await ledgerFixture(decidedLines([intentLine(), line]))
     await expect(svc.list()).rejects.toThrow(expected as RegExp)
   })
 
   it('refuses a rolledback record that closes no open intent — the apply completion already closed it', async () => {
-    const { svc } = await ledgerFixture(decidedLines([
-      intentLine(),
-      appliedLine(),
-      { ...appliedLine(), kind: 'rolledback', intentId: 's1/rollback', at: '2026-09-26T00:00:07.000Z' },
-    ]))
+    const { svc } = await ledgerFixture(
+      decidedLines([
+        intentLine(),
+        appliedLine(),
+        { ...appliedLine(), kind: 'rolledback', intentId: 's1/rollback', at: '2026-09-26T00:00:07.000Z' },
+      ]),
+    )
     await expect(svc.list()).rejects.toThrow(/closes no open commit intent/)
   })
 
@@ -3708,23 +4511,45 @@ describe('K2: commit intents in the fold', () => {
 
   it.each([
     ['apply', 'decided', ['proposed', 'candidate', 'prepared', 'gated'], /needs proposal "s1" to be decided/],
-    ['rollback', 'applied', ['proposed', 'candidate', 'prepared', 'gated', 'decided'], /needs proposal "s1" to be applied/],
+    [
+      'rollback',
+      'applied',
+      ['proposed', 'candidate', 'prepared', 'gated', 'decided'],
+      /needs proposal "s1" to be applied/,
+    ],
   ] as const)('requires the state a %s intent commits (%s)', async (direction, _state, kinds, expected) => {
     const lines = decidedLines().slice(0, kinds.length)
-    const intent = direction === 'apply'
-      ? intentLine({ at: '2026-09-26T00:00:05.000Z' })
-      : intentLine({ intentId: 's1/rollback', direction: 'rollback', at: '2026-09-26T00:00:05.000Z' })
+    const intent =
+      direction === 'apply'
+        ? intentLine({ at: '2026-09-26T00:00:05.000Z' })
+        : intentLine({ intentId: 's1/rollback', direction: 'rollback', at: '2026-09-26T00:00:05.000Z' })
     const { svc } = await ledgerFixture([...lines, intent])
     await expect(svc.list()).rejects.toThrow(expected as RegExp)
   })
 
   it.each([
     ['no source', { files: [{ ...intentFile(), source: undefined }] }, /file 0 has no source/],
-    ['a digest that is not a digest', { files: [{ ...intentFile(), baselineSha256: 'not-a-digest' }] }, /file 0 has no valid baselineSha256/],
+    [
+      'a digest that is not a digest',
+      { files: [{ ...intentFile(), baselineSha256: 'not-a-digest' }] },
+      /file 0 has no valid baselineSha256/,
+    ],
     ['a direction this build has no commit for', { direction: 'revert' }, /declares direction "revert"/],
-    ['a relative target', { files: [{ ...intentFile(), target: 'skills/verify/SKILL.md' }] }, /an intent names the absolute production paths/],
-    ['a file that is not the object', { files: [{ ...intentFile(), target: '/production/skills/verify/README.md' }] }, /the file set of one skill object is ordered and fixed/],
-    ['a sidecar of another directory', { files: [intentFile(), { ...intentFile(), target: '/production/skills/other/SKILL.contract.json' }] }, /the files of one skill object live in one directory/],
+    [
+      'a relative target',
+      { files: [{ ...intentFile(), target: 'skills/verify/SKILL.md' }] },
+      /an intent names the absolute production paths/,
+    ],
+    [
+      'a file that is not the object',
+      { files: [{ ...intentFile(), target: '/production/skills/verify/README.md' }] },
+      /the file set of one skill object is ordered and fixed/,
+    ],
+    [
+      'a sidecar of another directory',
+      { files: [intentFile(), { ...intentFile(), target: '/production/skills/other/SKILL.contract.json' }] },
+      /the files of one skill object live in one directory/,
+    ],
     ['three files', { files: [intentFile(), intentFile(), intentFile()] }, /a fixed file set of one or two files/],
     ['no file list at all', { files: [] }, /a fixed file set of one or two files/],
   ])('refuses a commit intent with %s', async (_label, over, expected) => {
@@ -3732,17 +4557,28 @@ describe('K2: commit intents in the fold', () => {
     await expect(svc.list()).rejects.toThrow(expected as RegExp)
   })
 
-  it('folds an open intent back as the proposal\'s own openIntent, and clears it at the completion', async () => {
+  it("folds an open intent back as the proposal's own openIntent, and clears it at the completion", async () => {
     const open = await ledgerFixture(decidedLines([intentLine()]))
     const proposal = await open.svc.get('s1')
     expect(proposal.status).toBe('decided')
     expect(proposal.openIntent).toEqual({
-      intentId: FORGED_INTENT, proposalId: 's1', direction: 'apply', approvalRef: 'approval:decide',
-      files: [intentFile()], actor: 'root-1', at: '2026-09-26T00:00:05.000Z',
+      intentId: FORGED_INTENT,
+      proposalId: 's1',
+      direction: 'apply',
+      approvalRef: 'approval:decide',
+      files: [intentFile()],
+      actor: 'root-1',
+      at: '2026-09-26T00:00:05.000Z',
     })
     // A commit intent is not a lifecycle transition: the history is the one the
     // lifecycle records wrote.
-    expect(proposal.history.map(entry => entry.status)).toEqual(['proposed', 'candidate', 'prepared', 'gated', 'decided'])
+    expect(proposal.history.map(entry => entry.status)).toEqual([
+      'proposed',
+      'candidate',
+      'prepared',
+      'gated',
+      'decided',
+    ])
     expect((await open.svc.list())[0]!.openIntent?.intentId).toBe(FORGED_INTENT)
     expect(await open.svc.openIntentTargets()).toEqual([FORGED_TARGET])
 
@@ -3765,8 +4601,18 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     expect(outcome.targets).toEqual([target])
     expect(await readFile(target)).toEqual(Buffer.from(SKILL_CANDIDATE, 'utf8'))
     expect(await ledgerKinds(root)).toEqual([
-      'proposed', 'candidate', 'prepared', 'experiment_started', 'experiment_sample', 'experiment_sample', 'experiment_sample',
-      'experiment_sample', 'gated', 'decided', 'commit_intent', 'applied',
+      'proposed',
+      'candidate',
+      'prepared',
+      'experiment_started',
+      'experiment_sample',
+      'experiment_sample',
+      'experiment_sample',
+      'experiment_sample',
+      'gated',
+      'decided',
+      'commit_intent',
+      'applied',
     ])
     const intent = (await ledgerLinesOf(root)).find(line => line.kind === 'commit_intent')!
     expect(intent).toMatchObject({
@@ -3774,12 +4620,14 @@ describe('K2: the commit — intent, atomic write, completion', () => {
       proposalId: 's1',
       direction: 'apply',
       approvalRef: 'approval:call-1',
-      files: [{
-        target,
-        baselineSha256: sha256Of(P3_BASELINE),
-        contentSha256: sha256Of(SKILL_CANDIDATE),
-        source: CANDIDATE_SOURCE,
-      }],
+      files: [
+        {
+          target,
+          baselineSha256: sha256Of(P3_BASELINE),
+          contentSha256: sha256Of(SKILL_CANDIDATE),
+          source: CANDIDATE_SOURCE,
+        },
+      ],
       actor: 'root-1',
     })
     const applied = (await ledgerLinesOf(root)).find(line => line.kind === 'applied')!
@@ -3806,15 +4654,19 @@ describe('K2: the commit — intent, atomic write, completion', () => {
       intentId: 's1/rollback',
       direction: 'rollback',
       approvalRef: 'approval:call-2',
-      files: [{
-        target,
-        baselineSha256: sha256Of(SKILL_CANDIDATE),
-        contentSha256: sha256Of(P3_BASELINE),
-        source: CHAMPION_SOURCE,
-      }],
+      files: [
+        {
+          target,
+          baselineSha256: sha256Of(SKILL_CANDIDATE),
+          contentSha256: sha256Of(P3_BASELINE),
+          source: CHAMPION_SOURCE,
+        },
+      ],
     })
     expect((await ledgerLinesOf(root)).find(line => line.kind === 'rolledback')).toMatchObject({
-      intentId: 's1/rollback', targets: [target], approvalRef: 'approval:call-2',
+      intentId: 's1/rollback',
+      targets: [target],
+      approvalRef: 'approval:call-2',
     })
   })
 
@@ -3824,8 +4676,9 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     await writeFile(COMMIT_TARGET(skillRoot), '# a later writer moved this target\n')
 
-    await expect(svc.rollback('s1', 'root-1', 'approval:call-2'))
-      .rejects.toThrow(/does not hold the content proposal "s1" applied/)
+    await expect(svc.rollback('s1', 'root-1', 'approval:call-2')).rejects.toThrow(
+      /does not hold the content proposal "s1" applied/,
+    )
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).toBe('# a later writer moved this target\n')
     expect(await svc.openIntentTargets()).toEqual([])
@@ -3837,7 +4690,9 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     await writeFile(join(root, CHAMPION_SOURCE), '# the snapshot was damaged\n')
 
-    await expect(svc.rollback('s1', 'root-1', 'approval:call-2')).rejects.toThrow(/champion snapshot .* no longer hashes/)
+    await expect(svc.rollback('s1', 'root-1', 'approval:call-2')).rejects.toThrow(
+      /champion snapshot .* no longer hashes/,
+    )
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect(await readFile(COMMIT_TARGET(skillRoot))).toEqual(Buffer.from(SKILL_CANDIDATE, 'utf8'))
     expect(await svc.openIntentTargets()).toEqual([])
@@ -3856,8 +4711,9 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     // s1's rollback would restore a baseline on top of a version newer than the
     // one it is undoing: it stops by name, writes nothing and records no intent.
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
-    await expect(svc.rollback('s1', 'root-1', 'approval:call-3'))
-      .rejects.toThrow(/does not hold the content proposal "s1" applied/)
+    await expect(svc.rollback('s1', 'root-1', 'approval:call-3')).rejects.toThrow(
+      /does not hold the content proposal "s1" applied/,
+    )
     expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(P3_CANDIDATE_B)
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect((await svc.get('s1')).status).toBe('applied')
@@ -3880,7 +4736,7 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     expect(await svc.openIntentTargets()).toEqual([])
   })
 
-  it('refuses a second apply on a target another proposal\'s open intent names, and admits one once that intent is settled', async () => {
+  it("refuses a second apply on a target another proposal's open intent names, and admits one once that intent is settled", async () => {
     const fixture = await decidedSkillFixture(P3_CANDIDATE_A)
     const { svc, root, skillRoot } = fixture
     const target = COMMIT_TARGET(skillRoot)
@@ -3892,8 +4748,9 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     expect((await svc.get('s2')).prepared!.skillBaseline!.sha256).toBe(baselineSha256)
 
     const crashing = reopenWithProbe(svc, fixture, 'intent-recorded')
-    expect(await refusalOf(crashing.apply('s1', 'root-1', 'approval:call-1')))
-      .toContain('in-process probe throw after intent-recorded')
+    expect(await refusalOf(crashing.apply('s1', 'root-1', 'approval:call-1'))).toContain(
+      'in-process probe throw after intent-recorded',
+    )
     const reopened = reopenWithProbe(svc, fixture)
     const interrupted = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     expect(await readFile(target)).toEqual(Buffer.from(P3_BASELINE, 'utf8'))
@@ -3903,7 +4760,7 @@ describe('K2: the commit — intent, atomic write, completion', () => {
 
     // The second commit is refused by name, before it reads or moves anything.
     const refusal = await refusalOf(reopened.apply('s2', 'root-1', 'approval:call-2'))
-    expect(refusal).toContain('another proposal\'s unsettled intent')
+    expect(refusal).toContain("another proposal's unsettled intent")
     expect(refusal).toContain(dirname(target))
     expect(refusal).toContain('s1/apply')
     expect(refusal).toContain('"s1"')
@@ -3934,7 +4791,7 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     expect((await reopened.get('s3')).status).toBe('applied')
   })
 
-  it('refuses a rollback on a target another proposal\'s open intent names, leaving production and the ledger untouched', async () => {
+  it("refuses a rollback on a target another proposal's open intent names, leaving production and the ledger untouched", async () => {
     const fixture = await decidedSkillFixture(P3_CANDIDATE_A)
     const { svc, root, skillRoot } = fixture
     const target = COMMIT_TARGET(skillRoot)
@@ -3945,8 +4802,9 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     await walkSkillToDecided(svc, 's2', P3_CANDIDATE_B)
 
     const crashing = reopenWithProbe(svc, fixture, 'intent-recorded')
-    expect(await refusalOf(crashing.apply('s2', 'root-1', 'approval:call-2')))
-      .toContain('in-process probe throw after intent-recorded')
+    expect(await refusalOf(crashing.apply('s2', 'root-1', 'approval:call-2'))).toContain(
+      'in-process probe throw after intent-recorded',
+    )
     const reopened = reopenWithProbe(svc, fixture)
     const interrupted = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     expect(await readFile(target)).toEqual(Buffer.from(P3_CANDIDATE_A, 'utf8'))
@@ -3954,7 +4812,7 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     expect(await reopened.openIntentTargets()).toEqual([target])
 
     const refusal = await refusalOf(reopened.rollback('s1', 'root-1', 'approval:call-3'))
-    expect(refusal).toContain('another proposal\'s unsettled intent')
+    expect(refusal).toContain("another proposal's unsettled intent")
     expect(refusal).toContain(dirname(target))
     expect(refusal).toContain('s2/apply')
     expect(refusal).toContain('"s2"')
@@ -3999,10 +4857,15 @@ describe('K2: recovery — an interruption between two durable writes leaves one
     const pinned = (await stat(target)).mtimeMs
 
     const outcomes = await reopened.reconcile()
-    expect(outcomes).toEqual([{
-      intentId: 's1/apply', proposalId: 's1', direction: 'apply', targets: [target],
-      result: stage === 'write-renamed' ? 'completed-written' : 'completed-redone',
-    }])
+    expect(outcomes).toEqual([
+      {
+        intentId: 's1/apply',
+        proposalId: 's1',
+        direction: 'apply',
+        targets: [target],
+        result: stage === 'write-renamed' ? 'completed-written' : 'completed-redone',
+      },
+    ])
     expect(await readFile(target)).toEqual(Buffer.from(SKILL_CANDIDATE, 'utf8'))
     if (stage === 'write-renamed') expect((await stat(target)).mtimeMs).toBe(pinned)
     else expect((await stat(target)).mtimeMs).not.toBe(pinned)
@@ -4028,10 +4891,15 @@ describe('K2: recovery — an interruption between two durable writes leaves one
     expect(await readFile(target, 'utf8')).toBe(stage === 'write-renamed' ? P3_BASELINE : SKILL_CANDIDATE)
 
     const outcomes = await reopened.reconcile()
-    expect(outcomes).toEqual([{
-      intentId: 's1/rollback', proposalId: 's1', direction: 'rollback', targets: [target],
-      result: stage === 'write-renamed' ? 'completed-written' : 'completed-redone',
-    }])
+    expect(outcomes).toEqual([
+      {
+        intentId: 's1/rollback',
+        proposalId: 's1',
+        direction: 'rollback',
+        targets: [target],
+        result: stage === 'write-renamed' ? 'completed-written' : 'completed-redone',
+      },
+    ])
     expect(await readFile(target)).toEqual(Buffer.from(P3_BASELINE, 'utf8'))
     const settled = await ledgerKinds(root)
     expect(settled.filter(kind => kind === 'rolledback')).toHaveLength(1)
@@ -4108,9 +4976,13 @@ describe('K2: recovery — an interruption between two durable writes leaves one
     expect((await reopened.reconcile()).map(outcome => outcome.result)).toEqual(['completed-redone'])
 
     const settled = await readFile(join(root, 'proposals.jsonl'), 'utf8')
-    await expect(reopened.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('is applied; cannot record "applied"')
+    await expect(reopened.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(
+      'is applied; cannot record "applied"',
+    )
     await expect(reopened.rollback('s1', 'root-1', 'approval:call-2')).resolves.toBeDefined()
-    await expect(reopened.rollback('s1', 'root-1', 'approval:call-3')).rejects.toThrow('is rolledback; cannot record "rolledback"')
+    await expect(reopened.rollback('s1', 'root-1', 'approval:call-3')).rejects.toThrow(
+      'is rolledback; cannot record "rolledback"',
+    )
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).not.toBe(settled)
     expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
     expect((await ledgerKinds(root)).filter(kind => kind === 'rolledback')).toHaveLength(1)
@@ -4118,37 +4990,47 @@ describe('K2: recovery — an interruption between two durable writes leaves one
 })
 
 describe('K2: a source that is gone, or a target a third party touched, stops the commit by name', () => {
-  it.each(['apply', 'rollback'] as const)('blocks a %s whose target a third party rewrote, leaving the intent open and nothing written', async direction => {
-    const fixture = await decidedSkillFixture()
-    if (direction === 'rollback') await fixture.svc.apply('s1', 'root-1', 'approval:call-1')
-    const { root, skillRoot } = fixture
-    const crashing = reopenWithProbe(fixture.svc, fixture, 'intent-recorded')
-    await refusalOf(
-      direction === 'apply'
-        ? crashing.apply('s1', 'root-1', 'approval:call-1')
-        : crashing.rollback('s1', 'root-1', 'approval:call-2'),
-    )
-    const reopened = reopenWithProbe(fixture.svc, fixture)
-    const target = COMMIT_TARGET(skillRoot)
-    await writeFile(target, '# a third party rewrote production\n')
-    const bytes = await readFile(join(root, 'proposals.jsonl'), 'utf8')
+  it.each(['apply', 'rollback'] as const)(
+    'blocks a %s whose target a third party rewrote, leaving the intent open and nothing written',
+    async direction => {
+      const fixture = await decidedSkillFixture()
+      if (direction === 'rollback') await fixture.svc.apply('s1', 'root-1', 'approval:call-1')
+      const { root, skillRoot } = fixture
+      const crashing = reopenWithProbe(fixture.svc, fixture, 'intent-recorded')
+      await refusalOf(
+        direction === 'apply'
+          ? crashing.apply('s1', 'root-1', 'approval:call-1')
+          : crashing.rollback('s1', 'root-1', 'approval:call-2'),
+      )
+      const reopened = reopenWithProbe(fixture.svc, fixture)
+      const target = COMMIT_TARGET(skillRoot)
+      await writeFile(target, '# a third party rewrote production\n')
+      const bytes = await readFile(join(root, 'proposals.jsonl'), 'utf8')
 
-    const outcomes = await reopened.reconcile()
-    expect(outcomes).toHaveLength(1)
-    expect(outcomes[0]).toMatchObject({ intentId: `s1/${direction}`, proposalId: 's1', direction, targets: [target], result: 'blocked' })
-    expect(outcomes[0]!.detail).toMatch(/a third party changed it/)
-    expect(outcomes[0]!.detail).toMatch(/the intent stays open/)
-    expect(await readFile(target, 'utf8')).toBe('# a third party rewrote production\n')
-    expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(bytes)
-    // The intent is still there, so a loader that refuses while it is open keeps
-    // refusing, and the retry that names it gets the same stop thrown.
-    expect((await reopened.get('s1')).openIntent?.intentId).toBe(`s1/${direction}`)
-    expect(await reopened.openIntentTargets()).toEqual([target])
-    const retry = direction === 'apply'
-      ? reopened.apply('s1', 'root-1', 'approval:call-1')
-      : reopened.rollback('s1', 'root-1', 'approval:call-2')
-    await expect(retry).rejects.toThrow(/a third party changed it/)
-  })
+      const outcomes = await reopened.reconcile()
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]).toMatchObject({
+        intentId: `s1/${direction}`,
+        proposalId: 's1',
+        direction,
+        targets: [target],
+        result: 'blocked',
+      })
+      expect(outcomes[0]!.detail).toMatch(/a third party changed it/)
+      expect(outcomes[0]!.detail).toMatch(/the intent stays open/)
+      expect(await readFile(target, 'utf8')).toBe('# a third party rewrote production\n')
+      expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(bytes)
+      // The intent is still there, so a loader that refuses while it is open keeps
+      // refusing, and the retry that names it gets the same stop thrown.
+      expect((await reopened.get('s1')).openIntent?.intentId).toBe(`s1/${direction}`)
+      expect(await reopened.openIntentTargets()).toEqual([target])
+      const retry =
+        direction === 'apply'
+          ? reopened.apply('s1', 'root-1', 'approval:call-1')
+          : reopened.rollback('s1', 'root-1', 'approval:call-2')
+      await expect(retry).rejects.toThrow(/a third party changed it/)
+    },
+  )
 
   it.each(['apply', 'rollback'] as const)('blocks a %s whose recoverable source is gone', async direction => {
     const fixture = await decidedSkillFixture()
@@ -4244,8 +5126,10 @@ describe('K2: a real write failure is not a mock — the intent stays open and r
  * together.                                                            *
  * ------------------------------------------------------------------ */
 
-const SKILL_DIR = (root: string, proposalId = 's1', name = 'verify') => join(root, 'sandbox', proposalId, 'skills', name)
-const CHAMPION_DIR = (root: string, proposalId = 's1', name = 'verify') => join(root, 'sandbox', proposalId, 'champion', 'skills', name)
+const SKILL_DIR = (root: string, proposalId = 's1', name = 'verify') =>
+  join(root, 'sandbox', proposalId, 'skills', name)
+const CHAMPION_DIR = (root: string, proposalId = 's1', name = 'verify') =>
+  join(root, 'sandbox', proposalId, 'champion', 'skills', name)
 const SIDECAR_TARGET = (skillRoot: string, name = 'verify') => join(skillRoot, name, SKILL_SIDECAR_FILE)
 const SIDECAR_CANDIDATE_SOURCE = 'sandbox/s1/skills/verify/SKILL.contract.json'
 const SIDECAR_CHAMPION_SOURCE = 'sandbox/s1/champion/skills/verify/SKILL.contract.json'
@@ -4257,7 +5141,9 @@ function declaredSidecar(text: string): Record<string, any> {
 
 /** The candidate sidecar the derivation produces: the production declaration with only its content digest moved. */
 function derivedSidecar(productionSidecarText: string, candidateSkillMd: string): string {
-  return serializeSkillSidecar(sidecarWithSkillMd(declaredSidecar(productionSidecarText) as never, sha256Of(candidateSkillMd)))
+  return serializeSkillSidecar(
+    sidecarWithSkillMd(declaredSidecar(productionSidecarText) as never, sha256Of(candidateSkillMd)),
+  )
 }
 
 /** The policy-bearing statements of a sidecar, for the "only the digest moves" assertions. */
@@ -4288,12 +5174,14 @@ async function productionExecutionObject(skillRoot: string, content: string, sha
 }
 
 /** A production fixture walked to decided(PROMOTE) over an execution object; `probe` opens an interrupt window. */
-async function executionDecidedFixture(options: {
-  production?: string
-  candidate?: string
-  shape?: SkillShape
-  probe?: (stage: CommitStage, target?: string) => void
-} = {}) {
+async function executionDecidedFixture(
+  options: {
+    production?: string
+    candidate?: string
+    shape?: SkillShape
+    probe?: (stage: CommitStage, target?: string) => void
+  } = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), 'evolution-object-'))
   const root = join(dir, 'evolution')
   const skillRoot = join(dir, 'skills')
@@ -4326,12 +5214,17 @@ function reopenWithObjectProbe(
 }
 
 /** A probe that throws at one stage, optionally only for the file the test names. */
-function crashAtObject(stage: CommitStage, forFile?: 'skillMd' | 'sidecar'): (seen: CommitStage, target?: string) => void {
+function crashAtObject(
+  stage: CommitStage,
+  forFile?: 'skillMd' | 'sidecar',
+): (seen: CommitStage, target?: string) => void {
   const wanted = forFile === undefined ? undefined : forFile === 'skillMd' ? 'SKILL.md' : SKILL_SIDECAR_FILE
   return (seen, target) => {
     if (seen !== stage) return
     if (wanted !== undefined && !(target ?? '').endsWith(wanted)) return
-    throw new Error(`in-process probe throw after ${seen}${target === undefined ? '' : ` for ${target}`} — a throw, not a process exit`)
+    throw new Error(
+      `in-process probe throw after ${seen}${target === undefined ? '' : ` for ${target}`} — a throw, not a process exit`,
+    )
   }
 }
 
@@ -4368,8 +5261,10 @@ describe('K3: prepare freezes the whole skill object', () => {
         },
       },
       files: [
-        'skills/verify/SKILL.md', `skills/verify/${SKILL_SIDECAR_FILE}`,
-        'champion/skills/verify/SKILL.md', `champion/skills/verify/${SKILL_SIDECAR_FILE}`,
+        'skills/verify/SKILL.md',
+        `skills/verify/${SKILL_SIDECAR_FILE}`,
+        'champion/skills/verify/SKILL.md',
+        `champion/skills/verify/${SKILL_SIDECAR_FILE}`,
       ],
     })
 
@@ -4389,7 +5284,9 @@ describe('K3: prepare freezes the whole skill object', () => {
 
   it('refuses a production knowledge sidecar by name, writing nothing', async () => {
     const { svc, root, skillRoot } = await serviceWithProduction()
-    await writeSkillDirectory(join(skillRoot, 'verify'), 'verify', skillText('# knowledge production skill'), { sidecar: 'knowledge' })
+    await writeSkillDirectory(join(skillRoot, 'verify'), 'verify', skillText('# knowledge production skill'), {
+      sidecar: 'knowledge',
+    })
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('# candidate') })
 
@@ -4406,20 +5303,27 @@ describe('K3: prepare freezes the whole skill object', () => {
     await mkdir(join(directory, 'references'), { recursive: true })
     await writeFile(join(directory, 'references', 'notes.md'), 'the declared resource\n')
     await writeFile(join(directory, 'SKILL.md'), content)
-    await writeFile(join(directory, SKILL_SIDECAR_FILE), `${JSON.stringify({
-      contractVersion: 1,
-      type: 'execution',
-      capabilities: [PROMOTION_ROW],
-      precondition: 'the fixture skill is installed where discovery looks',
-      inputs: [],
-      outputs: [],
-      requiredTools: ['bash'],
-      verifier: { ref: 'command' },
-      content: {
-        skillMdSha256: sha256Of(content),
-        resources: [{ path: 'references/notes.md', sha256: sha256Of('the declared resource\n') }],
-      },
-    }, null, 2)}\n`)
+    await writeFile(
+      join(directory, SKILL_SIDECAR_FILE),
+      `${JSON.stringify(
+        {
+          contractVersion: 1,
+          type: 'execution',
+          capabilities: [PROMOTION_ROW],
+          precondition: 'the fixture skill is installed where discovery looks',
+          inputs: [],
+          outputs: [],
+          requiredTools: ['bash'],
+          verifier: { ref: 'command' },
+          content: {
+            skillMdSha256: sha256Of(content),
+            resources: [{ path: 'references/notes.md', sha256: sha256Of('the declared resource\n') }],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    )
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('# candidate') })
 
@@ -4445,17 +5349,24 @@ describe('K3: prepare freezes the whole skill object', () => {
 
     // The other direction: the declaration no longer covers the bytes.
     await rm(join(skillRoot, 'verify', 'notes.txt'))
-    await writeFile(SIDECAR_TARGET(skillRoot), `${JSON.stringify({
-      contractVersion: 1,
-      type: 'execution',
-      capabilities: [PROMOTION_ROW],
-      precondition: 'the fixture skill is installed where discovery looks',
-      inputs: [],
-      outputs: [],
-      requiredTools: ['bash'],
-      verifier: { ref: 'command' },
-      content: { skillMdSha256: sha256Of(skillText('# another skill entirely')), resources: [] },
-    }, null, 2)}\n`)
+    await writeFile(
+      SIDECAR_TARGET(skillRoot),
+      `${JSON.stringify(
+        {
+          contractVersion: 1,
+          type: 'execution',
+          capabilities: [PROMOTION_ROW],
+          precondition: 'the fixture skill is installed where discovery looks',
+          inputs: [],
+          outputs: [],
+          requiredTools: ['bash'],
+          verifier: { ref: 'command' },
+          content: { skillMdSha256: sha256Of(skillText('# another skill entirely')), resources: [] },
+        },
+        null,
+        2,
+      )}\n`,
+    )
     const drifted = await refusalOf(svc.prepare('s1', 'root-1'))
     expect(drifted).toContain('is not the loadable object its files claim')
     expect(drifted).toContain('SKILL.md is not the declared content')
@@ -4488,9 +5399,10 @@ describe('K3: P2 and P3 hold the whole object', () => {
       const fixture = await executionDecidedFixture()
       const { svc, root, skillRoot } = fixture
       const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
-      const moved = file === 'SKILL.md'
-        ? skillText('# the candidate SKILL.md moved after prepare')
-        : derivedSidecar(fixture.productionSidecar, skillText('# a sidecar derived from other bytes'))
+      const moved =
+        file === 'SKILL.md'
+          ? skillText('# the candidate SKILL.md moved after prepare')
+          : derivedSidecar(fixture.productionSidecar, skillText('# a sidecar derived from other bytes'))
       await writeFile(join(SKILL_DIR(root), file), moved)
 
       const refusal = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
@@ -4550,10 +5462,13 @@ describe('K3: P2 and P3 hold the whole object', () => {
     const { svc, root, skillRoot } = fixture
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     const declared = declaredSidecar(fixture.productionSidecar)
-    await writeFile(SIDECAR_TARGET(skillRoot), serializeSkillSidecar({
-      ...declared,
-      requiredTools: [...declared.requiredTools, 'job_output'],
-    } as never))
+    await writeFile(
+      SIDECAR_TARGET(skillRoot),
+      serializeSkillSidecar({
+        ...declared,
+        requiredTools: [...declared.requiredTools, 'job_output'],
+      } as never),
+    )
 
     const refusal = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
     expect(refusal).toContain('sidecar')
@@ -4573,8 +5488,9 @@ describe('K3: P2 and P3 hold the whole object', () => {
       capabilities: [PROMOTION_ROW],
       requiredTools: ['bash'],
     })
-    expect(await refusalOf(guidance.svc.apply('s1', 'root-1', 'approval:call-1')))
-      .toContain('now carries a SKILL.contract.json the baseline prepare recorded did not have')
+    expect(await refusalOf(guidance.svc.apply('s1', 'root-1', 'approval:call-1'))).toContain(
+      'now carries a SKILL.contract.json the baseline prepare recorded did not have',
+    )
     expect(await readFile(join(guidance.root, 'proposals.jsonl'), 'utf8')).toBe(sidecarBefore)
   })
 
@@ -4586,7 +5502,10 @@ describe('K3: P2 and P3 hold the whole object', () => {
     const { svc, root, skillRoot } = fixture
     const championSidecar = join(CHAMPION_DIR(root), SKILL_SIDECAR_FILE)
     const beforePromotion = await readFile(join(root, 'proposals.jsonl'), 'utf8')
-    await writeFile(championSidecar, derivedSidecar(fixture.productionSidecar, skillText('# a sidecar derived from other bytes')))
+    await writeFile(
+      championSidecar,
+      derivedSidecar(fixture.productionSidecar, skillText('# a sidecar derived from other bytes')),
+    )
     const promotionRefusal = await refusalOf(svc.checkPromotion('s1'))
     expect(promotionRefusal).toContain('no longer holds the sidecar bytes prepare recorded')
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(beforePromotion)
@@ -4604,7 +5523,9 @@ describe('K3: P2 and P3 hold the whole object', () => {
     expect(rollbackRefusal).toContain(SKILL_SIDECAR_FILE)
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(beforeRollback)
     expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).toBe(fixture.candidate)
-    expect(await readFile(SIDECAR_TARGET(skillRoot), 'utf8')).toBe(derivedSidecar(fixture.productionSidecar, fixture.candidate))
+    expect(await readFile(SIDECAR_TARGET(skillRoot), 'utf8')).toBe(
+      derivedSidecar(fixture.productionSidecar, fixture.candidate),
+    )
     expect(await svc.openIntentTargets()).toEqual([])
   })
 })
@@ -4704,7 +5625,12 @@ describe('K3: the two-file commit', () => {
 
     const intent = (await ledgerLinesOf(root)).find(line => line.kind === 'commit_intent')!
     expect(intent.files).toEqual([
-      { target: skillTarget, baselineSha256: sha256Of(production), contentSha256: sha256Of(candidate), source: CANDIDATE_SOURCE },
+      {
+        target: skillTarget,
+        baselineSha256: sha256Of(production),
+        contentSha256: sha256Of(candidate),
+        source: CANDIDATE_SOURCE,
+      },
       {
         target: sidecarTarget,
         baselineSha256: sha256Of(productionSidecar),
@@ -4723,8 +5649,14 @@ describe('K3: the two-file commit', () => {
     expect(await readFile(skillTarget, 'utf8')).toBe(production)
     expect(await readFile(sidecarTarget, 'utf8')).toBe(productionSidecar)
     const rollbackIntent = (await ledgerLinesOf(root)).filter(line => line.kind === 'commit_intent')[1]!
-    expect(rollbackIntent.files.map((file: { source: string }) => file.source)).toEqual([CHAMPION_SOURCE, SIDECAR_CHAMPION_SOURCE])
-    expect((await ledgerLinesOf(root)).find(line => line.kind === 'rolledback')!.targets).toEqual([skillTarget, sidecarTarget])
+    expect(rollbackIntent.files.map((file: { source: string }) => file.source)).toEqual([
+      CHAMPION_SOURCE,
+      SIDECAR_CHAMPION_SOURCE,
+    ])
+    expect((await ledgerLinesOf(root)).find(line => line.kind === 'rolledback')!.targets).toEqual([
+      skillTarget,
+      sidecarTarget,
+    ])
     expect(await svc.openIntentTargets()).toEqual([])
   })
 
@@ -4733,7 +5665,10 @@ describe('K3: the two-file commit', () => {
     const { svc, root, skillRoot, production } = fixture
     await svc.apply('s1', 'root-1', 'approval:call-1')
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
-    await writeFile(SIDECAR_TARGET(skillRoot), derivedSidecar(fixture.productionSidecar, skillText('# a third party rewrote the sidecar')))
+    await writeFile(
+      SIDECAR_TARGET(skillRoot),
+      derivedSidecar(fixture.productionSidecar, skillText('# a third party rewrote the sidecar')),
+    )
 
     const refusal = await refusalOf(svc.rollback('s1', 'root-1', 'approval:call-2'))
     expect(refusal).toContain('does not hold the content proposal "s1" applied')
@@ -4774,26 +5709,31 @@ describe('K3: the two-file commit', () => {
     // After the *second* rename every file is in place: only the record is missing.
     ['write-renamed', 'sidecar', 'completed-written'],
     ['commit-verified', undefined, 'completed-written'],
-  ] as const)('settles an apply interrupted after %s%s with both files and one completion row', async (stage, forFile, expected) => {
-    const fixture = await executionDecidedFixture()
-    const { svc, root, skillRoot, candidate, productionSidecar } = fixture
-    const crashing = reopenWithObjectProbe(svc, fixture, crashAtObject(stage, forFile))
-    expect(await refusalOf(crashing.apply('s1', 'root-1', 'approval:call-1'))).toContain(`in-process probe throw after ${stage}`)
-    const reopened = reopenWithObjectProbe(svc, fixture)
-    expect((await ledgerKinds(root)).at(-1)).toBe('commit_intent')
+  ] as const)(
+    'settles an apply interrupted after %s%s with both files and one completion row',
+    async (stage, forFile, expected) => {
+      const fixture = await executionDecidedFixture()
+      const { svc, root, skillRoot, candidate, productionSidecar } = fixture
+      const crashing = reopenWithObjectProbe(svc, fixture, crashAtObject(stage, forFile))
+      expect(await refusalOf(crashing.apply('s1', 'root-1', 'approval:call-1'))).toContain(
+        `in-process probe throw after ${stage}`,
+      )
+      const reopened = reopenWithObjectProbe(svc, fixture)
+      expect((await ledgerKinds(root)).at(-1)).toBe('commit_intent')
 
-    const outcomes = await reopened.reconcile()
-    expect(outcomes).toHaveLength(1)
-    expect(outcomes[0]!.targets).toEqual([COMMIT_TARGET(skillRoot), SIDECAR_TARGET(skillRoot)])
-    expect(outcomes[0]!.result).toBe(expected)
-    expect(await readFile(SIDECAR_TARGET(skillRoot), 'utf8')).toBe(derivedSidecar(productionSidecar, candidate))
-    expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).toBe(candidate)
-    const settledKinds = await ledgerKinds(root)
-    expect(settledKinds.filter(kind => kind === 'applied')).toHaveLength(1)
-    const applied = (await ledgerLinesOf(root)).find(line => line.kind === 'applied')!
-    expect(applied.targets).toEqual([COMMIT_TARGET(skillRoot), SIDECAR_TARGET(skillRoot)])
-    expect((await reopened.get('s1')).openIntent).toBeUndefined()
-  })
+      const outcomes = await reopened.reconcile()
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]!.targets).toEqual([COMMIT_TARGET(skillRoot), SIDECAR_TARGET(skillRoot)])
+      expect(outcomes[0]!.result).toBe(expected)
+      expect(await readFile(SIDECAR_TARGET(skillRoot), 'utf8')).toBe(derivedSidecar(productionSidecar, candidate))
+      expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).toBe(candidate)
+      const settledKinds = await ledgerKinds(root)
+      expect(settledKinds.filter(kind => kind === 'applied')).toHaveLength(1)
+      const applied = (await ledgerLinesOf(root)).find(line => line.kind === 'applied')!
+      expect(applied.targets).toEqual([COMMIT_TARGET(skillRoot), SIDECAR_TARGET(skillRoot)])
+      expect((await reopened.get('s1')).openIntent).toBeUndefined()
+    },
+  )
 
   it('finishes the mixed window: only SKILL.md renamed, then the sidecar written by the recovery', async () => {
     const fixture = await executionDecidedFixture()
@@ -4802,7 +5742,9 @@ describe('K3: the two-file commit', () => {
     // still the old one — a pair no loader accepts, and exactly the state the
     // ledger intent explains.
     const crashing = reopenWithObjectProbe(svc, fixture, crashAtObject('write-renamed', 'skillMd'))
-    expect(await refusalOf(crashing.apply('s1', 'root-1', 'approval:call-1'))).toContain('in-process probe throw after write-renamed')
+    expect(await refusalOf(crashing.apply('s1', 'root-1', 'approval:call-1'))).toContain(
+      'in-process probe throw after write-renamed',
+    )
     expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).toBe(candidate)
     expect(await readFile(SIDECAR_TARGET(skillRoot), 'utf8')).not.toBe(derivedSidecar(productionSidecar, candidate))
 
@@ -4821,7 +5763,9 @@ describe('K3: the two-file commit', () => {
     const fixture = await executionDecidedFixture()
     const { svc, root, skillRoot, candidate } = fixture
     const crashing = reopenWithObjectProbe(svc, fixture, crashAtObject('commit-verified'))
-    expect(await refusalOf(crashing.apply('s1', 'root-1', 'approval:call-1'))).toContain('in-process probe throw after commit-verified')
+    expect(await refusalOf(crashing.apply('s1', 'root-1', 'approval:call-1'))).toContain(
+      'in-process probe throw after commit-verified',
+    )
     expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).toBe(candidate)
     expect(await ledgerKinds(root)).not.toContain('applied')
 
@@ -4829,8 +5773,10 @@ describe('K3: the two-file commit', () => {
     const [outcome] = await reopened.reconcile()
     expect(outcome!.result).toBe('completed-written')
     expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
-    expect((await ledgerLinesOf(root)).find(line => line.kind === 'applied')!.targets)
-      .toEqual([COMMIT_TARGET(skillRoot), SIDECAR_TARGET(skillRoot)])
+    expect((await ledgerLinesOf(root)).find(line => line.kind === 'applied')!.targets).toEqual([
+      COMMIT_TARGET(skillRoot),
+      SIDECAR_TARGET(skillRoot),
+    ])
     expect(await reopened.reconcile()).toEqual([])
   })
 
@@ -4849,21 +5795,27 @@ describe('K3: the two-file commit', () => {
     expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).toBe(production)
     expect(await readFile(SIDECAR_TARGET(skillRoot), 'utf8')).toBe(productionSidecar)
     expect((await ledgerKinds(root)).filter(kind => kind === 'rolledback')).toHaveLength(1)
-    expect((await ledgerLinesOf(root)).find(line => line.kind === 'rolledback')!.targets)
-      .toEqual([COMMIT_TARGET(skillRoot), SIDECAR_TARGET(skillRoot)])
+    expect((await ledgerLinesOf(root)).find(line => line.kind === 'rolledback')!.targets).toEqual([
+      COMMIT_TARGET(skillRoot),
+      SIDECAR_TARGET(skillRoot),
+    ])
   })
 
   it('blocks both proposals of one skill directory: the per-object gate matches the directory, not one file', async () => {
     const fixture = await executionDecidedFixture()
     const { svc, root, skillRoot } = fixture
-    await walkToDecided(svc, { ...skillProposal, proposalId: 's2' }, { name: 'verify', content: skillText('# the second candidate') })
+    await walkToDecided(
+      svc,
+      { ...skillProposal, proposalId: 's2' },
+      { name: 'verify', content: skillText('# the second candidate') },
+    )
     const crashing = reopenWithObjectProbe(svc, fixture, crashAtObject('intent-recorded'))
     await refusalOf(crashing.apply('s1', 'root-1', 'approval:call-1'))
     const reopened = reopenWithObjectProbe(svc, fixture)
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
 
     const refusal = await refusalOf(reopened.apply('s2', 'root-1', 'approval:call-2'))
-    expect(refusal).toContain('another proposal\'s unsettled intent')
+    expect(refusal).toContain("another proposal's unsettled intent")
     expect(refusal).toContain(dirname(SIDECAR_TARGET(skillRoot)))
     expect(refusal).toContain('s1/apply')
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
@@ -4955,7 +5907,7 @@ describe('K3: the two-file commit', () => {
 })
 
 describe('K3: fold invariants for the two-file object', () => {
-  it('refuses a completion whose target list is not the intent\'s file set, in order', async () => {
+  it("refuses a completion whose target list is not the intent's file set, in order", async () => {
     const twoFile = intentLine({
       files: [intentFile(), { ...intentFile(), target: '/production/skills/verify/SKILL.contract.json' }],
     })

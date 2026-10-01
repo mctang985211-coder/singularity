@@ -12,7 +12,9 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Obligation, TaskContract, TaskInstance, TaskProposal, TaskProposalRoot } from '@dangosys/dsh-singularity-task'
 import type { NormalizedBatch } from '../../../task-runtime/src/normalize.ts'
 import type { ProposalReviewRequest, RootContractReviewRequest } from '../../../task-runtime/src/index.ts'
-import { ProposalReviewService, ownerSessionOfStore, renderProposalReview } from '../../src/proposal-review.ts'
+import { ownerSessionOfStore } from '../../src/coordination/identity.ts'
+import { renderProposalReview } from '../../src/services/proposal-render.ts'
+import { ProposalReviewService } from '../../src/services/proposal-review.ts'
 
 const OWNER = 'root-1'
 const STORE = `sg-t-${OWNER}`
@@ -89,7 +91,7 @@ function proposal(overrides: Partial<TaskProposal> = {}): TaskProposal {
     },
     batch: children,
     proposalDigest: 'd'.repeat(64),
-    admissionContext: { maxDepth: 2, maxChildren: 4, wallTimeMs: 600_000, auditOnly: { maxToolCalls: 40, attempts: 1 } },
+    admissionContext: { maxDepth: 2, maxChildren: 4, auditOnly: { maxToolCalls: 40, attempts: 1 } },
     admissionContextDigest: 'e'.repeat(64),
     reviewContext: { capabilityManifestDigest: 'f'.repeat(64), verifiers: [{ verifierId: 'command' }] },
     reviewContextDigest: 'a'.repeat(64),
@@ -513,7 +515,7 @@ function rootProposal(overrides: Partial<TaskProposalRoot> = {}): TaskProposalRo
     identity: { contractVersion: 1, storeId: STORE, rootSessionId: OWNER, requestKey: 'rk-root', contractDigest: 'c'.repeat(64) },
     contract,
     proposalDigest: 'd'.repeat(64),
-    admissionContext: { maxDepth: 2, maxChildren: 4, wallTimeMs: 600_000, auditOnly: { maxToolCalls: 40, attempts: 1 } },
+    admissionContext: { maxDepth: 2, maxChildren: 4, auditOnly: { maxToolCalls: 40, attempts: 1 } },
     admissionContextDigest: 'e'.repeat(64),
     reviewContext: { capabilityManifestDigest: 'f'.repeat(64), verifiers: [{ verifierId: 'command' }] },
     reviewContextDigest: 'a'.repeat(64),

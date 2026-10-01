@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import { GraphService } from '../../graph/src/index.ts'
-import { LayoutService } from '../../layout/src/index.ts'
+import { LayoutService } from '../../graph/src/layout.ts'
 
 /**
  * Both services open their configured default store while constructing, long

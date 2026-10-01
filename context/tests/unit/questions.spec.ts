@@ -29,7 +29,7 @@ const idOf = (childRunId: string, requestKey: string): string => questionIdOf({ 
 /** The reference text one `{sessionId, seq}` citation prints as, in the shape `context_read` takes. */
 const refOf = (sessionId: string, seq: number): string => `{"sessionId":${JSON.stringify(sessionId)},"seq":${seq}}`
 
-describe('the parent\'s view of the questions it owes an answer to', () => {
+describe("the parent's view of the questions it owes an answer to", () => {
   test('an open question is shown with its asking run, its blocking flag and the reference to its body', async () => {
     const { stack } = await chainStack()
     const questionId = idOf('r-c1', 'k1')
@@ -63,7 +63,7 @@ describe('the parent\'s view of the questions it owes an answer to', () => {
     expect(read.text).not.toContain('waiting_answer')
   })
 
-  test('a resolving answer takes the question out of the parent\'s view, a non-resolving one leaves it', async () => {
+  test("a resolving answer takes the question out of the parent's view, a non-resolving one leaves it", async () => {
     const { stack } = await chainStack()
     const resolved = idOf('r-c1', 'k1')
     const kept = idOf('r-c1', 'k2')
@@ -95,14 +95,16 @@ describe('the parent\'s view of the questions it owes an answer to', () => {
     // The root's run is cancelled: the question stays on record as an audit of
     // what was asked, and stops being anybody's open item — the asking run
     // derives its own release from the same rule, with no cancellation event.
-    await stack.task.markRunStatusIn('sg-t-s-root', 't-root', 'r-root', 'cancelled', 's-root', { reason: 'fixture stop' })
+    await stack.task.markRunStatusIn('sg-t-s-root', 't-root', 'r-root', 'cancelled', 's-root', {
+      reason: 'fixture stop',
+    })
     expect(expectOk(await stack.service.questionProjection('s-root')).text).toBe('')
     expect(expectOk(await stack.service.questionProjection('s-c1')).text).toBe('')
     expect((await stack.snapshot('sg-t-s-root')).questions?.all).toHaveLength(1)
   })
 })
 
-describe('the child\'s view of the answers it has not been shown', () => {
+describe("the child's view of the answers it has not been shown", () => {
   test('an answer is shown with its question, its resolution and the reference to its body', async () => {
     const { stack } = await chainStack()
     const questionId = idOf('r-c1', 'k1')
@@ -111,14 +113,16 @@ describe('the child\'s view of the answers it has not been shown', () => {
 
     const child = expectOk(await stack.service.questionProjection('s-c1'))
     expect(child.text).toContain('## Answers waiting to be read (1)')
-    expect(child.text).toContain(`- ${answer.answerId} — the answer to question ${questionId}, resolves: yes, answered `)
+    expect(child.text).toContain(
+      `- ${answer.answerId} — the answer to question ${questionId}, resolves: yes, answered `,
+    )
     expect(child.text).toContain(`ref:${refOf('s-root', 0)}`)
     expect(child.text).toContain('Read an answer at the reference on its line')
     // The parent's own view of that question is gone — it answered it.
     expect(expectOk(await stack.service.questionProjection('s-root')).text).toBe('')
   })
 
-  test('the answer disappears only once the caller\'s own Session holds its message id as a user message', async () => {
+  test("the answer disappears only once the caller's own Session holds its message id as a user message", async () => {
     const { stack } = await chainStack()
     const questionId = idOf('r-c1', 'k1')
     await stack.ask({ childRunId: 'r-c1', requestKey: 'k1' })
@@ -182,7 +186,9 @@ describe('waiting_answer is derived from the question facts, never written', () 
     expect(read.text).not.toContain('phase active')
     // The projection derives the same word from the same facts.
     expect(expectOk(await stack.service.dynamicProjection('s-c1')).text).toContain('phase waiting_answer')
-    expect(expectOk(await stack.service.contextRead('s-c1', { kind: 'run', ref: 'r-c1' })).text).toContain('phase waiting_answer')
+    expect(expectOk(await stack.service.contextRead('s-c1', { kind: 'run', ref: 'r-c1' })).text).toContain(
+      'phase waiting_answer',
+    )
     // The record itself is unchanged: no phase change was written, and the run
     // still stands where the protocol left it.
     expect((await stack.snapshot(chain.storeId)).runs.find(run => run.runId === 'r-c1')?.executionPhase).toBe('active')
@@ -197,7 +203,13 @@ describe('waiting_answer is derived from the question facts, never written', () 
   test('a waiting_children run keeps its own phase and its batch beside an open question', async () => {
     const { stack } = await chainStack()
     await stack.ask({ childRunId: 'r-c1', requestKey: 'k1' })
-    await stack.runFacts({ taskId: 't-c1', runId: 'r-c1', sessionId: 's-c1', phase: 'waiting_children', batchId: 'b-r-c1-p-1' })
+    await stack.runFacts({
+      taskId: 't-c1',
+      runId: 'r-c1',
+      sessionId: 's-c1',
+      phase: 'waiting_children',
+      batchId: 'b-r-c1-p-1',
+    })
 
     const read = expectOk(await stack.service.taskRead('s-c1'))
     expect(read.text).toContain('phase waiting_children')
@@ -206,7 +218,7 @@ describe('waiting_answer is derived from the question facts, never written', () 
     expect(expectOk(await stack.service.dynamicProjection('s-c1')).text).toContain('phase waiting_children')
   })
 
-  test('a related task\'s own open question shows in the caller\'s status line', async () => {
+  test("a related task's own open question shows in the caller's status line", async () => {
     const { stack } = await chainStack()
     await stack.ask({ childRunId: 'r-c1', requestKey: 'k1' })
     const status = expectOk(await stack.service.taskStatus('s-root'))
@@ -258,9 +270,13 @@ describe('a caller with no question plane', () => {
     expect(expectRefused(await stack.service.questionProjection('s-bystander'), 'unbound')).toContain('asks no parent')
     // No graph publishes this session and no ledger names it: a caller outside
     // the domain is refused, never answered with an empty list.
-    expect(expectRefused(await stack.service.questionProjection('s-nowhere'), 'unbound')).toContain('not a published member')
+    expect(expectRefused(await stack.service.questionProjection('s-nowhere'), 'unbound')).toContain(
+      'not a published member',
+    )
     // A reviewer has no business Run: no question is its own to ask or answer.
-    stack.bindingSource(stack.ledger({ rootStoreId: chain.storeId, taskId: 't-c1', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
+    stack.bindingSource(
+      stack.ledger({ rootStoreId: chain.storeId, taskId: 't-c1', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }),
+    )
     expect(expectOk(await stack.service.questionProjection('s-review')).text).toBe('')
   })
 

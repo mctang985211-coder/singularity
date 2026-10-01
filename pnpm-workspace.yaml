@@ -1,7 +1,6 @@
 packages:
   - 'graph'
   - 'graphs'
-  - 'layout'
   - 'task'
   - 'verifier'
   - 'task-runtime'

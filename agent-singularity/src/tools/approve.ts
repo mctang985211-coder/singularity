@@ -1,8 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-approval'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
+import { approvalAnswer, text } from '../shared.ts'
 
 export function defineApproveTool(ctx: Context) {
   return defineTool({
@@ -23,14 +22,7 @@ export function defineApproveTool(ctx: Context) {
         reason: args.prompt,
         signal: exec.signal,
       })
-      // Only 'allowed-once' grants; every other native outcome fails closed to
-      // a rejection, keeping the reason audible to the model.
-      switch (outcome) {
-        case 'allowed-once': return 'approve'
-        case 'rejected': return 'reject'
-        case 'cancelled': return 'reject (cancelled before the human decided)'
-        case 'unavailable': return 'reject (no approval answerer available)'
-      }
+      return approvalAnswer(outcome)
     },
   })
 }

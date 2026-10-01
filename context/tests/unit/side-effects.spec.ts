@@ -37,7 +37,7 @@ async function readEverything(stack: FixtureStack): Promise<void> {
 }
 
 describe('reads change nothing', () => {
-  test('the store\'s events, its snapshot and the gate stand exactly where they stood', async () => {
+  test("the store's events, its snapshot and the gate stand exactly where they stood", async () => {
     const { stack, chain } = await chainStack()
     const eventsBefore = stack.storeEvents(chain.storeId).length
     const snapshotBefore = JSON.stringify(await stack.snapshot(chain.storeId))
@@ -59,7 +59,12 @@ describe('reads change nothing', () => {
     const calls = stack.observedCalls()
     expect(calls.recoveryStatus).toBeGreaterThan(0)
     expect(calls.readRunBinding).toBeGreaterThan(0)
-    expect(Object.keys(stack.ctx.taskRuntime as object).sort()).toEqual(['allowsRuntimeDecomposition', 'gate', 'readRunBinding', 'recoveryStatus'])
+    expect(Object.keys(stack.ctx.taskRuntime as object).sort()).toEqual([
+      'allowsRuntimeDecomposition',
+      'gate',
+      'readRunBinding',
+      'recoveryStatus',
+    ])
   })
 
   test('a read of a recovering store answers with the marker instead of waiting for the barrier', async () => {
@@ -72,7 +77,9 @@ describe('reads change nothing', () => {
     const failed = expectOk(await stack.service.taskStatus('s-g1'))
     expect(failed.text).toContain('recovery: recovering')
     stack.recoveryStatus(chain.storeId, { status: 'recovery-failed', reason: 'the log could not be read' })
-    expect(expectOk(await stack.service.dynamicProjection('s-g1')).text).toContain('recovery: recovery-failed — the log could not be read')
+    expect(expectOk(await stack.service.dynamicProjection('s-g1')).text).toContain(
+      'recovery: recovery-failed — the log could not be read',
+    )
     // Nothing above recovered, and the store is exactly where it was.
     expect(stack.storeEvents(chain.storeId).length).toBeGreaterThan(0)
   })
@@ -104,7 +111,9 @@ describe('reads change nothing', () => {
     stack.gate.setTerminal('s-c2')
     expect(expectOk(await stack.service.dynamicProjection('s-g1')).text).toContain('gate phase: submitted')
     expect(expectOk(await stack.service.dynamicProjection('s-c2')).text).toContain('gate phase: terminal')
-    expect(expectOk(await stack.service.dynamicProjection('s-root')).text).toContain('gate phase: not tracked for this session')
+    expect(expectOk(await stack.service.dynamicProjection('s-root')).text).toContain(
+      'gate phase: not tracked for this session',
+    )
   })
 })
 
@@ -123,7 +132,11 @@ describe('projections are stable', () => {
   test('the question plane is stable, writes nothing, and asks the runtime for nothing', async () => {
     const { stack, chain } = await chainStack()
     await stack.ask({ childRunId: 'r-c1', requestKey: 'k1' })
-    const answer = await stack.answer({ questionId: questionIdOf({ childRunId: 'r-c1', requestKey: 'k1' }), requestKey: 'a1', resolves: true })
+    const answer = await stack.answer({
+      questionId: questionIdOf({ childRunId: 'r-c1', requestKey: 'k1' }),
+      requestKey: 'a1',
+      resolves: true,
+    })
     const events = stack.storeEvents(chain.storeId).length
     const observed = stack.observedCalls()
 
@@ -172,13 +185,22 @@ describe('projections are stable', () => {
 describe('refusals of a read that cannot answer', () => {
   test('a reviewer whose delegated task vanished still reads the whole delegated domain by reference', async () => {
     const { stack } = await chainStack()
-    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', taskId: 't-missing', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
+    stack.bindingSource(
+      stack.ledger({
+        rootStoreId: 'sg-t-s-root',
+        taskId: 't-missing',
+        actor: 's-root',
+        at: '2026-09-25T00:00:00.000Z',
+      }),
+    )
     // The contract reads refuse, because the delegation names a task the store
     // does not hold…
     expect(expectRefused(await stack.service.taskRead('s-review'), 'not-found')).toContain('does not hold')
     // …while the domain itself is unchanged: a delegation never narrows a graph
     // to one task.
-    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'task', ref: 't-g1' })).text).toContain('objective: grandchild: build the deck')
+    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'task', ref: 't-g1' })).text).toContain(
+      'objective: grandchild: build the deck',
+    )
   })
 
   test('a member has no related scope and is told which scope answers', async () => {

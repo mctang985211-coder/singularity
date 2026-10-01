@@ -19,14 +19,15 @@ pnpm dsh plugin --profile web add /absolute/path/to/packages/singularity/bundle
 | Package | Role |
 |---|---|
 | `@dangosys/dsh-singularity` | meta-bundle (`dsh.bundle`) |
-| `@dangosys/dsh-singularity-graph` | per-graph agent topology store |
+| `@dangosys/dsh-singularity-graph` | per-graph plane: agent topology + session canvas geometry (`.`, `./layout`) |
 | `@dangosys/dsh-singularity-graphs` | graph registry + env binding |
-| `@dangosys/dsh-singularity-layout` | per-graph session geometry |
 | `@dangosys/dsh-singularity-agent-runtime` | scoped root / spawn / stop / prompt |
 | `@dangosys/dsh-singularity-task` | task contract / instances / runs + event-sourced store |
 | `@dangosys/dsh-singularity-verifier` | verifier registry + EvidenceBundle |
 | `@dangosys/dsh-singularity-task-runtime` | orchestration / admission / capability / handoff / MCP server registry (spawn-level per-env mounts) |
-| `@dangosys/dsh-singularity-agent` | root tools: graph_spawn / mark_ready / HITL + task_read / capability_list / context_read / task_intake / task_decompose / task_submit_result / task_answer / task_cancel / task_status / task_verify / task_review_pack / task_review_agent / task_diagnose / task_proposal_read / task_proposal_continue / task_proposal_cancel / escalate + 9 evolution_* (propose / candidate / prepare / replay / gate / decide / apply / rollback / list) |
+| `@dangosys/dsh-singularity-context` | read domain + prompt assembly projection (`task_read` / `task_status` / `context_read`) |
+| `@dangosys/dsh-singularity-evolution` | proposal ledger / two-sided experiment / promotion gate / durable apply + rollback |
+| `@dangosys/dsh-singularity-agent` | root tools: graph_spawn / graph_mark_ready / HITL + task_read / capability_list / context_read / skill / task_intake / task_decompose / task_submit_result / task_answer / task_cancel / task_status / task_verify / task_review_pack / task_review_agent / task_diagnose / task_proposal_read / task_proposal_continue / task_proposal_cancel / task_budget_extend / escalate + 9 evolution_* (propose / candidate / prepare / replay / gate / decide / apply / rollback / list) |
 | `@dangosys/dsh-singularity-graph-web` | `/singularity/*` HTTP + SSE + map static |
 | `@dangosys/dsh-singularity-map` | xyflow map SPA + FocusPanel |
 | `@dangosys/dsh-singularity-canvas-view` | 对话 \| Singularity shell |

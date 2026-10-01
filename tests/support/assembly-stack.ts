@@ -30,7 +30,7 @@ import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/l
 import SystemPrompt, { renderContextSnapshot, renderPrompt } from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
 import ToolRuntime from '../../../../thirdparty/deepseek-harness/packages/core/tools/lib/index.js'
 import { AgentRegistry, assembleContextFor } from '../../../../thirdparty/deepseek-harness/packages/core/agent/lib/index.js'
-import SessionStore, { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
+import SessionStore, { SessionId, SESSION_FORMAT_VERSION } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { SessionEvent } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
 import JsonlSessionPersistence from '../../../../thirdparty/deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
@@ -530,7 +530,7 @@ export class AssemblyStack {
       create: (header: { id: SessionId; version: number; createdAt: number; isSeeded: boolean; cwd: string; agentPreset: string; parentSession?: SessionId }) => Promise<{ append: (events: readonly unknown[]) => Promise<void>; close: () => Promise<void> }>
     }).create({
       id: SessionId(sessionId),
-      version: 3,
+      version: SESSION_FORMAT_VERSION,
       createdAt: Date.now(),
       isSeeded: false,
       cwd: this.checkout,

@@ -247,11 +247,12 @@ async function batchIdOf(h: ScriptedLoop, sessionId: string | SessionId): Promis
 
 /**
  * The notices the runtime pushed into one session, read off that session's own
- * log: a notice is a plugin-sourced user message (`task-runtime`'s `notify`), and
- * pushing one wakes the session's turn. A refusal path that woke somebody would
- * show up here — what "zero side effects" owes beyond "zero tasks" (A0 §4:
- * 零落库/零 spawn/零唤醒). A person's own message is never a plugin notice, so
- * nothing a spec typed into the session appears in this list.
+ * log: a notice is a producer-owned user message (`task-runtime`'s `notify`,
+ * `source.kind: 'task-runtime'`), and pushing one wakes the session's turn. A
+ * refusal path that woke somebody would show up here — what "zero side effects"
+ * owes beyond "zero tasks" (A0 §4: 零落库/零 spawn/零唤醒). A person's own
+ * message is never one of those notices, so nothing a spec typed into the
+ * session appears in this list.
  */
 function wakeNotices(h: ScriptedLoop, sessionId: string | SessionId): string[] {
   return h.eventsOf(sessionId)
@@ -259,7 +260,7 @@ function wakeNotices(h: ScriptedLoop, sessionId: string | SessionId): string[] {
     // The deployment's own notices — never the runtime-context snapshots DSH
     // writes when an assembled dynamic context changes (`form: 'snapshot'`, A2):
     // those are the model's context plane, not a message somebody sent.
-    .filter(event => (event.data as { source?: { kind?: string; form?: string } }).source?.kind === 'plugin')
+    .filter(event => (event.data as { source?: { kind?: string; form?: string } }).source?.kind === 'task-runtime')
     .filter(event => (event.data as { source?: { form?: string } }).source?.form !== 'snapshot')
     .flatMap(event => (event.data as { content?: readonly { type: string; text?: string }[] }).content ?? [])
     .flatMap(block => (block.text === undefined ? [] : [block.text]))
@@ -991,7 +992,7 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     // spawn sends is a pointer at it — the attribution ('runtime-prompt'/'spawn')
     // is unchanged. Everything else on the log is the deployment's
     // runtime-context plane: the dynamic half of the assembled context, written
-    // as a snapshot when it changes (`@deepseek-ai/dsh-system-prompt`).
+    // as a snapshot when it changes (the `runtime-context` producer).
     const userMessages = h.eventsOf(worker).filter(event => event.type === 'user/message')
     const delegated = userMessages.filter(event => (event.data as { source?: { channel?: string } }).source?.kind === 'runtime-prompt')
     expect(delegated).toHaveLength(1)
@@ -999,9 +1000,9 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     expect((delegated[0]!.data as { content: readonly { text?: string }[] }).content.map(block => block.text ?? '').join('\n'))
       .toBe(WORKER_KICKOFF_TEXT)
     for (const message of userMessages) {
-      const source = (message.data as { source?: { kind?: string; plugin?: string } }).source
+      const source = (message.data as { source?: { kind?: string } }).source
       expect(
-        source?.kind === 'runtime-prompt' || source?.plugin === '@deepseek-ai/dsh-system-prompt',
+        source?.kind === 'runtime-prompt' || source?.kind === 'runtime-context',
         JSON.stringify(source),
       ).toBe(true)
     }

@@ -1,17 +1,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ChildOutcome } from '@dangosys/dsh-singularity-task-runtime'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): SessionId {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('task_cancel: missing agent id')
-  return id
-}
+import { message, sessionId, text } from '../shared.ts'
 
 function renderOutcome(outcome: ChildOutcome): string {
   const run = outcome.runId === undefined ? '' : ` run ${outcome.runId}`
@@ -33,7 +24,7 @@ export function defineTaskCancelTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'task_cancel')
       const { storeId, run } = await ctx.taskRuntime.runForSession(caller)
       if (run.executionPhase !== 'waiting_children' || run.batchId === undefined) {
         return (
@@ -47,7 +38,7 @@ export function defineTaskCancelTool(ctx: Context) {
       try {
         outcomes = await ctx.taskRuntime.cancelBatch(storeId, batchId, caller)
       } catch (error) {
-        return `task_cancel rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `task_cancel rejected: ${message(error)}`
       }
       return [
         `cancelled batch ${batchId}${args.reason === undefined ? '' : ` (${args.reason})`}:`,

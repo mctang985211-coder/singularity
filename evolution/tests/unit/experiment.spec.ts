@@ -15,11 +15,8 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { EvolutionService } from '../../src/evolution.ts'
 import type { EvolutionProposal } from '../../src/evolution.ts'
-import type {
-  ExperimentSampleRecord,
-  ExperimentStartedRecord,
-  ExperimentView,
-} from '../../src/experiment.ts'
+import type { ExperimentView } from '../../src/experiment/freeze.ts'
+import type { ExperimentSampleRecord, ExperimentStartedRecord } from '../../src/experiment/spec.ts'
 import {
   buildExperimentReport,
   directoryDigest,
@@ -28,7 +25,7 @@ import {
   experimentSampleKey,
   experimentSampleKeyOf,
   foldExperiments,
-} from '../../src/experiment.ts'
+} from '../../src/experiment/record.ts'
 import type {
   ExperimentSampleRole,
   ExperimentSide,
@@ -63,15 +60,18 @@ async function service(root?: string, skillRoot?: string): Promise<{ svc: Evolut
   // Every experiment record names a proposal that exists in the ledger — the
   // orchestrator reads it through `get` before it freezes anything — so the
   // fixtures propose p1 first, exactly as a live call would find it.
-  await svc.propose({
-    proposalId: 'p1',
-    targetType: 'skill',
-    targetId: 'fixture-skill',
-    baseVersion: 'v1',
-    level: 'L2',
-    rationale: 'the fixture target failure',
-    sourceRefs: ['diagnosis:d1'],
-  }, 'root-1')
+  await svc.propose(
+    {
+      proposalId: 'p1',
+      targetType: 'skill',
+      targetId: 'fixture-skill',
+      baseVersion: 'v1',
+      level: 'L2',
+      rationale: 'the fixture target failure',
+      sourceRefs: ['diagnosis:d1'],
+    },
+    'root-1',
+  )
   return { svc, root: directory }
 }
 
@@ -87,15 +87,17 @@ function frozenSample(overrides: Partial<FrozenSample> = {}): FrozenSample {
     taskId: 't-failure',
     role: 'observed-failure',
     contractDigest: HEX('1'),
-    criteria: [{
-      criterionId: 'ac1',
-      verificationMode: 'deterministic',
-      command: 'test -f answer.txt',
-      protectedInputsDigest: protectedInputsDigest([]),
-      verifierRef: 'command',
-      verifierVersion: '1',
-      verifierAnchor: 'registered verifier "command" declares version "1"',
-    }],
+    criteria: [
+      {
+        criterionId: 'ac1',
+        verificationMode: 'deterministic',
+        command: 'test -f answer.txt',
+        protectedInputsDigest: protectedInputsDigest([]),
+        verifierRef: 'command',
+        verifierVersion: '1',
+        verifierAnchor: 'registered verifier "command" declares version "1"',
+      },
+    ],
     observed: { outcome: 'failed', runId: 'r-historical' },
     provider: {
       capabilities: [],
@@ -154,7 +156,10 @@ function side(
     workspace: `/tmp/workspaces/${role}/${which}`,
     initialDigest: HEX('3'),
     criteria: [criterion('ac1', verified ? 'pass' : 'fail')],
-    cost: { status: 'reported', metrics: { tokens: { uncachedInputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } } },
+    cost: {
+      status: 'reported',
+      metrics: { tokens: { uncachedInputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+    },
     ...overrides,
   }
 }
@@ -191,7 +196,10 @@ function reportFixture(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function startedRecord(frozen: FrozenExperiment, overrides: Partial<ExperimentStartedRecord> = {}): ExperimentStartedRecord {
+function startedRecord(
+  frozen: FrozenExperiment,
+  overrides: Partial<ExperimentStartedRecord> = {},
+): ExperimentStartedRecord {
   const frozenDigest = frozenDigestOf(frozen)
   const experimentId = experimentIdOf(frozen.proposalId, frozenDigest)
   return {
@@ -215,8 +223,9 @@ function startedRecord(frozen: FrozenExperiment, overrides: Partial<ExperimentSt
 
 describe('the frozen identity block', () => {
   it('hashes a value independently of key order, so a digest is an identity and not a spelling', () => {
-    expect(canonicalJson({ b: 1, a: { d: 2, c: [3, { f: 4, e: 5 }] } }))
-      .toBe(canonicalJson({ a: { c: [3, { e: 5, f: 4 }], d: 2 }, b: 1 }))
+    expect(canonicalJson({ b: 1, a: { d: 2, c: [3, { f: 4, e: 5 }] } })).toBe(
+      canonicalJson({ a: { c: [3, { e: 5, f: 4 }], d: 2 }, b: 1 }),
+    )
     expect(digestOf({ a: 1, b: 2 })).toBe(digestOf({ b: 2, a: 1 }))
     expect(digestOf({ a: 1 })).not.toBe(digestOf({ a: 2 }))
   })
@@ -355,35 +364,39 @@ describe('the mechanical verdicts', () => {
 
     // The baseline did not reproduce the historical failure: nothing was fixed,
     // and no fix can be claimed from a comparison that never showed the failure.
-    expect(compareExperimentSides(
-      failureRole,
-      side(failureRole, 'baseline'),
-      side(failureRole, 'candidate'),
-    )).toBe('not-fixed')
+    expect(compareExperimentSides(failureRole, side(failureRole, 'baseline'), side(failureRole, 'candidate'))).toBe(
+      'not-fixed',
+    )
 
     // The candidate failed where the baseline did not: unfixed, and worse.
-    expect(compareExperimentSides(
-      failureRole,
-      side(failureRole, 'baseline'),
-      side(failureRole, 'candidate', { outcome: 'failed', criteria: [criterion('ac1', 'fail')] }),
-    )).toBe('not-fixed')
+    expect(
+      compareExperimentSides(
+        failureRole,
+        side(failureRole, 'baseline'),
+        side(failureRole, 'candidate', { outcome: 'failed', criteria: [criterion('ac1', 'fail')] }),
+      ),
+    ).toBe('not-fixed')
   })
 
   it('calls a regression or holdout sample regressed only when the candidate is worse', () => {
     for (const role of ['observed-regression', 'holdout'] as const) {
       expect(compareExperimentSides(role, side(role, 'baseline'), side(role, 'candidate'))).toBe('maintained')
       // A rank drop.
-      expect(compareExperimentSides(
-        role,
-        side(role, 'baseline'),
-        side(role, 'candidate', { outcome: 'failed', criteria: [criterion('ac1', 'fail')] }),
-      )).toBe('regressed')
+      expect(
+        compareExperimentSides(
+          role,
+          side(role, 'baseline'),
+          side(role, 'candidate', { outcome: 'failed', criteria: [criterion('ac1', 'fail')] }),
+        ),
+      ).toBe('regressed')
       // A shared criterion flipping pass → fail, ranks unchanged.
-      expect(compareExperimentSides(
-        role,
-        side(role, 'baseline', { criteria: [criterion('ac1', 'pass'), criterion('ac2', 'pass')] }),
-        side(role, 'candidate', { criteria: [criterion('ac1', 'pass'), criterion('ac2', 'fail')] }),
-      )).toBe('regressed')
+      expect(
+        compareExperimentSides(
+          role,
+          side(role, 'baseline', { criteria: [criterion('ac1', 'pass'), criterion('ac2', 'pass')] }),
+          side(role, 'candidate', { criteria: [criterion('ac1', 'pass'), criterion('ac2', 'fail')] }),
+        ),
+      ).toBe('regressed')
     }
   })
 
@@ -399,11 +412,9 @@ describe('the mechanical verdicts', () => {
       // evidence: there is no reproduced success for the candidate to keep.
       expect(compareExperimentSides(role, failedBaseline, side(role, 'candidate'))).toBe('inconclusive')
       for (const outcome of ['cancelled', 'interrupted'] as const) {
-        expect(compareExperimentSides(
-          role,
-          side(role, 'baseline', { outcome, criteria: [] }),
-          side(role, 'candidate'),
-        )).toBe('inconclusive')
+        expect(
+          compareExperimentSides(role, side(role, 'baseline', { outcome, criteria: [] }), side(role, 'candidate')),
+        ).toBe('inconclusive')
       }
       // A verified baseline keeps the old rule exactly: only a worse candidate
       // is a regression, and a candidate that does not degrade is maintained.
@@ -413,35 +424,57 @@ describe('the mechanical verdicts', () => {
   })
 
   it('reads an unsettled side and a changed contract as inconclusive, never as a verdict on the candidate', () => {
-    expect(compareExperimentSides(
-      failureRole,
-      side(failureRole, 'baseline', { outcome: 'cancelled', criteria: [] }),
-      side(failureRole, 'candidate'),
-    )).toBe('inconclusive')
-    expect(compareExperimentSides(
-      failureRole,
-      side(failureRole, 'baseline', { outcome: 'interrupted', criteria: [], runId: undefined, taskId: undefined }),
-      side(failureRole, 'candidate'),
-    )).toBe('inconclusive')
+    expect(
+      compareExperimentSides(
+        failureRole,
+        side(failureRole, 'baseline', { outcome: 'cancelled', criteria: [] }),
+        side(failureRole, 'candidate'),
+      ),
+    ).toBe('inconclusive')
+    expect(
+      compareExperimentSides(
+        failureRole,
+        side(failureRole, 'baseline', { outcome: 'interrupted', criteria: [], runId: undefined, taskId: undefined }),
+        side(failureRole, 'candidate'),
+      ),
+    ).toBe('inconclusive')
     // A criterion that exists on one side only is a different contract, not a pass.
-    expect(compareExperimentSides(
-      failureRole,
-      side(failureRole, 'baseline', { outcome: 'failed', criteria: [criterion('ac1', 'fail')] }),
-      side(failureRole, 'candidate', { criteria: [criterion('ac1', 'pass'), criterion('ac2', 'pass')] }),
-    )).toBe('inconclusive')
+    expect(
+      compareExperimentSides(
+        failureRole,
+        side(failureRole, 'baseline', { outcome: 'failed', criteria: [criterion('ac1', 'fail')] }),
+        side(failureRole, 'candidate', { criteria: [criterion('ac1', 'pass'), criterion('ac2', 'pass')] }),
+      ),
+    ).toBe('inconclusive')
   })
 
   it('keeps the six overall verdicts mechanically distinguishable', () => {
     const sample = (role: ExperimentSampleRole, verdict: string) => ({ role, verdict }) as never
-    expect(overallExperimentVerdict([sample('observed-failure', 'fixed'), sample('holdout', 'maintained')])).toBe('fixed')
-    expect(overallExperimentVerdict([sample('observed-failure', 'fixed'), sample('holdout', 'regressed')])).toBe('fixed-with-regression')
-    expect(overallExperimentVerdict([sample('observed-failure', 'not-fixed'), sample('holdout', 'maintained')])).toBe('not-fixed')
-    expect(overallExperimentVerdict([sample('observed-failure', 'both-failed'), sample('holdout', 'maintained')])).toBe('both-failed')
-    expect(overallExperimentVerdict([sample('observed-failure', 'not-fixed'), sample('holdout', 'regressed')])).toBe('regressed')
-    expect(overallExperimentVerdict([sample('observed-failure', 'inconclusive'), sample('holdout', 'maintained')])).toBe('inconclusive')
+    expect(overallExperimentVerdict([sample('observed-failure', 'fixed'), sample('holdout', 'maintained')])).toBe(
+      'fixed',
+    )
+    expect(overallExperimentVerdict([sample('observed-failure', 'fixed'), sample('holdout', 'regressed')])).toBe(
+      'fixed-with-regression',
+    )
+    expect(overallExperimentVerdict([sample('observed-failure', 'not-fixed'), sample('holdout', 'maintained')])).toBe(
+      'not-fixed',
+    )
+    expect(overallExperimentVerdict([sample('observed-failure', 'both-failed'), sample('holdout', 'maintained')])).toBe(
+      'both-failed',
+    )
+    expect(overallExperimentVerdict([sample('observed-failure', 'not-fixed'), sample('holdout', 'regressed')])).toBe(
+      'regressed',
+    )
+    expect(
+      overallExperimentVerdict([sample('observed-failure', 'inconclusive'), sample('holdout', 'maintained')]),
+    ).toBe('inconclusive')
     // A regression outranks an unfixed target; an unsettled side outranks both.
-    expect(overallExperimentVerdict([sample('observed-failure', 'fixed'), sample('observed-regression', 'regressed')])).toBe('fixed-with-regression')
-    expect(overallExperimentVerdict([sample('observed-failure', 'both-failed'), sample('holdout', 'regressed')])).toBe('both-failed')
+    expect(
+      overallExperimentVerdict([sample('observed-failure', 'fixed'), sample('observed-regression', 'regressed')]),
+    ).toBe('fixed-with-regression')
+    expect(overallExperimentVerdict([sample('observed-failure', 'both-failed'), sample('holdout', 'regressed')])).toBe(
+      'both-failed',
+    )
   })
 })
 
@@ -545,7 +578,14 @@ describe('assertExperimentReport', () => {
     expect(() => assertExperimentReport(noCriteria)).toThrow(/verified outcome needs criterion evidence/)
 
     const interrupted = reportFixture()
-    Object.assign(interrupted.samples[1]!.candidate, { outcome: 'interrupted', criteria: [], initialDigest: undefined, reason: undefined, runId: undefined, taskId: undefined })
+    Object.assign(interrupted.samples[1]!.candidate, {
+      outcome: 'interrupted',
+      criteria: [],
+      initialDigest: undefined,
+      reason: undefined,
+      runId: undefined,
+      taskId: undefined,
+    })
     interrupted.samples[1]!.verdict = 'inconclusive' as never
     interrupted.verdict = 'inconclusive' as never
     expect(() => assertExperimentReport(interrupted)).toThrow(/must carry the reason it has no terminal run/)
@@ -569,7 +609,7 @@ describe('assertExperimentReport', () => {
     }
   })
 
-  it('requires the frozen provider identity to record the candidate side\'s registry revision (K3)', () => {
+  it("requires the frozen provider identity to record the candidate side's registry revision (K3)", () => {
     const report = reportFixture()
     const [sample] = report.frozen.samples
     expect(sample!.provider!.candidateRegistryRevision).toBe(HEX('4'))
@@ -614,8 +654,9 @@ describe('the experiment ledger family', () => {
 
     // A line whose frozen block does not hash to the digest it carries is not a
     // record of anything: the derivation is re-run on the way in.
-    await expect(svc.recordExperimentStart({ ...record, frozen: frozenFixture({ model: selectionFixture('other') }) }))
-      .rejects.toThrow(/digest that does not match its frozen block/)
+    await expect(
+      svc.recordExperimentStart({ ...record, frozen: frozenFixture({ model: selectionFixture('other') }) }),
+    ).rejects.toThrow(/digest that does not match its frozen block/)
     expect(await svc.experiments()).toHaveLength(1)
 
     // A differently frozen experiment is a different experiment: its own id,
@@ -625,6 +666,36 @@ describe('the experiment ledger family', () => {
     await svc.recordExperimentStart(other)
     expect(await svc.experiments('p1')).toHaveLength(2)
     expect((await svc.experiment(record.experimentId)).frozen.model).toEqual(selectionFixture())
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('announces the frozen experiment once, and not the idempotent repeat', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'experiment-ledger-'))
+    const changes: string[] = []
+    const ctx = fixtureCtx() as unknown as { emit: (name: string, payload: { proposalId: string }) => void }
+    ctx.emit = (name, payload) => {
+      if (name === 'evolution/change') changes.push(payload.proposalId)
+    }
+    const svc = new EvolutionService(ctx as never, { root })
+    await svc.propose(
+      {
+        proposalId: 'p1',
+        targetType: 'skill',
+        targetId: 'fixture-skill',
+        baseVersion: 'v1',
+        level: 'L2',
+        rationale: 'the fixture target failure',
+        sourceRefs: ['diagnosis:d1'],
+      },
+      'root-1',
+    )
+    const record = startedRecord(frozenFixture())
+    await svc.recordExperimentStart(record)
+    const announced = changes.length
+    expect(changes.at(-1)).toBe('p1')
+    // The identical repeat writes nothing, so it announces nothing either.
+    await svc.recordExperimentStart(record)
+    expect(changes).toHaveLength(announced)
     await rm(root, { recursive: true, force: true })
   })
 
@@ -656,11 +727,14 @@ describe('the experiment ledger family', () => {
       at: '2026-09-26T00:00:00.000Z',
     }
     await svc.recordExperimentSample(record)
-    expect((await svc.experiments('p1'))[0]!.samples).toMatchObject([{ experimentId: started.experimentId, outcome: 'failed' }])
+    expect((await svc.experiments('p1'))[0]!.samples).toMatchObject([
+      { experimentId: started.experimentId, outcome: 'failed' },
+    ])
 
     // The same key again — same content or not — is a refusal, not an overwrite.
-    await expect(svc.recordExperimentSample({ ...record, outcome: 'verified', at: '2026-09-26T02:00:00.000Z' }))
-      .rejects.toThrow(/is recorded twice/)
+    await expect(
+      svc.recordExperimentSample({ ...record, outcome: 'verified', at: '2026-09-26T02:00:00.000Z' }),
+    ).rejects.toThrow(/is recorded twice/)
     expect((await svc.experiment(started.experimentId)).samples).toHaveLength(1)
 
     // A second service over the same ledger reads the same view.
@@ -693,19 +767,24 @@ describe('the experiment ledger family', () => {
       actor: 'root-1',
       at: '2026-09-26T00:00:00.000Z',
     }
-    await expect(svc.recordExperimentSample({ ...base, preparedContentDigest: HEX('9') }))
-      .rejects.toThrow(/candidate content identity that is not the experiment's own/)
+    await expect(svc.recordExperimentSample({ ...base, preparedContentDigest: HEX('9') })).rejects.toThrow(
+      /candidate content identity that is not the experiment's own/,
+    )
     // The key member is the digest of the *whole* candidate identity (K3): a
     // record keyed by the `SKILL.md` digest alone is not this experiment's key,
     // because a candidate whose sidecar differs is a different experiment.
-    await expect(svc.recordExperimentSample({ ...base, preparedContentDigest: frozen.candidate!.sha256 }))
-      .rejects.toThrow(/candidate content identity that is not the experiment's own/)
-    await expect(svc.recordExperimentSample({ ...base, repetition: 3 }))
-      .rejects.toThrow(/repetition that is not the experiment's own/)
-    await expect(svc.recordExperimentSample({ ...base, sampleTaskId: 't-unknown' }))
-      .rejects.toThrow(/which the experiment never froze/)
-    await expect(svc.recordExperimentSample({ ...base, initialDigest: undefined }))
-      .rejects.toThrow(/must carry the frozen digest its workspace was built from/)
+    await expect(
+      svc.recordExperimentSample({ ...base, preparedContentDigest: frozen.candidate!.sha256 }),
+    ).rejects.toThrow(/candidate content identity that is not the experiment's own/)
+    await expect(svc.recordExperimentSample({ ...base, repetition: 3 })).rejects.toThrow(
+      /repetition that is not the experiment's own/,
+    )
+    await expect(svc.recordExperimentSample({ ...base, sampleTaskId: 't-unknown' })).rejects.toThrow(
+      /which the experiment never froze/,
+    )
+    await expect(svc.recordExperimentSample({ ...base, initialDigest: undefined })).rejects.toThrow(
+      /must carry the frozen digest its workspace was built from/,
+    )
     // Nothing was written by any of the refusals.
     expect((await svc.experiment(started.experimentId)).samples).toHaveLength(0)
     await rm(root, { recursive: true, force: true })
@@ -715,7 +794,11 @@ describe('the experiment ledger family', () => {
     const { svc, root } = await service()
     const guidance = frozenFixture()
     const execution = frozenFixture({
-      candidate: { name: CANDIDATE.name, sha256: CANDIDATE.sha256, contract: { sha256: HEX('5'), contractDigest: HEX('6') } },
+      candidate: {
+        name: CANDIDATE.name,
+        sha256: CANDIDATE.sha256,
+        contract: { sha256: HEX('5'), contractDigest: HEX('6') },
+      },
     })
     const keyOf = (frozen: FrozenExperiment) =>
       experimentSampleKeyOf({ proposalId: frozen.proposalId, frozen }, 't-failure', 'candidate')
@@ -750,8 +833,9 @@ describe('the experiment ledger family', () => {
       actor: 'root-1',
       at: '2026-09-26T00:00:00.000Z',
     }
-    await expect(svc.recordExperimentSample({ ...record, preparedContentDigest: digestOf(CANDIDATE) }))
-      .rejects.toThrow(/candidate content identity that is not the experiment's own/)
+    await expect(svc.recordExperimentSample({ ...record, preparedContentDigest: digestOf(CANDIDATE) })).rejects.toThrow(
+      /candidate content identity that is not the experiment's own/,
+    )
     await svc.recordExperimentSample(record)
     expect((await svc.experiment(started.experimentId)).samples).toHaveLength(1)
     await rm(root, { recursive: true, force: true })
@@ -786,10 +870,17 @@ describe('the experiment ledger family', () => {
     expect(() => foldExperiments([unknownProposal], proposals)).toThrow(/unknown proposal/)
 
     // A sample line before its experiment started is not a record of anything.
-    expect(() => foldExperiments([{
-      kind: 'experiment_sample',
-      experimentId: 'e-nowhere',
-    } as unknown as { kind: string }], proposals)).toThrow(/names unknown experiment/)
+    expect(() =>
+      foldExperiments(
+        [
+          {
+            kind: 'experiment_sample',
+            experimentId: 'e-nowhere',
+          } as unknown as { kind: string },
+        ],
+        proposals,
+      ),
+    ).toThrow(/names unknown experiment/)
   })
 
   it('keeps the v1 family readable beside the new one, and the two keys apart', async () => {
@@ -798,10 +889,16 @@ describe('the experiment ledger family', () => {
     // This build prepares a replacement of an existing production SKILL.md, so
     // the fixture walks its candidate only against one that is there.
     await mkdir(join(skillRoot, 'fixture-skill'), { recursive: true })
-    await writeFile(join(skillRoot, 'fixture-skill', 'SKILL.md'), '---\nname: fixture-skill\ndescription: x\n---\n\nbody\n')
+    await writeFile(
+      join(skillRoot, 'fixture-skill', 'SKILL.md'),
+      '---\nname: fixture-skill\ndescription: x\n---\n\nbody\n',
+    )
     const { svc } = await service(root, skillRoot)
     // The proposal this ledger already carries, walked through the lifecycle.
-    await svc.candidate('p1', { skill: 'v2' }, 'root-1', { name: 'fixture-skill', content: '---\nname: fixture-skill\ndescription: x\n---\n\nbody\n' })
+    await svc.candidate('p1', { skill: 'v2' }, 'root-1', {
+      name: 'fixture-skill',
+      content: '---\nname: fixture-skill\ndescription: x\n---\n\nbody\n',
+    })
     await svc.prepare('p1', 'root-1')
     expect((await svc.get('p1')).status).toBe('prepared')
 
@@ -816,7 +913,11 @@ describe('the experiment ledger family', () => {
   it('builds the report from the records, refuses an incomplete experiment, and writes nothing itself', async () => {
     const frozen = frozenFixture()
     const started = startedRecord(frozen)
-    const record = (sampleTaskId: string, sampleSide: ExperimentSide, outcome: ExperimentSampleRecord['outcome']): ExperimentSampleRecord => ({
+    const record = (
+      sampleTaskId: string,
+      sampleSide: ExperimentSide,
+      outcome: ExperimentSampleRecord['outcome'],
+    ): ExperimentSampleRecord => ({
       formatVersion: 4,
       kind: 'experiment_sample',
       proposalId: frozen.proposalId,
@@ -825,12 +926,19 @@ describe('the experiment ledger family', () => {
       sampleTaskId,
       side: sampleSide,
       repetition: 0,
-      ...(outcome === 'interrupted' ? {} : { taskId: `t-${sampleTaskId}-${sampleSide}`, runId: `r-${sampleTaskId}-${sampleSide}`, initialDigest: frozen.snapshot.digest }),
+      ...(outcome === 'interrupted'
+        ? {}
+        : {
+            taskId: `t-${sampleTaskId}-${sampleSide}`,
+            runId: `r-${sampleTaskId}-${sampleSide}`,
+            initialDigest: frozen.snapshot.digest,
+          }),
       outcome,
       evidenceRefs: [],
-      criteria: outcome === 'interrupted' || outcome === 'cancelled'
-        ? []
-        : [{ criterionId: 'ac1', verdict: outcome === 'verified' ? 'pass' : 'fail', verifierId: 'command' }],
+      criteria:
+        outcome === 'interrupted' || outcome === 'cancelled'
+          ? []
+          : [{ criterionId: 'ac1', verdict: outcome === 'verified' ? 'pass' : 'fail', verifierId: 'command' }],
       workspace: `/tmp/ws/${sampleTaskId}/${sampleSide}`,
       cost: { status: 'unknown', reason: 'the fixture reports no metrics' },
       ...(outcome === 'interrupted' ? { reason: 'the fixture never settled a run' } : {}),
@@ -851,10 +959,7 @@ describe('the experiment ledger family', () => {
     // Half an experiment has no report: an incomplete comparison is not evidence.
     expect(() => buildExperimentReport(view)).toThrow(/is incomplete/)
 
-    view.samples.push(
-      record('t-holdout', 'baseline', 'verified'),
-      record('t-holdout', 'candidate', 'verified'),
-    )
+    view.samples.push(record('t-holdout', 'baseline', 'verified'), record('t-holdout', 'candidate', 'verified'))
     const report = buildExperimentReport(view)
     // The baseline reproduced the historical failure and the candidate passed:
     // a clean fix, with the holdout maintained.
@@ -907,7 +1012,10 @@ describe('the experiment ledger family', () => {
     expect(inconclusive.samples[0]!.verdict).toBe('inconclusive')
     expect(inconclusive.verdict).toBe('inconclusive')
     expect(inconclusive.samples[0]!.candidate.reason).toContain('never settled a run')
-    expect(inconclusive.samples[0]!.baseline.cost).toEqual({ status: 'unknown', reason: 'the fixture reports no metrics' })
+    expect(inconclusive.samples[0]!.baseline.cost).toEqual({
+      status: 'unknown',
+      reason: 'the fixture reports no metrics',
+    })
   })
 
   it('folds a hand-written proposal beside the experiment family, each by its own rules', async () => {
@@ -946,12 +1054,22 @@ describe('the experiment ledger family', () => {
     // different object and therefore a different key.
     expect(experimentSampleKey(key)).toBe(['p1', digestOf(CANDIDATE), 't-failure', 'baseline', '0'].join('\0'))
     expect(experimentSampleKey(key)).not.toContain(CANDIDATE.sha256)
-    expect(experimentSampleKey(experimentSampleKeyOf(view, 't-failure', 'candidate'))).not.toBe(experimentSampleKey(key))
+    expect(experimentSampleKey(experimentSampleKeyOf(view, 't-failure', 'candidate'))).not.toBe(
+      experimentSampleKey(key),
+    )
     expect(experimentSampleKey(experimentSampleKeyOf(view, 't-holdout', 'baseline'))).not.toBe(experimentSampleKey(key))
-    expect(experimentSampleKey(experimentSampleKeyOf({ ...view, frozen: frozenFixture({ repetition: 1 }) }, 't-failure', 'baseline')))
-      .not.toBe(experimentSampleKey(key))
-    const execution = { proposalId: 'p1', frozen: frozenFixture({ candidate: { ...CANDIDATE, contract: { sha256: HEX('5'), contractDigest: HEX('6') } } }) }
-    expect(experimentSampleKey(experimentSampleKeyOf(execution, 't-failure', 'baseline'))).not.toBe(experimentSampleKey(key))
+    expect(
+      experimentSampleKey(
+        experimentSampleKeyOf({ ...view, frozen: frozenFixture({ repetition: 1 }) }, 't-failure', 'baseline'),
+      ),
+    ).not.toBe(experimentSampleKey(key))
+    const execution = {
+      proposalId: 'p1',
+      frozen: frozenFixture({ candidate: { ...CANDIDATE, contract: { sha256: HEX('5'), contractDigest: HEX('6') } } }),
+    }
+    expect(experimentSampleKey(experimentSampleKeyOf(execution, 't-failure', 'baseline'))).not.toBe(
+      experimentSampleKey(key),
+    )
   })
 })
 
@@ -965,25 +1083,45 @@ describe('the candidate and prepare refusals (S4-E 收尾)', () => {
   it('refuses a candidate that carries nothing to materialize or evaluate', async () => {
     const { svc, root } = await service()
     try {
-      await expect(svc.candidate('p1', { skill: '1' }, 'root-1', undefined)).rejects.toThrow('mutation must be an object')
+      await expect(svc.candidate('p1', { skill: '1' }, 'root-1', undefined)).rejects.toThrow(
+        'mutation must be an object',
+      )
       // No candidate line was written: the proposal is still the record it was.
       expect((await svc.get('p1')).status).toBe('proposed')
-    } finally { await rm(root, { recursive: true, force: true }) }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('refuses a prepare whose production Skill does not exist, before writing sandbox or ledger', async () => {
     const root = await mkdtemp(join(tmpdir(), 'experiment-prepare-refusal-'))
     const svc = new EvolutionService(fixtureCtx(), { root, skillRoot: join(root, 'production') })
     try {
-      await svc.propose({ proposalId: 'p1', targetType: 'skill', targetId: 'fixture-skill', baseVersion: '1', level: 'L2', rationale: 'replace existing', sourceRefs: ['d1'] }, 'root-1')
+      await svc.propose(
+        {
+          proposalId: 'p1',
+          targetType: 'skill',
+          targetId: 'fixture-skill',
+          baseVersion: '1',
+          level: 'L2',
+          rationale: 'replace existing',
+          sourceRefs: ['d1'],
+        },
+        'root-1',
+      )
       await svc.candidate('p1', { skill: '1' }, 'root-1', { name: 'fixture-skill', content: 'candidate' })
       const before = await readFile(svc.file, 'utf8')
-      const err = await svc.prepare('p1', 'root-1').then(() => undefined, e => e)
+      const err = await svc.prepare('p1', 'root-1').then(
+        () => undefined,
+        e => e,
+      )
       expect.soft(err, 'a prepare with no production skill to replace must refuse').toBeInstanceOf(Error)
       expect.soft(await readFile(svc.file, 'utf8'), 'the ledger bytes must stay unchanged').toBe(before)
       expect.soft(await readdir(root), 'no sandbox directory may be created').not.toContain('sandbox')
       expect.soft((await svc.get('p1')).status, 'the candidate stays the state it was').toBe('candidate')
-    } finally { await rm(root, { recursive: true, force: true }) }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })
 
@@ -1003,13 +1141,26 @@ describe('the ledger write boundary is formatVersion 4 (K3)', () => {
     const { svc, root } = await service()
     try {
       const before = await readFile(svc.file, 'utf8')
-      const err = await svc.recordExperimentStart({ ...startedRecord(frozenFixture()), formatVersion: 1 } as never).then(() => undefined, e => e)
+      const err = await svc
+        .recordExperimentStart({ ...startedRecord(frozenFixture()), formatVersion: 1 } as never)
+        .then(
+          () => undefined,
+          e => e,
+        )
       expect.soft(err, 'an old-version start must throw before append').toBeInstanceOf(Error)
-      expect.soft(String((err as Error).message), 'the refusal must name the version it saw and the version this build writes')
+      expect
+        .soft(
+          String((err as Error).message),
+          'the refusal must name the version it saw and the version this build writes',
+        )
         .toMatch(/formatVersion 1[\s\S]*formatVersion 4/)
       expect.soft(await readFile(svc.file, 'utf8'), 'ledger bytes must stay unchanged').toBe(before)
-      await expect.soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable').resolves.toBeDefined()
-    } finally { await rm(root, { recursive: true, force: true }) }
+      await expect
+        .soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable')
+        .resolves.toBeDefined()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('refuses a direct experiment start that declares no version', async () => {
@@ -1018,12 +1169,19 @@ describe('the ledger write boundary is formatVersion 4 (K3)', () => {
       const before = await readFile(svc.file, 'utf8')
       const unversioned = { ...startedRecord(frozenFixture()) } as Record<string, unknown>
       delete unversioned.formatVersion
-      const err = await svc.recordExperimentStart(unversioned as never).then(() => undefined, e => e)
+      const err = await svc.recordExperimentStart(unversioned as never).then(
+        () => undefined,
+        e => e,
+      )
       expect.soft(err, 'an unversioned start must throw before append').toBeInstanceOf(Error)
       expect.soft(String((err as Error).message)).toMatch(/declares formatVersion null/)
       expect.soft(await readFile(svc.file, 'utf8'), 'ledger bytes must stay unchanged').toBe(before)
-      await expect.soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable').resolves.toBeDefined()
-    } finally { await rm(root, { recursive: true, force: true }) }
+      await expect
+        .soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable')
+        .resolves.toBeDefined()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('refuses an old-version start that repeats a recorded identity, instead of the idempotent no-op', async () => {
@@ -1033,62 +1191,118 @@ describe('the ledger write boundary is formatVersion 4 (K3)', () => {
       const started = startedRecord(frozen)
       await svc.recordExperimentStart(started)
       const before = await readFile(svc.file, 'utf8')
-      const err = await svc.recordExperimentStart({ ...started, formatVersion: 1 } as never).then(() => undefined, e => e)
+      const err = await svc.recordExperimentStart({ ...started, formatVersion: 1 } as never).then(
+        () => undefined,
+        e => e,
+      )
       expect.soft(err, 'a repeat at another version is a refusal, not the idempotent return').toBeInstanceOf(Error)
       expect.soft(String((err as Error).message)).toMatch(/formatVersion 1/)
-      expect.soft(await readFile(svc.file, 'utf8'), 'the recorded line stays the only line for this experiment').toBe(before)
+      expect
+        .soft(await readFile(svc.file, 'utf8'), 'the recorded line stays the only line for this experiment')
+        .toBe(before)
       expect.soft((await svc.experiments('p1')).length, 'no second experiment was opened').toBe(1)
-      await expect.soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable').resolves.toBeDefined()
-    } finally { await rm(root, { recursive: true, force: true }) }
+      await expect
+        .soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable')
+        .resolves.toBeDefined()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('refuses a direct experiment sample that declares an old version, before the append', async () => {
-    const {svc, root} = await service()
+    const { svc, root } = await service()
     try {
-      const frozen=frozenFixture(), started=startedRecord(frozen)
+      const frozen = frozenFixture(),
+        started = startedRecord(frozen)
       await svc.recordExperimentStart(started)
-      const before=await readFile(svc.file,'utf8')
-      const err=await svc.recordExperimentSample({
-        formatVersion:1, kind:'experiment_sample', proposalId:'p1', experimentId:started.experimentId,
-        preparedContentDigest:digestOf(frozen.candidate), sampleTaskId:'t-failure', side:'baseline', repetition:0,
-        taskId:'t-replay', runId:'r-replay', outcome:'failed', reviewRef:'t-replay#r-replay', evidenceRefs:['e-1'],
-        criteria:[{criterionId:'ac1',verdict:'fail'}],workspace:'/tmp/ws',initialDigest:frozen.snapshot.digest,
-        cost:{status:'unknown',reason:'review fixture'}, actor:'root-1',at:'2026-09-26T00:00:00.000Z'
-      } as never).then(()=>undefined,e=>e)
+      const before = await readFile(svc.file, 'utf8')
+      const err = await svc
+        .recordExperimentSample({
+          formatVersion: 1,
+          kind: 'experiment_sample',
+          proposalId: 'p1',
+          experimentId: started.experimentId,
+          preparedContentDigest: digestOf(frozen.candidate),
+          sampleTaskId: 't-failure',
+          side: 'baseline',
+          repetition: 0,
+          taskId: 't-replay',
+          runId: 'r-replay',
+          outcome: 'failed',
+          reviewRef: 't-replay#r-replay',
+          evidenceRefs: ['e-1'],
+          criteria: [{ criterionId: 'ac1', verdict: 'fail' }],
+          workspace: '/tmp/ws',
+          initialDigest: frozen.snapshot.digest,
+          cost: { status: 'unknown', reason: 'review fixture' },
+          actor: 'root-1',
+          at: '2026-09-26T00:00:00.000Z',
+        } as never)
+        .then(
+          () => undefined,
+          e => e,
+        )
       expect.soft(err, 'an old-version sample must throw before append').toBeInstanceOf(Error)
       expect.soft(String((err as Error).message)).toMatch(/formatVersion 1/)
-      expect.soft(await readFile(svc.file,'utf8'), 'ledger bytes must stay unchanged').toBe(before)
-      await expect.soft(new EvolutionService(fixtureCtx(),{root}).list(), 'the ledger must remain readable').resolves.toBeDefined()
-    } finally { await rm(root,{recursive:true,force:true}) }
+      expect.soft(await readFile(svc.file, 'utf8'), 'ledger bytes must stay unchanged').toBe(before)
+      await expect
+        .soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable')
+        .resolves.toBeDefined()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })
 
 describe('the fold admits only the current lifecycle (S4-E 收尾)', () => {
   const common = { formatVersion: 4, proposalId: 'p1', actor: 'root-1', at: '2026-09-26T00:00:00.000Z' }
   const proposed = (over: Record<string, unknown> = {}) => ({
-    ...common, kind: 'proposed', targetType: 'skill', targetId: 'fixture-skill', baseVersion: 'v1', level: 'L2',
-    rationale: 'the fixture proposal', sourceRefs: ['diagnosis:d1'], ...over,
+    ...common,
+    kind: 'proposed',
+    targetType: 'skill',
+    targetId: 'fixture-skill',
+    baseVersion: 'v1',
+    level: 'L2',
+    rationale: 'the fixture proposal',
+    sourceRefs: ['diagnosis:d1'],
+    ...over,
   })
   const candidate = (over: Record<string, unknown> = {}) => ({
-    ...common, kind: 'candidate', versionSet: { skill: 'v2' }, mutation: { name: 'fixture-skill', content: 'candidate bytes' }, ...over,
+    ...common,
+    kind: 'candidate',
+    versionSet: { skill: 'v2' },
+    mutation: { name: 'fixture-skill', content: 'candidate bytes' },
+    ...over,
   })
   const prepared = (over: Record<string, unknown> = {}) => ({
-    ...common, kind: 'prepared', sandbox: 'sandbox/p1', mechanical: true, champion: 'captured',
+    ...common,
+    kind: 'prepared',
+    sandbox: 'sandbox/p1',
+    mechanical: true,
+    champion: 'captured',
     skillContent: { name: 'fixture-skill', sha256: 'a'.repeat(64) },
     skillBaseline: { name: 'fixture-skill', sha256: 'b'.repeat(64) },
-    files: ['skills/fixture-skill/SKILL.md'], ...over,
+    files: ['skills/fixture-skill/SKILL.md'],
+    ...over,
   })
   const gated = () => ({
-    ...common, kind: 'gated',
+    ...common,
+    kind: 'gated',
     gate: {
-      targetFailureFixed: 'fixed', originalAcceptanceMaintained: 'maintained', existingRegressionMaintained: 'maintained',
-      noUnacceptableSideEffects: 'none', holdoutPerformanceAcceptable: 'acceptable', resourceCostAcceptable: 'acceptable',
+      targetFailureFixed: 'fixed',
+      originalAcceptanceMaintained: 'maintained',
+      existingRegressionMaintained: 'maintained',
+      noUnacceptableSideEffects: 'none',
+      holdoutPerformanceAcceptable: 'acceptable',
+      resourceCostAcceptable: 'acceptable',
       regressionEvidenceRefs: ['evidence:1'],
     },
   })
 
   /** The raw bytes a hostile caller could write, and the service that must refuse them. */
-  async function forged(lines: readonly Record<string, unknown>[]): Promise<{ svc: EvolutionService; root: string; bytes: string }> {
+  async function forged(
+    lines: readonly Record<string, unknown>[],
+  ): Promise<{ svc: EvolutionService; root: string; bytes: string }> {
     const root = await mkdtemp(join(tmpdir(), 's4e-fold-refusal-'))
     const bytes = `${lines.map(line => JSON.stringify(line)).join('\n')}\n`
     await writeFile(join(root, 'proposals.jsonl'), bytes)
@@ -1099,22 +1313,35 @@ describe('the fold admits only the current lifecycle (S4-E 收尾)', () => {
   async function refuses(lines: readonly Record<string, unknown>[], expected: RegExp): Promise<void> {
     const { svc, root, bytes } = await forged(lines)
     try {
-      const err = await svc.list().then(() => undefined, e => e)
+      const err = await svc.list().then(
+        () => undefined,
+        e => e,
+      )
       expect(err, `a ledger of ${JSON.stringify(lines.map(line => line.kind))} must be refused`).toBeInstanceOf(Error)
       expect(String((err as Error).message)).toMatch(expected)
-      expect(await readFile(join(root, 'proposals.jsonl'), 'utf8'), 'the refused ledger stays byte for byte').toBe(bytes)
-      await expect(new EvolutionService(fixtureCtx(), { root }).list(), 'the verdict belongs to the bytes, not one instance').rejects.toThrow(expected)
-    } finally { await rm(root, { recursive: true, force: true }) }
+      expect(await readFile(join(root, 'proposals.jsonl'), 'utf8'), 'the refused ledger stays byte for byte').toBe(
+        bytes,
+      )
+      await expect(
+        new EvolutionService(fixtureCtx(), { root }).list(),
+        'the verdict belongs to the bytes, not one instance',
+      ).rejects.toThrow(expected)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   }
 
   it('refuses a capability candidate written in the shape a ledger before this build holds', async () => {
     // A6 admits a capability candidate, but only the one-whole-row shape its own
     // lifecycle records: the old `{ name, entry }` mutation is a payload no live
     // entry writes, and the fold refuses it exactly as `candidate` would.
-    await refuses([
-      proposed({ targetType: 'capability', targetId: 'research' }),
-      candidate({ versionSet: { capability: '1' }, mutation: { name: 'research', entry: { preset: 'standard' } } }),
-    ], /capability-row-invalid/)
+    await refuses(
+      [
+        proposed({ targetType: 'capability', targetId: 'research' }),
+        candidate({ versionSet: { capability: '1' }, mutation: { name: 'research', entry: { preset: 'standard' } } }),
+      ],
+      /capability-row-invalid/,
+    )
   })
 
   it('refuses a candidate that carries no mutation', async () => {

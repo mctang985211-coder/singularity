@@ -2,12 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { CreateGraphRequest } from '@dangosys/dsh-singularity-graphs'
 import { GRAPHS_PATH } from '../../constants.ts'
-import { readJson, send } from '../libs/http.ts'
-
-function fail(res: ServerResponse, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error)
-  send(res, 400, 'text/plain; charset=utf-8', message)
-}
+import { fail, guardMethod, readJson, sendJson, urlOf } from '../libs/http.ts'
 
 export function registerGraphs(ctx: Context): () => void {
   const stopList = ctx.webServer.register({
@@ -15,9 +10,10 @@ export function registerGraphs(ctx: Context): () => void {
     path: GRAPHS_PATH,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
+        if (!guardMethod(req, res, 'GET', 'POST')) return
         if (req.method === 'GET') {
           const snapshot = await ctx.graphs.snapshot()
-          send(res, 200, 'application/json; charset=utf-8', {
+          sendJson(res, 200, {
             ...snapshot,
             graphs: snapshot.graphs.map(graph => ({
               ...graph,
@@ -28,13 +24,9 @@ export function registerGraphs(ctx: Context): () => void {
           })
           return
         }
-        if (req.method === 'POST') {
-          const body = await readJson<CreateGraphRequest>(req)
-          const { graph, reused } = await ctx.graphs.create(body)
-          send(res, 200, 'application/json; charset=utf-8', { ...graph, reused })
-          return
-        }
-        send(res, 405, 'text/plain; charset=utf-8', 'method not allowed')
+        const body = await readJson<CreateGraphRequest>(req)
+        const { graph, reused } = await ctx.graphs.create(body)
+        sendJson(res, 200, { ...graph, reused })
       } catch (error) {
         fail(res, error)
       }
@@ -46,7 +38,7 @@ export function registerGraphs(ctx: Context): () => void {
     path: GRAPHS_PATH,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       try {
-        const url = new URL(req.url ?? '/', 'http://dsh.local')
+        const url = urlOf(req)
         const parts = url.pathname
           .slice(GRAPHS_PATH.length + 1)
           .split('/')
@@ -55,33 +47,14 @@ export function registerGraphs(ctx: Context): () => void {
         const [id, action] = parts
         if (id.length === 0) throw new Error('graphs: missing graph id')
 
-        if (action === 'select') {
-          if (req.method !== 'POST') {
-            send(res, 405, 'text/plain; charset=utf-8', 'method not allowed')
-            return
+        if (action === 'select' || action === 'ready' || action === 'delete') {
+          if (!guardMethod(req, res, 'POST')) return
+          if (action === 'select') sendJson(res, 200, await ctx.graphs.select(id))
+          else if (action === 'ready') sendJson(res, 200, await ctx.graphs.markReady(id))
+          else {
+            await ctx.graphs.remove(id)
+            sendJson(res, 200, { ok: true })
           }
-          const graph = await ctx.graphs.select(id)
-          send(res, 200, 'application/json; charset=utf-8', graph)
-          return
-        }
-
-        if (action === 'ready') {
-          if (req.method !== 'POST') {
-            send(res, 405, 'text/plain; charset=utf-8', 'method not allowed')
-            return
-          }
-          const graph = await ctx.graphs.markReady(id)
-          send(res, 200, 'application/json; charset=utf-8', graph)
-          return
-        }
-
-        if (action === 'delete') {
-          if (req.method !== 'POST') {
-            send(res, 405, 'text/plain; charset=utf-8', 'method not allowed')
-            return
-          }
-          await ctx.graphs.remove(id)
-          send(res, 200, 'application/json; charset=utf-8', { ok: true })
           return
         }
 

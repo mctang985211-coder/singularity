@@ -11,8 +11,8 @@ import {
   countReviewAgentRuns,
   readReviewerDelegation,
   reviewAgentLedgerFile,
-} from '../../src/review-agent-ledger.ts'
-import type { ReviewAgentRunStart } from '../../src/review-agent-ledger.ts'
+} from '../../src/coordination/ledger.ts'
+import type { ReviewAgentRunStart } from '../../src/coordination/ledger.ts'
 import {
   REVIEWER_BASELINE,
   REVIEWER_PRESET,
@@ -341,8 +341,9 @@ const NO_SUGGESTION_REPLY = '```json\n'
   + '\n```'
 
 describe('the ledger as the reviewer binding source (A2)', () => {
-  const entry = (overrides: Record<string, string> = {}) => ({
-    formatVersion: 1,
+  const entry = (overrides: Record<string, unknown> = {}) => ({
+    formatVersion: 2,
+    kind: 'started',
     rootStoreId: 'sg-t-root',
     taskId: 't1',
     sessionId: 's-review',
@@ -517,7 +518,7 @@ describe('the review-agent admission (K4-1)', () => {
     // What a process restart sees: the file, no module state (K4-1).
     expect(await attempt(1, 's-restart')).toBe('admitted')
     vi.resetModules()
-    const restarted = await import('../../src/review-agent-ledger.ts')
+    const restarted = await import('../../src/coordination/ledger.ts')
 
     expect(await restarted.countReviewAgentRuns(ROOT_STORE)).toBe(1)
     // The row written before the restart is spent for the fresh module too: it
@@ -941,7 +942,7 @@ describe('task_review_agent', () => {
 
   test('a spawn failure is reported without recording a diagnosis, and leaves the attempt interrupted', async () => {
     const { ctx, recordDiagnosisIn } = fixture(undefined, async () => {
-      throw new Error('agent-presets: preset "singularity-reviewer" not found')
+      throw new Error('Unknown agent preset: singularity-reviewer')
     })
     const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
     expect(recordDiagnosisIn).not.toHaveBeenCalled()

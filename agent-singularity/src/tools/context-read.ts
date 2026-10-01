@@ -1,43 +1,13 @@
-/**
- * `context_read` (A2 §D, dispatch subgoal 3): the one reference reader of the
- * deployment — one record of the caller's own graph domain, by the identity the
- * record already has.
- *
- * The authorization is the caller, never the reference: the service resolves
- * the live session to its graph domain first, then looks the reference up
- * inside that domain — so an id from another graph is a named refusal, and
- * there is deliberately NO `graphId`, `storeId` or `callerId` parameter a model
- * could widen the domain with. This tool replaces the raw cross-session readers
- * (`session_event_read` and its siblings), which are sealed on every
- * runtime-owned agent.
- * @module dsh-singularity-agent/tools/context-read
- */
+/** `context_read` (A2 §D, dispatch subgoal 3): the one reference reader of the deployment — one record of the caller's own graph domain, by the identity the record already has. @module dsh-singularity-agent/tools/context-read */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@dangosys/dsh-singularity-context'
 import { CONTEXT_OUTPUT_LIMIT_BYTES } from '@dangosys/dsh-singularity-context'
-import { adaptRead, callerSessionId } from './projected-read.ts'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
+import { adaptRead, sessionId, text, undeclaredParameters } from '../shared.ts'
 
 /** Every parameter this tool declares; anything else is refused by name before any read happens. */
 const DECLARED = ['kind', 'ref', 'offset', 'limit'] as const
-
-/**
- * Refuse a call carrying a key this tool does not declare — a `graphId`,
- * `storeId` or `callerId` above all: the reference never authorizes, and an
- * undeclared key is named rather than silently ignored.
- */
-function undeclared(args: Record<string, unknown>): string | undefined {
-  const extra = Object.keys(args).filter(key => !(DECLARED as readonly string[]).includes(key))
-  if (extra.length === 0) return undefined
-  return [
-    `context_read rejected: undeclared parameter${extra.length === 1 ? '' : 's'} ${extra.map(key => `"${key}"`).join(', ')} —`,
-    `this tool accepts ${DECLARED.join(', ')} and has no argument that names a graph, a store or a caller:`,
-    'the read domain is the calling session\'s own graph, and nothing here can widen it. Nothing was read.',
-  ].join(' ')
-}
 
 export function defineContextReadTool(ctx: Context) {
   return defineTool({
@@ -107,9 +77,15 @@ export function defineContextReadTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const refused = undeclared(args)
+      const refused = undeclaredParameters(
+        args,
+        DECLARED,
+        'context_read',
+        'and has no argument that names a graph, a store or a caller: the read domain is the calling session\'s own graph, and nothing here can widen it',
+        'Nothing was read.',
+      )
       if (refused !== undefined) return refused
-      const caller = callerSessionId(exec, 'context_read')
+      const caller = sessionId(exec, 'context_read')
       return adaptRead(
         'context_read',
         await ctx.singularityContext.contextRead(caller, {

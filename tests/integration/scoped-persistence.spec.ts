@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { GraphService } from '../../graph/src/index.ts'
-import { LayoutService } from '../../layout/src/index.ts'
-import { DEFAULT_ROOT } from '../../layout/src/types.ts'
+import { LayoutService } from '../../graph/src/layout.ts'
+import { DEFAULT_ROOT } from '../../graph/src/layout-types.ts'
 
 function harness(name: 'graph' | 'layout') {
   const ctx = new Context()

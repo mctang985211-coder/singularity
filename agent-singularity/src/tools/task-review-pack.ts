@@ -1,35 +1,24 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
 import type { Diagnosis, ReviewDimensions, ReviewMetrics, ReviewRecord, TaskId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
-import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import { countReviewAgentRuns, readReviewAgentAttempts, reviewAgentBudget } from '../review-agent-ledger.ts'
-import type { ReviewAgentAttempt, ReviewAgentSource } from '../review-agent-ledger.ts'
-import { evolutionEnabled, handoffStateLine } from '../handoff-rules.ts'
-import type { HandoffFacts } from '../handoff-rules.ts'
-import { renderJudgementDimensions } from './review-escalation.ts'
+import { JUDGED_DIMENSIONS, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
+import { readReviewAgentAttempts } from '../coordination/ledger.ts'
+import type { ReviewAgentAttempt, ReviewAgentSource } from '../coordination/ledger.ts'
+import { handoffFactsOf, handoffStateLine } from '../coordination/handoff-rules.ts'
+import type { HandoffFacts } from '../coordination/handoff-rules.ts'
+import { reviewRef } from '../coordination/identity.ts'
+import { sessionId, text } from '../shared.ts'
 
-const text = (value: string) => [{ type: 'text' as const, text: value }]
+export { reviewRef }
 
-function sessionId(exec: ToolRunContext): SessionId {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('task_review_pack: missing agent id')
-  return id
+/** The judgement line: the six dimensions whose conclusion the fact table does not carry, named so a reader cannot mistake the facts for a verdict. */
+export function renderJudgementDimensions(): string {
+  return `needs judgement (agent): ${JUDGED_DIMENSIONS.join(', ')} (not mechanically observable from the fact table; a review agent may conclude them)`
 }
 
-/** The ref a diagnosis uses in `reviewRefs` to name one review record, and a pack uses to name its source. */
-export function reviewRef(review: { readonly taskId: TaskId; readonly runId?: string | null }): string {
-  return `${review.taskId}#${review.runId ?? 'no-run'}`
-}
-
-/**
- * The review record of one exact source, or nothing when the store holds none.
- * The source is named, never inferred: a review is of the run it recorded, and
- * a task with several runs has several reviews.
- */
+/** The review record of one exact source, or nothing when the store holds none. */
 export function reviewForSource(snapshot: TaskSnapshot, source: ReviewAgentSource): ReviewRecord | undefined {
   return snapshot.reviews.find(review => review.taskId === source.taskId && (review.runId ?? null) === source.runId)
 }
@@ -39,18 +28,7 @@ function latestReview(snapshot: TaskSnapshot, taskId: TaskId): ReviewRecord | un
   return [...snapshot.reviews].reverse().find(item => item.taskId === taskId)
 }
 
-/**
- * The ledger state of one source: every **review** attempt the store holds for
- * it, in the order they were claimed — the default attempt (`null` key) and each
- * explicit one — with how each ended. This is what a reader checks before asking
- * for a review: an attempt that is still open is the one a new call would return
- * instead of starting another, and a new review of an already-reviewed source
- * needs an explicit `requestKey`.
- *
- * Supervisor rows carry a source too (the hand-off's), so they are filtered out
- * here: they are not review attempts of this source, and what a reader of a pack
- * learns about a hand-off comes from the diagnosis line below.
- */
+/** The ledger state of one source: every **review** attempt the store holds for it, in the order they were claimed — the default attempt (`null` key) and each explicit one — with how each ended. */
 function renderAttempts(attempts: readonly ReviewAgentAttempt[], source: ReviewAgentSource): string[] {
   const mine = attempts.filter(attempt => attempt.role === 'reviewer' && attempt.source.taskId === source.taskId && attempt.source.runId === source.runId)
   if (mine.length === 0) {
@@ -72,13 +50,7 @@ function reviewSummary(snapshot: TaskSnapshot, taskId: TaskId): string {
   return `review ${reviewRef(review)}: ${review.outcome}${detail === undefined ? '' : ` — ${detail}`}`
 }
 
-/**
- * The effort line: one clause per counter that exists, and nothing for the ones
- * that do not — an absent field means "not observed" (see `ReviewMetrics`), so
- * printing 0 for it would invent a measurement. The two counters whose scope is
- * easy to misread (`tokens`, `humanInterventions`) and the one that is
- * structurally constant (`retries`) carry their caveat inline.
- */
+/** The effort line: one clause per counter that exists, and nothing for the ones that do not — an absent field means "not observed" (see `ReviewMetrics`), so printing 0 for it would invent a measurement. */
 function renderMetrics(metrics: ReviewMetrics): string {
   const parts: string[] = []
   if (metrics.tokens !== undefined) {
@@ -91,12 +63,7 @@ function renderMetrics(metrics: ReviewMetrics): string {
   return parts.join(' — ')
 }
 
-/**
- * One line per dimension that the record actually carries: the observed facts,
- * copied out, never rated and never narrated. Anything a dimension omits is
- * omitted here too, so the pack stays a fact sheet — the explanation lives in
- * the diagnoses below it.
- */
+/** One line per dimension that the record actually carries: the observed facts, copied out, never rated and never narrated. */
 function renderDimensions(dimensions: ReviewDimensions): string[] {
   const lines: string[] = []
   const outcome = dimensions.outcomeCorrectness
@@ -146,11 +113,7 @@ function renderDimensions(dimensions: ReviewDimensions): string[] {
   return lines
 }
 
-/**
- * One review line, with the session id a reader drills into. Printing it here
- * is what lets a diagnosis point `session_trace` at the session the review came
- * from without a second lookup (§2.7.5).
- */
+/** One review line, with the session id a reader drills into. Printing it here is what lets a diagnosis point `session_trace` at the session the review came from without a second lookup (§2.7.5). */
 function renderReview(review: ReviewRecord): string[] {
   const duration = review.durationMs === undefined ? '' : ` duration ${review.durationMs}ms`
   const session = review.sessionId === undefined ? '' : ` session ${review.sessionId}`
@@ -160,8 +123,6 @@ function renderReview(review: ReviewRecord): string[] {
   for (const criterion of review.criteria ?? []) {
     // The deciding judge rides next to the verdict (S1-V slice 2): a reader of
     // the pack sees which registered verifier decided, at which version, without
-    // opening the evidence bundle. A record written before the judge was
-    // recorded renders exactly as it did before — no suffix, nothing invented.
     const judge = criterion.verifierId === undefined
       ? ''
       : criterion.verifierVersion === undefined
@@ -182,21 +143,7 @@ function renderReview(review: ReviewRecord): string[] {
   return lines
 }
 
-/**
- * How far one diagnosis's suggestions have been taken up (A5 §3, plan F.4): a
- * diagnosis that carries **proposals** is the A6 hand-off, and this line reports
- * what the deployment really did with it — the supervisor it was delegated to,
- * the coordinator being started right now, or the named reason nothing was opened
- * (the evolution chain off, a suggestion this build has no executor for, the
- * store's allowance spent, or nothing having asked yet).
- *
- * The answer is `handoffStateLine` (over `handoffDecision`) — the very function
- * the consumption entry acts on — so the pack cannot drift from what a consumer
- * would do. A conclusion
- * *without* proposals is not a hand-off and gets no mark (a normal completion
- * stays a conclusion), and an interrupted attempt has no diagnosis at all, so it
- * can never reach this line.
- */
+/** How far one diagnosis's suggestions have been taken up (A5 §3, plan F.4): */
 function handoffMark(diagnosis: Diagnosis, handoff: HandoffFacts): string | undefined {
   return handoffStateLine({
     enabled: handoff.enabled,
@@ -228,21 +175,7 @@ function renderDiagnosis(diagnosis: Diagnosis, handoff: HandoffFacts): string[] 
   return lines
 }
 
-/**
- * What each of the task's runs was bound to and loaded (S1-C item 4): one line
- * per run that recorded a binding, naming the registry revision, the providers
- * (skill, role, short content digest) and the granted MCP servers. This is what
- * makes "which version did this execution run against?" answerable from the
- * pack, next to the run ids the reviews above already cite.
- *
- * The pack reports the record; it does not re-read the snapshots. It is the
- * facts sheet a reviewer starts from, and the bytes are re-checked by the
- * entries that act on them (`task_read`, a run re-entry) — a line here says what
- * the run was bound to, never that the content is still on disk. A run that
- * carries no binding (one written before the field existed, or one whose caller
- * assembled its plan without a pre-check) contributes no line, and nothing is
- * invented for it.
- */
+/** What each of the task's runs was bound to and loaded (S1-C item 4): */
 function renderBindings(snapshot: TaskSnapshot, taskId: TaskId): string[] {
   const lines: string[] = []
   for (const run of snapshot.runs.filter(item => item.taskId === taskId)) {
@@ -273,20 +206,7 @@ export interface ReviewPackInput {
   readonly handoff: HandoffFacts
 }
 
-/**
- * The pack for one source of one task: the source itself first, then the facts
- * (reviews, dependency edges, parent/child summaries), the ledger state of that
- * source, the judgement dimensions the facts cannot settle, and the diagnoses
- * that explain them.
- *
- * No trigger decision is printed (A5): whether a review agent runs is decided by
- * the two triggers — a **failed** review, or an explicit call — under the
- * store's own allowance, and the fact table a pack carries says nothing about
- * either beyond the observations it already prints (the outcome, the criteria,
- * the log tail, the capability coverage). A reader that needs the allowance
- * gets it from the attempt list and from `task_review_agent`'s own refusal.
- * @throws when the source's task is not in the snapshot.
- */
+/** The pack for one source of one task: the source itself first, then the facts (reviews, dependency edges, parent/child summaries), the ledger state of that source, the judgement dimensions the facts. */
 export function buildReviewPack(input: ReviewPackInput): string {
   const { snapshot, source, attempts, handoff } = input
   const { taskId } = source
@@ -348,7 +268,7 @@ export function defineTaskReviewPackTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const graph = await ctx.graphs.graphForSession(sessionId(exec))
+      const graph = await ctx.graphs.graphForSession(sessionId(exec, 'task_review_pack'))
       const storeId = rootTaskStoreId(graph.rootSessionId)
       const source: ReviewAgentSource = { taskId: args.taskId, runId: args.runId }
       const snapshot = await ctx.task.openStore(storeId)
@@ -366,11 +286,7 @@ export function defineTaskReviewPackTool(ctx: Context) {
         snapshot,
         source,
         attempts,
-        handoff: {
-          enabled: evolutionEnabled(ctx),
-          attempts,
-          budget: { used: await countReviewAgentRuns(storeId), max: reviewAgentBudget() },
-        },
+        handoff: await handoffFactsOf(ctx, storeId, attempts),
       })
     },
   })

@@ -5,9 +5,17 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { SessionNotInGraphError } from '../../../graphs/src/index.ts'
 import type { Diagnosis, EvidenceBundle, TaskInstance, TaskRun } from '../../../task/src/index.ts'
-import { TaskService, batchIdFor, budgetExtensionRequestDigest, rootTaskStoreId, runMemberSlots, runMemberTaskIds } from '../../../task/src/index.ts'
+import {
+  TaskService,
+  batchIdFor,
+  budgetExtensionRequestDigest,
+  rootTaskStoreId,
+  runMemberSlots,
+  runMemberTaskIds,
+} from '../../../task/src/index.ts'
 import { VerifierRegistry } from '../../../verifier/src/index.ts'
 import type { CapabilityConfig, Config, RootRecoveryRequest } from '../../src/index.ts'
+import type { StoreRecoveryState } from '../../src/config.ts'
 import { TaskRuntime } from '../../src/index.ts'
 
 /** The temporary evidence roots this file minted, removed after each test. */
@@ -59,7 +67,14 @@ interface SpawnCall {
  * The model loop is not mounted: `agentRuntime.spawn` records and answers, which
  * is the boundary the entry's own rules stop at.
  */
-function harness(options: { config?: Partial<Config>; sessions?: Map<string, StoredSession>; verifier?: boolean; live?: readonly string[] } = {}) {
+function harness(
+  options: {
+    config?: Partial<Config>
+    sessions?: Map<string, StoredSession>
+    verifier?: boolean
+    live?: readonly string[]
+  } = {},
+) {
   const sessions = options.sessions ?? new Map<string, StoredSession>()
   const disposers: Array<() => unknown> = []
   const spawns: SpawnCall[] = []
@@ -71,7 +86,9 @@ function harness(options: { config?: Partial<Config>; sessions?: Map<string, Sto
       sessions.set(header.id, stored)
       return {
         read: async () => ({ events: stored.events }),
-        append: async (events: SessionEvent[]) => { stored.events.push(...events) },
+        append: async (events: SessionEvent[]) => {
+          stored.events.push(...events)
+        },
         flush: async () => {},
         close: async () => {},
       }
@@ -81,7 +98,9 @@ function harness(options: { config?: Partial<Config>; sessions?: Map<string, Sto
       if (stored === undefined) throw new Error('missing session ' + id)
       return {
         read: async () => ({ events: stored.events }),
-        append: async (events: SessionEvent[]) => { stored.events.push(...events) },
+        append: async (events: SessionEvent[]) => {
+          stored.events.push(...events)
+        },
         flush: async () => {},
         close: async () => {},
       }
@@ -113,7 +132,11 @@ function harness(options: { config?: Partial<Config>; sessions?: Map<string, Sto
     return resolveGraph(String(parent), seen)
   }
   const graphs = {
-    graphForSession: vi.fn(async (sessionId: string) => ({ ...resolveGraph(sessionId), graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root' })),
+    graphForSession: vi.fn(async (sessionId: string) => ({
+      ...resolveGraph(sessionId),
+      graphStoreId: 'sg-g-root',
+      layoutStoreId: 'sg-l-root',
+    })),
   }
   /**
    * The sessions this process image holds live: the caller, and every session its
@@ -194,14 +217,24 @@ function criterion(criterionId: string, extra: Record<string, unknown> = {}): Re
 /** The root contract every case starts from: one command criterion and the map position 1 rests on. */
 function rootTask(overrides: Partial<TaskInstance> = {}): TaskInstance {
   const acceptanceCriteria = [
-    { criterionId: 'root-goal', description: 'the goal is delivered', verificationMode: 'deterministic' as const, requiredEvidence: [], mandatory: true, command: 'true' },
+    {
+      criterionId: 'root-goal',
+      description: 'the goal is delivered',
+      verificationMode: 'deterministic' as const,
+      requiredEvidence: [],
+      mandatory: true,
+      command: 'true',
+    },
     {
       criterionId: 'root-map',
       description: 'the members the map names passed',
       verificationMode: 'composite' as const,
       requiredEvidence: [],
       mandatory: true,
-      childEvidence: [{ childIndex: 0, criterionId: 'child-0' }, { childIndex: 1, criterionId: 'child-1' }],
+      childEvidence: [
+        { childIndex: 0, criterionId: 'child-0' },
+        { childIndex: 1, criterionId: 'child-1' },
+      ],
     },
   ]
   return {
@@ -291,16 +324,23 @@ interface SourceMemberPlan {
  * at. Written through the store's own entry, which is where a run's accumulation
  * always comes from — the runtime never writes members itself.
  */
-async function admitMembers(h: Harness, runId: string, members: readonly string[], proposalId = 'p-first'): Promise<void> {
-  await h.task.commitIn(STORE, [{
-    kind: 'TaskDecomposed',
-    taskId: 'root',
-    runId,
-    timestamp: NOW,
-    actor: 'test',
-    payload: { childTaskIds: [...members], batchId: batchIdFor(runId, proposalId), parentRunId: runId, proposalId },
-    schemaVersion: 1,
-  }] as never)
+async function admitMembers(
+  h: Harness,
+  runId: string,
+  members: readonly string[],
+  proposalId = 'p-first',
+): Promise<void> {
+  await h.task.commitIn(STORE, [
+    {
+      kind: 'TaskDecomposed',
+      taskId: 'root',
+      runId,
+      timestamp: NOW,
+      actor: 'test',
+      payload: { childTaskIds: [...members], batchId: batchIdFor(runId, proposalId), parentRunId: runId, proposalId },
+      schemaVersion: 1,
+    },
+  ] as never)
 }
 
 /**
@@ -318,14 +358,14 @@ async function storeWithSourceRun(
   const base = rootTask()
   const root: TaskInstance = {
     ...base,
-    acceptanceCriteria: base.acceptanceCriteria.map(criterionEntry => criterionEntry.criterionId === 'root-map'
-      ? { ...criterionEntry, childEvidence: map as never }
-      : criterionEntry),
+    acceptanceCriteria: base.acceptanceCriteria.map(criterionEntry =>
+      criterionEntry.criterionId === 'root-map' ? { ...criterionEntry, childEvidence: map as never } : criterionEntry,
+    ),
     contract: {
       ...base.contract!,
-      acceptanceCriteria: base.contract!.acceptanceCriteria.map(criterionEntry => criterionEntry.criterionId === 'root-map'
-        ? { ...criterionEntry, childEvidence: map as never }
-        : criterionEntry),
+      acceptanceCriteria: base.contract!.acceptanceCriteria.map(criterionEntry =>
+        criterionEntry.criterionId === 'root-map' ? { ...criterionEntry, childEvidence: map as never } : criterionEntry,
+      ),
     },
   }
   await h.task.createStore(STORE)
@@ -341,11 +381,17 @@ async function storeWithSourceRun(
       await h.task.markRunStatusIn(STORE, member.childId, sibling.run.runId, 'verifying', 'test')
       await h.task.markRunStatusIn(STORE, member.childId, sibling.run.runId, 'verified', 'test')
     } else {
-      await h.task.markRunStatusIn(STORE, member.childId, sibling.run.runId, 'failed', 'test', { reason: `${member.childId} did not hold` })
+      await h.task.markRunStatusIn(STORE, member.childId, sibling.run.runId, 'failed', 'test', {
+        reason: `${member.childId} did not hold`,
+      })
     }
   }
   await h.task.startRunIn(STORE, run('r-first', 'root'), 'test')
-  await admitMembers(h, 'r-first', plan.map(member => member.childId))
+  await admitMembers(
+    h,
+    'r-first',
+    plan.map(member => member.childId),
+  )
   await h.task.markRunStatusIn(STORE, 'root', 'r-first', 'failed', 'test', { reason: 'the map did not hold' })
   await h.task.recordDiagnosisIn(STORE, diagnosis('d-1'), 'test')
 }
@@ -378,27 +424,29 @@ async function storeWithFailedRoot(
   const sibling = passedSibling('child-0')
   const diagnosisId = options.diagnosisId ?? 'd-1'
   const base = rootTask()
-  const withReference = options.productReference === undefined
-    ? base
-    : {
-        ...base,
-        acceptanceCriteria: base.acceptanceCriteria.map((criterion, index) => index === 0
-          ? { ...criterion, requiresArtifact: [options.productReference] }
-          : criterion),
-        contract: {
-          ...base.contract!,
-          acceptanceCriteria: base.contract!.acceptanceCriteria.map((criterion, index) => index === 0
-            ? { ...criterion, requiresArtifact: [options.productReference] }
-            : criterion),
-        },
-      }
-  const root = options.capability === undefined
-    ? withReference
-    : {
-        ...withReference,
-        requestedCapabilities: [options.capability],
-        contract: { ...withReference.contract!, requiredCapabilities: [options.capability] },
-      }
+  const withReference =
+    options.productReference === undefined
+      ? base
+      : {
+          ...base,
+          acceptanceCriteria: base.acceptanceCriteria.map((criterion, index) =>
+            index === 0 ? { ...criterion, requiresArtifact: [options.productReference] } : criterion,
+          ),
+          contract: {
+            ...base.contract!,
+            acceptanceCriteria: base.contract!.acceptanceCriteria.map((criterion, index) =>
+              index === 0 ? { ...criterion, requiresArtifact: [options.productReference] } : criterion,
+            ),
+          },
+        }
+  const root =
+    options.capability === undefined
+      ? withReference
+      : {
+          ...withReference,
+          requestedCapabilities: [options.capability],
+          contract: { ...withReference.contract!, requiredCapabilities: [options.capability] },
+        }
   await h.task.createStore(STORE)
   await h.task.createTaskIn(STORE, root, 'test')
   await h.task.admitTaskIn(STORE, 'root', 'test', { manifest: MANIFEST })
@@ -411,7 +459,9 @@ async function storeWithFailedRoot(
     await h.task.markRunStatusIn(STORE, 'child-0', sibling.run.runId, 'verified', 'test')
   }
   await h.task.startRunIn(STORE, run('r-first', 'root', ROOT_SESSION, { executionPhase: 'active' }), 'test')
-  await h.task.markRunStatusIn(STORE, 'root', 'r-first', 'failed', 'test', { reason: 'the second member never verified' })
+  await h.task.markRunStatusIn(STORE, 'root', 'r-first', 'failed', 'test', {
+    reason: 'the second member never verified',
+  })
   await h.task.recordDiagnosisIn(STORE, diagnosis(diagnosisId), 'test')
   return { sibling, diagnosisId }
 }
@@ -422,22 +472,29 @@ async function storeWithVerifiedRoot(h: Harness): Promise<void> {
   await h.task.createTaskIn(STORE, rootTask(), 'test')
   await h.task.admitTaskIn(STORE, 'root', 'test', { manifest: MANIFEST })
   await h.task.startRunIn(STORE, run('r-first', 'root'), 'test')
-  await h.task.recordEvidenceIn(STORE, {
-    evidenceId: 'e-root',
-    taskRunId: 'r-first',
-    taskId: 'root',
-    artifacts: [],
-    verifierResults: [{ criterionId: 'root-goal', status: 'pass', verifierId: 'command' }],
-    claims: [],
-    generatedAt: NOW,
-  }, 'test')
+  await h.task.recordEvidenceIn(
+    STORE,
+    {
+      evidenceId: 'e-root',
+      taskRunId: 'r-first',
+      taskId: 'root',
+      artifacts: [],
+      verifierResults: [{ criterionId: 'root-goal', status: 'pass', verifierId: 'command' }],
+      claims: [],
+      generatedAt: NOW,
+    },
+    'test',
+  )
   await h.task.markRunStatusIn(STORE, 'root', 'r-first', 'verifying', 'test')
   await h.task.markRunStatusIn(STORE, 'root', 'r-first', 'verified', 'test')
   await h.task.recordDiagnosisIn(STORE, diagnosis('d-1'), 'test')
 }
 
 /** The reuse declaration a case declares: position 0, the passed sibling, its own run and bundle. */
-function reuse(sibling: ReturnType<typeof passedSibling>, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function reuse(
+  sibling: ReturnType<typeof passedSibling>,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     childIndex: 0,
     taskId: sibling.task.taskId,
@@ -493,13 +550,20 @@ describe('A6 recovery entry: the attempt it opens', () => {
     // moves exactly as a retry moves it — `failed` → `running` with one more run
     // id — and nothing else about it changes.
     const rootOf = (snapshot: typeof before) => snapshot.tasks.find(item => item.taskId === 'root')
-    expect({ ...rootOf(after), status: 'failed', runIds: rootOf(before)?.runIds })
-      .toEqual({ ...rootOf(before), status: 'failed', runIds: rootOf(before)?.runIds })
-    expect(after.tasks.filter(item => item.taskId !== 'root')).toEqual(before.tasks.filter(item => item.taskId !== 'root'))
+    expect({ ...rootOf(after), status: 'failed', runIds: rootOf(before)?.runIds }).toEqual({
+      ...rootOf(before),
+      status: 'failed',
+      runIds: rootOf(before)?.runIds,
+    })
+    expect(after.tasks.filter(item => item.taskId !== 'root')).toEqual(
+      before.tasks.filter(item => item.taskId !== 'root'),
+    )
     expect(after.evidence).toEqual(before.evidence)
     expect(after.diagnoses).toEqual(before.diagnoses)
     expect(after.reviews).toEqual(before.reviews)
-    expect(after.runs.find(item => item.runId === 'r-first')).toEqual(before.runs.find(item => item.runId === 'r-first'))
+    expect(after.runs.find(item => item.runId === 'r-first')).toEqual(
+      before.runs.find(item => item.runId === 'r-first'),
+    )
     // One new run, born active, in a new session, carrying the attempt record.
     const attemptRun = after.runs.find(item => item.runId === outcome.runId)
     expect(attemptRun?.taskId).toBe('root')
@@ -676,14 +740,19 @@ describe('A6 recovery entry: what it refuses, with no run started', () => {
     expect(message).toContain('allows 2 run(s)')
     expect(await runsOf(h, 'root')).toHaveLength(1)
     // Raising the ceiling through the ordinary store fact releases exactly one attempt.
-    await h.task.recordBudgetExtensionIn(STORE, 'root', {
-      requestKey: 'raise-1',
-      requestDigest: budgetExtensionRequestDigest({ requestKey: 'raise-1', maxRuns: 4 }),
-      maxRuns: { previous: 2, next: 4 },
-      approvalRef: 'approval:call-1',
-      requestedBy: ROOT_SESSION,
-      baseline: { maxRuns: 2 },
-    } as never, ROOT_SESSION)
+    await h.task.recordBudgetExtensionIn(
+      STORE,
+      'root',
+      {
+        requestKey: 'raise-1',
+        requestDigest: budgetExtensionRequestDigest({ requestKey: 'raise-1', maxRuns: 4 }),
+        maxRuns: { previous: 2, next: 4 },
+        approvalRef: 'approval:call-1',
+        requestedBy: ROOT_SESSION,
+        baseline: { maxRuns: 2 },
+      } as never,
+      ROOT_SESSION,
+    )
     const started = await recover(h)
     expect(started.attempt).toBe('started')
     expect(await runsOf(h, 'root')).toHaveLength(2)
@@ -700,9 +769,11 @@ describe('A6 recovery entry: what it refuses, with no run started', () => {
   test('refuses two entries that claim one position', async () => {
     const h = harness()
     const { sibling } = await storeWithFailedRoot(h)
-    const message = await refusal(() => recover(h, {
-      reuses: [reuse(sibling) as never, reuse(sibling) as never],
-    }))
+    const message = await refusal(() =>
+      recover(h, {
+        reuses: [reuse(sibling) as never, reuse(sibling) as never],
+      }),
+    )
     expect(message).toContain('is claimed by another entry')
     expect(await runsOf(h, 'root')).toHaveLength(1)
   })
@@ -713,9 +784,11 @@ describe('A6 recovery entry: what it refuses, with no run started', () => {
     // The failed run reads child-0 at position 0. A declaration for position 1
     // citing child-0 has to be judged against the member the run reads there,
     // which is nobody: the position is not the sibling's.
-    const message = await refusal(() => recover(h, {
-      reuses: [reuse(sibling) as never, { ...reuse(sibling), childIndex: 1 } as never],
-    }))
+    const message = await refusal(() =>
+      recover(h, {
+        reuses: [reuse(sibling) as never, { ...reuse(sibling), childIndex: 1 } as never],
+      }),
+    )
     expect(message).toContain('declared reuse does not resolve')
     expect(message).toContain('reuses[1]')
     expect(message).toContain('reads no member at position 1')
@@ -732,15 +805,19 @@ describe('A6 recovery entry: what it refuses, with no run started', () => {
     await h.task.recordEvidenceIn(STORE, failedSibling.bundle, 'test')
     await h.task.markRunStatusIn(STORE, 'child-f', failedSibling.run.runId, 'verifying', 'test')
     await h.task.markRunStatusIn(STORE, 'child-f', failedSibling.run.runId, 'verified', 'test')
-    const message = await refusal(() => recover(h, {
-      reuses: [{
-        childIndex: 0,
-        taskId: 'child-f',
-        sourceRunId: failedSibling.run.runId,
-        evidenceId: failedSibling.bundle.evidenceId,
-        criterionId: 'child-0',
-      } as never],
-    }))
+    const message = await refusal(() =>
+      recover(h, {
+        reuses: [
+          {
+            childIndex: 0,
+            taskId: 'child-f',
+            sourceRunId: failedSibling.run.runId,
+            evidenceId: failedSibling.bundle.evidenceId,
+            criterionId: 'child-0',
+          } as never,
+        ],
+      }),
+    )
     expect(message).toContain('declared reuse does not resolve')
     expect(message).toContain('failed run')
     expect(await runsOf(h, 'root')).toHaveLength(1)
@@ -765,7 +842,9 @@ describe('A6 recovery entry: what it refuses, with no run started', () => {
   test('refuses a citation of an artifact the bundle does not hold', async () => {
     const h = harness()
     const { sibling } = await storeWithFailedRoot(h)
-    const message = await refusal(() => recover(h, { reuses: [reuse(sibling, { artifactRefs: ['a-not-here'] }) as never] }))
+    const message = await refusal(() =>
+      recover(h, { reuses: [reuse(sibling, { artifactRefs: ['a-not-here'] }) as never] }),
+    )
     expect(message).toContain('holds no artifact "a-not-here"')
     expect(await runsOf(h, 'root')).toHaveLength(1)
   })
@@ -774,10 +853,16 @@ describe('A6 recovery entry: what it refuses, with no run started', () => {
     const h = harness()
     await storeWithFailedRoot(h)
     await h.task.createStore('sg-t-somewhere-else')
-    await h.task.createTaskIn('sg-t-somewhere-else', { ...rootTask({ parentTaskId: undefined, taskId: 'stranger' }) }, 'test')
-    const message = await refusal(() => recover(h, {
-      reuses: [{ childIndex: 0, taskId: 'stranger', sourceRunId: 'r-stranger', evidenceId: 'e-stranger' } as never],
-    }))
+    await h.task.createTaskIn(
+      'sg-t-somewhere-else',
+      { ...rootTask({ parentTaskId: undefined, taskId: 'stranger' }) },
+      'test',
+    )
+    const message = await refusal(() =>
+      recover(h, {
+        reuses: [{ childIndex: 0, taskId: 'stranger', sourceRunId: 'r-stranger', evidenceId: 'e-stranger' } as never],
+      }),
+    )
     expect(message).toContain('no task "stranger" exists in this store')
     expect(await runsOf(h, 'root')).toHaveLength(1)
   })
@@ -791,7 +876,7 @@ describe('A6 recovery entry: the persistent boundaries across a restart', () => 
     const started = await recover(first)
     const afterStart = await first.task.snapshotIn(STORE)
     expect(afterStart.runs).toHaveLength(3)
-    expect((afterStart.runs.find(item => item.runId === started.runId))?.batchId).toBeUndefined()
+    expect(afterStart.runs.find(item => item.runId === started.runId)?.batchId).toBeUndefined()
     expect(afterStart.runs.find(item => item.runId === started.runId)?.batches).toBeUndefined()
 
     // The process dies here: the attempt's run exists and no batch was admitted.
@@ -873,7 +958,9 @@ describe('A6 recovery entry: the root hands its result in only when its referenc
     // The gap is on the record as an obligation, exactly where the spawn gate
     // records the same finding — a refusal that leaves the gap unrecorded would
     // be a finding nobody can act on.
-    expect(after.obligations.some(item => item.goal.includes('report-from-producer') && item.sourceTaskId === 'root')).toBe(true)
+    expect(
+      after.obligations.some(item => item.goal.includes('report-from-producer') && item.sourceTaskId === 'root'),
+    ).toBe(true)
   })
 })
 
@@ -891,7 +978,9 @@ describe('A6 recovery entry: a cancelled attempt is terminal, and the next admis
     // record — never restarted, never charged twice — and a *new* key is refused
     // by name, because a recovery is opened for a failed task and this store's
     // root is not one any more.
-    await h.task.markRunStatusIn(STORE, 'root', started.runId, 'cancelled', 'test', { reason: 'a person cancelled the attempt' })
+    await h.task.markRunStatusIn(STORE, 'root', started.runId, 'cancelled', 'test', {
+      reason: 'a person cancelled the attempt',
+    })
     const answered = await recover(h)
     expect(answered.attempt).toBe('existing')
     expect(answered.runId).toBe(started.runId)
@@ -911,32 +1000,41 @@ describe('A6 recovery entry: a cancelled attempt is terminal, and the next admis
   })
 })
 
-describe('A6 recovery entry: the binding is derived from the failed run\'s own facts', () => {
+describe("A6 recovery entry: the binding is derived from the failed run's own facts", () => {
   test('binds a passed sibling that stands after the failed member, at the position the map names', async () => {
     const h = harness()
     // The failed attempt read two members: position 0 failed, position 1 passed.
     // The driver really does start a member after a failed one (a failed member is
     // terminal and leaves the round's pending list), so this is a shape a real run
     // reaches — and the passed sibling at position 1 must not be re-run.
-    await storeWithSourceRun(h, [
-      { childId: 'child-0', criterionId: 'member-0', outcome: 'failed', verdict: 'fail' },
-      { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'pass' },
-    ], [{ childIndex: 0, criterionId: 'member-0' }, { childIndex: 1, criterionId: 'member-1' }])
+    await storeWithSourceRun(
+      h,
+      [
+        { childId: 'child-0', criterionId: 'member-0', outcome: 'failed', verdict: 'fail' },
+        { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'pass' },
+      ],
+      [
+        { childIndex: 0, criterionId: 'member-0' },
+        { childIndex: 1, criterionId: 'member-1' },
+      ],
+    )
     const before = await h.task.snapshotIn(STORE)
 
     // No `reuses` in the request: the two-field chain's shape, where the caller
     // states nothing about evidence and the store's facts decide.
     const outcome = await recover(h)
     expect(outcome.attempt).toBe('started')
-    expect(outcome.reusedMembers).toEqual([{
-      childIndex: 1,
-      taskId: 'child-1',
-      sourceRunId: 'r-child-1',
-      evidenceId: 'e-child-1',
-      criterionId: 'member-1',
-      artifactRefs: ['a-child-1', 'report'],
-      inputRefs: [],
-    }])
+    expect(outcome.reusedMembers).toEqual([
+      {
+        childIndex: 1,
+        taskId: 'child-1',
+        sourceRunId: 'r-child-1',
+        evidenceId: 'e-child-1',
+        criterionId: 'member-1',
+        artifactRefs: ['a-child-1', 'report'],
+        inputRefs: [],
+      },
+    ])
     expect(outcome.unboundMembers).toEqual([])
 
     // The attempt's record carries the same citation, and its member sequence
@@ -951,7 +1049,9 @@ describe('A6 recovery entry: the binding is derived from the failed run\'s own f
     const after = await h.task.snapshotIn(STORE)
     expect(before.runs.filter(item => item.taskId === 'child-1')).toHaveLength(1)
     expect(after.runs.filter(item => item.taskId === 'child-1')).toHaveLength(1)
-    expect(after.evidence.find(item => item.evidenceId === 'e-child-1')).toEqual(before.evidence.find(item => item.evidenceId === 'e-child-1'))
+    expect(after.evidence.find(item => item.evidenceId === 'e-child-1')).toEqual(
+      before.evidence.find(item => item.evidenceId === 'e-child-1'),
+    )
   })
 
   test('reports a passed sibling it cannot bind, with the reasons, and leaves the position open', async () => {
@@ -960,10 +1060,17 @@ describe('A6 recovery entry: the binding is derived from the failed run\'s own f
     // bundle carries a *failing* verdict for it: the sibling verified (its
     // mandatory criterion held) but the evidence the map asks for is not there, so
     // the citation cannot be bound and the position has to be done again.
-    await storeWithSourceRun(h, [
-      { childId: 'child-0', criterionId: 'member-0', outcome: 'failed', verdict: 'fail' },
-      { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'fail' },
-    ], [{ childIndex: 0, criterionId: 'member-0' }, { childIndex: 1, criterionId: 'member-1' }])
+    await storeWithSourceRun(
+      h,
+      [
+        { childId: 'child-0', criterionId: 'member-0', outcome: 'failed', verdict: 'fail' },
+        { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'fail' },
+      ],
+      [
+        { childIndex: 0, criterionId: 'member-0' },
+        { childIndex: 1, criterionId: 'member-1' },
+      ],
+    )
 
     const outcome = await recover(h)
     expect(outcome.reusedMembers).toEqual([])
@@ -988,15 +1095,19 @@ describe('A6 recovery entry: the binding is derived from the failed run\'s own f
 
   test('binds the sibling the map asks for and reports only the position it cannot, in one attempt', async () => {
     const h = harness()
-    await storeWithSourceRun(h, [
-      { childId: 'child-0', criterionId: 'member-0', outcome: 'verified', verdict: 'pass' },
-      { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'fail' },
-      { childId: 'child-2', criterionId: 'member-2', outcome: 'failed', verdict: 'fail' },
-    ], [
-      { childIndex: 0, criterionId: 'member-0' },
-      { childIndex: 1, criterionId: 'member-1' },
-      { childIndex: 2, criterionId: 'member-2' },
-    ])
+    await storeWithSourceRun(
+      h,
+      [
+        { childId: 'child-0', criterionId: 'member-0', outcome: 'verified', verdict: 'pass' },
+        { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'fail' },
+        { childId: 'child-2', criterionId: 'member-2', outcome: 'failed', verdict: 'fail' },
+      ],
+      [
+        { childIndex: 0, criterionId: 'member-0' },
+        { childIndex: 1, criterionId: 'member-1' },
+        { childIndex: 2, criterionId: 'member-2' },
+      ],
+    )
     const outcome = await recover(h)
     expect(outcome.reusedMembers.map(member => member.childIndex)).toEqual([0])
     expect(outcome.unboundMembers.map(entry => entry.childIndex)).toEqual([1])
@@ -1004,47 +1115,65 @@ describe('A6 recovery entry: the binding is derived from the failed run\'s own f
     // there: positions 1 and 2 are not filled yet — the attempt's own batches
     // will fill them, and a judgement made before that reads them as positions
     // the run does not hold.
-    expect(runMemberSlots((await h.task.snapshotIn(STORE)).runs.find(item => item.runId === outcome.runId)!))
-      .toEqual(['child-0'])
+    expect(runMemberSlots((await h.task.snapshotIn(STORE)).runs.find(item => item.runId === outcome.runId)!)).toEqual([
+      'child-0',
+    ])
   })
 
   test('an explicit declaration of the same unresolvable citation refuses the whole recovery', async () => {
     const h = harness()
-    await storeWithSourceRun(h, [
-      { childId: 'child-0', criterionId: 'member-0', outcome: 'verified', verdict: 'pass' },
-    ], [{ childIndex: 0, criterionId: 'member-0' }])
-    const message = await refusal(() => recover(h, {
-      reuses: [{
-        childIndex: 0,
-        taskId: 'child-0',
-        sourceRunId: 'r-child-0',
-        evidenceId: 'e-child-0',
-        criterionId: 'member-1',
-      } as never],
-    }))
+    await storeWithSourceRun(
+      h,
+      [{ childId: 'child-0', criterionId: 'member-0', outcome: 'verified', verdict: 'pass' }],
+      [{ childIndex: 0, criterionId: 'member-0' }],
+    )
+    const message = await refusal(() =>
+      recover(h, {
+        reuses: [
+          {
+            childIndex: 0,
+            taskId: 'child-0',
+            sourceRunId: 'r-child-0',
+            evidenceId: 'e-child-0',
+            criterionId: 'member-1',
+          } as never,
+        ],
+      }),
+    )
     expect(message).toContain('the declared reuse does not resolve')
     expect(await runsOf(h, 'root')).toHaveLength(1)
   })
 
   test('an explicit declaration at a position after a failed member is accepted', async () => {
     const h = harness()
-    await storeWithSourceRun(h, [
-      { childId: 'child-0', criterionId: 'member-0', outcome: 'failed', verdict: 'fail' },
-      { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'pass' },
-    ], [{ childIndex: 0, criterionId: 'member-0' }, { childIndex: 1, criterionId: 'member-1' }])
+    await storeWithSourceRun(
+      h,
+      [
+        { childId: 'child-0', criterionId: 'member-0', outcome: 'failed', verdict: 'fail' },
+        { childId: 'child-1', criterionId: 'member-1', outcome: 'verified', verdict: 'pass' },
+      ],
+      [
+        { childIndex: 0, criterionId: 'member-0' },
+        { childIndex: 1, criterionId: 'member-1' },
+      ],
+    )
     const outcome = await recover(h, {
-      reuses: [{
-        childIndex: 1,
-        taskId: 'child-1',
-        sourceRunId: 'r-child-1',
-        evidenceId: 'e-child-1',
-        criterionId: 'member-1',
-      } as never],
+      reuses: [
+        {
+          childIndex: 1,
+          taskId: 'child-1',
+          sourceRunId: 'r-child-1',
+          evidenceId: 'e-child-1',
+          criterionId: 'member-1',
+        } as never,
+      ],
     })
     expect(outcome.attempt).toBe('started')
     expect(outcome.reusedMembers.map(member => member.childIndex)).toEqual([1])
-    expect(runMemberSlots((await h.task.snapshotIn(STORE)).runs.find(item => item.runId === outcome.runId)!))
-      .toEqual([undefined, 'child-1'])
+    expect(runMemberSlots((await h.task.snapshotIn(STORE)).runs.find(item => item.runId === outcome.runId)!)).toEqual([
+      undefined,
+      'child-1',
+    ])
   })
 })
 
@@ -1092,12 +1221,44 @@ describe('A6 recovery entry: the caller must own the store it asks for', () => {
     expect(h.spawns).toHaveLength(0)
   })
 
-  test('serves the store\'s own graph — the positive control', async () => {
+  test("serves the store's own graph — the positive control", async () => {
     const h = harness({ live: [ROOT_SESSION] })
     await storeWithFailedRoot(h)
     const outcome = await recover(h, {}, ROOT_SESSION)
     expect(outcome.attempt).toBe('started')
     expect(await runsOf(h, 'root')).toHaveLength(2)
     expect(h.spawns).toHaveLength(1)
+  })
+})
+
+describe('the live barrier projection', () => {
+  test('serves a live barrier’s deferred work without its handles, and nothing for a store without one', () => {
+    const h = harness()
+    expect(h.runtime.recoveryState(STORE)).toBeUndefined()
+
+    const state: StoreRecoveryState = {
+      status: 'recovering',
+      promise: Promise.resolve(),
+      release: () => {},
+      released: Promise.resolve(true),
+      pendingDrivers: [],
+      pendingNotices: [{ sessionId: 's-1', text: 'the batch settled' }],
+      wokenSessions: new Set(['s-1']),
+      pendingBatchResults: [
+        { storeId: STORE, runId: 'r-1', batchId: 'b-1', sessionId: 's-1', messageId: 'm-1', text: 'done' },
+      ],
+      cancelled: true,
+    }
+    h.runtime.storeRecovery.set(STORE, state)
+
+    // Only the deferred work crosses the boundary: the barrier's promise, release and failure stay inside.
+    expect(h.runtime.recoveryState(STORE)).toEqual({
+      wokenSessions: ['s-1'],
+      pendingNotices: [{ sessionId: 's-1', text: 'the batch settled' }],
+      pendingBatchResults: [
+        { storeId: STORE, runId: 'r-1', batchId: 'b-1', sessionId: 's-1', messageId: 'm-1', text: 'done' },
+      ],
+      cancelled: true,
+    })
   })
 })

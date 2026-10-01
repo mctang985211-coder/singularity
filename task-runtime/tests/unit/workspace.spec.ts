@@ -4,7 +4,13 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { sha256Hex } from '../../../task/src/index.ts'
-import { normalizeWorkspacePath, readProcessStartTime, WorkspaceBusyError, WorkspaceRegistry, WORKSPACE_OWNERS_DIR } from '../../src/workspace.ts'
+import {
+  normalizeWorkspacePath,
+  readProcessStartTime,
+  WorkspaceBusyError,
+  WorkspaceRegistry,
+  WORKSPACE_OWNERS_DIR,
+} from '../../src/workspace.ts'
 import type { WorkspaceOwner } from '../../src/workspace.ts'
 
 /**
@@ -58,14 +64,21 @@ async function markerText(reg: WorkspaceRegistry): Promise<string> {
 }
 
 async function markerExists(): Promise<boolean> {
-  return readdir(markerRoot).then(entries => entries.includes(`${sha256Hex(checkout)}.json`), () => false)
+  return readdir(markerRoot).then(
+    entries => entries.includes(`${sha256Hex(checkout)}.json`),
+    () => false,
+  )
 }
 
 /** A pid that is certainly not alive: a child of this test that has exited. */
 async function deadPid(): Promise<number> {
   const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' })
   const pid = child.pid as number
-  await new Promise<void>(resolve => child.once('close', () => { resolve() }))
+  await new Promise<void>(resolve =>
+    child.once('close', () => {
+      resolve()
+    }),
+  )
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       process.kill(pid, 0)
@@ -81,7 +94,12 @@ async function deadPid(): Promise<number> {
 async function liveChild(): Promise<{ pid: number; stop: () => void }> {
   const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 60000)'], { stdio: 'ignore' })
   const pid = child.pid as number
-  return { pid, stop: () => { child.kill('SIGKILL') } }
+  return {
+    pid,
+    stop: () => {
+      child.kill('SIGKILL')
+    },
+  }
 }
 
 /** Write a marker by hand, the shape a killed process would have left behind. */
@@ -192,10 +210,14 @@ describe('WorkspaceRegistry stack', () => {
     const run = runOwner()
     await reg.claim(checkout, run)
     const before = await markerText(reg)
-    await expect(reg.push(checkout, verifierOwner(), batchOwner())).rejects.toThrow(/a handover names the holder that is actually there/)
+    await expect(reg.push(checkout, verifierOwner(), batchOwner())).rejects.toThrow(
+      /a handover names the holder that is actually there/,
+    )
     expect(reg.ownerOf(checkout)).toEqual(run)
     expect(await markerText(reg)).toBe(before)
-    await expect(reg.release(checkout, verifierOwner())).rejects.toThrow(/only the holder on top of the stack releases it/)
+    await expect(reg.release(checkout, verifierOwner())).rejects.toThrow(
+      /only the holder on top of the stack releases it/,
+    )
   })
 
   test('releasing a workspace this process never claimed throws', async () => {
@@ -371,7 +393,13 @@ describe('live foreign markers', () => {
       const reg = registry()
       const previous = runOwner()
       const recorded = await readProcessStartTime(child.pid)
-      await writeRawMarker(reg, { path: checkout, pid: child.pid, processStartedAt: recorded, owner: previous, since: previous.since })
+      await writeRawMarker(reg, {
+        path: checkout,
+        pid: child.pid,
+        processStartedAt: recorded,
+        owner: previous,
+        since: previous.since,
+      })
       const busy = await reg.claim(checkout, verifierOwner()).catch((thrown: unknown) => thrown)
       expect(busy).toBeInstanceOf(WorkspaceBusyError)
       expect((busy as WorkspaceBusyError).message).toContain(`names pid ${child.pid}, which is alive`)
@@ -381,7 +409,13 @@ describe('live foreign markers', () => {
       // The pid is live, but the process answering to it did not write this
       // marker: the recorded start time says so, and the reason names it. The
       // rule is unchanged — a live pid is never adopted.
-      await writeRawMarker(reg, { path: checkout, pid: child.pid, processStartedAt: '1', owner: previous, since: previous.since })
+      await writeRawMarker(reg, {
+        path: checkout,
+        pid: child.pid,
+        processStartedAt: '1',
+        owner: previous,
+        since: previous.since,
+      })
       const reused = await reg.claim(checkout, verifierOwner()).catch((thrown: unknown) => thrown)
       const text = (reused as WorkspaceBusyError).message
       if (recorded !== undefined) expect(text).toContain('the pid was reused')

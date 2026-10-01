@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -9,6 +9,7 @@ import { AgentRegistry } from '../../../../thirdparty/deepseek-harness/packages/
 import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
 import { createScope } from '../../../../thirdparty/deepseek-harness/packages/core/scope/lib/index.js'
 import JsonlSessionPersistence from '../../../../thirdparty/deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
+import { SessionQueryError } from '../../../../thirdparty/deepseek-harness/packages/session-query/session-query/lib/index.js'
 import SessionStore, { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { SessionEvent } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -49,8 +50,8 @@ import { graphRegistry, mountContextReadCore } from '../support/context-plane.ts
  *
  * **Crash semantics.** `session-persistence-jsonl` writes each append through to
  * disk before `append` resolves. Probed on this fixture's shape (`compression:
- * 'none'`): after `await handle.append([…])` the artifact
- * `<dir>/_no-cwd/sg-t-s-root/session.v3.jsonl` already held the header line and the
+ * 'none'`): after `await handle.append([…])` the session artifact under
+ * `<dir>/_no-cwd/sg-t-s-root/` already held the header line and the
  * event line — no flush was needed — and a second write-open of the same session
  * while the first handle was live threw `SessionAlreadyOwnedError` (the backend's
  * `flock`). A dying process closes its descriptors and releases that lock, so
@@ -243,6 +244,23 @@ function installSkill(home: string, name = SKILL_NAME): void {
   writeFileSync(join(directory, 'SKILL.md'), `---\nname: ${name}\ndescription: ${name} fixture skill\n---\n\nDo the recovery fixture work.\n`, 'utf8')
 }
 
+/** One stub session's durable header — the facts a second boot's worker resume re-reads. */
+interface StubSessionHeader {
+  readonly id: string
+  readonly cwd: string
+  readonly agentPreset: string
+  readonly parentSession?: string
+}
+
+/** The one JSON file a fixture keeps per directory, or `undefined` before the first boot wrote it. */
+function readStubFile<T>(path: string): T | undefined {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as T
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Boot one deployment over one directory. Everything the deployment's loader
  * mounts is mounted here the same way, except the agent loop.
@@ -307,13 +325,20 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
   ctx.provide('permissionPresets', { set: vi.fn(), resolve: () => ({}) })
   ctx.provide('layout', { setIn: async () => {} })
+  // The graph store's own records are durable across boots: the node a spawn
+  // publishes and its delegation edge are what a second boot's resume re-reads.
+  const graphFile = join(dir, 'graph.json')
+  const persistedGraph = readStubFile<{ agents: { id: string; name: string; status: string }[]; edges: unknown[] }>(graphFile)
   const graphState = {
     version: 1,
     id: 'g1',
     roots: [ROOT],
-    agents: [] as { id: string; name: string; status: string }[],
+    agents: persistedGraph?.agents ?? [],
     groups: [] as unknown[],
-    edges: [] as unknown[],
+    edges: persistedGraph?.edges ?? [],
+  }
+  const saveGraph = (): void => {
+    writeFileSync(graphFile, JSON.stringify({ agents: graphState.agents, edges: graphState.edges }), 'utf8')
   }
   ctx.provide('graph', {
     snapshotIn: async () => structuredClone(graphState),
@@ -322,9 +347,13 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
         if (event.kind === 'agent/add' && event.agent !== undefined) graphState.agents.push(event.agent)
         if (event.kind === 'edge/add' && event.edge !== undefined) graphState.edges.push(event.edge)
       }
+      saveGraph()
     },
     setStatusIn: async () => {},
-    addAgentIn: async (_storeId: string, agent: { id: string; name: string; status: string }) => { graphState.agents.push(agent) },
+    addAgentIn: async (_storeId: string, agent: { id: string; name: string; status: string }) => {
+      graphState.agents.push(agent)
+      saveGraph()
+    },
   } as never)
   ctx.provide('graphs', graphRegistry({
     graphForSession: async () => ({
@@ -359,8 +388,25 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
       await handle.close()
     }
   }
+  // The sessions this deployment minted, durable across boots: a second boot's
+  // worker resume reads a header (preset, parentage) and the session's own events.
+  const sessionFile = join(dir, 'stub-sessions.json')
+  const sessions = new Map<string, StubSessionHeader>(
+    Object.entries(readStubFile<Record<string, StubSessionHeader>>(sessionFile) ?? {}),
+  )
+  const rememberSession = (header: StubSessionHeader): void => {
+    sessions.set(header.id, header)
+    writeFileSync(sessionFile, JSON.stringify(Object.fromEntries(sessions)), 'utf8')
+  }
   ctx.provide('sessionQuery', {
     readSurface: async (sessionId: string) => ({ capturedThroughSeq: (await readLog(sessionId)).at(-1)?.seq ?? null }),
+    readSession: async (sessionId: string) => {
+      const header = sessions.get(String(sessionId))
+      if (header === undefined) {
+        throw new SessionQueryError(`session "${String(sessionId)}" not found`, 'SESSION_QUERY_SESSION_NOT_FOUND')
+      }
+      return { session: structuredClone(header), inheritedEventCount: 0, events: [] }
+    },
     readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
       const events = await readLog(String(request.sessionId))
       const target = events.find(event => event.seq === request.seq)
@@ -441,14 +487,34 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   // bundle mounts them: the read side of every case below goes through it.
   await mountContextReadCore(ctx)
   ctx.agents.setFactory({
-    createAgent: async (_ownerCtx: Context, opts: { sessionId: SessionId; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) =>
-      ({ agent: await mint(opts.sessionId, opts.setup), dispose: async () => {} }),
+    createAgent: async (
+      _ownerCtx: Context,
+      opts: {
+        sessionId: SessionId
+        meta?: { cwd?: string; parentSession?: SessionId; agentPreset?: string }
+        setup?: (agentCtx: Context, agent: Agent) => Promise<unknown>
+      },
+    ) => ({ agent: await mint(opts.sessionId, opts.setup, opts.meta), dispose: async () => {} }),
     resume: async (_ownerCtx: Context, opts: { resumeSessionId: SessionId; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) =>
       ({ agent: await mint(opts.resumeSessionId, opts.setup), dispose: async () => {} }),
   } as never)
 
   /** Hand one stub agent to the runtime: the scope, the setup hook, and the idle body. */
-  async function mint(sessionId: SessionId, setup?: (agentCtx: Context, agent: Agent) => Promise<unknown>): Promise<Agent> {
+  async function mint(
+    sessionId: SessionId,
+    setup?: (agentCtx: Context, agent: Agent) => Promise<unknown>,
+    meta?: { cwd?: string; parentSession?: SessionId; agentPreset?: string },
+  ): Promise<Agent> {
+    // The header a resume reads back: recorded once, when this process mints the
+    // Session, and durable so a later boot over the same directory reads it.
+    if (!sessions.has(String(sessionId))) {
+      rememberSession({
+        id: String(sessionId),
+        cwd: meta?.cwd ?? dir,
+        agentPreset: meta?.agentPreset ?? 'standard',
+        ...(meta?.parentSession === undefined ? {} : { parentSession: String(meta.parentSession) }),
+      })
+    }
     let self!: Agent
     const agent = {
       id: String(sessionId),
@@ -460,7 +526,11 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
       // where a submission was due, which is the no-progress path; a body that
       // never returns parks the driver with the child in flight.
       whenIdle: async () => { await runWorkerTurn(String(sessionId), self) },
-      session: { id: String(sessionId), header: { id: String(sessionId), cwd: dir, agentPreset: 'standard' }, append: vi.fn() },
+      session: {
+        id: String(sessionId),
+        header: sessions.get(String(sessionId)) ?? { id: String(sessionId), cwd: dir, agentPreset: 'standard' },
+        append: vi.fn(),
+      },
     } as unknown as Agent
     self = agent
     let scope!: ReturnType<typeof createScope>
@@ -669,7 +739,7 @@ describe('A3 recovery from the real session log', () => {
     await b.dispose()
   })
 
-  it('cancels a worker that was in flight when the process died, and settles its batch by the rules', async () => {
+  it('continues a worker that was in flight when the process died, until its owner stops it and the batch settles', async () => {
     const dir = workspace()
     const a = await boot(dir, { worker: () => new Promise<void>(() => {}) })
     const root = await seedLegacyRoot(a, 'ship the release')
@@ -687,20 +757,32 @@ describe('A3 recovery from the real session log', () => {
     const b = await boot(dir)
     await b.runtime.adoptRoot(STORE, ROOT)
 
-    // The in-flight worker is cancelled by name — nothing can confirm the writes
-    // it may already have made — and the batch ends on its terminal state. The
-    // parent is *told*, not judged: a child that did not verify is the parent's
-    // fact to read, and only the parent's own submission can fail it (K1 §2).
-    const outcomes = await b.runtime.awaitBatch(STORE, batchId)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])
+    // G §5.25 (CONT-1): an ordinary in-flight worker is continued, not cancelled.
+    // The same Run and Session come back, recovery starts nothing, and the batch
+    // still waits on the child it was admitted with.
+    expect(b.spawns).toHaveLength(0)
+    const recovered = await b.snapshot()
+    const continued = recovered.runs.find(run => run.runId === crashedRun.runId)!
+    expect(continued.status).toBe('running')
+    expect(continued.executionPhase).toBe('active')
+    expect(recovered.reviews.some(review => review.runId === crashedRun.runId)).toBe(false)
+    expect((await b.runtime.runForSession(continued.sessionId)).run.runId).toBe(crashedRun.runId)
+
+    // The child's owner then stops it — the one write nothing else can make on
+    // its behalf — and the batch adopts that terminal state. The parent is
+    // *told*, not judged: only its own submission can fail it (K1 §2).
+    await b.task.markRunStatusIn(STORE, continued.taskId, continued.runId, 'cancelled', ROOT, {
+      reason: 'test: the child was stopped by its owner',
+    })
+    expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['cancelled'])
     const after = await b.snapshot()
-    const cancelled = after.runs.find(run => run.runId === crashedRun.runId)!
-    expect(cancelled.status).toBe('cancelled')
-    expect(cancelled.runId).toBe(crashedRun.runId)
-    const cancelledReview = after.reviews.find(review => review.runId === crashedRun.runId)!
-    expect(cancelledReview.outcome).toBe('cancelled')
-    expect(cancelledReview.anomalies.join(' ')).toContain('was in flight when this store was reopened and never submitted')
+    const stopped = after.runs.find(run => run.runId === crashedRun.runId)!
+    expect(stopped.status).toBe('cancelled')
     expect(after.tasks.find(task => task.taskId === childTaskIds[0])!.status).toBe('cancelled')
+    // The cancellation on the record is the owner's, not a recovery verdict.
+    const cancellation = taskEvents(await b.events()).filter(event => event.kind === 'TaskCancelled' && event.runId === crashedRun.runId)
+    expect(cancellation).toHaveLength(1)
+    expect(JSON.stringify(cancellation[0])).toContain('the child was stopped by its owner')
     const parent = await b.task.runIn(STORE, root.runId)
     expect(parent.status).toBe('running')
     expect(parent.executionPhase).toBe('active')
@@ -709,14 +791,14 @@ describe('A3 recovery from the real session log', () => {
     expect(b.relayed.filter(item => item.messageId === `m-batchend-${batchId}`)).toHaveLength(1)
 
     // The parent may then hand in its own result, and its composite criterion
-    // needs a verified child — this one is cancelled, so the verdict is a failure
+    // needs a verified child — this one was stopped, so the verdict is a failure
     // the *parent's* submission produced.
     expect((await b.runtime.submitResult(ROOT, { summary: 'the parent hands in its own result' })).status).toBe('failed')
     const judged = await b.snapshot()
     expect(judged.reviews.find(review => review.runId === root.runId)?.outcome).toBe('failed')
     expect(judged.tasks.find(task => task.taskId === root.taskId)!.status).toBe('failed')
     // Recovery started nothing: the child that existed is the child that was
-    // settled, and no second run was charged to the tree.
+    // stopped, and no second run was charged to the tree.
     expect(b.spawns).toHaveLength(0)
     expect(after.runs).toHaveLength(2)
     await b.dispose()
@@ -771,25 +853,30 @@ describe('A3 recovery from the real session log', () => {
 
   it('refuses a write for a rebound waiting parent and a terminal child through the real pipeline, while the coordination read still answers', async () => {
     const dir = workspace()
-    const a = await boot(dir, { worker: () => new Promise<void>(() => {}) })
+    // The crash point: the child verified and the parent's handback frozen — the
+    // store holds the parent waiting_children and the child terminal when the
+    // barrier gates the rebound sessions.
+    const a = await boot(dir, { parkDrain: (sessionId, index) => sessionId === ROOT && index === 2 })
     const root = await seedLegacyRoot(a, 'ship the release')
-    await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+    const { childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
-      children: children('long child'),
+      children: children('terminal child'),
     })
-    // The crash point: the parent is waiting_children with a child in flight.
-    await vi.waitFor(async () => expect((await a.snapshot()).runs).toHaveLength(2))
-    const crashedChild = childRunOf(await a.snapshot(), root.taskId)
-    expect(crashedChild.executionPhase).toBe('active')
+    await vi.waitFor(async () => {
+      const snapshot = await a.snapshot()
+      expect(snapshot.runs.find(run => run.taskId === childTaskIds[0])?.status).toBe('verified')
+      expect(snapshot.runs.find(run => run.runId === root.runId)?.executionPhase).toBe('waiting_children')
+    })
+    const crashedChild = (await a.snapshot()).runs.find(run => run.taskId === childTaskIds[0])!
+    expect(crashedChild.executionPhase).toBe('submitted')
     await a.crash()
 
     // The second process parks the restarted batch in the parent's own drain, so
-    // the store holds both phases this case is about: the parent waiting_children,
-    // and the child recovery cancelled — it was in flight when the process died
-    // and nothing can confirm the writes it may have made.
+    // the store holds both phases this case is about when the barrier gates it:
+    // the parent waiting_children, and the child already terminal.
     const b = await boot(dir, { parkDrain: (sessionId, index) => sessionId === ROOT && index === 1 })
     // The restart's own door (A2 §E): the barrier reconciles the store, gates
-    // *every* session it knows — the waiting parent and the cancelled child
+    // *every* session it knows — the waiting parent and the terminal child
     // alike — and registers the waiting parent's driver before it returns.
     await b.runtime.adoptRoot(STORE, ROOT)
     // The read door then resolves both bindings, and the gate each session
@@ -798,7 +885,7 @@ describe('A3 recovery from the real session log', () => {
     expect(parent.run.runId).toBe(root.runId)
     expect(parent.run.executionPhase).toBe('waiting_children')
     const child = await b.runtime.runForSession(crashedChild.sessionId)
-    expect(child.run.status).toBe('cancelled')
+    expect(child.run.status).toBe('verified')
     expect(b.runtime.gate.phaseOf(ROOT)).toBe('waiting_children')
     expect(b.runtime.gate.phaseOf(crashedChild.sessionId)).toBe('terminal')
 
@@ -827,15 +914,15 @@ describe('A3 recovery from the real session log', () => {
     expect(parentRead.text).toContain('objective: ship the release')
     expect(parentRead.text).toContain('children: 1')
     // The child's line in the root's view carries its run's terminal status and
-    // phase; the child's own read below carries the run id the tree view prints
-    // only for the caller's own run (A2 §D: a summary line names the task, and a
-    // run record is read by its own reference).
-    expect(parentRead.text).toContain(`- ${crashedChild.taskId} [cancelled]`)
-    expect(parentRead.text).toContain('run: cancelled')
+    // phase; the child's own read below carries the run line that names the
+    // caller's own run (A2 §D: a summary line names the task, and a run record is
+    // read by its own reference).
+    expect(parentRead.text).toContain(`- ${crashedChild.taskId} [verified]`)
+    expect(parentRead.text).toContain('run: verified')
     expect(b.runtime.gate.phaseOf(ROOT)).toBe('waiting_children')
     const childRead = await throughPipeline(b, crashedChild.sessionId, 'task_read', 'call-read-child')
     expect(childRead.isError).toBe(false)
-    expect(childRead.text).toContain(`run ${crashedChild.runId} [cancelled]`)
+    expect(childRead.text).toContain(`run ${crashedChild.runId} [verified]`)
     expect(b.runtime.gate.phaseOf(crashedChild.sessionId)).toBe('terminal')
     expect(b.ranTools.slice(before)).toEqual([])
   })
@@ -1205,7 +1292,7 @@ describe('A3 recovery from the real session log', () => {
       parkDrain: sessionId => sessionId !== ROOT,
     })
     const root = await seedLegacyRoot(a, 'ship the release')
-    const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+    const { childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: [{ ...children('bound child')[0]!, requiredCapabilities: [SKILL_ROW] }],
     })
@@ -1224,31 +1311,28 @@ describe('A3 recovery from the real session log', () => {
     await a.crash()
 
     const b = await boot(dir, { capabilities: { [SKILL_ROW]: { skills: [SKILL_NAME] } } })
-    await b.runtime.adoptRoot(STORE, ROOT)
-
-    // The batch settles on the refused run rather than continuing past it.
-    expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['failed'])
+    // G §5.25: a persisted content binding that no longer reads back is the
+    // activation's own refusal, by name — the pass does not settle a substitute
+    // verdict and the store keeps exactly the facts the crash left.
+    const written = taskEvents(await b.events()).length
+    await expect(b.runtime.adoptRoot(STORE, ROOT)).rejects.toThrow(/content binding changed/)
+    expect(b.spawns).toHaveLength(0)
     const after = await b.snapshot()
-    const failed = after.runs.find(run => run.runId === crashed.runId)!
-    expect(failed.status).toBe('failed')
-    const review = after.reviews.find(item => item.runId === crashed.runId)!
-    expect(review.outcome).toBe('failed')
-    expect(review.localizedCause).toContain("recovery re-check rejected this run's content binding")
-    expect(review.localizedCause).toContain('cannot be read')
-    // Nothing fell back to the production skill path: the run was not verified,
-    // and no evidence was recorded for it.
+    const held = after.runs.find(run => run.runId === crashed.runId)!
+    expect(held.status).toBe('running')
+    expect(held.executionPhase).toBe('submitted')
+    // Nothing fell back to the production skill path: no verdict, no review, and
+    // no evidence was written for the run.
+    expect(after.reviews.some(review => review.runId === crashed.runId)).toBe(false)
     expect(after.evidence.filter(item => item.taskRunId === crashed.runId)).toHaveLength(0)
-    // The failed child ends the batch: the parent takes its execution back and is
-    // told what happened instead of being accepted on its behalf (K1 §2) — and its
-    // own submission is what its composite criterion then judges.
+    // The refusal is the named verdict for the next business call too, and the
+    // store is byte-for-byte what the crash left (the failed barrier wrote nothing).
+    await expect(b.runtime.submitResult(ROOT, { summary: 'the parent hands in its own result' }))
+      .rejects.toThrow(/recovery-failed.*content binding changed/)
     const parent = after.runs.find(run => run.runId === root.runId)!
     expect(parent.status).toBe('running')
-    expect(parent.executionPhase).toBe('active')
-    expect(after.reviews.some(review => review.runId === root.runId)).toBe(false)
-    expect(b.relayed.filter(item => item.messageId === `m-batchend-${batchId}`)).toHaveLength(1)
-    expect((await b.runtime.submitResult(ROOT, { summary: 'the parent hands in its own result' })).status).toBe('failed')
-    expect((await b.snapshot()).tasks.find(task => task.taskId === root.taskId)!.status).toBe('failed')
-    expect(b.spawns).toHaveLength(0)
+    expect(parent.executionPhase).toBe('waiting_children')
+    expect(taskEvents(await b.events())).toHaveLength(written)
     await b.dispose()
   })
 })
@@ -1538,7 +1622,7 @@ describe('A3: a cancellation during verification', () => {
  * not start cancelling root runs.
  */
 describe('A3 recovery: an in-flight replay is not a root', () => {
-  it('cancels the replay whose worker was in flight, and leaves the root run alone', async () => {
+  it('continues the replay whose worker was in flight, and leaves the root run alone', async () => {
     const dir = workspace()
     const a = await boot(dir, { worker: () => new Promise<void>(() => {}) })
     const root = await seedLegacyRoot(a, 'ship the release')
@@ -1559,13 +1643,15 @@ describe('A3 recovery: an in-flight replay is not a root', () => {
     await b.runtime.adoptRoot(STORE, ROOT)
 
     const after = await b.snapshot()
-    // The replay's worker is cancelled with the recovery named, not left running.
-    const cancelled = after.runs.find(run => run.runId === crashed.runId)!
-    expect(cancelled.status).toBe('cancelled')
-    const review = after.reviews.find(item => item.runId === crashed.runId)!
-    expect(review.outcome).toBe('cancelled')
-    expect(review.anomalies.join(' ')).toContain('was in flight when this store was reopened and never submitted')
-    expect(after.tasks.find(task => task.taskId === crashed.taskId)!.status).toBe('cancelled')
+    // The replay's worker comes back as the same Run and Session (G §5.25), and
+    // its task is not judged by recovery: nothing settles it, so no verdict and
+    // no review appear on its record.
+    const continued = after.runs.find(run => run.runId === crashed.runId)!
+    expect(continued.status).toBe('running')
+    expect(continued.executionPhase).toBe('active')
+    expect((await b.runtime.runForSession(crashed.sessionId)).run.runId).toBe(crashed.runId)
+    expect(after.tasks.find(task => task.taskId === crashed.taskId)!.status).not.toBe('cancelled')
+    expect(after.reviews.some(review => review.runId === crashed.runId)).toBe(false)
     // The root run is untouched: it is the store's own session, and it may sit
     // `active` between its own decisions.
     const rootRun = after.runs.find(run => run.runId === root.runId)!
@@ -1573,7 +1659,7 @@ describe('A3 recovery: an in-flight replay is not a root', () => {
     expect(rootRun.executionPhase).toBe('active')
     expect(after.reviews.filter(item => item.runId === root.runId)).toHaveLength(0)
     // Recovery started nothing: the worker that existed is the worker that was
-    // cancelled.
+    // brought back.
     expect(b.spawns).toHaveLength(0)
     expect(after.runs).toHaveLength(3)
     await b.dispose()
@@ -1684,12 +1770,18 @@ describe('A2: the explicit recovery barrier', () => {
     // The read door still answers — diagnosable, not executable.
     await expect(b.runtime.runForSession(crashedChild.sessionId)).resolves.toMatchObject({ storeId: STORE })
 
-    // The explicit barrier is the retry: after it, the same submission is
-    // judged on the record (the in-flight child was settled cancelled by the
-    // barrier's own pass).
-    await b.runtime.adoptRoot(STORE, ROOT)
+    // The explicit barrier is the retry: the in-flight child comes back as the
+    // same Run and Session (G §5.25), and the same submission is judged on the
+    // record — the child's own criteria are what its own hand-in is verified by.
+    const adopted = await b.runtime.adoptRoot(STORE, ROOT)
+    expect(adopted).toMatchObject({ adopted: true, taskId: root.taskId, runId: root.runId })
     const settled = await b.runtime.submitResult(crashedChild.sessionId, { summary: 'late work' })
-    expect(settled.status).toBe('cancelled')
+    expect(settled.status).toBe('verified')
+    const after = await b.snapshot()
+    const verified = after.runs.find(run => run.runId === crashedChild.runId)!
+    expect(verified.status).toBe('verified')
+    expect(verified.submission?.summary).toBe('late work')
+    expect(after.tasks.find(task => task.taskId === crashedChild.taskId)!.status).toBe('verified')
     await b.dispose()
   })
 
@@ -1736,28 +1828,33 @@ describe('A2: the explicit recovery barrier', () => {
 
   it('stands a registered driver down when the barrier fails after registering it, and the retry re-registers from the record', async () => {
     const dir = workspace()
-    const a = await boot(dir, { worker: () => new Promise<void>(() => {}) })
+    // The crash point: the child verified and the parent's handback frozen, so
+    // the pass registers the waiting parent's driver without any settlement write
+    // of its own.
+    const a = await boot(dir, { parkDrain: (sessionId, index) => sessionId === ROOT && index === 2 })
     const root = await seedLegacyRoot(a, 'ship the release')
-    const { batchId } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+    const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
-      children: children('long child'),
+      children: children('terminal child'),
     })
-    await vi.waitFor(async () => expect((await a.snapshot()).runs).toHaveLength(2))
+    await vi.waitFor(async () => {
+      const snapshot = await a.snapshot()
+      expect(snapshot.runs.find(run => run.taskId === childTaskIds[0])?.status).toBe('verified')
+      expect(snapshot.runs.find(run => run.runId === root.runId)?.executionPhase).toBe('waiting_children')
+    })
     await a.crash()
 
     const b = await boot(dir)
-    // A storage failure armed after the run pass's last settlement write (the
-    // cancelled child's terminal review): the barrier registers the waiting
-    // parent's driver, then cannot read the store to initialize the gates —
-    // the read failure the contract says must fail the barrier rather than
-    // masquerade as ready.
+    // A storage failure armed at the gates' own read — after the pass registered
+    // the waiting parent's driver: the barrier then cannot read the store to
+    // initialize its sessions' gates, the read failure the contract says must
+    // fail the barrier rather than masquerade as ready.
     const realSnapshotIn = b.task.snapshotIn.bind(b.task)
-    const realReview = b.task.recordReviewIn.bind(b.task)
+    const realGateInit = b.runtime.initializeStoreGates.bind(b.runtime)
     let failReads = false
-    const reviewSpy = vi.spyOn(b.task, 'recordReviewIn').mockImplementation(async (...args: Parameters<TaskService['recordReviewIn']>) => {
-      const result = await realReview(...args)
+    const gateSpy = vi.spyOn(b.runtime, 'initializeStoreGates').mockImplementation(async (storeId: string) => {
       failReads = true
-      return result
+      return await realGateInit(storeId)
     })
     const snapshotSpy = vi.spyOn(b.task, 'snapshotIn').mockImplementation(async (storeId: string) => {
       if (failReads) throw new Error('the store log became unreadable')
@@ -1765,17 +1862,17 @@ describe('A2: the explicit recovery barrier', () => {
     })
     await expect(b.runtime.adoptRoot(STORE, ROOT)).rejects.toThrow(/could not be read to initialize its sessions' gates/)
     snapshotSpy.mockRestore()
-    reviewSpy.mockRestore()
+    gateSpy.mockRestore()
 
     // The driver the barrier registered was stood down, not started: zero
     // spawns, the registration is gone (awaitBatch answers from the store
-    // instead of hanging on a parked promise), and nothing wrote the batch's
-    // settlement on the driver's behalf.
+    // instead of hanging on a parked promise), and the parent keeps the phase
+    // the record holds.
     expect(b.spawns).toHaveLength(0)
     const parentRun = await b.task.runIn(STORE, root.runId)
     expect(parentRun.status).toBe('running')
     expect(parentRun.executionPhase).toBe('waiting_children')
-    expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['cancelled'])
+    expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['verified'])
 
     // The failure is the named verdict for the next business call, carrying
     // the original reason.
@@ -1784,12 +1881,12 @@ describe('A2: the explicit recovery barrier', () => {
 
     // The next explicit activation is the retry: the driver is re-registered
     // from the persistent record, released by the barrier, and the batch
-    // completes by its own rules (the child the first pass cancelled keeps
-    // its committed settlement) — handing the parent back its own decision,
-    // which is told, not judged (K1 §2).
+    // completes by its own rules (the terminal child keeps its committed
+    // settlement) — handing the parent back its own decision, which is told,
+    // not judged (K1 §2).
     const adopted = await b.runtime.adoptRoot(STORE, ROOT)
     expect(adopted).toMatchObject({ adopted: true, taskId: root.taskId, runId: root.runId })
-    expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['cancelled'])
+    expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['verified'])
     const settled = await b.task.runIn(STORE, root.runId)
     expect(settled.status).toBe('running')
     expect(settled.executionPhase).toBe('active')

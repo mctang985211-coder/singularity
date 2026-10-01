@@ -4,7 +4,6 @@ import { approvedBudgetCeilings, rootTaskStoreId } from '@dangosys/dsh-singulari
 /**
  * The root budget as configured (`Config.rootBudget`). Every member is optional:
  * absent means the deployment sets no such limit, which is a statement about
- * what is enforced and must be read as one.
  */
 export interface RootBudgetConfig {
   /** How many runs the tree may start, counted over the store's whole run list. */
@@ -12,7 +11,6 @@ export interface RootBudgetConfig {
   /**
    * Writes that may hold one workspace at a time. This deployment enforces
    * exactly one, so any other value is a limit it cannot honor — see
-   * {@link assertRootBudgetConfig}.
    */
   maxConcurrentWrites?: number
 }
@@ -20,7 +18,6 @@ export interface RootBudgetConfig {
 /**
  * The run ceiling a root budget is measured in. Every member is optional, and
  * absent means the deployment sets no such limit — which is a statement about
- * what is enforced and has to be read as one.
  */
 export interface RootBudgetCeilings {
   /** The run count the tree may reach. */
@@ -39,24 +36,19 @@ export interface ResolvedRootBudget {
   readonly configured: RootBudgetCeilings
 }
 
-export type RootBudgetResolution =
-  | ({ readonly ok: true } & ResolvedRootBudget)
-  | { readonly ok: false; readonly reason: string }
+type RootBudgetResolution =
+  ({ readonly ok: true } & ResolvedRootBudget) | { readonly ok: false; readonly reason: string }
 
 /**
  * Whether a root budget enforces anything at all. The configuration's schema
  * materializes an absent `rootBudget` as an empty object, so the presence of an
- * object is not the question a refusal may ask: a budget with no member in force
- * is no budget, and an entry that refuses work over an unmeasurable tree would
- * otherwise refuse it for a limit this deployment never set. Every refusal that
- * is "a configured limit cannot be measured" asks this first.
  */
 export function hasRootLimits(config: RootBudgetConfig | undefined): boolean {
   return config !== undefined && (config.maxRuns !== undefined || config.maxConcurrentWrites !== undefined)
 }
 
 /** The verdict a start or a batch admission gets. A refusal always names the limit it hit. */
-export type BudgetVerdict = { readonly allowed: true } | { readonly allowed: false; readonly reason: string }
+type BudgetVerdict = { readonly allowed: true } | { readonly allowed: false; readonly reason: string }
 
 function instant(value: string | undefined): number | undefined {
   if (typeof value !== 'string' || value.length === 0) return undefined
@@ -66,24 +58,7 @@ function instant(value: string | undefined): number | undefined {
 
 /**
  * The root budget a snapshot is under, or the reason none can be measured.
- *
  * The owner is the store's own root: among the parentless tasks, the one whose
- * run is bound to the root session the store id derives from
- * (`rootTaskStoreId`) — the same durable rule the recovery path uses to tell a
- * store's own root run apart from a replay's. A replay's task is parentless by
- * design and carries no such binding (its session is minted for the replay), so
- * it shares the root's total instead of claiming a budget of its own (§3.5, the
- * funding-root reference); inventing one for it would hand every experiment a
- * fresh allowance. No run naming a root session of this store means no owner,
- * and the store keeps the honest recovery diagnostic rather than a guess.
- *
- * Run ceilings come from the latest approved extension or the configuration.
- * Historical deadline fields are read by the Task store and have no execution effect.
- *
- * `reason` texts are recovery diagnostics: they say what is missing (no root,
- * no run bound to this store as its root, several such tasks, a root run with
- * no readable start) so an operator reading `task_status` knows why the tree
- * cannot be started under a budget instead of being handed a fabricated one.
  */
 export function resolveRootBudget(snapshot: TaskSnapshot, config: RootBudgetConfig): RootBudgetResolution {
   const roots = snapshot.tasks.filter(task => task.parentTaskId === undefined)
@@ -160,7 +135,11 @@ function boundRunOf(snapshot: TaskSnapshot, task: TaskInstance): TaskRun | undef
 }
 
 /** The root's first run: the run its own `runIds` names first, among the runs bound to this store as its root. */
-function firstRun(snapshot: TaskSnapshot, task: TaskInstance, storeId: string): { runId: RunId; startedAt: string } | undefined {
+function firstRun(
+  snapshot: TaskSnapshot,
+  task: TaskInstance,
+  storeId: string,
+): { runId: RunId; startedAt: string } | undefined {
   const bound = snapshot.runs.filter(run => run.taskId === task.taskId && rootTaskStoreId(run.sessionId) === storeId)
   const named = task.runIds.length > 0 ? bound.find(run => run.runId === task.runIds[0]) : undefined
   const run = named ?? bound[0]
@@ -185,11 +164,12 @@ export function checkRunStart(snapshot: TaskSnapshot, budget: ResolvedRootBudget
 /**
  * Whether a decomposition batch of `childCount` children may be admitted. The
  * check is a reservation, not a forecast: the children will each start a run, so
- * a batch that would push the tree past `maxRuns` is refused whole — before a
- * task, a child or an event exists — rather than admitted and then started until
- * the budget runs out mid-batch.
  */
-export function checkBatchAdmission(snapshot: TaskSnapshot, budget: ResolvedRootBudget, childCount: number): BudgetVerdict {
+export function checkBatchAdmission(
+  snapshot: TaskSnapshot,
+  budget: ResolvedRootBudget,
+  childCount: number,
+): BudgetVerdict {
   if (budget.maxRuns === undefined) return { allowed: true }
   const total = snapshot.runs.length + childCount
   if (total > budget.maxRuns) {
@@ -206,17 +186,12 @@ export function checkBatchAdmission(snapshot: TaskSnapshot, budget: ResolvedRoot
 /**
  * Refuse a root budget this deployment cannot execute. The one such limit is
  * `maxConcurrentWrites`: the workspace registry enforces exactly one writer, so
- * a configuration asking for any other number is a hard limit nobody can honor —
- * and §3.5's rule is that asking for an unenforceable hard limit refuses to
- * start rather than starting under a limit that is not real. Everything else
- * about the shape (unknown members, negative values) is the Config schema's
- * business, checked where the configuration is loaded.
  */
 export function assertRootBudgetConfig(config: RootBudgetConfig): void {
   if (config.maxConcurrentWrites !== undefined && config.maxConcurrentWrites !== 1) {
     throw new Error(
       `rootBudget.maxConcurrentWrites is ${config.maxConcurrentWrites}: this deployment enforces exactly 1 concurrent writer per workspace, ` +
-      'so it cannot honor another number and refuses to start rather than run under a limit it cannot execute',
+        'so it cannot honor another number and refuses to start rather than run under a limit it cannot execute',
     )
   }
 }

@@ -1,30 +1,22 @@
-/**
- * Singularity agent runtime over the graph.
- * @module dsh-singularity-agent-runtime
- */
+/** Singularity agent runtime over the graph.
+ * @module dsh-singularity-agent-runtime */
 
 import { Context, Service } from '@deepseek-ai/cordis'
+import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import type {} from '@deepseek-ai/dsh-agent-presets'
-import type { AgentSetup } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-permission-presets'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-session-query'
-import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import type {} from '@deepseek-ai/dsh-permission-presets'
+import type {} from '@deepseek-ai/dsh-tools'
 import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
-import type {} from '@dangosys/dsh-singularity-layout'
-import { DEFAULT_ROOT } from '@dangosys/dsh-singularity-layout'
-import type { Agent, AgentHandle, ContentBlock, GraphEvent, GraphScope, RootRequest, RuntimePromptSource, SpawnRequest, WorkerResumeRequest } from './types.ts'
+import { DEFAULT_ROOT, type GraphEvent } from '@dangosys/dsh-singularity-graph'
 import { applyWorkerGrant } from './grants.ts'
-import {
-  ensureAgentMessageDelivered,
-  readToolCallBody,
-  reconcileAgentMessageDeliveries,
-} from './messages.ts'
+import { ensureAgentMessageDelivered, readToolCallBody, reconcileAgentMessageDeliveries } from './messages.ts'
 import type {
   AgentMessageIntent,
   MessageDelivery,
@@ -36,158 +28,30 @@ import type {
 import { rootPromptText } from './prompts/root.prompts.ts'
 import { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
 import { sealRawSessionReads } from './raw-session-guard.ts'
+import type { GraphScope, RootRequest, RuntimePromptSource, SpawnRequest, WorkerResumeRequest } from './types.ts'
 import { WORKER_DEFAULT_PERMISSION_PRESET, resumeWorkerAgent as resumeWorker } from './worker-resume.ts'
 import type { WorkerResumeDeps, WorkerRole } from './worker-resume.ts'
 
-/** The nine tools the evolution chain is reached through; a deployment's switch is what registers them. */
-const EVOLUTION_TOOLS = [
-  'evolution_propose',
-  'evolution_candidate',
-  'evolution_prepare',
-  'evolution_replay',
-  'evolution_gate',
-  'evolution_decide',
-  'evolution_apply',
-  'evolution_rollback',
-  'evolution_list',
-]
-
-/** The tools every root may call whatever the deployment's evolution switch says. */
-const ROOT_CORE_TOOLS = [
-  'graph_spawn',
-  'graph_mark_ready',
-  'hitl_ask',
-  'hitl_approve',
-  'task_read',
-  'capability_list',
-  // The one reference reader a root shares with every other role (A2): the
-  // records its own reads name — evidence, reviews, sessions — are read by id
-  // through this tool, which authorizes by the caller's graph domain. The raw
-  // cross-session readers were never on this surface and are sealed below.
-  'context_read',
-  // The skill loader rides the mounted preset's plane (`tool-skill`), not the
-  // global layer: allowing it here is what lets the root load domain reference
-  // skills (e.g. bb-pipeline) discovered from the deployment's skill roots.
-  'skill',
-  // Accepting the user's own goal is the root's core path (A0): the tool is
-  // unconditional, because a graph whose root contract cannot be accepted has
-  // no goal to delegate at all.
-  'task_intake',
-  'task_decompose',
-  'task_submit_result',
-  // The root is a legal addressee (A4 §F.1): its children ask it their
-  // questions, so answering one is a coordination action of the root's own
-  // surface. `task_ask_parent` is deliberately absent — the root has no parent
-  // to ask, and a tool that cannot be answered is one not worth offering.
-  'task_answer',
-  'task_cancel',
-  'task_proposal_read',
-  'task_proposal_continue',
-  'task_proposal_cancel',
-  'task_status',
-  'task_verify',
-  'task_review_pack',
-  'task_review_agent',
-  'task_diagnose',
-  // Asking a person to raise the tree's own ceilings is the root coordination
-  // session's call and nobody else's (K4): the store is derived from the session
-  // in the runtime, the tool is the single entry the whole grant admits, and it
-  // is deliberately here rather than in the worker baseline or the reviewer's
-  // read-only surface. Its presence also means the entry survives a *terminal*
-  // root run: a tree that spent its allowance is exactly the tree whose owner has
-  // to be able to ask for more, so the gate admits this one call in every phase.
-  'task_budget_extend',
-]
-
-/** Structural view of the deployment's switch position (`ctx.singularityEvolution`), read softly so this package needs no dependency on the assembly that provides it. */
-interface EvolutionExposureLike {
-  readonly enabled: boolean
-}
-
-/**
- * Whether this composition registered the nine `evolution_*` tools. Soft read:
- * a context that mounts no singularity agent plugin provides no such service,
- * and that absence is the closed state — never "assume the chain is there". The
- * answer decides both the root's allow-list and its prompt, because a prompt
- * that names a tool the surface does not carry asks for a call that cannot
- * happen (prompt contracts §1/§7).
- */
-function evolutionEnabled(ctx: Context): boolean {
-  return (ctx.get('singularityEvolution') as EvolutionExposureLike | undefined)?.enabled ?? false
-}
-
-/**
- * The root's tool allow-list for one composition, single point: `createRoot` and
- * `resumeRoot` both restrict with this, so a root cannot be assembled on one
- * fact and prompted on another. Off, the nine names are absent — `restrict` is a
- * mask over what exists, and with the chain off nothing registered them. On, the
- * list is exactly the deployment's previous one, name for name.
- */
-function rootToolsFor(enabled: boolean): readonly string[] {
-  // `escalate` trails the chain because it always has: the on-composition is the
-  // list this deployment ran before the switch existed.
-  return enabled ? [...ROOT_CORE_TOOLS, ...EVOLUTION_TOOLS, 'escalate'] : [...ROOT_CORE_TOOLS, 'escalate']
-}
-
-/** Root-local registrations also obey the coordination allow-list. */
-function sealRootTools(agentCtx: Context, enabled: boolean): void {
-  agentCtx.tools.presentAs('native')
-  const allowed = new Set(rootToolsFor(enabled))
-  agentCtx.tools.guard(execution =>
-    allowed.has(execution.name)
-      ? undefined
-      : 'singularity: the root coordinates through task tools; delegate engineering work with task_decompose',
-  )
-}
-
-/**
- * `hitl_approve` asks through `ctx.approval`, whose 'never' policy (bundled into
- * danger-full-access) auto-rejects before any answerer sees the request. Root
- * agents expose no policy-gated tools, so pinning their session to 'ask'
- * re-enables only the explicit human decision.
- */
-function pinRootApprovalPolicy(session: Session): void {
-  setApprovalPolicy(session, 'ask')
-}
-
-/** One message source of this runtime's own, as {@link RuntimePromptSource} declares it. */
-function runtimePrompt(channel: RuntimePromptSource['channel']): RuntimePromptSource {
-  return { kind: 'runtime-prompt', channel }
-}
 export type {
   AgentOptions,
-  CanvasNode,
-  ContentBlock,
   GraphScope,
   McpServerSpec,
   RootRequest,
   RuntimePromptSource,
-  SessionVisibility,
   SpawnRequest,
   WorkerCapabilityGrant,
   WorkerGrant,
   WorkerResumeRequest,
   WorkerRunFacts,
 } from './types.ts'
-export { applyWorkerGrant, resolveGrant } from './grants.ts'
+export { applyWorkerGrant } from './grants.ts'
 export type { ResolvedGrant } from './grants.ts'
 export { findSkillFileIn, parseSkillFile, skillRootsFor } from './skill-file.ts'
-export type { ParsedSkillFile } from './skill-file.ts'
 export { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
-export { RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, sealRawSessionReads } from './raw-session-guard.ts'
-export { WORKER_DEFAULT_PERMISSION_PRESET, WorkerResumeRefusal, resumeWorkerAgent } from './worker-resume.ts'
+export { RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS } from './raw-session-guard.ts'
+export { WorkerResumeRefusal } from './worker-resume.ts'
 export type { WorkerResumeDeps, WorkerResumeRefusalCode, WorkerRole } from './worker-resume.ts'
-export {
-  MessageDeliveryRefusal,
-  answerMessageText,
-  ensureAgentMessageDelivered,
-  messageAccepted,
-  questionMessageText,
-  readToolCallBody,
-  reconcileAgentMessageDeliveries,
-  relayMessage,
-  toolCallRefIn,
-} from './messages.ts'
+export { answerMessageText, questionMessageText, toolCallRefIn } from './messages.ts'
 export type {
   AgentMessageIntent,
   MessageDelivery,
@@ -223,9 +87,6 @@ export class AgentRuntime extends Service {
 
   constructor(ctx: Context) {
     super(ctx, 'agentRuntime')
-    ctx.provide('sessionVisibility', {
-      isVisible: sessionId => !this.owned.has(sessionId) || this.roots.has(sessionId),
-    })
     ctx.on('agent/status', ({ agent, status }) => {
       const scope = this.scopes.get(agent.id)
       if (scope !== undefined) void ctx.graph.setStatusIn(scope.graphStoreId, agent.id, status)
@@ -289,27 +150,12 @@ export class AgentRuntime extends Service {
       const handle = await this.ctx.agents.resume({
         resumeSessionId: sessionId,
         agentOptions: this.ctx.agentDefaultModel.currentSelection(),
-        setup: async (agentCtx, agent) => {
-          await this.ctx.agentPresets.mount(agentCtx, agentPreset)
-          this.ctx.permissionPresets.set(agent.session, 'danger-full-access')
-          pinRootApprovalPolicy(agent.session)
-          const evolution = evolutionEnabled(this.ctx)
-          agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
-          agentCtx.tools.restrict({ allow: rootToolsFor(evolution) })
-          // The raw cross-session readers are sealed at execution for every
-          // agent this runtime owns (raw-session-guard.ts): the root's
-          // allow-list already leaves them off the surface; this is the backstop
-          // a preset or MCP merge cannot lift.
-          sealRawSessionReads(agentCtx)
-          sealRootTools(agentCtx, evolution)
-        },
+        setup: rootSetup(this.ctx, agentPreset),
       })
       this.handles.set(sessionId, handle)
       return handle
     } catch (error) {
-      this.owned.delete(sessionId)
-      this.roots.delete(sessionId)
-      this.scopes.delete(sessionId)
+      await this.releaseSession(sessionId)
       throw error
     }
   }
@@ -325,20 +171,10 @@ export class AgentRuntime extends Service {
           sessionId: request.sessionId,
           meta: { cwd: request.cwd, agentPreset },
           agentOptions: { ...this.ctx.agentDefaultModel.currentSelection(), ...request.agentOptions },
-          setup: async (agentCtx, agent) => {
-            await this.ctx.agentPresets.mount(agentCtx, agentPreset)
-            this.ctx.permissionPresets.set(agent.session, 'danger-full-access')
-            pinRootApprovalPolicy(agent.session)
-            const evolution = evolutionEnabled(this.ctx)
-            agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
-            agentCtx.tools.restrict({ allow: rootToolsFor(evolution) })
-            sealRawSessionReads(agentCtx)
-            sealRootTools(agentCtx, evolution)
-          },
+          setup: rootSetup(this.ctx, agentPreset),
         })
       } catch (error) {
-        this.owned.delete(request.sessionId)
-        this.scopes.delete(request.sessionId)
+        await this.releaseSession(request.sessionId)
         throw error
       }
       try {
@@ -352,12 +188,7 @@ export class AgentRuntime extends Service {
         this.handles.set(handle.agent.id, handle)
         return handle
       } catch (error) {
-        this.owned.delete(request.sessionId)
-        this.owned.delete(handle.agent.id)
-        this.roots.delete(handle.agent.id)
-        this.scopes.delete(request.sessionId)
-        this.scopes.delete(handle.agent.id)
-        await handle.dispose()
+        await this.releaseSession(handle.agent.id, handle)
         throw error
       }
     })
@@ -390,7 +221,7 @@ export class AgentRuntime extends Service {
           },
           agentOptions: { ...this.ctx.agentDefaultModel.currentSelection(), ...request.agentOptions },
           signal: request.signal,
-          setup: this.workerSetup({
+          setup: workerSetup(this.ctx, {
             agentPreset,
             permissionPreset: request.permissionPreset ?? WORKER_DEFAULT_PERMISSION_PRESET,
             taskWorker: request.taskWorker === true,
@@ -398,8 +229,7 @@ export class AgentRuntime extends Service {
           }),
         })
       } catch (error) {
-        this.owned.delete(request.sessionId)
-        this.scopes.delete(request.sessionId)
+        await this.releaseSession(request.sessionId)
         throw error
       }
       let published = false
@@ -423,58 +253,24 @@ export class AgentRuntime extends Service {
         this.scopes.set(handle.agent.id, scope)
         this.handles.set(handle.agent.id, handle)
         await this.ctx.parallel('agentRuntime/spawned', { parentId: parent.id, sessionId: handle.agent.id })
-        // The caller's awaited door, after publication and the spawn
-        // announcement and before any model input: what must be durable for the
-        // child's first request to be admissible (the reviewer ledger, A2 §D) is
-        // written and read back here. A rejection fails the spawn below — the
-        // handle is disposed, the node is marked failed, and no followup was
-        // ever queued.
+        // The caller's awaited door, after publication and before any model input; a rejection fails the spawn.
         await request.beforePrompt?.()
-        // The delegated task, under this runtime's own attribution: `kind: 'user'`
-        // is DSH's host-attested human input marker, and the worker's first turn is
-        // nobody's request but this deployment's (A0 §1.10, {@link RuntimePromptSource}).
         const kickoff = request.prompt ?? [{ type: 'text' as const, text: WORKER_KICKOFF_TEXT }]
         handle.agent.followup(createUserMessage({ content: [...kickoff], source: runtimePrompt('spawn') }))
         return handle
       } catch (error) {
-        this.handles.delete(handle.agent.id)
-        this.owned.delete(request.sessionId)
-        this.owned.delete(handle.agent.id)
-        this.scopes.delete(request.sessionId)
-        this.scopes.delete(handle.agent.id)
-        await handle.dispose()
+        await this.releaseSession(handle.agent.id, handle)
         if (published) await this.ctx.graph.setStatusIn(scope.graphStoreId, handle.agent.id, 'failed')
         throw error
       }
     })
   }
 
-  /**
-   * Bring one spawned worker's persisted Session back live (A4 §F.1), through
-   * the recovery entry `./worker-resume.ts` documents: the same Session, the
-   * same composition (the shared `workerSetup` below, which `spawn` also hands
-   * the agent factory), the same grant, seal and permission — and **idle**.
-   * Nothing is sent to the model here; the caller wakes the Session when it has
-   * something to deliver (§F.1: "恢复后由调用方决定何时 steer").
-   *
-   * The handle lands in the same `handles` map a spawn's product does, so
-   * `stopAgents`/`stopGraph` and the session-visibility rule treat a resumed
-   * worker exactly as they treat a spawned one. There is no second roster, no
-   * second mailbox and no second handle table: this entry owns nothing the
-   * spawn path does not already own.
-   * @param request - the Session, its graph scope, the Run facts the caller read
-   *   from its store, and the authorization the Run was admitted with.
-   * @returns the live handle of the same Session, idle.
-   * @throws WorkerResumeRefusal with the stable code of what could not be established.
-   */
+  /** Bring one spawned worker's persisted Session back live and idle; refusals are named (A4 §F.1). */
   async resumeWorkerAgent(request: WorkerResumeRequest): Promise<AgentHandle> {
     if (this.closing) throw new Error('agent-runtime: closing')
     const sessionId = SessionId(request.sessionId)
     return await this.inGraph(request.scope, async () => {
-      // The same window a spawn opens: while the factory composes this
-      // Session's world it is not yet a live session of this runtime, and the
-      // visibility rule and the stop path read this map. Removed again below
-      // when the resume refuses, so a refusal leaves no trace of the attempt.
       this.owned.add(sessionId)
       this.scopes.set(sessionId, request.scope)
       try {
@@ -482,8 +278,7 @@ export class AgentRuntime extends Service {
         this.handles.set(sessionId, handle)
         return handle
       } catch (error) {
-        this.owned.delete(sessionId)
-        this.scopes.delete(sessionId)
+        await this.releaseSession(sessionId)
         throw error
       }
     })
@@ -523,11 +318,7 @@ export class AgentRuntime extends Service {
         this.scopes.delete(id)
         continue
       }
-      this.handles.delete(id)
-      this.owned.delete(id)
-      this.roots.delete(id)
-      this.scopes.delete(id)
-      await handle.dispose()
+      await this.releaseSession(id, handle)
     }
   }
 
@@ -541,59 +332,27 @@ export class AgentRuntime extends Service {
       throw new Error(`agent-runtime: agent "${agent.id}" is not in graph`)
     }
     this.live(agent)
-    // The graph's setup text is written by this runtime for its own root session
-    // (`graphs.create`), never by a person: it carries this runtime's own message
-    // source for the same reason a spawn does (A0 §1.10).
     agent.followup(createUserMessage({ content: [...prompt], source: runtimePrompt('prompt') }))
   }
 
-  /**
-   * Read back the body of a `tool/call` one question or answer cites (A4 §F.1),
-   * flushing the sending Session first so the citation names a durable event.
-   * Thin adapter over {@link readToolCallBody}: this class owns the handle and the
-   * context, the delivery rules own themselves (`./messages.ts`).
-   * @param ref - the sending Session and the seq of its `tool/call`.
-   * @returns the tool name and the raw arguments text the model produced.
-   * @throws MessageDeliveryRefusal with the named reason the citation is unusable.
-   */
+  /** Read back the body of a `tool/call` a question or answer cites, flushing the sender first (A4 §F.1). */
   async readToolCallBody(ref: ToolCallRef): Promise<ToolCallBody> {
     if (this.closing) throw new Error('agent-runtime: closing')
     return await readToolCallBody(this.deliveryDeps(), ref)
   }
 
-  /**
-   * Deliver one already-committed message identity into its target Session's
-   * inbox, at most once, and report what that Session's log can witness. Called
-   * by the question protocol after the Task store committed the intent (A4's
-   * third sub-goal); re-calling it after a crash delivers only what is missing.
-   * @param intent - the recorded identity, the two Sessions, and the body.
-   * @returns the settled status: `delivered`, `already-present`, or `unavailable`.
-   * @throws MessageDeliveryRefusal when the attempt cannot be decided or confirmed.
-   */
+  /** Deliver one already-committed message identity at most once and report what the target log witnesses. */
   async ensureAgentMessageDelivered(intent: AgentMessageIntent): Promise<MessageDelivery> {
     if (this.closing) throw new Error('agent-runtime: closing')
     return await ensureAgentMessageDelivered(this.deliveryDeps(), intent)
   }
 
-  /**
-   * Reconcile a set of committed intents against their target Sessions, one at a
-   * time, and report each record's outcome — the recovery path's entry point
-   * (§F.1). No ledger of its own: the delivered fact is each target's own fold.
-   * @param intents - the records the Task store holds, in delivery order.
-   * @returns one report per record; a refused record names why.
-   */
-  async reconcileAgentMessageDeliveries(
-    intents: readonly AgentMessageIntent[],
-  ): Promise<MessageDeliveryReport[]> {
+  /** Reconcile a set of committed intents against their target Sessions, one at a time (A4 §F.1). */
+  async reconcileAgentMessageDeliveries(intents: readonly AgentMessageIntent[]): Promise<MessageDeliveryReport[]> {
     if (this.closing) throw new Error('agent-runtime: closing')
     return await reconcileAgentMessageDeliveries(this.deliveryDeps(), intents)
   }
 
-  /**
-   * The services one delivery reaches, resolved to the three capabilities
-   * `./messages.ts` declares and no more: this class's own fields stay private,
-   * and a service the module never calls is never handed to it.
-   */
   private deliveryDeps(): MessageDeliveryDeps {
     return {
       agents: this.ctx.agents,
@@ -602,50 +361,13 @@ export class AgentRuntime extends Service {
     }
   }
 
-  /**
-   * The one composition a worker's scoped world is built from. `spawn` and
-   * {@link resumeWorkerAgent} both hand this to the agent factory, so a resumed
-   * worker is composed exactly as its spawn composed it (A4 §F.1: same preset,
-   * same permission posture, same policy prompt, same grant, same seal) — and
-   * this package holds one worker composition, not a spawn flavor and a
-   * recovery flavor that could drift apart.
-   */
-  private workerSetup(role: WorkerRole): AgentSetup {
-    return async (agentCtx, agent) => {
-      await this.ctx.agentPresets.mount(agentCtx, role.agentPreset)
-      // Unknown preset names throw out of permissionPresets.set itself
-      // (its resolve names the preset), failing the spawn — or the resume —
-      // loudly.
-      this.ctx.permissionPresets.set(agent.session, role.permissionPreset)
-      // A task worker carries the role's stable policy as a prompt section
-      // (order 75, between the root's 70 and the contract's 80): the rules
-      // every worker runs under, reprojected into surface node 0 on every
-      // step. The contract itself is NOT registered here — it is the
-      // context assembly's section, projected from the store at each model
-      // request, so this scope holds no second copy of it.
-      if (role.taskWorker) {
-        agentCtx.systemPrompt.section({ name: 'singularity:worker', order: 75, text: WORKER_POLICY_TEXT, interpolate: false })
-      }
-      // A capability grant restricts the surface the preset just joined
-      // (its tools are inherited, so restrictable) and registers the
-      // granted skills into this worker's own layer. A spawn nobody
-      // authorized with capabilities keeps its composition's surface.
-      if (role.grant !== undefined) await applyWorkerGrant(agentCtx, agent, role.grant)
-      sealRawSessionReads(agentCtx)
-    }
-  }
-
-  /**
-   * What one worker resume reaches: the live registry, the deployment's own
-   * session read path, the graph store, this runtime's worker composition, and
-   * the model selection a spawn would run under.
-   */
+  /** What one worker resume reaches: the live registry, the session read path, the graph store, composition and options. */
   private workerResumeDeps(request: WorkerResumeRequest): WorkerResumeDeps {
     return {
       agents: this.ctx.agents,
       sessionQuery: this.ctx.sessionQuery,
       graph: this.ctx.graph,
-      setup: role => this.workerSetup(role),
+      setup: role => workerSetup(this.ctx, role),
       agentOptions: { ...this.ctx.agentDefaultModel.currentSelection(), ...request.agentOptions },
     }
   }
@@ -664,6 +386,17 @@ export class AgentRuntime extends Service {
     return run
   }
 
+  /** Forget one session this runtime was composing; only a handle this attempt owns is unregistered and disposed. */
+  private async releaseSession(sessionId: SessionId, handle?: AgentHandle): Promise<void> {
+    this.owned.delete(sessionId)
+    this.roots.delete(sessionId)
+    this.scopes.delete(sessionId)
+    if (handle !== undefined) {
+      this.handles.delete(sessionId)
+      await handle.dispose()
+    }
+  }
+
   private live(agent: Agent): void {
     if (this.ctx.agents.get(agent.id) !== agent) throw new Error(`agent-runtime: agent "${agent.id}" is not live`)
   }
@@ -672,6 +405,109 @@ export class AgentRuntime extends Service {
     const scope = this.scopes.get(sessionId)
     if (scope === undefined) throw new Error('agent-runtime: agent has no graph scope')
     return scope
+  }
+}
+
+/** One message source of this runtime's own, as {@link RuntimePromptSource} declares it. */
+function runtimePrompt(channel: RuntimePromptSource['channel']): RuntimePromptSource {
+  return { kind: 'runtime-prompt', channel }
+}
+
+/** The nine tools the evolution chain is reached through; a deployment's switch is what registers them. */
+const EVOLUTION_TOOLS = [
+  'evolution_propose',
+  'evolution_candidate',
+  'evolution_prepare',
+  'evolution_replay',
+  'evolution_gate',
+  'evolution_decide',
+  'evolution_apply',
+  'evolution_rollback',
+  'evolution_list',
+]
+
+/** The tools every root may call whatever the deployment's evolution switch says (README Design notes). */
+const ROOT_CORE_TOOLS = [
+  'graph_spawn',
+  'graph_mark_ready',
+  'hitl_ask',
+  'hitl_approve',
+  'task_read',
+  'capability_list',
+  'context_read',
+  'skill',
+  'task_intake',
+  'task_decompose',
+  'task_submit_result',
+  'task_answer',
+  'task_cancel',
+  'task_proposal_read',
+  'task_proposal_continue',
+  'task_proposal_cancel',
+  'task_status',
+  'task_verify',
+  'task_review_pack',
+  'task_review_agent',
+  'task_diagnose',
+  'task_budget_extend',
+]
+
+/** Structural view of `ctx.singularityEvolution`, read softly so this package needs no dependency on it. */
+interface EvolutionExposureLike {
+  readonly enabled: boolean
+}
+
+/** Whether this composition registered the nine `evolution_*` tools; a context without the service reads as off. */
+function evolutionEnabled(ctx: Context): boolean {
+  return (ctx.get('singularityEvolution') as EvolutionExposureLike | undefined)?.enabled ?? false
+}
+
+/** The root's tool allow-list for one composition: the core tools plus `escalate`, plus the chain when it is on. */
+function rootToolsFor(enabled: boolean): readonly string[] {
+  return enabled ? [...ROOT_CORE_TOOLS, ...EVOLUTION_TOOLS, 'escalate'] : [...ROOT_CORE_TOOLS, 'escalate']
+}
+
+/** Root-local registrations also obey the coordination allow-list. */
+function sealRootTools(agentCtx: Context, enabled: boolean): void {
+  agentCtx.tools.presentAs('native')
+  const allowed = new Set(rootToolsFor(enabled))
+  agentCtx.tools.guard(execution =>
+    allowed.has(execution.name)
+      ? undefined
+      : 'singularity: the root coordinates through task tools; delegate engineering work with task_decompose',
+  )
+}
+
+/** Compose one root's scoped world; `createRoot` and `resumeRoot` both hand this to the agent factory. */
+function rootSetup(ctx: Context, agentPreset: string): AgentSetup {
+  return async (agentCtx, agent) => {
+    await ctx.agentPresets.mount(agentCtx, agentPreset)
+    ctx.permissionPresets.set(agent.session, 'danger-full-access')
+    // danger-full-access bundles approval policy 'never', which auto-rejects hitl_approve; pin the root to 'ask'.
+    setApprovalPolicy(agent.session, 'ask')
+    const evolution = evolutionEnabled(ctx)
+    agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
+    agentCtx.tools.restrict({ allow: rootToolsFor(evolution) })
+    sealRawSessionReads(agentCtx)
+    sealRootTools(agentCtx, evolution)
+  }
+}
+
+/** The one composition a worker's scoped world is built from; `spawn` and a resume both hand this to the factory. */
+function workerSetup(ctx: Context, role: WorkerRole): AgentSetup {
+  return async (agentCtx, agent) => {
+    await ctx.agentPresets.mount(agentCtx, role.agentPreset)
+    ctx.permissionPresets.set(agent.session, role.permissionPreset)
+    if (role.taskWorker) {
+      agentCtx.systemPrompt.section({
+        name: 'singularity:worker',
+        order: 75,
+        text: WORKER_POLICY_TEXT,
+        interpolate: false,
+      })
+    }
+    if (role.grant !== undefined) await applyWorkerGrant(agentCtx, agent, role.grant)
+    sealRawSessionReads(agentCtx)
   }
 }
 

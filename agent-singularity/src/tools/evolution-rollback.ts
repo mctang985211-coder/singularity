@@ -1,24 +1,10 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { applyTargets } from '@dangosys/dsh-singularity-evolution'
-import { renderOpenIntentRecovery } from './evolution-commit.ts'
+import { denialReason, message, renderOpenIntentRecovery, sessionId, text } from '../shared.ts'
 
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): string {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('evolution_rollback: missing agent id')
-  return id
-}
-
-/**
- * What a restored object means for production, stated honestly in the output:
- * the skill root is watched, so the restored bytes are what the next admission
- * loads, the directory is admitted again once its commit intent is closed, and a
- * run already bound to the applied version keeps its own snapshot.
- */
+/** What a restored object means for production, stated honestly in the output: */
 function restoreNote(targetType: string): string {
   if (targetType === 'capability') {
     return 'the production capability row was restored or removed to its prepared baseline, and any new skill was removed; ' +
@@ -57,19 +43,17 @@ export function defineEvolutionRollbackTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'evolution_rollback')
       const agent = exec.agent
       if (agent === undefined) throw new Error('evolution_rollback: missing agent')
       let proposal
       try {
         proposal = await ctx.evolution.get(args.proposalId)
       } catch (error) {
-        return `evolution_rollback rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_rollback rejected: ${message(error)}`
       }
       // A commit intent this proposal left open is settled, not bypassed (K2):
       // the recorded intent already binds its grant and the content it was
-      // approved against, so the retry asks the service the only open question —
-      // what does production hold? — without a second human approval.
       if (proposal.openIntent !== undefined) {
         try {
           const recovered = await ctx.evolution.rollback(args.proposalId, caller, proposal.openIntent.approvalRef)
@@ -82,7 +66,7 @@ export function defineEvolutionRollbackTool(ctx: Context) {
             restoreNote(recovered.proposal.targetType),
           ].join('\n')
         } catch (error) {
-          return `evolution_rollback rejected: ${error instanceof Error ? error.message : String(error)}`
+          return `evolution_rollback rejected: ${message(error)}`
         }
       }
       if (proposal.status !== 'applied') {
@@ -110,11 +94,7 @@ export function defineEvolutionRollbackTool(ctx: Context) {
         signal: exec.signal,
       })
       if (outcome !== 'allowed-once') {
-        const why = outcome === 'rejected'
-          ? 'the human rejected it'
-          : outcome === 'cancelled'
-            ? 'the request was cancelled before the human decided'
-            : 'no approval answerer available'
+        const why = denialReason(outcome)
         return `evolution_rollback: nothing written — ${why}; proposal ${proposal.proposalId} stays applied`
       }
       try {
@@ -128,7 +108,7 @@ export function defineEvolutionRollbackTool(ctx: Context) {
           `human approval: approval:${exec.callId}`,
         ].join('\n')
       } catch (error) {
-        return `evolution_rollback rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_rollback rejected: ${message(error)}`
       }
     },
   })

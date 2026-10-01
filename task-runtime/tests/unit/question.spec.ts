@@ -1,7 +1,14 @@
 import { describe, expect, test } from 'vitest'
 import { ExecutionGate } from '../../src/gate.ts'
 import { TaskRuntime } from '../../src/index.ts'
-import { answerMessageIdOf, applyStoreQuestionBlocking, parseCallArguments, pendingQuestionMessages, questionMessageIdOf, releaseAskingSessions } from '../../src/question.ts'
+import {
+  answerMessageIdOf,
+  applyStoreQuestionBlocking,
+  parseCallArguments,
+  pendingQuestionMessages,
+  questionMessageIdOf,
+  releaseAskingSessions,
+} from '../../src/question.ts'
 import type { QuestionAnswerRecord, QuestionRecord, RunId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 
 /**
@@ -86,7 +93,9 @@ describe('the delivery identities', () => {
 
 describe('parseCallArguments', () => {
   test('accepts a JSON object and refuses everything else by name', () => {
-    expect(parseCallArguments({ name: 'task_ask_parent', arguments: '{"requestKey":"k1"}' })).toEqual({ requestKey: 'k1' })
+    expect(parseCallArguments({ name: 'task_ask_parent', arguments: '{"requestKey":"k1"}' })).toEqual({
+      requestKey: 'k1',
+    })
     expect(() => parseCallArguments({ name: 'task_ask_parent', arguments: 'not json' })).toThrow(/are not JSON/)
     expect(() => parseCallArguments({ name: 'task_ask_parent', arguments: '[1,2]' })).toThrow(/not a JSON object/)
     expect(() => parseCallArguments({ name: 'task_ask_parent', arguments: '"a string"' })).toThrow(/not a JSON object/)
@@ -112,7 +121,12 @@ describe('pendingQuestionMessages', () => {
     // model read it, and the asking run can still act on it.
     const answered = pendingQuestionMessages(snapshot([{ ...asked, answers: [answerRecord()] }]))
     expect(answered.messages.map(message => message.kind)).toEqual(['question', 'answer'])
-    expect(answered.messages[1]).toMatchObject({ kind: 'answer', answerId: 'a-1', targetSessionId: 's-r-child', senderSessionId: 's-r-parent' })
+    expect(answered.messages[1]).toMatchObject({
+      kind: 'answer',
+      answerId: 'a-1',
+      targetSessionId: 's-r-child',
+      senderSessionId: 's-r-parent',
+    })
   })
 
   test('owes nothing for a question whose asking run settled, and nothing for its answers', () => {
@@ -129,21 +143,26 @@ describe('pendingQuestionMessages', () => {
     const orphan = question({ parentRunId: 'r-missing' })
     const { messages, refused } = pendingQuestionMessages(snapshot([orphan]))
     expect(messages).toEqual([])
-    expect(refused).toEqual([{
-      subject: 'question "q-1"',
-      messageId: 'm-q-1',
-      status: 'refused',
-      reason: 'the store holds the question without both of its runs, so neither the ask nor its answers can be addressed',
-    }])
+    expect(refused).toEqual([
+      {
+        subject: 'question "q-1"',
+        messageId: 'm-q-1',
+        status: 'refused',
+        reason:
+          'the store holds the question without both of its runs, so neither the ask nor its answers can be addressed',
+      },
+    ])
   })
 
   test('refuses a snapshot that cannot show questions at all rather than reading it as "none"', () => {
-    expect(() => pendingQuestionMessages({ runs: [], tasks: [] } as unknown as TaskSnapshot)).toThrow(/carries no question index/)
+    expect(() => pendingQuestionMessages({ runs: [], tasks: [] } as unknown as TaskSnapshot)).toThrow(
+      /carries no question index/,
+    )
   })
 })
 
 describe('releaseAskingSessions', () => {
-  test("recomputes the block of every session whose question the settled run was asked", () => {
+  test('recomputes the block of every session whose question the settled run was asked', () => {
     const gate = new ExecutionGate()
     const first = question()
     const second = question({ questionId: 'q-2', childRunId: 'r-other', requestKey: 'k2', messageId: 'm-q-2' })
@@ -182,7 +201,9 @@ describe('releaseAskingSessions', () => {
     expect(gate.questionsBlocked('s-r-child')).toBe(false)
     // A snapshot with no question index is "cannot see", and a settlement must not
     // fail on it: there is nothing to release and nothing to invent.
-    expect(() => releaseAskingSessions(gate, { runs: [], tasks: [] } as unknown as TaskSnapshot, 'r-parent')).not.toThrow()
+    expect(() =>
+      releaseAskingSessions(gate, { runs: [], tasks: [] } as unknown as TaskSnapshot, 'r-parent'),
+    ).not.toThrow()
   })
 
   test('does not decide a value the gate already holds', () => {

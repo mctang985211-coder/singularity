@@ -1,18 +1,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { EvidenceBundle, RunId } from '@dangosys/dsh-singularity-task'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): SessionId {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('task_verify: missing agent id')
-  return id
-}
+import { sessionId, text } from '../shared.ts'
 
 /** Local view of the verifier service; resolved softly so this package never imports the verifier plugin. */
 interface RunVerifier {
@@ -24,10 +15,6 @@ interface EnvSource {
   store: { get(id: string): { path: string } }
 }
 
-function softService<T>(ctx: Context, name: string): T | undefined {
-  return (ctx.get?.(name) ?? (ctx as unknown as Record<string, T | undefined>)[name]) as T | undefined
-}
-
 export function defineTaskVerifyTool(ctx: Context) {
   return defineTool({
     name: 'task_verify',
@@ -37,8 +24,8 @@ export function defineTaskVerifyTool(ctx: Context) {
     parameters: {},
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (_args, exec) => {
-      const caller = sessionId(exec)
-      const verifier = softService<RunVerifier>(ctx, 'verifier')
+      const caller = sessionId(exec, 'task_verify')
+      const verifier = ctx.get('verifier') as RunVerifier | undefined
       if (verifier === undefined || typeof verifier.verifyRun !== 'function') {
         throw new Error('task_verify: verifier service is not loaded')
       }
@@ -49,14 +36,12 @@ export function defineTaskVerifyTool(ctx: Context) {
       let cwd: string | undefined
       try {
         const graph = await ctx.graphs.graphForSession(caller)
-        cwd = softService<EnvSource>(ctx, 'envBuilder')?.store.get(graph.envId).path
+        cwd = (ctx.get('envBuilder') as EnvSource | undefined)?.store.get(graph.envId).path
       } catch {
         cwd = undefined
       }
       // The verifier sets no timer when `timeoutMs` is undefined
       // (`verifier/src/command-verifier.ts:47`), so a criterion with a long
-      // command would hang this turn forever. Judge under the same deadline the
-      // final verification gets, and refuse to run rather than run unbounded.
       const timeoutMs = ctx.taskRuntime.verifyTimeoutMs
       if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
         throw new Error(

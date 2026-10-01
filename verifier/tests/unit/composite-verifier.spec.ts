@@ -1,5 +1,12 @@
 import { describe, expect, test, vi } from 'vitest'
-import type { AcceptanceCriterion, EvidenceBundle, TaskInstance, TaskRun, TaskSnapshot, VerificationResult } from '../../../task/src/types.ts'
+import type {
+  AcceptanceCriterion,
+  EvidenceBundle,
+  TaskInstance,
+  TaskRun,
+  TaskSnapshot,
+  VerificationResult,
+} from '../../../task/src/types.ts'
 import type { VerifyRequest } from '../../src/types.ts'
 import { CompositeVerifier, judgeCompositeCriterion } from '../../src/composite-verifier.ts'
 
@@ -49,7 +56,13 @@ function verdict(criterionId: string, status: VerificationResult['status']): Ver
   return { criterionId, status, verifierId: 'fake-verifier' }
 }
 
-function bundle(evidenceId: string, taskRunId: string, taskId: string, verifierResults: VerificationResult[], artifacts: EvidenceBundle['artifacts'] = []): EvidenceBundle {
+function bundle(
+  evidenceId: string,
+  taskRunId: string,
+  taskId: string,
+  verifierResults: VerificationResult[],
+  artifacts: EvidenceBundle['artifacts'] = [],
+): EvidenceBundle {
   return {
     evidenceId,
     taskRunId,
@@ -89,7 +102,6 @@ function request(criteria: AcceptanceCriterion[] = [criterion()], runId = 'r1'):
 
 function source(members: TaskInstance[], runs: TaskRun[] = [], evidence: EvidenceBundle[] = []) {
   return {
-    runMembersIn: vi.fn(async (_storeId: string, _runId: string) => members),
     runMemberSlotsIn: vi.fn(async (_storeId: string, _runId: string) => members),
     snapshotIn: vi.fn(async (_storeId: string) => snapshot(members, runs, evidence)),
   }
@@ -104,7 +116,6 @@ function source(members: TaskInstance[], runs: TaskRun[] = [], evidence: Evidenc
 function runSource(byRun: Record<string, TaskInstance[]>, runs: TaskRun[] = [], evidence: EvidenceBundle[] = []) {
   const all = Object.values(byRun).flat()
   return {
-    runMembersIn: vi.fn(async (_storeId: string, runId: string) => byRun[runId] ?? []),
     runMemberSlotsIn: vi.fn(async (_storeId: string, runId: string) => byRun[runId] ?? []),
     snapshotIn: vi.fn(async (_storeId: string) => snapshot(all, runs, evidence)),
   }
@@ -129,7 +140,9 @@ describe('CompositeVerifier', () => {
   })
 
   test('fails when any child is not verified, naming the stragglers', async () => {
-    const verifier = new CompositeVerifier(source([child('c1', 'verified'), child('c2', 'running'), child('c3', 'failed')]))
+    const verifier = new CompositeVerifier(
+      source([child('c1', 'verified'), child('c2', 'running'), child('c3', 'failed')]),
+    )
     const [result] = await verifier.verifyIn('sg-t-root', request())
     expect(result.status).toBe('fail')
     expect(result.details).toContain('c2(running)')
@@ -155,22 +168,37 @@ describe('CompositeVerifier', () => {
 describe('CompositeVerifier parent evidence map (P4, KISS §6 C2)', () => {
   test('P4-A: a complete childEvidence map over verified children passes and names what was checked', async () => {
     const children = [
-      child('c1', 'verified', [criterion({ criterionId: 'ac1-1', verificationMode: 'deterministic', command: 'true' })]),
-      child('c2', 'verified', [criterion({ criterionId: 'ac2-1', verificationMode: 'deterministic', command: 'true' })]),
+      child('c1', 'verified', [
+        criterion({ criterionId: 'ac1-1', verificationMode: 'deterministic', command: 'true' }),
+      ]),
+      child('c2', 'verified', [
+        criterion({ criterionId: 'ac2-1', verificationMode: 'deterministic', command: 'true' }),
+      ]),
     ]
     const runs = [run('r-c1', 'c1', 'verified'), run('r-c2', 'c2', 'verified')]
     const evidence = [
-      bundle('e-c1', 'r-c1', 'c1', [verdict('ac1-1', 'pass')], [{ artifactId: 'a-trace', kind: 'bemu_trace', uri: 'traces/bemu.jsonl' }]),
+      bundle(
+        'e-c1',
+        'r-c1',
+        'c1',
+        [verdict('ac1-1', 'pass')],
+        [{ artifactId: 'a-trace', kind: 'bemu_trace', uri: 'traces/bemu.jsonl' }],
+      ),
       bundle('e-c2', 'r-c2', 'c2', [verdict('ac2-1', 'pass')]),
     ]
     const verifier = new CompositeVerifier(source(children, runs, evidence))
-    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({
-      childEvidence: [
-        { childIndex: 0, criterionId: 'ac1-1' },
-        { childIndex: 1, evidenceRef: 'e-c2' },
-        { childIndex: 1 },
-      ],
-    })]))
+    const [result] = await verifier.verifyIn(
+      'sg-t-root',
+      request([
+        criterion({
+          childEvidence: [
+            { childIndex: 0, criterionId: 'ac1-1' },
+            { childIndex: 1, evidenceRef: 'e-c2' },
+            { childIndex: 1 },
+          ],
+        }),
+      ]),
+    )
     expect(result.status).toBe('pass')
     expect(result.details).toContain('child #0 (c1) criterion "ac1-1" passed')
     expect(result.details).toContain('child #1 (c2) evidence "e-c2" present')
@@ -180,20 +208,32 @@ describe('CompositeVerifier parent evidence map (P4, KISS §6 C2)', () => {
   test('P4-A: an evidenceRef is satisfied by artifact kind and artifact id spellings of the verified run', async () => {
     const children = [child('c1', 'verified', [])]
     const runs = [run('r-c1', 'c1', 'verified')]
-    const evidence = [bundle('e-c1', 'r-c1', 'c1', [], [{ artifactId: 'a-trace', kind: 'bemu_trace', uri: 'traces/bemu.jsonl' }])]
+    const evidence = [
+      bundle('e-c1', 'r-c1', 'c1', [], [{ artifactId: 'a-trace', kind: 'bemu_trace', uri: 'traces/bemu.jsonl' }]),
+    ]
     const verifier = new CompositeVerifier(source(children, runs, evidence))
     for (const ref of ['bemu_trace', 'a-trace', 'e-c1']) {
-      const [result] = await verifier.verifyIn('sg-t-root', request([criterion({ childEvidence: [{ childIndex: 0, evidenceRef: ref }] })]))
+      const [result] = await verifier.verifyIn(
+        'sg-t-root',
+        request([criterion({ childEvidence: [{ childIndex: 0, evidenceRef: ref }] })]),
+      )
       expect(result.status, ref).toBe('pass')
     }
   })
 
   test('P4-B: a map pointing at a criterion the child does not have fails, naming the missing item', async () => {
-    const children = [child('c1', 'verified', [criterion({ criterionId: 'ac1-1', verificationMode: 'deterministic', command: 'true' })])]
+    const children = [
+      child('c1', 'verified', [
+        criterion({ criterionId: 'ac1-1', verificationMode: 'deterministic', command: 'true' }),
+      ]),
+    ]
     const runs = [run('r-c1', 'c1', 'verified')]
     const evidence = [bundle('e-c1', 'r-c1', 'c1', [verdict('ac1-1', 'pass')])]
     const verifier = new CompositeVerifier(source(children, runs, evidence))
-    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({ childEvidence: [{ childIndex: 0, criterionId: 'ac1-9' }] })]))
+    const [result] = await verifier.verifyIn(
+      'sg-t-root',
+      request([criterion({ childEvidence: [{ childIndex: 0, criterionId: 'ac1-9' }] })]),
+    )
     expect(result.status).toBe('fail')
     expect(result.details).toContain('ac1-9')
     expect(result.details).toContain('child #0 (c1) has no criterion')
@@ -202,9 +242,14 @@ describe('CompositeVerifier parent evidence map (P4, KISS §6 C2)', () => {
   test('P4-B: a map pointing at an evidence ref the child never produced fails, naming the missing item', async () => {
     const children = [child('c1', 'verified', [])]
     const runs = [run('r-c1', 'c1', 'verified')]
-    const evidence = [bundle('e-c1', 'r-c1', 'c1', [], [{ artifactId: 'a-trace', kind: 'bemu_trace', uri: 'traces/bemu.jsonl' }])]
+    const evidence = [
+      bundle('e-c1', 'r-c1', 'c1', [], [{ artifactId: 'a-trace', kind: 'bemu_trace', uri: 'traces/bemu.jsonl' }]),
+    ]
     const verifier = new CompositeVerifier(source(children, runs, evidence))
-    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({ childEvidence: [{ childIndex: 0, evidenceRef: 'verilator_trace' }] })]))
+    const [result] = await verifier.verifyIn(
+      'sg-t-root',
+      request([criterion({ childEvidence: [{ childIndex: 0, evidenceRef: 'verilator_trace' }] })]),
+    )
     expect(result.status).toBe('fail')
     expect(result.details).toContain('verilator_trace')
     expect(result.details).toContain('child #0 (c1) evidence does not contain')
@@ -215,23 +260,32 @@ describe('CompositeVerifier parent evidence map (P4, KISS §6 C2)', () => {
     const runs = [run('r-c1', 'c1', 'verified')]
     const evidence = [bundle('e-c1', 'r-c1', 'c1', [])]
     const verifier = new CompositeVerifier(source(children, runs, evidence))
-    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({
-      childEvidence: [
-        { childIndex: 2 },
-        { childIndex: 0, criterionId: 'ac1-7' },
-      ],
-    })]))
+    const [result] = await verifier.verifyIn(
+      'sg-t-root',
+      request([
+        criterion({
+          childEvidence: [{ childIndex: 2 }, { childIndex: 0, criterionId: 'ac1-7' }],
+        }),
+      ]),
+    )
     expect(result.status).toBe('fail')
     expect(result.details).toContain('child #2 does not exist')
     expect(result.details).toContain('ac1-7')
   })
 
   test('P4-B: a criterion without a passing verdict in the verified run evidence fails the map', async () => {
-    const children = [child('c1', 'verified', [criterion({ criterionId: 'ac1-1', verificationMode: 'deterministic', command: 'true' })])]
+    const children = [
+      child('c1', 'verified', [
+        criterion({ criterionId: 'ac1-1', verificationMode: 'deterministic', command: 'true' }),
+      ]),
+    ]
     const runs = [run('r-c1', 'c1', 'verified')]
     const evidence = [bundle('e-c1', 'r-c1', 'c1', [verdict('ac1-1', 'inconclusive')])]
     const verifier = new CompositeVerifier(source(children, runs, evidence))
-    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({ childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }] })]))
+    const [result] = await verifier.verifyIn(
+      'sg-t-root',
+      request([criterion({ childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }] })]),
+    )
     expect(result.status).toBe('fail')
     expect(result.details).toContain('ac1-1')
     expect(result.details).toContain('no passing verdict')
@@ -243,25 +297,42 @@ describe('CompositeVerifier parent evidence map (P4, KISS §6 C2)', () => {
     // on the failed first run — an expired reference, not evidence.
     const runs = [run('r-c1a', 'c1', 'failed'), run('r-c1b', 'c1', 'verified')]
     const evidence = [
-      bundle('e-c1a', 'r-c1a', 'c1', [verdict('ac1-1', 'fail')], [{ artifactId: 'a-stale', kind: 'bemu_trace', uri: 'traces/stale.jsonl' }]),
+      bundle(
+        'e-c1a',
+        'r-c1a',
+        'c1',
+        [verdict('ac1-1', 'fail')],
+        [{ artifactId: 'a-stale', kind: 'bemu_trace', uri: 'traces/stale.jsonl' }],
+      ),
       bundle('e-c1b', 'r-c1b', 'c1', [verdict('ac1-1', 'pass')]),
     ]
     const verifier = new CompositeVerifier(source(children, runs, evidence))
-    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({ childEvidence: [{ childIndex: 0, evidenceRef: 'bemu_trace' }] })]))
+    const [result] = await verifier.verifyIn(
+      'sg-t-root',
+      request([criterion({ childEvidence: [{ childIndex: 0, evidenceRef: 'bemu_trace' }] })]),
+    )
     expect(result.status).toBe('fail')
     expect(result.details).toContain('bemu_trace')
     // The same reference from the verified run satisfies the map.
-    const satisfied = new CompositeVerifier(source(children, runs, [
-      ...evidence,
-      bundle('e-c1c', 'r-c1b', 'c1', [], [{ artifactId: 'a-fresh', kind: 'bemu_trace', uri: 'traces/fresh.jsonl' }]),
-    ]))
-    const [ok] = await satisfied.verifyIn('sg-t-root', request([criterion({ childEvidence: [{ childIndex: 0, evidenceRef: 'bemu_trace' }] })]))
+    const satisfied = new CompositeVerifier(
+      source(children, runs, [
+        ...evidence,
+        bundle('e-c1c', 'r-c1b', 'c1', [], [{ artifactId: 'a-fresh', kind: 'bemu_trace', uri: 'traces/fresh.jsonl' }]),
+      ]),
+    )
+    const [ok] = await satisfied.verifyIn(
+      'sg-t-root',
+      request([criterion({ childEvidence: [{ childIndex: 0, evidenceRef: 'bemu_trace' }] })]),
+    )
     expect(ok.status).toBe('pass')
   })
 
   test('a map with no children to satisfy it fails instead of degrading to the conjunction', async () => {
     const verifier = new CompositeVerifier(source([]))
-    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({ childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }] })]))
+    const [result] = await verifier.verifyIn(
+      'sg-t-root',
+      request([criterion({ childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }] })]),
+    )
     expect(result.status).toBe('fail')
     expect(result.details).toContain('ac1-1')
     // The no-map criterion keeps the documented inconclusive.
@@ -283,13 +354,18 @@ describe('CompositeVerifier parent evidence map (P4, KISS §6 C2)', () => {
 
 describe('CompositeVerifier run membership (K1 multi-batch)', () => {
   /** One verified member carrying the criterion a map names, with the bundle that proves it. */
-  function verifiedMember(taskId: string, criterionId: string): {
+  function verifiedMember(
+    taskId: string,
+    criterionId: string,
+  ): {
     member: TaskInstance
     run: TaskRun
     evidence: EvidenceBundle
   } {
     return {
-      member: child(taskId, 'verified', [criterion({ criterionId, verificationMode: 'deterministic', command: 'true' })]),
+      member: child(taskId, 'verified', [
+        criterion({ criterionId, verificationMode: 'deterministic', command: 'true' }),
+      ]),
       run: run(`r-${taskId}`, taskId, 'verified'),
       evidence: bundle(`e-${taskId}`, `r-${taskId}`, taskId, [verdict(criterionId, 'pass')]),
     }
@@ -305,40 +381,55 @@ describe('CompositeVerifier run membership (K1 multi-batch)', () => {
       [first.evidence, second.evidence],
     )
     const verifier = new CompositeVerifier(source)
-    const [ok] = await verifier.verifyIn('sg-t-root', request([criterion({
-      childEvidence: [
-        { childIndex: 0, criterionId: 'ac1-1' },
-        { childIndex: 1, criterionId: 'ac2-1' },
-      ],
-    })]))
+    const [ok] = await verifier.verifyIn(
+      'sg-t-root',
+      request([
+        criterion({
+          childEvidence: [
+            { childIndex: 0, criterionId: 'ac1-1' },
+            { childIndex: 1, criterionId: 'ac2-1' },
+          ],
+        }),
+      ]),
+    )
     expect(ok.status).toBe('pass')
     expect(ok.details).toContain('child #1 (c2) criterion "ac2-1" passed')
 
     // The second batch's first member is not position 0 at run level: a map
     // that spelled it as one resolves the first batch's member instead and
     // fails on the criterion that member does not carry.
-    const [confused] = await verifier.verifyIn('sg-t-root', request([criterion({
-      childEvidence: [{ childIndex: 0, criterionId: 'ac2-1' }],
-    })]))
+    const [confused] = await verifier.verifyIn(
+      'sg-t-root',
+      request([
+        criterion({
+          childEvidence: [{ childIndex: 0, criterionId: 'ac2-1' }],
+        }),
+      ]),
+    )
     expect(confused.status).toBe('fail')
     expect(confused.details).toContain('child #0 (c1) has no criterion "ac2-1"')
   })
 
-  test('a childIndex past the run\'s accumulated members fails, naming the count', async () => {
+  test("a childIndex past the run's accumulated members fails, naming the count", async () => {
     const first = verifiedMember('c1', 'ac1-1')
     const second = verifiedMember('c2', 'ac2-1')
-    const verifier = new CompositeVerifier(runSource(
-      { r1: [first.member, second.member] },
-      [first.run, second.run],
-      [first.evidence, second.evidence],
-    ))
-    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({
-      childEvidence: [{ childIndex: 2 }, { childIndex: 1, criterionId: 'ac2-1' }],
-    })]))
+    const verifier = new CompositeVerifier(
+      runSource({ r1: [first.member, second.member] }, [first.run, second.run], [first.evidence, second.evidence]),
+    )
+    const [result] = await verifier.verifyIn(
+      'sg-t-root',
+      request([
+        criterion({
+          childEvidence: [{ childIndex: 2 }, { childIndex: 1, criterionId: 'ac2-1' }],
+        }),
+      ]),
+    )
     expect(result.status).toBe('fail')
     // Only the out-of-range entry is defective: the other entry is satisfied,
     // so a missing member does not turn the whole map into noise.
-    expect(result.details).toBe('incomplete childEvidence map: child #2 does not exist (the run\'s member sequence holds 2 filled position(s))')
+    expect(result.details).toBe(
+      "incomplete childEvidence map: child #2 does not exist (the run's member sequence holds 2 filled position(s))",
+    )
   })
 
   test('an unfilled position fails by name instead of shifting the members behind it (A6)', async () => {
@@ -349,14 +440,18 @@ describe('CompositeVerifier run membership (K1 multi-batch)', () => {
     // position, never as the sibling sitting one place too early.
     const sibling = verifiedMember('c1', 'ac1-1')
     const source = {
-      runMembersIn: vi.fn(async () => [sibling.member]),
       runMemberSlotsIn: vi.fn(async () => [undefined, sibling.member]),
       snapshotIn: vi.fn(async () => snapshot([sibling.member], [sibling.run], [sibling.evidence])),
     }
     const verifier = new CompositeVerifier(source)
-    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({
-      childEvidence: [{ childIndex: 0 }, { childIndex: 1, criterionId: 'ac1-1' }],
-    })]))
+    const [result] = await verifier.verifyIn(
+      'sg-t-root',
+      request([
+        criterion({
+          childEvidence: [{ childIndex: 0 }, { childIndex: 1, criterionId: 'ac1-1' }],
+        }),
+      ]),
+    )
     expect(result.status).toBe('fail')
     // The unfilled position is named *as a position*, and it is the only one
     // reported: c1 at position 1 verified, so the hole did not shift it to 0.
@@ -369,26 +464,40 @@ describe('CompositeVerifier run membership (K1 multi-batch)', () => {
     expect(plain.details).toContain('#0 (unfilled)')
   })
 
-  test('historical members belong to their own run: run2 resolves run2\'s first member', async () => {
+  test("historical members belong to their own run: run2 resolves run2's first member", async () => {
     const old = verifiedMember('c1', 'ac1-1')
     const current = verifiedMember('c9', 'ac9-1')
-    const verifier = new CompositeVerifier(runSource(
-      { r1: [old.member], r2: [current.member] },
-      [old.run, current.run],
-      [old.evidence, current.evidence],
-    ))
-    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({
-      childEvidence: [{ childIndex: 0, criterionId: 'ac9-1' }],
-    })], 'r2'))
+    const verifier = new CompositeVerifier(
+      runSource({ r1: [old.member], r2: [current.member] }, [old.run, current.run], [old.evidence, current.evidence]),
+    )
+    const [result] = await verifier.verifyIn(
+      'sg-t-root',
+      request(
+        [
+          criterion({
+            childEvidence: [{ childIndex: 0, criterionId: 'ac9-1' }],
+          }),
+        ],
+        'r2',
+      ),
+    )
     expect(result.status).toBe('pass')
     expect(result.details).toContain('child #0 (c9) criterion "ac9-1" passed')
     expect(result.details).not.toContain('c1')
 
     // The first run still answers with its own member — the two runs' members
     // are not one list — and a run that admitted no batch has none at all.
-    const [earlier] = await verifier.verifyIn('sg-t-root', request([criterion({
-      childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }],
-    })], 'r1'))
+    const [earlier] = await verifier.verifyIn(
+      'sg-t-root',
+      request(
+        [
+          criterion({
+            childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }],
+          }),
+        ],
+        'r1',
+      ),
+    )
     expect(earlier.status).toBe('pass')
     expect(earlier.details).toContain('child #0 (c1)')
     const [none] = await verifier.verifyIn('sg-t-root', request([criterion()], 'r3'))
@@ -406,10 +515,8 @@ describe('CompositeVerifier executable selftest samples (V2-1, KISS §4.3)', () 
     for (const sample of samples) {
       const store = sample.store
       expect(store, `sample "${sample.name}" declares the store view it is judged against`).toBeDefined()
-      const result = await judgeCompositeCriterion(
-        sample.criterion,
-        store!.children,
-        async () => snapshot(store!.children, store!.runs ?? [], store!.evidence ?? []),
+      const result = await judgeCompositeCriterion(sample.criterion, store!.children, async () =>
+        snapshot(store!.children, store!.runs ?? [], store!.evidence ?? []),
       )
       statuses.push(result.status)
       expect(result.verifierId).toBe('composite')

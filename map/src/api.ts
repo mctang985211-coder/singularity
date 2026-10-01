@@ -1,15 +1,35 @@
-import type { GraphSnapshot, LayoutSnapshot, CanvasNode } from './types'
+import type {
+  CanvasNode,
+  CreateGraphBody,
+  EvolutionInvalidation,
+  EvolutionProposalWire,
+  EvolutionResponse,
+  GraphEntry,
+  GraphEnv,
+  GraphSnapshot,
+  GraphsResponse,
+  LayoutSnapshot,
+  ProposalDecision,
+  RecoveryResponse,
+  ReviewResponse,
+  TaskInvalidation,
+  TaskSnapshotWire,
+} from './types'
 import type { GraphMeta, HitlPending } from './store'
 
-export const GRAPH_ID = new URLSearchParams(window.location.search).get('graphId')
-const query = '?graphId=' + encodeURIComponent(GRAPH_ID ?? '')
-const GRAPH = '/singularity/graph' + query
-const LAYOUT = '/singularity/layout' + query
-const EVENTS = '/singularity/events' + query
-const HITL = '/singularity/hitl'
+const SEARCH = new URLSearchParams(window.location.search)
+export const INITIAL_GRAPH_ID = SEARCH.get('graphId')
 
-function check(res: Response, body: string): void {
-  if (!res.ok) throw new Error(`${res.url}: ${res.status} ${body}`)
+// An explicit ?storeId names the task store of the graph loaded at boot; a graph
+// switched from inside the SPA drops it and derives the store id instead.
+let storeOverride: string | null = SEARCH.get('storeId')
+
+export function taskStoreId(rootSessionId: string): string {
+  return storeOverride ?? `sg-t-${rootSessionId}`
+}
+
+export function setStoreOverride(id: string | null): void {
+  storeOverride = id
 }
 
 export interface ViewSnapshot {
@@ -18,57 +38,138 @@ export interface ViewSnapshot {
   layout: LayoutSnapshot
 }
 
-export async function fetchGraph(): Promise<ViewSnapshot> {
-  const res = await fetch(GRAPH)
-  const text = await res.text()
-  check(res, text)
-  return JSON.parse(text) as ViewSnapshot
+export interface ProposalDecisionResult {
+  readonly ok: boolean
+  readonly error?: string
 }
 
-export async function fetchHitl(): Promise<{ pending: HitlPending[] }> {
-  const res = await fetch(HITL)
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, init)
   const text = await res.text()
-  check(res, text)
-  return JSON.parse(text) as { pending: HitlPending[] }
+  if (!res.ok) throw new Error(`${res.url}: ${res.status} ${text}`)
+  return (text.length === 0 ? undefined : JSON.parse(text)) as T
 }
 
-export async function answerHitl(
+function graphQuery(graphId: string): string {
+  return '?graphId=' + encodeURIComponent(graphId)
+}
+
+function post<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export function fetchGraph(graphId: string): Promise<ViewSnapshot> {
+  return request<ViewSnapshot>('/singularity/graph' + graphQuery(graphId))
+}
+
+export function fetchHitl(): Promise<{ pending: HitlPending[] }> {
+  return request<{ pending: HitlPending[] }>('/singularity/hitl')
+}
+
+export function answerHitl(
   id: string,
   answer: { kind: 'ask'; text: string } | { kind: 'approve'; decision: 'approve' | 'reject' },
 ): Promise<{ pending: HitlPending[] }> {
-  const res = await fetch(HITL, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id, answer }),
-  })
-  const text = await res.text()
-  check(res, text)
-  return JSON.parse(text) as { pending: HitlPending[] }
+  return post<{ pending: HitlPending[] }>('/singularity/hitl', { id, answer })
 }
 
-export async function putLayout(sessionId: string, node: CanvasNode): Promise<LayoutSnapshot> {
-  const res = await fetch(LAYOUT, {
+export function putLayout(graphId: string, sessionId: string, node: CanvasNode): Promise<LayoutSnapshot> {
+  return request<LayoutSnapshot>('/singularity/layout' + graphQuery(graphId), {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ sessionId, node }),
   })
-  const text = await res.text()
-  check(res, text)
-  return JSON.parse(text) as LayoutSnapshot
 }
 
-export function openEvents(handlers: {
-  onSnapshot: (view: ViewSnapshot) => void
-  onHitl: (pending: HitlPending[]) => void
-  onError: () => void
-}): EventSource {
-  const source = new EventSource(EVENTS)
+export function fetchGraphs(): Promise<GraphsResponse> {
+  return request<GraphsResponse>('/singularity/graphs')
+}
+
+export function fetchGraphEnvs(): Promise<{ envs: GraphEnv[] }> {
+  return request<{ envs: GraphEnv[] }>('/singularity/graph-envs')
+}
+
+export function createGraph(body: CreateGraphBody): Promise<GraphEntry> {
+  return post<GraphEntry>('/singularity/graphs', body)
+}
+
+export function selectGraph(id: string): Promise<GraphEntry> {
+  return post<GraphEntry>(`/singularity/graphs/${encodeURIComponent(id)}/select`, {})
+}
+
+export function deleteGraph(id: string): Promise<{ ok: boolean }> {
+  return post<{ ok: boolean }>(`/singularity/graphs/${encodeURIComponent(id)}/delete`, {})
+}
+
+export function fetchTask(storeId: string): Promise<{ snapshot: TaskSnapshotWire | null }> {
+  return request<{ snapshot: TaskSnapshotWire | null }>('/singularity/task?storeId=' + encodeURIComponent(storeId))
+}
+
+export function decideProposal(body: {
+  storeId: string
+  proposalId: string
+  decision: ProposalDecision
+  reason?: string
+}): Promise<ProposalDecisionResult> {
+  return post<ProposalDecisionResult>('/singularity/task/proposals/decide', body)
+}
+
+export function fetchEvolution(): Promise<EvolutionResponse> {
+  return request<EvolutionResponse>('/singularity/evolution')
+}
+
+export function fetchEvolutionProposal(id: string): Promise<{ proposal: EvolutionProposalWire | null }> {
+  return request<{ proposal: EvolutionProposalWire | null }>('/singularity/evolution/' + encodeURIComponent(id))
+}
+
+export function fetchRecovery(storeId: string): Promise<RecoveryResponse> {
+  return request<RecoveryResponse>('/singularity/recovery?storeId=' + encodeURIComponent(storeId))
+}
+
+export function fetchReview(storeId: string, runId: string): Promise<ReviewResponse> {
+  return request<ReviewResponse>(
+    '/singularity/review?storeId=' + encodeURIComponent(storeId) + '&runId=' + encodeURIComponent(runId),
+  )
+}
+
+function parse<T>(event: Event): T | null {
+  const data = (event as MessageEvent).data
+  if (typeof data !== 'string' || data.length === 0) return null
+  try {
+    return JSON.parse(data) as T
+  } catch {
+    return null
+  }
+}
+
+export function openEvents(
+  graphId: string,
+  handlers: {
+    onSnapshot: (view: ViewSnapshot) => void
+    onHitl: (pending: HitlPending[]) => void
+    onTask: (hint: TaskInvalidation) => void
+    onEvolution: (hint: EvolutionInvalidation) => void
+    onError: () => void
+  },
+): EventSource {
+  const source = new EventSource('/singularity/events' + graphQuery(graphId))
   source.addEventListener('snapshot', event => {
-    handlers.onSnapshot(JSON.parse((event as MessageEvent).data) as ViewSnapshot)
+    const data = parse<ViewSnapshot>(event)
+    if (data !== null) handlers.onSnapshot(data)
   })
   source.addEventListener('hitl', event => {
-    const data = JSON.parse((event as MessageEvent).data) as { pending: HitlPending[] }
-    handlers.onHitl(data.pending)
+    const data = parse<{ pending?: HitlPending[] }>(event)
+    if (data !== null) handlers.onHitl(data.pending ?? [])
+  })
+  source.addEventListener('task', event => {
+    handlers.onTask(parse<TaskInvalidation>(event) ?? {})
+  })
+  source.addEventListener('evolution', event => {
+    handlers.onEvolution(parse<EvolutionInvalidation>(event) ?? {})
   })
   source.onerror = () => {
     if (source.readyState !== EventSource.CLOSED) return

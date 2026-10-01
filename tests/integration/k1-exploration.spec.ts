@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -465,14 +465,21 @@ async function bootOver(dir: string, options: ReopenOptions = {}): Promise<Reope
   ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
   ctx.provide('permissionPresets', { set: vi.fn(), resolve: () => ({}) })
   ctx.provide('layout', { setIn: async () => {} })
-  const graphState = {
-    version: 1,
-    id: 'g1',
-    roots: [String(ROOT)],
-    agents: [] as { id: string; name: string; status: string }[],
-    groups: [] as unknown[],
-    edges: [] as unknown[],
+  const graphFile = join(dir, 'graph-store.json')
+  const graphState = (
+    existsSync(graphFile)
+      ? JSON.parse(readFileSync(graphFile, 'utf8'))
+      : { version: 1, id: 'g1', roots: [String(ROOT)], agents: [], groups: [], edges: [] }
+  ) as {
+    version: number
+    id: string
+    roots: string[]
+    agents: { id: string; name: string; status: string }[]
+    groups: unknown[]
+    edges: unknown[]
   }
+  // The graph store's own record: a boot reads what the dead process published.
+  const saveGraph = (): void => writeFileSync(graphFile, JSON.stringify(graphState))
   ctx.provide('graph', {
     snapshotIn: async () => structuredClone(graphState),
     commitIn: async (_storeId: string, events: readonly { kind: string; agent?: { id: string; name: string; status: string }; edge?: unknown }[]) => {
@@ -480,9 +487,13 @@ async function bootOver(dir: string, options: ReopenOptions = {}): Promise<Reope
         if (event.kind === 'agent/add' && event.agent !== undefined) graphState.agents.push(event.agent)
         if (event.kind === 'edge/add' && event.edge !== undefined) graphState.edges.push(event.edge)
       }
+      saveGraph()
     },
     setStatusIn: async () => {},
-    addAgentIn: async (_storeId: string, agent: { id: string; name: string; status: string }) => { graphState.agents.push(agent) },
+    addAgentIn: async (_storeId: string, agent: { id: string; name: string; status: string }) => {
+      graphState.agents.push(agent)
+      saveGraph()
+    },
   } as never)
   ctx.provide('graphs', {
     graphForSession: async () => ({
@@ -504,18 +515,24 @@ async function bootOver(dir: string, options: ReopenOptions = {}): Promise<Reope
     members: () => [String(ROOT), ...graphState.agents.map(agent => String(agent.id))],
   } as never)
 
-  /** One read handle over the real JSONL log — what `events()` and the session plane below read. */
-  const readLog = async (sessionId: string): Promise<readonly SessionEvent[]> => {
+  /** One read handle over the real JSONL log: the events, and the header a resume rebuilds from. */
+  const readSession = async (
+    sessionId: string,
+  ): Promise<{ session: unknown; inheritedEventCount: number; events: readonly SessionEvent[] }> => {
     const handle = await (persistence as unknown as {
-      open: (id: SessionId, access: 'read') => Promise<{ read: () => Promise<{ events: readonly SessionEvent[] }>; close: () => Promise<void> }>
+      open: (id: SessionId, access: 'read') => Promise<{ header: unknown; read: () => Promise<{ events: readonly SessionEvent[] }>; close: () => Promise<void> }>
     }).open(SessionId(sessionId), 'read')
     try {
-      return (await handle.read()).events
+      return { session: handle.header, inheritedEventCount: 0, events: (await handle.read()).events }
     } finally {
       await handle.close()
     }
   }
+
+  /** What `events()` and the read surface below read. */
+  const readLog = async (sessionId: string): Promise<readonly SessionEvent[]> => (await readSession(sessionId)).events
   ctx.provide('sessionQuery', {
+    readSession,
     readSurface: async (sessionId: string) => ({ capturedThroughSeq: (await readLog(sessionId)).at(-1)?.seq ?? null }),
     readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
       const events = await readLog(String(request.sessionId))
@@ -612,9 +629,34 @@ async function bootOver(dir: string, options: ReopenOptions = {}): Promise<Reope
     await runtime.submitResult(sessionId, { summary: 'recovery fixture worker finished' })
   }
 
+  /** The Session a real spawn leaves durably: the header a worker resume reads back. */
+  async function createSpawnLog(request: SpawnRequest, parent: Agent): Promise<void> {
+    try {
+      const existing = await persistence.open(SessionId(String(request.sessionId)), 'read')
+      await existing.close()
+      return
+    } catch (error) {
+      if (!(error instanceof Error) || !/not found/.test(error.message)) throw error
+    }
+    const handle = await (persistence as unknown as {
+      create: (header: SessionHeader) => Promise<{ flush: () => Promise<void>; close: () => Promise<void> }>
+    }).create({
+      version: SESSION_FORMAT_VERSION,
+      id: SessionId(String(request.sessionId)),
+      createdAt: Date.now(),
+      isSeeded: false,
+      cwd: request.cwd ?? parent.session.header.cwd,
+      agentPreset: request.agentPreset ?? parent.session.header.agentPreset,
+      parentSession: parent.session.header.id,
+    } as unknown as SessionHeader)
+    await handle.flush()
+    await handle.close()
+  }
+
   const originalSpawn = agentRuntime.spawn.bind(agentRuntime)
   agentRuntime.spawn = async (parent: Agent, request: SpawnRequest) => {
     spawns.push(String(request.sessionId))
+    await createSpawnLog(request, parent)
     return await originalSpawn(parent, request)
   }
   await agentRuntime.createRoot({ sessionId: SessionId(String(ROOT)), scope: { graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root' }, cwd: dir })
@@ -1298,12 +1340,25 @@ describe('K1-4: the windows a restart opens around a batch end', () => {
     const childTaskId = admitted.childTaskIds[0]!
     await vi.waitFor(async () => expect(runOf(await a.snapshot(), childTaskId).executionPhase).toBe('active'))
     expect(runOf(await a.snapshot(), root.taskId).executionPhase).toBe('waiting_children')
+    const crashed = runOf(await a.snapshot(), childTaskId)
     await a.crash()
 
-    // The process that adopts the store settles that in-flight child and finishes
-    // the batch the record already holds — once: one admission, one start, and no
-    // worker spawned again.
+    // G §5.25 (CONT-1): the in-flight child is continued, not cancelled — the same
+    // Run and Session come back and recovery starts nothing for it.
     const b = await reopen(dir)
+    expect(b.spawns).toEqual([])
+    const continued = runOf(await b.snapshot(), childTaskId)
+    expect(continued.runId).toBe(crashed.runId)
+    expect(continued.status).toBe('running')
+    expect(continued.executionPhase).toBe('active')
+    expect((await b.snapshot()).reviews.some(review => review.runId === crashed.runId)).toBe(false)
+    expect((await b.runtime.runForSession(String(crashed.sessionId))).run.runId).toBe(crashed.runId)
+
+    // Its owner stops it — the one write nothing else can make on its behalf — and
+    // the batch the record already holds adopts that terminal state, once.
+    await b.task.markRunStatusIn(STORE, childTaskId, crashed.runId, 'cancelled', String(ROOT), {
+      reason: 'test: the child was stopped by its owner',
+    })
     const outcomes = await b.runtime.awaitBatch(STORE, admitted.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])
     expect(outcomes.map(outcome => outcome.taskId)).toEqual([childTaskId])
@@ -1362,7 +1417,7 @@ describe('K1-4: the windows a restart opens around a batch end', () => {
     expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === childTaskIds[0])).toHaveLength(1)
   })
 
-  it('reopens over a replay that was in flight, and settles it without running it again', async () => {
+  it('reopens over a replay that was in flight, and continues it without running it again', async () => {
     const dir = workspace()
     const a = await bootOver(dir, { worker: () => new Promise(() => {}) })
     const root = await activateRoot(a)
@@ -1383,17 +1438,20 @@ describe('K1-4: the windows a restart opens around a batch end', () => {
     const crashedRun = runOf(await a.snapshot(), replayTaskId)
     await a.crash()
 
-    // The next process settles the run it finds in flight, without executing it
-    // again: one run, one start, no worker spawned, and the same run id.
+    // The next process continues the run it finds in flight, without executing it
+    // again: one run, one start, no worker spawned, and the same run id (G §5.25).
     const b = await reopen(dir)
-    const settledRun = runOf(await b.snapshot(), replayTaskId)
-    expect(settledRun.runId).toBe(crashedRun.runId)
-    expect(settledRun.status).toBe('cancelled')
+    const continued = runOf(await b.snapshot(), replayTaskId)
+    expect(continued.runId).toBe(crashedRun.runId)
+    expect(continued.status).toBe('running')
+    expect(continued.executionPhase).toBe('active')
+    expect((await b.runtime.runForSession(String(crashedRun.sessionId))).run.runId).toBe(crashedRun.runId)
+    expect((await b.snapshot()).reviews.some(review => review.runId === crashedRun.runId)).toBe(false)
     expect((await b.snapshot()).runs.filter(run => run.taskId === replayTaskId)).toHaveLength(1)
     expect(b.spawns).toEqual([])
     const events = taskEvents(await b.events())
     expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === replayTaskId)).toHaveLength(1)
-    // A second pass changes nothing.
+    // A second pass continues the same run again and starts nothing.
     await b.runtime.reconcileStore(STORE)
     expect((await b.snapshot()).runs.filter(run => run.taskId === replayTaskId)).toHaveLength(1)
     expect(b.spawns).toEqual([])

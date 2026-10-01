@@ -109,12 +109,10 @@ const DIGEST_B = '2a9321d03321c4139d814d9288cdf630640a511d3d8da3349e05665cae4a3e
 const ADMISSION_CONTEXT: AdmissionContext = {
   maxDepth: 4,
   maxChildren: 8,
-  wallTimeMs: 120_000,
   auditOnly: { maxToolCalls: 150, attempts: 1 },
 }
-const ADMISSION_CONTEXT_CANONICAL =
-  '{"auditOnly":{"attempts":1,"maxToolCalls":150},"maxChildren":8,"maxDepth":4,"wallTimeMs":120000}'
-const ADMISSION_CONTEXT_SHA256 = '6470da4b48e3967df7d37c79aeee1a4f1b830d5441c4bb518de4f36fea11ac5d'
+const ADMISSION_CONTEXT_CANONICAL = '{"auditOnly":{"attempts":1,"maxToolCalls":150},"maxChildren":8,"maxDepth":4}'
+const ADMISSION_CONTEXT_SHA256 = '545bbf8684cbeddd46a8f1f831eb4e45d49a70f47074932aa6d0c57e4b89b5ac'
 
 /** Written with the verifiers in the order a registry might have listed them; the digest normalizes that order away. */
 const REVIEW_CONTEXT: TaskProposalReviewContext = {
@@ -232,14 +230,16 @@ describe('proposal identities', () => {
   test('is unmoved by key order and by a limit spelled as an absent key', () => {
     const reordered: AdmissionContext = {
       auditOnly: { attempts: 1, maxToolCalls: 150 },
-      wallTimeMs: 120_000,
       maxChildren: 8,
       maxDepth: 4,
     }
     expect(admissionContextDigest(reordered)).toBe(ADMISSION_CONTEXT_SHA256)
-    // `wallTimeMs: undefined` and an absent `wallTimeMs` mean one thing, so they are one identity.
-    expect(admissionContextDigest({ ...ADMISSION_CONTEXT, wallTimeMs: undefined }))
-      .toBe(admissionContextDigest({ maxDepth: 4, maxChildren: 8, auditOnly: { maxToolCalls: 150, attempts: 1 } }))
+    // An `undefined`-valued audit limit and an absent one mean one identity.
+    const droppedTokens: AdmissionContext = {
+      ...ADMISSION_CONTEXT,
+      auditOnly: { ...ADMISSION_CONTEXT.auditOnly, tokens: undefined },
+    }
+    expect(admissionContextDigest(droppedTokens)).toBe(admissionContextDigest(ADMISSION_CONTEXT))
   })
 
   test('moves when an enforced or an audited limit moves', () => {
@@ -247,7 +247,6 @@ describe('proposal identities', () => {
     const moves = [
       admissionContextDigest({ ...ADMISSION_CONTEXT, maxDepth: 5 }),
       admissionContextDigest({ ...ADMISSION_CONTEXT, maxChildren: 9 }),
-      admissionContextDigest({ ...ADMISSION_CONTEXT, wallTimeMs: 60_000 }),
       admissionContextDigest({ ...ADMISSION_CONTEXT, auditOnly: { ...ADMISSION_CONTEXT.auditOnly, tokens: 2_000 } }),
       admissionContextDigest({ ...ADMISSION_CONTEXT, auditOnly: { maxToolCalls: 150 } }),
     ]

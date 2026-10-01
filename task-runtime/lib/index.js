@@ -1,22 +1,18 @@
-import { randomUUID } from "node:crypto";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { Context, Service } from "@deepseek-ai/cordis";
-import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
-import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskProposalId } from "@dangosys/dsh-singularity-task";
+import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TERMINAL_RUN_STATUSES, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskProposalId } from "@dangosys/dsh-singularity-task";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { answerMessageText, findSkillFileIn, parseSkillFile, questionMessageText, skillRootsFor, toolCallRefIn } from "@dangosys/dsh-singularity-agent-runtime";
 import { homedir } from "node:os";
+import { answerMessageText, findSkillFileIn, parseSkillFile, questionMessageText, skillRootsFor, toolCallRefIn } from "@dangosys/dsh-singularity-agent-runtime";
+import { SessionId } from "@deepseek-ai/dsh-session";
+import { randomUUID } from "node:crypto";
+import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
 
 //#region src/mcp-servers.ts
 /**
 * The servers a capability may name. `bbdev` is the buckyball checkout's own
 * FastMCP server (45 tools, submit/poll-shaped to stay under the per-call
-* timeout); `waveform` is that checkout's waveform-mcp build (VCD/FST reads,
-* stdio, seven signal/event tools). Both bind `{repoRoot:buckyball}`: the
-* worker's env must contain a buckyball checkout, and a capability that names
-* one on an env without it fails the spawn loudly.
 */
 const MCP_SERVER_REGISTRY = {
 	bbdev: {
@@ -45,9 +41,6 @@ const ANY_PLACEHOLDER_LIKE = /\{[^{}]*\}/;
 /**
 * Substitute the placeholders of one template field. `{envRoot}` is the env
 * root; `{repoRoot:<repo>}` is that env's checkout of `<repo>`. An env-free
-* field passes through untouched; an env-needing field with no binding, a repo
-* the env does not contain, or a placeholder outside the vocabulary all throw
-* — a miswired server must never mount partially.
 */
 function substitute(template, binding, serverName) {
 	if (!ANY_PLACEHOLDER_LIKE.test(template)) return template;
@@ -65,12 +58,6 @@ function substitute(template, binding, serverName) {
 /**
 * Materialize one manifest's MCP grants into mount-ready specs.
 * @param manifest - the resolved capability manifest (server names already validated at admission).
-* @param binding - the run's env binding, or undefined when the session has none.
-* @param registry - the template table; a parameter so tests can exercise bad
-*   templates (unknown placeholders) that the shipped registry must never hold.
-* @returns one spec per distinct granted server, in first-declaration order.
-* @throws when a granted name is outside the registry, when an
-*   env-needing server has no binding, or when its repo is absent from the env.
 */
 function resolveMcpServerSpecs(manifest, binding, registry = MCP_SERVER_REGISTRY) {
 	const names = manifestMcpServers(manifest);
@@ -95,49 +82,15 @@ function resolveMcpServerSpecs(manifest, binding, registry = MCP_SERVER_REGISTRY
 /**
 * Reject MCP server names outside the registry, the same discipline
 * {@link resolveToolLabels} applies to labels: named vocabulary in the error,
-* whole resolution rejected before anything is persisted or spawned.
 */
-function assertKnownMcpServers(capability, names) {
-	for (const name of names) if (MCP_SERVER_REGISTRY[name] === void 0) throw new Error(`task-runtime: capability "${capability}" declares unknown MCP server "${name}"; known servers: ${Object.keys(MCP_SERVER_REGISTRY).sort().join(", ")}`);
+/** Reject a name outside a closed vocabulary, naming the vocabulary in the refusal. */
+function assertKnownName(capability, kind, knownLabel, knownNames, name) {
+	if (knownNames.includes(name)) return;
+	throw new Error(`task-runtime: capability "${capability}" declares unknown ${kind} "${name}"; ${knownLabel}: ${[...knownNames].sort().join(", ")}`);
 }
 /**
 * Capability tool labels → the real DSH tool names each label grants.
-*
 * A capability table is authored against what the WORK needs, not against
-* whichever names a given harness release registers: `filesystem` stays
-* `filesystem` while DSH's file tools are `read`/`write`/`edit`. This table is
-* the whole vocabulary — a label outside it is rejected at admission — and its
-* values are the names that reach the worker's tool filter. Each value is the
-* `name` the registering tool plugin declares:
-*
-* | label             | registers in                                                        |
-* | ----------------- | ------------------------------------------------------------------- |
-* | filesystem        | `fs/tool-fs` (`read.ts:78`, `write.ts:73`, `edit.ts:85`)             |
-* | search            | `fs/tool-fs-search` (`glob.ts:313`, `grep.ts:285`)                  |
-* | bash              | `shell/tool-bash` (`index.ts:242`)                                  |
-* | jobs              | `jobs/tool-jobs` (`index.ts:302,342,362`)                           |
-* | skill             | `skill/tool-skill` (`index.ts:82`)                                  |
-* | ask-user          | `interaction/tool-ask-user` (`index.ts:21`)                         |
-* | web               | `web/tool-web` (`fetch.ts:459`, `search.ts:326`)                    |
-* | todo              | `todo/tool-todo` (`index.ts:147`)                                   |
-* | goal              | `goal/tool-goal` (`index.ts:195,207,234`)                           |
-* | subagent          | `subagent/tool-subagent` (`index.ts:380`), `.../tool-subagent-control` (`index.ts:29,77`, `list-agents.ts:93`) |
-*
-* Paths are relative to `thirdparty/deepseek-harness/packages/`. The raw
-* cross-session readers (`session_event_read` and its siblings) are deliberately
-* NOT a label: A2 sealed them off every Singularity role's surface — history is
-* read through `context_read`, whose caller-side authorization is the graph
-* domain, not a cwd.
-*
-* A label only carries names a composition can be expected to mount; a
-* capability-declared name the worker's own composition does not offer fails
-* that spawn loudly (`agent-runtime/src/grants.ts`), which is the point — the
-* capability asked for a tool the composition cannot give. `read_image` is
-* deliberately NOT in `filesystem`: `tool-fs` registers it only while
-* `attachments` is mounted (`fs/tool-fs/src/index.ts:70-73`), so granting it
-* would make every filesystem capability depend on a plane it never names.
-* `bash` is likewise absent on a Windows deployment, where the standard preset
-* disables `tool-bash`.
 */
 const TOOL_LABELS = {
 	filesystem: [
@@ -172,35 +125,16 @@ const TOOL_LABELS = {
 /**
 * Expand one capability's tool labels into real DSH tool names.
 * @param capability - capability name, named in the rejection.
-* @param labels - the labels the capability declares.
-* @returns every real tool name the labels grant, in declaration order.
-* @throws when a label is not in {@link TOOL_LABELS}; the error lists the vocabulary.
 */
 function resolveToolLabels(capability, labels) {
 	return labels.flatMap((label) => {
-		const expanded = TOOL_LABELS[label];
-		if (expanded === void 0) throw new Error(`task-runtime: capability "${capability}" declares unknown tool label "${label}"; known labels: ${Object.keys(TOOL_LABELS).sort().join(", ")}`);
-		return [...expanded];
+		assertKnownName(capability, "tool label", "known labels", Object.keys(TOOL_LABELS), label);
+		return [...TOOL_LABELS[label]];
 	});
 }
 /**
 * The capability-worker baseline: what every worker needs whatever its
 * capabilities are, because its own prompt tells it to use these. Every entry
-* cites the prompt line that needs it (the worker policy section,
-* `agent-runtime/src/prompts/worker.prompts.ts`, plus the shell tool's own
-* guidance for `jobs`):
-*
-* - `filesystem` — "Do the work" / "Keep changes scoped to this task".
-* - `bash` — "Where a criterion lists a command, make that command exit 0 in the checkout".
-* - `jobs` — that same command is often long-running, and `bash`'s own description
-*   tells the model to collect background output with `job_output`/`job_kill`.
-* - `search` — locate the code the work touches.
-* - `skill` — without the loader the granted skills are unreachable, and
-*   `tool-skill` only injects the catalog when its tool is visible.
-* - `ask-user` — "Need a human decision? Ask with `ask_user_question`".
-*
-* A composition that offers none of them (the `bb-verify` node mounts no shell)
-* simply keeps what it has: see `agent-runtime/src/grants.ts`.
 */
 const WORKER_BASELINE_LABELS = [
 	"filesystem",
@@ -213,75 +147,6 @@ const WORKER_BASELINE_LABELS = [
 /**
 * Baseline tool names that are not a capability label: the task machinery the
 * worker prompt calls. They are exactly the Layer-0 universal control tools the
-* frozen material fixes for every agent (`细化想法4.md:724-738`: `task_read`,
-* `task_decompose`, `task_status`, and the verifier tool this deployment names
-* `task_verify`) — L0 is the "every node, whatever it works on" layer, so a
-* worker keeps it whatever its capabilities declare — plus the two A3
-* coordination tools (`task_submit_result`, `task_cancel`) and
-* `capability_list`, which have no label that could expand to them either.
-*
-* They are listed here individually, unlike the labels above, because these tools
-* are registered on the GLOBAL layer rather than a capability or preset plane
-* (`agent-singularity/src/index.ts`): the grant filter only keeps an inherited
-* tool the allow-list names (`agent-runtime/src/grants.ts:99`), and there is no
-* label that could expand to them.
-*
-* Every entry cites the prompt or tool contract that needs it:
-* - `capability_list`: `task_decompose` asks callers to discover valid capability
-*   names before proposing children, including recursively spawned workers.
-* - `task_decompose` — a worker admitted as decomposable is told it may call it with
-*   a `reason` and the child task list, and for a `leaf` worker whose deployment
-*   runs with `Config.allowRuntimeDecomposition` on, the runtime-split rule the
-*   context projection carries opens the same tool to it.
-* - `task_submit_result` — "When the work is done, hand it in with `task_submit_result`"
-*   (the worker policy section): the submission is the only completion a worker
-*   can claim, so a worker without the tool could never finish a run.
-* - `task_read` — the caller's own contract and run (A2 §D).
-* - `task_status` — the same policy line: the project state with `task_status`.
-* - `context_read` — the one reference reader (A2 §D): the worker's handoff and
-*   its task records point at artifacts, evidence, reviews, diagnoses and
-*   sessions by id, and this is the only door that reads them inside the
-*   caller's own graph domain — the raw cross-session readers it replaced are
-*   sealed off every runtime-owned agent (`agent-runtime`'s execution guard).
-* - `task_verify` — "`task_verify` is only a self-check" (the worker policy section).
-* - `task_cancel` — no prompt line asks for it: a run that decomposed holds a
-*   batch of its own, and the protocol's only way to end that batch early is
-*   this call (A3 §3.6). It is also the one write the execution gate keeps for
-*   a run in `waiting_children` or `submitted` (`gate.ts:COORDINATION_ALLOWED`),
-*   so the tool has to be on the surface of every run that can hold a batch.
-* - `task_proposal_read`, `task_proposal_continue`, `task_proposal_cancel`
-*   (T2/T3) — a decomposition proposal is not always admitted on the spot: a
-*   reviewed deployment answers `task_decompose` with a proposal id and nothing
-*   admitted, and the tool's own answer points the caller at
-*   `task_proposal_read` for the batch as it was recorded. The other two are
-*   the coordination actions on that record — continuing it after a decision
-*   (which can admit the batch, so the gate classifies it with
-*   `task_decompose`) and withdrawing it before admission (classified with
-*   `task_cancel`). They are task-domain actions of a node that proposed work,
-*   not platform management: the human decision itself never happens in a
-*   worker's tool plane — the review channel is wired at the service assembly
-*   and a worker has no tool that could decide a proposal.
-* - `task_ask_parent`, `task_answer` (A4 §F.1) — the two halves of the direct
-*   parent/child question protocol, and the only effects a run keeps while it is
-*   blocked on an unanswered question (`gate.ts:COORDINATION_ALLOWED`). **A4
-*   sub-goal ③a note**: the names are listed here so a worker's own surface can
-*   reach the runtime entries the write gate and the blocking tests drive; the
-*   shipped tool definitions, their schemas and the root's own policy line are
-*   ③c's, and nothing here decides what a call is allowed to say — the gate and
-*   the Task store do.
-*
-* `graph_spawn` is deliberately NOT here, even though the deployment registers
-* it for the root: it reaches the graph without Task Admission and returns the
-* child's last assistant text as its result, which breaks frozen invariants #2
-* ("Task 可以自由生成，但必须通过 Task Admission") and #6 ("Parent 必须消费
-* evidence，而不是直接相信 child natural-language result")
-* (`细化想法4.md:2075`, `:2079`); such a node has no task record, so no evidence,
-* no review, and nothing `task_status` or the parent's composite criterion can
-* see. Nodes grow by their worker calling `task_decompose`, which admits the
-* batch and has the orchestrator spawn each child. Every worker holds that tool
-* whatever its `decompositionStatus`; whether a `leaf` task's own call is
-* admitted is the runtime's decision, not the tool plane's
-* (`Config.allowRuntimeDecomposition`, `index.ts:DEFAULT_ALLOW_RUNTIME_DECOMPOSITION`).
 */
 const WORKER_BASELINE_TOOLS = [
 	"task_read",
@@ -301,7 +166,6 @@ const WORKER_BASELINE_TOOLS = [
 /**
 * Every real tool name a capability worker keeps on top of what its
 * capabilities declare.
-* @returns the expanded baseline, de-duplicated.
 */
 function workerBaseline() {
 	return [...new Set([...resolveToolLabels("worker baseline", WORKER_BASELINE_LABELS), ...WORKER_BASELINE_TOOLS])];
@@ -309,19 +173,6 @@ function workerBaseline() {
 /**
 * Resolve required capability names against the configured registry.
 * A required name that has an entry contributes its skills/tools/preset to the
-* manifest; a name without an entry lands in `missing`. Closure is `closed`
-* when nothing is missing, otherwise `gap`.
-*
-* Tool labels are expanded here, so the manifest carries the real DSH tool names
-* a worker is granted — and an unknown label rejects the whole resolution with
-* the vocabulary named, before anything is persisted or spawned. MCP server
-* names are validated against `MCP_SERVER_REGISTRY` the same way and copied
-* onto the manifest entry; the spawn seam binds them to the run's env.
-* @param required - capability names the caller requires.
-* @param registry - the configured capability table.
-* @returns the resolved manifest.
-* @throws when a matched capability declares a tool label outside {@link TOOL_LABELS}
-*   or an MCP server outside `MCP_SERVER_REGISTRY`.
 */
 function resolveCapabilities(required, registry) {
 	const capabilities = {};
@@ -332,7 +183,7 @@ function resolveCapabilities(required, registry) {
 			missing.push(name);
 			continue;
 		}
-		assertKnownMcpServers(name, entry.mcpServers ?? []);
+		for (const server of entry.mcpServers ?? []) assertKnownName(name, "MCP server", "known servers", Object.keys(MCP_SERVER_REGISTRY), server);
 		capabilities[name] = {
 			skills: [...entry.skills ?? []],
 			tools: resolveToolLabels(name, entry.tools ?? []),
@@ -352,8 +203,6 @@ function resolveCapabilities(required, registry) {
 /**
 * Flatten a manifest's granted skills and tools into a run's capability
 * snapshot; each granted MCP server rides along as an `mcp:<serverName>`
-* marker, so the recorded grant shows the server plane too (the server's tools
-* themselves appear on the worker as `mcp__<serverName>__<tool>`).
 */
 function capabilitySnapshot(manifest) {
 	const granted = /* @__PURE__ */ new Set();
@@ -376,7 +225,6 @@ function resolvePreset(manifest, defaultPreset) {
 /**
 * Strictness order for conflicting capability permissions (strictest wins):
 * sandbox decides first (`read-only` > `workspace-write` > `danger-full-access`),
-* approval breaks ties (`ask` > `never`), declaration order breaks what remains.
 */
 const SANDBOX_STRICTNESS = {
 	"read-only": 2,
@@ -390,9 +238,6 @@ const APPROVAL_STRICTNESS = {
 /**
 * The permission preset a spawned worker runs under: the strictest preset any
 * matched capability declares, or `undefined` when none declares one (the
-* caller then keeps the default posture). `resolveSpec` (the permissionPresets
-* registry's `resolve`) doubles as existence validation — an unknown preset
-* name fails loudly here, before the spawn.
 */
 function resolvePermission(manifest, resolveSpec) {
 	const declared = [...new Set(Object.values(manifest.capabilities).flatMap((entry) => entry.permission === void 0 ? [] : [entry.permission]))];
@@ -411,414 +256,42 @@ function resolvePermission(manifest, resolveSpec) {
 }
 
 //#endregion
-//#region src/protected-inputs.ts
-function message$7(error) {
+//#region src/helpers.ts
+/** The small primitives every module here shares: error text, waiting, and shape checks. */
+function message(error) {
 	return error instanceof Error ? error.message : String(error);
 }
-function isPlainObject$2(value) {
+function sleep(ms) {
+	return new Promise((resolve$1) => {
+		setTimeout(resolve$1, ms);
+	});
+}
+function now() {
+	return (/* @__PURE__ */ new Date()).toISOString();
+}
+/** Non-blank text: the one check every string field shares, with no rewriting of the value. */
+function nonBlank(value) {
+	return typeof value === "string" && value.trim().length > 0;
+}
+function isPlainObject(value) {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const prototype = Object.getPrototypeOf(value);
 	return prototype === Object.prototype || prototype === null;
 }
-/** Non-blank text: the one check every string field shares. */
-function nonBlank$2(value) {
-	return typeof value === "string" && value.trim().length > 0;
+/** The keys a value carries that a closed field set does not declare, in declaration order. */
+function unknownFieldKeys(value, allowed) {
+	const declared = new Set(allowed);
+	return Object.keys(value).filter((key) => !declared.has(key));
 }
-/**
-* The authoring form of one criterion's declaration: a non-empty array of
-* non-blank strings, in the order the caller wrote them.
-*
-* Everything else is *not* this generator's business. An absent declaration
-* says nothing was declared; the already-fixed form, a bare string, a mixed or
-* otherwise malformed array are left exactly as declared so
-* {@link protectedInputDefects} — through `admission.contractDefects` — refuses
-* them with a reason of their own. Fixing a malformed declaration instead of
-* refusing it would accept a shape nobody promised to read.
-*/
-function declaredPaths(value) {
-	if (!Array.isArray(value) || value.length === 0) return [];
-	return value.every((item) => nonBlank$2(item)) ? [...value] : [];
-}
-/**
-* The label one criterion is reported under: the declared id when it has one,
-* its position otherwise — the vocabulary `normalize.ts` names criteria with,
-* so a caller reading a refusal sees one numbering, not two.
-*/
-function criterionLabel(childLabel$1, criterion, index) {
-	return `${childLabel$1} criterion ${nonBlank$2(criterion.criterionId) ? JSON.stringify(criterion.criterionId) : index + 1}`;
-}
-/**
-* Fix the byte identity of every declared protected input, against the
-* checkout directory the criterion's judge will run in.
-*
-* `paths` are the paths **as declared** (the caller's spellings, verbatim):
-* each is resolved against `cwd` for the read — an absolute path stays
-* absolute — while the returned ref keeps the declared spelling, so the
-* identity names what the caller wrote and not a tidied version of it. An
-* identical declaration repeated is read once and produces one entry, in
-* first-declaration order; two spellings of the same file stay two
-* declarations.
-*
-* Refusals are values, never throws: a path that cannot be read (missing,
-* unreadable, a directory) yields a reason naming the label and the path, and a
-* session whose checkout directory cannot be resolved (`cwd === undefined`)
-* yields one reason instead of fixing the declaration against the wrong base.
-* That refusal is whole-batch and absolute paths are not exempt: the checkout
-* names the directory the criterion's judge runs in, so a batch that cannot
-* name it cannot promise that what it fixed is what the re-check will compare —
-* and the refs of a batch refused for one path are never trustworthy either.
-* Nothing is ever written: the files are read and left byte-identical.
-*/
-async function fixProtectedInputs(paths, cwd, label) {
-	if (paths.length === 0) return {
-		refs: [],
-		reasons: []
-	};
-	if (cwd === void 0) return {
-		refs: [],
-		reasons: [`${label} protectedInputs cannot be fixed: the session's checkout directory cannot be resolved (the session has no readable graph env binding), so the declared paths are refused rather than fixed against the wrong base`]
-	};
-	const refs = [];
-	const reasons = [];
-	const seen = /* @__PURE__ */ new Set();
-	for (const path of paths) {
-		if (seen.has(path)) continue;
-		seen.add(path);
-		try {
-			refs.push({
-				path,
-				sha256: sha256Hex(await readFile(resolve(cwd, path)))
-			});
-		} catch (error) {
-			reasons.push(`${label} protectedInputs path ${JSON.stringify(path)} cannot be read: ${message$7(error)}`);
-		}
-	}
-	return {
-		refs,
-		reasons
-	};
-}
-/**
-* Fix the declarations of one criterion list, rebuilding only the criteria that
-* declared one: every untouched criterion is carried by reference, and the
-* caller's input is never mutated — which is also why the returned list is
-* typed read-only.
-*
-* `label` is the position prefix a criterion is reported under (`child 0` on a
-* decomposition, `replay of "t-1"` on a replay); {@link criterionLabel} appends
-* the criterion's own id or position. A criterion whose fixing was refused is
-* carried unchanged — it never reaches the store, because the caller refuses
-* the whole batch on any reason — so no half-fixed identity can be read as a
-* fixed one.
-*/
-async function fixCriteriaProtectedInputs(criteria, cwd, label) {
-	const reasons = [];
-	if (!Array.isArray(criteria)) return {
-		criteria,
-		reasons
-	};
-	const fixed = [];
-	for (const [index, criterion] of criteria.entries()) {
-		const paths = declaredPaths(criterion.protectedInputs);
-		if (paths.length === 0) {
-			fixed.push(criterion);
-			continue;
-		}
-		const outcome = await fixProtectedInputs(paths, cwd, criterionLabel(label, criterion, index));
-		reasons.push(...outcome.reasons);
-		fixed.push(outcome.reasons.length === 0 ? {
-			...criterion,
-			protectedInputs: outcome.refs
-		} : criterion);
-	}
-	return {
-		criteria: fixed,
-		reasons
-	};
-}
-/**
-* Fix the declared protected inputs of a whole decomposition proposal before
-* anything else reads it: the runtime calls this ahead of the single
-* normalization entry, so the contract the store receives — and both content
-* identities computed over it — describe the fixed byte identity rather than
-* the caller's paths.
-*
-* Absent declarations and every malformed shape are carried exactly as
-* declared, and a child nothing was fixed in is returned by reference: this
-* function converts the authoring form, it does not validate, so the reasons it
-* returns are only the ones fixing itself could produce.
-*/
-async function fixSpecProtectedInputs(spec, cwd) {
-	const reasons = [];
-	if (!Array.isArray(spec?.children)) return {
-		spec,
-		reasons
-	};
-	const children = [];
-	for (const [index, child] of spec.children.entries()) {
-		if (child === null || typeof child !== "object" || !Array.isArray(child.acceptanceCriteria)) {
-			children.push(child);
-			continue;
-		}
-		const outcome = await fixCriteriaProtectedInputs(child.acceptanceCriteria, cwd, `child ${index}`);
-		reasons.push(...outcome.reasons);
-		const touched = outcome.criteria.some((criterion, position) => criterion !== child.acceptanceCriteria[position]);
-		children.push(touched ? {
-			...child,
-			acceptanceCriteria: outcome.criteria
-		} : child);
-	}
-	return {
-		spec: children.some((child, index) => child !== spec.children[index]) ? {
-			...spec,
-			children
-		} : spec,
-		reasons
-	};
-}
-/**
-* Structural defects of the **fixed** form of every criterion's protected
-* inputs: each declaration must be an array of plain objects carrying exactly
-* `path` (non-blank string) and `sha256` (lowercase 64-character hex). Shape
-* only — whether the file still hashes to that digest is the pre-judgement
-* re-check's question, and it needs the checkout, not this function.
-*
-* The ordinary decomposition path and the replay path share this function (via
-* `admission.contractDefects`) so one rule can never hold on one and not on the
-* other, and the declared string form is refused here as well: reaching
-* admission with paths instead of digests means the runtime's fixing step was
-* bypassed, which is exactly the state that must not be persisted. Every reason
-* is prefixed with `<label> criterion "<id>"`, the label the other contract
-* rules use.
-*/
-function protectedInputDefects(criteria, label) {
-	const reasons = [];
-	for (const criterion of criteria) {
-		const where = `${label} criterion ${JSON.stringify(criterion.criterionId)}`;
-		const declared = criterion.protectedInputs;
-		if (declared === void 0) continue;
-		if (!Array.isArray(declared)) {
-			reasons.push(`${where} protectedInputs must be an array of { path, sha256 } entries (declared paths are fixed by admission, never stored as strings)`);
-			continue;
-		}
-		declared.forEach((entry, index) => {
-			const at = `${where} protectedInputs entry ${index}`;
-			if (!isPlainObject$2(entry)) {
-				reasons.push(`${at} must be an object with only path and sha256`);
-				return;
-			}
-			for (const key of Object.keys(entry)) if (key !== "path" && key !== "sha256") reasons.push(`${at} declares unknown field ${JSON.stringify(key)}`);
-			if (!nonBlank$2(entry.path)) reasons.push(`${at} path must be a non-empty string`);
-			if (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) reasons.push(`${at} sha256 must be a lowercase 64-character hex digest`);
-		});
-	}
-	return reasons;
-}
-
-//#endregion
-//#region src/admission.ts
-/** Modes whose criterion is executed by the command verifier and therefore needs `command`. */
-const EXECUTABLE_MODES = [
-	"deterministic",
-	"simulation",
-	"measurement"
-];
-/** Every mode a criterion may declare, in declaration order (`VerificationMode`); the list the mode rule names. */
-const VERIFICATION_MODES = [
-	"deterministic",
-	"simulation",
-	"formal",
-	"measurement",
-	"review",
-	"composite"
-];
-/**
-* Structural reasons one task's parent-acceptance declarations are malformed
-* (P4, KISS §6 C2). Shape only: whether a mapping target exists is judged at
-* acceptance time, never here. The ordinary decomposition path and the replay
-* path share this function so both judge the same declarations the same way.
-*
-* `label` names the task under validation (`task "t-1"`, `child 0 ("c1")`,
-* `replay of "t-1"`); every reason is prefixed with it.
-*/
-function independentAcceptanceDefects(criteria, requiresIndependentAcceptance, label) {
-	const reasons = [];
-	for (const criterion of criteria) {
-		const where = `${label} criterion "${criterion.criterionId}"`;
-		if (criterion.acceptsArtifact !== void 0 && (!Array.isArray(criterion.acceptsArtifact) || criterion.acceptsArtifact.some((ref) => typeof ref !== "string" || ref.trim().length === 0))) reasons.push(`${where} acceptsArtifact must be an array of non-empty strings`);
-		if (criterion.heuristic !== void 0 && typeof criterion.heuristic !== "boolean") reasons.push(`${where} heuristic must be a boolean`);
-		const map = criterion.childEvidence;
-		if (map !== void 0) if (!Array.isArray(map)) reasons.push(`${where} childEvidence must be an array of entries`);
-		else {
-			map.forEach((entry, index) => {
-				const at = `${where} childEvidence entry ${index}`;
-				if (typeof entry !== "object" || entry === null) {
-					reasons.push(`${at} must be an object`);
-					return;
-				}
-				if (!Number.isInteger(entry.childIndex) || entry.childIndex < 0) reasons.push(`${at} childIndex must be a non-negative integer`);
-				if (entry.criterionId !== void 0 && (typeof entry.criterionId !== "string" || entry.criterionId.trim().length === 0)) reasons.push(`${at} criterionId must be a non-empty string`);
-				if (entry.evidenceRef !== void 0 && (typeof entry.evidenceRef !== "string" || entry.evidenceRef.trim().length === 0)) reasons.push(`${at} evidenceRef must be a non-empty string`);
-			});
-			if (map.length > 0 && criterion.verificationMode !== "composite") reasons.push(`${where} childEvidence requires verificationMode "composite" (the composite verifier is its only judge)`);
-			if (map.length > 0 && criterion.heuristic === true) reasons.push(`${where} cannot be both heuristic and carry a childEvidence map: a heuristic judgement is never a mechanical check`);
-		}
-	}
-	if (requiresIndependentAcceptance === true && !criteria.some((criterion) => (criterion.childEvidence?.length ?? 0) > 0)) reasons.push(`${label} requires independent parent acceptance but no acceptance criterion carries a childEvidence map (the composite conjunction alone cannot stand in for the root goal)`);
-	return reasons;
-}
-/**
-* The one structural rule a **root contract** owes on top of
-* {@link contractDefects} (A0 §1.2): at least one mandatory criterion whose
-* judge is something other than the composite conjunction.
-*
-* Why it is a rule of its own and not folded into {@link contractDefects}: a
-* decomposition child may legitimately be judged by "my children verified" —
-* its parent owns the goal it was delegated — while a *root* has nobody above
-* it, so a root whose only mandatory criterion is the composite conjunction is
-* satisfied by its own decomposition and by nothing else. That is the shape the
-* graph entry used to mint from its fixed spec, and it is exactly the shape
-* this rule refuses to call a root goal. Applying it to every contract would
-* break the delegated-children case; applying it to nothing would let a root
-* re-enter through the old shape.
-*
-* Structural, and only structural: it says which *kind* of judge the contract
-* names, never whether that judge is any good. A `command` that is a constant
-* truth, a model's self-report, or a `heuristic` criterion are all outside what
-* a shape rule can decide — §1.2 says so in as many words ("不能用恒真命令、
-* 模型自述或 heuristic 冒充确定性根通过"), and P4 already labels a heuristic
-* verdict as never a deterministic pass. What this rule does buy is that the
-* root's acceptance cannot be *only* the conjunction of what it delegated.
-*
-* `label` names the contract under validation (`root contract`, `root
-* contract of session "s-…"`); the reason is prefixed with it, like every other
-* contract rule's.
-*/
-function rootIndependenceDefects(criteria, label) {
-	if (criteria.some((criterion) => criterion.mandatory === true && criterion.verificationMode !== "composite")) return [];
-	return [`${label} requires at least one mandatory acceptance criterion judged by something other than the composite conjunction (verificationMode !== "composite"): a root whose only mandatory criterion is "all children verified" is satisfied by its own decomposition and has no independent check of the goal it was given`];
-}
-/**
-* Whether a criterion declares a command a verifier could actually run. A
-* declared command that is blank — or not text at all — is as missing as an
-* absent one: nothing executable was handed to the judge.
-*/
-function hasCommand(command) {
-	return typeof command === "string" && command.trim().length > 0;
-}
-/**
-* Structural defects of one task's acceptance contract (T1, construction guide
-* §4): what has to hold before a contract can be admitted at all, whichever
-* entry wrote it — an ordinary decomposition child, a replay candidate, or
-* (later) a template instance. Texts, ids, modes, and the fixed form of a
-* criterion's protected acceptance inputs only; nothing here judges whether a
-* criterion is any good, and nothing here needs the store.
-*
-* The ordinary decomposition path and the replay path share this function so
-* that a rule can never hold on one and not on the other. The *parent* task's
-* own criteria are deliberately not put through it: a parent that already
-* exists was admitted when it was created, and T1 does not re-open contracts
-* that predate the normalized one — `checkDecomposition` still applies
-* {@link independentAcceptanceDefects} to the parent, which is its own P4
-* promise about a declaration the parent itself carries.
-*
-* `label` names the task under validation (`child 0 ("t-1")`, `replay of
-* "t-1"`); every reason is prefixed with it.
-*/
-function contractDefects(criteria, label) {
-	const reasons = [];
-	if (criteria.length === 0) {
-		reasons.push(`${label} requires at least one acceptance criterion`);
-		return reasons;
-	}
-	const seen = /* @__PURE__ */ new Set();
-	const reportedDuplicate = /* @__PURE__ */ new Set();
-	for (const criterion of criteria) {
-		const where = `${label} criterion "${criterion.criterionId}"`;
-		const description = criterion.description;
-		if (typeof description !== "string" || description.trim().length === 0) reasons.push(`${where} requires a non-empty description`);
-		if (!VERIFICATION_MODES.includes(criterion.verificationMode)) reasons.push(`${where} verificationMode "${String(criterion.verificationMode)}" is not one of ${VERIFICATION_MODES.join(", ")}`);
-		else if (EXECUTABLE_MODES.includes(criterion.verificationMode) && !hasCommand(criterion.command)) reasons.push(`${where} (${criterion.verificationMode}) requires a command`);
-		if (seen.has(criterion.criterionId) && !reportedDuplicate.has(criterion.criterionId)) {
-			reasons.push(`${label} declares criterion id "${criterion.criterionId}" more than once`);
-			reportedDuplicate.add(criterion.criterionId);
-		}
-		seen.add(criterion.criterionId);
-		reasons.push(...protectedInputDefects([criterion], label));
-	}
-	if (!criteria.some((criterion) => criterion.mandatory === true)) reasons.push(`${label} requires at least one mandatory acceptance criterion`);
-	return reasons;
-}
-/**
-* How one planned child is named in a refusal: its position always, its id when
-* the batch has one yet ({@link AdmissionChild.taskId}). A batch is judged
-* before its ids are minted (`TaskRuntime.deriveBatch` / `checkDerivedBatch`
-* deliberately mint nothing), so a refusal names the child's position — and the
-* same verdict comes out either way, because only the id in the message differs.
-*/
-function childLabel(child, index) {
-	return child.taskId === void 0 ? `child ${index}` : `child ${index} ("${child.taskId}")`;
-}
-/**
-* How one planned child is named inside a dependency message: its id when it
-* has one, its batch position otherwise (`#0` is the first child). The two
-* forms appear in `dependency "…" → "…"` messages only — the edges this
-* function builds are the plan's own, checked for duplicates and cycles before
-* any id exists.
-*/
-function childRef(child, index) {
-	return child?.taskId ?? `#${index}`;
-}
-/**
-* Structural admission checks for one decomposition batch (RFC §36). Pure:
-* every rule is validated up front and the caller persists only when the
-* verdict is `ok`, so admission is atomic for the whole batch.
-*/
-function checkDecomposition(parent, children, existingEdges) {
-	const reasons = [];
-	const policy = parent.decompositionPolicy;
-	if (!policy.allowed) reasons.push(policy.leaf === true ? `task "${parent.taskId}" decomposition is not allowed: it is admitted as leaf and runtime decomposition is off (allowRuntimeDecomposition: false), so only a task admitted decomposable may split` : `task "${parent.taskId}" decomposition is not allowed`);
-	if (policy.maxDepth !== void 0 && parent.depth + 1 > policy.maxDepth) reasons.push(`task "${parent.taskId}" children would exceed maxDepth ${policy.maxDepth} (depth ${parent.depth + 1})`);
-	if (policy.maxChildren !== void 0 && children.length > policy.maxChildren) reasons.push(`task "${parent.taskId}" would have ${children.length} children, above maxChildren ${policy.maxChildren}`);
-	if (children.length === 0) reasons.push(`task "${parent.taskId}" decomposition requires at least one child`);
-	reasons.push(...independentAcceptanceDefects(parent.acceptanceCriteria, parent.requiresIndependentAcceptance, `task "${parent.taskId}"`));
-	const plannedEdges = [];
-	children.forEach((child, index) => {
-		const label = childLabel(child, index);
-		if (child.objective.trim().length === 0) reasons.push(`${label} objective must be non-empty`);
-		reasons.push(...contractDefects(child.acceptanceCriteria, label));
-		reasons.push(...independentAcceptanceDefects(child.acceptanceCriteria, child.requiresIndependentAcceptance, label));
-		for (const criterion of child.acceptanceCriteria) {
-			if (criterion.requiresArtifact !== void 0 && (!Array.isArray(criterion.requiresArtifact) || criterion.requiresArtifact.some((ref) => typeof ref !== "string" || ref.trim().length === 0))) reasons.push(`${label} criterion "${criterion.criterionId}" requiresArtifact must be an array of non-empty strings`);
-			if (criterion.verifierRef !== void 0 && (typeof criterion.verifierRef !== "string" || criterion.verifierRef.trim().length === 0)) reasons.push(`${label} criterion "${criterion.criterionId}" verifierRef must be a non-empty string`);
-		}
-		for (const dependency of child.dependsOn ?? []) {
-			if (!Number.isInteger(dependency) || dependency < 0 || dependency >= children.length) {
-				reasons.push(`${label} dependsOn index ${dependency} is out of range`);
-				continue;
-			}
-			if (dependency === index) {
-				reasons.push(`${label} cannot depend on itself`);
-				continue;
-			}
-			plannedEdges.push({
-				from: childRef(children[dependency], dependency),
-				to: childRef(child, index)
-			});
-		}
+/** Run `work` after the work already queued under `key`, in call order; the drained entry goes. */
+function enqueueByKey(chains, key, work) {
+	const run = (chains.get(key) ?? Promise.resolve()).then(work, work);
+	const settled = run.then(() => void 0, () => void 0);
+	chains.set(key, settled);
+	settled.then(() => {
+		if (chains.get(key) === settled) chains.delete(key);
 	});
-	const edges = [...existingEdges, ...plannedEdges];
-	const seen = /* @__PURE__ */ new Set();
-	for (const edge of edges) {
-		const key = `${edge.from}→${edge.to}`;
-		if (seen.has(key)) reasons.push(`dependency "${key}" is declared more than once`);
-		seen.add(key);
-	}
-	for (const edge of plannedEdges) if (reaches(edges, edge.to, edge.from)) reasons.push(`dependency "${edge.from}" → "${edge.to}" creates a cycle`);
-	return reasons.length === 0 ? { ok: true } : {
-		ok: false,
-		reasons
-	};
+	return run;
 }
 
 //#endregion
@@ -826,73 +299,6 @@ function checkDecomposition(parent, children, existingEdges) {
 /**
 * What a session bound to a run may still call once its run is no longer
 * `active`. Read-only inspection, diagnosis, the human-question tools, and the
-* controlled cancellation of this batch: the work of *looking at* a run or
-* ending it, never of making it produce more. `context_read` is the one
-* history/reference reader here: the raw cross-session tools it replaced
-* (`session_event_read` and its siblings) are sealed off every runtime-owned
-* agent by the execution guard, so they have no phase to be allowed in.
-*
-* `task_cancel` is in the list because cancelling is the one write a waiting or
-* submitted run is allowed: the run has stopped deciding, and the owner may
-* still stop the tree.
-*
-* The proposal tools follow the same categories (T2/T3). `task_proposal_read`
-* reads a saved proposal and `task_proposal_cancel` withdraws the batch its own
-* session proposed: they are the looking-at and the ending of what this run
-* already asked for, exactly the work `task_read` and `task_cancel` do.
-* `task_proposal_continue` is deliberately **not** here: it can admit a batch,
-* which is the same effect `task_decompose` has, so it is a write in every
-* non-active phase — a run that has stopped deciding its own work does not get
-* to turn a proposal into tasks.
-*
-* `task_review_agent` (K4) belongs with `task_review_pack` and `task_diagnose`,
-* one step further than either: it reads one task's facts, publishes ONE
-* read-only reviewer node, and records the reviewer's judgement as a Diagnosis.
-* Nothing it does is work the stopped tree could be asked to justify — the
-* reviewer's grant is the read-only baseline (`reviewerGrant`: no shell, no
-* write, no spawn, no evolution tool), so the call cannot be the in-flight
-* checkout writer the drain exists to wait for either. What it must not become
-* is a *business* bound in disguise: a tree that stopped at its deadline, or
-* that has spent its run allowance, can still be looked at — the postmortem is
-* the reason the record exists, and the reviewer's own per-store allowance and
-* watchdog are the only bounds on it (`agent-singularity/review-agent-ledger`).
-* What still refuses in these phases is work: `task_decompose`, `graph_spawn`,
-* `task_submit_result`, and every other write, named as the late call it is.
-*
-* `task_budget_extend` (K4) is the one entry here that appends a store fact, and
-* that is deliberate: the fact it appends is a *person's* decision about the
-* tree's own ceiling, which only the approval channel produces (the store still
-* refuses an empty reference, and the reference is now minted by the assembly
-* from the host call the question was asked under, not read back from a session
-* log). It belongs in this list for exactly the reason `task_review_pack` does — the
-* caller is the root coordination session of a tree that has stopped, and a tree
-* that spent its allowance is precisely the tree whose owner has to be able to
-* ask for more ("终态亦可调用"). What the gate protects is untouched by a
-* ceiling: the call starts no run, resumes none, un-settles nothing, creates no
-* task or child, opens no gate and touches no checkout — the runtime entry's own
-* contract — so it can neither be the in-flight writer the drain waits for nor a
-* second door into a stopped tree's work. Denying it here would leave K4's one
-* entry shut.
-*
-* `task_recover` (A6) belongs here for the same reason, one step further: it is
-* the entry that opens a failed tree's **new attempt**, and the session that may
-* call it is the supervisor the hand-off was delegated to — a coordination
-* session with no run of its own, so no phase ever gates it in the first place,
-* and a tree that has stopped is exactly the tree a recovery exists for. What
-* makes it safe in this list is what it is not: it is never on a root's
-* allow-list (no root prompt names it), the caller is checked against the
-* deployment's own delegation ledger, the capability a recovery depends on must
-* already be approved and applied, and the runtime re-checks the store's facts,
-* its ceilings and the attempt's idempotency before any run is written. It is
-* not a second way into a stopped run's work: the old run stays terminal, and
-* the one thing it creates is a *new* run the ordinary chain drives.
-*
-* The two question tools (A4 §F.1) are coordination in the plainest sense: a
-* child asking its direct parent is the one effect still admitted while its own
-* run is blocked on a question, and a parent answering a child is the one effect
-* a `waiting_children` parent may still produce. Neither makes anything else
-* writable — answering is not a phase change, and a blocked run keeps its block
-* until the answer that resolves it.
 */
 const COORDINATION_ALLOWED = new Set([
 	"task_read",
@@ -929,18 +335,9 @@ const TERMINAL_JOB_STATUSES = new Set([
 const DRAIN_KILL_REASON = "task-runtime: write drain before admission closes";
 /** How often the drain re-reads the in-flight set. Short: the calls it waits for usually settle in milliseconds. */
 const DRAIN_POLL_MS = 5;
-function message$6(error) {
-	return error instanceof Error ? error.message : String(error);
-}
-function sleep$1(ms) {
-	return new Promise((resolve$1) => {
-		setTimeout(resolve$1, ms);
-	});
-}
 /**
 * The phase each session is in, what it has in flight, and whether it is waiting
 * on an answer. One instance per runtime; nothing here touches the store or a
-* service, so the rules can be tested as the pure state machine they are.
 */
 var ExecutionGate = class {
 	phases = /* @__PURE__ */ new Map();
@@ -949,24 +346,16 @@ var ExecutionGate = class {
 	/**
 	* How many times this process wrote one session's phase by its own authority
 	* ({@link setPhase}, {@link setTerminal}): the applicability token a
-	* store-derived phase is checked against.
 	*/
 	decisions = /* @__PURE__ */ new Map();
 	/**
 	* The sessions whose runs are waiting on an unresolved blocking question
 	* (A4 §F.1). A set rather than a map of booleans: "no entry" and "not blocked"
-	* are the same fact, and a cleared session must not leave a stale value to be
-	* read back. Nothing here is persisted or projected — the store's question
-	* facts are the durable state, and this is the live process's handle on them.
 	*/
 	questionBlocked = /* @__PURE__ */ new Set();
 	/**
 	* Move a session's phase: the runtime calls this when **it** is the authority
 	* for the transition — a committed admission or submission, a settled run, an
-	* unload, the binding of a session to its own run. This is one of the two
-	* writers that count as a decision ({@link decisionToken}); a phase that only
-	* the *store* implies goes through {@link applyStorePhase} instead, and does
-	* not count as one.
 	*/
 	setPhase(sessionId, phase) {
 		this.decisions.set(sessionId, this.decisionToken(sessionId) + 1);
@@ -975,13 +364,6 @@ var ExecutionGate = class {
 	/**
 	* Mark a session's run terminal: only the allow-list runs from here, and its
 	* reason says the call is late. A decision, like {@link setPhase} — it moves
-	* the phase because this process knows the run is over, not because a read of
-	* the store implied it.
-	*
-	* The question block goes with it: an open question requires *both* runs to be
-	* running, so a run this process just made terminal is blocked by nothing —
-	* leaving the flag set would make the refusal name a wait that no longer
-	* exists.
 	*/
 	setTerminal(sessionId) {
 		this.decisions.set(sessionId, this.decisionToken(sessionId) + 1);
@@ -991,14 +373,6 @@ var ExecutionGate = class {
 	/**
 	* How many times this process has written this session's phase by its own
 	* authority; `0` for a session it has never written one for. This is the
-	* applicability token for a phase read out of the store: take it *before* the
-	* read, hand it back with the value ({@link applyStorePhase}).
-	*
-	* What it answers is not "is this value current" — a second read would race
-	* the first exactly as it did — but "did anything of ours decide this session
-	* while the read was in flight". That is the only thing that can make a value
-	* the store returned older than the gate: the read happened, the store
-	* recorded a decision of ours, and the value the read handed back predates it.
 	*/
 	decisionToken(sessionId) {
 		return this.decisions.get(sessionId) ?? 0;
@@ -1006,27 +380,6 @@ var ExecutionGate = class {
 	/**
 	* Apply a phase the store implies — never one this process decided — and only
 	* when it is newer than everything decided here: `token` is the
-	* {@link decisionToken} taken before the read that produced `phase`, and a
-	* count that no longer matches means a decision landed while that read was in
-	* flight. The value is then older than the gate's, and it is dropped; the
-	* return says which of the two happened.
-	*
-	* Two trajectories reach a store-derived phase that is too old, and only one
-	* of them is this token's:
-	*
-	* - a read that **straddled** a decision — the store returned the old record,
-	*   and the decision landed before the value could be applied — is what this
-	*   token refuses: the decision is on the record by then, so the count moved
-	*   and the value is dropped. Applying it would re-open a gate a settled run
-	*   had closed, and no other guard can see it, because the wait was inside the
-	*   read and the store is already up to date when the value arrives.
-	* - a read taken **inside a window whose decision is in effect but not yet
-	*   persisted** (a cancellation raising its barrier before the store records
-	*   it) cannot be refused by this token: the read starts *after* the decision,
-	*   so the count it took is current, and the value is old only because the
-	*   store's write has not happened yet. That window belongs to the caller,
-	*   which refuses it before calling this — the token covers a read that
-	*   straddled a decision, never one that raced a write.
 	*/
 	applyStorePhase(sessionId, phase, token) {
 		if (this.decisionToken(sessionId) !== token) return false;
@@ -1037,15 +390,6 @@ var ExecutionGate = class {
 	/**
 	* Record that a session's run is — or is no longer — waiting on an unresolved
 	* blocking question (A4 §F.1). A decision of this process about a fact this
-	* process just wrote (the ask it committed, the answer that released one, the
-	* addressee's own settlement that ended every question addressed to it), so it
-	* counts as one exactly as {@link setPhase} does; a value the *store* implies
-	* goes through {@link applyStoreQuestionsBlocked}.
-	*
-	* `false` is not "probably unblocked": the caller is stating the derivation it
-	* just took from the store's question facts (`blockingQuestionsOf`), which is
-	* what makes a second blocking question keep the session blocked after the
-	* first is answered.
 	*/
 	setQuestionsBlocked(sessionId, blocked) {
 		this.decisions.set(sessionId, this.decisionToken(sessionId) + 1);
@@ -1055,9 +399,6 @@ var ExecutionGate = class {
 	/**
 	* Apply a blocking state the store implies — never one this process decided —
 	* under the same token rule as {@link applyStorePhase}: `token` is the
-	* {@link decisionToken} taken before the read that produced it, and a value
-	* the gate has moved past is dropped rather than applied. The return says
-	* which of the two happened.
 	*/
 	applyStoreQuestionsBlocked(sessionId, blocked, token) {
 		if (this.decisionToken(sessionId) !== token) return false;
@@ -1076,7 +417,6 @@ var ExecutionGate = class {
 	/**
 	* Register a call that was let through. Called for every allowed call whatever
 	* its phase, because the phase can change while it runs — that in-flight write
-	* is what `drainSession` waits for.
 	*/
 	trackAllowed(sessionId, callId, toolName) {
 		this.calls.set(callId, {
@@ -1091,8 +431,6 @@ var ExecutionGate = class {
 	/**
 	* The session's in-flight calls that count as writes: everything whose name is
 	* not in {@link COORDINATION_ALLOWED}. The definition is the allow-list, not a
-	* second list of write tools — a tool this deployment adds is a write until the
-	* coordination protocol says otherwise, and the two answers cannot drift.
 	*/
 	inFlightWrites(sessionId) {
 		const writes = [];
@@ -1109,15 +447,6 @@ var ExecutionGate = class {
 	/**
 	* Decide one call. A session with no phase is not bound to a run and is not
 	* gated; an `active` run with no blocking question is still deciding its own
-	* work. Every other state allows the coordination list and denies everything
-	* else, naming what holds the session — the phase, or the question it waits on
-	* — the refused tool, and what is still allowed.
-	*
-	* The two refusals are one decision with two names because a caller has to be
-	* able to tell them apart: `active` plus a blocking question is *not* "the
-	* phase closed writes", it is "this run is waiting for an answer", and an
-	* answer (not a phase change) is what ends it. Both are computed after the
-	* allow-list, so the question tools and the reads answer in either state.
 	*/
 	decide(sessionId, toolName) {
 		const phase = this.phases.get(sessionId);
@@ -1134,15 +463,6 @@ var ExecutionGate = class {
 	/**
 	* Wait — bounded — until this session has no in-flight write and no live
 	* managed job, and say exactly what is left when the window closes. Never
-	* assumes a stop: `confirmed: false` with named `pending` entries is the
-	* honest answer for a call that did not settle or a job that is still not
-	* terminal, and the caller must refuse verification on it (§3.3).
-	*
-	* Order matters: the in-flight calls first (they are the writes this process
-	* can see finish), then the jobs this session started (kill, then wait for a
-	* terminal status within whatever window is left). The jobs step is skipped
-	* entirely when the deployment gave no service or no agent — there is nothing
-	* to reconcile, which is not the same as "nothing running".
 	*/
 	async drainSession(sessionId, opts) {
 		const deadline = Date.now() + opts.timeoutMs;
@@ -1154,7 +474,7 @@ var ExecutionGate = class {
 				pending.push(...writes.map((call) => `in-flight call "${call.name}" (${call.callId}) had not settled when the drain window closed`));
 				break;
 			}
-			await sleep$1(DRAIN_POLL_MS);
+			await sleep(DRAIN_POLL_MS);
 		}
 		const { jobs, agent } = opts;
 		if (jobs !== void 0 && agent !== void 0) pending.push(...await reconcileJobs(jobs, agent, deadline));
@@ -1167,12 +487,10 @@ var ExecutionGate = class {
 /**
 * One write drain, wired the way every caller means it: the caller's own window,
 * the coordination call that must not be waited for, and the managed jobs — which
-* are reconciled only when both the service and the agent authorizing the kills
-* are there. The rule lives in one place so the three call sites cannot drift.
 */
-async function drainSession(gate, sessionId, options) {
+async function drainSession(gate$1, sessionId, options) {
 	const { jobs, agent } = options;
-	return await gate.drainSession(sessionId, {
+	return await gate$1.drainSession(sessionId, {
 		timeoutMs: options.timeoutMs,
 		...options.excludeCallId === void 0 ? {} : { excludeCallId: options.excludeCallId },
 		...jobs === void 0 || agent === void 0 ? {} : {
@@ -1184,8 +502,6 @@ async function drainSession(gate, sessionId, options) {
 /**
 * Kill and confirm every non-terminal job the agent owns, within what is left of
 * the drain window. Every failure mode is a *named* entry in the returned list:
-* a jobs call that threw, a job that could not be waited for, a job whose status
-* is still not terminal. None of them is read as "stopped".
 */
 async function reconcileJobs(jobs, agent, deadline) {
 	const pending = [];
@@ -1193,7 +509,7 @@ async function reconcileJobs(jobs, agent, deadline) {
 	try {
 		listed = jobs.list(agent);
 	} catch (error) {
-		return [`the jobs service could not be listed (${message$6(error)}), so its managed work could not be reconciled`];
+		return [`the jobs service could not be listed (${message(error)}), so its managed work could not be reconciled`];
 	}
 	for (const entry of listed) {
 		const id = entry.id;
@@ -1205,7 +521,7 @@ async function reconcileJobs(jobs, agent, deadline) {
 		try {
 			jobs.kill(id, agent, DRAIN_KILL_REASON);
 		} catch (error) {
-			pending.push(`job "${id}" (${entry.status}) could not be killed: ${message$6(error)}`);
+			pending.push(`job "${id}" (${entry.status}) could not be killed: ${message(error)}`);
 			continue;
 		}
 		const remaining = deadline - Date.now();
@@ -1217,1254 +533,10 @@ async function reconcileJobs(jobs, agent, deadline) {
 			const settled = await jobs.wait(id, remaining, agent);
 			if (!TERMINAL_JOB_STATUSES.has(settled.status)) pending.push(`job "${id}" is "${settled.status}"${settled.detail === void 0 ? "" : ` (${settled.detail})`} after being asked to stop, which is not a terminal status`);
 		} catch (error) {
-			pending.push(`job "${id}" (${entry.status}) could not be waited for: ${message$6(error)}`);
+			pending.push(`job "${id}" (${entry.status}) could not be waited for: ${message(error)}`);
 		}
 	}
 	return pending;
-}
-
-//#endregion
-//#region src/skill-contract.ts
-/**
-* The sidecar file, read as JSON, named exactly here so every producer and
-* reader of a skill directory agrees on one spelling.
-*/
-const SKILL_SIDECAR_FILE = "SKILL.contract.json";
-/**
-* The sidecar contract version this build writes and reads. Like the task
-* contract's `TASK_CONTRACT_VERSION` it versions the data definition, not a
-* skill: a sidecar declaring a version this build does not know is refused
-* rather than read with the wrong field semantics.
-*/
-const SKILL_CONTRACT_VERSION = 1;
-/**
-* The directories a skill may hold supporting files in. The supported shape is
-* deliberately one level deep — `<dir>/<file>` — because a deeper tree cannot
-* be described by the identity without inventing rules for directories, and an
-* unsupported shape has to be refused by name rather than skipped.
-*/
-const SUPPORTED_SKILL_RESOURCE_DIRS = ["references", "scripts"];
-/**
-* Whether one declared resource path is a path this contract can identify:
-* exactly `<dir>/<file>` with `<dir>` in {@link SUPPORTED_SKILL_RESOURCE_DIRS},
-* POSIX separators, no `.`/`..` segment, nothing absolute. Anything else —
-* nested trees, a second segment, backslashes, a bare directory — is outside
-* the supported shape and is refused by name.
-*/
-function isSupportedSkillResourcePath(path) {
-	const segments = path.split("/");
-	if (segments.length !== 2) return false;
-	const [directory, file] = segments;
-	if (!SUPPORTED_SKILL_RESOURCE_DIRS.includes(directory)) return false;
-	return file.length > 0 && file !== "." && file !== ".." && !file.includes("\\");
-}
-const EXECUTION_FIELDS = [
-	"contractVersion",
-	"type",
-	"capabilities",
-	"precondition",
-	"inputs",
-	"outputs",
-	"requiredTools",
-	"verifier",
-	"content"
-];
-const KNOWLEDGE_FIELDS = [
-	"contractVersion",
-	"type",
-	"source",
-	"scope",
-	"content",
-	"contentCheck"
-];
-const PORT_FIELDS = [
-	"name",
-	"description",
-	"required"
-];
-const RESOURCE_FIELDS = ["path", "sha256"];
-const VERIFIER_FIELDS = ["ref"];
-const CONTENT_CHECK_FIELDS = ["kind", "command"];
-const CONTENT_FIELDS = ["skillMdSha256", "resources"];
-function isPlainObject$1(value) {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
-}
-/** Non-blank text: the one check every string field shares, with no rewriting of the value. */
-function nonBlank$1(value) {
-	return typeof value === "string" && value.trim().length > 0;
-}
-function isSha256Hex(value) {
-	return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
-}
-/** How an unexpected value reads in a refusal: JSON for scalars, a noun for containers. */
-function described(value) {
-	if (value === null) return "null";
-	if (Array.isArray(value)) return "an array";
-	if (typeof value === "string") return JSON.stringify(value);
-	if (typeof value === "object") return "an object";
-	return String(value);
-}
-/** What a value *is*, for the one refusal that cannot name a field (the whole sidecar). */
-function kindOf(value) {
-	if (value === null) return "null";
-	if (Array.isArray(value)) return "an array";
-	return typeof value;
-}
-function shape(reason) {
-	return {
-		code: "sidecar-shape",
-		reason
-	};
-}
-function unknownFields$1(value, allowed, where, carries) {
-	return Object.keys(value).filter((key) => !allowed.includes(key)).sort().map((key) => ({
-		code: "sidecar-unknown-field",
-		reason: `${where} declares unknown field ${JSON.stringify(key)}; ${carries}`
-	}));
-}
-/** One string list: an array of non-blank names, each once, `[]` allowed unless `minItems` says otherwise. */
-function nameListDefects(value, where, missing, duplicate, minItems = 0) {
-	if (!Array.isArray(value) || minItems > 0 && value.length < minItems) return [shape(missing)];
-	const defects = [];
-	const seen = /* @__PURE__ */ new Set();
-	value.forEach((item, index) => {
-		if (!nonBlank$1(item)) {
-			defects.push(shape(`${where}[${index}] must be a non-blank string`));
-			return;
-		}
-		if (seen.has(item)) {
-			defects.push(shape(duplicate(item, index)));
-			return;
-		}
-		seen.add(item);
-	});
-	return defects;
-}
-/** Ports: closed objects, each list naming a port once. */
-function portDefects(value, where) {
-	if (!Array.isArray(value)) return [shape(`${where} must be an array of ports`)];
-	const defects = [];
-	const seen = /* @__PURE__ */ new Set();
-	value.forEach((port, index) => {
-		const at = `${where}[${index}]`;
-		if (!isPlainObject$1(port)) {
-			defects.push(shape(`${at} must be an object carrying name, description, required`));
-			return;
-		}
-		defects.push(...unknownFields$1(port, PORT_FIELDS, at, "a port carries name, description, required"));
-		if (!nonBlank$1(port.name)) defects.push(shape(`${at}.name must be a non-blank string`));
-		if (!nonBlank$1(port.description)) defects.push(shape(`${at}.description must be a non-blank string`));
-		if (typeof port.required !== "boolean") defects.push(shape(`${at}.required must be a boolean`));
-		if (nonBlank$1(port.name)) {
-			if (seen.has(port.name)) defects.push(shape(`${at} duplicates port ${JSON.stringify(port.name)}`));
-			seen.add(port.name);
-		}
-	});
-	return defects;
-}
-/** The content identity: exact digests, a supported path vocabulary, and one sorted list. */
-function contentDefects$1(value) {
-	if (!isPlainObject$1(value)) return [shape("sidecar.content must be an object carrying skillMdSha256 and resources")];
-	const defects = unknownFields$1(value, CONTENT_FIELDS, "sidecar.content", "a content identity carries skillMdSha256, resources");
-	if (!isSha256Hex(value.skillMdSha256)) defects.push(shape("sidecar.content.skillMdSha256 must be a lowercase 64-character hex digest"));
-	const resources = value.resources;
-	if (!Array.isArray(resources)) {
-		defects.push(shape("sidecar.content.resources must be an array of resource identities"));
-		return defects;
-	}
-	const seen = /* @__PURE__ */ new Set();
-	let previous;
-	resources.forEach((resource, index) => {
-		const at = `sidecar.content.resources[${index}]`;
-		if (!isPlainObject$1(resource)) {
-			defects.push(shape(`${at} must be an object carrying path, sha256`));
-			return;
-		}
-		defects.push(...unknownFields$1(resource, RESOURCE_FIELDS, at, "a resource identity carries path, sha256"));
-		if (!nonBlank$1(resource.path) || !isSupportedSkillResourcePath(resource.path)) defects.push(shape(`${at}.path ${described(resource.path)} is not a supported resource path (references/<file> or scripts/<file>)`));
-		else if (seen.has(resource.path)) defects.push(shape(`${at} duplicates ${JSON.stringify(resource.path)}`));
-		else {
-			if (previous !== void 0 && resource.path < previous) defects.push(shape(`${at} path ${JSON.stringify(resource.path)} precedes ${JSON.stringify(previous)}; the list must be sorted by path`));
-			seen.add(resource.path);
-			previous = resource.path;
-		}
-		if (!isSha256Hex(resource.sha256)) defects.push(shape(`${at}.sha256 must be a lowercase 64-character hex digest`));
-	});
-	return defects;
-}
-function verifierDefects(value) {
-	if (!isPlainObject$1(value)) return [shape("sidecar.verifier must be an object carrying a ref")];
-	const defects = unknownFields$1(value, VERIFIER_FIELDS, "sidecar.verifier", "a verifier reference carries ref");
-	if (!nonBlank$1(value.ref)) defects.push(shape("sidecar.verifier.ref must be a non-blank string"));
-	return defects;
-}
-function contentCheckDefects(value) {
-	if (!isPlainObject$1(value)) return [shape("sidecar.contentCheck must be an object carrying kind and command")];
-	const defects = unknownFields$1(value, CONTENT_CHECK_FIELDS, "sidecar.contentCheck", "a content check carries kind, command");
-	if (value.kind !== "command") defects.push(shape(`sidecar.contentCheck.kind ${described(value.kind)} is not one of command`));
-	if (!nonBlank$1(value.command)) defects.push(shape("sidecar.contentCheck.command must be a non-blank string"));
-	return defects;
-}
-/**
-* Every reason one declared sidecar is not acceptable, in field order — never
-* just the first, so one refusal names everything wrong with the declaration.
-*
-* Purely declaration-level: the version, the closed field set of the declared
-* type, the shape of every field, and the internal consistency of the content
-* identity. It reads no files, so it cannot tell whether the digests are true —
-* that comparison needs the skill directory and lives in the loader. The
-* returned defects are values, not throws: a caller refusing a sidecar reports
-* all of them and writes nothing.
-*/
-function skillContractDefects(value) {
-	if (!isPlainObject$1(value)) return [shape(`the sidecar must be a JSON object, got ${kindOf(value)}`)];
-	const defects = [];
-	if (value.contractVersion === void 0) defects.push({
-		code: "sidecar-unknown-version",
-		reason: `sidecar.contractVersion is missing; this build reads and writes version ${SKILL_CONTRACT_VERSION}`
-	});
-	else if (value.contractVersion !== SKILL_CONTRACT_VERSION) defects.push({
-		code: "sidecar-unknown-version",
-		reason: `sidecar.contractVersion ${described(value.contractVersion)} is not a version this build reads (${SKILL_CONTRACT_VERSION})`
-	});
-	const type = value.type;
-	if (type !== "execution" && type !== "knowledge") {
-		defects.push(shape(`sidecar.type ${described(type)} is not one of execution, knowledge`));
-		return defects;
-	}
-	if (type === "execution") {
-		defects.push(...unknownFields$1(value, EXECUTION_FIELDS, "sidecar", `an execution sidecar carries ${EXECUTION_FIELDS.join(", ")}`));
-		defects.push(...nameListDefects(value.capabilities, "sidecar.capabilities", "sidecar.capabilities must be a non-empty array of capability names", (name, index) => `sidecar.capabilities[${index}] duplicates ${JSON.stringify(name)}`, 1));
-		if (!nonBlank$1(value.precondition)) defects.push(shape("sidecar.precondition must be a non-blank string"));
-		defects.push(...portDefects(value.inputs, "sidecar.inputs"));
-		defects.push(...portDefects(value.outputs, "sidecar.outputs"));
-		defects.push(...nameListDefects(value.requiredTools, "sidecar.requiredTools", "sidecar.requiredTools must be an array of tool names", (name, index) => `sidecar.requiredTools[${index}] duplicates ${JSON.stringify(name)}`));
-		defects.push(...verifierDefects(value.verifier));
-		defects.push(...contentDefects$1(value.content));
-		return defects;
-	}
-	defects.push(...unknownFields$1(value, KNOWLEDGE_FIELDS, "sidecar", `a knowledge sidecar carries ${KNOWLEDGE_FIELDS.join(", ")}`));
-	if (!nonBlank$1(value.source)) defects.push(shape("sidecar.source must be a non-blank string"));
-	if (!nonBlank$1(value.scope)) defects.push(shape("sidecar.scope must be a non-blank string"));
-	defects.push(...contentDefects$1(value.content));
-	defects.push(...contentCheckDefects(value.contentCheck));
-	return defects;
-}
-/**
-* The identity of a whole sidecar: SHA-256 over {@link canonicalize} of the
-* declared data, so key order and `undefined`-valued keys do not move it while
-* any declared field does. Call it on a sidecar that passed
-* {@link skillContractDefects}: an unvalidated object can carry fields this
-* identity would then cover without a rule saying what they mean.
-*/
-function skillContractDigest(sidecar) {
-	return sha256Hex(canonicalize(sidecar));
-}
-/**
-* The identity of one content identity: SHA-256 over {@link canonicalize} of the
-* `SKILL.md` digest and the resource list. Separate from
-* {@link skillContractDigest} so a caller can name the bytes (a run recording
-* what it read) without claiming a sidecar it did not read.
-*/
-function skillContentDigest(content) {
-	return sha256Hex(canonicalize(content));
-}
-/**
-* The same declaration with one field replaced: `content.skillMdSha256`.
-*
-* A same-name improvement of an execution skill changes the `SKILL.md` and
-* nothing else about the object (K3): the capabilities, precondition, ports,
-* required tools, verifier and resources are the ones the production sidecar
-* declared, so the candidate's sidecar is *derived* from the production one
-* rather than authored — a content update that could also move a declaration
-* would be an undeclared privilege change. Every other field is carried over
-* item by item; the digest is checked first, because a value that is not a
-* lowercase 64-character hex SHA-256 would produce a declaration no reader could
-* verify and no writer should persist.
-*/
-function sidecarWithSkillMd(sidecar, skillMdSha256) {
-	if (!/^[0-9a-f]{64}$/.test(skillMdSha256)) throw new Error(`skill-contract: cannot replace sidecar content.skillMdSha256 with ${JSON.stringify(skillMdSha256)} — a content identity is a lowercase 64-character hex SHA-256, and a rewritten sidecar is a declaration a loader will have to verify against real bytes`);
-	return {
-		...sidecar,
-		content: {
-			...sidecar.content,
-			skillMdSha256
-		}
-	};
-}
-/**
-* The deterministic byte sequence of one declaration — what a file holds when
-* this build writes a sidecar.
-*
-* Determinism is the point: {@link skillContractDigest} hashes the canonical
-* key order, so the bytes on disk must be a function of the declaration alone,
-* not of the order a caller happened to build its object in. Two calls with the
-* same declaration produce the same string, and a reader can verify a file by
-* parsing it and re-serializing: identical bytes mean the declaration did not
-* move — which is exactly how the K3 derivation check compares a candidate's
-* sidecar with the one re-derived from the champion's bytes. The shape is
-* canonical keys, two-space indentation, one trailing newline.
-*/
-function serializeSkillSidecar(sidecar) {
-	return `${JSON.stringify(JSON.parse(canonicalize(sidecar)), null, 2)}\n`;
-}
-
-//#endregion
-//#region src/verified-read.ts
-/** Resolve `rel` under `base`, refusing anything that would land outside. */
-function resolveWithin(base, rel) {
-	const abs = resolve(base, rel);
-	if (abs !== base && !abs.startsWith(`${base}${sep}`)) throw new Error(`verified-read: path ${JSON.stringify(rel)} escapes ${base}`);
-	return abs;
-}
-/**
-* Walk `rel` under `root` one component at a time, refusing anything but real
-* entries: a symbolic link anywhere on the path, a non-regular entry where the
-* target should be, or a non-directory where a directory should be all fail
-* loudly, so a read can never land outside the root through a redirected path
-* even though the lexical path stays inside. A component that is simply absent
-* (ENOENT / ENOTDIR anywhere along the walk) is reported as `missing`, never
-* thrown — the caller decides whether absence is an error or an answer.
-*/
-async function walkVerified(root, rel) {
-	const abs = resolveWithin(root, rel);
-	const steps = relative(root, abs).split(sep);
-	let current = root;
-	for (const step of steps) {
-		current = join(current, step);
-		let stat$1;
-		try {
-			stat$1 = await lstat(current);
-		} catch (error) {
-			const code = error.code;
-			if (code === "ENOENT" || code === "ENOTDIR") return {
-				missing: true,
-				reason: code === "ENOTDIR" ? "a path component is not a directory" : "no such file or directory"
-			};
-			throw error;
-		}
-		if (stat$1.isSymbolicLink()) throw new Error(`verified-read: "${current}" is a symbolic link; a path and its ancestors must be real entries inside ${root}`);
-		if (current === abs ? !stat$1.isFile() : !stat$1.isDirectory()) throw new Error(`verified-read: "${current}" is not a regular ${current === abs ? "file" : "directory"}`);
-	}
-	return {
-		missing: false,
-		abs
-	};
-}
-/**
-* Read the file at `rel` under `root` as raw bytes, refusing anything but a
-* real regular file: the entry itself and every ancestor between `root` and it
-* must not be a symbolic link. A missing file, a directory in the file's place,
-* or any other non-regular entry fails loudly. The bytes are returned exactly
-* as stored — no decoding, no newline conversion.
-*/
-async function readVerifiedFile(root, rel) {
-	const walked = await walkVerified(root, rel);
-	if (walked.missing) throw new Error(`verified-read: ${JSON.stringify(rel)} is missing under ${root} (${walked.reason})`);
-	return readFile(walked.abs);
-}
-
-//#endregion
-//#region src/sidecar.ts
-/**
-* A capability table as a query, going through `resolveCapabilities` — the same
-* resolution admission performs — so the pre-check sees exactly the grant a
-* spawn would build and a broken row is refused with the resolution's own
-* reason instead of being silently treated as granting nothing.
-*/
-function capabilityToolQuery(capabilities) {
-	return (capability) => {
-		let manifest;
-		try {
-			manifest = resolveCapabilities([capability], capabilities);
-		} catch (error) {
-			return {
-				known: false,
-				reason: error instanceof Error ? error.message : String(error)
-			};
-		}
-		const entry = manifest.capabilities[capability];
-		if (entry === void 0) return {
-			known: false,
-			reason: `capability "${capability}" is not in the capability table`
-		};
-		return {
-			known: true,
-			tools: entry.tools,
-			mcpServers: entry.mcpServers ?? []
-		};
-	};
-}
-/** Build the pre-check context from a capability table and the registered verifier ids. */
-function skillValidationContext(capabilities, verifierRefs) {
-	return {
-		verifierRefs: [...verifierRefs].sort(),
-		capabilityTools: capabilityToolQuery(capabilities)
-	};
-}
-/**
-* The verdicts that may close an execution gap — and the only place a caller
-* needs to ask. A knowledge or guidance verdict is not in the result, so the
-* closure semantics cannot be relaxed by accident at a call site.
-*/
-function executionProviders(verdicts) {
-	return verdicts.filter((verdict) => verdict.valid && verdict.role === "execution-provider");
-}
-function message$5(error) {
-	return error instanceof Error ? error.message : String(error);
-}
-function defect$1(code, detail) {
-	return {
-		code,
-		detail
-	};
-}
-/** The sidecar contract's own defect codes are already named the same way, so they carry over unchanged. */
-function contractDefects$1(defects) {
-	return defects.map((item) => defect$1(item.code, item.reason));
-}
-/** Whether the bytes are text a worker can read: valid UTF-8 with no NUL byte. */
-function isText(bytes) {
-	if (bytes.includes(0)) return false;
-	try {
-		new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-		return true;
-	} catch {
-		return false;
-	}
-}
-/**
-* Read the compiled bytes of one file under the skill directory, turning a
-* refusal into a named defect rather than a throw, so one broken entry does not
-* hide the rest of the scan.
-*/
-async function readBytes(directory, relativePath, relative$1, defects) {
-	try {
-		const walked = await walkVerified(directory, relativePath);
-		if (walked.missing) {
-			defects.push(defect$1("content-mismatch", `${relative$1} is declared but missing from the skill directory`));
-			return;
-		}
-		return await readFile(walked.abs);
-	} catch (error) {
-		defects.push(defect$1("content-unsupported", `${relative$1} cannot be read as a real file: ${message$5(error)}`));
-		return;
-	}
-}
-/**
-* Walk one skill directory and describe it: which files sit at supported
-* positions with their real digests, which direct entries the supported
-* vocabulary does not cover, and every entry that is not a shape this contract
-* supports. Nothing is skipped silently — a link, a nested tree or a non-text
-* file is named.
-*/
-async function scanSkillDirectory(directory) {
-	const scanned = {
-		skillMdPresent: false,
-		resources: [],
-		uncovered: [],
-		unsupported: [],
-		defects: []
-	};
-	let entries;
-	try {
-		entries = await readdir(directory, { withFileTypes: true });
-	} catch (error) {
-		scanned.defects.push(defect$1("skill-missing", `skill directory ${directory} cannot be read: ${message$5(error)}`));
-		return scanned;
-	}
-	for (const entry of entries) {
-		const name = entry.name;
-		const at = join(directory, name);
-		let info;
-		try {
-			info = await lstat(at);
-		} catch (error) {
-			scanned.defects.push(defect$1("content-unsupported", `${name} cannot be read: ${message$5(error)}`));
-			continue;
-		}
-		if (name === "SKILL.md") {
-			scanned.skillMdPresent = true;
-			if (info.isSymbolicLink()) {
-				scanned.defects.push(defect$1("content-unsupported", "SKILL.md is a symbolic link; a skill's SKILL.md must be a real file"));
-				continue;
-			}
-			if (!info.isFile()) {
-				scanned.defects.push(defect$1("content-unsupported", "SKILL.md is not a regular file"));
-				continue;
-			}
-			const bytes = await readBytes(directory, "SKILL.md", "SKILL.md", scanned.defects);
-			if (bytes !== void 0) {
-				scanned.skillMdSha256 = sha256Hex(bytes);
-				try {
-					const parsed = parseSkillFile(bytes.toString("utf8"), join(directory, "SKILL.md"));
-					scanned.frontmatter = {
-						name: parsed.name,
-						description: parsed.description
-					};
-				} catch (error) {
-					scanned.defects.push(defect$1("skill-file-invalid", message$5(error)));
-				}
-			}
-			continue;
-		}
-		if (name === SKILL_SIDECAR_FILE) continue;
-		if (SUPPORTED_SKILL_RESOURCE_DIRS.includes(name)) {
-			if (info.isSymbolicLink()) {
-				scanned.unsupported.push(`${name}/`);
-				scanned.defects.push(defect$1("content-unsupported", `${name}/ is a symbolic link; a skill directory\'s entries must be real`));
-				continue;
-			}
-			if (!info.isDirectory()) {
-				scanned.unsupported.push(`${name}/`);
-				scanned.defects.push(defect$1("content-unsupported", `${name} is not a directory`));
-				continue;
-			}
-			let children;
-			try {
-				children = await readdir(at, { withFileTypes: true });
-			} catch (error) {
-				scanned.unsupported.push(`${name}/`);
-				scanned.defects.push(defect$1("content-unsupported", `${name}/ cannot be read: ${message$5(error)}`));
-				continue;
-			}
-			for (const child of children) {
-				const relative$1 = `${name}/${child.name}`;
-				let childInfo;
-				try {
-					childInfo = await lstat(join(at, child.name));
-				} catch (error) {
-					scanned.unsupported.push(relative$1);
-					scanned.defects.push(defect$1("content-unsupported", `${relative$1} cannot be read: ${message$5(error)}`));
-					continue;
-				}
-				if (childInfo.isSymbolicLink()) {
-					scanned.unsupported.push(relative$1);
-					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is a symbolic link; a resource must be a real file`));
-					continue;
-				}
-				if (childInfo.isDirectory()) {
-					scanned.unsupported.push(relative$1);
-					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is a directory nested deeper than the supported one-level shape (${name}/<file>)`));
-					continue;
-				}
-				if (!childInfo.isFile()) {
-					scanned.unsupported.push(relative$1);
-					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is not a regular file`));
-					continue;
-				}
-				const bytes = await readBytes(directory, relative$1, relative$1, scanned.defects);
-				if (bytes === void 0) {
-					scanned.unsupported.push(relative$1);
-					continue;
-				}
-				if (!isText(bytes)) {
-					scanned.unsupported.push(relative$1);
-					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is not UTF-8 text; a supported resource is a text file a worker can read`));
-					continue;
-				}
-				scanned.resources.push({
-					path: relative$1,
-					sha256: sha256Hex(bytes)
-				});
-			}
-			continue;
-		}
-		if (info.isSymbolicLink()) {
-			scanned.defects.push(defect$1("content-unsupported", `${name} is a symbolic link; a skill directory holds real entries only`));
-			continue;
-		}
-		scanned.uncovered.push(info.isDirectory() ? `${name}/` : name);
-	}
-	scanned.resources.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-	scanned.uncovered.sort();
-	return scanned;
-}
-/**
-* Load and check one skill directory: the directory itself, `SKILL.md`, the
-* sidecar when there is one, the identity of the bytes on disk, and the shape
-* of everything else in it.
-*
-* The returned `content` is the identity computed from the bytes just read —
-* the same value a clean sidecar declares, and the honest answer for a skill
-* that declares nothing. `defects` empty means the directory is fully described
-* by its identity: every file is `SKILL.md`, the sidecar itself, or a supported
-* resource the declaration names. Absence of a sidecar is not a defect: the
-* skill is then guidance, not a provider.
-*/
-async function loadSkillSidecar(directory) {
-	let info;
-	try {
-		info = await lstat(directory);
-	} catch (error) {
-		return {
-			directory,
-			uncovered: [],
-			defects: [defect$1("skill-missing", `skill directory ${directory} cannot be read: ${message$5(error)}`)]
-		};
-	}
-	if (info.isSymbolicLink()) return {
-		directory,
-		uncovered: [],
-		defects: [defect$1("content-unsupported", `${directory} is a symbolic link; a skill directory must be a real directory`)]
-	};
-	if (!info.isDirectory()) return {
-		directory,
-		uncovered: [],
-		defects: [defect$1("skill-missing", `${directory} is not a directory`)]
-	};
-	const scanned = await scanSkillDirectory(directory);
-	const defects = [...scanned.defects];
-	if (!scanned.skillMdPresent) defects.push(defect$1("skill-missing", `${join(directory, "SKILL.md")} does not exist; a skill directory carries a SKILL.md`));
-	const content = scanned.skillMdSha256 === void 0 ? void 0 : {
-		skillMdSha256: scanned.skillMdSha256,
-		resources: scanned.resources
-	};
-	let sidecar;
-	let sidecarBytes;
-	try {
-		const walked = await walkVerified(directory, SKILL_SIDECAR_FILE);
-		if (!walked.missing) sidecarBytes = await readFile(walked.abs);
-	} catch (error) {
-		defects.push(defect$1("content-unsupported", `${SKILL_SIDECAR_FILE} cannot be read as a real file: ${message$5(error)}`));
-	}
-	if (sidecarBytes !== void 0) if (!isText(sidecarBytes)) defects.push(defect$1("sidecar-unreadable", `${SKILL_SIDECAR_FILE} is not UTF-8 text`));
-	else {
-		let declared;
-		try {
-			declared = JSON.parse(sidecarBytes.toString("utf8"));
-		} catch (error) {
-			defects.push(defect$1("sidecar-unreadable", `${SKILL_SIDECAR_FILE} is not readable JSON: ${message$5(error)}`));
-		}
-		if (declared !== void 0) {
-			const declaredDefects = skillContractDefects(declared);
-			defects.push(...contractDefects$1(declaredDefects));
-			if (declaredDefects.length === 0) {
-				const sidecarValue = declared;
-				sidecar = sidecarValue;
-				if (content !== void 0) defects.push(...contentDefects(sidecarValue.content, content, scanned.uncovered, scanned.unsupported));
-			}
-		}
-	}
-	return {
-		directory,
-		...sidecar === void 0 ? {} : { sidecar },
-		...content === void 0 ? {} : { content },
-		...scanned.frontmatter === void 0 ? {} : { frontmatter: scanned.frontmatter },
-		uncovered: scanned.uncovered,
-		defects
-	};
-}
-/**
-* Compare a declared identity with the bytes on disk: the declared `SKILL.md`
-* digest, every declared resource, and — the other direction — every file the
-* declaration does not name. A missing declared file or a changed byte is a
-* `content-mismatch`; a file nobody declared is `content-unsupported`, because
-* an identity that covers most of a directory is not an identity of it. A path
-* the scan already refused for its shape is not counted again here.
-*/
-function contentDefects(declared, actual, uncovered, unsupported) {
-	const defects = [];
-	if (declared.skillMdSha256 !== actual.skillMdSha256) defects.push(defect$1("content-mismatch", `SKILL.md is not the declared content: declared ${declared.skillMdSha256}, read ${actual.skillMdSha256}`));
-	const refused = (path) => unsupported.some((entry) => entry.endsWith("/") ? path.startsWith(entry) : path === entry);
-	const actualResources = new Map(actual.resources.map((resource) => [resource.path, resource.sha256]));
-	for (const declaredResource of declared.resources) {
-		const read = actualResources.get(declaredResource.path);
-		if (read === void 0) {
-			if (refused(declaredResource.path)) continue;
-			defects.push(defect$1("content-mismatch", `${declaredResource.path} is declared but missing from the skill directory`));
-			continue;
-		}
-		if (read !== declaredResource.sha256) defects.push(defect$1("content-mismatch", `${declaredResource.path} is not the declared content: declared ${declaredResource.sha256}, read ${read}`));
-	}
-	const declaredPaths$1 = new Set(declared.resources.map((resource) => resource.path));
-	for (const resource of actual.resources) if (!declaredPaths$1.has(resource.path)) defects.push(defect$1("content-unsupported", `${resource.path} is not covered by the declared identity; the identity must name every file in the skill directory`));
-	for (const entry of uncovered) defects.push(defect$1("content-unsupported", `${entry} is not covered by the declared identity; a sidecar declares SKILL.md plus resources under ${SUPPORTED_SKILL_RESOURCE_DIRS.join("/, ")}/ only`));
-	return defects;
-}
-/**
-* The unified pre-check: one candidate provider against the deployment's
-* verifier vocabulary and capability table (guide §2.3, S1-C item 3). Every
-* entry — config load, provider replacement, candidate promotion — calls this,
-* so `evolution_apply` is not the only defence and no entry can be the one that
-* skipped it.
-*
-* Rules, in the order they are checked:
-*
-* 1. The directory exists, is a real directory, and is named after the skill.
-* 2. The loader reads it: `SKILL.md`, the sidecar when present, the supported
-*    resources, and every entry whose shape the contract does not support. The
-*    declared content identity must equal the bytes read, and the `SKILL.md`
-*    frontmatter must parse and declare the granted name — the same rule, and
-*    the same words, the spawn's `readSkillFile` applies when it registers the
-*    body.
-* 3. A sidecar the caller supplied must be the one the directory carries.
-* 4. An execution sidecar's `verifier.ref` must be a registered verifier, and
-*    its `requiredTools` must be granted by the capabilities it declares it
-*    serves (`mcp__<server>__<tool>` counts when the capability mounts that
-*    server; the worker baseline is deliberately not counted — a capability
-*    must grant what the provider it carries needs).
-* 5. A knowledge sidecar is checked for content and carried as knowledge: it
-*    never becomes an execution provider.
-*
-* The verdict is a value: all defects are collected, nothing is written, and a
-* caller that only wants execution providers filters with
-* {@link executionProviders}.
-*/
-async function validateSkillProvider(candidate, context) {
-	const defects = [];
-	const refuse = (directory$1) => ({
-		valid: false,
-		name: candidate.name,
-		...directory$1 === void 0 ? {} : { directory: directory$1 },
-		defects
-	});
-	if (candidate.directory === void 0) {
-		defects.push(defect$1("skill-missing", `no directory was discovered for skill "${candidate.name}"; a provider without a SKILL.md on disk cannot be an execution provider`));
-		return refuse(void 0);
-	}
-	const directory = candidate.directory;
-	if (basename(directory) !== candidate.name) defects.push(defect$1("skill-name-mismatch", `skill "${candidate.name}" resolves to directory ${directory}, whose name is "${basename(directory)}"; a skill directory is named after the skill it holds`));
-	const loaded = await loadSkillSidecar(directory);
-	defects.push(...loaded.defects);
-	const content = loaded.content;
-	const frontmatter = loaded.frontmatter;
-	if (frontmatter !== void 0 && frontmatter.name !== candidate.name) defects.push(defect$1("skill-name-mismatch", `skill file ${join(directory, "SKILL.md")} declares name "${frontmatter.name}" but the capability grants "${candidate.name}"`));
-	if (candidate.sidecar !== void 0) {
-		const suppliedDefects = skillContractDefects(candidate.sidecar);
-		defects.push(...contractDefects$1(suppliedDefects));
-		if (loaded.sidecar === void 0) defects.push(defect$1("sidecar-mismatch", `skill "${candidate.name}" was checked against a supplied sidecar, but ${join(directory, SKILL_SIDECAR_FILE)} holds none; a declaration must describe the directory it is validated against`));
-		else if (suppliedDefects.length === 0 && skillContractDigest(loaded.sidecar) !== skillContractDigest(candidate.sidecar)) defects.push(defect$1("sidecar-mismatch", `the supplied sidecar for skill "${candidate.name}" is not the declaration in ${join(directory, SKILL_SIDECAR_FILE)}`));
-	}
-	const sidecar = loaded.sidecar ?? candidate.sidecar;
-	if (sidecar === void 0) {
-		if (defects.length > 0 || content === void 0 || frontmatter === void 0) return refuse(directory);
-		return {
-			valid: true,
-			role: "guidance",
-			name: candidate.name,
-			directory,
-			description: frontmatter.description,
-			content,
-			contentDigest: skillContentDigest(content),
-			uncovered: loaded.uncovered
-		};
-	}
-	if (sidecar.type === "execution") {
-		if (!context.verifierRefs.includes(sidecar.verifier.ref)) {
-			const registered = [...context.verifierRefs].sort();
-			defects.push(defect$1("verifier-unknown", `skill "${candidate.name}" declares execution verifier ${JSON.stringify(sidecar.verifier.ref)}, which is not registered; registered verifiers: ${registered.length === 0 ? "none" : registered.join(", ")}`));
-		}
-		const tools = /* @__PURE__ */ new Set();
-		const servers = /* @__PURE__ */ new Set();
-		let grantComplete = true;
-		for (const capability of sidecar.capabilities) {
-			const answer = context.capabilityTools(capability);
-			if (!answer.known) {
-				grantComplete = false;
-				defects.push(defect$1("capability-unknown", `skill "${candidate.name}" declares capability ${JSON.stringify(capability)}: ${answer.reason}`));
-				continue;
-			}
-			for (const tool of answer.tools) tools.add(tool);
-			for (const server of answer.mcpServers) servers.add(server);
-		}
-		if (grantComplete) {
-			const uncoveredTools = sidecar.requiredTools.filter((tool) => !tools.has(tool) && ![...servers].some((server) => tool.startsWith(`mcp__${server}__`) && tool.length > `mcp__${server}__`.length));
-			if (uncoveredTools.length > 0) {
-				const granted = [...tools].sort().join(", ");
-				defects.push(defect$1("tool-not-covered", `skill "${candidate.name}" requires tools its declared capabilities do not grant: ${[...uncoveredTools].sort().map((tool) => JSON.stringify(tool)).join(", ")}; declared capabilities ${sidecar.capabilities.join(", ")} grant: ${granted}${servers.size === 0 ? "" : ` · mounted servers: ${[...servers].sort().join(", ")}`}`));
-			}
-		}
-		if (defects.length > 0 || content === void 0 || frontmatter === void 0) return refuse(directory);
-		return {
-			valid: true,
-			role: "execution-provider",
-			name: candidate.name,
-			directory,
-			capabilities: [...sidecar.capabilities],
-			precondition: sidecar.precondition,
-			description: frontmatter.description,
-			inputs: sidecar.inputs.map((port) => ({
-				name: port.name,
-				description: port.description,
-				required: port.required
-			})),
-			outputs: sidecar.outputs.map((port) => ({
-				name: port.name,
-				description: port.description,
-				required: port.required
-			})),
-			requiredTools: [...sidecar.requiredTools],
-			verifierRef: sidecar.verifier.ref,
-			contractDigest: skillContractDigest(sidecar),
-			content,
-			contentDigest: skillContentDigest(content)
-		};
-	}
-	if (defects.length > 0 || content === void 0 || frontmatter === void 0) return refuse(directory);
-	return {
-		valid: true,
-		role: "knowledge",
-		name: candidate.name,
-		directory,
-		source: sidecar.source,
-		scope: sidecar.scope,
-		contentCheck: {
-			kind: sidecar.contentCheck.kind,
-			command: sidecar.contentCheck.command
-		},
-		description: frontmatter.description,
-		contractDigest: skillContractDigest(sidecar),
-		content,
-		contentDigest: skillContentDigest(content)
-	};
-}
-/**
-* The registry revision: SHA-256 over {@link canonicalize} of the capability
-* table (each row sorted by name, carrying its skills, the tool labels it
-* declares, the DSH tool names those labels expand to, its preset, permission
-* and MCP servers — defaults and declaration order normalized away) plus every
-* provider's sidecar identity.
-*
-* What it covers, and what it deliberately does not: a run can cite this
-* revision to say which table and which declared provider content it resolved
-* against. Two runs with the same revision resolved the same rows over the same
-* declared sidecar content. It does **not** cover the bytes of a skill that
-* declares nothing (its identity is `null` here), the verifier registry's own
-* revisions, or the deployment's environment — a caller that needs those records
-* them separately rather than reading them into this digest.
-*/
-function registryRevision(capabilities, providers) {
-	return sha256Hex(canonicalize({
-		capabilities: Object.keys(capabilities).sort().map((name) => {
-			const entry = capabilities[name];
-			const answers = capabilityToolQuery(capabilities)(name);
-			return {
-				name,
-				skills: [...new Set(entry.skills ?? [])].sort(),
-				declaredTools: [...new Set(entry.tools ?? [])].sort(),
-				tools: answers.known ? [...new Set(answers.tools)].sort() : [],
-				mcpServers: answers.known ? [...new Set(answers.mcpServers)].sort() : [],
-				...entry.preset === void 0 ? {} : { preset: entry.preset },
-				...entry.permission === void 0 ? {} : { permission: entry.permission }
-			};
-		}),
-		providers: providers.map((provider) => ({
-			name: provider.name,
-			contractDigest: provider.contractDigest
-		})).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
-	}));
-}
-
-//#endregion
-//#region src/provider-precheck.ts
-/**
-* Resolve an optional sibling plugin's service by property or `ctx.get(name)`,
-* the soft pattern this repo uses for services a deployment may or may not
-* mount (`verifier`, `sessionQuery`, `agents`): absent in test contexts and in
-* smaller bundles, not an error.
-*
-* Both lookups are inside the `try` because cordis refuses a property read of a
-* service the asking context does not have (`cannot get property "verifier"
-* without inject`, `reflect.ts` — it throws instead of returning `undefined`).
-* An optional service that is absent is exactly the case this function exists
-* for, so the refusal is the answer: `undefined`.
-*/
-function optionalService(host, name) {
-	if (host === null || typeof host !== "object") return void 0;
-	const holder = host;
-	try {
-		const viaContext = typeof holder.get === "function" ? holder.get(name) : void 0;
-		if (viaContext !== void 0) return viaContext;
-		return holder[name];
-	} catch {
-		return;
-	}
-}
-/**
-* The registered verifier vocabulary a provider check judges execution sidecars
-* against, or `undefined` when the deployment cannot list it — no verifier
-* service, a service that never became ready, or a registry whose own read
-* throws.
-*
-* `ready()` first, and only here: a verifier service that has been constructed
-* but not readied reports an empty `verifierIds()`, and reading that as "no
-* verifier is registered" would refuse every execution provider on a deployment
-* whose registry is merely still loading. The distinction between "the registry
-* could not answer" and "the registry answered: empty" is exactly what the
-* returned `undefined` preserves: a caller refuses an execution sidecar in the
-* first case (fail-closed, {@link unlistableVerifierRefusal}) and names the
-* registry's own answer in the second.
-*
-* One implementation for every consumer — the admission pre-check, the
-* load-time scan and the promotion checks all ask it (guide §2.4, S1-C item 3).
-*/
-async function registeredVerifierIds(host) {
-	const verifier = optionalService(host, "verifier");
-	if (verifier === void 0) return void 0;
-	try {
-		await verifier.ready?.();
-		return verifier.verifierIds?.();
-	} catch {
-		return;
-	}
-}
-/**
-* The registered verifier vocabulary *and the version each instance declares*,
-* or `undefined` under exactly the conditions {@link registeredVerifierIds}
-* answers `undefined`. The two are read together by a caller that has to recall
-* a verdict against the instance that produced it (the evolution promotion
-* gate): an id list cannot tell a re-registered judge from the one that judged,
-* and a version list read without the ids could name a judge that is gone.
-*
-* Registration is awaited once, then both halves are read from the same
-* instance. A registry that implements `verifierIds()` but no
-* `verifierVersions()` answers an empty map — "no version was declared", which
-* is the truth for it, not a refusal.
-*/
-async function registeredVerifierVocabulary(host) {
-	const verifier = optionalService(host, "verifier");
-	if (verifier === void 0) return void 0;
-	try {
-		await verifier.ready?.();
-		const ids = verifier.verifierIds?.();
-		if (ids === void 0) return void 0;
-		return {
-			ids,
-			versions: verifier.verifierVersions?.() ?? {}
-		};
-	} catch {
-		return;
-	}
-}
-/**
-* The refusal of an execution sidecar the deployment cannot judge because its
-* verifier vocabulary could not be listed: the declared ref is refused rather
-* than assumed registered (fail-closed). The admission pre-check and the
-* evolution promotion checks share this function, so one situation reads the
-* same way in every entry instead of each inventing its own explanation.
-*/
-function unlistableVerifierRefusal(name, directory, ref) {
-	return {
-		valid: false,
-		name,
-		...directory === void 0 ? {} : { directory },
-		defects: [defect("verifier-unknown", `skill "${name}" declares execution verifier ${JSON.stringify(ref)} but the verifier registry cannot be listed (verifierIds() is unavailable, so the registry was never readied); the ref is refused rather than assumed registered`)]
-	};
-}
-/**
-* Read the ledger's open commit intents, once per pre-check. `undefined` means
-* this deployment offers no evolution service at all — no commit can be in
-* flight, so no gate is applied. A ledger that cannot be read answers a gate
-* that refuses by name instead.
-*
-* Every target is kept as the directory that holds it, never as the file path:
-* the gate matches providers by directory ({@link commitRefusalFor}), so a
-* ledger naming the sidecar of a two-file commit lands on the same entry as one
-* naming its `SKILL.md`.
-*/
-async function readCommitGate(ledger) {
-	if (ledger === void 0) return void 0;
-	if (ledger.openIntentTargets === void 0) return {
-		openTargets: /* @__PURE__ */ new Set(),
-		openCapabilities: /* @__PURE__ */ new Set(),
-		unreadable: "the evolution service offers no openIntentTargets() read"
-	};
-	if (ledger.openIntentCapabilities === void 0) return {
-		openTargets: /* @__PURE__ */ new Set(),
-		openCapabilities: /* @__PURE__ */ new Set(),
-		unreadable: "the evolution service offers no openIntentCapabilities() read"
-	};
-	try {
-		const [targets, capabilities] = await Promise.all([ledger.openIntentTargets(), ledger.openIntentCapabilities()]);
-		return {
-			openTargets: new Set(targets.map((target) => dirname(resolve(target)))),
-			openCapabilities: new Set(capabilities)
-		};
-	} catch (error) {
-		return {
-			openTargets: /* @__PURE__ */ new Set(),
-			openCapabilities: /* @__PURE__ */ new Set(),
-			unreadable: `reading it failed (${error instanceof Error ? error.message : String(error)})`
-		};
-	}
-}
-/**
-* The refusal of a provider whose directory a commit left open (K2-3, matched by
-* directory since K3): the intent is the record that a production write is
-* underway and its completion has not been recorded, so production may not be
-* what the ledger says it is. One intent covers a skill directory's fixed file
-* set together, so a target naming any one of those files refuses the directory
-* as a whole — the version standing beside it may be the other half of a mixed
-* pair, which is not admissible either. The provider stays refused until a
-* reconciliation settles that commit, and every other provider in the same
-* pre-check is judged exactly as before.
-*/
-function openCommitRefusal(name, directory) {
-	return {
-		valid: false,
-		name,
-		directory,
-		defects: [defect("commit-intent-open", `skill "${name}" is the target of an open evolution commit intent: a file of ${directory} was named by an apply or rollback, its intent was persisted and its completion was never recorded, so production may not hold the version the ledger describes. One intent covers the fixed file set of that directory together (\`SKILL.md\`, plus the \`SKILL.contract.json\` beside it when the skill has one), so a directory holding any file under an open intent is refused whole rather than admitted as a mixed version: the provider stays refused until a reconciliation settles that commit (the deployment reconciles at startup, or an apply/rollback retry settles it)`)]
-	};
-}
-/**
-* The refusal of one capability **row** an open evolution commit intent moves
-* (A6): row-keyed, not directory-keyed, because a row-only capability commit has
-* no file at all and nothing discovery finds can stand for it. The row's grant is
-* not the deployment's yet — the commit that would make it so has not recorded
-* its completion, and for a capability commit the row is installed *before* the
-* table file the next restart loads, so the in-process table can hold a row the
-* deployment would lose. Nothing of that row is resolved here: a row that may not
-* be admitted is not a provider question, and reading its skills would report
-* verdicts for a grant that is not in force.
-*/
-function openCapabilityRowRefusal(name) {
-	return defect("commit-intent-open", `capability "${name}" is the target of an open evolution commit intent: an apply or rollback persisted that intent and never recorded its completion, so the row the deployment's table reads now may not be the row it keeps — a capability commit installs the row in the process before it writes the deployment's own table file, and the completion is what claims both halves landed. The row is refused whole rather than admitted as a half-product: it stays refused until a reconciliation settles that commit (the deployment reconciles at startup, or an apply/rollback retry settles it)`);
-}
-/**
-* The refusal of every skill candidate on a deployment whose evolution ledger
-* cannot be read: whether a commit intent is open against this provider cannot
-* be established, so it is refused rather than assumed clear (fail-closed). The
-* absence of an evolution service is a different situation and is not refused —
-* a deployment with no ledger has no commit in flight.
-*/
-function unreadableCommitLedgerRefusal(name, directory, target, why) {
-	return {
-		valid: false,
-		name,
-		directory,
-		defects: [defect("commit-ledger-unreadable", `skill "${name}" cannot be admitted against ${target}: the deployment's evolution commit ledger is unreadable (${why}), so whether a commit intent is open against this provider cannot be established — the provider is refused rather than assumed clear (fail-closed)`)]
-	};
-}
-/**
-* Every root one discovery view covers, in search order — the single root list
-* the pre-check searches and the one a refusal names, so "searched the roots"
-* in an error message is never a hand-written approximation of the search.
-*/
-async function skillSearchRoots(view = {}) {
-	return [...view.extraRoots ?? [], ...await skillRootsFor(view.cwd)];
-}
-function defect(code, detail) {
-	return {
-		code,
-		detail
-	};
-}
-/**
-* The refusal one skill candidate gets from the commit gate, or `undefined` when
-* the gate has nothing to say about it: only a provider whose discovered
-* directory holds a file an open commit names is refused, and every other
-* candidate in the same pre-check is judged exactly as it would be without the
-* gate.
-*
-* The comparison is by directory, not by file (K3): one commit intent covers the
-* fixed file set of a skill directory together (`SKILL.md`, and the
-* `SKILL.contract.json` beside it when the skill has one), so a ledger naming
-* either file marks the same directory as owned by an unsettled commit. Matching
-* file paths would admit a directory whenever the ledger reported the one file
-* this check did not look at.
-*/
-function commitRefusalFor(gate, name, directory) {
-	if (gate === void 0) return void 0;
-	const skillFile = resolve(join(directory, "SKILL.md"));
-	if (gate.unreadable !== void 0) return unreadableCommitLedgerRefusal(name, directory, skillFile, gate.unreadable);
-	if (!gate.openTargets.has(resolve(directory))) return void 0;
-	return openCommitRefusal(name, directory);
-}
-/**
-* The row-keyed half of that same gate (A6): the defects one capability row owes
-* because an open commit intent moves it, or `[]` when none does. It is asked
-* once per row the pre-check was handed — before discovery, because the row is
-* what is refused and not any skill of it — and it answers only for that row.
-* A row the ledger names and the request never asked about is none of this
-* pre-check's business.
-*/
-function capabilityRowRefusals(gate, capability) {
-	if (gate === void 0) return [];
-	if (!gate.openCapabilities.has(capability)) return [];
-	return [openCapabilityRowRefusal(capability)];
-}
-/** The search-failure refusal: the skill name and the roots, which no phase-1 validator can know. */
-function undiscovered(name, roots) {
-	return {
-		valid: false,
-		name,
-		defects: [defect("skill-missing", `no SKILL.md for skill "${name}" is reachable from the worker's discovery roots; searched ${roots.join(", ")}`)]
-	};
-}
-/**
-* The one provider identity a revision can cite: a validated sidecar, or
-* `null` for a skill that declares none. Guidance skills declare no execution
-* contract, so they are cited as the name alone rather than given a digest
-* that does not exist.
-*/
-function providerIdentity(verdict) {
-	if (!verdict.valid) return void 0;
-	return verdict.role === "guidance" ? {
-		name: verdict.name,
-		contractDigest: null
-	} : {
-		name: verdict.name,
-		contractDigest: verdict.contractDigest
-	};
-}
-/**
-* Every provider content identity one pre-check resolved, deduplicated by name
-* and sorted by it: the list a caller folds into whatever it records about the
-* resolution (the registry revision here, the review context in
-* `./proposal.ts`). One function so those two cannot disagree about what
-* "resolved" means: refused verdicts contribute nothing (a refused provider is
-* never something a run resolved against), and a name that appears in two rows
-* is one identity.
-*/
-function providerContentIdentities(capabilities) {
-	return capabilities.flatMap((row) => row.skills).flatMap((verdict) => providerIdentity(verdict) ?? []).filter((identity, index, all) => all.findIndex((entry) => entry.name === identity.name) === index).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
-}
-/**
-* Check every skill every listed capability declares, from one discovery
-* viewpoint.
-*
-* The rules, in the order they are applied per skill: it must be discoverable
-* from the view's roots; no file of the directory it resolves into may be a
-* target an evolution commit left open (K2, matched by directory since K3); the
-* directory must pass {@link validateSkillProvider} against the table and the
-* verifier vocabulary. An execution sidecar is refused when the vocabulary is
-* unknown (`verifierRefs` absent) — the one case the phase-1 validator cannot
-* judge, because it would read an empty list as "nothing is registered".
-*
-* One rule is applied per **row** and before any of that: a row an open commit
-* intent moves is refused whole and not resolved at all
-* ({@link openCapabilityRowRefusal}), so a row-only capability commit — which no
-* directory can name — is admitted by nothing.
-*
-* Nothing is written and nothing is thrown: every refusal is a verdict, and
-* {@link providerRefusals} turns the refusals into the lines a caller reports
-* before it refuses the whole batch. The commit gate is read once per call and
-* only refusals — nothing here reconciles, so asking an admission question
-* never settles a commit as a side effect.
-*/
-async function precheckProviders(request) {
-	const roots = await skillSearchRoots(request.view);
-	const verifierRefs = request.verifierRefs;
-	const context = skillValidationContext(request.table, verifierRefs ?? []);
-	const commitGate = await readCommitGate(request.commitLedger);
-	const capabilities = [];
-	for (const capability of request.capabilities) {
-		const rowRefusals = capabilityRowRefusals(commitGate, capability);
-		if (rowRefusals.length > 0) {
-			capabilities.push({
-				capability,
-				skills: [],
-				refusals: rowRefusals
-			});
-			continue;
-		}
-		const declared = request.table[capability]?.skills ?? [];
-		const skills = [];
-		for (const name of [...new Set(declared)]) {
-			const file = await findSkillFileIn(roots, name);
-			if (file === void 0) {
-				skills.push(undiscovered(name, roots));
-				continue;
-			}
-			const directory = dirname(file);
-			const commitRefusal = commitRefusalFor(commitGate, name, directory);
-			if (commitRefusal !== void 0) {
-				skills.push(commitRefusal);
-				continue;
-			}
-			if (verifierRefs === void 0) {
-				const loaded = await loadSkillSidecar(directory);
-				if (loaded.sidecar?.type === "execution") {
-					skills.push(unlistableVerifierRefusal(name, directory, loaded.sidecar.verifier.ref));
-					continue;
-				}
-			}
-			skills.push(await validateSkillProvider({
-				name,
-				directory
-			}, context));
-		}
-		capabilities.push({
-			capability,
-			skills
-		});
-	}
-	const providers = providerContentIdentities(capabilities);
-	return {
-		capabilities,
-		roots,
-		...verifierRefs === void 0 ? {} : { verifierRefs: [...verifierRefs] },
-		revision: registryRevision(request.table, providers)
-	};
-}
-/**
-* One capability row as it would read after a replacement, checked by the same
-* pre-check a batch is admitted under: `entry` is folded into `table` — the row
-* as `config.yml` will hold it once written — and every skill the new row grants
-* is discovered from `view` and judged by {@link validateSkillProvider}, with
-* the row's own tool labels expanding through `resolveCapabilities` as the
-* covering set for a skill that declares this row.
-*
-* The two entries that write a row share this function, so the run-time registry
-* mirror (`TaskRuntime.applyCapabilityRow`) asks exactly the question the
-* promotion gate (`EvolutionService.checkPromotion`) asked before the row
-* reached `config.yml`: one composition, one vocabulary of refusals, no entry
-* that can be replaced without being judged. `refusals` is empty for a row that
-* grants no skill or only loadable providers — and for the commit that is
-* installing its own row, whose open intent the caller exempts by name
-* (`applyCapabilityRow`'s `commitRow`); a row another open intent moves is
-* refused as a row (A6).
-*/
-async function precheckReplacedCapabilityRow(request) {
-	const precheck = await precheckProviders({
-		capabilities: [request.name],
-		table: {
-			...request.table,
-			[request.name]: request.entry
-		},
-		view: request.view,
-		...request.verifierRefs === void 0 ? {} : { verifierRefs: request.verifierRefs },
-		...request.commitLedger === void 0 ? {} : { commitLedger: request.commitLedger }
-	});
-	return {
-		precheck,
-		refusals: providerRefusals(precheck)
-	};
-}
-/**
-* The head every refusal line shares: the capability that declares the skill,
-* the skill itself, and the directory discovery found (when it found one).
-* One function, so the two renderings below can never describe the same refusal
-* differently.
-*/
-function refusalHead(capability, verdict) {
-	const where = verdict.directory === void 0 ? "" : ` (found at ${verdict.directory})`;
-	return `capability ${JSON.stringify(capability)} skill ${JSON.stringify(verdict.name)}${where}`;
-}
-/**
-* Every refused provider of one pre-check, one line each, naming the capability
-* that declares it, the skill, the directory when one was found, and every
-* defect with its code. Empty means the batch may proceed — which is a
-* statement about *loadable* providers only: this pre-check never adds a
-* capability to the closure, and knowledge/guidance verdicts are loadable
-* without being execution providers.
-*/
-function providerRefusals(precheck) {
-	return precheck.capabilities.flatMap((row) => [...(row.refusals ?? []).map((item) => `capability ${JSON.stringify(row.capability)}: ${item.code}: ${item.detail}`), ...row.skills.filter((verdict) => !verdict.valid).map((verdict) => `${refusalHead(row.capability, verdict)}: ${verdict.defects.map((item) => `${item.code}: ${item.detail}`).join("; ")}`)]);
-}
-/**
-* The same refusals, one line per defect: the shape a loud report wants, since
-* a caller reading a log needs the capability, the skill, the defect code and
-* the detail of each problem rather than a summary line per provider. The
-* load-time scan (`TaskRuntime.providerLoadReport`) prints these; admission
-* refuses a batch on {@link providerRefusals}.
-*/
-function providerDefectLines(precheck) {
-	return precheck.capabilities.flatMap((row) => [...(row.refusals ?? []).map((item) => `capability ${JSON.stringify(row.capability)}: ${item.code}: ${item.detail}`), ...row.skills.filter((verdict) => !verdict.valid).flatMap((verdict) => verdict.defects.map((item) => `${refusalHead(row.capability, verdict)}: ${item.code}: ${item.detail}`))]);
 }
 
 //#endregion
@@ -2472,10 +544,6 @@ function providerDefectLines(precheck) {
 /**
 * Whether a root budget enforces anything at all. The configuration's schema
 * materializes an absent `rootBudget` as an empty object, so the presence of an
-* object is not the question a refusal may ask: a budget with no member in force
-* is no budget, and an entry that refuses work over an unmeasurable tree would
-* otherwise refuse it for a limit this deployment never set. Every refusal that
-* is "a configured limit cannot be measured" asks this first.
 */
 function hasRootLimits(config) {
 	return config !== void 0 && (config.maxRuns !== void 0 || config.maxConcurrentWrites !== void 0);
@@ -2487,24 +555,7 @@ function instant(value) {
 }
 /**
 * The root budget a snapshot is under, or the reason none can be measured.
-*
 * The owner is the store's own root: among the parentless tasks, the one whose
-* run is bound to the root session the store id derives from
-* (`rootTaskStoreId`) — the same durable rule the recovery path uses to tell a
-* store's own root run apart from a replay's. A replay's task is parentless by
-* design and carries no such binding (its session is minted for the replay), so
-* it shares the root's total instead of claiming a budget of its own (§3.5, the
-* funding-root reference); inventing one for it would hand every experiment a
-* fresh allowance. No run naming a root session of this store means no owner,
-* and the store keeps the honest recovery diagnostic rather than a guess.
-*
-* Run ceilings come from the latest approved extension or the configuration.
-* Historical deadline fields are read by the Task store and have no execution effect.
-*
-* `reason` texts are recovery diagnostics: they say what is missing (no root,
-* no run bound to this store as its root, several such tasks, a root run with
-* no readable start) so an operator reading `task_status` knows why the tree
-* cannot be started under a budget instead of being handed a fabricated one.
 */
 function resolveRootBudget(snapshot, config) {
 	const roots = snapshot.tasks.filter((task) => task.parentTaskId === void 0);
@@ -2567,40 +618,771 @@ function firstRun(snapshot, task, storeId) {
 /**
 * Whether the persisted run count leaves room for another run.
 */
-function checkRunStart(snapshot, budget) {
-	if (budget.maxRuns !== void 0 && snapshot.runs.length >= budget.maxRuns) return {
+function checkRunStart(snapshot, budget$1) {
+	if (budget$1.maxRuns !== void 0 && snapshot.runs.length >= budget$1.maxRuns) return {
 		allowed: false,
-		reason: `the root budget allows ${budget.maxRuns} run(s) for root ${budget.rootTaskId} and the store already holds ${snapshot.runs.length}; the limit counts recorded runs so it cannot be reset by a restart`
+		reason: `the root budget allows ${budget$1.maxRuns} run(s) for root ${budget$1.rootTaskId} and the store already holds ${snapshot.runs.length}; the limit counts recorded runs so it cannot be reset by a restart`
 	};
 	return { allowed: true };
 }
 /**
 * Whether a decomposition batch of `childCount` children may be admitted. The
 * check is a reservation, not a forecast: the children will each start a run, so
-* a batch that would push the tree past `maxRuns` is refused whole — before a
-* task, a child or an event exists — rather than admitted and then started until
-* the budget runs out mid-batch.
 */
-function checkBatchAdmission(snapshot, budget, childCount) {
-	if (budget.maxRuns === void 0) return { allowed: true };
+function checkBatchAdmission(snapshot, budget$1, childCount) {
+	if (budget$1.maxRuns === void 0) return { allowed: true };
 	const total = snapshot.runs.length + childCount;
-	if (total > budget.maxRuns) return {
+	if (total > budget$1.maxRuns) return {
 		allowed: false,
-		reason: `a batch of ${childCount} child task(s) would need ${childCount} run slot(s) and the root budget allows ${budget.maxRuns} run(s) in total, of which ${snapshot.runs.length} are already recorded (${total} > ${budget.maxRuns}); the batch is refused whole, with no side effects`
+		reason: `a batch of ${childCount} child task(s) would need ${childCount} run slot(s) and the root budget allows ${budget$1.maxRuns} run(s) in total, of which ${snapshot.runs.length} are already recorded (${total} > ${budget$1.maxRuns}); the batch is refused whole, with no side effects`
 	};
 	return { allowed: true };
 }
 /**
 * Refuse a root budget this deployment cannot execute. The one such limit is
 * `maxConcurrentWrites`: the workspace registry enforces exactly one writer, so
-* a configuration asking for any other number is a hard limit nobody can honor —
-* and §3.5's rule is that asking for an unenforceable hard limit refuses to
-* start rather than starting under a limit that is not real. Everything else
-* about the shape (unknown members, negative values) is the Config schema's
-* business, checked where the configuration is loaded.
 */
 function assertRootBudgetConfig(config) {
 	if (config.maxConcurrentWrites !== void 0 && config.maxConcurrentWrites !== 1) throw new Error(`rootBudget.maxConcurrentWrites is ${config.maxConcurrentWrites}: this deployment enforces exactly 1 concurrent writer per workspace, so it cannot honor another number and refuses to start rather than run under a limit it cannot execute`);
+}
+
+//#endregion
+//#region src/skill-contract.ts
+/**
+* The sidecar file, read as JSON, named exactly here so every producer and
+* reader of a skill directory agrees on one spelling.
+*/
+const SKILL_SIDECAR_FILE = "SKILL.contract.json";
+/**
+* The sidecar contract version this build writes and reads. Like the task
+* contract's `TASK_CONTRACT_VERSION` it versions the data definition, not a
+*/
+const SKILL_CONTRACT_VERSION = 1;
+/**
+* The directories a skill may hold supporting files in. The supported shape is
+* deliberately one level deep — `<dir>/<file>` — because a deeper tree cannot
+*/
+const SUPPORTED_SKILL_RESOURCE_DIRS = ["references", "scripts"];
+/**
+* Whether one declared resource path is a path this contract can identify:
+* exactly `<dir>/<file>` with `<dir>` in {@link SUPPORTED_SKILL_RESOURCE_DIRS},
+*/
+function isSupportedSkillResourcePath(path) {
+	const segments = path.split("/");
+	if (segments.length !== 2) return false;
+	const [directory, file] = segments;
+	if (!SUPPORTED_SKILL_RESOURCE_DIRS.includes(directory)) return false;
+	return file.length > 0 && file !== "." && file !== ".." && !file.includes("\\");
+}
+const EXECUTION_FIELDS = [
+	"contractVersion",
+	"type",
+	"capabilities",
+	"precondition",
+	"inputs",
+	"outputs",
+	"requiredTools",
+	"verifier",
+	"content"
+];
+const KNOWLEDGE_FIELDS = [
+	"contractVersion",
+	"type",
+	"source",
+	"scope",
+	"content",
+	"contentCheck"
+];
+const PORT_FIELDS = [
+	"name",
+	"description",
+	"required"
+];
+const RESOURCE_FIELDS = ["path", "sha256"];
+const VERIFIER_FIELDS = ["ref"];
+const CONTENT_CHECK_FIELDS = ["kind", "command"];
+const CONTENT_FIELDS = ["skillMdSha256", "resources"];
+function isSha256Hex(value) {
+	return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+/** How an unexpected value reads in a refusal: JSON for scalars, a noun for containers. */
+function described(value) {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "an array";
+	if (typeof value === "string") return JSON.stringify(value);
+	if (typeof value === "object") return "an object";
+	return String(value);
+}
+/** What a value *is*, for the one refusal that cannot name a field (the whole sidecar). */
+function kindOf(value) {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "an array";
+	return typeof value;
+}
+function shape(reason) {
+	return {
+		code: "sidecar-shape",
+		reason
+	};
+}
+function unknownFields$1(value, allowed, where, carries) {
+	return unknownFieldKeys(value, allowed).sort().map((key) => ({
+		code: "sidecar-unknown-field",
+		reason: `${where} declares unknown field ${JSON.stringify(key)}; ${carries}`
+	}));
+}
+/** One string list: an array of non-blank names, each once, `[]` allowed unless `minItems` says otherwise. */
+function nameListDefects(value, where, missing, duplicate, minItems = 0) {
+	if (!Array.isArray(value) || minItems > 0 && value.length < minItems) return [shape(missing)];
+	const defects = [];
+	const seen = /* @__PURE__ */ new Set();
+	value.forEach((item, index) => {
+		if (!nonBlank(item)) {
+			defects.push(shape(`${where}[${index}] must be a non-blank string`));
+			return;
+		}
+		if (seen.has(item)) {
+			defects.push(shape(duplicate(item, index)));
+			return;
+		}
+		seen.add(item);
+	});
+	return defects;
+}
+/** Ports: closed objects, each list naming a port once. */
+function portDefects(value, where) {
+	if (!Array.isArray(value)) return [shape(`${where} must be an array of ports`)];
+	const defects = [];
+	const seen = /* @__PURE__ */ new Set();
+	value.forEach((port, index) => {
+		const at = `${where}[${index}]`;
+		if (!isPlainObject(port)) {
+			defects.push(shape(`${at} must be an object carrying name, description, required`));
+			return;
+		}
+		defects.push(...unknownFields$1(port, PORT_FIELDS, at, "a port carries name, description, required"));
+		if (!nonBlank(port.name)) defects.push(shape(`${at}.name must be a non-blank string`));
+		if (!nonBlank(port.description)) defects.push(shape(`${at}.description must be a non-blank string`));
+		if (typeof port.required !== "boolean") defects.push(shape(`${at}.required must be a boolean`));
+		if (nonBlank(port.name)) {
+			if (seen.has(port.name)) defects.push(shape(`${at} duplicates port ${JSON.stringify(port.name)}`));
+			seen.add(port.name);
+		}
+	});
+	return defects;
+}
+/** The content identity: exact digests, a supported path vocabulary, and one sorted list. */
+function contentDefects$1(value) {
+	if (!isPlainObject(value)) return [shape("sidecar.content must be an object carrying skillMdSha256 and resources")];
+	const defects = unknownFields$1(value, CONTENT_FIELDS, "sidecar.content", "a content identity carries skillMdSha256, resources");
+	if (!isSha256Hex(value.skillMdSha256)) defects.push(shape("sidecar.content.skillMdSha256 must be a lowercase 64-character hex digest"));
+	const resources = value.resources;
+	if (!Array.isArray(resources)) {
+		defects.push(shape("sidecar.content.resources must be an array of resource identities"));
+		return defects;
+	}
+	const seen = /* @__PURE__ */ new Set();
+	let previous;
+	resources.forEach((resource, index) => {
+		const at = `sidecar.content.resources[${index}]`;
+		if (!isPlainObject(resource)) {
+			defects.push(shape(`${at} must be an object carrying path, sha256`));
+			return;
+		}
+		defects.push(...unknownFields$1(resource, RESOURCE_FIELDS, at, "a resource identity carries path, sha256"));
+		if (!nonBlank(resource.path) || !isSupportedSkillResourcePath(resource.path)) defects.push(shape(`${at}.path ${described(resource.path)} is not a supported resource path (references/<file> or scripts/<file>)`));
+		else if (seen.has(resource.path)) defects.push(shape(`${at} duplicates ${JSON.stringify(resource.path)}`));
+		else {
+			if (previous !== void 0 && resource.path < previous) defects.push(shape(`${at} path ${JSON.stringify(resource.path)} precedes ${JSON.stringify(previous)}; the list must be sorted by path`));
+			seen.add(resource.path);
+			previous = resource.path;
+		}
+		if (!isSha256Hex(resource.sha256)) defects.push(shape(`${at}.sha256 must be a lowercase 64-character hex digest`));
+	});
+	return defects;
+}
+function verifierDefects(value) {
+	if (!isPlainObject(value)) return [shape("sidecar.verifier must be an object carrying a ref")];
+	const defects = unknownFields$1(value, VERIFIER_FIELDS, "sidecar.verifier", "a verifier reference carries ref");
+	if (!nonBlank(value.ref)) defects.push(shape("sidecar.verifier.ref must be a non-blank string"));
+	return defects;
+}
+function contentCheckDefects(value) {
+	if (!isPlainObject(value)) return [shape("sidecar.contentCheck must be an object carrying kind and command")];
+	const defects = unknownFields$1(value, CONTENT_CHECK_FIELDS, "sidecar.contentCheck", "a content check carries kind, command");
+	if (value.kind !== "command") defects.push(shape(`sidecar.contentCheck.kind ${described(value.kind)} is not one of command`));
+	if (!nonBlank(value.command)) defects.push(shape("sidecar.contentCheck.command must be a non-blank string"));
+	return defects;
+}
+/**
+* Every reason one declared sidecar is not acceptable, in field order — never
+* just the first, so one refusal names everything wrong with the declaration.
+*/
+function skillContractDefects(value) {
+	if (!isPlainObject(value)) return [shape(`the sidecar must be a JSON object, got ${kindOf(value)}`)];
+	const defects = [];
+	if (value.contractVersion === void 0) defects.push({
+		code: "sidecar-unknown-version",
+		reason: `sidecar.contractVersion is missing; this build reads and writes version ${SKILL_CONTRACT_VERSION}`
+	});
+	else if (value.contractVersion !== SKILL_CONTRACT_VERSION) defects.push({
+		code: "sidecar-unknown-version",
+		reason: `sidecar.contractVersion ${described(value.contractVersion)} is not a version this build reads (${SKILL_CONTRACT_VERSION})`
+	});
+	const type = value.type;
+	if (type !== "execution" && type !== "knowledge") {
+		defects.push(shape(`sidecar.type ${described(type)} is not one of execution, knowledge`));
+		return defects;
+	}
+	if (type === "execution") {
+		defects.push(...unknownFields$1(value, EXECUTION_FIELDS, "sidecar", `an execution sidecar carries ${EXECUTION_FIELDS.join(", ")}`));
+		defects.push(...nameListDefects(value.capabilities, "sidecar.capabilities", "sidecar.capabilities must be a non-empty array of capability names", (name, index) => `sidecar.capabilities[${index}] duplicates ${JSON.stringify(name)}`, 1));
+		if (!nonBlank(value.precondition)) defects.push(shape("sidecar.precondition must be a non-blank string"));
+		defects.push(...portDefects(value.inputs, "sidecar.inputs"));
+		defects.push(...portDefects(value.outputs, "sidecar.outputs"));
+		defects.push(...nameListDefects(value.requiredTools, "sidecar.requiredTools", "sidecar.requiredTools must be an array of tool names", (name, index) => `sidecar.requiredTools[${index}] duplicates ${JSON.stringify(name)}`));
+		defects.push(...verifierDefects(value.verifier));
+		defects.push(...contentDefects$1(value.content));
+		return defects;
+	}
+	defects.push(...unknownFields$1(value, KNOWLEDGE_FIELDS, "sidecar", `a knowledge sidecar carries ${KNOWLEDGE_FIELDS.join(", ")}`));
+	if (!nonBlank(value.source)) defects.push(shape("sidecar.source must be a non-blank string"));
+	if (!nonBlank(value.scope)) defects.push(shape("sidecar.scope must be a non-blank string"));
+	defects.push(...contentDefects$1(value.content));
+	defects.push(...contentCheckDefects(value.contentCheck));
+	return defects;
+}
+/**
+* The identity of a whole sidecar: SHA-256 over {@link canonicalize} of the
+* declared data, so key order and `undefined`-valued keys do not move it while
+*/
+function skillContractDigest(sidecar) {
+	return sha256Hex(canonicalize(sidecar));
+}
+/**
+* The identity of one content identity: SHA-256 over {@link canonicalize} of the
+* `SKILL.md` digest and the resource list. Separate from
+*/
+function skillContentDigest(content) {
+	return sha256Hex(canonicalize(content));
+}
+/**
+* The same declaration with one field replaced: `content.skillMdSha256`.
+* A same-name improvement of an execution skill changes the `SKILL.md` and
+*/
+function sidecarWithSkillMd(sidecar, skillMdSha256) {
+	if (!/^[0-9a-f]{64}$/.test(skillMdSha256)) throw new Error(`skill-contract: cannot replace sidecar content.skillMdSha256 with ${JSON.stringify(skillMdSha256)} — a content identity is a lowercase 64-character hex SHA-256, and a rewritten sidecar is a declaration a loader will have to verify against real bytes`);
+	return {
+		...sidecar,
+		content: {
+			...sidecar.content,
+			skillMdSha256
+		}
+	};
+}
+/**
+* The deterministic byte sequence of one declaration — what a file holds when
+* this build writes a sidecar.
+*/
+function serializeSkillSidecar(sidecar) {
+	return `${JSON.stringify(JSON.parse(canonicalize(sidecar)), null, 2)}\n`;
+}
+
+//#endregion
+//#region src/verified-read.ts
+/** Resolve `rel` under `base`, refusing anything that would land outside. */
+function resolveWithin(base, rel) {
+	const abs = resolve(base, rel);
+	if (abs !== base && !abs.startsWith(`${base}${sep}`)) throw new Error(`verified-read: path ${JSON.stringify(rel)} escapes ${base}`);
+	return abs;
+}
+/**
+* Walk `rel` under `root` one component at a time, refusing anything but real
+* entries: a symbolic link anywhere on the path, a non-regular entry where the
+*/
+async function walkVerified(root, rel) {
+	const abs = resolveWithin(root, rel);
+	const steps = relative(root, abs).split(sep);
+	let current = root;
+	for (const step of steps) {
+		current = join(current, step);
+		let stat$1;
+		try {
+			stat$1 = await lstat(current);
+		} catch (error) {
+			const code = error.code;
+			if (code === "ENOENT" || code === "ENOTDIR") return {
+				missing: true,
+				reason: code === "ENOTDIR" ? "a path component is not a directory" : "no such file or directory"
+			};
+			throw error;
+		}
+		if (stat$1.isSymbolicLink()) throw new Error(`verified-read: "${current}" is a symbolic link; a path and its ancestors must be real entries inside ${root}`);
+		if (current === abs ? !stat$1.isFile() : !stat$1.isDirectory()) throw new Error(`verified-read: "${current}" is not a regular ${current === abs ? "file" : "directory"}`);
+	}
+	return {
+		missing: false,
+		abs
+	};
+}
+/**
+* Read the file at `rel` under `root` as raw bytes, refusing anything but a
+* real regular file: the entry itself and every ancestor between `root` and it
+*/
+async function readVerifiedFile(root, rel) {
+	const walked = await walkVerified(root, rel);
+	if (walked.missing) throw new Error(`verified-read: ${JSON.stringify(rel)} is missing under ${root} (${walked.reason})`);
+	return readFile(walked.abs);
+}
+
+//#endregion
+//#region src/sidecar.ts
+/**
+* A capability table as a query, going through `resolveCapabilities` — the same
+* resolution admission performs — so the pre-check sees exactly the grant a
+*/
+function capabilityToolQuery(capabilities) {
+	return (capability) => {
+		let manifest;
+		try {
+			manifest = resolveCapabilities([capability], capabilities);
+		} catch (error) {
+			return {
+				known: false,
+				reason: message(error)
+			};
+		}
+		const entry = manifest.capabilities[capability];
+		if (entry === void 0) return {
+			known: false,
+			reason: `capability "${capability}" is not in the capability table`
+		};
+		return {
+			known: true,
+			tools: entry.tools,
+			mcpServers: entry.mcpServers ?? []
+		};
+	};
+}
+/** Build the pre-check context from a capability table and the registered verifier ids. */
+function skillValidationContext(capabilities, verifierRefs) {
+	return {
+		verifierRefs: [...verifierRefs].sort(),
+		capabilityTools: capabilityToolQuery(capabilities)
+	};
+}
+/**
+* The verdicts that may close an execution gap — and the only place a caller
+* needs to ask. A knowledge or guidance verdict is not in the result, so the
+*/
+function executionProviders(verdicts) {
+	return verdicts.filter((verdict) => verdict.valid && verdict.role === "execution-provider");
+}
+function defect$1(code, detail) {
+	return {
+		code,
+		detail
+	};
+}
+/** The sidecar contract's own defect codes are already named the same way, so they carry over unchanged. */
+function contractDefects$1(defects) {
+	return defects.map((item) => defect$1(item.code, item.reason));
+}
+/** Whether the bytes are text a worker can read: valid UTF-8 with no NUL byte. */
+function isText(bytes) {
+	if (bytes.includes(0)) return false;
+	try {
+		new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		return true;
+	} catch {
+		return false;
+	}
+}
+/**
+* Read the compiled bytes of one file under the skill directory, turning a
+* refusal into a named defect rather than a throw, so one broken entry does not
+*/
+async function readBytes(directory, relativePath, relative$1, defects) {
+	try {
+		const walked = await walkVerified(directory, relativePath);
+		if (walked.missing) {
+			defects.push(defect$1("content-mismatch", `${relative$1} is declared but missing from the skill directory`));
+			return;
+		}
+		return await readFile(walked.abs);
+	} catch (error) {
+		defects.push(defect$1("content-unsupported", `${relative$1} cannot be read as a real file: ${message(error)}`));
+		return;
+	}
+}
+/**
+* Walk one skill directory and describe it: which files sit at supported
+* positions with their real digests, which direct entries the supported
+*/
+async function scanSkillDirectory(directory) {
+	const scanned = {
+		skillMdPresent: false,
+		resources: [],
+		uncovered: [],
+		unsupported: [],
+		defects: []
+	};
+	let entries;
+	try {
+		entries = await readdir(directory, { withFileTypes: true });
+	} catch (error) {
+		scanned.defects.push(defect$1("skill-missing", `skill directory ${directory} cannot be read: ${message(error)}`));
+		return scanned;
+	}
+	for (const entry of entries) {
+		const name = entry.name;
+		const at = join(directory, name);
+		let info;
+		try {
+			info = await lstat(at);
+		} catch (error) {
+			scanned.defects.push(defect$1("content-unsupported", `${name} cannot be read: ${message(error)}`));
+			continue;
+		}
+		if (name === "SKILL.md") {
+			scanned.skillMdPresent = true;
+			if (info.isSymbolicLink()) {
+				scanned.defects.push(defect$1("content-unsupported", "SKILL.md is a symbolic link; a skill's SKILL.md must be a real file"));
+				continue;
+			}
+			if (!info.isFile()) {
+				scanned.defects.push(defect$1("content-unsupported", "SKILL.md is not a regular file"));
+				continue;
+			}
+			const bytes = await readBytes(directory, "SKILL.md", "SKILL.md", scanned.defects);
+			if (bytes !== void 0) {
+				scanned.skillMdSha256 = sha256Hex(bytes);
+				/**
+				* The name this file loads under, parsed by the same reader the spawn
+				* uses (`readSkillFile`): a file declaring another name, or whose
+				*/
+				try {
+					const parsed = parseSkillFile(bytes.toString("utf8"), join(directory, "SKILL.md"));
+					scanned.frontmatter = {
+						name: parsed.name,
+						description: parsed.description
+					};
+				} catch (error) {
+					scanned.defects.push(defect$1("skill-file-invalid", message(error)));
+				}
+			}
+			continue;
+		}
+		if (name === SKILL_SIDECAR_FILE) continue;
+		if (SUPPORTED_SKILL_RESOURCE_DIRS.includes(name)) {
+			if (info.isSymbolicLink()) {
+				scanned.unsupported.push(`${name}/`);
+				scanned.defects.push(defect$1("content-unsupported", `${name}/ is a symbolic link; a skill directory\'s entries must be real`));
+				continue;
+			}
+			if (!info.isDirectory()) {
+				scanned.unsupported.push(`${name}/`);
+				scanned.defects.push(defect$1("content-unsupported", `${name} is not a directory`));
+				continue;
+			}
+			let children;
+			try {
+				children = await readdir(at, { withFileTypes: true });
+			} catch (error) {
+				scanned.unsupported.push(`${name}/`);
+				scanned.defects.push(defect$1("content-unsupported", `${name}/ cannot be read: ${message(error)}`));
+				continue;
+			}
+			for (const child of children) {
+				const relative$1 = `${name}/${child.name}`;
+				let childInfo;
+				try {
+					childInfo = await lstat(join(at, child.name));
+				} catch (error) {
+					scanned.unsupported.push(relative$1);
+					scanned.defects.push(defect$1("content-unsupported", `${relative$1} cannot be read: ${message(error)}`));
+					continue;
+				}
+				if (childInfo.isSymbolicLink()) {
+					scanned.unsupported.push(relative$1);
+					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is a symbolic link; a resource must be a real file`));
+					continue;
+				}
+				if (childInfo.isDirectory()) {
+					scanned.unsupported.push(relative$1);
+					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is a directory nested deeper than the supported one-level shape (${name}/<file>)`));
+					continue;
+				}
+				if (!childInfo.isFile()) {
+					scanned.unsupported.push(relative$1);
+					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is not a regular file`));
+					continue;
+				}
+				const bytes = await readBytes(directory, relative$1, relative$1, scanned.defects);
+				if (bytes === void 0) {
+					scanned.unsupported.push(relative$1);
+					continue;
+				}
+				if (!isText(bytes)) {
+					scanned.unsupported.push(relative$1);
+					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is not UTF-8 text; a supported resource is a text file a worker can read`));
+					continue;
+				}
+				scanned.resources.push({
+					path: relative$1,
+					sha256: sha256Hex(bytes)
+				});
+			}
+			continue;
+		}
+		if (info.isSymbolicLink()) {
+			scanned.defects.push(defect$1("content-unsupported", `${name} is a symbolic link; a skill directory holds real entries only`));
+			continue;
+		}
+		scanned.uncovered.push(info.isDirectory() ? `${name}/` : name);
+	}
+	scanned.resources.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+	scanned.uncovered.sort();
+	return scanned;
+}
+/**
+* Load and check one skill directory: the directory itself, `SKILL.md`, the
+* sidecar when there is one, the identity of the bytes on disk, and the shape
+*/
+async function loadSkillSidecar(directory) {
+	let info;
+	try {
+		info = await lstat(directory);
+	} catch (error) {
+		return {
+			directory,
+			uncovered: [],
+			defects: [defect$1("skill-missing", `skill directory ${directory} cannot be read: ${message(error)}`)]
+		};
+	}
+	if (info.isSymbolicLink()) return {
+		directory,
+		uncovered: [],
+		defects: [defect$1("content-unsupported", `${directory} is a symbolic link; a skill directory must be a real directory`)]
+	};
+	if (!info.isDirectory()) return {
+		directory,
+		uncovered: [],
+		defects: [defect$1("skill-missing", `${directory} is not a directory`)]
+	};
+	const scanned = await scanSkillDirectory(directory);
+	const defects = [...scanned.defects];
+	if (!scanned.skillMdPresent) defects.push(defect$1("skill-missing", `${join(directory, "SKILL.md")} does not exist; a skill directory carries a SKILL.md`));
+	const content = scanned.skillMdSha256 === void 0 ? void 0 : {
+		skillMdSha256: scanned.skillMdSha256,
+		resources: scanned.resources
+	};
+	let sidecar;
+	let sidecarBytes;
+	try {
+		const walked = await walkVerified(directory, SKILL_SIDECAR_FILE);
+		if (!walked.missing) sidecarBytes = await readFile(walked.abs);
+	} catch (error) {
+		defects.push(defect$1("content-unsupported", `${SKILL_SIDECAR_FILE} cannot be read as a real file: ${message(error)}`));
+	}
+	if (sidecarBytes !== void 0) if (!isText(sidecarBytes)) defects.push(defect$1("sidecar-unreadable", `${SKILL_SIDECAR_FILE} is not UTF-8 text`));
+	else {
+		let declared;
+		try {
+			declared = JSON.parse(sidecarBytes.toString("utf8"));
+		} catch (error) {
+			defects.push(defect$1("sidecar-unreadable", `${SKILL_SIDECAR_FILE} is not readable JSON: ${message(error)}`));
+		}
+		if (declared !== void 0) {
+			const declaredDefects = skillContractDefects(declared);
+			defects.push(...contractDefects$1(declaredDefects));
+			if (declaredDefects.length === 0) {
+				const sidecarValue = declared;
+				sidecar = sidecarValue;
+				/**
+				* The declared identity against the bytes just read. A declaration is
+				* only worth the directory it describes, so an undeclared file at a
+				*/
+				if (content !== void 0) defects.push(...contentDefects(sidecarValue.content, content, scanned.uncovered, scanned.unsupported));
+			}
+		}
+	}
+	return {
+		directory,
+		...sidecar === void 0 ? {} : { sidecar },
+		...content === void 0 ? {} : { content },
+		...scanned.frontmatter === void 0 ? {} : { frontmatter: scanned.frontmatter },
+		uncovered: scanned.uncovered,
+		defects
+	};
+}
+/**
+* Compare a declared identity with the bytes on disk: the declared `SKILL.md`
+* digest, every declared resource, and — the other direction — every file the
+*/
+function contentDefects(declared, actual, uncovered, unsupported) {
+	const defects = [];
+	if (declared.skillMdSha256 !== actual.skillMdSha256) defects.push(defect$1("content-mismatch", `SKILL.md is not the declared content: declared ${declared.skillMdSha256}, read ${actual.skillMdSha256}`));
+	const refused = (path) => unsupported.some((entry) => entry.endsWith("/") ? path.startsWith(entry) : path === entry);
+	const actualResources = new Map(actual.resources.map((resource) => [resource.path, resource.sha256]));
+	for (const declaredResource of declared.resources) {
+		const read = actualResources.get(declaredResource.path);
+		if (read === void 0) {
+			if (refused(declaredResource.path)) continue;
+			defects.push(defect$1("content-mismatch", `${declaredResource.path} is declared but missing from the skill directory`));
+			continue;
+		}
+		if (read !== declaredResource.sha256) defects.push(defect$1("content-mismatch", `${declaredResource.path} is not the declared content: declared ${declaredResource.sha256}, read ${read}`));
+	}
+	const declaredPaths$1 = new Set(declared.resources.map((resource) => resource.path));
+	for (const resource of actual.resources) if (!declaredPaths$1.has(resource.path)) defects.push(defect$1("content-unsupported", `${resource.path} is not covered by the declared identity; the identity must name every file in the skill directory`));
+	for (const entry of uncovered) defects.push(defect$1("content-unsupported", `${entry} is not covered by the declared identity; a sidecar declares SKILL.md plus resources under ${SUPPORTED_SKILL_RESOURCE_DIRS.join("/, ")}/ only`));
+	return defects;
+}
+/**
+* The unified pre-check: one candidate provider against the deployment's
+* verifier vocabulary and capability table (guide §2.3, S1-C item 3). Every
+*/
+async function validateSkillProvider(candidate, context) {
+	const defects = [];
+	const refuse = (directory$1) => ({
+		valid: false,
+		name: candidate.name,
+		...directory$1 === void 0 ? {} : { directory: directory$1 },
+		defects
+	});
+	if (candidate.directory === void 0) {
+		defects.push(defect$1("skill-missing", `no directory was discovered for skill "${candidate.name}"; a provider without a SKILL.md on disk cannot be an execution provider`));
+		return refuse(void 0);
+	}
+	const directory = candidate.directory;
+	if (basename(directory) !== candidate.name) defects.push(defect$1("skill-name-mismatch", `skill "${candidate.name}" resolves to directory ${directory}, whose name is "${basename(directory)}"; a skill directory is named after the skill it holds`));
+	const loaded = await loadSkillSidecar(directory);
+	defects.push(...loaded.defects);
+	const content = loaded.content;
+	const frontmatter = loaded.frontmatter;
+	/**
+	* The name the file declares, checked against the name the capability grants
+	* with the spawn's own sentence. Directory naming and declared naming are two
+	*/
+	if (frontmatter !== void 0 && frontmatter.name !== candidate.name) defects.push(defect$1("skill-name-mismatch", `skill file ${join(directory, "SKILL.md")} declares name "${frontmatter.name}" but the capability grants "${candidate.name}"`));
+	if (candidate.sidecar !== void 0) {
+		const suppliedDefects = skillContractDefects(candidate.sidecar);
+		defects.push(...contractDefects$1(suppliedDefects));
+		if (loaded.sidecar === void 0) defects.push(defect$1("sidecar-mismatch", `skill "${candidate.name}" was checked against a supplied sidecar, but ${join(directory, SKILL_SIDECAR_FILE)} holds none; a declaration must describe the directory it is validated against`));
+		else if (suppliedDefects.length === 0 && skillContractDigest(loaded.sidecar) !== skillContractDigest(candidate.sidecar)) defects.push(defect$1("sidecar-mismatch", `the supplied sidecar for skill "${candidate.name}" is not the declaration in ${join(directory, SKILL_SIDECAR_FILE)}`));
+	}
+	const sidecar = loaded.sidecar ?? candidate.sidecar;
+	if (sidecar === void 0) {
+		if (defects.length > 0 || content === void 0 || frontmatter === void 0) return refuse(directory);
+		return {
+			valid: true,
+			role: "guidance",
+			name: candidate.name,
+			directory,
+			description: frontmatter.description,
+			content,
+			contentDigest: skillContentDigest(content),
+			uncovered: loaded.uncovered
+		};
+	}
+	if (sidecar.type === "execution") {
+		if (!context.verifierRefs.includes(sidecar.verifier.ref)) {
+			const registered = [...context.verifierRefs].sort();
+			defects.push(defect$1("verifier-unknown", `skill "${candidate.name}" declares execution verifier ${JSON.stringify(sidecar.verifier.ref)}, which is not registered; registered verifiers: ${registered.length === 0 ? "none" : registered.join(", ")}`));
+		}
+		const tools = /* @__PURE__ */ new Set();
+		const servers = /* @__PURE__ */ new Set();
+		let grantComplete = true;
+		for (const capability of sidecar.capabilities) {
+			const answer = context.capabilityTools(capability);
+			if (!answer.known) {
+				grantComplete = false;
+				defects.push(defect$1("capability-unknown", `skill "${candidate.name}" declares capability ${JSON.stringify(capability)}: ${answer.reason}`));
+				continue;
+			}
+			for (const tool of answer.tools) tools.add(tool);
+			for (const server of answer.mcpServers) servers.add(server);
+		}
+		if (grantComplete) {
+			/**
+			* The worker baseline is deliberately not part of the covering set: a
+			* capability must grant what the provider it carries needs, and a run
+			*/
+			const uncoveredTools = sidecar.requiredTools.filter((tool) => !tools.has(tool) && ![...servers].some((server) => tool.startsWith(`mcp__${server}__`) && tool.length > `mcp__${server}__`.length));
+			if (uncoveredTools.length > 0) {
+				const granted = [...tools].sort().join(", ");
+				defects.push(defect$1("tool-not-covered", `skill "${candidate.name}" requires tools its declared capabilities do not grant: ${[...uncoveredTools].sort().map((tool) => JSON.stringify(tool)).join(", ")}; declared capabilities ${sidecar.capabilities.join(", ")} grant: ${granted}${servers.size === 0 ? "" : ` · mounted servers: ${[...servers].sort().join(", ")}`}`));
+			}
+		}
+		if (defects.length > 0 || content === void 0 || frontmatter === void 0) return refuse(directory);
+		return {
+			valid: true,
+			role: "execution-provider",
+			name: candidate.name,
+			directory,
+			capabilities: [...sidecar.capabilities],
+			precondition: sidecar.precondition,
+			description: frontmatter.description,
+			inputs: sidecar.inputs.map((port) => ({
+				name: port.name,
+				description: port.description,
+				required: port.required
+			})),
+			outputs: sidecar.outputs.map((port) => ({
+				name: port.name,
+				description: port.description,
+				required: port.required
+			})),
+			requiredTools: [...sidecar.requiredTools],
+			verifierRef: sidecar.verifier.ref,
+			contractDigest: skillContractDigest(sidecar),
+			content,
+			contentDigest: skillContentDigest(content)
+		};
+	}
+	if (defects.length > 0 || content === void 0 || frontmatter === void 0) return refuse(directory);
+	return {
+		valid: true,
+		role: "knowledge",
+		name: candidate.name,
+		directory,
+		source: sidecar.source,
+		scope: sidecar.scope,
+		contentCheck: {
+			kind: sidecar.contentCheck.kind,
+			command: sidecar.contentCheck.command
+		},
+		description: frontmatter.description,
+		contractDigest: skillContractDigest(sidecar),
+		content,
+		contentDigest: skillContentDigest(content)
+	};
+}
+/**
+* The registry revision: SHA-256 over {@link canonicalize} of the capability
+* table (each row sorted by name, carrying its skills, the tool labels it
+*/
+function registryRevision(capabilities, providers) {
+	return sha256Hex(canonicalize({
+		capabilities: Object.keys(capabilities).sort().map((name) => {
+			const entry = capabilities[name];
+			const answers = capabilityToolQuery(capabilities)(name);
+			return {
+				name,
+				skills: [...new Set(entry.skills ?? [])].sort(),
+				declaredTools: [...new Set(entry.tools ?? [])].sort(),
+				tools: answers.known ? [...new Set(answers.tools)].sort() : [],
+				mcpServers: answers.known ? [...new Set(answers.mcpServers)].sort() : [],
+				...entry.preset === void 0 ? {} : { preset: entry.preset },
+				...entry.permission === void 0 ? {} : { permission: entry.permission }
+			};
+		}),
+		providers: providers.map((provider) => ({
+			name: provider.name,
+			contractDigest: provider.contractDigest
+		})).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+	}));
 }
 
 //#endregion
@@ -2610,19 +1392,9 @@ const RUN_BINDING_SKILLS_DIR = "skills";
 /**
 * Where run bindings are materialized unless the deployment says otherwise:
 * `<DSH_HOME or ~/.dsh>/singularity/run-bindings`, resolved per call so a test
-* (or a deployment) that moves `DSH_HOME` moves the snapshots with it.
-*
-* Outside the worker's checkout on purpose: the run's cwd is where a worker
-* writes, and content it can rewrite under itself would make "the worker loaded
-* the bound bytes" unverifiable. A snapshot is re-checked against its digest on
-* every read, so even a writer that reaches it cannot make it pass for
-* something else — but the ordinary case should not depend on that.
 */
 function defaultRunBindingRoot() {
 	return join(process.env.DSH_HOME !== void 0 && process.env.DSH_HOME.length > 0 ? process.env.DSH_HOME : join(homedir(), ".dsh"), "singularity", "run-bindings");
-}
-function message$4(error) {
-	return error instanceof Error ? error.message : String(error);
 }
 /** The identity one accepted verdict contributes to a run's record. */
 function skillBinding(provider) {
@@ -2640,18 +1412,6 @@ function skillBinding(provider) {
 /**
 * The providers one run selects: every accepted verdict of the run's own rows,
 * one entry per skill name, carrying the rows that grant it.
-*
-* A row whose declared skill has no accepted verdict is a refusal, not a
-* partial selection: such a skill would be resolved by discovery at spawn —
-* exactly the mutable production path this module exists to close — so the run
-* fails rather than loading bytes nothing judged. (Admission already refuses
-* such a batch; this is the same rule where the run is created, so a caller
-* that hands the cascade its own pre-check cannot slip past it.)
-*
-* A row the pre-check refused **as a row** (A6 — the capability an open
-* evolution commit intent moves) contributes nothing at all: it was never
-* resolved, so its declared skills are refused with the row's own reason rather
-* than reported as names nothing was read for.
 */
 function selectedProviders(providers, rows, declaredBy) {
 	if (providers === void 0) return [];
@@ -2659,6 +1419,10 @@ function selectedProviders(providers, rows, declaredBy) {
 	const refused = /* @__PURE__ */ new Map();
 	for (const row of providers.capabilities) {
 		if (!rows.includes(row.capability)) continue;
+		/**
+		* A row an open evolution commit intent moves was refused before it was
+		* resolved (A6): its declared skills are refused with the row's own reason,
+		*/
 		if ((row.refusals ?? []).length > 0) {
 			for (const name of declaredBy(row.capability)) refused.set(name, [...refused.get(name) ?? [], ...row.refusals]);
 			continue;
@@ -2688,10 +1452,12 @@ function selectedProviders(providers, rows, declaredBy) {
 }
 /** The granted MCP servers' identity: the registry key and the template it resolved to, or `null` when the registry holds no such key. */
 function mcpServerBindings(manifest, registry) {
-	const names = [];
-	for (const entry of Object.values(manifest.capabilities)) for (const name of entry.mcpServers ?? []) if (!names.includes(name)) names.push(name);
-	return names.map((serverName) => {
+	return manifestMcpServers(manifest).map((serverName) => {
 		const template = registry[serverName];
+		/**
+		* Canonical JSON, the same identity rule the registry revision and the task
+		* contract use: a template edited in any way moves the digest, and a mere
+		*/
 		return {
 			serverName,
 			templateDigest: template === void 0 ? null : sha256Hex(canonicalize(template))
@@ -2700,13 +1466,7 @@ function mcpServerBindings(manifest, registry) {
 }
 /**
 * Copy one selected provider's admitted bytes into the run's snapshot.
-*
 * Every file is read through the verified walk (a link or a wrong type anywhere
-* on the path is refused, never followed) and hashed against the identity the
-* pre-check recorded before it is written, and the sidecar is carried verbatim
-* after its own digest and shape are checked — the declaration a reader sees in
-* the snapshot is the declaration the provider was validated against, not a
-* fresh parse that could differ.
 */
 async function materializeProvider(provider, snapshotRoot, runId) {
 	const { verdict } = provider;
@@ -2724,7 +1484,7 @@ async function materializeProvider(provider, snapshotRoot, runId) {
 		try {
 			bytes = await readVerifiedFile(verdict.directory, file.rel);
 		} catch (error) {
-			throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${message$4(error)}`);
+			throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${message(error)}`);
 		}
 		const read = sha256Hex(bytes);
 		if (read !== file.sha256) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${file.rel} at ${verdict.directory} is not the admitted content (admitted ${file.sha256}, read ${read}); the provider changed after it was judged`);
@@ -2737,13 +1497,13 @@ async function materializeProvider(provider, snapshotRoot, runId) {
 	try {
 		sidecarBytes = await readVerifiedFile(verdict.directory, SKILL_SIDECAR_FILE);
 	} catch (error) {
-		throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${message$4(error)}`);
+		throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${message(error)}`);
 	}
 	let declared;
 	try {
 		declared = JSON.parse(sidecarBytes.toString("utf8"));
 	} catch (error) {
-		throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${SKILL_SIDECAR_FILE} is not readable JSON: ${message$4(error)}`);
+		throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${SKILL_SIDECAR_FILE} is not readable JSON: ${message(error)}`);
 	}
 	const defects = skillContractDefects(declared);
 	if (defects.length > 0) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${verdict.directory} is not a valid sidecar (${defects.map((item) => `${item.code}: ${item.reason}`).join("; ")})`);
@@ -2754,21 +1514,6 @@ async function materializeProvider(provider, snapshotRoot, runId) {
 /**
 * Bind one run's content: identify the providers its admission judged,
 * materialize their admitted bytes, and verify the snapshot against the record
-* before it is handed back to be stored.
-*
-* Returns `undefined` for a run that has capability rows but no pre-check — a
-* caller that assembled its plan itself. Such a run's grant resolves its skills
-* at spawn through the deployment's own discovery, which is exactly the mutable
-* path this module exists to close, so **nothing is claimed**: the run records no
-* binding at all rather than a record that looks authoritative and describes
-* bytes nobody judged. Every production entry runs the pre-check, so this is the
-* hand-built-caller case only.
-*
-* Throws — with the skill or the path named — when the admitted bytes are no
-* longer there, when the deployment cannot materialize at all, or when the
-* snapshot does not read back as the record describes it. A throw means the run
-* records no binding and loads no content: there is no state in which a run
-* claims content it did not load.
 */
 async function bindRunProviders(request) {
 	const rows = Object.keys(request.manifest.capabilities);
@@ -2787,9 +1532,13 @@ async function bindRunProviders(request) {
 	const snapshotRoot = join(runDirectory, RUN_BINDING_SKILLS_DIR);
 	await mkdir(dirname(runDirectory), { recursive: true });
 	try {
+		/**
+		* The run's own directory is created exclusively: an existing one belongs to
+		* a run that already bound (and is re-checked, never overwritten), or to
+		*/
 		await mkdir(runDirectory);
 	} catch (error) {
-		throw new Error(`run "${request.runId}" cannot bind content: ${runDirectory} already exists (${message$4(error)}); a run materializes once`);
+		throw new Error(`run "${request.runId}" cannot bind content: ${runDirectory} already exists (${message(error)}); a run materializes once`);
 	}
 	try {
 		for (const provider of selected) await materializeProvider(provider, snapshotRoot, request.runId);
@@ -2817,28 +1566,6 @@ async function bindRunProviders(request) {
 /**
 * Re-check one run's binding against the bytes its snapshot holds now — the read
 * a later reader (an old run's summary, a re-entry, a recovery path) performs
-* before trusting the record.
-*
-* The check is the loader the pre-check uses, so "the snapshot is the admitted
-* content" is judged by the same rules that admitted it: the `SKILL.md` and the
-* declared resources must hash to the recorded content identity, the sidecar to
-* the recorded contract identity, the frontmatter must declare the skill's own
-* name, and the snapshot root must hold exactly the recorded skills — an extra
-* directory would be registered into a worker's layer, so it is reported rather
-* than ignored.
-*
-* One more thing is re-read for a guidance skill: the loader names the entries
-* of its directory that the content identity does not cover (the same list
-* admission recorded as `uncovered`), and a snapshot must hold its bound content
-* only. An entry that appeared there since admission is therefore reported with
-* its name — the record described a directory that does not match these bytes —
-* while an entry the record lists as uncovered and absent from the snapshot is
-* simply a correct snapshot: materialization copies the identity's files, so a
-* source directory's uncovered entries never reach a run.
-*
-* Returns `undefined` for a record that names no snapshot: a run that loaded no
-* content (a deterministic criteria replay, a run with no provider) has nothing
-* to re-read, which is not the same as content that failed to re-read.
 */
 async function readRunBinding(binding) {
 	const root = binding.snapshotRoot;
@@ -2851,7 +1578,7 @@ async function readRunBinding(binding) {
 		entries = (await readdir(root, { withFileTypes: true })).map((entry) => entry.name);
 	} catch (error) {
 		entries = [];
-		rootDefects.push(`${root} cannot be read: ${message$4(error)}; the content this run was bound to is not available`);
+		rootDefects.push(`${root} cannot be read: ${message(error)}; the content this run was bound to is not available`);
 	}
 	for (const name of entries) if (!recorded.has(name)) rootDefects.push(`${join(root, name)} is not a skill this run's record names; a worker's skill layer would register it, so it is reported rather than ignored`);
 	for (const skill of binding.skills) {
@@ -2866,6 +1593,10 @@ async function readRunBinding(binding) {
 			else if (loaded.frontmatter !== void 0 && loaded.frontmatter.name !== skill.name) defects.push(`skill-name-mismatch: skill file ${join(root, skill.name, "SKILL.md")} declares name "${loaded.frontmatter.name}" but the record binds "${skill.name}"`);
 			const declared = loaded.sidecar === void 0 ? null : skillContractDigest(loaded.sidecar);
 			if (declared !== skill.contractDigest) defects.push(`sidecar-mismatch: the declaration in ${join(root, skill.name)} is not the one the run was bound to: bound ${skill.contractDigest ?? "none"}, read ${declared ?? "none"}`);
+			/**
+			* What a guidance skill's identity does *not* cover, re-read against the
+			* snapshot: the loader names the directory's root entries outside its
+			*/
 			if (skill.role === "guidance" && loaded.sidecar === void 0) for (const entry of [...loaded.uncovered].sort()) {
 				const noted = skill.uncovered.includes(entry) ? "; this run's record lists it as uncovered in the source skill, and a snapshot carries bound content only" : "";
 				defects.push(`content-mismatch: ${join(root, skill.name)} holds ${JSON.stringify(entry)}, which the content identity this run is bound to does not cover${noted}`);
@@ -2886,19 +1617,1511 @@ async function readRunBinding(binding) {
 }
 
 //#endregion
+//#region src/question.ts
+/**
+* The `m-` identity one question's message carries: derived from the question id,
+* never minted. A retry — in this process or after a restart — states the same
+*/
+function questionMessageIdOf(questionId) {
+	return `m-${questionId}`;
+}
+/** The `m-` identity one answer's message carries, derived from the answer id for the same reason ({@link questionMessageIdOf}). */
+function answerMessageIdOf(answerId) {
+	return `m-${answerId}`;
+}
+/**
+* The arguments object one cited `tool/call` must hold: a JSON object, refused by
+* name when it is not. Exported for the same reason this module's other pure
+*/
+function parseCallArguments(body) {
+	let parsed;
+	try {
+		parsed = JSON.parse(body.arguments);
+	} catch (error) {
+		throw new Error(`task-runtime: the arguments of the cited "${body.name}" call are not JSON (${message(error)}); a body that cannot be parsed is not a citation`);
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error(`task-runtime: the arguments of the cited "${body.name}" call are not a JSON object`);
+	return parsed;
+}
+/** One non-empty string field of a cited call's arguments, refused by name when it is absent or blank. */
+function requiredString(args, field, where) {
+	const value = args[field];
+	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`task-runtime: ${where} requires a non-empty "${field}" in its own arguments; the call carries ${JSON.stringify(value)}`);
+	return value;
+}
+/** One non-empty string the *caller* claims; a caller that cannot state its own identity is refused before anything is read. */
+function claimedString(value, field, toolName) {
+	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`task-runtime: ${toolName} needs a non-empty "${field}" from its caller; it received ${JSON.stringify(value)}`);
+	return value;
+}
+/** How one boolean argument reads: absent takes `absent`, a non-boolean is refused (never coerced). */
+function booleanArgument(args, field, absent, where) {
+	const value = args[field];
+	if (value === void 0) return absent;
+	if (typeof value !== "boolean") throw new Error(`task-runtime: ${where} carries "${field}": ${JSON.stringify(value)}, which is not a boolean`);
+	return value;
+}
+/**
+* Locate and read back the caller's *own* `tool/call`, by registration id.
+* The Session comes from the caller's identity (its run binding), never from the
+*/
+async function readOwnCall(deps, callerSessionId, callId, toolName) {
+	if (callId.length === 0) throw new Error(`task-runtime: ${toolName} needs the registration id of its own call to cite its body`);
+	let log;
+	try {
+		log = await deps.sessionQuery.readSession(SessionId(callerSessionId));
+	} catch (error) {
+		throw new Error(`task-runtime: ${toolName} cannot read session "${callerSessionId}" to locate its own call "${callId}": ${message(error)}`, { cause: error });
+	}
+	const ref = toolCallRefIn(log, callId);
+	if (ref === void 0) throw new Error(`task-runtime: session "${callerSessionId}" holds no tool/call "${callId}"; ${toolName} cites the call it is answering for, and a caller cannot cite somebody else's call or a call that was never made`);
+	let body;
+	try {
+		body = await deps.messages.readToolCallBody(ref);
+	} catch (error) {
+		throw new Error(`task-runtime: ${toolName} could not read back the body of its own call "${callId}" (${message(error)})`, { cause: error });
+	}
+	if (body.name !== toolName) throw new Error(`task-runtime: call "${callId}" in session "${callerSessionId}" is "${body.name}", not "${toolName}"; the cited body is the one that was sent`);
+	return {
+		...body,
+		ref
+	};
+}
+/** The body one ask cites, read back from the caller's own Session and checked against the claim the call makes. */
+async function checkAskBody(deps, caller, request) {
+	const body = await readOwnCall(deps, caller.sessionId, request.callId, "task_ask_parent");
+	const args = parseCallArguments(body);
+	const claimedKey = claimedString(request.requestKey, "requestKey", "task_ask_parent");
+	const actualKey = requiredString(args, "requestKey", "task_ask_parent");
+	if (actualKey !== claimedKey) throw new Error(`task-runtime: task_ask_parent claims request key "${claimedKey}", but the cited call "${request.callId}" asked under "${actualKey}"; the arguments the sender wrote are the only request key the store may record`);
+	const blocking = booleanArgument(args, "blocking", true, "task_ask_parent");
+	if (request.blocking !== void 0 && request.blocking !== blocking) throw new Error(`task-runtime: task_ask_parent claims blocking=${String(request.blocking)}, but the cited call "${request.callId}" declared ${String(blocking)}; a caller cannot record a blocking declaration its own message does not carry`);
+	return {
+		ref: body.ref,
+		digest: sha256Hex(body.arguments),
+		requestKey: actualKey,
+		question: requiredString(args, "question", "task_ask_parent"),
+		blocking
+	};
+}
+/** The body one answer cites, read back from the answering Session and checked against the claim the call makes. */
+async function checkAnswerBody(deps, caller, request) {
+	const body = await readOwnCall(deps, caller.sessionId, request.callId, "task_answer");
+	const args = parseCallArguments(body);
+	const claimedQuestion = claimedString(request.questionId, "questionId", "task_answer");
+	const actualQuestion = requiredString(args, "questionId", "task_answer");
+	if (actualQuestion !== claimedQuestion) throw new Error(`task-runtime: task_answer claims question "${claimedQuestion}", but the cited call "${request.callId}" answers "${actualQuestion}"; a call answers the question its own message names`);
+	const claimedKey = claimedString(request.requestKey, "requestKey", "task_answer");
+	const actualKey = requiredString(args, "requestKey", "task_answer");
+	if (actualKey !== claimedKey) throw new Error(`task-runtime: task_answer claims request key "${claimedKey}", but the cited call "${request.callId}" answered under "${actualKey}"`);
+	if (args.resolves === void 0) throw new Error(`task-runtime: task_answer requires a boolean "resolves" in its own arguments; the cited call "${request.callId}" carries none`);
+	const resolves = booleanArgument(args, "resolves", false, "task_answer");
+	if (request.resolves !== resolves) throw new Error(`task-runtime: task_answer claims resolves=${String(request.resolves)}, but the cited call "${request.callId}" declared ${String(resolves)}; an answer releases exactly what its own message declares`);
+	return {
+		ref: body.ref,
+		digest: sha256Hex(body.arguments),
+		questionId: actualQuestion,
+		requestKey: actualKey,
+		answer: requiredString(args, "answer", "task_answer"),
+		resolves
+	};
+}
+/**
+* Read one *recorded* citation back for the text a message carries. This is the
+* record's own `(session, seq)` — not the call in hand — so a retry delivers
+*/
+async function recordedText(deps, ref, field, where) {
+	let body;
+	try {
+		body = await deps.messages.readToolCallBody({
+			sessionId: SessionId(ref.sessionId),
+			seq: ref.seq
+		});
+	} catch (error) {
+		throw new Error(`task-runtime: the recorded body of ${where} could not be read from session "${ref.sessionId}" seq ${ref.seq}: ${message(error)}`, { cause: error });
+	}
+	return requiredString(parseCallArguments(body), field, `the recorded ${where}`);
+}
+/**
+* Compose and deliver one recorded message, reporting rather than throwing: by
+* this point the store's record is durable, so a delivery that cannot be decided
+*/
+async function deliverRecorded(deps, record) {
+	try {
+		const intent = {
+			targetSessionId: SessionId(record.targetSessionId),
+			senderSessionId: SessionId(record.senderSessionId),
+			messageId: record.messageId,
+			text: record.render(await recordedText(deps, record.ref, record.field, record.where))
+		};
+		const delivery = await deps.messages.ensureAgentMessageDelivered(intent);
+		return {
+			messageId: delivery.messageId,
+			status: delivery.status
+		};
+	} catch (error) {
+		return {
+			messageId: record.messageId,
+			status: "refused",
+			reason: message(error)
+		};
+	}
+}
+/**
+* The run one id names, or a refusal: every caller here reads a fact whose run
+* the store has already checked, so a missing one is a defect of the snapshot,
+*/
+function runOf(snapshot, runId, where) {
+	const run = snapshot.runs.find((candidate) => candidate.runId === runId);
+	if (run === void 0) throw new Error(`task-runtime: ${where} names run "${runId}", which the store's snapshot does not hold`);
+	return run;
+}
+/**
+* Ask one's direct parent (A4 §F.1): the `task_ask_parent` entry's whole effect.
+* Read the body → commit the intent → recompute the block → deliver under the
+*/
+async function askParentQuestion(deps, caller, request) {
+	const checked = await checkAskBody(deps, caller, request);
+	const ask = {
+		childRunId: caller.runId,
+		requestKey: checked.requestKey,
+		questionDigest: checked.digest,
+		questionRef: {
+			sessionId: caller.sessionId,
+			seq: checked.ref.seq
+		},
+		messageId: questionMessageIdOf(questionIdOf({
+			childRunId: caller.runId,
+			requestKey: checked.requestKey
+		})),
+		blocking: checked.blocking
+	};
+	const stored = await deps.task.askParentQuestionIn(caller.storeId, ask, caller.actor);
+	const snapshot = await deps.task.snapshotIn(caller.storeId);
+	deps.gate.setQuestionsBlocked(caller.sessionId, blockingQuestionsOf(snapshot, stored.question.childRunId).length > 0);
+	const parentRun = runOf(snapshot, stored.question.parentRunId, `question "${stored.question.questionId}"`);
+	const delivery = await deliverRecorded(deps, {
+		messageId: stored.question.messageId,
+		targetSessionId: parentRun.sessionId,
+		senderSessionId: caller.sessionId,
+		ref: stored.question.questionRef,
+		field: "question",
+		where: "the question",
+		render: (written) => questionMessageText(stored.question.questionId, written)
+	});
+	return {
+		question: stored.question,
+		created: stored.created,
+		delivery
+	};
+}
+/**
+* Answer one child's question (A4 §F.1): the `task_answer` entry's whole effect.
+* The answering run is the caller's own — the store refuses an answer from any
+*/
+async function answerParentQuestion(deps, caller, request) {
+	const checked = await checkAnswerBody(deps, caller, request);
+	const answer = {
+		questionId: checked.questionId,
+		parentRunId: caller.runId,
+		requestKey: checked.requestKey,
+		answerDigest: checked.digest,
+		resolves: checked.resolves,
+		answerRef: {
+			sessionId: caller.sessionId,
+			seq: checked.ref.seq
+		},
+		messageId: answerMessageIdOf(answerIdOf({
+			questionId: checked.questionId,
+			requestKey: checked.requestKey
+		}))
+	};
+	const stored = await deps.task.answerParentQuestionIn(caller.storeId, answer, caller.actor);
+	const snapshot = await deps.task.snapshotIn(caller.storeId);
+	const question = questionOf(snapshot, stored.answer.questionId);
+	if (question === void 0) throw new Error(`task-runtime: answer "${stored.answer.answerId}" was recorded, but its question is not in the store's snapshot; the block and the delivery cannot be decided from a fact the snapshot does not hold`);
+	const childRun = runOf(snapshot, question.childRunId, `question "${question.questionId}"`);
+	if (stored.answer.resolves) deps.gate.setQuestionsBlocked(childRun.sessionId, blockingQuestionsOf(snapshot, question.childRunId).length > 0);
+	const delivery = await deliverRecorded(deps, {
+		messageId: stored.answer.messageId,
+		targetSessionId: childRun.sessionId,
+		senderSessionId: caller.sessionId,
+		ref: stored.answer.answerRef,
+		field: "answer",
+		where: "the answer",
+		render: (written) => answerMessageText(stored.answer.answerId, stored.answer.questionId, written)
+	});
+	return {
+		answer: stored.answer,
+		created: stored.created,
+		delivery
+	};
+}
+/**
+* What one store's question facts still owe a message, derived from its own
+* snapshot and nothing else.
+*/
+function pendingQuestionMessages(snapshot) {
+	const index = snapshot.questions;
+	if (index === void 0) throw new Error("task-runtime: this store's snapshot carries no question index, so its pending question messages cannot be read");
+	const open = /* @__PURE__ */ new Set();
+	for (const run of snapshot.runs) for (const question of openQuestionsOf(snapshot, run.runId)) open.add(question.questionId);
+	const messages = [];
+	const refused = [];
+	for (const question of index.all) {
+		const subject = `question "${question.questionId}"`;
+		const childRun = snapshot.runs.find((run) => run.runId === question.childRunId);
+		const parentRun = snapshot.runs.find((run) => run.runId === question.parentRunId);
+		if (childRun === void 0 || parentRun === void 0) {
+			refused.push({
+				subject,
+				messageId: question.messageId,
+				status: "refused",
+				reason: "the store holds the question without both of its runs, so neither the ask nor its answers can be addressed"
+			});
+			continue;
+		}
+		if (open.has(question.questionId)) messages.push({
+			subject,
+			kind: "question",
+			questionId: question.questionId,
+			messageId: question.messageId,
+			ref: question.questionRef,
+			senderSessionId: childRun.sessionId,
+			targetSessionId: parentRun.sessionId
+		});
+		if (childRun.status !== "running") continue;
+		for (const answer of question.answers ?? []) messages.push({
+			subject: `answer "${answer.answerId}" for question "${question.questionId}"`,
+			kind: "answer",
+			questionId: question.questionId,
+			answerId: answer.answerId,
+			messageId: answer.messageId,
+			ref: answer.answerRef,
+			senderSessionId: parentRun.sessionId,
+			targetSessionId: childRun.sessionId
+		});
+	}
+	return {
+		messages,
+		refused
+	};
+}
+/**
+* Reconcile the deliveries one store's question facts still owe (§F.1's crash
+* recovery): read each pending body from its *recorded* citation, then hand the
+*/
+async function reconcileQuestionDeliveries(deps, storeId) {
+	const pending = pendingQuestionMessages(await deps.task.snapshotIn(storeId));
+	const composed = [];
+	const subjects = [];
+	const unreadable = /* @__PURE__ */ new Map();
+	for (const pendingMessage of pending.messages) {
+		const subject = pendingMessage.subject;
+		try {
+			subjects.push(subject);
+			composed.push({
+				targetSessionId: SessionId(pendingMessage.targetSessionId),
+				senderSessionId: SessionId(pendingMessage.senderSessionId),
+				messageId: pendingMessage.messageId,
+				text: pendingMessage.kind === "question" ? questionMessageText(pendingMessage.questionId, await recordedText(deps, pendingMessage.ref, "question", "the question")) : answerMessageText(pendingMessage.answerId, pendingMessage.questionId, await recordedText(deps, pendingMessage.ref, "answer", "the answer"))
+			});
+		} catch (error) {
+			subjects.pop();
+			unreadable.set(pendingMessage.messageId, {
+				subject,
+				messageId: pendingMessage.messageId,
+				status: "refused",
+				reason: message(error)
+			});
+		}
+	}
+	const settled = composed.length === 0 ? [] : await deps.messages.reconcileAgentMessageDeliveries(composed);
+	const reported = /* @__PURE__ */ new Map();
+	settled.forEach((report, index) => {
+		reported.set(report.messageId, {
+			subject: subjects[index],
+			messageId: report.messageId,
+			status: report.status,
+			...report.reason === void 0 ? {} : { reason: report.reason }
+		});
+	});
+	return [...pending.refused, ...pending.messages.flatMap((pendingMessage) => {
+		const record = reported.get(pendingMessage.messageId) ?? unreadable.get(pendingMessage.messageId);
+		return record === void 0 ? [] : [record];
+	})];
+}
+/**
+* Recompute the question block of every run that asked the run just settled —
+* the *fourth* moment the facts behind a block can move, and the one that has no
+*/
+function releaseAskingSessions(gate$1, snapshot, settledRunId) {
+	const index = snapshot.questions;
+	/**
+	* A snapshot without a question index cannot answer "what asked this run", and
+	* a settlement must not fail on that: the store's own facts are unchanged, and
+	*/
+	if (index === void 0) return;
+	const asking = /* @__PURE__ */ new Map();
+	for (const question of index.all) {
+		if (question.parentRunId !== settledRunId) continue;
+		const childRun = snapshot.runs.find((run) => run.runId === question.childRunId);
+		if (childRun === void 0 || childRun.status !== "running") continue;
+		asking.set(childRun.sessionId, childRun.runId);
+	}
+	for (const [sessionId, childRunId] of asking) {
+		const blocked = blockingQuestionsOf(snapshot, childRunId).length > 0;
+		/**
+		* Only a changed value is worth a decision: the gate's token is what drops a
+		* store-derived value read concurrently, and re-pushing the state a session
+		*/
+		if (gate$1.questionsBlocked(sessionId) !== blocked) gate$1.setQuestionsBlocked(sessionId, blocked);
+	}
+}
+/**
+* Push the question block every run in one snapshot implies onto the gate, under
+* the gate's own token rule — the recovery pass's half of §F.1's "restart from
+*/
+function applyStoreQuestionBlocking(gate$1, snapshot, tokenOf) {
+	for (const run of snapshot.runs) gate$1.applyStoreQuestionsBlocked(run.sessionId, blockingQuestionsOf(snapshot, run.runId).length > 0, tokenOf(run.sessionId));
+}
+/**
+* Whether one run still owes or waits for coordination: no unresolved blocking
+* question of its own, and no question of a child's it has not answered. The
+*/
+function pendingCoordinationOf(snapshot, runId) {
+	return [...openQuestionsOf(snapshot, runId), ...questionsAwaitingAnswerOf(snapshot, runId)];
+}
+
+//#endregion
+//#region src/workspace.ts
+/** The directory under a deployment's run-binding root that holds ownership markers (§3.4). */
+const WORKSPACE_OWNERS_DIR = "workspace-owners";
+/**
+* A workspace that cannot be claimed because something already holds it — or
+* because a marker exists that cannot be read as a holder. Carries the three
+*/
+var WorkspaceBusyError = class extends Error {
+	workspace;
+	owner;
+	since;
+	constructor(workspace, owner, since, detail) {
+		const held = owner === void 0 ? `a marker exists but names no holder: ${detail}` : `held by ${describeOwner(owner)} since ${since ?? owner.since} — ${detail}`;
+		super(`workspace ${workspace} is busy: ${held}`);
+		this.name = "WorkspaceBusyError";
+		this.workspace = workspace;
+		this.owner = owner;
+		this.since = since;
+	}
+};
+/** One line naming an owner the way every diagnostic in this module names it. */
+function describeOwner(owner) {
+	const parts = [`kind ${owner.kind}`, `store ${owner.storeId}`];
+	if (owner.taskId !== void 0) parts.push(`task ${owner.taskId}`);
+	if (owner.runId !== void 0) parts.push(`run ${owner.runId}`);
+	if (owner.batchId !== void 0) parts.push(`batch ${owner.batchId}`);
+	return parts.join(" ");
+}
+/**
+* The identity of an owner as a stack compares it: every declared field, `since`
+* included. Strict on purpose — two claims by the same run at different instants
+*/
+function ownerKey(owner) {
+	return JSON.stringify([
+		owner.kind,
+		owner.storeId,
+		owner.taskId ?? null,
+		owner.runId ?? null,
+		owner.batchId ?? null,
+		owner.since
+	]);
+}
+/**
+* Resolve a checkout path the way ownership keys it: absolute, with symbolic
+* links resolved, so the two spellings of one directory cannot become two
+*/
+async function normalizeWorkspacePath(path) {
+	try {
+		return await realpath(resolve(path));
+	} catch (error) {
+		throw new Error(`workspace ${path} cannot be resolved to a real path: ${message(error)}`);
+	}
+}
+/**
+* The kernel's start-time token for `pid`, or `undefined` when it cannot be read
+* (a non-Linux platform, a pid that is gone, a process this user may not stat).
+*/
+async function readProcessStartTime(pid) {
+	let stat$1;
+	try {
+		stat$1 = await readFile(`/proc/${pid}/stat`, "utf8");
+	} catch {
+		return;
+	}
+	const close = stat$1.lastIndexOf(")");
+	if (close < 0) return void 0;
+	const starttime = stat$1.slice(close + 1).trim().split(/\s+/)[19];
+	return starttime === void 0 || starttime.length === 0 ? void 0 : starttime;
+}
+/** True when `pid` is a live process this user can signal; EPERM means another user's live process, which counts as alive. */
+function pidIsAlive(pid) {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return error.code === "EPERM";
+	}
+}
+/**
+* How many marker writes this process has started; it names each write's
+* temporary file. Two chains mutate one workspace's marker at the same time in a
+*/
+let markerWriteSeq = 0;
+/** Parse a marker file's bytes; anything that is not a well-formed marker is reported, never repaired. */
+function parseMarker(raw, file) {
+	let declared;
+	try {
+		declared = JSON.parse(raw);
+	} catch (error) {
+		return {
+			kind: "unreadable",
+			reason: `${file} is not readable JSON (${message(error)}); an unreadable marker is not evidence that a workspace is free`
+		};
+	}
+	if (declared === null || typeof declared !== "object") return {
+		kind: "unreadable",
+		reason: `${file} does not hold a marker object`
+	};
+	const candidate = declared;
+	if (typeof candidate.pid !== "number" || candidate.owner === null || typeof candidate.owner !== "object" || typeof candidate.path !== "string") return {
+		kind: "unreadable",
+		reason: `${file} does not name a pid and an owner; only a human should decide what to do with it`
+	};
+	const owner = candidate.owner;
+	return {
+		kind: "held",
+		marker: {
+			path: candidate.path,
+			pid: candidate.pid,
+			...typeof candidate.processStartedAt === "string" ? { processStartedAt: candidate.processStartedAt } : {},
+			owner,
+			since: typeof candidate.since === "string" ? candidate.since : owner.since
+		}
+	};
+}
+/**
+* The in-process and on-disk ownership of a deployment's workspaces. One
+* instance per runtime; `close()` releases what this process still holds.
+*/
+/**
+* Release the layer on top of one workspace's stack, when `holds` says it is the
+* caller's. The comparison is the caller's own identity rule — a caller that
+*/
+async function releaseLayer(registry, workspace, holds) {
+	const top = registry.ownerOf(workspace);
+	if (top === void 0) return { released: false };
+	if (!holds(top)) return {
+		released: false,
+		conflict: top
+	};
+	await registry.release(workspace, top);
+	return { released: true };
+}
+var WorkspaceRegistry = class {
+	markerRoot;
+	pid;
+	stacks = /* @__PURE__ */ new Map();
+	/**
+	* One marker-mutation chain per workspace: every write and delete joins the
+	* tail of its workspace's chain, so overlapping mutations of one marker land
+	*/
+	markerWrites = /* @__PURE__ */ new Map();
+	constructor(options) {
+		this.markerRoot = options.markerRoot;
+		this.pid = options.pid ?? process.pid;
+	}
+	/** Queue one marker mutation after the ones this workspace already has in flight, in call order. */
+	queueMarkerMutation(workspace, mutate) {
+		return enqueueByKey(this.markerWrites, workspace, mutate);
+	}
+	/** Where one workspace's marker lives — derived from the path as given, so it is the same key the stack uses. */
+	markerPath(workspace) {
+		return join(this.markerRoot, `${sha256Hex(workspace)}.json`);
+	}
+	/** The owner on top of the stack, or `undefined` when this process holds nothing for the workspace. */
+	ownerOf(workspace) {
+		const held = this.stacks.get(workspace);
+		return held === void 0 || held.length === 0 ? void 0 : held[held.length - 1];
+	}
+	/**
+	* Take a workspace for `owner`. Refuses — before anything is written, so a
+	* refused claim leaves the marker exactly as it was — when this process
+	*/
+	async claim(workspace, owner) {
+		const top = this.ownerOf(workspace);
+		if (top !== void 0) throw new WorkspaceBusyError(workspace, top, top.since, "this process already holds the workspace; release the holder before claiming it again");
+		const read = await this.readMarker(workspace);
+		if (read.kind !== "absent") throw await this.busyFromMarker(workspace, read);
+		await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, owner));
+		this.stacks.set(workspace, [owner]);
+	}
+	/**
+	* Hand the workspace from `from` (which must be the current holder) to `to`,
+	* pushing `to` on the stack and rewriting the marker to name it. The stack is
+	*/
+	async push(workspace, from, to) {
+		const held = this.stacks.get(workspace);
+		if (held === void 0 || held.length === 0) throw new Error(`workspace ${workspace} cannot be handed from ${describeOwner(from)} to ${describeOwner(to)}: this process holds no claim on it`);
+		const top = held[held.length - 1];
+		if (ownerKey(top) !== ownerKey(from)) throw new Error(`workspace ${workspace} cannot be handed over: its current holder is ${describeOwner(top)} (since ${top.since}), not ${describeOwner(from)} (since ${from.since}); a handover names the holder that is actually there`);
+		held.push(to);
+		await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, to));
+	}
+	/**
+	* Release `owner`, which must be the current holder. A mismatch throws with
+	* both owners named — popping a lower holder would hand the checkout to
+	*/
+	async release(workspace, owner) {
+		const held = this.stacks.get(workspace);
+		if (held === void 0 || held.length === 0) throw new Error(`workspace ${workspace} cannot be released by ${describeOwner(owner)} (since ${owner.since}): this process holds no claim on it`);
+		const top = held[held.length - 1];
+		if (ownerKey(top) !== ownerKey(owner)) throw new Error(`workspace ${workspace} cannot be released by ${describeOwner(owner)} (since ${owner.since}): its current holder is ${describeOwner(top)} (since ${top.since}); only the holder on top of the stack releases it`);
+		held.pop();
+		if (held.length === 0) {
+			this.stacks.delete(workspace);
+			await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace));
+		} else {
+			/**
+			* The owner this release leaves behind is captured here, where the stack
+			* has just said it — a mutation that ran later would read whatever holder
+			*/
+			const remaining = held[held.length - 1];
+			await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, remaining));
+		}
+	}
+	/**
+	* Take over a marker whose owning process is gone — the recovery path only,
+	* and the only way a stale marker is ever cleared. An absent marker is a
+	*/
+	async reconcileAdopt(workspace) {
+		const read = await this.readMarker(workspace);
+		if (read.kind === "absent") return { adopted: true };
+		if (read.kind === "unreadable") return {
+			adopted: false,
+			reason: read.reason
+		};
+		const { marker } = read;
+		if (pidIsAlive(marker.pid)) return {
+			adopted: false,
+			reason: `workspace ${workspace} still has a holder: ${marker.pid === this.pid ? `the marker names this process's own pid ${marker.pid}, so no liveness probe can tell its holder apart from this process — settle this process's own claims instead` : `the marker names pid ${marker.pid}, which is alive${marker.processStartedAt === void 0 ? "" : ` (start time ${marker.processStartedAt})`}; a live owner is never taken over, however the recovery path explains it`}`
+		};
+		this.stacks.delete(workspace);
+		await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace));
+		return { adopted: true };
+	}
+	/**
+	* Release everything this process still holds, as an unload path does. Only
+	* markers that name this process's pid are deleted: a marker written by
+	*/
+	async close() {
+		const workspaces = [...this.stacks.keys()];
+		this.stacks.clear();
+		for (const workspace of workspaces) {
+			const read = await this.readMarker(workspace);
+			if (read.kind !== "held") continue;
+			if (read.marker.pid !== this.pid) continue;
+			await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace));
+		}
+	}
+	/** The busy error a marker earns: whose, why, and — when the recorded start time disagrees — that the pid was reused. */
+	async busyFromMarker(workspace, read) {
+		if (read.kind === "unreadable") return new WorkspaceBusyError(workspace, void 0, void 0, read.reason);
+		const { marker } = read;
+		if (marker.pid === this.pid) return new WorkspaceBusyError(workspace, marker.owner, marker.since, `the marker at ${this.markerPath(workspace)} names this process's own pid ${marker.pid}, but this process holds no claim on the workspace; the in-process stack is the truth, so the marker and this process disagree and the workspace is reported busy rather than taken`);
+		if (!pidIsAlive(marker.pid)) return new WorkspaceBusyError(workspace, marker.owner, marker.since, `the marker's pid ${marker.pid} is not alive, so the marker is stale; only the recovery path (reconcileAdopt) may take a stale marker over, because the process that wrote it may have died mid-write`);
+		const recorded = marker.processStartedAt;
+		const live = recorded === void 0 ? void 0 : await readProcessStartTime(marker.pid);
+		const reused = recorded !== void 0 && live !== void 0 && live !== recorded ? `; its recorded start time ${recorded} differs from the live ${live}, so the pid was reused and the marker's writer is gone (still reported busy: only reconcileAdopt clears a marker)` : "";
+		return new WorkspaceBusyError(workspace, marker.owner, marker.since, `the marker names pid ${marker.pid}, which is alive${reused}`);
+	}
+	async readMarker(workspace) {
+		const file = this.markerPath(workspace);
+		let raw;
+		try {
+			raw = await readFile(file, "utf8");
+		} catch (error) {
+			if (error.code === "ENOENT") return { kind: "absent" };
+			return {
+				kind: "unreadable",
+				reason: `${file} cannot be read (${message(error)}); an unreadable marker is not evidence that a workspace is free`
+			};
+		}
+		const read = parseMarker(raw, file);
+		if (read.kind === "held" && read.marker.path !== workspace) return {
+			kind: "unreadable",
+			reason: `${file} describes workspace ${read.marker.path}, not ${workspace}; the marker and this path disagree, which only a human should resolve`
+		};
+		return read;
+	}
+	async writeMarker(workspace, owner) {
+		const file = this.markerPath(workspace);
+		const marker = {
+			path: workspace,
+			pid: this.pid,
+			owner,
+			since: owner.since
+		};
+		/**
+		* The token describes the pid the marker names — this process, unless a test
+		* injected another pid — so a reader can compare it with the live process at
+		*/
+		const startedAt = await readProcessStartTime(this.pid);
+		if (startedAt !== void 0) marker.processStartedAt = startedAt;
+		await mkdir(dirname(file), { recursive: true });
+		markerWriteSeq += 1;
+		const tmp = `${file}.${markerWriteSeq}.tmp`;
+		await writeFile(tmp, `${JSON.stringify(marker, null, 2)}\n`, "utf8");
+		await rename(tmp, file);
+	}
+	async removeMarker(workspace) {
+		await rm(this.markerPath(workspace), { force: true });
+	}
+};
+
+//#endregion
+//#region src/config.ts
+const DEFAULT_VERIFY_TIMEOUT_MS = 600 * 1e3;
+const DEFAULT_BUDGET = {
+	maxToolCalls: 150,
+	attempts: 1
+};
+const DEFAULT_GENERATED_TASK_REVIEW = "off";
+const DEFAULT_WRITE_DRAIN_TIMEOUT_MS = 3e4;
+const DEFAULT_MAX_DEPTH = 4;
+const DEFAULT_MAX_CHILDREN = 8;
+const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true;
+const Capability = z.object({
+	skills: z.array(z.string()),
+	tools: z.array(z.string()),
+	preset: z.string(),
+	permission: z.string(),
+	mcpServers: z.array(z.string())
+});
+const RootBudget = z.object({
+	maxRuns: z.number(),
+	maxConcurrentWrites: z.number()
+});
+const ConfigSchema = z.object({
+	capabilities: z.dict(Capability).default({}),
+	defaultPreset: z.string(),
+	verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),
+	maxDepth: z.number().default(DEFAULT_MAX_DEPTH),
+	maxChildren: z.number().default(DEFAULT_MAX_CHILDREN),
+	budget: z.object({
+		maxToolCalls: z.number(),
+		tokens: z.number(),
+		attempts: z.number()
+	}).default({ ...DEFAULT_BUDGET }),
+	allowRuntimeDecomposition: z.boolean().default(DEFAULT_ALLOW_RUNTIME_DECOMPOSITION),
+	generatedTaskReview: z.union([z.const("off"), z.const("all")]).default(DEFAULT_GENERATED_TASK_REVIEW),
+	rootBudget: RootBudget,
+	writeDrainTimeoutMs: z.number().default(DEFAULT_WRITE_DRAIN_TIMEOUT_MS)
+});
+
+//#endregion
+//#region src/provider-precheck.ts
+/**
+* Resolve an optional sibling plugin's service by property or `ctx.get(name)`,
+* the soft pattern this repo uses for services a deployment may or may not
+*/
+function optionalService(host, name) {
+	if (host === null || typeof host !== "object") return void 0;
+	const holder = host;
+	try {
+		const viaContext = typeof holder.get === "function" ? holder.get(name) : void 0;
+		if (viaContext !== void 0) return viaContext;
+		return holder[name];
+	} catch {
+		return;
+	}
+}
+/**
+* The registered verifier vocabulary a provider check judges execution sidecars
+* against, or `undefined` when the deployment cannot list it — no verifier
+*/
+async function registeredVerifierIds(host) {
+	return (await registeredVerifierVocabulary(host))?.ids;
+}
+/**
+* The registered verifier vocabulary *and the version each instance declares*,
+* or `undefined` under exactly the conditions {@link registeredVerifierIds}
+*/
+async function registeredVerifierVocabulary(host) {
+	const verifier = optionalService(host, "verifier");
+	if (verifier === void 0) return void 0;
+	try {
+		await verifier.ready?.();
+		const ids = verifier.verifierIds?.();
+		if (ids === void 0) return void 0;
+		return {
+			ids,
+			versions: verifier.verifierVersions?.() ?? {}
+		};
+	} catch {
+		return;
+	}
+}
+/**
+* The refusal of an execution sidecar the deployment cannot judge because its
+* verifier vocabulary could not be listed: the declared ref is refused rather
+*/
+function unlistableVerifierRefusal(name, directory, ref) {
+	return {
+		valid: false,
+		name,
+		...directory === void 0 ? {} : { directory },
+		defects: [defect("verifier-unknown", `skill "${name}" declares execution verifier ${JSON.stringify(ref)} but the verifier registry cannot be listed (verifierIds() is unavailable, so the registry was never readied); the ref is refused rather than assumed registered`)]
+	};
+}
+/**
+* Read the ledger's open commit intents, once per pre-check. `undefined` means
+* this deployment offers no evolution service at all — no commit can be in
+*/
+async function readCommitGate(ledger) {
+	if (ledger === void 0) return void 0;
+	if (ledger.openIntentTargets === void 0) return {
+		openTargets: /* @__PURE__ */ new Set(),
+		openCapabilities: /* @__PURE__ */ new Set(),
+		unreadable: "the evolution service offers no openIntentTargets() read"
+	};
+	if (ledger.openIntentCapabilities === void 0) return {
+		openTargets: /* @__PURE__ */ new Set(),
+		openCapabilities: /* @__PURE__ */ new Set(),
+		unreadable: "the evolution service offers no openIntentCapabilities() read"
+	};
+	try {
+		const [targets, capabilities] = await Promise.all([ledger.openIntentTargets(), ledger.openIntentCapabilities()]);
+		return {
+			openTargets: new Set(targets.map((target) => dirname(resolve(target)))),
+			openCapabilities: new Set(capabilities)
+		};
+	} catch (error) {
+		return {
+			openTargets: /* @__PURE__ */ new Set(),
+			openCapabilities: /* @__PURE__ */ new Set(),
+			unreadable: `reading it failed (${message(error)})`
+		};
+	}
+}
+/**
+* The refusal of a provider whose directory a commit left open (K2-3, matched by
+* directory since K3): the intent is the record that a production write is
+*/
+function openCommitRefusal(name, directory) {
+	return {
+		valid: false,
+		name,
+		directory,
+		defects: [defect("commit-intent-open", `skill "${name}" is the target of an open evolution commit intent: a file of ${directory} was named by an apply or rollback, its intent was persisted and its completion was never recorded, so production may not hold the version the ledger describes. One intent covers the fixed file set of that directory together (\`SKILL.md\`, plus the \`SKILL.contract.json\` beside it when the skill has one), so a directory holding any file under an open intent is refused whole rather than admitted as a mixed version: the provider stays refused until a reconciliation settles that commit (the deployment reconciles at startup, or an apply/rollback retry settles it)`)]
+	};
+}
+/**
+* The refusal of one capability **row** an open evolution commit intent moves
+* (A6): row-keyed, not directory-keyed, because a row-only capability commit has
+*/
+function openCapabilityRowRefusal(name) {
+	return defect("commit-intent-open", `capability "${name}" is the target of an open evolution commit intent: an apply or rollback persisted that intent and never recorded its completion, so the row the deployment's table reads now may not be the row it keeps — a capability commit installs the row in the process before it writes the deployment's own table file, and the completion is what claims both halves landed. The row is refused whole rather than admitted as a half-product: it stays refused until a reconciliation settles that commit (the deployment reconciles at startup, or an apply/rollback retry settles it)`);
+}
+/**
+* The refusal of every skill candidate on a deployment whose evolution ledger
+* cannot be read: whether a commit intent is open against this provider cannot
+*/
+function unreadableCommitLedgerRefusal(name, directory, target, why) {
+	return {
+		valid: false,
+		name,
+		directory,
+		defects: [defect("commit-ledger-unreadable", `skill "${name}" cannot be admitted against ${target}: the deployment's evolution commit ledger is unreadable (${why}), so whether a commit intent is open against this provider cannot be established — the provider is refused rather than assumed clear (fail-closed)`)]
+	};
+}
+/**
+* Every root one discovery view covers, in search order — the single root list
+* the pre-check searches and the one a refusal names, so "searched the roots"
+*/
+async function skillSearchRoots(view = {}) {
+	return [...view.extraRoots ?? [], ...await skillRootsFor(view.cwd)];
+}
+function defect(code, detail) {
+	return {
+		code,
+		detail
+	};
+}
+/**
+* The refusal one skill candidate gets from the commit gate, or `undefined` when
+* the gate has nothing to say about it: only a provider whose discovered
+*/
+function commitRefusalFor(gate$1, name, directory) {
+	if (gate$1 === void 0) return void 0;
+	const skillFile = resolve(join(directory, "SKILL.md"));
+	if (gate$1.unreadable !== void 0) return unreadableCommitLedgerRefusal(name, directory, skillFile, gate$1.unreadable);
+	if (!gate$1.openTargets.has(resolve(directory))) return void 0;
+	return openCommitRefusal(name, directory);
+}
+/**
+* The row-keyed half of that same gate (A6): the defects one capability row owes
+* because an open commit intent moves it, or `[]` when none does. It is asked
+*/
+function capabilityRowRefusals(gate$1, capability) {
+	if (gate$1 === void 0) return [];
+	if (!gate$1.openCapabilities.has(capability)) return [];
+	return [openCapabilityRowRefusal(capability)];
+}
+/** The search-failure refusal: the skill name and the roots, which no phase-1 validator can know. */
+function undiscovered(name, roots) {
+	return {
+		valid: false,
+		name,
+		defects: [defect("skill-missing", `no SKILL.md for skill "${name}" is reachable from the worker's discovery roots; searched ${roots.join(", ")}`)]
+	};
+}
+/**
+* The one provider identity a revision can cite: a validated sidecar, or
+* `null` for a skill that declares none. Guidance skills declare no execution
+*/
+function providerIdentity(verdict) {
+	if (!verdict.valid) return void 0;
+	return verdict.role === "guidance" ? {
+		name: verdict.name,
+		contractDigest: null
+	} : {
+		name: verdict.name,
+		contractDigest: verdict.contractDigest
+	};
+}
+/**
+* Every provider content identity one pre-check resolved, deduplicated by name
+* and sorted by it: the list a caller folds into whatever it records about the
+*/
+function providerContentIdentities(capabilities) {
+	return capabilities.flatMap((row) => row.skills).flatMap((verdict) => providerIdentity(verdict) ?? []).filter((identity, index, all) => all.findIndex((entry) => entry.name === identity.name) === index).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+}
+/**
+* Check every skill every listed capability declares, from one discovery
+* viewpoint.
+*/
+async function precheckProviders(request) {
+	const roots = await skillSearchRoots(request.view);
+	const verifierRefs = request.verifierRefs;
+	const context = skillValidationContext(request.table, verifierRefs ?? []);
+	const commitGate = await readCommitGate(request.commitLedger);
+	const capabilities = [];
+	for (const capability of request.capabilities) {
+		/**
+		* A6, and first: a row an open commit intent moves is refused whole. It is
+		* not resolved — no skill verdict is taken, no revision absorbs it — because
+		*/
+		const rowRefusals = capabilityRowRefusals(commitGate, capability);
+		if (rowRefusals.length > 0) {
+			capabilities.push({
+				capability,
+				skills: [],
+				refusals: rowRefusals
+			});
+			continue;
+		}
+		const declared = request.table[capability]?.skills ?? [];
+		const skills = [];
+		for (const name of [...new Set(declared)]) {
+			const file = await findSkillFileIn(roots, name);
+			if (file === void 0) {
+				skills.push(undiscovered(name, roots));
+				continue;
+			}
+			const directory = dirname(file);
+			/**
+			* K2-3: a commit that left its intent behind owns this directory — the
+			* whole fixed file set of the skill — until a reconciliation settles it.
+			*/
+			const commitRefusal = commitRefusalFor(commitGate, name, directory);
+			if (commitRefusal !== void 0) {
+				skills.push(commitRefusal);
+				continue;
+			}
+			if (verifierRefs === void 0) {
+				/**
+				* The registry cannot be listed, so `ref` cannot be proved registered.
+				* Only an execution sidecar loses anything by that: a knowledge or
+				*/
+				const loaded = await loadSkillSidecar(directory);
+				if (loaded.sidecar?.type === "execution") {
+					skills.push(unlistableVerifierRefusal(name, directory, loaded.sidecar.verifier.ref));
+					continue;
+				}
+			}
+			skills.push(await validateSkillProvider({
+				name,
+				directory
+			}, context));
+		}
+		capabilities.push({
+			capability,
+			skills
+		});
+	}
+	const providers = providerContentIdentities(capabilities);
+	return {
+		capabilities,
+		roots,
+		...verifierRefs === void 0 ? {} : { verifierRefs: [...verifierRefs] },
+		revision: registryRevision(request.table, providers)
+	};
+}
+/**
+* One capability row as it would read after a replacement, checked by the same
+* pre-check a batch is admitted under: `entry` is folded into `table` — the row
+*/
+async function precheckReplacedCapabilityRow(request) {
+	const precheck = await precheckProviders({
+		capabilities: [request.name],
+		table: {
+			...request.table,
+			[request.name]: request.entry
+		},
+		view: request.view,
+		...request.verifierRefs === void 0 ? {} : { verifierRefs: request.verifierRefs },
+		...request.commitLedger === void 0 ? {} : { commitLedger: request.commitLedger }
+	});
+	return {
+		precheck,
+		refusals: providerRefusals(precheck)
+	};
+}
+/**
+* The head every refusal line shares: the capability that declares the skill,
+* the skill itself, and the directory discovery found (when it found one).
+*/
+function refusalHead(capability, verdict) {
+	const where = verdict.directory === void 0 ? "" : ` (found at ${verdict.directory})`;
+	return `capability ${JSON.stringify(capability)} skill ${JSON.stringify(verdict.name)}${where}`;
+}
+/** Every refusal of one pre-check: row-level refusals first, then one entry per refused provider. */
+function precheckRefusals(precheck) {
+	return precheck.capabilities.flatMap((row) => [...(row.refusals ?? []).map((item) => ({
+		head: `capability ${JSON.stringify(row.capability)}`,
+		defects: [item]
+	})), ...row.skills.filter((verdict) => !verdict.valid).map((verdict) => ({
+		head: refusalHead(row.capability, verdict),
+		defects: verdict.defects
+	}))]);
+}
+/**
+* Every refused provider of one pre-check, one line each, naming the capability
+* that declares it, the skill, the directory when one was found, and every
+*/
+function providerRefusals(precheck) {
+	return precheckRefusals(precheck).map((entry) => `${entry.head}: ${entry.defects.map((item) => `${item.code}: ${item.detail}`).join("; ")}`);
+}
+/**
+* The same refusals, one line per defect: the shape a loud report wants, since
+* a caller reading a log needs the capability, the skill, the defect code and
+*/
+function providerDefectLines(precheck) {
+	return precheckRefusals(precheck).flatMap((entry) => entry.defects.map((item) => `${entry.head}: ${item.code}: ${item.detail}`));
+}
+
+//#endregion
+//#region src/service/lifecycle.ts
+function assertClosedRootBudget(budget$1) {
+	if (budget$1 === void 0) return;
+	const known = new Set(["maxRuns", "maxConcurrentWrites"]);
+	const unknown = Object.keys(budget$1).filter((key) => !known.has(key));
+	if (unknown.length === 0) return;
+	throw new Error(`task-runtime: rootBudget names [${unknown.join(", ")}], which this deployment does not enforce; a hard limit that cannot be executed refuses to start rather than running under a promise nobody keeps`);
+}
+function assertGeneratedTaskReview(policy) {
+	if (policy === void 0 || policy === "off" || policy === "all") return;
+	throw new Error(`task-runtime: generatedTaskReview is ${JSON.stringify(policy)}; the review policy is "off" or "all" (§5 defines no other mode, and a policy this build cannot execute refuses to start rather than admitting unreviewed batches)`);
+}
+async function unload(self) {
+	/**
+	* The unload invalidates every recovery handle first (A2 §E): a driver
+	* parked behind a barrier would otherwise hold the await below on a
+	*/
+	for (const storeId of [...self.storeRecovery.keys()]) self.invalidateStoreRecovery(storeId);
+	self.storeRecovery.clear();
+	const entries = [...self.drivers.values()];
+	for (const entry of entries) entry.controller.abort();
+	await Promise.all(entries.map((entry) => entry.promise.catch((error) => {
+		warn(self, `unload: a driver did not settle cleanly (${message(error)})`);
+		return [];
+	})));
+	self.drivers.clear();
+	for (const sessionId of self.startedSessions) self.executionGate.setTerminal(sessionId);
+	try {
+		await self.workspaces.close();
+	} catch (error) {
+		warn(self, `unload: workspace markers could not be released (${message(error)})`);
+	}
+}
+async function serviceInit(self) {
+	await providerLoadReport(self);
+	/**
+	* The tool-execution gate's wiring (A3 §3.3): one decision per call before
+	* anything runs, one settle per call when its result arrives. Both are
+	*/
+	self.context.effect(() => {
+		const offPre = self.context.on("tools/pre-execute", async (exec, next) => {
+			const sessionId = exec.agent?.id;
+			if (sessionId === void 0) return await next();
+			const decision = self.executionGate.decide(String(sessionId), exec.name);
+			if (!decision.allow) return {
+				kind: "deny",
+				reason: decision.reason
+			};
+			self.executionGate.trackAllowed(String(sessionId), String(exec.callId), exec.name);
+			return await next();
+		}, { prepend: true });
+		const offResult = self.context.on("tools/result", (exec) => {
+			self.executionGate.settled(String(exec.callId));
+		});
+		return () => {
+			if (typeof offPre === "function") offPre();
+			if (typeof offResult === "function") offResult();
+		};
+	});
+}
+async function providerLoadReport(self) {
+	self.providerLoad ??= scanConfiguredProviders(self);
+	return self.providerLoad;
+}
+async function scanConfiguredProviders(self) {
+	let report;
+	try {
+		const precheck = await self.providerPrecheck(Object.keys(self.config.capabilities), { cwd: process.cwd() });
+		report = {
+			precheck,
+			defects: providerDefectLines(precheck)
+		};
+	} catch (error) {
+		report = {
+			defects: [],
+			failed: message(error)
+		};
+	}
+	reportProviderLoad(self, report);
+	return report;
+}
+function reportProviderLoad(self, report) {
+	const roots = report.precheck?.roots ?? [];
+	if (report.failed !== void 0) {
+		warn(self, `config load: the capability provider scan could not run (${report.failed}); the deployment starts, and admission still refuses a batch whose provider cannot be judged`);
+		return;
+	}
+	if (report.defects.length === 0) return;
+	warn(self, `config load: ${report.defects.length} provider defect${report.defects.length === 1 ? "" : "s"} in the effective capability table (roots: ${roots.join(", ")}); reported, not enforced — this process's own roots are not the worker's, so a skill reachable from a run's checkout may legitimately be missing here. Admission refuses a batch that names one of these.`);
+	for (const line of report.defects) warn(self, `config load: ${line}`);
+}
+function warn(self, message$1) {
+	const logger = self.context.logger;
+	logger?.("task-runtime").warn(message$1);
+}
+function verifyTimeoutMs(self) {
+	return self.config.verifyTimeoutMs;
+}
+function budget(self) {
+	return { ...self.config.budget };
+}
+function generatedTaskReview(self) {
+	return self.config.generatedTaskReview;
+}
+function gate(self) {
+	return self.executionGate;
+}
+function resolveCapabilitiesImpl(self, required) {
+	return resolveCapabilities(required, self.config.capabilities);
+}
+function listCapabilities(self) {
+	return structuredClone(self.config.capabilities);
+}
+async function applyCapabilityRow(self, name, entry, options = {}) {
+	if (entry === null) {
+		const rest = { ...self.config.capabilities };
+		delete rest[name];
+		self.config.capabilities = rest;
+		return;
+	}
+	await assertReplacementRow(self, name, entry, options);
+	self.config.capabilities = {
+		...self.config.capabilities,
+		[name]: structuredClone(entry)
+	};
+}
+async function assertReplacementRow(self, name, entry, options = {}) {
+	const verifierRefs = await self.registeredVerifierIds();
+	const ledger = self.softService("evolution");
+	const owned = new Set((options.commitTargets ?? []).map((target) => dirname(resolve(target))));
+	const exemptRow = options.commitRow;
+	const commitLedger = ledger === void 0 || owned.size === 0 && exemptRow === void 0 ? ledger : {
+		...ledger.openIntentTargets === void 0 ? {} : { openIntentTargets: async () => (await ledger.openIntentTargets()).filter((target) => !owned.has(dirname(resolve(target)))) },
+		...ledger.openIntentCapabilities === void 0 ? {} : { openIntentCapabilities: async () => (await ledger.openIntentCapabilities()).filter((row) => row !== exemptRow) }
+	};
+	const { refusals } = await precheckReplacedCapabilityRow({
+		name,
+		entry,
+		table: self.config.capabilities,
+		view: { cwd: process.cwd() },
+		...verifierRefs === void 0 ? {} : { verifierRefs },
+		...commitLedger === void 0 ? {} : { commitLedger }
+	});
+	if (refusals.length === 0) return;
+	throw new Error(`task-runtime: capability "${name}" was not replaced — the row grants providers that are not usable:\n` + refusals.map((line) => `- ${line}`).join("\n"));
+}
+
+//#endregion
+//#region src/protected-inputs.ts
+/**
+* The authoring form of one criterion's declaration: a non-empty array of
+* non-blank strings, in the order the caller wrote them.
+*/
+function declaredPaths(value) {
+	if (!Array.isArray(value) || value.length === 0) return [];
+	return value.every((item) => nonBlank(item)) ? [...value] : [];
+}
+/**
+* The label one criterion is reported under: the declared id when it has one,
+* its position otherwise — the vocabulary `normalize.ts` names criteria with,
+*/
+function criterionLabel(childLabel$1, criterion, index) {
+	return `${childLabel$1} criterion ${nonBlank(criterion.criterionId) ? JSON.stringify(criterion.criterionId) : index + 1}`;
+}
+/**
+* Fix the byte identity of every declared protected input, against the
+* checkout directory the criterion's judge will run in.
+*/
+async function fixProtectedInputs(paths, cwd, label) {
+	if (paths.length === 0) return {
+		refs: [],
+		reasons: []
+	};
+	if (cwd === void 0) return {
+		refs: [],
+		reasons: [`${label} protectedInputs cannot be fixed: the session's checkout directory cannot be resolved (the session has no readable graph env binding), so the declared paths are refused rather than fixed against the wrong base`]
+	};
+	const refs = [];
+	const reasons = [];
+	const seen = /* @__PURE__ */ new Set();
+	for (const path of paths) {
+		if (seen.has(path)) continue;
+		seen.add(path);
+		try {
+			refs.push({
+				path,
+				sha256: sha256Hex(await readFile(resolve(cwd, path)))
+			});
+		} catch (error) {
+			reasons.push(`${label} protectedInputs path ${JSON.stringify(path)} cannot be read: ${message(error)}`);
+		}
+	}
+	return {
+		refs,
+		reasons
+	};
+}
+/**
+* Fix the declarations of one criterion list, rebuilding only the criteria that
+* declared one: every untouched criterion is carried by reference, and the
+*/
+async function fixCriteriaProtectedInputs(criteria, cwd, label) {
+	const reasons = [];
+	/**
+	* A criterion list that is not an array is a shape defect whichever entry
+	* wrote it (`contractDefects` names it); carrying it here keeps the refusal
+	*/
+	if (!Array.isArray(criteria)) return {
+		criteria,
+		reasons
+	};
+	const fixed = [];
+	for (const [index, criterion] of criteria.entries()) {
+		const paths = declaredPaths(criterion.protectedInputs);
+		if (paths.length === 0) {
+			fixed.push(criterion);
+			continue;
+		}
+		const outcome = await fixProtectedInputs(paths, cwd, criterionLabel(label, criterion, index));
+		reasons.push(...outcome.reasons);
+		/**
+		* The fixed form is the runtime's own normalized shape, which the declared
+		* type cannot express (`CriterionSpec` declares paths): the cast is the
+		*/
+		fixed.push(outcome.reasons.length === 0 ? {
+			...criterion,
+			protectedInputs: outcome.refs
+		} : criterion);
+	}
+	return {
+		criteria: fixed,
+		reasons
+	};
+}
+/**
+* Fix the declared protected inputs of a whole decomposition proposal before
+* anything else reads it: the runtime calls this ahead of the single
+*/
+async function fixSpecProtectedInputs(spec, cwd) {
+	const reasons = [];
+	/**
+	* The spec's own shape is normalization's rule, not this walk's: a proposal
+	* whose `children` (or a child's `acceptanceCriteria`) is not an array is
+	*/
+	if (!Array.isArray(spec?.children)) return {
+		spec,
+		reasons
+	};
+	const children = [];
+	for (const [index, child] of spec.children.entries()) {
+		if (child === null || typeof child !== "object" || !Array.isArray(child.acceptanceCriteria)) {
+			children.push(child);
+			continue;
+		}
+		const outcome = await fixCriteriaProtectedInputs(child.acceptanceCriteria, cwd, `child ${index}`);
+		reasons.push(...outcome.reasons);
+		const touched = outcome.criteria.some((criterion, position) => criterion !== child.acceptanceCriteria[position]);
+		children.push(touched ? {
+			...child,
+			acceptanceCriteria: outcome.criteria
+		} : child);
+	}
+	return {
+		spec: children.some((child, index) => child !== spec.children[index]) ? {
+			...spec,
+			children
+		} : spec,
+		reasons
+	};
+}
+/**
+* Structural defects of the **fixed** form of every criterion's protected
+* inputs: each declaration must be an array of plain objects carrying exactly
+*/
+function protectedInputDefects(criteria, label) {
+	const reasons = [];
+	for (const criterion of criteria) {
+		const where = `${label} criterion ${JSON.stringify(criterion.criterionId)}`;
+		const declared = criterion.protectedInputs;
+		if (declared === void 0) continue;
+		if (!Array.isArray(declared)) {
+			reasons.push(`${where} protectedInputs must be an array of { path, sha256 } entries (declared paths are fixed by admission, never stored as strings)`);
+			continue;
+		}
+		declared.forEach((entry, index) => {
+			const at = `${where} protectedInputs entry ${index}`;
+			if (!isPlainObject(entry)) {
+				reasons.push(`${at} must be an object with only path and sha256`);
+				return;
+			}
+			for (const key of unknownFieldKeys(entry, ["path", "sha256"])) reasons.push(`${at} declares unknown field ${JSON.stringify(key)}`);
+			if (!nonBlank(entry.path)) reasons.push(`${at} path must be a non-empty string`);
+			if (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) reasons.push(`${at} sha256 must be a lowercase 64-character hex digest`);
+		});
+	}
+	return reasons;
+}
+
+//#endregion
+//#region src/admission.ts
+/** Modes whose criterion is executed by the command verifier and therefore needs `command`. */
+const EXECUTABLE_MODES = [
+	"deterministic",
+	"simulation",
+	"measurement"
+];
+/** Every mode a criterion may declare, in declaration order (`VerificationMode`); the list the mode rule names. */
+const VERIFICATION_MODES = [
+	"deterministic",
+	"simulation",
+	"formal",
+	"measurement",
+	"review",
+	"composite"
+];
+/**
+* Structural reasons one task's parent-acceptance declarations are malformed
+* (P4, KISS §6 C2). Shape only: whether a mapping target exists is judged at
+*/
+function independentAcceptanceDefects(criteria, requiresIndependentAcceptance, label) {
+	const reasons = [];
+	for (const criterion of criteria) {
+		const where = `${label} criterion "${criterion.criterionId}"`;
+		if (criterion.acceptsArtifact !== void 0 && (!Array.isArray(criterion.acceptsArtifact) || criterion.acceptsArtifact.some((ref) => typeof ref !== "string" || ref.trim().length === 0))) reasons.push(`${where} acceptsArtifact must be an array of non-empty strings`);
+		if (criterion.heuristic !== void 0 && typeof criterion.heuristic !== "boolean") reasons.push(`${where} heuristic must be a boolean`);
+		const map = criterion.childEvidence;
+		if (map !== void 0) if (!Array.isArray(map)) reasons.push(`${where} childEvidence must be an array of entries`);
+		else {
+			map.forEach((entry, index) => {
+				const at = `${where} childEvidence entry ${index}`;
+				if (typeof entry !== "object" || entry === null) {
+					reasons.push(`${at} must be an object`);
+					return;
+				}
+				if (!Number.isInteger(entry.childIndex) || entry.childIndex < 0) reasons.push(`${at} childIndex must be a non-negative integer`);
+				if (entry.criterionId !== void 0 && (typeof entry.criterionId !== "string" || entry.criterionId.trim().length === 0)) reasons.push(`${at} criterionId must be a non-empty string`);
+				if (entry.evidenceRef !== void 0 && (typeof entry.evidenceRef !== "string" || entry.evidenceRef.trim().length === 0)) reasons.push(`${at} evidenceRef must be a non-empty string`);
+			});
+			/**
+			* Only the composite verifier reads the map, and a heuristic judgement
+			* is never a mechanical check: a map on any other judge, or beside a
+			*/
+			if (map.length > 0 && criterion.verificationMode !== "composite") reasons.push(`${where} childEvidence requires verificationMode "composite" (the composite verifier is its only judge)`);
+			if (map.length > 0 && criterion.heuristic === true) reasons.push(`${where} cannot be both heuristic and carry a childEvidence map: a heuristic judgement is never a mechanical check`);
+		}
+	}
+	/**
+	* The contract-level marker is a promise that acceptance rests on the task's
+	* own evidence map. A missing, empty, or deleted map must refuse loudly —
+	*/
+	if (requiresIndependentAcceptance === true && !criteria.some((criterion) => (criterion.childEvidence?.length ?? 0) > 0)) reasons.push(`${label} requires independent parent acceptance but no acceptance criterion carries a childEvidence map (the composite conjunction alone cannot stand in for the root goal)`);
+	return reasons;
+}
+/**
+* The one structural rule a **root contract** owes on top of
+* {@link contractDefects} (A0 §1.2): at least one mandatory criterion whose
+*/
+function rootIndependenceDefects(criteria, label) {
+	if (criteria.some((criterion) => criterion.mandatory === true && criterion.verificationMode !== "composite")) return [];
+	return [`${label} requires at least one mandatory acceptance criterion judged by something other than the composite conjunction (verificationMode !== "composite"): a root whose only mandatory criterion is "all children verified" is satisfied by its own decomposition and has no independent check of the goal it was given`];
+}
+/**
+* Whether a criterion declares a command a verifier could actually run. A
+* declared command that is blank — or not text at all — is as missing as an
+*/
+function hasCommand(command) {
+	return typeof command === "string" && command.trim().length > 0;
+}
+/**
+* Structural defects of one task's acceptance contract (T1, construction guide
+* §4): what has to hold before a contract can be admitted at all, whichever
+*/
+function contractDefects(criteria, label) {
+	const reasons = [];
+	if (criteria.length === 0) {
+		reasons.push(`${label} requires at least one acceptance criterion`);
+		return reasons;
+	}
+	const seen = /* @__PURE__ */ new Set();
+	const reportedDuplicate = /* @__PURE__ */ new Set();
+	for (const criterion of criteria) {
+		const where = `${label} criterion "${criterion.criterionId}"`;
+		const description = criterion.description;
+		if (typeof description !== "string" || description.trim().length === 0) reasons.push(`${where} requires a non-empty description`);
+		if (!VERIFICATION_MODES.includes(criterion.verificationMode)) reasons.push(`${where} verificationMode "${String(criterion.verificationMode)}" is not one of ${VERIFICATION_MODES.join(", ")}`);
+		else if (EXECUTABLE_MODES.includes(criterion.verificationMode) && !hasCommand(criterion.command)) reasons.push(`${where} (${criterion.verificationMode}) requires a command`);
+		/**
+		* Duplicates are refused before the batch is persisted, not at acceptance:
+		* a verdict names its criterion by id, so two criteria sharing one id make
+		*/
+		if (seen.has(criterion.criterionId) && !reportedDuplicate.has(criterion.criterionId)) {
+			reasons.push(`${label} declares criterion id "${criterion.criterionId}" more than once`);
+			reportedDuplicate.add(criterion.criterionId);
+		}
+		seen.add(criterion.criterionId);
+		/**
+		* The fixed form of a criterion's protected acceptance inputs (S1-V slice
+		* 2): the same rule for an ordinary decomposition child and for a replay
+		*/
+		reasons.push(...protectedInputDefects([criterion], label));
+	}
+	if (!criteria.some((criterion) => criterion.mandatory === true)) reasons.push(`${label} requires at least one mandatory acceptance criterion`);
+	return reasons;
+}
+/**
+* How one planned child is named in a refusal: its position always, its id when
+* the batch has one yet ({@link AdmissionChild.taskId}). A batch is judged
+*/
+function childLabel(child, index) {
+	return child.taskId === void 0 ? `child ${index}` : `child ${index} ("${child.taskId}")`;
+}
+/**
+* How one planned child is named inside a dependency message: its id when it
+* has one, its batch position otherwise (`#0` is the first child). The two
+*/
+function childRef(child, index) {
+	return child?.taskId ?? `#${index}`;
+}
+/**
+* Structural admission checks for one decomposition batch (RFC §36). Pure:
+* every rule is validated up front and the caller persists only when the
+*/
+function checkDecomposition(parent, children, existingEdges) {
+	const reasons = [];
+	const policy = parent.decompositionPolicy;
+	if (!policy.allowed) reasons.push(policy.leaf === true ? `task "${parent.taskId}" decomposition is not allowed: it is admitted as leaf and runtime decomposition is off (allowRuntimeDecomposition: false), so only a task admitted decomposable may split` : `task "${parent.taskId}" decomposition is not allowed`);
+	if (policy.maxDepth !== void 0 && parent.depth + 1 > policy.maxDepth) reasons.push(`task "${parent.taskId}" children would exceed maxDepth ${policy.maxDepth} (depth ${parent.depth + 1})`);
+	if (policy.maxChildren !== void 0 && children.length > policy.maxChildren) reasons.push(`task "${parent.taskId}" would have ${children.length} children, above maxChildren ${policy.maxChildren}`);
+	if (children.length === 0) reasons.push(`task "${parent.taskId}" decomposition requires at least one child`);
+	/**
+	* The parent's own parent-acceptance declarations (P4): a stored task's
+	* criteria are immutable, so the marker-plus-map rule is re-checked here on
+	*/
+	reasons.push(...independentAcceptanceDefects(parent.acceptanceCriteria, parent.requiresIndependentAcceptance, `task "${parent.taskId}"`));
+	const plannedEdges = [];
+	children.forEach((child, index) => {
+		const label = childLabel(child, index);
+		if (child.objective.trim().length === 0) reasons.push(`${label} objective must be non-empty`);
+		/**
+		* Two separate judgements, both required: the contract's own structure
+		* ({@link contractDefects}, shared with the replay path) and the P4
+		*/
+		reasons.push(...contractDefects(child.acceptanceCriteria, label));
+		reasons.push(...independentAcceptanceDefects(child.acceptanceCriteria, child.requiresIndependentAcceptance, label));
+		for (const criterion of child.acceptanceCriteria) {
+			/**
+			* `requiresArtifact` gets a shape check here and nothing more: whether the
+			* named artifact exists is a spawn-time question (it needs the store
+			*/
+			if (criterion.requiresArtifact !== void 0 && (!Array.isArray(criterion.requiresArtifact) || criterion.requiresArtifact.some((ref) => typeof ref !== "string" || ref.trim().length === 0))) reasons.push(`${label} criterion "${criterion.criterionId}" requiresArtifact must be an array of non-empty strings`);
+			/**
+			* `verifierRef` gets a shape check here and nothing more: whether the id
+			* is registered is a batch-level question (it needs the verifier
+			*/
+			if (criterion.verifierRef !== void 0 && (typeof criterion.verifierRef !== "string" || criterion.verifierRef.trim().length === 0)) reasons.push(`${label} criterion "${criterion.criterionId}" verifierRef must be a non-empty string`);
+		}
+		for (const dependency of child.dependsOn ?? []) {
+			if (!Number.isInteger(dependency) || dependency < 0 || dependency >= children.length) {
+				reasons.push(`${label} dependsOn index ${dependency} is out of range`);
+				continue;
+			}
+			if (dependency === index) {
+				reasons.push(`${label} cannot depend on itself`);
+				continue;
+			}
+			plannedEdges.push({
+				from: childRef(children[dependency], dependency),
+				to: childRef(child, index)
+			});
+		}
+	});
+	const edges = [...existingEdges, ...plannedEdges];
+	const seen = /* @__PURE__ */ new Set();
+	for (const edge of edges) {
+		const key = `${edge.from}→${edge.to}`;
+		if (seen.has(key)) reasons.push(`dependency "${key}" is declared more than once`);
+		seen.add(key);
+	}
+	for (const edge of plannedEdges) if (reaches(edges, edge.to, edge.from)) reasons.push(`dependency "${edge.from}" → "${edge.to}" creates a cycle`);
+	return reasons.length === 0 ? { ok: true } : {
+		ok: false,
+		reasons
+	};
+}
+
+//#endregion
 //#region src/normalize.ts
 /**
 * The identity one batch is digested over (§4): where it came from, which
 * contract language it is written in, the caller's reason, and the complete
-* ordered children — each child reduced to its contract digest and the batch
-* facts the identity covers.
-*
-* One construction, shared by {@link normalizeDecomposition} (which digs the
-* batch) and by any writer that has to *name* the batch rather than digest it
-* (the runtime's proposal record, whose `proposalDigest` has to be the same
-* number the admission recorded). Two constructions of one identity would
-* eventually disagree, and a proposal whose digest is not the batch's would
-* make every approval binding meaningless.
 */
 function decompositionIdentity(context, reason, children) {
 	return {
@@ -2948,18 +3171,6 @@ const CRITERION_FIELDS = new Set([
 	"heuristic",
 	"protectedInputs"
 ]);
-function message$3(error) {
-	return error instanceof Error ? error.message : String(error);
-}
-function isPlainObject(value) {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
-}
-/** Non-blank text: the one check every string field shares. */
-function nonBlank(value) {
-	return typeof value === "string" && value.trim().length > 0;
-}
 /** A declared version value, rendered so a non-number cannot read like a number (`"1"` is not `1`). */
 function declaredText(value) {
 	return typeof value === "number" ? String(value) : JSON.stringify(value) ?? String(value);
@@ -2967,9 +3178,6 @@ function declaredText(value) {
 /**
 * A deep copy of declared contract data: primitives are immutable, arrays and
 * plain objects are rebuilt, so a caller mutating its input afterwards cannot
-* reach the normalized contract. Anything else is passed through unchanged — a
-* value no canonical form can carry is refused by the digest below, never
-* silently rewritten.
 */
 function copyValue(value) {
 	if (Array.isArray(value)) return value.map((item) => copyValue(item));
@@ -2982,7 +3190,7 @@ function copyValue(value) {
 }
 /** Report every key a level does not declare. */
 function unknownFields(source, allowed, label, reasons) {
-	for (const key of Object.keys(source)) if (!allowed.has(key)) reasons.push(`${label} declares unknown field ${JSON.stringify(key)}`);
+	for (const key of unknownFieldKeys(source, allowed)) reasons.push(`${label} declares unknown field ${JSON.stringify(key)}`);
 }
 /** A required text field; a blank or non-string value is refused with the field named. */
 function text(value, label, reasons) {
@@ -2995,7 +3203,6 @@ function text(value, label, reasons) {
 /**
 * A declared string collection: copied verbatim when it holds nothing but
 * non-blank strings, refused as one defect otherwise — a blank entry is
-* refused, not trimmed, and an omitted collection is the caller's `[]`.
 */
 function stringList(value, label, reasons) {
 	if (!Array.isArray(value) || value.some((item) => !nonBlank(item))) {
@@ -3007,7 +3214,6 @@ function stringList(value, label, reasons) {
 /**
 * A `dependsOn` list: integers only, copied verbatim. Whether an index is in
 * range, points at itself, or closes a cycle is admission's judgement — it
-* needs the whole batch, which this entry never sees as a graph.
 */
 function integerList(value, label, reasons) {
 	if (!Array.isArray(value) || value.some((item) => !Number.isInteger(item))) {
@@ -3028,7 +3234,6 @@ function booleanField(value, fallback, label, reasons) {
 /**
 * A value carried as declared. `command` and the P4 declarations are judged by
 * admission, so this entry only copies them: a shape those rules refuse never
-* reaches the store, and the cast is the boundary that says so.
 */
 function carried(value) {
 	return copyValue(value);
@@ -3036,12 +3241,6 @@ function carried(value) {
 /**
 * One criterion list. Ids are fixed here — a declared id verbatim, an absent
 * one from `idOf` — because the digest must not depend on spellings and because
-* a parent-level `childEvidence.criterionId` can only point at an id that was
-* fixed before its parent's criteria were accepted.
-*
-* A criterion that carried a defect is left out of the returned list: the batch
-* is refused as a whole, and the contract must describe only what a well-formed
-* declaration asked for.
 */
 function normalizeCriteria(raw, label, idOf, reasons) {
 	const criteria = [];
@@ -3096,6 +3295,10 @@ function normalizeChild(raw, index, reasons) {
 		return;
 	}
 	unknownFields(raw, CHILD_FIELDS, label, reasons);
+	/**
+	* The objective is stored byte-for-byte: a blank one is refused (nothing can
+	* be verified against it) and a padded one keeps its padding — the contract
+	*/
 	const objective = text(raw.objective, `${label} objective`, reasons);
 	const rawCriteria = raw.acceptanceCriteria;
 	let criteria = [];
@@ -3124,10 +3327,7 @@ function normalizeChild(raw, index, reasons) {
 }
 /**
 * Normalize one decomposition proposal.
-*
 * Returns every defect it found, never the first: a caller revising a proposal
-* needs the whole list, and a batch that returns at all is one the digest could
-* describe. A refusal is a value, never a throw.
 */
 function normalizeDecomposition(spec, context) {
 	const reasons = [];
@@ -3136,6 +3336,10 @@ function normalizeDecomposition(spec, context) {
 		reasons: ["decomposition must be an object with a reason and a children array"]
 	};
 	unknownFields(spec, BATCH_FIELDS, "decomposition", reasons);
+	/**
+	* The version gate: absent is the legacy adapter (this build's version is the
+	* one the runtime writes), declared must be a version whose field semantics
+	*/
 	const declaredVersion = spec.contractVersion;
 	if (declaredVersion !== void 0 && declaredVersion !== TASK_CONTRACT_VERSION) reasons.push(`unknown contract version ${declaredText(declaredVersion)}: this runtime writes version ${TASK_CONTRACT_VERSION}`);
 	let reason = "";
@@ -3168,9 +3372,13 @@ function normalizeDecomposition(spec, context) {
 			}
 		};
 	} catch (error) {
+		/**
+		* `canonicalize` refuses values JSON cannot round-trip (functions, symbols,
+		* `NaN`, class instances): no digest of such a proposal could be compared
+		*/
 		return {
 			ok: false,
-			reasons: [`decomposition content cannot be canonicalized: ${message$3(error)}`]
+			reasons: [`decomposition content cannot be canonicalized: ${message(error)}`]
 		};
 	}
 }
@@ -3186,14 +3394,6 @@ const ROOT_CONTRACT_FIELDS = new Set([
 /**
 * The criterion id a root contract's criterion gets when it declares none:
 * `ac-<j>`, one flat list.
-*
-* Why not the batch scheme (`ac<child>-<j>`): a root contract has no batch
-* position to be numbered by, so the child half of that name would have to be
-* invented — and an invented `ac1-2` on a root would read as "the second
-* criterion of the first child", which is a decomposition this contract is not.
-* The form is fixed here rather than left to the caller because an absent id
-* must be deterministic: the digest covers it, and two writers of the same root
-* contract must not produce two identities.
 */
 function rootCriterionId(index) {
 	return `ac-${index + 1}`;
@@ -3201,28 +3401,6 @@ function rootCriterionId(index) {
 /**
 * Normalize one root contract (A0 §2–§3): the caller's single contract —
 * objective, criteria, assumptions, constraints, declared capabilities — in,
-* its canonical {@link TaskContract} out, or every reason it was refused.
-*
-* It shares the contract-level rules with {@link normalizeDecomposition} rather
-* than restating them: the same closed field set per criterion (an undeclared
-* key is refused by name, never dropped), the same verbatim text rule (blankness
-* is refused, bytes are not rewritten), the same defaults (an omitted list is
-* `[]`, an omitted `mandatory` is `true`, an absent mode follows the command),
-* and the same criterion-id fixing — with the root's own id scheme
-* ({@link rootCriterionId}).
-*
-* What it does *not* do: structural admission. `contractDefects`, the root's
-* own independent-criterion rule (`admission.ts:rootIndependenceDefects`), the
-* protected-input shape rule and every capability/provider/verifier question are
-* asked by the intake entry over the value this returns, exactly as the
-* decomposition path asks them over a normalized batch. And it writes nothing:
-* the caller has the whole contract or a list of reasons, and a refused root
-* contract leaves no id, no event and no file read behind it.
-*
-* The `contractVersion` gate is the batch's: absent is this build's version (the
-* caller that does not version its input means the current language), and a
-* declared version whose field semantics this build does not know is refused
-* rather than read with today's reader.
 */
 function normalizeRootContract(spec) {
 	const reasons = [];
@@ -3266,50 +3444,32 @@ const PROPOSAL_REQUEST_KEY_PREFIX = "rk-";
 /**
 * The request key one call derives when its caller named none: `rk-` plus the
 * SHA-256 of {@link canonicalize} over
-* {@link ProposalRequestKeyContext} (key order is irrelevant; the same request
-* addresses the same key however it was written).
-*
-* A caller with its own stable identifier (a message id, a task row) may pass
-* it instead — the store refuses one key bound to two proposals either way,
-* so an explicit key is a promise the caller keeps, not a way around the rule.
-* The derived form is what makes a retry of the *same* batch idempotent
-* without any caller bookkeeping: a revision has different content, hence a
-* different digest, hence a new key.
 */
+function requestKeyOf(payload) {
+	return `${PROPOSAL_REQUEST_KEY_PREFIX}${sha256Hex(canonicalize(payload))}`;
+}
 function proposalRequestKey(context) {
-	return `${PROPOSAL_REQUEST_KEY_PREFIX}${sha256Hex(canonicalize({
+	return requestKeyOf({
 		parentTaskId: context.parentTaskId,
 		parentRunId: context.parentRunId,
 		callerSessionId: context.callerSessionId,
 		proposalDigest: context.proposalDigest
-	}))}`;
+	});
 }
 /**
 * The request key one root intake derives when its caller named none: `rk-` plus
 * the SHA-256 of {@link canonicalize} over {@link RootRequestKeyContext}.
-*
-* What the derivation buys, in the order it matters: the same contract asked for
-* again — in this process or after a restart — addresses the same proposal and is
-* answered from the record instead of being written twice; a revision is
-* different content, hence a different digest, hence a different key, which is
-* exactly what §6 wants a revision to be; and no caller has to keep a key of its
-* own to get that. A caller that *has* a stable identifier may pass it instead,
-* and the store then holds it to the same rule — one key names one proposal, and
-* a key already bound to other content is refused by name.
 */
 function rootProposalRequestKey(context) {
-	return `${PROPOSAL_REQUEST_KEY_PREFIX}${sha256Hex(canonicalize({
+	return requestKeyOf({
 		storeId: context.storeId,
 		rootSessionId: context.rootSessionId,
 		contractDigest: context.contractDigest
-	}))}`;
+	});
 }
 /**
 * The statuses in which a proposal is still "in flight" for the task that made
 * it — submitted and not yet admitted, not yet decided, or decided and not yet
-* re-checked. `admitted` and the four terminal statuses are excluded: a task
-* with one of those has either a batch (the run is coordinated by A3 from
-* there) or nothing waiting.
 */
 const OPEN_PROPOSAL_STATUSES = [
 	"ready",
@@ -3319,9 +3479,6 @@ const OPEN_PROPOSAL_STATUSES = [
 /**
 * Whether one proposal is still in flight for the task that made it —
 * submitted and not yet admitted, not yet decided, or decided and not yet
-* re-checked (§6). `admitted` and the four terminal statuses are not open: a
-* task with one of those has either a batch (the run is coordinated by A3 from
-* there) or nothing waiting.
 */
 function isOpenProposal(proposal) {
 	return OPEN_PROPOSAL_STATUSES.includes(proposal.status);
@@ -3329,18 +3486,6 @@ function isOpenProposal(proposal) {
 /**
 * The open proposal of one run, or `undefined` — §7.4's "已知等待": a run whose
 * own batch is waiting for a review (or for the admission its approval
-* authorizes) is idle on purpose, and an idle that is a known wait must not
-* count as stagnation.
-*
-* Both the task and the run are matched, not just the task: a proposal names
-* the run it was submitted from, and a *later* run of the same task is not
-* waiting on a batch its predecessor proposed.
-*
-* A snapshot with no proposal index (a hand-built one, or a store written
-* before proposals existed) answers `undefined` — the honest reading of "this
-* reader cannot see proposals", which is a run to be judged by the rules that
-* were in force when it was created rather than one this build's proposals
-* hold up.
 */
 function openProposalOf(snapshot, taskId, runId) {
 	const proposals = (snapshot.proposals?.byParentTask[taskId] ?? []).filter((proposal) => proposal.kind !== "root" && proposal.identity.parentRunId === runId && OPEN_PROPOSAL_STATUSES.includes(proposal.status));
@@ -3348,31 +3493,7 @@ function openProposalOf(snapshot, taskId, runId) {
 }
 /**
 * What a batch was reviewed against (§6), as this runtime can compute it.
-*
 * Two parts, and each has a stated boundary:
-*
-* - **The manifests**, through {@link capabilityManifestDigest}, folded with
-*   the provider content identity the admission-time pre-check resolved for
-*   the same rows. The manifest itself names skills, tools, presets,
-*   permissions and MCP servers — *names*, not bytes — so the fold adds what
-*   only discovery can answer: the `contractDigest` of every accepted
-*   provider (`null` for a skill that declares no sidecar, which is a skill
-*   whose content this deployment cannot pin). The fold covers the rows *this*
-*   batch matched and nothing else, which is what keeps §6's "an unrelated
-*   registry edit does not invalidate a reviewed proposal" true: a changed row
-*   the batch never resolved is not in this digest.
-* - **The judging verifiers**, as the ids the batch's criteria pin by
-*   `verifierRef`. Those are the only instances this runtime can name: the
-*   registered registry exposes its id vocabulary (`verifierIds()`), not the
-*   version or the configuration each id currently stands for, so
-*   `version`/`configurationDigest` are left off rather than invented (§6:
-*   "没有可信内容版本的资源必须标明身份保障有限"). A criterion with no
-*   `verifierRef` is dispatched by mode inside the verifier service and this
-*   runtime cannot see which instance that is; its mode is part of the batch
-*   content (the proposal digest covers the whole contract), so a *mode*
-*   change is a different proposal, while a re-registration that keeps an id
-*   and changes the behaviour behind it is **not** visible here and does not
-*   invalidate a reviewed proposal.
 */
 function reviewContextOf(input) {
 	return {
@@ -3389,9 +3510,6 @@ function reviewContextOf(input) {
 /**
 * The judging instances a batch's criteria pin by id, in first-appearance
 * order. See {@link reviewContextOf} for why this is an id list and not a
-* version binding; the digest over it is order-insensitive
-* (`task/src/proposal.ts:reviewContextDigest` sorts), the stored list keeps
-* the writer's order so a reader can see which criterion came first.
 */
 function verifierIdentitiesOf(criteria) {
 	const identities = [];
@@ -3407,12 +3525,6 @@ function verifierIdentitiesOf(criteria) {
 /**
 * Why two review contexts differ, as one line a refusal can carry: which part
 * of the resolution moved (the manifests and provider content, or the judging
-* verifiers). §6 requires the stale marking to name what changed — an
-* invalidation a reader cannot explain is a record that cannot be trusted —
-* and "the context changed" alone would be exactly that. The limits in force
-* are the other half of the re-check and have their own fingerprint
-* (`admissionContextDigest`), so a caller that has two of those reports the
-* difference itself.
 */
 function reviewContextDelta(before, after) {
 	const parts = [];
@@ -3424,898 +3536,1371 @@ function reviewContextDelta(before, after) {
 }
 
 //#endregion
-//#region src/question.ts
-function message$2(error) {
-	return error instanceof Error ? error.message : String(error);
-}
-/**
-* The `m-` identity one question's message carries: derived from the question id,
-* never minted. A retry — in this process or after a restart — states the same
-* identity, which is what lets a target's own fold answer "this one is already
-* here" instead of the framework keeping a ledger of what it sent.
-*/
-function questionMessageIdOf(questionId) {
-	return `m-${questionId}`;
-}
-/** The `m-` identity one answer's message carries, derived from the answer id for the same reason ({@link questionMessageIdOf}). */
-function answerMessageIdOf(answerId) {
-	return `m-${answerId}`;
-}
-/**
-* The arguments object one cited `tool/call` must hold: a JSON object, refused by
-* name when it is not. Exported for the same reason this module's other pure
-* steps are: the refusal rules are part of the contract, and a unit test should
-* be able to drive them without a store.
-*/
-function parseCallArguments(body) {
-	let parsed;
-	try {
-		parsed = JSON.parse(body.arguments);
-	} catch (error) {
-		throw new Error(`task-runtime: the arguments of the cited "${body.name}" call are not JSON (${message$2(error)}); a body that cannot be parsed is not a citation`);
-	}
-	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error(`task-runtime: the arguments of the cited "${body.name}" call are not a JSON object`);
-	return parsed;
-}
-/** One non-empty string field of a cited call's arguments, refused by name when it is absent or blank. */
-function requiredString(args, field, where) {
-	const value = args[field];
-	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`task-runtime: ${where} requires a non-empty "${field}" in its own arguments; the call carries ${JSON.stringify(value)}`);
-	return value;
-}
-/** One non-empty string the *caller* claims; a caller that cannot state its own identity is refused before anything is read. */
-function claimedString(value, field, toolName) {
-	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`task-runtime: ${toolName} needs a non-empty "${field}" from its caller; it received ${JSON.stringify(value)}`);
-	return value;
-}
-/** How one boolean argument reads: absent takes `absent`, a non-boolean is refused (never coerced). */
-function booleanArgument(args, field, absent, where) {
-	const value = args[field];
-	if (value === void 0) return absent;
-	if (typeof value !== "boolean") throw new Error(`task-runtime: ${where} carries "${field}": ${JSON.stringify(value)}, which is not a boolean`);
-	return value;
-}
-/**
-* Locate and read back the caller's *own* `tool/call`, by registration id.
-*
-* The Session comes from the caller's identity (its run binding), never from the
-* request: an id can only ever name an event of the calling session. The read
-* goes through agent-runtime's `readToolCallBody`, which flushes the live
-* Session first — the citation must be durable before a store may record it —
-* and refuses by name when the event is missing, unreadable, or not a tool call.
-*/
-async function readOwnCall(deps, callerSessionId, callId, toolName) {
-	if (callId.length === 0) throw new Error(`task-runtime: ${toolName} needs the registration id of its own call to cite its body`);
-	let log;
-	try {
-		log = await deps.sessionQuery.readSession(SessionId(callerSessionId));
-	} catch (error) {
-		throw new Error(`task-runtime: ${toolName} cannot read session "${callerSessionId}" to locate its own call "${callId}": ${message$2(error)}`, { cause: error });
-	}
-	const ref = toolCallRefIn(log, callId);
-	if (ref === void 0) throw new Error(`task-runtime: session "${callerSessionId}" holds no tool/call "${callId}"; ${toolName} cites the call it is answering for, and a caller cannot cite somebody else's call or a call that was never made`);
-	let body;
-	try {
-		body = await deps.messages.readToolCallBody(ref);
-	} catch (error) {
-		throw new Error(`task-runtime: ${toolName} could not read back the body of its own call "${callId}" (${message$2(error)})`, { cause: error });
-	}
-	if (body.name !== toolName) throw new Error(`task-runtime: call "${callId}" in session "${callerSessionId}" is "${body.name}", not "${toolName}"; the cited body is the one that was sent`);
-	return {
-		...body,
-		ref
-	};
-}
-/** The body one ask cites, read back from the caller's own Session and checked against the claim the call makes. */
-async function checkAskBody(deps, caller, request) {
-	const body = await readOwnCall(deps, caller.sessionId, request.callId, "task_ask_parent");
-	const args = parseCallArguments(body);
-	const claimedKey = claimedString(request.requestKey, "requestKey", "task_ask_parent");
-	const actualKey = requiredString(args, "requestKey", "task_ask_parent");
-	if (actualKey !== claimedKey) throw new Error(`task-runtime: task_ask_parent claims request key "${claimedKey}", but the cited call "${request.callId}" asked under "${actualKey}"; the arguments the sender wrote are the only request key the store may record`);
-	const blocking = booleanArgument(args, "blocking", true, "task_ask_parent");
-	if (request.blocking !== void 0 && request.blocking !== blocking) throw new Error(`task-runtime: task_ask_parent claims blocking=${String(request.blocking)}, but the cited call "${request.callId}" declared ${String(blocking)}; a caller cannot record a blocking declaration its own message does not carry`);
-	return {
-		ref: body.ref,
-		digest: sha256Hex(body.arguments),
-		requestKey: actualKey,
-		question: requiredString(args, "question", "task_ask_parent"),
-		blocking
-	};
-}
-/** The body one answer cites, read back from the answering Session and checked against the claim the call makes. */
-async function checkAnswerBody(deps, caller, request) {
-	const body = await readOwnCall(deps, caller.sessionId, request.callId, "task_answer");
-	const args = parseCallArguments(body);
-	const claimedQuestion = claimedString(request.questionId, "questionId", "task_answer");
-	const actualQuestion = requiredString(args, "questionId", "task_answer");
-	if (actualQuestion !== claimedQuestion) throw new Error(`task-runtime: task_answer claims question "${claimedQuestion}", but the cited call "${request.callId}" answers "${actualQuestion}"; a call answers the question its own message names`);
-	const claimedKey = claimedString(request.requestKey, "requestKey", "task_answer");
-	const actualKey = requiredString(args, "requestKey", "task_answer");
-	if (actualKey !== claimedKey) throw new Error(`task-runtime: task_answer claims request key "${claimedKey}", but the cited call "${request.callId}" answered under "${actualKey}"`);
-	if (args.resolves === void 0) throw new Error(`task-runtime: task_answer requires a boolean "resolves" in its own arguments; the cited call "${request.callId}" carries none`);
-	const resolves = booleanArgument(args, "resolves", false, "task_answer");
-	if (request.resolves !== resolves) throw new Error(`task-runtime: task_answer claims resolves=${String(request.resolves)}, but the cited call "${request.callId}" declared ${String(resolves)}; an answer releases exactly what its own message declares`);
-	return {
-		ref: body.ref,
-		digest: sha256Hex(body.arguments),
-		questionId: actualQuestion,
-		requestKey: actualKey,
-		answer: requiredString(args, "answer", "task_answer"),
-		resolves
-	};
-}
-/**
-* Read one *recorded* citation back for the text a message carries. This is the
-* record's own `(session, seq)` — not the call in hand — so a retry delivers
-* exactly the bytes the store's record points at, and a record whose Session can
-* no longer be read is a refusal rather than a made-up body.
-*/
-async function recordedText(deps, ref, field, where) {
-	let body;
-	try {
-		body = await deps.messages.readToolCallBody({
-			sessionId: SessionId(ref.sessionId),
-			seq: ref.seq
-		});
-	} catch (error) {
-		throw new Error(`task-runtime: the recorded body of ${where} could not be read from session "${ref.sessionId}" seq ${ref.seq}: ${message$2(error)}`, { cause: error });
-	}
-	return requiredString(parseCallArguments(body), field, `the recorded ${where}`);
-}
-/**
-* Compose and deliver one recorded message, reporting rather than throwing: by
-* this point the store's record is durable, so a delivery that cannot be decided
-* is information for the caller and a retry for the recovery pass — never a
-* reason to fail the call that already recorded the fact.
-*/
-async function deliverRecorded(deps, record) {
-	try {
-		const intent = {
-			targetSessionId: SessionId(record.targetSessionId),
-			senderSessionId: SessionId(record.senderSessionId),
-			messageId: record.messageId,
-			text: record.render(await recordedText(deps, record.ref, record.field, record.where))
-		};
-		const delivery = await deps.messages.ensureAgentMessageDelivered(intent);
-		return {
-			messageId: delivery.messageId,
-			status: delivery.status
-		};
-	} catch (error) {
-		return {
-			messageId: record.messageId,
-			status: "refused",
-			reason: message$2(error)
-		};
-	}
-}
-/**
-* The run one id names, or a refusal: every caller here reads a fact whose run
-* the store has already checked, so a missing one is a defect of the snapshot,
-* not a state to carry on from.
-*/
-function runOf(snapshot, runId, where) {
-	const run = snapshot.runs.find((candidate) => candidate.runId === runId);
-	if (run === void 0) throw new Error(`task-runtime: ${where} names run "${runId}", which the store's snapshot does not hold`);
-	return run;
-}
-/**
-* Ask one's direct parent (A4 §F.1): the `task_ask_parent` entry's whole effect.
-*
-* Read the body → commit the intent → recompute the block → deliver under the
-* recorded identity. The parent is never named by the caller: the store resolves
-* the asking task's direct parent and *its* current run, and the delivery goes to
-* that run's Session. A repeated request (same run, same key, same arguments
-* text) returns the record the store already holds, changes no gate state and
-* delivers the same `messageId` — which is `already-present` when the target
-* still holds it.
-*/
-async function askParentQuestion(deps, caller, request) {
-	const checked = await checkAskBody(deps, caller, request);
-	const ask = {
-		childRunId: caller.runId,
-		requestKey: checked.requestKey,
-		questionDigest: checked.digest,
-		questionRef: {
-			sessionId: caller.sessionId,
-			seq: checked.ref.seq
-		},
-		messageId: questionMessageIdOf(questionIdOf({
-			childRunId: caller.runId,
-			requestKey: checked.requestKey
-		})),
-		blocking: checked.blocking
-	};
-	const stored = await deps.task.askParentQuestionIn(caller.storeId, ask, caller.actor);
-	const snapshot = await deps.task.snapshotIn(caller.storeId);
-	deps.gate.setQuestionsBlocked(caller.sessionId, blockingQuestionsOf(snapshot, stored.question.childRunId).length > 0);
-	const parentRun = runOf(snapshot, stored.question.parentRunId, `question "${stored.question.questionId}"`);
-	const delivery = await deliverRecorded(deps, {
-		messageId: stored.question.messageId,
-		targetSessionId: parentRun.sessionId,
-		senderSessionId: caller.sessionId,
-		ref: stored.question.questionRef,
-		field: "question",
-		where: "the question",
-		render: (written) => questionMessageText(stored.question.questionId, written)
-	});
-	return {
-		question: stored.question,
-		created: stored.created,
-		delivery
-	};
-}
-/**
-* Answer one child's question (A4 §F.1): the `task_answer` entry's whole effect.
-*
-* The answering run is the caller's own — the store refuses an answer from any
-* other run, including the new run of a restarted task — and the body citation
-* must sit in the answering Session. The message goes to the *asking* run's
-* Session, so `resolves: true` both releases that run's write gate (recomputed
-* from the facts, so a second open question keeps it blocked) and puts the
-* parent's words in front of the model that asked.
-*/
-async function answerParentQuestion(deps, caller, request) {
-	const checked = await checkAnswerBody(deps, caller, request);
-	const answer = {
-		questionId: checked.questionId,
-		parentRunId: caller.runId,
-		requestKey: checked.requestKey,
-		answerDigest: checked.digest,
-		resolves: checked.resolves,
-		answerRef: {
-			sessionId: caller.sessionId,
-			seq: checked.ref.seq
-		},
-		messageId: answerMessageIdOf(answerIdOf({
-			questionId: checked.questionId,
-			requestKey: checked.requestKey
-		}))
-	};
-	const stored = await deps.task.answerParentQuestionIn(caller.storeId, answer, caller.actor);
-	const snapshot = await deps.task.snapshotIn(caller.storeId);
-	const question = questionOf(snapshot, stored.answer.questionId);
-	if (question === void 0) throw new Error(`task-runtime: answer "${stored.answer.answerId}" was recorded, but its question is not in the store's snapshot; the block and the delivery cannot be decided from a fact the snapshot does not hold`);
-	const childRun = runOf(snapshot, question.childRunId, `question "${question.questionId}"`);
-	if (stored.answer.resolves) deps.gate.setQuestionsBlocked(childRun.sessionId, blockingQuestionsOf(snapshot, question.childRunId).length > 0);
-	const delivery = await deliverRecorded(deps, {
-		messageId: stored.answer.messageId,
-		targetSessionId: childRun.sessionId,
-		senderSessionId: caller.sessionId,
-		ref: stored.answer.answerRef,
-		field: "answer",
-		where: "the answer",
-		render: (written) => answerMessageText(stored.answer.answerId, stored.answer.questionId, written)
-	});
-	return {
-		answer: stored.answer,
-		created: stored.created,
-		delivery
-	};
-}
-/**
-* What one store's question facts still owe a message, derived from its own
-* snapshot and nothing else.
-*
-* Two rules, and both are about what the *facts* can prove rather than about
-* what a process remembers:
-*
-* - every **open** question owes its ask: both runs are running and no answer
-*   has resolved it, so the parent still has to be able to answer it;
-* - every **answer** whose asking run is still running owes its delivery: the
-*   framework has no consumption proof (§F.1 keeps the reference until a real
-*   model step shows it), so even a resolved question's answer is owed to a run
-*   that may never have read it.
-*
-* Nothing else is owed. A question whose asking run settled is audit — its ask
-* and its answers are moot, and re-delivering them would be a message to a run
-* that cannot act on it.
-*/
-function pendingQuestionMessages(snapshot) {
-	const index = snapshot.questions;
-	if (index === void 0) throw new Error("task-runtime: this store's snapshot carries no question index, so its pending question messages cannot be read");
-	const open = /* @__PURE__ */ new Set();
-	for (const run of snapshot.runs) for (const question of openQuestionsOf(snapshot, run.runId)) open.add(question.questionId);
-	const messages = [];
-	const refused = [];
-	for (const question of index.all) {
-		const subject = `question "${question.questionId}"`;
-		const childRun = snapshot.runs.find((run) => run.runId === question.childRunId);
-		const parentRun = snapshot.runs.find((run) => run.runId === question.parentRunId);
-		if (childRun === void 0 || parentRun === void 0) {
-			refused.push({
-				subject,
-				messageId: question.messageId,
-				status: "refused",
-				reason: "the store holds the question without both of its runs, so neither the ask nor its answers can be addressed"
-			});
-			continue;
-		}
-		if (open.has(question.questionId)) messages.push({
-			subject,
-			kind: "question",
-			questionId: question.questionId,
-			messageId: question.messageId,
-			ref: question.questionRef,
-			senderSessionId: childRun.sessionId,
-			targetSessionId: parentRun.sessionId
-		});
-		if (childRun.status !== "running") continue;
-		for (const answer of question.answers ?? []) messages.push({
-			subject: `answer "${answer.answerId}" for question "${question.questionId}"`,
-			kind: "answer",
-			questionId: question.questionId,
-			answerId: answer.answerId,
-			messageId: answer.messageId,
-			ref: answer.answerRef,
-			senderSessionId: parentRun.sessionId,
-			targetSessionId: childRun.sessionId
-		});
-	}
-	return {
-		messages,
-		refused
-	};
-}
-/**
-* Reconcile the deliveries one store's question facts still owe (§F.1's crash
-* recovery): read each pending body from its *recorded* citation, then hand the
-* composed intents to agent-runtime's reconcile — which delivers only what the
-* target Session's own fold says is missing, so a second pass over the same
-* record adds nothing.
-*
-* A recorded body that can no longer be read is reported per record rather than
-* failing the pass: the facts are still the facts, the next activation is the
-* retry, and one unreadable Session must not hide the deliveries that could be
-* made. A target that is not live comes back `unavailable` — zero side effects,
-* no substitute parent, and the same retry rule.
-*/
-async function reconcileQuestionDeliveries(deps, storeId) {
-	const pending = pendingQuestionMessages(await deps.task.snapshotIn(storeId));
-	const composed = [];
-	const subjects = [];
-	const unreadable = /* @__PURE__ */ new Map();
-	for (const pendingMessage of pending.messages) {
-		const subject = pendingMessage.subject;
-		try {
-			subjects.push(subject);
-			composed.push({
-				targetSessionId: SessionId(pendingMessage.targetSessionId),
-				senderSessionId: SessionId(pendingMessage.senderSessionId),
-				messageId: pendingMessage.messageId,
-				text: pendingMessage.kind === "question" ? questionMessageText(pendingMessage.questionId, await recordedText(deps, pendingMessage.ref, "question", "the question")) : answerMessageText(pendingMessage.answerId, pendingMessage.questionId, await recordedText(deps, pendingMessage.ref, "answer", "the answer"))
-			});
-		} catch (error) {
-			subjects.pop();
-			unreadable.set(pendingMessage.messageId, {
-				subject,
-				messageId: pendingMessage.messageId,
-				status: "refused",
-				reason: message$2(error)
-			});
-		}
-	}
-	const settled = composed.length === 0 ? [] : await deps.messages.reconcileAgentMessageDeliveries(composed);
-	const reported = /* @__PURE__ */ new Map();
-	settled.forEach((report, index) => {
-		reported.set(report.messageId, {
-			subject: subjects[index],
-			messageId: report.messageId,
-			status: report.status,
-			...report.reason === void 0 ? {} : { reason: report.reason }
-		});
-	});
-	return [...pending.refused, ...pending.messages.flatMap((pendingMessage) => {
-		const record = reported.get(pendingMessage.messageId) ?? unreadable.get(pendingMessage.messageId);
-		return record === void 0 ? [] : [record];
-	})];
-}
-/**
-* Recompute the question block of every run that asked the run just settled —
-* the *fourth* moment the facts behind a block can move, and the one that has no
-* event of its own.
-*
-* An open question requires both runs to still be running ({@link
-* blockingQuestionsOf}), so the moment the *addressee* settles, every question
-* addressed to it stops being open: the asking run is no longer waiting on
-* anything, and nothing about it may be refused for a wait that no longer
-* exists. No `QuestionAnswered` was written and no phase moved, so the three
-* push sites that recompute a block (the ask, the resolving answer, recovery)
-* never run — without this step a run whose parent settled first would keep a
-* refusal that only its own wall time could end.
-*
-* Everything pushed here is derived from the snapshot the caller read *after*
-* the settlement, and the asking sessions are found from the store's own
-* questions (an answer carries no session; the citation does) rather than from
-* anything this process remembers. The asking run's own session is not the
-* subject — a run that settled closes its own gate — and a question whose asking
-* run is no longer running has nothing left to release.
-*/
-function releaseAskingSessions(gate, snapshot, settledRunId) {
-	const index = snapshot.questions;
-	if (index === void 0) return;
-	const asking = /* @__PURE__ */ new Map();
-	for (const question of index.all) {
-		if (question.parentRunId !== settledRunId) continue;
-		const childRun = snapshot.runs.find((run) => run.runId === question.childRunId);
-		if (childRun === void 0 || childRun.status !== "running") continue;
-		asking.set(childRun.sessionId, childRun.runId);
-	}
-	for (const [sessionId, childRunId] of asking) {
-		const blocked = blockingQuestionsOf(snapshot, childRunId).length > 0;
-		if (gate.questionsBlocked(sessionId) !== blocked) gate.setQuestionsBlocked(sessionId, blocked);
-	}
-}
-/**
-* Push the question block every run in one snapshot implies onto the gate, under
-* the gate's own token rule — the recovery pass's half of §F.1's "restart from
-* the durable facts". The token is the one taken before the snapshot read, so a
-* value that straddled a decision of this process is dropped exactly as a
-* store-derived phase is.
-*/
-function applyStoreQuestionBlocking(gate, snapshot, tokenOf) {
-	for (const run of snapshot.runs) gate.applyStoreQuestionsBlocked(run.sessionId, blockingQuestionsOf(snapshot, run.runId).length > 0, tokenOf(run.sessionId));
-}
-/**
-* Whether one run still owes or waits for coordination: no unresolved blocking
-* question of its own, and no question of a child's it has not answered. The
-* runtime reads this where a run's own next step would otherwise be automatic —
-* the parent's submission once its children are terminal — and the answer is
-* deliberately *derived* from the facts rather than stored: an answered question
-* and an unanswered one are the same list, one answer apart.
-*/
-function pendingCoordinationOf(snapshot, runId) {
-	return [...openQuestionsOf(snapshot, runId), ...questionsAwaitingAnswerOf(snapshot, runId)];
-}
-
-//#endregion
-//#region src/workspace.ts
-/** The directory under a deployment's run-binding root that holds ownership markers (§3.4). */
-const WORKSPACE_OWNERS_DIR = "workspace-owners";
-/**
-* A workspace that cannot be claimed because something already holds it — or
-* because a marker exists that cannot be read as a holder. Carries the three
-* things a caller needs to report it: which workspace, who holds it, and since
-* when. `owner`/`since` are absent only in the unreadable-marker case, where
-* nothing on disk names a holder; the message says so instead of inventing one.
-*/
-var WorkspaceBusyError = class extends Error {
-	workspace;
-	owner;
-	since;
-	constructor(workspace, owner, since, detail) {
-		const held = owner === void 0 ? `a marker exists but names no holder: ${detail}` : `held by ${describeOwner(owner)} since ${since ?? owner.since} — ${detail}`;
-		super(`workspace ${workspace} is busy: ${held}`);
-		this.name = "WorkspaceBusyError";
-		this.workspace = workspace;
-		this.owner = owner;
-		this.since = since;
-	}
-};
-/** One line naming an owner the way every diagnostic in this module names it. */
-function describeOwner(owner) {
-	const parts = [`kind ${owner.kind}`, `store ${owner.storeId}`];
-	if (owner.taskId !== void 0) parts.push(`task ${owner.taskId}`);
-	if (owner.runId !== void 0) parts.push(`run ${owner.runId}`);
-	if (owner.batchId !== void 0) parts.push(`batch ${owner.batchId}`);
-	return parts.join(" ");
-}
-/**
-* The identity of an owner as a stack compares it: every declared field, `since`
-* included. Strict on purpose — two claims by the same run at different instants
-* are two different holders, and a handover that names the run but not the
-* instant it was taken is not the holder this stack is looking at.
-*/
-function ownerKey(owner) {
-	return JSON.stringify([
-		owner.kind,
-		owner.storeId,
-		owner.taskId ?? null,
-		owner.runId ?? null,
-		owner.batchId ?? null,
-		owner.since
-	]);
-}
-function message$1(error) {
-	return error instanceof Error ? error.message : String(error);
-}
-/**
-* Resolve a checkout path the way ownership keys it: absolute, with symbolic
-* links resolved, so the two spellings of one directory cannot become two
-* markers. Throws when the path cannot be resolved (absent, a broken link, no
-* permission) — a workspace whose identity is unknown is not a workspace this
-* module will record an owner for.
-*/
-async function normalizeWorkspacePath(path) {
-	try {
-		return await realpath(resolve(path));
-	} catch (error) {
-		throw new Error(`workspace ${path} cannot be resolved to a real path: ${message$1(error)}`);
-	}
-}
-/**
-* The kernel's start-time token for `pid`, or `undefined` when it cannot be read
-* (a non-Linux platform, a pid that is gone, a process this user may not stat).
-* Exported because it is the one honest pid-reuse check available here: compare
-* it with the value a marker recorded.
-*/
-async function readProcessStartTime(pid) {
-	let stat$1;
-	try {
-		stat$1 = await readFile(`/proc/${pid}/stat`, "utf8");
-	} catch {
-		return;
-	}
-	const close = stat$1.lastIndexOf(")");
-	if (close < 0) return void 0;
-	const starttime = stat$1.slice(close + 1).trim().split(/\s+/)[19];
-	return starttime === void 0 || starttime.length === 0 ? void 0 : starttime;
-}
-/** True when `pid` is a live process this user can signal; EPERM means another user's live process, which counts as alive. */
-function pidIsAlive(pid) {
-	if (!Number.isInteger(pid) || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return error.code === "EPERM";
-	}
-}
-/**
-* How many marker writes this process has started; it names each write's
-* temporary file. Two chains mutate one workspace's marker at the same time in a
-* real deployment — a child's submission chain takes the verifier layer in and
-* out while the batch driver releases the child it has seen settle — and with one
-* shared temporary path the first `rename` takes the file away from the second,
-* whose release then fails with ENOENT. A counter per process rather than per
-* registry, because two registries in one process (a second graph's) write the
-* same marker path for the same workspace.
-*/
-let markerWriteSeq = 0;
-/** Parse a marker file's bytes; anything that is not a well-formed marker is reported, never repaired. */
-function parseMarker(raw, file) {
-	let declared;
-	try {
-		declared = JSON.parse(raw);
-	} catch (error) {
-		return {
-			kind: "unreadable",
-			reason: `${file} is not readable JSON (${message$1(error)}); an unreadable marker is not evidence that a workspace is free`
-		};
-	}
-	if (declared === null || typeof declared !== "object") return {
-		kind: "unreadable",
-		reason: `${file} does not hold a marker object`
-	};
-	const candidate = declared;
-	if (typeof candidate.pid !== "number" || candidate.owner === null || typeof candidate.owner !== "object" || typeof candidate.path !== "string") return {
-		kind: "unreadable",
-		reason: `${file} does not name a pid and an owner; only a human should decide what to do with it`
-	};
-	const owner = candidate.owner;
-	return {
-		kind: "held",
-		marker: {
-			path: candidate.path,
-			pid: candidate.pid,
-			...typeof candidate.processStartedAt === "string" ? { processStartedAt: candidate.processStartedAt } : {},
-			owner,
-			since: typeof candidate.since === "string" ? candidate.since : owner.since
-		}
-	};
-}
-/**
-* The in-process and on-disk ownership of a deployment's workspaces. One
-* instance per runtime; `close()` releases what this process still holds.
-*/
-/**
-* Release the layer on top of one workspace's stack, when `holds` says it is the
-* caller's. The comparison is the caller's own identity rule — a caller that
-* rebuilds its owner description from scratch cannot reproduce the instant a
-* layer was taken, so the registry's full-key check is not what decides here —
-* and the layer actually on top is what the registry is asked to pop, so the pop
-* can never take a stranger's.
-*
-* Returns `released: false` with the offending holder when the top is not the
-* caller's layer, and `released: false` alone when this process holds nothing:
-* the two cases mean different things, and each caller's policy decides which of
-* them is worth a diagnostic.
-*/
-async function releaseLayer(registry, workspace, holds) {
-	const top = registry.ownerOf(workspace);
-	if (top === void 0) return { released: false };
-	if (!holds(top)) return {
-		released: false,
-		conflict: top
-	};
-	await registry.release(workspace, top);
-	return { released: true };
-}
-var WorkspaceRegistry = class {
-	markerRoot;
-	pid;
-	stacks = /* @__PURE__ */ new Map();
-	/**
-	* One marker-mutation chain per workspace: every write and delete joins the
-	* tail of its workspace's chain, so overlapping mutations of one marker land
-	* in the order they were called — the same order the stack was mutated in.
-	* A rejected mutation is carried past, never stored: a write that failed
-	* (a permission, a full disk) must not wedge the mutations behind it, and its
-	* caller still sees the rejection it has to report.
-	*/
-	markerWrites = /* @__PURE__ */ new Map();
-	constructor(options) {
-		this.markerRoot = options.markerRoot;
-		this.pid = options.pid ?? process.pid;
-	}
-	/** Queue one marker mutation after the ones this workspace already has in flight, in call order. */
-	queueMarkerMutation(workspace, mutate) {
-		const run = (this.markerWrites.get(workspace) ?? Promise.resolve()).catch(() => void 0).then(mutate);
-		const stored = run.catch(() => void 0);
-		this.markerWrites.set(workspace, stored);
-		stored.then(() => {
-			if (this.markerWrites.get(workspace) === stored) this.markerWrites.delete(workspace);
-		});
-		return run;
-	}
-	/** Where one workspace's marker lives — derived from the path as given, so it is the same key the stack uses. */
-	markerPath(workspace) {
-		return join(this.markerRoot, `${sha256Hex(workspace)}.json`);
-	}
-	/** The owner on top of the stack, or `undefined` when this process holds nothing for the workspace. */
-	ownerOf(workspace) {
-		const held = this.stacks.get(workspace);
-		return held === void 0 || held.length === 0 ? void 0 : held[held.length - 1];
-	}
-	/**
-	* Take a workspace for `owner`. Refuses — before anything is written, so a
-	* refused claim leaves the marker exactly as it was — when this process
-	* already holds it, or when any marker is already there.
-	*/
-	async claim(workspace, owner) {
-		const top = this.ownerOf(workspace);
-		if (top !== void 0) throw new WorkspaceBusyError(workspace, top, top.since, "this process already holds the workspace; release the holder before claiming it again");
-		const read = await this.readMarker(workspace);
-		if (read.kind !== "absent") throw await this.busyFromMarker(workspace, read);
-		await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, owner));
-		this.stacks.set(workspace, [owner]);
-	}
-	/**
-	* Hand the workspace from `from` (which must be the current holder) to `to`,
-	* pushing `to` on the stack and rewriting the marker to name it. The stack is
-	* the ownership history: the run at the bottom keeps its claim while its batch
-	* and current child are on top of it.
-	*/
-	async push(workspace, from, to) {
-		const held = this.stacks.get(workspace);
-		if (held === void 0 || held.length === 0) throw new Error(`workspace ${workspace} cannot be handed from ${describeOwner(from)} to ${describeOwner(to)}: this process holds no claim on it`);
-		const top = held[held.length - 1];
-		if (ownerKey(top) !== ownerKey(from)) throw new Error(`workspace ${workspace} cannot be handed over: its current holder is ${describeOwner(top)} (since ${top.since}), not ${describeOwner(from)} (since ${from.since}); a handover names the holder that is actually there`);
-		held.push(to);
-		await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, to));
-	}
-	/**
-	* Release `owner`, which must be the current holder. A mismatch throws with
-	* both owners named — popping a lower holder would hand the checkout to
-	* someone while a writer still believes it holds the workspace. The last
-	* release deletes the marker; an earlier one rewrites it to the new top.
-	*/
-	async release(workspace, owner) {
-		const held = this.stacks.get(workspace);
-		if (held === void 0 || held.length === 0) throw new Error(`workspace ${workspace} cannot be released by ${describeOwner(owner)} (since ${owner.since}): this process holds no claim on it`);
-		const top = held[held.length - 1];
-		if (ownerKey(top) !== ownerKey(owner)) throw new Error(`workspace ${workspace} cannot be released by ${describeOwner(owner)} (since ${owner.since}): its current holder is ${describeOwner(top)} (since ${top.since}); only the holder on top of the stack releases it`);
-		held.pop();
-		if (held.length === 0) {
-			this.stacks.delete(workspace);
-			await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace));
-		} else {
-			const remaining = held[held.length - 1];
-			await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, remaining));
-		}
-	}
-	/**
-	* Take over a marker whose owning process is gone — the recovery path only,
-	* and the only way a stale marker is ever cleared. An absent marker is a
-	* success that changes nothing; a marker whose pid is alive, or whose bytes
-	* cannot be read as a marker, is a refusal that leaves
-	* everything in place, because adopting it would hand the checkout to a caller
-	* while a writer that may still be running has no idea.
-	*/
-	async reconcileAdopt(workspace) {
-		const read = await this.readMarker(workspace);
-		if (read.kind === "absent") return { adopted: true };
-		if (read.kind === "unreadable") return {
-			adopted: false,
-			reason: read.reason
-		};
-		const { marker } = read;
-		if (pidIsAlive(marker.pid)) return {
-			adopted: false,
-			reason: `workspace ${workspace} still has a holder: ${marker.pid === this.pid ? `the marker names this process's own pid ${marker.pid}, so no liveness probe can tell its holder apart from this process — settle this process's own claims instead` : `the marker names pid ${marker.pid}, which is alive${marker.processStartedAt === void 0 ? "" : ` (start time ${marker.processStartedAt})`}; a live owner is never taken over, however the recovery path explains it`}`
-		};
-		this.stacks.delete(workspace);
-		await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace));
-		return { adopted: true };
-	}
-	/**
-	* Release everything this process still holds, as an unload path does. Only
-	* markers that name this process's pid are deleted: a marker written by
-	* another process describes a writer this unload knows nothing about, and
-	* removing it could hand a checkout to the next caller while that writer runs.
-	*/
-	async close() {
-		const workspaces = [...this.stacks.keys()];
-		this.stacks.clear();
-		for (const workspace of workspaces) {
-			const read = await this.readMarker(workspace);
-			if (read.kind !== "held") continue;
-			if (read.marker.pid !== this.pid) continue;
-			await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace));
-		}
-	}
-	/** The busy error a marker earns: whose, why, and — when the recorded start time disagrees — that the pid was reused. */
-	async busyFromMarker(workspace, read) {
-		if (read.kind === "unreadable") return new WorkspaceBusyError(workspace, void 0, void 0, read.reason);
-		const { marker } = read;
-		if (marker.pid === this.pid) return new WorkspaceBusyError(workspace, marker.owner, marker.since, `the marker at ${this.markerPath(workspace)} names this process's own pid ${marker.pid}, but this process holds no claim on the workspace; the in-process stack is the truth, so the marker and this process disagree and the workspace is reported busy rather than taken`);
-		if (!pidIsAlive(marker.pid)) return new WorkspaceBusyError(workspace, marker.owner, marker.since, `the marker's pid ${marker.pid} is not alive, so the marker is stale; only the recovery path (reconcileAdopt) may take a stale marker over, because the process that wrote it may have died mid-write`);
-		const recorded = marker.processStartedAt;
-		const live = recorded === void 0 ? void 0 : await readProcessStartTime(marker.pid);
-		const reused = recorded !== void 0 && live !== void 0 && live !== recorded ? `; its recorded start time ${recorded} differs from the live ${live}, so the pid was reused and the marker's writer is gone (still reported busy: only reconcileAdopt clears a marker)` : "";
-		return new WorkspaceBusyError(workspace, marker.owner, marker.since, `the marker names pid ${marker.pid}, which is alive${reused}`);
-	}
-	async readMarker(workspace) {
-		const file = this.markerPath(workspace);
-		let raw;
-		try {
-			raw = await readFile(file, "utf8");
-		} catch (error) {
-			if (error.code === "ENOENT") return { kind: "absent" };
-			return {
-				kind: "unreadable",
-				reason: `${file} cannot be read (${message$1(error)}); an unreadable marker is not evidence that a workspace is free`
-			};
-		}
-		const read = parseMarker(raw, file);
-		if (read.kind === "held" && read.marker.path !== workspace) return {
-			kind: "unreadable",
-			reason: `${file} describes workspace ${read.marker.path}, not ${workspace}; the marker and this path disagree, which only a human should resolve`
-		};
-		return read;
-	}
-	async writeMarker(workspace, owner) {
-		const file = this.markerPath(workspace);
-		const marker = {
-			path: workspace,
-			pid: this.pid,
-			owner,
-			since: owner.since
-		};
-		const startedAt = await readProcessStartTime(this.pid);
-		if (startedAt !== void 0) marker.processStartedAt = startedAt;
-		await mkdir(dirname(file), { recursive: true });
-		markerWriteSeq += 1;
-		const tmp = `${file}.${markerWriteSeq}.tmp`;
-		await writeFile(tmp, `${JSON.stringify(marker, null, 2)}\n`, "utf8");
-		await rename(tmp, file);
-	}
-	async removeMarker(workspace) {
-		await rm(this.markerPath(workspace), { force: true });
-	}
-};
-
-//#endregion
-//#region src/handoff.ts
-/**
-* The envelope passed from a parent run to the child it delegates to (RFC §18).
-*
-* This module builds and persists the DATA of a handoff and nothing else: what
-* a worker is shown from it is the context package's projection
-* (`context/src/projections.ts`, `render.ts:handoffLines`), and the stable
-* behaviour rules that used to ride the same spawn prompt are the agent
-* runtime's worker policy section — neither is rendered here, because the
-* runtime must not grow a second rendering of what it owns as facts.
-*/
-function buildHandoff(init) {
-	return {
-		handoffId: `h-${randomUUID()}`,
-		parentTaskId: init.parentTask.taskId,
-		parentRunId: init.parentRun.runId,
-		childTaskId: init.childTask.taskId,
-		parentObjective: init.parentTask.objective,
-		reasonForDelegation: init.reason,
-		constraints: [...init.constraints ?? []],
-		decisions: [...init.decisions ?? []],
-		relevantArtifacts: (init.relevantArtifacts ?? init.parentRun.artifacts).map((artifact) => ({ ...artifact })),
-		relevantEvidence: [...init.relevantEvidence ?? []],
-		assumptions: [...init.assumptions ?? []],
-		openQuestions: [...init.openQuestions ?? []],
-		parentSessionRef: init.callerSessionId,
-		createdAt: (/* @__PURE__ */ new Date()).toISOString()
-	};
-}
-
-//#endregion
-//#region src/orchestrate.ts
+//#region src/orchestration/types.ts
 /** Raised when the verifier service (ticket C2) is not loaded in the context. */
 var VerifierUnavailableError = class extends Error {
 	name = "VerifierUnavailableError";
 };
-/** Grace the cascade's safety net grants a verifier beyond its own deadline before giving up on it. */
-const VERIFY_SAFETY_MARGIN_MS = 15e3;
-/** Block reason for a child the batch never started because the caller cancelled it. */
-const CANCELLED_BEFORE_START = "cancelled by the caller before this child started";
-/**
-* Rebuild the authorization a recovery pass has to state for one run, from the
-* store's own records, and hand it to the deployment's resume door.
-*
-* **Why it is rebuilt here and not remembered:** the spawn's grant is a
-* function of durable facts — the task's manifest in the store, and the run's
-* own provider binding — so the same helpers that resolved it at spawn
-* (`authorizedGrant`, `permissionFor`, `skillRootsForRun`) resolve it again.
-* A grant recorded somewhere and handed back would be a second source of
-* authorization that could drift from the manifest it came from; and a resume
-* states the plane it *would* install so the Session's own durable record can
-* refuse a grant it never ran under.
-*
-* The one thing this cannot rebuild is an overlay the spawn took from the
-* caller rather than from the store — a replay's candidate skill roots
-* (`ReplayOverlay.extraSkillRoots`, A6/S2-R's own subject). What is rebuilt is
-* the run's own binding snapshot, which is what a resumed worker loads its
-* content from; the candidate overlay of an interrupted experiment is not part
-* of the run's record and is not invented here.
-* @param env - the deployment's seam, for the store, the permission registry and the resume door.
-* @param storeId - the store the run belongs to.
-* @param run - the run as the store records it.
-* @returns what the attempt settled as, never a throw for a named refusal.
-*/
-async function resumeAdoptedWorker(env, storeId, run) {
-	const resume = env.resumeWorkerSession;
-	if (resume === void 0) return {
-		status: "refused",
-		reason: "this deployment wires no worker resume, so the Session of an adopted run cannot be brought back"
-	};
-	let manifest;
-	try {
-		manifest = (await env.task.snapshotIn(storeId)).capabilities[run.taskId];
-	} catch (error) {
-		return {
-			status: "refused",
-			reason: `the store could not be read for its manifest: ${message(error)}`
-		};
-	}
-	if (manifest === void 0) return {
-		status: "refused",
-		reason: `the store holds no capability manifest for task "${run.taskId}", so the composition run "${run.runId}" was spawned in cannot be rebuilt`
-	};
-	let grant;
-	let permissionPreset;
-	try {
-		grant = await authorizedGrant(env, manifest, skillRootsForRun([], run.providerBinding));
-		permissionPreset = permissionFor(env, manifest);
-	} catch (error) {
-		return {
-			status: "refused",
-			reason: `the run's authorization could not be rebuilt: ${message(error)}`
-		};
-	}
-	return await resume({
-		storeId,
-		run,
-		grant,
-		...permissionPreset === void 0 ? {} : { permissionPreset },
-		taskWorker: true
-	});
-}
 /** Raised when the deployment cannot observe a run's terminal state, so no honest settlement is possible. */
 var RunWatcherUnavailableError = class extends Error {
 	name = "RunWatcherUnavailableError";
 };
-function message(error) {
-	return error instanceof Error ? error.message : String(error);
+
+//#endregion
+//#region src/service/root-intake.ts
+async function adoptRoot(self, storeId, rootSessionId) {
+	/**
+	* The barrier already in flight for this store is the one to wait for: the
+	* join is the dedupe, so two explicit entries cannot run two recovery
+	*/
+	const inflight = self.storeRecovery.get(storeId);
+	if (inflight !== void 0 && (inflight.status === "recovering" || inflight.status === "ready")) {
+		await inflight.promise;
+		const settledStatus = (state$1) => state$1.status;
+		if (self.storeRecovery.get(storeId) === inflight && settledStatus(inflight) === "failed") throw inflight.failure;
+		return inflight.adoption;
+	}
+	let complete;
+	const completed = new Promise((resolve$1) => {
+		complete = resolve$1;
+	});
+	let release;
+	const released = new Promise((resolve$1) => {
+		release = resolve$1;
+	});
+	const state = {
+		status: "recovering",
+		promise: completed,
+		release,
+		released,
+		pendingDrivers: [],
+		pendingNotices: [],
+		wokenSessions: /* @__PURE__ */ new Set(),
+		pendingBatchResults: []
+	};
+	self.storeRecovery.set(storeId, state);
+	try {
+		const adoption = await adoptRootThroughBarrier(self, storeId, rootSessionId);
+		state.adoption = adoption;
+		await self.initializeStoreGates(storeId);
+		if (state.cancelled)
+ /**
+		* A cancellation or the unload invalidated this barrier: it finished
+		* its pass into a store that cancellation owns, so it leaves no ready
+		*/
+		self.storeRecovery.delete(storeId);
+		else state.status = "ready";
+		/**
+		* The wakes this barrier deferred run now and only now: the gates are in
+		* place and the store is `ready`, so the first request each one starts is
+		*/
+		const deferred = state.pendingQuestionDelivery;
+		state.pendingQuestionDelivery = void 0;
+		if (!state.cancelled) {
+			if (deferred !== void 0) await deferred();
+			for (const result of state.pendingBatchResults.splice(0)) await self.deliverBatchResultNow(result);
+			while (state.pendingNotices.length > 0) {
+				const notice = state.pendingNotices[0];
+				if (state.wokenSessions.has(notice.sessionId)) {
+					state.pendingNotices.shift();
+					continue;
+				}
+				self.notify(notice.sessionId, notice.text);
+				state.pendingNotices.shift();
+			}
+		}
+		/**
+		* The drivers start only now — after the facts, the gates and the
+		* registrations are settled. The barrier never waits for what they do;
+		*/
+		state.pendingDrivers.length = 0;
+		release(!state.cancelled);
+		return adoption;
+	} catch (error) {
+		state.status = "failed";
+		state.reason = message(error);
+		state.failure = error;
+		/**
+		* The failed barrier's deferred wake is dropped with it: a store that never
+		* reached `ready` wakes no model, and the record keeps the intents for the
+		*/
+		state.pendingQuestionDelivery = void 0;
+		for (const notice of state.pendingNotices) self.startedSessions.delete(notice.sessionId);
+		state.pendingNotices.length = 0;
+		state.wokenSessions.clear();
+		state.pendingBatchResults.length = 0;
+		/**
+		* Not-started is not executed (A2 §E): the drivers this barrier
+		* registered are aborted and removed, nothing is written on their behalf,
+		*/
+		self.standDownPendingDrivers(state);
+		release(false);
+		try {
+			await self.releaseStoreWorkspace(storeId);
+		} catch (cleanup) {
+			self.warn(`store ${storeId}: its workspace could not be released after a failed recovery (${message(cleanup)})`);
+		}
+		throw error;
+	} finally {
+		complete();
+	}
 }
+async function reconcileEvolutionCommits(self) {
+	const evolution = self.softService("evolution");
+	if (evolution?.reconcile === void 0) return;
+	let outcomes;
+	try {
+		outcomes = await evolution.reconcile();
+	} catch (error) {
+		throw new Error(`task-runtime: the evolution ledger could not be reconciled before this store was recovered (${message(error)}); the recovery barrier fails rather than taking a store over while an unsettled production commit may stand behind it`);
+	}
+	for (const outcome of outcomes) {
+		if (outcome.result !== "blocked") continue;
+		self.warn(`evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ${outcome.targets.join(", ")} could not be settled — ${outcome.detail ?? "no reason reported"}`);
+	}
+}
+async function adoptRootThroughBarrier(self, storeId, rootSessionId) {
+	/**
+	* K2-3/§E: production is reconciled before this barrier takes anything over.
+	* A graph activation arrives here (activate → adoptRoot), so an interrupted
+	*/
+	await reconcileEvolutionCommits(self);
+	await openOrCreateStore(self, storeId);
+	let snapshot = await self.context.task.snapshotIn(storeId);
+	self.reindex(storeId, snapshot);
+	let root = snapshot.tasks.find((task) => task.parentTaskId === void 0);
+	if (root === void 0) {
+		/**
+		* No root on the record is not the end of the question: the recovery pass
+		* is what continues an approval that was recorded before the process died
+		*/
+		await self.reconcileStore(storeId);
+		snapshot = await self.context.task.snapshotIn(storeId);
+		root = snapshot.tasks.find((task) => task.parentTaskId === void 0);
+		if (root === void 0) return {
+			adopted: false,
+			detail: nothingAdoptedDetail(storeId, rootSessionId, snapshot)
+		};
+	}
+	const run = [...snapshot.runs].reverse().find((item) => item.taskId === root.taskId && item.sessionId === rootSessionId);
+	if (run === void 0) throw new Error(`task-runtime: store "${storeId}" already has root task "${root.taskId}" without a run for session "${rootSessionId}"`);
+	/**
+	* Re-entering a run (a restarted root session adopts the run bound to it):
+	* the record's own content identity is re-checked before the run is handed
+	*/
+	if (run.providerBinding !== void 0) {
+		const read = await readRunBinding(run.providerBinding);
+		if (read !== void 0 && read.defects.length > 0) throw new Error(`task-runtime: run "${run.runId}" cannot be re-entered: the content it is bound to is not readable:\n- ${read.defects.join("\n- ")}`);
+	}
+	const phase = runGatePhase(run);
+	const rootWasStarted = self.startedSessions.has(rootSessionId);
+	self.sessions.set(rootSessionId, {
+		storeId,
+		taskId: root.taskId,
+		runId: run.runId
+	});
+	self.startedSessions.add(rootSessionId);
+	if (!rootWasStarted && (phase === "active" || phase === "waiting_children" && pendingCoordinationOf(snapshot, run.runId).length > 0)) self.notifyWhenReady(rootSessionId, "task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.");
+	if (phase === "terminal") self.executionGate.setTerminal(rootSessionId);
+	else if (phase !== void 0) self.executionGate.setPhase(rootSessionId, phase);
+	/**
+	* A submitted run left by a dead process is independently verified by the
+	* recovery pass. Take over this tree's checkout first so that verification
+	*/
+	if (snapshot.runs.some((item) => item.status === "running" && item.executionPhase === "submitted")) await self.rebuildWorkspaceOwnership(storeId);
+	/**
+	* Adoption is the recovery entry (§3.6): runs this process is not driving
+	* are settled or restarted, then the workspace layers are rebuilt from the
+	*/
+	await self.reconcileStore(storeId);
+	await self.rebuildWorkspaceOwnership(storeId);
+	return {
+		adopted: true,
+		taskId: root.taskId,
+		runId: run.runId,
+		phase: phase ?? "terminal",
+		detail: `store "${storeId}" holds root task "${root.taskId}" with run "${run.runId}" for session "${rootSessionId}"; the session is bound and its gate is "${phase ?? "ungated"}"`
+	};
+}
+async function initializeStoreGates(self, storeId) {
+	const tokens = /* @__PURE__ */ new Map();
+	for (const [sessionId, binding] of self.sessions) if (binding.storeId === storeId) tokens.set(sessionId, self.executionGate.decisionToken(sessionId));
+	let snapshot;
+	try {
+		snapshot = await self.context.task.snapshotIn(storeId);
+	} catch (error) {
+		throw new Error(`store ${storeId} could not be read to initialize its sessions' gates after recovery (${message(error)}); the recovery barrier fails rather than leaving the store half-gated`);
+	}
+	for (const run of snapshot.runs) self.gatePhaseFromStore(run.sessionId, run, storeId, tokens.get(run.sessionId) ?? 0);
+	/**
+	* The question blocks come from the same read and the same tokens (A4 §F.1):
+	* a restarted session whose run is waiting on an unresolved blocking question
+	*/
+	applyStoreQuestionBlocking(self.executionGate, snapshot, (sessionId) => tokens.get(sessionId) ?? 0);
+}
+function nothingAdoptedDetail(storeId, rootSessionId, snapshot) {
+	const open = (snapshot.proposals?.all ?? []).filter(isOpenProposal);
+	return `store "${storeId}" holds no root task for session "${rootSessionId}" after its recovery pass, which created no task, no run and no proposal; ${open.length === 0 ? "no proposal is open on it" : `${open.length === 1 ? "1 proposal is" : `${open.length} proposals are`} still open: ` + open.map((proposal) => `"${proposal.proposalId}" (${proposal.status})`).join(", ")}; a root task is created by a root contract intake, never by adoption`;
+}
+function runGatePhase(run) {
+	if (run.status !== "running") return "terminal";
+	return run.executionPhase;
+}
+async function openOrCreateStore(self, storeId) {
+	try {
+		await self.context.task.createStore(storeId);
+	} catch (error) {
+		if (!(error instanceof Error) || !/already (open|exists)/.test(error.message)) throw error;
+		await self.context.task.openStore(storeId);
+	}
+}
+async function intakeRootContract(self, storeId, rootSessionId, spec, options = {}) {
+	if (options.exec?.signal?.aborted === true) throw new Error(`task-runtime: the intake of a root contract for session "${rootSessionId}" was cancelled before anything was persisted`);
+	await self.assertRecoveryReady(storeId, "the intake of a root contract");
+	const submission = await submitRootContractProposal(self, storeId, rootSessionId, spec, options);
+	const continued = await self.continueProposal(storeId, submission.proposalId, rootSessionId);
+	if (continued.status === "activated") return {
+		status: "activated",
+		proposalId: continued.proposalId,
+		taskId: continued.taskId,
+		runId: continued.runId,
+		detail: continued.detail
+	};
+	if (continued.status === "pending_review") return {
+		status: "pending_review",
+		proposalId: continued.proposalId,
+		detail: continued.detail
+	};
+	throw new Error(`task-runtime: root contract of session "${rootSessionId}" is ${continued.status} (proposal ${continued.proposalId}): ${continued.detail}`);
+}
+async function submitRootContractProposal(self, storeId, rootSessionId, spec, options = {}) {
+	await self.assertRecoveryReady(storeId, "a root contract proposal");
+	return await serializeRootIntake(self, storeId, () => submitRootProposalOnce(self, storeId, rootSessionId, spec, options));
+}
+function rootRequestKey(storeId, rootSessionId, contract, requested) {
+	return requested ?? rootProposalRequestKey({
+		storeId,
+		rootSessionId,
+		contractDigest: contractDigest(contract)
+	});
+}
+async function rootProposalForRequest(self, storeId, requestKey, contract) {
+	const stored = (await self.context.task.snapshotIn(storeId)).proposals?.byRequestKey[requestKey];
+	if (stored === void 0) return void 0;
+	if (stored.kind !== "root") throw new Error(`task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", which is a decomposition batch; a request key names one proposal, and a root intake cannot take over a batch's key`);
+	if (stored.identity.contractDigest !== contractDigest(contract)) throw new Error(`task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", whose root contract is a different one (digest ${stored.identity.contractDigest} ≠ ${contractDigest(contract)}); a revision is new content under a new key (§6)`);
+	return stored;
+}
+async function assertRootContractOrigin(self, storeId, rootSessionId) {
+	const own = rootTaskStoreId(rootSessionId);
+	if (storeId !== own) throw originRefusal(rootSessionId, `store "${storeId}" is not this session's own store ("${own}"), and a root contract is intaken into the store of the session that asked (A0 §1.10) — never into another session's, whatever the contract says`);
+	const { header, events } = await rootSessionLog(self, rootSessionId);
+	/**
+	* The session's kind, before its log: a spawned session works on a task its
+	* parent already admitted, and no message on its log can make it the
+	*/
+	if (header?.origin === "subagent") throw originRefusal(rootSessionId, "this session is a delegated child (its header records origin \"subagent\"), and a root contract belongs to the top-level session a graph created — the task a spawned session works on was already admitted by its parent (A0 §1.10)");
+	const depth = header?.delegationDepth ?? 0;
+	if (depth > 0) throw originRefusal(rootSessionId, `this session is a delegated child (its header records delegation depth ${depth}), and a root contract belongs to the top-level session a graph created — the task a spawned session works on was already admitted by its parent (A0 §1.10)`);
+	if (events.some((event) => event.type === "user/message" && event.data.source.kind === "user")) return;
+	throw originRefusal(rootSessionId, "this session's own log holds no message from the person (no `user/message` event with source.kind \"user\", the marker DSH reserves for host-attested human input), so the request the contract stands on cannot be established here; the messages this deployment writes to a session of its own are attributed to their producers — its prompts carry source.kind \"runtime-prompt\" (the graph setup text and a spawn's delegated task) and its notices carry \"plugin\" — and neither is a request of the person's (A0 §1.10)");
+}
+async function rootSessionLog(self, rootSessionId) {
+	const persistence = self.softService("sessionPersistence");
+	if (persistence === void 0 || typeof persistence.open !== "function") throw originRefusal(rootSessionId, "this deployment mounts no session-persistence service, so its own log cannot be read (A0 §1.10)");
+	let handle;
+	try {
+		handle = await persistence.open(SessionId(rootSessionId), "read");
+		const { events } = await handle.read(0);
+		return {
+			header: handle.header,
+			events
+		};
+	} catch (error) {
+		throw originRefusal(rootSessionId, `its own log could not be read (${message(error)})`);
+	} finally {
+		/**
+		* A close that fails is not this call's answer: the log was already read —
+		* or already refused by name — and the handle's teardown is best-effort
+		*/
+		if (handle !== void 0) await handle.close().catch(() => void 0);
+	}
+}
+function originRefusal(rootSessionId, reason) {
+	return /* @__PURE__ */ new Error(`task-runtime: the root contract of session "${rootSessionId}" was refused: ${reason}`);
+}
+async function submitRootProposalOnce(self, storeId, rootSessionId, spec, options) {
+	if (options.exec?.signal?.aborted === true) throw new Error(`task-runtime: the intake of a root contract for session "${rootSessionId}" was cancelled before anything was persisted`);
+	/**
+	* Where the request came from, before anything is opened or written: a store
+	* that is not the session's own, a session that is a delegated child, or one
+	*/
+	await assertRootContractOrigin(self, storeId, rootSessionId);
+	/**
+	* The root session's store exists before its contract does (A0 §1.1): a graph
+	* creates the session, and the intake is what fills the store — so this is the
+	*/
+	await openOrCreateStore(self, storeId);
+	/**
+	* The session's checkout is resolved once: the directory the contract's
+	* protected acceptance inputs are read against, the provider pre-check
+	*/
+	const envPath = await self.envPathForSession(rootSessionId);
+	const derived = await deriveRootContract(self, spec, envPath);
+	if (!derived.ok) throw derived.refusal;
+	const { contract } = derived;
+	const requestKey = rootRequestKey(storeId, rootSessionId, contract, options.requestKey);
+	const stored = await rootProposalForRequest(self, storeId, requestKey, contract);
+	if (stored !== void 0) {
+		/**
+		* The caller asked again for the contract this request names: the record
+		* already carries it, so the answer is the record — and a proposal still
+		*/
+		const review$1 = stored.status === "pending_review" ? await self.requestProposalReview({
+			kind: "root",
+			storeId,
+			trigger: "submitted",
+			proposal: stored,
+			rootSessionId,
+			contract: structuredClone(stored.contract),
+			manifests: rootManifests(self, stored.contract)
+		}) : void 0;
+		return {
+			proposalId: stored.proposalId,
+			status: stored.status,
+			policy: stored.policy,
+			existing: true,
+			detail: rootSubmissionDetail(self, stored, true),
+			...review$1 === void 0 ? {} : { review: review$1 }
+		};
+	}
+	/**
+	* A genuinely new root contract: the store must not already hold a root (the
+	* same gate the reducer enforces inside the commit, asked here so the caller
+	*/
+	const root = await existingRootTask(self, storeId);
+	if (root !== void 0) throw new Error(`task-runtime: store "${storeId}" already holds root task "${root.taskId}", so a root contract cannot be intaken here (§1.6: an old graph's root is history and is not re-intaken; a new goal is a new graph)`);
+	const checked = await checkRootContract(self, {
+		rootSessionId,
+		contract,
+		...envPath === void 0 ? {} : { envPath }
+	});
+	if (!checked.ok) throw checked.refusal.error;
+	const { manifests, providers } = checked;
+	const reviewContext = reviewContextOf({
+		manifests,
+		criteria: contract.acceptanceCriteria,
+		providers: providerContentIdentities(providers.capabilities)
+	});
+	const policy = self.config.generatedTaskReview;
+	const identity = {
+		contractVersion: TASK_CONTRACT_VERSION,
+		storeId,
+		rootSessionId,
+		requestKey,
+		contractDigest: contractDigest(contract)
+	};
+	const proposal = {
+		kind: "root",
+		proposalId: rootProposalId(identity),
+		requestKey,
+		...options.supersedes === void 0 ? {} : { supersedes: options.supersedes },
+		status: policy === "all" ? "pending_review" : "ready",
+		policy,
+		identity,
+		contract: structuredClone(contract),
+		proposalDigest: rootProposalDigest(identity),
+		admissionContext: self.admissionContext(),
+		admissionContextDigest: admissionContextDigest(self.admissionContext()),
+		reviewContext,
+		reviewContextDigest: reviewContextDigest(reviewContext),
+		createdAt: now()
+	};
+	try {
+		await self.context.task.submitProposalIn(storeId, proposal, rootSessionId);
+	} catch (error) {
+		/**
+		* A store that already holds *this* contract is a race, not a failure: the
+		* request is answered from the record exactly as a retry is. Anything else
+		*/
+		const raced = await self.readProposal(storeId, proposal.proposalId).catch(() => void 0);
+		if (raced === void 0 || raced.kind !== "root" || raced.proposalDigest !== proposal.proposalDigest) throw error;
+		return {
+			proposalId: raced.proposalId,
+			status: raced.status,
+			policy: raced.policy,
+			existing: true,
+			detail: rootSubmissionDetail(self, raced, true)
+		};
+	}
+	if (proposal.status !== "pending_review") return {
+		proposalId: proposal.proposalId,
+		status: proposal.status,
+		policy: proposal.policy,
+		existing: false,
+		detail: rootSubmissionDetail(self, proposal, false)
+	};
+	const review = await self.requestProposalReview({
+		kind: "root",
+		storeId,
+		trigger: "submitted",
+		proposal,
+		rootSessionId,
+		contract: structuredClone(contract),
+		manifests
+	});
+	return {
+		proposalId: proposal.proposalId,
+		status: proposal.status,
+		policy: proposal.policy,
+		existing: false,
+		detail: rootSubmissionDetail(self, proposal, false),
+		review
+	};
+}
+async function deriveRootContract(self, spec, envPath) {
+	const fixed = await fixCriteriaProtectedInputs(Array.isArray(spec?.acceptanceCriteria) ? spec.acceptanceCriteria : [], envPath, "root contract");
+	const normalized = normalizeRootContract(fixed.reasons.length === 0 ? {
+		...spec,
+		acceptanceCriteria: fixed.criteria
+	} : spec);
+	const reasons = [...fixed.reasons, ...normalized.ok ? [] : normalized.reasons];
+	if (!normalized.ok || reasons.length > 0) return {
+		ok: false,
+		refusal: rootRefusal(reasons)
+	};
+	return {
+		ok: true,
+		contract: normalized.contract
+	};
+}
+function rootRefusal(reasons) {
+	return /* @__PURE__ */ new Error(`task-runtime: root contract rejected:\n- ${reasons.join("\n- ")}`);
+}
+function rootManifests(self, contract) {
+	return [self.resolveCapabilities(contract.requiredCapabilities)];
+}
+async function existingRootTask(self, storeId) {
+	return (await self.context.task.snapshotIn(storeId)).tasks.find((task) => task.parentTaskId === void 0);
+}
+async function checkRootContract(self, request) {
+	const { rootSessionId, contract } = request;
+	const label = `root contract of session "${rootSessionId}"`;
+	const defects = [...contractDefects(contract.acceptanceCriteria, label), ...rootIndependenceDefects(contract.acceptanceCriteria, label)];
+	if (defects.length > 0) return {
+		ok: false,
+		refusal: {
+			error: rootRefusal(defects),
+			reasons: defects
+		}
+	};
+	const manifests = rootManifests(self, contract);
+	const manifest = manifests[0];
+	if (manifest.missing.length > 0) {
+		const detail = `${label} is missing [${manifest.missing.join(", ")}] and a root has no parent to delegate them to`;
+		return {
+			ok: false,
+			refusal: {
+				error: rootRefusal([detail]),
+				reasons: [detail]
+			}
+		};
+	}
+	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), { ...request.envPath === void 0 ? {} : { cwd: request.envPath } });
+	const refusals = providerRefusals(precheck);
+	if (refusals.length > 0) return {
+		ok: false,
+		refusal: {
+			error: rootRefusal([`the provider pre-check rejected ${label}:`, ...refusals]),
+			reasons: refusals
+		}
+	};
+	try {
+		await self.assertKnownVerifierRefs(contract.acceptanceCriteria.map((criterion) => ({
+			childIndex: 0,
+			criterion
+		})), label);
+	} catch (error) {
+		const failure = error instanceof Error ? error : new Error(String(error));
+		return {
+			ok: false,
+			refusal: {
+				error: failure,
+				reasons: [failure.message]
+			}
+		};
+	}
+	return {
+		ok: true,
+		manifests,
+		providers: precheck
+	};
+}
+async function continueRootProposalIn(self, storeId, proposal) {
+	const rootSessionId = proposal.identity.rootSessionId;
+	/**
+	* The origin rule again, before the ladder's first write (§1.10): a proposal
+	* recorded before this rule existed, or written into the store by any other
+	*/
+	await assertRootContractOrigin(self, storeId, rootSessionId);
+	const existing = await existingRootTask(self, storeId);
+	if (existing !== void 0) return await self.expireProposal(storeId, proposal, `store "${storeId}" already holds root task "${existing.taskId}"; a root contract is one per store and a changed goal is a new graph (§1.6), so this proposal can no longer become the store's root`);
+	/**
+	* The policy gate (§5), the same rule the batch path follows: a contract born
+	* under `off` that has not been activated is subject to the deployment's
+	*/
+	const envPath = await self.envPathForSession(rootSessionId);
+	const contract = structuredClone(proposal.contract);
+	if (proposal.status === "ready" && proposal.policy === "off" && self.config.generatedTaskReview === "all") {
+		await self.context.task.changeProposalPhaseIn(storeId, {
+			proposalId: proposal.proposalId,
+			to: "pending_review",
+			reason: "the deployment tightened the review policy to \"all\" while this contract had not been activated yet (§5: only tightening is allowed, and it reaches whatever has not run)"
+		}, rootSessionId);
+		let detail = "it is now waiting for a review";
+		const reviewed = await checkRootContract(self, {
+			rootSessionId,
+			contract,
+			...envPath === void 0 ? {} : { envPath }
+		});
+		const tightened = await self.requireProposal(storeId, proposal.proposalId);
+		if (reviewed.ok) {
+			const review = await self.requestProposalReview({
+				kind: "root",
+				storeId,
+				trigger: "tightened",
+				proposal: tightened,
+				rootSessionId,
+				contract,
+				manifests: reviewed.manifests
+			});
+			detail += `; ${review.detail}`;
+		} else detail += `, and its contract no longer passes admission (${reviewed.refusal.reasons.join("; ")})`;
+		return {
+			proposalId: proposal.proposalId,
+			status: "pending_review",
+			detail: `proposal "${proposal.proposalId}" was sent for review: ${detail}`
+		};
+	}
+	const contextDigest = admissionContextDigest(self.admissionContext());
+	if (contextDigest !== proposal.admissionContextDigest) return await self.staleProposal(storeId, proposal, `the limits in force moved since the contract was proposed and reviewed (admission context ${proposal.admissionContextDigest} → ${contextDigest})`);
+	const checked = await checkRootContract(self, {
+		rootSessionId,
+		contract,
+		...envPath === void 0 ? {} : { envPath }
+	});
+	if (!checked.ok) {
+		if (checked.refusal.error instanceof VerifierUnavailableError) throw checked.refusal.error;
+		return await self.staleProposal(storeId, proposal, `the contract no longer passes admission: ${checked.refusal.reasons.join("; ")}`);
+	}
+	const { manifests, providers } = checked;
+	const reviewContext = reviewContextOf({
+		manifests,
+		criteria: contract.acceptanceCriteria,
+		providers: providerContentIdentities(providers.capabilities)
+	});
+	if (reviewContextDigest(reviewContext) !== proposal.reviewContextDigest) return await self.staleProposal(storeId, proposal, `the resolution this contract was reviewed against moved: ${reviewContextDelta(proposal.reviewContext, reviewContext)}`);
+	if (proposal.status === "approved") await self.context.task.changeProposalPhaseIn(storeId, {
+		proposalId: proposal.proposalId,
+		to: "ready",
+		reason: "the post-approval re-check passed: the store holds no root, the limits are the ones reviewed, and the capability resolution and the judging verifiers are the ones reviewed"
+	}, rootSessionId);
+	return await activateRootContract(self, {
+		storeId,
+		rootSessionId,
+		proposal,
+		contract,
+		manifests
+	});
+}
+async function activateRootContract(self, request) {
+	const { storeId, rootSessionId, proposal, contract } = request;
+	const manifest = request.manifests[0];
+	const taskId = `t-${randomUUID()}`;
+	const runId = `r-${randomUUID()}`;
+	const workspacePath = await self.workspacePathForSession(rootSessionId);
+	let claimed;
+	if (workspacePath !== void 0 && self.workspaces !== void 0) {
+		await self.workspaces.claim(workspacePath, {
+			kind: "run",
+			storeId,
+			taskId,
+			runId,
+			since: now()
+		});
+		claimed = self.workspaces.ownerOf(workspacePath);
+	}
+	try {
+		const providerBinding = await bindRunProviders({
+			storeId,
+			runId,
+			manifest,
+			table: self.config.capabilities,
+			root: self.config.runBindingRoot
+		});
+		const task = {
+			taskId,
+			definitionRef: {
+				taskType: "root",
+				version: 1
+			},
+			objective: contract.objective,
+			depth: 0,
+			acceptanceCriteria: contract.acceptanceCriteria,
+			requestedCapabilities: [...contract.requiredCapabilities],
+			decompositionStatus: "decomposable",
+			status: "created",
+			runIds: [],
+			childTaskIds: [],
+			contract: structuredClone(contract)
+		};
+		const run = {
+			runId,
+			taskId,
+			sessionId: rootSessionId,
+			capabilitySnapshot: capabilitySnapshot(manifest),
+			providerBinding,
+			executionPhase: "active",
+			artifacts: [],
+			verifierResults: [],
+			status: "running",
+			startedAt: now()
+		};
+		const consumption = {
+			kind: "root",
+			proposalId: proposal.proposalId,
+			proposalDigest: proposal.proposalDigest,
+			reviewContextDigest: proposal.reviewContextDigest,
+			rootTaskId: taskId,
+			rootRunId: runId,
+			admittedAt: now()
+		};
+		await self.context.task.admitRootProposalIn(storeId, task, run, rootSessionId, {
+			consumption,
+			manifest
+		});
+	} catch (error) {
+		/**
+		* Nothing was committed (the commit is all-or-nothing), so the claim this
+		* call made is the only thing to undo: leaving it would hold a checkout for
+		*/
+		if (workspacePath !== void 0 && claimed !== void 0) await self.workspaces?.release(workspacePath, claimed).catch((cause) => {
+			self.warn(`workspace ${workspacePath} could not be released after a refused activation (${message(cause)})`);
+		});
+		throw error;
+	}
+	self.sessions.set(rootSessionId, {
+		storeId,
+		taskId,
+		runId
+	});
+	self.startedSessions.add(rootSessionId);
+	self.executionGate.setPhase(rootSessionId, "active");
+	self.notifyWhenReady(rootSessionId, `the root contract of this session was activated: task ${taskId}, run ${runId} (proposal ${proposal.proposalId}, policy ${proposal.policy}). This session may now decompose, submit its own result, or cancel.`);
+	return {
+		proposalId: proposal.proposalId,
+		status: "activated",
+		taskId,
+		runId,
+		detail: `proposal "${proposal.proposalId}" is activated as root task ${taskId} with run ${runId}`
+	};
+}
+function rootSubmissionDetail(self, proposal, existing) {
+	const head = existing ? `request answered from proposal "${proposal.proposalId}" (policy ${proposal.policy}, status ${proposal.status})` : `proposal "${proposal.proposalId}" was recorded under policy ${proposal.policy} as ${proposal.status}`;
+	switch (proposal.status) {
+		case "ready": return `${head}; continue it to activate the root (policy off activates without a review, and the record says policy-off)`;
+		case "pending_review": return `${head}; it needs a recorded decision before the root may exist, and nothing is created, spawned or notified until then`;
+		case "approved": return `${head}; the approval is on record and the root is not activated yet — continue it to run the post-approval re-check`;
+		case "admitted": return `${head}; its root is activated already and will not be activated again`;
+		default: return `${head}; a ${proposal.status} proposal is not activated, and a revision is new content under a new key`;
+	}
+}
+async function serializeRootIntake(self, storeId, work) {
+	return await self.serializeParent(storeId, ROOT_PROPOSAL_TASK_ID, work);
+}
+async function reconcileRootProposal(self, storeId, proposal, report) {
+	const proposalId = proposal.proposalId;
+	await assertRootContractOrigin(self, storeId, proposal.identity.rootSessionId);
+	if (proposal.status === "pending_review") {
+		const existing = await existingRootTask(self, storeId);
+		if (existing !== void 0) {
+			await report(proposal, "expired", (await self.expireProposal(storeId, proposal, `store "${storeId}" already holds root task "${existing.taskId}", so this contract can no longer become its root`)).detail);
+			return;
+		}
+		const rootSessionId = proposal.identity.rootSessionId;
+		const contract = structuredClone(proposal.contract);
+		const envPath = await self.envPathForSession(rootSessionId);
+		const checked = await checkRootContract(self, {
+			rootSessionId,
+			contract,
+			...envPath === void 0 ? {} : { envPath }
+		});
+		if (!checked.ok) {
+			await report(proposal, proposal.status, `it waits for a review and its contract no longer passes admission (${checked.refusal.reasons.join("; ")}); the proposal stays pending_review`);
+			return;
+		}
+		await self.requestProposalReview({
+			kind: "root",
+			storeId,
+			trigger: "recovered",
+			proposal,
+			rootSessionId,
+			contract,
+			manifests: checked.manifests
+		});
+		return;
+	}
+	/**
+	* `ready` or `approved`: the tightening rule and the post-approval re-check
+	* both live in the continuation, which is also what re-binds an activation
+	*/
+	const continuation = await serializeRootIntake(self, storeId, () => self.continueProposalIn(storeId, proposalId, proposal.identity.rootSessionId, {}));
+	if (continuation.status === "activated") {
+		await rebindActivatedRoot(self, storeId, proposal.identity.rootSessionId, continuation.taskId, continuation.runId);
+		return;
+	}
+	await report(proposal, continuation.status, continuation.detail);
+}
+async function rebindActivatedRoot(self, storeId, rootSessionId, taskId, runId) {
+	self.sessions.set(rootSessionId, {
+		storeId,
+		taskId,
+		runId
+	});
+	self.startedSessions.add(rootSessionId);
+	let phase;
+	try {
+		phase = runGatePhase(await self.context.task.runIn(storeId, runId));
+	} catch {
+		phase = void 0;
+	}
+	if (phase === "terminal") self.executionGate.setTerminal(rootSessionId);
+	else if (phase !== void 0) self.executionGate.setPhase(rootSessionId, phase);
+	self.notifyWhenReady(rootSessionId, `recovery bound this session to its activated root contract: task ${taskId}, run ${runId}${phase === "terminal" ? " (that run is terminal, so this session is closed to new work)" : ""}. A late intake for a different contract is refused because the store already holds this root.`);
+}
+
+//#endregion
+//#region src/service/proposals.ts
+async function decomposeAndRun(self, storeId, parentTaskId, parentRunId, callerSessionId, spec, exec = {}) {
+	await self.assertRecoveryReady(storeId, "a decomposition");
+	const continued = await continueProposal(self, storeId, (await submitDecompositionProposal(self, storeId, parentTaskId, parentRunId, callerSessionId, spec, { ...exec.signal === void 0 && exec.callId === void 0 ? {} : { exec } })).proposalId, callerSessionId, { ...exec.callId === void 0 ? {} : { exec: { callId: exec.callId } } });
+	if (continued.status === "admitted") return {
+		status: "admitted",
+		proposalId: continued.proposalId,
+		batchId: continued.batchId,
+		childTaskIds: continued.childTaskIds
+	};
+	if (continued.status === "pending_review") return {
+		status: "pending_review",
+		proposalId: continued.proposalId,
+		detail: continued.detail,
+		batchId: void 0,
+		childTaskIds: void 0
+	};
+	throw new Error(`task-runtime: decomposition of "${parentTaskId}" is ${continued.status} (proposal ${continued.proposalId}): ${continued.detail}`);
+}
+async function submitDecompositionProposal(self, storeId, parentTaskId, parentRunId, callerSessionId, spec, options = {}) {
+	await self.assertRecoveryReady(storeId, "a decomposition proposal");
+	return await serializeParent(self, storeId, parentTaskId, () => submitProposalOnce(self, storeId, parentTaskId, parentRunId, callerSessionId, spec, options));
+}
+async function continueProposal(self, storeId, proposalId, caller, options = {}) {
+	await self.assertRecoveryReady(storeId, "the continuation of a proposal");
+	const proposal = await requireProposal(self, storeId, proposalId);
+	if (proposal.kind === "root") return await self.serializeRootIntake(storeId, () => continueProposalIn(self, storeId, proposalId, caller, options));
+	return await serializeParent(self, storeId, proposal.identity.parentTaskId, () => continueProposalIn(self, storeId, proposalId, caller, options));
+}
+async function decideProposal(self, storeId, proposalId, decision, decidedBy, exec = {}) {
+	await self.assertRecoveryReady(storeId, "a proposal decision");
+	const proposal = await requireProposal(self, storeId, proposalId);
+	const serialize = async (work) => proposal.kind === "root" ? await self.serializeRootIntake(storeId, work) : await serializeParent(self, storeId, proposal.identity.parentTaskId, work);
+	return await serialize(async () => {
+		const current = await requireProposal(self, storeId, proposalId);
+		if (decidedBy.trim().length === 0) throw new Error(`task-runtime: a decision on proposal "${proposalId}" requires a decider`);
+		if (decision.reason !== void 0 && decision.reason.trim().length === 0) throw new Error(`task-runtime: a decision reason on proposal "${proposalId}" must be non-empty when given`);
+		const decidedAt = decision.decidedAt ?? now();
+		let outcome = decision.outcome;
+		let reason = decision.reason;
+		if (outcome === "approved") {
+			/**
+			* A late approval may only invalidate (§6), and what makes it late is the
+			* subject's own state: a parent run that ended, or — for a root contract —
+			*/
+			const ended = await approvalLatenessReason(self, storeId, current);
+			if (ended !== void 0) {
+				outcome = "expired";
+				reason = `the approval arrived after ${current.kind === "root" ? "the root contract" : "the batch"} could be dispatched: ${ended}`;
+			}
+		}
+		if (outcome === "expired" && reason === void 0) throw new Error(`task-runtime: an expiry of proposal "${proposalId}" must state what ended the batch`);
+		await self.context.task.decideProposalIn(storeId, {
+			proposalId,
+			outcome,
+			proposalDigest: current.proposalDigest,
+			admissionContextDigest: current.admissionContextDigest,
+			...outcome === "approved" ? { reviewContextDigest: current.reviewContextDigest } : {},
+			decidedBy,
+			decidedAt,
+			...reason === void 0 ? {} : { reason }
+		}, decidedBy);
+		if (outcome !== "approved") return {
+			proposalId,
+			outcome,
+			status: outcome,
+			detail: `proposal "${proposalId}" is ${outcome}${reason === void 0 ? "" : `: ${reason}`}`,
+			...reason === void 0 ? {} : { reason }
+		};
+		try {
+			const continuation = await continueProposalIn(self, storeId, proposalId, proposalCallerOf(current), { exec });
+			return {
+				proposalId,
+				outcome,
+				status: continuation.status,
+				continuation,
+				detail: `proposal "${proposalId}" is approved; ${continuation.detail}`
+			};
+		} catch (error) {
+			/**
+			* The decision is on the record and what the proposal asked for was not
+			* created. Both facts are reported: the proposal stays where the
+			*/
+			const detail = message(error);
+			self.warn(`proposal ${proposalId}: the approval is recorded but the continuation failed (${detail})`);
+			const stored = await readProposal(self, storeId, proposalId).catch(() => void 0);
+			return {
+				proposalId,
+				outcome,
+				status: stored?.status ?? outcome,
+				detail: `the approval of proposal "${proposalId}" is recorded; ${current.kind === "root" ? "the root was not activated" : "the batch was not admitted"}: ${detail}`
+			};
+		}
+	});
+}
+async function approvalLatenessReason(self, storeId, proposal) {
+	if (proposal.kind !== "root") return await parentRunEndedReason(self, storeId, proposal);
+	const existing = await self.existingRootTask(storeId);
+	if (existing === void 0) return void 0;
+	return `store "${storeId}" already holds root task "${existing.taskId}"`;
+}
+async function cancelProposal(self, storeId, proposalId, caller) {
+	const owner = proposalCallerOf(await requireProposal(self, storeId, proposalId));
+	if (caller !== owner) throw new Error(`task-runtime: proposal "${proposalId}" was submitted by session "${owner}"; session "${caller}" cannot withdraw it (a withdrawal by anybody else is a decision, and is recorded as one — decideProposal with "cancelled")`);
+	return await decideProposal(self, storeId, proposalId, { outcome: "cancelled" }, caller);
+}
+function proposalCallerOf(proposal) {
+	return proposal.kind === "root" ? proposal.identity.rootSessionId : proposal.identity.callerSessionId;
+}
+async function proposalIn(self, storeId, proposalId) {
+	return await requireProposal(self, storeId, proposalId);
+}
+async function proposalsForParent(self, storeId, parentTaskId) {
+	return [...(await self.context.task.snapshotIn(storeId)).proposals?.byParentTask[parentTaskId] ?? []];
+}
+async function submitProposalOnce(self, storeId, parentTaskId, parentRunId, callerSessionId, spec, options) {
+	const actor = callerSessionId;
+	const identity = {
+		storeId,
+		parentTaskId,
+		parentRunId,
+		callerSessionId
+	};
+	const parentTask = await self.context.task.taskIn(storeId, parentTaskId);
+	const parentRun = await self.context.task.runIn(storeId, parentRunId);
+	const derived = await self.deriveBatch(identity, spec);
+	if (!derived.ok) return await refusePrecheck(self, storeId, parentTaskId, actor, derived.refusal);
+	const { batch } = derived;
+	/**
+	* (2) §6's request key: the caller's own when it has one, otherwise derived
+	*     from the calling context and the batch's own digest — stable across a
+	*/
+	const requestKey = options.requestKey ?? proposalRequestKey({
+		...identity,
+		proposalDigest: batch.admission.proposalDigest
+	});
+	const stored = await proposalForRequest(self, storeId, requestKey, batch.admission.proposalDigest);
+	if (stored !== void 0) {
+		/**
+		* The caller presented the batch again and the digest says it is the one
+		* this request names: the stored proposal already carries the content, so
+		*/
+		const storedBatch = self.storedBatchOf(stored);
+		const review$1 = stored.status === "pending_review" ? await requestProposalReview(self, {
+			storeId,
+			trigger: "submitted",
+			proposal: stored,
+			parentTask,
+			batch: storedBatch,
+			manifests: self.manifestsOf(storedBatch)
+		}) : void 0;
+		return {
+			proposalId: stored.proposalId,
+			status: stored.status,
+			policy: stored.policy,
+			existing: true,
+			detail: submissionDetail(stored, true),
+			...review$1 === void 0 ? {} : { review: review$1 }
+		};
+	}
+	/**
+	* (3) A genuinely new batch: only a run that may still decide its own work
+	*     may propose one, and the batch has to clear every admission rule. Two
+	*/
+	await self.assertDecomposableRun(storeId, parentTask, parentRun, callerSessionId, options.exec?.signal);
+	const inFlight = await self.inFlightProposalsOf(storeId, parentRunId);
+	if (inFlight.length > 0) {
+		const held = inFlight[0];
+		throw new Error(`task-runtime: run "${parentRunId}" already has a proposal in flight — "${held.proposalId}" is ${held.status}; a run has at most one batch proposal at a time, so continue that one (or withdraw it with task_proposal_cancel) rather than proposing a second, and nothing was recorded`);
+	}
+	const checked = await self.checkDerivedBatch({
+		identity,
+		parentTask,
+		batch,
+		...derived.envPath === void 0 ? {} : { envPath: derived.envPath }
+	});
+	if (!checked.ok) return await refusePrecheck(self, storeId, parentTaskId, actor, checked.refusal);
+	const { manifests, providers } = checked;
+	const reviewContext = reviewContextOf({
+		manifests,
+		criteria: batch.children.flatMap((child) => child.contract.acceptanceCriteria),
+		providers: providerContentIdentities(providers.capabilities)
+	});
+	const policy = self.config.generatedTaskReview;
+	const proposalIdentity = decompositionIdentity(identity, batch.reason, batch.children);
+	const proposal = {
+		proposalId: taskProposalId(proposalIdentity),
+		requestKey,
+		...options.supersedes === void 0 ? {} : { supersedes: options.supersedes },
+		status: policy === "all" ? "pending_review" : "ready",
+		policy,
+		identity: proposalIdentity,
+		batch: batch.children,
+		proposalDigest: batch.admission.proposalDigest,
+		admissionContext: batch.admission.context,
+		admissionContextDigest: admissionContextDigest(batch.admission.context),
+		reviewContext,
+		reviewContextDigest: reviewContextDigest(reviewContext),
+		createdAt: now()
+	};
+	try {
+		await self.context.task.submitProposalIn(storeId, proposal, actor);
+	} catch (error) {
+		/**
+		* A store that already holds *this* batch is a race, not a failure: the
+		* request is answered from the record exactly as a retry is. A refusal
+		*/
+		const raced = await readProposal(self, storeId, proposal.proposalId).catch(() => void 0);
+		if (raced === void 0 || raced.proposalDigest !== proposal.proposalDigest) throw error;
+		return {
+			proposalId: raced.proposalId,
+			status: raced.status,
+			policy: raced.policy,
+			existing: true,
+			detail: submissionDetail(raced, true)
+		};
+	}
+	if (proposal.status !== "pending_review") return {
+		proposalId: proposal.proposalId,
+		status: proposal.status,
+		policy: proposal.policy,
+		existing: false,
+		detail: submissionDetail(proposal, false)
+	};
+	const review = await requestProposalReview(self, {
+		storeId,
+		trigger: "submitted",
+		proposal,
+		parentTask,
+		batch,
+		manifests
+	});
+	return {
+		proposalId: proposal.proposalId,
+		status: proposal.status,
+		policy: proposal.policy,
+		existing: false,
+		detail: submissionDetail(proposal, false),
+		review
+	};
+}
+async function continueProposalIn(self, storeId, proposalId, caller, options) {
+	const proposal = await requireProposal(self, storeId, proposalId);
+	const owner = proposalCallerOf(proposal);
+	if (caller !== owner) throw new Error(`task-runtime: proposal "${proposalId}" was submitted by session "${owner}"; session "${caller}" cannot continue it (a proposal belongs to the session that made it, and an approval is continued on that session's behalf)`);
+	switch (proposal.status) {
+		case "admitted": {
+			const consumption = proposal.consumption;
+			if (consumption === void 0) throw new Error(`task-runtime: proposal "${proposalId}" is admitted without a consumption record; the store is inconsistent and nothing is dispatched`);
+			/**
+			* What the proposal became is read off the consumption, by kind: a batch
+			* names its children, a root contract names the task and run it became.
+			*/
+			if (consumption.kind === "root") return {
+				proposalId,
+				status: "activated",
+				taskId: consumption.rootTaskId,
+				runId: consumption.rootRunId,
+				detail: `proposal "${proposalId}" is activated as root task ${consumption.rootTaskId} with run ${consumption.rootRunId}; that root is not activated again`
+			};
+			return {
+				proposalId,
+				status: "admitted",
+				batchId: consumption.batchId,
+				childTaskIds: [...consumption.childTaskIds],
+				detail: `proposal "${proposalId}" is admitted as batch ${consumption.batchId}; the runtime owns that batch and it is not admitted again`
+			};
+		}
+		case "pending_review": return {
+			proposalId,
+			status: "pending_review",
+			detail: `proposal "${proposalId}" is waiting for a review; only a decision on the record advances it (§6)`
+		};
+		case "rejected":
+		case "cancelled":
+		case "stale":
+		case "expired": return {
+			proposalId,
+			status: proposal.status,
+			detail: `proposal "${proposalId}" is ${proposal.status}; nothing was admitted and nothing is dispatched`,
+			...proposal.decision?.reason === void 0 ? {} : { reason: proposal.decision.reason }
+		};
+		default: break;
+	}
+	/**
+	* A root contract's continuation is a different ladder from a batch's — one
+	* store-level gate and two fingerprints, with no parent task and no parent
+	*/
+	if (proposal.kind === "root") return await self.continueRootProposalIn(storeId, proposal);
+	const parentTaskId = proposal.identity.parentTaskId;
+	const parentTask = await self.context.task.taskIn(storeId, parentTaskId);
+	/**
+	* (1) The run's own state, re-read here (K1 §3): an approval is a record, and
+	* what it may still become is a question about the run *now*, never about the
+	*/
+	const parentRun = await self.context.task.runIn(storeId, proposal.identity.parentRunId).catch(() => void 0);
+	if (parentRun === void 0) throw new Error(`task-runtime: proposal "${proposalId}" cannot be continued: its parent run "${proposal.identity.parentRunId}" is not in store "${storeId}", and a batch is never admitted against a run the store does not hold`);
+	if (parentRun.batchId !== void 0) return await staleProposal(self, storeId, proposal, `run "${parentRun.runId}" is already waiting on batch "${parentRun.batchId}", so this proposal's batch cannot become it (a run holds at most one unfinished batch); the approval is not transferred to another batch`);
+	if (parentRun.status !== "running" || parentRun.executionPhase !== "active") throw new Error(`task-runtime: proposal "${proposalId}" cannot be continued: its parent run "${parentRun.runId}" is ${parentRun.status === "running" ? `in phase "${parentRun.executionPhase ?? "none"}"` : parentRun.status}; only an active run may admit a batch, nothing was admitted, and the approval stays on the record`);
+	const blocking = blockingQuestionsOf(await self.context.task.snapshotIn(storeId), parentRun.runId);
+	if (blocking.length > 0) throw new Error(`task-runtime: proposal "${proposalId}" cannot be continued: its parent run "${parentRun.runId}" is waiting on ${blocking.length === 1 ? "an unresolved blocking question" : `${blocking.length} unresolved blocking questions`} (${blocking.map((question) => question.questionId).join(", ")}); an answer releases the wait, and nothing was admitted`);
+	/**
+	* (2) The policy gate (§5). A batch born under `off` that has not been
+	* admitted is subject to the deployment's *current* policy: tightened to
+	*/
+	const envPath = await self.envPathForSession(owner);
+	if (proposal.status === "ready" && proposal.policy === "off" && self.config.generatedTaskReview === "all") {
+		await self.context.task.changeProposalPhaseIn(storeId, {
+			proposalId,
+			to: "pending_review",
+			reason: "the deployment tightened the review policy to \"all\" while this batch had not been admitted yet (§5: only tightening is allowed, and it reaches whatever has not run)"
+		}, owner);
+		const tightened = await requireProposal(self, storeId, proposalId);
+		const tightenedBatch = self.storedBatchOf(tightened);
+		let detail = "it is now waiting for a review";
+		const reviewed = await self.checkDerivedBatch({
+			identity: {
+				storeId,
+				parentTaskId: proposal.identity.parentTaskId,
+				parentRunId: proposal.identity.parentRunId,
+				callerSessionId: proposal.identity.callerSessionId
+			},
+			parentTask,
+			batch: tightenedBatch,
+			...envPath === void 0 ? {} : { envPath }
+		});
+		if (reviewed.ok) {
+			const review = await requestProposalReview(self, {
+				storeId,
+				trigger: "tightened",
+				proposal: tightened,
+				parentTask,
+				batch: tightenedBatch,
+				manifests: reviewed.manifests
+			});
+			detail += `; ${review.detail}`;
+		} else detail += `, and its batch no longer passes admission (${reviewed.refusal.reasons.join("; ")})`;
+		return {
+			proposalId,
+			status: "pending_review",
+			detail: `proposal "${proposalId}" was sent for review: ${detail}`
+		};
+	}
+	/**
+	* (3) The batch's content comes from the store (§6): a proposal carries what
+	* was asked for, so a continuation never depends on what this process still
+	*/
+	const identity = {
+		storeId,
+		parentTaskId: proposal.identity.parentTaskId,
+		parentRunId: proposal.identity.parentRunId,
+		callerSessionId: proposal.identity.callerSessionId
+	};
+	if (options.spec !== void 0) {
+		const presented = await self.deriveBatch(identity, options.spec);
+		if (!presented.ok) throw new Error(`task-runtime: the batch presented for proposal "${proposalId}" is not a usable one: ${presented.refusal.reasons.join("; ")}`);
+		if (presented.batch.admission.proposalDigest !== proposal.proposalDigest) throw new Error(`task-runtime: the batch presented for proposal "${proposalId}" is a different one (digest ${presented.batch.admission.proposalDigest} ≠ the stored ${proposal.proposalDigest}); an approval never travels to other content, and nothing was admitted`);
+	}
+	const batch = self.storedBatchOf(proposal);
+	/**
+	* (4) The re-check (§6): the stored batch is judged again exactly as it was
+	* judged at submission — structure, capabilities, providers, verifierRefs —
+	*/
+	const checked = await self.checkDerivedBatch({
+		identity,
+		parentTask,
+		batch,
+		...envPath === void 0 ? {} : { envPath }
+	});
+	if (!checked.ok) {
+		/**
+		* A verifier service this deployment cannot read is not a changed batch:
+		* it is a deployment that cannot judge the batch at all, so the approval is
+		*/
+		if (checked.refusal.error instanceof VerifierUnavailableError) throw checked.refusal.error;
+		return await staleProposal(self, storeId, proposal, `the batch no longer passes admission: ${checked.refusal.reasons.join("; ")}`);
+	}
+	const { manifests, providers } = checked;
+	/**
+	* The limits are recomputed from *this* process's configuration and compared
+	* with the fingerprint the approval bound: the stored batch carries the
+	*/
+	const contextDigest = admissionContextDigest(self.admissionContext());
+	if (contextDigest !== proposal.admissionContextDigest) return await staleProposal(self, storeId, proposal, `the limits in force moved since the batch was proposed and reviewed (admission context ${proposal.admissionContextDigest} → ${contextDigest})`);
+	const reviewContext = reviewContextOf({
+		manifests,
+		criteria: batch.children.flatMap((child) => child.contract.acceptanceCriteria),
+		providers: providerContentIdentities(providers.capabilities)
+	});
+	if (reviewContextDigest(reviewContext) !== proposal.reviewContextDigest) return await staleProposal(self, storeId, proposal, `the resolution this batch was reviewed against moved: ${reviewContextDelta(proposal.reviewContext, reviewContext)}`);
+	/**
+	* (5) The re-check passed: record it (`approved → ready`) and admit. A
+	* proposal that is already `ready` wrote that same fact earlier — the
+	*/
+	if (proposal.status === "approved") await self.context.task.changeProposalPhaseIn(storeId, {
+		proposalId,
+		to: "ready",
+		reason: "the post-approval re-check passed: the parent, the limits, the capability resolution, the judging verifiers and the batch content are the ones that were reviewed"
+	}, proposal.identity.callerSessionId);
+	const admitted = await self.admitPrecheckedBatch({
+		proposal,
+		parentTask,
+		parentRun,
+		batch,
+		manifests,
+		providers,
+		...options.exec === void 0 ? {} : { exec: options.exec }
+	});
+	return {
+		proposalId,
+		status: "admitted",
+		batchId: admitted.batchId,
+		childTaskIds: admitted.childTaskIds,
+		detail: `proposal "${proposalId}" is admitted as batch ${admitted.batchId} with ${admitted.childTaskIds.length} child task(s)`
+	};
+}
+async function staleProposal(self, storeId, proposal, reason) {
+	await self.context.task.changeProposalPhaseIn(storeId, {
+		proposalId: proposal.proposalId,
+		to: "stale",
+		reason
+	}, proposalCallerOf(proposal));
+	return {
+		proposalId: proposal.proposalId,
+		status: "stale",
+		detail: `proposal "${proposal.proposalId}" is stale: ${reason}`,
+		reason
+	};
+}
+async function expireProposal(self, storeId, proposal, reason) {
+	await self.context.task.decideProposalIn(storeId, {
+		proposalId: proposal.proposalId,
+		outcome: "expired",
+		proposalDigest: proposal.proposalDigest,
+		admissionContextDigest: proposal.admissionContextDigest,
+		decidedBy: "task-runtime",
+		decidedAt: now(),
+		reason
+	}, "task-runtime");
+	return {
+		proposalId: proposal.proposalId,
+		status: "expired",
+		detail: `proposal "${proposal.proposalId}" is expired: ${reason}`,
+		reason
+	};
+}
+async function parentRunEndedReason(self, storeId, proposal) {
+	/**
+	* Only a decomposition batch has a parent run to ask about: a root contract's
+	* dispatchability is the store's one-root gate, which `approvalLatenessReason`
+	*/
+	if (proposal.kind === "root") return void 0;
+	const run = await self.context.task.runIn(storeId, proposal.identity.parentRunId);
+	if (run.status !== "running") return `the parent run "${run.runId}" is ${run.status}`;
+	if (run.executionPhase === void 0) return `the parent run "${run.runId}" predates coordination phases`;
+	if (run.executionPhase !== "active") return `the parent run "${run.runId}" is in phase "${run.executionPhase}"`;
+}
+async function proposalForRequest(self, storeId, requestKey, proposalDigest) {
+	const stored = (await self.context.task.snapshotIn(storeId)).proposals?.byRequestKey[requestKey];
+	if (stored === void 0) return void 0;
+	if (stored.kind === "root")
+ /**
+	* A batch request cannot be answered by a root contract, even under the same
+	* key: the two address different subjects, and treating one as the other
+	*/
+	throw new Error(`task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", which is a root contract; a request key names one proposal, and a batch cannot take over a root intake's key`);
+	if (stored.proposalDigest !== proposalDigest) throw new Error(`task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", whose batch is a different one (digest ${stored.proposalDigest} ≠ ${proposalDigest}); a revision is new content under a new key (§6)`);
+	return stored;
+}
+async function requireProposal(self, storeId, proposalId) {
+	const proposal = await readProposal(self, storeId, proposalId);
+	if (proposal === void 0) throw new Error(`task-runtime: store "${storeId}" holds no proposal "${proposalId}"`);
+	return proposal;
+}
+async function readProposal(self, storeId, proposalId) {
+	return (await self.context.task.snapshotIn(storeId)).proposals?.byId[proposalId];
+}
+function submissionDetail(proposal, existing) {
+	const head = existing ? `request answered from proposal "${proposal.proposalId}" (policy ${proposal.policy}, status ${proposal.status})` : `proposal "${proposal.proposalId}" was recorded under policy ${proposal.policy} as ${proposal.status}`;
+	switch (proposal.status) {
+		case "ready": return `${head}; continue it to admit the batch (policy off admits without a review, and the record says policy-off)`;
+		case "pending_review": return `${head}; it needs a recorded decision before its batch can run, and its batch is not admitted, not spawned and its parent is not decomposed`;
+		case "approved": return `${head}; the approval is on record and the batch has not been admitted yet — continue it to run the post-approval re-check`;
+		case "admitted": return `${head}; its batch is admitted already and will not be admitted again`;
+		default: return `${head}; a ${proposal.status} proposal is not dispatched, and a revision is new content under a new key`;
+	}
+}
+async function requestProposalReview(self, request) {
+	const channel = self.softService("proposalReviewChannel");
+	if (channel === void 0 || typeof channel.requestReview !== "function") return {
+		requested: false,
+		detail: "no review channel is mounted (ctx.proposalReviewChannel), so nobody was asked; the proposal stays pending_review and only a recorded decision moves it"
+	};
+	const registeredVerifiers = await self.registeredVerifierIds();
+	const obligations = request.kind === "root" ? [] : await self.context.task.snapshotIn(request.storeId).then((snapshot) => snapshot.obligations.filter((obligation) => obligation.sourceTaskId === request.parentTask.taskId)).catch(() => []);
+	try {
+		const subject = request.kind === "root" ? {
+			kind: "root",
+			storeId: request.storeId,
+			trigger: request.trigger,
+			proposal: request.proposal,
+			rootSessionId: request.rootSessionId,
+			contract: structuredClone(request.contract),
+			manifests: request.manifests,
+			...registeredVerifiers === void 0 ? {} : { registeredVerifiers },
+			obligations
+		} : {
+			storeId: request.storeId,
+			trigger: request.trigger,
+			proposal: request.proposal,
+			parentTask: request.parentTask,
+			batch: request.batch,
+			manifests: request.manifests,
+			...registeredVerifiers === void 0 ? {} : { registeredVerifiers },
+			obligations
+		};
+		const notice = await channel.requestReview(subject);
+		return {
+			requested: notice.requested,
+			detail: notice.detail ?? (notice.requested ? "the review was requested" : "the review channel did not request a review")
+		};
+	} catch (error) {
+		const detail = message(error);
+		self.warn(`proposal ${request.proposal.proposalId}: the review channel failed (${detail}); the proposal stays pending_review`);
+		return {
+			requested: false,
+			detail: `the review channel failed: ${detail}`
+		};
+	}
+}
+async function refusePrecheck(self, storeId, parentTaskId, actor, refusal) {
+	for (const gap of refusal.gaps) for (const missing of gap.missing) await self.context.task.recordObligationIn(storeId, {
+		obligationId: `o-${randomUUID()}`,
+		goal: `capability "${missing}" required by child ${gap.childIndex} ("${gap.objective}") of "${parentTaskId}" is not granted by the registry`,
+		criterion: `capability "${missing}" resolves in the capability registry (capability_list shows it)`,
+		sourceTaskId: parentTaskId
+	}, actor);
+	throw refusal.error;
+}
+async function serializeParent(self, storeId, parentTaskId, work) {
+	return await enqueueByKey(self.parentChains, `${storeId}/${parentTaskId}`, work);
+}
+async function reconcileProposals(self, storeId) {
+	let snapshot;
+	try {
+		snapshot = await self.context.task.snapshotIn(storeId);
+	} catch (error) {
+		self.warn(`store ${storeId}: the proposals could not be read for recovery (${message(error)})`);
+		return [];
+	}
+	const unresolved = [];
+	const report = async (proposal, status, reason) => {
+		self.warn(`store ${storeId}: proposal ${proposal.proposalId}: ${reason}`);
+		unresolved.push({
+			proposalId: proposal.proposalId,
+			status,
+			reason
+		});
+	};
+	for (const proposal of snapshot.proposals?.all ?? []) {
+		if (!isOpenProposal(proposal)) continue;
+		const proposalId = proposal.proposalId;
+		try {
+			if (proposal.kind === "root") {
+				await self.reconcileRootProposal(storeId, proposal, report);
+				continue;
+			}
+			if (proposal.status === "pending_review") {
+				const ended = await parentRunEndedReason(self, storeId, proposal);
+				if (ended !== void 0) {
+					await report(proposal, proposal.status, `it waits for a review it can no longer be dispatched from (${ended}); only a recorded decision moves it (§6)`);
+					continue;
+				}
+				const parentTask = await self.context.task.taskIn(storeId, proposal.identity.parentTaskId);
+				const identity = {
+					storeId,
+					parentTaskId: proposal.identity.parentTaskId,
+					parentRunId: proposal.identity.parentRunId,
+					callerSessionId: proposal.identity.callerSessionId
+				};
+				const batch = self.storedBatchOf(proposal);
+				const envPath = await self.envPathForSession(proposal.identity.callerSessionId);
+				const checked = await self.checkDerivedBatch({
+					identity,
+					parentTask,
+					batch,
+					...envPath === void 0 ? {} : { envPath }
+				});
+				if (!checked.ok) {
+					await report(proposal, proposal.status, `it waits for a review and its batch no longer passes admission (${checked.refusal.reasons.join("; ")}); the proposal stays pending_review`);
+					continue;
+				}
+				await requestProposalReview(self, {
+					storeId,
+					trigger: "recovered",
+					proposal,
+					parentTask,
+					batch,
+					manifests: checked.manifests
+				});
+				continue;
+			}
+			const continuation = await serializeParent(self, storeId, proposal.identity.parentTaskId, () => continueProposalIn(self, storeId, proposalId, proposal.identity.callerSessionId, {}));
+			if (continuation.status !== "admitted" && continuation.status !== "activated") await report(proposal, continuation.status, continuation.detail);
+		} catch (error) {
+			const reason = message(error);
+			self.warn(`store ${storeId}: proposal ${proposalId} could not be continued during recovery (${reason}); it stays ${proposal.status}`);
+			unresolved.push({
+				proposalId,
+				status: proposal.status,
+				reason
+			});
+		}
+	}
+	return unresolved;
+}
+
+//#endregion
+//#region src/orchestration/verify.ts
+/** Grace the cascade's safety net grants a verifier beyond its own deadline before giving up on it. */
+const VERIFY_SAFETY_MARGIN_MS = 15e3;
 /** Read `signal.aborted` behind a function boundary so control-flow narrowing never freezes the value. */
 function isAborted(signal) {
 	return signal?.aborted === true;
@@ -4323,8 +4908,6 @@ function isAborted(signal) {
 /**
 * The KISS §4.3 UNKNOWN split, rendered into the orchestrator's feedback so a
 * reader never mistakes "the criterion was never tested" for "the judge is
-* broken" — confusing the two makes the system re-test the same thing
-* forever. Only an inconclusive verdict carries a kind; pass/fail need none.
 */
 function unknownTag(result) {
 	if (result.status !== "inconclusive" || result.unknownKind === void 0) return "";
@@ -4333,6 +4916,10 @@ function unknownTag(result) {
 function unmetMandatory(criteria, results) {
 	return criteria.filter((criterion) => criterion.mandatory).flatMap((criterion) => {
 		const result = results.find((item) => item.criterionId === criterion.criterionId);
+		/**
+		* KISS §5.1: a criterion explicitly labeled heuristic is judged and labeled,
+		* never counted as a deterministic pass — a natural-language coverage signal
+		*/
 		if (criterion.heuristic === true) return [{
 			criterionId: criterion.criterionId,
 			detail: `heuristic judgement${result === void 0 ? "" : ` (verdict ${result.status})`} — explicitly labeled heuristic, not counted as a deterministic pass`
@@ -4348,101 +4935,8 @@ function failureReason(unmet) {
 	return `mandatory criteria not satisfied: ${unmet.map((item) => `${item.criterionId} ${item.detail}`).join(", ")}`;
 }
 /**
-* The authorization one admitted child runs under, built from its manifest:
-* the tools and skills its matched capabilities declared (labels already
-* expanded at admission), the baseline its worker prompt needs, and whether the
-* mounted preset's own tool plane stays — which it does exactly when a matched
-* capability named its own preset, because a foreign composition's tool names
-* are not ours to enumerate. The MCP plane joins separately:
-* {@link authorizedGrant} binds the manifest's server names to the run's env.
-*/
-function workerGrant(manifest) {
-	return {
-		capabilities: Object.entries(manifest.capabilities).map(([capability, entry]) => ({
-			capability,
-			tools: [...entry.tools],
-			skills: [...entry.skills]
-		})),
-		baseline: workerBaseline(),
-		keepPresetTools: Object.values(manifest.capabilities).some((entry) => entry.preset !== void 0)
-	};
-}
-/**
-* The full grant for one spawn: {@link workerGrant} plus the manifest's MCP
-* servers materialized against the run's env binding, plus the skill roots the
-* worker's own skill layer registers before anything else (S1-C: the run's
-* snapshot; a replay's candidate overlay stays in front of it). Throws when a
-* declared server has no binding or its repo is absent from the env — inside the
-* spawn `try`, so the failure walks the run to `failed` with the cause named,
-* the same discipline as a dangling preset.
-*/
-async function authorizedGrant(env, manifest, skillRoots = []) {
-	const grant = {
-		...workerGrant(manifest),
-		...skillRoots.length === 0 ? {} : { skillRoots: [...skillRoots] }
-	};
-	if (manifestMcpServers(manifest).length === 0) return grant;
-	const binding = env.resolveMcpEnv === void 0 ? void 0 : await env.resolveMcpEnv();
-	return {
-		...grant,
-		mcpServers: resolveMcpServerSpecs(manifest, binding)
-	};
-}
-/**
-* The skill roots one worker's layer registers, in order: whatever the caller
-* passes first (a replay's candidate overlay, which must win a same-name
-* collision — P2's semantics) and then the run's own snapshot. The snapshot is
-* never conditional on the overlay: a run that bound content loads that content.
-*/
-function skillRootsForRun(overlayRoots, binding) {
-	return [...overlayRoots, ...binding?.snapshotRoot === void 0 ? [] : [binding.snapshotRoot]];
-}
-/**
-* Spawn one task worker (A2 §1.2, A6 §F.4): the composition every spawn builds
-* — the deployment's preset, the capability grant the manifest authorizes, the
-* strictest declared permission preset, the worker policy — for a caller other
-* than a batch round. The batch round builds the same request inline because it
-* already holds the pieces; the recovery entry (a new root attempt's worker) is
-* the second caller, and it must not build a composition of its own that could
-* drift from what a batch child runs under.
-*
-* What it deliberately does not do: claim a workspace, write an event or decide
-* a budget. Those belong to the caller's own order, and the admission rules
-* that gate them are the store's. A throw here is the spawn's own failure —
-* `env.spawn` refusing, a dangling preset, an unmountable permission, a grant
-* whose MCP server has no env binding — and each is named.
-*/
-async function spawnTaskWorker(env, request) {
-	await assertPresetUsable(env, request.manifest, request.agentPreset);
-	const permissionPreset = permissionFor(env, request.manifest);
-	const grant = await authorizedGrant(env, request.manifest, skillRootsForRun([], request.providerBinding));
-	return await env.spawn({
-		sessionId: request.sessionId,
-		name: request.name,
-		taskWorker: true,
-		grant,
-		...request.agentPreset === void 0 ? {} : { agentPreset: request.agentPreset },
-		...permissionPreset === void 0 ? {} : { permissionPreset },
-		...request.cwd === void 0 ? {} : { cwd: request.cwd },
-		...request.signal === void 0 ? {} : { signal: request.signal }
-	});
-}
-/**
 * The artifact references (per criterion) that no store evidence satisfies yet.
 * A reference matches an evidence id, an artifact kind, or an artifact id — the
-* three spellings a contract can name a product by. Judged at spawn time, never
-* at admission: existence needs the store snapshot.
-*
-* The two declarations differ in what "satisfied" means (P4, KISS §5.1):
-* `requiresArtifact` names a **verified reference product** — the producing run
-* must sit in the verified terminal state and its bundle must carry a passing
-* verdict, so a failed or still-running run's same-named product never closes
-* the gap — while `acceptsArtifact` names a **raw input** whose mere existence
-* in the store is the requirement.
-*
-* Exported for the second reader (A6 §F.4): a root hands its own result in only
-* when its contract's declared references are satisfied, and the same
-* derivation — not a second, weaker one — answers that.
 */
 function missingRequiredArtifacts(criteria, snapshot) {
 	const present = /* @__PURE__ */ new Set();
@@ -4470,15 +4964,6 @@ function missingArtifactReason(missing) {
 /**
 * Copy the verifier's per-criterion results onto a review record, filling the
 * command from the criterion itself when the result omits it — the record
-* must show what was checked without a trip back into the evidence bundle.
-*
-* The deciding judge travels with the verdict (S1-V slice 2): the registered
-* verifier id and the version of the instance that produced the verdict, so a
-* reader can tell which judge decided, and a later recall can index the
-* verdict by `(verifierRef, version)` (KISS §8.2) without reopening the bundle.
-* Both are optional on the record and omitted when the result carries neither —
-* a verdict written before the fields existed stays readable exactly as before,
-* and nothing is invented for it.
 */
 function reviewCriteria(criteria, results) {
 	return results.map((result) => {
@@ -4496,18 +4981,496 @@ function reviewCriteria(criteria, results) {
 	});
 }
 /**
+* Safety net around one verifier call. The verifier holds its own deadline
+* (`timeoutMs` goes down with every call) and kills whatever it started, so
+*/
+async function withTimeout(work, timeoutMs, runId) {
+	work.catch(() => {});
+	const budgetMs = timeoutMs + VERIFY_SAFETY_MARGIN_MS;
+	let timer;
+	const timeout = new Promise((_resolve, reject) => {
+		timer = setTimeout(() => reject(/* @__PURE__ */ new Error(`task-runtime: verification of run "${runId}" timed out after ${budgetMs}ms (verifier deadline ${timeoutMs}ms + ${VERIFY_SAFETY_MARGIN_MS}ms safety margin)`)), budgetMs);
+		if (typeof timer.unref === "function") timer.unref();
+	});
+	try {
+		return await Promise.race([work, timeout]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+/** Hand the verifier its own deadline and keep the safety net one margin behind it. */
+function verifyWithDeadline(env, storeId, runId) {
+	return withTimeout(env.verifyRun(storeId, runId, { timeoutMs: env.verifyTimeoutMs }), env.verifyTimeoutMs, runId);
+}
+/**
+* The L4 exit pointer (KISS §7, VRTC plan phase 3.1), appended to the feedback
+* a root agent reads at each of the three trigger sites. The escalation ledger
+*/
+function escalationHint(what, tried, suggested) {
+	return `L4 exit (KISS §7): report this to a human with the escalate tool — what: ${what}; tried: ${tried}; suggested: ${suggested}`;
+}
+/** Tail of the first unmet criterion that has a log; a missing reader or log keeps the field off the record. */
+async function failedLogTail(env, unmet, results) {
+	if (env.readLogTail === void 0) return void 0;
+	const logRef = unmet.map((item) => results.find((result) => result.criterionId === item.criterionId)).find((result) => result?.logRef !== void 0)?.logRef;
+	if (logRef === void 0) return void 0;
+	try {
+		return await env.readLogTail(logRef);
+	} catch {
+		return;
+	}
+}
+/**
+* ------------------------------------------------------------------------- *
+* Batch driving (A3 §3.1/§3.2/§3.6/§3.7)
+*/
+/** Run statuses that end a run: the states a batch adopts instead of driving further (the task package's own set). */
+function isTerminalRun(status) {
+	return TERMINAL_RUN_STATUSES.has(status);
+}
+/** Task statuses that end a child — a child in one of these is adopted, never started again. */
+const TERMINAL_TASK_STATUSES = new Set([
+	"verified",
+	"failed",
+	"blocked",
+	"cancelled"
+]);
+
+//#endregion
+//#region src/service/admission.ts
+async function deriveBatch(self, identity, spec) {
+	/**
+	* The session's checkout, resolved once: the same directory the caller's
+	* protected acceptance inputs are read against, the children's MCP servers
+	*/
+	const envPath = await self.envPathForSession(identity.callerSessionId);
+	const fixed = await fixSpecProtectedInputs(spec, envPath);
+	const normalized = normalizeDecomposition(fixed.spec, {
+		...identity,
+		admissionContext: self.admissionContext()
+	});
+	const reasons = [...fixed.reasons, ...normalized.ok ? [] : normalized.reasons];
+	if (!normalized.ok || reasons.length > 0) return {
+		ok: false,
+		refusal: {
+			error: self.contractRefusal(identity.parentTaskId, reasons),
+			reasons,
+			gaps: []
+		}
+	};
+	return {
+		ok: true,
+		batch: normalized.batch,
+		...envPath === void 0 ? {} : { envPath }
+	};
+}
+function manifestsOf(self, batch) {
+	return batch.children.map((child) => self.resolveCapabilities(child.contract.requiredCapabilities));
+}
+function storedBatchOf(proposal) {
+	if (proposal.kind === "root")
+ /**
+	* An internal invariant rather than a caller's mistake: every call site knows
+	* it is holding a decomposition proposal, and one that does not is a bug the
+	*/
+	throw new Error(`task-runtime: proposal "${proposal.proposalId}" is a root contract; it holds one contract and no batch`);
+	return {
+		contractVersion: proposal.identity.contractVersion,
+		reason: proposal.identity.reason,
+		children: proposal.batch.map((child) => ({
+			contract: structuredClone(child.contract),
+			dependsOn: [...child.dependsOn],
+			decomposable: child.decomposable,
+			requiresIndependentAcceptance: child.requiresIndependentAcceptance
+		})),
+		admission: {
+			proposalDigest: proposal.proposalDigest,
+			context: structuredClone(proposal.admissionContext)
+		}
+	};
+}
+async function assertDecomposableRun(self, storeId, parentTask, parentRun, callerSessionId, signal) {
+	const parentTaskId = parentTask.taskId;
+	if (parentRun.taskId !== parentTaskId) throw new Error(`task-runtime: run "${parentRun.runId}" belongs to task "${parentRun.taskId}", not "${parentTaskId}"`);
+	if (parentRun.sessionId !== callerSessionId) throw new Error(`task-runtime: run "${parentRun.runId}" is bound to session "${parentRun.sessionId}", not caller "${callerSessionId}"`);
+	if (parentRun.executionPhase === void 0) throw new Error(`task-runtime: run "${parentRun.runId}" predates coordination phases; it needs recovery (cancel this task tree and re-create it) before it can decompose`);
+	if (parentRun.executionPhase !== "active") throw new Error(`task-runtime: run "${parentRun.runId}" is in phase "${parentRun.executionPhase}"; only an active run may decompose (a run with an unfinished batch is handed back \`active\` when the batch ends; only then may it decompose again)`);
+	const openQuestions = blockingQuestionsOf(await self.context.task.snapshotIn(storeId), parentRun.runId);
+	if (openQuestions.length > 0) throw new Error(`task-runtime: run "${parentRun.runId}" is waiting on ${openQuestions.length === 1 ? "an unresolved blocking question" : `${openQuestions.length} unresolved blocking questions`} (${openQuestions.map((question) => question.questionId).join(", ")}); an answer releases the wait, and only then may the run delegate`);
+	if (signal?.aborted === true) throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`);
+}
+async function inFlightProposalsOf(self, storeId, parentRunId) {
+	const index = (await self.context.task.snapshotIn(storeId)).proposals;
+	/**
+	* An index this snapshot does not carry (a hand-built one) is not "no
+	* proposal exists": the check is skipped rather than answered wrongly, and the
+	*/
+	if (index === void 0) return [];
+	return index.all.filter((proposal) => proposal.kind !== "root" && proposal.identity.parentRunId === parentRunId && isOpenProposal(proposal));
+}
+async function checkDerivedBatch(self, request) {
+	const { identity, parentTask, batch } = request;
+	const parentTaskId = identity.parentTaskId;
+	const snapshot = await self.context.task.snapshotIn(identity.storeId);
+	/**
+	* A `leaf` child is the parent's prediction that the work fits one worker.
+	* With the runtime-decomposition switch on, the node's own admission call
+	*/
+	const leaf = parentTask.decompositionStatus === "leaf";
+	const verdict = checkDecomposition({
+		...parentTask,
+		decompositionPolicy: {
+			allowed: !leaf || self.config.allowRuntimeDecomposition,
+			leaf,
+			maxDepth: self.config.maxDepth,
+			maxChildren: self.config.maxChildren
+		}
+	}, batch.children.map((child) => ({
+		objective: child.contract.objective,
+		acceptanceCriteria: child.contract.acceptanceCriteria,
+		dependsOn: child.dependsOn,
+		requiresIndependentAcceptance: child.requiresIndependentAcceptance
+	})), snapshot.edges);
+	if (!verdict.ok) return {
+		ok: false,
+		refusal: {
+			error: /* @__PURE__ */ new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}":\n- ${verdict.reasons.join("\n- ")}`),
+			reasons: verdict.reasons,
+			gaps: []
+		}
+	};
+	const manifests = manifestsOf(self, batch);
+	const rejected = batch.children.map((child, index) => ({
+		child,
+		index,
+		manifest: manifests[index]
+	})).filter(({ child, manifest }) => manifest.missing.length > 0 && !child.decomposable);
+	if (rejected.length > 0) {
+		const detail = rejected.map(({ index, manifest }) => `child ${index} is missing [${manifest.missing.join(", ")}] and may not decompose`).join("; ");
+		const gaps = rejected.map(({ index, manifest }) => ({
+			childIndex: index,
+			objective: batch.children[index].contract.objective,
+			missing: [...manifest.missing]
+		}));
+		/**
+		* The gap is a fact the submission path records before it refuses: one
+		* obligation per missing capability, raised on the parent (KISS §7 — a
+		*/
+		const gapNames = [...new Set(rejected.flatMap(({ manifest }) => manifest.missing))];
+		return {
+			ok: false,
+			refusal: {
+				error: /* @__PURE__ */ new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}": capability gap: ${detail}; ` + escalationHint(`capabilities [${gapNames.join(", ")}] are not granted by the capability registry`, "capability_list and the children's declared capabilities", "grant the capability in the registry, or mark the child decomposable")),
+				reasons: [detail],
+				gaps
+			}
+		};
+	}
+	/**
+	* Provider pre-check (S1-C item 1): every skill the matched capabilities
+	* grant must be discoverable from the viewpoint of the workers about to be
+	*/
+	const precheck = await self.providerPrecheck([...new Set(manifests.flatMap((manifest) => Object.keys(manifest.capabilities)))], { ...request.envPath === void 0 ? {} : { cwd: request.envPath } });
+	const refusals = providerRefusals(precheck);
+	if (refusals.length > 0) return {
+		ok: false,
+		refusal: {
+			error: /* @__PURE__ */ new Error(`task-runtime: provider pre-check rejected decomposition of "${parentTaskId}":\n- ${refusals.join("\n- ")}`),
+			reasons: refusals,
+			gaps: []
+		}
+	};
+	try {
+		await self.assertKnownVerifierRefs(batch.children.flatMap((child, childIndex) => child.contract.acceptanceCriteria.map((criterion) => ({
+			childIndex,
+			criterion
+		}))), `decomposition of "${parentTaskId}"`);
+	} catch (error) {
+		/**
+		* A batch naming a judge this deployment cannot list is a *batch* defect,
+		* so it travels as a refusal the caller may invalidate a proposal for. A
+		*/
+		const failure = error instanceof Error ? error : new Error(String(error));
+		return {
+			ok: false,
+			refusal: {
+				error: failure,
+				reasons: [failure.message],
+				gaps: []
+			}
+		};
+	}
+	return {
+		ok: true,
+		batch,
+		manifests,
+		providers: precheck
+	};
+}
+async function admitPrecheckedBatch(self, request) {
+	const { proposal, parentTask, parentRun, batch, manifests, exec = {} } = request;
+	const providers = request.providers;
+	const storeId = proposal.identity.storeId;
+	const parentTaskId = parentTask.taskId;
+	const callerSessionId = proposal.identity.callerSessionId;
+	const actor = callerSessionId;
+	if (exec.signal?.aborted === true) throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`);
+	const childTaskIds = batch.children.map(() => `t-${randomUUID()}`);
+	const snapshot = await self.context.task.snapshotIn(storeId);
+	/**
+	* The root budget's batch reservation (§3.5): every child of this batch will
+	* start a run, so a batch that would push the tree past `maxRuns` is refused
+	*/
+	const budget$1 = resolveRootBudget(snapshot, self.config.rootBudget ?? {});
+	if (!budget$1.ok) {
+		if (hasRootLimits(self.config.rootBudget)) throw new Error(`task-runtime: decomposition of "${parentTaskId}" refused: the root budget cannot be resolved: ${budget$1.reason}`);
+	} else {
+		const reserved = checkBatchAdmission(snapshot, budget$1, batch.children.length);
+		if (!reserved.allowed) throw new Error(`task-runtime: decomposition of "${parentTaskId}" refused: ${reserved.reason}`);
+	}
+	/**
+	* Workspace ownership (§3.4): the parent run must be the writer that holds
+	* the checkout, or an ancestor of it must be. Anything else is another live
+	*/
+	const workspacePath = await self.workspacePathForSession(callerSessionId);
+	if (workspacePath !== void 0) await self.assertWorkspaceHeldBy(workspacePath, storeId, parentTask, parentRun.runId);
+	const children = batch.children.map((child, index) => ({
+		taskId: childTaskIds[index],
+		definitionRef: {
+			taskType: "subtask",
+			version: 1
+		},
+		parentTaskId,
+		objective: child.contract.objective,
+		depth: parentTask.depth + 1,
+		acceptanceCriteria: child.contract.acceptanceCriteria,
+		requestedCapabilities: [...child.contract.requiredCapabilities],
+		decompositionStatus: child.decomposable || manifests[index].missing.length > 0 ? "decomposable" : "leaf",
+		status: "created",
+		runIds: [],
+		childTaskIds: [],
+		contract: child.contract,
+		...child.requiresIndependentAcceptance ? { requiresIndependentAcceptance: true } : {}
+	}));
+	const edges = batch.children.flatMap((child, to) => child.dependsOn.map((from) => ({
+		from: childTaskIds[from],
+		to: childTaskIds[to]
+	})));
+	/**
+	* One commit (§1.3): the children, their admission, the dependency edges,
+	* the parent's decomposition record, every child's capability manifest, the
+	*/
+	const consumption = {
+		proposalId: proposal.proposalId,
+		proposalDigest: proposal.proposalDigest,
+		reviewContextDigest: proposal.reviewContextDigest,
+		parentRunId: parentRun.runId,
+		batchId: batchIdFor(parentRun.runId, proposal.proposalId),
+		childTaskIds,
+		admittedAt: now()
+	};
+	const { batchId } = consumption;
+	await self.context.task.admitBatchIn(storeId, parentTaskId, parentRun.runId, children, actor, edges, batch.admission, manifests, consumption);
+	self.executionGate.setPhase(callerSessionId, "waiting_children");
+	if (workspacePath !== void 0 && self.workspaces !== void 0) {
+		const held = self.workspaces.ownerOf(workspacePath);
+		if (held !== void 0) await self.workspaces.push(workspacePath, held, {
+			kind: "batch",
+			storeId,
+			taskId: parentTaskId,
+			batchId,
+			since: now()
+		});
+	}
+	/**
+	* Progress belongs to the runtime from here on (§3.7): the caller's signal
+	* governed admission only, and this batch's own controller is what a
+	*/
+	self.startBatchDriver({
+		storeId,
+		parentTaskId,
+		parentRunId: parentRun.runId,
+		batchId,
+		callerSessionId,
+		reason: batch.reason,
+		providers,
+		...exec.callId === void 0 ? {} : { excludeCallId: exec.callId }
+	});
+	return {
+		batchId,
+		childTaskIds
+	};
+}
+
+//#endregion
+//#region src/types.ts
+const BUDGET_EXTENSION_REQUEST_FIELDS = ["requestKey", "maxRuns"];
+
+//#endregion
+//#region src/service/budget.ts
+function ceilingsOf(budget$1) {
+	return { ...budget$1.maxRuns === void 0 ? {} : { maxRuns: budget$1.maxRuns } };
+}
+function registerRootBudgetApproval(self, approval) {
+	self.rootBudgetApproval = approval;
+	return () => {
+		if (self.rootBudgetApproval === approval) self.rootBudgetApproval = void 0;
+	};
+}
+async function extendRootBudget(self, sessionId, host, request) {
+	if ((typeof host === "object" && host !== null && typeof host.callId === "string" ? host.callId : "").length === 0) throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the host execution names no call (a non-empty \`callId\`, the host's own identity for the call this request's question is asked under); the question is asked under the host’s call, and nothing else can address an answer to this request`);
+	/**
+	* The request is the request and nothing else. A caller that carries a field
+	* of the old relay is carrying what only a person's answer may supply — the
+	*/
+	if (typeof request === "object" && request !== null) for (const key in request) {
+		if (BUDGET_EXTENSION_REQUEST_FIELDS.includes(key)) continue;
+		throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the request carries "${key}", which is not part of a budget-extension request (only ${BUDGET_EXTENSION_REQUEST_FIELDS.join(", ")} are read); a reading, a tool-call identity and an outcome are not a caller's to supply — this entry freezes the reading itself and asks the approval channel its deployment installed, so nothing a caller carries can go past the person`);
+	}
+	const { storeId, snapshot, budget: budget$1 } = await budgetExtensionContext(self, sessionId);
+	const requestKey = typeof request?.requestKey === "string" ? request.requestKey : "";
+	const judgement = judgeBudgetExtension(request, budget$1, requestKey.length === 0 ? void 0 : budgetExtensionIndex(snapshot).byRequestKey[requestKey]);
+	if (judgement.kind === "refused") throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: ${judgement.reason}`);
+	if (judgement.kind === "recorded") return {
+		storeId,
+		rootTaskId: budget$1.rootTaskId,
+		answeredFromRecord: true,
+		record: judgement.record
+	};
+	/**
+	* The one reading in force right now: frozen here, shown to the person, and
+	* re-checked by the store's serial region when the claim arrives. It is what
+	*/
+	const effective = ceilingsOf(budget$1);
+	const runsUsed = snapshot.runs.length;
+	const approval = self.rootBudgetApproval;
+	if (approval === void 0) throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: this deployment has no approval channel installed (no root budget approval was registered), and this entry never answers for a person (不能默许); install the approval that asks the person, or the ceiling stays where it is`);
+	const decision = await approval({
+		storeId,
+		rootTaskId: budget$1.rootTaskId,
+		rootSessionId: sessionId,
+		configured: budget$1.configured,
+		effective,
+		runsUsed,
+		proposal: judgement.proposal,
+		host
+	});
+	if (decision.kind === "refused") {
+		const recorded = budgetExtensionIndex(await self.context.task.snapshotIn(storeId)).byRequestKey[judgement.proposal.requestKey];
+		if (recorded !== void 0) {
+			if (recorded.requestDigest === judgement.proposal.requestDigest) return {
+				storeId,
+				rootTaskId: budget$1.rootTaskId,
+				answeredFromRecord: true,
+				record: recorded
+			};
+			throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: request key "${judgement.proposal.requestKey}" is already bound to ${describeBudgetExtension(recorded)} (identity ${recorded.requestDigest}); one key names one request, and different totals under it are a new request under a new key`);
+		}
+		throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the request was not approved (${decision.reason}); the ceilings are unchanged and no run started`);
+	}
+	const claim = {
+		...judgement.proposal,
+		baseline: { ...effective },
+		approvalRef: decision.reference,
+		requestedBy: sessionId
+	};
+	await self.context.task.recordBudgetExtensionIn(storeId, budget$1.rootTaskId, claim, sessionId);
+	const stored = budgetExtensionIndex(await self.context.task.snapshotIn(storeId)).byRequestKey[claim.requestKey];
+	if (stored === void 0) throw new Error(`task-runtime: budget extension "${claim.requestKey}" was committed to store "${storeId}" but the store does not hold it; a committed extension is a durable fact, and this is not one`);
+	return {
+		storeId,
+		rootTaskId: budget$1.rootTaskId,
+		answeredFromRecord: false,
+		record: stored
+	};
+}
+async function budgetExtensionContext(self, sessionId) {
+	if (typeof sessionId !== "string" || sessionId.length === 0) throw new Error("task-runtime: a budget extension needs the root session that asks: pass a non-empty session id");
+	let rootSessionId;
+	try {
+		rootSessionId = (await self.context.graphs.graphForSession(SessionId(sessionId))).rootSessionId;
+	} catch (error) {
+		throw new Error(`task-runtime: the budget of session "${sessionId}" cannot be extended: its graph could not be resolved (${message(error)}), so whether it is a graph's root coordination session cannot be established`);
+	}
+	if (rootSessionId !== sessionId) throw new Error(`task-runtime: session "${sessionId}" is not a root coordination session (its graph's root session is "${rootSessionId}"), so it cannot extend a tree's budget: a raise is a decision about the tree the root session accepted, and it is refused by name for a delegated worker, for a session of another graph, and for any session that is not the one its graph created`);
+	const storeId = rootTaskStoreId(sessionId);
+	let snapshot;
+	try {
+		snapshot = await self.context.task.openStore(storeId);
+	} catch (error) {
+		throw new Error(`task-runtime: the budget of session "${sessionId}" cannot be read: store "${storeId}" is unavailable (${message(error)})`);
+	}
+	const resolution = resolveRootBudget(snapshot, self.config.rootBudget ?? {});
+	if (!resolution.ok) throw new Error(`task-runtime: the budget of session "${sessionId}" cannot be extended: ${resolution.reason}`);
+	return {
+		storeId,
+		snapshot,
+		budget: resolution
+	};
+}
+function budgetExtensionIndex(snapshot) {
+	const index = snapshot.budgetExtensions;
+	if (index === void 0) throw new Error(`task-runtime: store "${snapshot.id}" carries no budget-extension index, so its approved ceilings cannot be read`);
+	return index;
+}
+function judgeBudgetExtension(request, budget$1, existing) {
+	if (typeof request !== "object" || request === null) return {
+		kind: "refused",
+		reason: "the request is not an object with a request key and maxRuns"
+	};
+	const requestKey = request.requestKey;
+	if (typeof requestKey !== "string" || requestKey.length === 0) return {
+		kind: "refused",
+		reason: "the request needs a non-empty request key: it is how a retry after a restart is recognised as the same request"
+	};
+	if (request.maxRuns === void 0) return {
+		kind: "refused",
+		reason: "the request names no maxRuns ceiling to raise"
+	};
+	if (!Number.isInteger(request.maxRuns) || request.maxRuns <= 0) return {
+		kind: "refused",
+		reason: `maxRuns ${JSON.stringify(request.maxRuns)} is not a positive whole number of runs; the approved value is the tree\u2019s whole run count, never an increment`
+	};
+	const proposalDigest = budgetExtensionRequestDigest({
+		requestKey,
+		maxRuns: request.maxRuns
+	});
+	if (existing !== void 0) {
+		if (existing.requestDigest === proposalDigest) return {
+			kind: "recorded",
+			record: existing
+		};
+		return {
+			kind: "refused",
+			reason: `request key "${requestKey}" is already bound to ${describeBudgetExtension(existing)} (identity ${existing.requestDigest}); one key names one request, and different totals under it are a new request under a new key`
+		};
+	}
+	if (budget$1.maxRuns === void 0) return {
+		kind: "refused",
+		reason: "this tree sets no maxRuns ceiling, so there is nothing to raise"
+	};
+	if (request.maxRuns <= budget$1.maxRuns) return {
+		kind: "refused",
+		reason: `maxRuns ${request.maxRuns} does not raise the ${budget$1.maxRuns} in force`
+	};
+	return {
+		kind: "proposed",
+		proposal: {
+			requestKey,
+			requestDigest: proposalDigest,
+			maxRuns: {
+				previous: budget$1.maxRuns,
+				next: request.maxRuns
+			}
+		}
+	};
+}
+
+//#endregion
+//#region src/orchestration/settlement.ts
+/**
 * The review dimensions and the effort counters for one terminal record,
 * assembled from what the store already holds plus one optional session read.
-*
-* Everything here is a mechanically observed fact: counts, declared modes,
-* names, and raw token buckets. No field is a score, and no derivation applies a
-* threshold or an opinion — §2.7.3 keeps the "why" in Diagnosis. A dimension or
-* counter whose source is missing is left out entirely rather than defaulted to
-* zero, so an absent field always means "not observed" and never "observed as
-* nothing".
-*
-* Best-effort by contract: this runs inside the terminal transition, so any read
-* that fails degrades to an omitted field instead of costing the record.
 */
 async function reviewEnrichment(env, storeId, taskId, outcome, run, criteria) {
 	try {
@@ -4592,84 +5555,26 @@ async function reviewEnrichment(env, storeId, taskId, outcome, run, criteria) {
 	}
 }
 /**
-* Safety net around one verifier call. The verifier holds its own deadline
-* (`timeoutMs` goes down with every call) and kills whatever it started, so
-* this only fires when a verifier ignores its deadline entirely: it gets
-* `timeoutMs + VERIFY_SAFETY_MARGIN_MS` before the cascade gives up on it,
-* marks the run failed, and walks on. The abandoned promise keeps a handler
-* attached — it may still settle (and reject) long after the race is lost, and
-* that must never surface as an unhandled rejection.
-*/
-async function withTimeout(work, timeoutMs, runId) {
-	work.catch(() => {});
-	const budgetMs = timeoutMs + VERIFY_SAFETY_MARGIN_MS;
-	let timer;
-	const timeout = new Promise((_resolve, reject) => {
-		timer = setTimeout(() => reject(/* @__PURE__ */ new Error(`task-runtime: verification of run "${runId}" timed out after ${budgetMs}ms (verifier deadline ${timeoutMs}ms + ${VERIFY_SAFETY_MARGIN_MS}ms safety margin)`)), budgetMs);
-		if (typeof timer.unref === "function") timer.unref();
-	});
-	try {
-		return await Promise.race([work, timeout]);
-	} finally {
-		clearTimeout(timer);
-	}
-}
-/** Hand the verifier its own deadline and keep the safety net one margin behind it. */
-function verifyWithDeadline(env, storeId, runId) {
-	return withTimeout(env.verifyRun(storeId, runId, { timeoutMs: env.verifyTimeoutMs }), env.verifyTimeoutMs, runId);
-}
-/**
-* The L4 exit pointer (KISS §7, VRTC plan phase 3.1), appended to the feedback
-* a root agent reads at each of the three trigger sites. The escalation ledger
-* and its tool live on the root plane (agent-singularity): a card carries a
-* human-approval gate that belongs on the root's tool surface, so the
-* orchestrator only points at the exit — it never calls across planes and never
-* blocks a cascade on a human answer.
-*/
-function escalationHint(what, tried, suggested) {
-	return `L4 exit (KISS §7): report this to a human with the escalate tool — what: ${what}; tried: ${tried}; suggested: ${suggested}`;
-}
-/**
 * The post-hoc half of the budget (see {@link BudgetConfig}): the members the
 * orchestrator cannot observe in flight are checked once, at terminal time,
-* against the run's session observation, and a breach is recorded as an
-* anomaly — never presented as enforcement, never flipping a verdict.
-* Best-effort like the enrichment read: no budget, no reader, or no
-* observation means no annotation.
 */
 async function budgetBreaches(env, run) {
-	const budget = env.budget;
-	if (budget === void 0 || env.observeSession === void 0) return [];
-	if (budget.maxToolCalls === void 0 && budget.tokens === void 0) return [];
+	const budget$1 = env.budget;
+	if (budget$1 === void 0 || env.observeSession === void 0) return [];
+	if (budget$1.maxToolCalls === void 0 && budget$1.tokens === void 0) return [];
 	const observation = await env.observeSession(run.sessionId).catch(() => void 0);
 	if (observation === void 0) return [];
 	const breaches = [];
-	if (budget.maxToolCalls !== void 0 && observation.tools !== void 0) {
+	if (budget$1.maxToolCalls !== void 0 && observation.tools !== void 0) {
 		const calls = observation.tools.calls.reduce((sum, call) => sum + call.count, 0);
-		if (calls > budget.maxToolCalls) breaches.push(`budget exceeded: maxToolCalls (observed ${calls} tool calls over the limit ${budget.maxToolCalls}; post-hoc check at terminal time — the run was not stopped in flight) — ${escalationHint("the run already spent more tool calls than its budget allows", "the run finished before the breach was observable", "raise the budget, split the task, or accept the overspend")}`);
+		if (calls > budget$1.maxToolCalls) breaches.push(`budget exceeded: maxToolCalls (observed ${calls} tool calls over the limit ${budget$1.maxToolCalls}; post-hoc check at terminal time — the run was not stopped in flight) — ${escalationHint("the run already spent more tool calls than its budget allows", "the run finished before the breach was observable", "raise the budget, split the task, or accept the overspend")}`);
 	}
-	if (budget.tokens !== void 0 && observation.tokens !== void 0) {
+	if (budget$1.tokens !== void 0 && observation.tokens !== void 0) {
 		const tokens = observation.tokens;
 		const total = tokens.uncachedInputTokens + tokens.outputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens;
-		if (total > budget.tokens) breaches.push(`budget exceeded: tokens (observed ${total} whole-session tokens over the limit ${budget.tokens}; post-hoc check at terminal time, session-scoped cumulative — the run was not stopped in flight) — ${escalationHint("the run already spent more tokens than its budget allows", "the run finished before the breach was observable", "raise the budget, split the task, or accept the overspend")}`);
+		if (total > budget$1.tokens) breaches.push(`budget exceeded: tokens (observed ${total} whole-session tokens over the limit ${budget$1.tokens}; post-hoc check at terminal time, session-scoped cumulative — the run was not stopped in flight) — ${escalationHint("the run already spent more tokens than its budget allows", "the run finished before the breach was observable", "raise the budget, split the task, or accept the overspend")}`);
 	}
 	return breaches;
-}
-/** Wait for the worker to go idle or fail; explicit cancellation stops its loop. */
-async function awaitWorker(handle, signal) {
-	const cancel = () => handle.agent.cancel({ kind: "parent" });
-	signal?.addEventListener("abort", cancel, { once: true });
-	try {
-		await handle.agent.whenIdle();
-		return isAborted(signal) ? { kind: "aborted" } : { kind: "idle" };
-	} catch (error) {
-		return isAborted(signal) ? { kind: "aborted" } : {
-			kind: "failed",
-			reason: message(error)
-		};
-	} finally {
-		signal?.removeEventListener("abort", cancel);
-	}
 }
 async function evidenceRefsFor(env, storeId, runId) {
 	return (await env.task.snapshotIn(storeId)).evidence.filter((item) => item.taskRunId === runId).map((item) => item.evidenceId);
@@ -4680,27 +5585,9 @@ async function runDurationMs(env, storeId, run) {
 	const end = finishedAt === void 0 ? Date.now() : Date.parse(finishedAt);
 	return Math.max(0, end - Date.parse(run.startedAt));
 }
-/** Tail of the first unmet criterion that has a log; a missing reader or log keeps the field off the record. */
-async function failedLogTail(env, unmet, results) {
-	if (env.readLogTail === void 0) return void 0;
-	const logRef = unmet.map((item) => results.find((result) => result.criterionId === item.criterionId)).find((result) => result?.logRef !== void 0)?.logRef;
-	if (logRef === void 0) return void 0;
-	try {
-		return await env.readLogTail(logRef);
-	} catch {
-		return;
-	}
-}
 /**
 * Every run walked to a terminal state gets exactly one review record, written
 * in the same moment right after the terminal status event — the discipline
-* the run cascade and the replay runner share. The dimensions and effort
-* metrics are derived alongside (§2.7.3) on a best-effort basis — see
-* {@link reviewEnrichment} — and never gate the record itself.
-*
-* The record is durable before anything is told about it: the deployment's
-* listener (A5's review-agent trigger) is handed the fact afterwards and is
-* never awaited, so no settlement waits on a reviewer.
 */
 async function recordTerminalReview(env, storeId, taskId, outcome, options = {}) {
 	const enrichment = await reviewEnrichment(env, storeId, taskId, outcome, options.run, options.criteria);
@@ -4723,116 +5610,15 @@ async function recordTerminalReview(env, storeId, taskId, outcome, options = {})
 		...enrichment.dimensions === void 0 ? {} : { dimensions: enrichment.dimensions },
 		...enrichment.metrics === void 0 ? {} : { metrics: enrichment.metrics }
 	}, env.actor);
+	/**
+	* The record is durable: the deployment may now be told about it. Handing the
+	* fact over is not waiting for what it does with it (A5) — a listener runs the
+	*/
 	env.onTerminalReview?.({
 		storeId,
 		taskId,
 		runId: options.run?.runId ?? null,
 		outcome
-	});
-}
-/**
-* Refuse a dangling preset before the spawn attempt: when the deployment
-* cannot mount the resolved preset, throw an error naming the preset and the
-* capabilities that granted it — the spawn catch walks the run to `failed`
-* with that cause, so a bad capability table entry can never leave a ghost
-* task.
-*/
-async function assertPresetUsable(env, manifest, preset) {
-	if (preset === void 0 || env.assertPreset === void 0) return;
-	try {
-		await env.assertPreset(preset);
-	} catch (error) {
-		const grantedBy = Object.entries(manifest.capabilities).flatMap(([name, entry]) => entry.preset === preset ? [name] : []);
-		throw new Error(`task-runtime: preset "${preset}"${grantedBy.length === 0 ? "" : ` granted by capabilities [${grantedBy.join(", ")}]`} is not mountable: ${message(error)}`);
-	}
-}
-/**
-* The strictest permission preset a manifest's capabilities declare. Unknown
-* names throw here (through the registry's resolve) so the spawn catch walks
-* the run to `failed` with the cause named — same discipline as
-* assertPresetUsable. Without a spec resolver (test contexts) the first
-* declared name passes through and the spawn's own set() validates it.
-*/
-function permissionFor(env, manifest) {
-	if (Object.values(manifest.capabilities).every((entry) => entry.permission === void 0)) return void 0;
-	if (env.resolvePermissionSpec === void 0) return Object.values(manifest.capabilities).find((entry) => entry.permission !== void 0)?.permission;
-	try {
-		return resolvePermission(manifest, env.resolvePermissionSpec);
-	} catch (error) {
-		const declaredBy = Object.entries(manifest.capabilities).flatMap(([name, entry]) => entry.permission === void 0 ? [] : [name]);
-		throw new Error(`task-runtime: permission declared by capabilities [${declaredBy.join(", ")}] is not usable: ${message(error)}`);
-	}
-}
-/** Run statuses that end a run: the states a batch adopts instead of driving further. */
-const TERMINAL_RUN_STATUSES = new Set([
-	"verified",
-	"failed",
-	"cancelled",
-	"blocked"
-]);
-function isTerminalRun(status) {
-	return TERMINAL_RUN_STATUSES.has(status);
-}
-/** Task statuses that end a child — a child in one of these is adopted, never started again. */
-const TERMINAL_TASK_STATUSES = new Set([
-	"verified",
-	"failed",
-	"blocked",
-	"cancelled"
-]);
-/**
-* One batch's children in the batch's own order, with each child's dependencies
-* mapped from task ids back to batch positions: the store is the only source of
-* the batch's shape, so a driver that re-reads it every round (a resumed batch
-* included) reads the same list the admission wrote.
-*
-* The members are the batch's own ({@link batchMembers}), never the parent
-* task's children: a task's children are every batch it ever admitted, and a
-* second batch must be driven as its own batch — positions it names are its own
-* (§4's batch-local index).
-*/
-function batchItems(memberTaskIds, edges) {
-	const position = new Map(memberTaskIds.map((taskId, index) => [taskId, index]));
-	return memberTaskIds.map((taskId, index) => ({
-		index,
-		taskId,
-		dependsOn: edges.filter((edge) => edge.to === taskId).map((edge) => position.get(edge.from)).filter((from) => from !== void 0).sort((left, right) => left - right)
-	}));
-}
-/** The latest run the store records for a task, or `undefined` when it has none (never started). */
-function latestRun(snapshot, taskId) {
-	return [...snapshot.runs].reverse().find((run) => run.taskId === taskId);
-}
-function taskOf(snapshot, taskId) {
-	return snapshot.tasks.find((task) => task.taskId === taskId);
-}
-/**
-* One child's outcome as the store records it. A child that never reached a
-* terminal state in a settled batch has no outcome to report and is named
-* `failed` — the batch is over, so a still-running child is a defect of the
-* settlement, never evidence of work in progress.
-*
-* `memberTaskIds` names the batch whose outcomes are asked for, and is the only
-* thing that decides whose outcomes are read. A run admits more than one batch
-* (K1) and the task's children are *every* batch's, so there is no default here:
-* a caller either holds the batch's recorded members or it cannot ask this
-* question.
-*/
-async function deriveChildOutcomes(task, storeId, parentTaskId, memberTaskIds) {
-	const snapshot = await task.snapshotIn(storeId);
-	if (taskOf(snapshot, parentTaskId) === void 0) return [];
-	return memberTaskIds.map((taskId) => {
-		const instance = taskOf(snapshot, taskId);
-		const run = latestRun(snapshot, taskId);
-		const status = instance?.status;
-		const evidenceId = run === void 0 ? void 0 : snapshot.evidence.find((item) => item.taskRunId === run.runId)?.evidenceId;
-		const outcome = status === "verified" || status === "failed" || status === "blocked" || status === "cancelled" ? status : "failed";
-		return {
-			taskId,
-			...run === void 0 ? {} : { runId: run.runId },
-			status: outcome,
-			...evidenceId === void 0 ? {} : { evidenceId }
-		};
 	});
 }
 /** Best-effort owner notification; a deployment without the seam, or a throwing one, changes nothing. */
@@ -4841,6 +5627,49 @@ function notifyOwner(env, sessionId, text$1) {
 	try {
 		env.notify(sessionId, text$1);
 	} catch {}
+}
+/**
+* ------------------------------------------------------------------------- *
+* Settlements the runtime drives from the outside (§3.6)
+*/
+/**
+* Settle one run terminal from outside the orchestration — a graph removal, or
+* a recovery pass that refuses to continue a run — with the same terminal-record
+*/
+async function settleRunFromRuntime(env, storeId, run, status, reason) {
+	const current = await env.task.runIn(storeId, run.runId);
+	if (current.status !== "running") return;
+	const snapshot = await env.task.snapshotIn(storeId);
+	const relatedTaskIds = snapshot.tasks.find((candidate) => candidate.taskId === current.taskId)?.childTaskIds ?? [];
+	try {
+		await env.task.markRunStatusIn(storeId, current.taskId, current.runId, status, env.actor, { reason });
+	} catch (error) {
+		/**
+		* Another settlement path can win this race: a driver's own abort branch, or
+		* this same cancellation arriving through the batch. The store is the arbiter
+		*/
+		const settled = await env.task.runIn(storeId, current.runId).catch(() => void 0);
+		if (settled === void 0 || settled.status === "running") throw error;
+		return;
+	}
+	if (!snapshot.reviews.some((review) => review.runId === current.runId)) await recordTerminalReview(env, storeId, current.taskId, status, {
+		run: current,
+		...status === "failed" ? { localizedCause: reason } : {},
+		anomalies: [reason],
+		relatedTaskIds
+	});
+	env.onRunSettled?.(storeId, current.taskId, current.runId, status);
+	/**
+	* The questions addressed to this run stop being open the moment it settles
+	* (A4 §F.1: an open question needs *both* runs running), so the runs that asked
+	*/
+	if (env.gate !== void 0) try {
+		releaseAskingSessions(env.gate, await env.task.snapshotIn(storeId), current.runId);
+	} catch (error) {
+		notifyOwner(env, current.sessionId, `task-runtime: the question blocks of the runs that asked run "${current.runId}" could not be recomputed after it settled (${message(error)}); the store's own derivation is unchanged and the next recovery recomputes them`);
+	}
+	await releaseWorkspaceLayer(env, runOwner(storeId, current.taskId, current.runId), current.sessionId);
+	notifyOwner(env, current.sessionId, `task-runtime: run "${current.runId}" was settled ${status}: ${reason}`);
 }
 /** The workspace this orchestration may own, when the deployment names one. */
 function workspaceOf(env) {
@@ -4871,14 +5700,6 @@ function batchOwner(storeId, taskId, batchId) {
 /**
 * Hand the workspace from the holder that has it to `next`, checking that the
 * holder is the one the caller believes it is.
-*
-* The check is on identity, not on `since`: a handover names the holder that is
-* actually on top, and the registry's stack key includes the instant it was
-* taken — an instant no caller can re-derive later. So the caller states who it
-* expects (`expected`), this reads the actual top, and only an identity match
-* proceeds; a mismatch is a named diagnostic instead of a silent pop, because
-* popping the wrong layer hands the checkout to a writer while another writer
-* still believes it holds it. `undefined` means "no expectation" (a fresh hold).
 */
 async function handOverWorkspace(env, next, expected, sessionId, what) {
 	const held = workspaceOf(env);
@@ -4901,26 +5722,16 @@ async function releaseWorkspaceLayer(env, owner, sessionId) {
 	if (held === void 0) return;
 	const { conflict } = await releaseLayer(held.registry, held.workspace, (top) => top.kind === owner.kind && top.storeId === owner.storeId && top.taskId === owner.taskId && top.runId === owner.runId && top.batchId === owner.batchId);
 	if (conflict === void 0) return;
+	/**
+	* A layer that is no longer on top because this store's ownership moved on is
+	* not a disagreement: the settlement and the batch driver can both release the
+	*/
 	if (conflict.storeId === owner.storeId) return;
 	notifyOwner(env, sessionId, `task-runtime: workspace ${held.workspace} was expected to be released by ${describeOwner(owner)}, but its holder is ${describeOwner(conflict)}; the layer is left in place`);
 }
 /**
 * Hold the workspace for one verifier call: the verification reads the result
 * exclusively, so the run's own hold is handed to a `verifier` layer and
-* released when the call returns (§3.4's stack: run → batch → child run →
-* verifier).
-*
-* A workspace held by *another store*, or by nobody at all while this
-* deployment claims a path, refuses the verification by name: a verifier's
-* commands would otherwise run in a checkout another writer holds, and that is
-* the one thing this rule exists to prevent (§3.4's "the verifier's execution
-* is exclusive too"). The checkout's own store is a different case and is
-* accepted: one store is one tree the runtime serializes, and a *recovery* that
-* rebuilt the stack holds the root's layer while a resumed verification runs.
-*
-* The refusal throws, so the submission's settlement fails the run with the
-* reason on its review record — the same shape every other unverifiable run
-* gets, never a verdict about bytes nothing can vouch for.
 */
 async function withVerifierWorkspace(env, storeId, taskId, runId, sessionId, work) {
 	const held = workspaceOf(env);
@@ -4941,12 +5752,759 @@ async function withVerifierWorkspace(env, storeId, taskId, runId, sessionId, wor
 		await releaseWorkspaceLayer(env, verifier, sessionId);
 	}
 }
+
+//#endregion
+//#region src/orchestration/spawn.ts
+/**
+* Rebuild the authorization a recovery pass has to state for one run, from the
+* store's own records, and hand it to the deployment's resume door.
+*/
+async function resumeAdoptedWorker(env, storeId, run) {
+	const resume = env.resumeWorkerSession;
+	if (resume === void 0) return {
+		status: "refused",
+		reason: "this deployment wires no worker resume, so the Session of an adopted run cannot be brought back"
+	};
+	let manifest;
+	try {
+		manifest = (await env.task.snapshotIn(storeId)).capabilities[run.taskId];
+	} catch (error) {
+		return {
+			status: "refused",
+			reason: `the store could not be read for its manifest: ${message(error)}`
+		};
+	}
+	if (manifest === void 0) return {
+		status: "refused",
+		reason: `the store holds no capability manifest for task "${run.taskId}", so the composition run "${run.runId}" was spawned in cannot be rebuilt`
+	};
+	let grant;
+	let permissionPreset;
+	try {
+		grant = await authorizedGrant(env, manifest, skillRootsForRun([], run.providerBinding));
+		permissionPreset = permissionFor(env, manifest);
+	} catch (error) {
+		return {
+			status: "refused",
+			reason: `the run's authorization could not be rebuilt: ${message(error)}`
+		};
+	}
+	return await resume({
+		storeId,
+		run,
+		grant,
+		...permissionPreset === void 0 ? {} : { permissionPreset },
+		taskWorker: true
+	});
+}
+/**
+* The authorization one admitted child runs under, built from its manifest:
+* the tools and skills its matched capabilities declared (labels already
+*/
+function workerGrant(manifest) {
+	return {
+		capabilities: Object.entries(manifest.capabilities).map(([capability, entry]) => ({
+			capability,
+			tools: [...entry.tools],
+			skills: [...entry.skills]
+		})),
+		baseline: workerBaseline(),
+		keepPresetTools: Object.values(manifest.capabilities).some((entry) => entry.preset !== void 0)
+	};
+}
+/**
+* The full grant for one spawn: {@link workerGrant} plus the manifest's MCP
+* servers materialized against the run's env binding, plus the skill roots the
+*/
+async function authorizedGrant(env, manifest, skillRoots = []) {
+	const grant = {
+		...workerGrant(manifest),
+		...skillRoots.length === 0 ? {} : { skillRoots: [...skillRoots] }
+	};
+	if (manifestMcpServers(manifest).length === 0) return grant;
+	const binding = env.resolveMcpEnv === void 0 ? void 0 : await env.resolveMcpEnv();
+	return {
+		...grant,
+		mcpServers: resolveMcpServerSpecs(manifest, binding)
+	};
+}
+/**
+* The skill roots one worker's layer registers, in order: whatever the caller
+* passes first (a replay's candidate overlay, which must win a same-name
+*/
+function skillRootsForRun(overlayRoots, binding) {
+	return [...overlayRoots, ...binding?.snapshotRoot === void 0 ? [] : [binding.snapshotRoot]];
+}
+/**
+* Spawn one task worker (A2 §1.2, A6 §F.4): the composition every spawn builds
+* — the deployment's preset, the capability grant the manifest authorizes, the
+*/
+async function spawnTaskWorker(env, request) {
+	await assertPresetUsable(env, request.manifest, request.agentPreset);
+	const permissionPreset = permissionFor(env, request.manifest);
+	const grant = await authorizedGrant(env, request.manifest, skillRootsForRun([], request.providerBinding));
+	return await env.spawn({
+		sessionId: request.sessionId,
+		name: request.name,
+		taskWorker: true,
+		grant,
+		...request.agentPreset === void 0 ? {} : { agentPreset: request.agentPreset },
+		...permissionPreset === void 0 ? {} : { permissionPreset },
+		...request.cwd === void 0 ? {} : { cwd: request.cwd },
+		...request.signal === void 0 ? {} : { signal: request.signal }
+	});
+}
+/**
+* Refuse a dangling preset before the spawn attempt: when the deployment
+* cannot mount the resolved preset, throw an error naming the preset and the
+*/
+async function assertPresetUsable(env, manifest, preset) {
+	if (preset === void 0 || env.assertPreset === void 0) return;
+	try {
+		await env.assertPreset(preset);
+	} catch (error) {
+		const grantedBy = Object.entries(manifest.capabilities).flatMap(([name, entry]) => entry.preset === preset ? [name] : []);
+		throw new Error(`task-runtime: preset "${preset}"${grantedBy.length === 0 ? "" : ` granted by capabilities [${grantedBy.join(", ")}]`} is not mountable: ${message(error)}`);
+	}
+}
+/**
+* The strictest permission preset a manifest's capabilities declare. Unknown
+* names throw here (through the registry's resolve) so the spawn catch walks
+*/
+function permissionFor(env, manifest) {
+	if (Object.values(manifest.capabilities).every((entry) => entry.permission === void 0)) return void 0;
+	if (env.resolvePermissionSpec === void 0) return Object.values(manifest.capabilities).find((entry) => entry.permission !== void 0)?.permission;
+	try {
+		return resolvePermission(manifest, env.resolvePermissionSpec);
+	} catch (error) {
+		const declaredBy = Object.entries(manifest.capabilities).flatMap(([name, entry]) => entry.permission === void 0 ? [] : [name]);
+		throw new Error(`task-runtime: permission declared by capabilities [${declaredBy.join(", ")}] is not usable: ${message(error)}`);
+	}
+}
+
+//#endregion
+//#region src/recovery.ts
+/** The fields one request may carry: anything else is refused by name rather than ignored. */
+const REQUEST_FIELDS = [
+	"sourceTaskId",
+	"sourceRunId",
+	"sourceDiagnosisId",
+	"requestKey",
+	"reuses"
+];
+/** The fields one reuse declaration may carry. */
+const REUSE_FIELDS = [
+	"childIndex",
+	"taskId",
+	"sourceRunId",
+	"evidenceId",
+	"criterionId",
+	"artifactRefs",
+	"inputRefs"
+];
+/**
+* Every reason one request cannot be a recovery request at all: an unknown
+* field (a caller may not smuggle a decision in), a missing or empty identity,
+*/
+function recoveryRequestDefects(request) {
+	if (!isPlainObject(request)) return ["the request must be an object"];
+	const defects = [];
+	for (const key of unknownFieldKeys(request, REQUEST_FIELDS)) defects.push(`unknown field "${key}": a recovery request carries ${REQUEST_FIELDS.join(", ")} and nothing else`);
+	if (!nonBlank(request.sourceTaskId)) defects.push("sourceTaskId must be a non-empty task id");
+	if (request.sourceRunId !== null && !nonBlank(request.sourceRunId)) defects.push("sourceRunId must be a non-empty run id or null (a failure that had no run)");
+	if (!nonBlank(request.sourceDiagnosisId)) defects.push("sourceDiagnosisId must be a non-empty diagnosis id");
+	if (!nonBlank(request.requestKey)) defects.push("requestKey must be a non-empty string");
+	if (request.reuses !== void 0) if (!Array.isArray(request.reuses)) defects.push("reuses must be an array of declarations");
+	else {
+		const claimed = /* @__PURE__ */ new Set();
+		request.reuses.forEach((entry, position) => {
+			if (!isPlainObject(entry)) {
+				defects.push(`reuses[${position}] must be an object`);
+				return;
+			}
+			for (const key of unknownFieldKeys(entry, REUSE_FIELDS)) defects.push(`reuses[${position}] has unknown field "${key}"`);
+			if (!Number.isInteger(entry.childIndex) || entry.childIndex < 0) defects.push(`reuses[${position}].childIndex must be a non-negative integer`);
+			for (const name of [
+				"taskId",
+				"sourceRunId",
+				"evidenceId"
+			]) if (!nonBlank(entry[name])) defects.push(`reuses[${position}].${name} must be a non-empty id`);
+			if (entry.criterionId !== void 0 && !nonBlank(entry.criterionId)) defects.push(`reuses[${position}].criterionId must be a non-empty string when given`);
+			for (const name of ["artifactRefs", "inputRefs"]) {
+				const value = entry[name];
+				if (value !== void 0 && (!Array.isArray(value) || value.some((item) => !nonBlank(item)))) defects.push(`reuses[${position}].${name} must be an array of non-empty references`);
+			}
+			if (Number.isInteger(entry.childIndex) && entry.childIndex >= 0) {
+				if (claimed.has(entry.childIndex)) defects.push(`reuses[${position}].childIndex ${entry.childIndex} is claimed by another entry; one position reads one member`);
+				claimed.add(entry.childIndex);
+			}
+		});
+	}
+	return defects;
+}
+/** The runs of one source task that are recovery attempts, in start order (which is the store's run order). */
+function recoveryAttemptsOf(snapshot, sourceTaskId) {
+	return snapshot.runs.filter((run) => run.taskId === sourceTaskId && run.recovery !== void 0);
+}
+/** The attempt one request key names on a source task, or `undefined`. */
+function recoveryAttemptWithKey(snapshot, sourceTaskId, requestKey) {
+	return recoveryAttemptsOf(snapshot, sourceTaskId).find((run) => run.recovery.requestKey === requestKey);
+}
+/**
+* The attempt one diagnosis already has whose run has not settled, or
+* `undefined` — the mutual exclusion one diagnosis's recovery has (plan §F.4:
+*/
+function inFlightRecoveryAttempt(snapshot, sourceTaskId, sourceDiagnosisId) {
+	return recoveryAttemptsOf(snapshot, sourceTaskId).find((run) => run.recovery.sourceDiagnosisId === sourceDiagnosisId && run.status === "running");
+}
+/**
+* What makes two attempts under one key the *same* attempt: the content the key
+* is bound to — the source run it recovers and the reuse it declares. A retry
+*/
+function recoveryAttemptDigest(recovery) {
+	return sha256Hex(canonicalize({
+		sourceRunId: recovery.sourceRunId ?? null,
+		reusedMembers: recovery.reusedMembers.map((member) => ({
+			childIndex: member.childIndex,
+			taskId: member.taskId,
+			sourceRunId: member.sourceRunId,
+			evidenceId: member.evidenceId,
+			criterionId: member.criterionId ?? null,
+			artifactRefs: [...member.artifactRefs],
+			inputRefs: [...member.inputRefs]
+		}))
+	}));
+}
+/** The request's own content identity, derived from the same fields the stored attempt carries. */
+function requestAttemptDigest(request) {
+	return recoveryAttemptDigest({
+		...request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId },
+		reusedMembers: (request.reuses ?? []).map((declaration) => ({
+			childIndex: declaration.childIndex,
+			taskId: declaration.taskId,
+			sourceRunId: declaration.sourceRunId,
+			evidenceId: declaration.evidenceId,
+			...declaration.criterionId === void 0 ? {} : { criterionId: declaration.criterionId },
+			artifactRefs: [...declaration.artifactRefs ?? []],
+			inputRefs: [...declaration.inputRefs ?? []]
+		}))
+	});
+}
+/** The input references one sibling task declares, across its criteria (`requiresArtifact`, `acceptsArtifact`, `protectedInputs`). */
+function declaredInputsOf(task) {
+	return new Set(task.acceptanceCriteria.flatMap((criterion) => [
+		...criterion.requiresArtifact ?? [],
+		...criterion.acceptsArtifact ?? [],
+		...(criterion.protectedInputs ?? []).map((input) => input.path)
+	]));
+}
+/** One declaration's citation, resolved against the store, or the reasons it does not resolve. */
+function citationDefects(declaration, context, at) {
+	const defects = [];
+	const sibling = context.snapshot.tasks.find((task) => task.taskId === declaration.taskId);
+	if (sibling === void 0) return [`${at}: no task "${declaration.taskId}" exists in this store`];
+	if (sibling.parentTaskId !== context.source.taskId) defects.push(`${at}: task "${sibling.taskId}" is a child of "${sibling.parentTaskId ?? "(none)"}", not of "${context.source.taskId}" — only a sibling of this attempt's own task is reusable`);
+	if (sibling.status !== "verified") defects.push(`${at}: sibling "${sibling.taskId}" is ${sibling.status}, not verified — only a passed sibling's evidence is reusable`);
+	const run = context.snapshot.runs.find((candidate) => candidate.runId === declaration.sourceRunId);
+	if (run === void 0) {
+		defects.push(`${at}: no run "${declaration.sourceRunId}" exists in this store`);
+		return defects;
+	}
+	if (run.taskId !== declaration.taskId) defects.push(`${at}: run "${run.runId}" belongs to task "${run.taskId}", not to the cited sibling "${declaration.taskId}"`);
+	if (run.status !== "verified") defects.push(`${at}: cited run "${run.runId}" is ${run.status}, not verified — only evidence of a verified run is reusable`);
+	const bundle = context.snapshot.evidence.find((item) => item.evidenceId === declaration.evidenceId);
+	if (bundle === void 0) {
+		defects.push(`${at}: no evidence "${declaration.evidenceId}" exists in this store`);
+		return defects;
+	}
+	if (bundle.taskRunId !== run.runId || bundle.taskId !== run.taskId) defects.push(`${at}: evidence "${bundle.evidenceId}" belongs to task "${bundle.taskId}"/run "${bundle.taskRunId}", not to the cited "${run.taskId}"/"${run.runId}"`);
+	const products = new Set(bundle.artifacts.flatMap((artifact) => [artifact.artifactId, artifact.kind]));
+	for (const reference of declaration.artifactRefs ?? []) if (!products.has(reference)) defects.push(`${at}: evidence "${bundle.evidenceId}" holds no artifact "${reference}" (by artifact id or kind)`);
+	const inputs = declaredInputsOf(sibling);
+	for (const reference of declaration.inputRefs ?? []) if (!inputs.has(reference)) defects.push(`${at}: sibling "${sibling.taskId}" declares no input "${reference}" (requiresArtifact, acceptsArtifact or protectedInputs)`);
+	if (declaration.criterionId !== void 0) if (!sibling.acceptanceCriteria.some((criterion) => criterion.criterionId === declaration.criterionId)) defects.push(`${at}: sibling "${sibling.taskId}" declares no criterion "${declaration.criterionId}"`);
+	else {
+		const verdict = bundle.verifierResults.find((result) => result.criterionId === declaration.criterionId);
+		if (verdict?.status !== "pass") defects.push(`${at}: criterion "${declaration.criterionId}" of sibling "${sibling.taskId}" carries ${verdict === void 0 ? "no verdict" : `a "${verdict.status}" verdict`} in evidence "${bundle.evidenceId}" — only a passing verdict is reusable`);
+	}
+	return defects;
+}
+/**
+* Every reason the declared reuse cannot be a binding of the original
+* acceptance map — the "invalid reference" refusal, with the affected item
+*/
+function reuseDefects(declarations, context) {
+	const defects = [];
+	const map = context.source.acceptanceCriteria.flatMap((criterion) => criterion.childEvidence ?? []);
+	declarations.forEach((declaration, position) => {
+		const at = `reuses[${position}]`;
+		if (context.sourceRun === void 0) defects.push(`${at}: source task "${context.source.taskId}" failed without a run, so there is no member sequence to read position ${position} from; a reuse is bound to the positions of the failed attempt and cannot be checked against nothing`);
+		else if (context.sourceMembers[declaration.childIndex] !== declaration.taskId) defects.push(`${at}: the failed run "${context.sourceRun.runId}" reads ${context.sourceMembers[declaration.childIndex] === void 0 ? "no member" : `"${context.sourceMembers[declaration.childIndex]}"`} at position ${declaration.childIndex}, not the cited "${declaration.taskId}"`);
+		defects.push(...citationDefects(declaration, context, at));
+		defects.push(...mapDefects(declaration, map, at));
+		defects.push(...stalenessDefects(declaration, context.snapshot, at));
+	});
+	return defects;
+}
+/**
+* Every reason a citation disagrees with the original acceptance map at the
+* position it claims: the map narrows a position to a criterion, to an evidence
+*/
+function mapDefects(declaration, map, at) {
+	const defects = [];
+	const entry = map.find((item) => item.childIndex === declaration.childIndex);
+	if (entry === void 0) return defects;
+	if (entry.criterionId !== void 0 && entry.criterionId !== declaration.criterionId) defects.push(`${at}: the original acceptance map narrows position ${declaration.childIndex} to criterion "${entry.criterionId}", and this declaration ${declaration.criterionId === void 0 ? "names no criterion" : `names "${declaration.criterionId}"`}`);
+	if (entry.evidenceRef !== void 0 && declaration.evidenceId !== entry.evidenceRef && !(declaration.artifactRefs ?? []).includes(entry.evidenceRef)) defects.push(`${at}: the original acceptance map narrows position ${declaration.childIndex} to evidence "${entry.evidenceRef}", which the cited bundle "${declaration.evidenceId}" does not carry (by evidence id, artifact id or artifact kind)`);
+	return defects;
+}
+/**
+* Whether the sibling's evidence still rests on what it rested on: every input
+* reference its own criteria declare (`requiresArtifact` as a verified reference
+*/
+function stalenessDefects(declaration, snapshot, at) {
+	const sibling = snapshot.tasks.find((task) => task.taskId === declaration.taskId);
+	if (sibling === void 0) return [];
+	return missingRequiredArtifacts(sibling.acceptanceCriteria, snapshot).map((issue) => `${at}: the sibling "${sibling.taskId}" declares ${issue.requirement === "requires" ? "a required product" : "a raw input"} "${issue.ref}" (criterion ${issue.criterionId}), which the store does not hold now as a ${issue.requirement === "requires" ? "verified reference product" : "usable input"}`);
+}
+/**
+* What the failed run's own facts support as a reuse (plan §F.4: the binding
+* comes from the store, never from a caller's parameters).
+*/
+function deriveReuse(context) {
+	const sourceRun = context.sourceRun;
+	if (sourceRun === void 0) return {
+		bound: [],
+		unbound: []
+	};
+	const slots = runMemberSlots(sourceRun);
+	const map = context.source.acceptanceCriteria.flatMap((criterion) => criterion.childEvidence ?? []);
+	const bound = [];
+	const unbound = [];
+	slots.forEach((taskId, childIndex) => {
+		if (taskId === void 0) return;
+		const sibling = context.snapshot.tasks.find((task) => task.taskId === taskId);
+		if (sibling === void 0 || sibling.status !== "verified") return;
+		const at = `position ${childIndex}`;
+		const entry = map.find((item) => item.childIndex === childIndex);
+		/**
+		* The sibling's own verified run and the bundle under it: the two identities
+		* the citation stands on. A missing one is *not* invented here — the citation
+		*/
+		const verifiedRun = context.snapshot.runs.find((run) => run.taskId === taskId && run.status === "verified");
+		const bundle = context.snapshot.evidence.find((item) => item.taskRunId === verifiedRun?.runId);
+		const declaration = {
+			childIndex,
+			taskId,
+			sourceRunId: verifiedRun?.runId ?? "",
+			evidenceId: bundle?.evidenceId ?? "",
+			...entry?.criterionId === void 0 ? {} : { criterionId: entry.criterionId },
+			artifactRefs: (bundle?.artifacts ?? []).flatMap((artifact) => [artifact.artifactId, artifact.kind]),
+			inputRefs: [...declaredInputsOf(sibling)]
+		};
+		const reasons = [
+			...citationDefects(declaration, context, at),
+			...mapDefects(declaration, map, at),
+			...stalenessDefects(declaration, context.snapshot, at)
+		];
+		if (reasons.length === 0) bound.push(declaration);
+		else unbound.push({
+			childIndex,
+			taskId,
+			...entry?.criterionId === void 0 ? {} : { criterionId: entry.criterionId },
+			reasons
+		});
+	});
+	return {
+		bound,
+		unbound
+	};
+}
+/** The stored form of one declaration: the closed record the run carries. */
+function storedReuse(declaration) {
+	return {
+		childIndex: declaration.childIndex,
+		taskId: declaration.taskId,
+		sourceRunId: declaration.sourceRunId,
+		evidenceId: declaration.evidenceId,
+		...declaration.criterionId === void 0 ? {} : { criterionId: declaration.criterionId },
+		artifactRefs: [...declaration.artifactRefs ?? []],
+		inputRefs: [...declaration.inputRefs ?? []]
+	};
+}
+
+//#endregion
+//#region src/service/root-recovery.ts
+async function recoverRootTask(self, storeId, request, caller) {
+	const defects = recoveryRequestDefects(request);
+	if (defects.length > 0) throw new Error(`task-runtime: the recovery request was refused:\n- ${defects.join("\n- ")}`);
+	if (typeof caller?.sessionId !== "string" || caller.sessionId.trim().length === 0) throw new Error("task-runtime: a recovery attempt is opened for the session that asks for it: pass a non-empty caller session id");
+	if (self.agentOrUndefined(caller.sessionId) === void 0) throw new Error(`task-runtime: caller session "${caller.sessionId}" has no live agent, so the new attempt's Session cannot be spawned from it; nothing was written and no run was started`);
+	await assertRecoveryCallerOwnsStore(self, storeId, caller);
+	await assertRecoveryReady(self, storeId, "a recovery attempt");
+	return await self.serializeRootIntake(storeId, () => recoverRootTaskOnce(self, storeId, request, caller));
+}
+async function assertRecoveryCallerOwnsStore(self, storeId, caller) {
+	const sessionId = caller.sessionId;
+	const graphs = self.context.graphs;
+	if (graphs === void 0) throw new Error(`task-runtime: session "${sessionId}" cannot open a recovery of store "${storeId}": this deployment has no graph registry, so its ownership of this store cannot be established; nothing was written`);
+	let graph;
+	try {
+		graph = await graphs.graphForSession(SessionId(sessionId));
+	} catch (error) {
+		throw new Error(`task-runtime: session "${sessionId}" cannot open a recovery of store "${storeId}": its graph could not be resolved (${message(error)}), so its ownership of this store cannot be established; nothing was written`);
+	}
+	const ownStoreId = rootTaskStoreId(graph.rootSessionId);
+	if (ownStoreId !== storeId) throw new Error(`task-runtime: session "${sessionId}" cannot open a recovery of store "${storeId}": its graph's root session is "${graph.rootSessionId}", whose store is "${ownStoreId}" — a recovery attempt is opened in the store of the caller's own graph, and nothing was written`);
+}
+async function recoverRootTaskOnce(self, storeId, request, caller) {
+	await assertRecoveryCallerOwnsStore(self, storeId, caller);
+	const sourceTaskId = request.sourceTaskId;
+	const snapshot = await self.context.task.snapshotIn(storeId);
+	const source = snapshot.tasks.find((task) => task.taskId === sourceTaskId);
+	if (source === void 0) throw new Error(`task-runtime: store "${storeId}" holds no task "${sourceTaskId}", so there is nothing to recover; a recovery is asked of the store that owns the failed task`);
+	if (source.parentTaskId !== void 0) throw new Error(`task-runtime: task "${sourceTaskId}" is a child of "${source.parentTaskId}"; a recovery attempt is opened for the store's own root task, and a child is re-run by a batch of its parent instead`);
+	const answered = recoveryAttemptForRequest(snapshot, request);
+	if (answered !== void 0) return answered;
+	const diagnosis = (snapshot.diagnoses ?? []).find((item) => item.diagnosisId === request.sourceDiagnosisId);
+	if (diagnosis === void 0) throw new Error(`task-runtime: store "${storeId}" holds no diagnosis "${request.sourceDiagnosisId}"; a recovery is asked for by a diagnosis of this store and by nothing else, so this hand-off names no fact here`);
+	if (diagnosis.taskId !== sourceTaskId) throw new Error(`task-runtime: diagnosis "${request.sourceDiagnosisId}" is about task "${diagnosis.taskId}", not the named source "${sourceTaskId}"; the hand-off and the store disagree about which task failed, and nothing was written`);
+	const inFlight = inFlightRecoveryAttempt(snapshot, sourceTaskId, request.sourceDiagnosisId);
+	if (inFlight !== void 0) throw new Error(`task-runtime: diagnosis "${request.sourceDiagnosisId}" already has a recovery attempt in flight (run "${inFlight.runId}", session "${inFlight.sessionId}", key "${inFlight.recovery?.requestKey ?? "unknown"}"); key "${request.requestKey}" starts nothing — an attempt ends when its run settles, and a new key may be asked for after that`);
+	if (source.status === "verified") throw new Error(`task-runtime: root task "${sourceTaskId}" is verified — a successful source is not recoverable, and nothing was written; an improvement on a succeeded goal needs a new intake under its own contract, not a recovery of this one`);
+	if (source.status === "running" || source.status === "verifying") throw new Error(`task-runtime: root task "${sourceTaskId}" is ${source.status}: an attempt is in flight, and a recovery does not hot-swap a live run`);
+	if (source.status !== "failed" && source.status !== "blocked") throw new Error(`task-runtime: root task "${sourceTaskId}" is ${source.status}; a recovery attempt is opened for a failed task (a \`failed\` task, or a \`blocked\` one that never ran), and this is not one`);
+	const sourceRun = recoverySourceRun(source, request, snapshot);
+	assertRecoveryContract(source);
+	/**
+	* The binding comes from the store, not from the caller: a request that names
+	* no reuse gets the citations the failed run's own facts support, and the
+	*/
+	const reuseContext = {
+		source,
+		...sourceRun === void 0 ? {} : { sourceRun },
+		sourceMembers: sourceRun === void 0 ? [] : runMemberSlots(sourceRun),
+		snapshot
+	};
+	const declared = request.reuses;
+	const derived = declared === void 0 ? deriveReuse(reuseContext) : void 0;
+	const declarations = declared ?? derived?.bound ?? [];
+	const reuseReasons = reuseDefects(declarations, reuseContext);
+	if (reuseReasons.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused; the declared reuse does not resolve:\n- ${reuseReasons.join("\n- ")}`);
+	const unbound = derived?.unbound ?? [];
+	const manifest = self.resolveCapabilities(source.requestedCapabilities);
+	if (manifest.missing.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused: the capability gap this attempt is for is still open ([${manifest.missing.join(", ")}] resolve to no row in this deployment's table); apply the row that closes it, and the recovery re-reads what the deployment holds then — nothing was written`);
+	const rootSessionId = sourceRun?.sessionId ?? self.recoverySessionFor(snapshot, storeId);
+	const envPath = await self.envPathForSession(rootSessionId);
+	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), { ...envPath === void 0 ? {} : { cwd: envPath } });
+	const refusals = providerRefusals(precheck);
+	if (refusals.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused by the provider pre-check:\n- ${refusals.join("\n- ")}`);
+	const budget$1 = resolveRootBudget(snapshot, self.config.rootBudget ?? {});
+	if (!budget$1.ok) {
+		if (hasRootLimits(self.config.rootBudget)) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused: the root budget cannot be resolved: ${budget$1.reason}`);
+	} else {
+		const verdict = checkRunStart(snapshot, budget$1);
+		if (!verdict.allowed) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused by the root budget: ${verdict.reason}; the ceiling is not raised by this entry and no count is reset — a person raises it through the budget-extension entry`);
+	}
+	return await startRecoveryAttempt(self, {
+		storeId,
+		source,
+		request,
+		declarations,
+		unbound,
+		manifest,
+		precheck,
+		rootSessionId,
+		actor: caller.sessionId,
+		...caller.signal === void 0 ? {} : { signal: caller.signal }
+	});
+}
+function recoveryAttemptForRequest(snapshot, request) {
+	const existing = recoveryAttemptWithKey(snapshot, request.sourceTaskId, request.requestKey);
+	if (existing === void 0) return void 0;
+	const stored = existing.recovery;
+	/**
+	* The key is bound to the *request*, not to the binding it produced: a
+	* request that names no reuse has its citations derived from the store (a
+	*/
+	const digest = stored.requestDigest ?? recoveryAttemptDigest(stored);
+	const wanted = requestAttemptDigest(request);
+	if (digest !== wanted) throw new Error(`task-runtime: request key "${request.requestKey}" already names a recovery attempt of "${request.sourceTaskId}" (run "${existing.runId}", session "${existing.sessionId}", request ${digest}); this request's content is ${wanted} — one key names one request, and a different request is a different key`);
+	return {
+		attempt: "existing",
+		storeId: snapshot.id,
+		sourceTaskId: request.sourceTaskId,
+		sourceDiagnosisId: stored.sourceDiagnosisId,
+		requestKey: stored.requestKey,
+		runId: existing.runId,
+		sessionId: existing.sessionId,
+		status: existing.status,
+		reusedMembers: stored.reusedMembers.map((member) => ({
+			...member,
+			artifactRefs: [...member.artifactRefs],
+			inputRefs: [...member.inputRefs]
+		})),
+		unboundMembers: (stored.unboundMembers ?? []).map((entry) => ({
+			...entry,
+			reasons: [...entry.reasons]
+		})),
+		detail: `request key "${stored.requestKey}" already named this recovery attempt: run "${existing.runId}" is ${existing.status}${existing.finishedAt === void 0 ? "" : ` (finished ${existing.finishedAt})`}; nothing was written`
+	};
+}
+function recoverySourceRun(source, request, snapshot) {
+	if (request.sourceRunId !== null) {
+		const run = snapshot.runs.find((candidate) => candidate.runId === request.sourceRunId);
+		if (run === void 0) throw new Error(`task-runtime: store "${snapshot.id}" holds no run "${request.sourceRunId}"; the named source attempt does not exist`);
+		if (run.taskId !== source.taskId) throw new Error(`task-runtime: run "${run.runId}" belongs to task "${run.taskId}", not to the named source "${source.taskId}"; nothing was written`);
+		if (run.status !== "failed") throw new Error(`task-runtime: source run "${run.runId}" is ${run.status}; a recovery recovers a *failed* attempt (its run settled \`failed\`), and this run is not one`);
+		return run;
+	}
+	const running = snapshot.runs.filter((run) => run.taskId === source.taskId && run.status === "running");
+	if (running.length > 0) throw new Error(`task-runtime: the request names no source run, but task "${source.taskId}" holds a run in flight (${running.map((run) => run.runId).join(", ")}); a failure without a run is a task that never started, not one an attempt is running for`);
+}
+function assertRecoveryContract(source) {
+	const contract = source.contract;
+	if (contract === void 0) throw new Error(`task-runtime: task "${source.taskId}" carries no contract, so its original acceptance cannot be read; a recovery binds its reuse to that acceptance, and nothing is guessed for a task that has none`);
+	const disagreement = contract.objective !== source.objective ? "its objective" : canonicalize(contract.acceptanceCriteria) !== canonicalize(source.acceptanceCriteria) ? "its acceptance criteria" : canonicalize(contract.requiredCapabilities) !== canonicalize(source.requestedCapabilities) ? "its required capabilities" : void 0;
+	if (disagreement !== void 0) throw new Error(`task-runtime: task "${source.taskId}"'s contract and its projection disagree on ${disagreement}; the original contract and acceptance criteria have to be one record before an attempt can be bound to them`);
+	if (source.acceptanceCriteria.length === 0) throw new Error(`task-runtime: task "${source.taskId}" declares no acceptance criterion, so there is nothing the new attempt could be judged by`);
+}
+async function startRecoveryAttempt(self, input) {
+	const { storeId, source, request, declarations, manifest, rootSessionId, actor } = input;
+	const runId = `r-${randomUUID()}`;
+	const sessionId = `s-${randomUUID()}`;
+	const reusedMembers = declarations.map(storedReuse);
+	const recovery = {
+		sourceDiagnosisId: request.sourceDiagnosisId,
+		requestKey: request.requestKey,
+		...request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId },
+		requestedAt: now(),
+		requestDigest: requestAttemptDigest(request),
+		reusedMembers,
+		...input.unbound.length === 0 ? {} : { unboundMembers: input.unbound.map((entry) => ({
+			...entry,
+			reasons: [...entry.reasons]
+		})) }
+	};
+	/**
+	* The preset the worker will be mounted on, resolved once: the run records it
+	* so a resume rebuilds the same composition rather than the deployment's
+	*/
+	const preset = resolvePreset(manifest, self.config.defaultPreset);
+	const workspacePath = await self.workspacePathForSession(rootSessionId);
+	let claimed;
+	if (workspacePath !== void 0 && self.workspaces !== void 0) {
+		await self.workspaces.claim(workspacePath, {
+			kind: "run",
+			storeId,
+			taskId: source.taskId,
+			runId,
+			since: now()
+		});
+		claimed = self.workspaces.ownerOf(workspacePath);
+	}
+	let binding;
+	try {
+		binding = await bindRunProviders({
+			storeId,
+			runId,
+			manifest,
+			providers: input.precheck,
+			table: self.config.capabilities,
+			root: self.config.runBindingRoot
+		});
+		const run = {
+			runId,
+			taskId: source.taskId,
+			sessionId,
+			capabilitySnapshot: capabilitySnapshot(manifest),
+			...preset === void 0 ? {} : { agentPreset: preset },
+			...binding === void 0 ? {} : { providerBinding: binding },
+			executionPhase: "active",
+			recovery,
+			artifacts: [],
+			verifierResults: [],
+			status: "running",
+			startedAt: now()
+		};
+		await self.context.task.startRunIn(storeId, run, actor, { manifest });
+		self.sessions.set(sessionId, {
+			storeId,
+			taskId: source.taskId,
+			runId
+		});
+		self.startedSessions.add(sessionId);
+		self.executionGate.setPhase(sessionId, "active");
+		if (workspacePath !== void 0) self.sessionWorkspaces.set(sessionId, workspacePath);
+	} catch (error) {
+		if (workspacePath !== void 0 && claimed !== void 0) await self.workspaces?.release(workspacePath, claimed).catch((cause) => {
+			self.warn(`workspace ${workspacePath} could not be released after a refused attempt (${message(cause)})`);
+		});
+		throw error;
+	}
+	/**
+	* From here the attempt is a durable fact. A spawn that fails is settled on
+	* the run, never left as a running attempt nothing drives.
+	*/
+	try {
+		await spawnTaskWorker(await self.orchestrateEnv(actor, actor, workspacePath), {
+			sessionId,
+			name: `recovery of ${source.objective.trim().replace(/\s+/g, " ").slice(0, 32) || source.taskId}`,
+			manifest,
+			...binding === void 0 ? {} : { providerBinding: binding },
+			...preset === void 0 ? {} : { agentPreset: preset },
+			...workspacePath === void 0 ? {} : { cwd: workspacePath },
+			...input.signal === void 0 ? {} : { signal: input.signal }
+		});
+	} catch (error) {
+		const reason = message(error);
+		const env = await self.orchestrateEnv(actor, actor, workspacePath);
+		const run = (await self.context.task.snapshotIn(storeId).catch(() => void 0))?.runs.find((item) => item.runId === runId);
+		if (run !== void 0 && run.status === "running") await settleRunFromRuntime(env, storeId, run, "failed", `the recovery attempt's worker could not be spawned: ${reason}`);
+		if (workspacePath !== void 0 && claimed !== void 0) await self.workspaces?.release(workspacePath, claimed).catch((cause) => {
+			self.warn(`workspace ${workspacePath} could not be released after a failed spawn (${message(cause)})`);
+		});
+		throw new Error(`task-runtime: the recovery attempt of "${source.taskId}" was opened (run "${runId}", session "${sessionId}") but its worker could not be spawned: ${reason}; the attempt's run was settled failed with this cause, and a new attempt needs a new request key`);
+	}
+	const stored = (await self.context.task.snapshotIn(storeId)).runs.find((item) => item.runId === runId);
+	return {
+		attempt: "started",
+		storeId,
+		sourceTaskId: source.taskId,
+		sourceDiagnosisId: request.sourceDiagnosisId,
+		requestKey: request.requestKey,
+		runId,
+		sessionId,
+		status: stored?.status ?? "running",
+		reusedMembers,
+		unboundMembers: input.unbound.map((entry) => ({
+			...entry,
+			reasons: [...entry.reasons]
+		})),
+		detail: `a recovery attempt of "${source.taskId}" was opened: run "${runId}" in session "${sessionId}" under diagnosis "${request.sourceDiagnosisId}", key "${request.requestKey}"${reusedMembers.length === 0 ? "" : `, reading ${reusedMembers.length} already verified sibling member(s) at the position(s) ${reusedMembers.map((member) => member.childIndex).join(", ")}`}${input.unbound.length === 0 ? "" : `; ${input.unbound.length} position(s) whose passed sibling could not be bound (${input.unbound.map((entry) => `#${entry.childIndex}`).join(", ")}) are done again and the reasons are on the record`}; the original acceptance criteria judge it, and the store total it spends is the same one`
+	};
+}
+function invalidateStoreRecovery(self, storeId) {
+	const state = self.storeRecovery.get(storeId);
+	if (state === void 0) return;
+	if (state.status === "recovering") {
+		state.cancelled = true;
+		self.standDownPendingDrivers(state);
+		state.release(false);
+	} else self.storeRecovery.delete(storeId);
+}
+async function recoveryStatus(self, storeId) {
+	const state = self.storeRecovery.get(storeId);
+	if (state !== void 0) {
+		if (state.status === "recovering") return { status: "recovering" };
+		if (state.status === "failed") return {
+			status: "recovery-failed",
+			reason: state.reason ?? "the recovery barrier failed"
+		};
+		return { status: "ready" };
+	}
+	let snapshot;
+	try {
+		snapshot = await self.context.task.openStore(storeId);
+	} catch (error) {
+		return {
+			status: "not-activated",
+			reason: message(error)
+		};
+	}
+	for (const run of snapshot.runs) {
+		if (run.status !== "running") continue;
+		/**
+		* Live work, not recovery's: a session this process started, or a session
+		* whose agent is live here (a resumed root, a spawned worker still in its
+		*/
+		if (self.startedSessions.has(run.sessionId)) continue;
+		if (self.agentOrUndefined(run.sessionId) !== void 0) continue;
+		if (run.batchId !== void 0 && self.drivers.has(`${storeId}/${run.batchId}`)) continue;
+		if (rootTaskStoreId(run.sessionId) === storeId) continue;
+		if (run.executionPhase === void 0) return {
+			status: "needs-recovery",
+			reason: `run "${run.runId}" predates coordination phases and is not treated as active`
+		};
+		return {
+			status: "recovery-required",
+			reason: `run "${run.runId}" (phase "${run.executionPhase}") is in flight from a process that is gone`
+		};
+	}
+	return { status: "ready" };
+}
+async function assertRecoveryReady(self, storeId, entry) {
+	const readiness = await recoveryStatus(self, storeId);
+	if (readiness.status === "ready" || readiness.status === "not-activated") return;
+	const because = readiness.status === "recovering" ? "its recovery barrier is still running; retry once the graph's activation completes" : readiness.status === "recovery-failed" ? `the last recovery failed: ${readiness.reason}; an explicit activation (adoptRoot) retries it` : readiness.status === "needs-recovery" ? `${readiness.reason}; only reading and cancelling are allowed` : `${readiness.reason}; await the graph's activation or adoptRoot before executing against this store`;
+	throw new Error(`task-runtime: ${entry} on store "${storeId}" is refused: the store is ${readiness.status} — ${because}`);
+}
+
+//#endregion
+//#region src/handoff.ts
+/**
+* The envelope passed from a parent run to the child it delegates to (RFC §18).
+* This module builds and persists the DATA of a handoff and nothing else: what
+*/
+function buildHandoff(init) {
+	return {
+		handoffId: `h-${randomUUID()}`,
+		parentTaskId: init.parentTask.taskId,
+		parentRunId: init.parentRun.runId,
+		childTaskId: init.childTask.taskId,
+		parentObjective: init.parentTask.objective,
+		reasonForDelegation: init.reason,
+		constraints: [...init.constraints ?? []],
+		decisions: [...init.decisions ?? []],
+		relevantArtifacts: (init.relevantArtifacts ?? init.parentRun.artifacts).map((artifact) => ({ ...artifact })),
+		relevantEvidence: [...init.relevantEvidence ?? []],
+		assumptions: [...init.assumptions ?? []],
+		openQuestions: [...init.openQuestions ?? []],
+		parentSessionRef: init.callerSessionId,
+		createdAt: (/* @__PURE__ */ new Date()).toISOString()
+	};
+}
+
+//#endregion
+//#region src/orchestration/observe.ts
+/** Wait for the worker to go idle or fail; explicit cancellation stops its loop. */
+async function awaitWorker(handle, signal) {
+	const cancel = () => handle.agent.cancel({ kind: "parent" });
+	signal?.addEventListener("abort", cancel, { once: true });
+	try {
+		await handle.agent.whenIdle();
+		return isAborted(signal) ? { kind: "aborted" } : { kind: "idle" };
+	} catch (error) {
+		return isAborted(signal) ? { kind: "aborted" } : {
+			kind: "failed",
+			reason: message(error)
+		};
+	} finally {
+		signal?.removeEventListener("abort", cancel);
+	}
+}
+/**
+* One batch's children in the batch's own order, with each child's dependencies
+* mapped from task ids back to batch positions: the store is the only source of
+*/
+function batchItems(memberTaskIds, edges) {
+	const position = new Map(memberTaskIds.map((taskId, index) => [taskId, index]));
+	return memberTaskIds.map((taskId, index) => ({
+		index,
+		taskId,
+		dependsOn: edges.filter((edge) => edge.to === taskId).map((edge) => position.get(edge.from)).filter((from) => from !== void 0).sort((left, right) => left - right)
+	}));
+}
+/** The latest run the store records for a task, or `undefined` when it has none (never started). */
+function latestRun(snapshot, taskId) {
+	return [...snapshot.runs].reverse().find((run) => run.taskId === taskId);
+}
+function taskOf(snapshot, taskId) {
+	return snapshot.tasks.find((task) => task.taskId === taskId);
+}
 /**
 * Wait for one run's terminal status. The subscription is taken first (through
 * {@link OrchestrateEnv.watchRun}, which subscribes and then reads the current
-* state), so a run that settled between the caller's read and this call is
-* reported rather than missed. A deployment without the watcher cannot promise
-* a settlement, and says so by name instead of waiting forever.
 */
 async function waitRunTerminal(env, storeId, runId) {
 	const current = await env.task.runIn(storeId, runId);
@@ -4968,11 +6526,6 @@ async function waitRunTerminal(env, storeId, runId) {
 function agentIsRunning(handle) {
 	return handle.agent.status === "running";
 }
-function sleep(ms) {
-	return new Promise((resolve$1) => {
-		setTimeout(resolve$1, ms);
-	});
-}
 /** How long a batch waits for a settled run's own settlement to finish before adopting the state as it stands. */
 const SETTLEMENT_TAIL_WINDOW_MS = 2e3;
 /** How often that wait re-reads the gate's phase. Short: the tail it waits for is a store write away. */
@@ -4980,20 +6533,6 @@ const SETTLEMENT_POLL_MS = 5;
 /**
 * Wait for one run to be terminal *and* settled: the status event, and then the
 * in-process settlement that wrote it — whose last act is closing the gate for
-* the run's session.
-*
-* The two are not the same instant, and the gap matters. The terminal status is
-* written before the settlement's review record and before the workspace layer
-* it held comes off the stack, so a batch that adopted the status alone could
-* start its next child into a checkout the previous one has not released yet, or
-* report a batch as settled while a child's record is still being written. The
-* gate is the completion signal because this runtime closes it after the record
-* is in the store (`onRunSettled`); a session the gate knows nothing about is a
-* run this process is not settling (a recovery adoption, a foreign writer) and
-* has nothing to wait for.
-*
-* Bounded: a settlement that never closes the gate is reported and the terminal
-* state adopted as it stands, rather than hanging the batch on it.
 */
 async function waitRunSettled(env, storeId, runId, sessionId) {
 	const status = await waitRunTerminal(env, storeId, runId);
@@ -5015,7 +6554,6 @@ function idleReminderText(run) {
 /**
 * Wait for the run's terminal state or batch cancellation.
 * An active worker that goes idle gets one submission reminder; a worker waiting
-* for children, verification, a proposal, or an answer gets none.
 */
 async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 	const recorded = waitRunSettled(env, storeId, run.runId, run.sessionId);
@@ -5065,7 +6603,6 @@ async function awaitWaitingTerminal(cancel, signal, terminal) {
 /**
 * The cancellation one session's own agent exposes, when this deployment can
 * resolve it — what the driver needs to end a wait it did not start (A4 §F.1).
-* A deployment that cannot name the agent has no cancellation to hand over.
 */
 function cancelAgentOf(env, sessionId) {
 	const agent = env.agentFor?.(sessionId);
@@ -5076,10 +6613,444 @@ function cancelAgentOf(env, sessionId) {
 		cancel.call(agent, { kind: "parent" });
 	};
 }
+/** Restore the same active Run/Session and observe its persisted settlement. */
+async function awaitAdoptedWorkerWait(env, batch, item, run, dependencyTaskIds) {
+	const resumed = await resumeAdoptedWorker(env, batch.storeId, run);
+	if (resumed.status !== "live") throw new Error(`task-runtime: cannot continue run "${run.runId}" in Session "${run.sessionId}" : ${resumed.reason}`);
+	/**
+	* The block is *derived* from the store here, never assumed — this process wrote
+	* no ask, and the wait it adopted may be an answered-but-unread one, where the
+	*/
+	env.gate.setQuestionsBlocked(run.sessionId, blockingQuestionsOf(await env.task.snapshotIn(batch.storeId), run.runId).length > 0);
+	if (resumed.status === "live" && env.gate.phaseOf(run.sessionId) === void 0) env.gate.setPhase(run.sessionId, "active");
+	const terminal = waitRunSettled(env, batch.storeId, run.runId, run.sessionId).then((status) => ({
+		kind: "terminal",
+		status
+	}));
+	const observation = await awaitWaitingTerminal(cancelAgentOf(env, run.sessionId), batch.signal, terminal);
+	switch (observation.kind) {
+		case "terminal": {
+			const snapshot = await env.task.snapshotIn(batch.storeId);
+			const status = snapshot.runs.find((candidate) => candidate.runId === run.runId)?.status ?? observation.status;
+			env.onRunSettled?.(batch.storeId, item.taskId, run.runId, status);
+			await releaseWorkspaceLayer(env, runOwner(batch.storeId, item.taskId, run.runId), run.sessionId);
+			const evidenceId = childEvidenceId(snapshot, run.runId);
+			return {
+				taskId: item.taskId,
+				runId: run.runId,
+				status,
+				...evidenceId === void 0 ? {} : { evidenceId }
+			};
+		}
+		case "aborted": return await settleChildRun(env, batch.storeId, {
+			item,
+			run,
+			dependencyTaskIds
+		}, {
+			status: "cancelled",
+			anomalies: [`the batch was cancelled while this recovered child waited: ${batch.reason}`]
+		});
+	}
+}
+/**
+* The blockers a cancelled batch names: the siblings that were in flight when it was cancelled.
+*/
+function startedBlocker(snapshot, items) {
+	return items.flatMap((item) => {
+		const run = latestRun(snapshot, item.taskId);
+		const task = taskOf(snapshot, item.taskId);
+		if (run === void 0 || task === void 0 || task.status === "verified") return [];
+		return [{
+			taskId: item.taskId,
+			outcome: task.status
+		}];
+	});
+}
+/** The store's own account of how a batch's children ended, one `2 verified` per status. */
+function outcomeTally(outcomes) {
+	const counts = /* @__PURE__ */ new Map();
+	for (const outcome of outcomes) counts.set(outcome.status, (counts.get(outcome.status) ?? 0) + 1);
+	return [...counts].sort(([left], [right]) => left.localeCompare(right)).map(([status, count]) => `${count} ${status}`).join(", ");
+}
+/** {@link outcomeTally} named by the batch it belongs to — what a batch end reports. */
+function batchSummary(batchId, outcomes) {
+	return `batch ${batchId} ended: ${outcomes.length === 0 ? "no children" : outcomeTally(outcomes)}`;
+}
+/**
+* The `m-` identity one ended batch's result message carries: derived from the
+* batch id, never minted — the same derivation `questionMessageIdOf` makes for a
+*/
+function batchEndMessageId(batchId) {
+	return `m-batchend-${batchId}`;
+}
+/**
+* The body one batch-end message carries, rendered from the store's own account
+* of the batch: every member's terminal state and the evidence it left, and what
+*/
+function batchEndMessageText(batchId, outcomes) {
+	const children = outcomes.length === 0 ? "It admitted no children." : `Its children settled: ${outcomeTally(outcomes)}.`;
+	const lines = outcomes.map((outcome) => `- ${outcome.taskId} (run ${outcome.runId ?? "none"}): ${outcome.status}${outcome.evidenceId === void 0 ? "" : `, evidence ${outcome.evidenceId}`}`);
+	return [
+		`[task-batch-end ${batchId}] the child batch has ended and the workspace is handed back to you; nothing was submitted on your behalf.`,
+		children,
+		...lines,
+		"You are active again: read the children's results, continue your own work, delegate another batch (task_decompose), or hand in your own result (task_submit_result) — only that submission starts your acceptance."
+	].join("\n");
+}
+/**
+* The member task ids of one batch, as the run's own accumulated batches record
+* them. A run that records no such batch cannot be asked about it: the members of
+*/
+function batchMembers(run, batchId) {
+	const batch = run.batches?.find((candidate) => candidate.batchId === batchId);
+	if (batch === void 0) throw new Error(`task-runtime: run "${run.runId}" records no batch "${batchId}", so the store does not name its members; a batch is read from the run that admitted it, never derived from the task's children`);
+	return [...batch.memberTaskIds];
+}
+/**
+* The end-of-batch results one store's own facts still owe (K1 §2, §5).
+* A run that is `active` has no unfinished batch — `waiting_children → active`
+*/
+function owedBatchResults(snapshot) {
+	const owed = [];
+	for (const run of snapshot.runs) {
+		if (run.status !== "running" || run.executionPhase !== "active") continue;
+		for (const batch of run.batches ?? []) owed.push({
+			taskId: run.taskId,
+			runId: run.runId,
+			batchId: batch.batchId,
+			sessionId: run.sessionId,
+			memberTaskIds: [...batch.memberTaskIds]
+		});
+	}
+	return owed;
+}
+/**
+* Deliver one batch's end-of-batch message and report what the attempt settled
+* as. A deployment without the seam, or one whose relay refuses, changes nothing
+*/
+async function deliverBatchResult$1(env, result) {
+	if (env.deliverBatchResult === void 0) return "unavailable";
+	try {
+		return await env.deliverBatchResult(result);
+	} catch (error) {
+		return `refused: ${message(error)}`;
+	}
+}
+
+//#endregion
+//#region src/orchestration/batch.ts
+/**
+* End one batch and hand the parent back its own decision (K1 §2) — the
+* settlement a driver performs once every child has a terminal state.
+*/
+async function finishBatch(env, batch) {
+	const snapshot = await env.task.snapshotIn(batch.storeId);
+	const parentRun = await env.task.runIn(batch.storeId, batch.parentRunId);
+	/**
+	* The batch's own members, read from the run's accumulated batches: the task's
+	* children are every batch's, and a second batch must report (and drain) its
+	*/
+	const members = batchMembers(parentRun, batch.batchId);
+	const outcomes = await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, members);
+	/**
+	* A parent whose run already settled was settled by somebody else, and its batch
+	* end is the store's record alone: the layer the batch took at admission — and
+	*/
+	if (parentRun.status !== "running") {
+		await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId);
+		return outcomes;
+	}
+	const childTaskIds = [...members];
+	if (batch.signal.aborted) {
+		/**
+		* The cancellation is the batch's terminal cleanup, taken as it always was:
+		* the run ends `cancelled` — never failed by a drain it was stopped before —
+		*/
+		await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId);
+		const reason = `cancelled by the caller while the batch settled: ${batch.reason}`;
+		await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, "cancelled", env.actor, { reason });
+		await recordTerminalReview(env, batch.storeId, batch.parentTaskId, "cancelled", {
+			run: parentRun,
+			anomalies: [reason],
+			relatedTaskIds: childTaskIds
+		});
+		env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, "cancelled");
+		notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}. Children: ${batchSummary(batch.batchId, outcomes)}`);
+		return outcomes;
+	}
+	/**
+	* The unprocessed coordination items no longer hold the parent where it is
+	* (K1 §2): the batch ends regardless of what the parent still owes or waits
+	*/
+	const blocked = blockingQuestionsOf(snapshot, batch.parentRunId).length > 0;
+	/**
+	* Every child's write convergence, before the parent is told the batch is over
+	* (§3.3): a child settles through its own submission — which drained it — but a
+	*/
+	const childPending = [];
+	for (const childTaskId of childTaskIds) {
+		const childRun = latestRun(snapshot, childTaskId);
+		if (childRun === void 0) continue;
+		const childDrained = await drainSession(env.gate, childRun.sessionId, {
+			timeoutMs: env.writeDrainTimeoutMs,
+			jobs: env.jobs,
+			agent: env.agentFor?.(childRun.sessionId)
+		});
+		if (!childDrained.confirmed) childPending.push(`run "${childRun.runId}": ${childDrained.pending.join("; ")}`);
+	}
+	if (childPending.length > 0) {
+		const reason = `write convergence of the batch's children could not be confirmed: ${childPending.join("; ")}`;
+		await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed", env.actor, { reason });
+		await recordTerminalReview(env, batch.storeId, batch.parentTaskId, "failed", {
+			run: parentRun,
+			localizedCause: reason,
+			relatedTaskIds: childTaskIds
+		});
+		env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed");
+		notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}; the parent run is failed and its batch is not handed back.`);
+		return outcomes;
+	}
+	const drained = await drainSession(env.gate, parentRun.sessionId, {
+		timeoutMs: env.writeDrainTimeoutMs,
+		jobs: env.jobs,
+		agent: env.agentFor?.(parentRun.sessionId)
+	});
+	if (!drained.confirmed) {
+		const reason = `write convergence could not be confirmed: ${drained.pending.join("; ")}`;
+		await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed", env.actor, { reason });
+		await recordTerminalReview(env, batch.storeId, batch.parentTaskId, "failed", {
+			run: parentRun,
+			localizedCause: reason,
+			relatedTaskIds: childTaskIds
+		});
+		env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed");
+		notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}; the parent run is failed and is not verifiable.`);
+		return outcomes;
+	}
+	/**
+	* The handback (§2): both drains are confirmed, so the batch's layer comes off
+	* and the parent's own hold is on top again (§3.4) — confirmed stops first, then
+	*/
+	await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId);
+	/**
+	* The store's half of the handback (§1.3): one phase event says the run waits on
+	* nothing and closes the batch it names, so a reader of the store sees the same
+	*/
+	await env.task.changeRunPhaseIn(batch.storeId, batch.parentTaskId, batch.parentRunId, env.actor, {
+		phase: "active",
+		batchId: batch.batchId
+	});
+	env.gate.setPhase(parentRun.sessionId, "active");
+	env.gate.setQuestionsBlocked(parentRun.sessionId, blocked);
+	/**
+	* …and the parent is told: the batch's own outcomes, under the identity the
+	* batch derives, delivered to the Session that waited. A re-delivery states
+	*/
+	const message$1 = batchEndMessageText(batch.batchId, outcomes);
+	const delivery = await deliverBatchResult$1(env, {
+		storeId: batch.storeId,
+		runId: batch.parentRunId,
+		batchId: batch.batchId,
+		sessionId: parentRun.sessionId,
+		messageId: batchEndMessageId(batch.batchId),
+		text: message$1
+	});
+	/**
+	* A `skipped` delivery is not an undelivered one: the parent run ended before
+	* it could be told (a cancellation that won the race), and the
+	*/
+	if (delivery !== "delivered" && delivery !== "already-present" && delivery !== "skipped") notifyOwner(env, batch.callerSessionId, `task-runtime: ${batchSummary(batch.batchId, outcomes)}; ${message$1} (delivery: ${delivery})`);
+	return outcomes;
+}
+/**
+* Drive one admitted batch to settlement (A3 §3.1): reentrant, store-driven,
+* and owned by the runtime rather than by the tool call that admitted it.
+*/
+async function driveBatch(env, batch) {
+	/**
+	* The batch's own members, read from the run the store records as its parent
+	* ({@link batchMembers}): the fallback this used to have — the parent task's
+	*/
+	const members = async () => batchMembers(await env.task.runIn(batch.storeId, batch.parentRunId), batch.batchId);
+	try {
+		if (!await convergeAdmission(env, batch)) return await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, await members());
+		return await driveRounds(env, batch);
+	} catch (error) {
+		await failParentRun(env, batch, `the batch driver failed: ${message(error)}`);
+		return await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, await members());
+	}
+}
+/** The parent's own write convergence, before the batch's first child starts. */
+async function convergeAdmission(env, batch) {
+	const drained = await drainSession(env.gate, batch.callerSessionId, {
+		timeoutMs: env.writeDrainTimeoutMs,
+		...batch.excludeCallId === void 0 ? {} : { excludeCallId: batch.excludeCallId },
+		jobs: env.jobs,
+		agent: env.agentFor?.(batch.callerSessionId)
+	});
+	if (drained.confirmed) return true;
+	const reason = `write convergence could not be confirmed: ${drained.pending.join("; ")}`;
+	const snapshot = await env.task.snapshotIn(batch.storeId);
+	const parentRun = await env.task.runIn(batch.storeId, batch.parentRunId);
+	await blockUnstarted(env, batch.storeId, snapshot, batchItems(batchMembers(parentRun, batch.batchId), snapshot.edges), () => ({
+		reason: `the batch never started: ${reason}`,
+		blockers: []
+	}));
+	await failParentRun(env, batch, reason);
+	return false;
+}
+/** Fail the batch's parent run by name, with the one review record its terminal transition owes. */
+async function failParentRun(env, batch, reason) {
+	try {
+		const snapshot = await env.task.snapshotIn(batch.storeId);
+		const parentTask = taskOf(snapshot, batch.parentTaskId);
+		const parentRun = snapshot.runs.find((run) => run.runId === batch.parentRunId);
+		if (parentTask === void 0 || parentRun === void 0) return;
+		if (parentRun.status !== "running") return;
+		await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed", env.actor, { reason });
+		await recordTerminalReview(env, batch.storeId, batch.parentTaskId, "failed", {
+			run: parentRun,
+			localizedCause: reason,
+			relatedTaskIds: batchMembers(parentRun, batch.batchId)
+		});
+		env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed");
+		notifyOwner(env, batch.callerSessionId, `task-runtime: batch ${batch.batchId} failed: ${reason}`);
+	} catch (error) {
+		notifyOwner(env, batch.callerSessionId, `task-runtime: batch ${batch.batchId} failed and its parent run could not be settled: ${reason} (${message(error)})`);
+	}
+}
+/**
+* The one verification entry: a run whose phase change into `submitted` is
+* already committed is drained, judged, and settled.
+*/
+async function settleSubmittedRun(env, storeId, taskId, runId, opts = {}) {
+	const run = await env.task.runIn(storeId, runId);
+	if (isTerminalRun(run.status)) return run.status;
+	const task = await env.task.taskIn(storeId, taskId);
+	const snapshot = await env.task.snapshotIn(storeId);
+	const relatedTaskIds = opts.relatedTaskIds ?? snapshot.edges.filter((edge) => edge.to === taskId).map((edge) => edge.from);
+	const anomalies = opts.anomalies ?? [];
+	const drained = await drainSession(env.gate, run.sessionId, {
+		timeoutMs: env.writeDrainTimeoutMs,
+		...opts.excludeCallId === void 0 ? {} : { excludeCallId: opts.excludeCallId },
+		jobs: env.jobs,
+		agent: env.agentFor?.(run.sessionId)
+	});
+	if (!drained.confirmed) return await failSubmittedRun(env, storeId, task, run, relatedTaskIds, `write convergence could not be confirmed: ${drained.pending.join("; ")}`, anomalies);
+	if ((await env.task.taskIn(storeId, taskId)).status !== "verifying") await env.task.markRunStatusIn(storeId, taskId, runId, "verifying", env.actor);
+	let bundle;
+	try {
+		bundle = await withVerifierWorkspace(env, storeId, taskId, runId, run.sessionId, () => verifyWithDeadline(env, storeId, runId));
+	} catch (error) {
+		const reason$1 = message(error);
+		/**
+		* This run's verdict is written before the batch's failure seam, and that order
+		* is what makes it hold: the seam aborts the driver, whose abort settles an
+		*/
+		const status = await failSubmittedRun(env, storeId, task, run, relatedTaskIds, reason$1, anomalies);
+		if (error instanceof VerifierUnavailableError) {
+			const batchId = await parentBatchOf(env, storeId, task, run);
+			if (batchId !== void 0) await env.failBatch?.(storeId, batchId, `verification is unavailable: ${reason$1}`);
+		}
+		return status;
+	}
+	/**
+	* Cancellation wins over a verdict that arrives after it. The store settled this
+	* run while the verifier worked, so its verdict is voided: no status (the store
+	*/
+	const settled = await settledStatusOf(env, storeId, runId);
+	if (settled !== void 0) return settled;
+	const criteria = reviewCriteria(task.acceptanceCriteria, bundle.verifierResults);
+	const unmet = unmetMandatory(task.acceptanceCriteria, bundle.verifierResults);
+	if (unmet.length === 0) {
+		await env.task.markRunStatusIn(storeId, taskId, runId, "verified", env.actor);
+		await recordTerminalReview(env, storeId, taskId, "verified", {
+			run,
+			relatedTaskIds,
+			criteria,
+			anomalies
+		});
+		env.onRunSettled?.(storeId, taskId, runId, "verified");
+		await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId);
+		return "verified";
+	}
+	const reason = failureReason(unmet);
+	await env.task.markRunStatusIn(storeId, taskId, runId, "failed", env.actor, { reason });
+	await recordTerminalReview(env, storeId, taskId, "failed", {
+		run,
+		localizedCause: reason,
+		relatedTaskIds,
+		criteria,
+		anomalies,
+		logTail: await failedLogTail(env, unmet, bundle.verifierResults)
+	});
+	env.onRunSettled?.(storeId, taskId, runId, "failed");
+	await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId);
+	return "failed";
+}
+/**
+* The status of a run another actor has already settled, or `undefined` while it is
+* still in flight. The verdict path reads this before writing a verdict: a
+*/
+async function settledStatusOf(env, storeId, runId) {
+	const current = await env.task.runIn(storeId, runId);
+	return isTerminalRun(current.status) ? current.status : void 0;
+}
+/** Fail a run that could not be judged, with the reason recorded and its owner told. */
+async function failSubmittedRun(env, storeId, task, run, relatedTaskIds, reason, anomalies = []) {
+	const current = await env.task.runIn(storeId, run.runId);
+	if (isTerminalRun(current.status)) return current.status;
+	await env.task.markRunStatusIn(storeId, task.taskId, run.runId, "failed", env.actor, { reason });
+	await recordTerminalReview(env, storeId, task.taskId, "failed", {
+		run,
+		localizedCause: reason,
+		relatedTaskIds,
+		anomalies
+	});
+	env.onRunSettled?.(storeId, task.taskId, run.runId, "failed");
+	await releaseWorkspaceLayer(env, runOwner(storeId, task.taskId, run.runId), run.sessionId);
+	notifyOwner(env, run.sessionId, `task-runtime: run "${run.runId}" failed: ${reason}`);
+	return "failed";
+}
+/**
+* The batch a child run belongs to: the batch of its parent run that admitted
+* this child. `parentRunId` names the parent run and the membership is a fact of
+*/
+async function parentBatchOf(env, storeId, task, run) {
+	if (run.parentRunId === void 0 || task.parentTaskId === void 0) return void 0;
+	const parentRun = (await env.task.snapshotIn(storeId)).runs.find((candidate) => candidate.runId === run.parentRunId);
+	if (parentRun === void 0 || parentRun.taskId !== task.parentTaskId) return void 0;
+	return parentRun.batches?.find((batch) => batch.memberTaskIds.includes(task.taskId))?.batchId;
+}
+
+//#endregion
+//#region src/orchestration/child.ts
+/** Block reason for a child the batch never started because the caller cancelled it. */
+const CANCELLED_BEFORE_START = "cancelled by the caller before this child started";
+/**
+* One child's outcome as the store records it. A child that never reached a
+* terminal state in a settled batch has no outcome to report and is named
+*/
+async function deriveChildOutcomes(task, storeId, parentTaskId, memberTaskIds) {
+	const snapshot = await task.snapshotIn(storeId);
+	if (taskOf(snapshot, parentTaskId) === void 0) return [];
+	return memberTaskIds.map((taskId) => {
+		const instance = taskOf(snapshot, taskId);
+		const run = latestRun(snapshot, taskId);
+		const status = instance?.status;
+		const evidenceId = run === void 0 ? void 0 : snapshot.evidence.find((item) => item.taskRunId === run.runId)?.evidenceId;
+		const outcome = status === "verified" || status === "failed" || status === "blocked" || status === "cancelled" ? status : "failed";
+		return {
+			taskId,
+			...run === void 0 ? {} : { runId: run.runId },
+			status: outcome,
+			...evidenceId === void 0 ? {} : { evidenceId }
+		};
+	});
+}
 /**
 * The evidence one child's own submission, verification, or failure left in the
 * store. Read back rather than carried: the store is the truth about a run, and
-* a resumed batch has no memory of a handle it never held.
 */
 function childEvidenceId(snapshot, runId) {
 	return snapshot.evidence.find((item) => item.taskRunId === runId)?.evidenceId;
@@ -5097,12 +7068,6 @@ function adoptedOutcome(taskId, runId, status, snapshot) {
 /**
 * Settle one child run from its own state: mark the terminal transition it does
 * not have yet, or adopt the one it already has.
-*
-* The adoption branch is the one that keeps the batch honest about nested
-* work: a child whose own worker decomposed is settled by that nested batch —
-* by the time this runs, its run is already terminal and carries its own review
-* record, so marking it again would be an illegal transition and writing a
-* second review would be a bug the store refuses.
 */
 async function settleChildRun(env, storeId, child, verdict) {
 	const { item, run, dependencyTaskIds } = child;
@@ -5112,6 +7077,10 @@ async function settleChildRun(env, storeId, child, verdict) {
 	try {
 		await env.task.markRunStatusIn(storeId, item.taskId, run.runId, verdict.status, env.actor, { ...verdict.localizedCause === void 0 ? {} : { reason: verdict.localizedCause } });
 	} catch (error) {
+		/**
+		* Two settlement paths can reach one run at once: a child that decomposed in
+		* turn is settled by its own nested batch while this driver is cancelling the
+		*/
 		const settled = await env.task.runIn(storeId, run.runId).catch(() => void 0);
 		if (settled === void 0 || !isTerminalRun(settled.status)) throw error;
 		return adoptedOutcome(item.taskId, run.runId, settled.status, await env.task.snapshotIn(storeId));
@@ -5137,13 +7106,6 @@ async function settleChildRun(env, storeId, child, verdict) {
 /**
 * Drive one started child run to its terminal state and adopt it: the batch's
 * per-child half of {@link driveBatch}.
-*
-* Every ending here is named as what it is — a batch abort cancels the child,
-* a worker error is a failure. The submission path
-* does not appear as a branch:
-* a run that submitted is settled by {@link settleSubmittedRun} (via the worker
-* whose tool call it was), and this only waits for the terminal state that
-* settlement writes.
 */
 async function driveChildRound(env, batch, child) {
 	const { item, task, run, handle, dependencyTaskIds } = child;
@@ -5211,16 +7173,6 @@ async function blockUnstarted(env, storeId, snapshot, items, why) {
 /**
 * Block every child of one batch that never started, naming one reason — the
 * runtime-level entry for the paths that settle a batch without a driver
-* (`failBatch`, and the fallback for a driver that rejected before it settled
-* anything).
-*
-* It is {@link blockUnstarted} over the members the caller read from the batch's
-* own record rather than over a `BatchContext` the caller no longer holds, so the
-* *rule* — a child with no run and no terminal state is blocked, one that already
-* ran is left to its own settlement — stays in one place and the runtime's failure
-* seams share it with the driver. The batch's members are passed in, never
-* re-derived from the parent task: a parent task's children are every batch it
-* ever admitted, and this call ends one batch.
 */
 async function blockUnstartedChildren(env, storeId, memberTaskIds, reason) {
 	const snapshot = await env.task.snapshotIn(storeId);
@@ -5232,33 +7184,28 @@ async function blockUnstartedChildren(env, storeId, memberTaskIds, reason) {
 /**
 * Start one child of an admitted batch: every check the batch's admission could
 * not make (the evidence a criterion needs, the run budget that was reserved
-* but not yet charged) plus the run's own record, its content binding, the
-* workspace handover and the spawn.
-*
-* The run is recorded *before* the spawn attempt — the discipline the cascade
-* always had — so a refusal at any of those steps settles a run that exists
-* rather than leaving a child admitted with no way to reach a terminal state.
-* The binding is written before the run is recorded (S1-C), and a batch resumed
-* in a new process rebuilds its provider verdicts here (there is nothing to
-* carry over, and the pre-check is the one honest replacement).
 */
 async function startChildRound(env, batch, parentTask, parentRun, items, item, snapshot) {
 	const task = taskOf(snapshot, item.taskId);
 	if (task === void 0) throw new Error(`task-runtime: batch ${batch.batchId} names child "${item.taskId}", which the store does not hold`);
 	const dependencyTaskIds = item.dependsOn.map((dependency) => items[dependency].taskId);
 	const manifest = snapshot.capabilities[item.taskId];
+	/**
+	* The root budget is checked once per start, from the store's own count: the
+	* limit is not resettable by a restart (§3.5). A refusal is monotone — the
+	*/
 	const budgetSnapshot = await env.task.snapshotIn(batch.storeId);
-	const budget = resolveRootBudget(budgetSnapshot, env.rootBudget ?? {});
-	if (!budget.ok) {
+	const budget$1 = resolveRootBudget(budgetSnapshot, env.rootBudget ?? {});
+	if (!budget$1.ok) {
 		if (hasRootLimits(env.rootBudget)) return {
 			kind: "adopted",
 			outcome: await blockChild(env, batch.storeId, item, {
-				reason: `the root budget cannot be resolved: ${budget.reason}`,
+				reason: `the root budget cannot be resolved: ${budget$1.reason}`,
 				blockers: []
 			}, dependencyTaskIds)
 		};
 	} else {
-		const verdict = checkRunStart(budgetSnapshot, budget);
+		const verdict = checkRunStart(budgetSnapshot, budget$1);
 		if (!verdict.allowed) return {
 			kind: "adopted",
 			outcome: await blockChild(env, batch.storeId, item, {
@@ -5334,6 +7281,10 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 	try {
 		let providers = batch.providers;
 		if (providers === void 0 && env.precheck !== void 0) {
+			/**
+			* A resumed batch carries no verdicts — the process that judged them is
+			* gone — so the pre-check is re-run from this run's own viewpoint and a
+			*/
 			const fresh = await env.precheck(Object.keys(manifest.capabilities), env.workspacePath);
 			const refusals = providerRefusals(fresh);
 			if (refusals.length > 0) throw new Error(`the provider pre-check refused this run on resume:\n- ${refusals.join("\n- ")}`);
@@ -5365,6 +7316,10 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 		...run,
 		providerBinding: binding
 	};
+	/**
+	* The budget is charged here, before any worker exists: `TaskStarted` is the
+	* record `maxRuns` counts, so a crash between this write and the spawn does
+	*/
 	await env.task.startRunIn(batch.storeId, bound, env.actor);
 	try {
 		await assertPresetUsable(env, manifest, agentPreset);
@@ -5381,6 +7336,10 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 			})
 		};
 	}
+	/**
+	* One writer at a time (§3.4): the batch's hold is handed to this child for
+	* as long as it works. A workspace this process does not hold as expected is
+	*/
 	const handover = await handOverWorkspace(env, runOwner(batch.storeId, item.taskId, run.runId), (top) => top !== void 0 && top.batchId === batch.batchId, sessionId, `batch ${batch.batchId}`);
 	if (!handover.ok) return {
 		kind: "adopted",
@@ -5444,7 +7403,15 @@ async function driveRounds(env, batch) {
 		const snapshot = await env.task.snapshotIn(batch.storeId);
 		const parentTask = await env.task.taskIn(batch.storeId, batch.parentTaskId);
 		const parentRun = await env.task.runIn(batch.storeId, batch.parentRunId);
+		/**
+		* The batch's own members, read from the run's accumulation on every round: the
+		* parent task's children are every batch it ever admitted, so a second batch
+		*/
 		const members = batchMembers(parentRun, batch.batchId);
+		/**
+		* A parent whose run already settled was settled by somebody else — a
+		* cancellation, a batch failure seam, or the driver above this one. The
+		*/
 		if (parentRun.status !== "running") {
 			const items$1 = batchItems(members, snapshot.edges);
 			await blockUnstarted(env, batch.storeId, snapshot, items$1, () => ({
@@ -5498,492 +7465,150 @@ async function driveRounds(env, batch) {
 		await driveChildRound(env, batch, attempt.child);
 	}
 }
-/** Restore the same active Run/Session and observe its persisted settlement. */
-async function awaitAdoptedWorkerWait(env, batch, item, run, dependencyTaskIds) {
-	const resumed = await resumeAdoptedWorker(env, batch.storeId, run);
-	if (resumed.status !== "live") throw new Error(`task-runtime: cannot continue run "${run.runId}" in Session "${run.sessionId}" : ${resumed.reason}`);
-	env.gate.setQuestionsBlocked(run.sessionId, blockingQuestionsOf(await env.task.snapshotIn(batch.storeId), run.runId).length > 0);
-	if (resumed.status === "live" && env.gate.phaseOf(run.sessionId) === void 0) env.gate.setPhase(run.sessionId, "active");
-	const terminal = waitRunSettled(env, batch.storeId, run.runId, run.sessionId).then((status) => ({
-		kind: "terminal",
-		status
-	}));
-	const observation = await awaitWaitingTerminal(cancelAgentOf(env, run.sessionId), batch.signal, terminal);
-	switch (observation.kind) {
-		case "terminal": {
-			const snapshot = await env.task.snapshotIn(batch.storeId);
-			const status = snapshot.runs.find((candidate) => candidate.runId === run.runId)?.status ?? observation.status;
-			env.onRunSettled?.(batch.storeId, item.taskId, run.runId, status);
-			await releaseWorkspaceLayer(env, runOwner(batch.storeId, item.taskId, run.runId), run.sessionId);
-			const evidenceId = childEvidenceId(snapshot, run.runId);
-			return {
-				taskId: item.taskId,
-				runId: run.runId,
-				status,
-				...evidenceId === void 0 ? {} : { evidenceId }
-			};
+
+//#endregion
+//#region src/service/notify.ts
+function registerTerminalReviewListener(self, listener) {
+	self.terminalReviewListeners.add(listener);
+	return () => {
+		self.terminalReviewListeners.delete(listener);
+	};
+}
+function notifyTerminalReview(self, fact) {
+	for (const listener of self.terminalReviewListeners) try {
+		const answer = listener(fact);
+		if (answer !== void 0 && typeof answer.then === "function") answer.catch((error) => {
+			self.warn(`store ${fact.storeId}: a terminal-review listener failed after review ${fact.taskId}${fact.runId === null ? "" : `#${fact.runId}`} [${fact.outcome}] (${message(error)})`);
+		});
+	} catch (error) {
+		self.warn(`store ${fact.storeId}: a terminal-review listener failed after review ${fact.taskId}${fact.runId === null ? "" : `#${fact.runId}`} [${fact.outcome}] (${message(error)})`);
+	}
+}
+function notify(self, sessionId, text$1) {
+	const agent = self.agentOrUndefined(sessionId);
+	if (agent === void 0 || typeof agent.followup !== "function") return;
+	agent.followup(createUserMessage({
+		content: [{
+			type: "text",
+			text: text$1
+		}],
+		source: {
+			kind: "task-runtime",
+			form: "notice",
+			summary: boundContextSummary(text$1)
 		}
-		case "aborted": return await settleChildRun(env, batch.storeId, {
-			item,
-			run,
-			dependencyTaskIds
-		}, {
-			status: "cancelled",
-			anomalies: [`the batch was cancelled while this recovered child waited: ${batch.reason}`]
-		});
-	}
-}
-/**
-* The blockers a cancelled batch names: the siblings that were in flight when it was cancelled.
-*/
-function startedBlocker(snapshot, items) {
-	return items.flatMap((item) => {
-		const run = latestRun(snapshot, item.taskId);
-		const task = taskOf(snapshot, item.taskId);
-		if (run === void 0 || task === void 0 || task.status === "verified") return [];
-		return [{
-			taskId: item.taskId,
-			outcome: task.status
-		}];
-	});
-}
-/** The store's own account of how a batch's children ended, one `2 verified` per status. */
-function outcomeTally(outcomes) {
-	const counts = /* @__PURE__ */ new Map();
-	for (const outcome of outcomes) counts.set(outcome.status, (counts.get(outcome.status) ?? 0) + 1);
-	return [...counts].sort(([left], [right]) => left.localeCompare(right)).map(([status, count]) => `${count} ${status}`).join(", ");
-}
-/** {@link outcomeTally} named by the batch it belongs to — what a batch end reports. */
-function batchSummary(batchId, outcomes) {
-	return `batch ${batchId} ended: ${outcomes.length === 0 ? "no children" : outcomeTally(outcomes)}`;
-}
-/**
-* The `m-` identity one ended batch's result message carries: derived from the
-* batch id, never minted — the same derivation `questionMessageIdOf` makes for a
-* question, and for the same reason. A retry in this process or after a restart
-* states the same identity, so the target's own fold answers "this one is
-* already here" instead of the runtime keeping a ledger of what it sent.
-*/
-function batchEndMessageId(batchId) {
-	return `m-batchend-${batchId}`;
-}
-/**
-* The body one batch-end message carries, rendered from the store's own account
-* of the batch: every member's terminal state and the evidence it left, and what
-* the parent may do now. It is reprojected from the facts on every call (never
-* remembered, never edited between attempts), so the live delivery and a
-* recovery re-delivery carry the same words about the same batch.
-*
-* What it deliberately does not say is that anything was submitted: the runtime
-* submits nothing on the parent's behalf (K1 §2), and only the parent's own
-* `task_submit_result` starts its acceptance.
-*/
-function batchEndMessageText(batchId, outcomes) {
-	const children = outcomes.length === 0 ? "It admitted no children." : `Its children settled: ${outcomeTally(outcomes)}.`;
-	const lines = outcomes.map((outcome) => `- ${outcome.taskId} (run ${outcome.runId ?? "none"}): ${outcome.status}${outcome.evidenceId === void 0 ? "" : `, evidence ${outcome.evidenceId}`}`);
-	return [
-		`[task-batch-end ${batchId}] the child batch has ended and the workspace is handed back to you; nothing was submitted on your behalf.`,
-		children,
-		...lines,
-		"You are active again: read the children's results, continue your own work, delegate another batch (task_decompose), or hand in your own result (task_submit_result) — only that submission starts your acceptance."
-	].join("\n");
-}
-/**
-* The member task ids of one batch, as the run's own accumulated batches record
-* them. A run that records no such batch cannot be asked about it: the members of
-* a batch nobody names are not another batch's and not the task's children, so
-* the read fails by name instead of answering for a batch it cannot identify.
-*/
-function batchMembers(run, batchId) {
-	const batch = run.batches?.find((candidate) => candidate.batchId === batchId);
-	if (batch === void 0) throw new Error(`task-runtime: run "${run.runId}" records no batch "${batchId}", so the store does not name its members; a batch is read from the run that admitted it, never derived from the task's children`);
-	return [...batch.memberTaskIds];
-}
-/**
-* The end-of-batch results one store's own facts still owe (K1 §2, §5).
-*
-* A run that is `active` has no unfinished batch — `waiting_children → active`
-* clears `batchId` — so every entry of its accumulated `batches` names a batch
-* that ended, and each ended batch owes its Session the one message under
-* `m-batchend-<batchId>` ({@link batchEndMessageId}), whether the process that
-* ended it delivered it or died before it could. The store's own accumulation is
-* the whole derivation: nothing is guessed from a task's children, a batch no run
-* records is not a candidate, and a run that is still `waiting_children`,
-* `submitted` or terminal owes nothing here (its batch end is not durable yet, its
-* acceptance is what is in flight, or it is past being told).
-*
-* Being owed is a candidate, not a verdict: the target's own fold decides whether
-* the message is still missing when the delivery is attempted, so a second pass
-* over the same store re-derives the same list and delivers nothing twice.
-*/
-function owedBatchResults(snapshot) {
-	const owed = [];
-	for (const run of snapshot.runs) {
-		if (run.status !== "running" || run.executionPhase !== "active") continue;
-		for (const batch of run.batches ?? []) owed.push({
-			taskId: run.taskId,
-			runId: run.runId,
-			batchId: batch.batchId,
-			sessionId: run.sessionId,
-			memberTaskIds: [...batch.memberTaskIds]
-		});
-	}
-	return owed;
-}
-/**
-* Deliver one batch's end-of-batch message and report what the attempt settled
-* as. A deployment without the seam, or one whose relay refuses, changes nothing
-* about the batch: the store's facts are the result, and the message is the wake
-* that points at them.
-*/
-async function deliverBatchResult(env, result) {
-	if (env.deliverBatchResult === void 0) return "unavailable";
-	try {
-		return await env.deliverBatchResult(result);
-	} catch (error) {
-		return `refused: ${message(error)}`;
-	}
-}
-/**
-* End one batch and hand the parent back its own decision (K1 §2) — the
-* settlement a driver performs once every child has a terminal state.
-*
-* The order is the promise the parent is given:
-*
-* 1. **every child's write convergence is confirmed** — the one thing a batch end
-*    must not assume. A child that submitted has been drained by its own
-*    settlement, but a child that settled `blocked` or was settled by a
-*    cancellation may still hold writers or managed jobs, so each member run's
-*    Session is drained with the same primitive the admission and submission
-*    paths use. A convergence that cannot be confirmed is a parent failed by
-*    name: the workspace is not handed back, the phase is not persisted, the gate
-*    is not opened, and no parent is told it may write into a checkout somebody
-*    else may still be writing to;
-* 2. the parent's own writes are drained, by the same rule and the same refusal
-*    (§3.3);
-* 3. the batch's workspace layer comes off, so the parent's own hold is on top
-*    again (§3.4) — confirmed stops first, the handback after them: the batch
-*    holds the checkout until every writer inside it is confirmed stopped (§2);
-* 4. `waiting_children → active` is persisted with the batch it closes, and the
-*    Session's gate follows into `active` — the *question* block is recomputed
-*    from the store in the same step, because an unresolved blocking question
-*    keeps refusing the parent's writes and a batch ending answers nothing
-*    (A4 §7.2);
-* 5. the batch's result is delivered to the parent's Session under the identity
-*    the batch derives, so the parent is *told* it may continue instead of a
-*    model having to notice a phase change.
-*
-* What the runtime no longer does is submit on the parent's behalf. A batch
-* ending is a fact about the children — several of which may have failed — not a
-* verdict about the parent, and only the parent's own `task_submit_result`
-* starts its verification (`settleSubmittedRun`, the one verification entry).
-*
-* Explicit cancellation can end the batch without judging it (§3.6).
-* Its release is the terminal cleanup it always was, taken before the run is
-* settled: a stopped run is not revived by its children's drains, and its own
-* checkout is still handed back. A parent whose run already settled was settled
-* by somebody else, and its batch end is the store's record alone.
-*/
-async function finishBatch(env, batch) {
-	const snapshot = await env.task.snapshotIn(batch.storeId);
-	const parentRun = await env.task.runIn(batch.storeId, batch.parentRunId);
-	const members = batchMembers(parentRun, batch.batchId);
-	const outcomes = await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, members);
-	if (parentRun.status !== "running") {
-		await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId);
-		return outcomes;
-	}
-	const childTaskIds = [...members];
-	if (batch.signal.aborted) {
-		await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId);
-		const reason = `cancelled by the caller while the batch settled: ${batch.reason}`;
-		await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, "cancelled", env.actor, { reason });
-		await recordTerminalReview(env, batch.storeId, batch.parentTaskId, "cancelled", {
-			run: parentRun,
-			anomalies: [reason],
-			relatedTaskIds: childTaskIds
-		});
-		env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, "cancelled");
-		notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}. Children: ${batchSummary(batch.batchId, outcomes)}`);
-		return outcomes;
-	}
-	const blocked = blockingQuestionsOf(snapshot, batch.parentRunId).length > 0;
-	const childPending = [];
-	for (const childTaskId of childTaskIds) {
-		const childRun = latestRun(snapshot, childTaskId);
-		if (childRun === void 0) continue;
-		const childDrained = await drainSession(env.gate, childRun.sessionId, {
-			timeoutMs: env.writeDrainTimeoutMs,
-			jobs: env.jobs,
-			agent: env.agentFor?.(childRun.sessionId)
-		});
-		if (!childDrained.confirmed) childPending.push(`run "${childRun.runId}": ${childDrained.pending.join("; ")}`);
-	}
-	if (childPending.length > 0) {
-		const reason = `write convergence of the batch's children could not be confirmed: ${childPending.join("; ")}`;
-		await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed", env.actor, { reason });
-		await recordTerminalReview(env, batch.storeId, batch.parentTaskId, "failed", {
-			run: parentRun,
-			localizedCause: reason,
-			relatedTaskIds: childTaskIds
-		});
-		env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed");
-		notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}; the parent run is failed and its batch is not handed back.`);
-		return outcomes;
-	}
-	const drained = await drainSession(env.gate, parentRun.sessionId, {
-		timeoutMs: env.writeDrainTimeoutMs,
-		jobs: env.jobs,
-		agent: env.agentFor?.(parentRun.sessionId)
-	});
-	if (!drained.confirmed) {
-		const reason = `write convergence could not be confirmed: ${drained.pending.join("; ")}`;
-		await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed", env.actor, { reason });
-		await recordTerminalReview(env, batch.storeId, batch.parentTaskId, "failed", {
-			run: parentRun,
-			localizedCause: reason,
-			relatedTaskIds: childTaskIds
-		});
-		env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed");
-		notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}; the parent run is failed and is not verifiable.`);
-		return outcomes;
-	}
-	await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId);
-	await env.task.changeRunPhaseIn(batch.storeId, batch.parentTaskId, batch.parentRunId, env.actor, {
-		phase: "active",
-		batchId: batch.batchId
-	});
-	env.gate.setPhase(parentRun.sessionId, "active");
-	env.gate.setQuestionsBlocked(parentRun.sessionId, blocked);
-	const message$8 = batchEndMessageText(batch.batchId, outcomes);
-	const delivery = await deliverBatchResult(env, {
-		storeId: batch.storeId,
-		runId: batch.parentRunId,
-		batchId: batch.batchId,
-		sessionId: parentRun.sessionId,
-		messageId: batchEndMessageId(batch.batchId),
-		text: message$8
-	});
-	if (delivery !== "delivered" && delivery !== "already-present" && delivery !== "skipped") notifyOwner(env, batch.callerSessionId, `task-runtime: ${batchSummary(batch.batchId, outcomes)}; ${message$8} (delivery: ${delivery})`);
-	return outcomes;
-}
-/**
-* Drive one admitted batch to settlement (A3 §3.1): reentrant, store-driven,
-* and owned by the runtime rather than by the tool call that admitted it.
-*
-* The first step is the parent's own drain — admission closed at the atomic
-* commit, so whatever the parent still had in flight has to stop before the
-* first child starts writing (§3.3); an unconfirmable drain blocks the children
-* that never started and fails the parent by name instead of assuming a stop.
-*
-* Then every round re-reads the store: children already terminal are adopted,
-* exactly one ready child is started (the batch is serial by dependency order,
-* not parallel — §5's declared boundary), and the round waits for that child's
-* terminal state. A nested decomposition is not a recursive call: the child's
-* own `task_decompose` registers its own driver, and this loop only waits for
-* the child's run to settle.
-*
-* A driver failure is a parent failed with the cause named, recorded and notified
-* (§3.1's "no fire-and-forget") — but never a batch reported as ended on facts the
-* store did not give: when the batch's members cannot be read (the parent run is
-* unreadable, or its record does not hold this batch), this promise rejects by
-* name instead of resolving with an outcome list derived from another batch's
-* members or from the task's whole child history. The runtime's own belt settles
-* the batch such a rejection names (`registerDriver` → `failBatchFromRuntime`).
-*/
-async function driveBatch(env, batch) {
-	const members = async () => batchMembers(await env.task.runIn(batch.storeId, batch.parentRunId), batch.batchId);
-	try {
-		if (!await convergeAdmission(env, batch)) return await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, await members());
-		return await driveRounds(env, batch);
-	} catch (error) {
-		await failParentRun(env, batch, `the batch driver failed: ${message(error)}`);
-		return await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, await members());
-	}
-}
-/** The parent's own write convergence, before the batch's first child starts. */
-async function convergeAdmission(env, batch) {
-	const drained = await drainSession(env.gate, batch.callerSessionId, {
-		timeoutMs: env.writeDrainTimeoutMs,
-		...batch.excludeCallId === void 0 ? {} : { excludeCallId: batch.excludeCallId },
-		jobs: env.jobs,
-		agent: env.agentFor?.(batch.callerSessionId)
-	});
-	if (drained.confirmed) return true;
-	const reason = `write convergence could not be confirmed: ${drained.pending.join("; ")}`;
-	const snapshot = await env.task.snapshotIn(batch.storeId);
-	const parentRun = await env.task.runIn(batch.storeId, batch.parentRunId);
-	await blockUnstarted(env, batch.storeId, snapshot, batchItems(batchMembers(parentRun, batch.batchId), snapshot.edges), () => ({
-		reason: `the batch never started: ${reason}`,
-		blockers: []
 	}));
-	await failParentRun(env, batch, reason);
-	return false;
 }
-/** Fail the batch's parent run by name, with the one review record its terminal transition owes. */
-async function failParentRun(env, batch, reason) {
-	try {
-		const snapshot = await env.task.snapshotIn(batch.storeId);
-		const parentTask = taskOf(snapshot, batch.parentTaskId);
-		const parentRun = snapshot.runs.find((run) => run.runId === batch.parentRunId);
-		if (parentTask === void 0 || parentRun === void 0) return;
-		if (parentRun.status !== "running") return;
-		await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed", env.actor, { reason });
-		await recordTerminalReview(env, batch.storeId, batch.parentTaskId, "failed", {
-			run: parentRun,
-			localizedCause: reason,
-			relatedTaskIds: batchMembers(parentRun, batch.batchId)
+function notifyWhenReady(self, sessionId, text$1) {
+	const storeId = self.sessions.get(sessionId)?.storeId;
+	const barrier = storeId === void 0 ? void 0 : self.storeRecovery.get(storeId);
+	if (barrier !== void 0 && barrier.status === "recovering" && barrier.cancelled !== true) {
+		barrier.pendingNotices.push({
+			sessionId,
+			text: text$1
 		});
-		env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed");
-		notifyOwner(env, batch.callerSessionId, `task-runtime: batch ${batch.batchId} failed: ${reason}`);
-	} catch (error) {
-		notifyOwner(env, batch.callerSessionId, `task-runtime: batch ${batch.batchId} failed and its parent run could not be settled: ${reason} (${message(error)})`);
+		return;
 	}
+	notify(self, sessionId, text$1);
 }
-/**
-* The one verification entry: a run whose phase change into `submitted` is
-* already committed is drained, judged, and settled.
-*
-* Everything that verifies a run goes through here — the worker's own
-* `task_submit_result` (a parent's included: a batch ending hands the run back
-* `active` and only the parent's own submission starts its acceptance), and the
-* recovery path's continuation of a run that submitted before a restart. That is
-* what makes the paths share the budget, the drain, the verifier deadline and
-* the review discipline instead of separate implementations that drift (§3.1
-* "验证权唯一").
-*
-* A drain that cannot be confirmed fails the run with the pending work named:
-* judging a run whose writers may still be running would produce a verdict
-* about bytes nothing can vouch for (§3.3).
-*/
-async function settleSubmittedRun(env, storeId, taskId, runId, opts = {}) {
-	const run = await env.task.runIn(storeId, runId);
-	if (isTerminalRun(run.status)) return run.status;
-	const task = await env.task.taskIn(storeId, taskId);
-	const snapshot = await env.task.snapshotIn(storeId);
-	const relatedTaskIds = opts.relatedTaskIds ?? snapshot.edges.filter((edge) => edge.to === taskId).map((edge) => edge.from);
-	const anomalies = opts.anomalies ?? [];
-	const drained = await drainSession(env.gate, run.sessionId, {
-		timeoutMs: env.writeDrainTimeoutMs,
-		...opts.excludeCallId === void 0 ? {} : { excludeCallId: opts.excludeCallId },
-		jobs: env.jobs,
-		agent: env.agentFor?.(run.sessionId)
-	});
-	if (!drained.confirmed) return await failSubmittedRun(env, storeId, task, run, relatedTaskIds, `write convergence could not be confirmed: ${drained.pending.join("; ")}`, anomalies);
-	if ((await env.task.taskIn(storeId, taskId)).status !== "verifying") await env.task.markRunStatusIn(storeId, taskId, runId, "verifying", env.actor);
-	let bundle;
-	try {
-		bundle = await withVerifierWorkspace(env, storeId, taskId, runId, run.sessionId, () => verifyWithDeadline(env, storeId, runId));
-	} catch (error) {
-		const reason$1 = message(error);
-		const status = await failSubmittedRun(env, storeId, task, run, relatedTaskIds, reason$1, anomalies);
-		if (error instanceof VerifierUnavailableError) {
-			const batchId = await parentBatchOf(env, storeId, task, run);
-			if (batchId !== void 0) await env.failBatch?.(storeId, batchId, `verification is unavailable: ${reason$1}`);
+/** Queue one owner notice without waking the session: a blocked run reads it in the request the answer's wake opens. */
+function appendNotice(self, sessionId, text$1) {
+	const agent = self.agentOrUndefined(sessionId);
+	if (agent === void 0) return;
+	agent.inbox.append("next-turn", createUserMessage({
+		content: [{
+			type: "text",
+			text: text$1
+		}],
+		source: {
+			kind: "task-runtime",
+			form: "notice",
+			summary: boundContextSummary(text$1)
 		}
-		return status;
+	}));
+}
+async function deliverBatchResult(self, result) {
+	const barrier = self.storeRecovery.get(result.storeId);
+	if (barrier !== void 0 && barrier.status === "recovering" && barrier.cancelled !== true) {
+		barrier.pendingBatchResults.push(result);
+		return "unavailable";
 	}
-	const settled = await settledStatusOf(env, storeId, runId);
-	if (settled !== void 0) return settled;
-	const criteria = reviewCriteria(task.acceptanceCriteria, bundle.verifierResults);
-	const unmet = unmetMandatory(task.acceptanceCriteria, bundle.verifierResults);
-	if (unmet.length === 0) {
-		await env.task.markRunStatusIn(storeId, taskId, runId, "verified", env.actor);
-		await recordTerminalReview(env, storeId, taskId, "verified", {
-			run,
-			relatedTaskIds,
-			criteria,
-			anomalies
+	return await deliverBatchResultNow(self, result);
+}
+async function deliverBatchResultNow(self, result) {
+	let run;
+	try {
+		run = await self.context.task.runIn(result.storeId, result.runId);
+	} catch (error) {
+		self.warn(`store ${result.storeId}: whether run "${result.runId}" is still running could not be read before the end-of-batch message for "${result.batchId}" was delivered (${message(error)}); nothing was delivered and the next activation retries`);
+		return "unavailable";
+	}
+	if (run.status !== "running") return "skipped";
+	const relay = self.context.agentRuntime;
+	if (typeof relay?.ensureAgentMessageDelivered !== "function") {
+		self.warn(`store ${result.storeId}: batch "${result.batchId}" ended with no message relay in this deployment; run "${result.runId}" was handed back active and its Session was not told`);
+		return "unavailable";
+	}
+	try {
+		const delivery = await relay.ensureAgentMessageDelivered({
+			targetSessionId: SessionId(result.sessionId),
+			senderSessionId: SessionId(result.sessionId),
+			messageId: result.messageId,
+			text: result.text
 		});
-		env.onRunSettled?.(storeId, taskId, runId, "verified");
-		await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId);
-		return "verified";
+		if (delivery.status === "delivered" || delivery.status === "already-present") return delivery.status;
+		self.warn(`store ${result.storeId}: the end-of-batch message for "${result.batchId}" was not delivered to session ${result.sessionId} (${delivery.status}); the batch's facts stand and the next activation retries the delivery`);
+		return delivery.status === "unavailable" ? "unavailable" : "refused";
+	} catch (error) {
+		self.warn(`store ${result.storeId}: the end-of-batch message for "${result.batchId}" could not be delivered (${message(error)})`);
+		return "refused";
 	}
-	const reason = failureReason(unmet);
-	await env.task.markRunStatusIn(storeId, taskId, runId, "failed", env.actor, { reason });
-	await recordTerminalReview(env, storeId, taskId, "failed", {
-		run,
-		localizedCause: reason,
-		relatedTaskIds,
-		criteria,
-		anomalies,
-		logTail: await failedLogTail(env, unmet, bundle.verifierResults)
+}
+async function redeliverBatchResult(self, storeId, batchId) {
+	const found = await self.batchRecordIn(storeId, batchId);
+	if (found === void 0) throw new Error(`task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; there is nothing to re-deliver`);
+	const outcomes = await deriveChildOutcomes(self.context.task, storeId, found.taskId, found.memberTaskIds);
+	return await deliverBatchResult(self, {
+		storeId,
+		runId: found.run.runId,
+		batchId,
+		sessionId: found.run.sessionId,
+		messageId: batchEndMessageId(batchId),
+		text: batchEndMessageText(batchId, outcomes)
 	});
-	env.onRunSettled?.(storeId, taskId, runId, "failed");
-	await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId);
-	return "failed";
 }
-/**
-* The status of a run another actor has already settled, or `undefined` while it is
-* still in flight. The verdict path reads this before writing a verdict: a
-* cancellation that lands during a verifier call owns the settlement, and the store
-* refuses both a move out of a terminal state and evidence for a settled run.
-*/
-async function settledStatusOf(env, storeId, runId) {
-	const current = await env.task.runIn(storeId, runId);
-	return isTerminalRun(current.status) ? current.status : void 0;
-}
-/** Fail a run that could not be judged, with the reason recorded and its owner told. */
-async function failSubmittedRun(env, storeId, task, run, relatedTaskIds, reason, anomalies = []) {
-	const current = await env.task.runIn(storeId, run.runId);
-	if (isTerminalRun(current.status)) return current.status;
-	await env.task.markRunStatusIn(storeId, task.taskId, run.runId, "failed", env.actor, { reason });
-	await recordTerminalReview(env, storeId, task.taskId, "failed", {
-		run,
-		localizedCause: reason,
-		relatedTaskIds,
-		anomalies
+async function reconcileSessionJobs(self, sessionId) {
+	const jobs = self.softService("jobs");
+	const agent = self.agentOrUndefined(sessionId);
+	if (jobs === void 0 || agent === void 0) return;
+	const drained = await drainSession(self.executionGate, sessionId, {
+		timeoutMs: self.config.writeDrainTimeoutMs,
+		jobs,
+		agent
 	});
-	env.onRunSettled?.(storeId, task.taskId, run.runId, "failed");
-	await releaseWorkspaceLayer(env, runOwner(storeId, task.taskId, run.runId), run.sessionId);
-	notifyOwner(env, run.sessionId, `task-runtime: run "${run.runId}" failed: ${reason}`);
-	return "failed";
+	if (!drained.confirmed) self.warn(`session ${sessionId}: managed work was not confirmed stopped: ${drained.pending.join("; ")}`);
 }
-/**
-* The batch a child run belongs to: the batch of its parent run that admitted
-* this child. `parentRunId` names the parent run and the membership is a fact of
-* that run's accumulated batches — never an id parsed back into a task, which is
-* exactly what could not survive a parent that admits more than one batch (K1).
-* The run is a batch member of at most one batch, so the answer is unique.
-*
-* The parent-run guard is what keeps a replay's lineage (`parentRunId` naming
-* the champion) from being read as a batch membership: the run named must be the
-* parent *task*'s own run. A run whose parent has no batch entry answers
-* `undefined` — a membership this build cannot name is not guessed at.
-*/
-async function parentBatchOf(env, storeId, task, run) {
-	if (run.parentRunId === void 0 || task.parentTaskId === void 0) return void 0;
-	const parentRun = (await env.task.snapshotIn(storeId)).runs.find((candidate) => candidate.runId === run.parentRunId);
-	if (parentRun === void 0 || parentRun.taskId !== task.parentTaskId) return void 0;
-	return parentRun.batches?.find((batch) => batch.memberTaskIds.includes(task.taskId))?.batchId;
+/** Wake every session that still holds its unread message, with this site's own text. */
+function wakeUnclaimed(self, entries, text$1) {
+	for (const { sessionId, messageId } of entries) {
+		if (!sessionHoldsPendingMessage(self, sessionId, messageId)) continue;
+		notify(self, sessionId, text$1(messageId));
+	}
 }
+function wakeUnclaimedBatchResults(self, unread) {
+	wakeUnclaimed(self, unread, (messageId) => `task-runtime: this session was brought back after a restart with the result of a child batch it has not read (message "${messageId}" is still pending in its inbox); read it and act on it — the framework will not send a second copy`);
+}
+function sessionHoldsPendingMessage(self, sessionId, messageId) {
+	const inbox = self.agentOrUndefined(sessionId)?.inbox;
+	if (inbox === void 0) return false;
+	return [...inbox.nextTurn ?? [], ...inbox.nextStep ?? []].some((message$1) => String(message$1.id) === messageId);
+}
+
+//#endregion
+//#region src/orchestration/replay.ts
 /**
 * Replay runner (guide §2.7.6, W15): create the caller-shaped replay task in
 * the store, run it once through the real spawn + verify chain — or straight
-* through the verifier alone for a deterministic criteria replay — and settle
-* it with the same terminal-record discipline every other run gets
-* ({@link recordTerminalReview}), the lineage tag on the record's anomalies.
-* The replayed task is parentless and the historical task it mirrors is never
-* touched: a replay is a comparison experiment, not a tree edit. Nothing asks a
-* replay to decompose — its projection carries no decomposition guidance and no
-* spawn prompt invites one — but nothing refuses it either: `task_decompose` is
-* on every worker's surface, and a replayed worker that splits is settled by its
-* batch through the ordinary parent acceptance.
-*
-* A spawning replay is a worker like any other and follows the same rules: it
-* is born `active` and it *submits* — an idle worker is not a completion, the
-* usage accounting still applies, and verification comes from the one entry every
-* run shares ({@link settleSubmittedRun}). A workerless replay is born
-* `submitted` (origin `runtime`) because there is nobody to submit: its
-* criteria are judged by the verifier and the run settles on the verdict.
-*
-* What the run is *placed under* travels with the init (S4-E §Q3): the caller's
-* frozen model selection ({@link ReplayRunInit.agentOptions}). It is carried on
-* the spawn request, so the deployment remembers it for the session and the
-* sub-execution a replayed worker decomposes into inherits exactly the same
-* binding; it is absent for an ordinary replay, whose run and spawn are what they
-* always were. The run's clock is not this entry's: its time is bounded by the
-* runtime's persisted run count and observed usage.
 */
 async function runReplayTask(env, storeId, init, signals = {}) {
 	const task = init.task;
@@ -6000,6 +7625,10 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 	});
 	const sessionId = `s-${randomUUID()}`;
 	const runId = `r-${randomUUID()}`;
+	/**
+	* The run exists before the spawn attempt so a spawn refusal can still walk
+	* it to a terminal state — same discipline as a batch child. Its birth phase
+	*/
 	const birthSubmission = init.spawn ? void 0 : {
 		summary: "criteria replay (no worker spawned)",
 		evidenceRefs: [],
@@ -6021,10 +7650,18 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 		status: "running",
 		startedAt: startedAt.toISOString()
 	};
+	/**
+	* The execution binding this run is placed under (S4-E §Q3): the caller's frozen
+	* model selection, as one *bound view* of the env that every wait and every spawn
+	*/
 	const bound = {
 		...env,
 		...init.agentOptions === void 0 ? {} : { agentOptions: init.agentOptions }
 	};
+	/**
+	* The replay's content binding comes from the pre-check the caller carried
+	* (`ReplayRunInit.providers`), not from a fresh discovery here: the identities
+	*/
 	let contentBinding;
 	try {
 		contentBinding = await bindRunProviders({
@@ -6054,6 +7691,10 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 	try {
 		await assertPresetUsable(env, init.manifest, init.agentPreset);
 		const permissionPreset = permissionFor(env, init.manifest);
+		/**
+		* The overlay's roots stay in front (a candidate skill wins a same-name
+		* collision for this worker), and the run's own snapshot follows: what the
+		*/
 		const roots = skillRootsForRun(init.skillRoots ?? [], contentBinding);
 		handle = await bound.spawn({
 			sessionId,
@@ -6101,18 +7742,6 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 /**
 * Settle one replay run the replay's own observation decided — a cancellation, a
 * worker error — and report what the run settled
-* as.
-*
-* Two settlement paths can reach one run at once, and this is not hypothetical for
-* a replay: a replayed worker that decomposed is settled by its own batch (the
-* ordinary parent acceptance submits and verifies the parent run) while this path
-* is deciding. The arbitration is the one the batch's per-child settlement already
-* applies ({@link settleChildRun}, `settleRunFromRuntime` beside it): the store is
-* the arbiter — a run it now holds terminal stands, this settlement adds nothing,
-* and the outcome reports the state the store holds rather than the one this wait
-* was about to write. The two writes are otherwise exactly what they were: the
-* status event with its reason, one terminal review carrying the localized cause
-* and the lineage anomaly, and the settlement bookkeeping.
 */
 async function settleReplayRun(env, storeId, task, run, settlement) {
 	const current = await env.task.runIn(storeId, run.runId);
@@ -6120,6 +7749,10 @@ async function settleReplayRun(env, storeId, task, run, settlement) {
 	try {
 		await env.task.markRunStatusIn(storeId, task.taskId, run.runId, settlement.status, env.actor, { ...settlement.reason === void 0 ? {} : { reason: settlement.reason } });
 	} catch (error) {
+		/**
+		* The store's own arbiter rule, as in `settleChildRun`: a run it now holds
+		* terminal was settled by somebody else while this settlement was in flight,
+		*/
 		const settled = await env.task.runIn(storeId, run.runId).catch(() => void 0);
 		if (settled === void 0 || !isTerminalRun(settled.status)) throw error;
 		return await finishReplay(env, storeId, run, statusOutcome(settled.status));
@@ -6139,7 +7772,6 @@ function statusOutcome(status) {
 /**
 * The replay result read back from the store: the review record the settlement
 * wrote carries the duration and the verdict per criterion, and the evidence
-* bundle the verifier produced is what the comparison report names.
 */
 async function finishReplay(env, storeId, run, status) {
 	const snapshot = await env.task.snapshotIn(storeId);
@@ -6154,383 +7786,1652 @@ async function finishReplay(env, storeId, run, status) {
 		...evidenceId === void 0 ? {} : { evidenceId }
 	};
 }
-/**
-* Settle one run terminal from outside the orchestration — a graph removal, or
-* a recovery pass that refuses to continue a run — with the same terminal-record
-* discipline every other settlement uses: the status event, its one review
-* record (idempotent: a run whose review already exists is not given a second),
-* the gate closed for its session, and the workspace layer it held released.
-*
-* A run that is already terminal is left exactly as it is: this is a settlement
-* entry, not an overwrite.
-*/
-async function settleRunFromRuntime(env, storeId, run, status, reason) {
-	const current = await env.task.runIn(storeId, run.runId);
-	if (current.status !== "running") return;
-	const snapshot = await env.task.snapshotIn(storeId);
-	const relatedTaskIds = snapshot.tasks.find((candidate) => candidate.taskId === current.taskId)?.childTaskIds ?? [];
+
+//#endregion
+//#region src/service/replay.ts
+async function replayTask(self, storeId, championTaskId, options, callerSessionId) {
+	const known = new Set([
+		"lineage",
+		"overlay",
+		"contract",
+		"spawn",
+		"workspace",
+		"agentOptions",
+		"signal"
+	]);
+	const unknown = Object.keys(options).filter((key) => !known.has(key));
+	if (unknown.length > 0) throw new Error(`task-runtime: replayTask does not accept options [${unknown.join(", ")}]`);
+	await self.assertRecoveryReady(storeId, "a replay");
+	const champion = await self.context.task.taskIn(storeId, championTaskId);
+	if (champion.status !== "verified" && champion.status !== "failed") throw new Error(`task-runtime: champion task "${championTaskId}" is ${champion.status}; only a terminal (verified or failed) task can be replayed`);
+	const championRunId = champion.runIds[champion.runIds.length - 1];
+	const effective = options.contract ?? {
+		objective: champion.objective,
+		acceptanceCriteria: champion.acceptanceCriteria,
+		requiredCapabilities: champion.requestedCapabilities
+	};
+	const table = {
+		...self.config.capabilities,
+		...options.overlay?.capabilityOverrides ?? {}
+	};
+	const manifest = resolveCapabilities(effective.requiredCapabilities, table);
+	if (manifest.missing.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(", ")}] under the overlay`);
+	/**
+	* The checkout this replay's everything resolves against: the workspace the
+	* caller named, resolved to its real path first so the claim, the cwd and the
+	*/
+	const named = options.workspace === void 0 ? void 0 : await normalizeWorkspacePath(options.workspace.path);
+	const envPath = named ?? await self.envPathForSession(callerSessionId);
+	/**
+	* The same provider pre-check the ordinary decomposition runs (S1-C item 1),
+	* from the replay's checkout and under the overlay's own capability
+	*/
+	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
+		...envPath === void 0 ? {} : { cwd: envPath },
+		...options.overlay?.extraSkillRoots === void 0 ? {} : { extraRoots: [...options.overlay.extraSkillRoots] }
+	}, table);
+	const refusals = providerRefusals(precheck);
+	if (refusals.length > 0) throw new Error(`task-runtime: provider pre-check rejected replay of "${championTaskId}":\n- ${refusals.join("\n- ")}`);
+	/**
+	* The replay path shares the ordinary decomposition's rules: the contract's
+	* own structure (T1) and the P4 parent-acceptance declarations (contract 8).
+	*/
+	const label = `replay of "${championTaskId}"`;
+	/**
+	* Protected acceptance inputs are fixed the same way the ordinary path
+	* fixes them (S1-V slice 2), against the replay caller's checkout: the
+	*/
+	const fixed = await fixCriteriaProtectedInputs(effective.acceptanceCriteria, envPath, label);
+	const acceptanceDefects = [
+		...fixed.reasons,
+		...contractDefects(fixed.criteria, label),
+		...independentAcceptanceDefects(fixed.criteria, champion.requiresIndependentAcceptance, label)
+	];
+	if (acceptanceDefects.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" rejected:\n- ${acceptanceDefects.join("\n- ")}`);
+	await self.assertKnownVerifierRefs(fixed.criteria.map((criterion) => ({
+		childIndex: 0,
+		criterion
+	})), `replay of "${championTaskId}"`);
+	/**
+	* The replayed task's contract: the lineage-tagged objective, the criteria
+	* deep-copied (a candidate definition is the caller's object, not the
+	*/
+	const contract = {
+		contractVersion: TASK_CONTRACT_VERSION,
+		objective: `[${options.lineage}] ${effective.objective}`,
+		acceptanceCriteria: structuredClone([...fixed.criteria]),
+		assumptions: [...champion.contract?.assumptions ?? []],
+		constraints: [...champion.contract?.constraints ?? []],
+		requiredCapabilities: [...effective.requiredCapabilities]
+	};
+	const task = {
+		taskId: `t-${randomUUID()}`,
+		definitionRef: { ...champion.definitionRef },
+		objective: contract.objective,
+		depth: 0,
+		acceptanceCriteria: contract.acceptanceCriteria,
+		requestedCapabilities: [...contract.requiredCapabilities],
+		decompositionStatus: "leaf",
+		status: "created",
+		runIds: [],
+		childTaskIds: [],
+		contract,
+		...champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}
+	};
+	const spawn = options.spawn !== false;
+	/**
+	* A replayed worker reads its context the way every task worker does (A2):
+	* the replay task is parentless by design, so the store records no handoff
+	*/
+	const replaySnapshot = await self.context.task.snapshotIn(storeId);
+	const replayBudget = resolveRootBudget(replaySnapshot, self.config.rootBudget ?? {});
+	if (!replayBudget.ok) {
+		if (hasRootLimits(self.config.rootBudget)) throw new Error(`task-runtime: replay of "${championTaskId}" refused: the root budget cannot be resolved: ${replayBudget.reason}`);
+	} else {
+		const startVerdict = checkRunStart(replaySnapshot, replayBudget);
+		if (!startVerdict.allowed) throw new Error(`task-runtime: replay of "${championTaskId}" refused: ${startVerdict.reason}`);
+	}
+	const workspacePath = named ?? await self.workspacePathForSession(callerSessionId);
+	const workspaceOwner = workspacePath === void 0 ? void 0 : await claimReplayWorkspace(self, workspacePath, storeId, callerSessionId, championTaskId, task.taskId);
+	self.replayLineage.set(task.taskId, options.lineage);
+	const controller = new AbortController();
+	const run = async () => {
+		try {
+			const outcome = await runReplayTask(await self.orchestrateEnv(callerSessionId, callerSessionId, named), storeId, {
+				task,
+				manifest,
+				providers: precheck,
+				lineage: options.lineage,
+				agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, self.config.defaultPreset),
+				...options.overlay?.extraSkillRoots === void 0 ? {} : { skillRoots: [...options.overlay.extraSkillRoots] },
+				...options.agentOptions === void 0 ? {} : { agentOptions: { ...options.agentOptions } },
+				spawn,
+				championRunId
+			}, {
+				...options.signal === void 0 ? {} : { admission: options.signal },
+				advance: controller.signal
+			});
+			/**
+			* A named workspace is what the outcome of this replay reports: the
+			* comparison report names the directory each side's run went through. An
+			*/
+			return named === void 0 ? outcome : {
+				...outcome,
+				workspace: named
+			};
+		} finally {
+			if (workspacePath !== void 0 && workspaceOwner !== void 0) await releaseReplayWorkspace(self, workspacePath, workspaceOwner);
+		}
+	};
+	const promise = run();
+	/**
+	* A replay is a driver like a batch is: the runtime owns its progress, so a
+	* cancellation or an unload stops it. Its own promise never rejects — the
+	*/
+	const driverKey = `replay/${storeId}/${championTaskId}`;
+	self.registerDriver(driverKey, storeId, controller, promise.then(() => [], () => []));
 	try {
-		await env.task.markRunStatusIn(storeId, current.taskId, current.runId, status, env.actor, { reason });
-	} catch (error) {
-		const settled = await env.task.runIn(storeId, current.runId).catch(() => void 0);
-		if (settled === void 0 || settled.status === "running") throw error;
-		return;
+		return await promise;
+	} finally {
+		self.drivers.delete(driverKey);
 	}
-	if (!snapshot.reviews.some((review) => review.runId === current.runId)) await recordTerminalReview(env, storeId, current.taskId, status, {
-		run: current,
-		...status === "failed" ? { localizedCause: reason } : {},
-		anomalies: [reason],
-		relatedTaskIds
-	});
-	env.onRunSettled?.(storeId, current.taskId, current.runId, status);
-	if (env.gate !== void 0) try {
-		releaseAskingSessions(env.gate, await env.task.snapshotIn(storeId), current.runId);
-	} catch (error) {
-		notifyOwner(env, current.sessionId, `task-runtime: the question blocks of the runs that asked run "${current.runId}" could not be recomputed after it settled (${message(error)}); the store's own derivation is unchanged and the next recovery recomputes them`);
+}
+async function claimReplayWorkspace(self, workspace, storeId, callerSessionId, championTaskId, replayTaskId) {
+	const registry = self.workspaces;
+	if (registry === void 0) throw new Error("task-runtime: the workspace registry is not initialized");
+	const owner = {
+		kind: "run",
+		storeId,
+		taskId: replayTaskId,
+		runId: `replay-of-${championTaskId}`,
+		since: now()
+	};
+	const top = registry.ownerOf(workspace);
+	if (top === void 0) {
+		await registry.claim(workspace, owner);
+		return registry.ownerOf(workspace) ?? owner;
 	}
-	await releaseWorkspaceLayer(env, runOwner(storeId, current.taskId, current.runId), current.sessionId);
-	notifyOwner(env, current.sessionId, `task-runtime: run "${current.runId}" was settled ${status}: ${reason}`);
+	const callerRunId = self.sessions.get(callerSessionId)?.runId;
+	if (!(callerRunId !== void 0 && top.storeId === storeId && top.runId === callerRunId)) throw new WorkspaceBusyError(workspace, top, top.since, `a replay from session ${callerSessionId} cannot write into a checkout held by ${top.kind} ${top.taskId ?? top.batchId ?? ""}`);
+	await registry.push(workspace, top, owner);
+	return owner;
+}
+async function releaseReplayWorkspace(self, workspace, owner) {
+	const registry = self.workspaces;
+	if (registry === void 0) return;
+	const { conflict } = await releaseLayer(registry, workspace, (top) => top.kind === owner.kind && top.runId === owner.runId && top.storeId === owner.storeId);
+	if (conflict !== void 0) self.warn(`workspace ${workspace} was expected to hold the replay layer ${owner.runId ?? ""}, but holds ${describeOwner(conflict)}`);
 }
 
 //#endregion
-//#region src/recovery.ts
-/** The fields one request may carry: anything else is refused by name rather than ignored. */
-const REQUEST_FIELDS = [
-	"sourceTaskId",
-	"sourceRunId",
-	"sourceDiagnosisId",
-	"requestKey",
-	"reuses"
-];
-/** The fields one reuse declaration may carry. */
-const REUSE_FIELDS = [
-	"childIndex",
-	"taskId",
-	"sourceRunId",
-	"evidenceId",
-	"criterionId",
-	"artifactRefs",
-	"inputRefs"
-];
-function nonEmpty$1(value) {
-	return typeof value === "string" && value.trim().length > 0;
+//#region src/service/drivers.ts
+function registerDriver(self, key, storeId, controller, promise, parentTaskId) {
+	self.drivers.set(key, {
+		controller,
+		promise,
+		storeId,
+		...parentTaskId === void 0 ? {} : { parentTaskId }
+	});
+	const forget = () => {
+		if (self.drivers.get(key)?.controller === controller) self.drivers.delete(key);
+	};
+	promise.then(forget, async (error) => {
+		forget();
+		const reason = `driver ${key} failed outside its own settlement: ${message(error)}`;
+		self.warn(reason);
+		await failBatchFromRuntime(self, storeId, key, reason);
+	});
 }
-function isRecord(value) {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
+function standDownPendingDrivers(self, state) {
+	for (const pending of state.pendingDrivers.splice(0)) {
+		if (self.drivers.get(pending.key)?.controller === pending.controller) self.drivers.delete(pending.key);
+		pending.controller.abort();
+	}
+}
+async function failBatchFromRuntime(self, storeId, key, reason, outcome = "failed") {
+	const prefix = `${storeId}/`;
+	if (!key.startsWith(prefix)) return;
+	const batchId = key.slice(prefix.length);
+	const parts = settlementParts(self, `fail-batch:${storeId}`);
+	try {
+		const found = await batchRecordIn(self, storeId, batchId);
+		if (found === void 0) return;
+		await blockUnstartedChildren(parts, storeId, found.memberTaskIds, reason);
+		const parentRun = await self.context.task.runIn(storeId, found.run.runId).catch(() => void 0);
+		if (parentRun === void 0 || parentRun.status !== "running") return;
+		await settleRunFromRuntime(parts, storeId, parentRun, outcome, `batch ${batchId} ${outcome}: ${reason}`);
+	} catch (error) {
+		self.warn(`store ${storeId}: the failed driver ${key} could not be settled (${message(error)})`);
+	}
+}
+async function batchRecordIn(self, storeId, batchId) {
+	const found = [...(await self.context.task.snapshotIn(storeId)).runs].reverse().flatMap((run) => (run.batches ?? []).map((batch) => ({
+		run,
+		batch
+	}))).find((entry) => entry.batch.batchId === batchId);
+	return found === void 0 ? void 0 : {
+		taskId: found.run.taskId,
+		run: found.run,
+		memberTaskIds: [...found.batch.memberTaskIds]
+	};
+}
+function batchHeldByRun(run, batchId) {
+	return run.batches?.some((batch) => batch.batchId === batchId) === true;
+}
+function settlementParts(self, actor) {
+	return {
+		task: self.context.task,
+		actor,
+		notify: (sessionId, text$1) => {
+			self.notify(sessionId, text$1);
+		},
+		observeSession: async (sessionId) => self.observeSession(sessionId),
+		budget: { ...self.config.budget },
+		onRunSettled: (storeId, taskId, runId, status) => {
+			runSettledFromRuntime(self, storeId, taskId, runId, status);
+		},
+		onTerminalReview: (fact) => self.notifyTerminalReview(fact),
+		gate: self.executionGate
+	};
+}
+function runSettledFromRuntime(self, storeId, taskId, runId, status) {
+	recomputeAskingSessions(self, storeId, runId);
+	const sessionId = self.sessionBoundInProcess(storeId, runId);
+	if (sessionId === void 0) return;
+	self.executionGate.setTerminal(sessionId);
+	self.releaseRunWorkspaceLayer(storeId, runId, sessionId).catch((error) => {
+		self.warn(`run ${runId}: the workspace layer it held could not be released (${message(error)})`);
+	}).finally(() => {
+		if (self.sessionWorkspaces.size > 0) self.sessionWorkspaces.delete(sessionId);
+		if (self.sessionExecutionBindings.size > 0) self.sessionExecutionBindings.delete(sessionId);
+	});
+}
+async function recomputeAskingSessions(self, storeId, runId) {
+	try {
+		releaseAskingSessions(self.executionGate, await self.context.task.snapshotIn(storeId), runId);
+	} catch (error) {
+		self.warn(`store ${storeId}: the question blocks of the runs that asked run "${runId}" could not be recomputed after it settled (${message(error)})`);
+	}
+}
+function reportUnsettledQuestionDeliveries(self, storeId, deliveries) {
+	const unsettled = deliveries.filter((delivery) => delivery.status === "refused" || delivery.status === "unavailable");
+	if (unsettled.length === 0) return;
+	const counts = /* @__PURE__ */ new Map();
+	for (const delivery of unsettled) counts.set(delivery.status, (counts.get(delivery.status) ?? 0) + 1);
+	const byStatus = [...counts].sort(([left], [right]) => left.localeCompare(right)).map(([status, count]) => `${count} ${status}`).join(", ");
+	self.warn(`store ${storeId}: ${unsettled.length} of ${deliveries.length} owed question message${deliveries.length === 1 ? "" : "s"} could not be settled (${byStatus}): ${unsettled.map((delivery) => `${delivery.subject} [${delivery.status}${delivery.reason === void 0 ? "" : `: ${delivery.reason}`}]`).join("; ")}. The Task records still hold these intents, no substitute parent is invented, and the next activation retries them`);
+}
+function startBatchDriver(self, options) {
+	const key = `${options.storeId}/${options.batchId}`;
+	if (self.drivers.has(key)) return;
+	const controller = new AbortController();
+	const batch = {
+		storeId: options.storeId,
+		parentTaskId: options.parentTaskId,
+		parentRunId: options.parentRunId,
+		batchId: options.batchId,
+		callerSessionId: options.callerSessionId,
+		reason: options.reason,
+		...options.excludeCallId === void 0 ? {} : { excludeCallId: options.excludeCallId },
+		...options.providers === void 0 ? {} : { providers: options.providers }
+	};
+	const barrier = self.storeRecovery.get(options.storeId);
+	const gate$1 = barrier !== void 0 && barrier.status === "recovering" ? barrier : void 0;
+	const promise = (async () => {
+		if (gate$1 !== void 0) {
+			gate$1.pendingDrivers.push({
+				key,
+				controller
+			});
+			if (!await Promise.race([gate$1.released, new Promise((resolve$1) => {
+				controller.signal.addEventListener("abort", () => resolve$1(false), { once: true });
+			})]) || controller.signal.aborted) return [];
+		}
+		return await driveBatch(await self.orchestrateEnv(options.callerSessionId, options.callerSessionId), {
+			...batch,
+			signal: controller.signal
+		});
+	})();
+	registerDriver(self, key, options.storeId, controller, promise, options.parentTaskId);
+}
+async function submitResult(self, callerSessionId, spec, exec = {}) {
+	if (spec.summary.trim().length === 0) throw new Error("task-runtime: a submission requires a non-empty summary of what was delivered");
+	const { storeId, task, run } = await self.runForSession(callerSessionId);
+	/**
+	* The recovery door comes before the run's own verdicts (A2 §E): a store
+	* this process has not recovered is refused by name even when the run
+	*/
+	await self.assertRecoveryReady(storeId, "a result submission");
+	if (run.status !== "running") return {
+		status: run.status,
+		detail: `run "${run.runId}" is already settled as "${run.status}"; the recorded submission stands and nothing was changed`
+	};
+	const phase = run.executionPhase;
+	if (phase === "submitted") return {
+		status: "submitted",
+		detail: `run "${run.runId}" already submitted: ${run.submission?.summary ?? "a submission is recorded"}${run.submission?.submittedAt === void 0 ? "" : ` at ${run.submission.submittedAt}`}. Verification is under way (or already recorded); a second submission changes nothing.`
+	};
+	if (phase === "waiting_children") throw new Error(`task-runtime: run "${run.runId}" is waiting on its child batch (${run.batchId ?? "unrecorded"}); a parent cannot submit while its children are still running — the batch has to end and hand the run back before the parent may hand in its own result`);
+	if (phase === void 0) throw new Error(`task-runtime: run "${run.runId}" predates coordination phases; it cannot submit (needs recovery: cancel this task tree and re-create it)`);
+	/**
+	* A run hands its result in only when the references its own contract
+	* declares are satisfied (A6 §F.4: "根最终提交必须检查产物已满足"). The
+	*/
+	const store = await self.context.task.snapshotIn(storeId);
+	const missingArtifacts = missingRequiredArtifacts(task.acceptanceCriteria, store);
+	if (missingArtifacts.length > 0) {
+		for (const missing of missingArtifacts) await self.context.task.recordObligationIn(storeId, {
+			obligationId: `o-${randomUUID()}`,
+			goal: `artifact/evidence "${missing.ref}" required by task "${task.taskId}" criterion ${missing.criterionId} does not exist in the task store${missing.requirement === "requires" ? " as a verified reference product" : ""}`,
+			criterion: missing.requirement === "requires" ? `the task store holds evidence or an artifact named "${missing.ref}" (evidence id, artifact kind, or artifact id) produced by a verified run carrying a passing verdict` : `the task store holds evidence or an artifact named "${missing.ref}" (evidence id, artifact kind, or artifact id)`,
+			sourceTaskId: task.taskId
+		}, callerSessionId);
+		throw new Error(`task-runtime: the submission of run "${run.runId}" was refused: ${missingArtifactReason(missingArtifacts)}; the result is not handed in while the contract's own references are unsatisfied — produce or run what closes the gap, then submit`);
+	}
+	const submission = {
+		summary: spec.summary,
+		evidenceRefs: [...spec.evidenceRefs ?? []],
+		...spec.notes === void 0 ? {} : { notes: spec.notes },
+		submittedAt: now(),
+		origin: "worker"
+	};
+	/**
+	* Admission closes first (§3.3): this event is what refuses the next write,
+	* the next decomposition and a second submission. The drain that follows is
+	*/
+	await self.context.task.changeRunPhaseIn(storeId, task.taskId, run.runId, callerSessionId, {
+		phase: "submitted",
+		submission
+	});
+	self.executionGate.setPhase(callerSessionId, "submitted");
+	const env = await self.orchestrateEnv(callerSessionId, callerSessionId);
+	const lineage = self.replayLineage.get(task.taskId);
+	/**
+	* What this receipt is about: a run that admitted batches is judged on them
+	* (K1 §4's accumulated membership), so its review record names its members —
+	*/
+	const members = runMemberTaskIds(run);
+	const status = await settleSubmittedRun(env, storeId, task.taskId, run.runId, {
+		...exec.callId === void 0 ? {} : { excludeCallId: exec.callId },
+		...lineage === void 0 ? {} : { anomalies: [lineage] },
+		...members.length === 0 ? {} : { relatedTaskIds: members }
+	});
+	return {
+		status,
+		detail: status === "verified" ? `run "${run.runId}" submitted and verified.` : `run "${run.runId}" submitted and settled ${status}; the terminal review record names why.`
+	};
+}
+async function cancelBatch(self, storeId, batchId, callerSessionId) {
+	if (!batchId.startsWith("b-")) throw new Error(`task-runtime: "${batchId}" is not a batch id (a batch id is "b-<parentRunId>-<proposalId>")`);
+	const parentRun = [...(await self.context.task.snapshotIn(storeId)).runs].reverse().find((run) => run.sessionId === callerSessionId);
+	if (parentRun === void 0) throw new Error(`task-runtime: batch "${batchId}" cannot be cancelled by session "${callerSessionId}": no run of store "${storeId}" is bound to it`);
+	if (parentRun.batchId !== batchId) throw new Error(`task-runtime: batch "${batchId}" is not the batch run "${parentRun.runId}" is waiting on (${parentRun.batchId === void 0 ? "it holds no unfinished batch" : `it waits on "${parentRun.batchId}"`}); a batch is cancelled by the run that admitted it, while it is in flight`);
+	const parentTaskId = parentRun.taskId;
+	if (parentRun.status !== "running" || parentRun.executionPhase !== "waiting_children") throw new Error(`task-runtime: batch "${batchId}" is not in flight (its parent run is ${parentRun.status}${parentRun.executionPhase === void 0 ? "" : ` in phase "${parentRun.executionPhase}"`}); there is nothing to cancel`);
+	const entry = self.drivers.get(`${storeId}/${batchId}`);
+	if (entry === void 0) throw new Error(`task-runtime: batch "${batchId}" is not being driven by this process (it may have settled, or it is waiting for recovery); cancel the graph instead`);
+	entry.controller.abort();
+	/**
+	* The abort reaches the batches this one owns as well: a child that
+	* decomposed in turn holds a batch of its own, and leaving its driver parked
+	*/
+	await abortDescendantBatches(self, storeId, parentTaskId);
+	/**
+	* The runs under this batch that are still in flight are settled as cancelled
+	* here, rather than left to their aborted drivers: a child inside a
+	*/
+	await settleCancelledDescendants(self, storeId, parentTaskId, batchId, callerSessionId);
+	const outcomes = await entry.promise;
+	/**
+	* A driver that never started (a recovery barrier stood it down when this
+	* cancellation aborted it) settles nothing itself: the parent run and the
+	*/
+	const parentNow = await self.context.task.runIn(storeId, parentRun.runId).catch(() => void 0);
+	if (parentNow !== void 0 && parentNow.status === "running") await failBatchFromRuntime(self, storeId, `${storeId}/${batchId}`, `the batch was cancelled by its caller before its driver started: ${batchId}`, "cancelled");
+	return outcomes;
+}
+async function settleCancelledDescendants(self, storeId, taskId, batchId, callerSessionId) {
+	const snapshot = await self.context.task.snapshotIn(storeId);
+	const parentOf = new Map(snapshot.tasks.map((task) => [task.taskId, task.parentTaskId]));
+	const under = (candidate) => {
+		for (let current = parentOf.get(candidate); current !== void 0; current = parentOf.get(current)) if (current === taskId) return true;
+		return false;
+	};
+	const runs = snapshot.runs.filter((run) => run.status === "running" && run.taskId !== taskId && under(run.taskId));
+	if (runs.length === 0) return;
+	const env = await self.orchestrateEnv(callerSessionId, `cancel-batch:${batchId}`);
+	for (const run of runs) await settleRunFromRuntime(env, storeId, run, "cancelled", `the batch was cancelled while this child ran: ${batchId}`);
+}
+async function abortDescendantBatches(self, storeId, taskId) {
+	let snapshot;
+	try {
+		snapshot = await self.context.task.snapshotIn(storeId);
+	} catch (error) {
+		self.warn(`store ${storeId}: the batches under "${taskId}" could not be listed (${message(error)}); only the batch itself was aborted`);
+		return;
+	}
+	const parentOf = new Map(snapshot.tasks.map((task) => [task.taskId, task.parentTaskId]));
+	const under = (candidate) => {
+		for (let current = parentOf.get(candidate); current !== void 0; current = parentOf.get(current)) if (current === taskId) return true;
+		return false;
+	};
+	const entries = [...self.drivers.entries()].filter(([, driver]) => {
+		if (driver.storeId !== storeId || driver.parentTaskId === void 0) return false;
+		return driver.parentTaskId !== taskId && under(driver.parentTaskId);
+	});
+	for (const [, driver] of entries) driver.controller.abort();
+	await Promise.all(entries.map(([, driver]) => driver.promise.catch(() => [])));
+}
+async function cancelGraph(self, storeId, reason) {
+	try {
+		self.reindex(storeId, await self.context.task.snapshotIn(storeId));
+	} catch (error) {
+		self.warn(`store ${storeId}: it could not be read for the cancellation "${reason}" (${message(error)}), so nothing was cancelled`);
+		return;
+	}
+	/**
+	* The barrier below is in effect before it is durable, so the store is marked
+	* as being closed *before* the gate loop: from here until this method returns,
+	*/
+	self.closingStores.add(storeId);
+	/**
+	* A cancellation invalidates the recovery handle (A2 §E): drivers a still
+	* running barrier registered but not started stand down here — not-started
+	*/
+	self.invalidateStoreRecovery(storeId);
+	try {
+		for (const [sessionId, binding] of self.sessions) if (binding.storeId === storeId) self.executionGate.setTerminal(sessionId);
+		const entries = [...self.drivers.values()].filter((entry) => entry.storeId === storeId);
+		for (const entry of entries) entry.controller.abort();
+		await Promise.all(entries.map((entry) => entry.promise.catch(() => [])));
+		const snapshot = await self.context.task.snapshotIn(storeId);
+		const env = await self.orchestrateEnv(self.recoverySessionFor(snapshot, storeId), `cancel-graph:${storeId}`);
+		const stillRunning = snapshot.runs.filter((run) => run.status === "running");
+		for (const run of stillRunning) await settleRunFromRuntime(env, storeId, run, "cancelled", `cancelled with the graph: ${reason}`);
+		for (const run of stillRunning) await self.reconcileSessionJobs(run.sessionId);
+		await self.releaseStoreWorkspace(storeId);
+	} finally {
+		self.closingStores.delete(storeId);
+	}
+}
+async function awaitBatch(self, storeId, batchId) {
+	if (!batchId.startsWith("b-")) throw new Error(`task-runtime: "${batchId}" is not a batch id (a batch id is "b-<parentRunId>-<proposalId>")`);
+	const entry = self.drivers.get(`${storeId}/${batchId}`);
+	if (entry !== void 0) return await entry.promise;
+	const found = await batchRecordIn(self, storeId, batchId);
+	if (found === void 0) throw new Error(`task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; a batch is read from the run that admitted it, never derived from its id`);
+	return await deriveChildOutcomes(self.context.task, storeId, found.taskId, found.memberTaskIds);
 }
 /**
-* Every reason one request cannot be a recovery request at all: an unknown
-* field (a caller may not smuggle a decision in), a missing or empty identity,
-* a `reuses` member that is not a declaration. Structural only — whether the
-* named task, run or diagnosis exists is the store's answer, asked after this
-* (and answered as a refusal of its own).
+* Stop a `waiting_children` run whose batch this build cannot name: settle it
+* cancelled by name instead of attributing a batch the store does not record.
 */
-function recoveryRequestDefects(request) {
-	if (!isRecord(request)) return ["the request must be an object"];
-	const defects = [];
-	for (const key of Object.keys(request)) if (!REQUEST_FIELDS.includes(key)) defects.push(`unknown field "${key}": a recovery request carries ${REQUEST_FIELDS.join(", ")} and nothing else`);
-	if (!nonEmpty$1(request.sourceTaskId)) defects.push("sourceTaskId must be a non-empty task id");
-	if (request.sourceRunId !== null && !nonEmpty$1(request.sourceRunId)) defects.push("sourceRunId must be a non-empty run id or null (a failure that had no run)");
-	if (!nonEmpty$1(request.sourceDiagnosisId)) defects.push("sourceDiagnosisId must be a non-empty diagnosis id");
-	if (!nonEmpty$1(request.requestKey)) defects.push("requestKey must be a non-empty string");
-	if (request.reuses !== void 0) if (!Array.isArray(request.reuses)) defects.push("reuses must be an array of declarations");
-	else {
-		const claimed = /* @__PURE__ */ new Set();
-		request.reuses.forEach((entry, position) => {
-			if (!isRecord(entry)) {
-				defects.push(`reuses[${position}] must be an object`);
-				return;
+async function stopUnidentifiedBatch(self, env, storeId, run) {
+	const reason = run.batchId === void 0 ? `recovery: run "${run.runId}" waits on its children but records no batch id, and a batch this build cannot name is not restarted` : `recovery: run "${run.runId}" waits on batch "${run.batchId}", which the run's own accumulation does not hold. A batch admitted before batches were identified by (parent run, proposal) is a stopped old state: this build cannot tell which run or which proposal admitted it, so it is not restarted and its ownership is not guessed at — the run is settled cancelled`;
+	self.warn(`store ${storeId}: ${reason}`);
+	await settleRunFromRuntime(env, storeId, run, "cancelled", reason);
+	await self.reconcileSessionJobs(run.sessionId);
+}
+async function reconcileStore(self, storeId) {
+	const snapshot = await self.context.task.snapshotIn(storeId);
+	self.reindex(storeId, snapshot);
+	const depthOf = (taskId) => snapshot.tasks.find((task) => task.taskId === taskId)?.depth ?? 0;
+	const ordered = snapshot.runs.filter((run) => run.status === "running").sort((left, right) => depthOf(right.taskId) - depthOf(left.taskId));
+	const env = await self.orchestrateEnv(self.recoverySessionFor(snapshot, storeId), `recovery:${storeId}`);
+	const questionResumes = [];
+	const waiting = [];
+	const submitted = [];
+	await self.rebuildWorkspaceOwnership(storeId);
+	for (const run of ordered) {
+		if (run.executionPhase === void 0) continue;
+		if (run.providerBinding !== void 0) {
+			const read = await self.readRunBinding(run.providerBinding);
+			if (read !== void 0 && read.defects.length > 0) throw new Error(`task-runtime: run "${run.runId}" content binding changed:\n- ${read.defects.join("\n- ")}`);
+		}
+		if (rootTaskStoreId(run.sessionId) !== storeId && !self.startedSessions.has(run.sessionId) && run.submission?.origin !== "runtime") {
+			const attempt = await resumeAdoptedWorker(env, storeId, run);
+			if (attempt.status !== "live") throw new Error(`task-runtime: cannot continue run "${run.runId}" in Session "${run.sessionId}": ${attempt.reason}`);
+			questionResumes.push({
+				subject: `run "${run.runId}" (session "${run.sessionId}")`,
+				status: "live"
+			});
+		}
+		if (run.executionPhase === "waiting_children") {
+			if (run.batchId === void 0 || !batchHeldByRun(run, run.batchId)) {
+				await stopUnidentifiedBatch(self, env, storeId, run);
+				continue;
 			}
-			for (const key of Object.keys(entry)) if (!REUSE_FIELDS.includes(key)) defects.push(`reuses[${position}] has unknown field "${key}"`);
-			if (!Number.isInteger(entry.childIndex) || entry.childIndex < 0) defects.push(`reuses[${position}].childIndex must be a non-negative integer`);
-			for (const name of [
-				"taskId",
-				"sourceRunId",
-				"evidenceId"
-			]) if (!nonEmpty$1(entry[name])) defects.push(`reuses[${position}].${name} must be a non-empty id`);
-			if (entry.criterionId !== void 0 && !nonEmpty$1(entry.criterionId)) defects.push(`reuses[${position}].criterionId must be a non-empty string when given`);
-			for (const name of ["artifactRefs", "inputRefs"]) {
-				const value = entry[name];
-				if (value !== void 0 && (!Array.isArray(value) || value.some((item) => !nonEmpty$1(item)))) defects.push(`reuses[${position}].${name} must be an array of non-empty references`);
+			waiting.push(run);
+		} else if (run.executionPhase === "submitted") submitted.push(run);
+	}
+	for (const run of submitted) {
+		const lineage = self.replayLineage.get(run.taskId);
+		await settleSubmittedRun(env, storeId, run.taskId, run.runId, lineage === void 0 ? {} : { anomalies: [lineage] });
+	}
+	for (const run of waiting) startBatchDriver(self, {
+		storeId,
+		parentTaskId: run.taskId,
+		parentRunId: run.runId,
+		batchId: run.batchId,
+		callerSessionId: run.sessionId,
+		reason: `continued batch ${run.batchId} after a restart`
+	});
+	/**
+	* The question deliveries this store still owes (A4 §F.1). This is the pass
+	* a restart runs, and it runs it *after* the sessions the barrier brought
+	*/
+	const deliverQuestions = async () => {
+		const deliveries = await reconcileQuestionDeliveries(self.questionCoordination(), storeId);
+		reportUnsettledQuestionDeliveries(self, storeId, deliveries);
+		await self.wakeUnclaimedQuestionMessages(storeId, deliveries);
+		const barrier$1 = self.storeRecovery.get(storeId);
+		const candidates = deliveries.filter((delivery) => delivery.status === "delivered" || delivery.status === "already-present");
+		if (barrier$1 !== void 0 && candidates.length > 0) {
+			const snapshot$1 = await self.context.task.snapshotIn(storeId);
+			const targetOf = new Map(pendingQuestionMessages(snapshot$1).messages.map((message$1) => [message$1.messageId, message$1.targetSessionId]));
+			for (const delivery of candidates) {
+				const target = targetOf.get(delivery.messageId);
+				if (target === void 0) continue;
+				if (delivery.status === "delivered" || self.sessionHoldsPendingMessage(target, delivery.messageId)) barrier$1.wokenSessions.add(target);
 			}
-			if (Number.isInteger(entry.childIndex) && entry.childIndex >= 0) {
-				if (claimed.has(entry.childIndex)) defects.push(`reuses[${position}].childIndex ${entry.childIndex} is claimed by another entry; one position reads one member`);
-				claimed.add(entry.childIndex);
-			}
+		}
+		return deliveries;
+	};
+	/**
+	* The end-of-batch results this store still owes (K1 §2, §5) — the second
+	* delivery the pass makes, and the one a crash in the window between a batch's
+	*/
+	const deliverBatches = async () => {
+		const owed = owedBatchResults(await self.context.task.snapshotIn(storeId));
+		if (owed.length === 0) return;
+		const unread = [];
+		for (const entry of owed) try {
+			if (await self.redeliverBatchResult(storeId, entry.batchId) === "already-present") unread.push({
+				sessionId: entry.sessionId,
+				messageId: batchEndMessageId(entry.batchId)
+			});
+		} catch (error) {
+			self.warn(`store ${storeId}: the end-of-batch message for "${entry.batchId}" could not be re-derived (${message(error)}); the batch's facts stand and the next activation retries`);
+		}
+		self.wakeUnclaimedBatchResults(unread);
+	};
+	const barrier = self.storeRecovery.get(storeId);
+	let questionDeliveries = [];
+	if (barrier === void 0 || barrier.status !== "recovering") {
+		questionDeliveries = await deliverQuestions();
+		await deliverBatches();
+	} else if (barrier.cancelled !== true) barrier.pendingQuestionDelivery = async () => {
+		await deliverQuestions();
+		await deliverBatches();
+	};
+	/**
+	* The proposal pass comes last (T2/T3 §5–§6): a batch it admits is driven by
+	* the driver it starts, and the workspace question is already settled above,
+	*/
+	return {
+		unresolvedProposals: await self.reconcileProposals(storeId),
+		questionDeliveries,
+		questionResumes
+	};
+}
+async function failBatch(self, storeId, batchId, reason) {
+	const found = await batchRecordIn(self, storeId, batchId);
+	if (found === void 0) return;
+	self.drivers.get(`${storeId}/${batchId}`)?.controller.abort();
+	const env = await self.orchestrateEnv(await self.sessionForStore(storeId), `fail-batch:${storeId}`);
+	await blockUnstartedChildren(env, storeId, found.memberTaskIds, reason);
+	const parentRun = (await self.context.task.snapshotIn(storeId)).runs.find((run) => run.runId === found.run.runId);
+	if (parentRun === void 0 || parentRun.status !== "running") return;
+	await settleRunFromRuntime(env, storeId, parentRun, "failed", reason);
+}
+
+//#endregion
+//#region src/service/questions.ts
+async function askParentQuestionImpl(self, callerSessionId, request) {
+	const caller = await questionCaller(self, callerSessionId, "task_ask_parent");
+	return await askParentQuestion(questionCoordination(self), caller, request);
+}
+async function answerParentQuestionImpl(self, callerSessionId, request) {
+	const caller = await questionCaller(self, callerSessionId, "task_answer");
+	/**
+	* Nothing is settled here: what the answer changes is the *asking* run's own
+	* block (recomputed by the question entry from the store) and its Session,
+	*/
+	return await answerParentQuestion(questionCoordination(self), caller, request);
+}
+async function questionCaller(self, callerSessionId, entry) {
+	if (self.agentOrUndefined(callerSessionId) === void 0) throw new Error(`task-runtime: ${entry} needs a live caller session; "${callerSessionId}" has no live agent in this process, and the question identity comes from the live caller's own run`);
+	let binding;
+	try {
+		binding = await self.runForSession(callerSessionId);
+	} catch (error) {
+		throw new Error(`task-runtime: ${entry} refused: ${message(error)}`, { cause: error });
+	}
+	await self.assertRecoveryReady(binding.storeId, entry);
+	return {
+		sessionId: callerSessionId,
+		storeId: binding.storeId,
+		runId: binding.run.runId,
+		actor: callerSessionId
+	};
+}
+function questionCoordination(self) {
+	return {
+		task: self.context.task,
+		sessionQuery: self.context.sessionQuery,
+		messages: self.context.agentRuntime,
+		gate: self.executionGate
+	};
+}
+async function wakeUnclaimedQuestionMessages(self, storeId, deliveries) {
+	const unread = new Set(deliveries.filter((delivery) => delivery.status === "already-present").map((delivery) => delivery.messageId));
+	if (unread.size === 0) return;
+	const snapshot = await self.context.task.snapshotIn(storeId);
+	const targets = /* @__PURE__ */ new Map();
+	for (const message$1 of pendingQuestionMessages(snapshot).messages) if (unread.has(message$1.messageId)) targets.set(message$1.targetSessionId, message$1.messageId);
+	wakeUnclaimed(self, [...targets].map(([sessionId, messageId]) => ({
+		sessionId,
+		messageId
+	})), (messageId) => `task-runtime: this session was brought back after a restart with coordination input it has not read (message "${messageId}" is still pending in its inbox); read it and act on it — the framework will not send a second copy`);
+}
+
+//#endregion
+//#region src/service/sessions.ts
+async function resumeAdoptedWorkerSession(self, request) {
+	const sessionId = request.run.sessionId;
+	const continuing = self.startedSessions.has(sessionId);
+	/**
+	* A session already live here is one this process holds: the resume is not
+	* repeated (it would be an ownership conflict by construction), and only the
+	*/
+	const live = self.agentOrUndefined(sessionId) !== void 0;
+	const bound = self.sessions.get(sessionId);
+	if (live && (bound === void 0 || bound.storeId !== request.storeId || bound.runId !== request.run.runId)) throw new Error(`task-runtime: Session "${sessionId}" is live under another owner or Run binding`);
+	if (!live) {
+		const graph = await self.context.graphs.graphForSession(SessionId(sessionId));
+		await self.context.agentRuntime.resumeWorkerAgent({
+			sessionId: SessionId(sessionId),
+			scope: {
+				graphStoreId: graph.graphStoreId,
+				layoutStoreId: graph.layoutStoreId
+			},
+			run: {
+				storeId: request.storeId,
+				taskId: request.run.taskId,
+				runId: request.run.runId,
+				sessionId: SessionId(sessionId),
+				...request.run.agentPreset === void 0 ? {} : { agentPreset: request.run.agentPreset },
+				capabilitySnapshot: request.run.capabilitySnapshot
+			},
+			grant: request.grant,
+			...request.permissionPreset === void 0 ? {} : { permissionPreset: request.permissionPreset },
+			taskWorker: request.taskWorker
 		});
 	}
-	return defects;
+	self.sessions.set(sessionId, {
+		storeId: request.storeId,
+		taskId: request.run.taskId,
+		runId: request.run.runId
+	});
+	self.startedSessions.add(sessionId);
+	await applyResumedSessionGate(self, request.storeId, sessionId, request.run.runId);
+	if (!live) {
+		const drained = await drainAdoptedSession(self, sessionId);
+		if (!drained.confirmed) {
+			await stopAdoptedSession(self, sessionId);
+			throw new Error(`task-runtime: managed work of Session "${sessionId}" could not be confirmed stopped: ${drained.pending.join("; ")}`);
+		}
+	}
+	const snapshot = await self.context.task.snapshotIn(request.storeId);
+	const blockedOnOwnQuestion = blockingQuestionsOf(snapshot, request.run.runId).length > 0;
+	const coordinationPending = request.run.executionPhase === "waiting_children" && pendingCoordinationOf(snapshot, request.run.runId).length > 0;
+	if (!continuing && (request.run.executionPhase === "active" || coordinationPending)) {
+		const notice = "task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.";
+		if (blockedOnOwnQuestion) appendNotice(self, sessionId, notice);
+		else self.notifyWhenReady(sessionId, notice);
+	}
+	return { status: "live" };
 }
-/** The runs of one source task that are recovery attempts, in start order (which is the store's run order). */
-function recoveryAttemptsOf(snapshot, sourceTaskId) {
-	return snapshot.runs.filter((run) => run.taskId === sourceTaskId && run.recovery !== void 0);
+async function applyResumedSessionGate(self, storeId, sessionId, runId) {
+	const token = self.executionGate.decisionToken(sessionId);
+	const snapshot = await self.context.task.snapshotIn(storeId);
+	const run = snapshot.runs.find((candidate) => candidate.runId === runId);
+	if (run === void 0) throw new Error(`task-runtime: resumed Run "${runId}" is absent from store "${storeId}"`);
+	gatePhaseFromStore(self, sessionId, run, storeId, token);
+	self.executionGate.applyStoreQuestionsBlocked(sessionId, blockingQuestionsOf(snapshot, runId).length > 0, token);
 }
-/** The attempt one request key names on a source task, or `undefined`. */
-function recoveryAttemptWithKey(snapshot, sourceTaskId, requestKey) {
-	return recoveryAttemptsOf(snapshot, sourceTaskId).find((run) => run.recovery.requestKey === requestKey);
-}
-/**
-* The attempt one diagnosis already has whose run has not settled, or
-* `undefined` — the mutual exclusion one diagnosis's recovery has (plan §F.4:
-* "无在途恢复尝试"). "In flight" is the run's own status and nothing else: a
-* run that is still `running` is an attempt still being made, and every
-* terminal status — verified, failed, cancelled, blocked — releases the
-* diagnosis for another key.
-*/
-function inFlightRecoveryAttempt(snapshot, sourceTaskId, sourceDiagnosisId) {
-	return recoveryAttemptsOf(snapshot, sourceTaskId).find((run) => run.recovery.sourceDiagnosisId === sourceDiagnosisId && run.status === "running");
-}
-/**
-* What makes two attempts under one key the *same* attempt: the content the key
-* is bound to — the source run it recovers and the reuse it declares. A retry
-* of the same request reproduces this digest and is answered from the record; a
-* different content under the same key is a refusal by name (the rule every
-* request key in this runtime follows).
-*/
-function recoveryAttemptDigest(recovery) {
-	return sha256Hex(canonicalize({
-		sourceRunId: recovery.sourceRunId ?? null,
-		reusedMembers: recovery.reusedMembers.map((member) => ({
-			childIndex: member.childIndex,
-			taskId: member.taskId,
-			sourceRunId: member.sourceRunId,
-			evidenceId: member.evidenceId,
-			criterionId: member.criterionId ?? null,
-			artifactRefs: [...member.artifactRefs],
-			inputRefs: [...member.inputRefs]
-		}))
-	}));
-}
-/** The request's own content identity, derived from the same fields the stored attempt carries. */
-function requestAttemptDigest(request) {
-	return recoveryAttemptDigest({
-		...request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId },
-		reusedMembers: (request.reuses ?? []).map((declaration) => ({
-			childIndex: declaration.childIndex,
-			taskId: declaration.taskId,
-			sourceRunId: declaration.sourceRunId,
-			evidenceId: declaration.evidenceId,
-			...declaration.criterionId === void 0 ? {} : { criterionId: declaration.criterionId },
-			artifactRefs: [...declaration.artifactRefs ?? []],
-			inputRefs: [...declaration.inputRefs ?? []]
-		}))
+async function drainAdoptedSession(self, sessionId) {
+	return await drainSession(self.executionGate, sessionId, {
+		timeoutMs: self.config.writeDrainTimeoutMs,
+		jobs: self.softService("jobs"),
+		agent: self.agentOrUndefined(sessionId)
 	});
 }
-/** The input references one sibling task declares, across its criteria (`requiresArtifact`, `acceptsArtifact`, `protectedInputs`). */
-function declaredInputsOf(task) {
-	return new Set(task.acceptanceCriteria.flatMap((criterion) => [
-		...criterion.requiresArtifact ?? [],
-		...criterion.acceptsArtifact ?? [],
-		...(criterion.protectedInputs ?? []).map((input) => input.path)
-	]));
-}
-/** One declaration's citation, resolved against the store, or the reasons it does not resolve. */
-function citationDefects(declaration, context, at) {
-	const defects = [];
-	const sibling = context.snapshot.tasks.find((task) => task.taskId === declaration.taskId);
-	if (sibling === void 0) return [`${at}: no task "${declaration.taskId}" exists in this store`];
-	if (sibling.parentTaskId !== context.source.taskId) defects.push(`${at}: task "${sibling.taskId}" is a child of "${sibling.parentTaskId ?? "(none)"}", not of "${context.source.taskId}" — only a sibling of this attempt's own task is reusable`);
-	if (sibling.status !== "verified") defects.push(`${at}: sibling "${sibling.taskId}" is ${sibling.status}, not verified — only a passed sibling's evidence is reusable`);
-	const run = context.snapshot.runs.find((candidate) => candidate.runId === declaration.sourceRunId);
-	if (run === void 0) {
-		defects.push(`${at}: no run "${declaration.sourceRunId}" exists in this store`);
-		return defects;
+async function stopAdoptedSession(self, sessionId) {
+	try {
+		await self.context.agentRuntime.stopAgents([SessionId(sessionId)]);
+	} catch (error) {
+		self.warn(`session ${sessionId}: the resumed worker could not be stopped again (${message(error)})`);
 	}
-	if (run.taskId !== declaration.taskId) defects.push(`${at}: run "${run.runId}" belongs to task "${run.taskId}", not to the cited sibling "${declaration.taskId}"`);
-	if (run.status !== "verified") defects.push(`${at}: cited run "${run.runId}" is ${run.status}, not verified — only evidence of a verified run is reusable`);
-	const bundle = context.snapshot.evidence.find((item) => item.evidenceId === declaration.evidenceId);
-	if (bundle === void 0) {
-		defects.push(`${at}: no evidence "${declaration.evidenceId}" exists in this store`);
-		return defects;
+}
+async function rebuildWorkspaceOwnership(self, storeId) {
+	const snapshot = await self.context.task.snapshotIn(storeId);
+	const rootTaskId = snapshot.tasks.find((task) => task.parentTaskId === void 0)?.taskId;
+	const rootRun = snapshot.runs.find((run$1) => run$1.status === "running" && rootTaskStoreId(run$1.sessionId) === storeId) ?? snapshot.runs.find((run$1) => run$1.status === "running" && run$1.taskId === rootTaskId && run$1.recovery !== void 0);
+	if (rootRun === void 0) {
+		await releaseStoreWorkspace(self, storeId);
+		return;
 	}
-	if (bundle.taskRunId !== run.runId || bundle.taskId !== run.taskId) defects.push(`${at}: evidence "${bundle.evidenceId}" belongs to task "${bundle.taskId}"/run "${bundle.taskRunId}", not to the cited "${run.taskId}"/"${run.runId}"`);
-	const products = new Set(bundle.artifacts.flatMap((artifact) => [artifact.artifactId, artifact.kind]));
-	for (const reference of declaration.artifactRefs ?? []) if (!products.has(reference)) defects.push(`${at}: evidence "${bundle.evidenceId}" holds no artifact "${reference}" (by artifact id or kind)`);
-	const inputs = declaredInputsOf(sibling);
-	for (const reference of declaration.inputRefs ?? []) if (!inputs.has(reference)) defects.push(`${at}: sibling "${sibling.taskId}" declares no input "${reference}" (requiresArtifact, acceptsArtifact or protectedInputs)`);
-	if (declaration.criterionId !== void 0) if (!sibling.acceptanceCriteria.some((criterion) => criterion.criterionId === declaration.criterionId)) defects.push(`${at}: sibling "${sibling.taskId}" declares no criterion "${declaration.criterionId}"`);
-	else {
-		const verdict = bundle.verifierResults.find((result) => result.criterionId === declaration.criterionId);
-		if (verdict?.status !== "pass") defects.push(`${at}: criterion "${declaration.criterionId}" of sibling "${sibling.taskId}" carries ${verdict === void 0 ? "no verdict" : `a "${verdict.status}" verdict`} in evidence "${bundle.evidenceId}" — only a passing verdict is reusable`);
+	const workspace = await workspacePathForSession(self, rootRun.sessionId);
+	if (workspace === void 0) return;
+	const held = self.workspaces.ownerOf(workspace);
+	if (held !== void 0) {
+		if (held.storeId !== storeId) throw new Error(`task-runtime: workspace ${workspace} is held by ${describeOwner(held)}`);
+		return;
 	}
-	return defects;
-}
-/**
-* Every reason the declared reuse cannot be a binding of the original
-* acceptance map — the "invalid reference" refusal, with the affected item
-* named per reason (plan §F.4: "无效引用拒绝并列出受影响项").
-*
-* Three questions, in the order a reader checks them:
-*
-* 1. **Does the position exist in the failed attempt?** The cited sibling must
-*    be the member the failed run reads at that very position (`childIndex`),
-*    which is what "the same position" means. A source that failed without a
-*    run — a rejected admission, a blocked task — has no member sequence to
-*    read positions from, so a reuse of it is refused by name rather than
-*    bound to a position nobody can check.
-* 2. **Does the citation resolve?** The sibling, its verified run, the bundle,
-*    the criterion's passing verdict, the artifacts and the declared inputs —
-*    {@link citationDefects}.
-* 3. **Does it agree with the original acceptance map?** Where the map names
-*    this position, the criterion it narrows to is the criterion the binding
-*    carries: a declaration that names nothing there, or names another
-*    criterion, is refused — the map is immutable and the attempt binds to it,
-*    never around it.
-*/
-function reuseDefects(declarations, context) {
-	const defects = [];
-	const map = context.source.acceptanceCriteria.flatMap((criterion) => criterion.childEvidence ?? []);
-	declarations.forEach((declaration, position) => {
-		const at = `reuses[${position}]`;
-		if (context.sourceRun === void 0) defects.push(`${at}: source task "${context.source.taskId}" failed without a run, so there is no member sequence to read position ${position} from; a reuse is bound to the positions of the failed attempt and cannot be checked against nothing`);
-		else if (context.sourceMembers[declaration.childIndex] !== declaration.taskId) defects.push(`${at}: the failed run "${context.sourceRun.runId}" reads ${context.sourceMembers[declaration.childIndex] === void 0 ? "no member" : `"${context.sourceMembers[declaration.childIndex]}"`} at position ${declaration.childIndex}, not the cited "${declaration.taskId}"`);
-		defects.push(...citationDefects(declaration, context, at));
-		defects.push(...mapDefects(declaration, map, at));
-		defects.push(...stalenessDefects(declaration, context.snapshot, at));
-	});
-	return defects;
-}
-/**
-* Every reason a citation disagrees with the original acceptance map at the
-* position it claims: the map narrows a position to a criterion, to an evidence
-* reference, or to both, and the binding has to carry what the map names — the
-* map is immutable and the attempt binds to it, never around it.
-*/
-function mapDefects(declaration, map, at) {
-	const defects = [];
-	const entry = map.find((item) => item.childIndex === declaration.childIndex);
-	if (entry === void 0) return defects;
-	if (entry.criterionId !== void 0 && entry.criterionId !== declaration.criterionId) defects.push(`${at}: the original acceptance map narrows position ${declaration.childIndex} to criterion "${entry.criterionId}", and this declaration ${declaration.criterionId === void 0 ? "names no criterion" : `names "${declaration.criterionId}"`}`);
-	if (entry.evidenceRef !== void 0 && declaration.evidenceId !== entry.evidenceRef && !(declaration.artifactRefs ?? []).includes(entry.evidenceRef)) defects.push(`${at}: the original acceptance map narrows position ${declaration.childIndex} to evidence "${entry.evidenceRef}", which the cited bundle "${declaration.evidenceId}" does not carry (by evidence id, artifact id or artifact kind)`);
-	return defects;
-}
-/**
-* Whether the sibling's evidence still rests on what it rested on: every input
-* reference its own criteria declare (`requiresArtifact` as a verified reference
-* product, `acceptsArtifact` as an existing raw input) has to resolve in the
-* store *now*. A binding whose inputs moved is not the evidence that was judged,
-* and re-running the position is the honest answer — reported, never silent.
-*
-* The one input vocabulary this read cannot check is `protectedInputs`: those
-* are file identities re-checked by the verifier against the checkout, which a
-* store snapshot does not hold. The citation still carries them
-* ({@link RootRecoveryReuse.inputRefs}), so a reader sees what the sibling's
-* criteria declared.
-*/
-function stalenessDefects(declaration, snapshot, at) {
-	const sibling = snapshot.tasks.find((task) => task.taskId === declaration.taskId);
-	if (sibling === void 0) return [];
-	return missingRequiredArtifacts(sibling.acceptanceCriteria, snapshot).map((issue) => `${at}: the sibling "${sibling.taskId}" declares ${issue.requirement === "requires" ? "a required product" : "a raw input"} "${issue.ref}" (criterion ${issue.criterionId}), which the store does not hold now as a ${issue.requirement === "requires" ? "verified reference product" : "usable input"}`);
-}
-/**
-* What the failed run's own facts support as a reuse (plan §F.4: the binding
-* comes from the store, never from a caller's parameters).
-*
-* The derivation reads exactly four durable facts — the failed run's member
-* sequence, each member's own verified run and evidence bundle, the original
-* acceptance criteria's `childEvidence` map, and the store's current evidence
-* for the inputs and products those members declared — and it binds a position
-* only when all of them resolve:
-*
-* - a member that did not pass is not a candidate: it is the work the attempt is
-*   for, and its position is left for the replacement an agent proposes;
-* - a passed member whose citation does not resolve (no verified run, no bundle,
-*   no passing verdict for the criterion the map names there, an artifact the
-*   bundle does not hold, an input or product the store no longer answers for)
-*   is **reported** in {@link ReuseDerivation.unbound} with every reason named —
-*   never bound, never silently dropped;
-* - a run that failed without a run (a rejected admission, a blocked task) has no
-*   member sequence, so nothing is derived and nothing is reported: there is no
-*   passed member the attempt is ignoring.
-*
-* The result is deterministic: the same store answers the same citations, so two
-* attempts at one source bind the same members at the same positions.
-*/
-function deriveReuse(context) {
-	const sourceRun = context.sourceRun;
-	if (sourceRun === void 0) return {
-		bound: [],
-		unbound: []
+	const adoption = await self.workspaces.reconcileAdopt(workspace);
+	if (!adoption.adopted) throw new Error(`task-runtime: cannot take over workspace ${workspace}: ${adoption.reason}`);
+	let owner = {
+		kind: "run",
+		storeId,
+		taskId: rootRun.taskId,
+		runId: rootRun.runId,
+		since: now()
 	};
-	const slots = runMemberSlots(sourceRun);
-	const map = context.source.acceptanceCriteria.flatMap((criterion) => criterion.childEvidence ?? []);
-	const bound = [];
-	const unbound = [];
-	slots.forEach((taskId, childIndex) => {
-		if (taskId === void 0) return;
-		const sibling = context.snapshot.tasks.find((task) => task.taskId === taskId);
-		if (sibling === void 0 || sibling.status !== "verified") return;
-		const at = `position ${childIndex}`;
-		const entry = map.find((item) => item.childIndex === childIndex);
-		const verifiedRun = context.snapshot.runs.find((run) => run.taskId === taskId && run.status === "verified");
-		const bundle = context.snapshot.evidence.find((item) => item.taskRunId === verifiedRun?.runId);
-		const declaration = {
-			childIndex,
-			taskId,
-			sourceRunId: verifiedRun?.runId ?? "",
-			evidenceId: bundle?.evidenceId ?? "",
-			...entry?.criterionId === void 0 ? {} : { criterionId: entry.criterionId },
-			artifactRefs: (bundle?.artifacts ?? []).flatMap((artifact) => [artifact.artifactId, artifact.kind]),
-			inputRefs: [...declaredInputsOf(sibling)]
+	await self.workspaces.claim(workspace, owner);
+	let run = rootRun;
+	while (run.executionPhase === "waiting_children") {
+		const batch = run.batches?.find((batch$1) => batch$1.batchId === run.batchId);
+		if (batch === void 0) throw new Error(`task-runtime: Run "${run.runId}" has no identifiable persisted child batch`);
+		const next = {
+			kind: "batch",
+			storeId,
+			taskId: run.taskId,
+			batchId: batch.batchId,
+			since: now()
 		};
-		const reasons = [
-			...citationDefects(declaration, context, at),
-			...mapDefects(declaration, map, at),
-			...stalenessDefects(declaration, context.snapshot, at)
-		];
-		if (reasons.length === 0) bound.push(declaration);
-		else unbound.push({
-			childIndex,
-			taskId,
-			...entry?.criterionId === void 0 ? {} : { criterionId: entry.criterionId },
-			reasons
-		});
+		await self.workspaces.push(workspace, owner, next);
+		owner = next;
+		const children = snapshot.runs.filter((child) => child.status === "running" && batch.memberTaskIds.includes(child.taskId));
+		if (children.length > 1) throw new Error(`task-runtime: batch "${batch.batchId}" holds multiple running workspace writers`);
+		if (children.length === 0) break;
+		run = children[0];
+		const childOwner = {
+			kind: "run",
+			storeId,
+			taskId: run.taskId,
+			runId: run.runId,
+			since: now()
+		};
+		await self.workspaces.push(workspace, owner, childOwner);
+		owner = childOwner;
+	}
+}
+async function releaseStoreWorkspace(self, storeId) {
+	if (self.workspaces === void 0) return;
+	const workspace = await workspacePathForSession(self, recoverySessionFor(self, void 0, storeId));
+	if (workspace === void 0) return;
+	for (;;) {
+		const top = self.workspaces.ownerOf(workspace);
+		if (top === void 0) return;
+		if (top.storeId !== storeId) {
+			self.warn(`workspace ${workspace} holds a layer of store ${top.storeId} (${top.kind}) while store ${storeId} is being cancelled; only this process's own layers are released here`);
+			return;
+		}
+		await self.workspaces.release(workspace, top);
+	}
+}
+function recoverySessionFor(self, snapshot, storeId) {
+	const rootRun = snapshot?.runs.find((run) => run.taskId === snapshot.tasks.find((task) => task.parentTaskId === void 0)?.taskId);
+	if (rootRun !== void 0) return rootRun.sessionId;
+	for (const [sessionId, binding] of self.sessions) if (binding.storeId === storeId) return sessionId;
+	return storeId;
+}
+async function sessionForStore(self, storeId) {
+	try {
+		return recoverySessionFor(self, await self.context.task.snapshotIn(storeId), storeId);
+	} catch {
+		return storeId;
+	}
+}
+async function runForSession(self, sessionId) {
+	const found = await lookupRun(self, sessionId);
+	if (found === void 0) throw new Error(`task-runtime: no task run is bound to session "${sessionId}"`);
+	return found;
+}
+function allowsRuntimeDecomposition(self) {
+	return self.config.allowRuntimeDecomposition;
+}
+function gatePhaseFromStore(self, sessionId, run, storeId, token) {
+	if (self.closingStores.has(storeId) && self.executionGate.phaseOf(sessionId) !== void 0) return;
+	const phase = self.runGatePhase(run);
+	if (phase === void 0) return;
+	self.executionGate.applyStorePhase(sessionId, phase, token);
+}
+async function lookupRun(self, sessionId) {
+	const binding = self.sessions.get(sessionId);
+	if (binding !== void 0) {
+		const resolved = await resolveBinding(self, binding);
+		if (resolved !== void 0) return resolved;
+		self.sessions.delete(sessionId);
+	}
+	let rootSessionId;
+	try {
+		rootSessionId = (await self.context.graphs.graphForSession(SessionId(sessionId))).rootSessionId;
+	} catch {
+		return;
+	}
+	const storeId = rootTaskStoreId(rootSessionId);
+	let snapshot;
+	try {
+		snapshot = await self.context.task.openStore(storeId);
+		reindex(self, storeId, snapshot);
+	} catch {
+		return;
+	}
+	const rebinding = self.sessions.get(sessionId);
+	if (rebinding === void 0) return void 0;
+	return await resolveBinding(self, rebinding);
+}
+async function resolveBinding(self, binding) {
+	try {
+		const [task, run] = await Promise.all([self.context.task.taskIn(binding.storeId, binding.taskId), self.context.task.runIn(binding.storeId, binding.runId)]);
+		return {
+			storeId: binding.storeId,
+			task,
+			run
+		};
+	} catch {
+		return;
+	}
+}
+function reindex(self, storeId, snapshot) {
+	for (const run of snapshot.runs) self.sessions.set(run.sessionId, {
+		storeId,
+		taskId: run.taskId,
+		runId: run.runId
 	});
+}
+async function workspacePathForSession(self, sessionId) {
+	const path = await self.envPathForSession(sessionId);
+	if (path === void 0) return void 0;
+	try {
+		return await normalizeWorkspacePath(path);
+	} catch (error) {
+		self.warn(`workspace ownership is skipped for session ${sessionId}: ${message(error)}`);
+		return;
+	}
+}
+async function workspacePathFor(self, sessionId) {
+	return self.envPathForSession(sessionId);
+}
+async function assertWorkspaceHeldBy(self, workspace, storeId, parentTask, parentRunId) {
+	if (self.workspaces === void 0) return;
+	const top = self.workspaces.ownerOf(workspace);
+	if (top === void 0) throw new WorkspaceBusyError(workspace, void 0, void 0, `store ${storeId} does not hold this workspace in this process; the run ${parentRunId} would be writing into a checkout nobody claimed (claim it through the graph entry, or resolve the ownership marker first)`);
+	if (top.storeId !== storeId) throw new WorkspaceBusyError(workspace, top, top.since, `it is held by another store (${top.storeId}), not by ${storeId}`);
+	if (top.taskId === parentTask.taskId) return;
+	/**
+	* An ancestor of this task holds it: the delegation chain the nested-child
+	* case walks (a grandchild's own decomposition happens under its parent's
+	*/
+	let ancestor = parentTask.parentTaskId;
+	while (ancestor !== void 0) {
+		if (top.taskId === ancestor) return;
+		ancestor = await ancestorTaskIdFor(self, storeId, ancestor);
+	}
+	throw new WorkspaceBusyError(workspace, top, top.since, `it is held by ${top.kind} ${top.taskId ?? top.batchId ?? ""}, which is not run ${parentRunId}'s own run, its batch, or one of its ancestors`);
+}
+async function ancestorTaskIdFor(self, storeId, taskId) {
+	try {
+		return (await self.context.task.taskIn(storeId, taskId)).parentTaskId;
+	} catch {
+		return;
+	}
+}
+
+//#endregion
+//#region src/service/env.ts
+const HUMAN_TOOLS = new Set([
+	"hitl_ask",
+	"hitl_approve",
+	"ask_user_question"
+]);
+function toolResultFailed(data) {
+	if (data.error !== void 0) return true;
+	return data.message?.isError === true;
+}
+function skillNameFrom(rawArguments) {
+	try {
+		const parsed = JSON.parse(rawArguments);
+		return typeof parsed.name === "string" && parsed.name.length > 0 ? parsed.name : void 0;
+	} catch {
+		return;
+	}
+}
+function tokenUsageOf(value) {
+	if (typeof value !== "object" || value === null) return void 0;
+	const buckets = value;
+	if ([
+		buckets.uncachedInputTokens,
+		buckets.outputTokens,
+		buckets.cacheReadTokens,
+		buckets.cacheWriteTokens
+	].some((item) => typeof item !== "number")) return void 0;
 	return {
-		bound,
-		unbound
+		uncachedInputTokens: buckets.uncachedInputTokens,
+		outputTokens: buckets.outputTokens,
+		cacheReadTokens: buckets.cacheReadTokens,
+		cacheWriteTokens: buckets.cacheWriteTokens
 	};
 }
-/** The stored form of one declaration: the closed record the run carries. */
-function storedReuse(declaration) {
+function admissionContext(self) {
+	const budget$1 = self.config.budget;
 	return {
-		childIndex: declaration.childIndex,
-		taskId: declaration.taskId,
-		sourceRunId: declaration.sourceRunId,
-		evidenceId: declaration.evidenceId,
-		...declaration.criterionId === void 0 ? {} : { criterionId: declaration.criterionId },
-		artifactRefs: [...declaration.artifactRefs ?? []],
-		inputRefs: [...declaration.inputRefs ?? []]
+		maxDepth: self.config.maxDepth,
+		maxChildren: self.config.maxChildren,
+		auditOnly: {
+			...budget$1.maxToolCalls === void 0 ? {} : { maxToolCalls: budget$1.maxToolCalls },
+			...budget$1.tokens === void 0 ? {} : { tokens: budget$1.tokens },
+			...budget$1.attempts === void 0 ? {} : { attempts: budget$1.attempts }
+		}
 	};
 }
+async function sessionEnv(self, sessionId) {
+	/**
+	* The whole resolution sits inside the `try`, service lookup included: on a
+	* real Cordis context an absent service throws on property access
+	*/
+	try {
+		const envBuilder = self.context.get?.("envBuilder") ?? self.context.envBuilder;
+		if (envBuilder === void 0) return void 0;
+		const graph = await self.context.graphs.graphForSession(SessionId(sessionId));
+		return envBuilder.store.get(graph.envId);
+	} catch {
+		return;
+	}
+}
+async function envPathForSession(self, sessionId) {
+	const named = self.sessionWorkspaces.get(sessionId);
+	if (named !== void 0) return named;
+	return (await sessionEnv(self, sessionId))?.path;
+}
+function contractRefusal(parentTaskId, reasons) {
+	return /* @__PURE__ */ new Error(`task-runtime: contract rejected decomposition of "${parentTaskId}":\n- ${reasons.join("\n- ")}`);
+}
+async function orchestrateEnv(self, callerSessionId, actor, workspace) {
+	/**
+	* A session this process already spawned into a named workspace keeps
+	* working in it: the replay's own decomposition builds its env here, and the
+	*/
+	const named = workspace ?? self.sessionWorkspaces.get(callerSessionId);
+	const workspacePath = named ?? await self.workspacePathForSession(callerSessionId);
+	/**
+	* …and it keeps running under what it was spawned under (S4-E §Q3): the frozen
+	* model selection of the experiment it belongs to. The same session-level
+	*/
+	const binding = self.sessionExecutionBindings.get(callerSessionId);
+	return {
+		task: self.context.task,
+		actor,
+		...self.config.defaultPreset !== void 0 ? { defaultPreset: self.config.defaultPreset } : {},
+		...self.config.runBindingRoot === void 0 ? {} : { runBindingRoot: self.config.runBindingRoot },
+		verifyTimeoutMs: self.config.verifyTimeoutMs,
+		budget: { ...self.config.budget },
+		allowRuntimeDecomposition: self.config.allowRuntimeDecomposition,
+		gate: self.executionGate,
+		workspaces: self.workspaces,
+		...workspacePath === void 0 ? {} : { workspacePath },
+		...named === void 0 ? {} : { workerCwd: named },
+		...binding?.agentOptions === void 0 ? {} : { agentOptions: binding.agentOptions },
+		writeDrainTimeoutMs: self.config.writeDrainTimeoutMs,
+		...self.config.rootBudget === void 0 ? {} : { rootBudget: { ...self.config.rootBudget } },
+		precheck: (capabilities, cwd) => providerPrecheck(self, capabilities, { ...cwd === void 0 ? {} : { cwd } }),
+		notify: (sessionId, text$1) => {
+			self.notify(sessionId, text$1);
+		},
+		watchRun: (storeId, runId, callback) => watchRun(self, storeId, runId, callback),
+		agentFor: (sessionId) => agentOrUndefined(self, sessionId),
+		jobs: self.softService("jobs"),
+		onRunSettled: (storeId, taskId, runId, status) => {
+			self.runSettledFromRuntime(storeId, taskId, runId, status);
+		},
+		failBatch: (storeId, batchId, reason) => self.failBatch(storeId, batchId, reason),
+		deliverBatchResult: (message$1) => self.deliverBatchResult(message$1),
+		assertPreset: async (preset) => {
+			const presets = self.context.get?.("agentPresets") ?? self.context.agentPresets;
+			if (presets === void 0) return;
+			await presets.resolve(preset);
+		},
+		resolvePermissionSpec: (name) => {
+			const presets = self.context.get?.("permissionPresets") ?? self.context.permissionPresets;
+			if (presets === void 0) throw new Error("task-runtime: permissionPresets service is not loaded; cannot rank declared permissions");
+			return presets.resolve(name);
+		},
+		resolveMcpEnv: async () => {
+			/**
+			* The same graph env the verifier's cwd comes from; absent in test
+			* contexts and in deployments without env-builder — a capability that
+			*/
+			const env = await sessionEnv(self, callerSessionId);
+			if (env === void 0) return void 0;
+			/**
+			* A named workspace stands in for the env root: a server this run's
+			* capability grants works in the checkout the worker works in, not in
+			*/
+			const root = named ?? env.path;
+			return {
+				envRoot: root,
+				checkout: (repo) => {
+					const component = (env.components ?? []).find((item) => item.repo === repo);
+					return component === void 0 ? void 0 : join(root, component.dir);
+				}
+			};
+		},
+		spawn: (request) => {
+			const parent = liveAgent(self, callerSessionId);
+			/**
+			* The session this spawn creates works where the spawn says it does, and
+			* this process remembers it for as long as the run behind it: an
+			*/
+			const sessionWorkspace = request.cwd ?? named;
+			if (sessionWorkspace !== void 0) self.sessionWorkspaces.set(request.sessionId, sessionWorkspace);
+			/**
+			* What the session *runs under* is remembered the same way (S4-E §Q3): a
+			* replay's worker carries the experiment's frozen selection, and the
+			*/
+			if (request.agentOptions !== void 0) self.sessionExecutionBindings.set(request.sessionId, { agentOptions: request.agentOptions });
+			return self.context.agentRuntime.spawn(parent, {
+				sessionId: SessionId(request.sessionId),
+				name: request.name,
+				...request.taskWorker === void 0 ? {} : { taskWorker: request.taskWorker },
+				...request.agentPreset !== void 0 ? { agentPreset: request.agentPreset } : {},
+				...request.permissionPreset !== void 0 ? { permissionPreset: request.permissionPreset } : {},
+				...request.cwd !== void 0 ? { cwd: request.cwd } : {},
+				...request.agentOptions !== void 0 ? { agentOptions: request.agentOptions } : {},
+				...request.grant !== void 0 ? { grant: request.grant } : {},
+				...request.signal !== void 0 ? { signal: request.signal } : {}
+			});
+		},
+		resumeWorkerSession: (request) => self.resumeAdoptedWorkerSession(request),
+		verifyRun: async (storeId, runId, options = {}) => {
+			const verifier = runVerifier(self);
+			if (verifier === void 0 || typeof verifier.verifyRun !== "function") throw new VerifierUnavailableError(`task-runtime: verifier service is not loaded; cannot verify run "${runId}" (expected plugin id "verifier", ticket C2)`);
+			const cwd = named ?? await envPathForSession(self, callerSessionId);
+			return verifier.verifyRun(storeId, runId, {
+				...cwd === void 0 ? {} : { cwd },
+				...options
+			});
+		},
+		readLogTail: async (logRef) => runVerifier(self)?.logTail?.(logRef),
+		observeSession: async (sessionId) => observeSession(self, sessionId),
+		onTerminalReview: (fact) => self.notifyTerminalReview(fact),
+		onRunBound: (sessionId, binding$1) => {
+			self.sessions.set(sessionId, binding$1);
+			self.startedSessions.add(sessionId);
+		}
+	};
+}
+function watchRun(self, storeId, runId, callback) {
+	const listeners = [];
+	const notifyFrom = async (snapshot) => {
+		const run = snapshot.runs.find((candidate) => candidate.runId === runId);
+		if (run === void 0 || run.status === "running") return;
+		callback(run.status);
+	};
+	try {
+		const off = self.context.on("task/change", (snapshot) => {
+			if (snapshot.id !== storeId) return;
+			notifyFrom(snapshot);
+		});
+		if (typeof off === "function") listeners.push(off);
+	} catch (error) {
+		self.warn(`cannot subscribe to task/change for store ${storeId}: ${message(error)}`);
+	}
+	(async () => {
+		try {
+			await notifyFrom(await self.context.task.snapshotIn(storeId));
+		} catch {}
+	})();
+	return () => {
+		for (const off of listeners) off();
+	};
+}
+function sessionBoundInProcess(self, storeId, runId) {
+	for (const [sessionId, binding] of self.sessions) if (binding.storeId === storeId && binding.runId === runId) return sessionId;
+}
+async function releaseRunWorkspaceLayer(self, storeId, runId, sessionId) {
+	const workspace = await self.workspacePathForSession(sessionId);
+	if (workspace === void 0 || self.workspaces === void 0) return;
+	await releaseLayer(self.workspaces, workspace, (top) => top.kind === "run" && top.storeId === storeId && top.runId === runId);
+}
+async function observeSession(self, sessionId) {
+	const tokens = sessionTokens(self, sessionId);
+	const events = await sessionEvents(self, sessionId);
+	if (tokens === void 0 && events === void 0) return void 0;
+	const calls = /* @__PURE__ */ new Map();
+	const humanCallIds = [];
+	const approvalCallIds = /* @__PURE__ */ new Set();
+	const skillCalls = [];
+	let failures = 0;
+	let approvals = 0;
+	let compactions = 0;
+	for (const event of events ?? []) if (event.type === "tool/call") {
+		const name = event.data.name;
+		if (typeof name !== "string") continue;
+		calls.set(name, (calls.get(name) ?? 0) + 1);
+		if (HUMAN_TOOLS.has(name)) humanCallIds.push(String(event.data.callId));
+		if (name === "skill") {
+			const skill = skillNameFrom(event.data.arguments);
+			if (skill !== void 0) skillCalls.push(skill);
+		}
+	} else if (event.type === "tool/result") {
+		if (toolResultFailed(event.data)) failures += 1;
+	} else if (event.type === "approval/asked") {
+		approvals += 1;
+		if (typeof event.data.callId === "string") approvalCallIds.add(event.data.callId);
+	} else if (event.type === "compaction/start") compactions += 1;
+	const tools = events === void 0 ? void 0 : {
+		calls: [...calls].map(([name, count]) => ({
+			name,
+			count
+		})).sort((left, right) => left.name.localeCompare(right.name)),
+		failures
+	};
+	return {
+		...tokens === void 0 ? {} : { tokens },
+		...tools === void 0 ? {} : { tools },
+		...events === void 0 ? {} : { skillCalls },
+		...events === void 0 ? {} : { humanInterventions: approvals + humanCallIds.filter((id) => !approvalCallIds.has(id)).length },
+		...events === void 0 ? {} : { compactions }
+	};
+}
+function sessionTokens(self, sessionId) {
+	const sessions = self.softService("sessions");
+	const projections = self.softService("sessionProjections");
+	if (sessions === void 0 || projections === void 0) return void 0;
+	try {
+		const session = sessions.get(SessionId(sessionId));
+		if (session === void 0) return void 0;
+		return tokenUsageOf(projections.snapshot(session, ["tokenUsage"]).values.tokenUsage);
+	} catch {
+		return;
+	}
+}
+async function sessionEvents(self, sessionId) {
+	const query = self.softService("sessionQuery");
+	if (query === void 0 || typeof query.readSession !== "function") return void 0;
+	try {
+		return (await query.readSession(SessionId(sessionId))).events;
+	} catch {
+		return;
+	}
+}
+function softService(self, name) {
+	return optionalService(self.context, name);
+}
+function runVerifier(self) {
+	return self.softService("verifier");
+}
+async function registeredVerifierIdsImpl(self) {
+	return registeredVerifierIds(self.context);
+}
+async function providerPrecheck(self, capabilities, view, table = self.config.capabilities) {
+	const verifierRefs = await registeredVerifierIdsImpl(self);
+	const commitLedger = self.softService("evolution");
+	return precheckProviders({
+		capabilities,
+		table,
+		view,
+		...verifierRefs === void 0 ? {} : { verifierRefs },
+		...commitLedger === void 0 ? {} : { commitLedger }
+	});
+}
+async function capabilityProviderReport(self, sessionId, capabilities) {
+	const envPath = await envPathForSession(self, sessionId);
+	return providerPrecheck(self, capabilities ?? Object.keys(self.config.capabilities), { ...envPath === void 0 ? {} : { cwd: envPath } });
+}
+async function readRunBindingImpl(binding) {
+	return readRunBinding(binding);
+}
+async function assertKnownVerifierRefs(self, declared, what) {
+	const refs = declared.filter((item) => item.criterion.verifierRef !== void 0);
+	if (refs.length === 0) return;
+	const registered = await registeredVerifierIdsImpl(self);
+	if (registered === void 0) throw new VerifierUnavailableError(`task-runtime: cannot validate verifierRef on ${what}: the verifier service is not loaded or cannot list its registry`);
+	const unknown = refs.filter((item) => !registered.includes(item.criterion.verifierRef));
+	if (unknown.length === 0) return;
+	const detail = unknown.map((item) => `child ${item.childIndex} criterion "${item.criterion.criterionId}" references unknown verifier "${item.criterion.verifierRef}"`).join("; ");
+	throw new Error(`task-runtime: admission rejected ${what}: ${detail}; registered verifiers: ${registered.join(", ")}`);
+}
+function liveAgent(self, sessionId) {
+	const agent = agentOrUndefined(self, sessionId);
+	if (agent === void 0) throw new Error(`task-runtime: caller session "${sessionId}" has no live agent; cannot spawn child workers`);
+	return agent;
+}
+function agentOrUndefined(self, sessionId) {
+	const registry = self.softService("agents");
+	if (registry === void 0) return void 0;
+	try {
+		return registry.get(sessionId);
+	} catch {
+		return;
+	}
+}
+
+//#endregion
+//#region src/service/runtime.ts
+var TaskRuntime = class extends Service {
+	static inject = [
+		"task",
+		"agentRuntime",
+		"graphs",
+		"sessionQuery"
+	];
+	static Config = ConfigSchema;
+	config;
+	sessions = /* @__PURE__ */ new Map();
+	startedSessions = /* @__PURE__ */ new Set();
+	drivers = /* @__PURE__ */ new Map();
+	replayLineage = /* @__PURE__ */ new Map();
+	sessionWorkspaces = /* @__PURE__ */ new Map();
+	sessionExecutionBindings = /* @__PURE__ */ new Map();
+	executionGate;
+	closingStores = /* @__PURE__ */ new Set();
+	storeRecovery = /* @__PURE__ */ new Map();
+	workspaces;
+	providerLoad;
+	parentChains = /* @__PURE__ */ new Map();
+	rootBudgetApproval;
+	terminalReviewListeners = /* @__PURE__ */ new Set();
+	constructor(ctx, config) {
+		super(ctx, "taskRuntime");
+		const rootBudget = config?.rootBudget === void 0 ? void 0 : { ...config.rootBudget };
+		/**
+		* A hard limit this deployment cannot execute is refused at load, not
+		* accepted and quietly ignored (§3.5). The schema keeps unknown keys on the
+		*/
+		if (config?.budget !== void 0) {
+			const unknown = Object.keys(config.budget).filter((key) => ![
+				"maxToolCalls",
+				"tokens",
+				"attempts"
+			].includes(key));
+			if (unknown.length > 0) throw new Error(`task-runtime: budget names unsupported fields [${unknown.join(", ")}]`);
+		}
+		assertClosedRootBudget(rootBudget);
+		assertRootBudgetConfig(rootBudget ?? {});
+		assertGeneratedTaskReview(config?.generatedTaskReview);
+		this.config = {
+			capabilities: structuredClone(config?.capabilities ?? {}),
+			...config?.defaultPreset !== void 0 ? { defaultPreset: config.defaultPreset } : {},
+			verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
+			maxDepth: config?.maxDepth ?? DEFAULT_MAX_DEPTH,
+			maxChildren: config?.maxChildren ?? DEFAULT_MAX_CHILDREN,
+			budget: {
+				...DEFAULT_BUDGET,
+				...config?.budget ?? {}
+			},
+			allowRuntimeDecomposition: config?.allowRuntimeDecomposition ?? DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
+			generatedTaskReview: config?.generatedTaskReview ?? DEFAULT_GENERATED_TASK_REVIEW,
+			runBindingRoot: config?.runBindingRoot ?? defaultRunBindingRoot(),
+			...rootBudget === void 0 ? {} : { rootBudget },
+			writeDrainTimeoutMs: config?.writeDrainTimeoutMs ?? DEFAULT_WRITE_DRAIN_TIMEOUT_MS
+		};
+		this.executionGate = new ExecutionGate();
+		this.workspaces = new WorkspaceRegistry({ markerRoot: join(this.config.runBindingRoot ?? defaultRunBindingRoot(), WORKSPACE_OWNERS_DIR) });
+		/**
+		* Unload (A3 §3.6): every driver is aborted and awaited, the gate closes for
+		* every session this runtime tracks, and the workspace markers this process
+		*/
+		ctx.effect(() => () => this.unload());
+	}
+	async unload() {
+		return unload(this);
+	}
+	async [Service.init]() {
+		return serviceInit(this);
+	}
+	async providerLoadReport() {
+		return providerLoadReport(this);
+	}
+	warn(message$1) {
+		return warn(this, message$1);
+	}
+	get verifyTimeoutMs() {
+		return verifyTimeoutMs(this);
+	}
+	get budget() {
+		return budget(this);
+	}
+	get generatedTaskReview() {
+		return generatedTaskReview(this);
+	}
+	get gate() {
+		return gate(this);
+	}
+	resolveCapabilities(required) {
+		return resolveCapabilitiesImpl(this, required);
+	}
+	listCapabilities() {
+		return listCapabilities(this);
+	}
+	async applyCapabilityRow(name, entry, options = {}) {
+		return applyCapabilityRow(this, name, entry, options);
+	}
+	async adoptRoot(storeId, rootSessionId) {
+		return adoptRoot(this, storeId, rootSessionId);
+	}
+	async initializeStoreGates(storeId) {
+		return initializeStoreGates(this, storeId);
+	}
+	runGatePhase(run) {
+		return runGatePhase(run);
+	}
+	async intakeRootContract(storeId, rootSessionId, spec, options = {}) {
+		return intakeRootContract(this, storeId, rootSessionId, spec, options);
+	}
+	async submitRootContractProposal(storeId, rootSessionId, spec, options = {}) {
+		return submitRootContractProposal(this, storeId, rootSessionId, spec, options);
+	}
+	async decomposeAndRun(storeId, parentTaskId, parentRunId, callerSessionId, spec, exec = {}) {
+		return decomposeAndRun(this, storeId, parentTaskId, parentRunId, callerSessionId, spec, exec);
+	}
+	async submitDecompositionProposal(storeId, parentTaskId, parentRunId, callerSessionId, spec, options = {}) {
+		return submitDecompositionProposal(this, storeId, parentTaskId, parentRunId, callerSessionId, spec, options);
+	}
+	async continueProposal(storeId, proposalId, caller, options = {}) {
+		return continueProposal(this, storeId, proposalId, caller, options);
+	}
+	async decideProposal(storeId, proposalId, decision, decidedBy, exec = {}) {
+		return decideProposal(this, storeId, proposalId, decision, decidedBy, exec);
+	}
+	async cancelProposal(storeId, proposalId, caller) {
+		return cancelProposal(this, storeId, proposalId, caller);
+	}
+	async proposalIn(storeId, proposalId) {
+		return proposalIn(this, storeId, proposalId);
+	}
+	async proposalsForParent(storeId, parentTaskId) {
+		return proposalsForParent(this, storeId, parentTaskId);
+	}
+	registerRootBudgetApproval(approval) {
+		return registerRootBudgetApproval(this, approval);
+	}
+	registerTerminalReviewListener(listener) {
+		return registerTerminalReviewListener(this, listener);
+	}
+	notifyTerminalReview(fact) {
+		return notifyTerminalReview(this, fact);
+	}
+	async extendRootBudget(sessionId, host, request) {
+		return extendRootBudget(this, sessionId, host, request);
+	}
+	async recoverRootTask(storeId, request, caller) {
+		return recoverRootTask(this, storeId, request, caller);
+	}
+	async deriveBatch(identity, spec) {
+		return deriveBatch(this, identity, spec);
+	}
+	manifestsOf(batch) {
+		return manifestsOf(this, batch);
+	}
+	storedBatchOf(proposal) {
+		return storedBatchOf(proposal);
+	}
+	async assertDecomposableRun(storeId, parentTask, parentRun, callerSessionId, signal) {
+		return assertDecomposableRun(this, storeId, parentTask, parentRun, callerSessionId, signal);
+	}
+	async inFlightProposalsOf(storeId, parentRunId) {
+		return inFlightProposalsOf(this, storeId, parentRunId);
+	}
+	async checkDerivedBatch(request) {
+		return checkDerivedBatch(this, request);
+	}
+	async admitPrecheckedBatch(request) {
+		return admitPrecheckedBatch(this, request);
+	}
+	async existingRootTask(storeId) {
+		return existingRootTask(this, storeId);
+	}
+	async continueRootProposalIn(storeId, proposal) {
+		return continueRootProposalIn(this, storeId, proposal);
+	}
+	async serializeRootIntake(storeId, work) {
+		return serializeRootIntake(this, storeId, work);
+	}
+	async continueProposalIn(storeId, proposalId, caller, options) {
+		return continueProposalIn(this, storeId, proposalId, caller, options);
+	}
+	async staleProposal(storeId, proposal, reason) {
+		return staleProposal(this, storeId, proposal, reason);
+	}
+	async expireProposal(storeId, proposal, reason) {
+		return expireProposal(this, storeId, proposal, reason);
+	}
+	async requireProposal(storeId, proposalId) {
+		return requireProposal(this, storeId, proposalId);
+	}
+	async readProposal(storeId, proposalId) {
+		return readProposal(this, storeId, proposalId);
+	}
+	async requestProposalReview(request) {
+		return requestProposalReview(this, request);
+	}
+	async serializeParent(storeId, parentTaskId, work) {
+		return serializeParent(this, storeId, parentTaskId, work);
+	}
+	async reconcileProposals(storeId) {
+		return reconcileProposals(this, storeId);
+	}
+	async reconcileRootProposal(storeId, proposal, report) {
+		return reconcileRootProposal(this, storeId, proposal, report);
+	}
+	async replayTask(storeId, championTaskId, options, callerSessionId) {
+		return replayTask(this, storeId, championTaskId, options, callerSessionId);
+	}
+	registerDriver(key, storeId, controller, promise, parentTaskId) {
+		return registerDriver(this, key, storeId, controller, promise, parentTaskId);
+	}
+	standDownPendingDrivers(state) {
+		return standDownPendingDrivers(this, state);
+	}
+	invalidateStoreRecovery(storeId) {
+		return invalidateStoreRecovery(this, storeId);
+	}
+	async batchRecordIn(storeId, batchId) {
+		return batchRecordIn(this, storeId, batchId);
+	}
+	runSettledFromRuntime(storeId, taskId, runId, status) {
+		return runSettledFromRuntime(this, storeId, taskId, runId, status);
+	}
+	startBatchDriver(options) {
+		return startBatchDriver(this, options);
+	}
+	async submitResult(callerSessionId, spec, exec = {}) {
+		return submitResult(this, callerSessionId, spec, exec);
+	}
+	async askParentQuestion(callerSessionId, request) {
+		return askParentQuestionImpl(this, callerSessionId, request);
+	}
+	async answerParentQuestion(callerSessionId, request) {
+		return answerParentQuestionImpl(this, callerSessionId, request);
+	}
+	questionCoordination() {
+		return questionCoordination(this);
+	}
+	async cancelBatch(storeId, batchId, callerSessionId) {
+		return cancelBatch(this, storeId, batchId, callerSessionId);
+	}
+	async cancelGraph(storeId, reason) {
+		return cancelGraph(this, storeId, reason);
+	}
+	async awaitBatch(storeId, batchId) {
+		return awaitBatch(this, storeId, batchId);
+	}
+	async reconcileStore(storeId) {
+		return reconcileStore(this, storeId);
+	}
+	async wakeUnclaimedQuestionMessages(storeId, deliveries) {
+		return wakeUnclaimedQuestionMessages(this, storeId, deliveries);
+	}
+	wakeUnclaimedBatchResults(unread) {
+		return wakeUnclaimedBatchResults(this, unread);
+	}
+	sessionHoldsPendingMessage(sessionId, messageId) {
+		return sessionHoldsPendingMessage(this, sessionId, messageId);
+	}
+	async resumeAdoptedWorkerSession(request) {
+		return resumeAdoptedWorkerSession(this, request);
+	}
+	async rebuildWorkspaceOwnership(storeId) {
+		return rebuildWorkspaceOwnership(this, storeId);
+	}
+	async releaseStoreWorkspace(storeId) {
+		return releaseStoreWorkspace(this, storeId);
+	}
+	async failBatch(storeId, batchId, reason) {
+		return failBatch(this, storeId, batchId, reason);
+	}
+	recoverySessionFor(snapshot, storeId) {
+		return recoverySessionFor(this, snapshot, storeId);
+	}
+	async sessionForStore(storeId) {
+		return sessionForStore(this, storeId);
+	}
+	async runForSession(sessionId) {
+		return runForSession(this, sessionId);
+	}
+	allowsRuntimeDecomposition() {
+		return allowsRuntimeDecomposition(this);
+	}
+	gatePhaseFromStore(sessionId, run, storeId, token) {
+		return gatePhaseFromStore(this, sessionId, run, storeId, token);
+	}
+	async recoveryStatus(storeId) {
+		return recoveryStatus(this, storeId);
+	}
+	/** The live barrier's deferred work; a store this process holds no barrier for has none to show. */
+	recoveryState(storeId) {
+		const state = this.storeRecovery.get(storeId);
+		if (state === void 0) return void 0;
+		return {
+			wokenSessions: [...state.wokenSessions],
+			pendingNotices: state.pendingNotices.map((notice) => ({ ...notice })),
+			pendingBatchResults: state.pendingBatchResults.map((result) => ({ ...result })),
+			...state.cancelled === void 0 ? {} : { cancelled: state.cancelled }
+		};
+	}
+	async assertRecoveryReady(storeId, entry) {
+		return assertRecoveryReady(this, storeId, entry);
+	}
+	reindex(storeId, snapshot) {
+		return reindex(this, storeId, snapshot);
+	}
+	async workspacePathForSession(sessionId) {
+		return workspacePathForSession(this, sessionId);
+	}
+	async workspacePathFor(sessionId) {
+		return workspacePathFor(this, sessionId);
+	}
+	async assertWorkspaceHeldBy(workspace, storeId, parentTask, parentRunId) {
+		return assertWorkspaceHeldBy(this, workspace, storeId, parentTask, parentRunId);
+	}
+	notify(sessionId, text$1) {
+		return notify(this, sessionId, text$1);
+	}
+	notifyWhenReady(sessionId, text$1) {
+		return notifyWhenReady(this, sessionId, text$1);
+	}
+	async deliverBatchResult(message$1) {
+		return deliverBatchResult(this, message$1);
+	}
+	async deliverBatchResultNow(message$1) {
+		return deliverBatchResultNow(this, message$1);
+	}
+	async redeliverBatchResult(storeId, batchId) {
+		return redeliverBatchResult(this, storeId, batchId);
+	}
+	async reconcileSessionJobs(sessionId) {
+		return reconcileSessionJobs(this, sessionId);
+	}
+	admissionContext() {
+		return admissionContext(this);
+	}
+	async envPathForSession(sessionId) {
+		return envPathForSession(this, sessionId);
+	}
+	contractRefusal(parentTaskId, reasons) {
+		return contractRefusal(parentTaskId, reasons);
+	}
+	async orchestrateEnv(callerSessionId, actor, workspace) {
+		return orchestrateEnv(this, callerSessionId, actor, workspace);
+	}
+	watchRun(storeId, runId, callback) {
+		return watchRun(this, storeId, runId, callback);
+	}
+	sessionBoundInProcess(storeId, runId) {
+		return sessionBoundInProcess(this, storeId, runId);
+	}
+	async releaseRunWorkspaceLayer(storeId, runId, sessionId) {
+		return releaseRunWorkspaceLayer(this, storeId, runId, sessionId);
+	}
+	async observeSession(sessionId) {
+		return observeSession(this, sessionId);
+	}
+	softService(name) {
+		return softService(this, name);
+	}
+	async registeredVerifierIds() {
+		return registeredVerifierIdsImpl(this);
+	}
+	async providerPrecheck(capabilities, view, table = this.config.capabilities) {
+		return providerPrecheck(this, capabilities, view, table);
+	}
+	async capabilityProviderReport(sessionId, capabilities) {
+		return capabilityProviderReport(this, sessionId, capabilities);
+	}
+	async readRunBinding(binding) {
+		return readRunBindingImpl(binding);
+	}
+	async assertKnownVerifierRefs(declared, what) {
+		return assertKnownVerifierRefs(this, declared, what);
+	}
+	liveAgent(sessionId) {
+		return liveAgent(this, sessionId);
+	}
+	agentOrUndefined(sessionId) {
+		return agentOrUndefined(this, sessionId);
+	}
+	/** Public alias of the protected `Service.ctx` for the extracted modules. */
+	get context() {
+		return this.ctx;
+	}
+};
 
 //#endregion
 //#region src/obligation.ts
-function nonEmpty(value) {
-	return typeof value === "string" && value.trim().length > 0;
-}
 /**
 * Parse one obligations.yml text (JSON-compatible YAML) into templates,
 * refusing malformed entries loudly — a template that cannot be read is a
-* defect in the domain pack, not an empty template set.
 */
 function parseObligationTemplates(text$1, source) {
 	let raw;
 	try {
 		raw = JSON.parse(text$1);
 	} catch (error) {
-		throw new Error(`obligation: ${source} is not JSON-compatible YAML: ${error instanceof Error ? error.message : String(error)}`);
+		throw new Error(`obligation: ${source} is not JSON-compatible YAML: ${message(error)}`);
 	}
 	if (!Array.isArray(raw)) throw new Error(`obligation: ${source} must be an array of templates`);
 	return raw.map((entry, index) => {
 		const label = `${source} entry ${index}`;
 		if (typeof entry !== "object" || entry === null) throw new Error(`obligation: ${label} must be an object`);
 		const candidate = entry;
-		if (!nonEmpty(candidate.id)) throw new Error(`obligation: ${label} requires a non-empty "id"`);
-		if (!nonEmpty(candidate.question)) throw new Error(`obligation: ${label} requires a non-empty "question"`);
-		if (!nonEmpty(candidate.evidenceForm)) throw new Error(`obligation: ${label} requires a non-empty "evidenceForm"`);
+		if (!nonBlank(candidate.id)) throw new Error(`obligation: ${label} requires a non-empty "id"`);
+		if (!nonBlank(candidate.question)) throw new Error(`obligation: ${label} requires a non-empty "question"`);
+		if (!nonBlank(candidate.evidenceForm)) throw new Error(`obligation: ${label} requires a non-empty "evidenceForm"`);
 		const capabilities = candidate.typicalCapabilities ?? [];
-		if (!Array.isArray(capabilities) || capabilities.some((item) => !nonEmpty(item))) throw new Error(`obligation: ${label} "typicalCapabilities" must be an array of non-empty strings`);
+		if (!Array.isArray(capabilities) || capabilities.some((item) => !nonBlank(item))) throw new Error(`obligation: ${label} "typicalCapabilities" must be an array of non-empty strings`);
 		return {
 			id: candidate.id,
 			question: candidate.question,
@@ -6542,8 +9443,6 @@ function parseObligationTemplates(text$1, source) {
 /**
 * Walk up from `start` to the directory holding `.git` (the same semantics as
 * skill-filesystem's findProjectRoot, here with an 8-level cap so a detached
-* env root cannot walk to the filesystem root and pick up an unrelated repo).
-* `undefined` when no repo root is found within the cap.
 */
 async function findRepoRoot(start, maxLevels = 8) {
 	let current = start;
@@ -6560,7 +9459,6 @@ async function findRepoRoot(start, maxLevels = 8) {
 /**
 * Load every `<repoRoot>/.agents/skills/<name>/references/obligations.yml`, in directory
 * order. A pack without the file contributes nothing; an absent skills root
-* yields an empty list. A malformed file throws — see parseObligationTemplates.
 */
 async function loadObligationTemplates(repoRoot) {
 	const skillsRoot = join(repoRoot, ".agents", "skills");
@@ -6594,8 +9492,6 @@ function obligationText(obligation) {
 /**
 * Compare one template set against the current task graph. An entry is covered
 * when a task requested one of its typical capabilities (`via capability
-* <name>`) or a recorded obligation mentions its id or question (`via
-* obligation <id>`). Everything else is uncovered — reported, never blocked.
 */
 function checkObligationCoverage(templates, snapshot) {
 	const requested = new Set(snapshot.tasks.flatMap((task) => task.requestedCapabilities));
@@ -6629,5360 +9525,7 @@ function checkObligationCoverage(templates, snapshot) {
 
 //#endregion
 //#region src/index.ts
-/**
-* Tools that put a question or an approval in front of a human. `hitl_ask` and
-* `hitl_approve` are this deployment's root tools
-* (`agent-singularity/src/tools/ask.ts:11`, `approve.ts:9`); `ask_user_question`
-* is the worker baseline's (`capability.ts:55`).
-*/
-const HUMAN_TOOLS = new Set([
-	"hitl_ask",
-	"hitl_approve",
-	"ask_user_question"
-]);
-/**
-* Whether one `tool/result` payload reports a failure: the optional error
-* identity (appended only alongside `isError`) or any error-marked content block.
-*/
-function toolResultFailed(data) {
-	if (data.error !== void 0) return true;
-	return (data.message?.content ?? []).some((block) => block.isError === true);
-}
-/** The skill name one `skill` tool call asked for, parsed from its raw arguments JSON. */
-function skillNameFrom(rawArguments) {
-	try {
-		const parsed = JSON.parse(rawArguments);
-		return typeof parsed.name === "string" && parsed.name.length > 0 ? parsed.name : void 0;
-	} catch {
-		return;
-	}
-}
-/** The `tokenUsage` projection's wire view, or `undefined` when the value is not that shape. */
-function tokenUsageOf(value) {
-	if (typeof value !== "object" || value === null) return void 0;
-	const buckets = value;
-	if ([
-		buckets.uncachedInputTokens,
-		buckets.outputTokens,
-		buckets.cacheReadTokens,
-		buckets.cacheWriteTokens
-	].some((item) => typeof item !== "number")) return void 0;
-	return {
-		uncachedInputTokens: buckets.uncachedInputTokens,
-		outputTokens: buckets.outputTokens,
-		cacheReadTokens: buckets.cacheReadTokens,
-		cacheWriteTokens: buckets.cacheWriteTokens
-	};
-}
-const DEFAULT_VERIFY_TIMEOUT_MS = 600 * 1e3;
-/** Per-run usage annotations; execution has no total wall-clock cutoff. */
-const DEFAULT_BUDGET = {
-	maxToolCalls: 150,
-	attempts: 1
-};
-/**
-* The proposal statuses that hold a run (K1 §1: at most one proposal in flight
-* per run): a batch that is waiting for its review, ready to be admitted, or
-* approved and not yet continued. `admitted` is a consumption rather than a
-* hold, and rejected/cancelled/stale/expired are terminal — neither keeps the
-* run from proposing the next batch.
-*/
-const IN_FLIGHT_PROPOSAL_STATUSES = new Set([
-	"pending_review",
-	"ready",
-	"approved"
-]);
-/**
-* The shipped review policy (T2/T3 §5): `off`. Every decomposition this
-* deployment has ever run was admitted on the machine rules alone, and the
-* guide's decision is that a human review is something a deployment *turns on*
-* (§5: no risk-based classifier, no "only when no template matched") rather
-* than something it turns off. `off` is not a silent state: the proposal
-* record carries the policy it was born under, which is what lets a reader
-* tell "this batch ran without a human review" from "a person approved it".
-*/
-const DEFAULT_GENERATED_TASK_REVIEW = "off";
-/**
-* The shipped write-drain window (A3 §3.3). Thirty seconds is far above the
-* settle time of a tool call this process can see finish — the drain waits on
-* in-flight registrations and the session's managed jobs, both of which either
-* stop promptly or are the thing the caller must be told about — and far below
-* a verifier call's own deadline, so a drain that cannot be confirmed fails the
-* run long before the verification budget it would otherwise waste.
-*/
-const DEFAULT_WRITE_DRAIN_TIMEOUT_MS = 3e4;
-/**
-* Growth guardrails handed to admission as `decompositionPolicy`
-* ({@link Config.maxDepth}, {@link Config.maxChildren}, checked at
-* `admission.ts:47-58`).
-*
-* `4` is one level of headroom above the deepest tree actually exercised: the
-* §4.1 run recorded "根 → 子 → 孙" three levels (`docs/singularity-harness-guide.md:258`),
-* so a shallower cap would forbid a shape known to work while a deeper one would
-* let a runaway self-decomposer spend its whole budget before admission ever
-* refuses. `8` is several times the batches real runs send (2–4 children):
-* a single batch above it is a parent enumerating work it should
-* have delegated a level down, not a decomposition the orchestrator should run.
-*/
-const DEFAULT_MAX_DEPTH = 4;
-const DEFAULT_MAX_CHILDREN = 8;
-/**
-* Whether a task admitted `leaf` may still decompose itself
-* ({@link Config.allowRuntimeDecomposition}) — the door this deployment leaves
-* open on every node's own judgement, and the reason `leaf` is a hint rather
-* than a lock.
-*
-* A parent that admits a child `leaf` predicted the work fits one worker. That
-* prediction is one guess made before the work started, while `细化想法4.md:415-427`
-* puts `DECOMPOSE` at the Task Worker's own discretion and §36 (`:1459-1483`)
-* asks for criteria the node can apply, not for a verdict frozen at delegation
-* time: with the switch off, a node that discovers it is not atomic has no legal
-* path, which is the only thing that made the recursion unreachable. Nothing
-* else moves: `task_decompose` is already in every worker's grant whatever its
-* `decompositionStatus` (`capability.ts:145`), so a switch-off deployment hands a
-* worker a tool the same runtime then refuses.
-*
-* The switch relaxes no guardrail, so `true` is the shipped default. A batch
-* still clears every admission rule — structure, acyclic dependencies,
-* executable criteria carrying a command, the capability-gap rule,
-* {@link Config.maxDepth}, {@link Config.maxChildren} — and a run still holds at
-* most one unfinished batch and one proposal in flight (K1 §1; an *active* run
-* is the whole of that rule, and a batch that ended hands the run back active).
-* A deployment that wants every split pre-declared by the parent sets `false`
-* and keeps the pre-switch refusal, named message included.
-*/
-const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true;
-const Capability = z.object({
-	skills: z.array(z.string()),
-	tools: z.array(z.string()),
-	preset: z.string(),
-	permission: z.string(),
-	mcpServers: z.array(z.string())
-});
-const RootBudget = z.object({
-	maxRuns: z.number(),
-	maxConcurrentWrites: z.number()
-});
-const ConfigSchema = z.object({
-	capabilities: z.dict(Capability).default({}),
-	defaultPreset: z.string(),
-	verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),
-	maxDepth: z.number().default(DEFAULT_MAX_DEPTH),
-	maxChildren: z.number().default(DEFAULT_MAX_CHILDREN),
-	budget: z.object({
-		maxToolCalls: z.number(),
-		tokens: z.number(),
-		attempts: z.number()
-	}).default({ ...DEFAULT_BUDGET }),
-	allowRuntimeDecomposition: z.boolean().default(DEFAULT_ALLOW_RUNTIME_DECOMPOSITION),
-	generatedTaskReview: z.union([z.const("off"), z.const("all")]).default(DEFAULT_GENERATED_TASK_REVIEW),
-	rootBudget: RootBudget,
-	writeDrainTimeoutMs: z.number().default(DEFAULT_WRITE_DRAIN_TIMEOUT_MS)
-});
-const BUDGET_EXTENSION_REQUEST_FIELDS = ["requestKey", "maxRuns"];
-function now() {
-	return (/* @__PURE__ */ new Date()).toISOString();
-}
-/** The ceilings one resolved root budget is under: what is in force, per dimension. */
-function ceilingsOf(budget) {
-	return { ...budget.maxRuns === void 0 ? {} : { maxRuns: budget.maxRuns } };
-}
-var TaskRuntime = class extends Service {
-	static inject = [
-		"task",
-		"agentRuntime",
-		"graphs",
-		"sessionQuery"
-	];
-	static Config = ConfigSchema;
-	config;
-	/** sessionId → run binding, rebuilt whenever a store is (re)opened. */
-	sessions = /* @__PURE__ */ new Map();
-	/**
-	* The sessions this process actually started (a spawned worker, a root run
-	* created here, a replay). Deliberately *not* populated by {@link reindex}:
-	* the recovery path needs to tell "this process is running that run right
-	* now" from "the store holds a run from a process that is gone", and a
-	* binding rebuilt from a snapshot cannot answer that.
-	*/
-	startedSessions = /* @__PURE__ */ new Set();
-	/**
-	* The batches and replays this process owns, keyed `<storeId>/<batchId>`
-	* (`replay/<runId>` for a replay). The map is the registration the recovery
-	* path consults, and the controller in each entry is what a cancellation,
-	* the unload path aborts.
-	*/
-	drivers = /* @__PURE__ */ new Map();
-	/**
-	* The lineage tag of each replay task this process started, keyed by task id.
-	* A spawning replay's worker submits like any other worker, so its terminal
-	* review is written by the shared settlement entry — which is where the tag has
-	* to be known. In-process only, and honest about it: a replay resumed in a new
-	* process records no lineage on the run it continues.
-	*/
-	replayLineage = /* @__PURE__ */ new Map();
-	/**
-	* The directory each session this process spawned into a *named* workspace
-	* works in, keyed by session: a replay may be placed in a directory of its own
-	* (S4-E), and that directory — not the session's graph env — is then the
-	* checkout every one of its runs resolves against, its own decomposition and its
-	* children's spawns included.
-	*
-	* In-process only, like the ownership registry it feeds and the session index
-	* beside it: a session the process never spawned has no entry, and a restart
-	* resolves the store's own sessions from the graph again. An entry lives while
-	* the run bound to its session is non-terminal ({@link runSettledFromRuntime}
-	* forgets it), which is exactly as long as anything can resolve through it.
-	*/
-	sessionWorkspaces = /* @__PURE__ */ new Map();
-	/**
-	* What each session this process spawned *runs under*, keyed by session: the
-	* model selection its agent was created with (`agentOptions`). A replay carries
-	* an experiment's frozen binding (S4-E §Q3), and the sub-execution its worker
-	* decomposes into is the same run of the same experiment — so the orchestration
-	* that session's own decomposition builds resolves the binding from here, exactly
-	* as it resolves the workspace it works in from {@link sessionWorkspaces} beside
-	* it.
-	*
-	* In-process only, for the same reason and with the same honesty: a session this
-	* process never spawned has no entry, and the binding is not part of any record
-	* (a replay resumed in a new process continues under the deployment's own
-	* selection, as it always continued without a lineage tag). An entry lives while
-	* the run bound to its session is non-terminal ({@link runSettledFromRuntime}
-	* forgets it), which is exactly as long as anything resolves through it.
-	*/
-	sessionExecutionBindings = /* @__PURE__ */ new Map();
-	/** The tool-execution gate and the write drain (A3 §3.3); this runtime owns every phase it writes. */
-	executionGate;
-	/**
-	* The stores a cancellation is closing right now ({@link cancelGraph}), from
-	* the instant its gate was closed to the instant the operation is done with
-	* the store.
-	*
-	* A cancellation is the one transition that puts a barrier in effect *before*
-	* the store records it, so during that window the record still says `running`
-	* and phase `active` — older than the barrier already in effect here. A read
-	* path that rebinds a session in the window would re-apply that older phase
-	* and lift the barrier, so {@link gatePhaseFromStore} refuses to move a phase
-	* a session already holds while its store is in this set. The store is the
-	* truth again the moment the entry goes.
-	*/
-	closingStores = /* @__PURE__ */ new Set();
-	/**
-	* One recovery barrier per store (A2 §E): what an explicit activation
-	* awaits, what every business execution entry checks before its first side
-	* effect, and what a cancellation or the unload invalidates. The persistent
-	* record stays the source of truth; this map only says what this process has
-	* recovered — it is never persisted and never a second state machine.
-	*/
-	storeRecovery = /* @__PURE__ */ new Map();
-	/** The one-writer-per-workspace ownership registry (A3 §3.4). */
-	workspaces;
-	/** The load-time provider scan, taken once ({@link providerLoadReport}). */
-	providerLoad;
-	/**
-	* One tail per store and parent task: the serialization §6 asks for, so two
-	* approved proposals competing for the same parent cannot interleave their
-	* re-checks and their commits. See {@link serializeParent}.
-	*/
-	parentChains = /* @__PURE__ */ new Map();
-	/**
-	* The one approval that can authorize a budget extension (K4), installed by
-	* the assembly through {@link registerRootBudgetApproval} at construction time
-	* and consulted by {@link extendRootBudget} — the only thing in this process
-	* that may turn a request into a grant. A deployment that installed none
-	* refuses new requests by name rather than assume a decision it never took.
-	*/
-	rootBudgetApproval;
-	/**
-	* Who the deployment wants told when a terminal review became durable (A5),
-	* installed through {@link registerTerminalReviewListener}. A list, and
-	* not a single slot: this is an observation door with no decision attached,
-	* so one deployment may watch the same fact for more than one reason without
-	* the second registration replacing the first.
-	*/
-	terminalReviewListeners = /* @__PURE__ */ new Set();
-	constructor(ctx, config) {
-		super(ctx, "taskRuntime");
-		const rootBudget = config?.rootBudget === void 0 ? void 0 : { ...config.rootBudget };
-		if (config?.budget !== void 0) {
-			const unknown = Object.keys(config.budget).filter((key) => ![
-				"maxToolCalls",
-				"tokens",
-				"attempts"
-			].includes(key));
-			if (unknown.length > 0) throw new Error(`task-runtime: budget names unsupported fields [${unknown.join(", ")}]`);
-		}
-		this.assertClosedRootBudget(rootBudget);
-		assertRootBudgetConfig(rootBudget ?? {});
-		this.assertGeneratedTaskReview(config?.generatedTaskReview);
-		this.config = {
-			capabilities: structuredClone(config?.capabilities ?? {}),
-			...config?.defaultPreset !== void 0 ? { defaultPreset: config.defaultPreset } : {},
-			verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
-			maxDepth: config?.maxDepth ?? DEFAULT_MAX_DEPTH,
-			maxChildren: config?.maxChildren ?? DEFAULT_MAX_CHILDREN,
-			budget: {
-				...DEFAULT_BUDGET,
-				...config?.budget ?? {}
-			},
-			allowRuntimeDecomposition: config?.allowRuntimeDecomposition ?? DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
-			generatedTaskReview: config?.generatedTaskReview ?? DEFAULT_GENERATED_TASK_REVIEW,
-			runBindingRoot: config?.runBindingRoot ?? defaultRunBindingRoot(),
-			...rootBudget === void 0 ? {} : { rootBudget },
-			writeDrainTimeoutMs: config?.writeDrainTimeoutMs ?? DEFAULT_WRITE_DRAIN_TIMEOUT_MS
-		};
-		this.executionGate = new ExecutionGate();
-		this.workspaces = new WorkspaceRegistry({ markerRoot: join(this.config.runBindingRoot ?? defaultRunBindingRoot(), WORKSPACE_OWNERS_DIR) });
-		ctx.effect(() => () => this.unload());
-	}
-	/**
-	* Refuse a root budget carrying a member this build does not execute. The
-	* schema keeps unknown keys, so this is where a caller's typo or a limit from
-	* a newer version is caught: a `maxTokens` or `maxWallClock` nobody enforces
-	* would read as a promise the deployment breaks silently.
-	*/
-	assertClosedRootBudget(budget) {
-		if (budget === void 0) return;
-		const known = new Set(["maxRuns", "maxConcurrentWrites"]);
-		const unknown = Object.keys(budget).filter((key) => !known.has(key));
-		if (unknown.length === 0) return;
-		throw new Error(`task-runtime: rootBudget names [${unknown.join(", ")}], which this deployment does not enforce; a hard limit that cannot be executed refuses to start rather than running under a promise nobody keeps`);
-	}
-	/**
-	* Refuse a review policy this build does not implement. The configuration
-	* schema types the member, but a deployment that constructs the runtime
-	* directly (a test, an embedding process) bypasses the schema, and a policy
-	* nobody implements is worse than a refusal to start: a value like `"risk"`
-	* would read as "somebody decides which batches are reviewed" while this
-	* build quietly admits everything. `off` and `all` are the two modes §5
-	* defines; nothing is inferred from a near miss.
-	*/
-	assertGeneratedTaskReview(policy) {
-		if (policy === void 0 || policy === "off" || policy === "all") return;
-		throw new Error(`task-runtime: generatedTaskReview is ${JSON.stringify(policy)}; the review policy is "off" or "all" (§5 defines no other mode, and a policy this build cannot execute refuses to start rather than admitting unreviewed batches)`);
-	}
-	/**
-	* The unload path: abort every driver, await their settlements, close the gate
-	* for every session this runtime tracks, and release the workspace markers
-	* this process wrote. Warnings, never throws — an unload that raised would
-	* leave the rest of the process's disposal half-done.
-	*/
-	async unload() {
-		for (const storeId of [...this.storeRecovery.keys()]) this.invalidateStoreRecovery(storeId);
-		this.storeRecovery.clear();
-		const entries = [...this.drivers.values()];
-		for (const entry of entries) entry.controller.abort();
-		await Promise.all(entries.map((entry) => entry.promise.catch((error) => {
-			this.warn(`unload: a driver did not settle cleanly (${error instanceof Error ? error.message : String(error)})`);
-			return [];
-		})));
-		this.drivers.clear();
-		for (const sessionId of this.startedSessions) this.executionGate.setTerminal(sessionId);
-		try {
-			await this.workspaces.close();
-		} catch (error) {
-			this.warn(`unload: workspace markers could not be released (${error instanceof Error ? error.message : String(error)})`);
-		}
-	}
-	/**
-	* Cordis runs this after construction, once the injected services are there:
-	* the load-time provider scan (S1-C item 3) is taken here, so the first thing
-	* a deployment learns about its own capability table is what its own discovery
-	* roots make of it.
-	*
-	* This hook never throws: see {@link providerLoadReport} for why the scan
-	* reports instead of refusing to start.
-	*/
-	async [Service.init]() {
-		await this.providerLoadReport();
-		this.ctx.effect(() => {
-			const offPre = this.ctx.on("tools/pre-execute", async (exec, next) => {
-				const sessionId = exec.agent?.id;
-				if (sessionId === void 0) return await next();
-				const decision = this.executionGate.decide(String(sessionId), exec.name);
-				if (!decision.allow) return {
-					kind: "deny",
-					reason: decision.reason
-				};
-				this.executionGate.trackAllowed(String(sessionId), String(exec.callId), exec.name);
-				return await next();
-			}, { prepend: true });
-			const offResult = this.ctx.on("tools/result", (exec) => {
-				this.executionGate.settled(String(exec.callId));
-			});
-			return () => {
-				if (typeof offPre === "function") offPre();
-				if (typeof offResult === "function") offResult();
-			};
-		});
-	}
-	/**
-	* The load-time provider scan over the capability table this process is
-	* running (guide §2.4, S1-C item 3): every skill the effective table names,
-	* discovered from the harness process's own skill roots (`process.cwd()`'s
-	* project roots, `$DSH_HOME/skills`, the user root) and judged by
-	* {@link validateSkillProvider} — the same validator admission, capability
-	* replacement and candidate promotion use.
-	*
-	* Why this reports instead of refusing the deployment: the harness process's
-	* own viewpoint is **not** the worker's. A deployment-level process loads
-	* `config.yml` long before any graph env exists, so it cannot see the checkout
-	* a worker will run in (`/…/env/<name>`, whose own `.agents/skills` a worker's
-	* discovery walks first) — a skill that resolves fine at admission is
-	* therefore legitimately *missing* from the load-time viewpoint. Failing the
-	* load on that would refuse configurations that work, and it would fail for a
-	* reason the operator cannot fix by editing the table. So every defect is
-	* printed, nothing is enforced here, and the hard gate stays where the
-	* viewpoint is the worker's own: the admission pre-check, which refuses the
-	* whole batch before it persists anything.
-	*
-	* The result is kept as a value ({@link ProviderLoadReport}): the effective
-	* provider set and the defect summary stay queryable after the log line has
-	* scrolled away, without re-running the validation. It is the *load-time* fact
-	* — a row replaced later in this process (an evolution apply, a rollback) was
-	* judged by its own entry before it landed, and is not folded back into this
-	* report.
-	*/
-	async providerLoadReport() {
-		this.providerLoad ??= this.scanConfiguredProviders();
-		return this.providerLoad;
-	}
-	/**
-	* One load-time scan, never thrown: a scan that cannot run (a discovery or a
-	* read that fails outright) is reported as {@link ProviderLoadReport.failed}
-	* and printed just as loudly as a refused provider.
-	*/
-	async scanConfiguredProviders() {
-		let report;
-		try {
-			const precheck = await this.providerPrecheck(Object.keys(this.config.capabilities), { cwd: process.cwd() });
-			report = {
-				precheck,
-				defects: providerDefectLines(precheck)
-			};
-		} catch (error) {
-			report = {
-				defects: [],
-				failed: error instanceof Error ? error.message : String(error)
-			};
-		}
-		this.reportProviderLoad(report);
-		return report;
-	}
-	/**
-	* The load report, printed through the cordis logger when one is mounted: one
-	* line per defect (capability, skill, defect code, detail) plus a header that
-	* says what was scanned and that the deployment is starting anyway.
-	*/
-	reportProviderLoad(report) {
-		const roots = report.precheck?.roots ?? [];
-		if (report.failed !== void 0) {
-			this.warn(`config load: the capability provider scan could not run (${report.failed}); the deployment starts, and admission still refuses a batch whose provider cannot be judged`);
-			return;
-		}
-		if (report.defects.length === 0) return;
-		this.warn(`config load: ${report.defects.length} provider defect${report.defects.length === 1 ? "" : "s"} in the effective capability table (roots: ${roots.join(", ")}); reported, not enforced — this process's own roots are not the worker's, so a skill reachable from a run's checkout may legitimately be missing here. Admission refuses a batch that names one of these.`);
-		for (const line of report.defects) this.warn(`config load: ${line}`);
-	}
-	/** Best-effort warn through the cordis logger when one is mounted; tests and minimal contexts may not have it. */
-	warn(message$8) {
-		const logger = this.ctx.logger;
-		logger?.("task-runtime").warn(message$8);
-	}
-	/**
-	* The wall-clock deadline one `verifier.verifyRun` call runs under
-	* ({@link Config.verifyTimeoutMs}). Exposed because the same deadline has to
-	* reach the model-facing `task_verify` self-check: its tool call would
-	* otherwise run the verifier with no timer at all.
-	*/
-	get verifyTimeoutMs() {
-		return this.config.verifyTimeoutMs;
-	}
-	/** The resolved per-run budget ({@link Config.budget}); which member is enforced, checked post-hoc, or declared only is documented on {@link BudgetConfig}. */
-	get budget() {
-		return { ...this.config.budget };
-	}
-	/**
-	* The review policy in force for batches that have not been admitted yet
-	* ({@link Config.generatedTaskReview}), exposed read-only: a deployment's own
-	* policy is not a secret, and a caller that has to say what happens next
-	* (`decomposeAndRun`'s pending answer, a tool's status line) should read it
-	* from the runtime rather than infer it from a proposal's birth policy — the
-	* two differ exactly when the deployment tightened it after that batch was
-	* proposed.
-	*/
-	get generatedTaskReview() {
-		return this.config.generatedTaskReview;
-	}
-	/**
-	* The tool-execution gate this runtime maintains (A3 §3.3), exposed read-only:
-	* what a phase admits and refuses is part of what this service promises, and
-	* the runtime is its only writer. Diagnostics and tests read it; nothing
-	* outside moves a phase through it.
-	*/
-	get gate() {
-		return this.executionGate;
-	}
-	/** Resolve required capability names against the configured registry. */
-	resolveCapabilities(required) {
-		return resolveCapabilities(required, this.config.capabilities);
-	}
-	/** The effective capability registry, cloned so callers cannot mutate runtime state. */
-	listCapabilities() {
-		return structuredClone(this.config.capabilities);
-	}
-	/**
-	* Evolution apply/rollback seam (guide §2.7.7, W16): replace one capability
-	* row in the effective registry at runtime — whole-row semantics, the same
-	* row the evolution_apply tool edited in `config.yml` just before calling
-	* this, so a restart reloads the identical table. `null` removes the row
-	* (rollback of a newly-added capability). Later admissions resolve against
-	* the replaced row; in-flight runs are untouched.
-	*
-	* **A replacement is validated before it lands; a removal is not.** This is
-	* the entry that makes a row effective in this process, so it runs the same
-	* check the promotion gate ran before the row was written to `config.yml`:
-	* every skill the new row grants is discovered from the harness process's own
-	* roots and judged by `validateSkillProvider`
-	* ({@link precheckReplacedCapabilityRow}), against the live registry's verifier
-	* vocabulary — fail-closed when that vocabulary cannot be listed. An unusable
-	* provider rejects with its named defects and the table is left exactly as it
-	* was, so no path into the effective registry skips the one validator
-	* (guide §2.4, S1-C item 3). A removal needs no such check: it grants
-	* nothing, and refusing a rollback would strand a deployment on a row it is
-	* trying to undo.
-	*
-	* `options.commitTargets` and `options.commitRow` are for the one caller that
-	* is itself the commit installing the row (A6): a capability commit writes a
-	* **new** skill's files and then registers the row that grants them, while its
-	* own `commit_intent` is still open — and the pre-check above refuses any
-	* provider whose directory an open intent touches, *and* any row an open intent
-	* moves, which would be the very provider and the very row this call is
-	* registering. The caller therefore names its own in-flight file set and the
-	* row it is installing, and only those are exempt from those one-or-two
-	* refusals: every *other* open intent still refuses the row by name, and the
-	* row is still judged by the whole admission pre-check, so a caller that named
-	* a foreign target or a foreign row would only weaken its own gate. A
-	* production deployment never passes either.
-	*/
-	async applyCapabilityRow(name, entry, options = {}) {
-		if (entry === null) {
-			const rest = { ...this.config.capabilities };
-			delete rest[name];
-			this.config.capabilities = rest;
-			return;
-		}
-		await this.assertReplacementRow(name, entry, options);
-		this.config.capabilities = {
-			...this.config.capabilities,
-			[name]: structuredClone(entry)
-		};
-	}
-	/**
-	* The replacement check behind {@link applyCapabilityRow}: the row as it will
-	* read after this write, judged by the admission pre-check itself. Throws with
-	* every refusal named (capability, skill, defect code, detail) — and writes
-	* nothing, which is what makes the caller's table unchanged.
-	*
-	* `options.commitTargets` and `options.commitRow` exempt the in-flight files
-	* and the row of the commit this call belongs to from the pre-check's
-	* open-intent gate only (see {@link applyCapabilityRow}); the ledger view
-	* handed to the pre-check is the deployment's own, with exactly those targets'
-	* directories and that row filtered out. A read the service does not offer is
-	* left absent rather than answered empty, so the pre-check's fail-closed rule
-	* keeps holding through the wrapper.
-	*/
-	async assertReplacementRow(name, entry, options = {}) {
-		const verifierRefs = await this.registeredVerifierIds();
-		const ledger = this.softService("evolution");
-		const owned = new Set((options.commitTargets ?? []).map((target) => dirname(resolve(target))));
-		const exemptRow = options.commitRow;
-		const commitLedger = ledger === void 0 || owned.size === 0 && exemptRow === void 0 ? ledger : {
-			...ledger.openIntentTargets === void 0 ? {} : { openIntentTargets: async () => (await ledger.openIntentTargets()).filter((target) => !owned.has(dirname(resolve(target)))) },
-			...ledger.openIntentCapabilities === void 0 ? {} : { openIntentCapabilities: async () => (await ledger.openIntentCapabilities()).filter((row) => row !== exemptRow) }
-		};
-		const { refusals } = await precheckReplacedCapabilityRow({
-			name,
-			entry,
-			table: this.config.capabilities,
-			view: { cwd: process.cwd() },
-			...verifierRefs === void 0 ? {} : { verifierRefs },
-			...commitLedger === void 0 ? {} : { commitLedger }
-		});
-		if (refusals.length === 0) return;
-		throw new Error(`task-runtime: capability "${name}" was not replaced — the row grants providers that are not usable:\n` + refusals.map((line) => `- ${line}`).join("\n"));
-	}
-	/**
-	* Open one root session's store and adopt the root it already holds, or say
-	* that it holds none (A0 §3, the recovery half of the old `createRootTask`).
-	*
-	* **It creates nothing.** A root task comes into existence exactly one way —
-	* a root contract that passed the review gate and was activated
-	* ({@link intakeRootContract}) — and this entry refuses to be a second door:
-	* there is no parameter, flag or entry that mints a root without a proposal,
-	* which is what keeps §1.3's "批准前零根任务" a property of the system rather
-	* than of one call path.
-	*
-	* What it does, in order: create-or-open the store (`rootTaskStoreId`), index
-	* every run the store holds, and then —
-	*
-	* - **no root task**: run the store's own recovery pass (`reconcileStore`:
-	*   settle or restart what a dead process left in flight, then the proposals)
-	*   and answer from what that pass left. Adoption is the entry graphs and
-	*   recovery use (§3 stage B), so the pass runs *here*: a contract whose
-	*   approval is on the record and whose process died is carried into the root
-	*   it was about by exactly this pass, and a waiting contract's review is
-	*   re-asked from the stored facts by it — answering "nothing to adopt" before
-	*   that pass would leave a recorded decision uncontinued. A root the pass
-	*   activates is then bound the way the bullet below binds one; a store the
-	*   pass leaves without a root still answers `{ adopted: false }`, with the
-	*   proposals still open on it named by id and status and the fact that
-	*   nothing was created stated. A store with no task is a normal state since
-	*   §1.1 (a graph's store is opened by its creation and filled when a contract
-	*   is accepted), not a failure to report;
-	* - **a root task, with a run bound to this root session**: re-check the run's
-	*   content binding (S1-C: a snapshot that is no longer readable refuses the
-	*   re-entry by name rather than resuming against whatever stands at that path
-	*   now), bind the session in this process, derive the session's gate phase
-	*   from the store's own run record, rebuild this process's workspace
-	*   ownership before any submitted run is verified, and settle or restart
-	*   whatever the store left in flight (`reconcileStore`) — the same recovery
-	*   a reopen performs;
-	* - **a root task without a run for this session**: refuse by name. That state
-	*   is a store whose root was created for a different session or whose run
-	*   record is gone, and neither is something to guess a binding for.
-	*
-	* The gate phase is *derived*, never remembered: a root run that is no longer
-	* running — terminal, cancelled, failed, verified — leaves the session
-	* `terminal`, so a late intake or a late write on a finished root is refused by
-	* the gate as well as by the state (§1.8). Reading it back from the store is
-	* what makes that true after a restart, when no process holds the phase the
-	* dead one set.
-	*
-	* **The recovery barrier (A2 §E).** This entry is what an explicit graph
-	* activation awaits, and the whole pass above is one barrier: the
-	* reconciliation of any open production commit intent (K2, before the store is
-	* touched at all — {@link reconcileEvolutionCommits}), reconciliation of the
-	* facts, the gate initialization for *every* session the store knows, and the
-	* registration of the drivers the pass restarts. The barrier waits for exactly
-	* those — never for a batch's execution or a model's output — because a driver
-	* it registers is parked (registered, so a cancellation finds it, but not
-	* started) until the barrier completes. A store-read failure, a workspace
-	* conflict or an exception in the pass fails the barrier rather than surfacing
-	* as a warning over an unrecovered store, and a cancellation or the unload
-	* invalidates the handle it leaves. Nothing here is a second persisted state
-	* machine: the store remains the only source of truth, the next explicit
-	* activation is the retry, and business execution checks the handle through
-	* {@link recoveryStatus} instead of re-running the pass.
-	*/
-	async adoptRoot(storeId, rootSessionId) {
-		const inflight = this.storeRecovery.get(storeId);
-		if (inflight !== void 0 && (inflight.status === "recovering" || inflight.status === "ready")) {
-			await inflight.promise;
-			const settledStatus = (state$1) => state$1.status;
-			if (this.storeRecovery.get(storeId) === inflight && settledStatus(inflight) === "failed") throw inflight.failure;
-			return inflight.adoption;
-		}
-		let complete;
-		const completed = new Promise((resolve$1) => {
-			complete = resolve$1;
-		});
-		let release;
-		const released = new Promise((resolve$1) => {
-			release = resolve$1;
-		});
-		const state = {
-			status: "recovering",
-			promise: completed,
-			release,
-			released,
-			pendingDrivers: [],
-			pendingNotices: [],
-			pendingBatchResults: []
-		};
-		this.storeRecovery.set(storeId, state);
-		try {
-			const adoption = await this.adoptRootThroughBarrier(storeId, rootSessionId);
-			state.adoption = adoption;
-			await this.initializeStoreGates(storeId);
-			if (state.cancelled) this.storeRecovery.delete(storeId);
-			else state.status = "ready";
-			const deferred = state.pendingQuestionDelivery;
-			state.pendingQuestionDelivery = void 0;
-			if (!state.cancelled) {
-				while (state.pendingNotices.length > 0) {
-					const notice = state.pendingNotices[0];
-					this.notify(notice.sessionId, notice.text);
-					state.pendingNotices.shift();
-				}
-				for (const result of state.pendingBatchResults.splice(0)) await this.deliverBatchResultNow(result);
-				if (deferred !== void 0) await deferred();
-			}
-			state.pendingDrivers.length = 0;
-			release(!state.cancelled);
-			return adoption;
-		} catch (error) {
-			state.status = "failed";
-			state.reason = error instanceof Error ? error.message : String(error);
-			state.failure = error;
-			state.pendingQuestionDelivery = void 0;
-			for (const notice of state.pendingNotices) this.startedSessions.delete(notice.sessionId);
-			state.pendingNotices.length = 0;
-			state.pendingBatchResults.length = 0;
-			this.standDownPendingDrivers(state);
-			release(false);
-			try {
-				await this.releaseStoreWorkspace(storeId);
-			} catch (cleanup) {
-				this.warn(`store ${storeId}: its workspace could not be released after a failed recovery (${cleanup instanceof Error ? cleanup.message : String(cleanup)})`);
-			}
-			throw error;
-		} finally {
-			complete();
-		}
-	}
-	/**
-	* Settle every open evolution commit intent before this process takes a store
-	* over (K2): production is never reconciled lazily, and the deployment's tool
-	* switch does not exempt it — a deployment that registers no evolution tool
-	* still has to know whether production holds what its ledger says. Both
-	* recovery entries reach this through {@link adoptRootThroughBarrier}: an
-	* explicit graph activation (activate → adoptRoot) and a restarted root
-	* session adopting its run.
-	*
-	* Read softly (`optionalService(this.ctx, 'evolution')`): a deployment that
-	* mounts no evolution plane has no commit to settle and is not refused. A
-	* `blocked` outcome is reported by name and does not fail the barrier — the
-	* intent stays open, admission refuses the provider whose target it names, and
-	* settling it (a retry of the apply/rollback, a later activation) remains the
-	* way forward. A real failure of the reconciliation itself does fail the
-	* barrier: it is the one result that cannot be read as "nothing was underway".
-	*/
-	async reconcileEvolutionCommits() {
-		const evolution = this.softService("evolution");
-		if (evolution?.reconcile === void 0) return;
-		let outcomes;
-		try {
-			outcomes = await evolution.reconcile();
-		} catch (error) {
-			throw new Error(`task-runtime: the evolution ledger could not be reconciled before this store was recovered (${error instanceof Error ? error.message : String(error)}); the recovery barrier fails rather than taking a store over while an unsettled production commit may stand behind it`);
-		}
-		for (const outcome of outcomes) {
-			if (outcome.result !== "blocked") continue;
-			this.warn(`evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ${outcome.targets.join(", ")} could not be settled — ${outcome.detail ?? "no reason reported"}`);
-		}
-	}
-	/** {@link adoptRoot}'s own pass, as one barrier body: the adoption in the order it always ran. */
-	async adoptRootThroughBarrier(storeId, rootSessionId) {
-		await this.reconcileEvolutionCommits();
-		await this.openOrCreateStore(storeId);
-		let snapshot = await this.ctx.task.snapshotIn(storeId);
-		this.reindex(storeId, snapshot);
-		let root = snapshot.tasks.find((task) => task.parentTaskId === void 0);
-		if (root === void 0) {
-			await this.reconcileStore(storeId);
-			snapshot = await this.ctx.task.snapshotIn(storeId);
-			root = snapshot.tasks.find((task) => task.parentTaskId === void 0);
-			if (root === void 0) return {
-				adopted: false,
-				detail: this.nothingAdoptedDetail(storeId, rootSessionId, snapshot)
-			};
-		}
-		const run = [...snapshot.runs].reverse().find((item) => item.taskId === root.taskId && item.sessionId === rootSessionId);
-		if (run === void 0) throw new Error(`task-runtime: store "${storeId}" already has root task "${root.taskId}" without a run for session "${rootSessionId}"`);
-		if (run.providerBinding !== void 0) {
-			const read = await readRunBinding(run.providerBinding);
-			if (read !== void 0 && read.defects.length > 0) throw new Error(`task-runtime: run "${run.runId}" cannot be re-entered: the content it is bound to is not readable:\n- ${read.defects.join("\n- ")}`);
-		}
-		const phase = this.runGatePhase(run);
-		const rootWasStarted = this.startedSessions.has(rootSessionId);
-		this.sessions.set(rootSessionId, {
-			storeId,
-			taskId: root.taskId,
-			runId: run.runId
-		});
-		this.startedSessions.add(rootSessionId);
-		if (!rootWasStarted && (phase === "active" || phase === "waiting_children" && pendingCoordinationOf(snapshot, run.runId).length > 0)) this.notifyWhenReady(rootSessionId, "task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.");
-		if (phase === "terminal") this.executionGate.setTerminal(rootSessionId);
-		else if (phase !== void 0) this.executionGate.setPhase(rootSessionId, phase);
-		if (snapshot.runs.some((item) => item.status === "running" && item.executionPhase === "submitted")) await this.rebuildWorkspaceOwnership(storeId);
-		await this.reconcileStore(storeId);
-		await this.rebuildWorkspaceOwnership(storeId);
-		return {
-			adopted: true,
-			taskId: root.taskId,
-			runId: run.runId,
-			phase: phase ?? "terminal",
-			detail: `store "${storeId}" holds root task "${root.taskId}" with run "${run.runId}" for session "${rootSessionId}"; the session is bound and its gate is "${phase ?? "ungated"}"`
-		};
-	}
-	/**
-	* The gate initialization the recovery barrier owes every session the store
-	* knows (A2 §E): one snapshot read taken *after* the pass, each run's phase
-	* derived and applied under the gate's own token rule — the token is taken
-	* before the read, so a decision that lands while it is in flight drops the
-	* value it was about to apply. A run that predates phases leaves its session
-	* ungated (A3's boundary: reading and cancelling are its only continuations),
-	* and {@link gatePhaseFromStore}'s closing-store guard keeps a cancellation's
-	* barrier ahead of this pass.
-	*
-	* This is the one place a restart's sessions get their phases back: the read
-	* door (`lookupRun`) no longer writes the gate, so a query cannot be the
-	* thing that recovers a store or re-gates a session. A store that cannot be
-	* read here fails the barrier — half-gated is not recovered.
-	*/
-	async initializeStoreGates(storeId) {
-		const tokens = /* @__PURE__ */ new Map();
-		for (const [sessionId, binding] of this.sessions) if (binding.storeId === storeId) tokens.set(sessionId, this.executionGate.decisionToken(sessionId));
-		let snapshot;
-		try {
-			snapshot = await this.ctx.task.snapshotIn(storeId);
-		} catch (error) {
-			throw new Error(`store ${storeId} could not be read to initialize its sessions' gates after recovery (${error instanceof Error ? error.message : String(error)}); the recovery barrier fails rather than leaving the store half-gated`);
-		}
-		for (const run of snapshot.runs) this.gatePhaseFromStore(run.sessionId, run, storeId, tokens.get(run.sessionId) ?? 0);
-		applyStoreQuestionBlocking(this.executionGate, snapshot, (sessionId) => tokens.get(sessionId) ?? 0);
-	}
-	/**
-	* What {@link adoptRoot} answers when the store still holds no root *after* its
-	* recovery pass ran (A0 §3 stage B): the proposals that pass left open, by id and
-	* status, and the fact that nothing was created.
-	*
-	* `adopted: false` is a normal answer (§1.1), and this detail is what keeps it an
-	* honest one. Recovery never advances a waiting contract and never mints a root
-	* without an accepted contract, so what a caller gets back is the state of the
-	* intake rather than a verdict: the pass ran, a named proposal is still waiting
-	* for a decision or a continuation, and adopting created no task, no run and no
-	* proposal of its own.
-	*/
-	nothingAdoptedDetail(storeId, rootSessionId, snapshot) {
-		const open = (snapshot.proposals?.all ?? []).filter(isOpenProposal);
-		return `store "${storeId}" holds no root task for session "${rootSessionId}" after its recovery pass, which created no task, no run and no proposal; ${open.length === 0 ? "no proposal is open on it" : `${open.length === 1 ? "1 proposal is" : `${open.length} proposals are`} still open: ` + open.map((proposal) => `"${proposal.proposalId}" (${proposal.status})`).join(", ")}; a root task is created by a root contract intake, never by adoption`;
-	}
-	/**
-	* The gate phase one stored run implies: its coordination phase while it is
-	* running, `terminal` once it is not, and `undefined` for a record that
-	* predates coordination phases (A3's own boundary — such a run is not gated,
-	* and its only legal continuation is cancellation).
-	*
-	* The derivation every rebinding door performs ({@link adoptRoot} for a root
-	* session, {@link gatePhaseFromStore} for any other): the gate is a handle on
-	* the run's phase, and the phase is the store's fact, so a session this
-	* process never held — or one whose phase moved under an in-flight call — is
-	* gated as what its run is, never as what this process happens to remember.
-	*/
-	runGatePhase(run) {
-		if (run.status !== "running") return "terminal";
-		return run.executionPhase;
-	}
-	/** Create the store, or open the one that already exists — the two ways a store can be there (A0 §1.1). */
-	async openOrCreateStore(storeId) {
-		try {
-			await this.ctx.task.createStore(storeId);
-		} catch (error) {
-			if (!(error instanceof Error) || !/already (open|exists)/.test(error.message)) throw error;
-			await this.ctx.task.openStore(storeId);
-		}
-	}
-	/**
-	* One root contract intake, all the way through (A0 §1.3–§1.4): the proposal
-	* is submitted, and — when it may run — activated in the same call. This is
-	* the entry the root agent's `task_intake` tool and a direct service call
-	* share, and there is no third one: an intake that stops at "the proposal was
-	* recorded" is {@link submitRootContractProposal}, and the only thing that
-	* turns a proposal into a root task is {@link continueProposal}.
-	*
-	* Under `off` the submission is born `ready` and the continuation runs
-	* immediately, so the *same* call both records `policy-off` and activates — the
-	* caller never has to ask twice for a contract that needs no review. Under
-	* `all` the proposal is born `pending_review` and this call returns with no
-	* task, no run, no spawn and no notification: nothing exists until a recorded
-	* decision approves it. A contract that fails the machine rules is refused
-	* with field-level reasons before a proposal exists at all.
-	*/
-	async intakeRootContract(storeId, rootSessionId, spec, options = {}) {
-		if (options.exec?.signal?.aborted === true) throw new Error(`task-runtime: the intake of a root contract for session "${rootSessionId}" was cancelled before anything was persisted`);
-		await this.assertRecoveryReady(storeId, "the intake of a root contract");
-		const submission = await this.submitRootContractProposal(storeId, rootSessionId, spec, options);
-		const continued = await this.continueProposal(storeId, submission.proposalId, rootSessionId);
-		if (continued.status === "activated") return {
-			status: "activated",
-			proposalId: continued.proposalId,
-			taskId: continued.taskId,
-			runId: continued.runId,
-			detail: continued.detail
-		};
-		if (continued.status === "pending_review") return {
-			status: "pending_review",
-			proposalId: continued.proposalId,
-			detail: continued.detail
-		};
-		throw new Error(`task-runtime: root contract of session "${rootSessionId}" is ${continued.status} (proposal ${continued.proposalId}): ${continued.detail}`);
-	}
-	/**
-	* One root contract proposal is submitted (A0 §1.2–§1.3): the pure pre-check,
-	* the immutable record with the policy it was born under, and — under `all` —
-	* the review request. Nothing is activated here, whatever the policy: no root
-	* task, no run, no spawn, and no id minted except the proposal's own
-	* content-derived one.
-	*
-	* The order is the same contract the batch path follows (§5: 坏提案不弹审批):
-	* the presented contract is fixed and normalized, then judged — structural
-	* rules, the root's independent-criterion rule, capability resolution and the
-	* gap rule, the provider pre-check, the verifier ids — and a contract that
-	* fails any of them is refused with field-level reasons *before* a proposal
-	* exists, so nothing is shown to a person about a contract that could never
-	* run. A contract that passes is recorded once behind its content-derived id,
-	* carrying the contract itself, and a retry of the same request (same key,
-	* same content) is answered from the record (`existing: true`) instead of
-	* building a second proposal.
-	*/
-	async submitRootContractProposal(storeId, rootSessionId, spec, options = {}) {
-		await this.assertRecoveryReady(storeId, "a root contract proposal");
-		return await this.serializeRootIntake(storeId, () => this.submitRootProposalOnce(storeId, rootSessionId, spec, options));
-	}
-	/**
-	* Admission and progress are two phases with two owners (A3 §3.1), and this
-	* entry is the boundary between them — now with the review gate of §5–§6 in
-	* front of it.
-	*
-	* **Submission**: the batch is pre-checked (protected-input fixing,
-	* normalization, structural admission, capability admission, the provider
-	* pre-check, verifierRef validation — all before any write) and recorded as
-	* an immutable proposal carrying the policy it was born under, the limits in
-	* force and the resolution it was reviewed against
-	* ({@link submitDecompositionProposal}).
-	*
-	* **Continuation** (governed by `exec.signal` and the stored decision): the
-	* batch is re-checked against what it was proposed under — the parent's state,
-	* the limits, the capability resolution, the judging verifiers — and only then
-	* admitted ({@link continueProposal}). Under policy `all` that re-check has an
-	* approval behind it, or the batch waits; under `off` it runs immediately,
-	* exactly as it did before T2.
-	*
-	* **Admission and the atomic commit**: one `admitBatchIn` records the
-	* children, their admission, the dependency edges, the batch identity, the
-	* parent's `active → waiting_children` phase change (§1.3) *and* the proposal
-	* it consumed, in one commit — so "this proposal became these tasks" is one
-	* durable fact a crash can be recovered from. The root budget must be able to
-	* reserve one run per child (§3.5), and the caller's checkout must already be
-	* held by this run or an ancestor of it (§3.4). Every refusal here is a
-	* refusal whole: no id minted, no event written, no worker started.
-	*
-	* **Progress** (governed by the runtime): the batch is handed to a driver
-	* registered under the runtime's own controller, and this call returns
-	* `{ batchId, childTaskIds }` immediately. The caller's signal dies with the
-	* commit; a tool call that returns, or a caller that aborts its own call,
-	* cannot stop a batch the store already admitted (§3.7). {@link awaitBatch}
-	* and the owner notification are how a caller learns how it went.
-	*
-	* This entry keeps its pre-T2 signature and its `off`-path behaviour (it
-	* returns the batch), and it is the gate, not the tool layer, that answers a
-	* batch under `all`: a direct call gets `{ status: 'pending_review' }` and no
-	* batch, exactly as the `task_decompose` tool does. A batch that was decided
-	* against between the two calls (rejected, cancelled, stale, expired) is
-	* refused by name — the caller has to revise and propose again, which is what
-	* the diagnostic says.
-	*/
-	async decomposeAndRun(storeId, parentTaskId, parentRunId, callerSessionId, spec, exec = {}) {
-		await this.assertRecoveryReady(storeId, "a decomposition");
-		const submission = await this.submitDecompositionProposal(storeId, parentTaskId, parentRunId, callerSessionId, spec, { ...exec.signal === void 0 && exec.callId === void 0 ? {} : { exec } });
-		const continued = await this.continueProposal(storeId, submission.proposalId, callerSessionId, { ...exec.callId === void 0 ? {} : { exec: { callId: exec.callId } } });
-		if (continued.status === "admitted") return {
-			status: "admitted",
-			proposalId: continued.proposalId,
-			batchId: continued.batchId,
-			childTaskIds: continued.childTaskIds
-		};
-		if (continued.status === "pending_review") return {
-			status: "pending_review",
-			proposalId: continued.proposalId,
-			detail: continued.detail,
-			batchId: void 0,
-			childTaskIds: void 0
-		};
-		throw new Error(`task-runtime: decomposition of "${parentTaskId}" is ${continued.status} (proposal ${continued.proposalId}): ${continued.detail}`);
-	}
-	/**
-	* One decomposition proposal is submitted (T2/T3 §5–§6): the pure pre-check,
-	* the immutable record with the policy it was born under, and — under `all` —
-	* the review request. Nothing is admitted here and no child id is minted,
-	* whatever the policy: submission is the record of what was asked for, and
-	* {@link continueProposal} is the only path that turns it into tasks.
-	*
-	* The order is the contract (§5: 坏提案不弹审批): an illegal batch is refused
-	* — with field-level reasons, and with the capability gaps the existing
-	* mechanism records as obligations — before a proposal exists and therefore
-	* before anything can be shown to a person. A batch that passes is recorded
-	* once: the id is derived from its content and the request key from its
-	* calling context, so a retry of the same request answers with the stored
-	* proposal (`existing: true`) instead of building a second one, a different
-	* content under the same explicit key is refused by name, and a revision is
-	* new content and a new key.
-	*
-	* The proposal carries the batch's content, not only its digest (§6), so what
-	* a reviewer reads, what a decision binds and what a continuation admits are
-	* one record — and an approval taken in one process is continuable in another
-	* with nothing but the store.
-	*/
-	async submitDecompositionProposal(storeId, parentTaskId, parentRunId, callerSessionId, spec, options = {}) {
-		await this.assertRecoveryReady(storeId, "a decomposition proposal");
-		return await this.serializeParent(storeId, parentTaskId, () => this.submitProposalOnce(storeId, parentTaskId, parentRunId, callerSessionId, spec, options));
-	}
-	/**
-	* One continuation (§6): the post-approval (and post-restart) re-check, and
-	* the only place a proposal becomes what it asked for — a batch of tasks, or
-	* (A0 §1.4) a root task with its run.
-	*
-	* The re-check is the whole point of an approval being a *record* rather than
-	* a switch. Before anything is admitted, the subject's own state, the limits in
-	* force, the capability resolution, the judging verifiers and the content are
-	* recomputed and compared with the fingerprints the approval bound — content
-	* whose context moved is marked `stale` with the difference named (§6: 不把旧批准
-	* 转移给新上下文), and a parent run that ended — or a store that already holds a
-	* root, for a root contract — takes the approval down with it (`expired`, never
-	* a dispatch). Only a proposal that still is what was reviewed is admitted,
-	* from `ready`, with its consumption in the same commit.
-	*
-	* Idempotent from the outside: an already-admitted proposal answers with what
-	* its consumption recorded (no second batch, no second root, no second commit),
-	* a waiting one answers `pending_review` without writing anything, and a
-	* terminal one answers with the status the store holds.
-	*
-	* `options.spec` re-presents the batch a caller believes this proposal means.
-	* It is only ever a *confirmation*: the re-presented batch is derived and
-	* compared with the stored identity, and a different batch — or one whose
-	* protected acceptance inputs no longer reproduce the fixed identity — is
-	* refused by name. The batch that is admitted is always the stored one, which
-	* is what the approval was made against. A root contract needs no such
-	* re-presentation: its subject is the store and the session, not a parent whose
-	* batch a caller could have confused.
-	*/
-	async continueProposal(storeId, proposalId, caller, options = {}) {
-		await this.assertRecoveryReady(storeId, "the continuation of a proposal");
-		const proposal = await this.requireProposal(storeId, proposalId);
-		if (proposal.kind === "root") return await this.serializeRootIntake(storeId, () => this.continueProposalIn(storeId, proposalId, caller, options));
-		return await this.serializeParent(storeId, proposal.identity.parentTaskId, () => this.continueProposalIn(storeId, proposalId, caller, options));
-	}
-	/**
-	* One review decision is recorded (T2/T3 §6) — the trusted entry the approval
-	* channel (stage C) and tests call, never a model tool with a decision
-	* argument. Everything it writes is read from the stored proposal: the
-	* dossier digest and both context fingerprints come from the record, so a
-	* decision cannot name a different batch than the one it is about, and the
-	* reducer refuses a claim that disagrees with what is stored.
-	*
-	* An approval whose parent run has ended is **not** recorded as an approval:
-	* §6's rule is that a late approval may only invalidate the proposal, so the
-	* entry records `expired` with the reason that made it late and dispatches
-	* nothing. An approval that lands is continued immediately
-	* ({@link continueProposal}) — and a continuation that could not be performed
-	* is reported in the result rather than thrown away: the approval is on the
-	* record either way, and the caller learns why the batch did not run.
-	*/
-	async decideProposal(storeId, proposalId, decision, decidedBy, exec = {}) {
-		await this.assertRecoveryReady(storeId, "a proposal decision");
-		const proposal = await this.requireProposal(storeId, proposalId);
-		const serialize = async (work) => proposal.kind === "root" ? await this.serializeRootIntake(storeId, work) : await this.serializeParent(storeId, proposal.identity.parentTaskId, work);
-		return await serialize(async () => {
-			const current = await this.requireProposal(storeId, proposalId);
-			if (decidedBy.trim().length === 0) throw new Error(`task-runtime: a decision on proposal "${proposalId}" requires a decider`);
-			if (decision.reason !== void 0 && decision.reason.trim().length === 0) throw new Error(`task-runtime: a decision reason on proposal "${proposalId}" must be non-empty when given`);
-			const decidedAt = decision.decidedAt ?? now();
-			let outcome = decision.outcome;
-			let reason = decision.reason;
-			if (outcome === "approved") {
-				const ended = await this.approvalLatenessReason(storeId, current);
-				if (ended !== void 0) {
-					outcome = "expired";
-					reason = `the approval arrived after ${current.kind === "root" ? "the root contract" : "the batch"} could be dispatched: ${ended}`;
-				}
-			}
-			if (outcome === "expired" && reason === void 0) throw new Error(`task-runtime: an expiry of proposal "${proposalId}" must state what ended the batch`);
-			await this.ctx.task.decideProposalIn(storeId, {
-				proposalId,
-				outcome,
-				proposalDigest: current.proposalDigest,
-				admissionContextDigest: current.admissionContextDigest,
-				...outcome === "approved" ? { reviewContextDigest: current.reviewContextDigest } : {},
-				decidedBy,
-				decidedAt,
-				...reason === void 0 ? {} : { reason }
-			}, decidedBy);
-			if (outcome !== "approved") return {
-				proposalId,
-				outcome,
-				status: outcome,
-				detail: `proposal "${proposalId}" is ${outcome}${reason === void 0 ? "" : `: ${reason}`}`,
-				...reason === void 0 ? {} : { reason }
-			};
-			try {
-				const continuation = await this.continueProposalIn(storeId, proposalId, this.proposalCallerOf(current), { exec });
-				return {
-					proposalId,
-					outcome,
-					status: continuation.status,
-					continuation,
-					detail: `proposal "${proposalId}" is approved; ${continuation.detail}`
-				};
-			} catch (error) {
-				const detail = error instanceof Error ? error.message : String(error);
-				this.warn(`proposal ${proposalId}: the approval is recorded but the continuation failed (${detail})`);
-				const stored = await this.readProposal(storeId, proposalId).catch(() => void 0);
-				return {
-					proposalId,
-					outcome,
-					status: stored?.status ?? outcome,
-					detail: `the approval of proposal "${proposalId}" is recorded; ${current.kind === "root" ? "the root was not activated" : "the batch was not admitted"}: ${detail}`
-				};
-			}
-		});
-	}
-	/**
-	* Why an approval arriving now is too late to be honoured, or `undefined` when
-	* it is not. Two subjects, two questions: a decomposition batch is late when
-	* its parent run has left the deciding phase ({@link parentRunEndedReason}),
-	* and a root contract is late when the store already holds a root task — the
-	* intake could no longer become that store's root, whatever the contract says.
-	*/
-	async approvalLatenessReason(storeId, proposal) {
-		if (proposal.kind !== "root") return await this.parentRunEndedReason(storeId, proposal);
-		const existing = await this.existingRootTask(storeId);
-		if (existing === void 0) return void 0;
-		return `store "${storeId}" already holds root task "${existing.taskId}"`;
-	}
-	/**
-	* One explicit withdrawal of a proposal (T2/T3 §6; root contracts A0 §1.3): a
-	* `cancelled` decision, by the session the proposal belongs to — the run that
-	* proposed a batch, or the root session a contract is the goal of. A withdrawal
-	* from anywhere else — a deployment retiring a proposal, a reviewer refusing
-	* one — goes through {@link decideProposal} with `cancelled` or `rejected`,
-	* which records *who* decided instead of hiding it behind the caller's
-	* identity.
-	*/
-	async cancelProposal(storeId, proposalId, caller) {
-		const proposal = await this.requireProposal(storeId, proposalId);
-		const owner = this.proposalCallerOf(proposal);
-		if (caller !== owner) throw new Error(`task-runtime: proposal "${proposalId}" was submitted by session "${owner}"; session "${caller}" cannot withdraw it (a withdrawal by anybody else is a decision, and is recorded as one — decideProposal with "cancelled")`);
-		return await this.decideProposal(storeId, proposalId, { outcome: "cancelled" }, caller);
-	}
-	/**
-	* The session a proposal belongs to: the caller whose run proposed a batch, or
-	* the root session a root contract is the goal of. One reader for the two
-	* owners, so "who may continue, decide or withdraw this" is answered once
-	* rather than re-derived — with the wrong field — at each entry.
-	*/
-	proposalCallerOf(proposal) {
-		return proposal.kind === "root" ? proposal.identity.rootSessionId : proposal.identity.callerSessionId;
-	}
-	/**
-	* The proposal one id names, as the store holds it (§6) — the read side a
-	* tool renders. A proposal is addressed by `proposalId` and by nothing else:
-	* there is no "is it approved?" question a caller can assert, and no approval
-	* credential this entry would accept, because the answer is the stored record
-	* or a refusal naming the id.
-	*/
-	async proposalIn(storeId, proposalId) {
-		return await this.requireProposal(storeId, proposalId);
-	}
-	/** Every proposal one parent task holds, in submission order — what a task's own view of its batches reads. */
-	async proposalsForParent(storeId, parentTaskId) {
-		return [...(await this.ctx.task.snapshotIn(storeId)).proposals?.byParentTask[parentTaskId] ?? []];
-	}
-	/**
-	* Install the one approval that can authorize an extension (K4) — what the
-	* assembly wires to the real DSH `approval.request()` at construction time,
-	* and the only thing {@link extendRootBudget} treats as a person's decision.
-	*
-	* Why the entry does not take the approval from its caller: an extension is a
-	* person's decision about the tree, and a caller must not be able to hand in
-	* anything that stands for one — a string that looks like a reference, a
-	* decision read back out of some session's log, a field of the request. The
-	* one decision that counts is the one this callback returns; an entry whose
-	* deployment installed no callback refuses a new request by name instead of
-	* assuming one.
-	*
-	* One approval at a time, as a deployment has one person-facing channel:
-	* installing another replaces the current one. The disposer returned here
-	* clears the registration it made and only that one, so a disposer kept from
-	* an earlier registration cannot uninstall a later one.
-	* @param approval - the callback that puts the ask to the person and answers with their decision.
-	* @returns a disposer that uninstalls this approval.
-	*/
-	registerRootBudgetApproval(approval) {
-		if (typeof approval !== "function") throw new Error("task-runtime: a root budget approval must be a function that answers the ask it is given");
-		this.rootBudgetApproval = approval;
-		return () => {
-			if (this.rootBudgetApproval === approval) this.rootBudgetApproval = void 0;
-		};
-	}
-	/**
-	* Install one listener the runtime tells when a terminal review became
-	* durable (A5) — the fact the review-agent trigger scans the store for.
-	*
-	* **What this door is not.** It carries no decision and no permission: the
-	* listener is told *what was recorded* and is never awaited, so nothing it
-	* does can hold a settlement, change a record or decide a phase. That is the
-	* whole reason it exists as an observation rather than as a second verb on the
-	* settle path: a deployment that installs none settles exactly as one that
-	* installs a hundred, and a listener whose own work fails (an unwritable
-	* ledger, a reviewer that cannot start) is reported and dropped by the
-	* runtime rather than propagated into the run it was told about.
-	*
-	* The listener is called once per review record, with the store, the task, the
-	* run under review (`null` for a review that carries none) and the outcome —
-	* never with "the latest review", so it cannot mistake one source for another.
-	* @param listener - the callback, called after the record is durable.
-	* @returns a disposer that removes exactly this listener.
-	*/
-	registerTerminalReviewListener(listener) {
-		if (typeof listener !== "function") throw new Error("task-runtime: a terminal-review listener must be a function");
-		this.terminalReviewListeners.add(listener);
-		return () => {
-			this.terminalReviewListeners.delete(listener);
-		};
-	}
-	/**
-	* Hand one recorded review to the listeners, fire-and-forget.
-	*
-	* Every listener is called and every answer is dropped: a promise one returns
-	* is left to settle on its own and a rejection is warned about, because a
-	* listener that fails has failed at *its* work (starting a reviewer), not at
-	* recording the review. A throwing listener is caught here for the same
-	* reason — the settlement path must come out of this function exactly as it
-	* went in.
-	*/
-	notifyTerminalReview(fact) {
-		for (const listener of this.terminalReviewListeners) try {
-			const answer = listener(fact);
-			if (answer !== void 0 && typeof answer.then === "function") answer.catch((error) => {
-				this.warn(`store ${fact.storeId}: a terminal-review listener failed after review ${fact.taskId}${fact.runId === null ? "" : `#${fact.runId}`} [${fact.outcome}] (${error instanceof Error ? error.message : String(error)})`);
-			});
-		} catch (error) {
-			this.warn(`store ${fact.storeId}: a terminal-review listener failed after review ${fact.taskId}${fact.runId === null ? "" : `#${fact.runId}`} [${fact.outcome}] (${error instanceof Error ? error.message : String(error)})`);
-		}
-	}
-	/**
-	* One budget extension, asked and recorded (K4): the whole entry, in one
-	* call.
-	*
-	* **What the caller supplies, and what it cannot.** The session is the tree's
-	* root coordination session, `host` is the DSH host execution the tool call
-	* runs under, and `request` is the request itself — a key and the totals the
-	* tree should be bounded by, and nothing else. The request is closed: any
-	* other field is refused by name, because the fields the old two-call relay
-	* carried (a `baseline`, a `callId`, an approval reference, an outcome) are
-	* exactly the ones a caller could use to go around the person. There is no
-	* second call, no public commit, and no reading a caller hands back: the
-	* reading this entry re-checks is the one it froze itself.
-	*
-	* **The order.** The host's call identity and the request's closure first
-	* (nothing else can be read without them); then the store: the session's graph
-	* has to name this session as its root (`rootTaskStoreId` derives the store
-	* from it) and the budget has to resolve through {@link resolveRootBudget}, so
-	* a delegated worker, another graph's session and an unresolvable graph are
-	* refused before any store is opened; then the store's extension index, where
-	* a key that already holds this exact request is answered from the record —
-	* zero writes and nobody asked, because a repeat never puts a question to a
-	* person twice; then the request's own rules against the ceilings in force,
-	* where a named dimension must be bounded by this deployment and its total a
-	* raise of the value in force. Every refusal writes nothing and asks nobody.
-	*
-	* **The freeze and the question.** What is left is a request that could be
-	* granted: the entry freezes the complete reading in force
-	* ({@link ceilingsOf} of the resolved budget) and the usage with it, and then
-	* asks the installed approval ({@link registerRootBudgetApproval}) — with the
-	* store, the root task and session, the configured ceilings, the frozen
-	* reading, the runs the store already holds, the proposal pairs and the host
-	* execution untouched. With no approval installed it refuses by name: this
-	* entry never makes a person's decision for them. An approval that refuses is
-	* reported with the reason it gave; one that allows proceeds, and the
-	* reference it returns is kept in the record as the audit reference of the
-	* question — never as a credential anything here would accept. A refusal
-	* that arrives after the identical request was recorded under its key is
-	* answered with the store's record instead: the store is re-read once there,
-	* nothing is appended, and a record of other content is refused by the key's
-	* binding.
-	*
-	* **Where the serialization is.** The claim goes to the store through
-	* `TaskService.recordBudgetExtensionIn`, unchanged, whose serial region
-	* re-checks *every* dimension of the frozen reading against the ceilings in
-	* force and answers a repeat of the stored request from the record. Two grants
-	* approved against one reading therefore cannot both stand, whichever
-	* dimension each one moves, and a ceiling that moved between the freeze and
-	* the commit is refused by name rather than re-based — the reading that
-	* travels with the claim is what a person was shown, and nothing is recomputed
-	* here after the question was asked.
-	*
-	* **What an extension is not.** It is a record of a decision, not work: it
-	* starts no run, resumes none, un-settles none, creates no task, child or
-	* candidate, recovers no store and opens no gate — a tree whose recovery is
-	* still pending can be granted the budget it will need, and the grant changes
-	* nothing until the tree runs again. A running run keeps the wall clock it
-	* started with (its per-run time is not reset); what an extension lengthens is
-	* only the tree's own bound, which every admission, driver and watchdog path
-	* reads through {@link resolveRootBudget}.
-	* @param sessionId - the root coordination session of the tree whose budget is raised.
-	* @param host - the host execution the tool call runs under, carried untouched to the approval.
-	* @param request - the key and the totals the tree should be bounded by, and nothing else.
-	* @returns the store, the root task and the record the store holds — with `answeredFromRecord` when the answer is a record the store already held.
-	*/
-	async extendRootBudget(sessionId, host, request) {
-		if ((typeof host === "object" && host !== null && typeof host.callId === "string" ? host.callId : "").length === 0) throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the host execution names no call (a non-empty \`callId\`, the host's own identity for the call this request's question is asked under); the question is asked under the host’s call, and nothing else can address an answer to this request`);
-		if (typeof request === "object" && request !== null) for (const key in request) {
-			if (BUDGET_EXTENSION_REQUEST_FIELDS.includes(key)) continue;
-			throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the request carries "${key}", which is not part of a budget-extension request (only ${BUDGET_EXTENSION_REQUEST_FIELDS.join(", ")} are read); a reading, a tool-call identity and an outcome are not a caller's to supply — this entry freezes the reading itself and asks the approval channel its deployment installed, so nothing a caller carries can go past the person`);
-		}
-		const { storeId, snapshot, budget } = await this.budgetExtensionContext(sessionId);
-		const requestKey = typeof request?.requestKey === "string" ? request.requestKey : "";
-		const existing = requestKey.length === 0 ? void 0 : this.budgetExtensionIndex(snapshot).byRequestKey[requestKey];
-		const judgement = this.judgeBudgetExtension(request, budget, existing);
-		if (judgement.kind === "refused") throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: ${judgement.reason}`);
-		if (judgement.kind === "recorded") return {
-			storeId,
-			rootTaskId: budget.rootTaskId,
-			answeredFromRecord: true,
-			record: judgement.record
-		};
-		const effective = ceilingsOf(budget);
-		const runsUsed = snapshot.runs.length;
-		const approval = this.rootBudgetApproval;
-		if (approval === void 0) throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: this deployment has no approval channel installed (no root budget approval was registered), and this entry never answers for a person (不能默许); install the approval that asks the person, or the ceiling stays where it is`);
-		const decision = await approval({
-			storeId,
-			rootTaskId: budget.rootTaskId,
-			rootSessionId: sessionId,
-			configured: budget.configured,
-			effective,
-			runsUsed,
-			proposal: judgement.proposal,
-			host
-		});
-		if (decision.kind === "refused") {
-			const recorded = this.budgetExtensionIndex(await this.ctx.task.snapshotIn(storeId)).byRequestKey[judgement.proposal.requestKey];
-			if (recorded !== void 0) {
-				if (recorded.requestDigest === judgement.proposal.requestDigest) return {
-					storeId,
-					rootTaskId: budget.rootTaskId,
-					answeredFromRecord: true,
-					record: recorded
-				};
-				throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: request key "${judgement.proposal.requestKey}" is already bound to ${describeBudgetExtension(recorded)} (identity ${recorded.requestDigest}); one key names one request, and different totals under it are a new request under a new key`);
-			}
-			throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the request was not approved (${decision.reason}); the ceilings are unchanged and no run started`);
-		}
-		const claim = {
-			...judgement.proposal,
-			baseline: { ...effective },
-			approvalRef: decision.reference,
-			requestedBy: sessionId
-		};
-		await this.ctx.task.recordBudgetExtensionIn(storeId, budget.rootTaskId, claim, sessionId);
-		const stored = this.budgetExtensionIndex(await this.ctx.task.snapshotIn(storeId)).byRequestKey[claim.requestKey];
-		if (stored === void 0) throw new Error(`task-runtime: budget extension "${claim.requestKey}" was committed to store "${storeId}" but the store does not hold it; a committed extension is a durable fact, and this is not one`);
-		return {
-			storeId,
-			rootTaskId: budget.rootTaskId,
-			answeredFromRecord: false,
-			record: stored
-		};
-	}
-	/**
-	* The execution-recovery entry (A6, plan §F.4): one failed root task's **new
-	* attempt** — a new root Run/Session in the same store, opened now, driven by
-	* the ordinary chain afterwards.
-	*
-	* What this entry is, and what it is not. It is the runtime's own door, called
-	* by the host composition layer (the tool adapter → evolution's coordinator →
-	* here), never a model tool by itself, and it re-checks *its own* rules from
-	* the store rather than trusting a caller: it never imports evolution, never
-	* reads a promotion ledger, and has no parameter that could stand for a
-	* person's approval. "The capability change was approved and applied" is
-	* answered by the store and the effective table — the source's required rows
-	* resolve now and their providers pass the ordinary pre-check — and nothing
-	* else.
-	*
-	* The order, and why each step is where it is:
-	*
-	* 1. **the request's closed shape**, before the store is opened: an unknown
-	*    field is refused by name, so a caller cannot smuggle a decision in.
-	* 2. **the caller**: a live coordination session *of this store's own graph*,
-	*    because the new attempt's Session is spawned from it and a recovery is
-	*    asked of the tree that failed. A caller without a live agent, a session
-	*    of another graph and a session whose graph cannot be resolved are one
-	*    refusal family, each named, and all of them before anything is written
-	*    ({@link assertRecoveryCallerOwnsStore}).
-	* 3. **the store's facts, re-checked here**: the source task is this store's
-	*    own root; the named source run is a failed run of it (or the failure had
-	*    no run); its contract and acceptance criteria are the ones the store
-	*    holds; the diagnosis is a record of this store naming this task; the
-	*    required capability rows resolve *now* and their providers pass the
-	*    ordinary pre-check; the K4 ceilings in force allow one more run; and the
-	*    task is in a failing terminal state (a `failed` task, or a `blocked` one
-	*    that never ran).
-	* 4. **idempotency and mutual exclusion**, from the attempt records: the same
-	*    key with the same content answers from the record; the same key with
-	*    other content is refused; a diagnosis with an attempt still in flight is
-	*    refused under a different key — by name, before the source's own status
-	*    is read — in this process and after a restart alike (the attempt is the
-	*    run, and the run's status is the fact).
-	* 5. **the reuse citations**, each resolved against the failed run's own
-	*    members and the original acceptance map. A citation that does not resolve
-	*    is refused with every affected item named, before anything is written.
-	* 6. **the write**: one commit starts the run (`TaskRetried` + `TaskStarted`,
-	*    carrying the attempt record and the run's re-resolved manifest). The
-	*    attempt is durable at that instant, so a crash between here and the spawn
-	*    leaves an attempt a same-key retry answers with the same run — never a
-	*    second one.
-	* 7. **the spawn**: the attempt's worker, composed exactly as a batch child's
-	*    (the deployment's preset, the capability grant, the worker policy) over
-	*    the checkout the source's tree works in. A spawn that fails settles the
-	*    attempt's run `failed` with the cause named — the record stands, and the
-	*    attempt is over.
-	*
-	* Nothing of the old attempt is touched: its run, its evidence, its review and
-	* its task's history stay exactly as they were, and no in-flight run is
-	* hot-swapped. The new attempt's own submission is judged by the original
-	* immutable acceptance criteria, and its batches count against the same store
-	* total the first attempt did — the ceiling is read from the store, never
-	* reset.
-	*/
-	async recoverRootTask(storeId, request, caller) {
-		const defects = recoveryRequestDefects(request);
-		if (defects.length > 0) throw new Error(`task-runtime: the recovery request was refused:\n- ${defects.join("\n- ")}`);
-		if (typeof caller?.sessionId !== "string" || caller.sessionId.trim().length === 0) throw new Error("task-runtime: a recovery attempt is opened for the session that asks for it: pass a non-empty caller session id");
-		if (this.agentOrUndefined(caller.sessionId) === void 0) throw new Error(`task-runtime: caller session "${caller.sessionId}" has no live agent, so the new attempt's Session cannot be spawned from it; nothing was written and no run was started`);
-		await this.assertRecoveryCallerOwnsStore(storeId, caller);
-		await this.assertRecoveryReady(storeId, "a recovery attempt");
-		return await this.serializeRootIntake(storeId, () => this.recoverRootTaskOnce(storeId, request, caller));
-	}
-	/**
-	* The caller's own graph, and the store of the root session that graph names:
-	* the one rule that decides whether a recovery may be asked of this store at
-	* all.
-	*
-	* **Why the service entry owns this.** The tool adapter and the evolution
-	* coordinator each check the membership they are responsible for, but a caller
-	* can reach `recoverRootTask` directly — the host composition layer does — and
-	* a rule only the tool checks is a rule a direct caller skips. What this check
-	* rests on is the deployment's own record, never the caller's word: the
-	* session's graph is the registry's fact, and the store id derives from the
-	* root session that graph names (`rootTaskStoreId`). So a session of another
-	* graph, a session no graph publishes, and a graph whose root names somebody
-	* else's store are one refusal family, each named. Deliberately absent: any
-	* read of the evolution ledger, any caller-supplied approval, and any
-	* distinction of *which* session inside the graph is asking — that a recovery
-	* is asked for by the graph's trusted supervisor is the coordinator's own
-	* rule, and this entry re-checks only the ownership that is its own (plan
-	* §F.4: 两层的直接调用入口各自重检所属规则).
-	*
-	* **Fail-closed, and before every write.** A graph that cannot be resolved is
-	* "ownership cannot be established", not "some other graph owns this store":
-	* the refusal names the caller, the graph's root session and store when they
-	* are known, and this store, and says that nothing was written. The check is
-	* two reads at most, so both call sites — the public entry and the serialized
-	* section — can afford it, and a refusal leaves the store, its batches and
-	* its files exactly as they were.
-	*/
-	async assertRecoveryCallerOwnsStore(storeId, caller) {
-		const sessionId = caller.sessionId;
-		const graphs = this.ctx.graphs;
-		if (graphs === void 0) throw new Error(`task-runtime: session "${sessionId}" cannot open a recovery of store "${storeId}": this deployment has no graph registry, so its ownership of this store cannot be established; nothing was written`);
-		let graph;
-		try {
-			graph = await graphs.graphForSession(SessionId(sessionId));
-		} catch (error) {
-			throw new Error(`task-runtime: session "${sessionId}" cannot open a recovery of store "${storeId}": its graph could not be resolved (${error instanceof Error ? error.message : String(error)}), so its ownership of this store cannot be established; nothing was written`);
-		}
-		const ownStoreId = rootTaskStoreId(graph.rootSessionId);
-		if (ownStoreId !== storeId) throw new Error(`task-runtime: session "${sessionId}" cannot open a recovery of store "${storeId}": its graph's root session is "${graph.rootSessionId}", whose store is "${ownStoreId}" — a recovery attempt is opened in the store of the caller's own graph, and nothing was written`);
-	}
-	/** One recovery attempt, inside the store's own serialization — see {@link recoverRootTask} for the order. */
-	async recoverRootTaskOnce(storeId, request, caller) {
-		await this.assertRecoveryCallerOwnsStore(storeId, caller);
-		const sourceTaskId = request.sourceTaskId;
-		const snapshot = await this.ctx.task.snapshotIn(storeId);
-		const source = snapshot.tasks.find((task) => task.taskId === sourceTaskId);
-		if (source === void 0) throw new Error(`task-runtime: store "${storeId}" holds no task "${sourceTaskId}", so there is nothing to recover; a recovery is asked of the store that owns the failed task`);
-		if (source.parentTaskId !== void 0) throw new Error(`task-runtime: task "${sourceTaskId}" is a child of "${source.parentTaskId}"; a recovery attempt is opened for the store's own root task, and a child is re-run by a batch of its parent instead`);
-		const answered = this.recoveryAttemptForRequest(snapshot, request);
-		if (answered !== void 0) return answered;
-		const diagnosis = (snapshot.diagnoses ?? []).find((item) => item.diagnosisId === request.sourceDiagnosisId);
-		if (diagnosis === void 0) throw new Error(`task-runtime: store "${storeId}" holds no diagnosis "${request.sourceDiagnosisId}"; a recovery is asked for by a diagnosis of this store and by nothing else, so this hand-off names no fact here`);
-		if (diagnosis.taskId !== sourceTaskId) throw new Error(`task-runtime: diagnosis "${request.sourceDiagnosisId}" is about task "${diagnosis.taskId}", not the named source "${sourceTaskId}"; the hand-off and the store disagree about which task failed, and nothing was written`);
-		const inFlight = inFlightRecoveryAttempt(snapshot, sourceTaskId, request.sourceDiagnosisId);
-		if (inFlight !== void 0) throw new Error(`task-runtime: diagnosis "${request.sourceDiagnosisId}" already has a recovery attempt in flight (run "${inFlight.runId}", session "${inFlight.sessionId}", key "${inFlight.recovery?.requestKey ?? "unknown"}"); key "${request.requestKey}" starts nothing — an attempt ends when its run settles, and a new key may be asked for after that`);
-		if (source.status === "verified") throw new Error(`task-runtime: root task "${sourceTaskId}" is verified — a successful source is not recoverable, and nothing was written; an improvement on a succeeded goal needs a new intake under its own contract, not a recovery of this one`);
-		if (source.status === "running" || source.status === "verifying") throw new Error(`task-runtime: root task "${sourceTaskId}" is ${source.status}: an attempt is in flight, and a recovery does not hot-swap a live run`);
-		if (source.status !== "failed" && source.status !== "blocked") throw new Error(`task-runtime: root task "${sourceTaskId}" is ${source.status}; a recovery attempt is opened for a failed task (a \`failed\` task, or a \`blocked\` one that never ran), and this is not one`);
-		const sourceRun = this.recoverySourceRun(source, request, snapshot);
-		this.assertRecoveryContract(source);
-		const reuseContext = {
-			source,
-			...sourceRun === void 0 ? {} : { sourceRun },
-			sourceMembers: sourceRun === void 0 ? [] : runMemberSlots(sourceRun),
-			snapshot
-		};
-		const declared = request.reuses;
-		const derived = declared === void 0 ? deriveReuse(reuseContext) : void 0;
-		const declarations = declared ?? derived?.bound ?? [];
-		const reuseReasons = reuseDefects(declarations, reuseContext);
-		if (reuseReasons.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused; the declared reuse does not resolve:\n- ${reuseReasons.join("\n- ")}`);
-		const unbound = derived?.unbound ?? [];
-		const manifest = this.resolveCapabilities(source.requestedCapabilities);
-		if (manifest.missing.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused: the capability gap this attempt is for is still open ([${manifest.missing.join(", ")}] resolve to no row in this deployment's table); apply the row that closes it, and the recovery re-reads what the deployment holds then — nothing was written`);
-		const rootSessionId = sourceRun?.sessionId ?? this.recoverySessionFor(snapshot, storeId);
-		const envPath = await this.envPathForSession(rootSessionId);
-		const precheck = await this.providerPrecheck(Object.keys(manifest.capabilities), { ...envPath === void 0 ? {} : { cwd: envPath } });
-		const refusals = providerRefusals(precheck);
-		if (refusals.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused by the provider pre-check:\n- ${refusals.join("\n- ")}`);
-		const budget = resolveRootBudget(snapshot, this.config.rootBudget ?? {});
-		if (!budget.ok) {
-			if (hasRootLimits(this.config.rootBudget)) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused: the root budget cannot be resolved: ${budget.reason}`);
-		} else {
-			const verdict = checkRunStart(snapshot, budget);
-			if (!verdict.allowed) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused by the root budget: ${verdict.reason}; the ceiling is not raised by this entry and no count is reset — a person raises it through the budget-extension entry`);
-		}
-		return await this.startRecoveryAttempt({
-			storeId,
-			source,
-			request,
-			declarations,
-			unbound,
-			manifest,
-			precheck,
-			rootSessionId,
-			actor: caller.sessionId,
-			...caller.signal === void 0 ? {} : { signal: caller.signal }
-		});
-	}
-	/**
-	* The attempt one request is already answered by — and the refusal one key
-	* bound to other content earns.
-	*
-	* The two questions are asked of the same records, in this order: the key
-	* first (a retry of the same request is answered from the run it named, in
-	* this process and after a restart alike), then the content the key is bound
-	* to. A key already bound to another attempt of the same diagnosis is refused
-	* by name: a key is a promise about content, and re-using it is how a caller
-	* would try to make one attempt mean two.
-	*/
-	recoveryAttemptForRequest(snapshot, request) {
-		const existing = recoveryAttemptWithKey(snapshot, request.sourceTaskId, request.requestKey);
-		if (existing === void 0) return void 0;
-		const stored = existing.recovery;
-		const digest = stored.requestDigest ?? recoveryAttemptDigest(stored);
-		const wanted = requestAttemptDigest(request);
-		if (digest !== wanted) throw new Error(`task-runtime: request key "${request.requestKey}" already names a recovery attempt of "${request.sourceTaskId}" (run "${existing.runId}", session "${existing.sessionId}", request ${digest}); this request's content is ${wanted} — one key names one request, and a different request is a different key`);
-		return {
-			attempt: "existing",
-			storeId: snapshot.id,
-			sourceTaskId: request.sourceTaskId,
-			sourceDiagnosisId: stored.sourceDiagnosisId,
-			requestKey: stored.requestKey,
-			runId: existing.runId,
-			sessionId: existing.sessionId,
-			status: existing.status,
-			reusedMembers: stored.reusedMembers.map((member) => ({
-				...member,
-				artifactRefs: [...member.artifactRefs],
-				inputRefs: [...member.inputRefs]
-			})),
-			unboundMembers: (stored.unboundMembers ?? []).map((entry) => ({
-				...entry,
-				reasons: [...entry.reasons]
-			})),
-			detail: `request key "${stored.requestKey}" already named this recovery attempt: run "${existing.runId}" is ${existing.status}${existing.finishedAt === void 0 ? "" : ` (finished ${existing.finishedAt})`}; nothing was written`
-		};
-	}
-	/**
-	* The failed run one request names, or `undefined` when the failure had none.
-	* A named run must be this task's and must be failed; a request that names
-	* none is only honest for a task that has no run in flight — a blocked task
-	* that never started, or a failure whose run is already terminal — because a
-	* running run means an attempt is in flight rather than a failure to recover.
-	*/
-	recoverySourceRun(source, request, snapshot) {
-		if (request.sourceRunId !== null) {
-			const run = snapshot.runs.find((candidate) => candidate.runId === request.sourceRunId);
-			if (run === void 0) throw new Error(`task-runtime: store "${snapshot.id}" holds no run "${request.sourceRunId}"; the named source attempt does not exist`);
-			if (run.taskId !== source.taskId) throw new Error(`task-runtime: run "${run.runId}" belongs to task "${run.taskId}", not to the named source "${source.taskId}"; nothing was written`);
-			if (run.status !== "failed") throw new Error(`task-runtime: source run "${run.runId}" is ${run.status}; a recovery recovers a *failed* attempt (its run settled \`failed\`), and this run is not one`);
-			return run;
-		}
-		const running = snapshot.runs.filter((run) => run.taskId === source.taskId && run.status === "running");
-		if (running.length > 0) throw new Error(`task-runtime: the request names no source run, but task "${source.taskId}" holds a run in flight (${running.map((run) => run.runId).join(", ")}); a failure without a run is a task that never started, not one an attempt is running for`);
-	}
-	/**
-	* The contract and acceptance criteria the attempt must be judged by, re-read
-	* here rather than taken from a caller: the store's own record is the original
-	* goal, and the projection fields must still agree with it. Nothing is
-	* rewritten — the store refuses a contract edit outright — but "the original
-	* contract and acceptance are unchanged" is the runtime's own pre-check
-	* (plan §F.4: 两层的直接调用入口各自重检), and a record whose goal and
-	* criteria disagree is refused before an attempt is bound to it.
-	*
-	* A task with no contract — one created before contracts existed — has no
-	* original acceptance a reuse could bind to and is refused by name.
-	*/
-	assertRecoveryContract(source) {
-		const contract = source.contract;
-		if (contract === void 0) throw new Error(`task-runtime: task "${source.taskId}" carries no contract, so its original acceptance cannot be read; a recovery binds its reuse to that acceptance, and nothing is guessed for a task that has none`);
-		const disagreement = contract.objective !== source.objective ? "its objective" : canonicalize(contract.acceptanceCriteria) !== canonicalize(source.acceptanceCriteria) ? "its acceptance criteria" : canonicalize(contract.requiredCapabilities) !== canonicalize(source.requestedCapabilities) ? "its required capabilities" : void 0;
-		if (disagreement !== void 0) throw new Error(`task-runtime: task "${source.taskId}"'s contract and its projection disagree on ${disagreement}; the original contract and acceptance criteria have to be one record before an attempt can be bound to them`);
-		if (source.acceptanceCriteria.length === 0) throw new Error(`task-runtime: task "${source.taskId}" declares no acceptance criterion, so there is nothing the new attempt could be judged by`);
-	}
-	/**
-	* The write: claim the checkout, bind the attempt's content, start the run
-	* (with its record), register what only this process can hold, and spawn the
-	* worker. Every failure that happens after the commit settles the run `failed`
-	* with the cause named — an attempt nobody can drive is over, not a run left
-	* `running` forever.
-	*/
-	async startRecoveryAttempt(input) {
-		const { storeId, source, request, declarations, manifest, rootSessionId, actor } = input;
-		const runId = `r-${randomUUID()}`;
-		const sessionId = `s-${randomUUID()}`;
-		const reusedMembers = declarations.map(storedReuse);
-		const recovery = {
-			sourceDiagnosisId: request.sourceDiagnosisId,
-			requestKey: request.requestKey,
-			...request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId },
-			requestedAt: now(),
-			requestDigest: requestAttemptDigest(request),
-			reusedMembers,
-			...input.unbound.length === 0 ? {} : { unboundMembers: input.unbound.map((entry) => ({
-				...entry,
-				reasons: [...entry.reasons]
-			})) }
-		};
-		const preset = resolvePreset(manifest, this.config.defaultPreset);
-		const workspacePath = await this.workspacePathForSession(rootSessionId);
-		let claimed;
-		if (workspacePath !== void 0 && this.workspaces !== void 0) {
-			await this.workspaces.claim(workspacePath, {
-				kind: "run",
-				storeId,
-				taskId: source.taskId,
-				runId,
-				since: now()
-			});
-			claimed = this.workspaces.ownerOf(workspacePath);
-		}
-		let binding;
-		try {
-			binding = await bindRunProviders({
-				storeId,
-				runId,
-				manifest,
-				providers: input.precheck,
-				table: this.config.capabilities,
-				root: this.config.runBindingRoot
-			});
-			const run = {
-				runId,
-				taskId: source.taskId,
-				sessionId,
-				capabilitySnapshot: capabilitySnapshot(manifest),
-				...preset === void 0 ? {} : { agentPreset: preset },
-				...binding === void 0 ? {} : { providerBinding: binding },
-				executionPhase: "active",
-				recovery,
-				artifacts: [],
-				verifierResults: [],
-				status: "running",
-				startedAt: now()
-			};
-			await this.ctx.task.startRunIn(storeId, run, actor, { manifest });
-			this.sessions.set(sessionId, {
-				storeId,
-				taskId: source.taskId,
-				runId
-			});
-			this.startedSessions.add(sessionId);
-			this.executionGate.setPhase(sessionId, "active");
-			if (workspacePath !== void 0) this.sessionWorkspaces.set(sessionId, workspacePath);
-		} catch (error) {
-			if (workspacePath !== void 0 && claimed !== void 0) await this.workspaces?.release(workspacePath, claimed).catch((cause) => {
-				this.warn(`workspace ${workspacePath} could not be released after a refused attempt (${cause instanceof Error ? cause.message : String(cause)})`);
-			});
-			throw error;
-		}
-		try {
-			await spawnTaskWorker(await this.orchestrateEnv(actor, actor, workspacePath), {
-				sessionId,
-				name: `recovery of ${source.objective.trim().replace(/\s+/g, " ").slice(0, 32) || source.taskId}`,
-				manifest,
-				...binding === void 0 ? {} : { providerBinding: binding },
-				...preset === void 0 ? {} : { agentPreset: preset },
-				...workspacePath === void 0 ? {} : { cwd: workspacePath },
-				...input.signal === void 0 ? {} : { signal: input.signal }
-			});
-		} catch (error) {
-			const reason = error instanceof Error ? error.message : String(error);
-			const env = await this.orchestrateEnv(actor, actor, workspacePath);
-			const run = (await this.ctx.task.snapshotIn(storeId).catch(() => void 0))?.runs.find((item) => item.runId === runId);
-			if (run !== void 0 && run.status === "running") await settleRunFromRuntime(env, storeId, run, "failed", `the recovery attempt's worker could not be spawned: ${reason}`);
-			if (workspacePath !== void 0 && claimed !== void 0) await this.workspaces?.release(workspacePath, claimed).catch((cause) => {
-				this.warn(`workspace ${workspacePath} could not be released after a failed spawn (${cause instanceof Error ? cause.message : String(cause)})`);
-			});
-			throw new Error(`task-runtime: the recovery attempt of "${source.taskId}" was opened (run "${runId}", session "${sessionId}") but its worker could not be spawned: ${reason}; the attempt's run was settled failed with this cause, and a new attempt needs a new request key`);
-		}
-		const stored = (await this.ctx.task.snapshotIn(storeId)).runs.find((item) => item.runId === runId);
-		return {
-			attempt: "started",
-			storeId,
-			sourceTaskId: source.taskId,
-			sourceDiagnosisId: request.sourceDiagnosisId,
-			requestKey: request.requestKey,
-			runId,
-			sessionId,
-			status: stored?.status ?? "running",
-			reusedMembers,
-			unboundMembers: input.unbound.map((entry) => ({
-				...entry,
-				reasons: [...entry.reasons]
-			})),
-			detail: `a recovery attempt of "${source.taskId}" was opened: run "${runId}" in session "${sessionId}" under diagnosis "${request.sourceDiagnosisId}", key "${request.requestKey}"${reusedMembers.length === 0 ? "" : `, reading ${reusedMembers.length} already verified sibling member(s) at the position(s) ${reusedMembers.map((member) => member.childIndex).join(", ")}`}${input.unbound.length === 0 ? "" : `; ${input.unbound.length} position(s) whose passed sibling could not be bound (${input.unbound.map((entry) => `#${entry.childIndex}`).join(", ")}) are done again and the reasons are on the record`}; the original acceptance criteria judge it, and the store total it spends is the same one`
-		};
-	}
-	/**
-	* The store one budget-extension call works on, its root session established —
-	* the one place this entry's trust and reading rules live.
-	*
-	* The session's graph answers first because "is this session a graph's root
-	* coordination session" is the graph's own fact, and the store id is derived
-	* from the session the graph names ({@link rootTaskStoreId}) rather than from
-	* the caller's string: a worker session, a session of another graph and a
-	* session whose graph cannot be resolved are one refusal family here, each
-	* named, and none of them opens a store.
-	*
-	* The budget has to resolve for an extension to mean anything: the tree's
-	* owner is the root task and the configured ceilings are measured from the root
-	* run's own start, so a store with no measurable root (no root task, no run for
-	* it, an unreadable start) refuses by the resolver's own words — the same
-	* refusal every admission path uses, at the same place, instead of a second
-	* reading of the store invented here.
-	*/
-	async budgetExtensionContext(sessionId) {
-		if (typeof sessionId !== "string" || sessionId.length === 0) throw new Error("task-runtime: a budget extension needs the root session that asks: pass a non-empty session id");
-		let rootSessionId;
-		try {
-			rootSessionId = (await this.ctx.graphs.graphForSession(SessionId(sessionId))).rootSessionId;
-		} catch (error) {
-			throw new Error(`task-runtime: the budget of session "${sessionId}" cannot be extended: its graph could not be resolved (${error instanceof Error ? error.message : String(error)}), so whether it is a graph's root coordination session cannot be established`);
-		}
-		if (rootSessionId !== sessionId) throw new Error(`task-runtime: session "${sessionId}" is not a root coordination session (its graph's root session is "${rootSessionId}"), so it cannot extend a tree's budget: a raise is a decision about the tree the root session accepted, and it is refused by name for a delegated worker, for a session of another graph, and for any session that is not the one its graph created`);
-		const storeId = rootTaskStoreId(sessionId);
-		let snapshot;
-		try {
-			snapshot = await this.ctx.task.openStore(storeId);
-		} catch (error) {
-			throw new Error(`task-runtime: the budget of session "${sessionId}" cannot be read: store "${storeId}" is unavailable (${error instanceof Error ? error.message : String(error)})`);
-		}
-		const resolution = resolveRootBudget(snapshot, this.config.rootBudget ?? {});
-		if (!resolution.ok) throw new Error(`task-runtime: the budget of session "${sessionId}" cannot be extended: ${resolution.reason}`);
-		return {
-			storeId,
-			snapshot,
-			budget: resolution
-		};
-	}
-	/** The store's own extension index; a snapshot that carries none is a refusal, never "the store holds no extensions". */
-	budgetExtensionIndex(snapshot) {
-		const index = snapshot.budgetExtensions;
-		if (index === void 0) throw new Error(`task-runtime: store "${snapshot.id}" carries no budget-extension index, so its approved ceilings cannot be read`);
-		return index;
-	}
-	/**
-	* One extension request, judged against the ceilings in force and against what
-	* the store already holds — the request's own rules, applied before anybody is
-	* asked, and pure: it reads the values it is given and writes nothing.
-	*
-	* The order is deliberate. The request's own shape first (a key, at least one
-	* dimension, values that denote something), then the store's answer for the key
-	* — a repeat of a recorded request is *answered* from the record before any
-	* bound is judged, so a key whose totals were approved can be retried after the
-	* tree moved on and still be idempotent — and only then the bounds of the
-	* dimensions the request *names*: a dimension this deployment leaves unbounded
-	* is not a number to raise, and a named total has to be a raise of the ceiling
-	* in force.
-	*
-	* What is deliberately *not* judged here is the reading. The runtime freezes
-	* the complete reading in force itself (no caller has one to supply), and the
-	* store re-checks every dimension of that frozen reading inside its serial
-	* region, which is where two grants approved against one reading are really
-	* made mutually exclusive — including over the dimensions a request leaves
-	* alone.
-	*/
-	judgeBudgetExtension(request, budget, existing) {
-		if (typeof request !== "object" || request === null) return {
-			kind: "refused",
-			reason: "the request is not an object with a request key and maxRuns"
-		};
-		const requestKey = request.requestKey;
-		if (typeof requestKey !== "string" || requestKey.length === 0) return {
-			kind: "refused",
-			reason: "the request needs a non-empty request key: it is how a retry after a restart is recognised as the same request"
-		};
-		if (request.maxRuns === void 0) return {
-			kind: "refused",
-			reason: "the request names no maxRuns ceiling to raise"
-		};
-		if (request.maxRuns !== void 0 && (!Number.isInteger(request.maxRuns) || request.maxRuns <= 0)) return {
-			kind: "refused",
-			reason: `maxRuns ${JSON.stringify(request.maxRuns)} is not a positive whole number of runs; the approved value is the tree\u2019s whole run count, never an increment`
-		};
-		const proposalDigest = budgetExtensionRequestDigest({
-			requestKey,
-			...request.maxRuns === void 0 ? {} : { maxRuns: request.maxRuns }
-		});
-		if (existing !== void 0) {
-			if (existing.requestDigest === proposalDigest) return {
-				kind: "recorded",
-				record: existing
-			};
-			return {
-				kind: "refused",
-				reason: `request key "${requestKey}" is already bound to ${describeBudgetExtension(existing)} (identity ${existing.requestDigest}); one key names one request, and different totals under it are a new request under a new key`
-			};
-		}
-		if (budget.maxRuns === void 0) return {
-			kind: "refused",
-			reason: "this tree sets no maxRuns ceiling, so there is nothing to raise"
-		};
-		if (request.maxRuns <= budget.maxRuns) return {
-			kind: "refused",
-			reason: `maxRuns ${request.maxRuns} does not raise the ${budget.maxRuns} in force`
-		};
-		return {
-			kind: "proposed",
-			proposal: {
-				requestKey,
-				requestDigest: proposalDigest,
-				maxRuns: {
-					previous: budget.maxRuns,
-					next: request.maxRuns
-				}
-			}
-		};
-	}
-	/**
-	* The first half of the pure pre-check (T2/T3 §2): the caller's declared
-	* batch becomes a normalized one — protected acceptance inputs fixed against
-	* the caller's own checkout (S1-V slice 2), the one normalization entry over
-	* them, and the content identity out.
-	*
-	* It writes nothing: no event, no obligation, no child id, no proposal. The
-	* derivation is separate from {@link checkDerivedBatch} because the *request*
-	* a caller presents is decided by this value alone — the digest is what a
-	* request key is derived from and what the store is searched by — while the
-	* batch's admission rules are asked only once it is clear that this is not
-	* simply a request the store already answers (T3 §6 idempotency).
-	*
-	* Protected inputs are fixed here, not in normalization: by the time the
-	* single entry reads the batch there is one form and one form only, and a
-	* refused fixing joins the normalization refusal — same error, same no-op.
-	*/
-	async deriveBatch(identity, spec) {
-		const envPath = await this.envPathForSession(identity.callerSessionId);
-		const fixed = await fixSpecProtectedInputs(spec, envPath);
-		const normalized = normalizeDecomposition(fixed.spec, {
-			...identity,
-			admissionContext: this.admissionContext()
-		});
-		const reasons = [...fixed.reasons, ...normalized.ok ? [] : normalized.reasons];
-		if (!normalized.ok || reasons.length > 0) return {
-			ok: false,
-			refusal: {
-				error: this.contractRefusal(identity.parentTaskId, reasons),
-				reasons,
-				gaps: []
-			}
-		};
-		return {
-			ok: true,
-			batch: normalized.batch,
-			...envPath === void 0 ? {} : { envPath }
-		};
-	}
-	/** The manifests one normalized batch resolves to, in batch order — the same list the admission records per child. */
-	manifestsOf(batch) {
-		return batch.children.map((child) => this.resolveCapabilities(child.contract.requiredCapabilities));
-	}
-	/**
-	* The batch one stored proposal holds, in the shape admission consumes (§6):
-	* the contracts and declarations a reviewer read, the caller's reason from the
-	* identity, and the limits and digest the proposal recorded. The store is the
-	* source of truth — a proposal carries its content, not only its digest — so a
-	* continuation, a review request and a recovery in a process that never
-	* submitted the batch all render and re-check the same batch from the saved
-	* facts.
-	*
-	* Rebuilding cannot smuggle other content in: the record's own reducer refused
-	* a submission whose {@link TaskProposalChild} entries disagree with the
-	* identity (same order, same contract digests, same declarations), and the
-	* continuation re-derives the identity from this batch and compares the digest
-	* with the stored one before anything is admitted.
-	*/
-	storedBatchOf(proposal) {
-		if (proposal.kind === "root") throw new Error(`task-runtime: proposal "${proposal.proposalId}" is a root contract; it holds one contract and no batch`);
-		return {
-			contractVersion: proposal.identity.contractVersion,
-			reason: proposal.identity.reason,
-			children: proposal.batch.map((child) => ({
-				contract: structuredClone(child.contract),
-				dependsOn: [...child.dependsOn],
-				decomposable: child.decomposable,
-				requiresIndependentAcceptance: child.requiresIndependentAcceptance
-			})),
-			admission: {
-				proposalDigest: proposal.proposalDigest,
-				context: structuredClone(proposal.admissionContext)
-			}
-		};
-	}
-	/**
-	* The run protocol one decomposition has to satisfy before anything is
-	* proposed: the run belongs to this task, it is bound to this caller, it is
-	* `active`, it is not waiting on an unresolved blocking question, and the call
-	* was not already cancelled. Unknown and non-`active` phases are refusals
-	* rather than guesses, and a phase-less run is an old record whose only legal
-	* continuation is cancellation.
-	*
-	* **`active` is the batch gate (K1 §1).** A run holds at most one unfinished
-	* batch, and an admitted batch moves it `active → waiting_children` in the same
-	* commit that creates the children, so "this run is `active`" is the whole of
-	* "this run has no unfinished batch" — no second count of batches is kept, and
-	* a second batch may be proposed exactly when the first one has ended and the
-	* run is active again.
-	*
-	* **A blocking question is the run's own wait (K1 §1).** A run that asked its
-	* parent something unresolved is parked where the protocol put it, and
-	* delegating from there would start writers beside a wait that has not ended.
-	* The fact is read from the store's question records rather than from the
-	* gate's in-memory flag, because admission has to answer the same way in a
-	* process that never delivered the question.
-	*
-	* These checks are asked *after* a request the store already answers has been
-	* answered from the record: a retry of a request the run has already proposed
-	* is that proposal, whatever state the run is in now (T3 §6 — the same request
-	* never builds a second batch), while a genuinely new batch may only be
-	* proposed by a run that is still deciding its own work.
-	*/
-	async assertDecomposableRun(storeId, parentTask, parentRun, callerSessionId, signal) {
-		const parentTaskId = parentTask.taskId;
-		if (parentRun.taskId !== parentTaskId) throw new Error(`task-runtime: run "${parentRun.runId}" belongs to task "${parentRun.taskId}", not "${parentTaskId}"`);
-		if (parentRun.sessionId !== callerSessionId) throw new Error(`task-runtime: run "${parentRun.runId}" is bound to session "${parentRun.sessionId}", not caller "${callerSessionId}"`);
-		if (parentRun.executionPhase === void 0) throw new Error(`task-runtime: run "${parentRun.runId}" predates coordination phases; it needs recovery (cancel this task tree and re-create it) before it can decompose`);
-		if (parentRun.executionPhase !== "active") throw new Error(`task-runtime: run "${parentRun.runId}" is in phase "${parentRun.executionPhase}"; only an active run may decompose (a run with an unfinished batch is handed back \`active\` when the batch ends; only then may it decompose again)`);
-		const openQuestions = blockingQuestionsOf(await this.ctx.task.snapshotIn(storeId), parentRun.runId);
-		if (openQuestions.length > 0) throw new Error(`task-runtime: run "${parentRun.runId}" is waiting on ${openQuestions.length === 1 ? "an unresolved blocking question" : `${openQuestions.length} unresolved blocking questions`} (${openQuestions.map((question) => question.questionId).join(", ")}); an answer releases the wait, and only then may the run delegate`);
-		if (signal?.aborted === true) throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`);
-	}
-	/**
-	* The tasks this run has already asked a person about — its `pending_review`
-	* and `approved`/`ready` decomposition proposals that are neither consumed nor
-	* terminal (K1 §1: at most one proposal in flight per run).
-	*
-	* The question is asked of the run, not the task: a parent that ended one batch
-	* and proposed another is a different run state from the run that proposed the
-	* first, and the store's proposal records are where "in flight" is defined —
-	* `admitted` is a consumption, and rejected/cancelled/stale/expired are
-	* terminal, so neither holds the run.
-	*/
-	async inFlightProposalsOf(storeId, parentRunId) {
-		const index = (await this.ctx.task.snapshotIn(storeId)).proposals;
-		if (index === void 0) return [];
-		return index.all.filter((proposal) => proposal.kind !== "root" && proposal.identity.parentRunId === parentRunId && IN_FLIGHT_PROPOSAL_STATUSES.has(proposal.status));
-	}
-	/**
-	* The second half of the pure pre-check (§2): the batch's own admission rules
-	* over a derived batch — structural admission (`contractDefects`,
-	* `independentAcceptanceDefects`, the growth guardrails, dependency
-	* acyclicity), capability resolution and the gap rule, the provider
-	* pre-check, and verifierRef validation.
-	*
-	* Pure and reusable: this is exactly what the post-approval re-check asks
-	* again (§6), and it answers with a value ({@link DecompositionRefusal}) so
-	* the caller decides whether a refusal is a refusal or an invalidation.
-	*/
-	async checkDerivedBatch(request) {
-		const { identity, parentTask, batch } = request;
-		const parentTaskId = identity.parentTaskId;
-		const snapshot = await this.ctx.task.snapshotIn(identity.storeId);
-		const leaf = parentTask.decompositionStatus === "leaf";
-		const verdict = checkDecomposition({
-			...parentTask,
-			decompositionPolicy: {
-				allowed: !leaf || this.config.allowRuntimeDecomposition,
-				leaf,
-				maxDepth: this.config.maxDepth,
-				maxChildren: this.config.maxChildren
-			}
-		}, batch.children.map((child) => ({
-			objective: child.contract.objective,
-			acceptanceCriteria: child.contract.acceptanceCriteria,
-			dependsOn: child.dependsOn,
-			requiresIndependentAcceptance: child.requiresIndependentAcceptance
-		})), snapshot.edges);
-		if (!verdict.ok) return {
-			ok: false,
-			refusal: {
-				error: /* @__PURE__ */ new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}":\n- ${verdict.reasons.join("\n- ")}`),
-				reasons: verdict.reasons,
-				gaps: []
-			}
-		};
-		const manifests = this.manifestsOf(batch);
-		const rejected = batch.children.map((child, index) => ({
-			child,
-			index,
-			manifest: manifests[index]
-		})).filter(({ child, manifest }) => manifest.missing.length > 0 && !child.decomposable);
-		if (rejected.length > 0) {
-			const detail = rejected.map(({ index, manifest }) => `child ${index} is missing [${manifest.missing.join(", ")}] and may not decompose`).join("; ");
-			const gaps = rejected.map(({ index, manifest }) => ({
-				childIndex: index,
-				objective: batch.children[index].contract.objective,
-				missing: [...manifest.missing]
-			}));
-			const gapNames = [...new Set(rejected.flatMap(({ manifest }) => manifest.missing))];
-			return {
-				ok: false,
-				refusal: {
-					error: /* @__PURE__ */ new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}": capability gap: ${detail}; ` + escalationHint(`capabilities [${gapNames.join(", ")}] are not granted by the capability registry`, "capability_list and the children's declared capabilities", "grant the capability in the registry, or mark the child decomposable")),
-					reasons: [detail],
-					gaps
-				}
-			};
-		}
-		const precheck = await this.providerPrecheck([...new Set(manifests.flatMap((manifest) => Object.keys(manifest.capabilities)))], { ...request.envPath === void 0 ? {} : { cwd: request.envPath } });
-		const refusals = providerRefusals(precheck);
-		if (refusals.length > 0) return {
-			ok: false,
-			refusal: {
-				error: /* @__PURE__ */ new Error(`task-runtime: provider pre-check rejected decomposition of "${parentTaskId}":\n- ${refusals.join("\n- ")}`),
-				reasons: refusals,
-				gaps: []
-			}
-		};
-		try {
-			await this.assertKnownVerifierRefs(batch.children.flatMap((child, childIndex) => child.contract.acceptanceCriteria.map((criterion) => ({
-				childIndex,
-				criterion
-			}))), `decomposition of "${parentTaskId}"`);
-		} catch (error) {
-			const failure = error instanceof Error ? error : new Error(String(error));
-			return {
-				ok: false,
-				refusal: {
-					error: failure,
-					reasons: [failure.message],
-					gaps: []
-				}
-			};
-		}
-		return {
-			ok: true,
-			batch,
-			manifests,
-			providers: precheck
-		};
-	}
-	/**
-	* The admission half of one batch that passed the pre-check (T2/T3 §6): the
-	* protocol's own commitments, made only now — the root budget reserves one run
-	* per child (§3.5), the caller's checkout must be this run's or an ancestor's
-	* (§3.4), the child ids are minted, and one `admitBatchIn` commit records the
-	* children, their admission, the dependency edges, the batch identity, the
-	* parent's `active → waiting_children` phase change and the proposal
-	* consumption together (§1.3). The driver is started last, so progress belongs
-	* to the runtime before the caller hears anything.
-	*
-	* The proposal is what makes this half addressable: its consumption names the
-	* very children this commit creates, so "the proposal was consumed and these
-	* are its tasks" is one durable fact — the record a recovery reads instead of
-	* admitting a second batch.
-	*
-	* A refusal here is a refusal whole (nothing is minted or committed), and it
-	* leaves the proposal where it was: `ready` under policy `off`, or `approved`
-	* for a batch that was approved and could not be started yet. Nothing is spent
-	* by a budget that says no, and a later continuation retries the same batch.
-	*/
-	async admitPrecheckedBatch(request) {
-		const { proposal, parentTask, parentRun, batch, manifests, exec = {} } = request;
-		const providers = request.providers;
-		const storeId = proposal.identity.storeId;
-		const parentTaskId = parentTask.taskId;
-		const callerSessionId = proposal.identity.callerSessionId;
-		const actor = callerSessionId;
-		if (exec.signal?.aborted === true) throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`);
-		const childTaskIds = batch.children.map(() => `t-${randomUUID()}`);
-		const snapshot = await this.ctx.task.snapshotIn(storeId);
-		const budget = resolveRootBudget(snapshot, this.config.rootBudget ?? {});
-		if (!budget.ok) {
-			if (hasRootLimits(this.config.rootBudget)) throw new Error(`task-runtime: decomposition of "${parentTaskId}" refused: the root budget cannot be resolved: ${budget.reason}`);
-		} else {
-			const reserved = checkBatchAdmission(snapshot, budget, batch.children.length);
-			if (!reserved.allowed) throw new Error(`task-runtime: decomposition of "${parentTaskId}" refused: ${reserved.reason}`);
-		}
-		const workspacePath = await this.workspacePathForSession(callerSessionId);
-		if (workspacePath !== void 0) await this.assertWorkspaceHeldBy(workspacePath, storeId, parentTask, parentRun.runId);
-		const children = batch.children.map((child, index) => ({
-			taskId: childTaskIds[index],
-			definitionRef: {
-				taskType: "subtask",
-				version: 1
-			},
-			parentTaskId,
-			objective: child.contract.objective,
-			depth: parentTask.depth + 1,
-			acceptanceCriteria: child.contract.acceptanceCriteria,
-			requestedCapabilities: [...child.contract.requiredCapabilities],
-			decompositionStatus: child.decomposable || manifests[index].missing.length > 0 ? "decomposable" : "leaf",
-			status: "created",
-			runIds: [],
-			childTaskIds: [],
-			contract: child.contract,
-			...child.requiresIndependentAcceptance ? { requiresIndependentAcceptance: true } : {}
-		}));
-		const edges = batch.children.flatMap((child, to) => child.dependsOn.map((from) => ({
-			from: childTaskIds[from],
-			to: childTaskIds[to]
-		})));
-		const consumption = {
-			proposalId: proposal.proposalId,
-			proposalDigest: proposal.proposalDigest,
-			reviewContextDigest: proposal.reviewContextDigest,
-			parentRunId: parentRun.runId,
-			batchId: batchIdFor(parentRun.runId, proposal.proposalId),
-			childTaskIds,
-			admittedAt: now()
-		};
-		const { batchId } = consumption;
-		await this.ctx.task.admitBatchIn(storeId, parentTaskId, parentRun.runId, children, actor, edges, batch.admission, manifests, consumption);
-		this.executionGate.setPhase(callerSessionId, "waiting_children");
-		if (workspacePath !== void 0 && this.workspaces !== void 0) {
-			const held = this.workspaces.ownerOf(workspacePath);
-			if (held !== void 0) await this.workspaces.push(workspacePath, held, {
-				kind: "batch",
-				storeId,
-				taskId: parentTaskId,
-				batchId,
-				since: now()
-			});
-		}
-		this.startBatchDriver({
-			storeId,
-			parentTaskId,
-			parentRunId: parentRun.runId,
-			batchId,
-			callerSessionId,
-			reason: batch.reason,
-			providers,
-			...exec.callId === void 0 ? {} : { excludeCallId: exec.callId }
-		});
-		return {
-			batchId,
-			childTaskIds
-		};
-	}
-	/**
-	* The request key one root intake is addressed by: the caller's own when it has
-	* one, otherwise derived from the store, the root session and the contract's
-	* digest (`proposal.ts:rootProposalRequestKey`). The same derivation in both
-	* the submission and the re-check, so "the request the store already answers"
-	* is one question with one answer.
-	*/
-	rootRequestKey(storeId, rootSessionId, contract, requested) {
-		return requested ?? rootProposalRequestKey({
-			storeId,
-			rootSessionId,
-			contractDigest: contractDigest(contract)
-		});
-	}
-	/** The root proposal one request key already names, or `undefined` when the key is free; other content under the key is refused by name (§6). */
-	async rootProposalForRequest(storeId, requestKey, contract) {
-		const stored = (await this.ctx.task.snapshotIn(storeId)).proposals?.byRequestKey[requestKey];
-		if (stored === void 0) return void 0;
-		if (stored.kind !== "root") throw new Error(`task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", which is a decomposition batch; a request key names one proposal, and a root intake cannot take over a batch's key`);
-		if (stored.identity.contractDigest !== contractDigest(contract)) throw new Error(`task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", whose root contract is a different one (digest ${stored.identity.contractDigest} ≠ ${contractDigest(contract)}); a revision is new content under a new key (§6)`);
-		return stored;
-	}
-	/**
-	* One root contract's origin, established before anything is read or written on
-	* its behalf (A0 §1.10): the store must be the root session's own
-	* (`rootTaskStoreId`), that session must be a top-level one — a delegated child
-	* is a worker, and its task was admitted by its parent — and its own durable log
-	* must hold the person's request: a `user/message` event whose
-	* `source.kind === 'user'`, the kind DSH reserves for host-attested human input
-	* (`tool-goal/src/authority.ts:hasDirectHumanInput`).
-	*
-	* **Why the check is fail-closed.** The rules are mechanical and each is
-	* answered by a refusal rather than by a default: the store↔session mapping is
-	* arithmetic, the delegation facts are the header the spawn stamped, and the
-	* request half is *existence* — at least one message whose source is the person.
-	* Everything else that reaches a session's log is attributed to its **producer**:
-	* this deployment writes its own prompts under `runtime-prompt` (the graph setup
-	* text and a spawn's delegated task, `agent-runtime`'s own source) and its notices
-	* under `plugin` (`notify`), and neither counts — a session that only ever heard
-	* from the deployment has no request to attribute a contract to, and treating the
-	* model's summary of a conversation as the request is exactly the "model
-	* self-reported confirmation" §1.10 forbids. A log this deployment cannot read is
-	* refused for the same reason — "the source could not be checked" is not "the
-	* source is the person". Deliberately absent: any natural-language entailment.
-	* Whether the contract *states* the request well is the model's reasoning and the
-	* §1.2 rules judge the contract itself; this rule only tests that a request of
-	* the person's own is there.
-	*
-	* **Where each half belongs.** Which session may call `task_intake` — graph and
-	* root-session membership — is the tool's own rule, because the `graphs` record
-	* is the thing that knows it. What this check owns is the quadruple a caller can
-	* hand in wrongly: the store, the session, the session's kind and its origin
-	* (store ↔ session ↔ top-level ↔ origin), so both doors into a root — the tool's
-	* call and a direct service call — meet the same rule wherever a caller reaches
-	* the service from. A *top-level* session that no graph owns is deliberately not
-	* distinguished here: that is membership, the model-facing door and its tool rule
-	* own it, and a direct service caller is this deployment's own trusted code.
-	*
-	* **Zero side effects.** This is two reads (an id derivation and a log opened
-	* `read` and closed), so a refusal here leaves no store opened, no proposal, no
-	* task, no run, no worker and no notice — which is why both entries that could
-	* create a root call it before their first write.
-	*/
-	async assertRootContractOrigin(storeId, rootSessionId) {
-		const own = rootTaskStoreId(rootSessionId);
-		if (storeId !== own) throw this.originRefusal(rootSessionId, `store "${storeId}" is not this session's own store ("${own}"), and a root contract is intaken into the store of the session that asked (A0 §1.10) — never into another session's, whatever the contract says`);
-		const { header, events } = await this.rootSessionLog(rootSessionId);
-		if (header?.origin === "subagent") throw this.originRefusal(rootSessionId, "this session is a delegated child (its header records origin \"subagent\"), and a root contract belongs to the top-level session a graph created — the task a spawned session works on was already admitted by its parent (A0 §1.10)");
-		const depth = header?.delegationDepth ?? 0;
-		if (depth > 0) throw this.originRefusal(rootSessionId, `this session is a delegated child (its header records delegation depth ${depth}), and a root contract belongs to the top-level session a graph created — the task a spawned session works on was already admitted by its parent (A0 §1.10)`);
-		if (events.some((event) => event.type === "user/message" && event.data.source.kind === "user")) return;
-		throw this.originRefusal(rootSessionId, "this session's own log holds no message from the person (no `user/message` event with source.kind \"user\", the marker DSH reserves for host-attested human input), so the request the contract stands on cannot be established here; the messages this deployment writes to a session of its own are attributed to their producers — its prompts carry source.kind \"runtime-prompt\" (the graph setup text and a spawn's delegated task) and its notices carry \"plugin\" — and neither is a request of the person's (A0 §1.10)");
-	}
-	/**
-	* One root session's own durable log and header, read through
-	* `sessionPersistence` in one open/read/close — the surface a session's requests
-	* are recorded on, and the record of what kind of session it is — or a named
-	* refusal when this deployment cannot read it: no persistence service is
-	* mounted, the session is missing, or the open/read throws. The refusal is the
-	* answer rather than an empty log, because the rule it feeds is fail-closed
-	* ({@link assertRootContractOrigin}): an unreadable log is "the origin is not
-	* established", never "assume there is one". The header is handed back as the
-	* handle exposes it — a backend that models only the log answers `undefined`,
-	* which is read as "no delegation facts recorded" rather than as delegation.
-	*/
-	async rootSessionLog(rootSessionId) {
-		const persistence = this.softService("sessionPersistence");
-		if (persistence === void 0 || typeof persistence.open !== "function") throw this.originRefusal(rootSessionId, "this deployment mounts no session-persistence service, so its own log cannot be read (A0 §1.10)");
-		let handle;
-		try {
-			handle = await persistence.open(SessionId(rootSessionId), "read");
-			const { events } = await handle.read(0);
-			return {
-				header: handle.header,
-				events
-			};
-		} catch (error) {
-			throw this.originRefusal(rootSessionId, `its own log could not be read (${error instanceof Error ? error.message : String(error)})`);
-		} finally {
-			if (handle !== void 0) await handle.close().catch(() => void 0);
-		}
-	}
-	/**
-	* The one refusal text a root contract whose origin could not be established is
-	* refused with, whichever rule (or which unreadable log) said so. It is a
-	* family of its own rather than {@link rootRefusal}'s: "the contract was judged
-	* and found wanting" and "the request behind it is not established" are
-	* different facts about a call, and a caller that revises a contract must not
-	* confuse the second for the first.
-	*/
-	originRefusal(rootSessionId, reason) {
-		return /* @__PURE__ */ new Error(`task-runtime: the root contract of session "${rootSessionId}" was refused: ${reason}`);
-	}
-	/**
-	* One root submission, inside the store's root-intake serialization: the
-	* contract is fixed and normalized, a request the store already answers is
-	* answered from the record, everything else is judged, and the record is
-	* written once.
-	*
-	* The order is the batch path's, for the same reasons: §5's 坏提案不弹审批
-	* needs the judgement *before* the record, and T3 §6's idempotency needs the
-	* record lookup *before* the judgement — a retry of a request the store
-	* already answers is that proposal whatever state the store has moved to since.
-	*
-	* Ahead of all of it is one rule that is not about the contract at all: the
-	* origin of the request it states (§1.10), checked before the store is even
-	* opened ({@link assertRootContractOrigin}).
-	*/
-	async submitRootProposalOnce(storeId, rootSessionId, spec, options) {
-		if (options.exec?.signal?.aborted === true) throw new Error(`task-runtime: the intake of a root contract for session "${rootSessionId}" was cancelled before anything was persisted`);
-		await this.assertRootContractOrigin(storeId, rootSessionId);
-		await this.openOrCreateStore(storeId);
-		const envPath = await this.envPathForSession(rootSessionId);
-		const derived = await this.deriveRootContract(spec, envPath);
-		if (!derived.ok) throw derived.refusal;
-		const { contract } = derived;
-		const requestKey = this.rootRequestKey(storeId, rootSessionId, contract, options.requestKey);
-		const stored = await this.rootProposalForRequest(storeId, requestKey, contract);
-		if (stored !== void 0) {
-			const review$1 = stored.status === "pending_review" ? await this.requestProposalReview({
-				kind: "root",
-				storeId,
-				trigger: "submitted",
-				proposal: stored,
-				rootSessionId,
-				contract: structuredClone(stored.contract),
-				manifests: this.rootManifests(stored.contract)
-			}) : void 0;
-			return {
-				proposalId: stored.proposalId,
-				status: stored.status,
-				policy: stored.policy,
-				existing: true,
-				detail: this.rootSubmissionDetail(stored, true),
-				...review$1 === void 0 ? {} : { review: review$1 }
-			};
-		}
-		const root = await this.existingRootTask(storeId);
-		if (root !== void 0) throw new Error(`task-runtime: store "${storeId}" already holds root task "${root.taskId}", so a root contract cannot be intaken here (§1.6: an old graph's root is history and is not re-intaken; a new goal is a new graph)`);
-		const checked = await this.checkRootContract({
-			rootSessionId,
-			contract,
-			...envPath === void 0 ? {} : { envPath }
-		});
-		if (!checked.ok) throw checked.refusal.error;
-		const { manifests, providers } = checked;
-		const reviewContext = reviewContextOf({
-			manifests,
-			criteria: contract.acceptanceCriteria,
-			providers: providerContentIdentities(providers.capabilities)
-		});
-		const policy = this.config.generatedTaskReview;
-		const identity = {
-			contractVersion: TASK_CONTRACT_VERSION,
-			storeId,
-			rootSessionId,
-			requestKey,
-			contractDigest: contractDigest(contract)
-		};
-		const proposal = {
-			kind: "root",
-			proposalId: rootProposalId(identity),
-			requestKey,
-			...options.supersedes === void 0 ? {} : { supersedes: options.supersedes },
-			status: policy === "all" ? "pending_review" : "ready",
-			policy,
-			identity,
-			contract: structuredClone(contract),
-			proposalDigest: rootProposalDigest(identity),
-			admissionContext: this.admissionContext(),
-			admissionContextDigest: admissionContextDigest(this.admissionContext()),
-			reviewContext,
-			reviewContextDigest: reviewContextDigest(reviewContext),
-			createdAt: now()
-		};
-		try {
-			await this.ctx.task.submitProposalIn(storeId, proposal, rootSessionId);
-		} catch (error) {
-			const raced = await this.readProposal(storeId, proposal.proposalId).catch(() => void 0);
-			if (raced === void 0 || raced.kind !== "root" || raced.proposalDigest !== proposal.proposalDigest) throw error;
-			return {
-				proposalId: raced.proposalId,
-				status: raced.status,
-				policy: raced.policy,
-				existing: true,
-				detail: this.rootSubmissionDetail(raced, true)
-			};
-		}
-		if (proposal.status !== "pending_review") return {
-			proposalId: proposal.proposalId,
-			status: proposal.status,
-			policy: proposal.policy,
-			existing: false,
-			detail: this.rootSubmissionDetail(proposal, false)
-		};
-		const review = await this.requestProposalReview({
-			kind: "root",
-			storeId,
-			trigger: "submitted",
-			proposal,
-			rootSessionId,
-			contract: structuredClone(contract),
-			manifests
-		});
-		return {
-			proposalId: proposal.proposalId,
-			status: proposal.status,
-			policy: proposal.policy,
-			existing: false,
-			detail: this.rootSubmissionDetail(proposal, false),
-			review
-		};
-	}
-	/**
-	* The first half of the root pre-check: the declared contract's protected
-	* acceptance inputs are fixed against the root session's checkout (S1-V slice
-	* 2 — a path that cannot be read, or a session whose checkout cannot be
-	* resolved, refuses the whole contract), and the single root normalization
-	* entry reads the result. Writes nothing.
-	*/
-	async deriveRootContract(spec, envPath) {
-		const fixed = await fixCriteriaProtectedInputs(Array.isArray(spec?.acceptanceCriteria) ? spec.acceptanceCriteria : [], envPath, "root contract");
-		const normalized = normalizeRootContract(fixed.reasons.length === 0 ? {
-			...spec,
-			acceptanceCriteria: fixed.criteria
-		} : spec);
-		const reasons = [...fixed.reasons, ...normalized.ok ? [] : normalized.reasons];
-		if (!normalized.ok || reasons.length > 0) return {
-			ok: false,
-			refusal: this.rootRefusal(reasons)
-		};
-		return {
-			ok: true,
-			contract: normalized.contract
-		};
-	}
-	/** The one refusal text a root contract is rejected at the contract stage with, whichever step produced the reasons. */
-	rootRefusal(reasons) {
-		return /* @__PURE__ */ new Error(`task-runtime: root contract rejected:\n- ${reasons.join("\n- ")}`);
-	}
-	/** The manifests one root contract resolves to, from its declared capabilities — the list the activation records. */
-	rootManifests(contract) {
-		return [this.resolveCapabilities(contract.requiredCapabilities)];
-	}
-	/** The store's root task, if it has one, read from the store rather than remembered. */
-	async existingRootTask(storeId) {
-		return (await this.ctx.task.snapshotIn(storeId)).tasks.find((task) => task.parentTaskId === void 0);
-	}
-	/**
-	* The second half of the root pre-check (A0 §3): every rule a root contract
-	* has to clear before it can be proposed — structural (`contractDefects`), the
-	* independent-criterion rule that makes it a *goal* rather than a restatement
-	* of its own decomposition ({@link rootIndependenceDefects}), the capability
-	* resolution with the gap rule, the provider pre-check from the root session's
-	* own viewpoint, and the verifier ids its criteria pin.
-	*
-	* The gap rule differs from a batch child's by design: a child that is missing
-	* a capability and may decompose is admitted with the gap recorded as an
-	* obligation (its parent delegated the gap down), while a root intake has
-	* nobody above it to delegate to and nothing to record the gap *on* — the task
-	* does not exist yet — so a declared capability this deployment cannot grant is
-	* a named refusal. Zero side effects: no obligation, no task, no run, and no
-	* file written (the protected inputs were read, never rewritten).
-	*
-	* Pure and reusable: this is what the post-approval re-check asks again, so a
-	* contract whose resolution moved is judged by the same rules that judged it at
-	* submission.
-	*/
-	async checkRootContract(request) {
-		const { rootSessionId, contract } = request;
-		const label = `root contract of session "${rootSessionId}"`;
-		const defects = [...contractDefects(contract.acceptanceCriteria, label), ...rootIndependenceDefects(contract.acceptanceCriteria, label)];
-		if (defects.length > 0) return {
-			ok: false,
-			refusal: {
-				error: this.rootRefusal(defects),
-				reasons: defects
-			}
-		};
-		const manifests = this.rootManifests(contract);
-		const manifest = manifests[0];
-		if (manifest.missing.length > 0) {
-			const detail = `${label} is missing [${manifest.missing.join(", ")}] and a root has no parent to delegate them to`;
-			return {
-				ok: false,
-				refusal: {
-					error: this.rootRefusal([detail]),
-					reasons: [detail]
-				}
-			};
-		}
-		const precheck = await this.providerPrecheck(Object.keys(manifest.capabilities), { ...request.envPath === void 0 ? {} : { cwd: request.envPath } });
-		const refusals = providerRefusals(precheck);
-		if (refusals.length > 0) return {
-			ok: false,
-			refusal: {
-				error: this.rootRefusal([`the provider pre-check rejected ${label}:`, ...refusals]),
-				reasons: refusals
-			}
-		};
-		try {
-			await this.assertKnownVerifierRefs(contract.acceptanceCriteria.map((criterion) => ({
-				childIndex: 0,
-				criterion
-			})), label);
-		} catch (error) {
-			const failure = error instanceof Error ? error : new Error(String(error));
-			return {
-				ok: false,
-				refusal: {
-					error: failure,
-					reasons: [failure.message]
-				}
-			};
-		}
-		return {
-			ok: true,
-			manifests,
-			providers: precheck
-		};
-	}
-	/**
-	* One root continuation: the re-check ladder, and — if it passes — the
-	* activation. §1.4's rule is that a root contract becomes a task *only* here
-	* and only after the approval's own context is re-confirmed.
-	*
-	* The ladder, in the order the facts become decisive:
-	*
-	* 1. the origin of the request the contract states (§1.10,
-	*    {@link assertRootContractOrigin}) — a store that is not the session's own, a
-	*    session that is a delegated child, or a session whose own log holds no
-	*    request of the person's, cannot carry a root at all, and this is decided
-	*    before the ladder's first write;
-	* 2. the store's root task — a store that already holds one refuses every
-	*    further root intake. If the root on record is the one *this* proposal
-	*    consumed, the proposal is already admitted and the status ladder above has
-	*    answered; anything else is another root (a goal change is a new graph),
-	*    and this proposal can never become one, so it is `expired` by name;
-	* 3. the limits in force, against the fingerprint the approval bound — a
-	*    deployment that moved them after the review invalidates it (§6);
-	* 4. the resolution this contract was reviewed against — its declared
-	*    capabilities, the providers behind them and the verifiers its criteria
-	*    pin — recomputed and compared, with the difference named.
-	*
-	* Only then does it activate, and the activation is one atomic commit
-	* ({@link activateRootContract}) followed by this process's own binding, so a
-	* crash between the two is recovered by re-running this ladder: the consumption
-	* on record is what makes the second run an answer rather than a second root.
-	*/
-	async continueRootProposalIn(storeId, proposal) {
-		const rootSessionId = proposal.identity.rootSessionId;
-		await this.assertRootContractOrigin(storeId, rootSessionId);
-		const existing = await this.existingRootTask(storeId);
-		if (existing !== void 0) return await this.expireProposal(storeId, proposal, `store "${storeId}" already holds root task "${existing.taskId}"; a root contract is one per store and a changed goal is a new graph (§1.6), so this proposal can no longer become the store's root`);
-		const envPath = await this.envPathForSession(rootSessionId);
-		const contract = structuredClone(proposal.contract);
-		if (proposal.status === "ready" && proposal.policy === "off" && this.config.generatedTaskReview === "all") {
-			await this.ctx.task.changeProposalPhaseIn(storeId, {
-				proposalId: proposal.proposalId,
-				to: "pending_review",
-				reason: "the deployment tightened the review policy to \"all\" while this contract had not been activated yet (§5: only tightening is allowed, and it reaches whatever has not run)"
-			}, rootSessionId);
-			let detail = "it is now waiting for a review";
-			const reviewed = await this.checkRootContract({
-				rootSessionId,
-				contract,
-				...envPath === void 0 ? {} : { envPath }
-			});
-			const tightened = await this.requireProposal(storeId, proposal.proposalId);
-			if (reviewed.ok) {
-				const review = await this.requestProposalReview({
-					kind: "root",
-					storeId,
-					trigger: "tightened",
-					proposal: tightened,
-					rootSessionId,
-					contract,
-					manifests: reviewed.manifests
-				});
-				detail += `; ${review.detail}`;
-			} else detail += `, and its contract no longer passes admission (${reviewed.refusal.reasons.join("; ")})`;
-			return {
-				proposalId: proposal.proposalId,
-				status: "pending_review",
-				detail: `proposal "${proposal.proposalId}" was sent for review: ${detail}`
-			};
-		}
-		const contextDigest = admissionContextDigest(this.admissionContext());
-		if (contextDigest !== proposal.admissionContextDigest) return await this.staleProposal(storeId, proposal, `the limits in force moved since the contract was proposed and reviewed (admission context ${proposal.admissionContextDigest} → ${contextDigest})`);
-		const checked = await this.checkRootContract({
-			rootSessionId,
-			contract,
-			...envPath === void 0 ? {} : { envPath }
-		});
-		if (!checked.ok) {
-			if (checked.refusal.error instanceof VerifierUnavailableError) throw checked.refusal.error;
-			return await this.staleProposal(storeId, proposal, `the contract no longer passes admission: ${checked.refusal.reasons.join("; ")}`);
-		}
-		const { manifests, providers } = checked;
-		const reviewContext = reviewContextOf({
-			manifests,
-			criteria: contract.acceptanceCriteria,
-			providers: providerContentIdentities(providers.capabilities)
-		});
-		if (reviewContextDigest(reviewContext) !== proposal.reviewContextDigest) return await this.staleProposal(storeId, proposal, `the resolution this contract was reviewed against moved: ${reviewContextDelta(proposal.reviewContext, reviewContext)}`);
-		if (proposal.status === "approved") await this.ctx.task.changeProposalPhaseIn(storeId, {
-			proposalId: proposal.proposalId,
-			to: "ready",
-			reason: "the post-approval re-check passed: the store holds no root, the limits are the ones reviewed, and the capability resolution and the judging verifiers are the ones reviewed"
-		}, rootSessionId);
-		return await this.activateRootContract({
-			storeId,
-			rootSessionId,
-			proposal,
-			contract,
-			manifests
-		});
-	}
-	/**
-	* The activation (A0 §1.4): one atomic commit creates the root task (parentless,
-	* depth 0, carrying the approved contract), its run (born `active`, in the
-	* proposal's root session) and the proposal's consumption — and then this
-	* process binds what only a process can hold.
-	*
-	* The order, and why each step is where it is:
-	*
-	* 1. **the checkout is claimed before anything is written.** A workspace another
-	*    live owner holds fails the activation with nothing persisted
-	*    ({@link WorkspaceBusyError}, §3.4), which is the same claim-before-write
-	*    order every run creation follows; a claim this call made and then lost the
-	*    commit for is released, so a refused activation leaves no ownership of a
-	*    root that does not exist;
-	* 2. **the run's content binding is materialized** (S1-C) — the same builder
-	*    every run uses, so a root that grants nothing still gets the honest empty
-	*    record rather than no record at all;
-	* 3. **the commit** (`admitRootProposalIn`) writes the task, the admission, the
-	*    capability manifest, the run and the consumption together. The reducer
-	*    refuses a store that already has a root, a consumption naming other
-	*    content, and a run that is not born active in this session — so a racing
-	*    second activation writes nothing;
-	* 4. **the in-process binding**: the session map, the started-session set and
-	*    the gate, which is what makes the root session's own tools — decompose,
-	*    submit, cancel — legal from here on;
-	* 5. **the notification** (best-effort, through the existing owner notice): a
-	*    root session that was waiting for its intake hears that its contract is
-	*    live. It is a notice, never a wake-up obligation: a session with no live
-	*    agent is skipped, and nothing about the activation depends on it.
-	*
-	* Idempotent from the outside by construction: the ladder in
-	* {@link continueRootProposalIn} answers an admitted proposal from its own
-	* consumption, and the reducer refuses a second activation even if two callers
-	* raced past that read. One accepted fact, one root.
-	*/
-	async activateRootContract(request) {
-		const { storeId, rootSessionId, proposal, contract } = request;
-		const manifest = request.manifests[0];
-		const taskId = `t-${randomUUID()}`;
-		const runId = `r-${randomUUID()}`;
-		const workspacePath = await this.workspacePathForSession(rootSessionId);
-		let claimed;
-		if (workspacePath !== void 0 && this.workspaces !== void 0) {
-			await this.workspaces.claim(workspacePath, {
-				kind: "run",
-				storeId,
-				taskId,
-				runId,
-				since: now()
-			});
-			claimed = this.workspaces.ownerOf(workspacePath);
-		}
-		try {
-			const providerBinding = await bindRunProviders({
-				storeId,
-				runId,
-				manifest,
-				table: this.config.capabilities,
-				root: this.config.runBindingRoot
-			});
-			const task = {
-				taskId,
-				definitionRef: {
-					taskType: "root",
-					version: 1
-				},
-				objective: contract.objective,
-				depth: 0,
-				acceptanceCriteria: contract.acceptanceCriteria,
-				requestedCapabilities: [...contract.requiredCapabilities],
-				decompositionStatus: "decomposable",
-				status: "created",
-				runIds: [],
-				childTaskIds: [],
-				contract: structuredClone(contract)
-			};
-			const run = {
-				runId,
-				taskId,
-				sessionId: rootSessionId,
-				capabilitySnapshot: capabilitySnapshot(manifest),
-				providerBinding,
-				executionPhase: "active",
-				artifacts: [],
-				verifierResults: [],
-				status: "running",
-				startedAt: now()
-			};
-			const consumption = {
-				kind: "root",
-				proposalId: proposal.proposalId,
-				proposalDigest: proposal.proposalDigest,
-				reviewContextDigest: proposal.reviewContextDigest,
-				rootTaskId: taskId,
-				rootRunId: runId,
-				admittedAt: now()
-			};
-			await this.ctx.task.admitRootProposalIn(storeId, task, run, rootSessionId, {
-				consumption,
-				manifest
-			});
-		} catch (error) {
-			if (workspacePath !== void 0 && claimed !== void 0) await this.workspaces?.release(workspacePath, claimed).catch((cause) => {
-				this.warn(`workspace ${workspacePath} could not be released after a refused activation (${cause instanceof Error ? cause.message : String(cause)})`);
-			});
-			throw error;
-		}
-		this.sessions.set(rootSessionId, {
-			storeId,
-			taskId,
-			runId
-		});
-		this.startedSessions.add(rootSessionId);
-		this.executionGate.setPhase(rootSessionId, "active");
-		this.notifyWhenReady(rootSessionId, `the root contract of this session was activated: task ${taskId}, run ${runId} (proposal ${proposal.proposalId}, policy ${proposal.policy}). This session may now decompose, submit its own result, or cancel.`);
-		return {
-			proposalId: proposal.proposalId,
-			status: "activated",
-			taskId,
-			runId,
-			detail: `proposal "${proposal.proposalId}" is activated as root task ${taskId} with run ${runId}`
-		};
-	}
-	/** One root submission's answer, in one sentence: the policy it was born under, the status it holds, and what the caller owes next. */
-	rootSubmissionDetail(proposal, existing) {
-		const head = existing ? `request answered from proposal "${proposal.proposalId}" (policy ${proposal.policy}, status ${proposal.status})` : `proposal "${proposal.proposalId}" was recorded under policy ${proposal.policy} as ${proposal.status}`;
-		switch (proposal.status) {
-			case "ready": return `${head}; continue it to activate the root (policy off activates without a review, and the record says policy-off)`;
-			case "pending_review": return `${head}; it needs a recorded decision before the root may exist, and nothing is created, spawned or notified until then`;
-			case "approved": return `${head}; the approval is on record and the root is not activated yet — continue it to run the post-approval re-check`;
-			case "admitted": return `${head}; its root is activated already and will not be activated again`;
-			default: return `${head}; a ${proposal.status} proposal is not activated, and a revision is new content under a new key`;
-		}
-	}
-	/**
-	* One store's root intakes, one at a time. The batch path serializes per
-	* parent (§6's "单进程同一父分解…应串行"); a root contract has no parent, so the
-	* subject that has to be serialized is the store itself — two intakes racing
-	* into one store must not both read "no root task yet" and both commit. The
-	* store's own reducer is the second line of defence (a store that already
-	* holds a root refuses the second activation), and a second *process* is
-	* covered by it alone, never by this map.
-	*/
-	async serializeRootIntake(storeId, work) {
-		return await this.serializeParent(storeId, ROOT_PROPOSAL_TASK_ID, work);
-	}
-	/**
-	* One submission, inside the parent's serialization: derivation, idempotency,
-	* the run protocol, the batch's admission rules, the record, and — under
-	* `all` — the review request. The order is the contract:
-	*
-	* 1. the presented batch is derived (protected inputs fixed, one
-	*    normalization), and an illegal batch is refused here, field by field,
-	*    *before* a proposal exists — §5's 坏提案不弹审批, and the capability gaps
-	*    of such a refusal are recorded as obligations by the same mechanism the
-	*    admission chain always used, because the derivation and the batch
-	*    judgement write nothing;
-	* 2. a request the store already answers (the same key and the same content)
-	*    is answered from the record — `existing: true`, the stored status, and,
-	*    for a proposal that is still waiting, the review requested again, because
-	*    a caller asking again is evidence that somebody is still waiting. This
-	*    comes *before* the run protocol, so a retry of a request the run has
-	*    already proposed is that proposal whatever state the run is in now;
-	* 3. a genuinely new batch takes the run protocol (only a run that may still
-	*    decide its own work may propose one) and every admission rule, then the
-	*    record is written once behind a content-derived id — carrying the batch
-	*    content itself, so the review, the decision and a later continuation all
-	*    rest on the same stored facts.
-	*/
-	async submitProposalOnce(storeId, parentTaskId, parentRunId, callerSessionId, spec, options) {
-		const actor = callerSessionId;
-		const identity = {
-			storeId,
-			parentTaskId,
-			parentRunId,
-			callerSessionId
-		};
-		const parentTask = await this.ctx.task.taskIn(storeId, parentTaskId);
-		const parentRun = await this.ctx.task.runIn(storeId, parentRunId);
-		const derived = await this.deriveBatch(identity, spec);
-		if (!derived.ok) return await this.refusePrecheck(storeId, parentTaskId, actor, derived.refusal);
-		const { batch } = derived;
-		const requestKey = options.requestKey ?? proposalRequestKey({
-			...identity,
-			proposalDigest: batch.admission.proposalDigest
-		});
-		const stored = await this.proposalForRequest(storeId, requestKey, batch.admission.proposalDigest);
-		if (stored !== void 0) {
-			const storedBatch = this.storedBatchOf(stored);
-			const review$1 = stored.status === "pending_review" ? await this.requestProposalReview({
-				storeId,
-				trigger: "submitted",
-				proposal: stored,
-				parentTask,
-				batch: storedBatch,
-				manifests: this.manifestsOf(storedBatch)
-			}) : void 0;
-			return {
-				proposalId: stored.proposalId,
-				status: stored.status,
-				policy: stored.policy,
-				existing: true,
-				detail: this.submissionDetail(stored, true),
-				...review$1 === void 0 ? {} : { review: review$1 }
-			};
-		}
-		await this.assertDecomposableRun(storeId, parentTask, parentRun, callerSessionId, options.exec?.signal);
-		const inFlight = await this.inFlightProposalsOf(storeId, parentRunId);
-		if (inFlight.length > 0) {
-			const held = inFlight[0];
-			throw new Error(`task-runtime: run "${parentRunId}" already has a proposal in flight — "${held.proposalId}" is ${held.status}; a run has at most one batch proposal at a time, so continue that one (or withdraw it with task_proposal_cancel) rather than proposing a second, and nothing was recorded`);
-		}
-		const checked = await this.checkDerivedBatch({
-			identity,
-			parentTask,
-			batch,
-			...derived.envPath === void 0 ? {} : { envPath: derived.envPath }
-		});
-		if (!checked.ok) return await this.refusePrecheck(storeId, parentTaskId, actor, checked.refusal);
-		const { manifests, providers } = checked;
-		const reviewContext = reviewContextOf({
-			manifests,
-			criteria: batch.children.flatMap((child) => child.contract.acceptanceCriteria),
-			providers: providerContentIdentities(providers.capabilities)
-		});
-		const policy = this.config.generatedTaskReview;
-		const proposalIdentity = decompositionIdentity(identity, batch.reason, batch.children);
-		const proposal = {
-			proposalId: taskProposalId(proposalIdentity),
-			requestKey,
-			...options.supersedes === void 0 ? {} : { supersedes: options.supersedes },
-			status: policy === "all" ? "pending_review" : "ready",
-			policy,
-			identity: proposalIdentity,
-			batch: batch.children,
-			proposalDigest: batch.admission.proposalDigest,
-			admissionContext: batch.admission.context,
-			admissionContextDigest: admissionContextDigest(batch.admission.context),
-			reviewContext,
-			reviewContextDigest: reviewContextDigest(reviewContext),
-			createdAt: now()
-		};
-		try {
-			await this.ctx.task.submitProposalIn(storeId, proposal, actor);
-		} catch (error) {
-			const raced = await this.readProposal(storeId, proposal.proposalId).catch(() => void 0);
-			if (raced === void 0 || raced.proposalDigest !== proposal.proposalDigest) throw error;
-			return {
-				proposalId: raced.proposalId,
-				status: raced.status,
-				policy: raced.policy,
-				existing: true,
-				detail: this.submissionDetail(raced, true)
-			};
-		}
-		if (proposal.status !== "pending_review") return {
-			proposalId: proposal.proposalId,
-			status: proposal.status,
-			policy: proposal.policy,
-			existing: false,
-			detail: this.submissionDetail(proposal, false)
-		};
-		const review = await this.requestProposalReview({
-			storeId,
-			trigger: "submitted",
-			proposal,
-			parentTask,
-			batch,
-			manifests
-		});
-		return {
-			proposalId: proposal.proposalId,
-			status: proposal.status,
-			policy: proposal.policy,
-			existing: false,
-			detail: this.submissionDetail(proposal, false),
-			review
-		};
-	}
-	/**
-	* One continuation, inside the subject's serialization (§6's "单进程串行"): the
-	* state ladder first, then the re-check, then — only if the proposal still is
-	* what was reviewed — admission (a batch) or activation (a root contract).
-	*
-	* The ladder answers without writing wherever the answer is already on the
-	* record: a consumed proposal answers with its own consumption (so a duplicate
-	* continuation cannot build a second batch or a second root), a waiting one
-	* answers `pending_review`, and a terminal one answers with the status the
-	* store holds. The re-check then resolves the four ways §6 describes — the
-	* subject already has what this proposal wanted (`stale` for a decomposed
-	* parent, `expired` for a store that holds another root), the parent run ended
-	* or the store's root appeared (`expired`), the context moved (`stale`, with
-	* the difference named), or the proposal still is what was reviewed
-	* (`approved → ready` and admit/activate).
-	*/
-	async continueProposalIn(storeId, proposalId, caller, options) {
-		const proposal = await this.requireProposal(storeId, proposalId);
-		const owner = this.proposalCallerOf(proposal);
-		if (caller !== owner) throw new Error(`task-runtime: proposal "${proposalId}" was submitted by session "${owner}"; session "${caller}" cannot continue it (a proposal belongs to the session that made it, and an approval is continued on that session's behalf)`);
-		switch (proposal.status) {
-			case "admitted": {
-				const consumption = proposal.consumption;
-				if (consumption === void 0) throw new Error(`task-runtime: proposal "${proposalId}" is admitted without a consumption record; the store is inconsistent and nothing is dispatched`);
-				if (consumption.kind === "root") return {
-					proposalId,
-					status: "activated",
-					taskId: consumption.rootTaskId,
-					runId: consumption.rootRunId,
-					detail: `proposal "${proposalId}" is activated as root task ${consumption.rootTaskId} with run ${consumption.rootRunId}; that root is not activated again`
-				};
-				return {
-					proposalId,
-					status: "admitted",
-					batchId: consumption.batchId,
-					childTaskIds: [...consumption.childTaskIds],
-					detail: `proposal "${proposalId}" is admitted as batch ${consumption.batchId}; the runtime owns that batch and it is not admitted again`
-				};
-			}
-			case "pending_review": return {
-				proposalId,
-				status: "pending_review",
-				detail: `proposal "${proposalId}" is waiting for a review; only a decision on the record advances it (§6)`
-			};
-			case "rejected":
-			case "cancelled":
-			case "stale":
-			case "expired": return {
-				proposalId,
-				status: proposal.status,
-				detail: `proposal "${proposalId}" is ${proposal.status}; nothing was admitted and nothing is dispatched`,
-				...proposal.decision?.reason === void 0 ? {} : { reason: proposal.decision.reason }
-			};
-			default: break;
-		}
-		if (proposal.kind === "root") return await this.continueRootProposalIn(storeId, proposal);
-		const parentTaskId = proposal.identity.parentTaskId;
-		const parentTask = await this.ctx.task.taskIn(storeId, parentTaskId);
-		const parentRun = await this.ctx.task.runIn(storeId, proposal.identity.parentRunId).catch(() => void 0);
-		if (parentRun === void 0) throw new Error(`task-runtime: proposal "${proposalId}" cannot be continued: its parent run "${proposal.identity.parentRunId}" is not in store "${storeId}", and a batch is never admitted against a run the store does not hold`);
-		if (parentRun.batchId !== void 0) return await this.staleProposal(storeId, proposal, `run "${parentRun.runId}" is already waiting on batch "${parentRun.batchId}", so this proposal's batch cannot become it (a run holds at most one unfinished batch); the approval is not transferred to another batch`);
-		if (parentRun.status !== "running" || parentRun.executionPhase !== "active") throw new Error(`task-runtime: proposal "${proposalId}" cannot be continued: its parent run "${parentRun.runId}" is ${parentRun.status === "running" ? `in phase "${parentRun.executionPhase ?? "none"}"` : parentRun.status}; only an active run may admit a batch, nothing was admitted, and the approval stays on the record`);
-		const blocking = blockingQuestionsOf(await this.ctx.task.snapshotIn(storeId), parentRun.runId);
-		if (blocking.length > 0) throw new Error(`task-runtime: proposal "${proposalId}" cannot be continued: its parent run "${parentRun.runId}" is waiting on ${blocking.length === 1 ? "an unresolved blocking question" : `${blocking.length} unresolved blocking questions`} (${blocking.map((question) => question.questionId).join(", ")}); an answer releases the wait, and nothing was admitted`);
-		const envPath = await this.envPathForSession(owner);
-		if (proposal.status === "ready" && proposal.policy === "off" && this.config.generatedTaskReview === "all") {
-			await this.ctx.task.changeProposalPhaseIn(storeId, {
-				proposalId,
-				to: "pending_review",
-				reason: "the deployment tightened the review policy to \"all\" while this batch had not been admitted yet (§5: only tightening is allowed, and it reaches whatever has not run)"
-			}, owner);
-			const tightened = await this.requireProposal(storeId, proposalId);
-			const tightenedBatch = this.storedBatchOf(tightened);
-			let detail = "it is now waiting for a review";
-			const reviewed = await this.checkDerivedBatch({
-				identity: {
-					storeId,
-					parentTaskId: proposal.identity.parentTaskId,
-					parentRunId: proposal.identity.parentRunId,
-					callerSessionId: proposal.identity.callerSessionId
-				},
-				parentTask,
-				batch: tightenedBatch,
-				...envPath === void 0 ? {} : { envPath }
-			});
-			if (reviewed.ok) {
-				const review = await this.requestProposalReview({
-					storeId,
-					trigger: "tightened",
-					proposal: tightened,
-					parentTask,
-					batch: tightenedBatch,
-					manifests: reviewed.manifests
-				});
-				detail += `; ${review.detail}`;
-			} else detail += `, and its batch no longer passes admission (${reviewed.refusal.reasons.join("; ")})`;
-			return {
-				proposalId,
-				status: "pending_review",
-				detail: `proposal "${proposalId}" was sent for review: ${detail}`
-			};
-		}
-		const identity = {
-			storeId,
-			parentTaskId: proposal.identity.parentTaskId,
-			parentRunId: proposal.identity.parentRunId,
-			callerSessionId: proposal.identity.callerSessionId
-		};
-		if (options.spec !== void 0) {
-			const presented = await this.deriveBatch(identity, options.spec);
-			if (!presented.ok) throw new Error(`task-runtime: the batch presented for proposal "${proposalId}" is not a usable one: ${presented.refusal.reasons.join("; ")}`);
-			if (presented.batch.admission.proposalDigest !== proposal.proposalDigest) throw new Error(`task-runtime: the batch presented for proposal "${proposalId}" is a different one (digest ${presented.batch.admission.proposalDigest} ≠ the stored ${proposal.proposalDigest}); an approval never travels to other content, and nothing was admitted`);
-		}
-		const batch = this.storedBatchOf(proposal);
-		const checked = await this.checkDerivedBatch({
-			identity,
-			parentTask,
-			batch,
-			...envPath === void 0 ? {} : { envPath }
-		});
-		if (!checked.ok) {
-			if (checked.refusal.error instanceof VerifierUnavailableError) throw checked.refusal.error;
-			return await this.staleProposal(storeId, proposal, `the batch no longer passes admission: ${checked.refusal.reasons.join("; ")}`);
-		}
-		const { manifests, providers } = checked;
-		const contextDigest = admissionContextDigest(this.admissionContext());
-		if (contextDigest !== proposal.admissionContextDigest) return await this.staleProposal(storeId, proposal, `the limits in force moved since the batch was proposed and reviewed (admission context ${proposal.admissionContextDigest} → ${contextDigest})`);
-		const reviewContext = reviewContextOf({
-			manifests,
-			criteria: batch.children.flatMap((child) => child.contract.acceptanceCriteria),
-			providers: providerContentIdentities(providers.capabilities)
-		});
-		if (reviewContextDigest(reviewContext) !== proposal.reviewContextDigest) return await this.staleProposal(storeId, proposal, `the resolution this batch was reviewed against moved: ${reviewContextDelta(proposal.reviewContext, reviewContext)}`);
-		if (proposal.status === "approved") await this.ctx.task.changeProposalPhaseIn(storeId, {
-			proposalId,
-			to: "ready",
-			reason: "the post-approval re-check passed: the parent, the limits, the capability resolution, the judging verifiers and the batch content are the ones that were reviewed"
-		}, proposal.identity.callerSessionId);
-		const admitted = await this.admitPrecheckedBatch({
-			proposal,
-			parentTask,
-			parentRun,
-			batch,
-			manifests,
-			providers,
-			...options.exec === void 0 ? {} : { exec: options.exec }
-		});
-		return {
-			proposalId,
-			status: "admitted",
-			batchId: admitted.batchId,
-			childTaskIds: admitted.childTaskIds,
-			detail: `proposal "${proposalId}" is admitted as batch ${admitted.batchId} with ${admitted.childTaskIds.length} child task(s)`
-		};
-	}
-	/**
-	* Invalidate one proposal whose context moved (§6), and remember that on the
-	* record: `stale` is terminal, it needs its reason, and it is a statement
-	* about the proposal rather than a deletion of it — the record and its approval
-	* stay readable, and a revision is new content under a new key.
-	*/
-	async staleProposal(storeId, proposal, reason) {
-		await this.ctx.task.changeProposalPhaseIn(storeId, {
-			proposalId: proposal.proposalId,
-			to: "stale",
-			reason
-		}, this.proposalCallerOf(proposal));
-		return {
-			proposalId: proposal.proposalId,
-			status: "stale",
-			detail: `proposal "${proposal.proposalId}" is stale: ${reason}`,
-			reason
-		};
-	}
-	/**
-	* Invalidate one proposal the subject can no longer dispatch (§6: a late
-	* approval may only invalidate) — a batch whose parent run ended, a root
-	* contract whose store already holds a root. The write is a *decision* —
-	* `expired` is one of the four outcomes the store records with a decider and a
-	* reason — and the decider is named `task-runtime`, because this invalidation
-	* is the runtime's own reading of the store's state rather than a person's
-	* decision.
-	*/
-	async expireProposal(storeId, proposal, reason) {
-		await this.ctx.task.decideProposalIn(storeId, {
-			proposalId: proposal.proposalId,
-			outcome: "expired",
-			proposalDigest: proposal.proposalDigest,
-			admissionContextDigest: proposal.admissionContextDigest,
-			decidedBy: "task-runtime",
-			decidedAt: now(),
-			reason
-		}, "task-runtime");
-		return {
-			proposalId: proposal.proposalId,
-			status: "expired",
-			detail: `proposal "${proposal.proposalId}" is expired: ${reason}`,
-			reason
-		};
-	}
-	/**
-	* Why the parent run can no longer host a batch, or `undefined` when it can —
-	* the question {@link approvalLatenessReason} asks (a late approval
-	* may only invalidate, §6). Three states, each named by what it means rather
-	* than by the field: the run is no longer running (cancelled, failed,
-	* verified), it predates the coordination phases (an old record whose only
-	* legal continuation is cancellation), or it has left the deciding phase by
-	* submitting its own result. A run that *is* waiting on an unfinished batch is
-	* not answered here either: that is a run which may hold another batch later
-	* (K1 §1), and {@link continueProposalIn}'s own re-check is where the batch a
-	* proposal competes with is judged.
-	*/
-	async parentRunEndedReason(storeId, proposal) {
-		if (proposal.kind === "root") return void 0;
-		const run = await this.ctx.task.runIn(storeId, proposal.identity.parentRunId);
-		if (run.status !== "running") return `the parent run "${run.runId}" is ${run.status}`;
-		if (run.executionPhase === void 0) return `the parent run "${run.runId}" predates coordination phases`;
-		if (run.executionPhase !== "active") return `the parent run "${run.runId}" is in phase "${run.executionPhase}"`;
-	}
-	/** The proposal a request key already names, or `undefined` when the key is free; a key bound to other content is a refusal by name (§6). */
-	async proposalForRequest(storeId, requestKey, proposalDigest) {
-		const stored = (await this.ctx.task.snapshotIn(storeId)).proposals?.byRequestKey[requestKey];
-		if (stored === void 0) return void 0;
-		if (stored.kind === "root") throw new Error(`task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", which is a root contract; a request key names one proposal, and a batch cannot take over a root intake's key`);
-		if (stored.proposalDigest !== proposalDigest) throw new Error(`task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", whose batch is a different one (digest ${stored.proposalDigest} ≠ ${proposalDigest}); a revision is new content under a new key (§6)`);
-		return stored;
-	}
-	/** The proposal one id names, or a refusal naming the id — the read every public entry starts from. */
-	async requireProposal(storeId, proposalId) {
-		const proposal = await this.readProposal(storeId, proposalId);
-		if (proposal === void 0) throw new Error(`task-runtime: store "${storeId}" holds no proposal "${proposalId}"`);
-		return proposal;
-	}
-	/**
-	* The proposal one id names, or `undefined`. The index is optional at the type
-	* level (snapshots built by hand predate proposals), and an index this reader
-	* cannot see is answered as "not this store's proposal" rather than guessed
-	* at.
-	*/
-	async readProposal(storeId, proposalId) {
-		return (await this.ctx.task.snapshotIn(storeId)).proposals?.byId[proposalId];
-	}
-	/**
-	* One submission's answer, in one sentence: the policy it was born under, the
-	* status it holds, and what the caller owes next. A re-answer says so, because
-	* "the proposal you sent before is still the one this request means" is a
-	* different fact from "a new proposal was written".
-	*/
-	submissionDetail(proposal, existing) {
-		const head = existing ? `request answered from proposal "${proposal.proposalId}" (policy ${proposal.policy}, status ${proposal.status})` : `proposal "${proposal.proposalId}" was recorded under policy ${proposal.policy} as ${proposal.status}`;
-		switch (proposal.status) {
-			case "ready": return `${head}; continue it to admit the batch (policy off admits without a review, and the record says policy-off)`;
-			case "pending_review": return `${head}; it needs a recorded decision before its batch can run, and its batch is not admitted, not spawned and its parent is not decomposed`;
-			case "approved": return `${head}; the approval is on record and the batch has not been admitted yet — continue it to run the post-approval re-check`;
-			case "admitted": return `${head}; its batch is admitted already and will not be admitted again`;
-			default: return `${head}; a ${proposal.status} proposal is not dispatched, and a revision is new content under a new key`;
-		}
-	}
-	/**
-	* Ask the deployment's review channel about one waiting proposal (§5–§6).
-	* A channel is optional and its answer is only ever a notice: absent, it
-	* answers "nobody was asked" and the proposal stays `pending_review`; present,
-	* it may ask a person and report what it did; a channel that throws is warned
-	* about and reported, never swallowed — and none of those outcomes can turn
-	* into an approval, because the only thing that advances a waiting proposal is
-	* a persisted decision.
-	*
-	* What the request carries is the subject as the store holds it: for a batch the
-	* parent task, the children and the obligations raised on that parent; for a
-	* root contract the contract itself and no parent — the task it would become
-	* does not exist while it waits, so there is nothing to read obligations off
-	* and nothing to pretend. Every arm is built here from stored facts, so a
-	* review requested after a restart shows what the record holds.
-	*/
-	async requestProposalReview(request) {
-		const channel = this.softService("proposalReviewChannel");
-		if (channel === void 0 || typeof channel.requestReview !== "function") return {
-			requested: false,
-			detail: "no review channel is mounted (ctx.proposalReviewChannel), so nobody was asked; the proposal stays pending_review and only a recorded decision moves it"
-		};
-		const registeredVerifiers = await this.registeredVerifierIds();
-		const obligations = request.kind === "root" ? [] : await this.ctx.task.snapshotIn(request.storeId).then((snapshot) => snapshot.obligations.filter((obligation) => obligation.sourceTaskId === request.parentTask.taskId)).catch(() => []);
-		try {
-			const subject = request.kind === "root" ? {
-				kind: "root",
-				storeId: request.storeId,
-				trigger: request.trigger,
-				proposal: request.proposal,
-				rootSessionId: request.rootSessionId,
-				contract: structuredClone(request.contract),
-				manifests: request.manifests,
-				...registeredVerifiers === void 0 ? {} : { registeredVerifiers },
-				obligations
-			} : {
-				storeId: request.storeId,
-				trigger: request.trigger,
-				proposal: request.proposal,
-				parentTask: request.parentTask,
-				batch: request.batch,
-				manifests: request.manifests,
-				...registeredVerifiers === void 0 ? {} : { registeredVerifiers },
-				obligations
-			};
-			const notice = await channel.requestReview(subject);
-			return {
-				requested: notice.requested,
-				detail: notice.detail ?? (notice.requested ? "the review was requested" : "the review channel did not request a review")
-			};
-		} catch (error) {
-			const detail = error instanceof Error ? error.message : String(error);
-			this.warn(`proposal ${request.proposal.proposalId}: the review channel failed (${detail}); the proposal stays pending_review`);
-			return {
-				requested: false,
-				detail: `the review channel failed: ${detail}`
-			};
-		}
-	}
-	/**
-	* Raise the obligations a capability-gap refusal owes, then raise the refusal
-	* itself: one obligation per missing capability, on the parent, with the
-	* wording the admission chain has always used (KISS §7 — a gap is a normal
-	* state with a record, not a silence). The pre-check wrote nothing, so this is
-	* the only place the *fact* of the gap is recorded, and it happens before the
-	* batch is refused — never twice, because a refused batch has no proposal to
-	* re-refuse.
-	*/
-	async refusePrecheck(storeId, parentTaskId, actor, refusal) {
-		for (const gap of refusal.gaps) for (const missing of gap.missing) await this.ctx.task.recordObligationIn(storeId, {
-			obligationId: `o-${randomUUID()}`,
-			goal: `capability "${missing}" required by child ${gap.childIndex} ("${gap.objective}") of "${parentTaskId}" is not granted by the registry`,
-			criterion: `capability "${missing}" resolves in the capability registry (capability_list shows it)`,
-			sourceTaskId: parentTaskId
-		}, actor);
-		throw refusal.error;
-	}
-	/**
-	* One parent's proposal operations, one at a time (§6: "单进程同一父分解的
-	* 重检、提案消费及子任务绑定应串行"). What this buys: two approved proposals
-	* competing for the same parent can only ever admit one batch — the loser's
-	* continuation reads the parent's state *after* the winner's commit, sees it
-	* decomposed, and is marked stale by name. The chain is this process's own, per
-	* store and parent; a second process is covered by the store's own refusals
-	* (a decomposed parent, a duplicate proposal id, a consumed proposal), never
-	* by this map.
-	*/
-	async serializeParent(storeId, parentTaskId, work) {
-		const key = `${storeId}/${parentTaskId}`;
-		const run = (this.parentChains.get(key) ?? Promise.resolve()).then(work, work);
-		const settled = run.then(() => void 0, () => void 0);
-		this.parentChains.set(key, settled);
-		settled.then(() => {
-			if (this.parentChains.get(key) === settled) this.parentChains.delete(key);
-		});
-		return await run;
-	}
-	/**
-	* The proposal pass of recovery (T3 §5), run at the end of
-	* {@link reconcileStore} — after the runs, so a batch this pass admits is
-	* either picked up by the run pass or driven by the driver this pass starts,
-	* and after the workspace adoption, so an admission is not attempted into a
-	* checkout somebody else holds.
-	*
-	* Per proposal, and in one sentence each: a proposal waiting for a review is
-	* *never* advanced by recovery — only a persisted decision moves it (§6) —
-	* and its review is requested again when this process can show the batch; a
-	* proposal that is `ready` or `approved` is continued (which is where §5's
-	* tightening reaches a batch that was born under `off` and the post-approval
-	* re-check decides whether the approval still covers the batch); everything
-	* terminal is left alone, including `admitted`, whose batch the run pass has
-	* already dealt with.
-	*
-	* Anything this pass could not finish is returned and warned about — never
-	* guessed at. An approval that survives a restart is continued from the store
-	* alone, because a proposal carries the batch it is about; a review request is
-	* re-sent with the same saved facts (the parent, the children's contracts, the
-	* resolution), so what a person is asked to review after a crash is what the
-	* record holds rather than whatever a live process happened to remember.
-	*/
-	async reconcileProposals(storeId) {
-		let snapshot;
-		try {
-			snapshot = await this.ctx.task.snapshotIn(storeId);
-		} catch (error) {
-			this.warn(`store ${storeId}: the proposals could not be read for recovery (${error instanceof Error ? error.message : String(error)})`);
-			return [];
-		}
-		const unresolved = [];
-		const report = async (proposal, status, reason) => {
-			this.warn(`store ${storeId}: proposal ${proposal.proposalId}: ${reason}`);
-			unresolved.push({
-				proposalId: proposal.proposalId,
-				status,
-				reason
-			});
-		};
-		for (const proposal of snapshot.proposals?.all ?? []) {
-			if (!isOpenProposal(proposal)) continue;
-			const proposalId = proposal.proposalId;
-			try {
-				if (proposal.kind === "root") {
-					await this.reconcileRootProposal(storeId, proposal, report);
-					continue;
-				}
-				if (proposal.status === "pending_review") {
-					const ended = await this.parentRunEndedReason(storeId, proposal);
-					if (ended !== void 0) {
-						await report(proposal, proposal.status, `it waits for a review it can no longer be dispatched from (${ended}); only a recorded decision moves it (§6)`);
-						continue;
-					}
-					const parentTask = await this.ctx.task.taskIn(storeId, proposal.identity.parentTaskId);
-					const identity = {
-						storeId,
-						parentTaskId: proposal.identity.parentTaskId,
-						parentRunId: proposal.identity.parentRunId,
-						callerSessionId: proposal.identity.callerSessionId
-					};
-					const batch = this.storedBatchOf(proposal);
-					const envPath = await this.envPathForSession(proposal.identity.callerSessionId);
-					const checked = await this.checkDerivedBatch({
-						identity,
-						parentTask,
-						batch,
-						...envPath === void 0 ? {} : { envPath }
-					});
-					if (!checked.ok) {
-						await report(proposal, proposal.status, `it waits for a review and its batch no longer passes admission (${checked.refusal.reasons.join("; ")}); the proposal stays pending_review`);
-						continue;
-					}
-					await this.requestProposalReview({
-						storeId,
-						trigger: "recovered",
-						proposal,
-						parentTask,
-						batch,
-						manifests: checked.manifests
-					});
-					continue;
-				}
-				const continuation = await this.serializeParent(storeId, proposal.identity.parentTaskId, () => this.continueProposalIn(storeId, proposalId, proposal.identity.callerSessionId, {}));
-				if (continuation.status !== "admitted" && continuation.status !== "activated") await report(proposal, continuation.status, continuation.detail);
-			} catch (error) {
-				const reason = error instanceof Error ? error.message : String(error);
-				this.warn(`store ${storeId}: proposal ${proposalId} could not be continued during recovery (${reason}); it stays ${proposal.status}`);
-				unresolved.push({
-					proposalId,
-					status: proposal.status,
-					reason
-				});
-			}
-		}
-		return unresolved;
-	}
-	/**
-	* One root contract's turn in the proposal pass (A0 §5): the same discipline as
-	* a batch's, with the subjects a root contract has instead of a parent task.
-	*
-	* A `pending_review` root contract is never advanced by recovery — only a
-	* persisted decision moves it — and its review is requested again from the
-	* stored contract when this process can still show it; a contract whose
-	* resolution no longer passes admission is reported and left waiting, exactly
-	* as a batch is. A `ready`/`approved` one is continued, which is where §5's
-	* tightening reaches a contract born under `off` and where the post-approval
-	* re-check decides whether an approval still covers it.
-	*
-	* The crash points this covers, both of them one call away from a root that
-	* exists:
-	*
-	* - **the decision is on the record and the activation never ran** — the
-	*   continuation re-checks and activates, and the store's own reducer is what
-	*   keeps it to one root;
-	* - **the activation commit landed and this process died before it bound the
-	*   session** — the status ladder answers `activated` from the consumption
-	*   itself, so recovery re-binds rather than minting a second task and run
-	*   ({@link adoptRoot} is that re-binding's other door, for a process that
-	*   starts from a graph entry instead).
-	*
-	* Ahead of both arms is the origin rule (§1.10,
-	* {@link assertRootContractOrigin}): a record whose request cannot be
-	* established is not something to ask a person about — a decision on it could
-	* never activate anything, because the ladder refuses the same fact at
-	* activation — and it is not something to continue either. The refusal travels
-	* out of this call so the proposal pass reports it unresolved by name.
-	*
-	* **The boundary this check does not cross.** {@link decideProposal} is left
-	* exactly as it was: a person's decision on a record that exists is a
-	* record-level fact, and it is written whether or not the contract could ever
-	* activate — the activation it would cause is the thing that is refused, here
-	* and at every other door into a root. Recovery's pass is not a decision, so it
-	* is the one place where "do not ask" can be honoured.
-	*/
-	async reconcileRootProposal(storeId, proposal, report) {
-		const proposalId = proposal.proposalId;
-		await this.assertRootContractOrigin(storeId, proposal.identity.rootSessionId);
-		if (proposal.status === "pending_review") {
-			const existing = await this.existingRootTask(storeId);
-			if (existing !== void 0) {
-				await report(proposal, "expired", (await this.expireProposal(storeId, proposal, `store "${storeId}" already holds root task "${existing.taskId}", so this contract can no longer become its root`)).detail);
-				return;
-			}
-			const rootSessionId = proposal.identity.rootSessionId;
-			const contract = structuredClone(proposal.contract);
-			const envPath = await this.envPathForSession(rootSessionId);
-			const checked = await this.checkRootContract({
-				rootSessionId,
-				contract,
-				...envPath === void 0 ? {} : { envPath }
-			});
-			if (!checked.ok) {
-				await report(proposal, proposal.status, `it waits for a review and its contract no longer passes admission (${checked.refusal.reasons.join("; ")}); the proposal stays pending_review`);
-				return;
-			}
-			await this.requestProposalReview({
-				kind: "root",
-				storeId,
-				trigger: "recovered",
-				proposal,
-				rootSessionId,
-				contract,
-				manifests: checked.manifests
-			});
-			return;
-		}
-		const continuation = await this.serializeRootIntake(storeId, () => this.continueProposalIn(storeId, proposalId, proposal.identity.rootSessionId, {}));
-		if (continuation.status === "activated") {
-			await this.rebindActivatedRoot(storeId, proposal.identity.rootSessionId, continuation.taskId, continuation.runId);
-			return;
-		}
-		await report(proposal, continuation.status, continuation.detail);
-	}
-	/**
-	* Bind a root this process just learned is activated — the crash case where the
-	* commit is durable and the session of the process that wrote it is gone. The
-	* store is the source of truth for the ids *and* for the phase: a root run that
-	* already reached a terminal state leaves the session `terminal` rather than
-	* open, so a late intake is refused by the gate as well as by the one-root rule
-	* (§1.8), and only a still-running root is bound `active`.
-	*/
-	async rebindActivatedRoot(storeId, rootSessionId, taskId, runId) {
-		this.sessions.set(rootSessionId, {
-			storeId,
-			taskId,
-			runId
-		});
-		this.startedSessions.add(rootSessionId);
-		let phase;
-		try {
-			phase = this.runGatePhase(await this.ctx.task.runIn(storeId, runId));
-		} catch {
-			phase = void 0;
-		}
-		if (phase === "terminal") this.executionGate.setTerminal(rootSessionId);
-		else if (phase !== void 0) this.executionGate.setPhase(rootSessionId, phase);
-		this.notifyWhenReady(rootSessionId, `recovery bound this session to its activated root contract: task ${taskId}, run ${runId}${phase === "terminal" ? " (that run is terminal, so this session is closed to new work)" : ""}. A late intake for a different contract is refused because the store already holds this root.`);
-	}
-	/**
-	* Replay one historical terminal task under a candidate overlay (guide
-	* §2.7.6, W15; the only consumer is `evolution_replay`). The replayed task is
-	* created parentless — the historical tree is never edited by a comparison
-	* experiment — with the lineage tag on its objective, and settles through the
-	* real spawn + verify chain (or the verifier alone when `spawn: false`).
-	*
-	* The champion's contract (objective / criteria / capabilities) is mirrored
-	* unless `options.contract` replaces it (the task_definition deterministic
-	* criteria replay). Capability resolution runs against the configured table
-	* with `overlay.capabilityOverrides` applied as whole-row replacements; a gap
-	* under the overlay refuses the replay before anything is persisted.
-	*
-	* The replayed task carries a normalized contract like every other creation
-	* (T1), and its criteria are judged by the same structural rules an ordinary
-	* decomposition child faces (`contractDefects` plus the P4 declarations).
-	* Protected acceptance inputs are fixed here too (S1-V slice 2), against the
-	* checkout the replay runs in — the caller's own, or the workspace the caller
-	* named (`options.workspace`, S4-E): a candidate contract declaring paths has
-	* their identity fixed before anything else reads it, while a champion's stored
-	* `{ path, sha256 }` refs are carried verbatim — the historical identity is
-	* what the pre-judgement re-check compares against, so it is never re-read
-	* from disk and never invented. A replay has no batch, so it records no
-	* admission context: nothing was proposed to a parent, there is no sibling
-	* set to bound, and the limits that do apply to its run are the run's own
-	* budget, not a batch's.
-	*
-	* A caller that names a workspace gets one isolated replay in a directory of
-	* its own: the path is resolved and claimed before anything persists, so an
-	* unusable or already-held directory refuses the replay with nothing written,
-	* and every directory the run resolves against — the pre-check, the protected
-	* inputs, the worker and its children, the verifier — is that one.
-	*
-	* The execution the comparison rests on is the caller's to freeze (S4-E §Q3):
-	* `options.agentOptions` is the model selection this run's worker and its
-	* sub-execution are created under, forwarded verbatim to the orchestration —
-	* this entry does not resolve the model, because what a run really ran under is
-	* the caller's frozen fact, and the runtime's job is to make it true. The run's
-	* execution has no total wall-clock cutoff. The options are a
-	* closed set: a key this build does not read — the deleted experiment clock
-	* above all — refuses the replay by name here, before anything else runs.
-	*/
-	async replayTask(storeId, championTaskId, options, callerSessionId) {
-		const known = new Set([
-			"lineage",
-			"overlay",
-			"contract",
-			"spawn",
-			"workspace",
-			"agentOptions",
-			"signal"
-		]);
-		const unknown = Object.keys(options).filter((key) => !known.has(key));
-		if (unknown.length > 0) throw new Error(`task-runtime: replayTask does not accept options [${unknown.join(", ")}]`);
-		await this.assertRecoveryReady(storeId, "a replay");
-		const champion = await this.ctx.task.taskIn(storeId, championTaskId);
-		if (champion.status !== "verified" && champion.status !== "failed") throw new Error(`task-runtime: champion task "${championTaskId}" is ${champion.status}; only a terminal (verified or failed) task can be replayed`);
-		const championRunId = champion.runIds[champion.runIds.length - 1];
-		const effective = options.contract ?? {
-			objective: champion.objective,
-			acceptanceCriteria: champion.acceptanceCriteria,
-			requiredCapabilities: champion.requestedCapabilities
-		};
-		const table = {
-			...this.config.capabilities,
-			...options.overlay?.capabilityOverrides ?? {}
-		};
-		const manifest = resolveCapabilities(effective.requiredCapabilities, table);
-		if (manifest.missing.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(", ")}] under the overlay`);
-		const named = options.workspace === void 0 ? void 0 : await normalizeWorkspacePath(options.workspace.path);
-		const envPath = named ?? await this.envPathForSession(callerSessionId);
-		const precheck = await this.providerPrecheck(Object.keys(manifest.capabilities), {
-			...envPath === void 0 ? {} : { cwd: envPath },
-			...options.overlay?.extraSkillRoots === void 0 ? {} : { extraRoots: [...options.overlay.extraSkillRoots] }
-		}, table);
-		const refusals = providerRefusals(precheck);
-		if (refusals.length > 0) throw new Error(`task-runtime: provider pre-check rejected replay of "${championTaskId}":\n- ${refusals.join("\n- ")}`);
-		const label = `replay of "${championTaskId}"`;
-		const fixed = await fixCriteriaProtectedInputs(effective.acceptanceCriteria, envPath, label);
-		const acceptanceDefects = [
-			...fixed.reasons,
-			...contractDefects(fixed.criteria, label),
-			...independentAcceptanceDefects(fixed.criteria, champion.requiresIndependentAcceptance, label)
-		];
-		if (acceptanceDefects.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" rejected:\n- ${acceptanceDefects.join("\n- ")}`);
-		await this.assertKnownVerifierRefs(fixed.criteria.map((criterion) => ({
-			childIndex: 0,
-			criterion
-		})), `replay of "${championTaskId}"`);
-		const contract = {
-			contractVersion: TASK_CONTRACT_VERSION,
-			objective: `[${options.lineage}] ${effective.objective}`,
-			acceptanceCriteria: structuredClone([...fixed.criteria]),
-			assumptions: [...champion.contract?.assumptions ?? []],
-			constraints: [...champion.contract?.constraints ?? []],
-			requiredCapabilities: [...effective.requiredCapabilities]
-		};
-		const task = {
-			taskId: `t-${randomUUID()}`,
-			definitionRef: { ...champion.definitionRef },
-			objective: contract.objective,
-			depth: 0,
-			acceptanceCriteria: contract.acceptanceCriteria,
-			requestedCapabilities: [...contract.requiredCapabilities],
-			decompositionStatus: "leaf",
-			status: "created",
-			runIds: [],
-			childTaskIds: [],
-			contract,
-			...champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}
-		};
-		const spawn = options.spawn !== false;
-		const replaySnapshot = await this.ctx.task.snapshotIn(storeId);
-		const replayBudget = resolveRootBudget(replaySnapshot, this.config.rootBudget ?? {});
-		if (!replayBudget.ok) {
-			if (hasRootLimits(this.config.rootBudget)) throw new Error(`task-runtime: replay of "${championTaskId}" refused: the root budget cannot be resolved: ${replayBudget.reason}`);
-		} else {
-			const startVerdict = checkRunStart(replaySnapshot, replayBudget);
-			if (!startVerdict.allowed) throw new Error(`task-runtime: replay of "${championTaskId}" refused: ${startVerdict.reason}`);
-		}
-		const workspacePath = named ?? await this.workspacePathForSession(callerSessionId);
-		const workspaceOwner = workspacePath === void 0 ? void 0 : await this.claimReplayWorkspace(workspacePath, storeId, callerSessionId, championTaskId, task.taskId);
-		this.replayLineage.set(task.taskId, options.lineage);
-		const controller = new AbortController();
-		const run = async () => {
-			try {
-				const outcome = await runReplayTask(await this.orchestrateEnv(callerSessionId, callerSessionId, named), storeId, {
-					task,
-					manifest,
-					providers: precheck,
-					lineage: options.lineage,
-					agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, this.config.defaultPreset),
-					...options.overlay?.extraSkillRoots === void 0 ? {} : { skillRoots: [...options.overlay.extraSkillRoots] },
-					...options.agentOptions === void 0 ? {} : { agentOptions: { ...options.agentOptions } },
-					spawn,
-					championRunId
-				}, {
-					...options.signal === void 0 ? {} : { admission: options.signal },
-					advance: controller.signal
-				});
-				return named === void 0 ? outcome : {
-					...outcome,
-					workspace: named
-				};
-			} finally {
-				if (workspacePath !== void 0 && workspaceOwner !== void 0) await this.releaseReplayWorkspace(workspacePath, workspaceOwner);
-			}
-		};
-		const promise = run();
-		const driverKey = `replay/${storeId}/${championTaskId}`;
-		this.registerDriver(driverKey, storeId, controller, promise.then(() => [], () => []));
-		try {
-			return await promise;
-		} finally {
-			this.drivers.delete(driverKey);
-		}
-	}
-	/**
-	* Register one runtime-owned driver (a batch, or a replay) and return at
-	* once: the caller's tool call is over, and the work is the runtime's (§3.7).
-	*
-	* The registered promise is meant never to reject — a driver settles its own
-	* failures by failing the run it reports on — so a rejection here is the one
-	* failure it could not settle from where it stood: the view of the deployment
-	* it was about to build (`orchestrateEnv`). That is still not fire-and-forget
-	* (§3.1): the batch's parent run is failed with the cause, the children that
-	* never started are blocked, and the owner is told. The belt below stays for a
-	* rejection for a key that names no batch (a replay, whose own caller already
-	* receives the error), so nothing surfaces as an unhandled rejection.
-	*/
-	registerDriver(key, storeId, controller, promise, parentTaskId) {
-		this.drivers.set(key, {
-			controller,
-			promise,
-			storeId,
-			...parentTaskId === void 0 ? {} : { parentTaskId }
-		});
-		const forget = () => {
-			if (this.drivers.get(key)?.controller === controller) this.drivers.delete(key);
-		};
-		promise.then(forget, async (error) => {
-			forget();
-			const reason = `driver ${key} failed outside its own settlement: ${error instanceof Error ? error.message : String(error)}`;
-			this.warn(reason);
-			await this.failBatchFromRuntime(storeId, key, reason);
-		});
-	}
-	/**
-	* Abort and remove the drivers a barrier registered but never released to
-	* start (A2 §E). Not-started is not executed: no body runs, nothing is
-	* written on the batch's behalf, and the persistent record — which still
-	* says the parent waits on its children — is what the next explicit
-	* activation re-registers from.
-	*/
-	standDownPendingDrivers(state) {
-		for (const pending of state.pendingDrivers.splice(0)) {
-			if (this.drivers.get(pending.key)?.controller === pending.controller) this.drivers.delete(pending.key);
-			pending.controller.abort();
-		}
-	}
-	/**
-	* A cancellation or the unload invalidates a store's recovery handle (A2
-	* §E): a barrier still in flight finishes its own pass but leaves no ready
-	* handle and stands its not-yet-started drivers down; a settled handle is
-	* dropped. The store's persistent record is untouched — the next explicit
-	* activation (`adoptRoot`, through `graphs`' activate) is the retry.
-	*/
-	invalidateStoreRecovery(storeId) {
-		const state = this.storeRecovery.get(storeId);
-		if (state === void 0) return;
-		if (state.status === "recovering") {
-			state.cancelled = true;
-			this.standDownPendingDrivers(state);
-			state.release(false);
-		} else this.storeRecovery.delete(storeId);
-	}
-	/**
-	* Fail one batch's parent run without an `OrchestrateEnv`: the children that
-	* never started are blocked, the parent run is failed with the cause, and the
-	* owner is told. Store-level on purpose — the caller is here because the env
-	* could not be built, so this path holds the settlement's own narrow
-	* capabilities ({@link TaskRuntime.settlementParts}) instead of building one —
-	* and it never throws, so a driver's failure cannot become an unhandled
-	* rejection of its own. `outcome` is `'cancelled'` only for a batch whose
-	* driver never started (a recovery barrier stood it down when the cancellation
-	* aborted it): the same writes a started driver's abort branch makes, from the
-	* one place that can still make them.
-	*
-	* The two writes are the orchestration's own (A4-5): `blockUnstartedChildren`
-	* and `settleRunFromRuntime`, the same pair every other batch failure uses —
-	* there is no second terminal-record writer here.
-	*/
-	async failBatchFromRuntime(storeId, key, reason, outcome = "failed") {
-		const prefix = `${storeId}/`;
-		if (!key.startsWith(prefix)) return;
-		const batchId = key.slice(prefix.length);
-		const parts = this.settlementParts(`fail-batch:${storeId}`);
-		try {
-			const found = await this.batchRecordIn(storeId, batchId);
-			if (found === void 0) return;
-			await blockUnstartedChildren(parts, storeId, found.memberTaskIds, reason);
-			const parentRun = await this.ctx.task.runIn(storeId, found.run.runId).catch(() => void 0);
-			if (parentRun === void 0 || parentRun.status !== "running") return;
-			await settleRunFromRuntime(parts, storeId, parentRun, outcome, `batch ${batchId} ${outcome}: ${reason}`);
-		} catch (error) {
-			this.warn(`store ${storeId}: the failed driver ${key} could not be settled (${error instanceof Error ? error.message : String(error)})`);
-		}
-	}
-	/**
-	* The batch one id names, as the store itself records it: the run whose
-	* **accumulated batches** hold it, together with the parent task that run works
-	* on and the members that entry records. `undefined` when no run of the store
-	* records the id that way.
-	*
-	* The accumulation is the record, not the run's current `batchId`: a batch a
-	* build before K1 admitted wrote only `b-<parentTaskId>` onto the run, with no
-	* proposal and no members, so a run that *waits* on an id its accumulation does
-	* not hold is exactly the stopped old state the persistence decision names. This
-	* read answers `undefined` for it rather than handing a caller the task's
-	* children — the members of a batch nobody can name are not the batch's members —
-	* and a settlement path that cannot name a batch reports instead of guessing.
-	*
-	* The members are returned with the entry because this read is the only place
-	* that knows the batch exists: the callers that ask for them would otherwise
-	* re-find the entry and be able to pass an absent member list down. A store read
-	* that *failed* is not a batch that is not recorded, so it is not caught here:
-	* the failure is reported as itself.
-	*/
-	async batchRecordIn(storeId, batchId) {
-		const found = [...(await this.ctx.task.snapshotIn(storeId)).runs].reverse().flatMap((run) => (run.batches ?? []).map((batch) => ({
-			run,
-			batch
-		}))).find((entry) => entry.batch.batchId === batchId);
-		return found === void 0 ? void 0 : {
-			taskId: found.run.taskId,
-			run: found.run,
-			memberTaskIds: [...found.batch.memberTaskIds]
-		};
-	}
-	/**
-	* Whether one run's own accumulation holds the batch it waits on — the binding a
-	* restart needs before it drives a batch (K1 §5).
-	*
-	* A batch is identified by the pair (parent run, proposal), and the run that
-	* admitted it is the only record that can say which members belong to it. A
-	* `waiting_children` run whose `batches` holds no such entry carries a batch from
-	* before batches were identified that way: nothing in the store says which run,
-	* which proposal, or which members a second batch of that parent would have.
-	*/
-	batchHeldByRun(run, batchId) {
-		return run.batches?.some((batch) => batch.batchId === batchId) === true;
-	}
-	/**
-	* The narrow capabilities one runtime-level settlement holds — the store, the
-	* actor, the notification seam and the gate/workspace bookkeeping — for the one
-	* path that writes a terminal state without an orchestration env
-	* ({@link failBatchFromRuntime}): the caller is there precisely because this
-	* deployment's own view could not be built, so this holds the services that
-	* cannot fail for that reason and nothing else. The checkout registry is
-	* deliberately not among them: resolving a workspace path here would guess at
-	* the very environment whose construction failed, and a marker left for the
-	* explicit activation to reconcile is honest where a guessed release is not.
-	* Every other batch failure goes through the driver's own env, which carries
-	* the registry and releases the layer.
-	*/
-	settlementParts(actor) {
-		return {
-			task: this.ctx.task,
-			actor,
-			notify: (sessionId, text$1) => {
-				this.notify(sessionId, text$1);
-			},
-			observeSession: async (sessionId) => this.observeSession(sessionId),
-			budget: { ...this.config.budget },
-			onRunSettled: (storeId, taskId, runId, status) => {
-				this.runSettledFromRuntime(storeId, taskId, runId, status);
-			},
-			onTerminalReview: (fact) => this.notifyTerminalReview(fact),
-			gate: this.executionGate
-		};
-	}
-	/**
-	* What the runtime does when *any* run reaches a terminal state (A3 §3.3): the
-	* gate closes for the session that held it, the questions addressed to it stop
-	* blocking the runs that asked ({@link recomputeAskingSessions}), and the
-	* workspace layer the run claimed comes off the stack. One implementation for
-	* the orchestration's settlements and the runtime's own, so a run settled from
-	* either side leaves the process in the same state.
-	*
-	* A run whose session this process never bound is settled like any other: its
-	* own gate has nothing to close here, but the runs that asked it are recomputed
-	* all the same, because the wait that ended is theirs.
-	*/
-	runSettledFromRuntime(storeId, taskId, runId, status) {
-		this.recomputeAskingSessions(storeId, runId);
-		const sessionId = this.sessionBoundInProcess(storeId, runId);
-		if (sessionId === void 0) return;
-		this.executionGate.setTerminal(sessionId);
-		this.releaseRunWorkspaceLayer(storeId, runId, sessionId).catch((error) => {
-			this.warn(`run ${runId}: the workspace layer it held could not be released (${error instanceof Error ? error.message : String(error)})`);
-		}).finally(() => {
-			if (this.sessionWorkspaces.size > 0) this.sessionWorkspaces.delete(sessionId);
-			if (this.sessionExecutionBindings.size > 0) this.sessionExecutionBindings.delete(sessionId);
-		});
-	}
-	/**
-	* Recompute the question block of every run that asked the run just settled
-	* (A4 §F.1), from the store, here.
-	*
-	* This is the orchestration side of the same step `settleRunFromRuntime` takes
-	* where its caller awaits it: the two settlements — the driver's own
-	* (`settleChildRun`, `finishBatch`, `settleSubmittedRun`) and the
-	* runtime-level entry — must not differ in what the gate shows afterwards, and
-	* both derive the value the same way. The read is reported rather than
-	* propagated: the run is settled and its record written by now, and a store
-	* this process cannot read back is a failure of the *release*, not of the
-	* settlement — the next recovery recomputes the same blocks.
-	*/
-	async recomputeAskingSessions(storeId, runId) {
-		try {
-			releaseAskingSessions(this.executionGate, await this.ctx.task.snapshotIn(storeId), runId);
-		} catch (error) {
-			this.warn(`store ${storeId}: the question blocks of the runs that asked run "${runId}" could not be recomputed after it settled (${error instanceof Error ? error.message : String(error)})`);
-		}
-	}
-	/**
-	* Report the question deliveries one recovery pass could not settle (A4 §F.1)
-	* — `refused` (the body could not be read back from its own citation, or the
-	* relay refused) and `unavailable` (the target Session is not live in this
-	* process) — as one warning, because the pass's own report is not enough: the
-	* explicit adoption drops it, and an undelivered question nobody is told about
-	* is a wait whose only remaining ends are a restart and a wall time.
-	*
-	* Nothing here changes the control flow: the intents stay on the Task record,
-	* the next activation retries them, and a delivery that settled is not reported
-	* at all. The line names the store, how many of how many intents are still
-	* owed, the count per status, and each affected fact with its own refusal.
-	*/
-	reportUnsettledQuestionDeliveries(storeId, deliveries) {
-		const unsettled = deliveries.filter((delivery) => delivery.status === "refused" || delivery.status === "unavailable");
-		if (unsettled.length === 0) return;
-		const counts = /* @__PURE__ */ new Map();
-		for (const delivery of unsettled) counts.set(delivery.status, (counts.get(delivery.status) ?? 0) + 1);
-		const byStatus = [...counts].sort(([left], [right]) => left.localeCompare(right)).map(([status, count]) => `${count} ${status}`).join(", ");
-		this.warn(`store ${storeId}: ${unsettled.length} of ${deliveries.length} owed question message${deliveries.length === 1 ? "" : "s"} could not be settled (${byStatus}): ${unsettled.map((delivery) => `${delivery.subject} [${delivery.status}${delivery.reason === void 0 ? "" : `: ${delivery.reason}`}]`).join("; ")}. The Task records still hold these intents, no substitute parent is invented, and the next activation retries them`);
-	}
-	/**
-	* Start the driver for one admitted batch. The controller is registered
-	* before the driver runs, so a cancellation arriving immediately after
-	* admission finds something to abort.
-	*
-	* When the registration happens *inside* a recovery barrier (A2 §E) the
-	* driver is parked after registering: the barrier waits for the
-	* registration — reconciliation, gates and drivers are what an activation
-	* owes — never for the body, so a `waiting_children` parent recovered inside
-	* a graph activation cannot lock that activation on its own batch. The
-	* barrier's completion releases the body; its failure or a cancellation
-	* stands it down unstarted, and an abort that lands while it is parked
-	* resolves it without a spawn.
-	*/
-	startBatchDriver(options) {
-		const key = `${options.storeId}/${options.batchId}`;
-		if (this.drivers.has(key)) return;
-		const controller = new AbortController();
-		const batch = {
-			storeId: options.storeId,
-			parentTaskId: options.parentTaskId,
-			parentRunId: options.parentRunId,
-			batchId: options.batchId,
-			callerSessionId: options.callerSessionId,
-			reason: options.reason,
-			...options.excludeCallId === void 0 ? {} : { excludeCallId: options.excludeCallId },
-			...options.providers === void 0 ? {} : { providers: options.providers }
-		};
-		const barrier = this.storeRecovery.get(options.storeId);
-		const gate = barrier !== void 0 && barrier.status === "recovering" ? barrier : void 0;
-		const promise = (async () => {
-			if (gate !== void 0) {
-				gate.pendingDrivers.push({
-					key,
-					controller
-				});
-				if (!await Promise.race([gate.released, new Promise((resolve$1) => {
-					controller.signal.addEventListener("abort", () => resolve$1(false), { once: true });
-				})]) || controller.signal.aborted) return [];
-			}
-			return await driveBatch(await this.orchestrateEnv(options.callerSessionId, options.callerSessionId), {
-				...batch,
-				signal: controller.signal
-			});
-		})();
-		this.registerDriver(key, options.storeId, controller, promise, options.parentTaskId);
-	}
-	/**
-	* The explicit submission (A3 §3.2, `task_submit_result`): the worker's own
-	* account of what it delivered, recorded as the phase change that closes
-	* admission, and then the one settlement path every verified run takes.
-	*
-	* A submission that arrives twice is answered from the record rather than
-	* applied again — the phase event is unique by construction, so the second
-	* caller reads the first one's result. A run waiting on its children may not
-	* submit at all: its batch has to end first (K1 §2), and the batch end hands
-	* the run back `active` — only then, with the workspace back and the children's
-	* outcomes in the store, may the parent hand in the result that starts its own
-	* acceptance.
-	*/
-	async submitResult(callerSessionId, spec, exec = {}) {
-		if (spec.summary.trim().length === 0) throw new Error("task-runtime: a submission requires a non-empty summary of what was delivered");
-		const { storeId, task, run } = await this.runForSession(callerSessionId);
-		await this.assertRecoveryReady(storeId, "a result submission");
-		if (run.status !== "running") return {
-			status: run.status,
-			detail: `run "${run.runId}" is already settled as "${run.status}"; the recorded submission stands and nothing was changed`
-		};
-		const phase = run.executionPhase;
-		if (phase === "submitted") return {
-			status: "submitted",
-			detail: `run "${run.runId}" already submitted: ${run.submission?.summary ?? "a submission is recorded"}${run.submission?.submittedAt === void 0 ? "" : ` at ${run.submission.submittedAt}`}. Verification is under way (or already recorded); a second submission changes nothing.`
-		};
-		if (phase === "waiting_children") throw new Error(`task-runtime: run "${run.runId}" is waiting on its child batch (${run.batchId ?? "unrecorded"}); a parent cannot submit while its children are still running — the batch has to end and hand the run back before the parent may hand in its own result`);
-		if (phase === void 0) throw new Error(`task-runtime: run "${run.runId}" predates coordination phases; it cannot submit (needs recovery: cancel this task tree and re-create it)`);
-		const store = await this.ctx.task.snapshotIn(storeId);
-		const missingArtifacts = missingRequiredArtifacts(task.acceptanceCriteria, store);
-		if (missingArtifacts.length > 0) {
-			for (const missing of missingArtifacts) await this.ctx.task.recordObligationIn(storeId, {
-				obligationId: `o-${randomUUID()}`,
-				goal: `artifact/evidence "${missing.ref}" required by task "${task.taskId}" criterion ${missing.criterionId} does not exist in the task store${missing.requirement === "requires" ? " as a verified reference product" : ""}`,
-				criterion: missing.requirement === "requires" ? `the task store holds evidence or an artifact named "${missing.ref}" (evidence id, artifact kind, or artifact id) produced by a verified run carrying a passing verdict` : `the task store holds evidence or an artifact named "${missing.ref}" (evidence id, artifact kind, or artifact id)`,
-				sourceTaskId: task.taskId
-			}, callerSessionId);
-			throw new Error(`task-runtime: the submission of run "${run.runId}" was refused: ${missingArtifactReason(missingArtifacts)}; the result is not handed in while the contract's own references are unsatisfied — produce or run what closes the gap, then submit`);
-		}
-		const submission = {
-			summary: spec.summary,
-			evidenceRefs: [...spec.evidenceRefs ?? []],
-			...spec.notes === void 0 ? {} : { notes: spec.notes },
-			submittedAt: now(),
-			origin: "worker"
-		};
-		await this.ctx.task.changeRunPhaseIn(storeId, task.taskId, run.runId, callerSessionId, {
-			phase: "submitted",
-			submission
-		});
-		this.executionGate.setPhase(callerSessionId, "submitted");
-		const env = await this.orchestrateEnv(callerSessionId, callerSessionId);
-		const lineage = this.replayLineage.get(task.taskId);
-		const members = runMemberTaskIds(run);
-		const status = await settleSubmittedRun(env, storeId, task.taskId, run.runId, {
-			...exec.callId === void 0 ? {} : { excludeCallId: exec.callId },
-			...lineage === void 0 ? {} : { anomalies: [lineage] },
-			...members.length === 0 ? {} : { relatedTaskIds: members }
-		});
-		return {
-			status,
-			detail: status === "verified" ? `run "${run.runId}" submitted and verified.` : `run "${run.runId}" submitted and settled ${status}; the terminal review record names why.`
-		};
-	}
-	/**
-	* Ask one's direct parent (A4 §F.1, `task_ask_parent`): the runtime entry the
-	* tool layer adapts.
-	*
-	* The identity is the caller's own — a live session, its run binding, and the
-	* parent the store derives from that run's task — and the body is read back
-	* from the caller's own Session before the store records anything, so a forged
-	* call id, another session's citation or a claim the message does not support
-	* is refused by name with no task event and no delivery. Everything after the
-	* commit (the write-gate block, the message under the *recorded* id) is owned
-	* by `./question.ts`; `unavailable` there is not a failure — the intent is
-	* durable, the record is returned, and recovery re-delivers.
-	*/
-	async askParentQuestion(callerSessionId, request) {
-		const caller = await this.questionCaller(callerSessionId, "task_ask_parent");
-		return await askParentQuestion(this.questionCoordination(), caller, request);
-	}
-	/**
-	* Answer one child's still-open question (A4 §F.1, `task_answer`): the same
-	* shape as {@link askParentQuestion}, with the answering run taken from the
-	* caller's binding and the delivery addressed to the run that asked. A
-	* resolving answer recomputes the *asking* run's block from the store, so a
-	* second open question keeps it blocked.
-	*/
-	async answerParentQuestion(callerSessionId, request) {
-		const caller = await this.questionCaller(callerSessionId, "task_answer");
-		return await answerParentQuestion(this.questionCoordination(), caller, request);
-	}
-	/**
-	* The identity every question call starts from: the live caller session, its
-	* run binding, and the store that binding names. A session with no run (a root
-	* before activation, a reviewer, a helper) has nobody to ask and nothing to
-	* answer, and is refused here before any other step.
-	*/
-	async questionCaller(callerSessionId, entry) {
-		if (this.agentOrUndefined(callerSessionId) === void 0) throw new Error(`task-runtime: ${entry} needs a live caller session; "${callerSessionId}" has no live agent in this process, and the question identity comes from the live caller's own run`);
-		let binding;
-		try {
-			binding = await this.runForSession(callerSessionId);
-		} catch (error) {
-			throw new Error(`task-runtime: ${entry} refused: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-		}
-		await this.assertRecoveryReady(binding.storeId, entry);
-		return {
-			sessionId: callerSessionId,
-			storeId: binding.storeId,
-			runId: binding.run.runId,
-			actor: callerSessionId
-		};
-	}
-	/** The services question coordination reaches: the store's entries, the session read path, agent-runtime's handle, and the gate. */
-	questionCoordination() {
-		return {
-			task: this.ctx.task,
-			sessionQuery: this.ctx.sessionQuery,
-			messages: this.ctx.agentRuntime,
-			gate: this.executionGate
-		};
-	}
-	/**
-	* Cancel one batch (`task_cancel`, §3.6): abort its driver, which settles the
-	* children — the one in flight is cancelled, the ones that never started are
-	* blocked before start, and the parent run is cancelled — and return that
-	* settlement.
-	*
-	* The batch is located by the **caller's own run**, never by parsing the id: a
-	* batch id names a pair (`b-<parentRunId>-<proposalId>`, {@link batchIdFor}),
-	* and a parent that admitted more than one batch has one id per batch. The
-	* caller's run is the fact this entry is authorized by, and its *current*
-	* unfinished batch (`run.batchId`) is the only batch that can be cancelled —
-	* a batch this run already ended is not in flight any more.
-	*
-	* Only the batch's own parent session may cancel it, and only while the batch
-	* is in flight. A batch this process is not driving (already settled, or
-	* waiting for recovery after a restart) is refused by name: silently
-	* synthesising a settlement would write terminal states the store's own
-	* records do not support, and the graph-level cancellation is the entry that
-	* covers that case.
-	*/
-	async cancelBatch(storeId, batchId, callerSessionId) {
-		if (!batchId.startsWith("b-")) throw new Error(`task-runtime: "${batchId}" is not a batch id (a batch id is "b-<parentRunId>-<proposalId>")`);
-		const parentRun = [...(await this.ctx.task.snapshotIn(storeId)).runs].reverse().find((run) => run.sessionId === callerSessionId);
-		if (parentRun === void 0) throw new Error(`task-runtime: batch "${batchId}" cannot be cancelled by session "${callerSessionId}": no run of store "${storeId}" is bound to it`);
-		if (parentRun.batchId !== batchId) throw new Error(`task-runtime: batch "${batchId}" is not the batch run "${parentRun.runId}" is waiting on (${parentRun.batchId === void 0 ? "it holds no unfinished batch" : `it waits on "${parentRun.batchId}"`}); a batch is cancelled by the run that admitted it, while it is in flight`);
-		const parentTaskId = parentRun.taskId;
-		if (parentRun.status !== "running" || parentRun.executionPhase !== "waiting_children") throw new Error(`task-runtime: batch "${batchId}" is not in flight (its parent run is ${parentRun.status}${parentRun.executionPhase === void 0 ? "" : ` in phase "${parentRun.executionPhase}"`}); there is nothing to cancel`);
-		const entry = this.drivers.get(`${storeId}/${batchId}`);
-		if (entry === void 0) throw new Error(`task-runtime: batch "${batchId}" is not being driven by this process (it may have settled, or it is waiting for recovery); cancel the graph instead`);
-		entry.controller.abort();
-		await this.abortDescendantBatches(storeId, parentTaskId);
-		await this.settleCancelledDescendants(storeId, parentTaskId, batchId, callerSessionId);
-		const outcomes = await entry.promise;
-		const parentNow = await this.ctx.task.runIn(storeId, parentRun.runId).catch(() => void 0);
-		if (parentNow !== void 0 && parentNow.status === "running") await this.failBatchFromRuntime(storeId, `${storeId}/${batchId}`, `the batch was cancelled by its caller before its driver started: ${batchId}`, "cancelled");
-		return outcomes;
-	}
-	/**
-	* Settle every run below `taskId` that is still in flight as cancelled — the
-	* runs this cancellation owns. The batch's own parent run is not settled here:
-	* its driver's abort branch does that, with the batch's terminal review and the
-	* owner notification.
-	*/
-	async settleCancelledDescendants(storeId, taskId, batchId, callerSessionId) {
-		const snapshot = await this.ctx.task.snapshotIn(storeId);
-		const parentOf = new Map(snapshot.tasks.map((task) => [task.taskId, task.parentTaskId]));
-		const under = (candidate) => {
-			for (let current = parentOf.get(candidate); current !== void 0; current = parentOf.get(current)) if (current === taskId) return true;
-			return false;
-		};
-		const runs = snapshot.runs.filter((run) => run.status === "running" && run.taskId !== taskId && under(run.taskId));
-		if (runs.length === 0) return;
-		const env = await this.orchestrateEnv(callerSessionId, `cancel-batch:${batchId}`);
-		for (const run of runs) await settleRunFromRuntime(env, storeId, run, "cancelled", `the batch was cancelled while this child ran: ${batchId}`);
-	}
-	/**
-	* Abort every batch driver of `storeId` whose parent task is a strict
-	* descendant of `taskId`, and wait for their settlements. Each registration
-	* names the parent task it drives, so the subtree is read from the store's own
-	* task list plus the registrations — never from the batch id, which names the
-	* pair (parent run, proposal) and cannot be parsed back into a task.
-	*/
-	async abortDescendantBatches(storeId, taskId) {
-		let snapshot;
-		try {
-			snapshot = await this.ctx.task.snapshotIn(storeId);
-		} catch (error) {
-			this.warn(`store ${storeId}: the batches under "${taskId}" could not be listed (${error instanceof Error ? error.message : String(error)}); only the batch itself was aborted`);
-			return;
-		}
-		const parentOf = new Map(snapshot.tasks.map((task) => [task.taskId, task.parentTaskId]));
-		const under = (candidate) => {
-			for (let current = parentOf.get(candidate); current !== void 0; current = parentOf.get(current)) if (current === taskId) return true;
-			return false;
-		};
-		const entries = [...this.drivers.entries()].filter(([, driver]) => {
-			if (driver.storeId !== storeId || driver.parentTaskId === void 0) return false;
-			return driver.parentTaskId !== taskId && under(driver.parentTaskId);
-		});
-		for (const [, driver] of entries) driver.controller.abort();
-		await Promise.all(entries.map(([, driver]) => driver.promise.catch(() => [])));
-	}
-	/**
-	* Cancel everything one store has in flight (§3.6), called by
-	* `graphs.remove` before the graph is stopped and exposed as a service API.
-	*
-	* The order is the promise: the gate closes for every session of the store
-	* first (so no further tool call writes anything), then every driver is
-	* aborted and awaited (so the children and parents settle through the same
-	* rules as a batch cancellation), then the runs that are still non-terminal —
-	* a root run with no batch in flight, a replay — are cancelled with the
-	* reason recorded, and finally the workspace claim this store held is released
-	* and its sessions' managed jobs are reconciled.
-	*
-	* Idempotent: every step tolerates having already happened, so a second call
-	* is a no-op rather than an error.
-	*/
-	async cancelGraph(storeId, reason) {
-		try {
-			this.reindex(storeId, await this.ctx.task.snapshotIn(storeId));
-		} catch (error) {
-			this.warn(`store ${storeId}: it could not be read for the cancellation "${reason}" (${error instanceof Error ? error.message : String(error)}), so nothing was cancelled`);
-			return;
-		}
-		this.closingStores.add(storeId);
-		this.invalidateStoreRecovery(storeId);
-		try {
-			for (const [sessionId, binding] of this.sessions) if (binding.storeId === storeId) this.executionGate.setTerminal(sessionId);
-			const entries = [...this.drivers.values()].filter((entry) => entry.storeId === storeId);
-			for (const entry of entries) entry.controller.abort();
-			await Promise.all(entries.map((entry) => entry.promise.catch(() => [])));
-			const snapshot = await this.ctx.task.snapshotIn(storeId);
-			const env = await this.orchestrateEnv(this.recoverySessionFor(snapshot, storeId), `cancel-graph:${storeId}`);
-			const stillRunning = snapshot.runs.filter((run) => run.status === "running");
-			for (const run of stillRunning) await settleRunFromRuntime(env, storeId, run, "cancelled", `cancelled with the graph: ${reason}`);
-			for (const run of stillRunning) await this.reconcileSessionJobs(run.sessionId);
-			await this.releaseStoreWorkspace(storeId);
-		} finally {
-			this.closingStores.delete(storeId);
-		}
-	}
-	/**
-	* The settlement of one batch, from the outside: the registered driver's own
-	* promise when this process is driving it, or the outcomes the store already
-	* records when the batch settled earlier (or in another process). §3.8's
-	* `awaitBatch` — the entry a test or a service uses to wait for a batch a tool
-	* call no longer waits for.
-	*
-	* The batch is resolved through the store's own accumulation — the run whose
-	* record holds this batch id, and that batch's members — never by parsing the
-	* id: an id names a pair, and a parent that admitted several batches holds one
-	* entry per batch. A batch no run records is refused by name rather than
-	* answered with another batch's children.
-	*/
-	async awaitBatch(storeId, batchId) {
-		if (!batchId.startsWith("b-")) throw new Error(`task-runtime: "${batchId}" is not a batch id (a batch id is "b-<parentRunId>-<proposalId>")`);
-		const entry = this.drivers.get(`${storeId}/${batchId}`);
-		if (entry !== void 0) return await entry.promise;
-		const found = await this.batchRecordIn(storeId, batchId);
-		if (found === void 0) throw new Error(`task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; a batch is read from the run that admitted it, never derived from its id`);
-		return await deriveChildOutcomes(this.ctx.task, storeId, found.taskId, found.memberTaskIds);
-	}
-	/** Restore running Sessions from their persisted execution phase. */
-	async reconcileStore(storeId) {
-		const snapshot = await this.ctx.task.snapshotIn(storeId);
-		this.reindex(storeId, snapshot);
-		const depthOf = (taskId) => snapshot.tasks.find((task) => task.taskId === taskId)?.depth ?? 0;
-		const ordered = snapshot.runs.filter((run) => run.status === "running").sort((left, right) => depthOf(right.taskId) - depthOf(left.taskId));
-		const env = await this.orchestrateEnv(this.recoverySessionFor(snapshot, storeId), `recovery:${storeId}`);
-		const questionResumes = [];
-		const waiting = [];
-		const submitted = [];
-		await this.rebuildWorkspaceOwnership(storeId);
-		for (const run of ordered) {
-			if (run.executionPhase === void 0) throw new Error(`task-runtime: run "${run.runId}" has no persisted executionPhase and cannot be continued`);
-			if (run.providerBinding !== void 0) {
-				const read = await this.readRunBinding(run.providerBinding);
-				if (read !== void 0 && read.defects.length > 0) throw new Error(`task-runtime: run "${run.runId}" content binding changed:\n- ${read.defects.join("\n- ")}`);
-			}
-			if (rootTaskStoreId(run.sessionId) !== storeId && !this.startedSessions.has(run.sessionId)) {
-				const attempt = await resumeAdoptedWorker(env, storeId, run);
-				if (attempt.status !== "live") throw new Error(`task-runtime: cannot continue run "${run.runId}" in Session "${run.sessionId}": ${attempt.reason}`);
-				questionResumes.push({
-					subject: `run "${run.runId}" (session "${run.sessionId}")`,
-					status: "live"
-				});
-			}
-			if (run.executionPhase === "waiting_children") {
-				if (run.batchId === void 0 || !this.batchHeldByRun(run, run.batchId)) throw new Error(`task-runtime: run "${run.runId}" has no identifiable persisted child batch`);
-				waiting.push(run);
-			} else if (run.executionPhase === "submitted") submitted.push(run);
-		}
-		for (const run of submitted) {
-			const lineage = this.replayLineage.get(run.taskId);
-			await settleSubmittedRun(env, storeId, run.taskId, run.runId, lineage === void 0 ? {} : { anomalies: [lineage] });
-		}
-		for (const run of waiting) this.startBatchDriver({
-			storeId,
-			parentTaskId: run.taskId,
-			parentRunId: run.runId,
-			batchId: run.batchId,
-			callerSessionId: run.sessionId,
-			reason: `continued batch ${run.batchId} after a restart`
-		});
-		const deliverQuestions = async () => {
-			const deliveries = await reconcileQuestionDeliveries(this.questionCoordination(), storeId);
-			this.reportUnsettledQuestionDeliveries(storeId, deliveries);
-			await this.wakeUnclaimedQuestionMessages(storeId, deliveries);
-			return deliveries;
-		};
-		const deliverBatches = async () => {
-			const owed = owedBatchResults(await this.ctx.task.snapshotIn(storeId));
-			if (owed.length === 0) return;
-			const unread = [];
-			for (const entry of owed) try {
-				if (await this.redeliverBatchResult(storeId, entry.batchId) === "already-present") unread.push({
-					sessionId: entry.sessionId,
-					messageId: batchEndMessageId(entry.batchId)
-				});
-			} catch (error) {
-				this.warn(`store ${storeId}: the end-of-batch message for "${entry.batchId}" could not be re-derived (${error instanceof Error ? error.message : String(error)}); the batch's facts stand and the next activation retries`);
-			}
-			this.wakeUnclaimedBatchResults(unread);
-		};
-		const barrier = this.storeRecovery.get(storeId);
-		let questionDeliveries = [];
-		if (barrier === void 0 || barrier.status !== "recovering") {
-			questionDeliveries = await deliverQuestions();
-			await deliverBatches();
-		} else if (barrier.cancelled !== true) barrier.pendingQuestionDelivery = async () => {
-			await deliverQuestions();
-			await deliverBatches();
-		};
-		return {
-			unresolvedProposals: await this.reconcileProposals(storeId),
-			questionDeliveries,
-			questionResumes
-		};
-	}
-	/**
-	* Wake a Session that was brought back with coordination input its own inbox
-	* still holds unread (A4 §F.1's wake contract).
-	*
-	* Why this exists: a delivery is a `steer`, and a retry whose target's fold
-	* already holds the identity is answered `already-present` **without steering**
-	* — right, because a second copy would be a duplicate, but it also means a
-	* message that was durable *before* the crash (spliced and flushed, never
-	* claimed) wakes nothing after the restart. The resumed driver stays idle with
-	* the question or the answer sitting in its restored inbox, and the wait would
-	* remain idle indefinitely. So the pass looks at the deliveries that came back
-	* `already-present`, checks the *live* inbox of the session each one addressed
-	* (the public `inbox.nextTurn`/`nextStep` read), and — only when that identity
-	* is still pending there — wakes the session with the runtime's own voice: a
-	* `plugin`-sourced `notice` (the shape {@link notify} always sends), never a
-	* person's message and never the question's or the answer's words.
-	*
-	* Nothing else is sent: a delivery that was steered in this pass needs no
-	* second wake, a session with no pending identity is left alone, and a session
-	* that is not live here cannot be woken (that is the `unavailable` case the
-	* report already names). A failure inside this step is reported, never
-	* propagated: the deliveries themselves were decided.
-	*/
-	async wakeUnclaimedQuestionMessages(storeId, deliveries) {
-		const unread = new Set(deliveries.filter((delivery) => delivery.status === "already-present").map((delivery) => delivery.messageId));
-		if (unread.size === 0) return;
-		const snapshot = await this.ctx.task.snapshotIn(storeId);
-		const targets = /* @__PURE__ */ new Map();
-		for (const message$8 of pendingQuestionMessages(snapshot).messages) if (unread.has(message$8.messageId)) targets.set(message$8.targetSessionId, message$8.messageId);
-		for (const [sessionId, messageId] of targets) {
-			if (!this.sessionHoldsPendingMessage(sessionId, messageId)) continue;
-			this.notify(sessionId, `task-runtime: this session was brought back after a restart with coordination input it has not read (message "${messageId}" is still pending in its inbox); read it and act on it — the framework will not send a second copy`);
-		}
-	}
-	/**
-	* Wake a Session that was brought back with an end-of-batch result its own inbox
-	* still holds unread — {@link wakeUnclaimedQuestionMessages}' rule applied to the
-	* batch messages (K1 §2, §5), and for the same reason.
-	*
-	* A batch end delivered before a crash is durable in the target's log but may
-	* never have been claimed (spliced and flushed, then the process died), so the
-	* pass's re-delivery answers `already-present` **without steering** — right,
-	* because a second copy would be a duplicate — and a resumed parent with the
-	* message sitting in its restored inbox would otherwise stay idle. The check is the same live-inbox read, and the wake is the same
-	* runtime-voice notice: never a second copy of the message.
-	*/
-	wakeUnclaimedBatchResults(unread) {
-		for (const { sessionId, messageId } of unread) {
-			if (!this.sessionHoldsPendingMessage(sessionId, messageId)) continue;
-			this.notify(sessionId, `task-runtime: this session was brought back after a restart with the result of a child batch it has not read (message "${messageId}" is still pending in its inbox); read it and act on it — the framework will not send a second copy`);
-		}
-	}
-	/**
-	* Whether one live session's own inbox still holds a message identity — the
-	* public pending read of a DSH Agent (`inbox.nextTurn` / `inbox.nextStep`),
-	* used only to decide whether a session needs waking (A4 §F.1's wake
-	* contract). A session this process does not hold is not "pending": it is a
-	* target the delivery report already names `unavailable`.
-	*/
-	sessionHoldsPendingMessage(sessionId, messageId) {
-		const inbox = this.agentOrUndefined(sessionId)?.inbox;
-		if (inbox === void 0) return false;
-		return [...inbox.nextTurn ?? [], ...inbox.nextStep ?? []].some((message$8) => String(message$8.id) === messageId);
-	}
-	/**
-	* The deployment half of the recovery pass's worker resume (A4 §F.1): resolve
-	* the Session's graph scope, take the Session over through
-	* `AgentRuntime.resumeWorkerAgent` under the run's own identity, and put the
-	* live result where every other live session of this process lives.
-	*
-	* The order after the resume is the promise the contract makes:
-	*
-	* 1. **The binding.** The Session is bound to its run in this process's one
-	*    binding table (`sessions`) and marked as work this process drives
-	*    (`startedSessions`), exactly as a spawn's product is — so the run's own
-	*    tools (`task_submit_result`, `task_answer`) resolve, and the next recovery
-	*    pass reads it as live work rather than as a stranger's.
-	* 2. **The gate, before anything can be delivered.** The run's phase and its
-	*    question block are applied from the store under the gate's own token rule
-	*    ({@link applyResumedSessionGate}) — the same derivation
-	*    `initializeStoreGates` performs for every session, moved ahead of the
-	*    delivery pass so the first request an answer wakes is already decided
-	*    under the facts the store holds.
-	* 3. **The managed work the dead process left.** The drain (the same
-	*    `drainSession` the settlement paths use, with the now-live agent and the
-	*    deployment's jobs service) kills and waits for this session's managed work
-	*    within the configured window. An unconfirmed drain refuses the takeover by
-	*    name: a resumed worker whose predecessor's jobs nobody could confirm
-	*    stopped must not be allowed to run as if nothing of the sort happened.
-	*
-	* A refused resume fails activation by name; the original Run stays intact
-	* and no replacement Session is created.
-	*/
-	async resumeAdoptedWorkerSession(request) {
-		const sessionId = request.run.sessionId;
-		const continuing = this.startedSessions.has(sessionId);
-		const live = this.agentOrUndefined(sessionId) !== void 0;
-		const bound = this.sessions.get(sessionId);
-		if (live && (bound === void 0 || bound.storeId !== request.storeId || bound.runId !== request.run.runId)) throw new Error(`task-runtime: Session "${sessionId}" is live under another owner or Run binding`);
-		if (!live) {
-			const graph = await this.ctx.graphs.graphForSession(SessionId(sessionId));
-			await this.ctx.agentRuntime.resumeWorkerAgent({
-				sessionId: SessionId(sessionId),
-				scope: {
-					graphStoreId: graph.graphStoreId,
-					layoutStoreId: graph.layoutStoreId
-				},
-				run: {
-					storeId: request.storeId,
-					taskId: request.run.taskId,
-					runId: request.run.runId,
-					sessionId: SessionId(sessionId),
-					...request.run.agentPreset === void 0 ? {} : { agentPreset: request.run.agentPreset },
-					capabilitySnapshot: request.run.capabilitySnapshot
-				},
-				grant: request.grant,
-				...request.permissionPreset === void 0 ? {} : { permissionPreset: request.permissionPreset },
-				taskWorker: request.taskWorker
-			});
-		}
-		this.sessions.set(sessionId, {
-			storeId: request.storeId,
-			taskId: request.run.taskId,
-			runId: request.run.runId
-		});
-		this.startedSessions.add(sessionId);
-		await this.applyResumedSessionGate(request.storeId, sessionId, request.run.runId);
-		if (!live) {
-			const drained = await this.drainAdoptedSession(sessionId);
-			if (!drained.confirmed) {
-				await this.stopAdoptedSession(sessionId);
-				throw new Error(`task-runtime: managed work of Session "${sessionId}" could not be confirmed stopped: ${drained.pending.join("; ")}`);
-			}
-		}
-		const coordinationPending = request.run.executionPhase === "waiting_children" && pendingCoordinationOf(await this.ctx.task.snapshotIn(request.storeId), request.run.runId).length > 0;
-		if (!continuing && (request.run.executionPhase === "active" || coordinationPending)) this.notifyWhenReady(sessionId, "task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.");
-		return { status: "live" };
-	}
-	/**
-	* Apply the phase and the question block one resumed session's run implies,
-	* from the store, under the gate's own token rule — the token taken *before*
-	* the read, so a decision this process made while the read was in flight drops
-	* the value instead of being overwritten by it. Same derivation as
-	* `initializeStoreGates`, applied per session because a delivered answer can
-	* wake this session before that pass runs.
-	*/
-	async applyResumedSessionGate(storeId, sessionId, runId) {
-		const token = this.executionGate.decisionToken(sessionId);
-		const snapshot = await this.ctx.task.snapshotIn(storeId);
-		const run = snapshot.runs.find((candidate) => candidate.runId === runId);
-		if (run === void 0) throw new Error(`task-runtime: resumed Run "${runId}" is absent from store "${storeId}"`);
-		this.gatePhaseFromStore(sessionId, run, storeId, token);
-		this.executionGate.applyStoreQuestionsBlocked(sessionId, blockingQuestionsOf(snapshot, runId).length > 0, token);
-	}
-	/** The drain a resumed Session owes: the session's managed work, with the agent that now owns it. */
-	async drainAdoptedSession(sessionId) {
-		return await drainSession(this.executionGate, sessionId, {
-			timeoutMs: this.config.writeDrainTimeoutMs,
-			jobs: this.softService("jobs"),
-			agent: this.agentOrUndefined(sessionId)
-		});
-	}
-	/** Let one resumed Session go again — the runtime's own stop path, never a private dispose. */
-	async stopAdoptedSession(sessionId) {
-		try {
-			await this.ctx.agentRuntime.stopAgents([SessionId(sessionId)]);
-		} catch (error) {
-			this.warn(`session ${sessionId}: the resumed worker could not be stopped again (${error instanceof Error ? error.message : String(error)})`);
-		}
-	}
-	/** Restore the persisted root → batch → worker ownership chain once. */
-	async rebuildWorkspaceOwnership(storeId) {
-		const snapshot = await this.ctx.task.snapshotIn(storeId);
-		const rootRun = snapshot.runs.find((run$1) => run$1.status === "running" && rootTaskStoreId(run$1.sessionId) === storeId);
-		if (rootRun === void 0) {
-			await this.releaseStoreWorkspace(storeId);
-			return;
-		}
-		const workspace = await this.workspacePathForSession(rootRun.sessionId);
-		if (workspace === void 0) return;
-		const held = this.workspaces.ownerOf(workspace);
-		if (held !== void 0) {
-			if (held.storeId !== storeId) throw new Error(`task-runtime: workspace ${workspace} is held by ${describeOwner(held)}`);
-			return;
-		}
-		const adoption = await this.workspaces.reconcileAdopt(workspace);
-		if (!adoption.adopted) throw new Error(`task-runtime: cannot take over workspace ${workspace}: ${adoption.reason}`);
-		let owner = {
-			kind: "run",
-			storeId,
-			taskId: rootRun.taskId,
-			runId: rootRun.runId,
-			since: now()
-		};
-		await this.workspaces.claim(workspace, owner);
-		let run = rootRun;
-		while (run.executionPhase === "waiting_children") {
-			const batch = run.batches?.find((batch$1) => batch$1.batchId === run.batchId);
-			if (batch === void 0) throw new Error(`task-runtime: Run "${run.runId}" has no identifiable persisted child batch`);
-			const next = {
-				kind: "batch",
-				storeId,
-				taskId: run.taskId,
-				batchId: batch.batchId,
-				since: now()
-			};
-			await this.workspaces.push(workspace, owner, next);
-			owner = next;
-			const children = snapshot.runs.filter((child) => child.status === "running" && batch.memberTaskIds.includes(child.taskId));
-			if (children.length > 1) throw new Error(`task-runtime: batch "${batch.batchId}" holds multiple running workspace writers`);
-			if (children.length === 0) break;
-			run = children[0];
-			const childOwner = {
-				kind: "run",
-				storeId,
-				taskId: run.taskId,
-				runId: run.runId,
-				since: now()
-			};
-			await this.workspaces.push(workspace, owner, childOwner);
-			owner = childOwner;
-		}
-	}
-	/** Release every layer this process holds for one store's workspace, naming any layer that is not the store's. */
-	async releaseStoreWorkspace(storeId) {
-		if (this.workspaces === void 0) return;
-		const sessionId = this.recoverySessionFor(void 0, storeId);
-		const workspace = await this.workspacePathForSession(sessionId);
-		if (workspace === void 0) return;
-		for (;;) {
-			const top = this.workspaces.ownerOf(workspace);
-			if (top === void 0) return;
-			if (top.storeId !== storeId) {
-				this.warn(`workspace ${workspace} holds a layer of store ${top.storeId} (${top.kind}) while store ${storeId} is being cancelled; only this process's own layers are released here`);
-				return;
-			}
-			await this.workspaces.release(workspace, top);
-		}
-	}
-	/**
-	* The fallback batch-failure seam the orchestration calls when a run's own
-	* settlement cannot finish the batch (verification unavailable in a nested
-	* submission): every child that never started is blocked, the parent run is
-	* failed with the reason, and the batch's driver is aborted so its own loop
-	* stops seeing work that no longer exists.
-	*
-	* Both writes are the orchestration's own (A4-5): {@link blockUnstartedChildren}
-	* and {@link settleRunFromRuntime} — the same pair `failBatchFromRuntime` uses —
-	* so this file holds no second copy of either record shape. The batch is
-	* resolved through the store's accumulation ({@link batchRecordIn}): the id
-	* names a pair, not a task.
-	*/
-	async failBatch(storeId, batchId, reason) {
-		const found = await this.batchRecordIn(storeId, batchId);
-		if (found === void 0) return;
-		this.drivers.get(`${storeId}/${batchId}`)?.controller.abort();
-		const env = await this.orchestrateEnv(await this.sessionForStore(storeId), `fail-batch:${storeId}`);
-		await blockUnstartedChildren(env, storeId, found.memberTaskIds, reason);
-		const parentRun = (await this.ctx.task.snapshotIn(storeId)).runs.find((run) => run.runId === found.run.runId);
-		if (parentRun === void 0 || parentRun.status !== "running") return;
-		await settleRunFromRuntime(env, storeId, parentRun, "failed", reason);
-	}
-	/** The session whose viewpoint a store-wide operation (recovery, cancellation) resolves its checkout from. */
-	recoverySessionFor(snapshot, storeId) {
-		const rootRun = snapshot?.runs.find((run) => run.taskId === snapshot.tasks.find((task) => task.parentTaskId === void 0)?.taskId);
-		if (rootRun !== void 0) return rootRun.sessionId;
-		for (const [sessionId, binding] of this.sessions) if (binding.storeId === storeId) return sessionId;
-		return storeId;
-	}
-	/** Any session bound to this store, for the seams that only need a viewpoint (never `storeId` if one exists). */
-	async sessionForStore(storeId) {
-		try {
-			return this.recoverySessionFor(await this.ctx.task.snapshotIn(storeId), storeId);
-		} catch {
-			return storeId;
-		}
-	}
-	/** Reverse lookup: the task run a (worker) session is bound to. */
-	async runForSession(sessionId) {
-		const found = await this.lookupRun(sessionId);
-		if (found === void 0) throw new Error(`task-runtime: no task run is bound to session "${sessionId}"`);
-		return found;
-	}
-	/**
-	* Whether this deployment admits a run's own `task_decompose`
-	* (`Config.allowRuntimeDecomposition`), read-only. The context package's
-	* worker projection carries the rule that follows from it; nothing here
-	* grants or denies a call — admission still decides every one.
-	*/
-	allowsRuntimeDecomposition() {
-		return this.config.allowRuntimeDecomposition;
-	}
-	/**
-	* The gate phase one bound session's run implies, applied on every rebinding.
-	* The gate is a handle on the run's phase and the phase is the store's fact,
-	* so a session this process rebound — from its index, from a reopened store,
-	* or with a phase that moved under an in-flight call — is gated as what its
-	* run is. `undefined` (a record that predates phases) leaves the session
-	* ungated, which is the gate's own contract for an unbindable phase, and a
-	* session with no run is never gated at all.
-	*
-	* Two ways a read of that record can be too old to apply, and each has its own
-	* guard: the closing set checked below (a decision of this process that the
-	* store's write has not caught up with yet), and the `token` its caller took
-	* before the read ({@link ExecutionGate.applyStorePhase}, for a read that
-	* straddled a decision).
-	*
-	* - **A read taken inside a window whose decision is in effect but not yet
-	*   persisted** — a store this process is closing ({@link cancelGraph}, whose
-	*   barrier is raised before it is written): there the record read back is
-	*   older than a phase this process already closed, so a rebinding may not
-	*   move a phase that session holds. Whether it holds one is the whole
-	*   distinction — a session the cancellation never reached has none, and the
-	*   store decides for it exactly as it does everywhere else, which is what
-	*   keeps the restore path (`waiting_children`, terminal records) working.
-	* - **A read that straddled a decision** — the query read the record, a
-	*   decision landed, and the value is applied afterwards: `token` is the
-	*   gate's decision count taken before that read ({@link initializeStoreGates}
-	*   is the caller now — the read door no longer writes the gate), and
-	*   {@link ExecutionGate.applyStorePhase} drops the value when it has moved
-	*   since. The closing set above cannot see this one — by then the store is
-	*   up to date and the store is not being closed any more.
-	*/
-	gatePhaseFromStore(sessionId, run, storeId, token) {
-		if (this.closingStores.has(storeId) && this.executionGate.phaseOf(sessionId) !== void 0) return;
-		const phase = this.runGatePhase(run);
-		if (phase === void 0) return;
-		this.executionGate.applyStorePhase(sessionId, phase, token);
-	}
-	/**
-	* The read door a session's first lookup takes (A2 §E): a read, and only a
-	* read. A binding this process holds is resolved against the store; a
-	* session this process never held resolves its store from its graph, opens
-	* it, and indexes the snapshot so the binding the record implies answers.
-	* Nothing else happens here — no recovery pass, no gate write, no spawn —
-	* because a query cannot be the thing that recovers a store: recovery runs
-	* behind the explicit activation barrier ({@link adoptRoot}), which is also
-	* where every session the store knows gets its gate phase
-	* ({@link initializeStoreGates}).
-	*/
-	async lookupRun(sessionId) {
-		const binding = this.sessions.get(sessionId);
-		if (binding !== void 0) {
-			const resolved = await this.resolveBinding(binding);
-			if (resolved !== void 0) return resolved;
-			this.sessions.delete(sessionId);
-		}
-		let rootSessionId;
-		try {
-			rootSessionId = (await this.ctx.graphs.graphForSession(SessionId(sessionId))).rootSessionId;
-		} catch {
-			return;
-		}
-		const storeId = rootTaskStoreId(rootSessionId);
-		let snapshot;
-		try {
-			snapshot = await this.ctx.task.openStore(storeId);
-			this.reindex(storeId, snapshot);
-		} catch {
-			return;
-		}
-		const rebinding = this.sessions.get(sessionId);
-		if (rebinding === void 0) return void 0;
-		return await this.resolveBinding(rebinding);
-	}
-	/**
-	* The recovery state of one store, as a read sees it (A2 §E): the barrier
-	* handle first, and — when no barrier has run for this store in this process
-	* — the store's own record, read-only. Work this process drives (a root it
-	* activated here, a worker it spawned, a batch whose driver is registered)
-	* is live, not recovery's; a still-running run nobody here drives is what
-	* `recovery-required` names, unless it predates coordination phases, which
-	* is the `needs-recovery` that allows only reading and cancelling. The
-	* store's own root run is its session's, not recovery's — the same rule the
-	* recovery pass applies — so a root legitimately sitting `active` between
-	* its own decisions is not a recovery verdict, and the gate plus the state
-	* rules are what refuse a write on it.
-	*
-	* Never a trigger: this opens no gate, starts no driver and settles no run,
-	* so a context query, a diagnostic or the DSH first-request check can show
-	* where a store stands without executing anything.
-	*/
-	async recoveryStatus(storeId) {
-		const state = this.storeRecovery.get(storeId);
-		if (state !== void 0) {
-			if (state.status === "recovering") return { status: "recovering" };
-			if (state.status === "failed") return {
-				status: "recovery-failed",
-				reason: state.reason ?? "the recovery barrier failed"
-			};
-			return { status: "ready" };
-		}
-		let snapshot;
-		try {
-			snapshot = await this.ctx.task.openStore(storeId);
-		} catch (error) {
-			return {
-				status: "not-activated",
-				reason: error instanceof Error ? error.message : String(error)
-			};
-		}
-		for (const run of snapshot.runs) {
-			if (run.status !== "running") continue;
-			if (this.startedSessions.has(run.sessionId)) continue;
-			if (this.agentOrUndefined(run.sessionId) !== void 0) continue;
-			if (run.batchId !== void 0 && this.drivers.has(`${storeId}/${run.batchId}`)) continue;
-			if (rootTaskStoreId(run.sessionId) === storeId) continue;
-			if (run.executionPhase === void 0) return {
-				status: "needs-recovery",
-				reason: `run "${run.runId}" predates coordination phases and is not treated as active`
-			};
-			return {
-				status: "recovery-required",
-				reason: `run "${run.runId}" (phase "${run.executionPhase}") is in flight from a process that is gone`
-			};
-		}
-		return { status: "ready" };
-	}
-	/**
-	* The recovery door every business execution entry passes before its first
-	* side effect (A2 §E): the same condition the barrier establishes, refused
-	* by name — `recovering` while the barrier runs, `recovery-failed` with the
-	* original reason after one failed, `recovery-required` for work a dead
-	* process left, `needs-recovery` for a record that predates phases. The
-	* store-nothing refusals never trigger recovery themselves; cancellation,
-	* close and the read-only doors are not gated here.
-	*
-	* The `not-activated` answer proceeds: the legal root entry (an intake)
-	* creates the store, and every other caller is refused by the store's own
-	* unknown-store error rather than by a recovery verdict.
-	*/
-	async assertRecoveryReady(storeId, entry) {
-		const readiness = await this.recoveryStatus(storeId);
-		if (readiness.status === "ready" || readiness.status === "not-activated") return;
-		const because = readiness.status === "recovering" ? "its recovery barrier is still running; retry once the graph's activation completes" : readiness.status === "recovery-failed" ? `the last recovery failed: ${readiness.reason}; an explicit activation (adoptRoot) retries it` : readiness.status === "needs-recovery" ? `${readiness.reason}; only reading and cancelling are allowed` : `${readiness.reason}; await the graph's activation or adoptRoot before executing against this store`;
-		throw new Error(`task-runtime: ${entry} on store "${storeId}" is refused: the store is ${readiness.status} — ${because}`);
-	}
-	async resolveBinding(binding) {
-		try {
-			const [task, run] = await Promise.all([this.ctx.task.taskIn(binding.storeId, binding.taskId), this.ctx.task.runIn(binding.storeId, binding.runId)]);
-			return {
-				storeId: binding.storeId,
-				task,
-				run
-			};
-		} catch {
-			return;
-		}
-	}
-	reindex(storeId, snapshot) {
-		for (const run of snapshot.runs) this.sessions.set(run.sessionId, {
-			storeId,
-			taskId: run.taskId,
-			runId: run.runId
-		});
-	}
-	/**
-	* The checkout one session's runs work in, in the form ownership keys it:
-	* the graph env's path, resolved to its real path so two spellings of one
-	* directory cannot become two markers ({@link normalizeWorkspacePath}).
-	*
-	* `undefined` means this deployment cannot name a checkout — no env-builder,
-	* no graph, or a path that does not resolve — and ownership is skipped rather
-	* than guessed, which is the honest reading of §3.4's `unbound`.
-	*/
-	async workspacePathForSession(sessionId) {
-		const path = await this.envPathForSession(sessionId);
-		if (path === void 0) return void 0;
-		try {
-			return await normalizeWorkspacePath(path);
-		} catch (error) {
-			this.warn(`workspace ownership is skipped for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
-			return;
-		}
-	}
-	/**
-	* The directory one session's runs work in, for a caller that has to *name* it
-	* — the one evaluation that freezes a workspace as its input snapshot has to
-	* know which directory to freeze (S4-E §F.2). The answer is
-	* {@link envPathForSession}'s: the workspace this process placed the session
-	* in, else the session's graph env checkout, and `undefined` when the
-	* deployment cannot name either.
-	*
-	* Read-only on purpose. This door resolves a path; it does not claim the
-	* workspace, does not take its ownership, and grants no write — a caller that
-	* runs something in the directory still goes through the ordinary entries,
-	* which check ownership themselves.
-	*/
-	async workspacePathFor(sessionId) {
-		return this.envPathForSession(sessionId);
-	}
-	/**
-	* Refuse a decomposition whose caller does not hold its own checkout. The
-	* holder may be the parent run itself (the ordinary case: a run works in its
-	* checkout and hands it down), a batch the runtime holds between children, or
-	* an ancestor run of this one — the chain a nested child sits on. Anything
-	* else is another writer, and the batch is refused *before* anything is
-	* written ({@link WorkspaceBusyError} carries the holder and since when).
-	*/
-	async assertWorkspaceHeldBy(workspace, storeId, parentTask, parentRunId) {
-		if (this.workspaces === void 0) return;
-		const top = this.workspaces.ownerOf(workspace);
-		if (top === void 0) throw new WorkspaceBusyError(workspace, void 0, void 0, `store ${storeId} does not hold this workspace in this process; the run ${parentRunId} would be writing into a checkout nobody claimed (claim it through the graph entry, or resolve the ownership marker first)`);
-		if (top.storeId !== storeId) throw new WorkspaceBusyError(workspace, top, top.since, `it is held by another store (${top.storeId}), not by ${storeId}`);
-		if (top.taskId === parentTask.taskId) return;
-		let ancestor = parentTask.parentTaskId;
-		while (ancestor !== void 0) {
-			if (top.taskId === ancestor) return;
-			ancestor = await this.ancestorTaskIdFor(storeId, ancestor);
-		}
-		throw new WorkspaceBusyError(workspace, top, top.since, `it is held by ${top.kind} ${top.taskId ?? top.batchId ?? ""}, which is not run ${parentRunId}'s own run, its batch, or one of its ancestors`);
-	}
-	/** The parent task id of one task, read from the store; `undefined` when the store cannot answer. */
-	async ancestorTaskIdFor(storeId, taskId) {
-		try {
-			return (await this.ctx.task.taskIn(storeId, taskId)).parentTaskId;
-		} catch {
-			return;
-		}
-	}
-	/**
-	* Take the checkout for one replay run: an unheld workspace is claimed, and a
-	* workspace the *caller's own* tree already holds is handed over (a replay
-	* without a named workspace writes where its caller writes). Any other holder
-	* is a conflict, and the replay refuses before its task is created — which is
-	* also how a workspace another side of a comparison still holds refuses the
-	* second side (`options.workspace`), by the same rule and the same error.
-	*
-	* The layer names the replayed task ({@link WorkspaceOwner.taskId}), because
-	* the hold is the replay run's own: the §3.4 admission compares a holder by
-	* task (`assertWorkspaceHeldBy`), so without it the replay's worker would be
-	* refused the decomposition it is entitled to — its own checkout would read as
-	* a stranger's. The `runId` stays the lineage label
-	* (`replay-of-<championTaskId>`): experiment lineage is not a store run id, and
-	* nothing addresses this layer by it.
-	*/
-	async claimReplayWorkspace(workspace, storeId, callerSessionId, championTaskId, replayTaskId) {
-		const registry = this.workspaces;
-		if (registry === void 0) throw new Error("task-runtime: the workspace registry is not initialized");
-		const owner = {
-			kind: "run",
-			storeId,
-			taskId: replayTaskId,
-			runId: `replay-of-${championTaskId}`,
-			since: now()
-		};
-		const top = registry.ownerOf(workspace);
-		if (top === void 0) {
-			await registry.claim(workspace, owner);
-			return registry.ownerOf(workspace) ?? owner;
-		}
-		const callerRunId = this.sessions.get(callerSessionId)?.runId;
-		if (!(callerRunId !== void 0 && top.storeId === storeId && top.runId === callerRunId)) throw new WorkspaceBusyError(workspace, top, top.since, `a replay from session ${callerSessionId} cannot write into a checkout held by ${top.kind} ${top.taskId ?? top.batchId ?? ""}`);
-		await registry.push(workspace, top, owner);
-		return owner;
-	}
-	/** Release the replay's own layer, leaving whatever the caller held in place. */
-	async releaseReplayWorkspace(workspace, owner) {
-		const registry = this.workspaces;
-		if (registry === void 0) return;
-		const { conflict } = await releaseLayer(registry, workspace, (top) => top.kind === owner.kind && top.runId === owner.runId && top.storeId === owner.storeId);
-		if (conflict !== void 0) this.warn(`workspace ${workspace} was expected to hold the replay layer ${owner.runId ?? ""}, but holds ${describeOwner(conflict)}`);
-	}
-	/**
-	* Best-effort owner notification through the live agent (A3 §3.1, DSH's
-	* tool-jobs precedent: a `plugin`-sourced `notice`). A session with no live
-	* agent — a worker that already left, a headless test context — is skipped,
-	* and a failing follow-up reports its error to the caller.
-	*/
-	notify(sessionId, text$1) {
-		const agent = this.agentOrUndefined(sessionId);
-		if (agent === void 0 || typeof agent.followup !== "function") return;
-		agent.followup(createUserMessage({
-			content: [{
-				type: "text",
-				text: text$1
-			}],
-			source: {
-				kind: "plugin",
-				plugin: "task-runtime",
-				form: "notice",
-				summary: boundContextSummary(text$1)
-			}
-		}));
-	}
-	/**
-	* Send one owner notice through the live Session when its store is ready, and
-	* park it on the recovery barrier when one is in flight (A4 §F.1's wake order).
-	*
-	* A notice is a wake: `followup` opens a turn in an idle Session, and a turn
-	* whose first request meets a store that is still `recovering` is refused by
-	* the recovery door with nothing to wake the Session again. The notices the
-	* barrier's own pass raises are therefore raised here rather than sent: the
-	* ready handle sends them in the order they were raised, and a failed or
-	* invalidated barrier drops them — a failed wake propagates its error, and
-	* the next explicit activation raises the same one from the record again. With
-	* no barrier in flight this is {@link notify}, unchanged.
-	*/
-	notifyWhenReady(sessionId, text$1) {
-		const storeId = this.sessions.get(sessionId)?.storeId;
-		const barrier = storeId === void 0 ? void 0 : this.storeRecovery.get(storeId);
-		if (barrier !== void 0 && barrier.status === "recovering" && barrier.cancelled !== true) {
-			barrier.pendingNotices.push({
-				sessionId,
-				text: text$1
-			});
-			return;
-		}
-		this.notify(sessionId, text$1);
-	}
-	/**
-	* Deliver one ended batch's result to the Session that waited for it (K1 §2),
-	* through the same relay A4's question messages use
-	* ({@link AgentRuntimeHandle.ensureAgentMessageDelivered}) and under the order
-	* {@link notifyWhenReady} established for every wake.
-	*
-	* The message is *identified* (`m-batchend-<batchId>`), which is what makes
-	* this call idempotent and re-entrant: a second call — a retry in this process,
-	* or the recovery pass re-deriving the same message from the run's accumulated
-	* batches — states the same identity, and the target's own fold decides that it
-	* is already present instead of the runtime keeping a ledger. The body is the
-	* one the driver handed over, rendered from the store's own facts.
-	*
-	* The barrier rule is the wake rule: while a store is `recovering`, a turn in
-	* one of its Sessions is refused by the recovery door with nothing left to wake
-	* it, so the delivery is registered on the barrier and the ready handle makes
-	* it once the gates are in place. A failed or invalidated barrier drops the
-	* registration, which loses nothing: the facts are the store's, and the next
-	* activation (or the recovery slice's pass) derives the same message again.
-	*/
-	async deliverBatchResult(message$8) {
-		const barrier = this.storeRecovery.get(message$8.storeId);
-		if (barrier !== void 0 && barrier.status === "recovering" && barrier.cancelled !== true) {
-			barrier.pendingBatchResults.push(message$8);
-			return "unavailable";
-		}
-		return await this.deliverBatchResultNow(message$8);
-	}
-	/**
-	* One delivery attempt, reporting rather than throwing: the batch's facts are
-	* the store's and the message is the wake that points at them, so a relay that
-	* is absent, refuses or has no live Session changes nothing about the batch —
-	* it is named once for the operator, and the next activation retries.
-	*
-	* The run the message addresses is re-read here, and it is the one guard every
-	* path shares — the live batch end, a delivery a barrier deferred, the recovery
-	* pass and a re-delivery a caller asked for. The message's whole content is "you
-	* are active again"; a run that settled while the delivery was on its way (a
-	* cancellation that arrived first, a verdict somebody else made)
-	* must not be woken by it, so a run that is no longer `running` is answered
-	* `skipped` with zero side effects (K1 §2: 绝不唤活终态).
-	*/
-	async deliverBatchResultNow(message$8) {
-		let run;
-		try {
-			run = await this.ctx.task.runIn(message$8.storeId, message$8.runId);
-		} catch (error) {
-			this.warn(`store ${message$8.storeId}: whether run "${message$8.runId}" is still running could not be read before the end-of-batch message for "${message$8.batchId}" was delivered (${error instanceof Error ? error.message : String(error)}); nothing was delivered and the next activation retries`);
-			return "unavailable";
-		}
-		if (run.status !== "running") return "skipped";
-		const relay = this.ctx.agentRuntime;
-		if (typeof relay?.ensureAgentMessageDelivered !== "function") {
-			this.warn(`store ${message$8.storeId}: batch "${message$8.batchId}" ended with no message relay in this deployment; run "${message$8.runId}" was handed back active and its Session was not told`);
-			return "unavailable";
-		}
-		try {
-			const delivery = await relay.ensureAgentMessageDelivered({
-				targetSessionId: SessionId(message$8.sessionId),
-				senderSessionId: SessionId(message$8.sessionId),
-				messageId: message$8.messageId,
-				text: message$8.text
-			});
-			if (delivery.status === "delivered" || delivery.status === "already-present") return delivery.status;
-			this.warn(`store ${message$8.storeId}: the end-of-batch message for "${message$8.batchId}" was not delivered to session ${message$8.sessionId} (${delivery.status}); the batch's facts stand and the next activation retries the delivery`);
-			return delivery.status === "unavailable" ? "unavailable" : "refused";
-		} catch (error) {
-			this.warn(`store ${message$8.storeId}: the end-of-batch message for "${message$8.batchId}" could not be delivered (${error instanceof Error ? error.message : String(error)})`);
-			return "refused";
-		}
-	}
-	/**
-	* Re-deliver one ended batch's result from the store's own facts (K1 §2's
-	* message, re-derived): the entry a recovery pass uses for a batch whose end is
-	* durable and whose Session was never told — or was told and never recorded it
-	* (§F.1's "恢复只补缺失投递", applied to batches). It is also what a recovery
-	* pass reconciles with, one owed batch at a time.
-	*
-	* Idempotent and re-entrant by construction, not by a ledger: the identity is
-	* derived from the batch (`batchEndMessageId`), the body from its members'
-	* terminal states and evidence, and the target's own fold decides whether the
-	* message is already there (`already-present`, nothing delivered twice). A
-	* batch no run of the store records is refused by name — a batch id names a
-	* pair, and one nothing records cannot be guessed at. A batch whose parent run
-	* already settled is `skipped`: the message's content is moot for a run that
-	* cannot act on it, and a terminal run is not woken.
-	*/
-	async redeliverBatchResult(storeId, batchId) {
-		const found = await this.batchRecordIn(storeId, batchId);
-		if (found === void 0) throw new Error(`task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; there is nothing to re-deliver`);
-		const outcomes = await deriveChildOutcomes(this.ctx.task, storeId, found.taskId, found.memberTaskIds);
-		return await this.deliverBatchResult({
-			storeId,
-			runId: found.run.runId,
-			batchId,
-			sessionId: found.run.sessionId,
-			messageId: batchEndMessageId(batchId),
-			text: batchEndMessageText(batchId, outcomes)
-		});
-	}
-	/**
-	* Kill and confirm one session's managed jobs — the half of the write
-	* convergence a cancellation owes its checkout. A deployment with no jobs
-	* service, or a session whose agent is gone, has nothing to reconcile, and
-	* the drain's own report is what a caller reads as "not confirmed".
-	*/
-	async reconcileSessionJobs(sessionId) {
-		const jobs = this.softService("jobs");
-		const agent = this.agentOrUndefined(sessionId);
-		if (jobs === void 0 || agent === void 0) return;
-		const drained = await drainSession(this.executionGate, sessionId, {
-			timeoutMs: this.config.writeDrainTimeoutMs,
-			jobs,
-			agent
-		});
-		if (!drained.confirmed) this.warn(`session ${sessionId}: managed work was not confirmed stopped: ${drained.pending.join("; ")}`);
-	}
-	/**
-	* The limits one batch is admitted under (T1, construction guide §4),
-	* recorded with the decomposition and never derived from the contract: the
-	* contract's own text has no field that can raise a limit, and every value
-	* here is resolved from this runtime's configuration at admission time.
-	*
-	* Only configured usage annotations are recorded.
-	*/
-	admissionContext() {
-		const budget = this.config.budget;
-		return {
-			maxDepth: this.config.maxDepth,
-			maxChildren: this.config.maxChildren,
-			auditOnly: {
-				...budget.maxToolCalls === void 0 ? {} : { maxToolCalls: budget.maxToolCalls },
-				...budget.tokens === void 0 ? {} : { tokens: budget.tokens },
-				...budget.attempts === void 0 ? {} : { attempts: budget.attempts }
-			}
-		};
-	}
-	/**
-	* The env binding the session's graph runs in, or `undefined` when the
-	* deployment mounts no env-builder or the graph cannot be read. Best-effort
-	* by contract: every caller decides what an unresolved env means — a
-	* verification command without `cwd`, a refused composition of MCP servers, a
-	* refused batch when a protected input has to be fixed — and none of them may
-	* guess one.
-	*/
-	async sessionEnv(sessionId) {
-		try {
-			const envBuilder = this.ctx.get?.("envBuilder") ?? this.ctx.envBuilder;
-			if (envBuilder === void 0) return void 0;
-			const graph = await this.ctx.graphs.graphForSession(SessionId(sessionId));
-			return envBuilder.store.get(graph.envId);
-		} catch {
-			return;
-		}
-	}
-	/**
-	* The session's checkout directory: the one directory a run's commands, a
-	* verifier's `cwd`, and a protected acceptance input's bytes are all resolved
-	* against. `undefined` means the deployment cannot name it — the caller
-	* refuses rather than fixing an identity against a base it does not know
-	* ({@link fixProtectedInputs}).
-	*
-	* A session this process spawned into a named workspace (S4-E) answers with
-	* that workspace: the graph env names where the caller's own tree works, which
-	* is not where a replay the caller placed elsewhere works. This is the one
-	* resolution point, so every path that asks for a session's checkout — the
-	* protected inputs of a nested batch, the pre-check a review re-runs, the
-	* capability report a worker reads — follows the same directory.
-	*/
-	async envPathForSession(sessionId) {
-		const named = this.sessionWorkspaces.get(sessionId);
-		if (named !== void 0) return named;
-		return (await this.sessionEnv(sessionId))?.path;
-	}
-	/**
-	* The single refusal text a decomposition batch is rejected at the contract
-	* stage with, whichever step produced the reasons (the protected-input fixing
-	* or the normalization entry): a caller reads one message shape and one
-	* reason-per-bullet list, and the label names the parent the batch was
-	* refused for.
-	*/
-	contractRefusal(parentTaskId, reasons) {
-		return /* @__PURE__ */ new Error(`task-runtime: contract rejected decomposition of "${parentTaskId}":\n- ${reasons.join("\n- ")}`);
-	}
-	/**
-	* The service-supplied seam the orchestration runs against (A3 §3.1). Every
-	* piece of the protocol that needs the process — the gate, the workspace
-	* registry, the notifications, the run watcher, the jobs service, the root
-	* budget — enters through here, which is what keeps `orchestrate.ts` free of
-	* cordis types and testable as the state machine it is.
-	*
-	* The checkout is resolved once per construction ({@link workspacePathForSession}):
-	* the caller's session is the viewpoint every path in this env shares — the
-	* verifier's `cwd`, the protected inputs' base, the skills' discovery root and
-	* the workspace ownership key are one directory.
-	*
-	* @param workspace - the already-normalized workspace this orchestration runs
-	* in, when it is not the caller session's own checkout: a replay placed in a
-	* directory the caller supplied (§S4-E). It replaces the checkout for the
-	* verifier's `cwd`, the MCP env the grant binds against, and the cwd every
-	* worker this env spawns starts in; absent, the session's own checkout is used
-	* exactly as before.
-	*/
-	async orchestrateEnv(callerSessionId, actor, workspace) {
-		const named = workspace ?? this.sessionWorkspaces.get(callerSessionId);
-		const workspacePath = named ?? await this.workspacePathForSession(callerSessionId);
-		const binding = this.sessionExecutionBindings.get(callerSessionId);
-		return {
-			task: this.ctx.task,
-			actor,
-			...this.config.defaultPreset !== void 0 ? { defaultPreset: this.config.defaultPreset } : {},
-			...this.config.runBindingRoot === void 0 ? {} : { runBindingRoot: this.config.runBindingRoot },
-			verifyTimeoutMs: this.config.verifyTimeoutMs,
-			budget: { ...this.config.budget },
-			allowRuntimeDecomposition: this.config.allowRuntimeDecomposition,
-			gate: this.executionGate,
-			workspaces: this.workspaces,
-			...workspacePath === void 0 ? {} : { workspacePath },
-			...named === void 0 ? {} : { workerCwd: named },
-			...binding?.agentOptions === void 0 ? {} : { agentOptions: binding.agentOptions },
-			writeDrainTimeoutMs: this.config.writeDrainTimeoutMs,
-			...this.config.rootBudget === void 0 ? {} : { rootBudget: { ...this.config.rootBudget } },
-			precheck: (capabilities, cwd) => this.providerPrecheck(capabilities, { ...cwd === void 0 ? {} : { cwd } }),
-			notify: (sessionId, text$1) => {
-				this.notify(sessionId, text$1);
-			},
-			watchRun: (storeId, runId, callback) => this.watchRun(storeId, runId, callback),
-			agentFor: (sessionId) => this.agentOrUndefined(sessionId),
-			jobs: this.softService("jobs"),
-			onRunSettled: (storeId, taskId, runId, status) => {
-				this.runSettledFromRuntime(storeId, taskId, runId, status);
-			},
-			failBatch: (storeId, batchId, reason) => this.failBatch(storeId, batchId, reason),
-			deliverBatchResult: (message$8) => this.deliverBatchResult(message$8),
-			assertPreset: async (preset) => {
-				const presets = this.ctx.get?.("agentPresets") ?? this.ctx.agentPresets;
-				if (presets === void 0) return;
-				await presets.resolve(preset);
-			},
-			resolvePermissionSpec: (name) => {
-				const presets = this.ctx.get?.("permissionPresets") ?? this.ctx.permissionPresets;
-				if (presets === void 0) throw new Error("task-runtime: permissionPresets service is not loaded; cannot rank declared permissions");
-				return presets.resolve(name);
-			},
-			resolveMcpEnv: async () => {
-				const env = await this.sessionEnv(callerSessionId);
-				if (env === void 0) return void 0;
-				const root = named ?? env.path;
-				return {
-					envRoot: root,
-					checkout: (repo) => {
-						const component = (env.components ?? []).find((item) => item.repo === repo);
-						return component === void 0 ? void 0 : join(root, component.dir);
-					}
-				};
-			},
-			spawn: (request) => {
-				const parent = this.liveAgent(callerSessionId);
-				const sessionWorkspace = request.cwd ?? named;
-				if (sessionWorkspace !== void 0) this.sessionWorkspaces.set(request.sessionId, sessionWorkspace);
-				if (request.agentOptions !== void 0) this.sessionExecutionBindings.set(request.sessionId, { agentOptions: request.agentOptions });
-				return this.ctx.agentRuntime.spawn(parent, {
-					sessionId: SessionId(request.sessionId),
-					name: request.name,
-					...request.taskWorker === void 0 ? {} : { taskWorker: request.taskWorker },
-					...request.agentPreset !== void 0 ? { agentPreset: request.agentPreset } : {},
-					...request.permissionPreset !== void 0 ? { permissionPreset: request.permissionPreset } : {},
-					...request.cwd !== void 0 ? { cwd: request.cwd } : {},
-					...request.agentOptions !== void 0 ? { agentOptions: request.agentOptions } : {},
-					...request.grant !== void 0 ? { grant: request.grant } : {},
-					...request.signal !== void 0 ? { signal: request.signal } : {}
-				});
-			},
-			resumeWorkerSession: (request) => this.resumeAdoptedWorkerSession(request),
-			verifyRun: async (storeId, runId, options = {}) => {
-				const verifier = this.runVerifier();
-				if (verifier === void 0 || typeof verifier.verifyRun !== "function") throw new VerifierUnavailableError(`task-runtime: verifier service is not loaded; cannot verify run "${runId}" (expected plugin id "verifier", ticket C2)`);
-				const cwd = named ?? await this.envPathForSession(callerSessionId);
-				return verifier.verifyRun(storeId, runId, {
-					...cwd === void 0 ? {} : { cwd },
-					...options
-				});
-			},
-			readLogTail: async (logRef) => this.runVerifier()?.logTail?.(logRef),
-			observeSession: async (sessionId) => this.observeSession(sessionId),
-			onTerminalReview: (fact) => this.notifyTerminalReview(fact),
-			onRunBound: (sessionId, binding$1) => {
-				this.sessions.set(sessionId, binding$1);
-				this.startedSessions.add(sessionId);
-			}
-		};
-	}
-	/**
-	* Observe one run's terminal transition (A3 §3.1) over the task service's own
-	* `task/change` event: subscribe first, then read the current status, so a run
-	* that settled between the caller's read and this subscription is reported
-	* rather than missed. The returned function unsubscribes.
-	*
-	* A deployment with no event bus (a minimal context) cannot promise the
-	* observer anything, and the returned no-op says so by leaving the caller's
-	* own timeout in charge.
-	*/
-	watchRun(storeId, runId, callback) {
-		const listeners = [];
-		const notifyFrom = async (snapshot) => {
-			const run = snapshot.runs.find((candidate) => candidate.runId === runId);
-			if (run === void 0 || run.status === "running") return;
-			callback(run.status);
-		};
-		try {
-			const off = this.ctx.on("task/change", (snapshot) => {
-				if (snapshot.id !== storeId) return;
-				notifyFrom(snapshot);
-			});
-			if (typeof off === "function") listeners.push(off);
-		} catch (error) {
-			this.warn(`cannot subscribe to task/change for store ${storeId}: ${error instanceof Error ? error.message : String(error)}`);
-		}
-		(async () => {
-			try {
-				await notifyFrom(await this.ctx.task.snapshotIn(storeId));
-			} catch {}
-		})();
-		return () => {
-			for (const off of listeners) off();
-		};
-	}
-	/** The session this process binds to one run, or `undefined` when the run was never bound here. */
-	sessionBoundInProcess(storeId, runId) {
-		for (const [sessionId, binding] of this.sessions) if (binding.storeId === storeId && binding.runId === runId) return sessionId;
-	}
-	/** Release the workspace layer one settled run held, never popping a stranger's layer. */
-	async releaseRunWorkspaceLayer(storeId, runId, sessionId) {
-		const workspace = await this.workspacePathForSession(sessionId);
-		if (workspace === void 0 || this.workspaces === void 0) return;
-		await releaseLayer(this.workspaces, workspace, (top) => top.kind === "run" && top.storeId === storeId && top.runId === runId);
-	}
-	/**
-	* One best-effort read of a run's session for the review record's dimensions
-	* and effort metrics (§2.7.3): the session's token projection plus one scan of
-	* its log. Every source is optional — a deployment that mounts no
-	* `sessionProjections`/`sessionQuery`, or a session that is no longer live,
-	* yields `undefined` and the record omits those fields rather than filling
-	* them with zeros.
-	*
-	* The log comes from `sessionQuery.readSession`, not `listEvents`: the
-	* lightweight records carry only the event type, while tool names, failure
-	* flags, `approval/asked` call ids and skill arguments all live in the event
-	* data. One read feeds every counter below.
-	*
-	* Human interventions count once per interaction: `approval/asked` events,
-	* plus human-tool calls whose call id no approval event already covers —
-	* `hitl_approve` asks through `ctx.approval`, so counting its tool call too
-	* would double that interaction. `hitl_ask` and `ask_user_question` ask
-	* through `ctx.userQuestions`, which writes no session event, so their tool
-	* call is the only trace.
-	*/
-	async observeSession(sessionId) {
-		const tokens = this.sessionTokens(sessionId);
-		const events = await this.sessionEvents(sessionId);
-		if (tokens === void 0 && events === void 0) return void 0;
-		const calls = /* @__PURE__ */ new Map();
-		const humanCallIds = [];
-		const approvalCallIds = /* @__PURE__ */ new Set();
-		const skillCalls = [];
-		let failures = 0;
-		let approvals = 0;
-		let compactions = 0;
-		for (const event of events ?? []) if (event.type === "tool/call") {
-			const name = event.data.name;
-			if (typeof name !== "string") continue;
-			calls.set(name, (calls.get(name) ?? 0) + 1);
-			if (HUMAN_TOOLS.has(name)) humanCallIds.push(String(event.data.callId));
-			if (name === "skill") {
-				const skill = skillNameFrom(event.data.arguments);
-				if (skill !== void 0) skillCalls.push(skill);
-			}
-		} else if (event.type === "tool/result") {
-			if (toolResultFailed(event.data)) failures += 1;
-		} else if (event.type === "approval/asked") {
-			approvals += 1;
-			if (typeof event.data.callId === "string") approvalCallIds.add(event.data.callId);
-		} else if (event.type === "compaction/start") compactions += 1;
-		const tools = events === void 0 ? void 0 : {
-			calls: [...calls].map(([name, count]) => ({
-				name,
-				count
-			})).sort((left, right) => left.name.localeCompare(right.name)),
-			failures
-		};
-		return {
-			...tokens === void 0 ? {} : { tokens },
-			...tools === void 0 ? {} : { tools },
-			...events === void 0 ? {} : { skillCalls },
-			...events === void 0 ? {} : { humanInterventions: approvals + humanCallIds.filter((id) => !approvalCallIds.has(id)).length },
-			...events === void 0 ? {} : { compactions }
-		};
-	}
-	/** The session's folded `tokenUsage` buckets, when both the session and the projection registry are reachable. */
-	sessionTokens(sessionId) {
-		const sessions = this.softService("sessions");
-		const projections = this.softService("sessionProjections");
-		if (sessions === void 0 || projections === void 0) return void 0;
-		try {
-			const session = sessions.get(SessionId(sessionId));
-			if (session === void 0) return void 0;
-			return tokenUsageOf(projections.snapshot(session, ["tokenUsage"]).values.tokenUsage);
-		} catch {
-			return;
-		}
-	}
-	/** One replay-validated raw log read; an absent reader or a load failure yields `undefined`. */
-	async sessionEvents(sessionId) {
-		const query = this.softService("sessionQuery");
-		if (query === void 0 || typeof query.readSession !== "function") return void 0;
-		try {
-			return (await query.readSession(SessionId(sessionId))).events;
-		} catch {
-			return;
-		}
-	}
-	/**
-	* Resolve an optional service by name, the same soft pattern this module
-	* already uses for the verifier and the agent registry: the service may be
-	* absent in test contexts and in deployments that mount a smaller bundle.
-	*/
-	softService(name) {
-		return optionalService(this.ctx, name);
-	}
-	/** The verifier service is an optional plugin; resolve it softly, never import the package. */
-	runVerifier() {
-		return this.ctx.get?.("verifier") ?? this.ctx.verifier;
-	}
-	/**
-	* The registered verifier vocabulary one provider pre-check judges execution
-	* sidecars against — `registeredVerifierIds` in `./provider-precheck.ts`, the
-	* one implementation every provider check shares, with the reasoning for
-	* `ready()`-first and for the fail-closed `undefined` documented there.
-	*/
-	async registeredVerifierIds() {
-		return registeredVerifierIds(this.ctx);
-	}
-	/**
-	* The provider pre-check (S1-C item 1) over the given capability rows, run
-	* against the effective table unless `table` replaces it (the replay overlay).
-	* Read-only: it discovers skill directories and reads them, writes nothing,
-	* and returns every refusal as a verdict rather than throwing.
-	*/
-	async providerPrecheck(capabilities, view, table = this.config.capabilities) {
-		const verifierRefs = await this.registeredVerifierIds();
-		const commitLedger = this.softService("evolution");
-		return precheckProviders({
-			capabilities,
-			table,
-			view,
-			...verifierRefs === void 0 ? {} : { verifierRefs },
-			...commitLedger === void 0 ? {} : { commitLedger }
-		});
-	}
-	/**
-	* The provider verdicts for the capability rows in play, discovered from one
-	* session's own viewpoint — the read-only entry `capability_list` renders
-	* (guide §2.3 item 1: the model sees the pre-check's conclusion before it
-	* dispatches, not only after admission refused its batch). Nothing is thrown
-	* for an unusable provider: the verdict says what is wrong with it, and the
-	* caller renders that.
-	*
-	* `capabilities` names the rows to check; omitting it checks every row of the
-	* effective table. A caller that wants the verdicts a *batch* resolved
-	* against should pass its matched rows — the revision then describes exactly
-	* what admission judged. Two things this recompute cannot reproduce, which is
-	* why admission carries its own result with the batch (S1-C item 4): the
-	* replay overlay's replaced table, and the bytes as they were at admission.
-	*/
-	async capabilityProviderReport(sessionId, capabilities) {
-		const envPath = await this.envPathForSession(sessionId);
-		return this.providerPrecheck(capabilities ?? Object.keys(this.config.capabilities), { ...envPath === void 0 ? {} : { cwd: envPath } });
-	}
-	/**
-	* Re-check the content a run's binding recorded against the bytes its snapshot
-	* holds now (S1-C item 4) — the read a historical view (`task_read`) and a
-	* re-entry (`adoptRoot` adopting an existing root run) both perform before
-	* trusting the record.
-	*
-	* `undefined` means the record names no snapshot: a run that loaded no content
-	* has nothing to re-read, which is not the same as content that failed to
-	* re-read. A caller that gets a report must look at its `defects`: content
-	* that is not readable as bound is reported by name and is never substituted
-	* with whatever the production path holds now.
-	*/
-	async readRunBinding(binding) {
-		return readRunBinding(binding);
-	}
-	/**
-	* verifierRef validation at creation/decomposition time, never spawn time
-	* (KISS §4.1 `verifier_ref`): every declared ref must name a registered
-	* verifier, or the whole batch is rejected before anything is persisted and
-	* the error lists the registered ids. The listing is read through the one
-	* helper every provider check shares (`registeredVerifierIds`), which readies
-	* the registry first — a service that has been constructed but not readied
-	* reports an empty list, and reading that as "nothing is registered" would
-	* refuse a healthy deployment's batches. A deployment whose verifier service is
-	* absent or cannot list its registry cannot make that promise either, so a
-	* declared ref fails loudly there instead of passing through unchecked.
-	*/
-	async assertKnownVerifierRefs(declared, what) {
-		const refs = declared.filter((item) => item.criterion.verifierRef !== void 0);
-		if (refs.length === 0) return;
-		const registered = await this.registeredVerifierIds();
-		if (registered === void 0) throw new VerifierUnavailableError(`task-runtime: cannot validate verifierRef on ${what}: the verifier service is not loaded or cannot list its registry`);
-		const unknown = refs.filter((item) => !registered.includes(item.criterion.verifierRef));
-		if (unknown.length === 0) return;
-		const detail = unknown.map((item) => `child ${item.childIndex} criterion "${item.criterion.criterionId}" references unknown verifier "${item.criterion.verifierRef}"`).join("; ");
-		throw new Error(`task-runtime: admission rejected ${what}: ${detail}; registered verifiers: ${registered.join(", ")}`);
-	}
-	/** The `agents` registry is not an injected dependency; resolve it softly like the verifier. */
-	liveAgent(sessionId) {
-		const agent = this.agentOrUndefined(sessionId);
-		if (agent === void 0) throw new Error(`task-runtime: caller session "${sessionId}" has no live agent; cannot spawn child workers`);
-		return agent;
-	}
-	/**
-	* The live agent behind one session, or `undefined` — the non-throwing half of
-	* {@link liveAgent}, for the seams where an absent agent is a legitimate state
-	* (a notification nobody can receive, a jobs call with no owner) rather than a
-	* refusal.
-	*/
-	agentOrUndefined(sessionId) {
-		const registry = this.ctx.get?.("agents") ?? this.ctx.agents;
-		if (registry === void 0) return void 0;
-		try {
-			return registry.get(sessionId);
-		} catch {
-			return;
-		}
-	}
-};
 var src_default = TaskRuntime;
 
 //#endregion
-export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, deriveReuse, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, driveBatch, escalationHint, executionProviders, findRepoRoot, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, normalizeDecomposition, openProposalOf, optionalService, owedBatchResults, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

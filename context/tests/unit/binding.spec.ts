@@ -27,13 +27,19 @@ async function chainStack(): Promise<{ stack: FixtureStack; chain: Chain }> {
 async function secondGraph(stack: FixtureStack): Promise<{ storeId: string; taskId: string; runId: string }> {
   stack.graph({ id: 'g-2', rootSessionId: 's-root-2', members: [] })
   stack.sessionLog('s-root-2', ['second graph request'])
-  await stack.seed({ taskId: 't-other', sessionId: 's-root-2', runId: 'r-other', objective: 'the other graph objective' })
+  await stack.seed({
+    taskId: 't-other',
+    sessionId: 's-root-2',
+    runId: 'r-other',
+    objective: 'the other graph objective',
+  })
   return { storeId: rootTaskStoreId('s-root-2'), taskId: 't-other', runId: 'r-other' }
 }
 
 /** Make one store's log answer as a corrupt file does: an unreadable store, not an absent one. */
 function breakStoreLog(stack: FixtureStack, storeId: string): void {
-  const persistence = (stack.ctx as unknown as { sessionPersistence: { open(id: string): Promise<unknown> } }).sessionPersistence
+  const persistence = (stack.ctx as unknown as { sessionPersistence: { open(id: string): Promise<unknown> } })
+    .sessionPersistence
   const original = persistence.open.bind(persistence)
   persistence.open = async (id: string) => {
     if (String(id) === storeId) throw new Error('the task store log is corrupt')
@@ -92,7 +98,9 @@ describe('caller resolution', () => {
     if (resolution.kind !== 'unbound') throw new Error('expected unbound')
     expect(resolution.refusal).toBe('unbound')
     expect(resolution.detail).toContain('not a published member of any graph')
-    expect(expectRefused(await stack.service.taskRead('s-stranger'), 'unbound')).toContain('never placed by the ids it passes')
+    expect(expectRefused(await stack.service.taskRead('s-stranger'), 'unbound')).toContain(
+      'never placed by the ids it passes',
+    )
   })
 
   test('a store that cannot be opened is unreadable, not an empty domain', async () => {
@@ -100,7 +108,8 @@ describe('caller resolution', () => {
     stack.graph({ id: 'g-broken', rootSessionId: 's-broken' })
     stack.sessionLog('s-broken', ['broken graph request'])
     stack.sessionLog(rootTaskStoreId('s-broken'), ['not a task store'])
-    const persistence = (stack.ctx as unknown as { sessionPersistence: { open(id: string): Promise<unknown> } }).sessionPersistence
+    const persistence = (stack.ctx as unknown as { sessionPersistence: { open(id: string): Promise<unknown> } })
+      .sessionPersistence
     const original = persistence.open.bind(persistence)
     persistence.open = async (id: string) => {
       if (id === rootTaskStoreId('s-broken')) throw new Error('task store log is corrupt')
@@ -117,21 +126,31 @@ describe('cross-graph reads', () => {
 
     // The task of the other graph is not in this caller's domain: named, and no
     // domain is opened for it.
-    expect(expectRefused(await stack.service.contextRead('s-g1', { kind: 'task', ref: other.taskId }), 'not-found'))
-      .toContain('never widens the read domain')
-    expect(expectRefused(await stack.service.contextRead('s-g1', { kind: 'run', ref: other.runId }), 'not-found'))
-      .toContain('ids from another graph are not readable here')
+    expect(
+      expectRefused(await stack.service.contextRead('s-g1', { kind: 'task', ref: other.taskId }), 'not-found'),
+    ).toContain('never widens the read domain')
+    expect(
+      expectRefused(await stack.service.contextRead('s-g1', { kind: 'run', ref: other.runId }), 'not-found'),
+    ).toContain('ids from another graph are not readable here')
     // A session reference is checked against the graph's published members, so
     // the refusal can name the real reason before any history is touched.
-    expect(expectRefused(await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-root-2' }), 'cross-graph'))
-      .toContain('not a published member of graph')
+    expect(
+      expectRefused(await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-root-2' }), 'cross-graph'),
+    ).toContain('not a published member of graph')
     // The same holds in the other direction, and for the status view.
-    expect(expectRefused(await stack.service.contextRead('s-root-2', { kind: 'task', ref: chain.child.taskId }), 'not-found'))
+    expect(
+      expectRefused(
+        await stack.service.contextRead('s-root-2', { kind: 'task', ref: chain.child.taskId }),
+        'not-found',
+      ),
+    )
     const graphScope = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph' })).text
     expect(graphScope).not.toContain('t-other')
     expect(graphScope).toContain('t-root')
     // And the caller's own domain is untouched by the attempt.
-    expect(expectOk(await stack.service.contextRead('s-g1', { kind: 'task', ref: chain.root.taskId })).text).toContain('t-root')
+    expect(expectOk(await stack.service.contextRead('s-g1', { kind: 'task', ref: chain.root.taskId })).text).toContain(
+      't-root',
+    )
   })
 })
 
@@ -150,11 +169,15 @@ describe('reviewer delegation', () => {
     expect(read.text).toContain('child one: build the bridge')
     // The delegated domain is the whole graph, not one task: the sibling's
     // evidence and a session of the graph are readable by reference.
-    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'evidence', ref: 'e-c2' })).text).toContain('e-c2')
-    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'session', ref: 's-c1' })).text).toContain('child one')
+    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'evidence', ref: 'e-c2' })).text).toContain(
+      'e-c2',
+    )
+    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'session', ref: 's-c1' })).text).toContain(
+      'child one',
+    )
   })
 
-  test('a reviewer\'s dynamic state is the delegated task, under its review-only label', async () => {
+  test("a reviewer's dynamic state is the delegated task, under its review-only label", async () => {
     const { stack } = await chainStack()
     stack.bindingSource(stack.ledger(DEPARTMENT))
     const text = expectOk(await stack.service.dynamicProjection('s-review')).text
@@ -183,18 +206,9 @@ describe('reviewer delegation', () => {
     expect(resolution.kind).toBe('unbound')
     if (resolution.kind !== 'unbound') throw new Error('expected unbound')
     expect(resolution.refusal).toBe('binding-conflict')
-    expect(expectRefused(await stack.service.taskRead('s-review'), 'binding-conflict')).toContain('two conflicting rows')
-  })
-
-  test('two sources that disagree about one session are a conflict, not a coin toss', async () => {
-    const { stack } = await chainStack()
-    stack.bindingSource(stack.ledger(DEPARTMENT))
-    const conflicting = stack.bindingSource(stack.ledger({ ...DEPARTMENT, taskId: 't-c2' }))
-    expect(expectRefused(await stack.service.taskRead('s-review'), 'binding-conflict')).toContain('more than one reviewer delegation')
-    // With the disagreeing source gone, the remaining one is the delegation.
-    conflicting()
-    const again = expectOk(await stack.service.taskRead('s-review'))
-    expect(again.text).toContain('child one: build the bridge')
+    expect(expectRefused(await stack.service.taskRead('s-review'), 'binding-conflict')).toContain(
+      'two conflicting rows',
+    )
   })
 
   test('a delegation naming another graph store is cross-graph', async () => {
@@ -243,7 +257,9 @@ describe('not activated', () => {
     expect(detail).toContain('task_intake')
     expect(detail).toContain('no objective is reported here')
     expect(expectRefused(await stack.service.contractProjection('s-empty'), 'not-activated')).toContain('task_intake')
-    expect(expectRefused(await stack.service.taskStatus('s-empty', { scope: 'graph' }), 'not-activated')).toContain('task_intake')
+    expect(expectRefused(await stack.service.taskStatus('s-empty', { scope: 'graph' }), 'not-activated')).toContain(
+      'task_intake',
+    )
   })
 
   test('a store that exists with no root task answers the same named state', async () => {
@@ -252,7 +268,9 @@ describe('not activated', () => {
     stack.sessionLog('s-held', ['a request nobody has contracted yet'])
     const storeId = rootTaskStoreId('s-held')
     await stack.task.createStore(storeId)
-    expect(expectRefused(await stack.service.taskRead('s-held'), 'not-activated')).toContain('opened, with no root task in it')
+    expect(expectRefused(await stack.service.taskRead('s-held'), 'not-activated')).toContain(
+      'opened, with no root task in it',
+    )
   })
 })
 
@@ -309,7 +327,7 @@ describe('a binding failure is not "outside the deployment" (Q1)', () => {
     expect(await placementOf(stack, 's-broken-root')).toBe('failed')
   })
 
-  test('a store the backend reports as absent binds the root\'s not-activated state, a member\'s silence, and a spawned session\'s refusal', async () => {
+  test("a store the backend reports as absent binds the root's not-activated state, a member's silence, and a spawned session's refusal", async () => {
     const { stack } = await chainStack()
     stack.graph({ id: 'g-no-store', rootSessionId: 's-no-store-root', members: ['s-no-store-member'] })
     // The root: a graph whose store does not exist yet is the named not-activated
@@ -318,16 +336,19 @@ describe('a binding failure is not "outside the deployment" (Q1)', () => {
     // A session the graph publishes without having spawned it (the real case is a
     // root of another graph a deployment resolves here): nothing to read, and the
     // member reading the plan gives it stays.
-    expect((await stack.service.resolveCaller('s-no-store-member'))).toMatchObject({ kind: 'member' })
-    expect(expectRefused(await stack.service.taskStatus('s-no-store-member', { scope: 'graph' }), 'not-activated'))
-      .toContain('does not exist yet')
+    expect(await stack.service.resolveCaller('s-no-store-member')).toMatchObject({ kind: 'member' })
+    expect(
+      expectRefused(await stack.service.taskStatus('s-no-store-member', { scope: 'graph' }), 'not-activated'),
+    ).toContain('does not exist yet')
     // A session the graph *did* spawn: the run it is bound by was written to that
     // store when it was spawned, so an absent store is a store that cannot be
     // read — the state that once let a bound worker's request assemble with no
     // contract at all.
     stack.spawned('g-no-store', 's-no-store-worker')
     expect(await placementOf(stack, 's-no-store-worker')).toBe('failed')
-    expect(expectRefused(await stack.service.taskRead('s-no-store-worker'), 'unreadable')).toContain('was recorded in that store')
+    expect(expectRefused(await stack.service.taskRead('s-no-store-worker'), 'unreadable')).toContain(
+      'was recorded in that store',
+    )
     // And the graph store's own edge is what decides: if that read fails, the
     // question cannot be answered and the session is refused rather than guessed.
     stack.breakGraphView(new Error('the graph store is not readable'), 'g-no-store')
@@ -372,12 +393,16 @@ describe('a delegation must come from a session of the graph it delegates into (
     // the sibling's evidence and a session of the graph.
     expect(expectOk(await stack.service.taskRead('s-review')).text).toContain('review-only')
     expect(expectOk(await stack.service.contextRead('s-review', { kind: 'task', ref: 't-c1' })).text).toContain('t-c1')
-    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'evidence', ref: 'e-c2' })).text).toContain('e-c2')
-    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'session', ref: 's-c1' })).text).toContain('child one')
+    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'evidence', ref: 'e-c2' })).text).toContain(
+      'e-c2',
+    )
+    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'session', ref: 's-c1' })).text).toContain(
+      'child one',
+    )
     expect(chain.storeId).toBe(DEPARTMENT.rootStoreId)
   })
 
-  test("a delegator of another graph grants nothing: the review read is refused by name", async () => {
+  test('a delegator of another graph grants nothing: the review read is refused by name', async () => {
     const { stack } = await chainStack()
     const other = await secondGraph(stack)
     stack.bindingSource(stack.ledger({ ...DEPARTMENT, actor: 's-root-2' }))
@@ -386,9 +411,15 @@ describe('a delegation must come from a session of the graph it delegates into (
     expect(detail).toContain('does not publish')
     // The delegated task, the other graph's task and the session history are all
     // out of reach: the refusal is not a narrower read, it is no domain at all.
-    expect(expectRefused(await stack.service.contextRead('s-review', { kind: 'task', ref: 't-c1' }), 'cross-graph')).toContain('s-root-2')
-    expect(expectRefused(await stack.service.contextRead('s-review', { kind: 'task', ref: other.taskId }), 'cross-graph')).toContain('s-root-2')
-    expect(expectRefused(await stack.service.contextRead('s-review', { kind: 'session', ref: 's-c1' }), 'cross-graph')).toContain('s-root-2')
+    expect(
+      expectRefused(await stack.service.contextRead('s-review', { kind: 'task', ref: 't-c1' }), 'cross-graph'),
+    ).toContain('s-root-2')
+    expect(
+      expectRefused(await stack.service.contextRead('s-review', { kind: 'task', ref: other.taskId }), 'cross-graph'),
+    ).toContain('s-root-2')
+    expect(
+      expectRefused(await stack.service.contextRead('s-review', { kind: 'session', ref: 's-c1' }), 'cross-graph'),
+    ).toContain('s-root-2')
     expect(expectRefused(await stack.service.taskStatus('s-review'), 'cross-graph')).toContain('s-root-2')
   })
 

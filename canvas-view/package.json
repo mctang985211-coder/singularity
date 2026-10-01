@@ -1,6 +1,6 @@
 {
   "name": "@dangosys/dsh-singularity-canvas-view",
-  "description": "Singularity map view switch (对话 | Singularity)",
+  "description": "Singularity map page: left-rail entry plus the main panel hosting the map SPA iframe",
   "version": "0.1.0",
   "type": "module",
   "main": "lib/index.js",
@@ -26,7 +26,12 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-locale"
+      ]
     }
   },
   "peerDependencies": {

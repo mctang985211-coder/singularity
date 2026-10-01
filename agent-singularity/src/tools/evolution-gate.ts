@@ -1,18 +1,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): SessionId {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('evolution_gate: missing agent id')
-  return id
-}
+import { message, sessionId, text } from '../shared.ts'
 
 export function defineEvolutionGateTool(ctx: Context) {
   return defineTool({
@@ -48,7 +39,7 @@ export function defineEvolutionGateTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'evolution_gate')
       // Evidence ids come from the caller's task store; a missing store just
       // means no id resolves, while on-disk path refs still can.
       let evidenceIds = new Set<string>()
@@ -79,7 +70,7 @@ export function defineEvolutionGateTool(ctx: Context) {
           'ledger entry only — nothing executed or promoted; next: evolution_decide (human approval required)',
         ].join('\n')
       } catch (error) {
-        return `evolution_gate rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_gate rejected: ${message(error)}`
       }
     },
   })

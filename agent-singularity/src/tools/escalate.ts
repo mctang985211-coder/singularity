@@ -1,17 +1,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { ESCALATION_TRIGGERS } from '../escalation.ts'
-import type { Escalation, EscalationTrigger } from '../escalation.ts'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): string {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('escalate: missing agent id')
-  return id
-}
+import { ESCALATION_TRIGGERS } from '../services/escalation.ts'
+import type { Escalation, EscalationTrigger } from '../services/escalation.ts'
+import { denialReason, message, sessionId, text } from '../shared.ts'
 
 /** The three KISS §7 elements, named the way the refusal and the record name them. */
 const ELEMENTS = ['what', 'tried', 'suggested'] as const
@@ -72,7 +64,7 @@ export function defineEscalateTool(ctx: Context) {
         if (escalations.length === 0) return 'escalations: none recorded'
         return [`escalations (${escalations.length}):`, ...escalations.map(renderEscalation)].join('\n')
       }
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'escalate')
       const agent = exec.agent
       if (agent === undefined) throw new Error('escalate: missing agent')
 
@@ -114,11 +106,7 @@ export function defineEscalateTool(ctx: Context) {
         signal: exec.signal,
       })
       if (outcome !== 'allowed-once') {
-        const why = outcome === 'rejected'
-          ? 'the human rejected it'
-          : outcome === 'cancelled'
-            ? 'the request was cancelled before the human decided'
-            : 'no approval answerer available'
+        const why = denialReason(outcome)
         return `escalate: no escalation recorded — ${why}; the work stays where it was`
       }
       try {
@@ -130,7 +118,7 @@ export function defineEscalateTool(ctx: Context) {
           `recorded after human approval ${escalation.approvalRef}; ledger: ${ctx.escalation.file}`,
         ].join('\n')
       } catch (error) {
-        return `escalate rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `escalate rejected: ${message(error)}`
       }
     },
   })

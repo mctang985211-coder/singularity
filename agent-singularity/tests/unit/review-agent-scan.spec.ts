@@ -8,9 +8,9 @@ import {
   countReviewAgentRuns,
   readReviewAgentAttempts,
   reviewAgentLedgerFile,
-} from '../../src/review-agent-ledger.ts'
-import { runReviewAgentAttempt } from '../../src/review-agent-run.ts'
-import { installReviewAgentAutoTrigger, scanFailedReviewSources } from '../../src/review-agent-scan.ts'
+} from '../../src/coordination/ledger.ts'
+import { runReviewAgentAttempt } from '../../src/coordination/review-run.ts'
+import { installReviewAgentAutoTrigger, scanFailedReviewSources } from '../../src/coordination/review-scan.ts'
 import type { TerminalReviewFact } from '@dangosys/dsh-singularity-task-runtime'
 
 /**

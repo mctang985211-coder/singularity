@@ -28,7 +28,10 @@ afterEach(() => {
 
 describe('parseSkillFile', () => {
   test('splits frontmatter from the body and defaults invocation to both surfaces', () => {
-    const parsed = parseSkillFile('---\nname: probe\ndescription: "Probe the thing"\n---\n\n# Probe\nbody\n', '/x/SKILL.md')
+    const parsed = parseSkillFile(
+      '---\nname: probe\ndescription: "Probe the thing"\n---\n\n# Probe\nbody\n',
+      '/x/SKILL.md',
+    )
     expect(parsed.name).toBe('probe')
     expect(parsed.description).toBe('Probe the thing')
     expect(parsed.invocation).toEqual({ modelInvocable: true, userInvocable: true })
@@ -67,13 +70,17 @@ describe('parseSkillFile', () => {
     expect(parsed.name).toBe('bb-pipeline')
     expect(parsed.description.length).toBeGreaterThan(0)
     expect(parsed.invocation).toEqual({ modelInvocable: true, userInvocable: true })
-    expect(parsed.content).toContain('# Buckyball 任务参考')
+    expect(parsed.content).toContain('# 1 Buckyball 适配库')
   })
 })
 
 describe('findSkillFile', () => {
   test('finds a project skill from the worker cwd and from an ancestor directory', async () => {
-    skill(join(root, 'checkout', '.agents', 'skills'), 'probe-skill', '---\nname: probe-skill\ndescription: d\n---\nbody\n')
+    skill(
+      join(root, 'checkout', '.agents', 'skills'),
+      'probe-skill',
+      '---\nname: probe-skill\ndescription: d\n---\nbody\n',
+    )
     const nested = join(root, 'checkout', 'src', 'deep')
     mkdirSync(nested, { recursive: true })
 

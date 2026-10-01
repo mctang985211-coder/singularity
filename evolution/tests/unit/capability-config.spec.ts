@@ -44,7 +44,9 @@ import { FIXTURE_API_KEY, writeCapabilityConfig } from '../../../tests/support/c
 const ROW = 'a6-experiment-row'
 const ENTRY: CapabilityConfig = { skills: ['the-new-skill'], tools: ['filesystem'] }
 
-async function file(rows: Record<string, CapabilityConfig> = { 'store-row': { skills: ['store-skill'] } }): Promise<string> {
+async function file(
+  rows: Record<string, CapabilityConfig> = { 'store-row': { skills: ['store-skill'] } },
+): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'capability-config-'))
   return await writeCapabilityConfig(join(dir, 'config.yml'), rows)
 }
@@ -67,7 +69,10 @@ function textDigest(text: string): string {
 
 /** The two whole-file states a write of `entry` into `text` may find: `text` as read, and the text its own write leaves. */
 function statesFor(text: string, path: string, name: string, entry: CapabilityConfig | null): CapabilityTableStates {
-  return { beforeSha256: textDigest(text), afterSha256: textDigest(applyCapabilityRowToConfig({ text, file: path, name, entry })) }
+  return {
+    beforeSha256: textDigest(text),
+    afterSha256: textDigest(applyCapabilityRowToConfig({ text, file: path, name, entry })),
+  }
 }
 
 /**
@@ -91,7 +96,11 @@ describe('the capability table text', () => {
     // it) are the bytes they were.
     expect(lineOf(next, 'store-row')).toBe(lineOf(before, 'store-row'))
     expect(next).toContain(FIXTURE_API_KEY)
-    const stripped = (text: string): string => text.split('\n').filter(line => !line.includes(ROW)).join('\n')
+    const stripped = (text: string): string =>
+      text
+        .split('\n')
+        .filter(line => !line.includes(ROW))
+        .join('\n')
     expect(stripped(next)).toBe(stripped(before))
     expect(capabilityRowRegion(next, path, ROW)!.indent).toBe(region.indent)
   })
@@ -110,7 +119,7 @@ describe('the capability table text', () => {
     expect(lineOf(removed, 'store-row')).toBe(lineOf(text, 'store-row'))
   })
 
-  it('adds a row the table does not hold, at the block\'s own indentation', async () => {
+  it("adds a row the table does not hold, at the block's own indentation", async () => {
     const path = await file({ first: { skills: ['a'] }, second: { skills: ['b'] } })
     const text = await readFile(path, 'utf8')
     const next = applyCapabilityRowToConfig({ text, file: path, name: ROW, entry: ENTRY })
@@ -126,16 +135,27 @@ describe('the capability table text', () => {
     const dir = await mkdtemp(join(tmpdir(), 'capability-config-'))
     const noEntry = join(dir, 'no-entry.yml')
     await writeFile(noEntry, '- id: other\n  config:\n    x: 1\n', 'utf8')
-    await expect(writeCapabilityRowToConfig({ file: noEntry, name: ROW, entry: ENTRY, states: NEVER })).rejects.toThrow(/task-runtime/)
+    await expect(writeCapabilityRowToConfig({ file: noEntry, name: ROW, entry: ENTRY, states: NEVER })).rejects.toThrow(
+      /task-runtime/,
+    )
     expect(await readFile(noEntry, 'utf8')).toBe('- id: other\n  config:\n    x: 1\n')
 
     const noBlock = join(dir, 'no-block.yml')
     await writeFile(noBlock, '- id: task-runtime\n  config:\n    verifyTimeoutMs: 1\n', 'utf8')
-    await expect(writeCapabilityRowToConfig({ file: noBlock, name: ROW, entry: ENTRY, states: NEVER })).rejects.toThrow(/capabilities/)
+    await expect(writeCapabilityRowToConfig({ file: noBlock, name: ROW, entry: ENTRY, states: NEVER })).rejects.toThrow(
+      /capabilities/,
+    )
 
     const inline = join(dir, 'inline.yml')
-    await writeFile(inline, `- id: task-runtime\n  config:\n    capabilities: { store-row: { skills: [a] } }\n---\napi:\n  key: ${FIXTURE_API_KEY}\n`, 'utf8')
-    const refusal = await writeCapabilityRowToConfig({ file: inline, name: ROW, entry: ENTRY, states: NEVER }).then(() => '', error => String(error))
+    await writeFile(
+      inline,
+      `- id: task-runtime\n  config:\n    capabilities: { store-row: { skills: [a] } }\n---\napi:\n  key: ${FIXTURE_API_KEY}\n`,
+      'utf8',
+    )
+    const refusal = await writeCapabilityRowToConfig({ file: inline, name: ROW, entry: ENTRY, states: NEVER }).then(
+      () => '',
+      error => String(error),
+    )
     expect(refusal).toContain('inline')
     // The deployment's secrets are never quoted back: a refusal names the file
     // and the row, and nothing else in it.
@@ -180,7 +200,13 @@ describe('the capability table text', () => {
       if (stage === 'before-write') throw new Error('the process died here')
     })
     await expect(
-      writeCapabilityRowToConfig({ file: path, name: ROW, entry: ENTRY, states: statesFor(before, path, ROW, ENTRY), probe: probe as never }),
+      writeCapabilityRowToConfig({
+        file: path,
+        name: ROW,
+        entry: ENTRY,
+        states: statesFor(before, path, ROW, ENTRY),
+        probe: probe as never,
+      }),
     ).rejects.toThrow('the process died here')
     expect(await readFile(path, 'utf8')).toBe(before)
   })
@@ -205,7 +231,10 @@ describe('the capability table text', () => {
         stages.push(stage)
         if (stage === 'staged') writeFileSync(path, thirdParty, 'utf8')
       },
-    }).then(() => '', error => String(error))
+    }).then(
+      () => '',
+      error => String(error),
+    )
 
     expect(refusal).toContain('capability-table-changed')
     expect(refusal).toContain(ROW)
@@ -216,7 +245,7 @@ describe('the capability table text', () => {
     expect((await readdir(join(path, '..'))).filter(entry => entry.includes('.tmp-'))).toEqual([])
   })
 
-  it('accepts a file that reads as this write\'s own result at the staged seam (a retry still settles)', async () => {
+  it("accepts a file that reads as this write's own result at the staged seam (a retry still settles)", async () => {
     // The other side of the same check: a file that already holds the bytes this
     // write leaves is one of the two frozen states, so the retry renames the same
     // bytes over it and settles.
@@ -246,8 +275,8 @@ describe('the capability table text', () => {
  * byte is a named stop with nothing written, while a retry that finds the file
  * already holding this commit's own result still settles.
  */
-describe('the capability table\'s frozen composed identity', () => {
-  it('freezes the file prepare read and the two files this proposal\'s own directions leave', async () => {
+describe("the capability table's frozen composed identity", () => {
+  it("freezes the file prepare read and the two files this proposal's own directions leave", async () => {
     const path = await file()
     const text = await readFile(path, 'utf8')
 
@@ -255,7 +284,9 @@ describe('the capability table\'s frozen composed identity', () => {
     // wrote, so the file it leaves is the file prepare read, byte for byte.
     const added = capabilityTableIdentity({ text, file: path, name: ROW, entry: ENTRY, restored: null })
     expect(added.baselineSha256).toBe(textDigest(text))
-    expect(added.applySha256).toBe(textDigest(applyCapabilityRowToConfig({ text, file: path, name: ROW, entry: ENTRY })))
+    expect(added.applySha256).toBe(
+      textDigest(applyCapabilityRowToConfig({ text, file: path, name: ROW, entry: ENTRY })),
+    )
     expect(added.rollbackSha256).toBe(added.baselineSha256)
 
     // The candidate replaces a row the file holds: the rollback restores it in
@@ -265,7 +296,9 @@ describe('the capability table\'s frozen composed identity', () => {
     const replaced = capabilityTableIdentity({ text, file: path, name: 'store-row', entry: ENTRY, restored })
     const applied = applyCapabilityRowToConfig({ text, file: path, name: 'store-row', entry: ENTRY })
     expect(replaced.applySha256).toBe(textDigest(applied))
-    expect(replaced.rollbackSha256).toBe(textDigest(applyCapabilityRowToConfig({ text: applied, file: path, name: 'store-row', entry: restored })))
+    expect(replaced.rollbackSha256).toBe(
+      textDigest(applyCapabilityRowToConfig({ text: applied, file: path, name: 'store-row', entry: restored })),
+    )
     // The hand-written row is not the canonical rendering, so the rollback's own
     // text is not the text prepare read: the identity says so.
     expect(replaced.rollbackSha256).not.toBe(replaced.baselineSha256)
@@ -279,7 +312,10 @@ describe('the capability table\'s frozen composed identity', () => {
       name: ROW,
       entry: ENTRY,
       states: { beforeSha256: 'b'.repeat(64), afterSha256: 'a'.repeat(64) },
-    }).then(() => '', error => String(error))
+    }).then(
+      () => '',
+      error => String(error),
+    )
     expect(refusal).toContain('capability-table-changed')
     expect(refusal).toContain(path)
     expect(refusal).toContain(ROW)
@@ -319,7 +355,10 @@ describe('the capability table\'s frozen composed identity', () => {
         rewritten = true
         writeFileSync(path, thirdParty, 'utf8')
       },
-    }).then(() => '', error => String(error))
+    }).then(
+      () => '',
+      error => String(error),
+    )
     expect(refusal).toContain('capability-table-changed')
     // The window between the read the edit was computed from and the write is
     // closed: the write the third party landed there is what the file keeps.

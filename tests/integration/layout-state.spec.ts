@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { LayoutState } from '../../layout/src/service/state.ts'
-import { DEFAULT_ROOT } from '../../layout/src/types.ts'
+import { LayoutState } from '../../graph/src/service/layout-state.ts'
+import { DEFAULT_ROOT } from '../../graph/src/layout-types.ts'
 
 const id = (value: string) => value as SessionId
 

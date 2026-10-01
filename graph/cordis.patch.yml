@@ -1,3 +1,5 @@
 - insert:
     - id: graph
       name: '@dangosys/dsh-singularity-graph'
+    - id: layout
+      name: '@dangosys/dsh-singularity-graph/layout'

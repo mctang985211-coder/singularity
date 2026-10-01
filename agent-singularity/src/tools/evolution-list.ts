@@ -1,8 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
+import { text } from '../shared.ts'
 
 const TARGET_TYPES: readonly ProposalTargetType[] = [
   'skill', 'tool', 'capability', 'task_definition', 'decomposition_policy',

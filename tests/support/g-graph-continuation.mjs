@@ -17,7 +17,7 @@ import JsonlSessionPersistence from '../../../../thirdparty/deepseek-harness/pac
 import SessionQueryEngine from '../../../../thirdparty/deepseek-harness/packages/session-query/session-query/lib/index.js'
 import { EnvStore } from '../../../env-builder/lib/index.js'
 import { GraphService } from '../../graph/lib/index.js'
-import { LayoutService } from '../../layout/lib/index.js'
+import { LayoutService } from '../../graph/lib/layout.js'
 import { GraphsService } from '../../graphs/lib/index.js'
 import { AgentRuntime } from '../../agent-runtime/lib/index.js'
 import { TaskService, rootTaskStoreId } from '../../task/lib/index.js'

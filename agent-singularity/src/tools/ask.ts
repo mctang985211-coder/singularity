@@ -1,8 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-questions'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
+import { text } from '../shared.ts'
 
 const QUESTION_ID = 'hitl-ask'
 

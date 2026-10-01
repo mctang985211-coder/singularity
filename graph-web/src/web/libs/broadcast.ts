@@ -1,8 +1,7 @@
 import type { ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import type { GraphSnapshot } from '@dangosys/dsh-singularity-graph'
-import type { LayoutSnapshot } from '@dangosys/dsh-singularity-layout'
-import type { GraphRecord } from '@dangosys/dsh-singularity-graphs'
+import type { GraphSnapshot, LayoutSnapshot } from '@dangosys/dsh-singularity-graph'
+import type { GraphRecord, GraphsSnapshot } from '@dangosys/dsh-singularity-graphs'
 
 export class GraphBroadcast {
   readonly clients = new Map<ServerResponse, { graph: GraphRecord; writes: Promise<void> }>()
@@ -29,13 +28,17 @@ export class GraphBroadcast {
 
   publishEvent(name: string, value: unknown): void {
     const frame = `event: ${name}\ndata: ${JSON.stringify(value)}\n\n`
+    for (const [res] of this.clients) {
+      if (res.destroyed) this.clients.delete(res)
+      else res.write(frame)
+    }
+  }
+
+  publishGraphs(snapshot: GraphsSnapshot): void {
     for (const [res, client] of this.clients) {
       if (res.destroyed) this.clients.delete(res)
-      else if (name === 'graphs') {
-        const graphs = value as { graphs: GraphRecord[] }
-        if (graphs.graphs.some(graph => graph.id === client.graph.id)) this.snapshot(res)
-        else res.end()
-      } else res.write(frame)
+      else if (snapshot.graphs.some(graph => graph.id === client.graph.id)) this.snapshot(res)
+      else res.end()
     }
   }
 

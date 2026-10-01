@@ -39,14 +39,16 @@ interface StoredSession {
  * real DSH `approval.request()`; nothing in this file writes a log the runtime
  * would read an approval out of, because the runtime reads no such log.
  */
-function harness(options: {
-  config?: Partial<Config>
-  sessions?: Map<string, StoredSession>
-  /** The graph's root session, when a test wants a session that is not the one that accepted the tree. */
-  graphRoot?: string
-  /** Refuse the graph lookup entirely, as a session no graph can name. */
-  graphsThrow?: boolean
-} = {}) {
+function harness(
+  options: {
+    config?: Partial<Config>
+    sessions?: Map<string, StoredSession>
+    /** The graph's root session, when a test wants a session that is not the one that accepted the tree. */
+    graphRoot?: string
+    /** Refuse the graph lookup entirely, as a session no graph can name. */
+    graphsThrow?: boolean
+  } = {},
+) {
   const sessions = options.sessions ?? new Map<string, StoredSession>()
   const disposers: Array<() => unknown> = []
   const persistence = {
@@ -56,7 +58,9 @@ function harness(options: {
       sessions.set(header.id, stored)
       return {
         read: async () => ({ events: stored.events }),
-        append: async (events: SessionEvent[]) => { stored.events.push(...events) },
+        append: async (events: SessionEvent[]) => {
+          stored.events.push(...events)
+        },
         flush: async () => {},
         close: async () => {},
       }
@@ -66,7 +70,9 @@ function harness(options: {
       if (stored === undefined) throw new Error('missing session ' + id)
       return {
         read: async () => ({ events: stored.events }),
-        append: async (events: SessionEvent[]) => { stored.events.push(...events) },
+        append: async (events: SessionEvent[]) => {
+          stored.events.push(...events)
+        },
         flush: async () => {},
         close: async () => {},
       }
@@ -187,8 +193,14 @@ async function storeWithRoot(h: Harness, runs = 1): Promise<void> {
       depth: 1,
     }
     await h.task.createTaskIn(STORE, task, 'test')
-    await h.task.admitTaskIn(STORE, `child-${index}`, 'test', { manifest: { capabilities: {}, missing: [], closure: 'closed' } })
-    await h.task.startRunIn(STORE, { ...rootRun(`r-${index}`), taskId: `child-${index}`, sessionId: `s-${index}` }, 'test')
+    await h.task.admitTaskIn(STORE, `child-${index}`, 'test', {
+      manifest: { capabilities: {}, missing: [], closure: 'closed' },
+    })
+    await h.task.startRunIn(
+      STORE,
+      { ...rootRun(`r-${index}`), taskId: `child-${index}`, sessionId: `s-${index}` },
+      'test',
+    )
   }
 }
 
@@ -201,10 +213,20 @@ function log(h: Harness): string {
   return JSON.stringify(events(h))
 }
 
-function taskEvents(h: Harness): Array<{ kind?: string; taskId?: string; sessionId?: string; payload?: { extension?: TaskBudgetExtensionClaim } }> {
+function taskEvents(
+  h: Harness,
+): Array<{ kind?: string; taskId?: string; sessionId?: string; payload?: { extension?: TaskBudgetExtensionClaim } }> {
   return events(h)
     .filter(item => item.type === 'task/event')
-    .map(item => item.data as { kind?: string; taskId?: string; sessionId?: string; payload?: { extension?: TaskBudgetExtensionClaim } })
+    .map(
+      item =>
+        item.data as {
+          kind?: string
+          taskId?: string
+          sessionId?: string
+          payload?: { extension?: TaskBudgetExtensionClaim }
+        },
+    )
 }
 
 /**
@@ -212,7 +234,9 @@ function taskEvents(h: Harness): Array<{ kind?: string; taskId?: string; session
  * *appended*: the claim the entry committed, before the store stamped it with
  * the event's own time.
  */
-function extensionEvents(h: Harness): Array<{ taskId?: string; sessionId?: string; extension: TaskBudgetExtensionClaim }> {
+function extensionEvents(
+  h: Harness,
+): Array<{ taskId?: string; sessionId?: string; extension: TaskBudgetExtensionClaim }> {
   return taskEvents(h)
     .filter(event => event.kind === 'TaskBudgetExtended')
     .map(event => {
@@ -236,7 +260,12 @@ function effectiveMaxRuns(snapshot: TaskSnapshot): number | undefined {
 
 /** The run/status facts an extension may never touch. */
 function runFacts(snapshot: TaskSnapshot): unknown {
-  return snapshot.runs.map(run => ({ runId: run.runId, status: run.status, startedAt: run.startedAt, finishedAt: run.finishedAt }))
+  return snapshot.runs.map(run => ({
+    runId: run.runId,
+    status: run.status,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+  }))
 }
 
 describe('extendRootBudget', () => {
@@ -354,9 +383,15 @@ describe('extendRootBudget', () => {
       'negative total': await refusal(() => extend(h, { requestKey: 'k-negative', maxRuns: -5 })),
       'not above the ceiling': await refusal(() => extend(h, { requestKey: 'k-low', maxRuns: 10 })),
       'increment read as a total': await refusal(() => extend(h, { requestKey: 'k-inc', maxRuns: 5 })),
-      'local time': await refusal(() => extend(h, { requestKey: 'k-local', deadlineAt: '2026-09-16T04:00:00' } as never)),
-      'duration in words': await refusal(() => extend(h, { requestKey: 'k-words', deadlineAt: 'two more hours' } as never)),
-      'deadline not later': await refusal(() => extend(h, { requestKey: 'k-earlier', deadlineAt: '2026-09-16T00:30:00.000Z' } as never)),
+      'local time': await refusal(() =>
+        extend(h, { requestKey: 'k-local', deadlineAt: '2026-09-16T04:00:00' } as never),
+      ),
+      'duration in words': await refusal(() =>
+        extend(h, { requestKey: 'k-words', deadlineAt: 'two more hours' } as never),
+      ),
+      'deadline not later': await refusal(() =>
+        extend(h, { requestKey: 'k-earlier', deadlineAt: '2026-09-16T00:30:00.000Z' } as never),
+      ),
     }
     expect(reasons['no dimension']).toContain('names no maxRuns')
     expect(reasons['no key']).toContain('non-empty request key')
@@ -382,8 +417,9 @@ describe('extendRootBudget', () => {
     await storeWithRoot(h)
     const approval = installAllowed(h)
     const committed = log(h)
-    expect(await refusal(() => extend(h, { requestKey: 'k-deadline', deadlineAt: APPROVED_DEADLINE } as never)))
-      .toContain('not part of a budget-extension request')
+    expect(
+      await refusal(() => extend(h, { requestKey: 'k-deadline', deadlineAt: APPROVED_DEADLINE } as never)),
+    ).toContain('not part of a budget-extension request')
     expect(approval).not.toHaveBeenCalled()
     expect(log(h)).toBe(committed)
 
@@ -391,8 +427,9 @@ describe('extendRootBudget', () => {
     const other = harness({ config: { rootBudget: {} } })
     await storeWithRoot(other)
     const otherApproval = installAllowed(other)
-    expect(await refusal(() => extend(other, { requestKey: 'k-runs', maxRuns: 20 })))
-      .toContain('sets no maxRuns ceiling')
+    expect(await refusal(() => extend(other, { requestKey: 'k-runs', maxRuns: 20 }))).toContain(
+      'sets no maxRuns ceiling',
+    )
     expect(otherApproval).not.toHaveBeenCalled()
     expect((await other.task.snapshotIn(STORE)).budgetExtensions?.all).toEqual([])
   })
@@ -435,10 +472,10 @@ describe('extendRootBudget', () => {
     // entry reads no field from there, and that is the point: what the caller
     // carried is refused by name rather than quietly trimmed, where "every
     // field" means every enumerable field a caller can reach.
-    const request = Object.assign(
-      Object.create({ baseline: { maxRuns: 10 } }),
-      { requestKey: 'k-proto', maxRuns: 20 },
-    ) as unknown as RootBudgetExtensionRequest
+    const request = Object.assign(Object.create({ baseline: { maxRuns: 10 } }), {
+      requestKey: 'k-proto',
+      maxRuns: 20,
+    }) as unknown as RootBudgetExtensionRequest
 
     expect(await refusal(() => extend(h, request))).toContain('carries "baseline"')
 
@@ -455,9 +492,11 @@ describe('extendRootBudget', () => {
 
     // The question is asked under the host's call: with no call there is nothing
     // the person's answer could be addressed by, and nothing is asked.
-    expect(await refusal(() =>
-      h.runtime.extendRootBudget(ROOT_SESSION, { callId: '', execution: {} }, { requestKey: 'k-1', maxRuns: 20 }),
-    )).toContain('names no call')
+    expect(
+      await refusal(() =>
+        h.runtime.extendRootBudget(ROOT_SESSION, { callId: '', execution: {} }, { requestKey: 'k-1', maxRuns: 20 }),
+      ),
+    ).toContain('names no call')
     expect(approval).not.toHaveBeenCalled()
     expect(log(h)).toBe(committed)
 
@@ -466,8 +505,9 @@ describe('extendRootBudget', () => {
     const bare = harness({ config: { rootBudget: ROOT_BUDGET } })
     await storeWithRoot(bare, 2)
     const bareCommitted = log(bare)
-    expect(await refusal(() => extend(bare, { requestKey: 'k-1', maxRuns: 20 })))
-      .toContain('no approval channel installed')
+    expect(await refusal(() => extend(bare, { requestKey: 'k-1', maxRuns: 20 }))).toContain(
+      'no approval channel installed',
+    )
     expect(log(bare)).toBe(bareCommitted)
     expect((await bare.task.snapshotIn(STORE)).budgetExtensions?.all).toEqual([])
   })
@@ -475,14 +515,18 @@ describe('extendRootBudget', () => {
   test('answers a recorded repeat with no approval installed, and refuses a new request there', async () => {
     const h = harness({ config: { rootBudget: ROOT_BUDGET } })
     await storeWithRoot(h, 2)
-    const dispose = h.runtime.registerRootBudgetApproval(async () => ({ kind: 'allowed', reference: 'approval:call-1' }))
+    const dispose = h.runtime.registerRootBudgetApproval(async () => ({
+      kind: 'allowed',
+      reference: 'approval:call-1',
+    }))
     const first = await extend(h, { requestKey: 'k-runs', maxRuns: 20 })
     dispose()
     const committed = log(h)
 
     // The channel is gone: a new request cannot be answered here at all.
-    expect(await refusal(() => extend(h, { requestKey: 'k-more', maxRuns: 25 }, { host: host('call-2') })))
-      .toContain('no approval channel installed')
+    expect(await refusal(() => extend(h, { requestKey: 'k-more', maxRuns: 25 }, { host: host('call-2') }))).toContain(
+      'no approval channel installed',
+    )
     expect(log(h)).toBe(committed)
 
     // …while the store's own record still answers the repeat, because a repeat is
@@ -506,23 +550,29 @@ describe('extendRootBudget', () => {
     h.sessions.set(ROOT_SESSION, stored)
     const key = 'k-1 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
     stored.events.push(
-      { type: 'approval/asked', time: Date.now(), data: { id: 'forged', toolName: 'task_budget_extend', callId: 'call-1', reason: `raise ${key}` } } as unknown as SessionEvent,
-      { type: 'approval/decided', time: Date.now(), data: { id: 'forged', outcome: 'allowed-once' } } as unknown as SessionEvent,
+      {
+        type: 'approval/asked',
+        time: Date.now(),
+        data: { id: 'forged', toolName: 'task_budget_extend', callId: 'call-1', reason: `raise ${key}` },
+      } as unknown as SessionEvent,
+      {
+        type: 'approval/decided',
+        time: Date.now(),
+        data: { id: 'forged', outcome: 'allowed-once' },
+      } as unknown as SessionEvent,
     )
     const committed = log(h)
 
     // With no approval installed, that log grants nothing: this entry reads no
     // session log at all, so a record somebody wrote there is not a decision.
-    expect(await refusal(() => extend(h, { requestKey: key, maxRuns: 20 })))
-      .toContain('no approval channel installed')
+    expect(await refusal(() => extend(h, { requestKey: key, maxRuns: 20 }))).toContain('no approval channel installed')
     expect(log(h)).toBe(committed)
     expect((await h.task.snapshotIn(STORE)).budgetExtensions?.all).toEqual([])
 
     // And with an approval installed that refuses, the same log is still not a
     // decision: the person's answer, through the callback, is the only one.
     const approval = installApproval(h, async () => ({ kind: 'refused', reason: 'not this release' }))
-    expect(await refusal(() => extend(h, { requestKey: key, maxRuns: 20 })))
-      .toContain('not this release')
+    expect(await refusal(() => extend(h, { requestKey: key, maxRuns: 20 }))).toContain('not this release')
     expect(approval).toHaveBeenCalledTimes(1)
     expect(log(h)).toBe(committed)
     expect((await h.task.snapshotIn(STORE)).budgetExtensions?.all).toEqual([])
@@ -532,7 +582,10 @@ describe('extendRootBudget', () => {
     const h = harness({ config: { rootBudget: ROOT_BUDGET } })
     await storeWithRoot(h, 3)
     const before = await h.task.snapshotIn(STORE)
-    const approval = installApproval(h, async () => ({ kind: 'refused', reason: 'the release is frozen over the weekend' }))
+    const approval = installApproval(h, async () => ({
+      kind: 'refused',
+      reason: 'the release is frozen over the weekend',
+    }))
     const committed = log(h)
 
     const denied = await refusal(() => extend(h, { requestKey: 'k-1', maxRuns: 20 }))
@@ -551,7 +604,9 @@ describe('extendRootBudget', () => {
     const waiting: Array<(decision: RootBudgetApprovalDecision) => void> = []
     installApproval(h, async ask => {
       asks.push(ask)
-      return await new Promise<RootBudgetApprovalDecision>(resolve => { waiting.push(resolve) })
+      return await new Promise<RootBudgetApprovalDecision>(resolve => {
+        waiting.push(resolve)
+      })
     })
     const before = await h.task.snapshotIn(STORE)
 
@@ -561,10 +616,7 @@ describe('extendRootBudget', () => {
     const moreRuns = extend(h, { requestKey: 'k-runs', maxRuns: 20 }, { host: host('call-runs') })
     const moreTime = extend(h, { requestKey: 'k-time', maxRuns: 30 }, { host: host('call-time') })
     await vi.waitFor(() => expect(asks).toHaveLength(2))
-    expect(asks.map(ask => ask.effective)).toEqual([
-      { maxRuns: 10 },
-      { maxRuns: 10 },
-    ])
+    expect(asks.map(ask => ask.effective)).toEqual([{ maxRuns: 10 }, { maxRuns: 10 }])
     for (const release of waiting) release({ kind: 'allowed', reference: 'approval:gated' })
 
     const settled = await Promise.allSettled([moreRuns, moreTime])
@@ -572,7 +624,9 @@ describe('extendRootBudget', () => {
     const rejected = settled.filter(item => item.status === 'rejected')
     expect(fulfilled).toHaveLength(1)
     expect(rejected).toHaveLength(1)
-    expect(((rejected[0] as PromiseRejectedResult).reason as Error).message).toContain('moved since this request was read')
+    expect(((rejected[0] as PromiseRejectedResult).reason as Error).message).toContain(
+      'moved since this request was read',
+    )
 
     // One fact, and only one: the second claim met a ceiling of its frozen
     // reading already moved and was refused, not re-based on what the first left.
@@ -587,8 +641,13 @@ describe('extendRootBudget', () => {
     const h = harness({ config: { rootBudget: ROOT_BUDGET } })
     await storeWithRoot(h, 2)
     const waiting: Array<(decision: RootBudgetApprovalDecision) => void> = []
-    installApproval(h, async () =>
-      await new Promise<RootBudgetApprovalDecision>(resolve => { waiting.push(resolve) }))
+    installApproval(
+      h,
+      async () =>
+        await new Promise<RootBudgetApprovalDecision>(resolve => {
+          waiting.push(resolve)
+        }),
+    )
     const persisted = taskEvents(h).length
 
     const first = extend(h, { requestKey: 'k-once', maxRuns: 20 })
@@ -642,8 +701,9 @@ describe('extendRootBudget', () => {
     await storeWithRoot(worker)
     const workerApproval = installAllowed(worker)
     const workerOpen = vi.spyOn(worker.task, 'openStore')
-    expect(await refusal(() => extend(worker, { requestKey: 'k-1', maxRuns: 20 }, { session: WORKER_SESSION })))
-      .toMatch(/is not a root coordination session \(its graph's root session is "root-session"\)/)
+    expect(
+      await refusal(() => extend(worker, { requestKey: 'k-1', maxRuns: 20 }, { session: WORKER_SESSION })),
+    ).toMatch(/is not a root coordination session \(its graph's root session is "root-session"\)/)
     expect(workerOpen).not.toHaveBeenCalled()
     expect(workerApproval).not.toHaveBeenCalled()
     expect((await worker.task.snapshotIn(STORE)).budgetExtensions?.all).toEqual([])
@@ -652,8 +712,9 @@ describe('extendRootBudget', () => {
     const stranger = harness({ config: { rootBudget: ROOT_BUDGET }, graphRoot: 'another-root' })
     const strangerApproval = installAllowed(stranger)
     const strangerOpen = vi.spyOn(stranger.task, 'openStore')
-    expect(await refusal(() => extend(stranger, { requestKey: 'k-1', maxRuns: 20 })))
-      .toContain('is not a root coordination session')
+    expect(await refusal(() => extend(stranger, { requestKey: 'k-1', maxRuns: 20 }))).toContain(
+      'is not a root coordination session',
+    )
     expect(strangerOpen).not.toHaveBeenCalled()
     expect(strangerApproval).not.toHaveBeenCalled()
 
@@ -662,8 +723,9 @@ describe('extendRootBudget', () => {
     await storeWithRoot(orphan)
     const orphanApproval = installAllowed(orphan)
     const orphanOpen = vi.spyOn(orphan.task, 'openStore')
-    expect(await refusal(() => extend(orphan, { requestKey: 'k-1', maxRuns: 20 })))
-      .toContain('its graph could not be resolved')
+    expect(await refusal(() => extend(orphan, { requestKey: 'k-1', maxRuns: 20 }))).toContain(
+      'its graph could not be resolved',
+    )
     expect(orphanOpen).not.toHaveBeenCalled()
     expect(orphanApproval).not.toHaveBeenCalled()
   })
@@ -690,7 +752,9 @@ describe('extendRootBudget', () => {
     expect(effectiveMaxRuns(snapshot)).toBe(20)
 
     // And the recorded request is still answered from the record, without a question.
-    const approval = installApproval(reopened, async () => { throw new Error('the approval was asked') })
+    const approval = installApproval(reopened, async () => {
+      throw new Error('the approval was asked')
+    })
     const repeat = await extend(reopened, { requestKey: 'k-more-runs', maxRuns: 20 })
     expect(repeat.answeredFromRecord).toBe(true)
     expect(approval).not.toHaveBeenCalled()
@@ -700,8 +764,9 @@ describe('extendRootBudget', () => {
     const h = harness({ config: { rootBudget: ROOT_BUDGET } })
     await h.task.createStore(STORE)
     const approval = installAllowed(h)
-    expect(await refusal(() => extend(h, { requestKey: 'k-1', maxRuns: 20 })))
-      .toMatch(/cannot be extended: store .* holds no root task/)
+    expect(await refusal(() => extend(h, { requestKey: 'k-1', maxRuns: 20 }))).toMatch(
+      /cannot be extended: store .* holds no root task/,
+    )
     expect(approval).not.toHaveBeenCalled()
   })
 })

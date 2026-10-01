@@ -1,15 +1,7 @@
 import { createHash } from 'node:crypto'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): string {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('evolution_candidate: missing agent id')
-  return id
-}
+import { message, sessionId, text } from '../shared.ts'
 
 export function defineEvolutionCandidateTool(ctx: Context) {
   return defineTool({
@@ -42,7 +34,7 @@ export function defineEvolutionCandidateTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'evolution_candidate')
       const versions = args.versionSet as Record<string, unknown>
       try {
         const mutation = JSON.parse(args.mutationJson) as unknown
@@ -91,7 +83,7 @@ export function defineEvolutionCandidateTool(ctx: Context) {
           'materialization), then evolution_replay (the two-sided experiment), then evolution_gate',
         ].join('\n')
       } catch (error) {
-        return `evolution_candidate rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_candidate rejected: ${message(error)}`
       }
     },
   })

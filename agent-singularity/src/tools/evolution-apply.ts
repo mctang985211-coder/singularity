@@ -1,23 +1,11 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { APPLYABLE_TARGET_TYPES, applyTargets, renderProviderRoles } from '@dangosys/dsh-singularity-evolution'
 import type { EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
-import { renderOpenIntentRecovery } from './evolution-commit.ts'
+import { denialReason, message, renderOpenIntentRecovery, sessionId, text } from '../shared.ts'
 
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): string {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('evolution_apply: missing agent id')
-  return id
-}
-
-/**
- * Why a decided PROMOTE proposal still cannot be applied: L4 harness evolution
- * and target types this build has no executor for.
- */
+/** Why a decided PROMOTE proposal still cannot be applied: L4 harness evolution and target types this build has no executor for. */
 function manualGuidance(proposal: EvolutionProposal): string | null {
   if (proposal.level === 'L4') {
     return 'L4 harness evolution has no executor in evolution_apply: supervisor implementation and validation must precede human review through the harness change workflow'
@@ -77,22 +65,17 @@ export function defineEvolutionApplyTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'evolution_apply')
       const agent = exec.agent
       if (agent === undefined) throw new Error('evolution_apply: missing agent')
       let proposal
       try {
         proposal = await ctx.evolution.get(args.proposalId)
       } catch (error) {
-        return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_apply rejected: ${message(error)}`
       }
       // An intent this proposal left open is settled, not bypassed (K2): the
       // retry asks the service the only question that is still open — what does
-      // production hold? — and the recorded intent already binds the grant and
-      // the content it was approved against, so no human is asked a second time
-      // and the promotion gate is not re-run. Everything the service refuses on
-      // that path (a direction this call cannot settle, a source that is gone, a
-      // target a third party changed) is reported as the service names it.
       if (proposal.openIntent !== undefined) {
         try {
           const recovered = await ctx.evolution.apply(args.proposalId, caller, proposal.openIntent.approvalRef)
@@ -105,7 +88,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
             effectNote(recovered.proposal),
           ].join('\n')
         } catch (error) {
-          return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`
+          return `evolution_apply rejected: ${message(error)}`
         }
       }
       // Every refusal lands BEFORE the human is asked — a proposal that cannot
@@ -123,10 +106,9 @@ export function defineEvolutionApplyTool(ctx: Context) {
         promotion = await ctx.evolution.checkPromotion(proposal.proposalId)
         // P3: the production baseline must still be the one this candidate was
         // evaluated against, checked BEFORE the human is asked. The service
-        // entry re-runs it after the grant, immediately before the write.
         await ctx.evolution.checkProductionBaseline(proposal.proposalId)
       } catch (error) {
-        return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_apply rejected: ${message(error)}`
       }
       const targets = applyTargets(proposal, ctx.evolution)
       const reason = [
@@ -150,11 +132,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
         signal: exec.signal,
       })
       if (outcome !== 'allowed-once') {
-        const why = outcome === 'rejected'
-          ? 'the human rejected it'
-          : outcome === 'cancelled'
-            ? 'the request was cancelled before the human decided'
-            : 'no approval answerer available'
+        const why = denialReason(outcome)
         return `evolution_apply: nothing written — ${why}; proposal ${proposal.proposalId} stays decided`
       }
       try {
@@ -169,7 +147,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
           `human approval: approval:${exec.callId} — rollback with evolution_rollback`,
         ].join('\n')
       } catch (error) {
-        return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_apply rejected: ${message(error)}`
       }
     },
   })

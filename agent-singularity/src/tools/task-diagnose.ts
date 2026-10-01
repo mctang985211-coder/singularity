@@ -1,13 +1,10 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
 import type { Diagnosis, DiagnosisProposal } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
+import { message, sessionId, text } from '../shared.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -18,15 +15,7 @@ function isTargetTypeName(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-/**
- * Validate the model-supplied proposals into the recorded shape. The target
- * type is an **open, non-empty name** (A5): the diagnosis does not own a
- * vocabulary, so a suggestion that names a surface no executor exists for is
- * recorded like any other — the entry that would convert it into an
- * executable proposal is where that name is checked
- * (`evolution_propose`'s fromDiagnosis, which refuses what it cannot execute
- * with zero ledger writes).
- */
+/** Validate the model-supplied proposals into the recorded shape. The target type is an **open, non-empty name** (A5): the diagnosis does not own a vocabulary, so a suggestion that names a surface no executor exists for is */
 function toProposals(value: unknown): DiagnosisProposal[] {
   if (value === undefined) return []
   if (!Array.isArray(value)) throw new Error('task_diagnose: proposals must be an array')
@@ -39,12 +28,6 @@ function toProposals(value: unknown): DiagnosisProposal[] {
     if (typeof item.rationale !== 'string') throw new Error(`task_diagnose: proposals[${index}].rationale must be a string`)
     return { targetType: item.targetType, targetId: item.targetId, rationale: item.rationale }
   })
-}
-
-function sessionId(exec: ToolRunContext): SessionId {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('task_diagnose: missing agent id')
-  return id
 }
 
 export function defineTaskDiagnoseTool(ctx: Context) {
@@ -84,7 +67,7 @@ export function defineTaskDiagnoseTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'task_diagnose')
       const graph = await ctx.graphs.graphForSession(caller)
       const storeId = rootTaskStoreId(graph.rootSessionId)
       const diagnosis: Diagnosis = {
@@ -102,7 +85,7 @@ export function defineTaskDiagnoseTool(ctx: Context) {
       try {
         await ctx.task.recordDiagnosisIn(storeId, diagnosis, caller)
       } catch (error) {
-        return `task_diagnose rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `task_diagnose rejected: ${message(error)}`
       }
       const proposals = diagnosis.proposals.map(item => `- ${item.targetType} ${item.targetId}: ${item.rationale}`)
       return [

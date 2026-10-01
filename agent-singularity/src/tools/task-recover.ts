@@ -1,38 +1,10 @@
-/**
- * `task_recover` (A6, plan §F.4): open one failed root task's **new attempt** for
- * a diagnosis that was handed to this session.
- *
- * The tool is an adapter and nothing else. It reads the caller from the live call
- * — the model never passes a session, a store, an approval or a decision, and the
- * schema has exactly the two fields the plan fixes — and hands the request to the
- * evolution plane's coordination entry, which checks that this session is the
- * supervisor the hand-off's diagnosis was delegated to and that this plane's own
- * records (the candidate's approval and application) are in force; the runtime
- * then re-checks the store's facts, the contract, the providers, the ceilings and
- * the attempt's idempotency before it writes anything. Both layers refuse on
- * their own: no validation lives in this function, because a rule only the tool
- * enforced would be a rule a direct service call could skip.
- *
- * What it is deliberately not: a general "retry" tool. A source that succeeded is
- * refused (an optimization suggestion with no frozen comparator stays a record),
- * a child task is refused (a batch of its parent re-runs it), a live run is never
- * hot-swapped, and a second key while an attempt is in flight is refused by name.
- * @module @dangosys/dsh-singularity-agent/tools/task-recover
- */
+/** `task_recover` (A6, plan §F.4): open one failed root task's **new attempt** for a diagnosis that was handed to this session. @module @dangosys/dsh-singularity-agent/tools/task-recover */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-task'
 import type { RecoveryCoordinationOutcome } from '@dangosys/dsh-singularity-evolution'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): string {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('task_recover: missing agent id')
-  return id
-}
+import { message, sessionId, text } from '../shared.ts'
 
 /** What one answer says: the attempt, the run it opened or already had, and what the coordination checked. */
 function renderOutcome(outcome: RecoveryCoordinationOutcome): string {
@@ -78,7 +50,7 @@ export function defineTaskRecoverTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'task_recover')
       try {
         const outcome = await ctx.evolution.coordinateRecovery(
           { sourceDiagnosisId: args.sourceDiagnosisId, requestKey: args.requestKey },
@@ -86,7 +58,7 @@ export function defineTaskRecoverTool(ctx: Context) {
         )
         return renderOutcome(outcome)
       } catch (error) {
-        return `task_recover rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `task_recover rejected: ${message(error)}`
       }
     },
   })

@@ -3,6 +3,7 @@
   "compilerOptions": {
     "allowImportingTsExtensions": true,
     "paths": {
+      "react": ["../../map/node_modules/@types/react/index.d.ts"],
       "@deepseek-ai/cordis": ["../../../../thirdparty/deepseek-harness/vendor/cordis/lib/types/index.d.ts"],
       "@deepseek-ai/dsh-typert-protocol": [
         "../../../../thirdparty/deepseek-harness/packages/typert/protocol/lib/types/index.d.ts"

@@ -21,9 +21,14 @@ describe('walkVerified', () => {
     const base = await root()
     await mkdir(join(base, 'skills', 'a'), { recursive: true })
     await writeFile(join(base, 'skills', 'a', 'SKILL.md'), 'body\n')
-    expect(await walkVerified(base, join('skills', 'a', 'SKILL.md'))).toEqual({ missing: false, abs: join(base, 'skills', 'a', 'SKILL.md') })
-    expect(await walkVerified(base, join('skills', 'b', 'SKILL.md')))
-      .toEqual({ missing: true, reason: 'no such file or directory' })
+    expect(await walkVerified(base, join('skills', 'a', 'SKILL.md'))).toEqual({
+      missing: false,
+      abs: join(base, 'skills', 'a', 'SKILL.md'),
+    })
+    expect(await walkVerified(base, join('skills', 'b', 'SKILL.md'))).toEqual({
+      missing: true,
+      reason: 'no such file or directory',
+    })
   })
 
   test('refuses a symbolic link at the target and at any ancestor', async () => {

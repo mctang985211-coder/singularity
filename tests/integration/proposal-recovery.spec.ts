@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -227,19 +227,39 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   ctx.provide('layout', { setIn: async () => {} })
   const review = new RecordingReviewChannel()
   ctx.provide('proposalReviewChannel', review as never)
-  const graphState = {
-    version: 1,
-    id: 'g1',
-    roots: [ROOT],
-    agents: [] as { id: string; name: string; status: string }[],
-    groups: [] as unknown[],
-    edges: [] as unknown[],
+  const graphFile = join(dir, 'graph-state.json')
+  const graphState = (existsSync(graphFile)
+    ? JSON.parse(readFileSync(graphFile, 'utf8'))
+    : { version: 1, id: 'g1', roots: [ROOT], agents: [], groups: [], edges: [] }) as {
+    version: number
+    id: string
+    roots: string[]
+    agents: { id: string; name: string; status: string }[]
+    groups: unknown[]
+    edges: unknown[]
+  }
+  const saveGraph = (): void => { writeFileSync(graphFile, JSON.stringify(graphState)) }
+  const applyGraphEvents = (
+    events: readonly { kind: string; agent?: { id: string; name: string; status: string }; edge?: unknown }[],
+  ): void => {
+    for (const event of events) {
+      if (event.kind === 'agent/add' && event.agent !== undefined && !graphState.agents.some(agent => agent.id === event.agent!.id)) {
+        graphState.agents.push(event.agent)
+      }
+      if (event.kind === 'edge/add' && event.edge !== undefined && !graphState.edges.some(edge => JSON.stringify(edge) === JSON.stringify(event.edge))) {
+        graphState.edges.push(event.edge)
+      }
+    }
+    saveGraph()
   }
   ctx.provide('graph', {
     snapshotIn: async () => structuredClone(graphState),
-    commitIn: async () => {},
+    commitIn: async (
+      _storeId: string,
+      events: readonly { kind: string; agent?: { id: string; name: string; status: string }; edge?: unknown }[],
+    ) => { applyGraphEvents(events) },
     setStatusIn: async () => {},
-    addAgentIn: async (_storeId: string, agent: { id: string; name: string; status: string }) => { graphState.agents.push(agent) },
+    addAgentIn: async (_storeId: string, agent: { id: string; name: string; status: string }) => { applyGraphEvents([{ kind: 'agent/add', agent }]) },
   } as never)
   ctx.provide('graphs', {
     graphForSession: async () => ({
@@ -250,6 +270,60 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
       graphStoreId: 'sg-g-root',
       layoutStoreId: 'sg-l-root',
     }),
+  } as never)
+  const ensureSessionLog = async (sessionId: string, header: Record<string, unknown>): Promise<void> => {
+    try {
+      const handle = await persistence.open(SessionId(sessionId), 'read')
+      await handle.close()
+      return
+    } catch (error) {
+      if (!(error instanceof Error) || !/not found/.test(error.message)) throw error
+    }
+    const handle = await persistence.create({
+      version: SESSION_FORMAT_VERSION,
+      createdAt: Date.now(),
+      isSeeded: false,
+      id: SessionId(sessionId),
+      ...header,
+    } as unknown as SessionHeader)
+    await handle.flush()
+    await handle.close()
+  }
+  ctx.provide('sessionQuery', {
+    readSession: async (sessionId: string) => {
+      const handle = await persistence.open(SessionId(sessionId), 'read')
+      try {
+        return {
+          session: (handle as unknown as { header: unknown }).header,
+          inheritedEventCount: 0,
+          events: (await handle.read()).events,
+        }
+      } finally {
+        await handle.close()
+      }
+    },
+    readSurface: async (sessionId: string) => {
+      const handle = await persistence.open(SessionId(sessionId), 'read')
+      try {
+        const { events } = await handle.read()
+        return { capturedThroughSeq: events.at(-1)?.seq ?? null }
+      } finally {
+        await handle.close()
+      }
+    },
+    readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
+      const handle = await persistence.open(SessionId(String(request.sessionId)), 'read')
+      try {
+        const { events } = await handle.read()
+        const target = events.find(event => event.seq === request.seq)
+        if (target === undefined) throw new Error(`session "${String(request.sessionId)}" has no event at seq ${request.seq}`)
+        const start = Math.max(0, request.seq - (request.before ?? 0))
+        const end = Math.min(events.length - 1, request.seq + (request.after ?? 0))
+        return { target, events: events.slice(start, end + 1), startSeq: start, endSeq: end }
+      } finally {
+        await handle.close()
+      }
+    },
   } as never)
   if (options.parkDrain !== undefined) {
     // The drain's one awaited jobs call never returns, so the drain — and the
@@ -272,6 +346,7 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   const verifier = new VerifierRegistry(ctx, { evidenceRoot: join(dir, 'evidence') })
   await verifier.ready()
   const spawns: SpawnRecord[] = []
+  const resumedSessions = new Set<string>()
   const agentRuntime = new AgentRuntime(ctx)
   await ctx.plugin(TaskRuntime, {
     capabilities: {},
@@ -281,27 +356,40 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
     runBindingRoot: join(home, 'run-bindings'),
   } as Config)
   const runtime = ctx.get('taskRuntime') as TaskRuntime
+  interface SessionMeta { cwd?: string; agentPreset?: string; parentSession?: string; delegationDepth?: number }
+
   ctx.agents.setFactory({
-    createAgent: async (_ownerCtx: Context, opts: { sessionId: SessionId; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) =>
-      ({ agent: await mint(opts.sessionId, opts.setup), dispose: async () => {} }),
-    resume: async (_ownerCtx: Context, opts: { resumeSessionId: SessionId; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) =>
-      ({ agent: await mint(opts.resumeSessionId, opts.setup), dispose: async () => {} }),
+    createAgent: async (_ownerCtx: Context, opts: { sessionId: SessionId; meta?: SessionMeta; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) =>
+      ({ agent: await mint(opts.sessionId, opts.setup, opts.meta), dispose: async () => {} }),
+    resume: async (_ownerCtx: Context, opts: { resumeSessionId: SessionId; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) => {
+      resumedSessions.add(String(opts.resumeSessionId))
+      return { agent: await mint(opts.resumeSessionId, opts.setup), dispose: async () => {} }
+    },
   } as never)
 
   /** Hand one stub agent to the runtime: the scope, the setup hook, and the idle body. */
-  async function mint(sessionId: SessionId, setup?: (agentCtx: Context, agent: Agent) => Promise<unknown>): Promise<Agent> {
+  async function mint(sessionId: SessionId, setup?: (agentCtx: Context, agent: Agent) => Promise<unknown>, meta?: SessionMeta): Promise<Agent> {
     let self!: Agent
+    const header = {
+      id: String(sessionId),
+      cwd: meta?.cwd ?? dir,
+      agentPreset: meta?.agentPreset ?? 'standard',
+      ...(meta?.parentSession === undefined ? {} : { parentSession: meta.parentSession }),
+      ...(meta?.delegationDepth === undefined ? {} : { delegationDepth: meta.delegationDepth }),
+    }
+    const resumeTurn = resumedSessions.has(String(sessionId))
     const agent = {
       id: String(sessionId),
       status: 'idle',
-      followup: vi.fn(),
+      followup: vi.fn(() => { if (resumeTurn) void runWorkerTurn(String(sessionId), self) }),
       cancel: vi.fn(),
       append: vi.fn(),
       // A body that returns without submitting leaves the run `active` where a
       // submission was due; a body that never returns parks the driver.
-      whenIdle: async () => { await runWorkerTurn(String(sessionId), self) },
-      session: { id: String(sessionId), header: { id: String(sessionId), cwd: dir, agentPreset: 'standard' }, append: vi.fn() },
+      whenIdle: async () => { if (!resumeTurn) await runWorkerTurn(String(sessionId), self) },
+      session: { id: String(sessionId), header, append: vi.fn() },
     } as unknown as Agent
+    await ensureSessionLog(String(sessionId), header)
     self = agent
     let scope!: ReturnType<typeof createScope>
     await ctx.plugin(Object.assign((inner: Context) => { scope = createScope(inner, agent) }, { inject: ['tools', 'systemPrompt'] }))
@@ -735,9 +823,10 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     await b.dispose()
   })
 
-  it('settles a run that was in flight when the process died without executing it again', async () => {
+  it('continues a run that was in flight when the process died, reusing its run and session', async () => {
     const dir = workspace()
-    const a = await boot(dir, { worker: () => new Promise(() => {}) })
+    let workerPhase: 'crash' | 'continue' = 'crash'
+    const a = await boot(dir, { worker: () => (workerPhase === 'crash' ? new Promise(() => {}) : undefined) })
     const root = await activateRoot(a)
     const admitted = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('long child'))
     if (admitted.status !== 'admitted') throw new Error('unreachable')
@@ -745,28 +834,25 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     const crashed = runOf(await a.snapshot(), admitted.childTaskIds[0]!)
     expect(crashed.executionPhase).toBe('active')
     await a.crash()
+    workerPhase = 'continue'
 
     const b = await reopen(dir)
     const outcomes = await b.runtime.awaitBatch(STORE, admitted.batchId)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])
-    // The run that was in flight is the run that is settled: its id is unchanged,
-    // nothing re-runs it, and the proposal keeps the batch it already consumed.
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    // The run continues: same id and session, one run, and the proposal keeps
+    // the batch it already consumed.
     const after = await b.snapshot()
     const settled = runOf(after, admitted.childTaskIds[0]!)
     expect(settled.runId).toBe(crashed.runId)
-    expect(settled.status).toBe('cancelled')
+    expect(settled.status).toBe('verified')
     expect(after.runs.filter(run => run.taskId === admitted.childTaskIds[0])).toHaveLength(1)
     expect(after.proposals!.byId[admitted.proposalId]!.consumption!.childTaskIds).toEqual(admitted.childTaskIds)
     expect(b.spawns).toHaveLength(0)
-    const review = after.reviews.find(item => item.runId === crashed.runId)
-    expect(review?.outcome).toBe('cancelled')
-    expect(review?.anomalies.join(' ')).toContain('was in flight when this store was reopened and never submitted')
-    // The parent was judged on that settlement, not left running: a child that
-    // did not verify cannot be accepted — the judgement is the root's own
-    // submission's (K1 §2), which is what this case states.
-    expect((await b.task.taskIn(STORE, admitted.childTaskIds[0]!)).status).toBe('cancelled')
+    const events = taskEvents(await b.events())
+    expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === admitted.childTaskIds[0])).toHaveLength(1)
+    expect((await b.task.taskIn(STORE, admitted.childTaskIds[0]!)).status).toBe('verified')
     await handInRoot(b)
-    expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('failed')
+    expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     await b.dispose()
   })
 
@@ -821,13 +907,15 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     await b.dispose()
   })
 
-  it('does not re-run a sibling that verified before the crash', async () => {
+  it('continues a sibling that was in flight while the verified one is not re-run', async () => {
     const dir = workspace()
+    let phase: 'crash' | 'continue' = 'crash'
     let stack!: Boot
     stack = await boot(dir, {
       // The first child hands its work in; every later one hangs once it starts,
-      // which is where the process dies.
+      // which is where the process dies. The resumed sibling then hands in.
       worker: sessionId => {
+        if (phase === 'continue') return
         const index = stack.spawns.findIndex(spawn => spawn.sessionId === sessionId)
         if (index <= 0) return
         return new Promise(() => {})
@@ -847,25 +935,28 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(inFlight.executionPhase).toBe('active')
     expect(passed.runId).not.toBe(inFlight.runId)
     await a.crash()
+    phase = 'continue'
 
     const b = await reopen(dir)
     const outcomes = await b.runtime.awaitBatch(STORE, admitted.batchId)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'cancelled'])
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
     const after = await b.snapshot()
     // The verified sibling is history: one run, one start, its evidence kept.
     expect(after.runs.filter(run => run.taskId === admitted.childTaskIds[0])).toHaveLength(1)
+    expect(runOf(after, admitted.childTaskIds[0]!).runId).toBe(passed.runId)
     expect(runOf(after, admitted.childTaskIds[0]!).status).toBe('verified')
     expect(after.tasks.find(task => task.taskId === admitted.childTaskIds[0])!.status).toBe('verified')
-    // The run that was in flight is settled, not executed again.
+    // The run that was in flight is the run that continues: same run, same
+    // session, settled by its own resumed turn.
     expect(runOf(after, admitted.childTaskIds[1]!).runId).toBe(inFlight.runId)
-    expect(runOf(after, admitted.childTaskIds[1]!).status).toBe('cancelled')
+    expect(runOf(after, admitted.childTaskIds[1]!).status).toBe('verified')
     const events = taskEvents(await b.events())
     expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === admitted.childTaskIds[0])).toHaveLength(1)
     expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === admitted.childTaskIds[1])).toHaveLength(1)
     // And the parent was judged on those two verdicts — by its own submission
-    // (K1 §2): one child that did not verify is a parent its own criteria refuse.
+    // (K1 §2).
     await handInRoot(b)
-    expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('failed')
+    expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     expect(b.spawns).toHaveLength(0)
     await b.dispose()
   })

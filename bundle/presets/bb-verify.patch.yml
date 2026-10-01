@@ -1,0 +1,87 @@
+# The `bb-verify` agent preset: the Buckyball verification worker composition.
+#
+# A `@deepseek-ai/dsh-agent-preset` declaration row. dsh 0.2.0 replaced the
+# directory-scanning `@deepseek-ai/dsh-agent-presets` roster package with the
+# `@deepseek-ai/dsh-agent-preset-registry` plus one declaration row per preset
+# (`$DSH_HOME/.agent-presets/` is no longer scanned), so the composition that
+# lived in `.dsh/.agent-presets/bb-verify/` is declared here, with the same
+# rows and the same `preset.yml` metadata.
+#
+# This is a static, path-free composition mounted by name from the capability
+# table (`preset: bb-verify` on a verify row). The bbdev tool face is NOT here:
+# it arrives per worker at spawn time as the env-bound `bbdev` MCP server
+# (`mcpServers: [bbdev]` on the capability rows; `mcp__bbdev__*` tools on the
+# worker's own layer), because the server script lives in the per-env checkout
+# (`environment/projectN/<owner>/buckyball`), which a static composition cannot
+# name. See `packages/singularity/task-runtime/src/mcp-servers.ts`.
+#
+# History: until 2026-09-18 this preset carried a cordis plugin row
+# (`file://…/buckyball/dsh-plugin/bb-verify/index.ts`) registering seven
+# `buckyball_bbdev_*` tools plus the CI-dispatch playbook (VERDICT line /
+# report.md contract). That was the legacy verify-runner architecture; the
+# dispatch path moved to `mcp__bb-dispatch__dispatch/fetch` and the playbook to
+# the `verify` skill, so the row is gone.
+#
+# Row semantics mirror `@deepseek-ai/dsh-web-app` `presets/standard.patch.yml`:
+# every row here is a tool/prompt plugin registering into the agent's scoped
+# registries, so no isolate realm is needed outside the compaction group.
+- insert:
+    - id: preset-bb-verify
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: bb-verify
+        name: bb-verify
+        description: Buckyball 验证 worker 组合：persona + 文件/搜索/skill 工具 + 长轮询折叠参数；bbdev 工具面由 spawn 级 per-env MCP 挂载（mcp__bbdev__*）提供，不在本预设内。
+        order: 10
+        plugins:
+          # The verify node's own persona, shadowing the deployment default.
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: 你是 Buckyball 验证 worker（bb-verify 组合）。验证操作走 bbdev MCP 工具（mcp__bbdev__*：submit 提交、task_status 轮询），不直接调 bbdev CLI；日志与报告经文件工具读写；结论由任务的验收链（判据命令 + task_verify 自检）承载。
+
+          # Read bbdev task logs and write verification artifacts.
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+
+          # The skill catalog + loader: capability-granted skills (verify /
+          # waveform / check) are pinned into the worker's own layer by the
+          # grant, and without this tool the pinned bodies never reach the model.
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+
+          # Compaction, mirroring `presets/standard.patch.yml`: verification
+          # rounds poll long-running bbdev tasks for tens of minutes; without a
+          # fold the session dies at the context window before the verdict
+          # lands. `tokenMeter` stays on the host plane (same rationale as the
+          # standard preset).
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  # The tokenrhythm gateway is flaky on large requests (probes:
+                  # <100k chars pass reliably, >=200k chars die intermittently),
+                  # so fold early and keep every request — main turn and fold
+                  # call alike — small.
+                  thresholdRatio: 0.4
+
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024

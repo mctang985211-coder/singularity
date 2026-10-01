@@ -1,16 +1,4 @@
-/**
- * The named vocabulary every read in this package answers in (A2 §D). One closed
- * union, shared by the tool adapters and the prompt assembly, so a caller that
- * handles `cross-graph` is handling exactly what a service can say — and a new
- * outcome cannot be invented by a tool that needs one.
- *
- * A refusal is a *result*, never an exception: the reads here are for a model
- * that has to be told what a fact is, and "this session is not bound" or "that
- * record is not in your graph" are answers, not crashes. `recoveryStatus`'s
- * markers (`recovering`, `recovery-failed`, `needs-recovery`, `not-activated`)
- * ride along inside results as display facts, never as triggers.
- * @module @dangosys/dsh-singularity-context/refusals
- */
+/** The named vocabulary every read answers in, the read algebra built on it, and the one place an error is read. @module @dangosys/dsh-singularity-context/refusals */
 
 /** Every outcome a read can refuse with, by name. */
 export type NamedRefusal =
@@ -23,10 +11,7 @@ export type NamedRefusal =
   | 'unreadable'
   | 'context-too-large'
 
-/**
- * The same vocabulary as a value, so a tool schema or a test can pin the whole
- * set instead of trusting that no ninth name was added quietly.
- */
+/** The same vocabulary as a value, so a tool schema or a test can pin the whole set. */
 export const NAMED_REFUSALS = [
   'not-activated',
   'unbound',
@@ -48,10 +33,7 @@ export interface ReadContinuation {
 export interface ProjectedReadOk {
   readonly ok: true
   readonly text: string
-  /**
-   * True when more of the same read is available: another record page, the rest
-   * of a session window, or further status entries.
-   */
+  /** True when more of the same read is available: another record page, the rest of a window, further entries. */
   readonly hasMore?: boolean
   /** The offset the next page starts at — the read's own unit (UTF-8 bytes, event seq, entry index). */
   readonly nextOffset?: number
@@ -78,4 +60,15 @@ export function read(text: string, source: string, continuation?: ReadContinuati
 /** One refused read: the name first, then the detail a caller renders as-is. */
 export function refused(refusal: NamedRefusal, detail: string): ProjectedReadRefused {
   return { ok: false, refusal, detail }
+}
+
+/** One error message, from whatever a read threw. */
+export function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** The coded error a session-query or registry read answers with, when it carries one. */
+export function errorCode(error: unknown): string | undefined {
+  const code = (error as { code?: unknown } | undefined)?.code
+  return typeof code === 'string' ? code : undefined
 }

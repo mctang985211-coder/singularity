@@ -6,7 +6,7 @@
     - id: graphs
       name: '@dangosys/dsh-singularity-graphs'
     - id: layout
-      name: '@dangosys/dsh-singularity-layout'
+      name: '@dangosys/dsh-singularity-graph/layout'
     - id: task
       name: '@dangosys/dsh-singularity-task'
     - id: verifier

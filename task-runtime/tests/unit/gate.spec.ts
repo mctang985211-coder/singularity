@@ -38,7 +38,20 @@ const CONTRACT_ALLOWED = [
 ]
 
 /** Tools the protocol closes in every non-active phase; the samples name their category. */
-const WRITE_TOOLS = ['write', 'edit', 'bash', 'job_list', 'job_kill', 'graph_spawn', 'evolution_apply', 'subagent_spawn', 'task_decompose', 'task_submit_result', 'task_verify', 'task_proposal_continue']
+const WRITE_TOOLS = [
+  'write',
+  'edit',
+  'bash',
+  'job_list',
+  'job_kill',
+  'graph_spawn',
+  'evolution_apply',
+  'subagent_spawn',
+  'task_decompose',
+  'task_submit_result',
+  'task_verify',
+  'task_proposal_continue',
+]
 
 /** The two question tools, named on their own so the rows about them read as what they are (A4 §F.1). */
 const QUESTION_TOOLS = ['task_ask_parent', 'task_answer']
@@ -66,7 +79,11 @@ function fakeJobs(initial: FakeJob[], behaviour: JobsBehaviour = {}) {
     list(agent?: unknown): readonly JobsViewEntry[] {
       if (behaviour.listThrows !== undefined) throw new Error(behaviour.listThrows)
       void agent
-      return initial.map(job => ({ id: job.id, status: statuses.get(job.id) as string, ...(job.detail === undefined ? {} : { detail: job.detail }) }))
+      return initial.map(job => ({
+        id: job.id,
+        status: statuses.get(job.id) as string,
+        ...(job.detail === undefined ? {} : { detail: job.detail }),
+      }))
     },
     kill(id: string, agent?: unknown, reason?: string): unknown {
       if (behaviour.killThrows !== undefined) throw new Error(behaviour.killThrows)
@@ -202,7 +219,8 @@ describe('ExecutionGate.decide', () => {
   test('an active run is still deciding its own work, so everything passes', () => {
     const gate = new ExecutionGate()
     gate.setPhase('s-1', 'active')
-    for (const tool of [...WRITE_TOOLS, ...CONTRACT_ALLOWED, 'some_future_tool']) expect(gate.decide('s-1', tool)).toEqual({ allow: true })
+    for (const tool of [...WRITE_TOOLS, ...CONTRACT_ALLOWED, 'some_future_tool'])
+      expect(gate.decide('s-1', tool)).toEqual({ allow: true })
   })
 
   for (const phase of ['waiting_children', 'submitted'] as const) {
@@ -246,7 +264,14 @@ describe('the question block (A4 §F.1)', () => {
     for (const tool of QUESTION_TOOLS) expect(gate.decide('s-1', tool)).toEqual({ allow: true })
     expect(gate.decide('s-1', 'task_read')).toEqual({ allow: true })
     expect(gate.decide('s-1', 'context_read')).toEqual({ allow: true })
-    for (const tool of ['write', 'bash', 'graph_spawn', 'task_decompose', 'task_submit_result', 'task_proposal_continue']) {
+    for (const tool of [
+      'write',
+      'bash',
+      'graph_spawn',
+      'task_decompose',
+      'task_submit_result',
+      'task_proposal_continue',
+    ]) {
       const decision = gate.decide('s-1', tool)
       expect(decision.allow).toBe(false)
       if (decision.allow) throw new Error('unreachable')
@@ -306,7 +331,8 @@ describe('the question block (A4 §F.1)', () => {
     expect(applied.questionsBlocked('s-2')).toBe(true)
 
     gate.setQuestionsBlocked('s-1', false)
-    for (const tool of ['write', 'task_decompose', 'task_submit_result']) expect(gate.decide('s-1', tool)).toEqual({ allow: true })
+    for (const tool of ['write', 'task_decompose', 'task_submit_result'])
+      expect(gate.decide('s-1', tool)).toEqual({ allow: true })
   })
 
   test('a session with no phase is not gated by a block either (the gate handles runs, not sessions in the abstract)', () => {
@@ -463,7 +489,9 @@ describe('drainSession', () => {
 
   test('a job that is still stopping after the kill is unconfirmed and named', async () => {
     const gate = new ExecutionGate()
-    const jobs = fakeJobs([{ id: 'bash-2', status: 'running', detail: 'sleep 600' }], { settleOnKill: { 'bash-2': 'stopping' } })
+    const jobs = fakeJobs([{ id: 'bash-2', status: 'running', detail: 'sleep 600' }], {
+      settleOnKill: { 'bash-2': 'stopping' },
+    })
     const result = await gate.drainSession('s-1', { timeoutMs: 100, jobs: jobs.service, agent: 'agent' })
     expect(result.confirmed).toBe(false)
     if (result.confirmed) throw new Error('unreachable')
@@ -474,8 +502,14 @@ describe('drainSession', () => {
 
   test('terminal jobs are left alone and do not consume the window', async () => {
     const gate = new ExecutionGate()
-    const jobs = fakeJobs([{ id: 'bash-3', status: 'completed' }, { id: 'bash-4', status: 'failed' }, { id: 'bash-5', status: 'killed' }])
-    expect(await gate.drainSession('s-1', { timeoutMs: 50, jobs: jobs.service, agent: 'agent' })).toEqual({ confirmed: true })
+    const jobs = fakeJobs([
+      { id: 'bash-3', status: 'completed' },
+      { id: 'bash-4', status: 'failed' },
+      { id: 'bash-5', status: 'killed' },
+    ])
+    expect(await gate.drainSession('s-1', { timeoutMs: 50, jobs: jobs.service, agent: 'agent' })).toEqual({
+      confirmed: true,
+    })
     expect(jobs.killed).toEqual([])
     expect(jobs.waited).toEqual([])
   })

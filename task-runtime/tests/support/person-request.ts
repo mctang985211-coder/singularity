@@ -12,7 +12,7 @@
  * contract be attributed to somebody.
  *
  * Everything else on a session's log is attributed to **its producer**: a
- * **notice** is the same event type with `source.kind: 'plugin'` — what
+ * **notice** is the same event type with `source.kind: 'task-runtime'` — what
  * `task-runtime`'s own `notify()` sends a session — and this deployment's own
  * prompts carry `runtime-prompt` (`agent-runtime/src/types.ts`: the graph setup
  * text and a spawn's delegated task). The notice lives here rather than assembled
@@ -68,7 +68,7 @@ export function pluginNotice(text: string, seq = 0): SessionEvent {
     time: Date.now(),
     data: createUserMessage({
       content: [{ type: 'text', text }],
-      source: { kind: 'plugin', plugin: 'task-runtime', form: 'notice', summary: boundContextSummary(text) },
+      source: { kind: 'task-runtime', form: 'notice', summary: boundContextSummary(text) },
     }),
     surfaceOp: 'append',
   }
@@ -81,7 +81,10 @@ export function pluginNotice(text: string, seq = 0): SessionEvent {
  * `text` stands for the request; a spec that asserts on the wording records its
  * own through the deployment's surface (`scripted-loop.recordRequest`).
  */
-export function requestedSession(sessionId: string, text = 'the request this contract stands on'): StoredRequestSession {
+export function requestedSession(
+  sessionId: string,
+  text = 'the request this contract stands on',
+): StoredRequestSession {
   return {
     header: { id: sessionId, cwd: '.', agentPreset: 'standard' } as unknown as SessionHeader,
     events: [personRequest(text)],

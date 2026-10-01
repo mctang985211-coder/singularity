@@ -1,20 +1,4 @@
-/**
- * Singularity's domain read core (A2+A1, dispatch subgoal 2): one place that
- * answers "what may this session read, and what does it say".
- *
- * The service resolves a **live caller** to a read domain from durable facts —
- * published graph membership and the persistent `TaskStarted` record, plus the
- * reviewer ledger for a delegation that has no business run — and then reads
- * records of that domain only. It never recovers, never adopts, never reconciles
- * and never waits: a store that is still recovering answers with its facts and a
- * `recovery` marker, and every outcome is one of the named results in
- * {@link NamedRefusal}.
- *
- * Consumers: the tool adapters (`task_read`, `task_status`, `context_read`) and
- * the prompt assembly consume these methods directly; both read the same service,
- * so the two views cannot describe different stores.
- * @module dsh-singularity-context
- */
+/** Singularity's domain read core (A2+A1): what a live session may read, and what it says. @module dsh-singularity/context */
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@dangosys/dsh-singularity-graphs'
@@ -24,35 +8,95 @@ import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
 import { assembleSingularityContext } from './assembly.ts'
-import {
-  loadCaller,
-  type BindingDeps,
-  type CallerResolution,
-  type LoadedCaller,
-  type ReviewerBindingSource,
-} from './bindings.ts'
-import {
-  contextRead,
-  contractProjection,
-  dynamicProjection,
-  questionProjection,
-  taskRead,
-  taskStatus,
-  type ContextReadQuery,
-  type EnvPathSource,
-  type ReadDeps,
-  type StatusQuery,
-} from './projections.ts'
+import { loadCaller } from './bindings/resolve.ts'
+import type { BindingDeps, LoadedCaller, ReviewerBindingSource } from './bindings/types.ts'
+import { contractProjection } from './reads/contract.ts'
+import { dynamicProjection } from './reads/dynamic.ts'
+import { questionProjection } from './reads/questions.ts'
+import { contextRead } from './reads/reference-read.ts'
+import { taskRead } from './reads/task-read.ts'
+import { taskStatus } from './reads/task-status.ts'
 import type { ProjectedRead } from './refusals.ts'
+import type { ContextReadQuery, EnvPathSource, ReadDeps, StatusQuery } from './types.ts'
 
-export * from './assembly.ts'
-export * from './bindings.ts'
-export * from './limits.ts'
-export * from './not-activated.ts'
-export * from './projections.ts'
-export * from './refusals.ts'
-export * from './render.ts'
-export * from './run-binding.ts'
+export {
+  assembleSingularityContext,
+  AssemblyRefusalError,
+  QUESTIONS_CONTEXT_NAME,
+  QUESTIONS_CONTEXT_ORDER,
+  STATE_CONTEXT_NAME,
+  STATE_CONTEXT_ORDER,
+  WORKER_CONTRACT_ORDER,
+  WORKER_CONTRACT_SECTION,
+} from './assembly.ts'
+export { loadCaller } from './bindings/resolve.ts'
+export { ReviewerBindingError, isGraphMember } from './bindings/types.ts'
+export type {
+  BindingDeps,
+  CallerBase,
+  CallerGraph,
+  CallerResolution,
+  CallerUnbound,
+  GraphRecordFacts,
+  LoadedCaller,
+  MembershipEdge,
+  MembershipNode,
+  ReadOnlyGraphs,
+  ReadOnlyTaskRuntime,
+  ReadOnlyTaskStore,
+  ReviewerBindingRecord,
+  ReviewerBindingSource,
+} from './bindings/types.ts'
+export { CONTEXT_OUTPUT_LIMIT_BYTES, omissionLine, OutputBudget, sliceUtf8, utf8Bytes } from './limits.ts'
+export type { OmissionReport, Utf8Slice } from './limits.ts'
+export { contractProjection } from './reads/contract.ts'
+export { dynamicProjection, relatedEntries } from './reads/dynamic.ts'
+export type { RelatedEntry } from './reads/dynamic.ts'
+export { notActivatedLines } from './reads/guards.ts'
+export { questionProjection } from './reads/questions.ts'
+export { contextRead } from './reads/reference-read.ts'
+export { taskRead } from './reads/task-read.ts'
+export { taskStatus } from './reads/task-status.ts'
+export { NAMED_REFUSALS, read, refused } from './refusals.ts'
+export type {
+  NamedRefusal,
+  ProjectedRead,
+  ProjectedReadOk,
+  ProjectedReadRefused,
+  ReadContinuation,
+} from './refusals.ts'
+export {
+  constraintItems,
+  contractLines,
+  criteriaLines,
+  handoffFor,
+  handoffLines,
+  handoffReferences,
+  latestRun,
+  rootAncestor,
+  runPhaseCell,
+  runPhaseSuffix,
+  taskSummaryLine,
+} from './render/fields.ts'
+export {
+  bindingLines,
+  diagnosisRecordText,
+  evidenceRecordText,
+  renderRunBinding,
+  reviewRecordText,
+  runRecordText,
+  taskRecordText,
+} from './render/records.ts'
+export type {
+  ContextReadQuery,
+  EnvPathSource,
+  ReadDeps,
+  ReviewReference,
+  SessionEventReference,
+  SessionQueryReads,
+  StatusQuery,
+  StatusScope,
+} from './types.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -63,19 +107,14 @@ declare module '@deepseek-ai/cordis' {
 export class SingularityContextService extends Service {
   static inject = ['task', 'graphs', 'taskRuntime', 'sessionQuery']
 
-  /** The registered delegation sources, in registration order; a later registration answers after an earlier one. */
-  private readonly reviewerSources: ReviewerBindingSource[] = []
+  /** The one registered delegation source, when this deployment has one. */
+  private reviewerSource: ReviewerBindingSource | undefined
 
   constructor(ctx: Context) {
     super(ctx, 'singularityContext')
   }
 
-  /**
-   * Mount the one `system-prompt/assemble` waterfall listener this service owns
-   * (`./assembly.ts`): the door the projections reach a real model request
-   * through. The registration rides this service's fiber, so it leaves when the
-   * service does.
-   */
+  /** Mount the one `system-prompt/assemble` waterfall listener this service owns. */
   [Service.init](): void {
     this.ctx.effect(
       () =>
@@ -86,25 +125,17 @@ export class SingularityContextService extends Service {
     )
   }
 
-  /**
-   * Register the narrow source this deployment reads reviewer delegations from
-   * (the reviewer ledger). Returns the disposer that removes it again, so a
-   * plugin that unloads takes its binding source with it.
-   */
+  /** Register the one reviewer-delegation source; the returned disposer removes it again. */
   registerReviewerBindingSource(source: ReviewerBindingSource): () => void {
-    this.reviewerSources.push(source)
+    const previous = this.reviewerSource
+    this.reviewerSource = source
     return () => {
-      const index = this.reviewerSources.indexOf(source)
-      if (index >= 0) this.reviewerSources.splice(index, 1)
+      if (this.reviewerSource === source) this.reviewerSource = previous
     }
   }
 
-  /**
-   * The domain a live session may read, from durable facts. Tools and assembly
-   * call this directly when they need the role (or the store) rather than a
-   * rendered read.
-   */
-  async resolveCaller(sessionId: string, signal?: AbortSignal): Promise<CallerResolution> {
+  /** The domain a live session may read, from durable facts. */
+  async resolveCaller(sessionId: string, signal?: AbortSignal): Promise<LoadedCaller['resolution']> {
     return (await this.load(sessionId, signal)).resolution
   }
 
@@ -133,18 +164,28 @@ export class SingularityContextService extends Service {
     return await dynamicProjection(this.readDeps(), await this.load(sessionId, signal))
   }
 
-  /**
-   * The question plane (A4 §F.1/§7.3): the questions this run has not been
-   * answered on, and the answers to its own questions that no model request has
-   * been shown to have carried into its Session yet.
-   */
+  /** The question plane (A4 §F.1/§7.3): open questions, and answers no read has been shown. */
   async questionProjection(sessionId: string, signal?: AbortSignal): Promise<ProjectedRead> {
     return await questionProjection(this.readDeps(), await this.load(sessionId, signal))
   }
 
-  private async load(sessionId: string, signal?: AbortSignal): Promise<LoadedCaller> {
+  /** The caller's own loaded domain, resolved once for every plane of one model request. */
+  async load(sessionId: string, signal?: AbortSignal): Promise<LoadedCaller> {
     signal?.throwIfAborted()
     return await loadCaller(this.bindingDeps(), sessionId, signal)
+  }
+
+  /** One plane of a caller already loaded — the assembly's own doors. */
+  async contractFor(caller: LoadedCaller): Promise<ProjectedRead> {
+    return await contractProjection(this.readDeps(), caller)
+  }
+
+  async dynamicFor(caller: LoadedCaller): Promise<ProjectedRead> {
+    return await dynamicProjection(this.readDeps(), caller)
+  }
+
+  async questionsFor(caller: LoadedCaller): Promise<ProjectedRead> {
+    return await questionProjection(this.readDeps(), caller)
   }
 
   private bindingDeps(): BindingDeps {
@@ -152,7 +193,7 @@ export class SingularityContextService extends Service {
       task: this.ctx.task,
       graphs: this.ctx.graphs,
       taskRuntime: this.ctx.taskRuntime,
-      reviewerSources: [...this.reviewerSources],
+      ...(this.reviewerSource === undefined ? {} : { reviewerSource: this.reviewerSource }),
     }
   }
 
@@ -165,17 +206,9 @@ export class SingularityContextService extends Service {
     }
   }
 
-  /**
-   * The env builder, when this deployment mounts one: the optional source the
-   * obligation-coverage line walks up from. Read through `ctx.get`, because a
-   * deployment without it must still answer every other read.
-   */
+  /** The env builder this deployment mounts, when it mounts one. */
   private envBuilder(): EnvPathSource | undefined {
-    const ctx = this.ctx as unknown as {
-      get?: (name: string) => unknown
-      envBuilder?: EnvPathSource
-    }
-    return (ctx.get?.('envBuilder') ?? ctx.envBuilder) as EnvPathSource | undefined
+    return this.ctx.get('envBuilder') as EnvPathSource | undefined
   }
 }
 

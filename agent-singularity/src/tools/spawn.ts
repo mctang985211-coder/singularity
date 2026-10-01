@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { sessionId, text } from '../shared.ts'
 
 export function defineSpawnTool(ctx: Context) {
   return defineTool({
@@ -15,12 +16,11 @@ export function defineSpawnTool(ctx: Context) {
     },
     output: {
       schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
+      render: (_args, value) => text(value),
     },
     execute: async (args, exec) => {
-      const sessionId = exec.agent?.id
-      if (sessionId === undefined) throw new Error('graph_spawn: missing agent id')
-      const graph = await ctx.graphs.graphForSession(sessionId)
+      const caller = sessionId(exec, 'graph_spawn')
+      const graph = await ctx.graphs.graphForSession(caller)
       if (graph.ready)
         throw new Error(`graph_spawn: graph ${graph.id} is ready; delegate objective work with task_decompose`)
       const handle = await ctx.agentRuntime.spawn(exec.agent!, {
@@ -38,7 +38,7 @@ export function defineSpawnTool(ctx: Context) {
         exec.signal.removeEventListener('abort', cancel)
       }
       const event = [...handle.agent.session.snapshotEvents()].reverse().find(item => item.type === 'assistant/message')
-      if (event === undefined || event.type !== 'assistant/message') {
+      if (event === undefined) {
         throw new Error(`graph_spawn: worker ${handle.agent.id} produced no response`)
       }
       const result = event.data.message.content

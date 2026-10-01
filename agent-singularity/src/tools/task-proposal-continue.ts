@@ -1,33 +1,10 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { ProposalContinuation } from '@dangosys/dsh-singularity-task-runtime'
-import { undeclaredParameters } from './proposal-parameters.ts'
-import { proposalStoreFor } from './proposal-store.ts'
+import { message, proposalStoreFor, sessionId, text, undeclaredParameters } from '../shared.ts'
 
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): SessionId {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('task_proposal_continue: missing agent id')
-  return id
-}
-
-/**
- * What one continuation settled, in the terms the caller acts on. A waiting
- * proposal is **not** an error and this text says so: the batch stays exactly
- * where it is, no child was created and nothing was spawned, and the caller
- * keeps working (or ends its turn) rather than asking again — a repeat of the
- * same request is answered by the same proposal.
- *
- * A root contract continued here is reported as what it is (A0 §2): the runtime
- * created the root task and its run, so the ids are named rather than folded
- * into the batch vocabulary. Nothing about a batch was admitted, and saying so
- * is the point — a reader that took this arm for an admission would go looking
- * for children that do not exist.
- */
+/** What one continuation settled, in the terms the caller acts on. A waiting proposal is **not** an error and this text says so: */
 function renderContinuation(continuation: ProposalContinuation): string {
   if (continuation.status === 'admitted') {
     return [
@@ -89,18 +66,17 @@ export function defineTaskProposalContinueTool(ctx: Context) {
     execute: async (args, exec) => {
       const undeclared = undeclaredParameters(args, ['proposalId'], 'task_proposal_continue')
       if (undeclared !== undefined) return undeclared
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'task_proposal_continue')
       let continuation: ProposalContinuation
       try {
         const storeId = await proposalStoreFor(ctx, caller)
         continuation = await ctx.taskRuntime.continueProposal(storeId, args.proposalId, caller, {
           // The registration id of this call, so the batch's drain does not wait
           // for the call that is asking (A3 §3.3). A caller without one — a test
-          // double — drains without the exclusion.
           ...(typeof exec.callId === 'string' && exec.callId.length > 0 ? { exec: { callId: String(exec.callId) } } : {}),
         })
       } catch (error) {
-        return `task_proposal_continue rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `task_proposal_continue rejected: ${message(error)}`
       }
       return renderContinuation(continuation)
     },

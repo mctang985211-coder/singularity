@@ -1,70 +1,35 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import {
-  Background,
-  BackgroundVariant,
-  Controls,
-  MiniMap,
-  ReactFlow,
-  ReactFlowProvider,
-  SelectionMode,
-  useReactFlow,
-  type NodeTypes,
-  type EdgeTypes,
-  type OnNodeDrag,
-  type OnNodesChange,
-  applyNodeChanges,
-} from '@xyflow/react'
-import '@xyflow/react/dist/style.css'
-import AgentNode from './components/AgentNode'
-import AgentEdge from './components/AgentEdge'
-import FocusPanel from './components/FocusPanel'
-import { ZoomTierTag } from './components/ZoomTierTag'
-import { pathIds, useStore, type FlowNode } from './store'
-import { GRAPH_ID } from './api'
+import { useEffect } from 'react'
+import GraphSwitcher from './components/GraphSwitcher'
+import { PANELS, panelById } from './panels'
+import { useStore } from './store'
 
-const nodeTypes = { agent: AgentNode } as NodeTypes
-const edgeTypes = { agent: AgentEdge } as EdgeTypes
-
-function Canvas() {
-  const nodes = useStore(s => s.nodes)
-  const edges = useStore(s => s.edges)
-  const paper = useStore(s => s.paper)
-  const selectedId = useStore(s => s.selectedId)
-  const error = useStore(s => s.error)
-  const setSelected = useStore(s => s.setSelected)
-  const setPaper = useStore(s => s.setPaper)
-  const moveNode = useStore(s => s.moveNode)
-  const setNodes = useStore(s => s.setNodes)
+export default function App() {
+  const tab = useStore(s => s.tab)
+  const setTab = useStore(s => s.setTab)
   const boot = useStore(s => s.boot)
-  const graph = useStore(s => s.graph)
-  const empty = useStore(s => s.empty)
+  const loadGraphs = useStore(s => s.loadGraphs)
   const applyChat = useStore(s => s.applyChat)
-  const [bootError, setBootError] = useState<string | null>(null)
-  const lastFittedGraphId = useRef<string | null>(null)
-  const { fitView } = useReactFlow()
+  const bootError = useStore(s => s.bootError)
+  const graphsError = useStore(s => s.graphsError)
+  const Active = panelById(tab).component
 
   useEffect(() => {
-    void boot().catch(error => setBootError(error instanceof Error ? error.message : String(error)))
+    void boot()
     return () => {
       useStore.getState().source?.close()
     }
   }, [boot])
 
   useEffect(() => {
-    if (graph === null || nodes.length === 0 || lastFittedGraphId.current === graph.id) return
-    const frame = requestAnimationFrame(() => {
-      fitView({ padding: 0.25, maxZoom: 1 })
-      lastFittedGraphId.current = graph.id
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [fitView, graph, nodes.length])
+    void loadGraphs()
+  }, [loadGraphs])
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       if (event.source !== window.parent || event.origin !== location.origin) return
       const data = event.data
       if (!data || typeof data !== 'object') return
-      if (data.graphId !== GRAPH_ID) return
+      if (data.graphId !== useStore.getState().graphId) return
       if (data.type === 'singularity:session-error') useStore.setState({ error: data.message })
       if (data.type === 'singularity:prompt-result') useStore.getState().finishPrompt(data.requestId, data.error)
       if (data.type === 'singularity:transcript') {
@@ -77,86 +42,38 @@ function Canvas() {
     return () => window.removeEventListener('message', onMessage)
   }, [applyChat])
 
-  const displayNodes = useMemo(() => {
-    const path = pathIds(selectedId, edges)
-    return nodes.map(n => ({
-      ...n,
-      className: selectedId !== null && !path.has(n.id) ? 'sg-dim' : undefined,
-    }))
-  }, [nodes, edges, selectedId])
-
-  const onNodeDragStop: OnNodeDrag = (_e, node) => {
-    void moveNode(node.id, node.position.x, node.position.y).catch(error => {
-      useStore.setState({ error: error instanceof Error ? error.message : String(error) })
-    })
-  }
-
-  const onNodesChange: OnNodesChange<FlowNode> = changes => {
-    setNodes(applyNodeChanges(changes, useStore.getState().nodes))
-  }
-
-  if (bootError !== null) {
-    return <div className="sg-boot">{bootError}</div>
-  }
-  if (error !== null) {
-    return <div className="sg-boot">{error}</div>
-  }
-  if (empty) {
-    return <div className="sg-boot">Select or create a graph</div>
-  }
-  if (graph === null) {
-    return <div className="sg-boot">Loading singularity map…</div>
-  }
-
   return (
-    <div className="sg-shell">
-      <ReactFlow
-        nodes={displayNodes}
-        edges={edges}
-        nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
-        minZoom={0.04}
-        maxZoom={2}
-        onlyRenderVisibleElements
-        panOnDrag={[1, 2]}
-        selectionOnDrag
-        selectionMode={SelectionMode.Partial}
-        nodesConnectable={false}
-        deleteKeyCode={null}
-        zoomOnDoubleClick={false}
-        snapToGrid={paper === 'grid'}
-        snapGrid={[24, 24]}
-        onNodeClick={(_e, node) => setSelected(node.id)}
-        onPaneClick={() => setSelected(null)}
-        onNodeDragStop={onNodeDragStop}
-        onNodesChange={onNodesChange}
-        fitView
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background
-          id="grid"
-          variant={paper === 'grid' ? BackgroundVariant.Lines : BackgroundVariant.Dots}
-          gap={paper === 'grid' ? 24 : 18}
-          color={paper === 'grid' ? 'var(--canvas-grid-fine)' : 'var(--canvas-dot)'}
-        />
-        <Controls showInteractive={false} />
-        <MiniMap pannable zoomable />
-        <ZoomTierTag />
-      </ReactFlow>
-      <div className="sg-toolbar" role="toolbar">
-        <button type="button" onClick={() => setPaper(paper === 'grid' ? 'plain' : 'grid')}>
-          {paper === 'grid' ? 'Grid' : 'Paper'}
-        </button>
-      </div>
-      <FocusPanel key={selectedId} />
+    <div className="sg-app">
+      <header className="sg-head">
+        <GraphSwitcher />
+        <nav className="sg-tabs" role="tablist" aria-label="Panels">
+          {PANELS.map(panel => (
+            <button
+              key={panel.id}
+              type="button"
+              role="tab"
+              aria-selected={panel.id === tab}
+              className={`sg-tab${panel.id === tab ? ' active' : ''}`}
+              onClick={() => setTab(panel.id)}
+            >
+              {panel.label}
+            </button>
+          ))}
+        </nav>
+      </header>
+      {bootError !== null && (
+        <div className="sg-banner" role="alert">
+          {bootError}
+        </div>
+      )}
+      {graphsError !== null && (
+        <div className="sg-banner" role="alert">
+          {graphsError}
+        </div>
+      )}
+      <main className="sg-panel-body">
+        <Active />
+      </main>
     </div>
-  )
-}
-
-export default function App() {
-  return (
-    <ReactFlowProvider>
-      <Canvas />
-    </ReactFlowProvider>
   )
 }

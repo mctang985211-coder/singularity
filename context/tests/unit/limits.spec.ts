@@ -120,10 +120,7 @@ describe('the output bound', () => {
     expect(projection.text).toMatch(/Omitted \d+ items\. read them by id\n- relevant evidence:/)
     const evidenceSection = projection.text.slice(projection.text.indexOf('- relevant evidence:'))
     const whole = evidenceSection.includes('- evidence `e-plan`') && evidenceSection.includes('- evidence `e-spec`')
-    expect(
-      whole || /Omitted \d+ items\. read them by id/.test(evidenceSection),
-      evidenceSection.slice(-400),
-    ).toBe(true)
+    expect(whole || /Omitted \d+ items\. read them by id/.test(evidenceSection), evidenceSection.slice(-400)).toBe(true)
   })
 })
 
@@ -196,7 +193,9 @@ describe('cancellation', () => {
     const controller = new AbortController()
     controller.abort()
     await expect(stack.service.taskRead('s-g1', controller.signal)).rejects.toThrow()
-    await expect(stack.service.contextRead('s-g1', { kind: 'task', ref: 't-root' }, controller.signal)).rejects.toThrow()
+    await expect(
+      stack.service.contextRead('s-g1', { kind: 'task', ref: 't-root' }, controller.signal),
+    ).rejects.toThrow()
     expect(expectRefused(await stack.service.taskRead('s-stranger'), 'unbound')).toBeDefined()
   })
 })

@@ -23,7 +23,7 @@
       "event": "layout/event",
       "payload": "LayoutEvent",
       "digest": "f6c87e2eaf9370beacbacdca1a7a37bbd427a041304bd24c7171f0669cf114fd",
-      "source": "layout/src/index.ts"
+      "source": "graph/src/layout.ts"
     },
     {
       "key": "event:task/event",

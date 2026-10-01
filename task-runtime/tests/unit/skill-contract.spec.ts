@@ -101,12 +101,13 @@ describe('skillContractDefects', () => {
   })
 
   test('the kind of problem is named: unknown version, unknown field, shape', () => {
-    expect(skillContractDefects(execution({ contractVersion: 2 as never })).map(defect => defect.code))
-      .toEqual(['sidecar-unknown-version'])
-    expect(skillContractDefects({ ...execution(), effort: 'high' }).map(defect => defect.code))
-      .toEqual(['sidecar-unknown-field'])
-    expect(skillContractDefects(execution({ precondition: '' })).map(defect => defect.code))
-      .toEqual(['sidecar-shape'])
+    expect(skillContractDefects(execution({ contractVersion: 2 as never })).map(defect => defect.code)).toEqual([
+      'sidecar-unknown-version',
+    ])
+    expect(skillContractDefects({ ...execution(), effort: 'high' }).map(defect => defect.code)).toEqual([
+      'sidecar-unknown-field',
+    ])
+    expect(skillContractDefects(execution({ precondition: '' })).map(defect => defect.code)).toEqual(['sidecar-shape'])
   })
 
   test('text fields are accepted verbatim and only checked for blankness', () => {
@@ -129,8 +130,9 @@ describe('skillContractDefects', () => {
     expect(reasons(skillContractDefects(execution({ contractVersion: 2 as never })))).toEqual([
       'sidecar.contractVersion 2 is not a version this build reads (1)',
     ])
-    expect(reasons(skillContractDefects({ type: 'execution' }))[0])
-      .toBe('sidecar.contractVersion is missing; this build reads and writes version 1')
+    expect(reasons(skillContractDefects({ type: 'execution' }))[0]).toBe(
+      'sidecar.contractVersion is missing; this build reads and writes version 1',
+    )
   })
 
   test('an unknown type is refused with the vocabulary named', () => {
@@ -201,75 +203,118 @@ describe('skillContractDefects', () => {
   })
 
   test('ports are closed objects, and one list cannot name a port twice', () => {
-    expect(reasons(skillContractDefects(execution({
-      inputs: [{ name: 'ball', description: 'the Ball', required: true, type: 'string' } as never],
-    })))).toEqual([
-      'sidecar.inputs[0] declares unknown field "type"; a port carries name, description, required',
-    ])
-    expect(reasons(skillContractDefects(execution({
-      inputs: [{ name: 'ball', description: 'the Ball', required: 'yes' } as never],
-    })))).toEqual([
-      'sidecar.inputs[0].required must be a boolean',
-    ])
-    expect(reasons(skillContractDefects(execution({
-      outputs: [
-        { name: 'log', description: 'a log', required: true },
-        { name: 'log', description: 'another log', required: false },
-      ],
-    })))).toEqual([
-      'sidecar.outputs[1] duplicates port "log"',
-    ])
+    expect(
+      reasons(
+        skillContractDefects(
+          execution({
+            inputs: [{ name: 'ball', description: 'the Ball', required: true, type: 'string' } as never],
+          }),
+        ),
+      ),
+    ).toEqual(['sidecar.inputs[0] declares unknown field "type"; a port carries name, description, required'])
+    expect(
+      reasons(
+        skillContractDefects(
+          execution({
+            inputs: [{ name: 'ball', description: 'the Ball', required: 'yes' } as never],
+          }),
+        ),
+      ),
+    ).toEqual(['sidecar.inputs[0].required must be a boolean'])
+    expect(
+      reasons(
+        skillContractDefects(
+          execution({
+            outputs: [
+              { name: 'log', description: 'a log', required: true },
+              { name: 'log', description: 'another log', required: false },
+            ],
+          }),
+        ),
+      ),
+    ).toEqual(['sidecar.outputs[1] duplicates port "log"'])
     expect(reasons(skillContractDefects(execution({ inputs: 'ball' as never })))).toEqual([
       'sidecar.inputs must be an array of ports',
     ])
   })
 
   test('the content identity needs both digests in their exact form', () => {
-    expect(reasons(skillContractDefects(execution({
-      content: { skillMdSha256: 'ABC', resources: [] },
-    })))).toEqual([
-      'sidecar.content.skillMdSha256 must be a lowercase 64-character hex digest',
-    ])
-    expect(reasons(skillContractDefects(execution({
-      content: { skillMdSha256: DIGEST_A, resources: [{ path: 'references/a.md', sha256: 'zz' }] },
-    })))).toEqual([
-      'sidecar.content.resources[0].sha256 must be a lowercase 64-character hex digest',
-    ])
-    expect(reasons(skillContractDefects(execution({
-      content: { skillMdSha256: DIGEST_A, resources: [{ path: 'docs/a.md', sha256: DIGEST_B }] },
-    })))).toEqual([
+    expect(
+      reasons(
+        skillContractDefects(
+          execution({
+            content: { skillMdSha256: 'ABC', resources: [] },
+          }),
+        ),
+      ),
+    ).toEqual(['sidecar.content.skillMdSha256 must be a lowercase 64-character hex digest'])
+    expect(
+      reasons(
+        skillContractDefects(
+          execution({
+            content: { skillMdSha256: DIGEST_A, resources: [{ path: 'references/a.md', sha256: 'zz' }] },
+          }),
+        ),
+      ),
+    ).toEqual(['sidecar.content.resources[0].sha256 must be a lowercase 64-character hex digest'])
+    expect(
+      reasons(
+        skillContractDefects(
+          execution({
+            content: { skillMdSha256: DIGEST_A, resources: [{ path: 'docs/a.md', sha256: DIGEST_B }] },
+          }),
+        ),
+      ),
+    ).toEqual([
       'sidecar.content.resources[0].path "docs/a.md" is not a supported resource path (references/<file> or scripts/<file>)',
     ])
-    expect(reasons(skillContractDefects(execution({
-      content: { skillMdSha256: DIGEST_A, resources: [{ path: 'references/a.md', sha256: DIGEST_B, size: 4 } as never] },
-    })))).toEqual([
-      'sidecar.content.resources[0] declares unknown field "size"; a resource identity carries path, sha256',
-    ])
+    expect(
+      reasons(
+        skillContractDefects(
+          execution({
+            content: {
+              skillMdSha256: DIGEST_A,
+              resources: [{ path: 'references/a.md', sha256: DIGEST_B, size: 4 } as never],
+            },
+          }),
+        ),
+      ),
+    ).toEqual(['sidecar.content.resources[0] declares unknown field "size"; a resource identity carries path, sha256'])
   })
 
   test('the resource list is sorted by path and names each file once', () => {
-    expect(reasons(skillContractDefects(execution({
-      content: {
-        skillMdSha256: DIGEST_A,
-        resources: [
-          { path: 'references/b.md', sha256: DIGEST_B },
-          { path: 'references/a.md', sha256: DIGEST_B },
-        ],
-      },
-    })))).toEqual([
+    expect(
+      reasons(
+        skillContractDefects(
+          execution({
+            content: {
+              skillMdSha256: DIGEST_A,
+              resources: [
+                { path: 'references/b.md', sha256: DIGEST_B },
+                { path: 'references/a.md', sha256: DIGEST_B },
+              ],
+            },
+          }),
+        ),
+      ),
+    ).toEqual([
       'sidecar.content.resources[1] path "references/a.md" precedes "references/b.md"; the list must be sorted by path',
     ])
-    expect(reasons(skillContractDefects(execution({
-      content: {
-        skillMdSha256: DIGEST_A,
-        resources: [
-          { path: 'scripts/x.sh', sha256: DIGEST_B },
-          { path: 'scripts/x.sh', sha256: DIGEST_B },
-        ],
-      },
-    })))).toEqual([
-      'sidecar.content.resources[1] duplicates "scripts/x.sh"',
-    ])
+    expect(
+      reasons(
+        skillContractDefects(
+          execution({
+            content: {
+              skillMdSha256: DIGEST_A,
+              resources: [
+                { path: 'scripts/x.sh', sha256: DIGEST_B },
+                { path: 'scripts/x.sh', sha256: DIGEST_B },
+              ],
+            },
+          }),
+        ),
+      ),
+    ).toEqual(['sidecar.content.resources[1] duplicates "scripts/x.sh"'])
   })
 
   test('a knowledge sidecar carries source, scope and a recognized content check', () => {
@@ -279,29 +324,35 @@ describe('skillContractDefects', () => {
     expect(reasons(skillContractDefects(knowledge({ scope: undefined as never })))).toEqual([
       'sidecar.scope must be a non-blank string',
     ])
-    expect(reasons(skillContractDefects(knowledge({ contentCheck: { kind: 'script', command: 'x' } as never })))).toEqual([
-      'sidecar.contentCheck.kind "script" is not one of command',
-    ])
+    expect(
+      reasons(skillContractDefects(knowledge({ contentCheck: { kind: 'script', command: 'x' } as never }))),
+    ).toEqual(['sidecar.contentCheck.kind "script" is not one of command'])
     expect(reasons(skillContractDefects(knowledge({ contentCheck: { kind: 'command', command: ' ' } })))).toEqual([
       'sidecar.contentCheck.command must be a non-blank string',
     ])
-    expect(reasons(skillContractDefects(knowledge({ contentCheck: { kind: 'command', command: 'x', timeoutMs: 5 } as never })))).toEqual([
-      'sidecar.contentCheck declares unknown field "timeoutMs"; a content check carries kind, command',
-    ])
+    expect(
+      reasons(
+        skillContractDefects(knowledge({ contentCheck: { kind: 'command', command: 'x', timeoutMs: 5 } as never })),
+      ),
+    ).toEqual(['sidecar.contentCheck declares unknown field "timeoutMs"; a content check carries kind, command'])
   })
 
   test('every defect of one sidecar is reported, not only the first', () => {
-    expect(reasons(skillContractDefects({
-      contractVersion: 3,
-      type: 'execution',
-      capabilities: [],
-      precondition: '',
-      inputs: [],
-      outputs: [],
-      requiredTools: [],
-      verifier: { ref: '' },
-      content: { skillMdSha256: 'nope', resources: [] },
-    }))).toEqual([
+    expect(
+      reasons(
+        skillContractDefects({
+          contractVersion: 3,
+          type: 'execution',
+          capabilities: [],
+          precondition: '',
+          inputs: [],
+          outputs: [],
+          requiredTools: [],
+          verifier: { ref: '' },
+          content: { skillMdSha256: 'nope', resources: [] },
+        }),
+      ),
+    ).toEqual([
       'sidecar.contractVersion 3 is not a version this build reads (1)',
       'sidecar.capabilities must be a non-empty array of capability names',
       'sidecar.precondition must be a non-blank string',
@@ -337,19 +388,25 @@ describe('skill sidecar identity', () => {
     } as ExecutionSkillSidecar
     expect(skillContractDigest(reordered)).toBe(EXECUTION_SHA256)
     expect(skillContractDigest(execution({ requiredTools: ['bash', 'read', 'job_output'] }))).not.toBe(EXECUTION_SHA256)
-    expect(skillContractDigest(execution({
-      content: { skillMdSha256: DIGEST_B, resources: [] },
-    }))).not.toBe(EXECUTION_SHA256)
+    expect(
+      skillContractDigest(
+        execution({
+          content: { skillMdSha256: DIGEST_B, resources: [] },
+        }),
+      ),
+    ).not.toBe(EXECUTION_SHA256)
   })
 
   test('the content digest describes exactly the bytes the identity names', () => {
-    expect(skillContentDigest({ skillMdSha256: DIGEST_A, resources: [] }))
-      .toBe(skillContentDigest({ skillMdSha256: DIGEST_A, resources: [] }))
-    expect(skillContentDigest({ skillMdSha256: DIGEST_A, resources: [] }))
-      .not.toBe(skillContentDigest({
+    expect(skillContentDigest({ skillMdSha256: DIGEST_A, resources: [] })).toBe(
+      skillContentDigest({ skillMdSha256: DIGEST_A, resources: [] }),
+    )
+    expect(skillContentDigest({ skillMdSha256: DIGEST_A, resources: [] })).not.toBe(
+      skillContentDigest({
         skillMdSha256: DIGEST_A,
         resources: [{ path: 'references/a.md', sha256: DIGEST_B }],
-      }))
+      }),
+    )
   })
 })
 

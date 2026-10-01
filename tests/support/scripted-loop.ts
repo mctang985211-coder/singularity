@@ -71,8 +71,8 @@ import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
 import { SingularityContextService } from '../../context/src/index.ts'
 import { EvolutionService, modelSelectionOf } from '../../evolution/src/index.ts'
-import { ProposalReviewService } from '../../agent-singularity/src/proposal-review.ts'
-import { supervisorDelegationSource } from '../../agent-singularity/src/review-agent-ledger.ts'
+import { ProposalReviewService } from '../../agent-singularity/src/services/proposal-review.ts'
+import { supervisorDelegationSource } from '../../agent-singularity/src/coordination/ledger.ts'
 import { defineTaskRecoverTool } from '../../agent-singularity/src/tools/task-recover.ts'
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
 import { defineEvolutionCandidateTool } from '../../agent-singularity/src/tools/evolution-candidate.ts'
@@ -455,7 +455,7 @@ export interface ScriptedLoop {
   /**
    * Put one **plugin-sourced** message on a session's log and let its turn read it
    * — {@link ScriptedLoop.userSays} in the runtime's own voice (`notify`'s shape,
-   * `source.kind === 'plugin'`). A case that has to drive a root's turn *without*
+   * `source.kind === 'task-runtime'`). A case that has to drive a root's turn *without*
    * any request of the person's on that session's log uses this: what the session
    * holds afterwards is a notice, which is exactly what a root contract's origin
    * must not accept (A0 §1.10).
@@ -1141,7 +1141,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
   pluginSays(text: string, sessionId: SessionId | string = this.primary): void {
     this.agent(sessionId).followup(createUserMessage({
       content: [{ type: 'text', text }],
-      source: { kind: 'plugin', plugin: 'task-runtime', form: 'notice', summary: boundContextSummary(text) },
+      source: { kind: 'task-runtime', form: 'notice', summary: boundContextSummary(text) },
     }))
   }
 

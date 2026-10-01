@@ -1,7 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
+import { EnvRecord } from "@dangosys/dsh-env-builder";
 import * as _dangosys_dsh_singularity_graph0 from "@dangosys/dsh-singularity-graph";
-import * as _dangosys_dsh_singularity_layout0 from "@dangosys/dsh-singularity-layout";
 
 //#region src/types.d.ts
 interface GraphRecord {
@@ -57,6 +57,8 @@ interface CreateGraphResult {
 }
 //#endregion
 //#region src/service/state.d.ts
+/** Whether an existing environment can be bound by a new graph: it has repositories, no graph, and no sessions. */
+declare function isReusableEnv(env: Pick<EnvRecord, 'id' | 'components' | 'sessionIds'>, boundEnvIds: ReadonlySet<string>): boolean;
 declare class GraphsState {
   private value;
   constructor(snapshot?: GraphsSnapshot);
@@ -84,13 +86,7 @@ declare module '@deepseek-ai/cordis' {
     'graphs/selected'(graph: GraphRecord): void;
   }
 }
-/**
- * The registry's own answer when no graph publishes a session, as a
- * distinguishable value: `graphForSession` reports this *fact* as this error,
- * so a reader that has to tell the fact apart from a failed read (the graph
- * registry or one of its stores being unreadable) can do so by code instead of
- * by message, and keeps a read failure a failure.
- */
+/** The registry's own answer when no graph publishes a session; distinguishable by code from a failed read. */
 declare const SESSION_NOT_IN_GRAPH = "graph-session-not-found";
 /** See {@link SESSION_NOT_IN_GRAPH}: the one error that means "no graph holds this session". */
 declare class SessionNotInGraphError extends Error {
@@ -99,51 +95,37 @@ declare class SessionNotInGraphError extends Error {
 }
 declare class GraphsService extends Service {
   static inject: string[];
-  private readonly ready;
+  private readonly stores;
   private readonly storeId;
-  private handle;
-  private state;
-  private nextSeq;
-  private writes;
+  private readonly ready;
   private transitions;
   constructor(ctx: Context);
   snapshot(): Promise<GraphsSnapshot>;
+  /** The selected graph; throws when no graph is selected. */
   current(): Promise<GraphRecord>;
   get(id: string): Promise<GraphRecord>;
   view(id: string): Promise<{
     meta: GraphRecord;
     graph: _dangosys_dsh_singularity_graph0.GraphSnapshot;
-    layout: _dangosys_dsh_singularity_layout0.LayoutSnapshot;
+    layout: _dangosys_dsh_singularity_graph0.LayoutSnapshot;
   }>;
   list(): Promise<readonly GraphRecord[]>;
   select(id: string): Promise<GraphRecord>;
   create(request: CreateGraphRequest): Promise<CreateGraphResult>;
-  private isReusable;
+  private resolveEnv;
   private assertReusable;
   private workspaceTaken;
   markReady(id: string): Promise<GraphRecord>;
   graphForSession(sessionId: SessionId): Promise<GraphRecord>;
   remove(id: string): Promise<void>;
-  /**
-   * One graph becomes this process's running environment, in the fixed order
-   * (A2 §E): the root session's graph queue is drained by `ensureRoot` first,
-   * then the root store's recovery barrier runs to its end — the fact
-   * reconciliation, every known session's gate initialization and the driver
-   * registrations the pass owes, never the batch execution behind them — and
-   * only then does this process switch its stores and environment and deliver
-   * input. Boot recovery of the selected graph goes through here too, not
-   * through an asynchronous selected-listener.
-   *
-   * A barrier failure leaves the commit to the caller: `select` has not
-   * committed (the previous selection stands), `remove`'s re-activation of the
-   * next graph fails loudly, and `create` keeps the registered graph selected
-   * and shows the failure rather than pretending the old selection stood.
-   */
+  /** Resolved lazily: task-runtime injects graphs, so a hard inject here would deadlock the plugin loader. */
+  private taskRuntime;
+  /** One graph becomes this process's running environment: recovery barrier, then store and env switch (A2 §E). */
   private activate;
   private commit;
   private transition;
-  private open;
-  private header;
+  /** The live registry reducer; every read goes through `ready` so a failed constructor open stays caller-visible. */
+  private state;
 }
 //#endregion
-export { CreateGraphRequest, CreateGraphResult, GraphArchive, GraphRecord, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError };
+export { CreateGraphRequest, CreateGraphResult, GraphArchive, GraphRecord, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, isReusableEnv };

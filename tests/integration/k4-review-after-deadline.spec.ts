@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { REVIEWER_BASELINE } from '../../agent-singularity/src/tools/review-agent.ts'
-import { countReviewAgentRuns, admitReviewAgent, readReviewAgentAttempts, readReviewerDelegation } from '../../agent-singularity/src/review-agent-ledger.ts'
-import { installReviewAgentAutoTrigger } from '../../agent-singularity/src/review-agent-scan.ts'
+import {
+  countReviewAgentRuns,
+  admitReviewAgent,
+  readReviewAgentAttempts,
+  readReviewerDelegation,
+} from '../../agent-singularity/src/coordination/ledger.ts'
+import { installReviewAgentAutoTrigger } from '../../agent-singularity/src/coordination/review-scan.ts'
 import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type ScriptedLoop } from '../support/scripted-loop.ts'
 
 /**

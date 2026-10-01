@@ -5,7 +5,14 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
-import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, TaskInstance, TaskRun, VerificationResult } from '../../../task/src/index.ts'
+import type {
+  AcceptanceCriterion,
+  EvidenceBundle,
+  TaskEvent,
+  TaskInstance,
+  TaskRun,
+  VerificationResult,
+} from '../../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
 import { sha256Hex } from '../../../task/src/contract.ts'
 import { CompositeVerifier } from '../../../verifier/src/composite-verifier.ts'
@@ -76,7 +83,11 @@ interface SpawnCall {
 }
 
 function harness(
-  options: { config?: Partial<Config>; verifier?: 'pass' | 'by-objective' | 'timeout' | 'absent' | 'real-composite'; spawnError?: string } = {},
+  options: {
+    config?: Partial<Config>
+    verifier?: 'pass' | 'by-objective' | 'timeout' | 'absent' | 'real-composite'
+    spawnError?: string
+  } = {},
   sharedSessions?: Map<string, StoredSession>,
 ) {
   const sessions = sharedSessions ?? new Map<string, StoredSession>()
@@ -94,7 +105,9 @@ function harness(
       sessions.set(header.id, stored)
       return {
         read: async () => ({ events: stored.events }),
-        append: async (events: SessionEvent[]) => { stored.events.push(...events) },
+        append: async (events: SessionEvent[]) => {
+          stored.events.push(...events)
+        },
         flush: async () => {},
         close: async () => {},
       }
@@ -104,7 +117,9 @@ function harness(
       if (stored === undefined) throw new Error('missing session ' + id)
       return {
         read: async () => ({ events: stored.events }),
-        append: async (events: SessionEvent[]) => { stored.events.push(...events) },
+        append: async (events: SessionEvent[]) => {
+          stored.events.push(...events)
+        },
         flush: async () => {},
         close: async () => {},
       }
@@ -135,7 +150,8 @@ function harness(
       })
     },
     steer: (message: { id: string; content: readonly { text?: string }[] }) => {
-      if (relayed.some(item => item.messageId === message.id)) throw new Error(`message "${message.id}" is already pending`)
+      if (relayed.some(item => item.messageId === message.id))
+        throw new Error(`message "${message.id}" is already pending`)
       relayed.push({
         sessionId: ROOT_SESSION,
         messageId: message.id,
@@ -148,76 +164,89 @@ function harness(
     resumeWorkerAgent: vi.fn(async (request: { sessionId: string }) => {
       resumed.push(request.sessionId)
       const agent = {
-        id: request.sessionId, cancel: () => {},
-        followup: (message: { content: readonly { text?: string }[] }) => {
-          notifications.push({ sessionId: request.sessionId, text: message.content.map(block => block.text ?? '').join('\n') })
-        },
-      }
-      liveAgents.set(request.sessionId, agent)
-      return { agent, dispose: async () => {} }
-    }),
-    spawn: vi.fn(async (_parent: unknown, request: {
-      sessionId: string
-      name: string
-      prompt?: Array<{ type: 'text'; text: string }>
-      contract?: string
-      taskWorker?: boolean
-      agentPreset?: string
-      permissionPreset?: string
-      cwd?: string
-      agentOptions?: SpawnCall['agentOptions']
-      grant?: SpawnCall['grant']
-    }) => {
-      if (options.spawnError !== undefined) throw new Error(options.spawnError)
-      spawned.push({
-        sessionId: request.sessionId,
-        name: request.name,
-        ...(request.prompt === undefined ? {} : { prompt: request.prompt.map(block => block.text).join('\n') }),
-        // A delegated child is spawned as a task worker (A2): the request carries
-        // no prompt and no contract text of its own — the contract is the context
-        // assembly's, read from the store at each model request.
-        ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
-        ...(request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset }),
-        ...(request.permissionPreset === undefined ? {} : { permissionPreset: request.permissionPreset }),
-        ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
-        ...(request.agentOptions === undefined ? {} : { agentOptions: request.agentOptions }),
-        ...(request.grant === undefined ? {} : { grant: request.grant }),
-      })
-      // `cancel` converges the agent to idle, as the real loop's does: a worker
-      // that is mid-turn when the batch is cancelled resolves its idle wait, and
-      // the wait that saw the abort reports it (A3 §3.7).
-      let releaseIdle: (() => void) | undefined
-      const agent = {
         id: request.sessionId,
-        cancel: vi.fn(() => {
-          cancelled.push(request.sessionId)
-          releaseIdle?.()
-        }),
-        whenIdle: vi.fn(() => new Promise<void>((resolve, reject) => {
-          releaseIdle = resolve
-          // A behaviour that throws must reach the driver as a failed worker, as
-          // the old whenIdle did — swallowing it here would hide the failure the
-          // run is supposed to report.
-          void (idleBehavior ?? defaultIdle)(request.sessionId).then(resolve, reject)
-        })),
+        cancel: () => {},
         followup: (message: { content: readonly { text?: string }[] }) => {
           notifications.push({
             sessionId: request.sessionId,
             text: message.content.map(block => block.text ?? '').join('\n'),
           })
         },
-        steer: (message: { id: string; content: readonly { text?: string }[] }) => {
-          if (relayed.some(item => item.messageId === message.id)) throw new Error(`message "${message.id}" is already pending`)
-          relayed.push({
-            sessionId: request.sessionId,
-            messageId: message.id,
-            text: message.content.map(block => block.text ?? '').join('\n'),
-          })
-        },
       }
       liveAgents.set(request.sessionId, agent)
-      return { agent, dispose: vi.fn(async () => {}) }
+      return { agent, dispose: async () => {} }
     }),
+    spawn: vi.fn(
+      async (
+        _parent: unknown,
+        request: {
+          sessionId: string
+          name: string
+          prompt?: Array<{ type: 'text'; text: string }>
+          contract?: string
+          taskWorker?: boolean
+          agentPreset?: string
+          permissionPreset?: string
+          cwd?: string
+          agentOptions?: SpawnCall['agentOptions']
+          grant?: SpawnCall['grant']
+        },
+      ) => {
+        if (options.spawnError !== undefined) throw new Error(options.spawnError)
+        spawned.push({
+          sessionId: request.sessionId,
+          name: request.name,
+          ...(request.prompt === undefined ? {} : { prompt: request.prompt.map(block => block.text).join('\n') }),
+          // A delegated child is spawned as a task worker (A2): the request carries
+          // no prompt and no contract text of its own — the contract is the context
+          // assembly's, read from the store at each model request.
+          ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
+          ...(request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset }),
+          ...(request.permissionPreset === undefined ? {} : { permissionPreset: request.permissionPreset }),
+          ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+          ...(request.agentOptions === undefined ? {} : { agentOptions: request.agentOptions }),
+          ...(request.grant === undefined ? {} : { grant: request.grant }),
+        })
+        // `cancel` converges the agent to idle, as the real loop's does: a worker
+        // that is mid-turn when the batch is cancelled resolves its idle wait, and
+        // the wait that saw the abort reports it (A3 §3.7).
+        let releaseIdle: (() => void) | undefined
+        const agent = {
+          id: request.sessionId,
+          cancel: vi.fn(() => {
+            cancelled.push(request.sessionId)
+            releaseIdle?.()
+          }),
+          whenIdle: vi.fn(
+            () =>
+              new Promise<void>((resolve, reject) => {
+                releaseIdle = resolve
+                // A behaviour that throws must reach the driver as a failed worker, as
+                // the old whenIdle did — swallowing it here would hide the failure the
+                // run is supposed to report.
+                void (idleBehavior ?? defaultIdle)(request.sessionId).then(resolve, reject)
+              }),
+          ),
+          followup: (message: { content: readonly { text?: string }[] }) => {
+            notifications.push({
+              sessionId: request.sessionId,
+              text: message.content.map(block => block.text ?? '').join('\n'),
+            })
+          },
+          steer: (message: { id: string; content: readonly { text?: string }[] }) => {
+            if (relayed.some(item => item.messageId === message.id))
+              throw new Error(`message "${message.id}" is already pending`)
+            relayed.push({
+              sessionId: request.sessionId,
+              messageId: message.id,
+              text: message.content.map(block => block.text ?? '').join('\n'),
+            })
+          },
+        }
+        liveAgents.set(request.sessionId, agent)
+        return { agent, dispose: vi.fn(async () => {}) }
+      },
+    ),
     /**
      * The relay the batch-end message rides (K1 §2): `delivered` the first time,
      * `already-present` when the target's own fold holds the identity, and
@@ -230,8 +259,10 @@ function harness(
       if (relayed.some(item => item.messageId === intent.messageId)) {
         return { messageId: intent.messageId, status: 'already-present' as const }
       }
-      ;(intent.targetSessionId === ROOT_SESSION ? parentAgent : liveAgents.get(intent.targetSessionId) as { steer: (m: unknown) => void })
-        .steer({ id: intent.messageId, content: [{ text: intent.text }] })
+      ;(intent.targetSessionId === ROOT_SESSION
+        ? parentAgent
+        : (liveAgents.get(intent.targetSessionId) as { steer: (m: unknown) => void })
+      ).steer({ id: intent.messageId, content: [{ text: intent.text }] })
       return { messageId: intent.messageId, status: 'delivered' as const }
     }),
   }
@@ -254,7 +285,9 @@ function harness(
     verifierIds: vi.fn(() => ['command', 'composite', 'review']),
     verifyRun: vi.fn(async (storeId: string, runId: string): Promise<EvidenceBundle> => {
       if (options.verifier === 'timeout') {
-        throw new Error(`task-runtime: verification of run "${runId}" timed out after 615000ms (verifier deadline 600000ms + 15000ms safety margin)`)
+        throw new Error(
+          `task-runtime: verification of run "${runId}" timed out after 615000ms (verifier deadline 600000ms + 15000ms safety margin)`,
+        )
       }
       const run = await taskService.runIn(storeId, runId)
       const instance = await taskService.taskIn(storeId, run.taskId)
@@ -358,7 +391,9 @@ function harness(
     notifications,
     relayed,
     graphs,
-    setIdleBehavior: (behavior: (sessionId: string) => Promise<void>) => { idleBehavior = behavior },
+    setIdleBehavior: (behavior: (sessionId: string) => Promise<void>) => {
+      idleBehavior = behavior
+    },
   }
 }
 
@@ -469,16 +504,22 @@ async function settleRunNested(
   }
   await task.markRunStatusIn(storeId, taskId, runId, 'verifying', actor)
   await task.recordEvidenceIn(storeId, bundle, 'nested-verifier')
-  await task.markRunStatusIn(storeId, taskId, runId, verdict === 'pass' ? 'verified' : 'failed', actor, { reason: 'nested verdict' })
-  await task.recordReviewIn(storeId, {
-    taskId,
-    runId,
-    sessionId: actor,
-    outcome: verdict === 'pass' ? 'verified' : 'failed',
-    evidenceRefs: [evidenceId],
-    anomalies: [],
-    ...(verdict === 'fail' ? { localizedCause: 'nested verdict' } : {}),
-  }, actor)
+  await task.markRunStatusIn(storeId, taskId, runId, verdict === 'pass' ? 'verified' : 'failed', actor, {
+    reason: 'nested verdict',
+  })
+  await task.recordReviewIn(
+    storeId,
+    {
+      taskId,
+      runId,
+      sessionId: actor,
+      outcome: verdict === 'pass' ? 'verified' : 'failed',
+      evidenceRefs: [evidenceId],
+      anomalies: [],
+      ...(verdict === 'fail' ? { localizedCause: 'nested verdict' } : {}),
+    },
+    actor,
+  )
   return evidenceId
 }
 
@@ -496,51 +537,85 @@ async function seedProducer(
   const taskId = `t-producer-${options.outcome}`
   const runId = `r-producer-${options.outcome}`
   const status: VerificationResult['status'] = options.outcome === 'verified' ? 'pass' : 'fail'
-  await h.task.createTaskIn(STORE, {
-    taskId,
-    definitionRef: { taskType: 'producer', version: 1 },
-    objective: 'produce the reference product',
-    depth: 0,
-    acceptanceCriteria: [{
-      criterionId: 'producer-1',
-      description: 'the product exists',
-      verificationMode: 'deterministic',
-      requiredEvidence: [],
-      mandatory: true,
-      command: 'true',
-    }],
-    requestedCapabilities: [],
-    decompositionStatus: 'leaf',
-    status: 'created',
-    runIds: [],
-    childTaskIds: [],
-  }, 'tester')
+  await h.task.createTaskIn(
+    STORE,
+    {
+      taskId,
+      definitionRef: { taskType: 'producer', version: 1 },
+      objective: 'produce the reference product',
+      depth: 0,
+      acceptanceCriteria: [
+        {
+          criterionId: 'producer-1',
+          description: 'the product exists',
+          verificationMode: 'deterministic',
+          requiredEvidence: [],
+          mandatory: true,
+          command: 'true',
+        },
+      ],
+      requestedCapabilities: [],
+      decompositionStatus: 'leaf',
+      status: 'created',
+      runIds: [],
+      childTaskIds: [],
+    },
+    'tester',
+  )
   await h.task.admitTaskIn(STORE, taskId, 'tester', { decompositionStatus: 'leaf' })
-  await h.task.startRunIn(STORE, {
-    runId,
-    taskId,
-    sessionId: 's-producer',
-    capabilitySnapshot: [],
-    artifacts: [],
-    verifierResults: [],
-    // Born active like every run this build creates (A3 §1.1): a phase-less run
-    // is an old record, and admission refuses to decompose under one.
-    executionPhase: 'active',
-    status: 'running',
-    startedAt: new Date().toISOString(),
-  }, 'tester')
+  await h.task.startRunIn(
+    STORE,
+    {
+      runId,
+      taskId,
+      sessionId: 's-producer',
+      capabilitySnapshot: [],
+      artifacts: [],
+      verifierResults: [],
+      // Born active like every run this build creates (A3 §1.1): a phase-less run
+      // is an old record, and admission refuses to decompose under one.
+      executionPhase: 'active',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    },
+    'tester',
+  )
   await h.task.markRunStatusIn(STORE, taskId, runId, 'verifying', 'tester')
-  await h.task.recordEvidenceIn(STORE, {
-    evidenceId: `e-${runId}`,
-    taskRunId: runId,
+  await h.task.recordEvidenceIn(
+    STORE,
+    {
+      evidenceId: `e-${runId}`,
+      taskRunId: runId,
+      taskId,
+      artifacts: [
+        {
+          artifactId: options.artifactId ?? `a-${options.kind}`,
+          kind: options.kind,
+          uri: `products/${options.kind}.jsonl`,
+        },
+      ],
+      verifierResults: [{ criterionId: 'producer-1', status, verifierId: 'fake-verifier' }],
+      claims: [
+        {
+          claimId: `claim-${options.kind}`,
+          criterionId: 'producer-1',
+          status,
+          verifierId: 'fake-verifier',
+          artifactRefs: [],
+        },
+      ],
+      generatedAt: new Date().toISOString(),
+    },
+    'tester',
+  )
+  await h.task.markRunStatusIn(
+    STORE,
     taskId,
-    artifacts: [{ artifactId: options.artifactId ?? `a-${options.kind}`, kind: options.kind, uri: `products/${options.kind}.jsonl` }],
-    verifierResults: [{ criterionId: 'producer-1', status, verifierId: 'fake-verifier' }],
-    claims: [{ claimId: `claim-${options.kind}`, criterionId: 'producer-1', status, verifierId: 'fake-verifier', artifactRefs: [] }],
-    generatedAt: new Date().toISOString(),
-  }, 'tester')
-  await h.task.markRunStatusIn(STORE, taskId, runId, options.outcome, 'tester',
-    options.outcome === 'failed' ? { reason: 'the producer failed' } : {})
+    runId,
+    options.outcome,
+    'tester',
+    options.outcome === 'failed' ? { reason: 'the producer failed' } : {},
+  )
   return { taskId, runId }
 }
 
@@ -557,31 +632,39 @@ async function createAcceptanceParent(
   await h.task.createStore(STORE)
   const taskId = 't-parent'
   const runId = 'r-parent'
-  await h.task.createTaskIn(STORE, {
-    taskId,
-    definitionRef: { taskType: 'root', version: 1 },
-    objective: 'prove the combination, not only the parts',
-    depth: 0,
-    acceptanceCriteria,
-    requestedCapabilities: [],
-    decompositionStatus: 'decomposable',
-    status: 'created',
-    runIds: [],
-    childTaskIds: [],
-  }, 'tester')
+  await h.task.createTaskIn(
+    STORE,
+    {
+      taskId,
+      definitionRef: { taskType: 'root', version: 1 },
+      objective: 'prove the combination, not only the parts',
+      depth: 0,
+      acceptanceCriteria,
+      requestedCapabilities: [],
+      decompositionStatus: 'decomposable',
+      status: 'created',
+      runIds: [],
+      childTaskIds: [],
+    },
+    'tester',
+  )
   await h.task.admitTaskIn(STORE, taskId, 'tester', { decompositionStatus: 'decomposable' })
-  await h.task.startRunIn(STORE, {
-    runId,
-    taskId,
-    sessionId: ROOT_SESSION,
-    capabilitySnapshot: [],
-    artifacts: [],
-    verifierResults: [],
-    // Born active like every run this build creates (A3 §1.1).
-    executionPhase: 'active',
-    status: 'running',
-    startedAt: new Date().toISOString(),
-  }, 'tester')
+  await h.task.startRunIn(
+    STORE,
+    {
+      runId,
+      taskId,
+      sessionId: ROOT_SESSION,
+      capabilitySnapshot: [],
+      artifacts: [],
+      verifierResults: [],
+      // Born active like every run this build creates (A3 §1.1).
+      executionPhase: 'active',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    },
+    'tester',
+  )
   return { taskId, runId }
 }
 
@@ -639,8 +722,13 @@ function taskEvents(h: Harness): TaskEvent[] {
  */
 function runEventKinds(h: Harness, runId: string): string[] {
   return taskEvents(h)
-    .filter(item => item.runId === runId && item.kind !== 'HandoffCreated'
-      && item.kind !== 'RunPhaseChanged' && item.kind !== 'RunProgressMarked')
+    .filter(
+      item =>
+        item.runId === runId &&
+        item.kind !== 'HandoffCreated' &&
+        item.kind !== 'RunPhaseChanged' &&
+        item.kind !== 'RunProgressMarked',
+    )
     .map(item => item.kind)
 }
 
@@ -685,15 +773,21 @@ describe('TaskRuntime.intakeRootContract', () => {
 
   test('refuses a contract whose only mandatory criterion is the composite conjunction, with nothing written', async () => {
     const h = harness()
-    await expect(h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
-      objective: 'the goal nobody stated',
-      acceptanceCriteria: [{
-        criterionId: 'root-children-verified',
-        description: 'all mandatory children verified',
-        mode: 'composite',
-        mandatory: true,
-      }],
-    })).rejects.toThrow(/requires at least one mandatory acceptance criterion judged by something other than the composite conjunction/)
+    await expect(
+      h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
+        objective: 'the goal nobody stated',
+        acceptanceCriteria: [
+          {
+            criterionId: 'root-children-verified',
+            description: 'all mandatory children verified',
+            mode: 'composite',
+            mandatory: true,
+          },
+        ],
+      }),
+    ).rejects.toThrow(
+      /requires at least one mandatory acceptance criterion judged by something other than the composite conjunction/,
+    )
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks).toHaveLength(0)
     expect(snapshot.runs).toHaveLength(0)
@@ -771,11 +865,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [
-        childSpec('task a'),
-        childSpec('task b', { dependsOn: [0] }),
-        childSpec('task c', { dependsOn: [0] }),
-      ],
+      children: [childSpec('task a'), childSpec('task b', { dependsOn: [0] }), childSpec('task c', { dependsOn: [0] })],
     })
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified', 'verified'])
@@ -784,7 +874,8 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
 
     const snapshot = await h.task.snapshotIn(STORE)
     const sessionOf = (taskId: string) =>
-      snapshot.runs.find(run => run.taskId === taskId && run.runId === outcomes.find(o => o.taskId === taskId)?.runId)?.sessionId
+      snapshot.runs.find(run => run.taskId === taskId && run.runId === outcomes.find(o => o.taskId === taskId)?.runId)
+        ?.sessionId
     expect(h.spawned[0]!.sessionId).toBe(sessionOf(outcomes[0]!.taskId))
     expect([h.spawned[1]!.sessionId, h.spawned[2]!.sessionId].sort()).toEqual(
       [sessionOf(outcomes[1]!.taskId), sessionOf(outcomes[2]!.taskId)].sort(),
@@ -795,14 +886,18 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     // projection reads back.
     expect(h.spawned[0]!.taskWorker).toBe(true)
     expect(h.spawned[0]!.prompt).toBeUndefined()
-    const handoff = (await h.task.snapshotIn(STORE)).handoffs.find(
-      item => item.childTaskId === outcomes[0]!.taskId,
-    )
+    const handoff = (await h.task.snapshotIn(STORE)).handoffs.find(item => item.childTaskId === outcomes[0]!.taskId)
     expect(handoff?.parentObjective).toBe('ship the release')
     expect(handoff?.reasonForDelegation).toBe('split the work')
 
     for (const outcome of outcomes) {
-      expect(runEventKinds(h, outcome.runId!)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
+      expect(runEventKinds(h, outcome.runId!)).toEqual([
+        'TaskStarted',
+        'TaskVerifying',
+        'EvidenceProduced',
+        'TaskVerified',
+        'ReviewRecorded',
+      ])
     }
     const parent = await h.task.taskIn(STORE, rootTaskId)
     expect(parent.decompositionStatus).toBe('decomposed')
@@ -819,11 +914,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [
-        childSpec('fail-me now'),
-        childSpec('downstream', { dependsOn: [0] }),
-        childSpec('independent'),
-      ],
+      children: [childSpec('fail-me now'), childSpec('downstream', { dependsOn: [0] }), childSpec('independent')],
     })
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked', 'verified'])
@@ -836,9 +927,17 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
 
     const blocked = await h.task.taskIn(STORE, outcomes[1]!.taskId)
     expect(blocked.status).toBe('blocked')
-    const blockedEvents = taskEvents(h).filter(item => item.kind === 'TaskBlocked' && item.taskId === outcomes[1]!.taskId)
+    const blockedEvents = taskEvents(h).filter(
+      item => item.kind === 'TaskBlocked' && item.taskId === outcomes[1]!.taskId,
+    )
     expect(blockedEvents).toHaveLength(1)
-    expect(runEventKinds(h, outcomes[2]!.runId!)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
+    expect(runEventKinds(h, outcomes[2]!.runId!)).toEqual([
+      'TaskStarted',
+      'TaskVerifying',
+      'EvidenceProduced',
+      'TaskVerified',
+      'ReviewRecorded',
+    ])
   })
 
   test('the handoff merges declared assumptions with dependency evidence references', async () => {
@@ -877,11 +976,13 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       reason: 'split the work',
       children: [
         childSpec('rtl implementation', {
-          acceptanceCriteria: [{
-            description: 'cycle-equivalent to the reference on N workloads',
-            command: 'true',
-            requiresArtifact: ['bemu_trace'],
-          }],
+          acceptanceCriteria: [
+            {
+              description: 'cycle-equivalent to the reference on N workloads',
+              command: 'true',
+              requiresArtifact: ['bemu_trace'],
+            },
+          ],
         }),
         childSpec('independent'),
       ],
@@ -892,10 +993,13 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(h.spawned).toHaveLength(1)
     expect((await h.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('blocked')
 
-    const artifactBlocked = taskEvents(h).filter(item => item.kind === 'TaskBlocked' && item.taskId === outcomes[0]!.taskId)
+    const artifactBlocked = taskEvents(h).filter(
+      item => item.kind === 'TaskBlocked' && item.taskId === outcomes[0]!.taskId,
+    )
     expect(artifactBlocked).toHaveLength(1)
-    expect(artifactBlocked[0]!.kind === 'TaskBlocked' ? artifactBlocked[0]!.payload.reason : undefined)
-      .toBe('missing required artifacts: bemu_trace (criterion ac1-1)')
+    expect(artifactBlocked[0]!.kind === 'TaskBlocked' ? artifactBlocked[0]!.payload.reason : undefined).toBe(
+      'missing required artifacts: bemu_trace (criterion ac1-1)',
+    )
 
     const snapshot = await h.task.snapshotIn(STORE)
     const records = snapshot.reviews.filter(item => item.taskId === outcomes[0]!.taskId)
@@ -940,11 +1044,13 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       reason: 'split the work',
       children: [
         childSpec('rtl implementation', {
-          acceptanceCriteria: [{
-            description: 'cycle-equivalent to the reference on N workloads',
-            command: 'true',
-            requiresArtifact: ['bemu_trace'],
-          }],
+          acceptanceCriteria: [
+            {
+              description: 'cycle-equivalent to the reference on N workloads',
+              command: 'true',
+              requiresArtifact: ['bemu_trace'],
+            },
+          ],
         }),
       ],
     })
@@ -959,10 +1065,12 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('a capability-gap rejection registers one obligation per missing capability on the parent', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('gap child', { requiredCapabilities: ['no-such-cap'] })],
-    })).rejects.toThrow(/capability gap/)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [childSpec('gap child', { requiredCapabilities: ['no-such-cap'] })],
+      }),
+    ).rejects.toThrow(/capability gap/)
 
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks).toHaveLength(1)
@@ -974,15 +1082,12 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('a spawn refusal fails the run with the cause, blocks dependents, and leaves no admitted ghost', async () => {
-    const spawnError = 'agent-presets: preset "default" not found (available: standard)'
+    const spawnError = 'Unknown agent preset: default'
     const h = harness({ verifier: 'by-objective', spawnError })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h, 'fail-me release')
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [
-        childSpec('unlucky child'),
-        childSpec('downstream', { dependsOn: [0] }),
-      ],
+      children: [childSpec('unlucky child'), childSpec('downstream', { dependsOn: [0] })],
     })
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked'])
@@ -990,10 +1095,11 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
 
     const cause = `spawn failed: ${spawnError}`
     expect(runEventKinds(h, outcomes[0]!.runId!)).toEqual(['TaskStarted', 'TaskFailed', 'ReviewRecorded'])
-    expect(taskEvents(h)
-      .filter(item => item.kind === 'TaskFailed' && item.runId === outcomes[0]!.runId)
-      .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined)))
-      .toEqual([cause])
+    expect(
+      taskEvents(h)
+        .filter(item => item.kind === 'TaskFailed' && item.runId === outcomes[0]!.runId)
+        .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined)),
+    ).toEqual([cause])
     expect((await h.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('failed')
 
     const snapshot = await h.task.snapshotIn(STORE)
@@ -1011,7 +1117,13 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     // it.
     expect((await h.task.runIn(STORE, rootRunId)).status).toBe('running')
     expect(await submitParentResult(h)).toBe('failed')
-    expect(runEventKinds(h, rootRunId)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskFailed', 'ReviewRecorded'])
+    expect(runEventKinds(h, rootRunId)).toEqual([
+      'TaskStarted',
+      'TaskVerifying',
+      'EvidenceProduced',
+      'TaskFailed',
+      'ReviewRecorded',
+    ])
   })
 
   test('spawn carries the strictest permission preset the capabilities declare', async () => {
@@ -1030,7 +1142,8 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
           'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
         }
         const spec = specs[name]
-        if (spec === undefined) throw new Error(`permission: unknown preset "${name}" (known: ${Object.keys(specs).join(', ')})`)
+        if (spec === undefined)
+          throw new Error(`permission: unknown preset "${name}" (known: ${Object.keys(specs).join(', ')})`)
         return spec
       },
     }
@@ -1060,7 +1173,9 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
 
   test('spawn carries the grant its manifest resolves to: declared tools and skills, the worker baseline', async () => {
     const home = pinSkillHome('ball-align')
-    const h = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } } } })
+    const h = harness({
+      config: { capabilities: { 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } } },
+    })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
@@ -1105,7 +1220,9 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     // task's admission-assigned criterion and the command a verifier will run.
     const child = await h.task.taskIn(STORE, outcomes[0]!.taskId)
     expect(child.objective).toBe('ball child')
-    expect(child.acceptanceCriteria.map(criterion => [criterion.criterionId, criterion.command])).toEqual([['ac1-1', 'true']])
+    expect(child.acceptanceCriteria.map(criterion => [criterion.criterionId, criterion.command])).toEqual([
+      ['ac1-1', 'true'],
+    ])
   })
 
   test('a child with no capabilities still carries the baseline grant', async () => {
@@ -1137,20 +1254,26 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('conflicting presets reject the whole batch without persisting or spawning any child', async () => {
-    const h = harness({ config: { capabilities: {
-      research: { preset: 'standard' },
-      verify: { preset: 'bb-verify' },
-    } } })
+    const h = harness({
+      config: {
+        capabilities: {
+          research: { preset: 'standard' },
+          verify: { preset: 'bb-verify' },
+        },
+      },
+    })
     const { taskId, runId } = await createRoot(h)
     const before = await h.task.snapshotIn(STORE)
     const eventsBefore = taskEvents(h)
-    await expect(decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [
-        childSpec('valid child', { requiredCapabilities: ['research'] }),
-        childSpec('conflicting child', { requiredCapabilities: ['research', 'verify'] }),
-      ],
-    })).rejects.toThrow(/conflicting capability presets: research -> standard, verify -> bb-verify/)
+    await expect(
+      decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [
+          childSpec('valid child', { requiredCapabilities: ['research'] }),
+          childSpec('conflicting child', { requiredCapabilities: ['research', 'verify'] }),
+        ],
+      }),
+    ).rejects.toThrow(/conflicting capability presets: research -> standard, verify -> bb-verify/)
     expect(h.spawned).toHaveLength(0)
     expect(await h.task.snapshotIn(STORE)).toEqual(before)
     expect(taskEvents(h)).toEqual(eventsBefore)
@@ -1160,10 +1283,12 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const h = harness({ config: { capabilities: { typo: { tools: ['filesytem'] } } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
 
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('typo child', { requiredCapabilities: ['typo'] })],
-    })).rejects.toThrow(/capability "typo" declares unknown tool label "filesytem"; known labels: /)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [childSpec('typo child', { requiredCapabilities: ['typo'] })],
+      }),
+    ).rejects.toThrow(/capability "typo" declares unknown tool label "filesytem"; known labels: /)
 
     expect(h.spawned).toHaveLength(0)
     // Admission rejected before anything was written: the root is still undecomposed and alone in the store.
@@ -1189,13 +1314,15 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
     expect(h.spawned).toHaveLength(0)
 
-    const cause = 'spawn failed: task-runtime: permission declared by capabilities [audited] is not usable: '
-      + 'permission: unknown preset "nope" (known: workspace-write, danger-full-access)'
+    const cause =
+      'spawn failed: task-runtime: permission declared by capabilities [audited] is not usable: ' +
+      'permission: unknown preset "nope" (known: workspace-write, danger-full-access)'
     expect(runEventKinds(h, outcomes[0]!.runId!)).toEqual(['TaskStarted', 'TaskFailed', 'ReviewRecorded'])
-    expect(taskEvents(h)
-      .filter(item => item.kind === 'TaskFailed' && item.runId === outcomes[0]!.runId)
-      .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined)))
-      .toEqual([cause])
+    expect(
+      taskEvents(h)
+        .filter(item => item.kind === 'TaskFailed' && item.runId === outcomes[0]!.runId)
+        .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined)),
+    ).toEqual([cause])
     const reviews = (await h.task.snapshotIn(STORE)).reviews.filter(item => item.runId === outcomes[0]!.runId)
     expect(reviews).toHaveLength(1)
     expect(reviews[0]!.localizedCause).toBe(cause)
@@ -1205,7 +1332,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const h = harness({ config: { capabilities: { research: { preset: 'ghost' } } } })
     h.ctx.agentPresets = {
       resolve: async (id?: string) => {
-        throw new Error(`agent-presets: preset "${id}" not found (available: standard)`)
+        throw new Error(`Unknown agent preset: ${id}`)
       },
     }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
@@ -1217,12 +1344,14 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
     expect(h.spawned).toHaveLength(0)
 
-    const cause = 'spawn failed: task-runtime: preset "ghost" granted by capabilities [research] is not mountable: agent-presets: preset "ghost" not found (available: standard)'
+    const cause =
+      'spawn failed: task-runtime: preset "ghost" granted by capabilities [research] is not mountable: Unknown agent preset: ghost'
     expect(runEventKinds(h, outcomes[0]!.runId!)).toEqual(['TaskStarted', 'TaskFailed', 'ReviewRecorded'])
-    expect(taskEvents(h)
-      .filter(item => item.kind === 'TaskFailed' && item.runId === outcomes[0]!.runId)
-      .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined)))
-      .toEqual([cause])
+    expect(
+      taskEvents(h)
+        .filter(item => item.kind === 'TaskFailed' && item.runId === outcomes[0]!.runId)
+        .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined)),
+    ).toEqual([cause])
     const reviews = (await h.task.snapshotIn(STORE)).reviews.filter(item => item.runId === outcomes[0]!.runId)
     expect(reviews).toHaveLength(1)
     expect(reviews[0]!.localizedCause).toBe(cause)
@@ -1231,13 +1360,12 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('a capability gap rejects the whole batch atomically when the child may not decompose', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [
-        childSpec('fine'),
-        childSpec('gap child', { requiredCapabilities: ['no-such-cap'] }),
-      ],
-    })).rejects.toThrow(/capability gap/)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [childSpec('fine'), childSpec('gap child', { requiredCapabilities: ['no-such-cap'] })],
+      }),
+    ).rejects.toThrow(/capability gap/)
 
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks).toHaveLength(1)
@@ -1267,10 +1395,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [
-        childSpec('splittable child', { decomposable: true }),
-        childSpec('plain child'),
-      ],
+      children: [childSpec('splittable child', { decomposable: true }), childSpec('plain child')],
     })
 
     const declared = await h.task.taskIn(STORE, outcomes[0]!.taskId)
@@ -1295,24 +1420,27 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     // runs, and the outer cascade verifies it exactly as before.
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
     for (const outcome of outcomes) {
-      expect(runEventKinds(h, outcome.runId!)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
+      expect(runEventKinds(h, outcome.runId!)).toEqual([
+        'TaskStarted',
+        'TaskVerifying',
+        'EvidenceProduced',
+        'TaskVerified',
+        'ReviewRecorded',
+      ])
     }
   })
 
   test('a child settled by its own nested decomposition is adopted, not verified a second time', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    h.setIdleBehavior(async (sessionId) => {
+    h.setIdleBehavior(async sessionId => {
       const bound = await h.runtime.runForSession(sessionId)
       await settleRunNested(h.task, bound.storeId, bound.task.taskId, bound.run.runId, sessionId)
     })
 
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [
-        childSpec('splittable child', { decomposable: true }),
-        childSpec('downstream', { dependsOn: [0] }),
-      ],
+      children: [childSpec('splittable child', { decomposable: true }), childSpec('downstream', { dependsOn: [0] })],
     })
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
@@ -1327,7 +1455,13 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect((await h.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
     expect((await h.task.runIn(STORE, nestedRunId)).status).toBe('verified')
     // The nested settlement counts as `verified`, so the dependent child still runs.
-    expect(runEventKinds(h, outcomes[1]!.runId!)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
+    expect(runEventKinds(h, outcomes[1]!.runId!)).toEqual([
+      'TaskStarted',
+      'TaskVerifying',
+      'EvidenceProduced',
+      'TaskVerified',
+      'ReviewRecorded',
+    ])
     // The parent's own acceptance is its own submission (K1 §2), and it is the
     // call that consults the harness verifier for this run.
     expect((await h.task.runIn(STORE, rootRunId)).status).toBe('running')
@@ -1338,17 +1472,14 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('a child that settled itself failed is adopted as failed instead of being marked again', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    h.setIdleBehavior(async (sessionId) => {
+    h.setIdleBehavior(async sessionId => {
       const bound = await h.runtime.runForSession(sessionId)
       await settleRunNested(h.task, bound.storeId, bound.task.taskId, bound.run.runId, sessionId, 'fail')
     })
 
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [
-        childSpec('splittable child', { decomposable: true }),
-        childSpec('downstream', { dependsOn: [0] }),
-      ],
+      children: [childSpec('splittable child', { decomposable: true }), childSpec('downstream', { dependsOn: [0] })],
     })
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked'])
@@ -1356,11 +1487,18 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     // is not verified a second time — the one settlement rule A3 gives every
     // terminal run.
     expect(outcomes[0]!.evidenceId).toBe(`e-nested-${outcomes[0]!.runId}`)
-    expect((await h.task.snapshotIn(STORE)).evidence
-      .filter(item => item.taskRunId === outcomes[0]!.runId)
-      .map(item => item.evidenceId))
-      .toEqual([`e-nested-${outcomes[0]!.runId}`])
-    expect(runEventKinds(h, outcomes[0]!.runId!)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskFailed', 'ReviewRecorded'])
+    expect(
+      (await h.task.snapshotIn(STORE)).evidence
+        .filter(item => item.taskRunId === outcomes[0]!.runId)
+        .map(item => item.evidenceId),
+    ).toEqual([`e-nested-${outcomes[0]!.runId}`])
+    expect(runEventKinds(h, outcomes[0]!.runId!)).toEqual([
+      'TaskStarted',
+      'TaskVerifying',
+      'EvidenceProduced',
+      'TaskFailed',
+      'ReviewRecorded',
+    ])
     expect(h.verifier.verifyRun).not.toHaveBeenCalledWith(STORE, outcomes[0]!.runId, expect.anything())
     expect((await h.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('failed')
     expect((await h.task.taskIn(STORE, outcomes[1]!.taskId)).status).toBe('blocked')
@@ -1369,13 +1507,12 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('structural admission failures persist nothing', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [
-        childSpec('cycle a', { dependsOn: [1] }),
-        childSpec('cycle b', { dependsOn: [0] }),
-      ],
-    })).rejects.toThrow(/cycle/)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [childSpec('cycle a', { dependsOn: [1] }), childSpec('cycle b', { dependsOn: [0] })],
+      }),
+    ).rejects.toThrow(/cycle/)
 
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks).toHaveLength(1)
@@ -1385,10 +1522,14 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('refuses a batch above the configured maxChildren, naming the limit, and persists nothing', async () => {
     const h = harness({ config: { maxChildren: 2 } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('task a'), childSpec('task b'), childSpec('task c')],
-    })).rejects.toThrow(/admission rejected decomposition of "[^"]+":\n- task "[^"]+" would have 3 children, above maxChildren 2/)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [childSpec('task a'), childSpec('task b'), childSpec('task c')],
+      }),
+    ).rejects.toThrow(
+      /admission rejected decomposition of "[^"]+":\n- task "[^"]+" would have 3 children, above maxChildren 2/,
+    )
 
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(1)
     expect(h.spawned).toHaveLength(0)
@@ -1407,10 +1548,12 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('refuses children that would exceed the configured maxDepth, naming the limit', async () => {
     const h = harness({ config: { maxDepth: 0 } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('task a')],
-    })).rejects.toThrow(/children would exceed maxDepth 0 \(depth 1\)/)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [childSpec('task a')],
+      }),
+    ).rejects.toThrow(/children would exceed maxDepth 0 \(depth 1\)/)
 
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(1)
     expect(h.spawned).toHaveLength(0)
@@ -1421,16 +1564,18 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(DEFAULT_MAX_CHILDREN).toBe(8)
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: Array.from({ length: 9 }, (_value, index) => childSpec(`task ${index}`)),
-    })).rejects.toThrow(/would have 9 children, above maxChildren 8/)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: Array.from({ length: 9 }, (_value, index) => childSpec(`task ${index}`)),
+      }),
+    ).rejects.toThrow(/would have 9 children, above maxChildren 8/)
 
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(1)
     expect(h.spawned).toHaveLength(0)
   })
 
-  test('a deployment that configures nothing admits a leaf worker\'s own decomposition: the grandchild verifies and the parent adopts it', async () => {
+  test("a deployment that configures nothing admits a leaf worker's own decomposition: the grandchild verifies and the parent adopts it", async () => {
     expect(DEFAULT_ALLOW_RUNTIME_DECOMPOSITION).toBe(true)
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
@@ -1457,7 +1602,10 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
 
     const snapshot = await h.task.snapshotIn(STORE)
     const grandchildren = snapshot.tasks.filter(task => task.parentTaskId === childTaskId)
-    expect(grandchildren.map(task => [task.depth, task.status])).toEqual([[2, 'verified'], [2, 'verified']])
+    expect(grandchildren.map(task => [task.depth, task.status])).toEqual([
+      [2, 'verified'],
+      [2, 'verified'],
+    ])
     expect(snapshot.tasks).toHaveLength(4)
 
     // The nested cascade settled the child's run; the outer round adopts it
@@ -1465,7 +1613,13 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(outcomes[0]!.status).toBe('verified')
     expect(outcomes[0]!.evidenceId).toBe(`e-${childRunId}`)
     expect(h.verifier.verifyRun).toHaveBeenCalledWith(STORE, childRunId, expect.anything())
-    expect(runEventKinds(h, childRunId)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
+    expect(runEventKinds(h, childRunId)).toEqual([
+      'TaskStarted',
+      'TaskVerifying',
+      'EvidenceProduced',
+      'TaskVerified',
+      'ReviewRecorded',
+    ])
     // The root's own acceptance waits for the root's own submission (K1 §2).
     expect((await h.task.runIn(STORE, rootRunId)).status).toBe('running')
     expect(await submitParentResult(h)).toBe('verified')
@@ -1486,7 +1640,9 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     })
 
     expect(nested.outcomes).toBeUndefined()
-    expect(nested.refusal).toMatch(/admission rejected decomposition of "[^"]+":\n- task "[^"]+" would have 3 children, above maxChildren 2/)
+    expect(nested.refusal).toMatch(
+      /admission rejected decomposition of "[^"]+":\n- task "[^"]+" would have 3 children, above maxChildren 2/,
+    )
     expect(nested.refusal).not.toMatch(/admitted as leaf/)
     // Nothing the refused batch planned was persisted, and the child still ran.
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(2)
@@ -1547,8 +1703,9 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect((await h.task.taskIn(STORE, neverStarted)).status).toBe('blocked')
     const blockedEvents = taskEvents(h).filter(item => item.kind === 'TaskBlocked' && item.taskId === neverStarted)
     expect(blockedEvents).toHaveLength(1)
-    expect(blockedEvents[0]!.kind === 'TaskBlocked' ? blockedEvents[0]!.payload.reason : undefined)
-      .toBe('cancelled by the caller before this child started')
+    expect(blockedEvents[0]!.kind === 'TaskBlocked' ? blockedEvents[0]!.payload.reason : undefined).toBe(
+      'cancelled by the caller before this child started',
+    )
 
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks.every(task => task.status !== 'admitted')).toBe(true)
@@ -1573,10 +1730,19 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     // The caller's signal governs admission only (A3 §3.7): an aborted one is a
     // batch that was never admitted, so nothing is persisted and the parent stays
     // free to decide again.
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('task a'), childSpec('task b')],
-    }, { signal: controller.signal })).rejects.toThrow(/cancelled before anything was persisted/)
+    await expect(
+      h.runtime.decomposeAndRun(
+        STORE,
+        rootTaskId,
+        rootRunId,
+        ROOT_SESSION,
+        {
+          reason: 'split the work',
+          children: [childSpec('task a'), childSpec('task b')],
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toThrow(/cancelled before anything was persisted/)
 
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks).toHaveLength(1)
@@ -1651,12 +1817,16 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       reason: 'split the work',
       children: [childSpec('task a')],
     })
-    expect(h.verifier.verifyRun).toHaveBeenCalledWith(STORE, expect.any(String), { timeoutMs: DEFAULT_VERIFY_TIMEOUT_MS })
+    expect(h.verifier.verifyRun).toHaveBeenCalledWith(STORE, expect.any(String), {
+      timeoutMs: DEFAULT_VERIFY_TIMEOUT_MS,
+    })
   })
 
   test('binds capability-granted MCP servers onto the spawn grant, resolved against the graph env', async () => {
     pinSkillHome('check')
-    const h = harness({ config: { capabilities: { 'check-ball-registration': { skills: ['check'], mcpServers: ['bbdev'] } } } })
+    const h = harness({
+      config: { capabilities: { 'check-ball-registration': { skills: ['check'], mcpServers: ['bbdev'] } } },
+    })
     h.ctx.envBuilder = {
       store: {
         get: (envId: string) => ({
@@ -1673,13 +1843,15 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(outcomes[0]!.status).toBe('verified')
     const grant = h.spawned[0]!.grant!
     expect(grant.capabilities).toEqual([{ capability: 'check-ball-registration', tools: [], skills: ['check'] }])
-    expect(grant.mcpServers).toEqual([{
-      serverName: 'bbdev',
-      command: '/fake/env/env1/fork/buckyball/scripts/claude/run_mcp_server.sh',
-      args: [],
-      env: {},
-      cwd: '/fake/env/env1/fork/buckyball',
-    }])
+    expect(grant.mcpServers).toEqual([
+      {
+        serverName: 'bbdev',
+        command: '/fake/env/env1/fork/buckyball/scripts/claude/run_mcp_server.sh',
+        args: [],
+        env: {},
+        cwd: '/fake/env/env1/fork/buckyball',
+      },
+    ])
     // the run record carries the mcp marker alongside the granted skill
     const run = await h.task.runIn(STORE, outcomes[0]!.runId!)
     expect(run.capabilitySnapshot).toEqual(['check', 'mcp:bbdev'])
@@ -1687,7 +1859,9 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
 
   test('a capability-granted MCP server with no env binding fails the spawn loudly and settles the run failed', async () => {
     pinSkillHome('check')
-    const h = harness({ config: { capabilities: { 'check-ball-registration': { skills: ['check'], mcpServers: ['bbdev'] } } } })
+    const h = harness({
+      config: { capabilities: { 'check-ball-registration': { skills: ['check'], mcpServers: ['bbdev'] } } },
+    })
     // no envBuilder in the context: the binding resolves to undefined
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
@@ -1714,7 +1888,9 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(outcomes[0]!.status).toBe('failed')
     const snapshot = await h.task.snapshotIn(STORE)
     const record = snapshot.reviews.find(item => item.taskId === outcomes[0]!.taskId)
-    expect(record!.localizedCause).toContain('binds {repoRoot:buckyball} but this run\'s env (/fake/env/env1) has no "buckyball" checkout')
+    expect(record!.localizedCause).toContain(
+      'binds {repoRoot:buckyball} but this run\'s env (/fake/env/env1) has no "buckyball" checkout',
+    )
   })
 
   test('a capability without MCP servers never consults the env binding', async () => {
@@ -1729,7 +1905,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(h.spawned[0]!.grant!.mcpServers).toBeUndefined()
   })
 
-  test('hands the configured verify deadline down as the verifier\'s own timeout', async () => {
+  test("hands the configured verify deadline down as the verifier's own timeout", async () => {
     const h = harness({ config: { verifyTimeoutMs: 1234 } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
@@ -1739,7 +1915,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(h.verifier.verifyRun).toHaveBeenCalledWith(STORE, expect.any(String), { timeoutMs: 1234 })
   })
 
-  test('a batch end hands the parent back active; the parent\'s own submission is what its verifier judges', async () => {
+  test("a batch end hands the parent back active; the parent's own submission is what its verifier judges", async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
@@ -1768,7 +1944,13 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect((await h.task.taskIn(STORE, rootTaskId)).status).toBe('verified')
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.evidence.some(item => item.taskRunId === rootRunId)).toBe(true)
-    expect(runEventKinds(h, rootRunId)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
+    expect(runEventKinds(h, rootRunId)).toEqual([
+      'TaskStarted',
+      'TaskVerifying',
+      'EvidenceProduced',
+      'TaskVerified',
+      'ReviewRecorded',
+    ])
   })
 
   test('fails the parent run when the verdict on its own criteria fails', async () => {
@@ -1813,7 +1995,13 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect((await h.task.runIn(STORE, rootRunId)).status).toBe('running')
     expect(await submitParentResult(h)).toBe('failed')
     expect((await h.task.taskIn(STORE, rootTaskId)).status).toBe('failed')
-    expect(runEventKinds(h, rootRunId)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskFailed', 'ReviewRecorded'])
+    expect(runEventKinds(h, rootRunId)).toEqual([
+      'TaskStarted',
+      'TaskVerifying',
+      'EvidenceProduced',
+      'TaskFailed',
+      'ReviewRecorded',
+    ])
   })
 
   test('names the unmet criterion and what the verifier said about it in the failure reason', async () => {
@@ -1855,10 +2043,11 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     })
 
     expect(outcomes[0]!.status).toBe('failed')
-    expect(taskEvents(h)
-      .filter(item => item.kind === 'TaskFailed' && item.runId === outcomes[0]!.runId)
-      .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined)))
-      .toEqual(['mandatory criteria not satisfied: ac1-1 inconclusive (timeout after 600000ms)'])
+    expect(
+      taskEvents(h)
+        .filter(item => item.kind === 'TaskFailed' && item.runId === outcomes[0]!.runId)
+        .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined)),
+    ).toEqual(['mandatory criteria not satisfied: ac1-1 inconclusive (timeout after 600000ms)'])
   })
 
   test('a verification that times out fails its run once and no late verdict can land on it', async () => {
@@ -1874,10 +2063,13 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect((await h.task.runIn(STORE, childRunId)).status).toBe('failed')
     expect(runEventKinds(h, childRunId)).toEqual(['TaskStarted', 'TaskVerifying', 'TaskFailed', 'ReviewRecorded'])
     expect((await h.task.snapshotIn(STORE)).evidence.filter(item => item.taskRunId === childRunId)).toHaveLength(0)
-    expect(taskEvents(h)
-      .filter(item => item.kind === 'TaskFailed' && item.runId === childRunId)
-      .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined)))
-      .toEqual([`task-runtime: verification of run "${childRunId}" timed out after 615000ms (verifier deadline 600000ms + 15000ms safety margin)`])
+    expect(
+      taskEvents(h)
+        .filter(item => item.kind === 'TaskFailed' && item.runId === childRunId)
+        .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined)),
+    ).toEqual([
+      `task-runtime: verification of run "${childRunId}" timed out after 615000ms (verifier deadline 600000ms + 15000ms safety margin)`,
+    ])
 
     // The abandoned verification is not gone: it settles late, carrying a pass
     // for a run that is already failed. The store refuses it, so the evidence
@@ -1995,7 +2187,7 @@ describe('the content a run is bound to (S1-C)', () => {
     expect(h.spawned[0]!.prompt).toBeUndefined()
   })
 
-  test('a production rewrite after the run was bound leaves the run\'s bytes alone, and the next run binds the new bytes', async () => {
+  test("a production rewrite after the run was bound leaves the run's bytes alone, and the next run binds the new bytes", async () => {
     const home = pinSkillHome('ball-align')
     const h = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'] } } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
@@ -2039,7 +2231,10 @@ describe('the content a run is bound to (S1-C)', () => {
     // second run would bind them.
     h.setIdleBehavior(async sessionId => {
       if (sessionId === h.spawned[0]?.sessionId) {
-        await writeFile(productionSkill(home), '---\nname: ball-align\ndescription: rewritten during the batch\n---\n\nreplaced\n')
+        await writeFile(
+          productionSkill(home),
+          '---\nname: ball-align\ndescription: rewritten during the batch\n---\n\nreplaced\n',
+        )
       }
       // Whatever the override does, the worker protocol still applies: the run
       // has to be submitted to reach a terminal state.
@@ -2079,14 +2274,16 @@ describe('the content a run is bound to (S1-C)', () => {
         capabilities: {
           'design-ball': { skills: ['ball-align'] },
           'check-ball-registration': { skills: ['check'] },
-          'research': { tools: ['filesystem'] },
+          research: { tools: ['filesystem'] },
         },
       },
     })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [childSpec('ball child', { requiredCapabilities: ['design-ball', 'check-ball-registration', 'research'] })],
+      children: [
+        childSpec('ball child', { requiredCapabilities: ['design-ball', 'check-ball-registration', 'research'] }),
+      ],
     })
 
     // The record, not a rendering of it: what the worker's assembled contract is
@@ -2107,23 +2304,25 @@ describe('the content a run is bound to (S1-C)', () => {
     expect(binding.skills.find(skill => skill.name === 'ball-align')?.capabilities).toEqual(['design-ball'])
     // Identity and purpose only: the body is never stored in the record — the
     // worker reads it with the `skill` tool from the snapshot the record names.
-    for (const skill of binding.skills) expect(JSON.stringify(skill)).not.toContain('Align a Buckyball Ball across layers')
+    for (const skill of binding.skills)
+      expect(JSON.stringify(skill)).not.toContain('Align a Buckyball Ball across layers')
     expect(binding.snapshotRoot).toBeDefined()
   })
 })
 
-
 describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
   test('P4-A: a parent AC with a complete childEvidence map verifies once every child verified', async () => {
     const h = harness({ verifier: 'real-composite' })
-    const { taskId, runId } = await createAcceptanceParent(h, [{
-      criterionId: 'root-combination',
-      description: 'the children together prove the root goal',
-      verificationMode: 'composite',
-      requiredEvidence: [],
-      mandatory: true,
-      childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }, { childIndex: 1 }],
-    }])
+    const { taskId, runId } = await createAcceptanceParent(h, [
+      {
+        criterionId: 'root-combination',
+        description: 'the children together prove the root goal',
+        verificationMode: 'composite',
+        requiredEvidence: [],
+        mandatory: true,
+        childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }, { childIndex: 1 }],
+      },
+    ])
 
     const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
@@ -2139,14 +2338,16 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
 
   test('P4-B: a map pointing at a criterion no child has fails the parent, naming the missing item', async () => {
     const h = harness({ verifier: 'real-composite' })
-    const { taskId, runId } = await createAcceptanceParent(h, [{
-      criterionId: 'root-combination',
-      description: 'the children together prove the root goal',
-      verificationMode: 'composite',
-      requiredEvidence: [],
-      mandatory: true,
-      childEvidence: [{ childIndex: 0, criterionId: 'ac1-9' }],
-    }])
+    const { taskId, runId } = await createAcceptanceParent(h, [
+      {
+        criterionId: 'root-combination',
+        description: 'the children together prove the root goal',
+        verificationMode: 'composite',
+        requiredEvidence: [],
+        mandatory: true,
+        childEvidence: [{ childIndex: 0, criterionId: 'ac1-9' }],
+      },
+    ])
 
     const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
@@ -2171,21 +2372,26 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
 
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [childSpec('rtl implementation', {
-        acceptanceCriteria: [{
-          description: 'cycle-equivalent to the reference on N workloads',
-          command: 'true',
-          requiresArtifact: ['bemu_trace'],
-        }],
-      })],
+      children: [
+        childSpec('rtl implementation', {
+          acceptanceCriteria: [
+            {
+              description: 'cycle-equivalent to the reference on N workloads',
+              command: 'true',
+              requiresArtifact: ['bemu_trace'],
+            },
+          ],
+        }),
+      ],
     })
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['blocked'])
     expect(outcomes[0]!.runId).toBeUndefined()
     expect(h.spawned).toHaveLength(0)
     const blocked = taskEvents(h).find(item => item.kind === 'TaskBlocked' && item.taskId === outcomes[0]!.taskId)
-    expect(blocked?.kind === 'TaskBlocked' ? blocked.payload.reason : undefined)
-      .toBe('missing required artifacts: bemu_trace (criterion ac1-1)')
+    expect(blocked?.kind === 'TaskBlocked' ? blocked.payload.reason : undefined).toBe(
+      'missing required artifacts: bemu_trace (criterion ac1-1)',
+    )
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.obligations).toHaveLength(1)
     expect(snapshot.obligations[0]!.goal).toContain('"bemu_trace"')
@@ -2201,20 +2407,24 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
       reason: 'split the work',
       children: [
         childSpec('rtl implementation', {
-          acceptanceCriteria: [{
-            description: 'consumes the golden trace as a raw input',
-            command: 'true',
-            acceptsArtifact: ['bemu_trace'],
-          }],
+          acceptanceCriteria: [
+            {
+              description: 'consumes the golden trace as a raw input',
+              command: 'true',
+              acceptsArtifact: ['bemu_trace'],
+            },
+          ],
         }),
         // The raw-input expression is still an existence check: a reference no
         // run ever produced blocks the same way a missing one always did.
         childSpec('dependent consumer', {
-          acceptanceCriteria: [{
-            description: 'consumes a trace nobody produced',
-            command: 'true',
-            acceptsArtifact: ['absent_trace'],
-          }],
+          acceptanceCriteria: [
+            {
+              description: 'consumes a trace nobody produced',
+              command: 'true',
+              acceptsArtifact: ['absent_trace'],
+            },
+          ],
         }),
       ],
     })
@@ -2222,20 +2432,23 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'blocked'])
     expect(h.spawned).toHaveLength(1)
     const blocked = taskEvents(h).find(item => item.kind === 'TaskBlocked' && item.taskId === outcomes[1]!.taskId)
-    expect(blocked?.kind === 'TaskBlocked' ? blocked.payload.reason : undefined)
-      .toBe('missing required artifacts: absent_trace (criterion ac2-1; raw input, any run state)')
+    expect(blocked?.kind === 'TaskBlocked' ? blocked.payload.reason : undefined).toBe(
+      'missing required artifacts: absent_trace (criterion ac2-1; raw input, any run state)',
+    )
   })
 
   test('P4-D: a heuristic criterion is not counted as a deterministic pass even when the verdict is pass', async () => {
     const h = harness()
-    const { taskId, runId } = await createAcceptanceParent(h, [{
-      criterionId: 'root-heuristic',
-      description: 'the combination reads as correct to a reviewer',
-      verificationMode: 'composite',
-      requiredEvidence: [],
-      mandatory: true,
-      heuristic: true,
-    }])
+    const { taskId, runId } = await createAcceptanceParent(h, [
+      {
+        criterionId: 'root-heuristic',
+        description: 'the combination reads as correct to a reviewer',
+        verificationMode: 'composite',
+        requiredEvidence: [],
+        mandatory: true,
+        heuristic: true,
+      },
+    ])
 
     const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
@@ -2257,13 +2470,15 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
 
   test('P4-D: the same parent without the heuristic label verifies — the default is unchanged', async () => {
     const h = harness()
-    const { taskId, runId } = await createAcceptanceParent(h, [{
-      criterionId: 'root-combination',
-      description: 'all mandatory children verified',
-      verificationMode: 'composite',
-      requiredEvidence: [],
-      mandatory: true,
-    }])
+    const { taskId, runId } = await createAcceptanceParent(h, [
+      {
+        criterionId: 'root-combination',
+        description: 'all mandatory children verified',
+        verificationMode: 'composite',
+        requiredEvidence: [],
+        mandatory: true,
+      },
+    ])
 
     await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
@@ -2277,10 +2492,12 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
   test('P4-E: a child requiring independent acceptance without a map is refused at admission and persists nothing', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('child a', { requiresIndependentAcceptance: true })],
-    })).rejects.toThrow(/requires independent parent acceptance/)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [childSpec('child a', { requiresIndependentAcceptance: true })],
+      }),
+    ).rejects.toThrow(/requires independent parent acceptance/)
 
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks).toHaveLength(1)
@@ -2290,12 +2507,18 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
   test('P4-E: a tampered (malformed) childEvidence map is refused at admission and persists nothing', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('child a', {
-        acceptanceCriteria: [{ description: 'the child works', command: 'true', childEvidence: [{ childIndex: -1 }] }],
-      })],
-    })).rejects.toThrow(/childEvidence/)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [
+          childSpec('child a', {
+            acceptanceCriteria: [
+              { description: 'the child works', command: 'true', childEvidence: [{ childIndex: -1 }] },
+            ],
+          }),
+        ],
+      }),
+    ).rejects.toThrow(/childEvidence/)
 
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks).toHaveLength(1)
@@ -2309,10 +2532,13 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
     const h = harness()
     expect(h.runtime.budget).toEqual(DEFAULT_BUDGET)
 
-    expect(() => harness({ config: { budget: { wallTimeMs: 1000 } } as never })).toThrow('unsupported fields [wallTimeMs]')
-    expect(() => harness({ config: { rootBudget: { wallTimeMs: 1000 } } as never })).toThrow('rootBudget names [wallTimeMs]')
+    expect(() => harness({ config: { budget: { wallTimeMs: 1000 } } as never })).toThrow(
+      'unsupported fields [wallTimeMs]',
+    )
+    expect(() => harness({ config: { rootBudget: { wallTimeMs: 1000 } } as never })).toThrow(
+      'rootBudget names [wallTimeMs]',
+    )
   })
-
 
   test('a tool-call count over budget is annotated post-hoc on the terminal record; the verdict stands', async () => {
     const h = harness({ config: { budget: { maxToolCalls: 2 } } })
@@ -2320,9 +2546,13 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
     // this budget member is a post-hoc check and not in-flight enforcement.
     h.ctx.sessionQuery = {
       readSession: async (sessionId: string) => ({
-        events: sessionId === ROOT_SESSION
-          ? []
-          : Array.from({ length: 3 }, (_value, index) => ({ type: 'tool/call', data: { name: 'bash', callId: `c${index}` } })),
+        events:
+          sessionId === ROOT_SESSION
+            ? []
+            : Array.from({ length: 3 }, (_value, index) => ({
+                type: 'tool/call',
+                data: { name: 'bash', callId: `c${index}` },
+              })),
       }),
     }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
@@ -2351,7 +2581,9 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
     const h = harness({ config: { budget: { tokens: 100 } } })
     h.ctx.sessions = { get: (sessionId: string) => ({ id: sessionId }) }
     h.ctx.sessionProjections = {
-      snapshot: () => ({ values: { tokenUsage: { uncachedInputTokens: 60, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 } } }),
+      snapshot: () => ({
+        values: { tokenUsage: { uncachedInputTokens: 60, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+      }),
     }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
@@ -2371,17 +2603,22 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
   })
 })
 
-
 describe('TaskRuntime criterion verifierRef (KISS §4.1, VRTC plan 1.4)', () => {
   test('an unknown verifierRef rejects the whole batch at admission, listing the registered ids, and persists nothing', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('pinned child', {
-        acceptanceCriteria: [{ description: 'judged by a pinned verifier', command: 'true', verifierRef: 'ghost' }],
-      })],
-    })).rejects.toThrow(/admission rejected decomposition of "[^"]+": child 0 criterion "ac1-1" references unknown verifier "ghost"; registered verifiers: command, composite, review/)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [
+          childSpec('pinned child', {
+            acceptanceCriteria: [{ description: 'judged by a pinned verifier', command: 'true', verifierRef: 'ghost' }],
+          }),
+        ],
+      }),
+    ).rejects.toThrow(
+      /admission rejected decomposition of "[^"]+": child 0 criterion "ac1-1" references unknown verifier "ghost"; registered verifiers: command, composite, review/,
+    )
 
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(1)
     expect(h.spawned).toHaveLength(0)
@@ -2392,9 +2629,11 @@ describe('TaskRuntime criterion verifierRef (KISS §4.1, VRTC plan 1.4)', () => 
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [childSpec('pinned child', {
-        acceptanceCriteria: [{ description: 'judged by a pinned verifier', command: 'true', verifierRef: 'command' }],
-      })],
+      children: [
+        childSpec('pinned child', {
+          acceptanceCriteria: [{ description: 'judged by a pinned verifier', command: 'true', verifierRef: 'command' }],
+        }),
+      ],
     })
 
     expect(outcomes[0]!.status).toBe('verified')
@@ -2404,12 +2643,18 @@ describe('TaskRuntime criterion verifierRef (KISS §4.1, VRTC plan 1.4)', () => 
   test('a declared verifierRef with no verifier service to validate against fails loudly before anything persists', async () => {
     const h = harness({ verifier: 'absent' })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('pinned child', {
-        acceptanceCriteria: [{ description: 'judged by a pinned verifier', command: 'true', verifierRef: 'command' }],
-      })],
-    })).rejects.toThrow(VerifierUnavailableError)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [
+          childSpec('pinned child', {
+            acceptanceCriteria: [
+              { description: 'judged by a pinned verifier', command: 'true', verifierRef: 'command' },
+            ],
+          }),
+        ],
+      }),
+    ).rejects.toThrow(VerifierUnavailableError)
 
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(1)
     expect(h.spawned).toHaveLength(0)
@@ -2424,26 +2669,36 @@ describe('TaskRuntime criterion verifierRef (KISS §4.1, VRTC plan 1.4)', () => 
     })
     expect(outcomes[0]!.status).toBe('verified')
 
-    await expect(h.runtime.replayTask(STORE, outcomes[0]!.taskId, {
-      lineage: 'evolution-replay:p-ref',
-      spawn: false,
-      contract: {
-        objective: 'candidate with a pinned judge',
-        acceptanceCriteria: [{
-          criterionId: 'cd-1',
-          description: 'x',
-          verificationMode: 'deterministic',
-          requiredEvidence: [],
-          mandatory: true,
-          command: 'true',
-          verifierRef: 'ghost',
-        }],
-        requiredCapabilities: [],
-      },
-    }, ROOT_SESSION)).rejects.toThrow(/admission rejected replay of "[^"]+": child 0 criterion "cd-1" references unknown verifier "ghost"; registered verifiers: command, composite, review/)
+    await expect(
+      h.runtime.replayTask(
+        STORE,
+        outcomes[0]!.taskId,
+        {
+          lineage: 'evolution-replay:p-ref',
+          spawn: false,
+          contract: {
+            objective: 'candidate with a pinned judge',
+            acceptanceCriteria: [
+              {
+                criterionId: 'cd-1',
+                description: 'x',
+                verificationMode: 'deterministic',
+                requiredEvidence: [],
+                mandatory: true,
+                command: 'true',
+                verifierRef: 'ghost',
+              },
+            ],
+            requiredCapabilities: [],
+          },
+        },
+        ROOT_SESSION,
+      ),
+    ).rejects.toThrow(
+      /admission rejected replay of "[^"]+": child 0 criterion "cd-1" references unknown verifier "ghost"; registered verifiers: command, composite, review/,
+    )
   })
 })
-
 
 describe('TaskRuntime unknown-kind feedback (KISS §4.3, VRTC plan 2.1)', () => {
   test('the failure reason tells an untested criterion (unknown: task) apart from a broken judge (unknown: verifier)', async () => {
@@ -2488,29 +2743,45 @@ describe('TaskRuntime unknown-kind feedback (KISS §4.3, VRTC plan 2.1)', () => 
     })
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'failed'])
-    const reasonOf = (runId: string) => taskEvents(h)
-      .filter(item => item.kind === 'TaskFailed' && item.runId === runId)
-      .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined))[0]
-    expect(reasonOf(outcomes[0]!.runId!))
-      .toBe('mandatory criteria not satisfied: ac1-1 inconclusive [unknown: task — the criterion was never tested] (timeout after 600000ms)')
-    expect(reasonOf(outcomes[1]!.runId!))
-      .toBe(`mandatory criteria not satisfied: ac2-1 inconclusive [unknown: verifier — the verifier could not judge] ${escalationHint(
+    const reasonOf = (runId: string) =>
+      taskEvents(h)
+        .filter(item => item.kind === 'TaskFailed' && item.runId === runId)
+        .map(item => (item.kind === 'TaskFailed' ? item.payload.reason : undefined))[0]
+    expect(reasonOf(outcomes[0]!.runId!)).toBe(
+      'mandatory criteria not satisfied: ac1-1 inconclusive [unknown: task — the criterion was never tested] (timeout after 600000ms)',
+    )
+    expect(reasonOf(outcomes[1]!.runId!)).toBe(
+      `mandatory criteria not satisfied: ac2-1 inconclusive [unknown: verifier — the verifier could not judge] ${escalationHint(
         'the verifier "fake-verifier" could not judge criterion "ac2-1"',
         'the criterion was run and the judge itself failed',
         'fix or replace the verifier, then re-verify the criterion',
-      )} (verifier exploded)`)
+      )} (verifier exploded)`,
+    )
 
     // The review record carries the kind too, so E3 can be read without the bundle.
     // It also carries the deciding judge since S1-V slice 2, copied off the
     // verifier result — the record names who decided, not only what was decided.
     const snapshot = await h.task.snapshotIn(STORE)
-    expect(snapshot.reviews.find(item => item.runId === outcomes[0]!.runId)!.criteria)
-      .toEqual([{ criterionId: 'ac1-1', verdict: 'inconclusive', verifierId: 'fake-verifier', command: 'true', unknownKind: 'task' }])
-    expect(snapshot.reviews.find(item => item.runId === outcomes[1]!.runId)!.criteria)
-      .toEqual([{ criterionId: 'ac2-1', verdict: 'inconclusive', verifierId: 'fake-verifier', command: 'true', unknownKind: 'verifier' }])
+    expect(snapshot.reviews.find(item => item.runId === outcomes[0]!.runId)!.criteria).toEqual([
+      {
+        criterionId: 'ac1-1',
+        verdict: 'inconclusive',
+        verifierId: 'fake-verifier',
+        command: 'true',
+        unknownKind: 'task',
+      },
+    ])
+    expect(snapshot.reviews.find(item => item.runId === outcomes[1]!.runId)!.criteria).toEqual([
+      {
+        criterionId: 'ac2-1',
+        verdict: 'inconclusive',
+        verifierId: 'fake-verifier',
+        command: 'true',
+        unknownKind: 'verifier',
+      },
+    ])
   })
 })
-
 
 describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   /** One verified champion child, spawned with the given capability table. */
@@ -2530,10 +2801,15 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     const { championTaskId, championRunId } = await champion(h)
     const before = await h.task.taskIn(STORE, championTaskId)
 
-    const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:p1',
-      overlay: { capabilityOverrides: { research: { preset: 'other-preset', skills: ['verify'] } } },
-    }, ROOT_SESSION)
+    const outcome = await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      {
+        lineage: 'evolution-replay:p1',
+        overlay: { capabilityOverrides: { research: { preset: 'other-preset', skills: ['verify'] } } },
+      },
+      ROOT_SESSION,
+    )
 
     expect(outcome.status).toBe('verified')
     // the spawn saw the override row, not the configured one
@@ -2565,16 +2841,27 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     expect(record!.anomalies).toEqual(['evolution-replay:p1'])
     expect(record!.criteria).toHaveLength(1)
     // event walk matches any verified run's
-    expect(runEventKinds(h, outcome.runId)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
+    expect(runEventKinds(h, outcome.runId)).toEqual([
+      'TaskStarted',
+      'TaskVerifying',
+      'EvidenceProduced',
+      'TaskVerified',
+      'ReviewRecorded',
+    ])
   })
 
   test('extra skill roots are forwarded to the worker grant, and the prompt never invites a split', async () => {
     const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
-    await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:p2',
-      overlay: { extraSkillRoots: ['/sandbox/p2/skills'] },
-    }, ROOT_SESSION)
+    await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      {
+        lineage: 'evolution-replay:p2',
+        overlay: { extraSkillRoots: ['/sandbox/p2/skills'] },
+      },
+      ROOT_SESSION,
+    )
     const spawn = h.spawned[h.spawned.length - 1]!
     expect(spawn.grant!.skillRoots).toEqual(['/sandbox/p2/skills'])
     // the overlay did not change the capability resolution
@@ -2586,13 +2873,11 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     // projection briefs it with, read from the store.
     expect(spawn.prompt).toBeUndefined()
     expect(spawn.taskWorker).toBe(true)
-    const replay = (await h.task.snapshotIn(STORE)).tasks.find(
-      task => task.objective.includes('[evolution-replay:p2]'),
-    )
+    const replay = (await h.task.snapshotIn(STORE)).tasks.find(task => task.objective.includes('[evolution-replay:p2]'))
     expect(replay?.objective).toContain('[evolution-replay:p2]')
   })
 
-  test('a spawning replay binds its own content: the overlay root stays first and the run\'s snapshot follows it', async () => {
+  test("a spawning replay binds its own content: the overlay root stays first and the run's snapshot follows it", async () => {
     const home = pinSkillHome('verify')
     const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
@@ -2600,12 +2885,23 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     // root exposes, with no sidecar (loadable guidance for the row under test).
     const sandbox = join(home, 'sandbox', 'p3', 'skills')
     await mkdir(join(sandbox, 'verify'), { recursive: true })
-    await writeFile(join(sandbox, 'verify', 'SKILL.md'), '---\nname: verify\ndescription: candidate verify\n---\n\nCANDIDATE BODY\n')
+    await writeFile(
+      join(sandbox, 'verify', 'SKILL.md'),
+      '---\nname: verify\ndescription: candidate verify\n---\n\nCANDIDATE BODY\n',
+    )
 
-    const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:binding',
-      overlay: { extraSkillRoots: [sandbox], capabilityOverrides: { research: { preset: 'standard', skills: ['verify'] } } },
-    }, ROOT_SESSION)
+    const outcome = await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      {
+        lineage: 'evolution-replay:binding',
+        overlay: {
+          extraSkillRoots: [sandbox],
+          capabilityOverrides: { research: { preset: 'standard', skills: ['verify'] } },
+        },
+      },
+      ROOT_SESSION,
+    )
 
     expect(outcome.status).toBe('verified')
     const run = await h.task.runIn(STORE, outcome.runId)
@@ -2623,14 +2919,19 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     expect((await h.runtime.readRunBinding(binding))?.defects).toEqual([])
   })
 
-  test('the replay renders the champion\'s own declarations and persists the same two lists', async () => {
+  test("the replay renders the champion's own declarations and persists the same two lists", async () => {
     const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
     const assumptions = ['a cycle-accurate reference model exists']
     const constraints = ['no network access', 'finish inside ten minutes']
     const { championTaskId } = await champion(h, 'champion work', { assumptions, constraints })
     const championContract = (await h.task.taskIn(STORE, championTaskId)).contract!
 
-    const outcome = await h.runtime.replayTask(STORE, championTaskId, { lineage: 'evolution-replay:declarations' }, ROOT_SESSION)
+    const outcome = await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      { lineage: 'evolution-replay:declarations' },
+      ROOT_SESSION,
+    )
 
     const replayTask = await h.task.taskIn(STORE, outcome.taskId)
     const stored = replayTask.contract!
@@ -2653,7 +2954,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     expect(championContract.constraints).toHaveLength(2)
   })
 
-  test('a capability override granting an MCP server binds it against the replay run\'s env', async () => {
+  test("a capability override granting an MCP server binds it against the replay run's env", async () => {
     const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
     h.ctx.envBuilder = {
       store: {
@@ -2664,19 +2965,26 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       },
     }
     const { championTaskId } = await champion(h)
-    const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:p-mcp',
-      overlay: { capabilityOverrides: { research: { preset: 'standard', mcpServers: ['bbdev'] } } },
-    }, ROOT_SESSION)
+    const outcome = await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      {
+        lineage: 'evolution-replay:p-mcp',
+        overlay: { capabilityOverrides: { research: { preset: 'standard', mcpServers: ['bbdev'] } } },
+      },
+      ROOT_SESSION,
+    )
     expect(outcome.status).toBe('verified')
     const spawn = h.spawned[h.spawned.length - 1]!
-    expect(spawn.grant!.mcpServers).toEqual([{
-      serverName: 'bbdev',
-      command: '/fake/env/env1/fork/buckyball/scripts/claude/run_mcp_server.sh',
-      args: [],
-      env: {},
-      cwd: '/fake/env/env1/fork/buckyball',
-    }])
+    expect(spawn.grant!.mcpServers).toEqual([
+      {
+        serverName: 'bbdev',
+        command: '/fake/env/env1/fork/buckyball/scripts/claude/run_mcp_server.sh',
+        args: [],
+        env: {},
+        cwd: '/fake/env/env1/fork/buckyball',
+      },
+    ])
     const replayRun = await h.task.runIn(STORE, outcome.runId)
     expect(replayRun.capabilitySnapshot).toContain('mcp:bbdev')
   })
@@ -2694,7 +3002,9 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     mkdirSync(named, { recursive: true })
     try {
       const realNamed = await realpath(named)
-      const h = harness({ config: { capabilities: { 'check-ball-registration': { skills: ['check'], mcpServers: ['bbdev'] } } } })
+      const h = harness({
+        config: { capabilities: { 'check-ball-registration': { skills: ['check'], mcpServers: ['bbdev'] } } },
+      })
       h.ctx.envBuilder = {
         store: {
           get: (envId: string) => ({
@@ -2703,12 +3013,19 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
           }),
         },
       }
-      const { championTaskId } = await champion(h, 'champion work', { requiredCapabilities: ['check-ball-registration'] })
+      const { championTaskId } = await champion(h, 'champion work', {
+        requiredCapabilities: ['check-ball-registration'],
+      })
 
-      const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-        lineage: 'evolution-replay:named-workspace',
-        workspace: { path: named },
-      }, ROOT_SESSION)
+      const outcome = await h.runtime.replayTask(
+        STORE,
+        championTaskId,
+        {
+          lineage: 'evolution-replay:named-workspace',
+          workspace: { path: named },
+        },
+        ROOT_SESSION,
+      )
 
       expect(outcome.status).toBe('verified')
       // The outcome names the workspace, normalized — the identity a report and a
@@ -2719,15 +3036,20 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       expect(spawn.cwd).toBe(realNamed)
       // So does the MCP server the capability grants: the env root a server's cwd
       // and `{repoRoot:…}` placeholders resolve against is the named workspace.
-      expect(spawn.grant!.mcpServers).toEqual([{
-        serverName: 'bbdev',
-        command: join(realNamed, 'fork/buckyball/scripts/claude/run_mcp_server.sh'),
-        args: [],
-        env: {},
-        cwd: join(realNamed, 'fork/buckyball'),
-      }])
+      expect(spawn.grant!.mcpServers).toEqual([
+        {
+          serverName: 'bbdev',
+          command: join(realNamed, 'fork/buckyball/scripts/claude/run_mcp_server.sh'),
+          args: [],
+          env: {},
+          cwd: join(realNamed, 'fork/buckyball'),
+        },
+      ])
       // And the verifier judges there.
-      expect(h.verifier.verifyRun).toHaveBeenCalledWith(STORE, outcome.runId, { cwd: realNamed, timeoutMs: DEFAULT_VERIFY_TIMEOUT_MS })
+      expect(h.verifier.verifyRun).toHaveBeenCalledWith(STORE, outcome.runId, {
+        cwd: realNamed,
+        timeoutMs: DEFAULT_VERIFY_TIMEOUT_MS,
+      })
     } finally {
       rmSync(parent, { recursive: true, force: true })
     }
@@ -2736,10 +3058,15 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   test('a presetOverride wins over the capability resolution; absent it, the capability preset stands', async () => {
     const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
     const first = await champion(h)
-    await h.runtime.replayTask(STORE, first.championTaskId, {
-      lineage: 'evolution-replay:p3',
-      overlay: { presetOverride: 'custom-preset' },
-    }, ROOT_SESSION)
+    await h.runtime.replayTask(
+      STORE,
+      first.championTaskId,
+      {
+        lineage: 'evolution-replay:p3',
+        overlay: { presetOverride: 'custom-preset' },
+      },
+      ROOT_SESSION,
+    )
     expect(h.spawned[h.spawned.length - 1]!.agentPreset).toBe('custom-preset')
 
     const h2 = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
@@ -2753,51 +3080,67 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     const { championTaskId } = await champion(h)
     const spawnedBefore = h.spawned.length
 
-    const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:p5',
-      spawn: false,
-      contract: {
-        objective: 'candidate definition replay',
-        acceptanceCriteria: [{
-          criterionId: 'cd-1',
-          description: 'candidate criterion',
-          verificationMode: 'deterministic',
-          requiredEvidence: [],
-          mandatory: true,
-          command: 'make candidate',
-        }],
-        requiredCapabilities: ['research'],
+    const outcome = await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      {
+        lineage: 'evolution-replay:p5',
+        spawn: false,
+        contract: {
+          objective: 'candidate definition replay',
+          acceptanceCriteria: [
+            {
+              criterionId: 'cd-1',
+              description: 'candidate criterion',
+              verificationMode: 'deterministic',
+              requiredEvidence: [],
+              mandatory: true,
+              command: 'make candidate',
+            },
+          ],
+          requiredCapabilities: ['research'],
+        },
       },
-    }, ROOT_SESSION)
+      ROOT_SESSION,
+    )
 
     expect(outcome.status).toBe('verified')
     expect(h.spawned).toHaveLength(spawnedBefore)
     const replayTask = await h.task.taskIn(STORE, outcome.taskId)
     expect(replayTask.acceptanceCriteria.map(item => item.criterionId)).toEqual(['cd-1'])
     const record = (await h.task.snapshotIn(STORE)).reviews.find(item => item.runId === outcome.runId)
-    expect(record!.criteria).toEqual([{ criterionId: 'cd-1', verdict: 'pass', verifierId: 'fake-verifier', command: 'make candidate' }])
+    expect(record!.criteria).toEqual([
+      { criterionId: 'cd-1', verdict: 'pass', verifierId: 'fake-verifier', command: 'make candidate' },
+    ])
     expect(record!.anomalies).toEqual(['evolution-replay:p5'])
   })
 
   test('a failing replay settles failed with the lineage tag and a localized cause', async () => {
     const h = harness({ config: { capabilities: { research: { preset: 'standard' } } }, verifier: 'by-objective' })
     const { championTaskId } = await champion(h, 'champion work')
-    const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:p6',
-      contract: {
-        objective: 'fail-me candidate',
-        acceptanceCriteria: [{
-          criterionId: 'cd-1',
-          description: 'fails',
-          verificationMode: 'deterministic',
-          requiredEvidence: [],
-          mandatory: true,
-          command: 'false',
-        }],
-        requiredCapabilities: ['research'],
+    const outcome = await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      {
+        lineage: 'evolution-replay:p6',
+        contract: {
+          objective: 'fail-me candidate',
+          acceptanceCriteria: [
+            {
+              criterionId: 'cd-1',
+              description: 'fails',
+              verificationMode: 'deterministic',
+              requiredEvidence: [],
+              mandatory: true,
+              command: 'false',
+            },
+          ],
+          requiredCapabilities: ['research'],
+        },
+        spawn: false,
       },
-      spawn: false,
-    }, ROOT_SESSION)
+      ROOT_SESSION,
+    )
 
     expect(outcome.status).toBe('failed')
     const record = (await h.task.snapshotIn(STORE)).reviews.find(item => item.runId === outcome.runId)
@@ -2812,15 +3155,22 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     const original = await h.task.taskIn(STORE, championTaskId)
     const before = await h.task.snapshotIn(STORE)
     const spawnCount = h.spawned.length
-    await expect(h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:conflicting-presets',
-      contract: {
-        objective: original.objective,
-        acceptanceCriteria: original.acceptanceCriteria,
-        requiredCapabilities: ['research', 'verify'],
-      },
-      overlay: { capabilityOverrides: { verify: { preset: 'bb-verify' } } },
-    }, ROOT_SESSION)).rejects.toThrow(/conflicting capability presets/)
+    await expect(
+      h.runtime.replayTask(
+        STORE,
+        championTaskId,
+        {
+          lineage: 'evolution-replay:conflicting-presets',
+          contract: {
+            objective: original.objective,
+            acceptanceCriteria: original.acceptanceCriteria,
+            requiredCapabilities: ['research', 'verify'],
+          },
+          overlay: { capabilityOverrides: { verify: { preset: 'bb-verify' } } },
+        },
+        ROOT_SESSION,
+      ),
+    ).rejects.toThrow(/conflicting capability presets/)
     expect(await h.task.snapshotIn(STORE)).toEqual(before)
     expect(h.spawned).toHaveLength(spawnCount)
   })
@@ -2829,32 +3179,52 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     // a still-running root is not a replayable champion
     const running = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
     const { taskId: runningRootId } = await createRoot(running)
-    await expect(running.runtime.replayTask(STORE, runningRootId, { lineage: 'evolution-replay:p7' }, ROOT_SESSION))
-      .rejects.toThrow(/is running; only a terminal/)
+    await expect(
+      running.runtime.replayTask(STORE, runningRootId, { lineage: 'evolution-replay:p7' }, ROOT_SESSION),
+    ).rejects.toThrow(/is running; only a terminal/)
 
     const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
-    await expect(h.runtime.replayTask(STORE, 't-ghost', { lineage: 'evolution-replay:p7' }, ROOT_SESSION))
-      .rejects.toThrow('unknown task "t-ghost"')
-    await expect(h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:p7',
-      contract: {
-        objective: 'gap replay',
-        acceptanceCriteria: [{ criterionId: 'cd-1', description: 'x', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-        requiredCapabilities: ['fly-to-moon'],
-      },
-    }, ROOT_SESSION)).rejects.toThrow(/capability gap \[fly-to-moon\]/)
+    await expect(
+      h.runtime.replayTask(STORE, 't-ghost', { lineage: 'evolution-replay:p7' }, ROOT_SESSION),
+    ).rejects.toThrow('unknown task "t-ghost"')
+    await expect(
+      h.runtime.replayTask(
+        STORE,
+        championTaskId,
+        {
+          lineage: 'evolution-replay:p7',
+          contract: {
+            objective: 'gap replay',
+            acceptanceCriteria: [
+              {
+                criterionId: 'cd-1',
+                description: 'x',
+                verificationMode: 'deterministic',
+                requiredEvidence: [],
+                mandatory: true,
+                command: 'true',
+              },
+            ],
+            requiredCapabilities: ['fly-to-moon'],
+          },
+        },
+        ROOT_SESSION,
+      ),
+    ).rejects.toThrow(/capability gap \[fly-to-moon\]/)
     // nothing was persisted for the rejected replays
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks.filter(task => task.objective.startsWith('[evolution-replay:'))).toHaveLength(0)
   })
 
   test('a spawn refusal fails the replay run with the cause and the lineage tag', async () => {
-    const options: { config?: Partial<Config>; spawnError?: string } = { config: { capabilities: { research: { preset: 'standard' } } } }
+    const options: { config?: Partial<Config>; spawnError?: string } = {
+      config: { capabilities: { research: { preset: 'standard' } } },
+    }
     const h = harness(options)
     const { championTaskId } = await champion(h)
     // the spawn seam starts failing after the champion settled
-    options.spawnError = 'agent-presets: preset "standard" not found'
+    options.spawnError = 'Unknown agent preset: standard'
 
     const outcome = await h.runtime.replayTask(STORE, championTaskId, { lineage: 'evolution-replay:p8' }, ROOT_SESSION)
     expect(outcome.status).toBe('failed')
@@ -2862,24 +3232,32 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     expect(replayTask.status).toBe('failed')
     const record = (await h.task.snapshotIn(STORE)).reviews.find(item => item.runId === outcome.runId)
     expect(record!.outcome).toBe('failed')
-    expect(record!.localizedCause).toBe('spawn failed: agent-presets: preset "standard" not found')
+    expect(record!.localizedCause).toBe('spawn failed: Unknown agent preset: standard')
     expect(record!.anomalies).toEqual(['evolution-replay:p8'])
     expect(runEventKinds(h, outcome.runId)).toEqual(['TaskStarted', 'TaskFailed', 'ReviewRecorded'])
   })
 
   describe('candidate contracts under the shared structural rules (T1, construction guide §4)', () => {
     /** A candidate contract as the replay entry takes it: valid unless the test overrides it. */
-    function candidate(overrides: Partial<{ objective: string; acceptanceCriteria: AcceptanceCriterion[]; requiredCapabilities: string[] }> = {}) {
+    function candidate(
+      overrides: Partial<{
+        objective: string
+        acceptanceCriteria: AcceptanceCriterion[]
+        requiredCapabilities: string[]
+      }> = {},
+    ) {
       return {
         objective: 'candidate definition replay',
-        acceptanceCriteria: [{
-          criterionId: 'cd-1',
-          description: 'the candidate definition holds',
-          verificationMode: 'deterministic' as const,
-          requiredEvidence: [],
-          mandatory: true,
-          command: 'make candidate',
-        }],
+        acceptanceCriteria: [
+          {
+            criterionId: 'cd-1',
+            description: 'the candidate definition holds',
+            verificationMode: 'deterministic' as const,
+            requiredEvidence: [],
+            mandatory: true,
+            command: 'make candidate',
+          },
+        ],
         requiredCapabilities: ['research'],
         ...overrides,
       }
@@ -2891,19 +3269,28 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       const before = await h.task.snapshotIn(STORE)
       const spawnCount = h.spawned.length
 
-      await expect(h.runtime.replayTask(STORE, championTaskId, {
-        lineage: 'evolution-replay:all-optional',
-        contract: candidate({
-          acceptanceCriteria: [{
-            criterionId: 'cd-1',
-            description: 'nothing is required',
-            verificationMode: 'deterministic',
-            requiredEvidence: [],
-            mandatory: false,
-            command: 'true',
-          }],
-        }),
-      }, ROOT_SESSION)).rejects.toThrow(
+      await expect(
+        h.runtime.replayTask(
+          STORE,
+          championTaskId,
+          {
+            lineage: 'evolution-replay:all-optional',
+            contract: candidate({
+              acceptanceCriteria: [
+                {
+                  criterionId: 'cd-1',
+                  description: 'nothing is required',
+                  verificationMode: 'deterministic',
+                  requiredEvidence: [],
+                  mandatory: false,
+                  command: 'true',
+                },
+              ],
+            }),
+          },
+          ROOT_SESSION,
+        ),
+      ).rejects.toThrow(
         /replay of "[^"]+" rejected:\n- replay of "[^"]+" requires at least one mandatory acceptance criterion/,
       )
 
@@ -2917,15 +3304,35 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       const before = await h.task.snapshotIn(STORE)
       const spawnCount = h.spawned.length
 
-      await expect(h.runtime.replayTask(STORE, championTaskId, {
-        lineage: 'evolution-replay:duplicate-id',
-        contract: candidate({
-          acceptanceCriteria: [
-            { criterionId: 'cd-dup', description: 'first', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' },
-            { criterionId: 'cd-dup', description: 'second', verificationMode: 'review', requiredEvidence: [], mandatory: true },
-          ],
-        }),
-      }, ROOT_SESSION)).rejects.toThrow(
+      await expect(
+        h.runtime.replayTask(
+          STORE,
+          championTaskId,
+          {
+            lineage: 'evolution-replay:duplicate-id',
+            contract: candidate({
+              acceptanceCriteria: [
+                {
+                  criterionId: 'cd-dup',
+                  description: 'first',
+                  verificationMode: 'deterministic',
+                  requiredEvidence: [],
+                  mandatory: true,
+                  command: 'true',
+                },
+                {
+                  criterionId: 'cd-dup',
+                  description: 'second',
+                  verificationMode: 'review',
+                  requiredEvidence: [],
+                  mandatory: true,
+                },
+              ],
+            }),
+          },
+          ROOT_SESSION,
+        ),
+      ).rejects.toThrow(
         /replay of "[^"]+" rejected:\n- replay of "[^"]+" declares criterion id "cd-dup" more than once/,
       )
 
@@ -2933,8 +3340,10 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       expect(h.spawned).toHaveLength(spawnCount)
     })
 
-    test('persists the effective candidate contract: the tagged objective, the candidate\'s criteria and capabilities, the champion\'s declarations', async () => {
-      const h = harness({ config: { capabilities: { research: { preset: 'standard' }, verify: { preset: 'bb-verify' } } } })
+    test("persists the effective candidate contract: the tagged objective, the candidate's criteria and capabilities, the champion's declarations", async () => {
+      const h = harness({
+        config: { capabilities: { research: { preset: 'standard' }, verify: { preset: 'bb-verify' } } },
+      })
       const assumptions = ['a cycle-accurate reference model exists']
       const constraints = ['no network access']
       const { championTaskId } = await champion(h, 'champion work', { assumptions, constraints })
@@ -2942,11 +3351,16 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       // its objective, its criteria, and the capability it requires.
       const contract = candidate({ requiredCapabilities: ['verify'] })
 
-      const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-        lineage: 'evolution-replay:candidate',
-        contract,
-        spawn: false,
-      }, ROOT_SESSION)
+      const outcome = await h.runtime.replayTask(
+        STORE,
+        championTaskId,
+        {
+          lineage: 'evolution-replay:candidate',
+          contract,
+          spawn: false,
+        },
+        ROOT_SESSION,
+      )
 
       expect(outcome.status).toBe('verified')
       const replayTask = await h.task.taskIn(STORE, outcome.taskId)
@@ -2958,14 +3372,16 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       expect(replayTask.contract).toEqual({
         contractVersion: 1,
         objective: '[evolution-replay:candidate] candidate definition replay',
-        acceptanceCriteria: [{
-          criterionId: 'cd-1',
-          description: 'the candidate definition holds',
-          verificationMode: 'deterministic',
-          requiredEvidence: [],
-          mandatory: true,
-          command: 'make candidate',
-        }],
+        acceptanceCriteria: [
+          {
+            criterionId: 'cd-1',
+            description: 'the candidate definition holds',
+            verificationMode: 'deterministic',
+            requiredEvidence: [],
+            mandatory: true,
+            command: 'make candidate',
+          },
+        ],
         assumptions,
         constraints,
         requiredCapabilities: ['verify'],
@@ -2977,20 +3393,27 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
       // Raw store calls, the shape the legacy-style tests use: a task admitted
       // and settled before the contract existed carries none.
-      const { taskId: championTaskId, runId: championRunId } = await createAcceptanceParent(h, [{
-        criterionId: 'legacy-1',
-        description: 'the legacy criterion holds',
-        verificationMode: 'deterministic',
-        requiredEvidence: [],
-        mandatory: true,
-        command: 'true',
-      }])
+      const { taskId: championTaskId, runId: championRunId } = await createAcceptanceParent(h, [
+        {
+          criterionId: 'legacy-1',
+          description: 'the legacy criterion holds',
+          verificationMode: 'deterministic',
+          requiredEvidence: [],
+          mandatory: true,
+          command: 'true',
+        },
+      ])
       await settleRunNested(h.task, STORE, championTaskId, championRunId, 'tester')
       const champion = await h.task.taskIn(STORE, championTaskId)
       expect(champion.contract).toBeUndefined()
       expect(champion.status).toBe('verified')
 
-      const outcome = await h.runtime.replayTask(STORE, championTaskId, { lineage: 'evolution-replay:legacy' }, ROOT_SESSION)
+      const outcome = await h.runtime.replayTask(
+        STORE,
+        championTaskId,
+        { lineage: 'evolution-replay:legacy' },
+        ROOT_SESSION,
+      )
 
       expect(outcome.status).toBe('verified')
       const replayTask = await h.task.taskIn(STORE, outcome.taskId)
@@ -3028,10 +3451,15 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     const { championTaskId } = await champion(h)
     const before = h.spawned.length
 
-    const frozen = await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:agent-options',
-      agentOptions: { ...FROZEN_OPTIONS },
-    }, ROOT_SESSION)
+    const frozen = await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      {
+        lineage: 'evolution-replay:agent-options',
+        agentOptions: { ...FROZEN_OPTIONS },
+      },
+      ROOT_SESSION,
+    )
 
     expect(frozen.status).toBe('verified')
     const worker = h.spawned[before]!
@@ -3039,7 +3467,12 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     // over the deployment default for this worker alone.
     expect(worker.agentOptions).toEqual(FROZEN_OPTIONS)
     // A replay that names none keeps the default: nothing was invented for it.
-    const plain = await h.runtime.replayTask(STORE, championTaskId, { lineage: 'evolution-replay:agent-options-default' }, ROOT_SESSION)
+    const plain = await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      { lineage: 'evolution-replay:agent-options-default' },
+      ROOT_SESSION,
+    )
     expect(plain.status).toBe('verified')
     expect(h.spawned[before + 1]!.agentOptions).toBeUndefined()
   })
@@ -3063,10 +3496,15 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       await h.runtime.submitResult(sessionId, { summary: 'the split ran; the replayed work continues under the child' })
     })
 
-    const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:sub-execution',
-      agentOptions: { ...FROZEN_OPTIONS },
-    }, ROOT_SESSION)
+    const outcome = await h.runtime.replayTask(
+      STORE,
+      championTaskId,
+      {
+        lineage: 'evolution-replay:sub-execution',
+        agentOptions: { ...FROZEN_OPTIONS },
+      },
+      ROOT_SESSION,
+    )
 
     expect(outcome.status).toBe('verified')
     const [worker, child] = h.spawned.slice(before)
@@ -3078,7 +3516,6 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     expect(child!.agentOptions).toEqual(FROZEN_OPTIONS)
     expect(child!.sessionId).not.toBe(worker!.sessionId)
   })
-
 })
 
 describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
@@ -3087,11 +3524,13 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const spec: DecomposeSpec = {
       reason: 'split the work',
-      children: [childSpec('child a', {
-        assumptions: ['a cycle-accurate reference model exists'],
-        constraints: ['no network access'],
-        requiredCapabilities: ['research'],
-      })],
+      children: [
+        childSpec('child a', {
+          assumptions: ['a cycle-accurate reference model exists'],
+          constraints: ['no network access'],
+          requiredCapabilities: ['research'],
+        }),
+      ],
     }
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, spec)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
@@ -3100,14 +3539,16 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
     expect(child.contract).toEqual({
       contractVersion: 1,
       objective: 'child a',
-      acceptanceCriteria: [{
-        criterionId: 'ac1-1',
-        description: 'child a works',
-        verificationMode: 'deterministic',
-        requiredEvidence: [],
-        mandatory: true,
-        command: 'true',
-      }],
+      acceptanceCriteria: [
+        {
+          criterionId: 'ac1-1',
+          description: 'child a works',
+          verificationMode: 'deterministic',
+          requiredEvidence: [],
+          mandatory: true,
+          command: 'true',
+        },
+      ],
       assumptions: ['a cycle-accurate reference model exists'],
       constraints: ['no network access'],
       requiredCapabilities: ['research'],
@@ -3181,34 +3622,74 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
   test('a batch the contract rejects persists nothing and spawns nothing', async () => {
     const children = (child: Record<string, unknown>) => [child] as unknown as DecomposeSpec['children']
     const cases: Array<[string, DecomposeSpec, RegExp]> = [
-      ['an unknown child field', {
-        reason: 'split the work',
-        children: children({ objective: 'child a', acceptanceCriteria: [{ description: 'child a works', command: 'true' }], skills: ['ball-align'] }),
-      }, /contract rejected decomposition of "[^"]+":\n- child 0 declares unknown field "skills"/],
-      ['a duplicate explicit criterion id', {
-        reason: 'split the work',
-        children: children({ objective: 'child a', acceptanceCriteria: [
-          { description: 'first', criterionId: 'dup', command: 'true' },
-          { description: 'second', criterionId: 'dup', command: 'true' },
-        ] }),
-      }, /contract rejected decomposition of "[^"]+":\n- child 0 declares criterion id "dup" more than once/],
-      ['an unknown contract version', {
-        reason: 'split the work',
-        contractVersion: 2,
-        children: [childSpec('child a')],
-      }, /contract rejected decomposition of "[^"]+":\n- unknown contract version 2: this runtime writes version 1/],
-      ['an all-optional criterion list', {
-        reason: 'split the work',
-        children: children({ objective: 'child a', acceptanceCriteria: [{ description: 'nothing is required', command: 'true', mandatory: false }] }),
-      }, /admission rejected decomposition of "[^"]+":\n- child 0 requires at least one mandatory acceptance criterion/],
-      ['a null mode', {
-        reason: 'split the work',
-        children: children({ objective: 'child a', acceptanceCriteria: [{ description: 'child a works', command: 'true', mode: null }] }),
-      }, /admission rejected decomposition of "[^"]+":\n- child 0 criterion "ac1-1" verificationMode "null" is not one of deterministic, simulation, formal, measurement, review, composite/],
-      ['a numeric mode', {
-        reason: 'split the work',
-        children: children({ objective: 'child a', acceptanceCriteria: [{ description: 'child a works', command: 'true', mode: 0 }] }),
-      }, /admission rejected decomposition of "[^"]+":\n- child 0 criterion "ac1-1" verificationMode "0" is not one of deterministic, simulation, formal, measurement, review, composite/],
+      [
+        'an unknown child field',
+        {
+          reason: 'split the work',
+          children: children({
+            objective: 'child a',
+            acceptanceCriteria: [{ description: 'child a works', command: 'true' }],
+            skills: ['ball-align'],
+          }),
+        },
+        /contract rejected decomposition of "[^"]+":\n- child 0 declares unknown field "skills"/,
+      ],
+      [
+        'a duplicate explicit criterion id',
+        {
+          reason: 'split the work',
+          children: children({
+            objective: 'child a',
+            acceptanceCriteria: [
+              { description: 'first', criterionId: 'dup', command: 'true' },
+              { description: 'second', criterionId: 'dup', command: 'true' },
+            ],
+          }),
+        },
+        /contract rejected decomposition of "[^"]+":\n- child 0 declares criterion id "dup" more than once/,
+      ],
+      [
+        'an unknown contract version',
+        {
+          reason: 'split the work',
+          contractVersion: 2,
+          children: [childSpec('child a')],
+        },
+        /contract rejected decomposition of "[^"]+":\n- unknown contract version 2: this runtime writes version 1/,
+      ],
+      [
+        'an all-optional criterion list',
+        {
+          reason: 'split the work',
+          children: children({
+            objective: 'child a',
+            acceptanceCriteria: [{ description: 'nothing is required', command: 'true', mandatory: false }],
+          }),
+        },
+        /admission rejected decomposition of "[^"]+":\n- child 0 requires at least one mandatory acceptance criterion/,
+      ],
+      [
+        'a null mode',
+        {
+          reason: 'split the work',
+          children: children({
+            objective: 'child a',
+            acceptanceCriteria: [{ description: 'child a works', command: 'true', mode: null }],
+          }),
+        },
+        /admission rejected decomposition of "[^"]+":\n- child 0 criterion "ac1-1" verificationMode "null" is not one of deterministic, simulation, formal, measurement, review, composite/,
+      ],
+      [
+        'a numeric mode',
+        {
+          reason: 'split the work',
+          children: children({
+            objective: 'child a',
+            acceptanceCriteria: [{ description: 'child a works', command: 'true', mode: 0 }],
+          }),
+        },
+        /admission rejected decomposition of "[^"]+":\n- child 0 criterion "ac1-1" verificationMode "0" is not one of deterministic, simulation, formal, measurement, review, composite/,
+      ],
     ]
 
     for (const [label, spec, expected] of cases) {
@@ -3219,8 +3700,14 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
       expect(h.spawned, label).toHaveLength(0)
       expect(await h.task.snapshotIn(STORE), label).toEqual(before)
       // No child task id reached the store: the parent is still alone.
-      expect(taskEvents(h).some(item => item.kind === 'TaskCreated' && item.taskId !== taskId), label).toBe(false)
-      expect(taskEvents(h).some(item => item.kind === 'TaskDecomposed'), label).toBe(false)
+      expect(
+        taskEvents(h).some(item => item.kind === 'TaskCreated' && item.taskId !== taskId),
+        label,
+      ).toBe(false)
+      expect(
+        taskEvents(h).some(item => item.kind === 'TaskDecomposed'),
+        label,
+      ).toBe(false)
     }
   })
 
@@ -3262,13 +3749,15 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
     /** One submission of `children` from a parent whose ids are fixed, so two runs differ only in the child ids they mint. */
     const submitted = async (children: DecomposeSpec['children']) => {
       const h = harness()
-      const { taskId, runId } = await createAcceptanceParent(h, [{
-        criterionId: 'root-combination',
-        description: 'the children together prove the root goal',
-        verificationMode: 'composite',
-        requiredEvidence: [],
-        mandatory: true,
-      }])
+      const { taskId, runId } = await createAcceptanceParent(h, [
+        {
+          criterionId: 'root-combination',
+          description: 'the children together prove the root goal',
+          verificationMode: 'composite',
+          requiredEvidence: [],
+          mandatory: true,
+        },
+      ])
       await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, { reason: 'split the work', children })
       const decomposed = taskEvents(h).find(item => item.kind === 'TaskDecomposed')
       if (decomposed?.kind !== 'TaskDecomposed' || decomposed.payload.admission === undefined) {
@@ -3281,7 +3770,8 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
       return { digest: decomposed.payload.admission.proposalDigest, childIds }
     }
 
-    const withDeclarations = () => childSpec('child a', { constraints: ['no network'], assumptions: ['a reference exists'] })
+    const withDeclarations = () =>
+      childSpec('child a', { constraints: ['no network'], assumptions: ['a reference exists'] })
     const first = await submitted([withDeclarations(), childSpec('child b', { dependsOn: [0] })])
     const second = await submitted([withDeclarations(), childSpec('child b', { dependsOn: [0] })])
 
@@ -3291,12 +3781,31 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
     expect(first.childIds).toHaveLength(2)
 
     const variants: Array<[string, DecomposeSpec['children']]> = [
-      ['a criterion changed', [
-        childSpec('child a', { constraints: ['no network'], assumptions: ['a reference exists'], acceptanceCriteria: [{ description: 'child a passes', command: 'true' }] }),
-        childSpec('child b', { dependsOn: [0] }),
-      ]],
-      ['a constraint changed', [childSpec('child a', { constraints: ['offline'], assumptions: ['a reference exists'] }), childSpec('child b', { dependsOn: [0] })]],
-      ['an assumption changed', [childSpec('child a', { constraints: ['no network'], assumptions: ['a faster host exists'] }), childSpec('child b', { dependsOn: [0] })]],
+      [
+        'a criterion changed',
+        [
+          childSpec('child a', {
+            constraints: ['no network'],
+            assumptions: ['a reference exists'],
+            acceptanceCriteria: [{ description: 'child a passes', command: 'true' }],
+          }),
+          childSpec('child b', { dependsOn: [0] }),
+        ],
+      ],
+      [
+        'a constraint changed',
+        [
+          childSpec('child a', { constraints: ['offline'], assumptions: ['a reference exists'] }),
+          childSpec('child b', { dependsOn: [0] }),
+        ],
+      ],
+      [
+        'an assumption changed',
+        [
+          childSpec('child a', { constraints: ['no network'], assumptions: ['a faster host exists'] }),
+          childSpec('child b', { dependsOn: [0] }),
+        ],
+      ],
     ]
     for (const [label, children] of variants) {
       expect((await submitted(children)).digest, label).not.toBe(first.digest)
@@ -3362,7 +3871,7 @@ describe('A3 coordination', () => {
 
     // The batch id is the pair (parent run, proposal) — a run admits more than
     // one batch, so the task id alone could not name this one (K1 §3).
-    const proposal = (await h.runtime.proposalIn(STORE, (await h.task.runIn(STORE, runId)).batches![0]!.proposalId))
+    const proposal = await h.runtime.proposalIn(STORE, (await h.task.runIn(STORE, runId)).batches![0]!.proposalId)
     expect(batchId).toBe(`b-${runId}-${proposal.proposalId}`)
     expect(childTaskIds).toHaveLength(1)
     // The handle came back with the children still unsettled, and the store says
@@ -3387,10 +3896,17 @@ describe('A3 coordination', () => {
     const { taskId, runId } = await createRoot(h)
     const controller = new AbortController()
 
-    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('task a')],
-    }, { signal: controller.signal })
+    const { batchId } = await h.runtime.decomposeAndRun(
+      STORE,
+      taskId,
+      runId,
+      ROOT_SESSION,
+      {
+        reason: 'split the work',
+        children: [childSpec('task a')],
+      },
+      { signal: controller.signal },
+    )
     // The tool call is over (or aborted) — ownership of the batch moved at the
     // atomic commit (A3 §3.7), so neither can stop it.
     controller.abort()
@@ -3409,7 +3925,8 @@ describe('A3 coordination', () => {
     const { taskId, runId } = await createRoot(h)
     h.setIdleBehavior(async () => {})
     const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work', children: [childSpec('stuck child')],
+      reason: 'split the work',
+      children: [childSpec('stuck child')],
     })
     await vi.waitFor(() => expect(h.notifications.some(item => item.text.includes('went idle'))).toBe(true))
     const childRun = (await h.task.snapshotIn(STORE)).runs.find(run => run.taskId !== taskId)!
@@ -3424,7 +3941,9 @@ describe('A3 coordination', () => {
     const { taskId, runId } = await createRoot(h)
     const replies: Array<{ status: string; detail: string }> = []
     h.setIdleBehavior(async sessionId => {
-      replies.push(await h.runtime.submitResult(sessionId, { summary: 'implemented and checked', evidenceRefs: ['docs/r.md'] }))
+      replies.push(
+        await h.runtime.submitResult(sessionId, { summary: 'implemented and checked', evidenceRefs: ['docs/r.md'] }),
+      )
       // The late call: the phase gate is unique, so this reads the record.
       replies.push(await h.runtime.submitResult(sessionId, { summary: 'second attempt' }))
     })
@@ -3443,8 +3962,14 @@ describe('A3 coordination', () => {
 
     const snapshot = await h.task.snapshotIn(STORE)
     const childRun = snapshot.runs.find(run => run.taskId !== taskId)!
-    expect(childRun.submission).toMatchObject({ summary: 'implemented and checked', evidenceRefs: ['docs/r.md'], origin: 'worker' })
-    const phaseEvents = taskEvents(h).filter(item => item.kind === 'RunPhaseChanged' && item.runId === childRun.runId && item.payload.phase === 'submitted')
+    expect(childRun.submission).toMatchObject({
+      summary: 'implemented and checked',
+      evidenceRefs: ['docs/r.md'],
+      origin: 'worker',
+    })
+    const phaseEvents = taskEvents(h).filter(
+      item => item.kind === 'RunPhaseChanged' && item.runId === childRun.runId && item.payload.phase === 'submitted',
+    )
     expect(phaseEvents).toHaveLength(1)
     // Nothing submitted anything for the parent: the batch ended, its own
     // `waiting_children → active` is on the record, and the run holds no
@@ -3457,11 +3982,15 @@ describe('A3 coordination', () => {
       .map(item => (item.kind === 'RunPhaseChanged' ? item.payload.phase : undefined))
     expect(parentPhases).toEqual(['waiting_children', 'active'])
     const parentPhaseEvents = taskEvents(h).filter(item => item.kind === 'RunPhaseChanged' && item.runId === runId)
-    expect(parentPhaseEvents.every(item => item.kind !== 'RunPhaseChanged' || item.payload.batchId === batchId)).toBe(true)
+    expect(parentPhaseEvents.every(item => item.kind !== 'RunPhaseChanged' || item.payload.batchId === batchId)).toBe(
+      true,
+    )
 
     // The parent may now submit, and its acceptance is its own: the same entry
     // the worker used, judged by the verifier the deployment wires.
-    const settled = await h.runtime.submitResult(ROOT_SESSION, { summary: 'the parent combines what the batch delivered' })
+    const settled = await h.runtime.submitResult(ROOT_SESSION, {
+      summary: 'the parent combines what the batch delivered',
+    })
     expect(settled.status).toBe('verified')
     const submitted = await h.task.runIn(STORE, runId)
     expect(submitted.submission?.origin).toBe('worker')
@@ -3478,8 +4007,9 @@ describe('A3 coordination', () => {
     })
     await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
 
-    await expect(h.runtime.submitResult(ROOT_SESSION, { summary: 'parent claims done' }))
-      .rejects.toThrow(/waiting on its child batch/)
+    await expect(h.runtime.submitResult(ROOT_SESSION, { summary: 'parent claims done' })).rejects.toThrow(
+      /waiting on its child batch/,
+    )
     // Nothing was written by the refused call.
     expect((await h.task.runIn(STORE, runId)).submission).toBeUndefined()
     await h.runtime.cancelBatch(STORE, batchId, ROOT_SESSION)
@@ -3494,7 +4024,9 @@ describe('A3 coordination', () => {
     // fire-and-forget (§3.1): the parent run fails by name, the child that never
     // started is blocked, and the owner is told.
     const runtime = h.runtime as unknown as { orchestrateEnv: (...args: unknown[]) => Promise<unknown> }
-    runtime.orchestrateEnv = async () => { throw new Error('the checkout cannot be resolved') }
+    runtime.orchestrateEnv = async () => {
+      throw new Error('the checkout cannot be resolved')
+    }
 
     const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
@@ -3561,7 +4093,9 @@ describe('A3 coordination', () => {
       reason: 'split the work',
       children: [childSpec('splittable child', { decomposable: true })],
     })
-    await vi.waitFor(() => expect(h.notifications.some(item => item.text.includes('went idle without submitting'))).toBe(true))
+    await vi.waitFor(() =>
+      expect(h.notifications.some(item => item.text.includes('went idle without submitting'))).toBe(true),
+    )
     const middle = await h.runtime.runForSession(h.spawned[0]!.sessionId)
     expect(middle.run.status).toBe('running')
     const nested = await decomposeAndSettle(h, STORE, middle.task.taskId, middle.run.runId, middle.run.sessionId, {
@@ -3576,7 +4110,7 @@ describe('A3 coordination', () => {
     expect(taskEvents(h).filter(item => item.kind === 'RunProgressMarked')).toHaveLength(0)
   })
 
-  test('the batch end opens the gate again: writing, delegating and submitting are the parent\'s own decisions', async () => {
+  test("the batch end opens the gate again: writing, delegating and submitting are the parent's own decisions", async () => {
     const h = harness()
     const { taskId, runId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
@@ -3596,12 +4130,14 @@ describe('A3 coordination', () => {
     expect((await h.task.runIn(STORE, runId)).executionPhase).toBe('active')
   })
 
-  test('a batch end never answers the parent\'s own question: active, and its writes stay refused', async () => {
+  test("a batch end never answers the parent's own question: active, and its writes stay refused", async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const state: { middleBatchId?: string; middleSession?: string } = {}
     let asked!: () => void
-    const askedInStore = new Promise<void>(resolve => { asked = resolve })
+    const askedInStore = new Promise<void>(resolve => {
+      asked = resolve
+    })
     h.setIdleBehavior(async sessionId => {
       const bound = await h.runtime.runForSession(sessionId)
       if (bound.task.depth === 1) {
@@ -3615,14 +4151,18 @@ describe('A3 coordination', () => {
         })
         state.middleBatchId = batchId
         state.middleSession = sessionId
-        await h.task.askParentQuestionIn(STORE, {
-          childRunId: bound.run.runId,
-          requestKey: 'k-middle',
-          questionDigest: sha256Hex('the middle worker cannot continue without an answer'),
-          questionRef: { sessionId, seq: 1 },
-          messageId: 'm-middle-question',
-          blocking: true,
-        }, sessionId)
+        await h.task.askParentQuestionIn(
+          STORE,
+          {
+            childRunId: bound.run.runId,
+            requestKey: 'k-middle',
+            questionDigest: sha256Hex('the middle worker cannot continue without an answer'),
+            questionRef: { sessionId, seq: 1 },
+            messageId: 'm-middle-question',
+            blocking: true,
+          },
+          sessionId,
+        )
         asked()
         return
       }
@@ -3632,10 +4172,12 @@ describe('A3 coordination', () => {
       await h.runtime.submitResult(sessionId, { summary: 'the grandchild is done' })
     })
 
-    const rootBatchId = (await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('middle child', { decomposable: true })],
-    })).batchId
+    const rootBatchId = (
+      await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [childSpec('middle child', { decomposable: true })],
+      })
+    ).batchId
     await vi.waitFor(() => expect(state.middleBatchId).toBeDefined())
     const middleOutcomes = await h.runtime.awaitBatch(STORE, state.middleBatchId!)
     expect(middleOutcomes.map(outcome => outcome.status)).toEqual(['verified'])
@@ -3657,8 +4199,11 @@ describe('A3 coordination', () => {
     expect(refused.allow === false ? refused.reason : '').toContain('unresolved blocking question')
     // The record agrees with the gate, and the question is nobody's answer.
     const snapshot = await h.task.snapshotIn(STORE)
-    expect(snapshot.questions!.all.filter(question => question.childRunId === middleRun.runId).map(question => question.answers ?? []))
-      .toEqual([[]])
+    expect(
+      snapshot
+        .questions!.all.filter(question => question.childRunId === middleRun.runId)
+        .map(question => question.answers ?? []),
+    ).toEqual([[]])
     await h.runtime.cancelBatch(STORE, rootBatchId, ROOT_SESSION)
   })
 
@@ -3693,8 +4238,7 @@ describe('A3 coordination', () => {
 
     // A batch no run records is refused by name rather than answered with
     // another batch's children.
-    await expect(h.runtime.redeliverBatchResult(STORE, 'b-not-a-batch'))
-      .rejects.toThrow(/is not recorded in store/)
+    await expect(h.runtime.redeliverBatchResult(STORE, 'b-not-a-batch')).rejects.toThrow(/is not recorded in store/)
   })
 
   test('derives the end-of-batch results a store still owes, and answers a terminal parent skipped', async () => {
@@ -3710,13 +4254,15 @@ describe('A3 coordination', () => {
     // batch), so the store owes that batch exactly one message — one candidate,
     // with the identity and the members the batch derives them from.
     const owed = owedBatchResults(await h.task.snapshotIn(STORE))
-    expect(owed).toEqual([{
-      taskId,
-      runId,
-      batchId,
-      sessionId: ROOT_SESSION,
-      memberTaskIds: [expect.any(String)],
-    }])
+    expect(owed).toEqual([
+      {
+        taskId,
+        runId,
+        batchId,
+        sessionId: ROOT_SESSION,
+        memberTaskIds: [expect.any(String)],
+      },
+    ])
 
     // The parents' own submission is what ends the run, and a run that ended owes
     // nothing: the message's content is moot for it and a terminal run is not woken.
@@ -3787,7 +4333,7 @@ describe('A3 coordination', () => {
     }
   })
 
-  test('stops a waiting parent whose batch the run\'s accumulation does not hold, by name', async () => {
+  test("stops a waiting parent whose batch the run's accumulation does not hold, by name", async () => {
     const h = harness()
     const { taskId, runId } = await createRoot(h)
     // The old state, written through the store's own service: the run waits on the
@@ -3795,11 +4341,26 @@ describe('A3 coordination', () => {
     // members — which the store's own reducer accepts (the field's shape is all it
     // checks) and which this build must stop rather than guess an owner for.
     const oldBatchId = `b-${taskId}`
-    await h.task.changeRunPhaseIn(STORE, taskId, runId, ROOT_SESSION, { phase: 'waiting_children', batchId: oldBatchId })
+    await h.task.changeRunPhaseIn(STORE, taskId, runId, ROOT_SESSION, {
+      phase: 'waiting_children',
+      batchId: oldBatchId,
+    })
     expect((await h.task.snapshotIn(STORE)).runs[0]?.executionPhase).toBe('waiting_children')
 
-    await expect(h.runtime.reconcileStore(STORE)).rejects.toThrow('no identifiable persisted child batch')
-    expect((await h.task.runIn(STORE, runId)).status).toBe('running')
+    const report = await h.runtime.reconcileStore(STORE)
+    const after = await h.task.snapshotIn(STORE)
+    const run = after.runs[0]!
+    expect(run.status).toBe('cancelled')
+    expect(run.batches ?? []).toEqual([])
+    const review = after.reviews.find(item => item.runId === runId)!
+    expect(review.outcome).toBe('cancelled')
+    expect(review.anomalies.join(' ')).toContain(oldBatchId)
+    expect(review.anomalies.join(' ')).toContain('stopped old state')
+    // Nothing was driven and no membership was invented for it.
+    expect(h.spawned).toEqual([])
+    expect(report.questionResumes).toEqual([])
+    await expect(h.runtime.awaitBatch(STORE, oldBatchId)).rejects.toThrow(/is not recorded in store/)
+    await expect(h.runtime.redeliverBatchResult(STORE, oldBatchId)).rejects.toThrow(/is not recorded in store/)
   })
   test('a child whose writes cannot be confirmed stopped fails the parent by name and hands nothing back', async () => {
     const h = harness({ config: { writeDrainTimeoutMs: 20 } })
@@ -3814,7 +4375,9 @@ describe('A3 coordination', () => {
     }
     const { taskId, runId } = await createRoot(h)
     let releaseChild!: () => void
-    const release = new Promise<void>(resolve => { releaseChild = resolve })
+    const release = new Promise<void>(resolve => {
+      releaseChild = resolve
+    })
     h.setIdleBehavior(async sessionId => {
       await release
       await h.runtime.submitResult(sessionId, { summary: 'the child is done' })
@@ -3845,7 +4408,7 @@ describe('A3 coordination', () => {
     expect(phases).toEqual(['waiting_children'])
     const record = (await h.task.snapshotIn(STORE)).reviews.find(review => review.runId === runId)!
     expect(record.outcome).toBe('failed')
-    expect(record.localizedCause).toContain('write convergence of the batch\'s children could not be confirmed')
+    expect(record.localizedCause).toContain("write convergence of the batch's children could not be confirmed")
     // Nothing was delivered as a batch result either: there is no result to hand
     // back while the checkout is unconfirmed.
     expect(h.relayed.some(item => item.messageId === `m-batchend-${batchId}`)).toBe(false)
@@ -3866,9 +4429,10 @@ describe('A3 coordination', () => {
     // of that same session is the first one that can meet the job.
     let armedSession: string | undefined
     h.ctx.jobs = {
-      list: (agent: unknown) => (armedSession !== undefined && (agent as { id?: string } | undefined)?.id === armedSession
-        ? [{ id: 'job-child', status: 'running' }]
-        : []),
+      list: (agent: unknown) =>
+        armedSession !== undefined && (agent as { id?: string } | undefined)?.id === armedSession
+          ? [{ id: 'job-child', status: 'running' }]
+          : [],
       kill: () => {},
       wait: async () => ({ status: 'running' }),
     }
@@ -3894,8 +4458,14 @@ describe('A3 coordination', () => {
     // stack — in this process's registry *and* in the marker a stranger reads —
     // while the parent is failed with the child's convergence named (§2).
     expect(registry.ownerOf(checkoutRoot)).toMatchObject({ kind: 'batch', storeId: STORE, taskId, batchId })
-    await vi.waitFor(async () => expect(await markerOwner(bindingRoot, workspace))
-      .toMatchObject({ kind: 'batch', storeId: STORE, taskId, batchId }))
+    await vi.waitFor(async () =>
+      expect(await markerOwner(bindingRoot, workspace)).toMatchObject({
+        kind: 'batch',
+        storeId: STORE,
+        taskId,
+        batchId,
+      }),
+    )
     const parentRun = await h.task.runIn(STORE, runId)
     expect(parentRun.status).toBe('failed')
     expect(parentRun.executionPhase).toBe('waiting_children')
@@ -3904,7 +4474,7 @@ describe('A3 coordination', () => {
     expect(h.runtime.gate.decide(ROOT_SESSION, 'write').allow).toBe(false)
     const record = (await h.task.snapshotIn(STORE)).reviews.find(review => review.runId === runId)!
     expect(record.outcome).toBe('failed')
-    expect(record.localizedCause).toContain('write convergence of the batch\'s children could not be confirmed')
+    expect(record.localizedCause).toContain("write convergence of the batch's children could not be confirmed")
     // No batch result was delivered either: there is no handback to report while
     // the children's stop is unconfirmed.
     expect(h.relayed.some(item => item.messageId === `m-batchend-${batchId}`)).toBe(false)
@@ -3931,8 +4501,9 @@ describe('A3 coordination', () => {
     // and in the marker a stranger reads — its phase is the batch's gift, and the
     // gate lets it write (§3.3).
     expect(registry.ownerOf(checkoutRoot)).toMatchObject({ kind: 'run', storeId: STORE, taskId, runId })
-    await vi.waitFor(async () => expect(await markerOwner(bindingRoot, workspace))
-      .toMatchObject({ kind: 'run', storeId: STORE, taskId, runId }))
+    await vi.waitFor(async () =>
+      expect(await markerOwner(bindingRoot, workspace)).toMatchObject({ kind: 'run', storeId: STORE, taskId, runId }),
+    )
     const parentRun = await h.task.runIn(STORE, runId)
     expect(parentRun.status).toBe('running')
     expect(parentRun.executionPhase).toBe('active')
@@ -3962,9 +4533,10 @@ describe('A3 coordination', () => {
     // *unconfirmed batch end* withholds the handback (K1 §2).
     let armedSession: string | undefined
     h.ctx.jobs = {
-      list: (agent: unknown) => (armedSession !== undefined && (agent as { id?: string } | undefined)?.id === armedSession
-        ? [{ id: 'job-child', status: 'running' }]
-        : []),
+      list: (agent: unknown) =>
+        armedSession !== undefined && (agent as { id?: string } | undefined)?.id === armedSession
+          ? [{ id: 'job-child', status: 'running' }]
+          : [],
       kill: () => {},
       wait: async () => ({ status: 'running' }),
     }
@@ -3995,10 +4567,12 @@ describe('A3 coordination', () => {
     const { taskId, runId } = await createRoot(h)
 
     // One recorded run (the root) plus two children would need three slots.
-    await expect(decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('task a'), childSpec('task b')],
-    })).rejects.toThrow(/would need 2 run slot/)
+    await expect(
+      decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [childSpec('task a'), childSpec('task b')],
+      }),
+    ).rejects.toThrow(/would need 2 run slot/)
 
     let snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks).toHaveLength(1)
@@ -4011,24 +4585,32 @@ describe('A3 coordination', () => {
     // flight, and re-sending the *same* one is answered from that record.)
     const reopened = harness({ config: { rootBudget: { maxRuns: 2 } } }, h.sessions)
     await reopened.task.openStore(STORE)
-    await expect(reopened.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('task a'), childSpec('task b')],
-    })).rejects.toThrow(/would need 2 run slot/)
+    await expect(
+      reopened.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [childSpec('task a'), childSpec('task b')],
+      }),
+    ).rejects.toThrow(/would need 2 run slot/)
 
     // A *different* batch is refused by name while that proposal is in flight
     // (K1 §1: one proposal per run at a time), with nothing recorded; withdrawing
     // it frees the run.
-    const pendingOfRun = (await h.task.snapshotIn(STORE)).proposals!.all
-      .filter(proposal => proposal.kind !== 'root' && proposal.identity.parentRunId === runId)
+    const pendingOfRun = (await h.task.snapshotIn(STORE)).proposals!.all.filter(
+      proposal => proposal.kind !== 'root' && proposal.identity.parentRunId === runId,
+    )
     expect(pendingOfRun.map(proposal => proposal.status)).toEqual(['ready'])
     const leftover = pendingOfRun[0]!
-    await expect(h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'a different split',
-      children: [childSpec('task a')],
-    })).rejects.toThrow(/already has a proposal in flight/)
-    expect((await h.task.snapshotIn(STORE)).proposals!.all
-      .filter(proposal => proposal.kind !== 'root' && proposal.identity.parentRunId === runId)).toHaveLength(1)
+    await expect(
+      h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+        reason: 'a different split',
+        children: [childSpec('task a')],
+      }),
+    ).rejects.toThrow(/already has a proposal in flight/)
+    expect(
+      (await h.task.snapshotIn(STORE)).proposals!.all.filter(
+        proposal => proposal.kind !== 'root' && proposal.identity.parentRunId === runId,
+      ),
+    ).toHaveLength(1)
     await h.runtime.cancelProposal(STORE, leftover.proposalId, ROOT_SESSION)
 
     const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
@@ -4070,27 +4652,27 @@ describe('A3 coordination', () => {
     // whole and carries no side effect; and because the count is a store fact, a
     // process that reopens the store counts exactly the same.
     const before = await h.task.snapshotIn(STORE)
-    await expect(decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'the third round',
-      children: [childSpec('task c')],
-    })).rejects.toThrow(/would need 1 run slot\(s\) and the root budget allows 3 run\(s\) in total, of which 3 are already recorded/)
+    await expect(
+      decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+        reason: 'the third round',
+        children: [childSpec('task c')],
+      }),
+    ).rejects.toThrow(
+      /would need 1 run slot\(s\) and the root budget allows 3 run\(s\) in total, of which 3 are already recorded/,
+    )
     const reopened = harness({ config: { rootBudget: { maxRuns: 3 } } }, h.sessions)
     await reopened.task.openStore(STORE)
-    await expect(reopened.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'the third round',
-      children: [childSpec('task c')],
-    })).rejects.toThrow(/run slot/)
+    await expect(
+      reopened.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+        reason: 'the third round',
+        children: [childSpec('task c')],
+      }),
+    ).rejects.toThrow(/run slot/)
     const after = await h.task.snapshotIn(STORE)
     expect(after.runs).toHaveLength(3)
     expect(after.tasks.map(task => task.taskId).sort()).toEqual(before.tasks.map(task => task.taskId).sort())
     expect(h.spawned).toHaveLength(2)
   })
-
-
-
-
-
-
 
   test('a second root on one checkout is refused before anything is written, and ownership is released when the tree settles', async () => {
     const checkoutRoot = checkout('a3-workspace')
@@ -4107,11 +4689,9 @@ describe('A3 coordination', () => {
     // session whose own log carries a request (A0 §1.10), and this case is about
     // the checkout, not about the origin rule.
     other.sessions.set('other-root', requestedSession('other-root', 'second tree'))
-    await expect(other.runtime.intakeRootContract(
-      rootTaskStoreId('other-root'),
-      'other-root',
-      rootContract('second tree'),
-    )).rejects.toThrow(WorkspaceBusyError)
+    await expect(
+      other.runtime.intakeRootContract(rootTaskStoreId('other-root'), 'other-root', rootContract('second tree')),
+    ).rejects.toThrow(WorkspaceBusyError)
     // The refused activation wrote no root: the store holds no task and no run. The
     // proposal the attempt recorded is the one durable trace, and it is what makes
     // the retry the same request rather than a second one.
@@ -4144,7 +4724,9 @@ describe('A3 coordination', () => {
    * the state the root's driver has to keep waiting in without losing the batch's
    * abort or its own deadline.
    */
-  async function nestedBatch(h: Harness): Promise<{ rootTaskId: string; rootRunId: string; rootBatchId: string; childSession: string }> {
+  async function nestedBatch(
+    h: Harness,
+  ): Promise<{ rootTaskId: string; rootRunId: string; rootBatchId: string; childSession: string }> {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     h.setIdleBehavior(async sessionId => {
       const bound = await h.runtime.runForSession(sessionId)
@@ -4189,8 +4771,9 @@ describe('A3 coordination', () => {
     expect(grandchildren).toHaveLength(2)
     expect(grandchildren.map(task => task.status).sort()).toEqual(['blocked', 'cancelled'])
     const neverStarted = grandchildren.find(task => task.status === 'blocked')!
-    expect(snapshot.reviews.find(review => review.taskId === neverStarted.taskId)?.anomalies.join(' '))
-      .toContain('cancelled by the caller before this child started')
+    expect(snapshot.reviews.find(review => review.taskId === neverStarted.taskId)?.anomalies.join(' ')).toContain(
+      'cancelled by the caller before this child started',
+    )
 
     expect((await h.task.runIn(STORE, shape.rootRunId)).status).toBe('cancelled')
     expect((await h.task.taskIn(STORE, shape.rootTaskId)).status).toBe('cancelled')
@@ -4210,7 +4793,6 @@ describe('A3 coordination', () => {
     expect(snapshot.tasks.every(task => task.status !== 'running')).toBe(true)
   })
 
-
   test('unload is not held up by a driver parked on a nested wait', async () => {
     const h = harness()
     await nestedBatch(h)
@@ -4221,7 +4803,9 @@ describe('A3 coordination', () => {
     const unloading = (h.disposers[h.disposers.length - 1] as () => Promise<void>)()
     const bounded = await Promise.race([
       unloading.then(() => 'settled'),
-      new Promise<string>(resolve => { setTimeout(() => resolve('hung'), 2_000).unref() }),
+      new Promise<string>(resolve => {
+        setTimeout(() => resolve('hung'), 2_000).unref()
+      }),
     ])
     expect(bounded).toBe('settled')
     const snapshot = await h.task.snapshotIn(STORE)
@@ -4296,47 +4880,61 @@ describe('A3 coordination', () => {
     // A terminal champion to replay: a verified task with its own run.
     const championTaskId = 't-champion'
     const championRunId = 'r-champion'
-    await h.task.createTaskIn(STORE, {
-      taskId: championTaskId,
-      definitionRef: { taskType: 'root', version: 1 },
-      objective: 'champion work',
-      depth: 0,
-      acceptanceCriteria: [{
-        criterionId: 'ac1-1',
-        description: 'it holds',
-        verificationMode: 'deterministic',
-        requiredEvidence: [],
-        mandatory: true,
-        command: 'true',
-      }],
-      requestedCapabilities: ['research'],
-      decompositionStatus: 'leaf',
-      status: 'created',
-      runIds: [],
-      childTaskIds: [],
-    }, 'tester')
+    await h.task.createTaskIn(
+      STORE,
+      {
+        taskId: championTaskId,
+        definitionRef: { taskType: 'root', version: 1 },
+        objective: 'champion work',
+        depth: 0,
+        acceptanceCriteria: [
+          {
+            criterionId: 'ac1-1',
+            description: 'it holds',
+            verificationMode: 'deterministic',
+            requiredEvidence: [],
+            mandatory: true,
+            command: 'true',
+          },
+        ],
+        requestedCapabilities: ['research'],
+        decompositionStatus: 'leaf',
+        status: 'created',
+        runIds: [],
+        childTaskIds: [],
+      },
+      'tester',
+    )
     await h.task.admitTaskIn(STORE, championTaskId, 'tester', { decompositionStatus: 'leaf' })
-    await h.task.startRunIn(STORE, {
-      runId: championRunId,
-      taskId: championTaskId,
-      sessionId: 's-champion',
-      capabilitySnapshot: [],
-      executionPhase: 'active',
-      artifacts: [],
-      verifierResults: [],
-      status: 'running',
-      startedAt: new Date().toISOString(),
-    }, 'tester')
+    await h.task.startRunIn(
+      STORE,
+      {
+        runId: championRunId,
+        taskId: championTaskId,
+        sessionId: 's-champion',
+        capabilitySnapshot: [],
+        executionPhase: 'active',
+        artifacts: [],
+        verifierResults: [],
+        status: 'running',
+        startedAt: new Date().toISOString(),
+      },
+      'tester',
+    )
     await h.task.markRunStatusIn(STORE, championTaskId, championRunId, 'verifying', 'tester')
-    await h.task.recordEvidenceIn(STORE, {
-      evidenceId: `e-${championRunId}`,
-      taskRunId: championRunId,
-      taskId: championTaskId,
-      artifacts: [],
-      verifierResults: [{ criterionId: 'ac1-1', status: 'pass', verifierId: 'fake-verifier' }],
-      claims: [],
-      generatedAt: new Date().toISOString(),
-    }, 'tester')
+    await h.task.recordEvidenceIn(
+      STORE,
+      {
+        evidenceId: `e-${championRunId}`,
+        taskRunId: championRunId,
+        taskId: championTaskId,
+        artifacts: [],
+        verifierResults: [{ criterionId: 'ac1-1', status: 'pass', verifierId: 'fake-verifier' }],
+        claims: [],
+        generatedAt: new Date().toISOString(),
+      },
+      'tester',
+    )
     await h.task.markRunStatusIn(STORE, championTaskId, championRunId, 'verified', 'tester')
 
     // A replay is a driver like a batch is: the runtime owns its progress, so a
@@ -4409,7 +5007,11 @@ describe('A3 coordination', () => {
     const crashed = snapshot.runs.find(run => run.runId === crashedRunId)!
     expect(crashed.status).toBe('running')
     expect(restarted.resumed).toEqual([crashedSession])
-    expect(restarted.notifications.filter(item => item.sessionId === crashedSession && item.text.includes('continue this same Run'))).toHaveLength(1)
+    expect(
+      restarted.notifications.filter(
+        item => item.sessionId === crashedSession && item.text.includes('continue this same Run'),
+      ),
+    ).toHaveLength(1)
     await restarted.runtime.submitResult(crashedSession, { summary: 'continued from persisted history' })
     // The batch resumed: the second child ran (once), and the parent settled.
     await vi.waitFor(() => expect(restarted.spawned).toHaveLength(1))
@@ -4421,8 +5023,13 @@ describe('A3 coordination', () => {
     const resumed = await restarted.task.runIn(STORE, runId)
     expect(resumed.status).toBe('running')
     expect(resumed.executionPhase).toBe('active')
-    expect(restarted.relayed.find(item => item.messageId === `m-batchend-${batchId}`)?.text).toContain('task_submit_result')
-    expect((await restarted.runtime.submitResult(ROOT_SESSION, { summary: 'the parent reports what the batch delivered' })).status).toBe('verified')
+    expect(restarted.relayed.find(item => item.messageId === `m-batchend-${batchId}`)?.text).toContain(
+      'task_submit_result',
+    )
+    expect(
+      (await restarted.runtime.submitResult(ROOT_SESSION, { summary: 'the parent reports what the batch delivered' }))
+        .status,
+    ).toBe('verified')
     expect((await restarted.task.runIn(STORE, runId)).status).toBe('verified')
   })
 
@@ -4473,8 +5080,12 @@ describe('A3 coordination', () => {
     // "in flight when the batch resumed" diagnostic the old branch wrote must not
     // appear.
     const driverWait = restarted.runtime.awaitBatch(STORE, batchId)
-    const relay = (restarted.ctx as unknown as { agentRuntime: { ensureAgentMessageDelivered: ReturnType<typeof vi.fn> } }).agentRuntime.ensureAgentMessageDelivered
-    await vi.waitFor(() => expect(relay).toHaveBeenCalledWith(expect.objectContaining({ messageId: `m-batchend-${childBatchId}` })))
+    const relay = (
+      restarted.ctx as unknown as { agentRuntime: { ensureAgentMessageDelivered: ReturnType<typeof vi.fn> } }
+    ).agentRuntime.ensureAgentMessageDelivered
+    await vi.waitFor(() =>
+      expect(relay).toHaveBeenCalledWith(expect.objectContaining({ messageId: `m-batchend-${childBatchId}` })),
+    )
     const held = await restarted.task.snapshotIn(STORE)
     const child = held.runs.find(run => run.runId === childRunId)!
     expect(child.status).toBe('running')
@@ -4502,78 +5113,103 @@ describe('A3 coordination', () => {
     // recovery evidence, so it is verified.
     const submittedTaskId = 't-submitted'
     const submittedRunId = 'r-submitted'
-    await h.task.createTaskIn(STORE, {
-      taskId: submittedTaskId,
-      definitionRef: { taskType: 'subtask', version: 1 },
-      parentTaskId: taskId,
-      objective: 'submitted work',
-      depth: 1,
-      acceptanceCriteria: [{
-        criterionId: 'ac1-1',
-        description: 'it holds',
-        verificationMode: 'deterministic',
-        requiredEvidence: [],
-        mandatory: true,
-        command: 'true',
-      }],
-      requestedCapabilities: [],
-      decompositionStatus: 'leaf',
-      status: 'created',
-      runIds: [],
-      childTaskIds: [],
-    }, 'tester')
+    await h.task.createTaskIn(
+      STORE,
+      {
+        taskId: submittedTaskId,
+        definitionRef: { taskType: 'subtask', version: 1 },
+        parentTaskId: taskId,
+        objective: 'submitted work',
+        depth: 1,
+        acceptanceCriteria: [
+          {
+            criterionId: 'ac1-1',
+            description: 'it holds',
+            verificationMode: 'deterministic',
+            requiredEvidence: [],
+            mandatory: true,
+            command: 'true',
+          },
+        ],
+        requestedCapabilities: [],
+        decompositionStatus: 'leaf',
+        status: 'created',
+        runIds: [],
+        childTaskIds: [],
+      },
+      'tester',
+    )
     await h.task.admitTaskIn(STORE, submittedTaskId, 'tester', { decompositionStatus: 'leaf' })
-    await h.task.startRunIn(STORE, {
-      runId: submittedRunId,
-      taskId: submittedTaskId,
-      sessionId: 's-submitted',
-      capabilitySnapshot: [],
-      executionPhase: 'active',
-      artifacts: [],
-      verifierResults: [],
-      status: 'running',
-      startedAt: new Date().toISOString(),
-    }, 'tester')
+    await h.task.startRunIn(
+      STORE,
+      {
+        runId: submittedRunId,
+        taskId: submittedTaskId,
+        sessionId: 's-submitted',
+        capabilitySnapshot: [],
+        executionPhase: 'active',
+        artifacts: [],
+        verifierResults: [],
+        status: 'running',
+        startedAt: new Date().toISOString(),
+      },
+      'tester',
+    )
     await h.task.changeRunPhaseIn(STORE, submittedTaskId, submittedRunId, 'tester', {
       phase: 'submitted',
-      submission: { summary: 'handed in before the crash', evidenceRefs: [], submittedAt: new Date().toISOString(), origin: 'worker' },
+      submission: {
+        summary: 'handed in before the crash',
+        evidenceRefs: [],
+        submittedAt: new Date().toISOString(),
+        origin: 'worker',
+      },
     })
 
     // (b) An old record with no phase at all: the read side derives
     // needs-recovery from that, and nothing here may invent a phase for it.
     const phaselessTaskId = 't-phaseless'
     const phaselessRunId = 'r-phaseless'
-    await h.task.createTaskIn(STORE, {
-      taskId: phaselessTaskId,
-      definitionRef: { taskType: 'subtask', version: 1 },
-      parentTaskId: taskId,
-      objective: 'old record',
-      depth: 1,
-      acceptanceCriteria: [{
-        criterionId: 'ac1-1',
-        description: 'it holds',
-        verificationMode: 'deterministic',
-        requiredEvidence: [],
-        mandatory: true,
-        command: 'true',
-      }],
-      requestedCapabilities: [],
-      decompositionStatus: 'leaf',
-      status: 'created',
-      runIds: [],
-      childTaskIds: [],
-    }, 'tester')
+    await h.task.createTaskIn(
+      STORE,
+      {
+        taskId: phaselessTaskId,
+        definitionRef: { taskType: 'subtask', version: 1 },
+        parentTaskId: taskId,
+        objective: 'old record',
+        depth: 1,
+        acceptanceCriteria: [
+          {
+            criterionId: 'ac1-1',
+            description: 'it holds',
+            verificationMode: 'deterministic',
+            requiredEvidence: [],
+            mandatory: true,
+            command: 'true',
+          },
+        ],
+        requestedCapabilities: [],
+        decompositionStatus: 'leaf',
+        status: 'created',
+        runIds: [],
+        childTaskIds: [],
+      },
+      'tester',
+    )
     await h.task.admitTaskIn(STORE, phaselessTaskId, 'tester', { decompositionStatus: 'leaf' })
-    await h.task.startRunIn(STORE, {
-      runId: phaselessRunId,
-      taskId: phaselessTaskId,
-      sessionId: 's-phaseless',
-      capabilitySnapshot: [],
-      artifacts: [],
-      verifierResults: [],
-      status: 'running',
-      startedAt: new Date().toISOString(),
-    }, 'tester')
+    await h.task.startRunIn(
+      STORE,
+      {
+        runId: phaselessRunId,
+        taskId: phaselessTaskId,
+        sessionId: 's-phaseless',
+        capabilitySnapshot: [],
+        artifacts: [],
+        verifierResults: [],
+        status: 'running',
+        startedAt: new Date().toISOString(),
+      },
+      'tester',
+    )
 
     await expect(h.runtime.reconcileStore(STORE)).rejects.toThrow('no capability manifest')
   })
@@ -4581,41 +5217,55 @@ describe('A3 coordination', () => {
    * A run a previous process left in flight, written through the store service —
    * the recovery path's subject, in a store this process is also driving.
    */
-  async function deadWorkerRun(h: Harness, parentTaskId: string, label: string): Promise<{ taskId: string; runId: string }> {
+  async function deadWorkerRun(
+    h: Harness,
+    parentTaskId: string,
+    label: string,
+  ): Promise<{ taskId: string; runId: string }> {
     const taskId = `t-${label}`
     const runId = `r-${label}`
-    await h.task.createTaskIn(STORE, {
-      taskId,
-      definitionRef: { taskType: 'subtask', version: 1 },
-      parentTaskId,
-      objective: label,
-      depth: 1,
-      acceptanceCriteria: [{
-        criterionId: 'ac1-1',
-        description: 'it holds',
-        verificationMode: 'deterministic',
-        requiredEvidence: [],
-        mandatory: true,
-        command: 'true',
-      }],
-      requestedCapabilities: [],
-      decompositionStatus: 'leaf',
-      status: 'created',
-      runIds: [],
-      childTaskIds: [],
-    }, 'tester')
+    await h.task.createTaskIn(
+      STORE,
+      {
+        taskId,
+        definitionRef: { taskType: 'subtask', version: 1 },
+        parentTaskId,
+        objective: label,
+        depth: 1,
+        acceptanceCriteria: [
+          {
+            criterionId: 'ac1-1',
+            description: 'it holds',
+            verificationMode: 'deterministic',
+            requiredEvidence: [],
+            mandatory: true,
+            command: 'true',
+          },
+        ],
+        requestedCapabilities: [],
+        decompositionStatus: 'leaf',
+        status: 'created',
+        runIds: [],
+        childTaskIds: [],
+      },
+      'tester',
+    )
     await h.task.admitTaskIn(STORE, taskId, 'tester', { decompositionStatus: 'leaf' })
-    await h.task.startRunIn(STORE, {
-      runId,
-      taskId,
-      sessionId: `s-${label}`,
-      capabilitySnapshot: [],
-      artifacts: [],
-      verifierResults: [],
-      status: 'running',
-      executionPhase: 'active',
-      startedAt: new Date().toISOString(),
-    }, 'tester')
+    await h.task.startRunIn(
+      STORE,
+      {
+        runId,
+        taskId,
+        sessionId: `s-${label}`,
+        capabilitySnapshot: [],
+        artifacts: [],
+        verifierResults: [],
+        status: 'running',
+        executionPhase: 'active',
+        startedAt: new Date().toISOString(),
+      },
+      'tester',
+    )
     return { taskId, runId }
   }
 
@@ -4627,7 +5277,10 @@ describe('A3 coordination', () => {
     // silently looked like a clean pass would be worse than the failure.
     const original = h.task.snapshotIn.bind(h.task)
     let attempts = 0
-    h.task.snapshotIn = async () => { attempts += 1; throw new Error('the log is unreadable') }
+    h.task.snapshotIn = async () => {
+      attempts += 1
+      throw new Error('the log is unreadable')
+    }
     // `reconcileStore` now answers with the proposals it could not finish
     // (T2/T3 §5), the question deliveries it owes and the question-waiting
     // workers it tried to bring back (A4 §F.1 — empty here, since the store could
@@ -4670,47 +5323,61 @@ describe('A3 coordination', () => {
     })
     const championTaskId = 't-champion'
     const championRunId = 'r-champion'
-    await h.task.createTaskIn(STORE, {
-      taskId: championTaskId,
-      definitionRef: { taskType: 'subtask', version: 1 },
-      parentTaskId: taskId,
-      objective: 'champion work',
-      depth: 1,
-      acceptanceCriteria: [{
-        criterionId: 'ac1-1',
-        description: 'it holds',
-        verificationMode: 'deterministic',
-        requiredEvidence: [],
-        mandatory: true,
-        command: 'true',
-      }],
-      requestedCapabilities: [],
-      decompositionStatus: 'leaf',
-      status: 'created',
-      runIds: [],
-      childTaskIds: [],
-    }, 'tester')
+    await h.task.createTaskIn(
+      STORE,
+      {
+        taskId: championTaskId,
+        definitionRef: { taskType: 'subtask', version: 1 },
+        parentTaskId: taskId,
+        objective: 'champion work',
+        depth: 1,
+        acceptanceCriteria: [
+          {
+            criterionId: 'ac1-1',
+            description: 'it holds',
+            verificationMode: 'deterministic',
+            requiredEvidence: [],
+            mandatory: true,
+            command: 'true',
+          },
+        ],
+        requestedCapabilities: [],
+        decompositionStatus: 'leaf',
+        status: 'created',
+        runIds: [],
+        childTaskIds: [],
+      },
+      'tester',
+    )
     await h.task.admitTaskIn(STORE, championTaskId, 'tester', { decompositionStatus: 'leaf' })
-    await h.task.startRunIn(STORE, {
-      runId: championRunId,
-      taskId: championTaskId,
-      sessionId: 's-champion',
-      capabilitySnapshot: [],
-      artifacts: [],
-      verifierResults: [],
-      status: 'running',
-      startedAt: new Date().toISOString(),
-    }, 'tester')
+    await h.task.startRunIn(
+      STORE,
+      {
+        runId: championRunId,
+        taskId: championTaskId,
+        sessionId: 's-champion',
+        capabilitySnapshot: [],
+        artifacts: [],
+        verifierResults: [],
+        status: 'running',
+        startedAt: new Date().toISOString(),
+      },
+      'tester',
+    )
     await h.task.markRunStatusIn(STORE, championTaskId, championRunId, 'verifying', 'tester')
-    await h.task.recordEvidenceIn(STORE, {
-      evidenceId: `e-${championRunId}`,
-      taskRunId: championRunId,
-      taskId: championTaskId,
-      artifacts: [],
-      verifierResults: [{ criterionId: 'ac1-1', status: 'pass', verifierId: 'fake-verifier' }],
-      claims: [],
-      generatedAt: new Date().toISOString(),
-    }, 'tester')
+    await h.task.recordEvidenceIn(
+      STORE,
+      {
+        evidenceId: `e-${championRunId}`,
+        taskRunId: championRunId,
+        taskId: championTaskId,
+        artifacts: [],
+        verifierResults: [{ criterionId: 'ac1-1', status: 'pass', verifierId: 'fake-verifier' }],
+        claims: [],
+        generatedAt: new Date().toISOString(),
+      },
+      'tester',
+    )
     await h.task.markRunStatusIn(STORE, championTaskId, championRunId, 'verified', 'tester')
 
     const replaying = h.runtime.replayTask(STORE, championTaskId, { lineage: 'evolution-replay:p1' }, ROOT_SESSION)
@@ -4721,7 +5388,7 @@ describe('A3 coordination', () => {
 
     await expect(h.runtime.reconcileStore(STORE)).rejects.toThrow('no capability manifest')
   })
-  test('a batch the store cannot read its parent run for is named, never answered with the parent\'s child history', async () => {
+  test("a batch the store cannot read its parent run for is named, never answered with the parent's child history", async () => {
     const h = harness()
     const { taskId, runId } = await createRoot(h)
 
@@ -4739,8 +5406,9 @@ describe('A3 coordination', () => {
       reason: 'the implementation',
       children: [childSpec('implement the release')],
     })
-    const secondMember = (await h.task.snapshotIn(STORE)).tasks
-      .find(task => task.parentTaskId === taskId && task.taskId !== firstMember)!.taskId
+    const secondMember = (await h.task.snapshotIn(STORE)).tasks.find(
+      task => task.parentTaskId === taskId && task.taskId !== firstMember,
+    )!.taskId
 
     // A store whose read of the *parent run* fails: the driver cannot be told which
     // members this batch has, and a read that failed is not a batch that ended. The
@@ -4774,11 +5442,14 @@ describe('A3 coordination', () => {
     // that did end is exactly where it was.
     expect(h.relayed.filter(item => item.messageId === `m-batchend-${second.batchId}`)).toEqual([])
     expect((await h.task.taskIn(STORE, firstMember)).status).toBe('verified')
-    expect((await h.task.runIn(STORE, runId)).batches?.map(batch => batch.batchId)).toEqual([first.batchId, second.batchId])
+    expect((await h.task.runIn(STORE, runId)).batches?.map(batch => batch.batchId)).toEqual([
+      first.batchId,
+      second.batchId,
+    ])
     vi.restoreAllMocks()
   })
 
-  test('a batch driver failure is recorded for the batch\'s own members, never for the parent\'s child history', async () => {
+  test("a batch driver failure is recorded for the batch's own members, never for the parent's child history", async () => {
     const h = harness()
     const { taskId, runId } = await createRoot(h)
 
@@ -4796,8 +5467,9 @@ describe('A3 coordination', () => {
       reason: 'the implementation',
       children: [childSpec('implement the release')],
     })
-    const secondMember = (await h.task.snapshotIn(STORE)).tasks
-      .find(task => task.parentTaskId === taskId && task.taskId !== firstMember)!.taskId
+    const secondMember = (await h.task.snapshotIn(STORE)).tasks.find(
+      task => task.parentTaskId === taskId && task.taskId !== firstMember,
+    )!.taskId
 
     // The store's read of the *parent run* fails for as long as that run waits on the
     // batch: a read that failed is not a batch that ended, and the driver must never
@@ -4870,18 +5542,23 @@ describe('A3 coordination', () => {
     expect(run.batchId).toBeUndefined()
   })
 
-  test('a batch the parent run\'s record does not hold is refused by name at the driver', async () => {
+  test("a batch the parent run's record does not hold is refused by name at the driver", async () => {
     const h = harness()
     const { taskId, runId } = await createRoot(h)
     // The state the store's own reducer accepts and this build stops by name (K1 §5):
     // a run that waits on a batch id its accumulation does not hold — a pre-K1
     // `b-<taskId>` — so nothing in the store names that batch's members.
     const oldBatchId = `b-${taskId}`
-    await h.task.changeRunPhaseIn(STORE, taskId, runId, ROOT_SESSION, { phase: 'waiting_children', batchId: oldBatchId })
+    await h.task.changeRunPhaseIn(STORE, taskId, runId, ROOT_SESSION, {
+      phase: 'waiting_children',
+      batchId: oldBatchId,
+    })
 
-    const env = await (h.runtime as unknown as {
-      orchestrateEnv(sessionId: string, actor: string): Promise<OrchestrateEnv>
-    }).orchestrateEnv(ROOT_SESSION, 'k1-test')
+    const env = await (
+      h.runtime as unknown as {
+        orchestrateEnv(sessionId: string, actor: string): Promise<OrchestrateEnv>
+      }
+    ).orchestrateEnv(ROOT_SESSION, 'k1-test')
     const controller = new AbortController()
     const driving = driveBatch(env, {
       storeId: STORE,

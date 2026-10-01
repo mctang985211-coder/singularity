@@ -1,7 +1,13 @@
 import { describe, expect, test, vi } from 'vitest'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { AgentRuntime, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from '../../src/index.ts'
+import {
+  AgentRuntime,
+  RAW_SESSION_READ_DENIAL,
+  RAW_SESSION_READ_TOOLS,
+  WORKER_KICKOFF_TEXT,
+  WORKER_POLICY_TEXT,
+} from '../../src/index.ts'
 
 const id = (value: string) => value as SessionId
 
@@ -414,17 +420,19 @@ describe('AgentRuntime root lifecycle', () => {
       name: 'worker',
       prompt: [{ type: 'text', text: 'work' }],
     })
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({
-      meta: {
-        cwd: '/environment',
-        agentPreset: 'standard',
-        parentSession: id('root'),
-        isSeeded: false,
-        origin: 'subagent',
-        delegationDepth: 1,
-      },
-      setup: expect.any(Function),
-    }))
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: {
+          cwd: '/environment',
+          agentPreset: 'standard',
+          parentSession: id('root'),
+          isSeeded: false,
+          origin: 'subagent',
+          delegationDepth: 1,
+        },
+        setup: expect.any(Function),
+      }),
+    )
     const childSession = {}
     const childCtx = { tools: { guard: vi.fn() }, systemPrompt: { section: vi.fn() } }
     await create.mock.calls[0][0].setup(childCtx, { session: childSession })
@@ -511,16 +519,18 @@ describe('AgentRuntime root lifecycle', () => {
       prompt: [{ type: 'text', text: 'work' }],
     })
 
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({
-      meta: {
-        cwd: '/environment',
-        agentPreset: 'standard',
-        parentSession: id('root'),
-        isSeeded: false,
-        origin: 'subagent',
-        delegationDepth: 3,
-      },
-    }))
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: {
+          cwd: '/environment',
+          agentPreset: 'standard',
+          parentSession: id('root'),
+          isSeeded: false,
+          origin: 'subagent',
+          delegationDepth: 3,
+        },
+      }),
+    )
   })
 
   test('coalesces concurrent resumes and rejects a changed scope', async () => {
@@ -592,9 +602,11 @@ describe('AgentRuntime root lifecycle', () => {
     // deployment's verifiers can settle (R1 S3 evidence: the third attempt kept
     // a full-summary goal the answer never supported and left two mandatory
     // criteria to a review that returned inconclusive).
-    expect(prompt).toContain('Include only requirements supported by the user\'s words and answers')
+    expect(prompt).toContain("Include only requirements supported by the user's words and answers")
     expect(prompt).toContain('do not make a mandatory criterion depend on a review that may never happen')
-    expect(prompt).toContain('Reuse an authoritative checker where it covers the result, keep only criteria for distinct requirements')
+    expect(prompt).toContain(
+      'Reuse an authoritative checker where it covers the result, keep only criteria for distinct requirements',
+    )
     expect(prompt).toContain('use known artifact paths')
     // The budget raise (K4) rides every root prompt — `task_budget_extend` is on
     // every root's allow-list — and it states the facts the model has to act on:
@@ -602,7 +614,9 @@ describe('AgentRuntime root lifecycle', () => {
     // and the ceiling moves only because a person moved it.
     expect(prompt).toContain('call task_budget_extend for a higher whole-total ceiling')
     expect(prompt).toContain("A stopped tree is still reviewable on the reviewer's own allowance")
-    expect(prompt).toContain('It re-opens no task, starts nothing by itself, and the runs already counted go on counting')
+    expect(prompt).toContain(
+      'It re-opens no task, starts nothing by itself, and the runs already counted go on counting',
+    )
     // A6 recovery belongs only to the separately granted supervisor hand-off;
     // an ordinary root neither receives the tool nor gets prompted to call it.
     expect(prompt).not.toContain('task_recover')
@@ -624,7 +638,7 @@ describe('AgentRuntime root lifecycle', () => {
     expect(prompt).toContain('Decisions require human approval')
     expect(prompt).toContain('evolution_apply with a second approval')
     expect(prompt).toContain('Read the ledger with evolution_list')
-    expect(prompt).toContain("an existing execution contract is derived at prepare")
+    expect(prompt).toContain('an existing execution contract is derived at prepare')
     expect(prompt).toContain('A new execution provider needs the capability row that grants it')
     expect(prompt).not.toMatch(/single-file|single file|candidate.vs.champion|v1 replay/i)
     // The domain reference map is a deployed skill, not part of the general root prompt.
@@ -794,8 +808,9 @@ describe('the spawn request contract (A2)', () => {
 
   test('a spawn with neither a prompt nor taskWorker is refused before anything is created', async () => {
     const state = await spawnContext()
-    await expect(state.runtime.spawn(state.root, { sessionId: id('child'), name: 'worker' }))
-      .rejects.toThrow('a spawn request needs a prompt')
+    await expect(state.runtime.spawn(state.root, { sessionId: id('child'), name: 'worker' })).rejects.toThrow(
+      'a spawn request needs a prompt',
+    )
     expect(state.live.has('child')).toBe(false)
   })
 
@@ -832,14 +847,16 @@ describe('the spawn request contract (A2)', () => {
       state.live.set(options.sessionId, { id: options.sessionId, ...child } as unknown as Agent)
       return { agent: state.live.get(options.sessionId)!, dispose: () => state.dispose(options.sessionId) }
     }
-    await expect(state.runtime.spawn(state.root, {
-      sessionId: id('child'),
-      name: 'worker',
-      taskWorker: true,
-      beforePrompt: async () => {
-        throw new Error('the ledger cannot be written')
-      },
-    })).rejects.toThrow('the ledger cannot be written')
+    await expect(
+      state.runtime.spawn(state.root, {
+        sessionId: id('child'),
+        name: 'worker',
+        taskWorker: true,
+        beforePrompt: async () => {
+          throw new Error('the ledger cannot be written')
+        },
+      }),
+    ).rejects.toThrow('the ledger cannot be written')
 
     expect(child.followup).not.toHaveBeenCalled()
     expect(state.dispose).toHaveBeenCalledExactlyOnceWith('child')
@@ -855,7 +872,12 @@ describe('the spawn request contract (A2)', () => {
     await state.spawn('child')
     const { guard } = await runSetup(state.createCalls[0]!.options)
 
-    expect(RAW_SESSION_READ_TOOLS).toEqual(['session_event_read', 'session_event_trace', 'session_trace', 'session_search'])
+    expect(RAW_SESSION_READ_TOOLS).toEqual([
+      'session_event_read',
+      'session_event_trace',
+      'session_trace',
+      'session_search',
+    ])
     for (const name of RAW_SESSION_READ_TOOLS) expect(denialOf(guard, name)).toBe(RAW_SESSION_READ_DENIAL)
     expect(RAW_SESSION_READ_DENIAL).toContain('context_read')
     for (const other of ['context_read', 'session_history_export', 'task_read', 'bash']) {
@@ -866,14 +888,33 @@ describe('the spawn request contract (A2)', () => {
   test.each([false, true])('root-local tools obey the coordination allow-list (evolution=%s)', async enabled => {
     const created = context([], 'idle', { evolution: { enabled } })
     const runtime = new AgentRuntime(created.ctx as never)
-    await runtime.createRoot({ sessionId: id('root'), cwd: '/workspace', scope: { graphStoreId: 'graph', layoutStoreId: 'layout' } })
+    await runtime.createRoot({
+      sessionId: id('root'),
+      cwd: '/workspace',
+      scope: { graphStoreId: 'graph', layoutStoreId: 'layout' },
+    })
     const resumed = context([id('root')], 'idle', { evolution: { enabled } })
-    await new AgentRuntime(resumed.ctx as never).ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
+    await new AgentRuntime(resumed.ctx as never).ensureRoot(id('root'), {
+      graphStoreId: 'graph',
+      layoutStoreId: 'layout',
+    })
     for (const assembly of [await assemble(created.createOptions[0]), await assemble(resumed.resumeOptions[0])]) {
       const allowed = enabled ? ROOT_TOOLS_OPEN : ROOT_TOOLS_CLOSED
       expect(assembly.presentAs).toHaveBeenCalledExactlyOnceWith('native')
       for (const name of allowed) expect(denialOf(assembly.guard, name), name).toBeUndefined()
-      for (const name of ['run_code', 'subagent', 'subagent_fork', 'read', 'grep', 'glob', 'write', 'edit', 'bash', 'jobs', 'mcp_custom']) {
+      for (const name of [
+        'run_code',
+        'subagent',
+        'subagent_fork',
+        'read',
+        'grep',
+        'glob',
+        'write',
+        'edit',
+        'bash',
+        'jobs',
+        'mcp_custom',
+      ]) {
         expect(denialOf(assembly.guard, name), name).toContain('delegate engineering work with task_decompose')
       }
       for (const name of EVOLUTION_TOOLS) {
@@ -886,15 +927,21 @@ describe('the spawn request contract (A2)', () => {
   test('the same execution seal is installed for a root, created or resumed', async () => {
     const created = context([])
     const createdRuntime = new AgentRuntime(created.ctx as never)
-    await createdRuntime.createRoot({ sessionId: id('root'), cwd: '/workspace', scope: { graphStoreId: 'graph', layoutStoreId: 'layout' } })
+    await createdRuntime.createRoot({
+      sessionId: id('root'),
+      cwd: '/workspace',
+      scope: { graphStoreId: 'graph', layoutStoreId: 'layout' },
+    })
     const createdAssembly = await assemble(created.createOptions[0])
-    for (const name of RAW_SESSION_READ_TOOLS) expect(denialOf(createdAssembly.guard, name)).toBe(RAW_SESSION_READ_DENIAL)
+    for (const name of RAW_SESSION_READ_TOOLS)
+      expect(denialOf(createdAssembly.guard, name)).toBe(RAW_SESSION_READ_DENIAL)
     expect(denialOf(createdAssembly.guard, 'context_read')).toBeUndefined()
 
     const resumed = context([id('root')])
     const resumedRuntime = new AgentRuntime(resumed.ctx as never)
     await resumedRuntime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
     const resumedAssembly = await assemble(resumed.resumeOptions[0])
-    for (const name of RAW_SESSION_READ_TOOLS) expect(denialOf(resumedAssembly.guard, name)).toBe(RAW_SESSION_READ_DENIAL)
+    for (const name of RAW_SESSION_READ_TOOLS)
+      expect(denialOf(resumedAssembly.guard, name)).toBe(RAW_SESSION_READ_DENIAL)
   })
 })

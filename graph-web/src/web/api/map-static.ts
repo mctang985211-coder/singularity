@@ -4,6 +4,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { MAP_PATH } from '../../constants.ts'
+import { urlOf } from '../libs/http.ts'
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -33,7 +34,7 @@ export function registerMapStatic(ctx: Context): () => void {
   const prefix = MAP_PATH
 
   const serve = async (req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? '/', 'http://dsh.local')
+    const url = urlOf(req)
     let rel = url.pathname.slice(prefix.length).replace(/^\/+/, '') || 'index.html'
     if (rel.endsWith('/')) rel += 'index.html'
     const abs = assetPath(root, rel)

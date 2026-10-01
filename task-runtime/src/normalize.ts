@@ -1,54 +1,9 @@
 /**
  * The single normalization entry for one decomposition batch (construction
  * guide §4): raw caller input in, the canonical contract of every child with
- * its defaults filled and its criterion ids fixed, plus the identity the batch
- * is admitted under — or every reason it was refused, in one pass.
- *
- * Why one entry: the model-facing tool, the runtime's own decomposition path
- * and (later) a template adapter all have to produce the same contract facts,
- * and the store refuses an instance whose projection fields disagree with the
- * contract it carries. Adapting here — before an id is minted, a capability
- * resolved, or anything persisted — is what makes a rejected batch
- * side-effect-free, and it is why this module is pure.
- *
- * Closed on purpose. Every level declares exactly the fields the contract has,
- * and any other key is a refusal, never a silent drop: an attempt to raise a
- * budget (`budget`, `maxDepth`, `tokens`) or to pin a skill (`skills`) through
- * a field the runtime never reads must fail loudly, or the proposal would look
- * like it said something the runtime did not honour. Text is stored verbatim
- * (no trimming, no newline rewriting) — blankness is refused, byte identity
- * belongs to the digest.
- *
- * What this entry does *not* judge: the shape of `command` and of the P4
- * declarations (`requiresArtifact`, `acceptsArtifact`, `verifierRef`,
- * `childEvidence`, `heuristic`), nor of `protectedInputs`. Those rules live in
- * `admission.ts` (`contractDefects`, `independentAcceptanceDefects`) and are
- * applied to the normalized batch before anything is persisted; a duplicate
- * here would be a second place to keep in step. A declared mode is carried the
- * same way.
- *
- * `protectedInputs` carries one extra thing worth naming: what arrives here is
- * already the **fixed** form — `{ path, sha256 }` refs — because the runtime
- * converts the caller's declared paths before this entry ever sees the batch
- * (`protected-inputs.ts`). That conversion is admission-time identity fixing,
- * not normalization: doing it here would make the contract's identity depend on
- * when the file happened to be read, and the read needs a checkout directory
- * this module has no business knowing about.
- *
- * The identity covers where the batch came from (store, parent task and run,
- * caller), its contract language, the caller's reason, and the complete
- * ordered children — never the ids admission mints, so the same proposal
- * retried against the same parent keeps one identity, and never the limits it
- * was admitted under: those are recorded beside the digest, which is what lets
- * a later gate compare content and context separately.
- * @module @dangosys/dsh-singularity-task-runtime/normalize
  */
 
-import {
-  TASK_CONTRACT_VERSION,
-  contractDigest,
-  decompositionDigest,
-} from '@dangosys/dsh-singularity-task'
+import { TASK_CONTRACT_VERSION, contractDigest, decompositionDigest } from '@dangosys/dsh-singularity-task'
 import type {
   AcceptanceCriterion,
   AdmissionContext,
@@ -60,6 +15,7 @@ import type {
   TaskContractVersion,
   VerificationMode,
 } from '@dangosys/dsh-singularity-task'
+import { isPlainObject, message, nonBlank, unknownFieldKeys } from './helpers.ts'
 
 /** Where one batch came from: the store, the parent, its run, and the caller that submitted it. */
 export interface DecompositionIdentityContext {
@@ -75,7 +31,7 @@ export interface NormalizationContext extends DecompositionIdentityContext {
 }
 
 /** One normalized child: its contract plus the batch facts the identity covers. */
-export interface NormalizedChild {
+interface NormalizedChild {
   contract: TaskContract
   dependsOn: number[]
   decomposable: boolean
@@ -94,15 +50,6 @@ export interface NormalizedBatch {
 /**
  * The identity one batch is digested over (§4): where it came from, which
  * contract language it is written in, the caller's reason, and the complete
- * ordered children — each child reduced to its contract digest and the batch
- * facts the identity covers.
- *
- * One construction, shared by {@link normalizeDecomposition} (which digs the
- * batch) and by any writer that has to *name* the batch rather than digest it
- * (the runtime's proposal record, whose `proposalDigest` has to be the same
- * number the admission recorded). Two constructions of one identity would
- * eventually disagree, and a proposal whose digest is not the batch's would
- * make every approval binding meaningless.
  */
 export function decompositionIdentity(
   context: DecompositionIdentityContext,
@@ -158,32 +105,14 @@ const CRITERION_FIELDS: ReadonlySet<string> = new Set([
   'protectedInputs',
 ])
 
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-  const prototype: unknown = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
-}
-
-/** Non-blank text: the one check every string field shares. */
-function nonBlank(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0
-}
-
 /** A declared version value, rendered so a non-number cannot read like a number (`"1"` is not `1`). */
 function declaredText(value: unknown): string {
-  return typeof value === 'number' ? String(value) : JSON.stringify(value) ?? String(value)
+  return typeof value === 'number' ? String(value) : (JSON.stringify(value) ?? String(value))
 }
 
 /**
  * A deep copy of declared contract data: primitives are immutable, arrays and
  * plain objects are rebuilt, so a caller mutating its input afterwards cannot
- * reach the normalized contract. Anything else is passed through unchanged — a
- * value no canonical form can carry is refused by the digest below, never
- * silently rewritten.
  */
 function copyValue<T>(value: T): T {
   if (Array.isArray(value)) return value.map(item => copyValue(item)) as unknown as T
@@ -196,9 +125,14 @@ function copyValue<T>(value: T): T {
 }
 
 /** Report every key a level does not declare. */
-function unknownFields(source: Record<string, unknown>, allowed: ReadonlySet<string>, label: string, reasons: string[]): void {
-  for (const key of Object.keys(source)) {
-    if (!allowed.has(key)) reasons.push(`${label} declares unknown field ${JSON.stringify(key)}`)
+function unknownFields(
+  source: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  label: string,
+  reasons: string[],
+): void {
+  for (const key of unknownFieldKeys(source, allowed)) {
+    reasons.push(`${label} declares unknown field ${JSON.stringify(key)}`)
   }
 }
 
@@ -214,7 +148,6 @@ function text(value: unknown, label: string, reasons: string[]): string {
 /**
  * A declared string collection: copied verbatim when it holds nothing but
  * non-blank strings, refused as one defect otherwise — a blank entry is
- * refused, not trimmed, and an omitted collection is the caller's `[]`.
  */
 function stringList(value: unknown, label: string, reasons: string[]): string[] {
   if (!Array.isArray(value) || value.some(item => !nonBlank(item))) {
@@ -227,7 +160,6 @@ function stringList(value: unknown, label: string, reasons: string[]): string[] 
 /**
  * A `dependsOn` list: integers only, copied verbatim. Whether an index is in
  * range, points at itself, or closes a cycle is admission's judgement — it
- * needs the whole batch, which this entry never sees as a graph.
  */
 function integerList(value: unknown, label: string, reasons: string[]): number[] {
   if (!Array.isArray(value) || value.some(item => !Number.isInteger(item))) {
@@ -250,7 +182,6 @@ function booleanField(value: unknown, fallback: boolean, label: string, reasons:
 /**
  * A value carried as declared. `command` and the P4 declarations are judged by
  * admission, so this entry only copies them: a shape those rules refuse never
- * reaches the store, and the cast is the boundary that says so.
  */
 function carried<T>(value: unknown): T {
   return copyValue(value) as T
@@ -259,12 +190,6 @@ function carried<T>(value: unknown): T {
 /**
  * One criterion list. Ids are fixed here — a declared id verbatim, an absent
  * one from `idOf` — because the digest must not depend on spellings and because
- * a parent-level `childEvidence.criterionId` can only point at an id that was
- * fixed before its parent's criteria were accepted.
- *
- * A criterion that carried a defect is left out of the returned list: the batch
- * is refused as a whole, and the contract must describe only what a well-formed
- * declaration asked for.
  */
 function normalizeCriteria(
   raw: readonly unknown[],
@@ -283,7 +208,8 @@ function normalizeCriteria(
       return
     }
     const declaredId = value.criterionId
-    if (declaredId !== undefined && !nonBlank(declaredId)) reasons.push(`${position} criterionId must be a non-empty string`)
+    if (declaredId !== undefined && !nonBlank(declaredId))
+      reasons.push(`${position} criterionId must be a non-empty string`)
     const criterionId = nonBlank(declaredId) ? declaredId : idOf(index)
     const criterionLabel = `${label} criterion ${JSON.stringify(criterionId)}`
 
@@ -298,20 +224,19 @@ function normalizeCriteria(
 
     const description = text(value.description, `${criterionLabel} description`, reasons)
     const mandatory = booleanField(value.mandatory, true, `${criterionLabel} mandatory`, reasons)
-    const requiredEvidence = value.requiredEvidence === undefined
-      ? []
-      : stringList(value.requiredEvidence, `${criterionLabel} requiredEvidence`, reasons)
+    const requiredEvidence =
+      value.requiredEvidence === undefined
+        ? []
+        : stringList(value.requiredEvidence, `${criterionLabel} requiredEvidence`, reasons)
 
     const command = value.command
     const criterion: AcceptanceCriterion = {
       criterionId,
       description,
-      // A declared mode is carried verbatim, whatever it is; whether it names
-      // one of the six judges is `contractDefects`' rule. Only an absent mode
-      // is defaulted — the one decision here: a command means the verifier can
-      // execute it, no command means a reviewer reads it. Absent means exactly
-      // `undefined`: a declared `null` is a declaration, and defaulting it
-      // would hand the criterion a judge the caller never named.
+      /**
+       * A declared mode is carried verbatim, whatever it is; whether it names
+       * one of the six judges is `contractDefects`' rule. Only an absent mode
+       */
       verificationMode: carried<VerificationMode>(
         value.mode === undefined ? (command !== undefined ? 'deterministic' : 'review') : value.mode,
       ),
@@ -323,11 +248,13 @@ function normalizeCriteria(
       ...(value.verifierRef === undefined ? {} : { verifierRef: carried<string>(value.verifierRef) }),
       ...(value.childEvidence === undefined ? {} : { childEvidence: carried<ChildEvidenceRef[]>(value.childEvidence) }),
       ...(value.heuristic === undefined ? {} : { heuristic: carried<boolean>(value.heuristic) }),
-      // The fixed protected inputs, carried verbatim like the P4 declarations
-      // (admission owns the shape rule). The runtime fixed their identity
-      // *before* this entry ran, so what is hashed here is the byte identity,
-      // never the caller's paths.
-      ...(value.protectedInputs === undefined ? {} : { protectedInputs: carried<ProtectedInputRef[]>(value.protectedInputs) }),
+      /**
+       * The fixed protected inputs, carried verbatim like the P4 declarations
+       * (admission owns the shape rule). The runtime fixed their identity
+       */
+      ...(value.protectedInputs === undefined
+        ? {}
+        : { protectedInputs: carried<ProtectedInputRef[]>(value.protectedInputs) }),
     }
     if (reasons.length > before) return
     criteria.push(criterion)
@@ -345,19 +272,22 @@ function normalizeChild(raw: unknown, index: number, reasons: string[]): Normali
   }
   unknownFields(raw, CHILD_FIELDS, label, reasons)
 
-  // The objective is stored byte-for-byte: a blank one is refused (nothing can
-  // be verified against it) and a padded one keeps its padding — the contract
-  // records what the caller asked for, not a tidied version of it.
+  /**
+   * The objective is stored byte-for-byte: a blank one is refused (nothing can
+   * be verified against it) and a padded one keeps its padding — the contract
+   */
   const objective = text(raw.objective, `${label} objective`, reasons)
 
   const rawCriteria = raw.acceptanceCriteria
   let criteria: AcceptanceCriterion[] = []
   if (!Array.isArray(rawCriteria)) reasons.push(`${label} acceptanceCriteria must be an array`)
-  else criteria = normalizeCriteria(rawCriteria, label, criterionIndex => `ac${index + 1}-${criterionIndex + 1}`, reasons)
+  else
+    criteria = normalizeCriteria(rawCriteria, label, criterionIndex => `ac${index + 1}-${criterionIndex + 1}`, reasons)
 
-  const requiredCapabilities = raw.requiredCapabilities === undefined
-    ? []
-    : stringList(raw.requiredCapabilities, `${label} requiredCapabilities`, reasons)
+  const requiredCapabilities =
+    raw.requiredCapabilities === undefined
+      ? []
+      : stringList(raw.requiredCapabilities, `${label} requiredCapabilities`, reasons)
   const assumptions = raw.assumptions === undefined ? [] : stringList(raw.assumptions, `${label} assumptions`, reasons)
   const constraints = raw.constraints === undefined ? [] : stringList(raw.constraints, `${label} constraints`, reasons)
   const dependsOn = raw.dependsOn === undefined ? [] : integerList(raw.dependsOn, `${label} dependsOn`, reasons)
@@ -387,10 +317,7 @@ function normalizeChild(raw: unknown, index: number, reasons: string[]): Normali
 
 /**
  * Normalize one decomposition proposal.
- *
  * Returns every defect it found, never the first: a caller revising a proposal
- * needs the whole list, and a batch that returns at all is one the digest could
- * describe. A refusal is a value, never a throw.
  */
 export function normalizeDecomposition(spec: unknown, context: NormalizationContext): NormalizationResult {
   const reasons: string[] = []
@@ -399,13 +326,15 @@ export function normalizeDecomposition(spec: unknown, context: NormalizationCont
   }
   unknownFields(spec, BATCH_FIELDS, 'decomposition', reasons)
 
-  // The version gate: absent is the legacy adapter (this build's version is the
-  // one the runtime writes), declared must be a version whose field semantics
-  // this build knows — reading a future contract with today's reader is the one
-  // failure a version field exists to prevent.
+  /**
+   * The version gate: absent is the legacy adapter (this build's version is the
+   * one the runtime writes), declared must be a version whose field semantics
+   */
   const declaredVersion = spec.contractVersion
   if (declaredVersion !== undefined && declaredVersion !== TASK_CONTRACT_VERSION) {
-    reasons.push(`unknown contract version ${declaredText(declaredVersion)}: this runtime writes version ${TASK_CONTRACT_VERSION}`)
+    reasons.push(
+      `unknown contract version ${declaredText(declaredVersion)}: this runtime writes version ${TASK_CONTRACT_VERSION}`,
+    )
   }
 
   let reason = ''
@@ -442,9 +371,10 @@ export function normalizeDecomposition(spec: unknown, context: NormalizationCont
       },
     }
   } catch (error) {
-    // `canonicalize` refuses values JSON cannot round-trip (functions, symbols,
-    // `NaN`, class instances): no digest of such a proposal could be compared
-    // with a digest of a different value, so the batch is refused, not hashed.
+    /**
+     * `canonicalize` refuses values JSON cannot round-trip (functions, symbols,
+     * `NaN`, class instances): no digest of such a proposal could be compared
+     */
     return { ok: false, reasons: [`decomposition content cannot be canonicalized: ${message(error)}`] }
   }
 }
@@ -462,14 +392,6 @@ const ROOT_CONTRACT_FIELDS: ReadonlySet<string> = new Set([
 /**
  * The criterion id a root contract's criterion gets when it declares none:
  * `ac-<j>`, one flat list.
- *
- * Why not the batch scheme (`ac<child>-<j>`): a root contract has no batch
- * position to be numbered by, so the child half of that name would have to be
- * invented — and an invented `ac1-2` on a root would read as "the second
- * criterion of the first child", which is a decomposition this contract is not.
- * The form is fixed here rather than left to the caller because an absent id
- * must be deterministic: the digest covers it, and two writers of the same root
- * contract must not produce two identities.
  */
 function rootCriterionId(index: number): string {
   return `ac-${index + 1}`
@@ -480,28 +402,6 @@ export type RootNormalizationResult = { ok: true; contract: TaskContract } | { o
 /**
  * Normalize one root contract (A0 §2–§3): the caller's single contract —
  * objective, criteria, assumptions, constraints, declared capabilities — in,
- * its canonical {@link TaskContract} out, or every reason it was refused.
- *
- * It shares the contract-level rules with {@link normalizeDecomposition} rather
- * than restating them: the same closed field set per criterion (an undeclared
- * key is refused by name, never dropped), the same verbatim text rule (blankness
- * is refused, bytes are not rewritten), the same defaults (an omitted list is
- * `[]`, an omitted `mandatory` is `true`, an absent mode follows the command),
- * and the same criterion-id fixing — with the root's own id scheme
- * ({@link rootCriterionId}).
- *
- * What it does *not* do: structural admission. `contractDefects`, the root's
- * own independent-criterion rule (`admission.ts:rootIndependenceDefects`), the
- * protected-input shape rule and every capability/provider/verifier question are
- * asked by the intake entry over the value this returns, exactly as the
- * decomposition path asks them over a normalized batch. And it writes nothing:
- * the caller has the whole contract or a list of reasons, and a refused root
- * contract leaves no id, no event and no file read behind it.
- *
- * The `contractVersion` gate is the batch's: absent is this build's version (the
- * caller that does not version its input means the current language), and a
- * declared version whose field semantics this build does not know is refused
- * rather than read with today's reader.
  */
 export function normalizeRootContract(spec: unknown): RootNormalizationResult {
   const reasons: string[] = []
@@ -512,7 +412,9 @@ export function normalizeRootContract(spec: unknown): RootNormalizationResult {
 
   const declaredVersion = spec.contractVersion
   if (declaredVersion !== undefined && declaredVersion !== TASK_CONTRACT_VERSION) {
-    reasons.push(`unknown contract version ${declaredText(declaredVersion)}: this runtime writes version ${TASK_CONTRACT_VERSION}`)
+    reasons.push(
+      `unknown contract version ${declaredText(declaredVersion)}: this runtime writes version ${TASK_CONTRACT_VERSION}`,
+    )
   }
 
   const label = 'root contract'
@@ -523,11 +425,14 @@ export function normalizeRootContract(spec: unknown): RootNormalizationResult {
   if (!Array.isArray(rawCriteria)) reasons.push(`${label} acceptanceCriteria must be an array`)
   else criteria = normalizeCriteria(rawCriteria, label, rootCriterionId, reasons)
 
-  const assumptions = spec.assumptions === undefined ? [] : stringList(spec.assumptions, `${label} assumptions`, reasons)
-  const constraints = spec.constraints === undefined ? [] : stringList(spec.constraints, `${label} constraints`, reasons)
-  const requiredCapabilities = spec.requiredCapabilities === undefined
-    ? []
-    : stringList(spec.requiredCapabilities, `${label} requiredCapabilities`, reasons)
+  const assumptions =
+    spec.assumptions === undefined ? [] : stringList(spec.assumptions, `${label} assumptions`, reasons)
+  const constraints =
+    spec.constraints === undefined ? [] : stringList(spec.constraints, `${label} constraints`, reasons)
+  const requiredCapabilities =
+    spec.requiredCapabilities === undefined
+      ? []
+      : stringList(spec.requiredCapabilities, `${label} requiredCapabilities`, reasons)
 
   if (reasons.length > 0) return { ok: false, reasons }
   return {

@@ -39,13 +39,13 @@ import {
   readSupervisorDelegation,
   readSupervisorHandoff,
   reviewAgentLedgerFile,
-} from '../../src/review-agent-ledger.ts'
+} from '../../src/coordination/ledger.ts'
 import {
   consumePendingHandoffs,
   handoffDelegatorOf,
   startSupervisorHandoff,
   type HandoffConsumption,
-} from '../../src/evolution-handoff.ts'
+} from '../../src/coordination/evolution-handoff.ts'
 import {
   COORDINATION_PRESET,
   SUPERVISOR_BASELINE,
@@ -55,8 +55,8 @@ import {
   supervisorGrant,
   supervisorHandoffDigest,
   supervisorPrompt,
-} from '../../src/handoff-rules.ts'
-import { REVIEWER_PRESET } from '../../src/review-agent-run.ts'
+} from '../../src/coordination/handoff-rules.ts'
+import { REVIEWER_PRESET } from '../../src/coordination/review-run.ts'
 
 const ROOT = 's-root'
 const STORE = `sg-t-${ROOT}`

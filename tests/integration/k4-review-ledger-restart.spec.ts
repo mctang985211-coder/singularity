@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { countReviewAgentRuns, readReviewerDelegation } from '../../agent-singularity/src/review-agent-ledger.ts'
+import { countReviewAgentRuns, readReviewerDelegation } from '../../agent-singularity/src/coordination/ledger.ts'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
 
 /**

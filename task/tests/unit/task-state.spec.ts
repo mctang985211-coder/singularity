@@ -664,7 +664,6 @@ describe('TaskState contract and admission records', () => {
   const ADMISSION_CONTEXT: AdmissionContext = {
     maxDepth: 2,
     maxChildren: 4,
-    wallTimeMs: 600_000,
     auditOnly: { maxToolCalls: 200, tokens: 1_000_000, attempts: 3 },
   }
 
@@ -786,7 +785,6 @@ describe('TaskState contract and admission records', () => {
     ['a fractional maxChildren', admission({ context: { ...ADMISSION_CONTEXT, maxChildren: 1.5 } }), 'task: task "root" admission context maxChildren must be a non-negative integer'],
     ['a non-object auditOnly', admission({ context: { ...ADMISSION_CONTEXT, auditOnly: 'none' } }), 'task: task "root" admission context auditOnly must be an object'],
     ['an array auditOnly', admission({ context: { ...ADMISSION_CONTEXT, auditOnly: [] } }), 'task: task "root" admission context auditOnly must be an object'],
-    ['an infinite wallTimeMs', admission({ context: { ...ADMISSION_CONTEXT, wallTimeMs: Number.POSITIVE_INFINITY } }), 'task: task "root" admission context wallTimeMs must be a finite number when present'],
     ['a NaN tokens limit', admission({ context: { ...ADMISSION_CONTEXT, auditOnly: { maxToolCalls: 200, tokens: Number.NaN } } }), 'task: task "root" admission context auditOnly.tokens must be a finite number when present'],
   ]
 

@@ -21,15 +21,40 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/pro
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { registryRevision, serializeSkillSidecar, SKILL_SIDECAR_FILE, skillContentDigest } from '@dangosys/dsh-singularity-task-runtime'
+import {
+  registryRevision,
+  serializeSkillSidecar,
+  SKILL_SIDECAR_FILE,
+  skillContentDigest,
+} from '@dangosys/dsh-singularity-task-runtime'
 import { EvolutionService } from '../../src/evolution.ts'
-import type { EvolutionProposal, GateAnswers } from '../../src/evolution.ts'
-import type { ExperimentSampleRecord, ExperimentStartedRecord, ExperimentView } from '../../src/experiment.ts'
-import { buildExperimentReport, directoryDigest, experimentIdOf, experimentLineage, experimentReportPath } from '../../src/experiment.ts'
-import type { ExperimentBudget, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, ModelSelection, SkillContentIdentity } from '../../src/replay.ts'
-import { digestOf, EXPERIMENT_COMPARER_VERSION, frozenDigestOf, modelSelectionOf, protectedInputsDigest } from '../../src/replay.ts'
+import type { GateAnswers } from '../../src/evolution.ts'
+import type { ExperimentSampleRecord, ExperimentStartedRecord } from '../../src/experiment/spec.ts'
+import {
+  buildExperimentReport,
+  directoryDigest,
+  experimentIdOf,
+  experimentLineage,
+  experimentReportPath,
+} from '../../src/experiment/record.ts'
+import type {
+  ExperimentBudget,
+  FrozenExperiment,
+  FrozenProviderIdentity,
+  FrozenProviderSkill,
+  FrozenSample,
+  ModelSelection,
+  SkillContentIdentity,
+} from '../../src/replay.ts'
+import {
+  digestOf,
+  EXPERIMENT_COMPARER_VERSION,
+  frozenDigestOf,
+  modelSelectionOf,
+  protectedInputsDigest,
+} from '../../src/replay.ts'
 
 const PROPOSAL = 's1'
 const SKILL = 'verify'
@@ -210,7 +235,16 @@ async function fixture(options: FixtureOptions = {}) {
     reflect: { provide: () => {} },
     effect: () => {},
     taskRuntime: { listCapabilities: () => ({ [ROW]: { skills: [SKILL], preset: 'standard' } }) },
-    task: { openStore: async () => ({ tasks: rows.tasks, runs: rows.runs, reviews: rows.reviews, evidence: rows.evidence, diagnoses: [], obligations: [] }) },
+    task: {
+      openStore: async () => ({
+        tasks: rows.tasks,
+        runs: rows.runs,
+        reviews: rows.reviews,
+        evidence: rows.evidence,
+        diagnoses: [],
+        obligations: [],
+      }),
+    },
     verifier: {
       ready: async () => {},
       verifierIds: () => ['command', 'composite', 'review'],
@@ -229,35 +263,41 @@ async function fixture(options: FixtureOptions = {}) {
     skillRoot,
     modelSelection: () => selectionOf(options.model ?? MODEL),
   })
-  await svc.propose({
-    proposalId: PROPOSAL,
-    targetType: 'skill',
-    targetId: SKILL,
-    baseVersion: 'v1',
-    level: 'L2',
-    rationale: 'the production skill never produces the answer the criterion asks for',
-    sourceRefs: ['diagnosis:d1'],
-  }, 'root-1')
+  await svc.propose(
+    {
+      proposalId: PROPOSAL,
+      targetType: 'skill',
+      targetId: SKILL,
+      baseVersion: 'v1',
+      level: 'L2',
+      rationale: 'the production skill never produces the answer the criterion asks for',
+      sourceRefs: ['diagnosis:d1'],
+    },
+    'root-1',
+  )
   await svc.candidate(PROPOSAL, { skill: 'v2' }, 'root-1', { name: SKILL, content: CANDIDATE })
   const prepared = await svc.prepare(PROPOSAL, 'root-1')
 
   // --- the candidate and production objects, as the freeze reads them (K3) ---
   const candidateIdentity = prepared.prepared!.skillContent!
   const baselineIdentity = prepared.prepared!.skillBaseline!
-  const candidateSidecar = candidateIdentity.contract === undefined
-    ? undefined
-    : await readFile(join(root, 'sandbox', PROPOSAL, 'skills', SKILL, SKILL_SIDECAR_FILE))
+  const candidateSidecar =
+    candidateIdentity.contract === undefined
+      ? undefined
+      : await readFile(join(root, 'sandbox', PROPOSAL, 'skills', SKILL, SKILL_SIDECAR_FILE))
   // One row granting the skill; the two revisions differ in exactly the entry
   // the candidate replaces — the runtime's own `registryRevision` over the same
   // table, with that skill's declaration digest substituted.
   const table = { [ROW]: { skills: [SKILL], preset: 'standard' } }
   const providerSkills: FrozenProviderSkill[] = execution
-    ? [{
-      name: SKILL,
-      role: 'execution-provider',
-      contractDigest: baselineIdentity.contract!.contractDigest,
-      contentDigest: skillContentDigest({ skillMdSha256: baselineIdentity.sha256, resources: [] }),
-    }]
+    ? [
+        {
+          name: SKILL,
+          role: 'execution-provider',
+          contractDigest: baselineIdentity.contract!.contractDigest,
+          contentDigest: skillContentDigest({ skillMdSha256: baselineIdentity.sha256, resources: [] }),
+        },
+      ]
     : []
   const productionRevision = execution
     ? registryRevision(table, [{ name: SKILL, contractDigest: baselineIdentity.contract!.contractDigest }])
@@ -271,19 +311,31 @@ async function fixture(options: FixtureOptions = {}) {
   // --- the samples, as the store holds their historical contracts -----------
   // The judge every criterion is frozen with (S4-E §Q3): the registered
   // `command` verifier at the version this deployment declares.
-  const judge = { ref: options.frozenJudge?.ref ?? 'command', version: options.frozenJudge?.version ?? VERIFIER_VERSION }
+  const judge = {
+    ref: options.frozenJudge?.ref ?? 'command',
+    version: options.frozenJudge?.version ?? VERIFIER_VERSION,
+  }
   const samples: FrozenSample[] = []
-  const addSample = (input: { taskId: string; role: FrozenSample['role']; criterionId: string; command: string; outcome: 'verified' | 'failed'; protectedInputs?: { path: string; sha256: string }[] }) => {
-    const acceptanceCriteria = [{
-      criterionId: input.criterionId,
-      description: 'works',
-      verificationMode: 'deterministic',
-      requiredEvidence: [],
-      mandatory: true,
-      command: input.command,
-      verifierRef: judge.ref,
-      ...(input.protectedInputs === undefined ? {} : { protectedInputs: input.protectedInputs }),
-    }]
+  const addSample = (input: {
+    taskId: string
+    role: FrozenSample['role']
+    criterionId: string
+    command: string
+    outcome: 'verified' | 'failed'
+    protectedInputs?: { path: string; sha256: string }[]
+  }) => {
+    const acceptanceCriteria = [
+      {
+        criterionId: input.criterionId,
+        description: 'works',
+        verificationMode: 'deterministic',
+        requiredEvidence: [],
+        mandatory: true,
+        command: input.command,
+        verifierRef: judge.ref,
+        ...(input.protectedInputs === undefined ? {} : { protectedInputs: input.protectedInputs }),
+      },
+    ]
     rows.tasks.push({
       taskId: input.taskId,
       definitionRef: { taskType: 'subtask', version: 1 },
@@ -313,15 +365,17 @@ async function fixture(options: FixtureOptions = {}) {
         acceptanceCriteria,
         requiredCapabilities: execution ? [ROW] : [],
       }),
-      criteria: [{
-        criterionId: input.criterionId,
-        verificationMode: 'deterministic',
-        command: input.command,
-        protectedInputsDigest: protectedInputsDigest(input.protectedInputs ?? []),
-        verifierRef: judge.ref,
-        verifierVersion: judge.version,
-        verifierAnchor: `registered verifier "${judge.ref}" declares version "${judge.version}"`,
-      }],
+      criteria: [
+        {
+          criterionId: input.criterionId,
+          verificationMode: 'deterministic',
+          command: input.command,
+          protectedInputsDigest: protectedInputsDigest(input.protectedInputs ?? []),
+          verifierRef: judge.ref,
+          verifierVersion: judge.version,
+          verifierAnchor: `registered verifier "${judge.ref}" declares version "${judge.version}"`,
+        },
+      ],
       observed: { outcome: input.outcome, runId: `r-history-${input.taskId}` },
       provider: providerIdentity({
         skills: providerSkills,
@@ -339,9 +393,21 @@ async function fixture(options: FixtureOptions = {}) {
     outcome: 'failed',
     protectedInputs: [{ path: protectedInput.path, sha256: sha256(protectedInput.bytes) }],
   })
-  addSample({ taskId: HOLDOUT_SAMPLE, role: 'holdout', criterionId: 'ac-holdout', command: 'test -f holdout.txt', outcome: 'verified' })
+  addSample({
+    taskId: HOLDOUT_SAMPLE,
+    role: 'holdout',
+    criterionId: 'ac-holdout',
+    command: 'test -f holdout.txt',
+    outcome: 'verified',
+  })
   if (options.regression !== undefined) {
-    addSample({ taskId: REGRESSION_SAMPLE, role: 'observed-regression', criterionId: 'ac-keep', command: 'test -f keep.txt', outcome: 'verified' })
+    addSample({
+      taskId: REGRESSION_SAMPLE,
+      role: 'observed-regression',
+      criterionId: 'ac-keep',
+      command: 'test -f keep.txt',
+      outcome: 'verified',
+    })
   }
 
   // --- the frozen block and the experiment id ------------------------------
@@ -355,14 +421,21 @@ async function fixture(options: FixtureOptions = {}) {
     samples,
     snapshot: { sourceDir: workspace, digest: await directoryDigest(workspace) },
     comparerVersion: EXPERIMENT_COMPARER_VERSION,
-    overlay: { baseline: 'none — the baseline runs under the production configuration', candidate: `extraSkillRoots: [sandbox/${PROPOSAL}/skills]` },
+    overlay: {
+      baseline: 'none — the baseline runs under the production configuration',
+      candidate: `extraSkillRoots: [sandbox/${PROPOSAL}/skills]`,
+    },
   }
   const frozenDigest = frozenDigestOf(frozen)
   const experimentId = experimentIdOf(PROPOSAL, frozenDigest)
   const reportPath = experimentReportPath(PROPOSAL, experimentId)
 
   // --- the four settled sides, as the store would hold them ----------------
-  const sides = { failure: options.failure ?? {}, holdout: options.holdout ?? {}, regression: options.regression ?? {} } as const
+  const sides = {
+    failure: options.failure ?? {},
+    holdout: options.holdout ?? {},
+    regression: options.regression ?? {},
+  } as const
   const settle = async (sample: FrozenSample, side: 'baseline' | 'candidate', outcome: Settlement) => {
     const lineage = experimentLineage(experimentId, sample.taskId, side)
     const taskId = `t-${sample.taskId}-${side}`
@@ -375,7 +448,12 @@ async function fixture(options: FixtureOptions = {}) {
     // the binding below is written from the same identities — so the fixture is
     // exactly the shape a real two-file run records (K3).
     const sideIdentity = side === 'candidate' ? candidateIdentity : baselineIdentity
-    const sideSidecar = side === 'candidate' ? candidateSidecar : productionSidecar === undefined ? undefined : Buffer.from(productionSidecar, 'utf8')
+    const sideSidecar =
+      side === 'candidate'
+        ? candidateSidecar
+        : productionSidecar === undefined
+          ? undefined
+          : Buffer.from(productionSidecar, 'utf8')
     const snapshotRoot = skillSnapshotRoot(sample.taskId, side)
     if (execution) {
       await mkdir(join(snapshotRoot, SKILL), { recursive: true })
@@ -388,7 +466,16 @@ async function fixture(options: FixtureOptions = {}) {
       parentTaskId: undefined,
       objective: `[${lineage}] ${sample.taskId}`,
       depth: 1,
-      acceptanceCriteria: [{ criterionId, description: 'works', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: sample.criteria[0]!.command }],
+      acceptanceCriteria: [
+        {
+          criterionId,
+          description: 'works',
+          verificationMode: 'deterministic',
+          requiredEvidence: [],
+          mandatory: true,
+          command: sample.criteria[0]!.command,
+        },
+      ],
       requestedCapabilities: execution ? [ROW] : [],
       decompositionStatus: 'leaf',
       status: outcome,
@@ -406,22 +493,32 @@ async function fixture(options: FixtureOptions = {}) {
         registryRevision: side === 'candidate' ? candidateRevision : productionRevision,
         capabilities: execution ? [ROW] : [],
         skills: execution
-          ? [{
-            name: SKILL,
-            role: 'execution-provider',
-            capabilities: [ROW],
-            description: 'gate fixture skill',
-            contractDigest: sideIdentity.contract!.contractDigest,
-            contentDigest: skillContentDigest({ skillMdSha256: sideIdentity.sha256, resources: [] }),
-            uncovered: [],
-          }]
+          ? [
+              {
+                name: SKILL,
+                role: 'execution-provider',
+                capabilities: [ROW],
+                description: 'gate fixture skill',
+                contractDigest: sideIdentity.contract!.contractDigest,
+                contentDigest: skillContentDigest({ skillMdSha256: sideIdentity.sha256, resources: [] }),
+                uncovered: [],
+              },
+            ]
           : [],
         mcpServers: [],
         ...(execution ? { snapshotRoot } : {}),
       },
     })
     sessions.set(`s-${runId}`, [requestHeader(frozen.model, 1)])
-    rows.evidence.push({ evidenceId: `e-${runId}`, taskRunId: runId, taskId, artifacts: [], verifierResults: [], claims: [], generatedAt: '2026-09-26T00:00:00.000Z' })
+    rows.evidence.push({
+      evidenceId: `e-${runId}`,
+      taskRunId: runId,
+      taskId,
+      artifacts: [],
+      verifierResults: [],
+      claims: [],
+      generatedAt: '2026-09-26T00:00:00.000Z',
+    })
     rows.reviews.push({
       taskId,
       runId,
@@ -429,12 +526,14 @@ async function fixture(options: FixtureOptions = {}) {
       evidenceRefs: [`e-${runId}`],
       anomalies: [],
       ...(options.metrics === undefined ? {} : { metrics: options.metrics }),
-      criteria: [{
-        criterionId,
-        verdict,
-        verifierId: judge.ref,
-        verifierVersion: options.sideJudgeVersion ?? judge.version,
-      }],
+      criteria: [
+        {
+          criterionId,
+          verdict,
+          verifierId: judge.ref,
+          verifierVersion: options.sideJudgeVersion ?? judge.version,
+        },
+      ],
     })
     const record: ExperimentSampleRecord = {
       formatVersion: 4,
@@ -450,17 +549,20 @@ async function fixture(options: FixtureOptions = {}) {
       outcome,
       reviewRef: `${taskId}#${runId}`,
       evidenceRefs: [`e-${runId}`],
-      criteria: [{
-        criterionId,
-        verdict,
-        verifierId: judge.ref,
-        verifierVersion: options.sideJudgeVersion ?? judge.version,
-      }],
+      criteria: [
+        {
+          criterionId,
+          verdict,
+          verifierId: judge.ref,
+          verifierVersion: options.sideJudgeVersion ?? judge.version,
+        },
+      ],
       workspace: join(root, 'sandbox', PROPOSAL, `exp-${experimentId}`, sample.taskId, side),
       initialDigest: frozen.snapshot.digest,
-      cost: options.metrics === undefined
-        ? { status: 'unknown', reason: "the run's review record carries no metrics, so no cost was reported for it" }
-        : { status: 'reported', metrics: options.metrics as never },
+      cost:
+        options.metrics === undefined
+          ? { status: 'unknown', reason: "the run's review record carries no metrics, so no cost was reported for it" }
+          : { status: 'reported', metrics: options.metrics as never },
       actor: 'root-1',
       at,
     }
@@ -482,9 +584,18 @@ async function fixture(options: FixtureOptions = {}) {
   }
   const records: ExperimentSampleRecord[] = []
   for (const sample of samples) {
-    const spec = sample.taskId === FAIL_SAMPLE ? sides.failure : sample.taskId === HOLDOUT_SAMPLE ? sides.holdout : sides.regression
-    records.push(await settle(sample, 'baseline', spec.baseline ?? (sample.taskId === FAIL_SAMPLE ? 'failed' : 'verified')))
-    records.push(await settle(sample, 'candidate', spec.candidate ?? (sample.taskId === FAIL_SAMPLE ? 'verified' : 'verified')))
+    const spec =
+      sample.taskId === FAIL_SAMPLE
+        ? sides.failure
+        : sample.taskId === HOLDOUT_SAMPLE
+          ? sides.holdout
+          : sides.regression
+    records.push(
+      await settle(sample, 'baseline', spec.baseline ?? (sample.taskId === FAIL_SAMPLE ? 'failed' : 'verified')),
+    )
+    records.push(
+      await settle(sample, 'candidate', spec.candidate ?? (sample.taskId === FAIL_SAMPLE ? 'verified' : 'verified')),
+    )
   }
   await svc.recordExperimentStart(started)
   for (const record of records) await svc.recordExperimentSample(record)
@@ -500,7 +611,11 @@ async function fixture(options: FixtureOptions = {}) {
       verifier: {
         ready: async () => {},
         verifierIds: () => ['command', 'composite', 'review'],
-        verifierVersions: () => ({ command: overrides.verifierVersion ?? options.verifierVersion ?? VERIFIER_VERSION, composite: '1', review: '1' }),
+        verifierVersions: () => ({
+          command: overrides.verifierVersion ?? options.verifierVersion ?? VERIFIER_VERSION,
+          composite: '1',
+          review: '1',
+        }),
       },
     }
     return new EvolutionService(reopenedCtx as never, {
@@ -511,7 +626,17 @@ async function fixture(options: FixtureOptions = {}) {
   }
 
   return {
-    svc, reopen, root, skillRoot, workspace, rows, sessions, reportPath, experimentId, frozen, prepared: prepared.prepared!,
+    svc,
+    reopen,
+    root,
+    skillRoot,
+    workspace,
+    rows,
+    sessions,
+    reportPath,
+    experimentId,
+    frozen,
+    prepared: prepared.prepared!,
     execution,
     candidateIdentity,
     baselineIdentity,
@@ -537,7 +662,10 @@ async function fixture(options: FixtureOptions = {}) {
      */
     async tamperLedger(mutate: (records: Record<string, any>[]) => void) {
       const path = join(root, 'proposals.jsonl')
-      const lines = (await readFile(path, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as Record<string, any>)
+      const lines = (await readFile(path, 'utf8'))
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line) as Record<string, any>)
       mutate(lines)
       await writeFile(path, `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
       const service = await reopen()
@@ -552,7 +680,10 @@ async function fixture(options: FixtureOptions = {}) {
       }
     },
     async ledgerKinds(): Promise<string[]> {
-      return (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => (JSON.parse(line) as { kind: string }).kind)
+      return (await readFile(join(root, 'proposals.jsonl'), 'utf8'))
+        .trim()
+        .split('\n')
+        .map(line => (JSON.parse(line) as { kind: string }).kind)
     },
   }
 }
@@ -581,7 +712,22 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
     expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
     // Each production write is one commit: its intent line before the write, its
     // completion after (K2).
-    expect(await f.ledgerKinds()).toEqual(['proposed', 'candidate', 'prepared', 'experiment_started', 'experiment_sample', 'experiment_sample', 'experiment_sample', 'experiment_sample', 'gated', 'decided', 'commit_intent', 'applied', 'commit_intent', 'rolledback'])
+    expect(await f.ledgerKinds()).toEqual([
+      'proposed',
+      'candidate',
+      'prepared',
+      'experiment_started',
+      'experiment_sample',
+      'experiment_sample',
+      'experiment_sample',
+      'experiment_sample',
+      'gated',
+      'decided',
+      'commit_intent',
+      'applied',
+      'commit_intent',
+      'rolledback',
+    ])
   })
 
   it('records an unknown cost without refusing when the frozen budget declares no ceiling', async () => {
@@ -599,20 +745,36 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
     const path = join(f.root, 'proposals.jsonl')
     const lines = (await readFile(path, 'utf8')).trim().split('\n')
     lines.splice(lines.findIndex(line => (JSON.parse(line) as { kind: string }).kind === 'experiment_started'))
-    lines.push(JSON.stringify({ formatVersion: 1, kind: 'replayed', proposalId: PROPOSAL, report: `sandbox/${PROPOSAL}/replay-report.json`, verdict: 'not-worse', tasks: [], actor: 'root-1', at: '2026-09-26T00:00:00.000Z' }))
+    lines.push(
+      JSON.stringify({
+        formatVersion: 1,
+        kind: 'replayed',
+        proposalId: PROPOSAL,
+        report: `sandbox/${PROPOSAL}/replay-report.json`,
+        verdict: 'not-worse',
+        tasks: [],
+        actor: 'root-1',
+        at: '2026-09-26T00:00:00.000Z',
+      }),
+    )
     await writeFile(path, `${lines.join('\n')}\n`)
     const tampered = await readFile(path, 'utf8')
 
     const reopened = await f.reopen()
-    expect(await refusal(reopened.get(PROPOSAL))).toMatch(new RegExp(`ledger line ${lines.length} in .*declares formatVersion 1`))
+    expect(await refusal(reopened.get(PROPOSAL))).toMatch(
+      new RegExp(`ledger line ${lines.length} in .*declares formatVersion 1`),
+    )
     expect(await refusal(reopened.checkPromotion(PROPOSAL))).toContain('formatVersion 1')
-    expect(await refusal(reopened.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide'))).toContain('formatVersion 1')
+    expect(await refusal(reopened.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide'))).toContain(
+      'formatVersion 1',
+    )
     // Nothing was appended beside the refused line.
     expect(await readFile(path, 'utf8')).toBe(tampered)
 
     const bare = await fixture()
     await bare.tamperLedger(lines => {
-      for (let at = lines.length - 1; at >= 0; at -= 1) if (lines[at]!.kind === 'experiment_started' || lines[at]!.kind === 'experiment_sample') lines.splice(at, 1)
+      for (let at = lines.length - 1; at >= 0; at -= 1)
+        if (lines[at]!.kind === 'experiment_started' || lines[at]!.kind === 'experiment_sample') lines.splice(at, 1)
     })
     const none = await refusal((await bare.reopen()).checkPromotion(PROPOSAL))
     expect(none).toContain('carries no two-sided experiment')
@@ -621,7 +783,10 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
   it('refuses an experiment that is missing a side', async () => {
     const f = await fixture()
     await f.tamperLedger(lines => {
-      lines.splice(lines.findIndex(line => line.kind === 'experiment_sample'), 1)
+      lines.splice(
+        lines.findIndex(line => line.kind === 'experiment_sample'),
+        1,
+      )
     })
     const message = await refusal((await f.reopen()).checkPromotion(PROPOSAL))
     expect(message).toContain('is incomplete')
@@ -630,7 +795,9 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
 
   it('refuses a report whose bytes are not the report its records recompute to', async () => {
     const f = await fixture()
-    await f.tamperReport(report => { report.samples[0].candidate.evidenceRefs = ['e-forged'] })
+    await f.tamperReport(report => {
+      report.samples[0].candidate.evidenceRefs = ['e-forged']
+    })
     const message = await refusal((await f.reopen()).checkPromotion(PROPOSAL))
     expect(message).toContain('is not the report its ledger records recompute to')
     // and nothing was decided or applied by the refusal
@@ -644,32 +811,42 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
     expect(await refusal((await f.reopen()).checkPromotion(PROPOSAL))).toContain('cannot be read')
   })
 
-  it('refuses a side that cites the sample\'s own historical run, and one that cites another run', async () => {
+  it("refuses a side that cites the sample's own historical run, and one that cites another run", async () => {
     const historical = await fixture()
     await historical.tamperLedger(lines => {
-      const record = lines.find(line => line.kind === 'experiment_sample' && line.sampleTaskId === FAIL_SAMPLE && line.side === 'candidate')!
+      const record = lines.find(
+        line => line.kind === 'experiment_sample' && line.sampleTaskId === FAIL_SAMPLE && line.side === 'candidate',
+      )!
       record.taskId = FAIL_SAMPLE
       record.runId = `r-history-${FAIL_SAMPLE}`
       record.reviewRef = `${FAIL_SAMPLE}#r-history-${FAIL_SAMPLE}`
     })
-    expect(await refusal((await historical.reopen()).checkPromotion(PROPOSAL))).toContain('the historical task is the case, not a baseline')
+    expect(await refusal((await historical.reopen()).checkPromotion(PROPOSAL))).toContain(
+      'the historical task is the case, not a baseline',
+    )
 
     const other = await fixture()
     await other.tamperLedger(lines => {
-      const record = lines.find(line => line.kind === 'experiment_sample' && line.sampleTaskId === FAIL_SAMPLE && line.side === 'candidate')!
+      const record = lines.find(
+        line => line.kind === 'experiment_sample' && line.sampleTaskId === FAIL_SAMPLE && line.side === 'candidate',
+      )!
       record.runId = `r-${FAIL_SAMPLE}-baseline`
       record.reviewRef = `t-${FAIL_SAMPLE}-baseline#r-${FAIL_SAMPLE}-baseline`
     })
-    expect(await refusal((await other.reopen()).checkPromotion(PROPOSAL))).toContain("no run of this experiment's own replay")
+    expect(await refusal((await other.reopen()).checkPromotion(PROPOSAL))).toContain(
+      "no run of this experiment's own replay",
+    )
   })
 
   it.each([
-    ['another run\'s evidence', 'e-r-t-fail-baseline', 'cites evidence'],
+    ["another run's evidence", 'e-r-t-fail-baseline', 'cites evidence'],
     ['an evidence id nobody holds', 'e-ghost', 'cites evidence'],
   ])('refuses evidenceRefs that name %s', async (_label, ref, expected) => {
     const f = await fixture()
     await f.tamperLedger(lines => {
-      const record = lines.find(line => line.kind === 'experiment_sample' && line.sampleTaskId === FAIL_SAMPLE && line.side === 'candidate')!
+      const record = lines.find(
+        line => line.kind === 'experiment_sample' && line.sampleTaskId === FAIL_SAMPLE && line.side === 'candidate',
+      )!
       record.evidenceRefs = [ref]
     })
     expect(await refusal((await f.reopen()).checkPromotion(PROPOSAL))).toContain(expected)
@@ -685,8 +862,12 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
   it('refuses a side whose stored review criteria disagree with the report', async () => {
     const f = await fixture()
     const review = f.rows.reviews.find(item => item.runId === `r-${FAIL_SAMPLE}-candidate`)!
-    review.criteria = [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command', verifierVersion: VERIFIER_VERSION }]
-    expect(await refusal(f.svc.checkPromotion(PROPOSAL))).toContain('the verdicts a promotion reads are the ones the store recorded')
+    review.criteria = [
+      { criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command', verifierVersion: VERIFIER_VERSION },
+    ]
+    expect(await refusal(f.svc.checkPromotion(PROPOSAL))).toContain(
+      'the verdicts a promotion reads are the ones the store recorded',
+    )
   })
 
   it('refuses an experiment that names no task store', async () => {
@@ -747,10 +928,12 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
   it('refuses when the deployment cannot list its verifier vocabulary', async () => {
     const f = await fixture()
     const reopened = await f.reopen()
-    const ctx = (reopened as unknown as { ctx: { verifier: { verifierIds?: () => string[]; ready?(): Promise<void> } } }).ctx
+    const ctx = (
+      reopened as unknown as { ctx: { verifier: { verifierIds?: () => string[]; ready?(): Promise<void> } } }
+    ).ctx
     delete ctx.verifier.verifierIds
     delete ctx.verifier.ready
-    expect(await refusal(reopened.checkPromotion(PROPOSAL))).toContain("cannot be listed in this context")
+    expect(await refusal(reopened.checkPromotion(PROPOSAL))).toContain('cannot be listed in this context')
   })
 
   it('refuses a side whose session log records a request on another route (S4-E §Q3)', async () => {
@@ -806,28 +989,48 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
 
   it('refuses a deployment that cannot resolve a structured model selection', async () => {
     const f = await fixture()
-    const bare = new EvolutionService(
-      (f.svc as unknown as { ctx: object }).ctx as never,
-      { root: f.root, skillRoot: f.skillRoot, modelSelection: () => undefined },
-    )
+    const bare = new EvolutionService((f.svc as unknown as { ctx: object }).ctx as never, {
+      root: f.root,
+      skillRoot: f.skillRoot,
+      modelSelection: () => undefined,
+    })
     expect(await refusal(bare.checkPromotion(PROPOSAL))).toContain('cannot name the model selection its runs share')
-    const unstructured = new EvolutionService(
-      (f.svc as unknown as { ctx: object }).ctx as never,
-      { root: f.root, skillRoot: f.skillRoot, modelSelection: () => ({ provider: '', model: 'm' }) as never },
+    const unstructured = new EvolutionService((f.svc as unknown as { ctx: object }).ctx as never, {
+      root: f.root,
+      skillRoot: f.skillRoot,
+      modelSelection: () => ({ provider: '', model: 'm' }) as never,
+    })
+    expect(await refusal(unstructured.checkPromotion(PROPOSAL))).toContain(
+      'cannot name the model selection its runs share',
     )
-    expect(await refusal(unstructured.checkPromotion(PROPOSAL))).toContain('cannot name the model selection its runs share')
-    const unwired = new EvolutionService(
-      (f.svc as unknown as { ctx: object }).ctx as never,
-      { root: f.root, skillRoot: f.skillRoot },
-    )
+    const unwired = new EvolutionService((f.svc as unknown as { ctx: object }).ctx as never, {
+      root: f.root,
+      skillRoot: f.skillRoot,
+    })
     expect(await refusal(unwired.checkPromotion(PROPOSAL))).toContain('no model-selection resolver was injected')
   })
 
   it.each([
-    ['both sides fail the target sample', { failure: { baseline: 'failed', candidate: 'failed' } }, 'both sides failed'],
-    ['the failure is not reproduced at all', { failure: { baseline: 'verified', candidate: 'verified' } }, 'did not fix the target failure'],
-    ['a holdout degrades while the target is fixed', { holdout: { candidate: 'failed' } }, 'a regression or holdout sample degraded'],
-    ['the target is unfixed and a regression sample degrades', { failure: { baseline: 'verified', candidate: 'failed' }, regression: { candidate: 'failed' } }, 'degraded and the target failure is not fixed'],
+    [
+      'both sides fail the target sample',
+      { failure: { baseline: 'failed', candidate: 'failed' } },
+      'both sides failed',
+    ],
+    [
+      'the failure is not reproduced at all',
+      { failure: { baseline: 'verified', candidate: 'verified' } },
+      'did not fix the target failure',
+    ],
+    [
+      'a holdout degrades while the target is fixed',
+      { holdout: { candidate: 'failed' } },
+      'a regression or holdout sample degraded',
+    ],
+    [
+      'the target is unfixed and a regression sample degrades',
+      { failure: { baseline: 'verified', candidate: 'failed' }, regression: { candidate: 'failed' } },
+      'degraded and the target failure is not fixed',
+    ],
     ['a side never settles', { failure: { candidate: 'cancelled' } }, 'could not settle'],
   ])('refuses when %s', async (_label, options, expected) => {
     const f = await fixture(options as FixtureOptions)
@@ -839,7 +1042,9 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
 
   it('refuses an unknown cost when the frozen budget declares a ceiling, and allows it without one', async () => {
     const ceiling = await fixture({ budget: { maxTokens: 5_000, note: 'the fixture ceiling' } })
-    expect(await refusal(ceiling.svc.checkPromotion(PROPOSAL))).toContain('an unknown cost cannot be shown to fit a ceiling')
+    expect(await refusal(ceiling.svc.checkPromotion(PROPOSAL))).toContain(
+      'an unknown cost cannot be shown to fit a ceiling',
+    )
 
     const reported = await fixture({
       budget: { maxTokens: 5_000 },
@@ -850,7 +1055,12 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
 
   it.each([
     ['holdout', { holdout: { baseline: 'failed', candidate: 'failed' } }, HOLDOUT_SAMPLE, 'holdout'],
-    ['observed-regression', { regression: { baseline: 'failed', candidate: 'failed' } }, REGRESSION_SAMPLE, 'observed-regression'],
+    [
+      'observed-regression',
+      { regression: { baseline: 'failed', candidate: 'failed' } },
+      REGRESSION_SAMPLE,
+      'observed-regression',
+    ],
   ])(
     'refuses a target fix that would launder a %s history which never reproduced its pass',
     async (_role, options, taskId, role) => {
@@ -883,8 +1093,13 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
       // refuses by name: no entry lets this experiment reach production.
       await f.tamperLedger(lines => {
         lines.push({
-          formatVersion: 4, kind: 'decided', proposalId: PROPOSAL, decision: 'PROMOTE',
-          approvalRef: 'approval:decide', actor: 'root-1', at: '2026-09-26T00:00:00.000Z',
+          formatVersion: 4,
+          kind: 'decided',
+          proposalId: PROPOSAL,
+          decision: 'PROMOTE',
+          approvalRef: 'approval:decide',
+          actor: 'root-1',
+          at: '2026-09-26T00:00:00.000Z',
         })
       })
       const reopened = await f.reopen()
@@ -898,7 +1113,11 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
   it('lets a target fix through when the historical successes are reproduced on both sides', async () => {
     const f = await fixture({ regression: { baseline: 'verified', candidate: 'verified' } })
     const report = JSON.parse(await readFile(join(f.root, f.reportPath), 'utf8'))
-    expect(report.samples.map((sample: { verdict: string }) => sample.verdict)).toEqual(['fixed', 'maintained', 'maintained'])
+    expect(report.samples.map((sample: { verdict: string }) => sample.verdict)).toEqual([
+      'fixed',
+      'maintained',
+      'maintained',
+    ])
     await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
     await f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide')
     const applied = await f.svc.apply(PROPOSAL, 'root-1', 'approval:apply')
@@ -909,14 +1128,17 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
 
   it('refuses a report this build cannot re-derive: the comparer a pre-rework build wrote', async () => {
     const f = await fixture()
-    await f.tamperReport(report => { report.frozen.comparerVersion = 'experiment-comparer@1' })
+    await f.tamperReport(report => {
+      report.frozen.comparerVersion = 'experiment-comparer@1'
+    })
     const message = await refusal(f.svc.checkPromotion(PROPOSAL))
     expect(message).toContain('comparerVersion must be "experiment-comparer@2"')
     expect(message).toContain('cannot re-derive')
     // The entry that can write refuses the same way, and writes nothing.
     await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
-    expect(await refusal(f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide')))
-      .toContain('comparerVersion must be "experiment-comparer@2"')
+    expect(await refusal(f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide'))).toContain(
+      'comparerVersion must be "experiment-comparer@2"',
+    )
     expect(await f.ledgerKinds()).not.toContain('decided')
     expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
   })
@@ -932,8 +1154,12 @@ describe('skill promotion gate: apply re-checks the evidence before it writes (E
 
   it('refuses an apply whose report was edited after the decision, writing nothing', async () => {
     const f = await decided()
-    await f.tamperReport(report => { report.samples[0].candidate.cost = { status: 'unknown', reason: 'rewritten' } })
-    expect(await refusal(f.svc.apply(PROPOSAL, 'root-1', 'approval:apply'))).toContain('is not the report its ledger records recompute to')
+    await f.tamperReport(report => {
+      report.samples[0].candidate.cost = { status: 'unknown', reason: 'rewritten' }
+    })
+    expect(await refusal(f.svc.apply(PROPOSAL, 'root-1', 'approval:apply'))).toContain(
+      'is not the report its ledger records recompute to',
+    )
     expect(await f.ledgerKinds()).not.toContain('applied')
     expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
   })
@@ -941,7 +1167,9 @@ describe('skill promotion gate: apply re-checks the evidence before it writes (E
   it('refuses an apply whose candidate moved after the decision, writing nothing', async () => {
     const f = await decided()
     await writeFile(join(f.root, 'sandbox', PROPOSAL, 'skills', SKILL, 'SKILL.md'), 'tampered after the decision\n')
-    expect(await refusal(f.svc.apply(PROPOSAL, 'root-1', 'approval:apply'))).toContain('no longer matches the content identity')
+    expect(await refusal(f.svc.apply(PROPOSAL, 'root-1', 'approval:apply'))).toContain(
+      'no longer matches the content identity',
+    )
     expect(await f.ledgerKinds()).not.toContain('applied')
     expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
   })
@@ -956,7 +1184,9 @@ describe('skill promotion gate: apply re-checks the evidence before it writes (E
   it('refuses an apply whose experiment stopped standing (judge drift), writing nothing', async () => {
     const f = await decided()
     const drifted = await f.reopen({ verifierVersion: '2' })
-    expect(await refusal(drifted.apply(PROPOSAL, 'root-1', 'approval:apply'))).toContain('the registered instance declares 2 now')
+    expect(await refusal(drifted.apply(PROPOSAL, 'root-1', 'approval:apply'))).toContain(
+      'the registered instance declares 2 now',
+    )
     expect(await f.ledgerKinds()).not.toContain('applied')
     expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
   })
@@ -966,19 +1196,31 @@ describe('skill promotion gate: the gate answers cite the completed experiment (
   it('refuses a skill gate with no experiment, and one whose experiment is incomplete', async () => {
     const bare = await fixture()
     await bare.tamperLedger(lines => {
-      for (let at = lines.length - 1; at >= 0; at -= 1) if (lines[at]!.kind === 'experiment_started' || lines[at]!.kind === 'experiment_sample') lines.splice(at, 1)
+      for (let at = lines.length - 1; at >= 0; at -= 1)
+        if (lines[at]!.kind === 'experiment_started' || lines[at]!.kind === 'experiment_sample') lines.splice(at, 1)
     })
-    expect(await refusal((await bare.reopen()).gate(PROPOSAL, gateAnswers([bare.reportPath]), 'root-1'))).toContain('has no two-sided experiment')
+    expect(await refusal((await bare.reopen()).gate(PROPOSAL, gateAnswers([bare.reportPath]), 'root-1'))).toContain(
+      'has no two-sided experiment',
+    )
 
     const incomplete = await fixture()
-    await incomplete.tamperLedger(lines => { lines.splice(lines.findIndex(line => line.kind === 'experiment_sample'), 1) })
-    expect(await refusal((await incomplete.reopen()).gate(PROPOSAL, gateAnswers([incomplete.reportPath]), 'root-1'))).toContain('is incomplete')
+    await incomplete.tamperLedger(lines => {
+      lines.splice(
+        lines.findIndex(line => line.kind === 'experiment_sample'),
+        1,
+      )
+    })
+    expect(
+      await refusal((await incomplete.reopen()).gate(PROPOSAL, gateAnswers([incomplete.reportPath]), 'root-1')),
+    ).toContain('is incomplete')
   })
 
   it('requires the experiment report among the regression evidence refs', async () => {
     const f = await fixture()
     await writeFile(join(f.root, 'regression.log'), 'ok')
-    expect(await refusal(f.svc.gate(PROPOSAL, gateAnswers(['sandbox/regression.log']), 'root-1'))).toContain('must cite its experiment report')
+    expect(await refusal(f.svc.gate(PROPOSAL, gateAnswers(['sandbox/regression.log']), 'root-1'))).toContain(
+      'must cite its experiment report',
+    )
     const gated = await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
     expect(gated.status).toBe('gated')
   })
@@ -994,14 +1236,52 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
    * pin the entry refusal beside the EVAL-4 refusal for the states that are.
    */
   async function capabilityGated(svc: EvolutionService, id = 'c1') {
-    await svc.propose({ proposalId: id, targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2', rationale: 'the fixture row', sourceRefs: ['diagnosis:d1'] }, 'root-1')
+    await svc.propose(
+      {
+        proposalId: id,
+        targetType: 'capability',
+        targetId: 'research',
+        baseVersion: 'v1',
+        level: 'L2',
+        rationale: 'the fixture row',
+        sourceRefs: ['diagnosis:d1'],
+      },
+      'root-1',
+    )
     await appendFile(
       join(svc.root, 'proposals.jsonl'),
       [
-        { formatVersion: 4, kind: 'candidate', proposalId: id, versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-26T00:00:01.000Z' },
-        { formatVersion: 4, kind: 'prepared', proposalId: id, sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-26T00:00:02.000Z' },
-        { formatVersion: 4, kind: 'gated', proposalId: id, gate: gateAnswers([`sandbox/${id}/replay-report.json`]), actor: 'root-1', at: '2026-09-26T00:00:04.000Z' },
-      ].map(line => JSON.stringify(line)).join('\n') + '\n',
+        {
+          formatVersion: 4,
+          kind: 'candidate',
+          proposalId: id,
+          versionSet: { capabilityTable: 'config.yml#doc1' },
+          mutation: { name: 'research', entry: { preset: 'standard' } },
+          actor: 'root-1',
+          at: '2026-09-26T00:00:01.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'prepared',
+          proposalId: id,
+          sandbox: null,
+          mechanical: false,
+          champion: 'none',
+          files: [],
+          actor: 'root-1',
+          at: '2026-09-26T00:00:02.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'gated',
+          proposalId: id,
+          gate: gateAnswers([`sandbox/${id}/replay-report.json`]),
+          actor: 'root-1',
+          at: '2026-09-26T00:00:04.000Z',
+        },
+      ]
+        .map(line => JSON.stringify(line))
+        .join('\n') + '\n',
     )
   }
 
@@ -1009,7 +1289,18 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     'refuses a %s PROMOTE with no evaluator, leaving the ledger and production untouched',
     async targetType => {
       const f = await fixture()
-      await f.svc.propose({ proposalId: 'x1', targetType, targetId: 'x', baseVersion: 'v1', level: 'L2', rationale: 'the fixture target', sourceRefs: ['diagnosis:d1'] }, 'root-1')
+      await f.svc.propose(
+        {
+          proposalId: 'x1',
+          targetType,
+          targetId: 'x',
+          baseVersion: 'v1',
+          level: 'L2',
+          rationale: 'the fixture target',
+          sourceRefs: ['diagnosis:d1'],
+        },
+        'root-1',
+      )
       const message = await refusal(f.svc.checkPromotion('x1'))
       expect(message).toContain(`targets "${targetType}", which has no evaluator in this build`)
       expect(await f.ledgerKinds()).not.toContain('decided')
@@ -1021,7 +1312,18 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     // is no materialized row to judge, not that no evaluator exists. What it
     // proves is unchanged — an unprepared proposal never reaches a decision.
     const f = await fixture()
-    await f.svc.propose({ proposalId: 'x1', targetType: 'capability', targetId: 'x', baseVersion: 'v1', level: 'L2', rationale: 'the fixture row', sourceRefs: ['diagnosis:d1'] }, 'root-1')
+    await f.svc.propose(
+      {
+        proposalId: 'x1',
+        targetType: 'capability',
+        targetId: 'x',
+        baseVersion: 'v1',
+        level: 'L2',
+        rationale: 'the fixture row',
+        sourceRefs: ['diagnosis:d1'],
+      },
+      'root-1',
+    )
     const message = await refusal(f.svc.checkPromotion('x1'))
     expect(message).toContain('capability-unprepared')
     expect(await f.ledgerKinds()).not.toContain('decided')
@@ -1042,8 +1344,19 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     // A decided and an applied line on top of the same lifecycle change nothing:
     // the refusal still lands at the candidate line, before the write and before
     // any approval this test does not grant.
-    const lines = (await readFile(join(f.root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as Record<string, any>)
-    lines.push({ formatVersion: 4, kind: 'decided', proposalId: 'c1', decision: 'PROMOTE', approvalRef: 'approval:legacy', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' })
+    const lines = (await readFile(join(f.root, 'proposals.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line) as Record<string, any>)
+    lines.push({
+      formatVersion: 4,
+      kind: 'decided',
+      proposalId: 'c1',
+      decision: 'PROMOTE',
+      approvalRef: 'approval:legacy',
+      actor: 'root-1',
+      at: '2026-09-20T00:00:05.000Z',
+    })
     await writeFile(join(f.root, 'proposals.jsonl'), `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
     const reopened = await f.reopen()
     const applyMessage = await refusal(reopened.apply('c1', 'root-1', 'approval:apply'))
@@ -1057,15 +1370,86 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     // entries never know the path, so the fixture owns it and asserts its bytes
     // stay put.
     const configFile = join(f.root, 'config.yml')
-    await writeFile(configFile, ['- id: task-runtime', '  config:', '    capabilities:', '      research: { preset: changed }', '', '---', 'api:', '  upstream: https://example.invalid', ''].join('\n'))
-    await writeFile(join(f.root, 'proposals.jsonl'), [
-      { formatVersion: 4, kind: 'proposed', proposalId: 'old1', targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2', rationale: 'the recorded suggestion', sourceRefs: ['diagnosis:d0'], actor: 'root-1', at: '2026-09-20T00:00:00.000Z' },
-      { formatVersion: 4, kind: 'candidate', proposalId: 'old1', versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-      { formatVersion: 4, kind: 'prepared', proposalId: 'old1', sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
-      { formatVersion: 4, kind: 'gated', proposalId: 'old1', gate: gateAnswers(['sandbox/old1/replay-report.json']), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
-      { formatVersion: 4, kind: 'decided', proposalId: 'old1', decision: 'PROMOTE', approvalRef: 'approval:decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
-      { formatVersion: 4, kind: 'applied', proposalId: 'old1', targets: [`${configFile} — document 1 task-runtime capabilities row "research"`], approvalRef: 'approval:apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
-    ].map(line => JSON.stringify(line)).join('\n') + '\n')
+    await writeFile(
+      configFile,
+      [
+        '- id: task-runtime',
+        '  config:',
+        '    capabilities:',
+        '      research: { preset: changed }',
+        '',
+        '---',
+        'api:',
+        '  upstream: https://example.invalid',
+        '',
+      ].join('\n'),
+    )
+    await writeFile(
+      join(f.root, 'proposals.jsonl'),
+      [
+        {
+          formatVersion: 4,
+          kind: 'proposed',
+          proposalId: 'old1',
+          targetType: 'capability',
+          targetId: 'research',
+          baseVersion: 'v1',
+          level: 'L2',
+          rationale: 'the recorded suggestion',
+          sourceRefs: ['diagnosis:d0'],
+          actor: 'root-1',
+          at: '2026-09-20T00:00:00.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'candidate',
+          proposalId: 'old1',
+          versionSet: { capabilityTable: 'config.yml#doc1' },
+          mutation: { name: 'research', entry: { preset: 'standard' } },
+          actor: 'root-1',
+          at: '2026-09-20T00:00:01.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'prepared',
+          proposalId: 'old1',
+          sandbox: null,
+          mechanical: false,
+          champion: 'none',
+          files: [],
+          actor: 'root-1',
+          at: '2026-09-20T00:00:02.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'gated',
+          proposalId: 'old1',
+          gate: gateAnswers(['sandbox/old1/replay-report.json']),
+          actor: 'root-1',
+          at: '2026-09-20T00:00:04.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'decided',
+          proposalId: 'old1',
+          decision: 'PROMOTE',
+          approvalRef: 'approval:decide',
+          actor: 'root-1',
+          at: '2026-09-20T00:00:05.000Z',
+        },
+        {
+          formatVersion: 4,
+          kind: 'applied',
+          proposalId: 'old1',
+          targets: [`${configFile} — document 1 task-runtime capabilities row "research"`],
+          approvalRef: 'approval:apply',
+          actor: 'root-1',
+          at: '2026-09-20T00:00:06.000Z',
+        },
+      ]
+        .map(line => JSON.stringify(line))
+        .join('\n') + '\n',
+    )
     const before = await readFile(configFile, 'utf8')
 
     // The applied line is refused at load — at the candidate line above it, since
@@ -1143,12 +1527,15 @@ describe('Q1: the frozen budget bounds the whole experiment, and the gate reads 
     expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
   })
 
-  it('refuses the review counterexample\'s own metrics shape: a partial tokenUsage is no readable total', async () => {
+  it("refuses the review counterexample's own metrics shape: a partial tokenUsage is no readable total", async () => {
     // The audit's counterexample reported `{ tokens: { uncachedInputTokens: 10,
     // outputTokens: 5 } }` — the two buckets its author typed, not the four the
     // deployment's projection reports. That total is unreadable rather than 15,
     // and an unreadable total is refused rather than filled in.
-    const f = await fixture({ budget: { maxTokens: 1 }, metrics: { tokens: { uncachedInputTokens: 10, outputTokens: 5 } } })
+    const f = await fixture({
+      budget: { maxTokens: 1 },
+      metrics: { tokens: { uncachedInputTokens: 10, outputTokens: 5 } },
+    })
     const message = await refusal(f.svc.checkPromotion(PROPOSAL))
     expect(message).toContain('not four readable counters')
     expect(message).toContain('cacheReadTokens')
@@ -1176,7 +1563,7 @@ describe('Q1: the frozen budget bounds the whole experiment, and the gate reads 
  * own content digest, its declaration digest, and the registry revision that
  * absorbs that digest) are pinned per side; nothing else may differ.
  */
-describe('skill promotion gate: the improved skill\'s complete object (K3)', () => {
+describe("skill promotion gate: the improved skill's complete object (K3)", () => {
   it('lets a two-file candidate through the whole chain, writing and restoring both files', async () => {
     const f = await fixture({ object: 'execution' })
     const check = await f.svc.checkPromotion(PROPOSAL)
@@ -1215,7 +1602,8 @@ describe('skill promotion gate: the improved skill\'s complete object (K3)', () 
 
   it('refuses a candidate side whose binding carries the production declaration digest', async () => {
     const f = await fixture({ object: 'execution' })
-    f.runOf(FAIL_SAMPLE, 'candidate').providerBinding.skills[0].contractDigest = f.baselineIdentity.contract!.contractDigest
+    f.runOf(FAIL_SAMPLE, 'candidate').providerBinding.skills[0].contractDigest =
+      f.baselineIdentity.contract!.contractDigest
     const message = await refusal(f.svc.checkPromotion(PROPOSAL))
     expect(message).toContain(`bound skill "${SKILL}" declaration`)
     expect(message).toContain('candidate side')
@@ -1246,7 +1634,10 @@ describe('skill promotion gate: the improved skill\'s complete object (K3)', () 
     const f = await fixture({ object: 'execution' })
     // The durable bytes the run really loaded, not the binding it recorded: a
     // sidecar rewritten after the experiment is not the declaration this side ran.
-    await writeFile(join(f.skillSnapshotRoot(FAIL_SAMPLE, 'candidate'), SKILL, SKILL_SIDECAR_FILE), '{"type":"execution"}\n')
+    await writeFile(
+      join(f.skillSnapshotRoot(FAIL_SAMPLE, 'candidate'), SKILL, SKILL_SIDECAR_FILE),
+      '{"type":"execution"}\n',
+    )
     const message = await refusal(f.svc.checkPromotion(PROPOSAL))
     expect(message).toContain('SKILL.contract.json')
     expect(message).toContain('candidate side')
@@ -1276,7 +1667,10 @@ describe('skill promotion gate: the improved skill\'s complete object (K3)', () 
     // Both files swapped for the production pair: the binding still claims the
     // candidate, and the bytes prove it never ran.
     await writeFile(join(f.skillSnapshotRoot(FAIL_SAMPLE, 'candidate'), SKILL, 'SKILL.md'), PRODUCTION)
-    await writeFile(join(f.skillSnapshotRoot(FAIL_SAMPLE, 'candidate'), SKILL, SKILL_SIDECAR_FILE), productionContract(PRODUCTION))
+    await writeFile(
+      join(f.skillSnapshotRoot(FAIL_SAMPLE, 'candidate'), SKILL, SKILL_SIDECAR_FILE),
+      productionContract(PRODUCTION),
+    )
     const message = await refusal(f.svc.checkPromotion(PROPOSAL))
     expect(message).toContain(f.candidateIdentity.sha256)
     expect(message).toContain('candidate side')
@@ -1284,14 +1678,17 @@ describe('skill promotion gate: the improved skill\'s complete object (K3)', () 
 
   it('refuses a candidate sidecar rewritten in the sandbox after the experiment, writing nothing', async () => {
     const f = await fixture({ object: 'execution' })
-    await writeFile(join(f.root, 'sandbox', PROPOSAL, 'skills', SKILL, SKILL_SIDECAR_FILE), '{"contractVersion":1,"type":"execution"}\n')
+    await writeFile(
+      join(f.root, 'sandbox', PROPOSAL, 'skills', SKILL, SKILL_SIDECAR_FILE),
+      '{"contractVersion":1,"type":"execution"}\n',
+    )
     const message = await refusal(f.svc.checkPromotion(PROPOSAL))
     expect(message).toContain('no longer matches the content identity recorded at prepare')
     expect(message).toContain(SKILL_SIDECAR_FILE)
     expect(await f.ledgerKinds()).not.toContain('decided')
   })
 
-  it('refuses a frozen candidate whose sidecar identity is not the prepared object\'s', async () => {
+  it("refuses a frozen candidate whose sidecar identity is not the prepared object's", async () => {
     const f = await fixture({ object: 'execution' })
     // The frozen block names the candidate the proposal did not prepare: same
     // `SKILL.md` bytes, another declaration — two different objects, and the
@@ -1311,7 +1708,9 @@ describe('skill promotion gate: the improved skill\'s complete object (K3)', () 
 
   it('keeps the guidance path exactly as it was: one file, no sidecar, production revision on both sides', async () => {
     const f = await fixture()
-    expect(f.frozen.samples[0]!.provider!.candidateRegistryRevision).toBe(f.frozen.samples[0]!.provider!.registryRevision)
+    expect(f.frozen.samples[0]!.provider!.candidateRegistryRevision).toBe(
+      f.frozen.samples[0]!.provider!.registryRevision,
+    )
     expect(await refusal(f.svc.checkPromotion(PROPOSAL))).toBe('')
     await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
     await f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide')

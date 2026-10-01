@@ -47,7 +47,12 @@ function relay(messageId: string, text = 'body'): UserMessage {
 
 /** One `tool/call` event, the shape a citation names. */
 function call(seq: number, callId: string): SessionEvent {
-  return { type: 'tool/call', seq: SessionSeq(seq), time: seq, data: { callId, name: 'task_ask_parent', arguments: '{}' } } as SessionEvent
+  return {
+    type: 'tool/call',
+    seq: SessionSeq(seq),
+    time: seq,
+    data: { callId, name: 'task_ask_parent', arguments: '{}' },
+  } as SessionEvent
 }
 
 /** One Session's own log: `inheritedEventCount` leading events came from the fork's ancestor. */

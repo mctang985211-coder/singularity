@@ -1,63 +1,21 @@
-/**
- * `task_review_agent`: spawn one read-only review agent for one exact review
- * source — a task and a run, or the no-run case — take the diagnosis it
- * produces (an observation, a conclusion, and whatever judgements and
- * proposals it chose to add), and persist it as a `Diagnosis`.
- *
- * Why an agent and not a parser (§2.7.3, and the owner's ruling): extracting
- * "was this specification adequate" from a complex context is not a parsing
- * problem, it is a judgement problem, and a review agent is the tool for it. Why
- * not a resident reviewer (§2.7.2): one agent per task would multiply sessions
- * and storage. Why not "the latest review" (A5): a review reviews the run the
- * caller names, so the caller names it — a source the ledger can key on, dedupe
- * on and hand to a later reader. Why the judgements are optional (A5 §3): the
- * conclusion is the diagnosis, "no improvement needed" and "the evidence does
- * not settle this" are conclusions too, and a dimension nobody could settle is
- * left out rather than padded with `unknown`.
- *
- * One source has at most one default attempt (the call with no `requestKey`),
- * which an automatic scan and an explicit call share; a repeat returns the same
- * claim, session and result and never re-charges the budget. A new review after
- * that attempt settled is an explicit act and names a non-empty `requestKey`, so
- * two different postmortems of one source are two identifiable attempts rather
- * than one overwritten one; the same key with a different focus is refused by
- * name, and a new key while an attempt is open returns that attempt's identity
- * instead of starting a second one in parallel.
- *
- * An attempt the process holding it died with is not "in flight" for this door:
- * the ledger settles it (recorded when the store already holds its diagnosis,
- * interrupted otherwise) before the request is decided, so a source whose
- * reviewer died can be reviewed again with an explicit key — while the spent run
- * stays spent.
- *
- * This module is the *explicit* door: it validates what a model call names and
- * renders the answer for the model. The attempt itself — the admission, the
- * claim, the pack, the spawn, the diagnosis, the terminal fact —
- * lives in `review-agent-run.ts`, which the automatic scan (A5) runs too, so the
- * two doors cannot drift. Nothing here decides whether a review *should* happen:
- * a failed review and an explicit call are the two triggers, and no threshold
- * gates either of them.
- * @module @dangosys/dsh-singularity-agent/tools/review-agent
- */
+/** `task_review_agent`: spawn one read-only review agent for one exact review source — a task and a run, or the no-run case — take the diagnosis it produces (an observation, a conclusion, and whatever judgements and @module @dangosys/dsh-singularity-agent/tools/review-agent */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
 import type { ReviewRecord, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import type { ReviewAgentAttempt, ReviewAgentPlan, ReviewAgentSource } from '../review-agent-ledger.ts'
+import type { ReviewAgentAttempt, ReviewAgentPlan, ReviewAgentSource } from '../coordination/ledger.ts'
 import {
   recordedDiagnosis,
   renderJudgements,
   runReviewAgentAttempt,
   sourceRef,
-} from '../review-agent-run.ts'
-import type { ReviewAttemptOutcome } from '../review-agent-run.ts'
+} from '../coordination/review-run.ts'
+import type { ReviewAttemptOutcome } from '../coordination/review-run.ts'
 import { reviewForSource } from './task-review-pack.ts'
-import { undeclaredParameters } from './proposal-parameters.ts'
+import { sessionId, text, undeclaredParameters } from '../shared.ts'
 
 export {
   REVIEWER_BASELINE,
@@ -65,17 +23,9 @@ export {
   recordedDiagnosis,
   renderJudgements,
   reviewerGrant,
-} from '../review-agent-run.ts'
+} from '../coordination/review-run.ts'
 
 const DECLARED_PARAMETERS = ['taskId', 'runId', 'reason', 'requestKey'] as const
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): SessionId {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('task_review_agent: missing agent id')
-  return SessionId(id)
-}
 
 /** A free-text argument, or `null` when the caller gave none: empty and whitespace-only read as none. */
 function optionalText(value: unknown): string | null {
@@ -87,13 +37,7 @@ function attemptLabel(attempt: ReviewAgentAttempt): string {
   return attempt.requestKey === null ? 'default attempt' : `requestKey "${attempt.requestKey}"`
 }
 
-/**
- * What one attempt the caller asked for already is: its identity, how it ended,
- * and — when it recorded a judgement — the same lines the attempt's own call
- * returned. A repeat is answered from the ledger and the store; nothing is
- * spawned and nothing is written (beyond the recovery note the admission may
- * have just appended for an attempt that never reached model input).
- */
+/** What one attempt the caller asked for already is: its identity, how it ended, and — when it recorded a judgement — the same lines the attempt's own call returned. A repeat is answered from the ledger and the store; */
 function renderExistingAttempt(attempt: ReviewAgentAttempt, snapshot: TaskSnapshot): string {
   const diagnosis = recordedDiagnosis(snapshot, attempt.sessionId)
   const status = attempt.settlement?.status ?? (diagnosis === undefined ? 'started' : 'recorded')
@@ -138,14 +82,7 @@ function renderRefusal(plan: Extract<ReviewAgentPlan, { kind: 'refused' }>, sour
   return `task_review_agent: budget exhausted (${plan.budget.used}/${plan.budget.max}) for store ${storeId} — no review agent started`
 }
 
-/**
- * What one request that arrived while an attempt was open is answered with.
- *
- * Only one state reaches this text: an attempt this process is really running
- * right now. An attempt a dead process left is recovered inside the admission's
- * region before the request is decided, so it can never be reported here as
- * something in flight — and never written off for being slow, either.
- */
+/** What one request that arrived while an attempt was open is answered with. */
 function renderOpenAttempt(attempt: ReviewAgentAttempt): string {
   return `task_review_agent: source ${sourceRef(attempt.source)} already has an attempt in flight ` +
     `(${attemptLabel(attempt)}, session ${attempt.sessionId}, run by this process right now) — the new request was not accepted; ` +
@@ -230,7 +167,7 @@ export function defineTaskReviewAgentTool(ctx: Context) {
     execute: async (args, exec) => {
       const undeclared = undeclaredParameters(args, DECLARED_PARAMETERS, 'task_review_agent')
       if (undeclared !== undefined) return undeclared
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'task_review_agent')
       const graph = await ctx.graphs.graphForSession(caller)
       const storeId = rootTaskStoreId(graph.rootSessionId)
       const source: ReviewAgentSource = { taskId: args.taskId, runId: args.runId }

@@ -2,7 +2,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { MessageId, createUserMessage, freezeMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId, SessionSeq } from "@deepseek-ai/dsh-session";
 import { setApprovalPolicy } from "@deepseek-ai/dsh-user-approval";
-import { DEFAULT_ROOT } from "@dangosys/dsh-singularity-layout";
+import { DEFAULT_ROOT } from "@dangosys/dsh-singularity-graph";
 import { RUN_CODE_NAME } from "@deepseek-ai/dsh-tools";
 import * as McpClient from "@deepseek-ai/dsh-mcp-client";
 import { readFile, readdir, stat } from "node:fs/promises";
@@ -10,9 +10,203 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { SessionAlreadyOwnedError } from "@deepseek-ai/dsh-session-persistence";
 
+//#region src/messages.ts
+/** One refused source read or delivery, with the stable name of what went wrong. */
+var MessageDeliveryRefusal = class extends Error {
+	code;
+	constructor(code, message, options) {
+		super(message, options);
+		this.name = "MessageDeliveryRefusal";
+		this.code = code;
+	}
+};
+/** The message body a question carries into its parent's Session: the stable question identity, then what was asked. */
+function questionMessageText(questionId, question) {
+	return `[task-question ${questionId}] ${question}`;
+}
+/** The message body an answer carries into the asking Session: both identities, then what the parent answered. */
+function answerMessageText(answerId, questionId, answer) {
+	return `[task-answer ${answerId} for ${questionId}] ${answer}`;
+}
+/** Build the identified, frozen relay message one intent delivers (pure, so a caller can inspect it). */
+function relayMessage(intent) {
+	return freezeMessage({
+		id: MessageId(intent.messageId),
+		role: "user",
+		content: [{
+			type: "text",
+			text: intent.text
+		}],
+		source: {
+			kind: "agent-message",
+			form: "relay",
+			senderSessionId: intent.senderSessionId
+		}
+	});
+}
+/** Whether one Session's own event suffix already holds the identity, in history or still pending. */
+function messageAccepted(events, messageId) {
+	return events.some((event) => event.type === "user/message" && event.data.id === messageId) || pendingInboxMessages(events).some((message) => message.id === messageId);
+}
+/** Whether the log durably records that this identity entered the Session's inbox (wider than `messageAccepted`). */
+function messageRecorded(events, messageId) {
+	return events.some((event) => event.type === "agent/inbox/spliced" && event.data.inserted.some((message) => message.id === messageId));
+}
+/** Read back the body of a cited `tool/call`, flushing the sending Session first; refusals are named. */
+async function readToolCallBody(deps, ref) {
+	const sessionId = SessionId(ref.sessionId);
+	const live = deps.sessions.get(sessionId);
+	if (live !== void 0) await witnessBarrier(deps, live, sessionId);
+	let window;
+	try {
+		window = await deps.sessionQuery.readEvent({
+			sessionId,
+			seq: SessionSeq(ref.seq)
+		});
+	} catch (error) {
+		throw sourceReadRefusal(String(sessionId), ref.seq, error);
+	}
+	const event = window.target;
+	if (event.type !== "tool/call" || typeof event.data.name !== "string" || event.data.name === "") throw new MessageDeliveryRefusal("source-not-tool-call", `agent-runtime: session "${String(sessionId)}" seq ${ref.seq} is not a tool call (event type "${event.type}")`);
+	return {
+		name: event.data.name,
+		arguments: event.data.arguments
+	};
+}
+/** One Session's own event suffix, without the fork-inherited prefix. */
+function ownSuffix(log) {
+	return log.events.slice(log.inheritedEventCount);
+}
+/** The citation of one `tool/call` inside a Session's own suffix, found by the call id (last event wins). */
+function toolCallRefIn(log, callId) {
+	const own = ownSuffix(log);
+	for (let index = own.length - 1; index >= 0; index -= 1) {
+		const event = own[index];
+		if (event.type !== "tool/call") continue;
+		if (String(event.data.callId) !== callId) continue;
+		return {
+			sessionId: log.session.id,
+			seq: event.seq
+		};
+	}
+}
+/** Put one committed identity into the target inbox at most once (reconcile → relay → flush → confirm). */
+async function ensureAgentMessageDelivered(deps, intent) {
+	const targetSessionId = SessionId(intent.targetSessionId);
+	const agent = deps.agents.get(targetSessionId);
+	if (agent === void 0) return {
+		messageId: intent.messageId,
+		status: "unavailable"
+	};
+	if (await acceptedAlready(deps, targetSessionId, intent.messageId)) return {
+		messageId: intent.messageId,
+		status: "already-present"
+	};
+	try {
+		agent.steer(relayMessage(intent));
+	} catch (error) {
+		if (isAlreadyPending(error, intent.messageId)) return {
+			messageId: intent.messageId,
+			status: "already-present"
+		};
+		throw error;
+	}
+	await witnessBarrier(deps, agent.session, targetSessionId, "target-not-durable");
+	const own = await ownSuffixOf(deps, targetSessionId);
+	if (!messageAccepted(own, intent.messageId) && !messageRecorded(own, intent.messageId)) throw new MessageDeliveryRefusal("delivery-unconfirmed", `agent-runtime: message "${intent.messageId}" was relayed to session "${String(targetSessionId)}" but is not in its log after the flush`);
+	return {
+		messageId: intent.messageId,
+		status: "delivered"
+	};
+}
+/** Deliver exactly the committed intents that are missing, in order, reporting each record separately. */
+async function reconcileAgentMessageDeliveries(deps, intents) {
+	const reports = [];
+	for (const intent of intents) try {
+		const delivery = await ensureAgentMessageDelivered(deps, intent);
+		reports.push({
+			messageId: delivery.messageId,
+			status: delivery.status
+		});
+	} catch (error) {
+		reports.push({
+			messageId: intent.messageId,
+			status: "refused",
+			reason: messageOf(error)
+		});
+	}
+	return reports;
+}
+/** The durability barrier: `session/flush` reaching no listener means the body cannot be witnessed. */
+async function witnessBarrier(deps, session, sessionId, code = "source-not-durable") {
+	let durable;
+	try {
+		durable = await deps.sessions.flush(session);
+	} catch (error) {
+		throw new MessageDeliveryRefusal(code, `agent-runtime: session "${String(sessionId)}" could not be flushed: ${messageOf(error)}`, { cause: error });
+	}
+	if (!durable) throw new MessageDeliveryRefusal(code, `agent-runtime: session "${String(sessionId)}" has no durability barrier (no session/flush participant)`);
+}
+/** Whether the target Session's own suffix already holds the identity. */
+async function acceptedAlready(deps, sessionId, messageId) {
+	return messageAccepted(await ownSuffixOf(deps, sessionId), messageId);
+}
+/** Read one Session's own event suffix; a failed read is a refusal, never an assumed "nothing there". */
+async function ownSuffixOf(deps, sessionId) {
+	let snapshot;
+	try {
+		snapshot = await deps.sessionQuery.readSession(sessionId);
+	} catch (error) {
+		throw new MessageDeliveryRefusal("target-unreadable", `agent-runtime: target session "${String(sessionId)}" could not be read, so whether a message was accepted cannot be decided: ${messageOf(error)}`, { cause: error });
+	}
+	return ownSuffix(snapshot);
+}
+/** The pending inbox one durable suffix describes, folded the way DSH replays it. */
+function pendingInboxMessages(events) {
+	const inbox = {
+		"next-turn": [],
+		"next-step": []
+	};
+	for (const event of events) {
+		if (event.type !== "agent/inbox/spliced") continue;
+		inbox[event.data.target].splice(event.data.start, event.data.removedCount ?? 0, ...event.data.inserted);
+	}
+	return [...inbox["next-turn"], ...inbox["next-step"]];
+}
+/** One line of an unknown failure, for refusals that carry a cause. */
+function messageOf(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+/** Whether one thrown error is DSH's duplicate-pending-inbox refusal for this id. */
+function isAlreadyPending(error, messageId) {
+	return error instanceof Error && error.message === `message "${messageId}" is already pending`;
+}
+/** Name one refused source read from the error the session read path raised. */
+function sourceReadRefusal(sessionId, seq, error) {
+	const code = error?.code;
+	if (code === "SESSION_QUERY_EVENT_NOT_FOUND") return new MessageDeliveryRefusal("source-event-missing", `agent-runtime: session "${sessionId}" has no event at seq ${seq}`, { cause: error });
+	if (code === "SESSION_QUERY_SESSION_NOT_FOUND") return new MessageDeliveryRefusal("source-session-missing", `agent-runtime: session "${sessionId}" does not exist`, { cause: error });
+	return new MessageDeliveryRefusal("source-unreadable", `agent-runtime: session "${sessionId}" could not be read: ${messageOf(error)}`, { cause: error });
+}
+
+//#endregion
 //#region src/skill-file.ts
 /** How far up from a worker's cwd project skill roots are looked for. */
 const PROJECT_LOOKUP_DEPTH = 8;
+/** The one runtime registration both skill paths build: a parsed SKILL.md or a discovered skill to pin. */
+function toRuntimeSkill(parsed) {
+	return {
+		name: parsed.name,
+		description: parsed.description,
+		...parsed.whenToUse === void 0 ? {} : { whenToUse: parsed.whenToUse },
+		...parsed.invocation === void 0 ? {} : { invocation: parsed.invocation },
+		source: "runtime",
+		...parsed.path === void 0 ? {} : { path: parsed.path },
+		...parsed.resourceBase === void 0 ? {} : { resourceBase: parsed.resourceBase },
+		...parsed.metadata === void 0 ? {} : { metadata: parsed.metadata },
+		content: parsed.content
+	};
+}
 function stripQuotes(value) {
 	const trimmed = value.trim();
 	if (trimmed.length >= 2 && (trimmed.startsWith("\"") && trimmed.endsWith("\"") || trimmed.startsWith("'") && trimmed.endsWith("'"))) return trimmed.slice(1, -1);
@@ -25,11 +219,7 @@ function parseBoolean(value, field, path) {
 	if (normalized === "false") return false;
 	throw new Error(`skill file ${path} has a non-boolean "${field}": ${value}`);
 }
-/**
-* Split `SKILL.md` text into its frontmatter fields and body. The frontmatter
-* grammar accepted here is the flat `key: value` one every skill in this
-* deployment uses; a nested structure fails loudly rather than being guessed at.
-*/
+/** Split `SKILL.md` text into its flat `key: value` frontmatter fields and body; nested lines fail loudly. */
 function parseSkillFile(text, path) {
 	const lines = text.split(/\r?\n/);
 	if (lines[0]?.trim() !== "---") throw new Error(`skill file ${path} has no YAML frontmatter (expected a leading "---" line)`);
@@ -68,7 +258,7 @@ async function skillFileIn(root, name) {
 	return (await stat(file).catch(() => void 0))?.isFile() === true ? file : void 0;
 }
 /** Skill roots for a worker working in `cwd`: its own project first, then the deployment's user roots. */
-async function skillRoots(cwd) {
+async function skillRootsFor(cwd) {
 	const roots = [];
 	if (cwd !== void 0) {
 		let dir = cwd;
@@ -84,46 +274,18 @@ async function skillRoots(cwd) {
 	roots.push(join(homedir(), ".agents", "skills"));
 	return roots;
 }
-/**
-* Locate the `SKILL.md` a granted skill name refers to under an explicit root
-* list, in the order given. The one search loop every discovery path shares:
-* {@link findSkillFile} runs it over a worker's own roots, and the task
-* runtime's provider pre-check runs it over the same roots with the replay
-* overlay's extra roots in front, so admission asks the question the spawn
-* will answer instead of restating the search.
-* @param roots - skill roots, searched in order.
-* @param name - the skill name a capability declares.
-* @returns the absolute path, or undefined when no root holds that skill.
-*/
+/** Locate the `SKILL.md` a granted skill name refers to under an explicit root list, in the given order. */
 async function findSkillFileIn(roots, name) {
 	for (const root of roots) {
 		const file = await skillFileIn(root, name);
 		if (file !== void 0) return file;
 	}
 }
-/**
-* Locate the `SKILL.md` a granted skill name refers to.
-* @param name - the skill name a capability declares.
-* @param cwd - the worker's working directory; project roots are searched upward from it.
-* @returns the absolute path, or undefined when no root holds that skill.
-*/
+/** Locate the `SKILL.md` a granted skill name refers to; project roots are searched upward from `cwd`. */
 async function findSkillFile(name, cwd) {
-	return findSkillFileIn(await skillRoots(cwd), name);
+	return findSkillFileIn(await skillRootsFor(cwd), name);
 }
-/**
-* Every root {@link findSkillFile} searches, for an error message that tells the
-* operator where a granted skill should have been.
-*/
-async function skillRootsFor(cwd) {
-	return skillRoots(cwd);
-}
-/**
-* Every `<root>/<name>/SKILL.md` under one extra skill root (the replay
-* overlay), in directory order. Only the directory-bundle form is scanned —
-* the sandbox materializes skills that way — and a root that cannot be read
-* throws, so a broken overlay path fails the spawn loudly with the cause
-* named instead of silently degrading to production skills.
-*/
+/** Every `<root>/<name>/SKILL.md` under one extra skill root, in directory order; an unreadable root throws. */
 async function listSkillFiles(root) {
 	const entries = await readdir(root, { withFileTypes: true });
 	const found = [];
@@ -137,37 +299,21 @@ async function listSkillFiles(root) {
 	}
 	return found;
 }
-/**
-* Read one granted skill's `SKILL.md` into a runtime registration. A file whose
-* frontmatter names a different skill than the grant asked for is rejected: the
-* registry would otherwise publish a body under the wrong name.
-* @param file - absolute path from {@link findSkillFile}.
-* @param name - the granted skill name, which the file must declare.
-* @returns the registration to hand to `ctx.skills.register`.
-*/
+/** Read one granted skill's `SKILL.md` into a runtime registration, rejecting a mismatched declared name. */
 async function readSkillFile(file, name) {
 	const parsed = parseSkillFile(await readFile(file, "utf8"), file);
 	if (parsed.name !== name) throw new Error(`skill file ${file} declares name "${parsed.name}" but the capability grants "${name}"`);
-	return {
-		name: parsed.name,
-		description: parsed.description,
-		...parsed.whenToUse === void 0 ? {} : { whenToUse: parsed.whenToUse },
-		invocation: parsed.invocation,
-		source: "runtime",
-		path: parsed.path,
+	return toRuntimeSkill({
+		...parsed,
 		resourceBase: {
 			kind: "directory",
 			path: dirname(parsed.path)
-		},
-		content: parsed.content
-	};
+		}
+	});
 }
 
 //#endregion
 //#region src/grants.ts
-function message(error) {
-	return error instanceof Error ? error.message : String(error);
-}
 function skillRegistry(agentCtx) {
 	return agentCtx.get("skills");
 }
@@ -186,14 +332,7 @@ function assertCapabilityTools(grant, visible) {
 	const detail = missing.map((entry) => `"${entry.capability}" grants unavailable tool${entry.tools.length > 1 ? "s" : ""} ${entry.tools.map((tool) => `"${tool}"`).join(", ")}`).join("; ");
 	throw new Error(`agent-runtime: capabilit${missing.length > 1 ? "ies" : "y"} ${detail}; this worker's visible tools: ${known}`);
 }
-/**
-* Compute the allow-list one worker's grant resolves to against the surface its
-* composition offers.
-* @param agentCtx - the unpublished worker's scoped context (the only context `restrict()` accepts).
-* @param agent - the worker the scoped context belongs to.
-* @param grant - the resolved capability grant.
-* @throws when a capability-declared tool is not visible to this worker.
-*/
+/** Compute the allow-list one grant resolves to; throws when a capability tool is not visible. */
 function resolveGrant(agentCtx, agent, grant) {
 	const visible = visibleToolNames(agentCtx, agent);
 	assertCapabilityTools(grant, visible);
@@ -209,29 +348,7 @@ function resolveGrant(agentCtx, agent, grant) {
 		baselineUnavailable: [...new Set(grant.baseline.filter((tool) => !visible.has(tool)))].sort()
 	};
 }
-/** One granted skill, pinned into the worker's own skill layer. */
-function pinnedSkill(skill) {
-	return {
-		name: skill.name,
-		description: skill.description,
-		...skill.whenToUse === void 0 ? {} : { whenToUse: skill.whenToUse },
-		...skill.invocation === void 0 ? {} : { invocation: skill.invocation },
-		source: "runtime",
-		...skill.path === void 0 ? {} : { path: skill.path },
-		...skill.resourceBase === void 0 ? {} : { resourceBase: skill.resourceBase },
-		...skill.metadata === void 0 ? {} : { metadata: skill.metadata },
-		content: skill.content
-	};
-}
-/**
-* Register every skill one grant's extra roots carry into the worker's own
-* layer (the replay overlay). Registered BEFORE the granted-skill resolution,
-* so a same-name granted skill keeps the overlay body — the registry is
-* first-wins within a layer, and skipping the name in {@link grantSkills} is
-* what keeps that rule silent instead of warn-logged. Returns the overlaid
-* names. A root that cannot be read throws: a broken overlay path must fail
-* the spawn loudly, never degrade to the production skill unnoticed.
-*/
+/** Register every skill one grant's extra roots carry into the worker's own layer (the replay overlay), first. */
 async function applySkillRoots(agentCtx, grant) {
 	const roots = grant.skillRoots ?? [];
 	const overlaid = /* @__PURE__ */ new Set();
@@ -243,7 +360,7 @@ async function applySkillRoots(agentCtx, grant) {
 		try {
 			files = await listSkillFiles(root);
 		} catch (error) {
-			throw new Error(`agent-runtime: skill overlay root "${root}" is not readable: ${message(error)}`);
+			throw new Error(`agent-runtime: skill overlay root "${root}" is not readable: ${messageOf(error)}`);
 		}
 		for (const { name, file } of files) {
 			if (overlaid.has(name)) continue;
@@ -253,17 +370,7 @@ async function applySkillRoots(agentCtx, grant) {
 	}
 	return overlaid;
 }
-/**
-* Grant one worker's capability skills.
-*
-* Each granted name is resolved through the deployment's own discovery first —
-* the discovered definition already carries the parsed body, invocation policy,
-* and resource base — and falls back to reading the `SKILL.md` directly when the
-* worker's composition mounts no discovery. Either way the definition is
-* registered into the WORKER's layer, which is what makes the grant hold and
-* what shadows a same-name skill for that worker alone. Names an overlay root
-* already registered are skipped: the overlay body wins.
-*/
+/** Grant one worker's capability skills; overlay-registered names are skipped so the overlay body wins. */
 async function grantSkills(agentCtx, agent, grant, overlaid) {
 	const granted = /* @__PURE__ */ new Map();
 	for (const capability of grant.capabilities) for (const skill of capability.skills) if (!granted.has(skill) && !overlaid.has(skill)) granted.set(skill, capability.capability);
@@ -277,7 +384,7 @@ async function grantSkills(agentCtx, agent, grant, overlaid) {
 			cwd
 		});
 		if (discovered !== void 0) {
-			skills.register(pinnedSkill(discovered));
+			skills.register(toRuntimeSkill(discovered));
 			continue;
 		}
 		const file = await findSkillFile(name, cwd);
@@ -288,15 +395,7 @@ async function grantSkills(agentCtx, agent, grant, overlaid) {
 		skills.register(await readSkillFile(file, name));
 	}
 }
-/**
-* Mount every MCP server one grant declares, one mcp-client instance per spec
-* on the worker's own scope. Awaiting `ctx.plugin` settles when the instance's
-* initial connect + tool sync finishes; with `failOnStartupError: true` a
-* server that cannot start rejects the mount — and with it the spawn — naming
-* the server, so a dead MCP path can never degrade into a quietly tool-less
-* worker. Disposal rides the worker's own fiber: the instance (and its child
-* process) dies with the agent.
-*/
+/** Mount every MCP server one grant declares, one mcp-client instance per spec, fail-closed on startup. */
 async function mountMcpServers(agentCtx, agent, grant) {
 	for (const spec of grant.mcpServers ?? []) try {
 		await agentCtx.plugin(McpClient, {
@@ -310,299 +409,20 @@ async function mountMcpServers(agentCtx, agent, grant) {
 			failOnStartupError: true
 		});
 	} catch (error) {
-		throw new Error(`agent-runtime: MCP server "${spec.serverName}" (command: ${spec.command}) failed to start for agent "${agent.id}": ${message(error)}`);
+		throw new Error(`agent-runtime: MCP server "${spec.serverName}" (command: ${spec.command}) failed to start for agent "${agent.id}": ${messageOf(error)}`);
 	}
 }
-/**
-* Apply one worker's capability grant to its unpublished scoped world.
-* @param agentCtx - the worker's scoped context, minted by the agent factory.
-* @param agent - the worker, identified for error messages.
-* @param grant - the resolved grant from the task runtime.
-* @throws when a capability-declared tool is not visible to the worker, a
-*   declared skill resolves nowhere, an MCP server fails to start, or the
-*   tools registry rejects the filter.
-*/
+/** Apply one worker's grant: restrict tools, register skills, mount MCP servers — all fail-closed. */
 async function applyWorkerGrant(agentCtx, agent, grant) {
 	const { allow } = resolveGrant(agentCtx, agent, grant);
 	try {
 		agentCtx.tools.restrict({ allow });
 	} catch (error) {
 		const capabilities = grant.capabilities.map((capability) => capability.capability);
-		throw new Error(`agent-runtime: could not restrict agent "${agent.id}" to [${allow.join(", ")}] for capabilit${capabilities.length === 1 ? "y" : "ies"} [${capabilities.join(", ")}]: ${message(error)}`);
+		throw new Error(`agent-runtime: could not restrict agent "${agent.id}" to [${allow.join(", ")}] for capabilit${capabilities.length === 1 ? "y" : "ies"} [${capabilities.join(", ")}]: ${messageOf(error)}`);
 	}
 	await grantSkills(agentCtx, agent, grant, await applySkillRoots(agentCtx, grant));
 	await mountMcpServers(agentCtx, agent, grant);
-}
-
-//#endregion
-//#region src/messages.ts
-/** One refused source read or delivery, with the stable name of what went wrong. */
-var MessageDeliveryRefusal = class extends Error {
-	code;
-	constructor(code, message$1, options) {
-		super(message$1, options);
-		this.name = "MessageDeliveryRefusal";
-		this.code = code;
-	}
-};
-/** The message body a question carries into its parent's Session: the stable question identity, then what was asked. */
-function questionMessageText(questionId, question) {
-	return `[task-question ${questionId}] ${question}`;
-}
-/**
-* The message body an answer carries into the asking Session: both identities,
-* so the receiving model can tell which answer resolves which question without
-* a second lookup, then what the parent answered.
-*/
-function answerMessageText(answerId, questionId, answer) {
-	return `[task-answer ${answerId} for ${questionId}] ${answer}`;
-}
-/**
-* Build the identified, frozen relay message one intent delivers. Pure and
-* exported so a caller can inspect the exact representation it is about to
-* write; nothing here reaches the Task store or the Session.
-*/
-function relayMessage(intent) {
-	return freezeMessage({
-		id: MessageId(intent.messageId),
-		role: "user",
-		content: [{
-			type: "text",
-			text: intent.text
-		}],
-		source: {
-			kind: "agent-message",
-			form: "relay",
-			senderSessionId: intent.senderSessionId
-		}
-	});
-}
-/**
-* Whether a Session's own event suffix already holds one message identity, in
-* history or still pending in the inbox. `events` must be the Session's own
-* suffix (its fork-inherited prefix belongs to the Session it descends from and
-* is not a delivery to this one).
-*
-* This is the *retry* rule: an identity a claim already removed and history
-* never took is not accepted, because the model never saw it and the recovery
-* path must deliver it again (§F.1: "claim 在 pre-step 前可能已移除").
-*/
-function messageAccepted(events, messageId) {
-	return events.some((event) => event.type === "user/message" && event.data.id === messageId) || pendingInboxMessages(events).some((message$1) => message$1.id === messageId);
-}
-/**
-* Whether the log durably records that this identity entered the Session's
-* inbox — the *receipt* rule, which is wider than {@link messageAccepted} by one
-* case: a claim (or a cancel's clear) removes a pending entry through a splice
-* that carries no identity, so between "claimed" and "in history" the identity
-* is in neither list while the insertion event stays in the log. That window is
-* not a delivery failure — the message was durably recorded and the target's own
-* driver was the one consuming it — and treating it as one would invite a
-* duplicate re-delivery of a message the Session already took.
-*/
-function messageRecorded(events, messageId) {
-	return events.some((event) => event.type === "agent/inbox/spliced" && event.data.inserted.some((message$1) => message$1.id === messageId));
-}
-/**
-* Read back the body of a cited `tool/call`: the evidence behind a question or an
-* answer, straight from the Session that sent it.
-*
-* A live Session is flushed first — the cited event must be durable before the
-* Task store commits an intent that cites it, because recovery reads the body
-* from the log and a body that only ever existed in a write buffer is not a
-* source. Refusals are named: an absent Session, an absent seq, an unreadable
-* Session, a Session with no durability barrier, and an event that is not the
-* `tool/call` it is cited as are five different things, and a caller that
-* cannot tell them apart would record the wrong fact.
-*/
-async function readToolCallBody(deps, ref) {
-	const sessionId = SessionId(ref.sessionId);
-	const live = deps.sessions.get(sessionId);
-	if (live !== void 0) await witnessBarrier(deps, live, sessionId);
-	let window;
-	try {
-		window = await deps.sessionQuery.readEvent({
-			sessionId,
-			seq: SessionSeq(ref.seq)
-		});
-	} catch (error) {
-		throw sourceReadRefusal(String(sessionId), ref.seq, error);
-	}
-	const event = window.target;
-	if (event.type !== "tool/call" || typeof event.data.name !== "string" || event.data.name === "") throw new MessageDeliveryRefusal("source-not-tool-call", `agent-runtime: session "${String(sessionId)}" seq ${ref.seq} is not a tool call (event type "${event.type}")`);
-	return {
-		name: event.data.name,
-		arguments: event.data.arguments
-	};
-}
-/**
-* The citation of one `tool/call` inside a Session's *own* event suffix, found
-* by the call id the tool layer holds (A4 §F.1).
-*
-* Why the caller needs this at all: the body of a question or an answer is the
-* sender's own tool call, and the durable citation into it is a `(session, seq)`
-* pair, while what a tool call has in hand is its registration id
-* ({@link ToolCallRef} is what {@link readToolCallBody} takes). This is that
-* translation, as a pure read of a Session log the caller already has, so the
-* lookup rule — own suffix only, the *last* event for an id — lives beside the
-* citation type instead of in each caller.
-*
-* The suffix rule is the delivery fold's ({@link ownSuffix}): a fork-inherited
-* prefix belongs to the Session this one descends from, and a call made there is
-* not a call this Session made. The last event wins because a log is append-only
-* and an id — were it ever re-dispatched — would be answered by its latest
-* durable record.
-*/
-function toolCallRefIn(log, callId) {
-	const own = log.events.slice(log.inheritedEventCount);
-	for (let index = own.length - 1; index >= 0; index -= 1) {
-		const event = own[index];
-		if (event.type !== "tool/call") continue;
-		if (String(event.data.callId) !== callId) continue;
-		return {
-			sessionId: log.session.id,
-			seq: event.seq
-		};
-	}
-}
-/**
-* Put one already-decided message into the target Session's inbox, at most once.
-*
-* Order: reconcile, then relay, then flush, then confirm. Reconcile-first is
-* what makes a retry harmless — a message already pending or already in history
-* is reported `already-present` without touching the inbox. The relay is
-* `agent.steer`, not `followup`: an answer must reach the target's next model
-* request, including one that is mid-turn (a followup would queue it behind the
-* current turn), and an idle target still opens a turn, which is what a question
-* addressed to a settled parent needs to be answered at all.
-*
-* The confirmation after the flush is deliberately wider than the retry fold
-* ({@link messageRecorded}): a target whose turn is already consuming the
-* message claims it out of the inbox before history takes it, and that window
-* must not be reported as a failed delivery. What `delivered` claims is exactly
-* what the log shows — the Session durably recorded this identity — never that
-* the model read it.
-*
-* A target with no live agent is `unavailable` before anything else happens: no
-* offline write, no resume, no substitute parent — the intent survives in the
-* Task store, and the recovery path is what brings the target back and calls
-* this again.
-*/
-async function ensureAgentMessageDelivered(deps, intent) {
-	const targetSessionId = SessionId(intent.targetSessionId);
-	const agent = deps.agents.get(targetSessionId);
-	if (agent === void 0) return {
-		messageId: intent.messageId,
-		status: "unavailable"
-	};
-	if (await acceptedAlready(deps, targetSessionId, intent.messageId)) return {
-		messageId: intent.messageId,
-		status: "already-present"
-	};
-	try {
-		agent.steer(relayMessage(intent));
-	} catch (error) {
-		if (isAlreadyPending(error, intent.messageId)) return {
-			messageId: intent.messageId,
-			status: "already-present"
-		};
-		throw error;
-	}
-	await witnessBarrier(deps, agent.session, targetSessionId, "target-not-durable");
-	const own = await ownSuffix(deps, targetSessionId);
-	if (!messageAccepted(own, intent.messageId) && !messageRecorded(own, intent.messageId)) throw new MessageDeliveryRefusal("delivery-unconfirmed", `agent-runtime: message "${intent.messageId}" was relayed to session "${String(targetSessionId)}" but is not in its log after the flush`);
-	return {
-		messageId: intent.messageId,
-		status: "delivered"
-	};
-}
-/**
-* Reconcile a set of committed intents against the Sessions that hold them,
-* delivering exactly the ones that are missing (§F.1: "恢复只补缺失投递").
-*
-* This is the entry point A4's recovery path calls with the records the Task
-* store holds: it owns no ledger of its own (the delivered fact *is* the
-* target's fold, and a second record could disagree with it), it never rewrites
-* an intent, and it reports each record separately so one unreachable parent
-* cannot hide the others. Intents are delivered in the order given, so the
-* target's inbox keeps the order the caller recorded.
-*/
-async function reconcileAgentMessageDeliveries(deps, intents) {
-	const reports = [];
-	for (const intent of intents) try {
-		const delivery = await ensureAgentMessageDelivered(deps, intent);
-		reports.push({
-			messageId: delivery.messageId,
-			status: delivery.status
-		});
-	} catch (error) {
-		reports.push({
-			messageId: intent.messageId,
-			status: "refused",
-			reason: messageOf$1(error)
-		});
-	}
-	return reports;
-}
-/**
-* The durability barrier, as the two callers state it: `session/flush` reaching
-* no listener means nothing stores this Session, so neither a cited body nor a
-* delivery can be witnessed. A refusal here is not a delivery failure — the
-* caller keeps the intent and can retry.
-*/
-async function witnessBarrier(deps, session, sessionId, code = "source-not-durable") {
-	let durable;
-	try {
-		durable = await deps.sessions.flush(session);
-	} catch (error) {
-		throw new MessageDeliveryRefusal(code, `agent-runtime: session "${String(sessionId)}" could not be flushed: ${messageOf$1(error)}`, { cause: error });
-	}
-	if (!durable) throw new MessageDeliveryRefusal(code, `agent-runtime: session "${String(sessionId)}" has no durability barrier (no session/flush participant)`);
-}
-/** Whether the target Session's own suffix already holds the identity. */
-async function acceptedAlready(deps, sessionId, messageId) {
-	return messageAccepted(await ownSuffix(deps, sessionId), messageId);
-}
-/**
-* Read one Session's own event suffix (without the fork-inherited prefix). A
-* failed read is a refusal, never an assumed "nothing there": a delivery decided
-* from an unreadable log could duplicate a message the Session already holds.
-*/
-async function ownSuffix(deps, sessionId) {
-	let snapshot;
-	try {
-		snapshot = await deps.sessionQuery.readSession(sessionId);
-	} catch (error) {
-		throw new MessageDeliveryRefusal("target-unreadable", `agent-runtime: target session "${String(sessionId)}" could not be read, so whether a message was accepted cannot be decided: ${messageOf$1(error)}`, { cause: error });
-	}
-	return snapshot.events.slice(snapshot.inheritedEventCount);
-}
-/** The pending inbox one durable suffix describes, folded the way DSH replays it. */
-function pendingInboxMessages(events) {
-	const inbox = {
-		"next-turn": [],
-		"next-step": []
-	};
-	for (const event of events) {
-		if (event.type !== "agent/inbox/spliced") continue;
-		inbox[event.data.target].splice(event.data.start, event.data.removedCount ?? 0, ...event.data.inserted);
-	}
-	return [...inbox["next-turn"], ...inbox["next-step"]];
-}
-/** Whether one thrown error is DSH's duplicate-pending-inbox refusal for this id. */
-function isAlreadyPending(error, messageId) {
-	return error instanceof Error && error.message === `message "${messageId}" is already pending`;
-}
-/** Name one refused source read from the error the session read path raised. */
-function sourceReadRefusal(sessionId, seq, error) {
-	const code = error?.code;
-	if (code === "SESSION_QUERY_EVENT_NOT_FOUND") return new MessageDeliveryRefusal("source-event-missing", `agent-runtime: session "${sessionId}" has no event at seq ${seq}`, { cause: error });
-	if (code === "SESSION_QUERY_SESSION_NOT_FOUND") return new MessageDeliveryRefusal("source-session-missing", `agent-runtime: session "${sessionId}" does not exist`, { cause: error });
-	return new MessageDeliveryRefusal("source-unreadable", `agent-runtime: session "${sessionId}" could not be read: ${messageOf$1(error)}`, { cause: error });
-}
-/** One line of an unknown failure, for refusals that carry a cause. */
-function messageOf$1(error) {
-	return error instanceof Error ? error.message : String(error);
 }
 
 //#endregion
@@ -626,29 +446,7 @@ Use task_review_pack for settled-task evidence and task_diagnose to record an ex
 
 //#endregion
 //#region src/prompts/worker.prompts.ts
-/**
-* The worker role's stable policy (A2): the rules every task worker runs under,
-* whatever its task, its handoff, or this deployment's decomposition switch.
-*
-* What belongs here and nowhere else: unconditional behaviour. The contract,
-* the root briefing and the handoff are the context package's assembly
-* projection (`singularity:worker-contract`, order 80 — this section sits just
-* ahead of it), and the rules that depend on the task or the deployment (the
-* decomposable hint, the runtime-split rule, the review wait) are the same
-* projection's conditional part — one rule lives in exactly one of the two.
-*
-* Migrated from the old spawn prompt (`task-runtime`'s retired
-* `renderWorkerPrompt`), minus the session-tool guidance: history is read with
-* `context_read` now, and the raw cross-session readers that prompt pointed at
-* are sealed (`./raw-session-guard.ts`). As a system-prompt section this text is
-* what the loop reprojects into surface node 0, so the rules survive the folds
-* the old spawn prompt did not.
-*/
-/**
-* The worker policy, registered as the `singularity:worker` section (order 75)
-* of every spawn that declares `taskWorker`. Unconditional on purpose: anything
-* that could change with the task or the deployment is not written here.
-*/
+/** The worker role's stable policy (A2), registered as the `singularity:worker` section (order 75). */
 const WORKER_POLICY_TEXT = [
 	"You are a Singularity task worker. The task you were delegated, its acceptance criteria and the current state of the project ride in your system context; the task store is the authority for all of it.",
 	"",
@@ -667,11 +465,7 @@ const WORKER_POLICY_TEXT = [
 	"- Going idle is not a submission. Submit when the work is done, or say what is missing with a clear failure.",
 	"- `task_verify` is only a self-check: it re-runs the verifier and records the evidence it produces, never changes task status, and does not stand in for a submission."
 ].join("\n");
-/**
-* The first user message a task worker receives when its spawn carried no
-* prompt of its own. The kickoff points at the context, it does not replace it:
-* the contract and state are the store's, and this only says where to look.
-*/
+/** The first user message a task worker receives when its spawn carried no prompt of its own. */
 const WORKER_KICKOFF_TEXT = "Begin your delegated task. Your contract, the root objective and the current task state are in your system context; re-read them with `task_read` whenever you need them, and hand the work in with `task_submit_result` when it is done.";
 
 //#endregion
@@ -685,58 +479,33 @@ const RAW_SESSION_READ_TOOLS = [
 ];
 /** The one denial reason every sealed call reports, by name. */
 const RAW_SESSION_READ_DENIAL = "singularity: raw cross-session reads are sealed; use context_read";
-/**
-* Deny the four readers on one agent's own scope, for the agent's whole life.
-* Registered through the agent's scoped context, so it travels with the agent
-* and touches no sibling; a scope chain re-evaluation cannot lift it, because
-* a guard has no allow answer.
-*/
+/** Deny the four readers on one agent's own scope, for the agent's whole life. */
 function sealRawSessionReads(agentCtx) {
 	agentCtx.tools.guard((execution) => RAW_SESSION_READ_TOOLS.includes(execution.name) ? RAW_SESSION_READ_DENIAL : void 0);
 }
 
 //#endregion
 //#region src/worker-resume.ts
-/**
-* The permission posture a worker runs under when nobody decided one for it —
-* the spawn's own default (`index.ts`, the shared worker setup), named here
-* because the resume must state the same posture it is checking against.
-*/
+/** The permission posture a worker runs under when nobody decided one for it — the spawn's own default. */
 const WORKER_DEFAULT_PERMISSION_PRESET = "danger-full-access";
 /** One refused resume, with the stable name of what could not be established. */
 var WorkerResumeRefusal = class extends Error {
 	code;
-	constructor(code, message$1, options) {
-		super(message$1, options);
+	constructor(code, message, options) {
+		super(message, options);
 		this.name = "WorkerResumeRefusal";
 		this.code = code;
 	}
 };
 /** The one marker `TaskRun.capabilitySnapshot` uses for a granted MCP server's plane (`task-runtime/src/capability.ts`). */
 const MCP_PLANE_MARKER = "mcp:";
-/**
-* Bring one spawned worker's persisted Session back live, or refuse by name.
-*
-* Order: ownership, then the Session's own durable record, then the declared
-* Run facts against it, then the graph's membership and delegation facts, then
-* the resume. Every check before `deps.agents.resume` is a read: a refusal
-* leaves the store, the Session log, the graph and the handle map exactly as
-* they were, and no Session is ever created to stand in for the one that could
-* not be taken over.
-* @param deps - the live registry, the session read path, the graph store and the composition.
-* @param request - the identity, its graph scope, the Run facts and the authorization claimed.
-* @returns the live handle of the same Session, idle and reachable, owning no new identity.
-* @throws WorkerResumeRefusal with the stable code of what could not be established.
-* @throws Error (unnamed) when the graph store cannot take the node's status
-*   repair: nothing was resumed, and that write is not a source decision a
-*   refusal code could name.
-*/
+/** Bring the persisted Session back live and idle, or refuse by name; every check before the resume is a read. */
 async function resumeWorkerAgent(deps, request) {
 	const sessionId = SessionId(request.sessionId);
 	if (deps.agents.get(sessionId) !== void 0) throw new WorkerResumeRefusal("ownership-conflict", `agent-runtime: session "${String(sessionId)}" is already live; a resume must wait until its owner settles`);
 	const persisted = await readPersistedSession(deps, sessionId);
 	const header = persisted.session;
-	const agentPreset = assertRunBinding(request, header, persisted.events.slice(persisted.inheritedEventCount));
+	const agentPreset = assertRunBinding(request, header, ownSuffix(persisted));
 	const member = await assertGraphMember(deps, request, header, sessionId);
 	const role = workerRole(request, agentPreset);
 	if (member.status === "running") await deps.graph.setStatusIn(request.scope.graphStoreId, sessionId, "idle");
@@ -751,25 +520,7 @@ async function readPersistedSession(deps, sessionId) {
 		throw new WorkerResumeRefusal("session-unreadable", `agent-runtime: session "${String(sessionId)}" could not be read, so it cannot be taken over safely: ${messageOf(error)}`, { cause: error });
 	}
 }
-/**
-* Refuse a declared Run, grant or permission the Session's own durable record
-* contradicts (A4 §F.1: "声明的 Run/绑定与 Session 持久事实不一致").
-*
-* What is checkable and why each one matters:
-* - the Run's `sessionId` — the store's binding is to one Session, and a resume
-*   under a Run that names another one would put a run's work on the wrong log;
-* - the Run's `agentPreset` against the header's — the header is what the
-*   resumed composition is built from, so a store that recorded a different
-*   preset means the two records disagree about what this Session is;
-* - the declared grant against the Run's recorded capability snapshot — the
-*   tool face is authorization, and the snapshot is the store's record of what
-*   the Run was admitted with;
-* - a `permission/preset` the log recorded against the declared permission —
-*   the log is the permission the Session actually ran under, and re-applying a
-*   different one would silently widen or narrow a session mid-task.
-* @returns the agent preset the Session's own header names — verified present,
-*   and the one the resumed composition is built from.
-*/
+/** Refuse a declared Run, grant or permission the Session's own durable record contradicts. */
 function assertRunBinding(request, header, own) {
 	const run = request.run;
 	if (run.storeId === "" || run.taskId === "" || run.runId === "") throw new WorkerResumeRefusal("binding-mismatch", `agent-runtime: the declared run identity is empty (store "${run.storeId}", task "${run.taskId}", run "${run.runId}")`);
@@ -784,13 +535,7 @@ function assertRunBinding(request, header, own) {
 	if (recordedPermission !== void 0 && recordedPermission !== applied) throw new WorkerResumeRefusal("binding-mismatch", `agent-runtime: session "${String(header.id)}" recorded permission preset "${recordedPermission}" but the resume would apply "${applied}"`);
 	return header.agentPreset;
 }
-/**
-* Refuse a Session the graph does not publish, or one whose delegation facts a
-* worker resume needs and cannot find (A4 §F.1: a resume must not invent the
-* member or its edge). Membership alone is not enough: the worker's lineage is
-* the parent the spawn published, and the Session's own header must agree with
-* the graph's edge — the two durable records are checked against each other.
-*/
+/** Refuse a Session the graph does not publish, or one whose delegation facts cannot be verified. */
 async function assertGraphMember(deps, request, header, sessionId) {
 	let snapshot;
 	try {
@@ -828,7 +573,7 @@ async function resume(deps, request, sessionId, role) {
 		throw new WorkerResumeRefusal("takeover-refused", `agent-runtime: session "${String(sessionId)}" could not be taken over safely: ${messageOf(error)}`, { cause: error });
 	}
 }
-/** The granted plane one grant declares: every capability's tools and skills, plus each MCP server's plane marker. */
+/** The granted plane one grant declares: every capability's tools and skills, plus each MCP server's marker. */
 function declaredPlane(grant) {
 	const plane = /* @__PURE__ */ new Set();
 	for (const capability of grant?.capabilities ?? []) {
@@ -845,97 +590,9 @@ function lastPermissionPreset(own) {
 		if (event.type === "permission/preset") return event.data.preset;
 	}
 }
-/** One line of an unknown failure, for refusals that carry a cause. */
-function messageOf(error) {
-	return error instanceof Error ? error.message : String(error);
-}
 
 //#endregion
 //#region src/index.ts
-/** The nine tools the evolution chain is reached through; a deployment's switch is what registers them. */
-const EVOLUTION_TOOLS = [
-	"evolution_propose",
-	"evolution_candidate",
-	"evolution_prepare",
-	"evolution_replay",
-	"evolution_gate",
-	"evolution_decide",
-	"evolution_apply",
-	"evolution_rollback",
-	"evolution_list"
-];
-/** The tools every root may call whatever the deployment's evolution switch says. */
-const ROOT_CORE_TOOLS = [
-	"graph_spawn",
-	"graph_mark_ready",
-	"hitl_ask",
-	"hitl_approve",
-	"task_read",
-	"capability_list",
-	"context_read",
-	"skill",
-	"task_intake",
-	"task_decompose",
-	"task_submit_result",
-	"task_answer",
-	"task_cancel",
-	"task_proposal_read",
-	"task_proposal_continue",
-	"task_proposal_cancel",
-	"task_status",
-	"task_verify",
-	"task_review_pack",
-	"task_review_agent",
-	"task_diagnose",
-	"task_budget_extend"
-];
-/**
-* Whether this composition registered the nine `evolution_*` tools. Soft read:
-* a context that mounts no singularity agent plugin provides no such service,
-* and that absence is the closed state — never "assume the chain is there". The
-* answer decides both the root's allow-list and its prompt, because a prompt
-* that names a tool the surface does not carry asks for a call that cannot
-* happen (prompt contracts §1/§7).
-*/
-function evolutionEnabled(ctx) {
-	return ctx.get("singularityEvolution")?.enabled ?? false;
-}
-/**
-* The root's tool allow-list for one composition, single point: `createRoot` and
-* `resumeRoot` both restrict with this, so a root cannot be assembled on one
-* fact and prompted on another. Off, the nine names are absent — `restrict` is a
-* mask over what exists, and with the chain off nothing registered them. On, the
-* list is exactly the deployment's previous one, name for name.
-*/
-function rootToolsFor(enabled) {
-	return enabled ? [
-		...ROOT_CORE_TOOLS,
-		...EVOLUTION_TOOLS,
-		"escalate"
-	] : [...ROOT_CORE_TOOLS, "escalate"];
-}
-/** Root-local registrations also obey the coordination allow-list. */
-function sealRootTools(agentCtx, enabled) {
-	agentCtx.tools.presentAs("native");
-	const allowed = new Set(rootToolsFor(enabled));
-	agentCtx.tools.guard((execution) => allowed.has(execution.name) ? void 0 : "singularity: the root coordinates through task tools; delegate engineering work with task_decompose");
-}
-/**
-* `hitl_approve` asks through `ctx.approval`, whose 'never' policy (bundled into
-* danger-full-access) auto-rejects before any answerer sees the request. Root
-* agents expose no policy-gated tools, so pinning their session to 'ask'
-* re-enables only the explicit human decision.
-*/
-function pinRootApprovalPolicy(session) {
-	setApprovalPolicy(session, "ask");
-}
-/** One message source of this runtime's own, as {@link RuntimePromptSource} declares it. */
-function runtimePrompt(channel) {
-	return {
-		kind: "runtime-prompt",
-		channel
-	};
-}
 var AgentRuntime = class extends Service {
 	static inject = [
 		"agentDefaultModel",
@@ -958,7 +615,6 @@ var AgentRuntime = class extends Service {
 	resuming = /* @__PURE__ */ new Map();
 	constructor(ctx) {
 		super(ctx, "agentRuntime");
-		ctx.provide("sessionVisibility", { isVisible: (sessionId) => !this.owned.has(sessionId) || this.roots.has(sessionId) });
 		ctx.on("agent/status", ({ agent, status }) => {
 			const scope = this.scopes.get(agent.id);
 			if (scope !== void 0) ctx.graph.setStatusIn(scope.graphStoreId, agent.id, status);
@@ -1010,27 +666,12 @@ var AgentRuntime = class extends Service {
 			const handle = await this.ctx.agents.resume({
 				resumeSessionId: sessionId,
 				agentOptions: this.ctx.agentDefaultModel.currentSelection(),
-				setup: async (agentCtx, agent) => {
-					await this.ctx.agentPresets.mount(agentCtx, agentPreset);
-					this.ctx.permissionPresets.set(agent.session, "danger-full-access");
-					pinRootApprovalPolicy(agent.session);
-					const evolution = evolutionEnabled(this.ctx);
-					agentCtx.systemPrompt.section({
-						name: "singularity:root",
-						order: 70,
-						text: rootPromptText(evolution)
-					});
-					agentCtx.tools.restrict({ allow: rootToolsFor(evolution) });
-					sealRawSessionReads(agentCtx);
-					sealRootTools(agentCtx, evolution);
-				}
+				setup: rootSetup(this.ctx, agentPreset)
 			});
 			this.handles.set(sessionId, handle);
 			return handle;
 		} catch (error) {
-			this.owned.delete(sessionId);
-			this.roots.delete(sessionId);
-			this.scopes.delete(sessionId);
+			await this.releaseSession(sessionId);
 			throw error;
 		}
 	}
@@ -1051,24 +692,10 @@ var AgentRuntime = class extends Service {
 						...this.ctx.agentDefaultModel.currentSelection(),
 						...request.agentOptions
 					},
-					setup: async (agentCtx, agent) => {
-						await this.ctx.agentPresets.mount(agentCtx, agentPreset);
-						this.ctx.permissionPresets.set(agent.session, "danger-full-access");
-						pinRootApprovalPolicy(agent.session);
-						const evolution = evolutionEnabled(this.ctx);
-						agentCtx.systemPrompt.section({
-							name: "singularity:root",
-							order: 70,
-							text: rootPromptText(evolution)
-						});
-						agentCtx.tools.restrict({ allow: rootToolsFor(evolution) });
-						sealRawSessionReads(agentCtx);
-						sealRootTools(agentCtx, evolution);
-					}
+					setup: rootSetup(this.ctx, agentPreset)
 				});
 			} catch (error) {
-				this.owned.delete(request.sessionId);
-				this.scopes.delete(request.sessionId);
+				await this.releaseSession(request.sessionId);
 				throw error;
 			}
 			try {
@@ -1082,12 +709,7 @@ var AgentRuntime = class extends Service {
 				this.handles.set(handle.agent.id, handle);
 				return handle;
 			} catch (error) {
-				this.owned.delete(request.sessionId);
-				this.owned.delete(handle.agent.id);
-				this.roots.delete(handle.agent.id);
-				this.scopes.delete(request.sessionId);
-				this.scopes.delete(handle.agent.id);
-				await handle.dispose();
+				await this.releaseSession(handle.agent.id, handle);
 				throw error;
 			}
 		});
@@ -1120,7 +742,7 @@ var AgentRuntime = class extends Service {
 						...request.agentOptions
 					},
 					signal: request.signal,
-					setup: this.workerSetup({
+					setup: workerSetup(this.ctx, {
 						agentPreset,
 						permissionPreset: request.permissionPreset ?? WORKER_DEFAULT_PERMISSION_PRESET,
 						taskWorker: request.taskWorker === true,
@@ -1128,8 +750,7 @@ var AgentRuntime = class extends Service {
 					})
 				});
 			} catch (error) {
-				this.owned.delete(request.sessionId);
-				this.scopes.delete(request.sessionId);
+				await this.releaseSession(request.sessionId);
 				throw error;
 			}
 			let published = false;
@@ -1176,35 +797,13 @@ var AgentRuntime = class extends Service {
 				}));
 				return handle;
 			} catch (error) {
-				this.handles.delete(handle.agent.id);
-				this.owned.delete(request.sessionId);
-				this.owned.delete(handle.agent.id);
-				this.scopes.delete(request.sessionId);
-				this.scopes.delete(handle.agent.id);
-				await handle.dispose();
+				await this.releaseSession(handle.agent.id, handle);
 				if (published) await this.ctx.graph.setStatusIn(scope.graphStoreId, handle.agent.id, "failed");
 				throw error;
 			}
 		});
 	}
-	/**
-	* Bring one spawned worker's persisted Session back live (A4 §F.1), through
-	* the recovery entry `./worker-resume.ts` documents: the same Session, the
-	* same composition (the shared `workerSetup` below, which `spawn` also hands
-	* the agent factory), the same grant, seal and permission — and **idle**.
-	* Nothing is sent to the model here; the caller wakes the Session when it has
-	* something to deliver (§F.1: "恢复后由调用方决定何时 steer").
-	*
-	* The handle lands in the same `handles` map a spawn's product does, so
-	* `stopAgents`/`stopGraph` and the session-visibility rule treat a resumed
-	* worker exactly as they treat a spawned one. There is no second roster, no
-	* second mailbox and no second handle table: this entry owns nothing the
-	* spawn path does not already own.
-	* @param request - the Session, its graph scope, the Run facts the caller read
-	*   from its store, and the authorization the Run was admitted with.
-	* @returns the live handle of the same Session, idle.
-	* @throws WorkerResumeRefusal with the stable code of what could not be established.
-	*/
+	/** Bring one spawned worker's persisted Session back live and idle; refusals are named (A4 §F.1). */
 	async resumeWorkerAgent(request) {
 		if (this.closing) throw new Error("agent-runtime: closing");
 		const sessionId = SessionId(request.sessionId);
@@ -1216,8 +815,7 @@ var AgentRuntime = class extends Service {
 				this.handles.set(sessionId, handle);
 				return handle;
 			} catch (error) {
-				this.owned.delete(sessionId);
-				this.scopes.delete(sessionId);
+				await this.releaseSession(sessionId);
 				throw error;
 			}
 		});
@@ -1247,11 +845,7 @@ var AgentRuntime = class extends Service {
 				this.scopes.delete(id);
 				continue;
 			}
-			this.handles.delete(id);
-			this.owned.delete(id);
-			this.roots.delete(id);
-			this.scopes.delete(id);
-			await handle.dispose();
+			await this.releaseSession(id, handle);
 		}
 	}
 	async prompt(agent, prompt) {
@@ -1266,48 +860,21 @@ var AgentRuntime = class extends Service {
 			source: runtimePrompt("prompt")
 		}));
 	}
-	/**
-	* Read back the body of a `tool/call` one question or answer cites (A4 §F.1),
-	* flushing the sending Session first so the citation names a durable event.
-	* Thin adapter over {@link readToolCallBody}: this class owns the handle and the
-	* context, the delivery rules own themselves (`./messages.ts`).
-	* @param ref - the sending Session and the seq of its `tool/call`.
-	* @returns the tool name and the raw arguments text the model produced.
-	* @throws MessageDeliveryRefusal with the named reason the citation is unusable.
-	*/
+	/** Read back the body of a `tool/call` a question or answer cites, flushing the sender first (A4 §F.1). */
 	async readToolCallBody(ref) {
 		if (this.closing) throw new Error("agent-runtime: closing");
 		return await readToolCallBody(this.deliveryDeps(), ref);
 	}
-	/**
-	* Deliver one already-committed message identity into its target Session's
-	* inbox, at most once, and report what that Session's log can witness. Called
-	* by the question protocol after the Task store committed the intent (A4's
-	* third sub-goal); re-calling it after a crash delivers only what is missing.
-	* @param intent - the recorded identity, the two Sessions, and the body.
-	* @returns the settled status: `delivered`, `already-present`, or `unavailable`.
-	* @throws MessageDeliveryRefusal when the attempt cannot be decided or confirmed.
-	*/
+	/** Deliver one already-committed message identity at most once and report what the target log witnesses. */
 	async ensureAgentMessageDelivered(intent) {
 		if (this.closing) throw new Error("agent-runtime: closing");
 		return await ensureAgentMessageDelivered(this.deliveryDeps(), intent);
 	}
-	/**
-	* Reconcile a set of committed intents against their target Sessions, one at a
-	* time, and report each record's outcome — the recovery path's entry point
-	* (§F.1). No ledger of its own: the delivered fact is each target's own fold.
-	* @param intents - the records the Task store holds, in delivery order.
-	* @returns one report per record; a refused record names why.
-	*/
+	/** Reconcile a set of committed intents against their target Sessions, one at a time (A4 §F.1). */
 	async reconcileAgentMessageDeliveries(intents) {
 		if (this.closing) throw new Error("agent-runtime: closing");
 		return await reconcileAgentMessageDeliveries(this.deliveryDeps(), intents);
 	}
-	/**
-	* The services one delivery reaches, resolved to the three capabilities
-	* `./messages.ts` declares and no more: this class's own fields stay private,
-	* and a service the module never calls is never handed to it.
-	*/
 	deliveryDeps() {
 		return {
 			agents: this.ctx.agents,
@@ -1315,39 +882,13 @@ var AgentRuntime = class extends Service {
 			sessionQuery: this.ctx.sessionQuery
 		};
 	}
-	/**
-	* The one composition a worker's scoped world is built from. `spawn` and
-	* {@link resumeWorkerAgent} both hand this to the agent factory, so a resumed
-	* worker is composed exactly as its spawn composed it (A4 §F.1: same preset,
-	* same permission posture, same policy prompt, same grant, same seal) — and
-	* this package holds one worker composition, not a spawn flavor and a
-	* recovery flavor that could drift apart.
-	*/
-	workerSetup(role) {
-		return async (agentCtx, agent) => {
-			await this.ctx.agentPresets.mount(agentCtx, role.agentPreset);
-			this.ctx.permissionPresets.set(agent.session, role.permissionPreset);
-			if (role.taskWorker) agentCtx.systemPrompt.section({
-				name: "singularity:worker",
-				order: 75,
-				text: WORKER_POLICY_TEXT,
-				interpolate: false
-			});
-			if (role.grant !== void 0) await applyWorkerGrant(agentCtx, agent, role.grant);
-			sealRawSessionReads(agentCtx);
-		};
-	}
-	/**
-	* What one worker resume reaches: the live registry, the deployment's own
-	* session read path, the graph store, this runtime's worker composition, and
-	* the model selection a spawn would run under.
-	*/
+	/** What one worker resume reaches: the live registry, the session read path, the graph store, composition and options. */
 	workerResumeDeps(request) {
 		return {
 			agents: this.ctx.agents,
 			sessionQuery: this.ctx.sessionQuery,
 			graph: this.ctx.graph,
-			setup: (role) => this.workerSetup(role),
+			setup: (role) => workerSetup(this.ctx, role),
 			agentOptions: {
 				...this.ctx.agentDefaultModel.currentSelection(),
 				...request.agentOptions
@@ -1361,6 +902,16 @@ var AgentRuntime = class extends Service {
 		this.operations.set(scope.graphStoreId, run.then(() => void 0, () => void 0));
 		return run;
 	}
+	/** Forget one session this runtime was composing; only a handle this attempt owns is unregistered and disposed. */
+	async releaseSession(sessionId, handle) {
+		this.owned.delete(sessionId);
+		this.roots.delete(sessionId);
+		this.scopes.delete(sessionId);
+		if (handle !== void 0) {
+			this.handles.delete(sessionId);
+			await handle.dispose();
+		}
+	}
 	live(agent) {
 		if (this.ctx.agents.get(agent.id) !== agent) throw new Error(`agent-runtime: agent "${agent.id}" is not live`);
 	}
@@ -1370,7 +921,101 @@ var AgentRuntime = class extends Service {
 		return scope;
 	}
 };
+/** One message source of this runtime's own, as {@link RuntimePromptSource} declares it. */
+function runtimePrompt(channel) {
+	return {
+		kind: "runtime-prompt",
+		channel
+	};
+}
+/** The nine tools the evolution chain is reached through; a deployment's switch is what registers them. */
+const EVOLUTION_TOOLS = [
+	"evolution_propose",
+	"evolution_candidate",
+	"evolution_prepare",
+	"evolution_replay",
+	"evolution_gate",
+	"evolution_decide",
+	"evolution_apply",
+	"evolution_rollback",
+	"evolution_list"
+];
+/** The tools every root may call whatever the deployment's evolution switch says (README Design notes). */
+const ROOT_CORE_TOOLS = [
+	"graph_spawn",
+	"graph_mark_ready",
+	"hitl_ask",
+	"hitl_approve",
+	"task_read",
+	"capability_list",
+	"context_read",
+	"skill",
+	"task_intake",
+	"task_decompose",
+	"task_submit_result",
+	"task_answer",
+	"task_cancel",
+	"task_proposal_read",
+	"task_proposal_continue",
+	"task_proposal_cancel",
+	"task_status",
+	"task_verify",
+	"task_review_pack",
+	"task_review_agent",
+	"task_diagnose",
+	"task_budget_extend"
+];
+/** Whether this composition registered the nine `evolution_*` tools; a context without the service reads as off. */
+function evolutionEnabled(ctx) {
+	return ctx.get("singularityEvolution")?.enabled ?? false;
+}
+/** The root's tool allow-list for one composition: the core tools plus `escalate`, plus the chain when it is on. */
+function rootToolsFor(enabled) {
+	return enabled ? [
+		...ROOT_CORE_TOOLS,
+		...EVOLUTION_TOOLS,
+		"escalate"
+	] : [...ROOT_CORE_TOOLS, "escalate"];
+}
+/** Root-local registrations also obey the coordination allow-list. */
+function sealRootTools(agentCtx, enabled) {
+	agentCtx.tools.presentAs("native");
+	const allowed = new Set(rootToolsFor(enabled));
+	agentCtx.tools.guard((execution) => allowed.has(execution.name) ? void 0 : "singularity: the root coordinates through task tools; delegate engineering work with task_decompose");
+}
+/** Compose one root's scoped world; `createRoot` and `resumeRoot` both hand this to the agent factory. */
+function rootSetup(ctx, agentPreset) {
+	return async (agentCtx, agent) => {
+		await ctx.agentPresets.mount(agentCtx, agentPreset);
+		ctx.permissionPresets.set(agent.session, "danger-full-access");
+		setApprovalPolicy(agent.session, "ask");
+		const evolution = evolutionEnabled(ctx);
+		agentCtx.systemPrompt.section({
+			name: "singularity:root",
+			order: 70,
+			text: rootPromptText(evolution)
+		});
+		agentCtx.tools.restrict({ allow: rootToolsFor(evolution) });
+		sealRawSessionReads(agentCtx);
+		sealRootTools(agentCtx, evolution);
+	};
+}
+/** The one composition a worker's scoped world is built from; `spawn` and a resume both hand this to the factory. */
+function workerSetup(ctx, role) {
+	return async (agentCtx, agent) => {
+		await ctx.agentPresets.mount(agentCtx, role.agentPreset);
+		ctx.permissionPresets.set(agent.session, role.permissionPreset);
+		if (role.taskWorker) agentCtx.systemPrompt.section({
+			name: "singularity:worker",
+			order: 75,
+			text: WORKER_POLICY_TEXT,
+			interpolate: false
+		});
+		if (role.grant !== void 0) await applyWorkerGrant(agentCtx, agent, role.grant);
+		sealRawSessionReads(agentCtx);
+	};
+}
 var src_default = AgentRuntime;
 
 //#endregion
-export { AgentRuntime, MessageDeliveryRefusal, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_DEFAULT_PERMISSION_PRESET, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, WorkerResumeRefusal, answerMessageText, applyWorkerGrant, src_default as default, ensureAgentMessageDelivered, findSkillFileIn, messageAccepted, parseSkillFile, questionMessageText, readToolCallBody, reconcileAgentMessageDeliveries, relayMessage, resolveGrant, resumeWorkerAgent, sealRawSessionReads, skillRootsFor, toolCallRefIn };
+export { AgentRuntime, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, WorkerResumeRefusal, answerMessageText, applyWorkerGrant, src_default as default, findSkillFileIn, parseSkillFile, questionMessageText, skillRootsFor, toolCallRefIn };

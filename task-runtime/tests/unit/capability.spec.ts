@@ -79,17 +79,24 @@ async function installExecutionSkill(sidecar?: {
   const skillMd = `---\nname: ${ROW_SKILL}\ndescription: fixture skill for the capability replacement check\n---\n\n# ${ROW_SKILL}\n`
   await writeFile(join(directory, 'SKILL.md'), skillMd)
   if (sidecar === undefined) return directory
-  await writeFile(join(directory, 'SKILL.contract.json'), `${JSON.stringify({
-    contractVersion: 1,
-    type: 'execution',
-    capabilities: [...sidecar.capabilities],
-    precondition: 'the fixture skill is installed where discovery looks',
-    inputs: [],
-    outputs: [],
-    requiredTools: [...sidecar.requiredTools],
-    verifier: { ref: sidecar.verifierRef },
-    content: { skillMdSha256: createHash('sha256').update(skillMd, 'utf8').digest('hex'), resources: [] },
-  }, null, 2)}\n`)
+  await writeFile(
+    join(directory, 'SKILL.contract.json'),
+    `${JSON.stringify(
+      {
+        contractVersion: 1,
+        type: 'execution',
+        capabilities: [...sidecar.capabilities],
+        precondition: 'the fixture skill is installed where discovery looks',
+        inputs: [],
+        outputs: [],
+        requiredTools: [...sidecar.requiredTools],
+        verifier: { ref: sidecar.verifierRef },
+        content: { skillMdSha256: createHash('sha256').update(skillMd, 'utf8').digest('hex'), resources: [] },
+      },
+      null,
+      2,
+    )}\n`,
+  )
   return directory
 }
 
@@ -113,7 +120,9 @@ describe('resolveCapabilities', () => {
     expect(manifest.missing).toEqual([])
     expect(manifest.capabilities['design-chip']).toEqual({ skills: ['chip-designer'], tools: [] })
     expect(manifest.capabilities['verify-ball-functional']).toEqual({
-      skills: ['verify'], tools: [], mcpServers: ['bbdev'],
+      skills: ['verify'],
+      tools: [],
+      mcpServers: ['bbdev'],
     })
   })
 
@@ -177,8 +186,11 @@ describe('TaskRuntime.applyCapabilityRow (W16 evolution apply/rollback seam)', (
     const rt = runtime()
     await rt.applyCapabilityRow('research', { preset: 'standard', skills: [ROW_SKILL] })
     expect(rt.listCapabilities()['research']).toEqual({ preset: 'standard', skills: [ROW_SKILL] })
-    expect(resolveCapabilities(['research'], rt.listCapabilities()).capabilities['research'])
-      .toEqual({ preset: 'standard', skills: [ROW_SKILL], tools: [] })
+    expect(resolveCapabilities(['research'], rt.listCapabilities()).capabilities['research']).toEqual({
+      preset: 'standard',
+      skills: [ROW_SKILL],
+      tools: [],
+    })
     await rt.applyCapabilityRow('new-cap', { tools: ['bash'] })
     expect(rt.listCapabilities()['new-cap']).toEqual({ tools: ['bash'] })
     await rt.applyCapabilityRow('research', null)
@@ -199,9 +211,9 @@ describe('TaskRuntime.applyCapabilityRow (W16 evolution apply/rollback seam)', (
   test('refuses a replacement whose provider skill is not discoverable, leaving the running table unchanged', async () => {
     const rt = runtime({ research: { preset: 'standard' } })
     const before = rt.listCapabilities()
-    const refusal = await rt.applyCapabilityRow('research', { skills: ['no-such-provider-skill'] }).catch(
-      (error: unknown) => (error instanceof Error ? error.message : String(error)),
-    )
+    const refusal = await rt
+      .applyCapabilityRow('research', { skills: ['no-such-provider-skill'] })
+      .catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
     expect(refusal).toContain('capability "research"')
     expect(refusal).toContain('skill "no-such-provider-skill"')
     expect(refusal).toContain('skill-missing')
@@ -213,18 +225,18 @@ describe('TaskRuntime.applyCapabilityRow (W16 evolution apply/rollback seam)', (
     await installExecutionSkill({ verifierRef: 'ghost-verifier', capabilities: ['research'], requiredTools: [] })
     const rt = runtime()
     const before = rt.listCapabilities()
-    const unknownVerifier = await rt.applyCapabilityRow('research', { skills: [ROW_SKILL] }).catch(
-      (error: unknown) => (error instanceof Error ? error.message : String(error)),
-    )
+    const unknownVerifier = await rt
+      .applyCapabilityRow('research', { skills: [ROW_SKILL] })
+      .catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
     expect(unknownVerifier).toContain('verifier-unknown')
     expect(unknownVerifier).toContain('ghost-verifier')
     expect(rt.listCapabilities()).toEqual(before)
 
     // The same row with a registered verifier but tools the row does not grant.
     await installExecutionSkill({ verifierRef: 'command', capabilities: ['research'], requiredTools: ['bash'] })
-    const uncoveredTools = await rt.applyCapabilityRow('research', { skills: [ROW_SKILL], tools: ['filesystem'] }).catch(
-      (error: unknown) => (error instanceof Error ? error.message : String(error)),
-    )
+    const uncoveredTools = await rt
+      .applyCapabilityRow('research', { skills: [ROW_SKILL], tools: ['filesystem'] })
+      .catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
     expect(uncoveredTools).toContain('tool-not-covered')
     expect(rt.listCapabilities()).toEqual(before)
 
@@ -260,14 +272,21 @@ describe('tool labels', () => {
     expect(() => resolveCapabilities(['typo'], { typo: { tools: ['filesytem'] } })).toThrow(
       /capability "typo" declares unknown tool label "filesytem"; known labels: /,
     )
-    expect(() => resolveCapabilities(['typo'], { typo: { tools: ['filesytem'] } })).toThrow(/ask-user, bash, filesystem/)
-    expect(() => resolveCapabilities(['typo'], { typo: { tools: ['filesytem'] } })).toThrow(/skill, subagent, todo, web/)
+    expect(() => resolveCapabilities(['typo'], { typo: { tools: ['filesytem'] } })).toThrow(
+      /ask-user, bash, filesystem/,
+    )
+    expect(() => resolveCapabilities(['typo'], { typo: { tools: ['filesytem'] } })).toThrow(
+      /skill, subagent, todo, web/,
+    )
   })
 
   test('every shipped label resolves to a non-empty name list', () => {
     for (const [label, names] of Object.entries(TOOL_LABELS)) {
       expect(names.length, label).toBeGreaterThan(0)
-      expect(names.every(name => name.length > 0), label).toBe(true)
+      expect(
+        names.every(name => name.length > 0),
+        label,
+      ).toBe(true)
     }
     // `run_code` is reserved by the tools registry: naming it in a filter throws.
     expect(Object.values(TOOL_LABELS).flat()).not.toContain('run_code')
@@ -276,18 +295,33 @@ describe('tool labels', () => {
   test('the worker baseline is the expanded labels plus the task machinery, and nothing else', () => {
     const baseline = workerBaseline()
     expect(baseline).toEqual([
-      'read', 'write', 'edit',
+      'read',
+      'write',
+      'edit',
       'bash',
-      'job_output', 'job_list', 'job_kill',
-      'glob', 'grep',
+      'job_output',
+      'job_list',
+      'job_kill',
+      'glob',
+      'grep',
       'skill',
       'ask_user_question',
-      'task_read', 'task_status', 'context_read', 'task_decompose', 'task_submit_result', 'task_cancel', 'task_verify', 'capability_list',
-      'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
+      'task_read',
+      'task_status',
+      'context_read',
+      'task_decompose',
+      'task_submit_result',
+      'task_cancel',
+      'task_verify',
+      'capability_list',
+      'task_proposal_read',
+      'task_proposal_continue',
+      'task_proposal_cancel',
       // A4 §F.1: the two halves of the parent/child question protocol — the one
       // coordination a blocked run still needs, and the answer its own child may
       // need from it.
-      'task_ask_parent', 'task_answer',
+      'task_ask_parent',
+      'task_answer',
     ])
     expect(baseline).toEqual([...new Set(baseline)])
     // The task machinery is the tail, in the order WORKER_BASELINE_TOOLS declares.
@@ -304,12 +338,22 @@ describe('tool labels', () => {
     // The T2/T3 proposal tools are task-domain coordination, not platform
     // management: a worker can read, continue and withdraw what it proposed, and
     // holds no tool that could decide a proposal or reach the platform surface.
-    expect(WORKER_BASELINE_TOOLS).toEqual(expect.arrayContaining(['task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel']))
+    expect(WORKER_BASELINE_TOOLS).toEqual(
+      expect.arrayContaining(['task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel']),
+    )
     // The question tools are task-domain coordination of the same kind: a worker
     // asks its direct parent and answers a child it was asked by, and nothing
     // about them reaches the platform surface.
     expect(WORKER_BASELINE_TOOLS).toEqual(expect.arrayContaining(['task_ask_parent', 'task_answer']))
-    for (const platformTool of ['hitl_ask', 'hitl_approve', 'evolution_decide', 'task_review_pack', 'task_diagnose', 'escalate', 'graph_spawn']) {
+    for (const platformTool of [
+      'hitl_ask',
+      'hitl_approve',
+      'evolution_decide',
+      'task_review_pack',
+      'task_diagnose',
+      'escalate',
+      'graph_spawn',
+    ]) {
       expect(baseline, platformTool).not.toContain(platformTool)
     }
   })
@@ -339,7 +383,10 @@ describe('manifest flattening', () => {
       build: { preset: 'cordis', tools: ['bash'] },
       verify: { preset: 'cordis', skills: ['verify'] },
     }
-    for (const required of [['build', 'verify'], ['verify', 'build']]) {
+    for (const required of [
+      ['build', 'verify'],
+      ['verify', 'build'],
+    ]) {
       const manifest = resolveCapabilities(required, registry)
       expect(resolvePreset(manifest, 'standard')).toBe('cordis')
       expect(capabilitySnapshot(manifest)).toEqual(['bash', 'verify'])
@@ -348,7 +395,10 @@ describe('manifest flattening', () => {
 
   test('conflicting presets are rejected during resolution in either requirement order', () => {
     const registry = { research: { preset: 'standard' }, verify: { preset: 'cordis' } }
-    for (const required of [['research', 'verify'], ['verify', 'research']]) {
+    for (const required of [
+      ['research', 'verify'],
+      ['verify', 'research'],
+    ]) {
       expect(() => resolveCapabilities(required, registry)).toThrow(
         'conflicting capability presets: research -> standard, verify -> cordis; one worker requires one preset',
       )
@@ -356,14 +406,19 @@ describe('manifest flattening', () => {
   })
 
   test('a directly supplied manifest cannot hide a conflict behind the default preset', () => {
-    expect(() => resolvePreset({
-      capabilities: {
-        research: { skills: [], tools: [], preset: 'standard' },
-        verify: { skills: [], tools: [], preset: 'cordis' },
-      },
-      missing: [],
-      closure: 'closed',
-    }, 'standard')).toThrow(/conflicting capability presets/)
+    expect(() =>
+      resolvePreset(
+        {
+          capabilities: {
+            research: { skills: [], tools: [], preset: 'standard' },
+            verify: { skills: [], tools: [], preset: 'cordis' },
+          },
+          missing: [],
+          closure: 'closed',
+        },
+        'standard',
+      ),
+    ).toThrow(/conflicting capability presets/)
   })
 })
 
@@ -404,7 +459,9 @@ describe('resolvePermission', () => {
       tight: { permission: 'read-only' },
     }
     expect(resolvePermission(resolveCapabilities(['loose', 'mid'], registry), permissionSpecs)).toBe('workspace-write')
-    expect(resolvePermission(resolveCapabilities(['loose', 'mid', 'tight'], registry), permissionSpecs)).toBe('read-only')
+    expect(resolvePermission(resolveCapabilities(['loose', 'mid', 'tight'], registry), permissionSpecs)).toBe(
+      'read-only',
+    )
     expect(resolvePermission(resolveCapabilities(['tight', 'loose'], registry), permissionSpecs)).toBe('read-only')
   })
 
@@ -413,7 +470,9 @@ describe('resolvePermission', () => {
       loose: { permission: 'danger-full-access' },
       asking: { permission: 'unconfined-ask' },
     }
-    expect(resolvePermission(resolveCapabilities(['loose', 'asking'], registry), permissionSpecs)).toBe('unconfined-ask')
+    expect(resolvePermission(resolveCapabilities(['loose', 'asking'], registry), permissionSpecs)).toBe(
+      'unconfined-ask',
+    )
   })
 
   test('an unknown preset name fails loud instead of being skipped', () => {

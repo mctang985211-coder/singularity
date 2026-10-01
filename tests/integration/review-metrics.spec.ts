@@ -7,7 +7,7 @@ import { tokenUsageProjectionDefinition } from '../../../../thirdparty/deepseek-
 import type { EvidenceBundle, ReviewRecord, VerificationResult } from '../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import { pinSkillHome, releaseSkillHomes } from '../../task-runtime/tests/support/skill-roots.ts'
-import type { RootContractSpec } from '../../task-runtime/src/index.ts'
+import type { CapabilityConfig, Config, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
 
@@ -32,6 +32,14 @@ import { personRequest } from '../../task-runtime/tests/support/person-request.t
 const ROOT_SESSION = 's-root'
 const STORE = rootTaskStoreId(ROOT_SESSION)
 
+/**
+ * The row this fixture's own deployment declares: the runtime ships no
+ * capability table, so a child requiring `design-ball` needs it here.
+ */
+const CAPABILITIES: Readonly<Record<string, CapabilityConfig>> = {
+  'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'] },
+}
+
 afterEach(releaseSkillHomes)
 
 /** The worker's log: the shape a real session writes, including one tool failure and one approval. */
@@ -42,7 +50,7 @@ const WORKER_LOG = [
   { type: 'tool/call', data: { turn: 1, step: 1, callId: 'c4', name: 'web_search', arguments: '{}' } },
   { type: 'tool/call', data: { turn: 1, step: 1, callId: 'c9', name: 'hitl_approve', arguments: '{}' } },
   { type: 'approval/asked', data: { id: 'a1', toolName: 'hitl_approve', callId: 'c9' } },
-  { type: 'tool/result', data: { turn: 1, step: 1, message: { content: [{ isError: true }] } } },
+  { type: 'tool/result', data: { turn: 1, step: 1, message: { isError: true } } },
   { type: 'compaction/start', data: {} },
   // The provider usage the token projection folds; one call's buckets.
   { type: 'assistant/message', data: { turn: 1, step: 1, message: {}, usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 50, cacheWriteTokens: 3 } } },
@@ -167,7 +175,7 @@ function harness() {
     },
   } as never)
 
-  const runtime = new TaskRuntime(ctx)
+  const runtime = new TaskRuntime(ctx, { capabilities: CAPABILITIES } as Config)
   return { ctx, task, runtime, log, spawned, readSession, snapshot, foldTokenUsage: () => foldTokenUsage(workerSessionEvents) }
 }
 

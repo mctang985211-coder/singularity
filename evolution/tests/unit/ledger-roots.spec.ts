@@ -90,15 +90,20 @@ describe('EvolutionService against the accumulated v1 ledger', () => {
 
     // A write appends nothing either: the loaded ledger rejects before the
     // write queue is ever reached, so the v1 bytes stay exactly as archived.
-    await expect(svc.propose({
-      proposalId: 'new-1',
-      targetType: 'skill',
-      targetId: 'verify',
-      baseVersion: 'v1',
-      level: 'L2',
-      rationale: 'must not land',
-      sourceRefs: ['diagnosis:d1'],
-    }, 'root-1')).rejects.toThrow(/formatVersion 1/)
+    await expect(
+      svc.propose(
+        {
+          proposalId: 'new-1',
+          targetType: 'skill',
+          targetId: 'verify',
+          baseVersion: 'v1',
+          level: 'L2',
+          rationale: 'must not land',
+          sourceRefs: ['diagnosis:d1'],
+        },
+        'root-1',
+      ),
+    ).rejects.toThrow(/formatVersion 1/)
     expect(await readFile(file, 'utf8')).toBe(text)
 
     // Nothing beside the ledger was created either — no sandbox, no archive.

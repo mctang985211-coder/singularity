@@ -19,13 +19,14 @@
  *    Session, the same key answers with the same Run, and the attempt is still
  *    drivable: driven here, it finishes and the **original** criteria accept it.
  * 2. **A new Run created before its Session was written** — the new process
- *    cannot resume a Session the log never held, and settles that Run by name.
- *    The same key still answers with the same Run and the budget stays spent.
+ *    cannot resume a Session the log never held: the activation refuses loudly
+ *    by name (G §5.25) and settles nothing. The same key still answers with the
+ *    same Run and the budget stays spent.
  * 3. **A batch admitted, its member's worker never started** — the batch and its
- *    member's Run are durable and the child's spawn never happened. The new
- *    process drives the batch to its end and settles the member by name (its
- *    Session never existed, so no worker can be invented for it): one Run per
- *    position, one batch, no second attempt.
+ *    member's Run are durable and the child's spawn never happened, so the
+ *    member's Session is published by no graph. The activation refuses loudly by
+ *    name and leaves the member's Run exactly as the dead image wrote it: one Run
+ *    per position, one batch, no second attempt.
  * 4. **The attempt submitted, its verdict not written** — the submission is
  *    durable and the process died inside the verification. The new process's
  *    store pass completes the original AC's independent verification once, on the
@@ -52,8 +53,12 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { countReviewAgentRuns, readSupervisorDelegation, reviewAgentLedgerFile } from '../../agent-singularity/src/review-agent-ledger.ts'
-import { consumePendingHandoffs, startSupervisorHandoff } from '../../agent-singularity/src/evolution-handoff.ts'
+import {
+  countReviewAgentRuns,
+  readSupervisorDelegation,
+  reviewAgentLedgerFile,
+} from '../../agent-singularity/src/coordination/ledger.ts'
+import { consumePendingHandoffs, startSupervisorHandoff } from '../../agent-singularity/src/coordination/evolution-handoff.ts'
 import { defineRootBudgetApproval } from '../../agent-singularity/src/tools/budget-extend.ts'
 import { rootTaskStoreId } from '../../task/src/index.ts'
 import type { Diagnosis, TaskRun, TaskSnapshot } from '../../task/src/index.ts'
@@ -349,9 +354,8 @@ async function driveChild(directory: string, boundary: Boundary | typeof HANDOFF
   attempt = await attemptAppears(stack)
   // The attempt's Session, given the durable existence the deployment's own loop
   // gives it on the first request of its turn: this fixture's stub loop never
-  // appends an event, and the instant before that write is the sibling boundary
-  // below (the Run is durable and nothing of its Session is).
-  if (boundary === 'attempt-created') {
+  // appends an event, and the instant before that write is the unwritten boundary.
+  if (boundary === 'attempt-created' || boundary === 'root-settlement') {
     await stack.seedLog(String(attempt.sessionId), ['the attempt is starting'], { parentSession: String(ROOT) })
   }
 
@@ -416,7 +420,7 @@ async function driveChild(directory: string, boundary: Boundary | typeof HANDOFF
 }
 
 describe.skipIf(BOUNDARY !== undefined)('A6 EVO-4 (real death): a killed recovery attempt, and the new process that reads it', () => {
-  it.each(BOUNDARIES)('leaves the %s window\'s own facts, and the new process finishes the attempt without a second Run', async boundary => {
+  it.each(BOUNDARIES)('leaves the %s window\'s own facts, and the new process reconciles them without a second Run', async boundary => {
     const directory = await sharedDirectory()
     const child = spawnSelfChild({
       specPath: SPEC_PATH,
@@ -441,8 +445,11 @@ describe.skipIf(BOUNDARY !== undefined)('A6 EVO-4 (real death): a killed recover
       rootBudget: { maxRuns: marker.runs },
       worker: attemptWorker(() => stack),
     })
-    const adopted = await stack.runtime.adoptRoot(STORE, ROOT)
-    expect(adopted).toMatchObject({ adopted: true })
+    // ── the new process's own entry, and the refusal each window answers ─────
+    const entry = await stack.runtime.adoptRoot(STORE, ROOT).then(
+      adopted => ({ adopted }),
+      (error: unknown) => ({ failure: String(error) }),
+    )
 
     // ── the same attempt, never a second one ──────────────────────────────────
     const snapshot = await stack.snapshot(STORE)
@@ -454,24 +461,45 @@ describe.skipIf(BOUNDARY !== undefined)('A6 EVO-4 (real death): a killed recover
     expect(marker.providerRevision).toBeDefined()
     expect(attempt.providerBinding?.registryRevision).toBe(marker.providerRevision)
     expect(snapshot.runs.filter(run => run.taskId === attempt.taskId && run.recovery !== undefined)).toHaveLength(1)
-    const answered = await stack.runtime.recoverRootTask(STORE, recoveryRequest({ taskId: attempt.taskId, runId: marker.sourceRunId! }), { sessionId: String(ROOT) })
-    expect(answered.attempt).toBe('existing')
-    expect(answered.runId).toBe(attempt.runId)
-    expect((await stack.snapshot(STORE)).runs).toHaveLength(snapshot.runs.length)
+    expect(snapshot.runs).toHaveLength(marker.runs)
 
     // ── the ceiling is the dead image's own count, read by a real admission ───
-    const ceiling = resolveRootBudget(await stack.snapshot(STORE), { maxRuns: marker.runs })
+    const ceiling = resolveRootBudget(snapshot, { maxRuns: marker.runs })
     if (!ceiling.ok) throw new Error(ceiling.reason)
-    // The champion the probe replays is the first attempt's failed member: a
-    // terminal task whose replay is a *new run of this store*, which is what the
-    // ceiling refuses.
-    const champion = (await stack.snapshot(STORE)).tasks.find(task => task.parentTaskId !== undefined && task.status === 'failed')!.taskId
-    const refused = await stack.runtime
-      .replayTask(STORE, champion, { lineage: 'a6-ceiling-probe', spawn: false } as never, String(ROOT))
-      .then(() => '', error => String(error))
-    expect(refused).toContain(`allows ${marker.runs} run(s)`)
-    expect(refused).toContain(`already holds ${marker.runs}`)
-    expect(checkRunStart(await stack.snapshot(STORE), ceiling).allowed).toBe(false)
+    // Two windows leave a Session the record itself cannot bring back — the log
+    // the attempt's Run was created before, and the frozen member's unpublished
+    // one — and G §5.25 fails those activations loudly by name.
+    if (boundary === 'attempt-created-unwritten' || boundary === 'batch-admitted') {
+      const refusedSession =
+        boundary === 'attempt-created-unwritten'
+          ? String(attempt.sessionId)
+          : String(snapshot.runs.find(run => run.runId === marker.replacementRunId)!.sessionId)
+      expect('failure' in entry).toBe(true)
+      const failure = 'failure' in entry ? entry.failure : ''
+      expect(failure).toContain(`session "${refusedSession}"`)
+      expect(failure).not.toContain('cannot take over workspace')
+      expect(checkRunStart(snapshot, ceiling).allowed).toBe(false)
+    } else {
+      expect('adopted' in entry).toBe(true)
+      const answered = await stack.runtime.recoverRootTask(
+        STORE,
+        recoveryRequest({ taskId: attempt.taskId, runId: marker.sourceRunId! }),
+        { sessionId: String(ROOT) },
+      )
+      expect(answered.attempt).toBe('existing')
+      expect(answered.runId).toBe(attempt.runId)
+      expect((await stack.snapshot(STORE)).runs).toHaveLength(snapshot.runs.length)
+      // The champion the probe replays is the first attempt's failed member: a
+      // terminal task whose replay is a *new run of this store*, which is what the
+      // ceiling refuses.
+      const champion = snapshot.tasks.find(task => task.parentTaskId !== undefined && task.status === 'failed')!.taskId
+      const refused = await stack.runtime
+        .replayTask(STORE, champion, { lineage: 'a6-ceiling-probe', spawn: false } as never, String(ROOT))
+        .then(() => '', error => String(error))
+      expect(refused).toContain(`allows ${marker.runs} run(s)`)
+      expect(refused).toContain(`already holds ${marker.runs}`)
+      expect(checkRunStart(await stack.snapshot(STORE), ceiling).allowed).toBe(false)
+    }
 
     // ── the window's own settlement ───────────────────────────────────────────
     if (boundary === 'attempt-created') {
@@ -501,47 +529,38 @@ describe.skipIf(BOUNDARY !== undefined)('A6 EVO-4 (real death): a killed recover
       expect((await stack.snapshot(STORE)).tasks.find(task => task.taskId === attempt.taskId)?.status).toBe('verified')
     }
     if (boundary === 'attempt-created-unwritten') {
-      // Nothing of the attempt's Session was ever written: the new process refuses
-      // to invent a worker for it (`session ... not found`) and settles that Run
-      // **by name** — no second Run, no batch, and the same key answers the Run it
-      // already named. The old image's count is what the ceiling reads, so a fresh
-      // key cannot start the attempt again.
-      const settledRun = await vi.waitFor(async () => {
-        const current = (await stack.snapshot(STORE)).runs.find(run => run.runId === attempt.runId)!
-        expect(current.status).not.toBe('running')
-        return current
-      }, { timeout: 30_000, interval: 25 })
-      expect(settledRun.status).toBe('failed')
-      expect(settledRun.batchId).toBeUndefined()
+      // Nothing of the attempt's Session was ever written, so the activation
+      // refuses by name (G §5.25) and settles no Run in its place: the attempt is
+      // still the running Run the dead image left, with no review, no batch and
+      // no worker. The explicit retry re-reads the same facts.
+      const after = await stack.snapshot(STORE)
+      const left = after.runs.find(run => run.runId === attempt.runId)!
+      expect(left.status).toBe('running')
+      expect(left.batchId).toBeUndefined()
+      expect(after.reviews.filter(review => review.runId === attempt.runId)).toEqual([])
       expect(stack.agent(marker.attemptSessionId!)).toBeUndefined()
-      const review = (await stack.snapshot(STORE)).reviews.find(item => item.runId === attempt.runId)!
-      expect(review.outcome).toBe('failed')
-      expect(review.localizedCause).toContain('could not be brought back under its own identity')
-      expect(review.localizedCause).toContain('not found')
-      const fresh = await stack.runtime.recoverRootTask(STORE, {
-        ...recoveryRequest({ taskId: attempt.taskId, runId: marker.sourceRunId! }),
-        requestKey: 'k-after-the-death',
-      }, { sessionId: String(ROOT) }).then(() => '', error => String(error))
-      expect(fresh).toContain(`allows ${marker.runs} run(s)`)
-      expect(fresh).toContain(`already holds ${marker.runs}`)
+      const retried = await stack.runtime.adoptRoot(STORE, ROOT).then(() => '', (error: unknown) => String(error))
+      expect(retried).toContain(`session "${String(attempt.sessionId)}"`)
+      expect(retried).toContain('could not be read, so it cannot be taken over safely')
       expect((await stack.snapshot(STORE)).runs).toHaveLength(marker.runs)
     }
     if (boundary === 'batch-admitted') {
-      // The batch is driven to its end by this process: the member's Session never
-      // existed, so no worker can be invented for it and it is settled by name —
-      // one Run per position, no second batch.
-      const outcomes = await stack.runtime.awaitBatch(STORE, String(attempt.batchId))
-      expect(outcomes).toHaveLength(1)
-      expect(outcomes[0]!.runId).toBe(marker.replacementRunId)
-      expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])
+      // The member's Session was never published by the graph — its spawn was the
+      // window — so the activation refuses by name before any driver could touch
+      // the batch: one Run per position, no second batch, and the member's Run is
+      // left exactly as the dead image wrote it.
+      const failed = 'failure' in entry ? entry.failure : ''
+      expect(failed).toContain('is not in a graph')
       const after = await stack.snapshot(STORE)
       const member = after.runs.find(run => run.runId === marker.replacementRunId)!
-      expect(member.status).toBe('cancelled')
-      const review = after.reviews.find(item => item.runId === member.runId)!
-      expect(review.outcome).toBe('cancelled')
-      expect(review.anomalies.join('\n')).toContain('was in flight when this store was reopened and never submitted')
+      expect(member.status).toBe('running')
+      expect(member.batchId).toBeUndefined()
+      expect(after.reviews.filter(review => review.runId === member.runId)).toEqual([])
       expect(after.runs).toHaveLength(marker.runs)
       expect(after.runs.filter(run => run.taskId === member.taskId)).toHaveLength(1)
+      const retried = await stack.runtime.adoptRoot(STORE, ROOT).then(() => '', (error: unknown) => String(error))
+      expect(retried).toContain(`session "${String(member.sessionId)}"`)
+      expect(retried).toContain('is not in a graph')
     }
     if (boundary === 'root-settlement') {
       // The submission the dead process made is the durable fact this process reads,

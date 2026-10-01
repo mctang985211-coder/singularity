@@ -1,9 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@dangosys/dsh-singularity-context'
-import { adaptRead, callerSessionId } from './projected-read.ts'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
+import { adaptRead, sessionId, text } from '../shared.ts'
 
 export function defineTaskStatusTool(ctx: Context) {
   return defineTool({
@@ -26,7 +24,7 @@ export function defineTaskStatusTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = callerSessionId(exec, 'task_status')
+      const caller = sessionId(exec, 'task_status')
       return adaptRead(
         'task_status',
         await ctx.singularityContext.taskStatus(caller, {

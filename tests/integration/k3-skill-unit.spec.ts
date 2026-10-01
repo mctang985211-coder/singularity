@@ -188,6 +188,7 @@ async function boot(options: {
     roots: [...roots],
     capabilities: { ...(options.capabilities ?? TABLE) },
     tools: true,
+    evolution: true,
     ...(options.quiet === true ? {} : { worker: (sessionId: SessionId, agent: Agent) => unitWorker(h, sessionId, agent) }),
   })
   const svc = new EvolutionService(h.ctx, {

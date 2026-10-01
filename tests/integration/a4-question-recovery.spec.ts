@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
-import { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
+import { SessionId, SESSION_FORMAT_VERSION } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import JsonlSessionPersistence from '../../../../thirdparty/deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
 import SessionQueryEngine from '../../../../thirdparty/deepseek-harness/packages/session-query/session-query/lib/index.js'
 import {
@@ -323,13 +323,13 @@ class Boot {
    * Give one live Session its first input, the way a spawn's kickoff does. A
    * created Session has no turn of its own until something is addressed to it,
    * and this fixture's scripted model answers per request — so the request has to
-   * be made, and it is made the way the deployment makes it (a plugin-sourced
-   * message, never a person's).
+   * be made, and it is made the way the deployment makes it (the runtime's own
+   * notice, never a person's).
    */
   begin(agent: Agent, text: string): void {
     agent.followup(createUserMessage({
       content: [{ type: 'text' as const, text }],
-      source: { kind: 'plugin', plugin: 'fixture', form: 'notice', summary: boundContextSummary(text) },
+      source: { kind: 'task-runtime', form: 'notice', summary: boundContextSummary(text) },
     }))
   }
 
@@ -344,7 +344,7 @@ class Boot {
 
   /** The durable artifact one Session owns: the bytes a second boot would read. */
   artifact(sessionId: string): string {
-    const suffix = join(sessionId, 'session.v3.jsonl')
+    const suffix = join(sessionId, `session.v${SESSION_FORMAT_VERSION}.jsonl`)
     const found = readdirSync(this.dir, { recursive: true })
       .map(entry => join(this.dir, String(entry)))
       .find(path => path.endsWith(suffix))
@@ -755,7 +755,7 @@ describe('A4 recovery from the real session log', () => {
     await b.dispose()
   })
 
-  it('settles an in-flight run without a question cancelled, exactly as it did before (the counter-example)', async () => {
+  it('continues an in-flight run without a question, the counter-example to the cancelled branch', async () => {
     const dir = workspace()
     const a = await Boot.open(dir, () => [{ text: 'nothing to do' }])
     await seedParentChild(a)
@@ -765,15 +765,28 @@ describe('A4 recovery from the real session log', () => {
     const b = await Boot.open(dir, () => [{ text: 'recovered' }], { graph: a.commits() })
     await b.create(ROOT)
     await b.runtime.adoptRoot(STORE, ROOT)
+    // G §5.25 (CONT-1): a Run with no question is continued like any other
+    // in-flight worker — the same Run and Session come back, and nothing settles
+    // it on recovery's initiative.
     const after = await b.snapshot()
     const childRun = after.runs.find(run => run.runId === 'r-child')
-    expect(childRun?.status).toBe('cancelled')
-    const review = after.reviews.find(item => item.runId === 'r-child')
-    expect(review?.outcome).toBe('cancelled')
-    expect(review?.anomalies.join(' ')).toContain('was in flight when this store was reopened')
+    expect(childRun?.status).toBe('running')
+    expect(childRun?.executionPhase).toBe('active')
+    expect(after.tasks.find(task => task.taskId === 't-child')?.status).toBe('running')
+    expect(after.reviews.some(review => review.runId === 'r-child')).toBe(false)
     expect(b.runtime.gate.questionsBlocked(CHILD)).toBe(false)
-    expect(b.runtime.gate.phaseOf(CHILD)).toBe('terminal')
-    // A late answer to the question nobody asked cannot revive it.
+    expect(b.runtime.gate.phaseOf(CHILD)).toBe('active')
+    // The resumed Session is woken with the continuation notice: the worker is
+    // reachable again and its next request carries the fact.
+    await vi.waitFor(() =>
+      expect(
+        b.adapter.requestsOf(CHILD).some(request =>
+          request.texts.some(text => text.includes('continue this same Run from the persisted conversation')),
+        ),
+      ).toBe(true),
+    )
+    // A late answer to the question nobody asked cannot revive anything: no
+    // such question exists on the record.
     await expect(b.task.answerParentQuestionIn(STORE, {
       questionId: 'q-none',
       parentRunId: 'r-root',
@@ -783,7 +796,7 @@ describe('A4 recovery from the real session log', () => {
       answerRef: { sessionId: ROOT, seq: 0 },
       messageId: 'm-q-none',
     }, ACTOR)).rejects.toThrow(/unknown question/)
-    expect((await b.snapshot()).runs.find(run => run.runId === 'r-child')?.status).toBe('cancelled')
+    expect((await b.snapshot()).runs.find(run => run.runId === 'r-child')?.status).toBe('running')
     await b.dispose()
   })
 

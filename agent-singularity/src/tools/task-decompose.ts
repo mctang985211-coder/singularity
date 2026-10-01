@@ -1,16 +1,10 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { DecomposeSpec, ProposalContinuation, ProposalSubmission } from '@dangosys/dsh-singularity-task-runtime'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): string {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('task_decompose: missing agent id')
-  return id
-}
+import { message, sessionId, text } from '../shared.ts'
+import { criterionSchema } from './criteria-schema.ts'
+import { pendingReviewText, proposalSubmissionParameters } from './proposal-shared.ts'
 
 export function defineTaskDecomposeTool(ctx: Context) {
   return defineTool({
@@ -24,27 +18,11 @@ export function defineTaskDecomposeTool(ctx: Context) {
       'come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.',
     parameters: {
       reason: { type: 'string', required: true, description: 'Why this delegation is needed; recorded in each child handoff' },
-      contractVersion: {
-        type: 'integer',
-        description:
-          'Contract version this batch is written under. The runtime stores version 1 and refuses a declared version it does not know, ' +
-          'so callers normally omit this field and let the runtime write the current version',
-      },
-      requestKey: {
-        type: 'string',
-        description:
-          'The stable key this request is addressed by, when the caller has an identifier of its own (a message id, a plan row; the runtime ' +
-          'derives one from the calling context and the batch content when this is omitted). One key names at most one proposal: repeating a ' +
-          'request with the same key is answered with the proposal already stored, while the same key with different content is refused. A ' +
-          'revision is different content, so it needs a new key',
-      },
-      supersedes: {
-        type: 'string',
-        description:
-          'The proposal id this batch revises — a rejected or stale one, whose record is kept. Naming it is what lets a reader follow the ' +
-          'history; it does not transfer anything from that proposal (an approval never travels to new content) and it does not replace the ' +
-          'new request key this submission needs',
-      },
+      ...proposalSubmissionParameters({
+        versionSubject: 'batch',
+        revisionSubject: 'batch',
+        derivation: 'the calling context and the batch content',
+      }),
       children: {
         type: 'array',
         required: true,
@@ -58,70 +36,27 @@ export function defineTaskDecomposeTool(ctx: Context) {
               type: 'array',
               required: true,
               description: 'How a verifier decides the child is done',
-              items: {
-                type: 'object',
-                additionalProperties: false,
-                properties: {
-                  description: { type: 'string', required: true, description: 'What must hold true' },
-                  criterionId: {
-                    type: 'string',
-                    description:
-                      'Stable id for this criterion: fixed at admission, and the only id a parent-level childEvidence.criterionId can rely on. ' +
-                      'Omitted, the runtime generates one from the batch position; declared ids must be unique inside a child. ' +
-                      'A parent-level childEvidence.criterionId must name an id the child it points to actually declared, ' +
-                      'which only holds when that child declares the id explicitly here',
-                  },
-                  command: { type: 'string', description: 'Shell command; exit code 0 proves the criterion (deterministic modes). Reuse an authoritative checker that already covers this result; do not duplicate its assertions' },
-                  mode: {
-                    type: 'string',
-                    enum: ['deterministic', 'simulation', 'formal', 'measurement', 'review', 'composite'],
-                    description: 'Verifier kind; defaults to deterministic when a command is given, review otherwise',
-                  },
-                  mandatory: { type: 'boolean', description: 'Whether the criterion must pass; default true' },
-                  requiredEvidence: { type: 'array', items: { type: 'string' }, description: 'Evidence kinds the verifier must attach' },
-                  requiresArtifact: {
-                    type: 'array',
-                    items: { type: 'string' },
-                    description: 'Artifact/evidence kinds or ids that must already exist in the task store as a verified reference product (a verified run carrying a passing verdict) for this criterion to be judgeable; a missing one blocks the child before spawn and registers an obligation',
-                  },
-                  acceptsArtifact: {
-                    type: 'array',
-                    items: { type: 'string' },
-                    description: 'Artifact/evidence kinds or ids this criterion consumes as a raw input: existence in the task store is the whole requirement, any run state. Missing blocks the child before spawn and registers an obligation',
-                  },
-                  verifierRef: {
-                    type: 'string',
-                    description: 'Registered verifier id that judges this criterion; must exist in the verifier registry — an unknown id rejects the whole batch at admission and the error lists the registered ids. Omit to dispatch by mode.',
-                  },
-                  childEvidence: {
-                    type: 'array',
-                    description: 'Parent-level evidence map (composite mode only): which member of this run — by 0-based position in the run\'s accumulated members, every batch it admits in admission order — this criterion rests on, optionally narrowed to a child criterion and an evidence reference. Judged at parent-acceptance time; an incomplete mapping fails the parent naming the missing items',
-                    items: {
-                      type: 'object',
-                      additionalProperties: false,
-                      properties: {
-                        childIndex: { type: 'integer', required: true, description: '0-based position of the member in the run\'s accumulated members: the batches this run admits, concatenated in admission order, so a later batch appends and never moves an earlier member' },
-                        criterionId: { type: 'string', description: 'The child criterion whose passing verdict is required' },
-                        evidenceRef: { type: 'string', description: 'The evidence id, artifact kind, or artifact id that must exist in the child\'s verified run evidence' },
-                      },
-                    },
-                  },
-                  heuristic: {
-                    type: 'boolean',
-                    description: 'Label this criterion a heuristic judgement: the verdict is marked as such and never counted as a deterministic pass. Mutually exclusive with childEvidence',
-                  },
-                  protectedInputs: {
-                    type: 'array',
-                    items: { type: 'string' },
-                    description:
-                      'Paths of acceptance inputs this criterion depends on that must not be modified by the executing side: acceptance scripts, threshold files, fixtures. ' +
-                      'Declare them as paths relative to the task\'s checkout (an absolute path stays absolute). Admission resolves each one against the session\'s checkout and fixes the SHA-256 of its bytes ' +
-                      'before the contract is written — a path that cannot be read refuses the whole batch, and no protected input is ever stored as a bare path. ' +
-                      'The verifier then re-reads every declared input before judging and fails the criterion, naming the path, if it is missing or its bytes changed. ' +
-                      'Only declared paths are protected: a criterion that lists none is not protected and nothing is checked or claimed for it.',
-                  },
-                },
-              },
+              items: criterionSchema({
+                description: 'What must hold true',
+                criterionId:
+                  'Stable id for this criterion: fixed at admission, and the only id a parent-level childEvidence.criterionId can rely on. ' +
+                  'Omitted, the runtime generates one from the batch position; declared ids must be unique inside a child. ' +
+                  'A parent-level childEvidence.criterionId must name an id the child it points to actually declared, ' +
+                  'which only holds when that child declares the id explicitly here',
+                command: 'Shell command; exit code 0 proves the criterion (deterministic modes). Reuse an authoritative checker that already covers this result; do not duplicate its assertions',
+                mode: 'Verifier kind; defaults to deterministic when a command is given, review otherwise',
+                requiresArtifact: 'Artifact/evidence kinds or ids that must already exist in the task store as a verified reference product (a verified run carrying a passing verdict) for this criterion to be judgeable; a missing one blocks the child before spawn and registers an obligation',
+                acceptsArtifact: 'Artifact/evidence kinds or ids this criterion consumes as a raw input: existence in the task store is the whole requirement, any run state. Missing blocks the child before spawn and registers an obligation',
+                verifierRef: 'Registered verifier id that judges this criterion; must exist in the verifier registry — an unknown id rejects the whole batch at admission and the error lists the registered ids. Omit to dispatch by mode.',
+                childEvidence: 'Parent-level evidence map (composite mode only): which member of this run — by 0-based position in the run\'s accumulated members, every batch it admits in admission order — this criterion rests on, optionally narrowed to a child criterion and an evidence reference. Judged at parent-acceptance time; an incomplete mapping fails the parent naming the missing items',
+                heuristic: 'Label this criterion a heuristic judgement: the verdict is marked as such and never counted as a deterministic pass. Mutually exclusive with childEvidence',
+                protectedInputs:
+                  'Paths of acceptance inputs this criterion depends on that must not be modified by the executing side: acceptance scripts, threshold files, fixtures. ' +
+                  'Declare them as paths relative to the task\'s checkout (an absolute path stays absolute). Admission resolves each one against the session\'s checkout and fixes the SHA-256 of its bytes ' +
+                  'before the contract is written — a path that cannot be read refuses the whole batch, and no protected input is ever stored as a bare path. ' +
+                  'The verifier then re-reads every declared input before judging and fails the criterion, naming the path, if it is missing or its bytes changed. ' +
+                  'Only declared paths are protected: a criterion that lists none is not protected and nothing is checked or claimed for it.',
+              }),
             },
             requiredCapabilities: {
               type: 'array',
@@ -155,27 +90,10 @@ export function defineTaskDecomposeTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'task_decompose')
       const { storeId, task, run } = await ctx.taskRuntime.runForSession(caller)
       // The two service entries the compat entry `decomposeAndRun` composes, in
       // the same order and with the same meanings (T2/T3 §6: 内部先提出提案，再按
-      // 策略推进). This tool composes them itself because the caller's own
-      // requestKey/supersedes have to reach the *submission*, and the service
-      // entry that does both takes no options. Every check stays in the runtime:
-      // nothing is normalized, judged or admitted here.
-      //
-      // The caller's whole spec goes to the runtime, which is the contract entry
-      // for it (T1 §4). The schema above validates the *declared surface* only:
-      // the types, the mode enum, and the closed child and criterion objects.
-      // Its parameter root is an implicitly open object, so a batch-level key
-      // this tool does not declare passes the schema and is refused by the
-      // runtime, by name — never dropped here, never accepted in silence. The
-      // cast is the seam where model arguments become the runtime's input; what
-      // makes it harmless is that nothing here reads the object first.
-      //
-      // The two keys this tool *does* declare are lifted out of the batch: they
-      // are options of the submission, not batch fields, and passing them along
-      // inside the spec would make the runtime refuse them by name.
       const { requestKey, supersedes, ...spec } = args
       const callId = typeof exec.callId === 'string' && exec.callId.length > 0 ? String(exec.callId) : undefined
       let submission: ProposalSubmission
@@ -194,32 +112,45 @@ export function defineTaskDecomposeTool(ctx: Context) {
               signal: exec.signal,
               // The registration id of this call, so the batch's first drain
               // does not wait for the call that is asking (A3 §3.3). A caller
-              // without one — a test double — drains without the exclusion.
               ...(callId === undefined ? {} : { callId }),
             },
           },
         )
         // The submission's own signal dies with it: a call that returns, or a
         // caller that aborts after the record exists, cannot stop a batch the
-        // store already holds (§3.7) — so only the call id rides along.
         continued = await ctx.taskRuntime.continueProposal(storeId, submission.proposalId, caller, {
           ...(callId === undefined ? {} : { exec: { callId } }),
         })
       } catch (error) {
-        return `task_decompose rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `task_decompose rejected: ${message(error)}`
       }
       if (continued.status === 'admitted') {
         return admittedText(task.taskId, continued.batchId, continued.childTaskIds)
       }
       if (continued.status === 'pending_review') {
-        return await pendingText(ctx, storeId, task.taskId, continued.proposalId, continued.detail)
+        return await pendingReviewText({
+          ctx,
+          storeId,
+          proposalId: continued.proposalId,
+          detail: continued.detail,
+          tool: 'task_decompose',
+          holding: `this batch, and ${task.taskId} has not been decomposed`,
+          lines: [
+            '- No child task exists, no worker was spawned, and this task is not decomposed: the batch is admitted only after the review',
+            '  decides and the runtime re-checks it against the limits, the capability resolution and the judging verifiers that were reviewed.',
+            `- Read the batch as it was recorded with \`task_proposal_read\` (${continued.proposalId}).`,
+            '- An approval needs nothing further from you: the decision is recorded on the proposal and the runtime continues the batch',
+            '  immediately, so you are notified when it settles.',
+            '- A refusal is a fact on the record: revise the batch against its reason (fix the cause, never weaken a criterion or drop a',
+            '  mandatory one) and call `task_decompose` again — a revision is new content, hence a new proposal, and you may name the',
+            '  refused one with `supersedes`.',
+            '- Do not re-submit the same content while it waits: the same request key is answered with this same proposal.',
+          ],
+        })
       }
       if (continued.status === 'activated') {
         // A root contract continued through this tool's service entry: no batch
         // was proposed, nothing was decomposed and no child exists, so the two
-        // arms above do not apply and neither does the refusal text below. The
-        // ids are reported as the runtime gave them — a caller that reads
-        // "activated" as "decomposed" would go looking for children.
         return [
           `task_decompose: proposal ${continued.proposalId} activated root task ${continued.taskId} with run ${continued.runId} instead of admitting a batch.`,
           `- ${continued.detail}`,
@@ -229,8 +160,6 @@ export function defineTaskDecomposeTool(ctx: Context) {
       }
       // Decided against between the submission and the continuation, or
       // invalidated by the re-check: the status the store holds, named, with the
-      // one way forward (a revision) — the same conclusion the compat entry
-      // raises, reported instead of thrown so the caller keeps the diagnosis.
       return [
         `task_decompose rejected: decomposition of "${task.taskId}" is ${continued.status} (proposal ${continued.proposalId}): ${continued.detail}${continued.reason === undefined ? '' : ` — ${continued.reason}`}`,
         'A rejected, cancelled, stale or expired batch never runs: revise it (a revision is new content, a new request key and a',
@@ -240,13 +169,7 @@ export function defineTaskDecomposeTool(ctx: Context) {
   })
 }
 
-/**
- * The batch is admitted, not finished (A3 §3.1): the call returns as soon as the
- * atomic commit landed, and the runtime drives the children from there. What the
- * caller may do next is not a matter of taste — the phase it is in decides it —
- * so the tool states the contract it is now under rather than leaving the model
- * to infer it from a status line.
- */
+/** The batch is admitted, not finished (A3 §3.1): the call returns as soon as the atomic commit landed, and the runtime drives the children from there. */
 function admittedText(taskId: string, batchId: string, childTaskIds: readonly string[]): string {
   return [
     `decomposed ${taskId} into ${childTaskIds.length} children (batch ${batchId}):`,
@@ -264,39 +187,3 @@ function admittedText(taskId: string, batchId: string, childTaskIds: readonly st
   ].join('\n')
 }
 
-/**
- * A batch waiting for a human review (T2/T3 §5–§6): the proposal holds the
- * whole batch, nothing was admitted, and the caller's next move is not another
- * submission — the same request answers with this same proposal. The policy is
- * read back from the proposal rather than assumed, because a proposal born under
- * `off` and sent to review by a tightened deployment keeps its birth policy on
- * the record; when the record cannot be read the text says so instead of
- * inventing one.
- */
-async function pendingText(
-  ctx: Context,
-  storeId: string,
-  taskId: string,
-  proposalId: string,
-  detail: string,
-): Promise<string> {
-  let policy = 'unknown — the proposal record could not be read back'
-  try {
-    policy = `${(await ctx.taskRuntime.proposalIn(storeId, proposalId)).policy}`
-  } catch {
-    // The batch is recorded and waiting either way; only this rendering is thin.
-  }
-  return [
-    `task_decompose is waiting for a review: proposal ${proposalId} (policy ${policy}) holds this batch, and ${taskId} has not been decomposed.`,
-    `- ${detail}`,
-    '- No child task exists, no worker was spawned, and this task is not decomposed: the batch is admitted only after the review',
-    '  decides and the runtime re-checks it against the limits, the capability resolution and the judging verifiers that were reviewed.',
-    `- Read the batch as it was recorded with \`task_proposal_read\` (${proposalId}).`,
-    '- An approval needs nothing further from you: the decision is recorded on the proposal and the runtime continues the batch',
-    '  immediately, so you are notified when it settles.',
-    '- A refusal is a fact on the record: revise the batch against its reason (fix the cause, never weaken a criterion or drop a',
-    '  mandatory one) and call `task_decompose` again — a revision is new content, hence a new proposal, and you may name the',
-    '  refused one with `supersedes`.',
-    '- Do not re-submit the same content while it waits: the same request key is answered with this same proposal.',
-  ].join('\n')
-}

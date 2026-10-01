@@ -57,9 +57,21 @@ import type { Config, GateAnswers, ProposeInput } from '../../src/evolution.ts'
 import { SKILL_SIDECAR_FILE } from '@dangosys/dsh-singularity-task-runtime'
 import { commitIntent, sha256Hex } from '../../src/commit.ts'
 import type { CommitHost, CommitRequest } from '../../src/commit.ts'
-import { buildExperimentReport, directoryDigest, experimentIdOf, experimentLineage, experimentReportPath } from '../../src/experiment.ts'
+import {
+  buildExperimentReport,
+  directoryDigest,
+  experimentIdOf,
+  experimentLineage,
+  experimentReportPath,
+} from '../../src/experiment/record.ts'
 import type { FrozenExperiment, FrozenProviderIdentity, FrozenSample, ModelSelection } from '../../src/replay.ts'
-import { digestOf, EXPERIMENT_COMPARER_VERSION, frozenDigestOf, modelSelectionOf, protectedInputsDigest } from '../../src/replay.ts'
+import {
+  digestOf,
+  EXPERIMENT_COMPARER_VERSION,
+  frozenDigestOf,
+  modelSelectionOf,
+  protectedInputsDigest,
+} from '../../src/replay.ts'
 
 /* ------------------------------------------------------------------------ *
  * The injected fs layer: an ordered op log and one deterministic failure.   *
@@ -108,7 +120,11 @@ vi.mock('node:fs/promises', async importOriginal => {
    * fails *after* part of the payload landed (a mid-write failure) rather than
    * before the call does anything.
    */
-  const ruleFor = (op: string, path: string, partial: boolean): { message: string; fired: boolean; afterBytes?: number } | undefined =>
+  const ruleFor = (
+    op: string,
+    path: string,
+    partial: boolean,
+  ): { message: string; fired: boolean; afterBytes?: number } | undefined =>
     fsLayer.fails.find(rule => rule.op === op && rule.path === path && (rule.afterBytes !== undefined) === partial)
   const maybeFail = (op: string, path: string): void => {
     const rule = ruleFor(op, path, false)
@@ -131,45 +147,54 @@ vi.mock('node:fs/promises', async importOriginal => {
    * (`writeFile`) is left alone, exactly as the real one is. A mid-write failure
    * rule lets that prefix really reach the file and then reports the failure.
    */
-  const wrap = (handle: FileHandle, path: string): FileHandle => new Proxy(handle, {
-    get(target, property) {
-      const value = Reflect.get(target, property, target) as unknown
-      if (typeof value !== 'function') return value
-      if (property === 'sync' || property === 'datasync') {
-        return async (): Promise<void> => {
-          record('fsync', path)
-          maybeFail('fsync', path)
-          await (value as () => Promise<void>).call(target)
-        }
-      }
-      if (property === 'write' || property === 'writeFile') {
-        return async (data: unknown, ...rest: unknown[]): Promise<unknown> => {
-          const payload = payloadOf(data)
-          record('write', path, headOf(payload))
-          const rule = ruleFor('write', path, true)
-          if (rule !== undefined) {
-            rule.fired = true
-            await (value as (...args: unknown[]) => Promise<unknown>).call(target, payload.slice(0, rule.afterBytes), ...rest)
-            throw new Error(rule.message)
+  const wrap = (handle: FileHandle, path: string): FileHandle =>
+    new Proxy(handle, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target) as unknown
+        if (typeof value !== 'function') return value
+        if (property === 'sync' || property === 'datasync') {
+          return async (): Promise<void> => {
+            record('fsync', path)
+            maybeFail('fsync', path)
+            await (value as () => Promise<void>).call(target)
           }
-          maybeFail('write', path)
-          const short = fsLayer.shortWrite
-          if (property === 'write' && short !== undefined && short.path === path) {
-            return await (value as (...args: unknown[]) => Promise<unknown>).call(target, payload.slice(0, short.bytes), ...rest)
+        }
+        if (property === 'write' || property === 'writeFile') {
+          return async (data: unknown, ...rest: unknown[]): Promise<unknown> => {
+            const payload = payloadOf(data)
+            record('write', path, headOf(payload))
+            const rule = ruleFor('write', path, true)
+            if (rule !== undefined) {
+              rule.fired = true
+              await (value as (...args: unknown[]) => Promise<unknown>).call(
+                target,
+                payload.slice(0, rule.afterBytes),
+                ...rest,
+              )
+              throw new Error(rule.message)
+            }
+            maybeFail('write', path)
+            const short = fsLayer.shortWrite
+            if (property === 'write' && short !== undefined && short.path === path) {
+              return await (value as (...args: unknown[]) => Promise<unknown>).call(
+                target,
+                payload.slice(0, short.bytes),
+                ...rest,
+              )
+            }
+            return await (value as (...args: unknown[]) => Promise<unknown>).call(target, data, ...rest)
           }
-          return await (value as (...args: unknown[]) => Promise<unknown>).call(target, data, ...rest)
         }
-      }
-      if (property === 'truncate') {
-        return async (length: number): Promise<void> => {
-          record('truncate', path, String(length))
-          maybeFail('truncate', path)
-          await (value as (length: number) => Promise<void>).call(target, length)
+        if (property === 'truncate') {
+          return async (length: number): Promise<void> => {
+            record('truncate', path, String(length))
+            maybeFail('truncate', path)
+            await (value as (length: number) => Promise<void>).call(target, length)
+          }
         }
-      }
-      return (value as (...args: unknown[]) => unknown).bind(target)
-    },
-  }) as FileHandle
+        return (value as (...args: unknown[]) => unknown).bind(target)
+      },
+    }) as FileHandle
   const open = actual.open as unknown as (path: string, flags: string, mode?: number) => Promise<FileHandle>
   const rename = actual.rename as unknown as (from: string, to: string) => Promise<void>
   const readFileActual = actual.readFile as unknown as (path: string, options?: unknown) => Promise<unknown>
@@ -336,7 +361,8 @@ async function refusalOf(action: Promise<unknown>): Promise<string> {
 /** The mutable store rows behind one fixture service. */
 function promotionRows(svc: EvolutionService): FixtureRows {
   const rows = (svc as unknown as { ctx: { promotionStore?: FixtureRows } }).ctx.promotionStore
-  if (rows === undefined) throw new Error('this service was not built on fixtureCtx(), so it has no promotion store to fill')
+  if (rows === undefined)
+    throw new Error('this service was not built on fixtureCtx(), so it has no promotion store to fill')
   return rows
 }
 
@@ -391,7 +417,12 @@ function fixtureProviderIdentity(): FrozenProviderIdentity {
 }
 
 /** One side's run row, with the provider binding the gate compares to the frozen identity. */
-function fixtureSideRun(input: { runId: string; taskId: string; outcome: string; at: string }): Record<string, unknown> {
+function fixtureSideRun(input: {
+  runId: string
+  taskId: string
+  outcome: string
+  at: string
+}): Record<string, unknown> {
   return {
     runId: input.runId,
     taskId: input.taskId,
@@ -408,7 +439,10 @@ function fixtureRequestHeader(): Record<string, unknown> {
     type: 'request/header',
     seq: 1,
     time: 0,
-    data: { header: { config: { provider: FIXTURE_SELECTION.provider, model: FIXTURE_SELECTION.model } }, reason: 'initial' },
+    data: {
+      header: { config: { provider: FIXTURE_SELECTION.provider, model: FIXTURE_SELECTION.model } },
+      reason: 'initial',
+    },
   }
 }
 
@@ -419,7 +453,10 @@ function fixtureRequestHeader(): Record<string, unknown> {
  * `evolution_replay` writes, composed the way `evolution.spec.ts` composes it so
  * a later stage (the commit) starts from evidence that already stands.
  */
-async function recordSkillExperiment(svc: EvolutionService, proposalId = 's1'): Promise<{ reportPath: string; experimentId: string }> {
+async function recordSkillExperiment(
+  svc: EvolutionService,
+  proposalId = 's1',
+): Promise<{ reportPath: string; experimentId: string }> {
   const proposal = await svc.get(proposalId)
   const candidate = proposal.prepared!.skillContent!
   const baseline = proposal.prepared!.skillBaseline!
@@ -428,16 +465,24 @@ async function recordSkillExperiment(svc: EvolutionService, proposalId = 's1'): 
   await mkdir(workspace, { recursive: true })
   await writeFile(join(workspace, 'input.txt'), 'the frozen input\n')
   const samples: FrozenSample[] = []
-  const sample = (taskId: string, role: FrozenSample['role'], criterionId: string, command: string, outcome: 'verified' | 'failed') => {
-    const acceptanceCriteria = [{
-      criterionId,
-      description: 'works',
-      verificationMode: 'deterministic',
-      requiredEvidence: [],
-      mandatory: true,
-      command,
-      verifierRef: FIXTURE_JUDGE.ref,
-    }]
+  const sample = (
+    taskId: string,
+    role: FrozenSample['role'],
+    criterionId: string,
+    command: string,
+    outcome: 'verified' | 'failed',
+  ) => {
+    const acceptanceCriteria = [
+      {
+        criterionId,
+        description: 'works',
+        verificationMode: 'deterministic',
+        requiredEvidence: [],
+        mandatory: true,
+        command,
+        verifierRef: FIXTURE_JUDGE.ref,
+      },
+    ]
     rows.tasks.push({
       taskId,
       definitionRef: { taskType: 'subtask', version: 1 },
@@ -455,15 +500,17 @@ async function recordSkillExperiment(svc: EvolutionService, proposalId = 's1'): 
       taskId,
       role,
       contractDigest: digestOf({ objective: `${taskId} objective`, acceptanceCriteria, requiredCapabilities: [] }),
-      criteria: [{
-        criterionId,
-        verificationMode: 'deterministic',
-        command,
-        protectedInputsDigest: protectedInputsDigest([]),
-        verifierRef: FIXTURE_JUDGE.ref,
-        verifierVersion: FIXTURE_JUDGE.version,
-        verifierAnchor: `registered verifier "${FIXTURE_JUDGE.ref}" declares version "${FIXTURE_JUDGE.version}"`,
-      }],
+      criteria: [
+        {
+          criterionId,
+          verificationMode: 'deterministic',
+          command,
+          protectedInputsDigest: protectedInputsDigest([]),
+          verifierRef: FIXTURE_JUDGE.ref,
+          verifierVersion: FIXTURE_JUDGE.version,
+          verifierAnchor: `registered verifier "${FIXTURE_JUDGE.ref}" declares version "${FIXTURE_JUDGE.version}"`,
+        },
+      ],
       observed: { outcome, runId: `r-history-${taskId}` },
       provider: fixtureProviderIdentity(),
     })
@@ -500,20 +547,23 @@ async function recordSkillExperiment(svc: EvolutionService, proposalId = 's1'): 
     at,
   })
   for (const entry of samples) {
-    const settlements = entry.taskId === 't-fail'
-      ? { baseline: 'failed', candidate: 'verified' }
-      : { baseline: 'verified', candidate: 'verified' }
+    const settlements =
+      entry.taskId === 't-fail'
+        ? { baseline: 'failed', candidate: 'verified' }
+        : { baseline: 'verified', candidate: 'verified' }
     for (const side of ['baseline', 'candidate'] as const) {
       const settlement = settlements[side] as 'verified' | 'failed'
       const lineage = experimentLineage(experimentId, entry.taskId, side)
       const taskId = `t-${entry.taskId}-${side}`
       const runId = `r-${entry.taskId}-${side}`
-      const criteria = [{
-        criterionId: entry.criteria[0]!.criterionId,
-        verdict: settlement === 'verified' ? 'pass' as const : 'fail' as const,
-        verifierId: FIXTURE_JUDGE.ref,
-        verifierVersion: FIXTURE_JUDGE.version,
-      }]
+      const criteria = [
+        {
+          criterionId: entry.criteria[0]!.criterionId,
+          verdict: settlement === 'verified' ? ('pass' as const) : ('fail' as const),
+          verifierId: FIXTURE_JUDGE.ref,
+          verifierVersion: FIXTURE_JUDGE.version,
+        },
+      ]
       rows.tasks.push({
         taskId,
         definitionRef: { taskType: 'subtask', version: 1 },
@@ -528,7 +578,15 @@ async function recordSkillExperiment(svc: EvolutionService, proposalId = 's1'): 
       })
       rows.runs.push(fixtureSideRun({ runId, taskId, outcome: settlement, at }))
       rows.sessions.set(`s-${runId}`, [fixtureRequestHeader()])
-      rows.evidence.push({ evidenceId: `e-${runId}`, taskRunId: runId, taskId, artifacts: [], verifierResults: [], claims: [], generatedAt: at })
+      rows.evidence.push({
+        evidenceId: `e-${runId}`,
+        taskRunId: runId,
+        taskId,
+        artifacts: [],
+        verifierResults: [],
+        claims: [],
+        generatedAt: at,
+      })
       rows.reviews.push({ taskId, runId, outcome: settlement, evidenceRefs: [`e-${runId}`], anomalies: [], criteria })
       await svc.recordExperimentSample({
         formatVersion: 4,
@@ -589,7 +647,9 @@ async function decidedSkillFixture() {
 
 /** Every ledger line, parsed, oldest first — the file itself, never the service's memory. */
 async function ledgerLinesOf(root: string): Promise<Record<string, any>[]> {
-  return (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+  return (await readFile(join(root, 'proposals.jsonl'), 'utf8'))
+    .trim()
+    .split('\n')
     .map(line => JSON.parse(line) as Record<string, any>)
 }
 
@@ -630,7 +690,9 @@ function expectDurableOrder(input: {
 }): void {
   const { source, ledger, root, target, completionKind } = input
   const sourceFsync = opIndex(op => op.op === 'fsync' && op.path === source)
-  const intentWrite = opIndex(op => op.op === 'write' && op.path === ledger && op.detail?.includes('"kind":"commit_intent"') === true)
+  const intentWrite = opIndex(
+    op => op.op === 'write' && op.path === ledger && op.detail?.includes('"kind":"commit_intent"') === true,
+  )
   expect(sourceFsync, `the source file is fsynced:\n${opLog()}`).toBeGreaterThanOrEqual(0)
   expect(intentWrite, `the intent line is written:\n${opLog()}`).toBeGreaterThanOrEqual(0)
   expect(sourceFsync, `the source file is fsynced before the intent line:\n${opLog()}`).toBeLessThan(intentWrite)
@@ -642,12 +704,18 @@ function expectDurableOrder(input: {
   expect(chain.at(-1), `the source chain reaches the ledger root:\n${opLog()}`).toBe(root)
   const chainFsyncs = chain.map(directory => opIndex(op => op.op === 'fsync' && op.path === directory))
   for (const [index, directory] of chain.entries()) {
-    expect(chainFsyncs[index], `the directory "${directory}" on the source chain is fsynced:\n${opLog()}`)
-      .toBeGreaterThanOrEqual(0)
-    expect(chainFsyncs[index], `"${directory}" is fsynced before the intent line:\n${opLog()}`).toBeLessThan(intentWrite)
+    expect(
+      chainFsyncs[index],
+      `the directory "${directory}" on the source chain is fsynced:\n${opLog()}`,
+    ).toBeGreaterThanOrEqual(0)
+    expect(chainFsyncs[index], `"${directory}" is fsynced before the intent line:\n${opLog()}`).toBeLessThan(
+      intentWrite,
+    )
     if (index > 0) {
-      expect(chainFsyncs[index], `the chain is fsynced inside-out ("${directory}" after "${chain[index - 1]}"):\n${opLog()}`)
-        .toBeGreaterThan(chainFsyncs[index - 1]!)
+      expect(
+        chainFsyncs[index],
+        `the chain is fsynced inside-out ("${directory}" after "${chain[index - 1]}"):\n${opLog()}`,
+      ).toBeGreaterThan(chainFsyncs[index - 1]!)
     }
   }
 
@@ -693,17 +761,19 @@ describe('K2 durability: the source, the intent line and the rename', () => {
       intentId: 's1/apply',
       proposalId: 's1',
       direction: 'apply',
-      files: [{
-        target,
-        source: CANDIDATE_SOURCE,
-        baselineSha256: sha256Of(PRODUCTION_BASELINE),
-        contentSha256: sha256Of(SKILL_CANDIDATE),
-      }],
+      files: [
+        {
+          target,
+          source: CANDIDATE_SOURCE,
+          baselineSha256: sha256Of(PRODUCTION_BASELINE),
+          contentSha256: sha256Of(SKILL_CANDIDATE),
+        },
+      ],
     })
     expect(sha256Hex(await readFile(target))).toBe(intent.files[0].contentSha256)
   })
 
-  it('makes a rollback\'s champion snapshot durable before its own intent', async () => {
+  it("makes a rollback's champion snapshot durable before its own intent", async () => {
     const { svc, root, skillRoot } = await decidedSkillFixture()
     await svc.apply('s1', 'root-1', 'approval:call-1')
     const target = targetOf(skillRoot)
@@ -808,7 +878,10 @@ describe('K2 durability: the source, the intent line and the rename', () => {
     expect(after.subarray(0, before.length)).toEqual(before)
     const tail = after.subarray(before.length).toString('utf8')
     expect(tail.split('\n')).toHaveLength(3)
-    const lines = tail.split('\n').slice(0, -1).map(line => JSON.parse(line) as Record<string, any>)
+    const lines = tail
+      .split('\n')
+      .slice(0, -1)
+      .map(line => JSON.parse(line) as Record<string, any>)
     expect(lines.map(line => line.kind)).toEqual(['commit_intent', 'applied'])
     const reopened = reopenLike(svc, { ...FIXTURE_CONFIG, root, skillRoot })
     expect((await reopened.get('s1')).status).toBe('applied')
@@ -897,13 +970,15 @@ describe('K2 durability: the source, the intent line and the rename', () => {
     // already carries the committed content, so only the completion is recorded —
     // exactly once.
     clearLayer()
-    expect(await svc.reconcile()).toEqual([{
-      intentId: 's1/apply',
-      proposalId: 's1',
-      direction: 'apply',
-      targets: [target],
-      result: 'completed-written',
-    }])
+    expect(await svc.reconcile()).toEqual([
+      {
+        intentId: 's1/apply',
+        proposalId: 's1',
+        direction: 'apply',
+        targets: [target],
+        result: 'completed-written',
+      },
+    ])
     expect(await readFile(target, 'utf8')).toBe(SKILL_CANDIDATE)
     expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
     expect((await svc.get('s1')).openIntent).toBeUndefined()
@@ -926,7 +1001,10 @@ describe('K2 durability: the source, the intent line and the rename', () => {
     expect(after.subarray(0, before.length)).toEqual(before)
     const tail = after.subarray(before.length).toString('utf8')
     expect(tail.split('\n')).toHaveLength(3)
-    const lines = tail.split('\n').slice(0, -1).map(line => JSON.parse(line) as Record<string, any>)
+    const lines = tail
+      .split('\n')
+      .slice(0, -1)
+      .map(line => JSON.parse(line) as Record<string, any>)
     expect(lines.map(line => line.kind)).toEqual(['commit_intent', 'applied'])
     // The ledger a restarted process reads still folds: a fragment would fail the
     // load by name.
@@ -1059,12 +1137,14 @@ describe('K2 durability: the source the intent would name', () => {
       proposalId: 's1',
       direction: 'apply',
       approvalRef: 'approval:call-1',
-      files: [{
-        target: targetOf(skillRoot),
-        baselineSha256: sha256Of(PRODUCTION_BASELINE),
-        contentSha256: sha256Of(SKILL_CANDIDATE),
-        source,
-      }],
+      files: [
+        {
+          target: targetOf(skillRoot),
+          baselineSha256: sha256Of(PRODUCTION_BASELINE),
+          contentSha256: sha256Of(SKILL_CANDIDATE),
+          source,
+        },
+      ],
       actor: 'root-1',
     })
 
@@ -1101,12 +1181,14 @@ describe('K2 durability: the source the intent would name', () => {
       proposalId: 's1',
       direction: 'apply',
       approvalRef: 'approval:call-1',
-      files: [{
-        target: outside,
-        baselineSha256: sha256Of(PRODUCTION_BASELINE),
-        contentSha256: sha256Of(SKILL_CANDIDATE),
-        source: CANDIDATE_SOURCE,
-      }],
+      files: [
+        {
+          target: outside,
+          baselineSha256: sha256Of(PRODUCTION_BASELINE),
+          contentSha256: sha256Of(SKILL_CANDIDATE),
+          source: CANDIDATE_SOURCE,
+        },
+      ],
       actor: 'root-1',
     }
 
@@ -1130,22 +1212,26 @@ describe('K2 durability: the source the intent would name', () => {
     // is what must refuse it, and it must write nothing while doing so.
     const ledger = join(root, 'proposals.jsonl')
     const lines = (await readFile(ledger, 'utf8')).trim().split('\n')
-    lines.push(JSON.stringify({
-      formatVersion: 4,
-      kind: 'commit_intent',
-      intentId: 's1/apply',
-      proposalId: 's1',
-      direction: 'apply',
-      approvalRef: 'approval:call-0',
-      files: [{
-        target,
-        baselineSha256: sha256Of(PRODUCTION_BASELINE),
-        contentSha256: sha256Of(SKILL_CANDIDATE),
-        source: '../../outside/SKILL.md',
-      }],
-      actor: 'root-1',
-      at: '2026-09-26T00:00:05.000Z',
-    }))
+    lines.push(
+      JSON.stringify({
+        formatVersion: 4,
+        kind: 'commit_intent',
+        intentId: 's1/apply',
+        proposalId: 's1',
+        direction: 'apply',
+        approvalRef: 'approval:call-0',
+        files: [
+          {
+            target,
+            baselineSha256: sha256Of(PRODUCTION_BASELINE),
+            contentSha256: sha256Of(SKILL_CANDIDATE),
+            source: '../../outside/SKILL.md',
+          },
+        ],
+        actor: 'root-1',
+        at: '2026-09-26T00:00:05.000Z',
+      }),
+    )
     await writeFile(ledger, `${lines.join('\n')}\n`)
     const reopened = reopenLike(svc, { ...FIXTURE_CONFIG, root, skillRoot })
 
@@ -1169,7 +1255,7 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
     const otherTarget = join(directory, '.other.md.tmp-4242-deadbeef')
     const plain = join(directory, 'notes.txt')
     await writeFile(stale, '# a staging file a killed attempt left behind\n')
-    await writeFile(otherTarget, '# another target\'s staging file, or a stranger\'s\n')
+    await writeFile(otherTarget, "# another target's staging file, or a stranger's\n")
     await writeFile(plain, '# a file nobody staged\n')
 
     await svc.apply('s1', 'root-1', 'approval:call-1')
@@ -1177,12 +1263,14 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
     // This target's own leftover is gone, and only it: the sweep is confined to
     // the target's directory and the target's own staging prefix.
     expect(existsSync(stale)).toBe(false)
-    expect(await readFile(otherTarget, 'utf8')).toBe('# another target\'s staging file, or a stranger\'s\n')
+    expect(await readFile(otherTarget, 'utf8')).toBe("# another target's staging file, or a stranger's\n")
     expect(await readFile(plain, 'utf8')).toBe('# a file nobody staged\n')
     // Swept before the new staging file is created, and production holds exactly
     // the committed version.
     const swept = opIndex(op => op.op === 'rm' && op.path === stale)
-    const stagedOpen = opIndex(op => op.op === 'open' && op.path.startsWith(join(directory, '.SKILL.md.tmp-')) && op.detail === 'wx')
+    const stagedOpen = opIndex(
+      op => op.op === 'open' && op.path.startsWith(join(directory, '.SKILL.md.tmp-')) && op.detail === 'wx',
+    )
     expect(swept).toBeGreaterThanOrEqual(0)
     expect(stagedOpen).toBeGreaterThan(swept)
     expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(SKILL_CANDIDATE)
@@ -1190,7 +1278,7 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
     expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
   })
 
-  it('sweeps this target\'s staging leftovers when a settlement only records a completion', async () => {
+  it("sweeps this target's staging leftovers when a settlement only records a completion", async () => {
     const { svc, root, skillRoot } = await decidedSkillFixture()
     const directory = dirname(targetOf(skillRoot))
     const target = targetOf(skillRoot)
@@ -1205,19 +1293,21 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
     const stale = join(directory, '.SKILL.md.tmp-4242-deadbeef')
     const otherTarget = join(directory, '.other.md.tmp-4242-deadbeef')
     await writeFile(stale, '# a staging file a killed attempt left behind\n')
-    await writeFile(otherTarget, '# another target\'s staging file, or a stranger\'s\n')
+    await writeFile(otherTarget, "# another target's staging file, or a stranger's\n")
     clearLayer()
 
-    expect(await svc.reconcile()).toEqual([{
-      intentId: 's1/apply',
-      proposalId: 's1',
-      direction: 'apply',
-      targets: [target],
-      result: 'completed-written',
-    }])
+    expect(await svc.reconcile()).toEqual([
+      {
+        intentId: 's1/apply',
+        proposalId: 's1',
+        direction: 'apply',
+        targets: [target],
+        result: 'completed-written',
+      },
+    ])
 
     expect(existsSync(stale)).toBe(false)
-    expect(await readFile(otherTarget, 'utf8')).toBe('# another target\'s staging file, or a stranger\'s\n')
+    expect(await readFile(otherTarget, 'utf8')).toBe("# another target's staging file, or a stranger's\n")
     expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
     expect((await svc.get('s1')).openIntent).toBeUndefined()
     expect(await readFile(target, 'utf8')).toBe(SKILL_CANDIDATE)
@@ -1227,7 +1317,10 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
     // leftover nothing is looking at any more.
     const swept = opIndex(op => op.op === 'rm' && op.path === stale)
     const completion = opIndex(
-      op => op.op === 'write' && op.path === join(root, 'proposals.jsonl') && op.detail?.includes('"kind":"applied"') === true,
+      op =>
+        op.op === 'write' &&
+        op.path === join(root, 'proposals.jsonl') &&
+        op.detail?.includes('"kind":"applied"') === true,
     )
     expect(swept).toBeGreaterThanOrEqual(0)
     expect(completion).toBeGreaterThan(swept)
@@ -1265,13 +1358,15 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
 
     // With the sweep possible again the same intent settles exactly once.
     clearLayer()
-    expect(await svc.reconcile()).toEqual([{
-      intentId: 's1/apply',
-      proposalId: 's1',
-      direction: 'apply',
-      targets: [target],
-      result: 'completed-written',
-    }])
+    expect(await svc.reconcile()).toEqual([
+      {
+        intentId: 's1/apply',
+        proposalId: 's1',
+        direction: 'apply',
+        targets: [target],
+        result: 'completed-written',
+      },
+    ])
     expect(existsSync(stale)).toBe(false)
     expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
     expect((await svc.get('s1')).openIntent).toBeUndefined()
@@ -1311,7 +1406,11 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
     expect(appended).toHaveLength(3)
     const lines = appended.slice(0, -1).map(line => JSON.parse(line) as Record<string, any>)
     expect(lines.map(line => line.kind)).toEqual(['commit_intent', 'applied'])
-    expect(lines[1]).toMatchObject({ intentId: 's1/apply', targets: [targetOf(skillRoot)], approvalRef: 'approval:call-1' })
+    expect(lines[1]).toMatchObject({
+      intentId: 's1/apply',
+      targets: [targetOf(skillRoot)],
+      approvalRef: 'approval:call-1',
+    })
     // One intent and one completion in the whole ledger, and production holds the
     // verified candidate bytes.
     const kinds = await ledgerKinds(root)
@@ -1377,7 +1476,7 @@ async function objectDecidedFixture() {
 
 /** The derived candidate sidecar the sandbox must hold for the fixture's candidate body. */
 async function expectedCandidateSidecar(root: string): Promise<string> {
-  return (await readFile(join(root, SIDECAR_CANDIDATE_SOURCE), 'utf8'))
+  return await readFile(join(root, SIDECAR_CANDIDATE_SOURCE), 'utf8')
 }
 
 describe('K3 durability: two files, two sources, one intent', () => {
@@ -1396,7 +1495,9 @@ describe('K3 durability: two files, two sources, one intent', () => {
       for (const directory of sourceDirectories(root, abs)) {
         const directorySync = opIndex(op => op.op === 'fsync' && op.path === directory, fileSync)
         expect(directorySync, `no fsync of ${directory} after ${source}\n${opLog()}`).toBeGreaterThan(fileSync)
-        expect(directorySync, `the chain of ${source} is not durable before the intent\n${opLog()}`).toBeLessThan(lineWrite)
+        expect(directorySync, `the chain of ${source} is not durable before the intent\n${opLog()}`).toBeLessThan(
+          lineWrite,
+        )
       }
     }
     // Both files are in place and the pair is the derived one.
@@ -1444,8 +1545,18 @@ describe('K3 durability: two files, two sources, one intent', () => {
       direction: 'apply',
       approvalRef: 'approval:call-1',
       files: [
-        { target: targetOf(skillRoot), baselineSha256: sha256Of(PRODUCTION_BASELINE), contentSha256: sha256Of(SKILL_CANDIDATE), source: CANDIDATE_SOURCE },
-        { target: sidecarTargetOf(skillRoot), baselineSha256: sha256Of(productionSidecar), contentSha256: sha256Hex(sidecarBytes), source: SIDECAR_CANDIDATE_SOURCE },
+        {
+          target: targetOf(skillRoot),
+          baselineSha256: sha256Of(PRODUCTION_BASELINE),
+          contentSha256: sha256Of(SKILL_CANDIDATE),
+          source: CANDIDATE_SOURCE,
+        },
+        {
+          target: sidecarTargetOf(skillRoot),
+          baselineSha256: sha256Of(productionSidecar),
+          contentSha256: sha256Hex(sidecarBytes),
+          source: SIDECAR_CANDIDATE_SOURCE,
+        },
       ],
       actor: 'root-1',
     }
@@ -1610,11 +1721,15 @@ describe('K3 durability: two files, two sources, one intent', () => {
       actor: 'root-1',
     })
 
-    const escapingSource = await refusalOf(commitIntent(host, request({ source: '../outside/SKILL.contract.json' }), bytes))
+    const escapingSource = await refusalOf(
+      commitIntent(host, request({ source: '../outside/SKILL.contract.json' }), bytes),
+    )
     expect(escapingSource).toContain('../outside/SKILL.contract.json')
     expect(escapingSource).toMatch(/is not inside the ledger root/)
 
-    const escapingTarget = await refusalOf(commitIntent(host, request({ target: join('..', 'outside', SKILL_SIDECAR_FILE) }), bytes))
+    const escapingTarget = await refusalOf(
+      commitIntent(host, request({ target: join('..', 'outside', SKILL_SIDECAR_FILE) }), bytes),
+    )
     expect(escapingTarget).toMatch(/is not inside the production skill root/)
 
     expect(await readFile(ledger)).toEqual(before)
@@ -1634,13 +1749,25 @@ describe('K3 durability: two files, two sources, one intent', () => {
       direction: 'apply',
       approvalRef: 'approval:call-1',
       files: [
-        { target: targetOf(skillRoot), baselineSha256: sha256Of(PRODUCTION_BASELINE), contentSha256: sha256Of(SKILL_CANDIDATE), source: CANDIDATE_SOURCE },
-        { target: sidecarTargetOf(skillRoot), baselineSha256: sha256Of(sidecar), contentSha256: sha256Of('# not the sidecar it claims'), source: SIDECAR_CANDIDATE_SOURCE },
+        {
+          target: targetOf(skillRoot),
+          baselineSha256: sha256Of(PRODUCTION_BASELINE),
+          contentSha256: sha256Of(SKILL_CANDIDATE),
+          source: CANDIDATE_SOURCE,
+        },
+        {
+          target: sidecarTargetOf(skillRoot),
+          baselineSha256: sha256Of(sidecar),
+          contentSha256: sha256Of('# not the sidecar it claims'),
+          source: SIDECAR_CANDIDATE_SOURCE,
+        },
       ],
       actor: 'root-1',
     }
 
-    const message = await refusalOf(commitIntent(host, request, [skillBytes, await readFile(join(root, SIDECAR_CANDIDATE_SOURCE))]))
+    const message = await refusalOf(
+      commitIntent(host, request, [skillBytes, await readFile(join(root, SIDECAR_CANDIDATE_SOURCE))]),
+    )
 
     expect(message).toContain(sidecarTargetOf(skillRoot))
     expect(message).toMatch(/not the content identity/)
@@ -1672,7 +1799,9 @@ describe('K3 durability: two files, two sources, one intent', () => {
     expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(PRODUCTION_BASELINE)
     const lines = await ledgerLinesOf(root)
     expect(lines.filter(line => line.kind === 'rolledback')).toHaveLength(1)
-    const rollbackFiles = lines.find(line => line.kind === 'commit_intent' && line.direction === 'rollback')!.files as { source: string }[]
+    const rollbackFiles = lines.find(line => line.kind === 'commit_intent' && line.direction === 'rollback')!.files as {
+      source: string
+    }[]
     expect(rollbackFiles.map(file => file.source)).toEqual([CHAMPION_SOURCE, SIDECAR_CHAMPION_SOURCE])
   })
 })

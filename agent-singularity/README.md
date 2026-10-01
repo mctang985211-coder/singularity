@@ -2,62 +2,72 @@
 
 [中文](README.zh.md) | English
 
-Purpose: Singularity graph worker delegation, readiness and cancellable human-in-the-loop tools.
+Purpose: The Singularity root agent's tool surface — delegation, task coordination, review, evolution and human decisions — plus the services it owns (HITL, escalation, proposal review, review ledger).
 
 Package: `@dangosys/dsh-singularity-agent`
 
-Dependencies: graphs, tools
+Dependencies: graphs, agent-runtime, context, task, task-runtime, evolution
 
-config.yaml: `evolution` (`off` | `on`, default `off`) — whether this composition registers the nine `evolution_*` tools on the global layer. Off (the shipped default, `DEFAULT_EVOLUTION`) registers the other 24 of the tools below and none of the evolution chain: no agent surface can call one, including a spawned worker with no grant, which otherwise keeps the global layer. On registers all 33, with the chain's validation, approvals, history reads and rollback unchanged. A value this build does not implement, or a configuration member it does not read, refuses to start and names what it refused.
+config.yaml: `evolution` (`off` | `on`, default `off`) — whether this composition registers the nine `evolution_*` tools on the global layer. Off registers the other 24 tools and no chain tool on any surface; on registers all 33. A value this build cannot execute, or a configuration member it does not read, refuses to start and names what it refused.
 
 ### Tools
 
-24 of the 33 are registered on the global layer in every composition; the nine `evolution_*` tools only when `evolution` is `on`, so a default deployment's global layer carries the 24 always-on tools (this whole list except the nine numbered 24–32) and a deployment that turned the chain on carries all 33. The root agent's allow-list (ROOT_TOOLS in `@dangosys/dsh-singularity-agent-runtime`) names these 24 minus `task_ask_parent` — a root has no parent to ask — and minus `task_recover`, whose only caller is the supervisor a hand-off was delegated to (A6), plus the `skill` loader the mounted preset provides; it reads which of the nine exist from `ctx.singularityEvolution` — a root surface and this list that drift apart is what the switch is there to prevent.
+24 tools are registered in every composition; the nine `evolution_*` ones only when `evolution` is `on`. The root agent's allow-list (`ROOT_TOOLS` in agent-runtime) names those 24 minus `task_ask_parent` (a root has no parent) and minus `task_recover` (the delegated supervisor's own entry), plus the preset's `skill` loader.
 
-1. graph_spawn: create a worker node through Singularity runtime and wait for its response.
-2. graph_mark_ready: mark the calling agent's graph ready.
-3. hitl_ask: wait for a human text answer; cancel with the tool execution.
-4. hitl_approve: wait for an explicit approve/reject decision; cancel with the tool execution.
-5. task_read: read the caller's task contract and (for the root) child task statuses; before a root contract has been accepted, the named not-activated state with whatever proposal is still open.
-6. capability_list: print the configured capability table — the legal capability names, with each tool label's expansion.
-7. context_read: read one record of the caller's own graph domain by its reference — `task`, `run`, `evidence`, `review`, `diagnosis`, or one `session` log/event paged by seq or byte offset. There is no argument that could widen the domain (a reference from another graph is a named refusal), and the raw cross-session readers it replaced are sealed on every runtime-owned agent.
-8. task_intake: accept this root session's contract — the user's objective with its acceptance criteria, assumptions, constraints and declared capabilities; the runtime normalizes and judges it, activates it as the graph's root task, or (where the deployment reviews contracts) answers with a proposal id and activates nothing. Root sessions only; there is no argument that approves anything.
-9. task_decompose: admit a child batch and return its batch id at once (reason + children with objective / acceptance criteria / dependsOn / decomposable); the runtime runs the children in dependency order while the caller keeps working. Where the deployment reviews generated tasks, the call answers with a proposal id and nothing admitted instead — the batch waits for a recorded decision.
-10. task_submit_result: hand in a finished run — a summary plus evidence references; the runtime closes write admission, drains in-flight writes, then the verifier decides.
-11. task_ask_parent: ask the caller's own direct parent one question (`requestKey`, `question`, optional `blocking`). The addressee is fixed by the caller's run — there is no recipient parameter, and the body is read back from this call itself. `blocking` defaults to `true`: writes, shell commands, another decomposition and `task_submit_result` are refused until an answer with `resolves: true` is recorded, and the answer then reaches the caller as a message and in its context; `false` leaves the run working while the question is open. A root, a reviewer and a parentless replay task are refused by name, with no question and no delivery.
-12. task_answer: answer one child's question by its id (`questionId`, `requestKey`, `answer`, `resolves`). `resolves: true` declares that question settled and releases exactly that block on the asking run (`resolves: false` keeps it open and settles nothing); it changes no contract, permission or task state, and the framework does not vouch for what the answer says. The asking run must be the caller's own — a question addressed to another run is refused.
-13. task_cancel: cancel the caller's own in-flight batch; the children settle as cancelled.
-14. task_proposal_read: read one saved proposal by id — its status and policy, the complete batch it carries, the digest, both context fingerprints, the decision on record and the batch it became. Read-only, and there is no argument that could claim a status.
-15. task_proposal_continue: continue a proposal this session submitted — the runtime re-checks it (parent state, limits, capability resolution, judging verifiers) and admits the batch if it still passes and carries an approval; a proposal still waiting is reported as waiting, and nothing is ever advanced by this call alone.
-16. task_proposal_cancel: withdraw a proposal this session submitted before its batch is admitted; only the proposing session may, and the record is kept.
-17. task_status: print the task tree with run / phase / evidence / review / diagnosis summaries.
-18. task_verify: worker self-check — re-run the verifier, record evidence, never change task status.
-19. task_review_pack: read-only evidence pack for ONE exact review source — a task and the run under review (or runId null for a review with no run): the task's reviews in full, parent/child summaries, dependency edges and the source's review attempts from the ledger. Each diagnosis that carries suggestions is marked with its A6 hand-off state — the supervisor it was delegated to, the coordinator being started, or the named reason nothing was opened (the evolution chain off, an unsupported target, the store's allowance spent, or nothing asked yet). The facts only — whether a review agent runs is decided elsewhere (a failed review is accepted on its own; an explicit call names its source).
-20. task_review_agent: spawn ONE read-only review agent for one exact review source (taskId, runId, optional reason and requestKey); one source has one default attempt a repeat returns instead of a second reviewer, a further review after it ended names a new requestKey, and a new attempt needs the per-store allowance; the reviewer records its own Diagnosis — a postmortem observation, a conclusion (a reasoned suggestion, no-improvement, or insufficient-evidence) and confidence, with judgements and proposals optional; a timeout or an unreadable reply settles the attempt interrupted with no Diagnosis at all. A review that settled `failed` is accepted on its own (the plugin's automatic trigger scans the store when the record lands and when a graph is activated), and a success is only ever reviewed on an explicit call.
-21. task_diagnose: persist a Diagnosis (proposals are suggestions only; nothing auto-executes).
-22. task_budget_extend: ask a human (native approval card showing the store, the ceiling in force, the runs already counted and the proposed new total) to raise one configured root ceiling — a new total `maxRuns` (agents have no lifetime deadline), keyed by `requestKey`; records one `TaskBudgetExtended` fact, answers a same-key retry from the record without asking again, and reopens nothing, starts nothing, and the runs already counted go on counting.
-23. task_recover: open ONE failed root goal's new attempt (sourceDiagnosisId + requestKey) for a recorded Diagnosis — the runtime opens a new Run/Session in the same store, judged by the original acceptance criteria, and every rule is re-checked below the tool (the caller must be the trusted supervisor the hand-off was delegated to, a capability change the diagnosis stands on must be approved and applied, and the store's own facts, ceilings and idempotency are the runtime's). Never on a root's surface.
-24. evolution_propose: register an evolution proposal (optionally transcribed from a Diagnosis).
-25. evolution_candidate: record the candidate's full version set and optional structured mutation.
-26. evolution_prepare: materialize a mechanical mutation into the proposal sandbox plus the champion snapshot.
-27. evolution_replay: replay the candidate against this graph's terminal historical tasks; writes the candidate-vs-champion report.
-28. evolution_gate: record the six gate answers (regression evidence refs must exist).
-29. evolution_decide: record PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH — only after a native human approval.
-30. evolution_apply: promote a decided PROMOTE (a same-name skill object, or one capability row with its optional new skill; L1–L3, materialized) into production; second human approval, names every production path it writes — for a capability row, the deployment's `config.yml` row as well as the new skill's files, written before the completion is recorded.
-31. evolution_rollback: restore the champion snapshot (or delete the apply product when there was no champion); human approval again.
-32. evolution_list: read the ledger with filters and history.
-33. escalate: report an unsettlable gap/budget/UNKNOWN(verifier) to a human (L4) — shown through the native approval seam and recorded in the append-only ledger (`.dsh/escalations.jsonl`) only after an explicit approve; reject/cancel/unavailable records nothing.
-
-Graphs are created from New graph. Repository installs are done by the agent with bash (clone + build per repo docs), then `env_register_component`.
+1. graph_spawn — create a setup-phase worker and wait for its final response; objective work goes through task_decompose.
+2. graph_mark_ready — mark the caller's graph ready after environment setup.
+3. hitl_ask — ask a human a text question and wait for the answer.
+4. hitl_approve — ask a human to approve/reject and wait; only `allowed-once` grants, everything else fails closed.
+5. task_read — read the caller's contract, task and run (root sees child statuses; before acceptance, the named not-activated state).
+6. capability_list — print the capability table with each tool label's expansion and the provider verdict for every declared skill.
+7. context_read — read one record of the caller's own graph domain (`task`, `run`, `evidence`, `review`, `diagnosis`, `session`), paged; no argument can widen the domain.
+8. task_intake — root sessions only: submit the root contract; the runtime normalizes and judges it, then activates it or answers with a proposal id.
+9. task_decompose — propose/admit one child batch and return its batch id at once (or a proposal id when the deployment reviews generated tasks).
+10. task_submit_result — hand in a finished run (summary + evidence); the runtime closes write admission, drains in-flight calls and hands the run to the verifier.
+11. task_ask_parent — ask the caller's own direct parent one question; `blocking` (default true) holds the run until an answer with `resolves: true`.
+12. task_answer — answer one child's question (`questionId`, `requestKey`, `answer`, `resolves`); `resolves: true` releases exactly that block.
+13. task_cancel — cancel the caller's own in-flight child batch.
+14. task_proposal_read — read one saved proposal: status, policy, complete batch, digests, recorded decision.
+15. task_proposal_continue — re-check and admit a proposal this session submitted; a proposal still waiting is reported as waiting.
+16. task_proposal_cancel — withdraw a proposal this session submitted before its batch is admitted.
+17. task_status — paged project status: the caller's task, its direct children and dependency neighbours, or the whole graph.
+18. task_verify — worker self-check: re-run the verifier and record evidence; no task status changes.
+19. task_review_pack — read-only evidence pack for one exact review source, including the A6 hand-off state of every diagnosis with suggestions.
+20. task_review_agent — start one read-only review attempt for one source; the reviewer records its own Diagnosis (observation, conclusion, confidence, optional judgements and proposals).
+21. task_diagnose — persist a Diagnosis (postmortem observation, scope, localized cause, confidence, optional proposals); suggestions never execute.
+22. task_budget_extend — ask a human to raise a configured root run ceiling; records one budget-extension fact and answers a same-key retry from the record.
+23. task_recover — the delegated supervisor's entry: open one failed root goal's new attempt for one recorded Diagnosis; never on a root's surface.
+24. evolution_propose — register an evolution proposal (optionally transcribed from a Diagnosis).
+25. evolution_candidate — record the candidate's version set and its one structured mutation.
+26. evolution_prepare — materialize a mutation into the proposal sandbox plus the champion snapshot.
+27. evolution_replay — run the two-sided experiment (baseline vs candidate) and write the comparison report.
+28. evolution_gate — record the six gate answers; regression evidence refs must exist.
+29. evolution_decide — record PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH after a native human approval.
+30. evolution_apply — promote a decided PROMOTE (same-name skill object, or one capability row with its optional new skill) into production; second human approval, every production path named.
+31. evolution_rollback — restore the champion snapshot (or remove the apply product) after a human approval.
+32. evolution_list — read the evolution ledger with status filters and history.
+33. escalate — raise an L4 card (capability gap, exhausted budget, UNKNOWN(verifier)); shown through the approval seam and recorded in the escalation ledger only after an explicit approve.
 
 ### Web APIs
 
-none
+none — the HITL cards are served by graph-web (`GET/POST /singularity/hitl`), which mounts this plugin for `ctx.hitl`.
 
 ### Service state
 
-1. ctx.singularityAgent: tool registration host; this composition registers 24 tools whatever the switch says (33 once `evolution` is `on`); root agents receive 23 of them (32 with evolution) via the ROOT_TOOLS allow-list — `task_ask_parent` is deliberately excluded (a root has no parent to ask) and `task_recover` is the trusted supervisor's own entry (A6)
-2. ctx.hitl: the canvas answerer on the native interaction seams — hitl_ask asks through ctx.userQuestions, hitl_approve through ctx.approval (native audit events + fail-closed); ctx.hitl only bridges those waterfalls to the pending cards the canvas answers over GET/POST /singularity/hitl, removed on answer, cancellation or service disposal
-3. ctx.proposalReviewChannel: the T2/T3 review channel mounted on this fiber — the task runtime resolves it softly and asks it when a proposal waits for a human (policy `all`): a decomposition batch, or a root contract, which it renders as the goal a root session would be admitted as (no parent section). It renders the saved subject (parent and every child, or the contract; limits, obligations, both context fingerprints), asks through the native approval seam on the store owner's session, and records the answer as a `TaskProposalDecided` through `taskRuntime.decideProposal` under its own decider identity (`approval:<owner session>`); no agent tool accepts an approval credential, and a proposal nobody can be asked about stays `pending_review` with the reason.
-4. ctx.evolution: the append-only evolution ledger (`proposals.jsonl` under `$DSH_HOME/evolution`) plus per-proposal sandboxes (`sandbox/<proposalId>/`) where evolution_prepare materializes a candidate's structured mutation and the champion snapshot, and where evolution_replay writes the candidate-vs-champion comparison report (`replay-report.json`) after running the candidate against the graph's terminal historical tasks; beyond ledger and sandbox, the only writes are evolution_apply / evolution_rollback promoting a PROMOTE-decided skill / agent_preset / capability into production (champion snapshot restored on rollback, apply product deleted when there was no champion) — each gated by its own native human approval, L4 and the bookkeeping-only types always refused; provided on the agent's own fiber, not by a child plugin, because the evolution_* tools read it through the context they were registered with. Constructed whatever `evolution` says — with the chain off it is simply unreachable (no tool to call it through, no automatic trigger anywhere in this deployment), because closing the exposure surface does not delete the ledger, its validation or its authorization rules
-5. ctx.singularityEvolution: `{ enabled: boolean }`, provided on this fiber — the switch this assembly actually resolved. Not a second gate, but the fact a sibling reads to keep its own surface in step (`ctx.get('singularityEvolution')?.enabled ?? false`; agent-runtime's root allow-list is the consumer). Absent when this plugin is not mounted, and that absence reads as `false`: a composition nobody turned evolution on for is not assembled as if somebody had
+1. ctx.singularityAgent: tool registration host (24 always; 33 with `evolution: on`); the root allow-list is ROOT_TOOLS in agent-runtime.
+2. ctx.hitl: the canvas answerer on `ctx.userQuestions` / `ctx.approval`; pending cards are listed and answered through graph-web.
+3. ctx.proposalReviewChannel: the T2/T3 review channel — renders the saved subject, asks the store owner's session through the approval seam, records the decision as `approval:<owner session>`.
+4. ctx.escalation: append-only escalation ledger at `$DSH_HOME/escalations.jsonl` (`<repoRoot>/.dsh` when `DSH_HOME` is unset); config override `root`.
+5. ctx.singularityEvolution: `{ enabled }` — the switch this assembly resolved, read by a sibling assembly to keep its surface in step.
+6. ctx.evolution: the evolution ledger (`$DSH_HOME/evolution/proposals.jsonl`) plus per-proposal sandboxes; constructed whatever the switch says, unreachable with the chain off.
+7. Review ledger: `$DSH_HOME/review-agents/agents.jsonl` (overrides `SINGULARITY_REVIEW_LEDGER_DIR`, cap `SINGULARITY_REVIEW_AGENT_BUDGET`) — append-only claim/started/settled rows for both the reviewer and supervisor roles.
+
+## Design notes
+
+- Layout: `src/index.ts` is the assembly. `src/services/` owns the mounted services (hitl, escalation, proposal-review + its rendering); `src/coordination/` owns the review ledger, one review attempt, the automatic scan, the A6 hand-off rules and identity helpers; `src/tools/` owns the 33 `define*Tool` entries; `src/shared.ts` owns the helpers they share. The pre-refactor top-level module paths are gone — every consumer imports the owning module directly.
+- `src/shared.ts` owns the helpers the tool surface used to copy: `text()`, `sessionId(exec, tool)`, `message()`, `undeclaredParameters()`, `denialReason()` / `approvalAnswer()`, `adaptRead()`, `proposalStoreFor()` and `questionCall()` — `message()` is also what the coordination and service modules use. One implementation per helper, per package.
+- The approval gates read the native outcome vocabulary, never an argument: only `allowed-once` lets a decision, an apply or an escalation be recorded; `rejected` / `cancelled` / `unavailable` are reported by name and write nothing.
+- The review ledger is the only durable record of coordination attempts. `admitReviewAgent` runs each decision inside one serial region per (ledger file, root store), writes the claim before the reviewer exists and counts the `started` row as the spent run; an open row no live process owns is recovered as `interrupted` (or `recorded` when the store already holds its diagnosis). A started supervisor row is the hand-off's terminal fact and is never recovered.
+- Hand-off decisions are pure functions of the deployment's switch, the diagnosis, the ledger attempts and the allowance (`handoff-rules.ts`): named stops (`no-suggestions`, `evolution-off`, `unsupported-target`, `requires-new-authority`, `budget-exhausted`, `handoff-conflict`) leave the diagnosis readable and pending. The supervisor never decides or applies a promotion — a person does.
+- Refusals are values, not silent drops: undeclared tool parameters, unknown store ids, unknown records and conflicting ledger rows are refused by name with the reason, so a model or an operator can act on the exact fact.
+- Long-form design rationale for the pre-refactor layout lives in `packages/singularity/docs/` (singularity-harness-guide.md, exploration-evolution-architecture.md, agent-prompt-contracts.md).

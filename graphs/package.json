@@ -33,7 +33,6 @@
   "dependencies": {
     "@dangosys/dsh-env-builder": "link:../../env-builder",
     "@dangosys/dsh-singularity-graph": "workspace:*",
-    "@dangosys/dsh-singularity-layout": "workspace:*",
     "@dangosys/dsh-singularity-agent-runtime": "workspace:*",
     "@dangosys/dsh-singularity-task": "workspace:*",
     "@dangosys/dsh-singularity-task-runtime": "workspace:*"

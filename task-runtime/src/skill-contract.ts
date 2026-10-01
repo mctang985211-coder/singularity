@@ -1,41 +1,10 @@
 /**
  * The typed skill sidecar contract: the declaration that sits beside a skill's
  * `SKILL.md` (`SKILL.contract.json`) and says what kind of skill it is, what it
- * provides, and exactly which bytes it is.
- *
- * Why a sidecar exists at all (guide §2.4): DSH's `SKILL.md` carries both
- * executable capability and domain knowledge, and the two need different
- * guarantees. An execution skill must name the capabilities it serves, the real
- * DSH tools it needs, and the registered verifier that judges its result, so a
- * caller can refuse it *before* a run rather than discovering the gap at spawn.
- * A knowledge skill has no execution verifier and must not pretend to have one:
- * it declares where its content comes from, what it applies to, and how to
- * check the content, and it never closes an execution gap.
- *
- * The identities here are content identities, on the same discipline as the
- * task contract (`task/src/contract.ts`, still the one digest basis this
- * module reuses): the digest covers exact bytes — no trim, no newline
- * conversion — and a skill whose directory holds a file the declaration does
- * not cover is not "mostly covered"; it is refused. A reader must never be
- * able to summarize one file and silently miss another part of what a worker
- * will read.
- *
- * This module owns the vocabulary, the shape rules and the one rewrite a
- * same-name content update is (both pure): the filesystem load, the identity
- * comparison against real bytes, and the unified pre-check live in
- * `./sidecar.ts`, which consumes these definitions instead of restating them.
- * {@link sidecarWithSkillMd} and {@link serializeSkillSidecar} are the pair a
- * candidate's second file is produced with: the production declaration with
- * exactly one digest moved, written as the deterministic bytes its identity
- * covers — so what a promotion compares is the derivation, not a patch anybody
- * submitted. It lives here, beside its only production consumers, as an
- * internal module of the runtime's provider implementation (R3-1): a `TaskRun`
- * records the content identity it used, and `task/src/types.ts` says so in
- * prose without needing this vocabulary to be a task export.
- * @module @dangosys/dsh-singularity-task-runtime/skill-contract
  */
 
 import { canonicalize, sha256Hex } from '@dangosys/dsh-singularity-task'
+import { isPlainObject, nonBlank, unknownFieldKeys } from './helpers.ts'
 
 /**
  * The sidecar file, read as JSON, named exactly here so every producer and
@@ -46,28 +15,21 @@ export const SKILL_SIDECAR_FILE = 'SKILL.contract.json'
 /**
  * The sidecar contract version this build writes and reads. Like the task
  * contract's `TASK_CONTRACT_VERSION` it versions the data definition, not a
- * skill: a sidecar declaring a version this build does not know is refused
- * rather than read with the wrong field semantics.
  */
 export const SKILL_CONTRACT_VERSION = 1 as const
 
 /** Every version of {@link SkillSidecar} this build can write or read. */
-export type SkillContractVersion = typeof SKILL_CONTRACT_VERSION
+type SkillContractVersion = typeof SKILL_CONTRACT_VERSION
 
 /**
  * The directories a skill may hold supporting files in. The supported shape is
  * deliberately one level deep — `<dir>/<file>` — because a deeper tree cannot
- * be described by the identity without inventing rules for directories, and an
- * unsupported shape has to be refused by name rather than skipped.
  */
 export const SUPPORTED_SKILL_RESOURCE_DIRS: readonly string[] = ['references', 'scripts']
 
 /**
  * Whether one declared resource path is a path this contract can identify:
  * exactly `<dir>/<file>` with `<dir>` in {@link SUPPORTED_SKILL_RESOURCE_DIRS},
- * POSIX separators, no `.`/`..` segment, nothing absolute. Anything else —
- * nested trees, a second segment, backslashes, a bare directory — is outside
- * the supported shape and is refused by name.
  */
 export function isSupportedSkillResourcePath(path: string): boolean {
   const segments = path.split('/')
@@ -91,8 +53,6 @@ export interface SkillResourceIdentity {
 /**
  * What a sidecar claims about the bytes a worker will read: the `SKILL.md`
  * itself plus every supported resource, in one sorted list. A skill directory
- * holding a file this identity does not name is refused by the loader — the
- * point of the identity is that it covers the content, not most of it.
  */
 export interface SkillContentIdentity {
   /** SHA-256 of the exact `SKILL.md` bytes. */
@@ -104,7 +64,6 @@ export interface SkillContentIdentity {
 /**
  * One declared input or output of an execution skill. Ports are named in the
  * skill's own vocabulary; the runtime does not resolve them against artifacts
- * or inputs in v1, so they are a readable contract, not a wiring.
  */
 export interface SkillPort {
   /** Port name. */
@@ -118,10 +77,8 @@ export interface SkillPort {
 /**
  * The registered judge an execution skill's result is verified by. Only the ref
  * is bound in v1: the registry exposes its ids (`VerifierRegistry.verifierIds()`)
- * and no per-ref version, so a version declared here could not be checked and
- * would be a field nobody consumes.
  */
-export interface SkillVerifierRef {
+interface SkillVerifierRef {
   /** Verifier id the registry is queried under; an unknown ref makes the skill an invalid provider. */
   ref: string
 }
@@ -147,9 +104,6 @@ export interface ExecutionSkillSidecar {
 /**
  * How a knowledge skill's content is checked. v1 knows one kind, `command`: a
  * check the deciding gate runs in the skill directory and reads the exit code
- * of. Nothing in this module — or in the loader — executes it; the reference is
- * validated as a declaration and carried, never run as a side effect of
- * validation.
  */
 export interface KnowledgeContentCheck {
   /** The one check kind this build recognizes. */
@@ -161,7 +115,6 @@ export interface KnowledgeContentCheck {
 /**
  * A knowledge skill: guidance a worker may read, with no execution verifier and
  * no place in the execution closure. It declares its source and scope so a
- * reader can judge where the content came from and what it applies to.
  */
 export interface KnowledgeSkillSidecar {
   contractVersion: SkillContractVersion
@@ -180,8 +133,6 @@ export type SkillSidecar = ExecutionSkillSidecar | KnowledgeSkillSidecar
 /**
  * The named kind of one declaration refusal. `unknown-version` and
  * `unknown-field` are their own codes because a caller acts differently on
- * them (one build-versions the reader, the other says which fields a type
- * carries); everything else is a shape defect inside the declared field set.
  */
 export type SkillContractDefectCode = 'sidecar-unknown-version' | 'sidecar-unknown-field' | 'sidecar-shape'
 
@@ -193,7 +144,15 @@ export interface SkillContractDefect {
 }
 
 const EXECUTION_FIELDS: readonly string[] = [
-  'contractVersion', 'type', 'capabilities', 'precondition', 'inputs', 'outputs', 'requiredTools', 'verifier', 'content',
+  'contractVersion',
+  'type',
+  'capabilities',
+  'precondition',
+  'inputs',
+  'outputs',
+  'requiredTools',
+  'verifier',
+  'content',
 ]
 const KNOWLEDGE_FIELDS: readonly string[] = ['contractVersion', 'type', 'source', 'scope', 'content', 'contentCheck']
 const PORT_FIELDS: readonly string[] = ['name', 'description', 'required']
@@ -201,17 +160,6 @@ const RESOURCE_FIELDS: readonly string[] = ['path', 'sha256']
 const VERIFIER_FIELDS: readonly string[] = ['ref']
 const CONTENT_CHECK_FIELDS: readonly string[] = ['kind', 'command']
 const CONTENT_FIELDS: readonly string[] = ['skillMdSha256', 'resources']
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-  const prototype: unknown = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
-}
-
-/** Non-blank text: the one check every string field shares, with no rewriting of the value. */
-function nonBlank(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0
-}
 
 function isSha256Hex(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
@@ -237,9 +185,13 @@ function shape(reason: string): SkillContractDefect {
   return { code: 'sidecar-shape', reason }
 }
 
-function unknownFields(value: Record<string, unknown>, allowed: readonly string[], where: string, carries: string): SkillContractDefect[] {
-  return Object.keys(value)
-    .filter(key => !allowed.includes(key))
+function unknownFields(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  where: string,
+  carries: string,
+): SkillContractDefect[] {
+  return unknownFieldKeys(value, allowed)
     .sort()
     .map(key => ({
       code: 'sidecar-unknown-field' as const,
@@ -298,7 +250,12 @@ function portDefects(value: unknown, where: string): SkillContractDefect[] {
 /** The content identity: exact digests, a supported path vocabulary, and one sorted list. */
 function contentDefects(value: unknown): SkillContractDefect[] {
   if (!isPlainObject(value)) return [shape('sidecar.content must be an object carrying skillMdSha256 and resources')]
-  const defects = unknownFields(value, CONTENT_FIELDS, 'sidecar.content', 'a content identity carries skillMdSha256, resources')
+  const defects = unknownFields(
+    value,
+    CONTENT_FIELDS,
+    'sidecar.content',
+    'a content identity carries skillMdSha256, resources',
+  )
   if (!isSha256Hex(value.skillMdSha256)) {
     defects.push(shape('sidecar.content.skillMdSha256 must be a lowercase 64-character hex digest'))
   }
@@ -317,12 +274,20 @@ function contentDefects(value: unknown): SkillContractDefect[] {
     }
     defects.push(...unknownFields(resource, RESOURCE_FIELDS, at, 'a resource identity carries path, sha256'))
     if (!nonBlank(resource.path) || !isSupportedSkillResourcePath(resource.path)) {
-      defects.push(shape(`${at}.path ${described(resource.path)} is not a supported resource path (references/<file> or scripts/<file>)`))
+      defects.push(
+        shape(
+          `${at}.path ${described(resource.path)} is not a supported resource path (references/<file> or scripts/<file>)`,
+        ),
+      )
     } else if (seen.has(resource.path)) {
       defects.push(shape(`${at} duplicates ${JSON.stringify(resource.path)}`))
     } else {
       if (previous !== undefined && resource.path < previous) {
-        defects.push(shape(`${at} path ${JSON.stringify(resource.path)} precedes ${JSON.stringify(previous)}; the list must be sorted by path`))
+        defects.push(
+          shape(
+            `${at} path ${JSON.stringify(resource.path)} precedes ${JSON.stringify(previous)}; the list must be sorted by path`,
+          ),
+        )
       }
       seen.add(resource.path)
       previous = resource.path
@@ -343,7 +308,12 @@ function verifierDefects(value: unknown): SkillContractDefect[] {
 
 function contentCheckDefects(value: unknown): SkillContractDefect[] {
   if (!isPlainObject(value)) return [shape('sidecar.contentCheck must be an object carrying kind and command')]
-  const defects = unknownFields(value, CONTENT_CHECK_FIELDS, 'sidecar.contentCheck', 'a content check carries kind, command')
+  const defects = unknownFields(
+    value,
+    CONTENT_CHECK_FIELDS,
+    'sidecar.contentCheck',
+    'a content check carries kind, command',
+  )
   if (value.kind !== 'command') {
     defects.push(shape(`sidecar.contentCheck.kind ${described(value.kind)} is not one of command`))
   }
@@ -354,13 +324,6 @@ function contentCheckDefects(value: unknown): SkillContractDefect[] {
 /**
  * Every reason one declared sidecar is not acceptable, in field order — never
  * just the first, so one refusal names everything wrong with the declaration.
- *
- * Purely declaration-level: the version, the closed field set of the declared
- * type, the shape of every field, and the internal consistency of the content
- * identity. It reads no files, so it cannot tell whether the digests are true —
- * that comparison needs the skill directory and lives in the loader. The
- * returned defects are values, not throws: a caller refusing a sidecar reports
- * all of them and writes nothing.
  */
 export function skillContractDefects(value: unknown): SkillContractDefect[] {
   if (!isPlainObject(value)) return [shape(`the sidecar must be a JSON object, got ${kindOf(value)}`)]
@@ -384,28 +347,41 @@ export function skillContractDefects(value: unknown): SkillContractDefect[] {
     return defects
   }
   if (type === 'execution') {
-    defects.push(...unknownFields(value, EXECUTION_FIELDS, 'sidecar', `an execution sidecar carries ${EXECUTION_FIELDS.join(', ')}`))
-    defects.push(...nameListDefects(
-      value.capabilities,
-      'sidecar.capabilities',
-      'sidecar.capabilities must be a non-empty array of capability names',
-      (name, index) => `sidecar.capabilities[${index}] duplicates ${JSON.stringify(name)}`,
-      1,
-    ))
+    defects.push(
+      ...unknownFields(
+        value,
+        EXECUTION_FIELDS,
+        'sidecar',
+        `an execution sidecar carries ${EXECUTION_FIELDS.join(', ')}`,
+      ),
+    )
+    defects.push(
+      ...nameListDefects(
+        value.capabilities,
+        'sidecar.capabilities',
+        'sidecar.capabilities must be a non-empty array of capability names',
+        (name, index) => `sidecar.capabilities[${index}] duplicates ${JSON.stringify(name)}`,
+        1,
+      ),
+    )
     if (!nonBlank(value.precondition)) defects.push(shape('sidecar.precondition must be a non-blank string'))
     defects.push(...portDefects(value.inputs, 'sidecar.inputs'))
     defects.push(...portDefects(value.outputs, 'sidecar.outputs'))
-    defects.push(...nameListDefects(
-      value.requiredTools,
-      'sidecar.requiredTools',
-      'sidecar.requiredTools must be an array of tool names',
-      (name, index) => `sidecar.requiredTools[${index}] duplicates ${JSON.stringify(name)}`,
-    ))
+    defects.push(
+      ...nameListDefects(
+        value.requiredTools,
+        'sidecar.requiredTools',
+        'sidecar.requiredTools must be an array of tool names',
+        (name, index) => `sidecar.requiredTools[${index}] duplicates ${JSON.stringify(name)}`,
+      ),
+    )
     defects.push(...verifierDefects(value.verifier))
     defects.push(...contentDefects(value.content))
     return defects
   }
-  defects.push(...unknownFields(value, KNOWLEDGE_FIELDS, 'sidecar', `a knowledge sidecar carries ${KNOWLEDGE_FIELDS.join(', ')}`))
+  defects.push(
+    ...unknownFields(value, KNOWLEDGE_FIELDS, 'sidecar', `a knowledge sidecar carries ${KNOWLEDGE_FIELDS.join(', ')}`),
+  )
   if (!nonBlank(value.source)) defects.push(shape('sidecar.source must be a non-blank string'))
   if (!nonBlank(value.scope)) defects.push(shape('sidecar.scope must be a non-blank string'))
   defects.push(...contentDefects(value.content))
@@ -416,9 +392,6 @@ export function skillContractDefects(value: unknown): SkillContractDefect[] {
 /**
  * The identity of a whole sidecar: SHA-256 over {@link canonicalize} of the
  * declared data, so key order and `undefined`-valued keys do not move it while
- * any declared field does. Call it on a sidecar that passed
- * {@link skillContractDefects}: an unvalidated object can carry fields this
- * identity would then cover without a rule saying what they mean.
  */
 export function skillContractDigest(sidecar: SkillSidecar): string {
   return sha256Hex(canonicalize(sidecar))
@@ -427,8 +400,6 @@ export function skillContractDigest(sidecar: SkillSidecar): string {
 /**
  * The identity of one content identity: SHA-256 over {@link canonicalize} of the
  * `SKILL.md` digest and the resource list. Separate from
- * {@link skillContractDigest} so a caller can name the bytes (a run recording
- * what it read) without claiming a sidecar it did not read.
  */
 export function skillContentDigest(content: SkillContentIdentity): string {
   return sha256Hex(canonicalize(content))
@@ -436,22 +407,13 @@ export function skillContentDigest(content: SkillContentIdentity): string {
 
 /**
  * The same declaration with one field replaced: `content.skillMdSha256`.
- *
  * A same-name improvement of an execution skill changes the `SKILL.md` and
- * nothing else about the object (K3): the capabilities, precondition, ports,
- * required tools, verifier and resources are the ones the production sidecar
- * declared, so the candidate's sidecar is *derived* from the production one
- * rather than authored — a content update that could also move a declaration
- * would be an undeclared privilege change. Every other field is carried over
- * item by item; the digest is checked first, because a value that is not a
- * lowercase 64-character hex SHA-256 would produce a declaration no reader could
- * verify and no writer should persist.
  */
 export function sidecarWithSkillMd(sidecar: SkillSidecar, skillMdSha256: string): SkillSidecar {
   if (!/^[0-9a-f]{64}$/.test(skillMdSha256)) {
     throw new Error(
       `skill-contract: cannot replace sidecar content.skillMdSha256 with ${JSON.stringify(skillMdSha256)} — a content identity is a ` +
-      'lowercase 64-character hex SHA-256, and a rewritten sidecar is a declaration a loader will have to verify against real bytes',
+        'lowercase 64-character hex SHA-256, and a rewritten sidecar is a declaration a loader will have to verify against real bytes',
     )
   }
   return { ...sidecar, content: { ...sidecar.content, skillMdSha256 } }
@@ -460,15 +422,6 @@ export function sidecarWithSkillMd(sidecar: SkillSidecar, skillMdSha256: string)
 /**
  * The deterministic byte sequence of one declaration — what a file holds when
  * this build writes a sidecar.
- *
- * Determinism is the point: {@link skillContractDigest} hashes the canonical
- * key order, so the bytes on disk must be a function of the declaration alone,
- * not of the order a caller happened to build its object in. Two calls with the
- * same declaration produce the same string, and a reader can verify a file by
- * parsing it and re-serializing: identical bytes mean the declaration did not
- * move — which is exactly how the K3 derivation check compares a candidate's
- * sidecar with the one re-derived from the champion's bytes. The shape is
- * canonical keys, two-space indentation, one trailing newline.
  */
 export function serializeSkillSidecar(sidecar: SkillSidecar): string {
   return `${JSON.stringify(JSON.parse(canonicalize(sidecar)), null, 2)}\n`

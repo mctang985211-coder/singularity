@@ -62,7 +62,7 @@ import ToolRuntime from '../../../../thirdparty/deepseek-harness/packages/core/t
 import SessionStore from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import SessionProjectionRegistry from '../../../../thirdparty/deepseek-harness/packages/session/session-projection/lib/index.js'
 import AgentLoop from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/lib/index.js'
-import LlmRuntime, { LlmAdapter, createUserMessage } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
+import LlmRuntime, { LlmAdapter, createSystemMessage, createUserMessage } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
 import type { GenerateOptions, LlmResolvedModelInfo, UserMessage, StreamChunk } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
 import { toolCallResponse, textResponse } from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/tests/mock-adapter.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -316,7 +316,10 @@ class Boot {
     // the header of the root it is about to open *and* the person's request that
     // justifies it, and the runtime's root entry (`ensureRoot`) resumes exactly
     // that record. The fixture writes both the way the deployment does, so a
-    // second boot finds the Session already there.
+    // second boot finds the Session already there. A Session's surface opens with
+    // its system head (v4), so the seed writes the closed turn that left the
+    // (empty) head behind; the loop's own projection replaces it on the first
+    // request the resumed agent makes.
     if (!(await persistence.list()).some(item => String(item.header.id) === ROOT)) {
       const seed = await backend.create({
         version: SESSION_FORMAT_VERSION,
@@ -327,13 +330,27 @@ class Boot {
         cwd: join(dir, 'env'),
         agentPreset: 'standard',
       } as unknown as SessionHeader)
-      await seed.append([{
-        type: 'user/message',
-        seq: 0,
-        time: Date.now(),
-        data: createUserMessage({ content: [{ type: 'text', text: 'ship the release' }], source: { kind: 'user' } }),
-        surfaceOp: 'append',
-      }] as never)
+      const seededAt = Date.now()
+      await seed.append([
+        { type: 'turn/start', seq: 0, time: seededAt, data: { turn: 1 } },
+        { type: 'step/start', seq: 1, time: seededAt + 1, data: { turn: 1, step: 1 } },
+        {
+          type: 'system/message',
+          seq: 2,
+          time: seededAt + 2,
+          data: { turn: 1, step: 1, message: createSystemMessage('') },
+          surfaceOp: 'append',
+        },
+        { type: 'step/end', seq: 3, time: seededAt + 3, data: { turn: 1, step: 1 } },
+        { type: 'turn/end', seq: 4, time: seededAt + 4, data: { turn: 1 } },
+        {
+          type: 'user/message',
+          seq: 5,
+          time: seededAt + 5,
+          data: createUserMessage({ content: [{ type: 'text', text: 'ship the release' }], source: { kind: 'user' } }),
+          surfaceOp: 'append',
+        },
+      ] as never)
       await seed.close()
     }
     const originalCreate = backend.create.bind(persistence)
@@ -622,7 +639,7 @@ class Boot {
 
   /** The durable artifact one Session owns: the bytes a second boot would read. */
   artifact(sessionId: string): string {
-    const suffix = join(sessionId, 'session.v3.jsonl')
+    const suffix = join(sessionId, `session.v${SESSION_FORMAT_VERSION}.jsonl`)
     const found = readdirSync(this.dir, { recursive: true })
       .map(entry => join(this.dir, String(entry)))
       .find(path => path.endsWith(suffix))
@@ -1165,7 +1182,7 @@ describe('the crash points of one exchange, reopened (A4-3)', () => {
     }, { timeout: 20_000 })
     // The wake is the deployment's own voice, never a person's, and it carries no
     // question body: the words stay in the recorded relay.
-    expect(wake.source.kind).toBe('plugin')
+    expect(wake.source.kind).toBe('task-runtime')
     const noticeText = wake.content.map(block => (block.type === 'text' ? block.text : '')).join('')
     expect(noticeText).not.toContain('which contract holds?')
     expect(noticeText).toContain(messageId)
@@ -1324,12 +1341,13 @@ describe('the crash points of one exchange, reopened (A4-3)', () => {
 })
 
 /**
- * The two endings the rework had to make true (A4 §F.1): a wait whose Session
- * cannot be brought back is settled by name rather than left running forever,
- * and a wait that is recovered still runs under the deadline it started with.
+ * What a recovered wait refuses and what ends it (A4 §F.1 + G §5.25): a wait
+ * whose Session cannot be brought back fails its activation by name and is left
+ * exactly where the crash left it, and a wait that is recovered still runs under
+ * the deadline it started with.
  */
 describe('what a recovered wait refuses and what ends it (A4 §F.1)', () => {
-  it('settles the run by name when its Session cannot be brought back, and revives nothing', async () => {
+  it('fails the activation by name when its Session cannot be brought back, and revives nothing', async () => {
     const dir = workspace()
     const childGo = Promise.withResolvers<void>()
     const first = await Boot.open(dir, {
@@ -1354,32 +1372,15 @@ describe('what a recovered wait refuses and what ends it (A4 §F.1)', () => {
       script: () => [{ text: 'nothing to do' }],
     })
     await second.root()
-    await second.adopt()
-    const settled = await vi.waitFor(async () => {
-      const snapshot = await second.snapshot()
-      const run = snapshot.runs.find(candidate => candidate.runId === childRun)
-      expect(run?.status, JSON.stringify(snapshot.reviews.find(review => review.runId === childRun) ?? null)).toBe('failed')
-      return snapshot
-    }, { timeout: 20_000 })
-    const review = settled.reviews.find(candidate => candidate.runId === childRun)
-    // The refusal is named: which Session, and which code could not be
-    // established — not "recovery failed" and not silence.
-    expect(review?.localizedCause).toContain('could not be brought back')
-    expect(review?.localizedCause).toContain('session-missing')
-    // No dead wait is left behind, and the run's questions stop being open.
+    // G §5.25: a resume that cannot be established fails the activation by name
+    // and mutates nothing — the wait is not settled by a substitute verdict.
+    await expect(second.adopt()).rejects.toThrow(/session ".*" does not exist/)
+    const held = await second.snapshot()
+    // The refusal is named by its cause and revives nothing: the run stays where
+    // the crash left it, no Session was created, and no answer exists.
+    expect(held.runs.find(candidate => candidate.runId === childRun)?.status).toBe('running')
     expect(second.ctx.agents.get(SessionId(childSession))).toBeUndefined()
-    expect(settled.questions?.byId[questionId]?.answers ?? []).toEqual([])
-    // A late answer is refused by the store and cannot revive the run.
-    await expect(second.task.answerParentQuestionIn(STORE, {
-      questionId,
-      parentRunId: (await second.runOf(ROOT)).runId,
-      requestKey: 'a1',
-      answerDigest: 'a'.repeat(64),
-      resolves: true,
-      answerRef: { sessionId: ROOT, seq: 0 },
-      messageId: `m-a-${questionId}`,
-    }, ROOT)).rejects.toThrow(/is not open/)
-    expect((await second.snapshot()).runs.find(candidate => candidate.runId === childRun)?.status).toBe('failed')
+    expect(held.questions?.byId[questionId]?.answers ?? []).toEqual([])
     await second.dispose()
   }, 60_000)
 

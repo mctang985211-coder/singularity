@@ -3,8 +3,8 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { EscalationService } from '../../src/escalation.ts'
-import type { EscalationInput } from '../../src/escalation.ts'
+import { EscalationService } from '../../src/services/escalation.ts'
+import type { EscalationInput } from '../../src/services/escalation.ts'
 import { defineEscalateTool } from '../../src/tools/escalate.ts'
 
 function fixtureCtx() {

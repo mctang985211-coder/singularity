@@ -29,7 +29,7 @@
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-agent-default-model": "*",
-    "@deepseek-ai/dsh-agent-presets": "*",
+    "@deepseek-ai/dsh-agent-preset-registry": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-mcp-client": "*",
     "@deepseek-ai/dsh-permission-presets": "*",
@@ -42,8 +42,7 @@
     "@deepseek-ai/dsh-user-approval": "*"
   },
   "dependencies": {
-    "@dangosys/dsh-singularity-graph": "workspace:*",
-    "@dangosys/dsh-singularity-layout": "workspace:*"
+    "@dangosys/dsh-singularity-graph": "workspace:*"
   },
   "license": "Apache-2.0",
   "devDependencies": {
@@ -53,7 +52,7 @@
     "@deepseek-ai/cordis": "link:../../../thirdparty/deepseek-harness/vendor/cordis",
     "@deepseek-ai/dsh-agent": "link:../../../thirdparty/deepseek-harness/packages/core/agent",
     "@deepseek-ai/dsh-agent-default-model": "link:../../../thirdparty/deepseek-harness/packages/core/agent-default-model",
-    "@deepseek-ai/dsh-agent-presets": "link:../../../thirdparty/deepseek-harness/packages/preset/agent-presets",
+    "@deepseek-ai/dsh-agent-preset-registry": "link:../../../thirdparty/deepseek-harness/packages/preset/agent-preset-registry",
     "@deepseek-ai/dsh-llm": "link:../../../thirdparty/deepseek-harness/packages/llm/llm",
     "@deepseek-ai/dsh-mcp-client": "link:../../../thirdparty/deepseek-harness/packages/mcp/mcp-client",
     "@deepseek-ai/dsh-permission-presets": "link:../../../thirdparty/deepseek-harness/packages/interaction/permission-presets",

@@ -1,17 +1,10 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { CapabilityConfig, CapabilityProviderPrecheck, SkillProviderVerdict } from '@dangosys/dsh-singularity-task-runtime'
 import { TOOL_LABELS, workerBaseline, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS } from '@dangosys/dsh-singularity-task-runtime'
+import { text } from '../shared.ts'
 
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-/**
- * `filesystem → read, write, edit, read_image` — the label kept, the real DSH
- * names it resolves to shown, so a reader can see what a worker is actually
- * granted. A label outside the vocabulary is shown as such and is what
- * admission rejects when the capability is next resolved.
- */
+/** `filesystem → read, write, edit, read_image` — the label kept, the real DSH names it resolves to shown, so a reader can see what a worker is actually granted. A label outside the vocabulary is shown as such and is what */
 function renderTools(entry: CapabilityConfig): string {
   const labels = entry.tools ?? []
   if (labels.length === 0) return 'tools: []'
@@ -36,12 +29,7 @@ function shortDigest(digest: string): string {
   return digest.slice(0, 12)
 }
 
-/**
- * One skill's provider verdict, in the words the pre-check uses: the role it
- * was accepted as — an execution provider, loadable knowledge, plain guidance —
- * or `invalid` with every named defect, so a model reading this before it
- * dispatches sees the same conclusion admission will reach.
- */
+/** One skill's provider verdict, in the words the pre-check uses: */
 function renderProvider(verdict: SkillProviderVerdict): string {
   if (!verdict.valid) {
     return `${verdict.name} → invalid (${verdict.defects.map(item => `${item.code}: ${item.detail}`).join('; ')})`
@@ -56,16 +44,7 @@ function renderProvider(verdict: SkillProviderVerdict): string {
   return `${verdict.name} → guidance (no sidecar; loadable guidance, not an execution provider; content: ${shortDigest(verdict.contentDigest)})`
 }
 
-/**
- * The provider line under one capability row: every skill's verdict, or the
- * fact that the row grants none. `rows` is the pre-check's own output, so an
- * error message or a missing skill cannot be papered over here.
- *
- * A row the pre-check refused *as a row* — the capability an open evolution
- * commit intent moves (A6) — has no verdicts to show: it was not resolved, and
- * that refusal is what the model has to see before it picks this name for a
- * batch admission will reject.
- */
+/** The provider line under one capability row: every skill's verdict, or the fact that the row grants none. `rows` is the pre-check's own output, so an error message or a missing skill cannot be papered over here. */
 function renderProviders(row: CapabilityProviderPrecheck | undefined): string {
   if (row === undefined) return 'providers: (not checked)'
   const refusals = row.refusals ?? []
@@ -92,7 +71,6 @@ export function defineCapabilityListTool(ctx: Context) {
       if (names.length === 0) return 'no capabilities configured'
       // The provider verdicts come from the same pre-check admission runs, from
       // this caller's own discovery viewpoint: a skill that is missing or
-      // unusable is visible here, before a batch is proposed and refused.
       const caller = exec.agent?.id
       const report = typeof caller === 'string' && caller.length > 0
         ? await ctx.taskRuntime.capabilityProviderReport(caller)

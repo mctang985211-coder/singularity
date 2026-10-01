@@ -1,16 +1,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { EVOLUTION_DECISIONS, renderProviderRoles } from '@dangosys/dsh-singularity-evolution'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): string {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('evolution_decide: missing agent id')
-  return id
-}
+import { denialReason, message, sessionId, text } from '../shared.ts'
 
 export function defineEvolutionDecideTool(ctx: Context) {
   return defineTool({
@@ -34,14 +26,14 @@ export function defineEvolutionDecideTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'evolution_decide')
       const agent = exec.agent
       if (agent === undefined) throw new Error('evolution_decide: missing agent')
       let proposal
       try {
         proposal = await ctx.evolution.get(args.proposalId)
       } catch (error) {
-        return `evolution_decide rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_decide rejected: ${message(error)}`
       }
       if (proposal.status !== 'gated') {
         return `evolution_decide rejected: proposal ${proposal.proposalId} is ${proposal.status}; only a gated proposal can be decided`
@@ -51,7 +43,7 @@ export function defineEvolutionDecideTool(ctx: Context) {
         try {
           promotion = await ctx.evolution.checkPromotion(proposal.proposalId)
         } catch (error) {
-          return `evolution_decide rejected: ${error instanceof Error ? error.message : String(error)}`
+          return `evolution_decide rejected: ${message(error)}`
         }
       }
       const gate = proposal.gate!
@@ -76,11 +68,7 @@ export function defineEvolutionDecideTool(ctx: Context) {
         signal: exec.signal,
       })
       if (outcome !== 'allowed-once') {
-        const why = outcome === 'rejected'
-          ? 'the human rejected it'
-          : outcome === 'cancelled'
-            ? 'the request was cancelled before the human decided'
-            : 'no approval answerer available'
+        const why = denialReason(outcome)
         return `evolution_decide: no decision recorded — ${why}; proposal ${proposal.proposalId} stays gated`
       }
       try {
@@ -92,7 +80,7 @@ export function defineEvolutionDecideTool(ctx: Context) {
             : 'recorded after human approval — the ledger notes the decision only; nothing was applied',
         ].join('\n')
       } catch (error) {
-        return `evolution_decide rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_decide rejected: ${message(error)}`
       }
     },
   })

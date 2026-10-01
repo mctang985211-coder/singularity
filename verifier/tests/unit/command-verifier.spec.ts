@@ -46,9 +46,11 @@ describe('CommandVerifier', () => {
 
   test('exit code 0 passes and merges stdout with stderr into a relative-referenced log', async () => {
     const { evidenceRoot, verifier, request } = await setup()
-    const [result] = await verifier.verify(request([
-      criterion({ command: 'node -e "process.stdout.write(\'out\'); process.stderr.write(\'err\'); process.exit(0)"' }),
-    ]))
+    const [result] = await verifier.verify(
+      request([
+        criterion({ command: "node -e \"process.stdout.write('out'); process.stderr.write('err'); process.exit(0)\"" }),
+      ]),
+    )
     expect(result.status).toBe('pass')
     expect(result.exitCode).toBe(0)
     expect(result.verifierId).toBe('command')
@@ -69,10 +71,9 @@ describe('CommandVerifier', () => {
 
   test('timeout kills the command and reports inconclusive', async () => {
     const { verifier, request } = await setup()
-    const [result] = await verifier.verify(request(
-      [criterion({ command: 'node -e "setTimeout(() => {}, 30000)"' })],
-      200,
-    ))
+    const [result] = await verifier.verify(
+      request([criterion({ command: 'node -e "setTimeout(() => {}, 30000)"' })], 200),
+    )
     expect(result.status).toBe('inconclusive')
     expect(result.details).toContain('timeout')
     expect(result.exitCode).toBeUndefined()
@@ -90,10 +91,9 @@ describe('CommandVerifier', () => {
     const { verifier, request } = await setup()
     const [noCommand] = await verifier.verify(request([criterion()]))
     expect(noCommand).toMatchObject({ status: 'inconclusive', unknownKind: 'task' })
-    const [timedOut] = await verifier.verify(request(
-      [criterion({ command: 'node -e "setTimeout(() => {}, 30000)"' })],
-      200,
-    ))
+    const [timedOut] = await verifier.verify(
+      request([criterion({ command: 'node -e "setTimeout(() => {}, 30000)"' })], 200),
+    )
     expect(timedOut).toMatchObject({ status: 'inconclusive', unknownKind: 'task' })
   })
 
@@ -105,15 +105,18 @@ describe('CommandVerifier', () => {
     for (const sample of samples) {
       const [result] = await verifier.verify(request([sample.criterion]))
       const judged = result.status === 'pass' ? 'pass' : result.status === 'fail' ? 'fail' : 'not-pass'
-      expect(judged, `sample "${sample.name}" (${sample.role}) expected ${sample.expect}, judged ${result.status}`).toBe(sample.expect)
+      expect(
+        judged,
+        `sample "${sample.name}" (${sample.role}) expected ${sample.expect}, judged ${result.status}`,
+      ).toBe(sample.expect)
     }
   })
 
   test('criterion ids are sanitized for log file names', async () => {
     const { verifier, request } = await setup()
-    const [result] = await verifier.verify(request([
-      criterion({ criterionId: 'build/test:one', command: 'node -e "process.exit(0)"' }),
-    ]))
+    const [result] = await verifier.verify(
+      request([criterion({ criterionId: 'build/test:one', command: 'node -e "process.exit(0)"' })]),
+    )
     expect(result.logRef).toBe('sg-t-root/r1/build_test_one.log')
   })
 

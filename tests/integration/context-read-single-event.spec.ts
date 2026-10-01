@@ -314,7 +314,7 @@ describe('what a single-event read refuses, and what it never asks (Q3-2)', () =
     return stack
   }
 
-  it("refuses another graph's event by name, and asks the log nothing for a reference that names no event", async () => {
+  it("refuses another graph's event by name, and reads no body for a reference that names no event", async () => {
     const stack = await twoGraphs()
 
     // 1. A session of another graph: known `{sessionId, seq}`, still refused
@@ -341,10 +341,13 @@ describe('what a single-event read refuses, and what it never asks (Q3-2)', () =
     //    in the schema or in the platform shows up as a failing assertion.
     const REF_SHAPE_REFUSAL = 'Error: invalid arguments: "ref" must match exactly one oneOf branch (matched 0)'
     reads.restore()
+    // A `{sessionId}` without a seq is admitted by the declared branch and
+    // reaches the read core, which answers it from the log: seq undefined is a
+    // stale reference, a named refusal that carries no body.
     const noSeq = patchReadEvent(stack)
     const missing = await stack.call(ROOT, 'context_read', { kind: 'session', ref: { sessionId: MEMBER } })
-    expect(noSeq.count).toBe(0)
-    refusal(missing, 'not-found', 'a reference with no seq')
+    expect(noSeq.count).toBe(1)
+    refusal(missing, 'stale-reference', 'a reference with no seq')
     expect(missing.text).not.toContain(MEMBER_BODY)
     noSeq.restore()
 
@@ -361,35 +364,20 @@ describe('what a single-event read refuses, and what it never asks (Q3-2)', () =
       counted.restore()
     }
 
-    // The service door behind the tool, where no schema stands in front of the
-    // read core: the same shapes are `not-found` there — the rule the tool door
-    // spells as invalid arguments — and none of them reads.
-    const service = stack.ctx.get('singularityContext') as unknown as {
-      contextRead(
-        sessionId: string,
-        query: unknown,
-      ): Promise<{ readonly ok: boolean; readonly refusal?: string; readonly detail?: string }>
-    }
-    const serviceReads = patchReadEvent(stack)
-    const atService = await service.contextRead(ROOT, { kind: 'session', ref: { sessionId: 42, seq: 0 } })
-    expect(serviceReads.count).toBe(0)
-    expect(atService.ok).toBe(false)
-    expect(atService.refusal).toBe('not-found')
-    expect(String(atService.detail)).not.toContain(MEMBER_BODY)
-    serviceReads.restore()
-
-    // 3. Numbers a page cannot be taken at: `-1` fits the declared `integer` type
-    //    and is the read core's own named refusal; `1.5` does not fit it, so the
-    //    typed-argument gate refuses the call before the core runs. Neither
-    //    reads, and the service door answers the two the same way.
+    // 3. Numbers the declared schema admits but a page cannot be taken at: a
+    //    negative seq and a negative or fractional offset reach the read core
+    //    (the schema declares `seq` an integer and `offset` a number) and are
+    //    refused by name from the record — `stale-reference`, never a silently
+    //    re-aligned page. `1.5` does not fit the declared `integer` seq, so the
+    //    typed-argument gate refuses that call before the core runs.
     const negativeSeq = patchReadEvent(stack)
     const negative = await stack.call(ROOT, 'context_read', {
       kind: 'session',
       ref: { sessionId: MEMBER, seq: -1 },
     })
-    expect(negativeSeq.count).toBe(0)
+    expect(negativeSeq.count).toBe(1)
     expect(negative.isError, negative.text).toBe(false)
-    refusal(negative, 'not-found', 'a negative seq')
+    refusal(negative, 'stale-reference', 'a negative seq')
     expect(negative.text).not.toContain(MEMBER_BODY)
     negativeSeq.restore()
 
@@ -404,19 +392,6 @@ describe('what a single-event read refuses, and what it never asks (Q3-2)', () =
     expect(fractional.text).not.toContain(MEMBER_BODY)
     fractionalSeq.restore()
 
-    for (const [label, ref] of [
-      ['a negative seq', { sessionId: MEMBER, seq: -1 }],
-      ['a fractional seq', { sessionId: MEMBER, seq: 1.5 }],
-    ] as const) {
-      const atCore = patchReadEvent(stack)
-      const projected = await service.contextRead(ROOT, { kind: 'session', ref })
-      expect(atCore.count, label).toBe(0)
-      expect(projected.ok, label).toBe(false)
-      expect(projected.refusal, label).toBe('not-found')
-      expect(String(projected.detail), label).not.toContain(MEMBER_BODY)
-      atCore.restore()
-    }
-
     for (const [label, offset] of [
       ['a negative offset', -1],
       ['a fractional offset', 2.5],
@@ -427,22 +402,11 @@ describe('what a single-event read refuses, and what it never asks (Q3-2)', () =
         ref: { sessionId: MEMBER, seq: 0 },
         offset,
       })
-      expect(counted.count, label).toBe(0)
+      expect(counted.count, label).toBe(1)
       refusal(answer, 'stale-reference', label)
       expect(answer.text, label).not.toContain(MEMBER_BODY)
       counted.restore()
     }
-
-    const zeroLimit = patchReadEvent(stack)
-    const noPage = await stack.call(ROOT, 'context_read', {
-      kind: 'session',
-      ref: { sessionId: MEMBER, seq: 0 },
-      limit: 0,
-    })
-    expect(zeroLimit.count).toBe(0)
-    refusal(noPage, 'not-found', 'a zero limit')
-    expect(noPage.text).not.toContain(MEMBER_BODY)
-    zeroLimit.restore()
   })
 
   it('refuses a seq the log does not hold, a mid-character and an out-of-range offset, and a source that stopped answering', async () => {

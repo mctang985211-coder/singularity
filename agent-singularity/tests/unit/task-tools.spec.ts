@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { WorkspaceBusyError, type CapabilityConfig } from '../../../task-runtime/src/index.ts'
+import { type CapabilityConfig } from '../../../task-runtime/src/index.ts'
 import { graphRegistry, mountContextReadCore, sessionQueryReads } from '../../../tests/support/context-plane.ts'
 import { defineCapabilityListTool } from '../../src/tools/capability-list.ts'
 import { defineTaskDecomposeTool } from '../../src/tools/task-decompose.ts'
@@ -1751,7 +1751,7 @@ describe('task_intake', () => {
     expect(result).not.toContain('root task t-')
   })
 
-  it('names the runtime refusal and the root-specific rules, having written nothing', async () => {
+  it('passes the runtime refusal through, adding no claim about what was written', async () => {
     const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
       throw new Error(
@@ -1761,13 +1761,13 @@ describe('task_intake', () => {
     }) as never
     const result = (await defineTaskIntakeTool(ctx as never).execute(rootContract, exec('root-1'))) as string
 
-    expect(result).toContain('task_intake rejected: task-runtime: root contract rejected:')
-    expect(result).toContain('at least one mandatory acceptance criterion')
-    expect(result).toContain('Nothing was written')
-    expect(result).toContain('new graph')
+    expect(result).toBe(
+      'task_intake rejected: task-runtime: root contract rejected:\n- root contract requires at least one mandatory acceptance criterion judged by ' +
+      'something other than the composite conjunction',
+    )
   })
 
-  it('refuses to re-intake a store that already holds a root task, naming the terminal rule', async () => {
+  it('refuses to re-intake a store that already holds a root task, naming the rule', async () => {
     const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
       throw new Error(
@@ -1777,140 +1777,12 @@ describe('task_intake', () => {
     const result = (await defineTaskIntakeTool(ctx as never).execute(rootContract, exec('root-1'))) as string
 
     expect(result).toContain('already holds root task "t-root"')
-    expect(result).toContain('terminal')
-    expect(result).toContain('Nothing was written')
+    expect(result).toBe(
+      'task_intake rejected: task-runtime: store "sg-t-root-1" already holds root task "t-root", so a root contract cannot be intaken here',
+    )
   })
 
-  /**
-   * The two refusal shapes, told apart by the store (stage-D defect 2). The
-   * intake writes the proposal first and activates it second, and the activation
-   * claims the checkout before it commits — so a refusal can leave the
-   * `TaskProposalSubmitted` behind (the workspace-conflict path), and a text
-   * claiming "nothing was written" there would be exactly wrong: the record is
-   * what a retry is answered by, and the caller has to know it is there.
-   */
-  function recordedProposalFor(
-    objective: string,
-    criteria: readonly { description: string }[] = rootContract.acceptanceCriteria,
-    overrides: Record<string, unknown> = {},
-  ) {
-    return {
-      kind: 'root',
-      proposalId: 'p-root-recorded',
-      requestKey: 'rk-intake-1',
-      status: 'ready',
-      policy: 'off',
-      identity: { contractVersion: 1, storeId: 'sg-t-root-1', rootSessionId: 'root-1', requestKey: 'rk-intake-1', contractDigest: 'c'.repeat(64) },
-      contract: { contractVersion: 1, objective, acceptanceCriteria: criteria, assumptions: [], constraints: [], requiredCapabilities: [] },
-      proposalDigest: 'd'.repeat(64),
-      admissionContext: { maxDepth: 3, maxChildren: 8, auditOnly: {} },
-      admissionContextDigest: 'e'.repeat(64),
-      reviewContext: { capabilityManifestDigest: 'f'.repeat(64), verifiers: [] },
-      reviewContextDigest: 'a'.repeat(64),
-      createdAt: '2026-09-23T00:00:00.000Z',
-      ...overrides,
-    }
-  }
-
-  /** The fixture's store as the read-back after a refusal sees it: the given proposals, and nothing else. */
-  function storeHolding(proposals: readonly unknown[]) {
-    return { proposals: { all: proposals, byId: {}, byRequestKey: {}, byParentTask: {} } }
-  }
-
-  it('says the contract is already on the record when the activation is what failed', async () => {
-    const { ctx } = await fixture()
-    ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
-      throw new WorkspaceBusyError(
-        '/env/checkout',
-        { kind: 'run', storeId: 'sg-t-other', taskId: 't-other', runId: 'r-other', since: '2026-09-23T00:00:00.000Z' },
-        undefined,
-        'the root contract cannot claim a checkout another live run holds',
-      )
-    }) as never
-    ctx.task.openStore = vi.fn(async () => ({ ...snapshot, ...storeHolding([recordedProposalFor(rootContract.objective)]) })) as never
-    const result = (await defineTaskIntakeTool(ctx as never).execute(rootContract, exec('root-1'))) as string
-
-    expect(result).toContain('task_intake rejected: workspace /env/checkout is busy')
-    expect(result).toContain('p-root-recorded')
-    expect(result).toContain('ready')
-    // The record is the retry's address, both ways in, and the read side works
-    // before the root exists (defect 1).
-    expect(result).toContain('same proposal')
-    expect(result).toContain('task_proposal_continue')
-    expect(result).toContain('task_proposal_read')
-    expect(result).not.toContain('Nothing was written')
-  })
-
-  it('matches a record by the objective the caller sent when the call carried no key of its own', async () => {
-    const { ctx } = await fixture()
-    ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
-      throw new Error('workspace /env/checkout is busy: held by kind run store sg-t-other')
-    }) as never
-    ctx.task.openStore = vi.fn(async () => ({
-      ...snapshot,
-      ...storeHolding([recordedProposalFor(rootContract.objective, rootContract.acceptanceCriteria, {
-        proposalId: 'p-root-derived',
-        requestKey: 'rk-derived',
-      })]),
-    })) as never
-    const { requestKey: _key, ...withoutKey } = rootContract
-    const result = (await defineTaskIntakeTool(ctx as never).execute(withoutKey, exec('root-1'))) as string
-
-    expect(result).toContain('p-root-derived')
-    expect(result).not.toContain('Nothing was written')
-  })
-
-  it('does not read another contract\'s record as this one, even under the same objective', async () => {
-    const { ctx } = await fixture()
-    ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
-      throw new Error('task-runtime: root contract rejected:\n- root contract objective must not be blank')
-    }) as never
-    // Same goal, other criteria: the objective alone is not the contract, and a
-    // text that claimed *this* contract was recorded would send the caller to a
-    // record that is not its own.
-    ctx.task.openStore = vi.fn(async () => ({
-      ...snapshot,
-      ...storeHolding([recordedProposalFor(rootContract.objective, [{ description: 'something else entirely' }], { proposalId: 'p-other', requestKey: 'rk-other' })]),
-    })) as never
-    const { requestKey: _key, ...withoutKey } = rootContract
-    const result = (await defineTaskIntakeTool(ctx as never).execute(withoutKey, exec('root-1'))) as string
-
-    expect(result).toContain('Nothing was written')
-    expect(result).not.toContain('p-other')
-  })
-
-  it('still says nothing was written when the store holds no proposal for this contract', async () => {
-    const { ctx } = await fixture()
-    ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
-      throw new Error('task-runtime: root contract rejected:\n- root contract objective must not be blank')
-    }) as never
-    // An open proposal for a *different* contract does not make this refusal a
-    // recorded one: the caller's own contract was never written.
-    ctx.task.openStore = vi.fn(async () => ({
-      ...snapshot,
-      ...storeHolding([recordedProposalFor('a goal somebody else asked for', [{ description: 'the other goal is met' }], { proposalId: 'p-other', requestKey: 'rk-other' })]),
-    })) as never
-    const result = (await defineTaskIntakeTool(ctx as never).execute(rootContract, exec('root-1'))) as string
-
-    expect(result).toContain('task-runtime: root contract rejected:')
-    expect(result).toContain('Nothing was written')
-    expect(result).not.toContain('p-other')
-  })
-
-  it('says nothing was written when the store does not exist yet', async () => {
-    const { ctx } = await fixture()
-    ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
-      throw new Error('task-runtime: root contract rejected:\n- root contract acceptanceCriteria must be an array')
-    }) as never
-    ctx.task.openStore = vi.fn(async () => {
-      throw new Error('task: store "sg-t-root-1" does not exist')
-    }) as never
-    const result = (await defineTaskIntakeTool(ctx as never).execute(rootContract, exec('root-1'))) as string
-
-    expect(result).toContain('Nothing was written')
-  })
-
-  it('reports a store it cannot read back instead of claiming nothing was written', async () => {
+  it('passes a refusal through even when the store cannot be read back', async () => {
     const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
       throw new Error('task-runtime: the intake of a root contract for session "root-1" was cancelled before anything was persisted')
@@ -1920,13 +1792,9 @@ describe('task_intake', () => {
     }) as never
     const result = (await defineTaskIntakeTool(ctx as never).execute(rootContract, exec('root-1'))) as string
 
-    // The caller is resolved through the read core first (A2), so the answer is
-    // that core's named refusal: the domain store cannot be read, with the store's
-    // own reason — and nothing was written.
     expect(result).toContain('task_intake rejected:')
     expect(result).toContain('invalid persisted event at seq 3')
     expect(result).toContain('cannot be read')
-    expect(result).toContain('nothing was written')
   })
 
   it('refuses a caller that is not the root session, by name, and calls nothing', async () => {

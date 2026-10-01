@@ -12,8 +12,21 @@ function task(overrides: Partial<TaskInstance> = {}): TaskInstance {
     objective: 'implement the feature',
     depth: 1,
     acceptanceCriteria: [
-      { criterionId: 'ac1-1', description: 'unit tests pass', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'pnpm test' },
-      { criterionId: 'ac1-2', description: 'reviewed', verificationMode: 'review', requiredEvidence: [], mandatory: false },
+      {
+        criterionId: 'ac1-1',
+        description: 'unit tests pass',
+        verificationMode: 'deterministic',
+        requiredEvidence: [],
+        mandatory: true,
+        command: 'pnpm test',
+      },
+      {
+        criterionId: 'ac1-2',
+        description: 'reviewed',
+        verificationMode: 'review',
+        requiredEvidence: [],
+        mandatory: false,
+      },
     ],
     requestedCapabilities: [],
     decompositionStatus: 'leaf',
@@ -76,7 +89,10 @@ describe('buildHandoff', () => {
       childTask: task(),
       reason: 'split the work',
       callerSessionId: 'root-session',
-      assumptions: ['a cycle-accurate reference model (BEMU) exists', 'dependency evidence "e-1" is verified and available as a reference'],
+      assumptions: [
+        'a cycle-accurate reference model (BEMU) exists',
+        'dependency evidence "e-1" is verified and available as a reference',
+      ],
     })
     expect(handoff.assumptions).toEqual([
       'a cycle-accurate reference model (BEMU) exists',
@@ -84,7 +100,7 @@ describe('buildHandoff', () => {
     ])
   })
 
-  test('defaults the relevant artifacts to the parent run\'s own, copied', () => {
+  test("defaults the relevant artifacts to the parent run's own, copied", () => {
     const parentRun = run()
     const handoff = buildHandoff({
       parentTask: task({ taskId: 'root', parentTaskId: undefined, depth: 0 }),

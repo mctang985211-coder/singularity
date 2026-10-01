@@ -25,8 +25,8 @@ import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
 
 const captured = vi.hoisted(() => ({ batches: [] as BatchContext[] }))
 
-vi.mock('../../src/orchestrate.ts', async importOriginal => {
-  const actual = await importOriginal<typeof import('../../src/orchestrate.ts')>()
+vi.mock('../../src/orchestration/batch.ts', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/orchestration/batch.ts')>()
   return {
     ...actual,
     driveBatch: async (_env: unknown, batch: BatchContext) => {
@@ -53,7 +53,9 @@ function harness() {
   sessions.set(ROOT_SESSION, requestedSession(ROOT_SESSION, 'ship the release'))
   const handle = (id: SessionId) => ({
     read: async () => ({ events: sessions.get(id)?.events ?? [] }),
-    append: async (records: readonly SessionEvent[]) => { sessions.get(id)?.events.push(...records) },
+    append: async (records: readonly SessionEvent[]) => {
+      sessions.get(id)?.events.push(...records)
+    },
     flush: async () => {},
     close: async () => {},
   })
@@ -83,14 +85,19 @@ function harness() {
       }),
     },
     agentRuntime: {
-      spawn: async () => { throw new Error('the mocked driver must not spawn a worker') },
+      spawn: async () => {
+        throw new Error('the mocked driver must not spawn a worker')
+      },
     },
   }
   const task = new TaskService(ctx as never)
   ctx.task = task
-  const runtime = new TaskRuntime(ctx as never, {
-    capabilities: { 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } },
-  } as unknown as Config)
+  const runtime = new TaskRuntime(
+    ctx as never,
+    {
+      capabilities: { 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } },
+    } as unknown as Config,
+  )
   return { ctx, task, runtime, sessions }
 }
 
@@ -116,7 +123,11 @@ describe('the pre-check a batch passed travels with its batch (S1-C)', () => {
     const { batchId, childTaskIds } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
-        { objective: 'design the ball', acceptanceCriteria: [{ description: 'works', command: 'true' }], requiredCapabilities: ['design-ball'] },
+        {
+          objective: 'design the ball',
+          acceptanceCriteria: [{ description: 'works', command: 'true' }],
+          requiredCapabilities: ['design-ball'],
+        },
         { objective: 'and then some', acceptanceCriteria: [{ description: 'works', command: 'true' }] },
       ],
     })
@@ -132,7 +143,9 @@ describe('the pre-check a batch passed travels with its batch (S1-C)', () => {
     const providers = batch.providers
     expect(providers).toBeDefined()
     expect(providers!.capabilities.map(row => row.capability)).toEqual(['design-ball'])
-    expect(providers!.capabilities[0]!.skills.map(skill => (skill.valid ? skill.role : 'invalid'))).toEqual(['guidance'])
+    expect(providers!.capabilities[0]!.skills.map(skill => (skill.valid ? skill.role : 'invalid'))).toEqual([
+      'guidance',
+    ])
     // The roots were the ones discovery actually walked, and the revision is the
     // value a run can cite later.
     expect(providers!.roots[0]).toBe(join(home, 'skills'))

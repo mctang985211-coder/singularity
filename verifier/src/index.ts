@@ -1,7 +1,4 @@
-/**
- * Verifier registry: per-mode dispatch, built-in verifiers, and EvidenceBundle construction.
- * @module dsh-singularity-verifier
- */
+/** @module dsh-singularity-verifier */
 
 import { randomUUID } from 'node:crypto'
 import { mkdir, open } from 'node:fs/promises'
@@ -22,11 +19,13 @@ import { CommandVerifier } from './command-verifier.ts'
 import { CompositeVerifier, judgeCompositeCriterion } from './composite-verifier.ts'
 import { protectedInputDefects } from './protected-inputs.ts'
 import { ReviewVerifier } from './review-verifier.ts'
-import type {
-  Verifier,
-  VerifierSelftestSample,
-  VerifierSelftestStore,
-  VerifyRequest,
+import {
+  LOG_TAIL_MAX_CHARS,
+  LOG_TAIL_MAX_LINES,
+  type Verifier,
+  type VerifierSelftestSample,
+  type VerifierSelftestStore,
+  type VerifyRequest,
 } from './types.ts'
 export type {
   Verifier,
@@ -41,9 +40,6 @@ export type { CompositeTaskSource } from './composite-verifier.ts'
 export { ReviewVerifier } from './review-verifier.ts'
 export { protectedInputDefects } from './protected-inputs.ts'
 
-/** Caps for the log-tail excerpt a review record carries: enough to read the failure, small enough to keep a record lean. */
-export const LOG_TAIL_MAX_LINES = 40
-export const LOG_TAIL_MAX_CHARS = 2048
 /** Read window for large logs: the tail of a failure lives at the end of the file. */
 const LOG_TAIL_READ_BYTES = 64 * 1024
 
@@ -55,11 +51,7 @@ declare module '@deepseek-ai/cordis' {
 
 /** Plugin config; every field optional — the constructor resolves defaults. */
 export interface Config {
-  /**
-   * Root directory for verifier evidence logs. Omitted resolves to
-   * `$DSH_HOME/task-evidence`, falling back to `<repo root>/.dsh/task-evidence`
-   * when `DSH_HOME` is unset. Run logs land in `<evidenceRoot>/<storeId>/<runId>/`.
-   */
+  /** Root for verifier evidence logs; omitted resolves to `$DSH_HOME/task-evidence`, else `<repo>/.dsh/task-evidence`. */
   evidenceRoot?: string
 }
 
@@ -72,16 +64,8 @@ export interface VerifyRunOptions {
 }
 
 /** Options for {@link VerifierRegistry.register}. */
-export interface RegisterOptions {
-  /**
-   * Explicit test-double declaration: the only channel that skips the
-   * executable selftest gate. A test double stands in for a judge without being
-   * one — a fixture whose verdicts the test dictates — and cannot prove a
-   * discrimination it does not have. Passing this is the caller's stated
-   * intent, logged as one warning; nothing infers it. A missing or descriptive
-   * selftest is refused like any other, so no production registration can slip
-   * through this gate by omission.
-   */
+interface RegisterOptions {
+  /** The explicit test-double declaration: the only channel that skips the executable selftest gate. */
   testDouble?: true
 }
 
@@ -90,72 +74,25 @@ function defaultEvidenceRoot(): string {
   return join(process.env.DSH_HOME ?? join(repoRoot, '.dsh'), 'task-evidence')
 }
 
-/** How a value reads back in a refusal when the declaration is malformed. */
-function described(value: unknown): string {
-  if (value === undefined) return 'undefined'
-  if (Array.isArray(value) && value.length === 0) return 'an empty array'
-  const json = JSON.stringify(value)
-  return json === undefined ? String(value) : json
-}
-
-/** How a sample is named in a refusal: by its name when it has one, by position otherwise. */
-function sampleWho(sample: VerifierSelftestSample, index: number): string {
-  return typeof sample.name === 'string' && sample.name.trim().length > 0 ? `sample "${sample.name}"` : `sample #${index}`
-}
-
 /** The thrown error's message, or the value itself when it is not an error. */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/**
- * The shape defects of one sample, as readable reasons: the fields the gate
- * needs to execute the sample and to know what a healthy judge returns for it.
- * Collected rather than thrown, so one refusal names every malformed sample.
- * A shape defect refuses registration *before* execution — a sample the gate
- * cannot read is never run as a guess.
- */
-function sampleShapeDefects(sample: VerifierSelftestSample, index: number): string[] {
-  const named = typeof sample.name === 'string' && sample.name.trim().length > 0
-  const who = sampleWho(sample, index)
-  const defects: string[] = []
-  if (!named) defects.push(`sample #${index} has no name`)
-  if (sample.role !== 'positive' && sample.role !== 'negative') {
-    defects.push(`${who} has no valid role (got ${described(sample.role)})`)
-  } else if (sample.role === 'positive' && sample.expect !== 'pass' && sample.expect !== 'not-pass') {
-    defects.push(`${who} (role positive) must expect "pass" or "not-pass" (got ${described(sample.expect)})`)
-  } else if (sample.role === 'negative' && sample.expect !== 'fail' && sample.expect !== 'not-pass') {
-    // A negative sample expecting `pass` could only ever be satisfied by a
-    // judge that cannot tell the sides apart, so it proves nothing.
-    defects.push(`${who} (role negative) must expect "fail" or "not-pass" (got ${described(sample.expect)})`)
-  }
-  const criterion = sample.criterion as AcceptanceCriterion | undefined
-  if (criterion === null || typeof criterion !== 'object'
-    || typeof criterion.criterionId !== 'string' || criterion.criterionId.trim().length === 0) {
-    defects.push(`${who} has no criterion carrying a criterionId`)
-  }
-  const store = sample.store as VerifierSelftestStore | undefined
-  if (store !== undefined && (store === null || typeof store !== 'object' || !Array.isArray(store.children))) {
-    defects.push(`${who} declares a store view without children`)
-  }
-  return defects
-}
-
-/**
- * The one result validation production dispatch and the selftest gate share,
- * so the rules cannot drift: exactly one result, for this criterion, signed by
- * this verifier, in a known status, with no `unknownKind` on a status that
- * cannot carry one. Plugins cross a runtime boundary — their TypeScript return
- * type is not validation. Throws the refusal text both callers report.
- */
+/** The one result check production dispatch and the selftest gate share: one result, this criterion, this verifier. */
 function validatedResult(verifier: Verifier, criterion: AcceptanceCriterion, results: unknown): VerificationResult {
-  const result = Array.isArray(results) && results.length === 1 ? results[0] as VerificationResult | undefined : undefined
-  if (result === undefined || result === null || typeof result !== 'object'
-    || result.criterionId !== criterion.criterionId || result.verifierId !== verifier.id
-    || !['pass', 'fail', 'inconclusive'].includes(result.status)
-    || (result.unknownKind !== undefined
-      && (result.status !== 'inconclusive' || !['task', 'verifier'].includes(result.unknownKind)))) {
-    throw new Error(`verifier "${verifier.id}" must return exactly one valid result for criterion "${criterion.criterionId}" with its own verifierId`)
+  const result =
+    Array.isArray(results) && results.length === 1 ? (results[0] as VerificationResult | undefined) : undefined
+  if (
+    result === undefined ||
+    result === null ||
+    typeof result !== 'object' ||
+    result.criterionId !== criterion.criterionId ||
+    result.verifierId !== verifier.id
+  ) {
+    throw new Error(
+      `verifier "${verifier.id}" must return exactly one valid result for criterion "${criterion.criterionId}" with its own verifierId`,
+    )
   }
   return result
 }
@@ -167,11 +104,7 @@ function sampleMissed(sample: VerifierSelftestSample, status: VerificationResult
   return status === 'pass'
 }
 
-/**
- * The store view a selftest sample declares, as the snapshot a store-reading
- * judgement sees: the sample's children, runs, and evidence, with every other
- * part of a snapshot empty. A sample proves the judgement, not the store.
- */
+/** The store view a sample declares, as the snapshot a store-reading judgement sees; the sample proves the judgement, not the store. */
 function sampleSnapshot(store: VerifierSelftestStore): TaskSnapshot {
   return {
     version: 1,
@@ -206,19 +139,7 @@ export class VerifierRegistry extends Service {
     this.composite = new CompositeVerifier(ctx.task)
   }
 
-  /**
-   * Register the three built-ins through the same executable selftest gate
-   * every other judge passes. Cordis calls this after construction
-   * (`Service.init`); {@link verifyRun} awaits it too, so a caller that never
-   * awaited it still gets a readied registry.
-   *
-   * Idempotent — the first call does the work, every later call awaits the same
-   * promise (a rejection stays a rejection: a built-in that fails its own
-   * selftest must not become registrable on a retry). Fail closed until it
-   * resolves: the registry holds no verifiers yet, so a dispatch that somehow
-   * got ahead of it would find no judge and refuse rather than judge with a
-   * half-built vocabulary.
-   */
+  /** Register the three built-ins through the executable selftest gate; idempotent, and fail-closed until it resolves. */
   async ready(): Promise<void> {
     this.readyPromise ??= this.registerBuiltins()
     return this.readyPromise
@@ -230,26 +151,13 @@ export class VerifierRegistry extends Service {
     await this.register(new ReviewVerifier())
   }
 
-  /**
-   * Add a verifier; later registrations win mode dispatch. Returns the
-   * disposer. Every registration goes through the executable selftest gate
-   * (KISS §4.3, V2-1): the verifier must declare positive and negative samples
-   * and then prove, by returning the declared verdict for each, that it can
-   * tell the sides apart. A registration that misses a sample — or declares a
-   * set the gate cannot execute — is refused with a readable reason naming the
-   * verifier and every missed or malformed sample, and is not added. The
-   * conclusion is the gate's, taken from executing the samples; a verifier's
-   * own description of itself is never consulted.
-   *
-   * The one exception is the caller's explicit `{ testDouble: true }` — the
-   * only skip-the-gate channel, for tests and fixtures that stand in for a
-   * judge without being one. It is declared, never inferred, and logged as one
-   * warning so the skip is visible in the run that took it.
-   */
+  /** Add a verifier (later registrations win mode dispatch) and return its disposer; the selftest gate runs first. */
   async register(verifier: Verifier, options: RegisterOptions = {}): Promise<() => void> {
     if (this.verifiers.has(verifier.id)) throw new Error(`verifier: duplicate verifier "${verifier.id}"`)
     if (options.testDouble === true) {
-      this.warn(`verifier "${verifier.id}" registered as a test double: the executable selftest gate is skipped by the caller's explicit declaration`)
+      this.warn(
+        `verifier "${verifier.id}" registered as a test double: the executable selftest gate is skipped by the caller's explicit declaration`,
+      )
     } else {
       await this.selftestGate(verifier)
     }
@@ -259,73 +167,52 @@ export class VerifierRegistry extends Service {
     }
   }
 
-  /**
-   * The executable selftest gate. Two refusals reach the caller, both naming
-   * the verifier: `cannot be registered` for a declaration the gate could not
-   * execute (missing, empty, one-sided, or malformed samples, or a store view
-   * only the registry's own composite judge can be run against), and
-   * `selftest failed` for samples that executed and were missed.
-   */
+  /** The executable selftest gate: an unexecutable declaration is refused by name, a missed sample fails registration. */
   private async selftestGate(verifier: Verifier): Promise<void> {
     const declared = verifier.selftest
     if (declared === undefined) {
       throw new Error(`verifier "${verifier.id}" cannot be registered: no executable selftest samples (KISS §4.3)`)
     }
     const samples = declared.samples
-    if (!Array.isArray(samples) || samples.length === 0) {
-      throw new Error(`verifier "${verifier.id}" cannot be registered: selftest.samples must be a non-empty array (got ${described(samples)})`)
-    }
     const defects: string[] = []
-    for (const [index, raw] of samples.entries()) {
-      const sample = raw as VerifierSelftestSample | null
-      if (sample === null || typeof sample !== 'object') {
-        defects.push(`sample #${index} is not an object`)
-        continue
-      }
-      defects.push(...sampleShapeDefects(sample, index))
-      // A store-reading sample needs a judge the registry can run against that
-      // store view; its own composite instance is the only one there is, so any
-      // other judge's store sample is unexecutable here — refused, never
-      // silently skipped as if it had passed.
+    // A store-reading sample needs the registry's own composite judge, the only one it can run against a store view.
+    for (const sample of samples) {
       if (sample.store !== undefined && verifier !== this.composite) {
-        defects.push(`${sampleWho(sample, index)} declares a store view, which only the registry's composite judge can execute`)
+        defects.push(
+          `sample "${sample.name}" declares a store view, which only the registry's composite judge can execute`,
+        )
       }
     }
-    if (!samples.some(sample => (sample as { role?: unknown } | null)?.role === 'positive')) {
-      defects.push('no sample declares role "positive"')
-    }
-    if (!samples.some(sample => (sample as { role?: unknown } | null)?.role === 'negative')) {
-      defects.push('no sample declares role "negative"')
-    }
+    if (!samples.some(sample => sample.role === 'positive')) defects.push('no sample declares role "positive"')
+    if (!samples.some(sample => sample.role === 'negative')) defects.push('no sample declares role "negative"')
     if (defects.length > 0) {
       throw new Error(`verifier "${verifier.id}" cannot be registered: ${defects.join('; ')}`)
     }
-    const misses = await this.executeSamples(verifier, samples as VerifierSelftestSample[])
+    const misses = await this.executeSamples(verifier, samples)
     if (misses.length > 0) throw new Error(`verifier "${verifier.id}" selftest failed: ${misses.join('; ')}`)
   }
 
-  /**
-   * Execute the declared samples in order and collect every miss. Each sample
-   * is judged the way production judges it — through `verify` for a
-   * criterion-only judge, through the shared composite judgement over the
-   * sample's declared store view for the registry's own composite instance —
-   * and validated by the same rules production applies. Samples run against a
-   * scratch cwd and log dir under the evidence root, so a command sample
-   * really spawns and everything it writes stays inside evidenceRoot.
-   */
+  /** Execute the declared samples in order and collect every miss, judged the way production judges them. */
   private async executeSamples(verifier: Verifier, samples: readonly VerifierSelftestSample[]): Promise<string[]> {
     const cwd = join(this.evidenceRoot, 'selftest', 'cwd')
     await mkdir(cwd, { recursive: true })
     const misses: string[] = []
     for (const [index, sample] of samples.entries()) {
-      const where = `${sampleWho(sample, index)} (role ${sample.role})`
+      const where = `sample "${sample.name}" (role ${sample.role})`
       const store = sample.store
       const logDir = join(this.evidenceRoot, 'selftest', verifier.id, String(index))
       let judged: VerificationResult[]
       try {
-        judged = store === undefined
-          ? await verifier.verify({ taskId: 'verifier-selftest', runId: 'verifier-selftest', criteria: [sample.criterion], cwd, logDir })
-          : [await judgeCompositeCriterion(sample.criterion, store.children, async () => sampleSnapshot(store))]
+        judged =
+          store === undefined
+            ? await verifier.verify({
+                taskId: 'verifier-selftest',
+                runId: 'verifier-selftest',
+                criteria: [sample.criterion],
+                cwd,
+                logDir,
+              })
+            : [await judgeCompositeCriterion(sample.criterion, store.children, async () => sampleSnapshot(store))]
       } catch (error) {
         misses.push(`${where} threw: ${messageOf(error)}`)
         continue
@@ -350,14 +237,7 @@ export class VerifierRegistry extends Service {
     return [...this.verifiers.keys()].sort()
   }
 
-  /**
-   * The version each registered verifier declares, by id — the registry metadata
-   * {@link stampVersion} puts on the verdicts that instance produces. A verifier
-   * that declares no version is absent from the map, so a reader distinguishes
-   * "declares none" from "is not registered" by the two reads together
-   * (`verifierIds()` for registration, this for the version). Read as a pair
-   * wherever a verdict has to be recalled against the instance that judged it.
-   */
+  /** The version each registered verifier declares, by id; an instance declaring none is absent from the map. */
   verifierVersions(): Record<string, string> {
     const versions: Record<string, string> = {}
     for (const [id, verifier] of this.verifiers) {
@@ -377,12 +257,7 @@ export class VerifierRegistry extends Service {
     await this.ready()
   }
 
-  /**
-   * Verify one run: dispatch each acceptance criterion of the run's task to a
-   * verifier supporting its mode, assemble an EvidenceBundle (one claim per
-   * result), record it through the task service, and return it. Marking the
-   * run verified or failed is the caller's job and must come after this call.
-   */
+  /** Verify one run: dispatch each criterion, assemble an EvidenceBundle, record it, and return it. */
   async verifyRun(storeId: string, runId: RunId, options: VerifyRunOptions = {}): Promise<EvidenceBundle> {
     await this.ready()
     const run = await this.ctx.task.runIn(storeId, runId)
@@ -413,85 +288,86 @@ export class VerifierRegistry extends Service {
     return bundle
   }
 
-  private async verifyCriterion(storeId: string, request: VerifyRequest, criterion: AcceptanceCriterion): Promise<VerificationResult[]> {
-    // An explicit `verifierRef` pins the judge by id (admission already
-    // rejected unknown ids, but a store can predate the registry or a replay
-    // can bypass admission); absent, dispatch by mode as before.
-    const verifier = criterion.verifierRef === undefined
-      ? this.findVerifier(criterion.verificationMode)
-      : this.verifiers.get(criterion.verifierRef)
+  private async verifyCriterion(
+    storeId: string,
+    request: VerifyRequest,
+    criterion: AcceptanceCriterion,
+  ): Promise<VerificationResult[]> {
+    // `verifierRef` pins the judge by id; absent, dispatch by mode. A store can predate the registry or bypass admission.
+    const verifier =
+      criterion.verifierRef === undefined
+        ? this.findVerifier(criterion.verificationMode)
+        : this.verifiers.get(criterion.verifierRef)
     if (verifier === undefined) {
       // The judge is missing — a verifier-side unknown (KISS §4.3 UNKNOWN_VERIFIER).
-      return [{
-        criterionId: criterion.criterionId,
-        status: 'inconclusive',
-        verifierId: criterion.verifierRef ?? 'verifier',
-        details: criterion.verifierRef === undefined
-          ? `no verifier supports mode "${criterion.verificationMode}"`
-          : `no verifier registered with id "${criterion.verifierRef}"`,
-        unknownKind: 'verifier',
-      }]
+      return [
+        {
+          criterionId: criterion.criterionId,
+          status: 'inconclusive',
+          verifierId: criterion.verifierRef ?? 'verifier',
+          details:
+            criterion.verifierRef === undefined
+              ? `no verifier supports mode "${criterion.verificationMode}"`
+              : `no verifier registered with id "${criterion.verifierRef}"`,
+          unknownKind: 'verifier',
+        },
+      ]
     }
     if (!verifier.supports(criterion.verificationMode)) {
-      return [{
-        criterionId: criterion.criterionId,
-        status: 'inconclusive',
-        verifierId: verifier.id,
-        details: `verifier "${verifier.id}" does not support mode "${criterion.verificationMode}"`,
-        unknownKind: 'verifier',
-      }]
+      return [
+        {
+          criterionId: criterion.criterionId,
+          status: 'inconclusive',
+          verifierId: verifier.id,
+          details: `verifier "${verifier.id}" does not support mode "${criterion.verificationMode}"`,
+          unknownKind: 'verifier',
+        },
+      ]
     }
     const protectedInputs = criterion.protectedInputs
     if ((protectedInputs?.length ?? 0) > 0) {
-      // The verdict rests on these inputs; an input that moved since admission
-      // means the product in front of the judge is not the one that was
-      // admitted to be judged. Refused before anything is dispatched, so a
-      // rewritten acceptance script can never be the thing that passes.
+      // The verdict rests on these inputs: one that moved since admission is not the one admitted to be judged.
       const defects = await protectedInputDefects(request.cwd, protectedInputs!)
       if (defects.length > 0) {
-        return [this.stampVersion(verifier, {
-          criterionId: criterion.criterionId,
-          status: 'fail',
-          verifierId: verifier.id,
-          details: defects.join('; '),
-        })]
+        return [
+          this.stampVersion(verifier, {
+            criterionId: criterion.criterionId,
+            status: 'fail',
+            verifierId: verifier.id,
+            details: defects.join('; '),
+          }),
+        ]
       }
     }
     let results: VerificationResult[]
     try {
-      // Evidence mappings remain mandatory even when a plugin owns mode dispatch.
+      // Evidence mappings remain mandatory even when a plugin owns mode dispatch; the registry's composite judges them.
       if ((criterion.childEvidence?.length ?? 0) > 0 && verifier !== this.composite) {
         const mapped = await this.composite.verifyIn(storeId, { ...request, criteria: [criterion] })
-        // The map is judged by the registry's own composite instance, so that
-        // instance — not the plugin that never ran — is what its verdict is
-        // attributed to.
         if (mapped[0]!.status !== 'pass') return mapped.map(result => this.stampVersion(this.composite, result))
       }
-      results = verifier instanceof CompositeVerifier
-        ? await verifier.verifyIn(storeId, { ...request, criteria: [criterion] })
-        : await verifier.verify({ ...request, criteria: [criterion] })
+      results =
+        verifier instanceof CompositeVerifier
+          ? await verifier.verifyIn(storeId, { ...request, criteria: [criterion] })
+          : await verifier.verify({ ...request, criteria: [criterion] })
       // Plugins cross a runtime boundary: their TypeScript return type is not validation.
       validatedResult(verifier, criterion, results)
     } catch (error) {
       // The judge itself broke — a verifier-side unknown, never a task failure.
-      return [{
-        criterionId: criterion.criterionId,
-        status: 'inconclusive',
-        verifierId: verifier.id,
-        details: error instanceof Error ? error.message : String(error),
-        unknownKind: 'verifier',
-      }]
+      return [
+        {
+          criterionId: criterion.criterionId,
+          status: 'inconclusive',
+          verifierId: verifier.id,
+          details: error instanceof Error ? error.message : String(error),
+          unknownKind: 'verifier',
+        },
+      ]
     }
     return results.map(result => this.normalizeLogRef(this.stampVersion(verifier, result)))
   }
 
-  /**
-   * Stamp the registered instance's version onto one verdict (KISS §8.2): a
-   * verdict can only be recalled against the instance that actually judged, so
-   * the version recorded is this instance's — a plugin-supplied
-   * `verifierVersion` is always discarded, and an instance that declares none
-   * acquires none.
-   */
+  /** Stamp the registered instance's version onto one verdict (KISS §8.2); a plugin-supplied version is discarded. */
   private stampVersion(verifier: Verifier, result: VerificationResult): VerificationResult {
     const stamped: VerificationResult = { ...result }
     delete stamped.verifierVersion
@@ -516,12 +392,7 @@ export class VerifierRegistry extends Service {
     return { ...result, logRef: rel }
   }
 
-  /**
-   * Tail excerpt of one criterion log (logRef relative to evidenceRoot),
-   * bounded by LOG_TAIL_MAX_LINES and LOG_TAIL_MAX_CHARS, for a failed review
-   * record to carry. `undefined` when the log is missing or unreadable — a
-   * record must never fail to write because a log is gone.
-   */
+  /** Tail excerpt of one criterion log, capped by the two LOG_TAIL limits; `undefined` when the log is missing. */
   async logTail(logRef: string): Promise<string | undefined> {
     const path = resolve(this.evidenceRoot, logRef)
     if (path !== this.evidenceRoot && !path.startsWith(this.evidenceRoot + sep)) {

@@ -1,20 +1,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { TaskProposal, TaskProposalDecomposition, TaskProposalRoot } from '@dangosys/dsh-singularity-task'
-import { renderProposalChildren, renderRootContract } from '../proposal-review.ts'
-import { undeclaredParameters } from './proposal-parameters.ts'
-import { proposalStoreFor } from './proposal-store.ts'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): SessionId {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('task_proposal_read: missing agent id')
-  return id
-}
+import { renderProposalChildren, renderRootContract } from '../services/proposal-render.ts'
+import { message, proposalStoreFor, sessionId, text, undeclaredParameters } from '../shared.ts'
 
 /** The decision on record, as a reader has to see it: what was decided, by whom, when, and why when a reason was given. */
 function decisionLines(proposal: TaskProposal): string[] {
@@ -37,8 +26,6 @@ function consumptionLines(proposal: TaskProposal): string[] {
   if (consumption === undefined) return []
   // Two kinds, two vocabularies (A0 §2): a batch is consumed as
   // `b-<parentRunId>-<proposalId>` plus its members, a root contract as the one
-  // root task and run it became. The record says which it is, so nothing here
-  // has to infer it.
   if (consumption.kind === 'root') {
     return [
       `consumed as root task ${consumption.rootTaskId} with run ${consumption.rootRunId} at ${consumption.admittedAt}:`,
@@ -51,12 +38,7 @@ function consumptionLines(proposal: TaskProposal): string[] {
   ]
 }
 
-/**
- * The payload digest and the two context fingerprints, as every reader of a
- * record needs them. `subject` names what the digest is of — a batch and a root
- * contract are both read through this tool, and calling a contract's digest a
- * batch digest would mislabel the number a decision binds.
- */
+/** The payload digest and the two context fingerprints, as every reader of a record needs them. */
 function digestLines(proposal: TaskProposal, subject: 'batch' | 'contract'): string[] {
   return [
     `${subject} digest (sha256): ${proposal.proposalDigest}`,
@@ -91,11 +73,7 @@ function renderBatchProposal(proposal: TaskProposalDecomposition): string {
   ].join('\n')
 }
 
-/**
- * One saved root contract proposal: the session it is the goal of, the contract
- * itself rather than a child batch — there is no parent task and no batch to
- * print — the decision and the root task it became.
- */
+/** One saved root contract proposal: the session it is the goal of, the contract itself rather than a child batch — there is no parent task and no batch to print — the decision and the root task it became. */
 function renderRootProposal(proposal: TaskProposalRoot): string {
   return [
     `proposal ${proposal.proposalId} [${proposal.status}] policy ${proposal.policy}`,
@@ -114,11 +92,7 @@ function renderRootProposal(proposal: TaskProposalRoot): string {
   ].join('\n')
 }
 
-/**
- * One saved proposal, as the record holds it — the whole batch, or the whole
- * root contract, not a summary, and nothing that is not on the record. There is
- * no argument for a status: the answer is the store's.
- */
+/** One saved proposal, as the record holds it — the whole batch, or the whole root contract, not a summary, and nothing that is not on the record. There is no argument for a status: the answer is the store's. */
 export function renderProposal(proposal: TaskProposal): string {
   return proposal.kind === 'root' ? renderRootProposal(proposal) : renderBatchProposal(proposal)
 }
@@ -144,12 +118,12 @@ export function defineTaskProposalReadTool(ctx: Context) {
     execute: async (args, exec) => {
       const undeclared = undeclaredParameters(args, ['proposalId'], 'task_proposal_read')
       if (undeclared !== undefined) return undeclared
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'task_proposal_read')
       try {
         const storeId = await proposalStoreFor(ctx, caller)
         return renderProposal(await ctx.taskRuntime.proposalIn(storeId, args.proposalId))
       } catch (error) {
-        return `task_proposal_read rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `task_proposal_read rejected: ${message(error)}`
       }
     },
   })

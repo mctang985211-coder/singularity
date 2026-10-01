@@ -260,6 +260,7 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
   h = await startRunStack({
     roots: [ROOT],
     capabilities: { [ROW]: { skills: [SKILL] } },
+    evolution: true,
     worker: (sessionId: SessionId, agent: Agent) => replayedWorker(h, sessionId, agent),
   })
   const skillRoot = join(h.home, 'skills')
@@ -298,12 +299,8 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
     await writeSample(h, first.storeId, { taskId: 't-holdout', runId: 'r-holdout-history', objective: 'the held-out answer file is produced', acceptance: criterion('ac-holdout', 'test -f holdout.txt'), outcome: 'verified' })
     await writeSample(h, first.storeId, { taskId: 't-regression', runId: 'r-regression-history', objective: 'the regression answer file is produced', acceptance: criterion('ac-keep', 'test -f keep.txt'), outcome: 'verified' })
   }
-  // The deployment's own tool definition, registered on the root agent's own
-  // scope: this fixture assembles a partial deployment (no agent plugin, so the
-  // global evolution chain is off and a global registration of one of its names
-  // would be masked by the root's allow-list), and the registry's documented
-  // per-agent variant is how one agent gets the real tool. The dispatch below is
-  // the loop's own (`ctx.tools.execute`), with the production schema checks.
+  // The switch is on, so the root allow-list carries these names; each one already
+  // has a global stand-in on this stack, and a scoped registration shadows the global one.
   for (const tool of [
     defineEvolutionReplayTool(h.ctx),
     defineEvolutionGateTool(h.ctx),

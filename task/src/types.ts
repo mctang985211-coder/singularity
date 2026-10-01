@@ -7,113 +7,43 @@ import type {
   TaskProposalIndex,
   TaskProposalPhaseChange,
 } from './proposal.ts'
-import type {
-  QuestionAnswerRecord,
-  QuestionRecord,
-  TaskQuestionIndex,
-} from './question.ts'
+import type { QuestionAnswerRecord, QuestionRecord, TaskQuestionIndex } from './question.ts'
 
 export type TaskId = string
 export type RunId = string
 
-export interface ArtifactRef { artifactId: string; kind: string; uri: string; digest?: string }
+export interface ArtifactRef {
+  artifactId: string
+  kind: string
+  uri: string
+  digest?: string
+}
 
-export type VerificationMode =
-  | 'deterministic' | 'simulation' | 'formal' | 'measurement' | 'review' | 'composite'
+export type VerificationMode = 'deterministic' | 'simulation' | 'formal' | 'measurement' | 'review' | 'composite'
 
-export interface AcceptanceCriterion {              // (§9.2)
+export interface AcceptanceCriterion {
+  // (§9.2)
   criterionId: string
   description: string
   verificationMode: VerificationMode
   requiredEvidence: string[]
   mandatory: boolean
-  command?: string        // required for deterministic|simulation|measurement
-  /**
-   * Artifact or evidence references (kinds or ids) that must exist in the task
-   * store before this criterion can be judged at all (KISS §5.1
-   * `requires_artifact`): an ordering constraint declared as an evidence
-   * dependency, not a sequence step. Admission validates only the shape
-   * (non-empty strings); existence is judged at spawn time by the orchestrator,
-   * which settles the child blocked — never spawned — and registers each
-   * missing item as an Obligation.
-   *
-   * Since P4 the match is tightened to a **verified reference product**: the
-   * producing run must sit in the verified terminal state and its bundle must
-   * carry a passing verdict. A failed or still-running run's same-named product
-   * never satisfies the reference. A raw input that need only exist is declared
-   * with {@link acceptsArtifact} instead.
-   */
+  command?: string // required for deterministic|simulation|measurement
+  /** Artifact or evidence references (kinds or ids) that must exist in the task store before this criterion can be judged at all (KISS §5.1 `requires_artifact`): an ordering constraint declared as an evidence dependency, not a sequence step. */
   requiresArtifact?: string[]
-  /**
-   * Artifact or evidence references (kinds or ids) this criterion consumes as a
-   * **raw input** (KISS §5.1): existence in the task store is the whole
-   * requirement — any run state, verified or not. This is the pre-P4
-   * `requiresArtifact` semantics, kept as its own field so a reference that
-   * must have been verified ({@link requiresArtifact}) and one that merely must
-   * exist are never confused. Judged at spawn time, blocked + Obligation when
-   * missing, exactly like `requiresArtifact`.
-   */
+  /** Artifact or evidence references (kinds or ids) this criterion consumes as a **raw input** (KISS §5.1): existence in the task store is the whole requirement — any run state, verified or not. */
   acceptsArtifact?: string[]
-  /**
-   * The registered verifier id that judges this criterion (KISS §4.1
-   * `verifier_ref`). Absent keeps the current behavior: dispatch by
-   * `verificationMode` to whichever registered verifier supports it. Present,
-   * the id must exist in the verifier registry — an unknown id rejects the
-   * whole decomposition batch at admission time (never at spawn time), with
-   * the error naming the registered ids.
-   */
+  /** The registered verifier id that judges this criterion (KISS §4.1 `verifier_ref`). Absent keeps the current behavior: dispatch by `verificationMode` to whichever registered verifier supports it. */
   verifierRef?: string
-  /**
-   * The parent-level evidence map (KISS §6 C2, minimal mechanical version):
-   * which child of this task — by position in its decomposition batch, the same
-   * index vocabulary `dependsOn` uses — this criterion rests on, optionally
-   * narrowed to one of the child's criteria and one evidence/artifact
-   * reference. The composite verifier judges every entry at parent-acceptance
-   * time against the store: the named child must be `verified`, the named
-   * criterion (when given) must carry a passing verdict in the child's verified
-   * run evidence, and the named reference (when given) must exist there. An
-   * incomplete mapping fails the criterion with the missing items named — the
-   * "all children verified" conjunction can never stand in for it.
-   *
-   * Absent (or empty) keeps the current composite behavior exactly. A non-empty
-   * map is judged only by the composite verifier, so admission requires
-   * `verificationMode: 'composite'` on the criterion that carries it — a
-   * declaration no judge reads would be a silent lie — and refuses the
-   * combination with `heuristic` (a heuristic judgement is never a mechanical
-   * check).
-   */
+  /** The parent-level evidence map (KISS §6 C2, minimal mechanical version): which child of this task — by position in its decomposition batch, the same index vocabulary `dependsOn` uses — this criterion rests on, optionally narrowed to one of … */
   childEvidence?: ChildEvidenceRef[]
-  /**
-   * Marks this criterion's judgement as **heuristic** (KISS §5.1): the verdict
-   * is explicitly labeled as such wherever it is reported, and it is never
-   * counted as a deterministic pass — a natural-language coverage signal can
-   * inform a reader but cannot close the criterion mechanically. Mutually
-   * exclusive with {@link childEvidence} (admission refuses the combination).
-   */
+  /** Marks this criterion's judgement as **heuristic** (KISS §5.1): the verdict is explicitly labeled as such wherever it is reported, and it is never counted as a deterministic pass — a natural-language coverage signal can inform a reader but … */
   heuristic?: boolean
-  /**
-   * The acceptance inputs this criterion's verdict rests on that the executing
-   * side must not modify (S1-V slice 2): acceptance scripts, threshold files,
-   * fixtures. Callers declare paths; admission resolves each one against the
-   * session's checkout and fixes its identity as the SHA-256 of its bytes
-   * ({@link ProtectedInputRef}), so the fixed identity — not a later read —
-   * is what the contract and its digests describe. Before judging the
-   * criterion the verifier registry re-reads every declared input and refuses
-   * the verdict — `fail`, naming the path — when one is missing or its bytes
-   * changed, so a rewritten acceptance script can never turn a wrong product
-   * into a pass. Only declared paths are protected; a criterion that declares
-   * none carries no protection and must not be described as protected.
-   */
+  /** The acceptance inputs this criterion's verdict rests on that the executing side must not modify (S1-V slice 2): acceptance scripts, threshold files, fixtures. */
   protectedInputs?: ProtectedInputRef[]
 }
 
-/**
- * One protected acceptance input ({@link AcceptanceCriterion.protectedInputs}):
- * the path as declared, plus the SHA-256 of the file's bytes fixed when the
- * task was admitted. The path is resolved against the same checkout directory
- * the criterion's judge runs in, both at admission and at the pre-judgement
- * re-check.
- */
+/** One protected acceptance input ({@link AcceptanceCriterion.protectedInputs}): the path as declared, plus the SHA-256 of the file's bytes fixed when the task was admitted. */
 export interface ProtectedInputRef {
   /** The input path as declared, resolved against the run's checkout directory. */
   path: string
@@ -121,19 +51,7 @@ export interface ProtectedInputRef {
   sha256: string
 }
 
-/**
- * One entry of a parent criterion's evidence map ({@link
- * AcceptanceCriterion.childEvidence}): a member of the parent run's admitted
- * batches, named by its stable position in that run's accumulation — the only
- * child identity that exists when the parent's criteria are authored, since
- * child task ids are minted by the orchestrator at admission time. Position `i`
- * is the `i`-th member of the run's batches in admission order
- * ({@link TaskRun.batches}), so a later batch appends and never renumbers the
- * members an earlier one contributed: the first member of the second batch has
- * the position after the last member of the first, not 0 again. Existence of
- * the mapping target is an acceptance-time question; admission validates the
- * shape only.
- */
+/** One entry of a parent criterion's evidence map ({@link AcceptanceCriterion.childEvidence}): a member of the parent run's admitted batches, named by its stable position in that run's accumulation — the only child identity that exists when … */
 export interface ChildEvidenceRef {
   /** Position of the member in the parent run's accumulated batch members (0-based, admission order). */
   childIndex: number
@@ -144,61 +62,36 @@ export interface ChildEvidenceRef {
 }
 
 export type TaskStatus =
-  | 'created' | 'admitted' | 'ready' | 'running' | 'blocked'
-  | 'verifying' | 'verified' | 'failed' | 'cancelled'
-export type DecompositionStatus = 'leaf' | 'decomposable' | 'decomposing' | 'decomposed'
+  'created' | 'admitted' | 'ready' | 'running' | 'blocked' | 'verifying' | 'verified' | 'failed' | 'cancelled'
+type DecompositionStatus = 'leaf' | 'decomposable' | 'decomposing' | 'decomposed'
 
-export interface TaskInstance {                     // (§5.2)
+export interface TaskInstance {
+  // (§5.2)
   taskId: TaskId
   definitionRef: { taskType: string; version: number }
   parentTaskId?: TaskId
-  /**
-   * The task's goal: the projection of {@link contract} (or, on a task created
-   * before the contract existed, the whole of what the store holds). Never an
-   * independent source — the store refuses an event whose projection disagrees
-   * with the contract it carries.
-   */
+  /** The task's goal: the projection of {@link contract} (or, on a task created before the contract existed, the whole of what the store holds). */
   objective: string
   depth: number
   /** The criteria the verifier judges: the projection of {@link contract}, checked for disagreement on write. */
   acceptanceCriteria: AcceptanceCriterion[]
   /** Capability requirements by name: the projection of {@link TaskContract.requiredCapabilities}. */
   requestedCapabilities: string[]
-  /**
-   * Where the task sits in the decomposition tree; `decomposed` is written when
-   * the task registers children. History, not a gate: a parent admits several
-   * batches over its life (`TaskDecomposed` accumulates members), so no reader
-   * may treat `decomposed` as "this task can never decompose again" — the run
-   * phase (`ExecutionPhase`) and the batch identity are what answer that.
-   */
+  /** Where the task sits in the decomposition tree; `decomposed` is written when the task registers children. */
   decompositionStatus: DecompositionStatus
   status: TaskStatus
   runIds: RunId[]
   childTaskIds: TaskId[]
-  /**
-   * The normalized contract this instance was created from (T1, construction
-   * guide §4): defaults filled, criterion ids fixed, assumptions and
-   * constraints persisted rather than left in a spawn prompt. Absent on tasks
-   * created before the field existed — their contract *is* the three
-   * projection fields above, read exactly as before, with nothing invented for
-   * the parts the store never held (no assumptions, no constraints, no
-   * version).
-   */
+  /** The normalized contract this instance was created from (T1, construction guide §4): defaults filled, criterion ids fixed, assumptions and constraints persisted rather than left in a spawn prompt. */
   contract?: TaskContract
-  /**
-   * Contract-level marker (KISS §6 C2): this task's acceptance must be decided
-   * by its own criteria and evidence map, never by the composite "all children
-   * verified" conjunction alone. Admission refuses a creation or decomposition
-   * whose task carries the marker while none of its criteria carries a
-   * {@link AcceptanceCriterion.childEvidence} map — deleting or never writing
-   * the map can never silently degrade the task back to the conjunction.
-   * Absent on every task that predates the field; a stored task's criteria are
-   * immutable, so the marker is only ever set at creation time.
-   */
+  /** Contract-level marker (KISS §6 C2): this task's acceptance must be decided by its own criteria and evidence map, never by the composite "all children verified" conjunction alone. */
   requiresIndependentAcceptance?: boolean
 }
 
-export interface DependencyEdge { from: TaskId; to: TaskId }  // `from` must verify before `to` starts
+export interface DependencyEdge {
+  from: TaskId
+  to: TaskId
+} // `from` must verify before `to` starts
 
 /** DFS over an edge list: true when `target` is reachable from `start`. */
 export function reaches(edges: readonly DependencyEdge[], start: TaskId, target: TaskId): boolean {
@@ -216,29 +109,26 @@ export function reaches(edges: readonly DependencyEdge[], start: TaskId, target:
 
 export type RunStatus = 'running' | 'blocked' | 'failed' | 'verified' | 'cancelled'
 
-/**
- * One skill a run's grant was built from, as the admission-time provider
- * pre-check judged it (S1-C item 4). The run *loaded* these bytes — the record
- * is what lets a reader tell which version an execution ran against after the
- * production files have moved on.
- *
- * Identity here is content identity, the same vocabulary the pre-check and the
- * evolution ledger use: `contentDigest` covers the `SKILL.md` bytes plus every
- * declared resource, `contractDigest` the sidecar the provider was validated
- * against. Both are recomputable from the run's own snapshot, which is what
- * makes "is this still the content the run was bound to?" a question a reader
- * can answer instead of trust.
- */
+/** The run statuses that end a run: no transition out of these resumes it (guide §4.2 G3 — blocked is a dead end). */
+export const TERMINAL_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+  'verified',
+  'failed',
+  'cancelled',
+  'blocked',
+])
+
+/** Whether `status` is terminal ({@link TERMINAL_RUN_STATUSES}). */
+export function isTerminalRunStatus(status: RunStatus): boolean {
+  return TERMINAL_RUN_STATUSES.has(status)
+}
+
+/** One skill a run's grant was built from, as the admission-time provider pre-check judged it (S1-C item 4). */
 export interface RunSkillBinding {
   /** The skill name a capability granted; the snapshot directory is named after it. */
   name: string
   /** How the pre-check accepted it — execution provider, loadable knowledge, or plain guidance. */
   role: 'execution-provider' | 'knowledge' | 'guidance'
-  /**
-   * The run's capability rows that grant this skill, sorted: the capability names
-   * a worker's summary groups its providers under, read from the record rather
-   * than re-derived from the store.
-   */
+  /** The run's capability rows that grant this skill, sorted: the capability names a worker's summary groups its providers under, read from the record rather than re-derived from the store. */
   capabilities: string[]
   /** The purpose the skill declares for itself, so a summary can say what the provider is for without reading its body. */
   description: string
@@ -246,30 +136,11 @@ export interface RunSkillBinding {
   contractDigest: string | null
   /** `skillContentDigest` of the bytes the run loaded. */
   contentDigest: string
-  /**
-   * Entries of the source skill directory the identity does not cover (a
-   * guidance skill's extra files, a directory reads as `name/`). They are not in
-   * the snapshot either, so naming them is the honest statement of what this
-   * binding does not include; empty for a provider whose identity covers its
-   * whole directory.
-   */
+  /** Entries of the source skill directory the identity does not cover (a guidance skill's extra files, a directory reads as `name/`). */
   uncovered: string[]
 }
 
-/**
- * One MCP server a run's manifest granted: the registry key it resolved through
- * and the identity of the template it resolved to. The resolved spec carries
- * machine paths, so the template — the part a deployment edits — is what is
- * digestible; `null` means the registry held no such key, which the spawn then
- * refuses by name.
- *
- * **Diagnostic only.** The digest records what the run *rendered* at bind
- * time; nothing re-reads the registry to compare, so it is not an execution
- * identity and no consumer may treat a matching digest as proof that the
- * server that actually started mounted those bytes. The spawn's own failure is
- * the enforcement for a missing server; a template edited between binding and
- * spawn is not caught here.
- */
+/** One MCP server a run's manifest granted: the registry key it resolved through and the identity of the template it resolved to. */
 export interface RunMcpServerBinding {
   /** The server name the capability declared and the worker's tools are namespaced under. */
   serverName: string
@@ -277,97 +148,24 @@ export interface RunMcpServerBinding {
   templateDigest: string | null
 }
 
-/**
- * What one run resolved against and loaded (S1-C item 4): the registry revision
- * the admission-time pre-check computed, the identity of every skill the run's
- * grant was built from, the MCP servers its manifest granted, and — when the
- * run loaded content at all — the run-scoped snapshot root those bytes were
- * materialized into.
- *
- * Why it exists next to {@link TaskRun.capabilitySnapshot}: the snapshot names
- * what was granted, this names the *bytes* that were granted. A capability row
- * can be edited, a production `SKILL.md` rewritten, a skill replaced outright;
- * a run that recorded only names cannot say which version it executed, and a
- * reader cannot tell whether the content it can see now is the content the run
- * was bound to.
- *
- * Absent members mean "not bound", never "bound to nothing": a run that loaded
- * no skill carries an empty `skills` list and no `snapshotRoot`, and a field
- * the record does not carry is never invented for it.
- */
+/** What one run resolved against and loaded (S1-C item 4): the registry revision the admission-time pre-check computed, the identity of every skill the run's grant was built from, the MCP servers its manifest granted, and — when the run … */
 export interface RunProviderBinding {
-  /**
-   * The registry revision the admission-time provider pre-check computed for
-   * this run's table and accepted providers (`provider-precheck.ts:registryRevision`):
-   * two runs citing the same revision resolved the same rows over the same
-   * declared provider content.
-   */
+  /** The registry revision the admission-time provider pre-check computed for this run's table and accepted providers (`provider-precheck.ts:registryRevision`): two runs citing the same revision resolved the same rows over the same declared … */
   registryRevision: string
-  /**
-   * Every capability row this run's manifest matched, sorted — including a row
-   * that grants no skill (its tools are granted without a provider). The summary
-   * a worker reads lists its capabilities from here, so a node that wants to
-   * re-decompose or delegate never has to guess a capability name.
-   */
+  /** Every capability row this run's manifest matched, sorted — including a row that grants no skill (its tools are granted without a provider). */
   capabilities: string[]
-  /**
-   * One entry per skill the run's grant was built from, sorted by name. A skill
-   * two capabilities declare appears once, naming both.
-   */
+  /** One entry per skill the run's grant was built from, sorted by name. A skill two capabilities declare appears once, naming both. */
   skills: RunSkillBinding[]
   /** The MCP servers the run's manifest granted, in first-declaration order. */
   mcpServers: RunMcpServerBinding[]
-  /**
-   * Absolute path of this run's snapshot skill root — the directory whose
-   * `<name>/SKILL.md` entries the worker's skill layer registers — present
-   * exactly when the run materialized the content it was bound to. A reader
-   * re-checks the bytes there against this record's digests; a missing or
-   * changed snapshot is a refusal to report, never a silent fallback to the
-   * production path.
-   */
+  /** Absolute path of this run's snapshot skill root — the directory whose `<name>/SKILL.md` entries the worker's skill layer registers — present exactly when the run materialized the content it was bound to. */
   snapshotRoot?: string
 }
 
-/**
- * Where one run sits in the A3 coordination protocol. `active` is the phase a
- * run is born in, and the only one in which it may write, decompose or
- * submit; `waiting_children` is a run whose decomposition batch was admitted
- * atomically and whose children have not all settled; `submitted` is a run
- * that handed in a {@link SubmissionRecord} and is waiting for (or inside)
- * verification.
- *
- * Four edges are legal: `active → waiting_children` (a batch is admitted and
- * the writing gate closes), `waiting_children → active` (that batch ended and
- * execution is handed back to the parent), and `active → submitted` /
- * `waiting_children → submitted` (the parent hands its own result in). A
- * parent that returned to `active` may open another batch, so
- * `active → waiting_children` is not a once-in-a-life edge.
- *
- * The phase — not the run status — is the admission gate: a run in
- * verification still carries status `running`, so `submitted` is what refuses
- * a second submission, a write after the gate closed, and a decomposition
- * admitted too late (A3 §1.2/§2).
- *
- * Absent on every run created before the field existed: such a run's phase is
- * unknown and is never guessed. A non-terminal phase-less run is reported as
- * `needs-recovery` — its only legal continuation is cancellation — and the
- * reducer refuses phase changes for it (A3 §3.6).
- */
+/** Where one run sits in the A3 coordination protocol. `active` is the phase a run is born in, and the only one in which it may write, decompose or submit; `waiting_children` is a run whose decomposition batch was admitted atomically and … */
 export type ExecutionPhase = 'active' | 'waiting_children' | 'submitted'
 
-/**
- * What one run handed in when it submitted (A3 `task_submit_result`): the
- * submitter's own account plus the references it names as proof. Written onto
- * the run by the transition into `submitted`; that phase is terminal for the
- * transition gate, so the record is written once and never overwritten — a
- * late submission is answered from the record, not applied.
- *
- * `origin` keeps the two recorded sources apart, and there are exactly two:
- * `worker` is the run's own agent claiming through `task_submit_result`;
- * `runtime` is the workerless criteria replay (`spawn: false`), whose run is
- * born with this record because no worker exists to submit and the verifier
- * alone settles the run.
- */
+/** What one run handed in when it submitted (A3 `task_submit_result`): the submitter's own account plus the references it names as proof. */
 export interface SubmissionRecord {
   /** What was delivered, in the submitter's words (the runtime writes it for a workerless criteria replay). */
   summary: string
@@ -381,18 +179,8 @@ export interface SubmissionRecord {
   origin: 'worker' | 'runtime'
 }
 
-/**
- * One no-progress marking on an `active` run (A3 `RunProgressMarked`): the
- * observable record that a worker went idle where a submission was due. It is
- * a diagnostic, not an accumulator — every marking overwrites the previous
- * one, and `rounds` is the caller's own consecutive count, so replay and live
- * observation agree on the last state.
- *
- * Absent on a run that was never marked, on a run whose phase is not `active`
- * (a run waiting on children or on verification is expected to be idle), and
- * on every run written before the field existed.
- */
-export interface NoProgressRecord {
+/** One no-progress marking on an `active` run (A3 `RunProgressMarked`): the observable record that a worker went idle where a submission was due. */
+interface NoProgressRecord {
   /** The only kind A3 writes. */
   kind: 'unsubmitted-idle'
   /** Consecutive no-progress rounds the caller observed; a positive integer, recorded as given. */
@@ -403,17 +191,8 @@ export interface NoProgressRecord {
   markedAt: string
 }
 
-/**
- * One batch a run admitted, as the run's snapshot projects it: the batch id
- * {@link batchIdFor} derives, the proposal it consumed, and the member task ids
- * that admission created, in batch order.
- *
- * The record is derived by the reducer from the parent's `TaskDecomposed`
- * event and never written into a run at start — a run's members are facts the
- * store already holds as tasks, and the projection is the one place that orders
- * them across a parent's several batches.
- */
-export interface TaskRunBatch {
+/** One batch a run admitted, as the run's snapshot projects it: the batch id {@link batchIdFor} derives, the proposal it consumed, and the member task ids that admission created, in batch order. */
+interface TaskRunBatch {
   /** The batch id: {@link batchIdFor} of this run and this proposal. */
   batchId: string
   /** The proposal this batch consumed; the content identity its members were admitted under. */
@@ -422,124 +201,39 @@ export interface TaskRunBatch {
   memberTaskIds: TaskId[]
 }
 
-/**
- * One member slot of a recovery attempt's run that is filled by an **already
- * verified sibling** instead of by a task this run admitted (A6, plan §F.4).
- *
- * Why it exists: a failed attempt's run may hold members that passed; re-running
- * them to satisfy the same parent criterion would be work nobody needs. A new
- * attempt therefore reads those members at their own positions — a member of
- * this run, in the sequence `childIndex` names — while the *evidence* stays the
- * one the sibling's own verified run produced. Nothing is copied: the entry
- * cites the sibling task, the run that verified it and the bundle, and the
- * composite judge's existing read (a member that is `verified`, judged by its
- * own verified run's evidence) resolves exactly as it does for a member this run
- * did produce.
- *
- * **Slots are claimed, not ordered.** {@link childIndex} is an absolute position
- * in the run's member sequence — the same `childIndex` a parent criterion's
- * `childEvidence` map names — and the members the run's own batches admit fill
- * the positions no entry claims, in ascending order. So a passed sibling *after*
- * a failed member keeps the position the original acceptance map names for it
- * (the batch driver really does start a member after a failed one: a failed
- * member is terminal and leaves the round's pending list, `orchestrate.ts`'s
- * `driveRounds`), and a position the attempt chooses not to reuse is filled by
- * the replacement an agent's next batch proposes. A position nothing has filled
- * *yet* is a slot the run has not reached; a reader that needs positions asks
- * for the slots ({@link runMemberSlots}) rather than for the ids alone.
- */
+/** One member slot of a recovery attempt's run that is filled by an **already verified sibling** instead of by a task this run admitted (A6, plan §F.4). */
 export interface RunMemberReuse {
-  /**
-   * The absolute position in this run's member sequence the entry claims — the
-   * `childIndex` a parent criterion's `childEvidence` map names. Two entries may
-   * not claim one position, and a claimed position must be the position the
-   * failed run read the cited sibling at.
-   */
+  /** The absolute position in this run's member sequence the entry claims — the `childIndex` a parent criterion's `childEvidence` map names. */
   childIndex: number
   /** The already verified sibling task the slot reads as: a child task of this run's own task. */
   taskId: TaskId
-  /**
-   * The sibling's own verified run — the one whose evidence is cited. Its task
-   * is {@link taskId} and it is `verified` in this store.
-   */
+  /** The sibling's own verified run — the one whose evidence is cited. Its task is {@link taskId} and it is `verified` in this store. */
   sourceRunId: RunId
   /** The evidence bundle under {@link sourceRunId} the citation rests on. */
   evidenceId: string
-  /**
-   * The criterion the sibling must have passed when the original acceptance map
-   * narrows this position to one: the cited bundle must carry a `pass` verdict
-   * for it and the sibling must declare it. Absent when the map names only the
-   * position.
-   */
+  /** The criterion the sibling must have passed when the original acceptance map narrows this position to one: the cited bundle must carry a `pass` verdict for it and the sibling must declare it. Absent when the map names only the position. */
   criterionId?: string
   /** Artifacts the citation names, by artifact id or kind, all present in the cited bundle. */
   artifactRefs: string[]
-  /**
-   * Input references the citation names, from the sibling's own declared input
-   * vocabulary (`requiresArtifact`, `acceptsArtifact`, `protectedInputs`). Empty
-   * when the citation rests on the run/evidence/product identity alone.
-   */
+  /** Input references the citation names, from the sibling's own declared input vocabulary (`requiresArtifact`, `acceptsArtifact`, `protectedInputs`). Empty when the citation rests on the run/evidence/product identity alone. */
   inputRefs: string[]
 }
 
-/**
- * The recovery attempt a run **is** (A6, plan §F.4): a failed root task's new
- * attempt, opened by the runtime's recovery entry in the same store, with the
- * diagnosis and request that asked for it and the sibling evidence it reads
- * instead of re-running.
- *
- * Why the attempt is the run's own field and not a separate record: what makes
- * an attempt idempotent is *which run it is* — the same key answered from the
- * record, an attempt in flight while its run is not terminal, and a new key
- * allowed only once it is. A second record keyed by the same attempt would be a
- * second place where "is this in flight?" is answered, and the two could
- * disagree; the run's own status is the one fact the store already keeps.
- *
- * The field is written once, with the run (`TaskStarted`), and never rewritten:
- * the record says what the attempt was asked for, the run's status says how it
- * went, and the reuse bindings say what it reads.
- */
+/** The recovery attempt a run **is** (A6, plan §F.4): a failed root task's new attempt, opened by the runtime's recovery entry in the same store, with the diagnosis and request that asked for it and the sibling evidence it reads instead of … */
 export interface RunRecovery {
   /** The diagnosis the attempt was requested for: the id of a `Diagnosis` record this store holds for this task. */
   sourceDiagnosisId: string
   /** The caller's request key. One key names one attempt of one diagnosis, and the same key answers with the same run. */
   requestKey: string
-  /**
-   * The failed run the source task's previous attempt was, when it had one. A
-   * task that failed without a run (a rejected admission, a blocked task) names
-   * none, and nothing is invented for it.
-   */
+  /** The failed run the source task's previous attempt was, when it had one. A task that failed without a run (a rejected admission, a blocked task) names none, and nothing is invented for it. */
   sourceRunId?: RunId
   /** When the attempt was opened. */
   requestedAt: string
-  /**
-   * The identity of the **request** this attempt answers: the source run it names
-   * and the citations its caller declared, over their canonical form
-   * (`requestAttemptDigest`). Absent on a record written before the field
-   * existed, whose request is compared by its citations instead.
-   *
-   * Why it is not derived from {@link reusedMembers}: those are the *binding* —
-   * what the attempt actually reads — and a request that names no reuse (the
-   * two-field chain) has its citations derived from the store, so the binding is
-   * not a function of the request. "One key names one request" is the rule the
-   * retry has to be answered by, and this is the request it names.
-   */
+  /** The identity of the **request** this attempt answers: the source run it names and the citations its caller declared, over their canonical form (`requestAttemptDigest`). */
   requestDigest?: string
   /** The already verified siblings this attempt reads, by the positions they claim. Empty when it re-runs everything. */
   reusedMembers: RunMemberReuse[]
-  /**
-   * The positions of the failed run that read a **passed sibling the attempt
-   * could not bind**, with the reasons it could not: an unresolved evidence,
-   * product or input identity, or a criterion the original acceptance map
-   * narrows the position to with no passing verdict behind it. The slot is left
-   * for the members the attempt's own batches admit — the position is done
-   * again — and this list is what makes that visible instead of silent
-   * (plan §F.4: 无效引用拒绝并列出受影响项).
-   *
-   * Empty or absent when nothing was left unbound, which includes every attempt
-   * that was asked for with declarations of its own: a caller's citation that
-   * does not resolve is refused outright and opens no attempt at all.
-   */
+  /** The positions of the failed run that read a **passed sibling the attempt could not bind**, with the reasons it could not: an unresolved evidence, product or input identity, or a criterion the original acceptance map narrows the position to … */
   unboundMembers?: RunMemberReuseRefusal[]
 }
 
@@ -555,87 +249,31 @@ export interface RunMemberReuseRefusal {
   reasons: string[]
 }
 
-export interface TaskRun {                          // (§5.3)
+export interface TaskRun {
+  // (§5.3)
   runId: RunId
   taskId: TaskId
   sessionId: string
   parentRunId?: RunId
   capabilitySnapshot: string[]
   agentPreset?: string
-  /**
-   * What this run was bound to and loaded (S1-C item 4). Absent on every run
-   * created before the field existed, and on a run whose caller assembled its
-   * plan without an admission-time pre-check: neither loaded content this build
-   * can vouch for, and neither is retroactively given a claim.
-   */
+  /** What this run was bound to and loaded (S1-C item 4). Absent on every run created before the field existed, and on a run whose caller assembled its plan without an admission-time pre-check: neither loaded content this build can vouch for … */
   providerBinding?: RunProviderBinding
-  /**
-   * Where this run sits in the A3 coordination protocol. A new run is born
-   * `active`, or `submitted` when it has no worker at all (a `spawn: false`
-   * replay). Absent on every run created before the field existed; its phase is
-   * read as unknown, never defaulted to `active`.
-   */
+  /** Where this run sits in the A3 coordination protocol. A new run is born `active`, or `submitted` when it has no worker at all (a `spawn: false` replay). */
   executionPhase?: ExecutionPhase
-  /**
-   * The batch this run is waiting on: the one still open, the id
-   * {@link batchIdFor} derives from this run and the proposal it consumed.
-   * Written by the `active → waiting_children` edge and cleared by the
-   * `waiting_children → active` edge that closes it, so it names the *current*
-   * unfinished batch — a run that returned to `active` reads with no batch id
-   * even though its history holds batches, and a run that submitted while
-   * waiting on children keeps the id it was waiting under (that phase change
-   * does not close the batch).
-   *
-   * A parent decomposes more than once, so this field is not a function of the
-   * task: it is what the run is waiting on now, and which batches a run
-   * admitted altogether is {@link batches}. Absent on a run that never admitted
-   * a batch.
-   */
+  /** The batch this run is waiting on: the one still open, the id {@link batchIdFor} derives from this run and the proposal it consumed. */
   batchId?: string
-  /**
-   * Every batch this run admitted, in admission order, with the member task ids
-   * each created — the run's accumulative membership. The reducer appends one
-   * entry per `TaskDecomposed` event that names this run, so members an earlier
-   * batch contributed are never overwritten by a later one and
-   * {@link runMemberTaskIds} is the concatenation in that order — behind the
-   * verified siblings a recovery attempt pins ({@link TaskRun.recovery}).
-   *
-   * Absent — not empty — on a run that admitted no batch of this shape, which
-   * includes every run written before batches were identified by
-   * `(parentRunId, proposalId)`; such a run's members are not guessed from its
-   * task's children (see
-   * `docs/persistence-changes/2026-09-26-k1-multi-batch.md`).
-   */
+  /** Every batch this run admitted, in admission order, with the member task ids each created — the run's accumulative membership. */
   batches?: TaskRunBatch[]
-  /**
-   * The recovery attempt this run *is* (A6). Absent on every run that is not
-   * one: a first attempt, a child, a replay — an ordinary run is not a recovery
-   * of anything, and nothing is inferred for it. Written only with the run's own
-   * start; see {@link RunRecovery}.
-   */
+  /** The recovery attempt this run *is* (A6). Absent on every run that is not one: a first attempt, a child, a replay — an ordinary run is not a recovery of anything, and nothing is inferred for it. */
   recovery?: RunRecovery
-  /**
-   * What this run handed in, written by the transition into `submitted`.
-   * Absent on a run that has not submitted; its presence is what makes a
-   * second submission a refusal rather than an overwrite.
-   */
+  /** What this run handed in, written by the transition into `submitted`. Absent on a run that has not submitted; its presence is what makes a second submission a refusal rather than an overwrite. */
   submission?: SubmissionRecord
-  /**
-   * The A3 question-id mount point, kept readable and never written again
-   * (A4): the store's question records are the one durable source of what a run
-   * waits on, and a second index that could disagree with them is what A4 took
-   * out of the write shape. The reducer still carries the field when an old
-   * record carries it, so a store written by A3 opens with the snapshot it had,
-   * and a new phase change carrying it is refused by name.
-   */
+  /** The A3 question-id mount point, kept readable and never written again (A4): the store's question records are the one durable source of what a run waits on, and a second index that could disagree with them is what A4 took out of the write … */
   pendingQuestionIds?: string[]
   /** The A3 blocking-question mount point, kept readable and never written again; see {@link pendingQuestionIds}. */
   blockingQuestionIds?: string[]
-  /**
-   * The last no-progress marking on this run (A3). Overwritten by each
-   * `RunProgressMarked`; absent until a caller marks one, and on every run
-   * written before the field existed.
-   */
+  /** The last no-progress marking on this run (A3). Overwritten by each `RunProgressMarked`; absent until a caller marks one, and on every run written before the field existed. */
   noProgress?: NoProgressRecord
   artifacts: ArtifactRef[]
   verifierResults: VerificationResult[]
@@ -644,26 +282,7 @@ export interface TaskRun {                          // (§5.3)
   finishedAt?: string
 }
 
-/**
- * The member **slots** one run reads, in the sequence a parent criterion's
- * `childIndex` names: the verified siblings its {@link TaskRun.recovery} claims
- * at the positions they name, and the `memberTaskIds` of its batches — in
- * admission order — filling the positions no entry claims, ascending
- * ({@link TaskRun.batches}).
- *
- * The sequence is stable: a later batch never moves a member an earlier one
- * contributed, a claimed position is never handed to a created member, and a
- * position the run has not reached yet answers `undefined` — a slot, not a
- * missing member. One derivation, shared by the positional reader
- * (`TaskService.runMemberSlotsIn`, what the composite judge reads) and by the
- * id-only reader ({@link runMemberTaskIds}), so "the run's members" cannot mean
- * two different orders.
- *
- * A run with no batches and no claimed positions has no members here — an empty
- * sequence, never its task's children: those belong to whichever batch admitted
- * them, and a run that admitted no batch of this shape is not given one by
- * guessing.
- */
+/** The member **slots** one run reads, in the sequence a parent criterion's `childIndex` names: the verified siblings its {@link TaskRun.recovery} claims at the positions they name, and the `memberTaskIds` of its batches — in admission order … */
 export function runMemberSlots(run: TaskRun): (TaskId | undefined)[] {
   const claimed = [...(run.recovery?.reusedMembers ?? [])].sort((left, right) => left.childIndex - right.childIndex)
   if (claimed.length === 0) return (run.batches ?? []).flatMap(batch => batch.memberTaskIds)
@@ -680,13 +299,7 @@ export function runMemberSlots(run: TaskRun): (TaskId | undefined)[] {
   return slots
 }
 
-/**
- * The member task ids one run reads, in slot order, with the slots it has not
- * filled left out: what a reader that needs *which* tasks are members — not
- * where each one sits — asks for. A reader that needs positions (the composite
- * judge, which indexes them by a criterion's `childIndex`) reads
- * {@link runMemberSlots}, whose holes are the not-yet-filled positions.
- */
+/** The member task ids one run reads, in slot order, with the slots it has not filled left out: what a reader that needs *which* tasks are members — not where each one sits — asks for. */
 export function runMemberTaskIds(run: TaskRun): TaskId[] {
   return runMemberSlots(run).filter((taskId): taskId is TaskId => taskId !== undefined)
 }
@@ -695,32 +308,18 @@ export interface VerificationResult {
   criterionId: string
   status: 'pass' | 'fail' | 'inconclusive'
   verifierId: string
-  /**
-   * The version of the registered verifier instance that produced this verdict
-   * (S1-V slice 2, KISS §8.2): stamped by the verifier registry from the
-   * instance it actually dispatched to — never from the criterion's own text
-   * or from the verifier's returned object. Absent when the registered
-   * instance declares no version, and on verdicts written before the field
-   * existed; a later version change never rewrites historical verdicts.
-   */
+  /** The version of the registered verifier instance that produced this verdict (S1-V slice 2, KISS §8.2): stamped by the verifier registry from the instance it actually dispatched to — never from the criterion's own text or from the verifier's … */
   verifierVersion?: string
   command?: string
   exitCode?: number
-  logRef?: string       // path relative to verifier evidenceRoot, never absolute
+  logRef?: string // path relative to verifier evidenceRoot, never absolute
   details?: string
-  /**
-   * Which side an `inconclusive` verdict belongs to (KISS §4.3's UNKNOWN
-   * split): `task` when the check never ran (timeout, the command never
-   * started) — the criterion was never tested; `verifier` when the judge
-   * itself is broken (the verifier threw, or none supports the mode). Absent
-   * on pass/fail and on a by-design inconclusive (a review criterion awaiting
-   * a human). Confusing the two kinds makes the system re-test the same thing
-   * forever, so the orchestrator's feedback text keeps them apart.
-   */
+  /** Which side an `inconclusive` verdict belongs to (KISS §4.3's UNKNOWN split): `task` when the check never ran (timeout, the command never started) — the criterion was never tested; `verifier` when the judge itself is broken (the verifier … */
   unknownKind?: 'task' | 'verifier'
 }
 
-export interface EvidenceClaim {                    // (§10)
+export interface EvidenceClaim {
+  // (§10)
   claimId: string
   criterionId: string
   status: 'pass' | 'fail' | 'inconclusive'
@@ -743,7 +342,8 @@ export interface EvidenceBundle {
   generatedAt: string
 }
 
-export interface TaskHandoff {                      // (§18)
+export interface TaskHandoff {
+  // (§18)
   handoffId: string
   parentTaskId: TaskId
   parentRunId: RunId
@@ -760,20 +360,20 @@ export interface TaskHandoff {                      // (§18)
   createdAt: string
 }
 
-export interface CapabilityManifest {               // (§11–12)
-  capabilities: Record<string, {
-    skills: string[]
-    /** Real DSH tool names the capability grants: labels are expanded when the manifest is resolved. */
-    tools: string[]
-    preset?: string
-    permission?: string
-    /**
-     * MCP server names the capability grants, resolved against the task
-     * runtime's server registry at admission and mounted per worker at spawn
-     * (`mcp__<server>__<tool>` on the worker's own tool layer). Absent = none.
-     */
-    mcpServers?: string[]
-  }>
+export interface CapabilityManifest {
+  // (§11–12)
+  capabilities: Record<
+    string,
+    {
+      skills: string[]
+      /** Real DSH tool names the capability grants: labels are expanded when the manifest is resolved. */
+      tools: string[]
+      preset?: string
+      permission?: string
+      /** MCP server names the capability grants, resolved against the task runtime's server registry at admission and mounted per worker at spawn (`mcp__<server>__<tool>` on the worker's own tool layer). Absent = none. */
+      mcpServers?: string[]
+    }
+  >
   missing: string[]
   closure: 'closed' | 'partial' | 'gap'
 }
@@ -781,11 +381,7 @@ export interface CapabilityManifest {               // (§11–12)
 /** The terminal outcome one run (or a child blocked before its run ever started) settled in. */
 export type ReviewOutcome = 'verified' | 'failed' | 'cancelled' | 'blocked'
 
-/**
- * One criterion's verdict as the verifier reported it, copied onto the review
- * record so a reader sees what was checked — command and exit code included —
- * without replaying the run or opening the evidence bundle.
- */
+/** One criterion's verdict as the verifier reported it, copied onto the review record so a reader sees what was checked — command and exit code included — without replaying the run or opening the evidence bundle. */
 export interface ReviewCriterion {
   criterionId: string
   /** The verifier's verdict for this criterion. */
@@ -800,12 +396,7 @@ export interface ReviewCriterion {
   exitCode?: number
   /** Log path relative to the verifier evidence root, when the verifier wrote one. */
   logRef?: string
-  /**
-   * Which side an inconclusive verdict belongs to, copied from the verifier
-   * result so a review reader (and the E3 escalation signal) can tell "the
-   * check never ran" (`task`) from "the judge is broken" (`verifier`) without
-   * reopening the evidence bundle.
-   */
+  /** Which side an inconclusive verdict belongs to, copied from the verifier result so a review reader (and the E3 escalation signal) can tell "the check never ran" (`task`) from "the judge is broken" (`verifier`) without reopening the evidence … */
   unknownKind?: 'task' | 'verifier'
 }
 
@@ -816,12 +407,7 @@ export interface ReviewBlocker {
   outcome: TaskStatus
 }
 
-/**
- * The four token buckets a session's `tokenUsage` projection reports, copied
- * verbatim from that projection's wire view (upstream
- * `llm/token-meter/src/usage-projection.ts:117-150`). Cumulative for the whole
- * session, not for one run — see {@link ReviewMetrics.tokens}.
- */
+/** The four token buckets a session's `tokenUsage` projection reports, copied verbatim from that projection's wire view (upstream `llm/token-meter/src/usage-projection.ts:117-150`). */
 export interface ReviewTokenUsage {
   uncachedInputTokens: number
   outputTokens: number
@@ -836,17 +422,8 @@ export interface ReviewToolCall {
   count: number
 }
 
-/**
- * Dimension 1, outcome correctness: the terminal status the run settled in and
- * what the verifier said per criterion. Both facts already exist on the record
- * (`outcome`, `criteria`); this restates them in derived form so a reader gets
- * the verdict tally without re-scanning `criteria`.
- *
- * Limitation: this says what was decided, never whether the decision was right.
- * "Correct" is not mechanically observable — it is exactly what Diagnosis exists
- * to explain (§2.7.3).
- */
-export interface OutcomeCorrectnessFacts {
+/** Dimension 1, outcome correctness: the terminal status the run settled in and what the verifier said per criterion. */
+interface OutcomeCorrectnessFacts {
   outcome: ReviewOutcome
   /** Criteria the record carries a verdict for; 0 when the verifier never reported. */
   criteriaCount: number
@@ -854,16 +431,8 @@ export interface OutcomeCorrectnessFacts {
   unmetCriterionIds: string[]
 }
 
-/**
- * Dimension 2, task specification quality: how much specification the task
- * carried, as counts. Purely mechanical — a thin specification is a fact here,
- * not a verdict.
- *
- * Limitation: counts say nothing about whether the objective is understandable
- * or whether one criterion is doing the work of three. Present whenever the task
- * was readable.
- */
-export interface TaskSpecificationFacts {
+/** Dimension 2, task specification quality: how much specification the task carried, as counts. Purely mechanical — a thin specification is a fact here, not a verdict. */
+interface TaskSpecificationFacts {
   /** Whether the objective has non-whitespace content. */
   objectivePresent: boolean
   /** The task's acceptance criteria count. */
@@ -873,7 +442,7 @@ export interface TaskSpecificationFacts {
 }
 
 /** One criterion's declaration shape, as authored on the task (not the verifier's verdict). */
-export interface AcceptanceCriterionShape {
+interface AcceptanceCriterionShape {
   criterionId: string
   mode: VerificationMode
   /** Whether the criterion declares a `command` to run. */
@@ -881,28 +450,13 @@ export interface AcceptanceCriterionShape {
   mandatory: boolean
 }
 
-/**
- * Dimension 3, acceptance quality: each criterion's declared verification mode
- * and whether it hands the verifier a command.
- *
- * Limitation: mode and command presence are the only mechanically observed
- * facts here. Whether a criterion actually pins down the intended behaviour is a
- * judgement this record deliberately does not make; a `review`-mode criterion
- * (no command) is recorded as such, not as a defect.
- */
-export interface AcceptanceFacts {
+/** Dimension 3, acceptance quality: each criterion's declared verification mode and whether it hands the verifier a command. Limitation: mode and command presence are the only mechanically observed facts here. */
+interface AcceptanceFacts {
   criteria: AcceptanceCriterionShape[]
 }
 
-/**
- * Dimension 4, decomposition quality: the position and shape of this task in
- * the decomposition tree at review time.
- *
- * Limitation: shape only. Whether the split was a *good* split is not derivable
- * from depth, child count, or edge count, and no threshold is applied to any of
- * them.
- */
-export interface DecompositionFacts {
+/** Dimension 4, decomposition quality: the position and shape of this task in the decomposition tree at review time. Limitation: shape only. */
+interface DecompositionFacts {
   depth: number
   decompositionStatus: DecompositionStatus
   childCount: number
@@ -912,16 +466,8 @@ export interface DecompositionFacts {
   outgoingEdges: number
 }
 
-/**
- * Dimension 5, capability coverage: what the task's resolved manifest granted
- * and what it could not resolve.
- *
- * Limitation: this is the admission-time resolution, not a claim that the
- * granted capability was the *right* one for the work. The flattening of skills
- * and tools into `granted` mirrors `capabilitySnapshot` and loses which
- * capability contributed which name.
- */
-export interface CapabilityCoverageFacts {
+/** Dimension 5, capability coverage: what the task's resolved manifest granted and what it could not resolve. Limitation: this is the admission-time resolution, not a claim that the granted capability was the *right* one for the work. */
+interface CapabilityCoverageFacts {
   /** The manifest's closure verdict: `closed` when nothing required was missing. */
   closure: CapabilityManifest['closure']
   /** Flattened skills+tools of the resolved manifest — exactly the list a run records in its `capabilitySnapshot`. */
@@ -930,16 +476,8 @@ export interface CapabilityCoverageFacts {
   missing: string[]
 }
 
-/**
- * Dimension 6, skill fit: skills the run's capabilities granted against skills
- * the session's log shows the `skill` tool actually loading.
- *
- * Limitation: `loaded` and `loadedOutsideGrant` appear only when the deployment
- * exposes a readable session log, and they are session-scoped — a session that
- * loaded a skill before any run existed still counts. Loading a skill is not
- * evidence that its instructions changed the work.
- */
-export interface SkillFitFacts {
+/** Dimension 6, skill fit: skills the run's capabilities granted against skills the session's log shows the `skill` tool actually loading. */
+interface SkillFitFacts {
   /** Skill names the run's capabilities granted. */
   granted: string[]
   /** Skill names the session's `skill` calls loaded, deduplicated and sorted; absent when no log was readable. */
@@ -948,18 +486,8 @@ export interface SkillFitFacts {
   loadedOutsideGrant?: string[]
 }
 
-/**
- * Dimension 7, tool fit: tools the run's capabilities granted (plus the worker
- * baseline) against tools the session's log shows being called.
- *
- * Limitation: the comparison is against capability grants and
- * `workerBaseline()`, not against what the mounted preset offers, so a worker
- * on a preset that keeps its own tool plane (`keepPresetTools`) can show names
- * in `calledOutsideGrant` that were in fact authorized by its composition. Names
- * are compared as the log records them; a tool reached through a wrapper is not
- * attributed. `called` and `calledOutsideGrant` appear only with a readable log.
- */
-export interface ToolFitFacts {
+/** Dimension 7, tool fit: tools the run's capabilities granted (plus the worker baseline) against tools the session's log shows being called. */
+interface ToolFitFacts {
   /** Real DSH tool names the run's capabilities granted (labels expanded at admission). */
   granted: string[]
   /** Tool names the session shows being called, with counts; absent when no log was readable. */
@@ -968,30 +496,15 @@ export interface ToolFitFacts {
   calledOutsideGrant?: string[]
 }
 
-/**
- * Dimension 8, context efficiency: only numbers that can be read reliably, and
- * nothing that rates them.
- *
- * Limitation: `tokens` is the same whole-session cumulative observation as
- * {@link ReviewMetrics.tokens} — for a long-lived root session it covers the
- * entire session, not this run, so it is systematically high. `compactions`
- * counts `compaction/start` events in the session. No ratio, budget, or
- * efficiency judgement is derived from either; absent when neither was readable.
- */
-export interface ContextEfficiencyFacts {
+/** Dimension 8, context efficiency: only numbers that can be read reliably, and nothing that rates them. */
+interface ContextEfficiencyFacts {
   /** Whole-session token buckets; the same value {@link ReviewMetrics.tokens} carries. */
   tokens?: ReviewTokenUsage
   /** `compaction/start` events observed in the session log. */
   compactions?: number
 }
 
-/**
- * The eight review dimensions (§2.7.3), each carrying mechanically observed
- * facts — never a score, never an LLM judgement, never transcript text. Every
- * member is optional and is omitted, not defaulted, when the data behind it does
- * not exist. A dimension answers "what did the system actually do here", leaving
- * "why" to Diagnosis.
- */
+/** The eight review dimensions (§2.7.3), each carrying mechanically observed facts — never a score, never an LLM judgement, never transcript text. Every member is optional and is omitted, not defaulted, when the data behind it does not exist. */
 export interface ReviewDimensions {
   outcomeCorrectness?: OutcomeCorrectnessFacts
   taskSpecification?: TaskSpecificationFacts
@@ -1004,74 +517,28 @@ export interface ReviewDimensions {
 }
 
 /** Call and failure totals over one session's tool traffic. */
-export interface ReviewToolCallTotals {
+interface ReviewToolCallTotals {
   /** `tool/call` events in the session log. */
   calls: number
   /** `tool/result` events whose payload reports a failure. */
   failures: number
 }
 
-/**
- * The six engineering-effort indicators, as counters. Every member is optional
- * and is omitted rather than filled with a placeholder when its source is
- * unavailable.
- *
- * `time` is deliberately absent: wall-clock duration already lives in
- * {@link ReviewRecord.durationMs} (run `startedAt` → the terminal transition,
- * verification included) and is not duplicated here.
- *
- * `artifactCount` is deliberately absent and is not `evidenceLogs`: nothing in
- * the deployment produces an `ArtifactRef` (the type has no writer, and
- * `TaskRun.artifacts` is always empty), so there is no trustworthy artifact
- * count to record. `evidenceLogs` counts criteria that carried a `logRef`
- * instead, and is named for what it measures.
- */
+/** The six engineering-effort indicators, as counters. Every member is optional and is omitted rather than filled with a placeholder when its source is unavailable. */
 export interface ReviewMetrics {
-  /**
-   * Provider-reported, whole-session token buckets from the session's
-   * `tokenUsage` projection. Limitation: the projection folds the entire
-   * session, so for the long-lived root session this is a session total, not a
-   * per-run figure, and it reads systematically high. Absent when the
-   * deployment exposes neither `sessionProjections` nor that key.
-   */
+  /** Provider-reported, whole-session token buckets from the session's `tokenUsage` projection. */
   tokens?: ReviewTokenUsage
   /** Session tool traffic; absent when no session log was readable. */
   toolCalls?: ReviewToolCallTotals
-  /**
-   * Count of human-intervention events in the session log: `approval/asked`
-   * plus calls to `hitl_ask` / `hitl_approve` / `ask_user_question`.
-   * Limitation: the count is session-scoped, and only `ask_user_question` is a
-   * worker tool — `hitl_*` are root tools, so interventions across the whole
-   * tree land on the root's record. A worker record showing 0 does not mean no
-   * human was involved anywhere in its tree.
-   */
+  /** Count of human-intervention events in the session log: `approval/asked` plus calls to `hitl_ask` / `hitl_approve` / `ask_user_question`. */
   humanInterventions?: number
-  /**
-   * `TaskStarted` count minus one for this task (`TaskInstance.runIds.length - 1`).
-   * Limitation: the current orchestrator has no retry branch, so this is
-   * structurally always 0 — a reader must not conclude "it was tried again and
-   * did not need to be" from it. Omitted for a runless (blocked) task.
-   */
+  /** `TaskStarted` count minus one for this task (`TaskInstance.runIds.length - 1`). Limitation: the current orchestrator has no retry branch, so this is structurally always 0 — a reader must not conclude "it was tried again and did not need to … */
   retries?: number
   /** Criteria on this record that carry a `logRef` — where the evidence for a verdict was written. */
   evidenceLogs?: number
 }
 
-/**
- * One lightweight terminal record per run, written exactly once when the run
- * reaches its terminal state. No scoring and no judge — a human reads it.
- * `localizedCause` is written only for `failed`; `anomalies` notes what is
- * otherwise notable (for `blocked`, which dependency blocked it).
- * The record is self-contained for a postmortem: `durationMs`, per-criterion
- * `criteria`, a truncated `logTail` on failure, and structured `blockedBy`
- * name the what and the why without a trip into evidence or logs.
- *
- * §2.7.3 makes Diagnosis, not Score, the first-class citizen: `dimensions`
- * therefore holds mechanically observed facts per review dimension (never a
- * rating, never an LLM judgement, never transcript text) and `metrics` holds
- * engineering-effort counters. Both are optional throughout and are omitted
- * rather than guessed when their source does not exist.
- */
+/** One lightweight terminal record per run, written exactly once when the run reaches its terminal state. No scoring and no judge — a human reads it. */
 export interface ReviewRecord {
   taskId: TaskId
   /** Absent when the task was blocked before any run started. */
@@ -1101,58 +568,41 @@ export interface ReviewRecord {
   metrics?: ReviewMetrics
 }
 
-/**
- * How sure the diagnoser is of its localized cause. Coarse on purpose
- * (§2.7.3: Review ≠ Judge — a diagnosis explains, it does not score).
- */
+/** How sure the diagnoser is of its localized cause. Coarse on purpose (§2.7.3: Review ≠ Judge — a diagnosis explains, it does not score). */
 export type DiagnosisConfidence = 'high' | 'medium' | 'low'
 
-/**
- * The mutation surfaces the Evolution ledger records a proposal under
- * (§2.7.6). This is Evolution's own vocabulary — what it can *execute* is
- * narrower still (`APPLYABLE_TARGET_TYPES` in the evolution package) — and it
- * is deliberately not the diagnosis's: a `DiagnosisProposal.targetType` is an
- * open name, and the conversion entry that would execute it is where the name
- * is checked against what can really run.
- */
+/** The mutation surfaces the Evolution ledger records a proposal under (§2.7.6). This is Evolution's own vocabulary — what it can *execute* is narrower still (`APPLYABLE_TARGET_TYPES` in the evolution package) — and it is deliberately not the … */
 export type ProposalTargetType =
-  | 'skill' | 'tool' | 'capability' | 'task_definition' | 'decomposition_policy'
-  | 'agent_preset' | 'workflow_policy' | 'verifier' | 'runtime_policy'
+  | 'skill'
+  | 'tool'
+  | 'capability'
+  | 'task_definition'
+  | 'decomposition_policy'
+  | 'agent_preset'
+  | 'workflow_policy'
+  | 'verifier'
+  | 'runtime_policy'
 
-/**
- * One structured suggestion a diagnosis raises. In P4 a proposal never
- * executes by itself (§2.7.6: no automatic production changes); it is data
- * for a human or a later Evolution step.
- */
+/** One structured suggestion a diagnosis raises. In P4 a proposal never executes by itself (§2.7.6: no automatic production changes); it is data for a human or a later Evolution step. */
 export interface DiagnosisProposal {
-  /**
-   * The mutation surface the suggestion points at, as a non-empty open name
-   * (A5): a diagnosis explains, and the store does not freeze what a
-   * suggestion may name — a target type no executor exists for is a recorded
-   * suggestion, refused by name at the entry that would convert it (A6).
-   */
+  /** The mutation surface the suggestion points at, as a non-empty open name (A5): a diagnosis explains, and the store does not freeze what a suggestion may name — a target type no executor exists for is a recorded suggestion, refused by name … */
   targetType: string
   targetId: string
   rationale: string
 }
 
-/**
- * The six review dimensions whose conclusion is not mechanically observable
- * (§2.7.3): the fact table records what the run did, and only a reader holding
- * the whole context can say whether what it did was adequate. The other two
- * dimensions are deliberately absent — `outcome_correctness` tallies the
- * verifier's own verdicts and `capability_coverage` reports the admission-time
- * `closed`/`partial`/`gap` closure, so both settle mechanically and need no
- * judgement. Names are the snake_case spelling of the `ReviewDimensions`
- * members, so a judgement and the facts it rests on read as one dimension.
- */
+/** The six review dimensions whose conclusion is not mechanically observable (§2.7.3): the fact table records what the run did, and only a reader holding the whole context can say whether what it did was adequate. */
 export type JudgedDimension =
-  | 'task_specification' | 'acceptance' | 'decomposition'
-  | 'skill_fit' | 'tool_fit' | 'context_efficiency'
+  'task_specification' | 'acceptance' | 'decomposition' | 'skill_fit' | 'tool_fit' | 'context_efficiency'
 
 /** Every judged dimension, in the order a report reads them. */
 export const JUDGED_DIMENSIONS: readonly JudgedDimension[] = [
-  'task_specification', 'acceptance', 'decomposition', 'skill_fit', 'tool_fit', 'context_efficiency',
+  'task_specification',
+  'acceptance',
+  'decomposition',
+  'skill_fit',
+  'tool_fit',
+  'context_efficiency',
 ]
 
 /** One dimension's coarse conclusion. Three values on purpose — this is not a rating scale. */
@@ -1161,44 +611,27 @@ export type JudgementVerdict = 'adequate' | 'inadequate' | 'unknown'
 /** Every judgement verdict, for reducer validation and rendering. */
 export const JUDGEMENT_VERDICTS: readonly JudgementVerdict[] = ['adequate', 'inadequate', 'unknown']
 
-/**
- * One judged dimension: an agent's (or a person's) conclusion over the facts a
- * `ReviewRecord` carries. Still not a score — `verdict` is a coarse three-way
- * call, `evidenceRefs` names what it rests on, and `rationale` states the
- * reasoning. When the evidence does not settle a dimension the verdict must be
- * `unknown`, never a guess.
- */
+/** One judged dimension: an agent's (or a person's) conclusion over the facts a `ReviewRecord` carries. Still not a score — `verdict` is a coarse three-way call, `evidenceRefs` names what it rests on, and `rationale` states the reasoning. */
 export interface ReviewJudgement {
   /** Which dimension this concludes; only the six non-mechanical ones are judgeable. */
   dimension: JudgedDimension
   /** The conclusion: adequate, inadequate, or unknown. */
   verdict: JudgementVerdict
-  /**
-   * Refs the judgement rests on: evidence ids, the review refs
-   * `task_review_pack` prints (`<taskId>#<runId>`, or `<taskId>#no-run`), or
-   * session ids. Required and non-empty — a conclusion that cites nothing is
-   * not reviewable.
-   */
+  /** Refs the judgement rests on: evidence ids, the review refs `task_review_pack` prints (`<taskId>#<runId>`, or `<taskId>#no-run`), or session ids. Required and non-empty — a conclusion that cites nothing is not reviewable. */
   evidenceRefs: string[]
   /** Why this verdict, in the writer's words. */
   rationale: string
 }
 
 /** Who produced a diagnosis, so an agent's judgement is never mistaken for a person's. */
-export interface DiagnosisProvenance {
+interface DiagnosisProvenance {
   /** `agent` when a spawned review agent wrote it; `human` for a person. */
   kind: 'agent' | 'human'
   /** The session that produced it, when one did — the id a reader drills into. */
   sessionId?: string
 }
 
-/**
- * The core product of review (§2.7.3): an explanation of what a task's
- * reviews show, not a score. Diagnosis lineage is a graph, not a tree
- * (§2.7.4): `reviewRefs` may name several records and `relatedTaskIds` may
- * point across tasks. Written once per `diagnosisId`, immutable afterwards;
- * a task accumulates as many diagnoses as callers record.
- */
+/** The core product of review (§2.7.3): an explanation of what a task's reviews show, not a score. Diagnosis lineage is a graph, not a tree (§2.7.4): `reviewRefs` may name several records and `relatedTaskIds` may point across tasks. */
 export interface Diagnosis {
   diagnosisId: string
   taskId: TaskId
@@ -1217,28 +650,13 @@ export interface Diagnosis {
   proposals: DiagnosisProposal[]
   /** Other tasks this diagnosis implicates (cross-task lineage, §2.7.4). */
   relatedTaskIds?: TaskId[]
-  /**
-   * Who wrote this diagnosis. Absent on records written before this field
-   * existed, and on any writer that does not declare itself; absence is read as
-   * human-written (the only producer there was).
-   */
+  /** Who wrote this diagnosis. Absent on records written before this field existed, and on any writer that does not declare itself; absence is read as human-written (the only producer there was). */
   producedBy?: DiagnosisProvenance
-  /**
-   * The six judged dimensions, when the writer made explicit calls. Optional: a
-   * diagnosis may explain a cause without judging every dimension, and an
-   * all-`unknown` judgement is a legitimate outcome — it says the evidence did
-   * not settle the dimension, which is itself information.
-   */
+  /** The six judged dimensions, when the writer made explicit calls. Optional: a diagnosis may explain a cause without judging every dimension, and an all-`unknown` judgement is a legitimate outcome — it says the evidence did not settle the … */
   judgements?: ReviewJudgement[]
 }
 
-/**
- * One structured record of what is still missing (KISS §2/§5): an Obligation
- * is a question, not an action — `goal` names the gap, `criterion` says how its
- * satisfaction would be judged, and `sourceTaskId` names the task whose
- * failure, block, or capability gap surfaced it. Recorded, never scheduled:
- * the runtime has no obligation scheduler, so nothing here auto-executes.
- */
+/** One structured record of what is still missing (KISS §2/§5): an Obligation is a question, not an action — `goal` names the gap, `criterion` says how its satisfaction would be judged, and `sourceTaskId` names the task whose failure, block … */
 export interface Obligation {
   obligationId: string
   /** What is still missing, as a question or a named gap. */
@@ -1266,48 +684,11 @@ export interface TaskSnapshot {
   readonly diagnoses: readonly Diagnosis[]
   readonly obligations: readonly Obligation[]
   readonly capabilities: Readonly<Record<string, CapabilityManifest>>
-  /**
-   * The store's proposals, indexed for the three questions a review gate asks
-   * (§6/§7): by proposal id, by the caller's request key, and by parent task.
-   * Root contracts (A0 §2) are in the first two views only: they have no parent
-   * task to be indexed under.
-   *
-   * Optional at the type level because a snapshot is also a shape other code
-   * builds by hand (a verifier's selftest store view, a test double), and those
-   * literals predate proposals. A snapshot produced by this build's reducer
-   * always carries it — empty members included — so an absent index means "this
-   * reader cannot see proposals", never "the store holds none"; see
-   * {@link TaskProposalIndex}.
-   */
+  /** The store's proposals, indexed for the three questions a review gate asks (§6/§7): by proposal id, by the caller's request key, and by parent task. */
   readonly proposals?: TaskProposalIndex
-  /**
-   * The store's parent/child questions (A4 §F.1), in ask order and by id, each
-   * carrying the answers recorded so far. This is the *only* durable source of
-   * question blocking: a run's open questions, and which of them block it, are
-   * derived from these records (see `question.ts`'s helpers), never from a
-   * phase, a run field or a second index.
-   *
-   * Optional at the type level for the same reason as {@link proposals} — a
-   * hand-built snapshot predates questions — and a snapshot produced by this
-   * build's reducer always carries it. A reader that cannot see the index must
-   * not read it as "no questions": see {@link TaskQuestionIndex}.
-   */
+  /** The store's parent/child questions (A4 §F.1), in ask order and by id, each carrying the answers recorded so far. */
   readonly questions?: TaskQuestionIndex
-  /**
-   * The ceilings a person raised on this tree's own budget (K4), in the order
-   * they were recorded and by request key. This is the *only* durable record of
-   * an approved raise: the deployment's own ceilings come from the configuration
-   * and are re-derived from the root's start on every read, while an approved
-   * one is an absolute value that survives a restart, a configuration change and
-   * a replay — which is why the resolver reads it instead of timing anything
-   * again.
-   *
-   * Optional at the type level for the same reason as {@link proposals}, and read
-   * the same way: a snapshot produced by this build's reducer always carries the
-   * index (empty members included), so an absent one means "this reader cannot
-   * see extensions", never "the store holds none". See
-   * {@link TaskBudgetExtensionIndex}.
-   */
+  /** The ceilings a person raised on this tree's own budget (K4), in the order they were recorded and by request key. */
   readonly budgetExtensions?: TaskBudgetExtensionIndex
 }
 
@@ -1318,27 +699,10 @@ export interface TaskEventPayloads {
   TaskAdmitted: { decompositionStatus: 'leaf' | 'decomposable' }
   /** A created task is rejected at admission and settles blocked. */
   TaskRejected: { reason: string }
-  /**
-   * A decomposable task's children are registered under it and the parent
-   * closes as decomposed. A parent decomposes more than once — one batch per
-   * delegation round — so this event is not a once-in-a-life record: each
-   * admission appends its members to the parent's children and, when it names
-   * the run that admitted it, one batch to that run's accumulation.
-   *
-   * The batch identity (`batchId`, `parentRunId`, `proposalId`) is all three or
-   * none: an admission this build writes carries the pair a batch is identified
-   * by, and an event written before batches had that identity carries none of
-   * them and is read as the decomposition it was (no run accumulation, no
-   * guessed batch).
-   */
+  /** A decomposable task's children are registered under it and the parent closes as decomposed. */
   TaskDecomposed: {
     childTaskIds: TaskId[]
-    /**
-     * The batch's content identity and the limits it was admitted under
-     * (construction guide §4). Absent for a batch admitted before the
-     * normalized contract existed — those children carry no contract either,
-     * and nothing is invented for them on read.
-     */
+    /** The batch's content identity and the limits it was admitted under (construction guide §4). */
     admission?: DecompositionAdmission
     /** The batch id {@link batchIdFor} derives from the run and the proposal below; refused when it is not that id. */
     batchId?: string
@@ -1363,53 +727,21 @@ export interface TaskEventPayloads {
   TaskCancelled: { reason?: string; finishedAt?: string }
   /** A failed task returns to ready so a new run can start. */
   TaskRetried: Record<string, never>
-  /**
-   * A running run's coordination phase changes (A3). The transition is the
-   * admission gate: `active → waiting_children` when its decomposition batch
-   * is admitted atomically, `waiting_children → active` when that batch ends
-   * and execution is handed back to the parent, and `→ submitted` when the run
-   * hands in a submission (explicitly or by runtime settlement). Replaying the
-   * store reconstructs exactly one path through {@link ExecutionPhase}, so a
-   * second submission, a decomposition admitted after the gate closed, and any
-   * late phase write are refused by the phase alone — the run status stays
-   * `running` through verification and cannot serve as that gate.
-   *
-   * A refused transition applies nothing: the reducer validates the whole
-   * payload before the run is touched.
-   */
+  /** A running run's coordination phase changes (A3). The transition is the admission gate: `active → waiting_children` when its decomposition batch is admitted atomically, `waiting_children → active` when that batch ends and execution is … */
   RunPhaseChanged: {
     phase: ExecutionPhase
-    /**
-     * The batch an `active ↔ waiting_children` edge names: the batch opened on
-     * the way out and the batch closed on the way back
-     * (`b-<parentRunId>-<proposalId>`, {@link batchIdFor}). Required for both
-     * batch edges and refused for `submitted`, which closes no batch.
-     */
+    /** The batch an `active ↔ waiting_children` edge names: the batch opened on the way out and the batch closed on the way back (`b-<parentRunId>-<proposalId>`, {@link batchIdFor}). */
     batchId?: string
     /** The record a `submitted` run hands in; required for that phase and refused elsewhere. */
     submission?: SubmissionRecord
-    /**
-     * The A3 question-id mount point, readable for old records only: the
-     * reducer still shape-checks and carries it, so a store written before A4
-     * replays to the same snapshot, while this build's write entries refuse a
-     * phase change that carries it — what a run waits on comes from the
-     * question facts ({@link QuestionRecord}), not from the phase.
-     */
+    /** The A3 question-id mount point, readable for old records only: the reducer still shape-checks and carries it, so a store written before A4 replays to the same snapshot, while this build's write entries refuse a phase change that carries it … */
     pendingQuestionIds?: string[]
     /** The A3 blocking-question mount point, readable for old records only; same handling as `pendingQuestionIds`. */
     blockingQuestionIds?: string[]
     /** The caller's account of the transition, when a reader needs one. */
     reason?: string
   }
-  /**
-   * A run was observed idle without submitting (A3): the no-progress record a
-   * reader shows before the budget stops a stuck run. Only an `active` run
-   * accepts a marking — a run waiting on children or on verification is
-   * expected to be idle, and marking it would count a legitimate wait as
-   * stagnation. `rounds` is the caller's consecutive count; the reducer
-   * records the number it is given and never accumulates, so replay agrees
-   * with live observation.
-   */
+  /** A run was observed idle without submitting (A3): the no-progress record a reader shows before the budget stops a stuck run. */
   RunProgressMarked: {
     /** The only kind A3 writes. */
     kind: 'unsubmitted-idle'
@@ -1420,42 +752,9 @@ export interface TaskEventPayloads {
     /** The observable diagnostic: why the run looks stuck. */
     note: string
   }
-  /**
-   * A child run asks its direct parent task a question (A4, plan §F.1). The
-   * record is the durable half of the exchange — the question's identity, the
-   * asking and answering runs, the citation of the body, the delivery's
-   * messageId, the request key and the content digest — and it is deliberately
-   * not the body: the text lives in the asking Session's own `tool/call` event,
-   * which {@link QuestionRecord.questionRef} names. Several questions may be
-   * open on one run, and a run with a blocking one stops its blocked work
-   * without any phase change: the blockage is derived from these records.
-   *
-   * The reducer is the gate. It re-derives the id from the child run and the
-   * key, requires the envelope to name that run, the child's task and its
-   * parent task, requires both runs to be running, requires the asking task to
-   * have a direct parent (a root or parentless replay task has none to ask, and
-   * the reducer refuses by name rather than inventing one), requires the cited
-   * Session to be the asking run's own, and refuses a second question under one
-   * id — a repeated request is answered from the stored record by the entry,
-   * never by a second event.
-   */
+  /** A child run asks its direct parent task a question (A4, plan §F.1). The record is the durable half of the exchange — the question's identity, the asking and answering runs, the citation of the body, the delivery's messageId, the request … */
   QuestionAsked: { question: QuestionRecord }
-  /**
-   * A parent run answers one of its children's questions (A4, plan §F.1). The
-   * answer is its own event, appended to the question's record: an open
-   * question accepts several answers (a partial one, then a resolving one), and
-   * `resolves` is the parent's declaration that this question is answered —
-   * `false` leaves it open, and the framework neither classifies the answer nor
-   * treats it as a contract or permission change.
-   *
-   * The reducer re-derives the answer id from the question and the key, refuses
-   * an answer whose run is not the run the question was asked of (a wrong
-   * parent, including one of a restarted run), refuses a question that is
-   * already resolved or whose child or parent run has settled (a late answer
-   * neither revives a run nor leaves a new fact), requires the envelope and the
-   * cited Session to be the answering run's own, and refuses a second answer
-   * under one id.
-   */
+  /** A parent run answers one of its children's questions (A4, plan §F.1). The answer is its own event, appended to the question's record: an open question accepts several answers (a partial one, then a resolving one), and `resolves` is the … */
   QuestionAnswered: { answer: QuestionAnswerRecord }
   /** The capability manifest a task was admitted with is stored. */
   CapabilityResolved: { manifest: CapabilityManifest }
@@ -1471,104 +770,21 @@ export interface TaskEventPayloads {
   DiagnosisRecorded: { diagnosis: Diagnosis }
   /** A structured "what is still missing" record raised by a failure, a block, or a capability gap; an Obligation is a question, never an action. */
   ObligationRecorded: { obligation: Obligation }
-  /**
-   * A person raised a ceiling of the tree's own budget (K4): the run count the
-   * tree may reach, the instant it must stop by, or both — each recorded as the
-   * pair (the ceiling in force when the request was read → the ceiling approved
-   * now), with the request's identity, the session that asked and the approving
-   * channel's reference.
-   *
-   * The reducer is the gate, and its subject is the *chain*: the envelope must
-   * name the store's own root session and its root task, every pair must be a
-   * raise on the canonical form of its dimension, the declared identity must be
-   * the identity of the content it accompanies, one request key is bound to one
-   * extension (the same key at the same content applies nothing a second time,
-   * at different content is a refusal by name), and a dimension that an earlier
-   * extension already moved must be asked for from *that* value — the value in
-   * force when this commit lands. That last check is what makes the entry's
-   * serial re-read meaningful: two grants approved against the same reading
-   * cannot both stand, and neither is silently re-based on the other's result.
-   *
-   * What it deliberately leaves alone: no run is started, resumed or un-settled,
-   * no task, child or candidate appears, no usage is zeroed, and no per-run
-   * wall time is restarted. An extension moves ceilings and nothing else.
-   */
+  /** A person raised a ceiling of the tree's own budget (K4): the run count the tree may reach, the instant it must stop by, or both — each recorded as the pair (the ceiling in force when the request was read → the ceiling approved now), with … */
   TaskBudgetExtended: { extension: TaskBudgetExtensionClaim }
-  /**
-   * A proposal enters the store (T2/T3, construction guide §6; root contracts
-   * A0 §2): one immutable submission with the policy it was born under, the
-   * complete normalized contracts it proposes, the limits it was admitted
-   * under, the resolution it was reviewed against, and both context
-   * fingerprints. The batch content is what a reviewer reads and an approval
-   * covers, so it is stored here rather than referenced: a waiting proposal, a
-   * rejected one, or a re-opened store renders it from saved facts. A proposal
-   * is born `ready` under policy `off` (the batch runs without a human review,
-   * and the record says so) or `pending_review` under policy `all`; the reducer
-   * refuses a record that claims the other combination, refuses a payload that
-   * disagrees with the identity it accompanies (length, order, contract digest,
-   * dependencies, flags — or, for a root contract, a contract that is not the
-   * one the identity digests), and refuses a proposal whose digests do not
-   * match the content they claim to describe. Nothing is admitted, no child
-   * exists, and no parent is marked decomposed by this event — a proposal is a
-   * question, not work.
-   *
-   * The record is discriminated by `kind` (`decomposition`, the batch shape
-   * above, or `root`, a single root contract for a root session); an absent kind
-   * is a decomposition proposal, which is what every record written before the
-   * field existed is. A root contract has no parent task, so its events carry
-   * the reserved `ROOT_PROPOSAL_TASK_ID` marker on the envelope instead — never
-   * a real task id, and a decomposition proposal's events may never carry the
-   * marker.
-   */
+  /** A proposal enters the store (T2/T3, construction guide §6; root contracts A0 §2): one immutable submission with the policy it was born under, the complete normalized contracts it proposes, the limits it was admitted under, the resolution … */
   TaskProposalSubmitted: { proposal: TaskProposal }
-  /**
-   * A human review decision (T2/T3, §6): approved, rejected, cancelled or
-   * expired, bound to the dossier digest and both context fingerprints shown
-   * when it was taken. The reducer refuses a decision whose digests disagree
-   * with the stored proposal and one that is not legal from the proposal's
-   * current status — so an approval can never travel to a revision, a
-   * re-resolution or a re-checked context, and a later approval of a batch
-   * whose parent run has ended is written as `expired` (an invalidation)
-   * rather than as an approval nobody could dispatch.
-   */
+  /** A human review decision (T2/T3, §6): approved, rejected, cancelled or expired, bound to the dossier digest and both context fingerprints shown when it was taken. */
   TaskProposalDecided: TaskProposalDecisionClaim
-  /**
-   * A runtime-driven proposal phase change (T2/T3, §6): to `pending_review`
-   * when the deployment tightens to `all` while a policy-off proposal is still
-   * un-admitted (only tightening is allowed; a waiting proposal is never
-   * released), to `ready` when an approval passed its post-approval re-check,
-   * and to `stale` when that re-check found the context or the parent state
-   * changed. The reducer checks the change against the status table — a
-   * re-review of a proposal already awaiting review, a re-check pass without an
-   * approval, and a stale marking of an admitted batch are all refused.
-   */
+  /** A runtime-driven proposal phase change (T2/T3, §6): to `pending_review` when the deployment tightens to `all` while a policy-off proposal is still un-admitted (only tightening is allowed; a waiting proposal is never released), to `ready` … */
   TaskProposalPhaseChanged: TaskProposalPhaseChange
-  /**
-   * A proposal is consumed (T2/T3, §6; root contracts A0 §2): what it asked for
-   * now exists, bound to the ids this event carries. For a decomposition batch
-   * that means the child task ids and the batch id of its parent run and
-   * proposal (`b-<parentRunId>-<proposalId>`, {@link batchIdFor}), written in
-   * the same commit as the children, the decomposition record carrying the same
-   * identity and the parent run's `active → waiting_children` change (A3
-   * `admitBatchIn`), so a crash after admission is recovered from the log alone
-   * — "this proposal was consumed and these are its tasks" is one durable fact,
-   * never a second batch. For a root contract it means the one root task and
-   * root run the activation minted, written in the same commit as both
-   * (`admitRootProposalIn`), so the same crash is recovered the same way and
-   * never mints a second root. The reducer refuses a second consumption of one
-   * proposal, a consumption whose digests do not match what was approved, a
-   * batch consumption whose parent run, derived batch id or child ids do not
-   * match what the store holds — including one written before batches were
-   * identified by run and proposal, which is refused by name rather than
-   * guessed at — and a root consumption naming anything but the store's one
-   * parentless task and its own born-active root run.
-   */
+  /** A proposal is consumed (T2/T3, §6; root contracts A0 §2): what it asked for now exists, bound to the ids this event carries. */
   TaskProposalAdmitted: TaskProposalConsumption
 }
 
 export type TaskEventKind = keyof TaskEventPayloads
 
-export interface TaskEventEnvelope<K extends TaskEventKind, P> {
+interface TaskEventEnvelope<K extends TaskEventKind, P> {
   readonly kind: K
   readonly taskId: TaskId
   readonly runId?: RunId

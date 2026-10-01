@@ -44,7 +44,11 @@ export function pinSkillHome(...skills: readonly string[]): string {
     mkdirSync(directory, { recursive: true })
     const fixture = join(FIXTURE_SKILLS, name, 'SKILL.md')
     if (existsSync(fixture)) copyFileSync(fixture, join(directory, 'SKILL.md'))
-    else writeFileSync(join(directory, 'SKILL.md'), `---\nname: ${name}\ndescription: reference skill for one test\n---\n\n# ${name}\n`)
+    else
+      writeFileSync(
+        join(directory, 'SKILL.md'),
+        `---\nname: ${name}\ndescription: reference skill for one test\n---\n\n# ${name}\n`,
+      )
   }
   return home
 }

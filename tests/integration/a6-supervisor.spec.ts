@@ -33,9 +33,13 @@ import {
   readReviewAgentAttempts,
   readSupervisorHandoff,
   reviewAgentLedgerFile,
-} from '../../agent-singularity/src/review-agent-ledger.ts'
-import { SUPERVISOR_BASELINE } from '../../agent-singularity/src/handoff-rules.ts'
-import { consumePendingHandoffs, installSupervisorHandoffTrigger, startSupervisorHandoff } from '../../agent-singularity/src/evolution-handoff.ts'
+} from '../../agent-singularity/src/coordination/ledger.ts'
+import { SUPERVISOR_BASELINE } from '../../agent-singularity/src/coordination/handoff-rules.ts'
+import {
+  consumePendingHandoffs,
+  installSupervisorHandoffTrigger,
+  startSupervisorHandoff,
+} from '../../agent-singularity/src/coordination/evolution-handoff.ts'
 import { buildReviewPack } from '../../agent-singularity/src/tools/task-review-pack.ts'
 import { rootTaskStoreId } from '../../task/src/index.ts'
 import type { TaskRun } from '../../task/src/index.ts'

@@ -1,3 +1,4 @@
+import { a as LayoutConfig, c as NodeShape, i as DEFAULT_ROOT, n as LayoutService, o as LayoutEvent, r as CanvasNode, s as LayoutSnapshot, t as LayoutState } from "./layout-BLFonytT.js";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 
@@ -93,7 +94,6 @@ declare class GraphService extends Service {
   static inject: string[];
   private readonly stores;
   private activeId?;
-  private closing;
   constructor(ctx: Context, config?: GraphConfig);
   switchStore(id: string): Promise<GraphSnapshot>;
   clearActive(): void;
@@ -101,23 +101,9 @@ declare class GraphService extends Service {
   snapshotIn(id: string): Promise<GraphSnapshot>;
   addAgent(agent: AgentNode, root?: boolean): Promise<void>;
   addAgentIn(storeId: string, agent: AgentNode, root?: boolean): Promise<void>;
-  setStatus(agentId: SessionId, status: AgentStatus): Promise<void>;
   setStatusIn(storeId: string, agentId: SessionId, status: AgentStatus): Promise<void>;
-  addGroup(group: GroupNode): Promise<void>;
-  addGroupIn(storeId: string, group: GroupNode): Promise<void>;
-  addMember(groupId: string, agentId: SessionId): Promise<void>;
-  addMemberIn(storeId: string, groupId: string, agentId: SessionId): Promise<void>;
-  addEdge(edge: GraphEdge): Promise<void>;
-  addEdgeIn(storeId: string, edge: GraphEdge): Promise<void>;
-  commit(events: readonly GraphEvent[]): Promise<void>;
   commitIn(storeId: string, events: readonly GraphEvent[]): Promise<void>;
-  private active;
   private activeStoreId;
-  private store;
-  private load;
-  private open;
-  private close;
-  private header;
 }
 //#endregion
-export { AgentNode, AgentStatus, EdgeKind, GraphConfig, GraphEdge, GraphEvent, GraphService, GraphService as default, GraphSnapshot, GraphState, GroupNode };
+export { AgentNode, AgentStatus, CanvasNode, DEFAULT_ROOT, EdgeKind, GraphConfig, GraphEdge, GraphEvent, GraphService, GraphService as default, GraphSnapshot, GraphState, GroupNode, LayoutConfig, LayoutEvent, LayoutService, LayoutSnapshot, LayoutState, NodeShape };

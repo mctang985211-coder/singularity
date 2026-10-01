@@ -11,7 +11,7 @@
 
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -57,7 +57,13 @@ const CANDIDATE_TEXT = skillText(NEW_SKILL, CANDIDATE_BODY)
 /** The execution declaration of the new skill, with the content identity of `content`. */
 function executionSidecar(
   content: string,
-  overrides: { capabilities?: string[]; requiredTools?: string[]; verifier?: { ref: string }; resources?: { path: string; sha256: string }[]; type?: string } = {},
+  overrides: {
+    capabilities?: string[]
+    requiredTools?: string[]
+    verifier?: { ref: string }
+    resources?: { path: string; sha256: string }[]
+    type?: string
+  } = {},
 ): SkillSidecar {
   return {
     contractVersion: 1,
@@ -73,15 +79,18 @@ function executionSidecar(
 }
 
 /** One capability mutation: exactly one whole row, plus the new skill it grants. */
-function capabilityMutation(options: {
-  rows?: unknown
-  skill?: unknown
-  entry?: CapabilityConfig
-  content?: string
-} = {}): unknown {
+function capabilityMutation(
+  options: {
+    rows?: unknown
+    skill?: unknown
+    entry?: CapabilityConfig
+    content?: string
+  } = {},
+): unknown {
   const content = options.content ?? CANDIDATE_TEXT
   const mutation: Record<string, unknown> = {
-    rows: 'rows' in options ? options.rows : { [NEW_ROW]: options.entry ?? { skills: [NEW_SKILL], tools: ['filesystem'] } },
+    rows:
+      'rows' in options ? options.rows : { [NEW_ROW]: options.entry ?? { skills: [NEW_SKILL], tools: ['filesystem'] } },
   }
   if ('skill' in options) mutation.skill = options.skill
   else mutation.skill = { name: NEW_SKILL, content, sidecar: executionSidecar(content) }
@@ -119,19 +128,24 @@ function gateAnswers(refs: string[]): GateAnswers {
  * the service's back (the third-party change) and read back what a commit
  * really did with it.
  */
-async function fixture(options: {
-  registry?: Record<string, CapabilityConfig>
-  commitProbe?: (stage: CommitStage, target?: string) => void
-  /** The table file's own write seam (`Config.capabilityConfigProbe`): throwing stops the commit exactly where it stands. */
-  capabilityConfigProbe?: (stage: 'before-write' | 'written', row: string) => void
-  installProductionSkill?: boolean
-} = {}) {
+async function fixture(
+  options: {
+    registry?: Record<string, CapabilityConfig>
+    commitProbe?: (stage: CommitStage, target?: string) => void
+    /** The table file's own write seam (`Config.capabilityConfigProbe`): throwing stops the commit exactly where it stands. */
+    capabilityConfigProbe?: (stage: 'before-write' | 'staged' | 'written', row: string) => void
+    installProductionSkill?: boolean
+  } = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), 'evolution-capability-'))
   const root = join(dir, 'evolution')
   const skillRoot = join(dir, 'skills')
   const home = join(dir, 'home')
   await mkdir(join(home, 'skills', STORE_SKILL), { recursive: true })
-  await writeFile(join(home, 'skills', STORE_SKILL, 'SKILL.md'), skillText(STORE_SKILL, '# the guidance the store already grants'))
+  await writeFile(
+    join(home, 'skills', STORE_SKILL, 'SKILL.md'),
+    skillText(STORE_SKILL, '# the guidance the store already grants'),
+  )
   await mkdir(skillRoot, { recursive: true })
   vi.stubEnv('DSH_HOME', home)
   vi.stubEnv('HOME', home)
@@ -199,15 +213,20 @@ async function recordEvidence(
   const workspace = join(fixture.root, 'snapshot')
   await mkdir(workspace, { recursive: true })
   await writeFile(join(workspace, 'input.txt'), 'the frozen input\n')
-  return recordCapabilityExperiment(fixture.svc, {
-    root: fixture.root,
-    skillRoot: fixture.skillRoot,
-    registry: fixture.registry,
-    rows: fixture.rows,
-    sessions: fixture.sessions,
-    workspace,
-    selection: modelSelectionOf(SELECTION)!,
-  }, await fixture.svc.get('cap1'), options)
+  return recordCapabilityExperiment(
+    fixture.svc,
+    {
+      root: fixture.root,
+      skillRoot: fixture.skillRoot,
+      registry: fixture.registry,
+      rows: fixture.rows,
+      sessions: fixture.sessions,
+      workspace,
+      selection: modelSelectionOf(SELECTION)!,
+    },
+    await fixture.svc.get('cap1'),
+    options,
+  )
 }
 
 /** The fixture one case works with: the service, its durable pieces, and the store the evidence lives in. */
@@ -305,8 +324,9 @@ describe('capability candidate: the whole chain', () => {
       join(skillRoot, NEW_SKILL, SKILL_SIDECAR_FILE),
     ])
     expect(await readFile(join(skillRoot, NEW_SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE_TEXT)
-    expect(await readFile(join(skillRoot, NEW_SKILL, SKILL_SIDECAR_FILE), 'utf8'))
-      .toBe(serializeSkillSidecar(executionSidecar(CANDIDATE_TEXT)))
+    expect(await readFile(join(skillRoot, NEW_SKILL, SKILL_SIDECAR_FILE), 'utf8')).toBe(
+      serializeSkillSidecar(executionSidecar(CANDIDATE_TEXT)),
+    )
     // The registry really moved, once, through the runtime's row seam.
     expect(registry[NEW_ROW]).toEqual({ skills: [NEW_SKILL], tools: ['filesystem'] })
     expect(applies).toEqual([{ name: NEW_ROW, entry: { skills: [NEW_SKILL], tools: ['filesystem'] } }])
@@ -317,8 +337,16 @@ describe('capability candidate: the whole chain', () => {
     expect(lines.find(line => line.kind === 'commit_intent')).toMatchObject({
       intentId: 'cap1/apply',
       files: [
-        { target: outcome.targets[0]!, baselineSha256: null, source: join('sandbox', 'cap1', 'skills', NEW_SKILL, 'SKILL.md') },
-        { target: outcome.targets[1]!, baselineSha256: null, source: join('sandbox', 'cap1', 'skills', NEW_SKILL, SKILL_SIDECAR_FILE) },
+        {
+          target: outcome.targets[0]!,
+          baselineSha256: null,
+          source: join('sandbox', 'cap1', 'skills', NEW_SKILL, 'SKILL.md'),
+        },
+        {
+          target: outcome.targets[1]!,
+          baselineSha256: null,
+          source: join('sandbox', 'cap1', 'skills', NEW_SKILL, SKILL_SIDECAR_FILE),
+        },
       ],
       capability: {
         name: NEW_ROW,
@@ -357,7 +385,10 @@ describe('capability candidate: the whole chain', () => {
     // whole commit is the one row and no file at all.
     const f = await fixture()
     const { svc, root, skillRoot, registry } = f
-    const mutation = capabilityMutation({ entry: { skills: ['a6-existing-guidance'], tools: ['filesystem'] }, skill: undefined })
+    const mutation = capabilityMutation({
+      entry: { skills: ['a6-existing-guidance'], tools: ['filesystem'] },
+      skill: undefined,
+    })
     await svc.propose(capabilityProposal, 'root-1')
     await svc.candidate('cap1', VERSION_SET, 'root-1', mutation)
     const prepared = await svc.prepare('cap1', 'root-1')
@@ -411,7 +442,10 @@ describe('capability candidate: the whole chain', () => {
     expect(await readFile(join(skillRoot, 'a6-untouched', 'SKILL.md'), 'utf8')).toBe('untouched\n')
     const lines = await ledgerLines(f.root)
     expect(lines.filter(line => line.kind === 'commit_intent').at(-1)!.intentId).toBe('cap1/rollback')
-    expect(lines.find(line => line.kind === 'rolledback')).toMatchObject({ intentId: 'cap1/rollback', targets: rolled.targets })
+    expect(lines.find(line => line.kind === 'rolledback')).toMatchObject({
+      intentId: 'cap1/rollback',
+      targets: rolled.targets,
+    })
   })
 
   it('rolls a replaced row back to the exact row the store held before the candidate', async () => {
@@ -441,15 +475,29 @@ describe('capability candidate: the whole chain', () => {
 
 describe('capability candidate: named refusals, zero writes', () => {
   it.each([
-    ['two rows', capabilityMutation({ rows: { [NEW_ROW]: { skills: [NEW_SKILL] }, other: { skills: ['a6-fixture-guidance'] } } }), 'capability-row-multiple'],
+    [
+      'two rows',
+      capabilityMutation({ rows: { [NEW_ROW]: { skills: [NEW_SKILL] }, other: { skills: ['a6-fixture-guidance'] } } }),
+      'capability-row-multiple',
+    ],
     ['zero rows', capabilityMutation({ rows: {} }), 'capability-row-missing'],
     ['no rows at all', capabilityMutation({ rows: undefined }), 'capability-row-missing'],
     ['rows that are not an object', capabilityMutation({ rows: ['x'] }), 'capability-row-missing'],
-    ['a row that is not a row', capabilityMutation({ entry: { skills: [NEW_SKILL], tools: 7 } as never }), 'capability-row-invalid'],
+    [
+      'a row that is not a row',
+      capabilityMutation({ entry: { skills: [NEW_SKILL], tools: 7 } as never }),
+      'capability-row-invalid',
+    ],
     [
       'declared resources',
       capabilityMutation({
-        skill: { name: NEW_SKILL, content: CANDIDATE_TEXT, sidecar: executionSidecar(CANDIDATE_TEXT, { resources: [{ path: 'scripts/run.sh', sha256: 'a'.repeat(64) }] }) },
+        skill: {
+          name: NEW_SKILL,
+          content: CANDIDATE_TEXT,
+          sidecar: executionSidecar(CANDIDATE_TEXT, {
+            resources: [{ path: 'scripts/run.sh', sha256: 'a'.repeat(64) }],
+          }),
+        },
       }),
       'skill-resources-nonempty',
     ],
@@ -474,18 +522,26 @@ describe('capability candidate: named refusals, zero writes', () => {
     [
       'a declaration that does not name the row',
       capabilityMutation({
-        skill: { name: NEW_SKILL, content: CANDIDATE_TEXT, sidecar: executionSidecar(CANDIDATE_TEXT, { capabilities: ['a6-some-other-row'] }) },
+        skill: {
+          name: NEW_SKILL,
+          content: CANDIDATE_TEXT,
+          sidecar: executionSidecar(CANDIDATE_TEXT, { capabilities: ['a6-some-other-row'] }),
+        },
       }),
       'skill-capabilities-missing-row',
     ],
     [
       'a content identity that is not the submitted SKILL.md',
-      capabilityMutation({ skill: { name: NEW_SKILL, content: CANDIDATE_TEXT, sidecar: executionSidecar(skillText('other', 'x')) } }),
+      capabilityMutation({
+        skill: { name: NEW_SKILL, content: CANDIDATE_TEXT, sidecar: executionSidecar(skillText('other', 'x')) },
+      }),
       'skill-content-mismatch',
     ],
     [
       'a declaration the loader cannot read',
-      capabilityMutation({ skill: { name: NEW_SKILL, content: CANDIDATE_TEXT, sidecar: { ...executionSidecar(CANDIDATE_TEXT), extra: 1 } } }),
+      capabilityMutation({
+        skill: { name: NEW_SKILL, content: CANDIDATE_TEXT, sidecar: { ...executionSidecar(CANDIDATE_TEXT), extra: 1 } },
+      }),
       'skill-sidecar-invalid',
     ],
     [
@@ -513,20 +569,31 @@ describe('capability candidate: named refusals, zero writes', () => {
     ],
     [
       'a preset on a new row',
-      capabilityMutation({ entry: { skills: [NEW_SKILL], tools: ['filesystem'], preset: 'standard' }, skill: undefined }),
+      capabilityMutation({
+        entry: { skills: [NEW_SKILL], tools: ['filesystem'], preset: 'standard' },
+        skill: undefined,
+      }),
       'capability-policy-change',
     ],
     [
       'an unregistered verifier',
       capabilityMutation({
-        skill: { name: NEW_SKILL, content: CANDIDATE_TEXT, sidecar: executionSidecar(CANDIDATE_TEXT, { verifier: { ref: 'a6-not-registered' } }) },
+        skill: {
+          name: NEW_SKILL,
+          content: CANDIDATE_TEXT,
+          sidecar: executionSidecar(CANDIDATE_TEXT, { verifier: { ref: 'a6-not-registered' } }),
+        },
       }),
       'skill-verifier-unregistered',
     ],
     [
       'required tools the store does not authorize',
       capabilityMutation({
-        skill: { name: NEW_SKILL, content: CANDIDATE_TEXT, sidecar: executionSidecar(CANDIDATE_TEXT, { requiredTools: ['read', 'web_fetch'] }) },
+        skill: {
+          name: NEW_SKILL,
+          content: CANDIDATE_TEXT,
+          sidecar: executionSidecar(CANDIDATE_TEXT, { requiredTools: ['read', 'web_fetch'] }),
+        },
       }),
       'skill-tool-unauthorized',
     ],
@@ -562,7 +629,12 @@ describe('capability candidate: named refusals, zero writes', () => {
     await writeFile(join(skillRoot, 'a6-existing-skill', 'SKILL.md'), skillText('a6-existing-skill', CANDIDATE_BODY))
     const content = skillText(NEW_SKILL, CANDIDATE_BODY)
     await svc.propose(capabilityProposal, 'root-1')
-    await svc.candidate('cap1', VERSION_SET, 'root-1', capabilityMutation({ content, skill: { name: NEW_SKILL, content, sidecar: executionSidecar(content) } }))
+    await svc.candidate(
+      'cap1',
+      VERSION_SET,
+      'root-1',
+      capabilityMutation({ content, skill: { name: NEW_SKILL, content, sidecar: executionSidecar(content) } }),
+    )
     const message = await refusalOf(svc.prepare('cap1', 'root-1'))
     expect(message).toContain('skill-renamed-production')
     expect(existsSync(join(root, 'sandbox'))).toBe(false)
@@ -572,7 +644,12 @@ describe('capability candidate: named refusals, zero writes', () => {
     const { svc, root, registry } = await fixture()
     const content = skillText('a6-some-other-name', CANDIDATE_BODY)
     await svc.propose(capabilityProposal, 'root-1')
-    await svc.candidate('cap1', VERSION_SET, 'root-1', capabilityMutation({ content, skill: { name: NEW_SKILL, content, sidecar: executionSidecar(content) } }))
+    await svc.candidate(
+      'cap1',
+      VERSION_SET,
+      'root-1',
+      capabilityMutation({ content, skill: { name: NEW_SKILL, content, sidecar: executionSidecar(content) } }),
+    )
     const message = await refusalOf(svc.prepare('cap1', 'root-1'))
     expect(message).toContain('skill-name-mismatch')
     expect(registry[NEW_ROW]).toBeUndefined()
@@ -611,7 +688,9 @@ describe('capability candidate: third-party change and half-products', () => {
     const message = await refusalOf(svc.apply('cap1', 'root-1', 'approval:apply'))
     expect(message).toContain('skill-name-taken')
     expect(registry[NEW_ROW]).toBeUndefined()
-    expect(await readFile(join(skillRoot, NEW_SKILL, 'SKILL.md'), 'utf8')).toBe(skillText(NEW_SKILL, '# a third party wrote this'))
+    expect(await readFile(join(skillRoot, NEW_SKILL, 'SKILL.md'), 'utf8')).toBe(
+      skillText(NEW_SKILL, '# a third party wrote this'),
+    )
     expect((await ledgerLines(svc.root)).some(line => line.kind === 'commit_intent')).toBe(false)
   })
 
@@ -647,7 +726,9 @@ describe('capability candidate: third-party change and half-products', () => {
     expect(outcomes[0]!.result, outcomes[0]!.detail ?? '').toBe('completed-redone')
     expect(registry[NEW_ROW]).toEqual({ skills: [NEW_SKILL], tools: ['filesystem'] })
     expect(await readFile(join(skillRoot, NEW_SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE_TEXT)
-    expect(await readFile(join(skillRoot, NEW_SKILL, SKILL_SIDECAR_FILE), 'utf8')).toBe(serializeSkillSidecar(executionSidecar(CANDIDATE_TEXT)))
+    expect(await readFile(join(skillRoot, NEW_SKILL, SKILL_SIDECAR_FILE), 'utf8')).toBe(
+      serializeSkillSidecar(executionSidecar(CANDIDATE_TEXT)),
+    )
     expect((await ledgerLines(f.root)).some(line => line.kind === 'applied')).toBe(true)
     expect(await svc.openIntentTargets()).toEqual([])
   })
@@ -663,7 +744,7 @@ describe('capability candidate: third-party change and half-products', () => {
  * check: a hand edit of the file moves bytes the registry never saw.
  */
 describe('capability candidate: the table file a third party moved', () => {
-  it('refuses apply with no side effect at all when the table\'s own row moved since prepare', async () => {
+  it("refuses apply with no side effect at all when the table's own row moved since prepare", async () => {
     // The candidate replaces a row the production table already holds, so the
     // file carries a row of that name at prepare — the row a hand edit can move
     // while the registry prepare compared (the same in-process table) stays put.

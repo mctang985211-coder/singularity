@@ -1,14 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): string {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('evolution_prepare: missing agent id')
-  return id
-}
+import { message, sessionId, text } from '../shared.ts'
 
 export function defineEvolutionPrepareTool(ctx: Context) {
   return defineTool({
@@ -34,15 +26,13 @@ export function defineEvolutionPrepareTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'evolution_prepare')
       try {
         const prepared = await ctx.evolution.prepare(args.proposalId, caller)
         const view = prepared.prepared!
         if (view.capabilityRow !== undefined) {
           // The A6 arm: one capability row, plus the new execution skill when the
           // candidate carries one. The production baseline this arm compares
-          // against is the *row* the registry held, so there is no skill
-          // baseline to read (a capability prepare records `null` there).
           const rowBaseline = view.capabilityBaseline ?? null
           return [
             `proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
@@ -60,7 +50,6 @@ export function defineEvolutionPrepareTool(ctx: Context) {
         }
         // The skill arm: the fold admits one prepared shape, a materialized skill
         // prepare that carries both content identities (P2/P3), so the render reads
-        // the champion and the production baseline straight off the record.
         const baseline = view.skillBaseline!
         return [
           `proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
@@ -75,7 +64,7 @@ export function defineEvolutionPrepareTool(ctx: Context) {
           'sandbox only — production was not touched; next: evolution_replay (the two-sided experiment), then evolution_gate',
         ].join('\n')
       } catch (error) {
-        return `evolution_prepare rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_prepare rejected: ${message(error)}`
       }
     },
   })

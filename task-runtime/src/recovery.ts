@@ -1,41 +1,6 @@
 /**
  * The execution-recovery entry's own rules (A6, plan §F.4): one failed root
  * task's **new attempt** — a new root Run/Session in the same store — and the
- * evidence a passed sibling contributes to it.
- *
- * What lives here and what does not. The runtime's entry
- * (`TaskRuntime.recoverRootTask`) owns the sequencing: it re-checks the store's
- * facts, the capability rows, the limits and the attempt's idempotency, then
- * writes one new run and spawns its worker. What lives in *this* module is the
- * part of that judgement that is a pure function of the request and the store's
- * snapshot — the request's closed shape, which run is which attempt, what makes
- * two attempts the same content, and which reuse declarations are invalid — so
- * the rules can be read (and tested) without the service around them.
- *
- * Three boundaries the code below states and the entry then holds to:
- *
- * 1. **The runtime never decides policy that is not its store's.** It reads the
- *    source task, its contract and criteria, its runs, the diagnosis record and
- *    the limits — nothing else. It does not import evolution, does not read a
- *    promotion ledger, and has no parameter that could stand for a person's
- *    approval: "the capability change was approved and applied" is answered by
- *    the store and the effective table (the required rows exist and their
- *    providers pass the ordinary pre-check), never by a caller's flag.
- * 2. **An attempt is a run, and the run is the record.** "Which attempt is
- *    this?" is answered from the source task's runs and their `recovery`
- *    fields, and "is it in flight?" from the run's own status — there is no
- *    second table where an attempt could be in flight and its run terminal.
- * 3. **A reuse is a citation, not a copy.** A declaration names the sibling
- *    task, its own verified run, the evidence bundle, the criterion and the
- *    input/product references; every one of them is resolved against the store
- *    and the *original* acceptance map. The binding a request that names no
- *    reuse gets is derived from those same facts by {@link deriveReuse}: a
- *    citation that resolves is bound, and one that does not is *reported* with
- *    every reason — never a silently weaker binding, and never a decision a
- *    caller could state. A caller that declares its own citations is held to
- *    every rule instead, and one that does not resolve refuses the whole
- *    recovery before anything is written.
- * @module @dangosys/dsh-singularity-task-runtime/recovery
  */
 
 import { canonicalize, runMemberSlots, sha256Hex } from '@dangosys/dsh-singularity-task'
@@ -50,19 +15,12 @@ import type {
   TaskRun,
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
-import { missingRequiredArtifacts } from './orchestrate.ts'
+import { missingRequiredArtifacts } from './orchestration/verify.ts'
+import { isPlainObject, nonBlank, unknownFieldKeys } from './helpers.ts'
 
 /**
  * One already verified sibling the new attempt reads at one of its leading
  * positions (plan §F.4, "已通过兄弟证据复用"): a citation of the task, the run
- * that verified it, the evidence bundle and the input/product references the
- * citation rests on.
- *
- * Every field is an identity the store can be asked about, because that is what
- * the refusal has to name when one of them does not resolve. {@link childIndex}
- * is an absolute position in the attempt's member sequence — the `childIndex` the
- * original acceptance map names — and the positions an entry does not claim are
- * filled by the members the attempt's own batches admit, in ascending order.
  */
 export interface RootRecoveryReuse {
   /** The absolute position in the attempt's member sequence this citation claims; unique within one request. */
@@ -84,14 +42,6 @@ export interface RootRecoveryReuse {
 /**
  * One recovery request, as the host composition layer hands it to the runtime
  * (plan §F.4: the tool and evolution's coordinator call this entry, and each
- * layer re-checks its own rules).
- *
- * The four identity fields are required and are the whole subject: *which* task
- * failed, *which* of its runs the failure is (or `null` when it had none — a
- * rejected admission, a blocked task), *which* diagnosis asks for the attempt,
- * and the caller's key. `reuses` is the optional second half: the siblings the
- * attempt reads instead of re-running, and nothing else about the work — what
- * to build and how is the new attempt's own proposals' business.
  */
 export interface RootRecoveryRequest {
   sourceTaskId: TaskId
@@ -108,67 +58,64 @@ export interface RootRecoveryRequest {
 /** The fields one request may carry: anything else is refused by name rather than ignored. */
 const REQUEST_FIELDS: readonly string[] = ['sourceTaskId', 'sourceRunId', 'sourceDiagnosisId', 'requestKey', 'reuses']
 /** The fields one reuse declaration may carry. */
-const REUSE_FIELDS: readonly string[] = ['childIndex', 'taskId', 'sourceRunId', 'evidenceId', 'criterionId', 'artifactRefs', 'inputRefs']
-
-function nonEmpty(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
+const REUSE_FIELDS: readonly string[] = [
+  'childIndex',
+  'taskId',
+  'sourceRunId',
+  'evidenceId',
+  'criterionId',
+  'artifactRefs',
+  'inputRefs',
+]
 
 /**
  * Every reason one request cannot be a recovery request at all: an unknown
  * field (a caller may not smuggle a decision in), a missing or empty identity,
- * a `reuses` member that is not a declaration. Structural only — whether the
- * named task, run or diagnosis exists is the store's answer, asked after this
- * (and answered as a refusal of its own).
  */
 export function recoveryRequestDefects(request: unknown): string[] {
-  if (!isRecord(request)) return ['the request must be an object']
+  if (!isPlainObject(request)) return ['the request must be an object']
   const defects: string[] = []
-  for (const key of Object.keys(request)) {
-    if (!REQUEST_FIELDS.includes(key)) {
-      defects.push(`unknown field "${key}": a recovery request carries ${REQUEST_FIELDS.join(', ')} and nothing else`)
-    }
+  for (const key of unknownFieldKeys(request, REQUEST_FIELDS)) {
+    defects.push(`unknown field "${key}": a recovery request carries ${REQUEST_FIELDS.join(', ')} and nothing else`)
   }
-  if (!nonEmpty(request.sourceTaskId)) defects.push('sourceTaskId must be a non-empty task id')
-  if (request.sourceRunId !== null && !nonEmpty(request.sourceRunId)) {
+  if (!nonBlank(request.sourceTaskId)) defects.push('sourceTaskId must be a non-empty task id')
+  if (request.sourceRunId !== null && !nonBlank(request.sourceRunId)) {
     defects.push('sourceRunId must be a non-empty run id or null (a failure that had no run)')
   }
-  if (!nonEmpty(request.sourceDiagnosisId)) defects.push('sourceDiagnosisId must be a non-empty diagnosis id')
-  if (!nonEmpty(request.requestKey)) defects.push('requestKey must be a non-empty string')
+  if (!nonBlank(request.sourceDiagnosisId)) defects.push('sourceDiagnosisId must be a non-empty diagnosis id')
+  if (!nonBlank(request.requestKey)) defects.push('requestKey must be a non-empty string')
   if (request.reuses !== undefined) {
     if (!Array.isArray(request.reuses)) defects.push('reuses must be an array of declarations')
     else {
       const claimed = new Set<number>()
       request.reuses.forEach((entry, position) => {
-        if (!isRecord(entry)) {
+        if (!isPlainObject(entry)) {
           defects.push(`reuses[${position}] must be an object`)
           return
         }
-        for (const key of Object.keys(entry)) {
-          if (!REUSE_FIELDS.includes(key)) defects.push(`reuses[${position}] has unknown field "${key}"`)
+        for (const key of unknownFieldKeys(entry, REUSE_FIELDS)) {
+          defects.push(`reuses[${position}] has unknown field "${key}"`)
         }
         if (!Number.isInteger(entry.childIndex) || (entry.childIndex as number) < 0) {
           defects.push(`reuses[${position}].childIndex must be a non-negative integer`)
         }
         for (const name of ['taskId', 'sourceRunId', 'evidenceId'] as const) {
-          if (!nonEmpty(entry[name])) defects.push(`reuses[${position}].${name} must be a non-empty id`)
+          if (!nonBlank(entry[name])) defects.push(`reuses[${position}].${name} must be a non-empty id`)
         }
-        if (entry.criterionId !== undefined && !nonEmpty(entry.criterionId)) {
+        if (entry.criterionId !== undefined && !nonBlank(entry.criterionId)) {
           defects.push(`reuses[${position}].criterionId must be a non-empty string when given`)
         }
         for (const name of ['artifactRefs', 'inputRefs'] as const) {
           const value = entry[name]
-          if (value !== undefined && (!Array.isArray(value) || value.some(item => !nonEmpty(item)))) {
+          if (value !== undefined && (!Array.isArray(value) || value.some(item => !nonBlank(item)))) {
             defects.push(`reuses[${position}].${name} must be an array of non-empty references`)
           }
         }
         if (Number.isInteger(entry.childIndex) && (entry.childIndex as number) >= 0) {
           if (claimed.has(entry.childIndex as number)) {
-            defects.push(`reuses[${position}].childIndex ${entry.childIndex} is claimed by another entry; one position reads one member`)
+            defects.push(
+              `reuses[${position}].childIndex ${entry.childIndex} is claimed by another entry; one position reads one member`,
+            )
           }
           claimed.add(entry.childIndex as number)
         }
@@ -179,48 +126,52 @@ export function recoveryRequestDefects(request: unknown): string[] {
 }
 
 /** The runs of one source task that are recovery attempts, in start order (which is the store's run order). */
-export function recoveryAttemptsOf(snapshot: TaskSnapshot, sourceTaskId: TaskId): TaskRun[] {
+function recoveryAttemptsOf(snapshot: TaskSnapshot, sourceTaskId: TaskId): TaskRun[] {
   return snapshot.runs.filter(run => run.taskId === sourceTaskId && run.recovery !== undefined)
 }
 
 /** The attempt one request key names on a source task, or `undefined`. */
-export function recoveryAttemptWithKey(snapshot: TaskSnapshot, sourceTaskId: TaskId, requestKey: string): TaskRun | undefined {
+export function recoveryAttemptWithKey(
+  snapshot: TaskSnapshot,
+  sourceTaskId: TaskId,
+  requestKey: string,
+): TaskRun | undefined {
   return recoveryAttemptsOf(snapshot, sourceTaskId).find(run => run.recovery!.requestKey === requestKey)
 }
 
 /**
  * The attempt one diagnosis already has whose run has not settled, or
  * `undefined` — the mutual exclusion one diagnosis's recovery has (plan §F.4:
- * "无在途恢复尝试"). "In flight" is the run's own status and nothing else: a
- * run that is still `running` is an attempt still being made, and every
- * terminal status — verified, failed, cancelled, blocked — releases the
- * diagnosis for another key.
  */
-export function inFlightRecoveryAttempt(snapshot: TaskSnapshot, sourceTaskId: TaskId, sourceDiagnosisId: string): TaskRun | undefined {
-  return recoveryAttemptsOf(snapshot, sourceTaskId)
-    .find(run => run.recovery!.sourceDiagnosisId === sourceDiagnosisId && run.status === 'running')
+export function inFlightRecoveryAttempt(
+  snapshot: TaskSnapshot,
+  sourceTaskId: TaskId,
+  sourceDiagnosisId: string,
+): TaskRun | undefined {
+  return recoveryAttemptsOf(snapshot, sourceTaskId).find(
+    run => run.recovery!.sourceDiagnosisId === sourceDiagnosisId && run.status === 'running',
+  )
 }
 
 /**
  * What makes two attempts under one key the *same* attempt: the content the key
  * is bound to — the source run it recovers and the reuse it declares. A retry
- * of the same request reproduces this digest and is answered from the record; a
- * different content under the same key is a refusal by name (the rule every
- * request key in this runtime follows).
  */
 export function recoveryAttemptDigest(recovery: Pick<RunRecovery, 'sourceRunId' | 'reusedMembers'>): string {
-  return sha256Hex(canonicalize({
-    sourceRunId: recovery.sourceRunId ?? null,
-    reusedMembers: recovery.reusedMembers.map(member => ({
-      childIndex: member.childIndex,
-      taskId: member.taskId,
-      sourceRunId: member.sourceRunId,
-      evidenceId: member.evidenceId,
-      criterionId: member.criterionId ?? null,
-      artifactRefs: [...member.artifactRefs],
-      inputRefs: [...member.inputRefs],
-    })),
-  }))
+  return sha256Hex(
+    canonicalize({
+      sourceRunId: recovery.sourceRunId ?? null,
+      reusedMembers: recovery.reusedMembers.map(member => ({
+        childIndex: member.childIndex,
+        taskId: member.taskId,
+        sourceRunId: member.sourceRunId,
+        evidenceId: member.evidenceId,
+        criterionId: member.criterionId ?? null,
+        artifactRefs: [...member.artifactRefs],
+        inputRefs: [...member.inputRefs],
+      })),
+    }),
+  )
 }
 
 /** The request's own content identity, derived from the same fields the stored attempt carries. */
@@ -252,11 +203,13 @@ export interface ReuseContext {
 
 /** The input references one sibling task declares, across its criteria (`requiresArtifact`, `acceptsArtifact`, `protectedInputs`). */
 function declaredInputsOf(task: TaskInstance): Set<string> {
-  return new Set(task.acceptanceCriteria.flatMap(criterion => [
-    ...(criterion.requiresArtifact ?? []),
-    ...(criterion.acceptsArtifact ?? []),
-    ...(criterion.protectedInputs ?? []).map(input => input.path),
-  ]))
+  return new Set(
+    task.acceptanceCriteria.flatMap(criterion => [
+      ...(criterion.requiresArtifact ?? []),
+      ...(criterion.acceptsArtifact ?? []),
+      ...(criterion.protectedInputs ?? []).map(input => input.path),
+    ]),
+  )
 }
 
 /** One declaration's citation, resolved against the store, or the reasons it does not resolve. */
@@ -267,10 +220,14 @@ function citationDefects(declaration: RootRecoveryReuse, context: ReuseContext, 
     return [`${at}: no task "${declaration.taskId}" exists in this store`]
   }
   if (sibling.parentTaskId !== context.source.taskId) {
-    defects.push(`${at}: task "${sibling.taskId}" is a child of "${sibling.parentTaskId ?? '(none)'}", not of "${context.source.taskId}" — only a sibling of this attempt's own task is reusable`)
+    defects.push(
+      `${at}: task "${sibling.taskId}" is a child of "${sibling.parentTaskId ?? '(none)'}", not of "${context.source.taskId}" — only a sibling of this attempt's own task is reusable`,
+    )
   }
   if (sibling.status !== 'verified') {
-    defects.push(`${at}: sibling "${sibling.taskId}" is ${sibling.status}, not verified — only a passed sibling's evidence is reusable`)
+    defects.push(
+      `${at}: sibling "${sibling.taskId}" is ${sibling.status}, not verified — only a passed sibling's evidence is reusable`,
+    )
   }
   const run = context.snapshot.runs.find(candidate => candidate.runId === declaration.sourceRunId)
   if (run === undefined) {
@@ -278,10 +235,14 @@ function citationDefects(declaration: RootRecoveryReuse, context: ReuseContext, 
     return defects
   }
   if (run.taskId !== declaration.taskId) {
-    defects.push(`${at}: run "${run.runId}" belongs to task "${run.taskId}", not to the cited sibling "${declaration.taskId}"`)
+    defects.push(
+      `${at}: run "${run.runId}" belongs to task "${run.taskId}", not to the cited sibling "${declaration.taskId}"`,
+    )
   }
   if (run.status !== 'verified') {
-    defects.push(`${at}: cited run "${run.runId}" is ${run.status}, not verified — only evidence of a verified run is reusable`)
+    defects.push(
+      `${at}: cited run "${run.runId}" is ${run.status}, not verified — only evidence of a verified run is reusable`,
+    )
   }
   const bundle = context.snapshot.evidence.find(item => item.evidenceId === declaration.evidenceId)
   if (bundle === undefined) {
@@ -291,17 +252,20 @@ function citationDefects(declaration: RootRecoveryReuse, context: ReuseContext, 
   if (bundle.taskRunId !== run.runId || bundle.taskId !== run.taskId) {
     defects.push(
       `${at}: evidence "${bundle.evidenceId}" belongs to task "${bundle.taskId}"/run "${bundle.taskRunId}", ` +
-      `not to the cited "${run.taskId}"/"${run.runId}"`,
+        `not to the cited "${run.taskId}"/"${run.runId}"`,
     )
   }
   const products = new Set(bundle.artifacts.flatMap(artifact => [artifact.artifactId, artifact.kind]))
   for (const reference of declaration.artifactRefs ?? []) {
-    if (!products.has(reference)) defects.push(`${at}: evidence "${bundle.evidenceId}" holds no artifact "${reference}" (by artifact id or kind)`)
+    if (!products.has(reference))
+      defects.push(`${at}: evidence "${bundle.evidenceId}" holds no artifact "${reference}" (by artifact id or kind)`)
   }
   const inputs = declaredInputsOf(sibling)
   for (const reference of declaration.inputRefs ?? []) {
     if (!inputs.has(reference)) {
-      defects.push(`${at}: sibling "${sibling.taskId}" declares no input "${reference}" (requiresArtifact, acceptsArtifact or protectedInputs)`)
+      defects.push(
+        `${at}: sibling "${sibling.taskId}" declares no input "${reference}" (requiresArtifact, acceptsArtifact or protectedInputs)`,
+      )
     }
   }
   if (declaration.criterionId !== undefined) {
@@ -312,7 +276,7 @@ function citationDefects(declaration: RootRecoveryReuse, context: ReuseContext, 
       if (verdict?.status !== 'pass') {
         defects.push(
           `${at}: criterion "${declaration.criterionId}" of sibling "${sibling.taskId}" carries ` +
-          `${verdict === undefined ? 'no verdict' : `a "${verdict.status}" verdict`} in evidence "${bundle.evidenceId}" — only a passing verdict is reusable`,
+            `${verdict === undefined ? 'no verdict' : `a "${verdict.status}" verdict`} in evidence "${bundle.evidenceId}" — only a passing verdict is reusable`,
         )
       }
     }
@@ -323,24 +287,6 @@ function citationDefects(declaration: RootRecoveryReuse, context: ReuseContext, 
 /**
  * Every reason the declared reuse cannot be a binding of the original
  * acceptance map — the "invalid reference" refusal, with the affected item
- * named per reason (plan §F.4: "无效引用拒绝并列出受影响项").
- *
- * Three questions, in the order a reader checks them:
- *
- * 1. **Does the position exist in the failed attempt?** The cited sibling must
- *    be the member the failed run reads at that very position (`childIndex`),
- *    which is what "the same position" means. A source that failed without a
- *    run — a rejected admission, a blocked task — has no member sequence to
- *    read positions from, so a reuse of it is refused by name rather than
- *    bound to a position nobody can check.
- * 2. **Does the citation resolve?** The sibling, its verified run, the bundle,
- *    the criterion's passing verdict, the artifacts and the declared inputs —
- *    {@link citationDefects}.
- * 3. **Does it agree with the original acceptance map?** Where the map names
- *    this position, the criterion it narrows to is the criterion the binding
- *    carries: a declaration that names nothing there, or names another
- *    criterion, is refused — the map is immutable and the attempt binds to it,
- *    never around it.
  */
 export function reuseDefects(declarations: readonly RootRecoveryReuse[], context: ReuseContext): string[] {
   const defects: string[] = []
@@ -350,12 +296,12 @@ export function reuseDefects(declarations: readonly RootRecoveryReuse[], context
     if (context.sourceRun === undefined) {
       defects.push(
         `${at}: source task "${context.source.taskId}" failed without a run, so there is no member sequence to read position ${position} from; ` +
-        'a reuse is bound to the positions of the failed attempt and cannot be checked against nothing',
+          'a reuse is bound to the positions of the failed attempt and cannot be checked against nothing',
       )
     } else if (context.sourceMembers[declaration.childIndex] !== declaration.taskId) {
       defects.push(
         `${at}: the failed run "${context.sourceRun.runId}" reads ${context.sourceMembers[declaration.childIndex] === undefined ? 'no member' : `"${context.sourceMembers[declaration.childIndex]}"`} ` +
-        `at position ${declaration.childIndex}, not the cited "${declaration.taskId}"`,
+          `at position ${declaration.childIndex}, not the cited "${declaration.taskId}"`,
       )
     }
     defects.push(...citationDefects(declaration, context, at))
@@ -368,8 +314,6 @@ export function reuseDefects(declarations: readonly RootRecoveryReuse[], context
 /**
  * Every reason a citation disagrees with the original acceptance map at the
  * position it claims: the map narrows a position to a criterion, to an evidence
- * reference, or to both, and the binding has to carry what the map names — the
- * map is immutable and the attempt binds to it, never around it.
  */
 function mapDefects(declaration: RootRecoveryReuse, map: readonly ChildEvidenceRef[], at: string): string[] {
   const defects: string[] = []
@@ -378,15 +322,17 @@ function mapDefects(declaration: RootRecoveryReuse, map: readonly ChildEvidenceR
   if (entry.criterionId !== undefined && entry.criterionId !== declaration.criterionId) {
     defects.push(
       `${at}: the original acceptance map narrows position ${declaration.childIndex} to criterion "${entry.criterionId}", ` +
-      `and this declaration ${declaration.criterionId === undefined ? 'names no criterion' : `names "${declaration.criterionId}"`}`,
+        `and this declaration ${declaration.criterionId === undefined ? 'names no criterion' : `names "${declaration.criterionId}"`}`,
     )
   }
-  if (entry.evidenceRef !== undefined
-    && declaration.evidenceId !== entry.evidenceRef
-    && !(declaration.artifactRefs ?? []).includes(entry.evidenceRef)) {
+  if (
+    entry.evidenceRef !== undefined &&
+    declaration.evidenceId !== entry.evidenceRef &&
+    !(declaration.artifactRefs ?? []).includes(entry.evidenceRef)
+  ) {
     defects.push(
       `${at}: the original acceptance map narrows position ${declaration.childIndex} to evidence "${entry.evidenceRef}", which the cited bundle ` +
-      `"${declaration.evidenceId}" does not carry (by evidence id, artifact id or artifact kind)`,
+        `"${declaration.evidenceId}" does not carry (by evidence id, artifact id or artifact kind)`,
     )
   }
   return defects
@@ -395,36 +341,25 @@ function mapDefects(declaration: RootRecoveryReuse, map: readonly ChildEvidenceR
 /**
  * Whether the sibling's evidence still rests on what it rested on: every input
  * reference its own criteria declare (`requiresArtifact` as a verified reference
- * product, `acceptsArtifact` as an existing raw input) has to resolve in the
- * store *now*. A binding whose inputs moved is not the evidence that was judged,
- * and re-running the position is the honest answer — reported, never silent.
- *
- * The one input vocabulary this read cannot check is `protectedInputs`: those
- * are file identities re-checked by the verifier against the checkout, which a
- * store snapshot does not hold. The citation still carries them
- * ({@link RootRecoveryReuse.inputRefs}), so a reader sees what the sibling's
- * criteria declared.
  */
 function stalenessDefects(declaration: RootRecoveryReuse, snapshot: TaskSnapshot, at: string): string[] {
   const sibling = snapshot.tasks.find(task => task.taskId === declaration.taskId)
   if (sibling === undefined) return []
-  return missingRequiredArtifacts(sibling.acceptanceCriteria, snapshot).map(issue =>
-    `${at}: the sibling "${sibling.taskId}" declares ${issue.requirement === 'requires' ? 'a required product' : 'a raw input'} ` +
-    `"${issue.ref}" (criterion ${issue.criterionId}), which the store does not hold now as a ` +
-    `${issue.requirement === 'requires' ? 'verified reference product' : 'usable input'}`,
+  return missingRequiredArtifacts(sibling.acceptanceCriteria, snapshot).map(
+    issue =>
+      `${at}: the sibling "${sibling.taskId}" declares ${issue.requirement === 'requires' ? 'a required product' : 'a raw input'} ` +
+      `"${issue.ref}" (criterion ${issue.criterionId}), which the store does not hold now as a ` +
+      `${issue.requirement === 'requires' ? 'verified reference product' : 'usable input'}`,
   )
 }
 
 /** What one attempt may read from a failed run: the citations its facts support, and the positions it could not bind. */
-export interface ReuseDerivation {
+interface ReuseDerivation {
   /** The citations the failed run's own members and evidence support, by the positions they claim. */
   readonly bound: RootRecoveryReuse[]
   /**
    * The positions of the failed run that read a passed sibling the attempt
    * **cannot** bind, each with every reason it could not. The slot is left for
-   * the members the attempt's own batches admit — the position is done again —
-   * and this list is what makes that a reported fact rather than a silent
-   * omission.
    */
   readonly unbound: RunMemberReuseRefusal[]
 }
@@ -432,26 +367,6 @@ export interface ReuseDerivation {
 /**
  * What the failed run's own facts support as a reuse (plan §F.4: the binding
  * comes from the store, never from a caller's parameters).
- *
- * The derivation reads exactly four durable facts — the failed run's member
- * sequence, each member's own verified run and evidence bundle, the original
- * acceptance criteria's `childEvidence` map, and the store's current evidence
- * for the inputs and products those members declared — and it binds a position
- * only when all of them resolve:
- *
- * - a member that did not pass is not a candidate: it is the work the attempt is
- *   for, and its position is left for the replacement an agent proposes;
- * - a passed member whose citation does not resolve (no verified run, no bundle,
- *   no passing verdict for the criterion the map names there, an artifact the
- *   bundle does not hold, an input or product the store no longer answers for)
- *   is **reported** in {@link ReuseDerivation.unbound} with every reason named —
- *   never bound, never silently dropped;
- * - a run that failed without a run (a rejected admission, a blocked task) has no
- *   member sequence, so nothing is derived and nothing is reported: there is no
- *   passed member the attempt is ignoring.
- *
- * The result is deterministic: the same store answers the same citations, so two
- * attempts at one source bind the same members at the same positions.
  */
 export function deriveReuse(context: ReuseContext): ReuseDerivation {
   const sourceRun = context.sourceRun
@@ -466,10 +381,10 @@ export function deriveReuse(context: ReuseContext): ReuseDerivation {
     if (sibling === undefined || sibling.status !== 'verified') return
     const at = `position ${childIndex}`
     const entry = map.find(item => item.childIndex === childIndex)
-    // The sibling's own verified run and the bundle under it: the two identities
-    // the citation stands on. A missing one is *not* invented here — the citation
-    // carries what the store holds (an absent identity, which the check below
-    // names), and the position goes to `unbound` with that reason.
+    /**
+     * The sibling's own verified run and the bundle under it: the two identities
+     * the citation stands on. A missing one is *not* invented here — the citation
+     */
     const verifiedRun = context.snapshot.runs.find(run => run.taskId === taskId && run.status === 'verified')
     const bundle = context.snapshot.evidence.find(item => item.taskRunId === verifiedRun?.runId)
     const declaration: RootRecoveryReuse = {

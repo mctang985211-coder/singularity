@@ -7,8 +7,11 @@ import {
   countReviewAgentRuns,
   readReviewAgentAttempts,
   reviewAgentLedgerFile,
-} from '../../agent-singularity/src/review-agent-ledger.ts'
-import { installReviewAgentAutoTrigger, scanFailedReviewSources } from '../../agent-singularity/src/review-agent-scan.ts'
+} from '../../agent-singularity/src/coordination/ledger.ts'
+import {
+  installReviewAgentAutoTrigger,
+  scanFailedReviewSources,
+} from '../../agent-singularity/src/coordination/review-scan.ts'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
 import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type ScriptedLoop } from '../support/scripted-loop.ts'
 
@@ -583,7 +586,7 @@ describe('a failed review is accepted on its own (A5)', () => {
 
     await failedReviewOf(h, root.storeId, tree.childTaskId)
     expect(reviewerSpawns(h)).toEqual([])
-    expect(lines.some(line => line.includes('could not'))).toBe(true)
+    await vi.waitFor(() => expect(lines.some(line => line.includes('could not'))).toBe(true))
 
     // The graph is activated with a ledger that now works: the same store is
     // scanned, and the source the terminal-commit trigger had to skip starts.

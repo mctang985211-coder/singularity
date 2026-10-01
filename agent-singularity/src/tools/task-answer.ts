@@ -1,57 +1,15 @@
-/**
- * `task_answer` (A4 §F.1): the tool half of "a parent answers the child that
- * asked it" — the schema the model writes, the caller's own identity, and the
- * rendering of one `AnsweredQuestionOutcome`.
- *
- * What the answer is, and what it is not:
- *
- * - **It is a declaration, not a classification.** `resolves: true` says the
- *   question is settled and releases exactly that one block on the asking run;
- *   `resolves: false` keeps it open and records the parent's words as an answer
- *   that settled nothing. No parameter carries a category, and nothing is
- *   inferred from the text.
- * - **It is not an authorization.** Answering changes no contract, no permission
- *   and no task state: the write gate recomputes the asking run's block from the
- *   store's question facts, so a second open question keeps it blocked.
- * - **It carries no recipient.** The message goes to the run that asked the
- *   question named by `questionId`; the answering run must be the run the
- *   question was addressed to, and the store refuses any other — including a new
- *   run of a restarted task.
- *
- * The body is read back from this call's own `tool/call` event in the answering
- * Session, so the recorded citation is always the message the model actually
- * wrote. Refusals are rendered rather than thrown, except a call with no agent
- * identity, which has no protocol to speak from.
- * @module dsh-singularity-agent/tools/task-answer
- */
+/** `task_answer` (A4 §F.1): the tool half of "a parent answers the child that asked it" — the schema the model writes, the caller's own identity, and the rendering of one `AnsweredQuestionOutcome`. @module dsh-singularity-agent/tools/task-answer */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { AnsweredQuestionOutcome } from '@dangosys/dsh-singularity-task-runtime'
-import { questionCall } from './question-call.ts'
+import { message, questionCall, text, undeclaredParameters } from '../shared.ts'
 
 type Delivery = AnsweredQuestionOutcome['delivery']
 
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
 /** Every parameter this tool declares; anything else is refused by name, before the store is touched. */
 const DECLARED = ['questionId', 'requestKey', 'answer', 'resolves'] as const
-
-/**
- * Refuse a call carrying a key this tool does not declare: the asking run is the
- * question's own child run, and there is no argument here that could address a
- * message, grant a permission or classify the answer.
- */
-function undeclared(args: Record<string, unknown>): string | undefined {
-  const extra = Object.keys(args).filter(key => !(DECLARED as readonly string[]).includes(key))
-  if (extra.length === 0) return undefined
-  return [
-    `task_answer rejected: undeclared parameter${extra.length === 1 ? '' : 's'} ${extra.map(key => `"${key}"`).join(', ')} —`,
-    `this tool accepts ${DECLARED.join(', ')} and has no argument that names a recipient, an authorization or a category:`,
-    'the answer goes to the run that asked the question you name. Nothing was answered and nothing was sent.',
-  ].join(' ')
-}
 
 /** How one delivery settled, in the answering model's words — `unavailable` is a retry, never a re-send under a new key. */
 function deliveryText(delivery: Delivery): string {
@@ -132,7 +90,13 @@ export function defineTaskAnswerTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec: ToolRunContext) => {
-      const refused = undeclared(args)
+      const refused = undeclaredParameters(
+        args,
+        DECLARED,
+        'task_answer',
+        'and has no argument that names a recipient, an authorization or a category: the answer goes to the run that asked the question you name',
+        'Nothing was answered and nothing was sent.',
+      )
       if (refused !== undefined) return refused
       const { caller, callId } = questionCall(exec, 'task_answer')
       let outcome: AnsweredQuestionOutcome
@@ -144,7 +108,7 @@ export function defineTaskAnswerTool(ctx: Context) {
           resolves: args.resolves,
         })
       } catch (error) {
-        return `task_answer rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `task_answer rejected: ${message(error)}`
       }
       return answeredText(outcome)
     },

@@ -1,4 +1,13 @@
+import type { EnvRecord } from '@dangosys/dsh-env-builder'
 import type { GraphsEvent, GraphsSnapshot, GraphRecord } from '../types.ts'
+
+/** Whether an existing environment can be bound by a new graph: it has repositories, no graph, and no sessions. */
+export function isReusableEnv(
+  env: Pick<EnvRecord, 'id' | 'components' | 'sessionIds'>,
+  boundEnvIds: ReadonlySet<string>,
+): boolean {
+  return env.components.length > 0 && !boundEnvIds.has(env.id) && env.sessionIds.length === 0
+}
 
 function copy<T>(value: T): T {
   return structuredClone(value)
@@ -27,7 +36,6 @@ export class GraphsState {
     switch (event.kind) {
       case 'graph/add': {
         const graph = event.graph
-        if (typeof graph.ready !== 'boolean') throw new Error('graphs: ready must be boolean')
         if (this.value.graphs.some(g => g.id === graph.id)) {
           throw new Error(`graphs: duplicate graph id "${graph.id}"`)
         }
@@ -64,9 +72,7 @@ export class GraphsState {
           throw new Error(`graphs: unknown graph "${event.id}"`)
         }
         const graphs = this.value.graphs.filter(g => g.id !== event.id)
-        const selectedId = this.value.selectedId === event.id
-          ? graphs[0]?.id
-          : this.value.selectedId
+        const selectedId = this.value.selectedId === event.id ? graphs[0]?.id : this.value.selectedId
         this.value = {
           ...this.value,
           graphs,

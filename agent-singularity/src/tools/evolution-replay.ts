@@ -1,46 +1,8 @@
-/**
- * `evolution_replay` (guide §2.7.6, W15 / S4-E §F.2): evaluate a prepared
- * candidate with the two-sided experiment — a **skill** candidate (an existing
- * skill's whole loadable object: `SKILL.md` plus the `SKILL.contract.json` when
- * it declares an execution provider) or a **capability** candidate (one whole
- * capability row plus, when it carries one, the new execution skill the row
- * grants; A6).
- *
- * One evaluation path ({@link ExperimentSpec}): every sample runs the baseline
- * and the candidate as *new* runs of this graph, each in its own workspace built
- * from one frozen snapshot. The sample roles are derived from the store's own
- * history here rather than taken from the caller (§F.2): the caller names tasks,
- * the ledger's latest review calls each one an observed failure, an observed
- * regression or a holdout. What the two sides are differs by candidate kind and
- * is the plane's own decision: a skill candidate's baseline is a new run on the
- * production object, and a capability candidate's baseline is offered the same
- * production configuration through the runtime's ordinary admission — a sample
- * whose configuration cannot admit it is recorded as the real `not-admitted`
- * refusal, with no invented Run. Any other target type is refused by name: a
- * tool, verifier, agent_preset or task_definition proposal stays the record
- * `evolution_propose` wrote.
- *
- * What this adapter supplies beyond the call's own arguments: the caller
- * session (from the live call), the input snapshot both experiment workspaces
- * are built from — the workspace the caller's session runs in, read through
- * `TaskRuntime.workspacePathFor` — and the model selection the experiment
- * freezes, read through the evolution service's injected resolver
- * (`EvolutionService.modelSelection`), the selection every replayed spawn is
- * placed under and the one the promotion gate re-reads from the runs' own
- * session logs. All three are read, never asked of the model: a caller's prose
- * is not evidence of where a run happened or which model ran it.
- *
- * The experiment itself (its frozen identity, the per-sample workspaces, the
- * idempotency keys, the report and its ledger records) lives in
- * `@dangosys/dsh-singularity-evolution`; this adapter declares the tool,
- * derives the call's identity, and renders what came back.
- * @module dsh-singularity-agent/tools/evolution-replay
- */
+/** `evolution_replay`: evaluate a prepared candidate with the two-sided experiment (baseline vs candidate) and record the frozen report. @module dsh-singularity-agent/tools/evolution-replay */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { ReviewRecord, TaskInstance, TaskSnapshot } from '@dangosys/dsh-singularity-task'
@@ -53,24 +15,9 @@ import type {
   ExperimentSampleSpec,
   ModelSelection,
 } from '@dangosys/dsh-singularity-evolution'
+import { message, sessionId, text } from '../shared.ts'
 
-const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-function sessionId(exec: ToolRunContext): SessionId {
-  const id = exec.agent?.id
-  if (typeof id !== 'string' || id.length === 0) throw new Error('evolution_replay: missing agent id')
-  return id
-}
-
-/**
- * The model selection this experiment freezes — read from the evolution plane's
- * injected resolver, never from the caller (§F.2: the model is frozen before the
- * runs, and a model-filled string could not be one). The injection is the whole
- * point: the runtime places every replayed spawn under exactly this selection,
- * and the promotion gate re-reads the runs' own requests against it.
- * A deployment that cannot name a structured selection gets the service's own
- * refusal here — before any run, before any ledger line.
- */
+/** The model selection this experiment freezes — read from the evolution plane's injected resolver, never from the caller (§F.2: the model is frozen before the runs, and a model-filled string could not be one). */
 function modelSelection(ctx: Context): ModelSelection {
   return ctx.evolution.modelSelection()
 }
@@ -82,7 +29,7 @@ async function callerWorkspace(ctx: Context, caller: SessionId): Promise<string>
   try {
     path = await runtime?.workspacePathFor?.(caller)
   } catch (error) {
-    throw new Error(`cannot resolve the caller session's workspace: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`cannot resolve the caller session's workspace: ${message(error)}`)
   }
   if (typeof path !== 'string' || path.length === 0) {
     throw new Error(
@@ -99,12 +46,7 @@ function latestReview(snapshot: TaskSnapshot, task: TaskInstance): ReviewRecord 
   return snapshot.reviews.find(item => item.runId === runId)
 }
 
-/**
- * The role one named task has, from the store's own history: its latest review
- * decides whether the case is a failure the candidate is meant to fix or a
- * passing case it must not break. The caller names tasks; it does not get to
- * label them (§F.2).
- */
+/** The role one named task has, from the store's own history: its latest review decides whether the case is a failure the candidate is meant to fix or a passing case it must not break. The caller names tasks; */
 function roleOf(snapshot: TaskSnapshot, taskId: string): ExperimentSampleSpec['role'] {
   const task = snapshot.tasks.find(item => item.taskId === taskId)
   if (task === undefined) throw new Error(`unknown task "${taskId}" in this graph's task store`)
@@ -121,13 +63,7 @@ function roleOf(snapshot: TaskSnapshot, taskId: string): ExperimentSampleSpec['r
   )
 }
 
-/**
- * The samples one skill experiment runs, derived from the call's task lists and
- * the store's history. Observed and holdout are both required and both
- * non-empty (§F.2): without a failure there is nothing the candidate fixes, and
- * without a holdout there is nothing it must not break — a comparison missing
- * either is not the evidence the promotion gate is asked for.
- */
+/** The samples one skill experiment runs, derived from the call's task lists and the store's history. Observed and holdout are both required and both non-empty (§F.2): */
 function deriveExperimentSamples(
   snapshot: TaskSnapshot,
   taskIds: readonly string[],
@@ -175,15 +111,7 @@ function renderExperimentCriterionDiff(baseline: readonly ExperimentCriterionDet
   return diff.length === 0 ? 'no criterion diff' : diff.join(', ')
 }
 
-/**
- * What one experiment produced, as its caller reads it. The baseline is said to
- * be a new run of *this* experiment in the first line that describes the sides:
- * §F.2's whole point is that the historical record locates a case and is never
- * the comparison's baseline, so the report is rendered without that vocabulary
- * at all. The candidate side is named by what the proposal *is*: a skill object's
- * identity, or the capability row (and, when it carries one, the new skill) a
- * capability candidate installs.
- */
+/** What one experiment produced, as its caller reads it. The baseline is said to be a new run of *this* experiment in the first line that describes the sides: */
 function renderExperiment(result: ExperimentResult, targetId: string): string {
   const { report } = result
   const ceiling = report.frozen.budget.maxTokens
@@ -240,7 +168,7 @@ async function runExperimentFor(
     const graph = await ctx.graphs.graphForSession(caller)
     snapshot = await ctx.task.openStore(rootTaskStoreId(graph.rootSessionId))
   } catch (error) {
-    throw new Error(`cannot open this graph's task store: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`cannot open this graph's task store: ${message(error)}`)
   }
   return ctx.evolution.runExperiment({
     proposalId: args.proposalId,
@@ -309,7 +237,7 @@ export function defineEvolutionReplayTool(ctx: Context) {
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
-      const caller = sessionId(exec)
+      const caller = sessionId(exec, 'evolution_replay')
       const taskIds = (args.taskIds as unknown[]).map(id => String(id))
       const holdoutTaskIds = ((args.holdoutTaskIds as unknown[] | undefined) ?? []).map(id => String(id))
       try {
@@ -333,7 +261,7 @@ export function defineEvolutionReplayTool(ctx: Context) {
         }, caller, exec.signal)
         return renderExperiment(result, proposal.targetId)
       } catch (error) {
-        return `evolution_replay rejected: ${error instanceof Error ? error.message : String(error)}`
+        return `evolution_replay rejected: ${message(error)}`
       }
     },
   })

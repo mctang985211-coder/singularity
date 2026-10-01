@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import type { RunProviderBinding } from '@dangosys/dsh-singularity-task'
 import type { RunBindingRead } from '@dangosys/dsh-singularity-task-runtime'
-import { renderRunBinding } from '../../src/run-binding.ts'
+import { renderRunBinding } from '../../src/render/records.ts'
 
 /**
  * The "chosen implementation" text projection (A2, migrated from the task
@@ -48,7 +48,9 @@ describe('renderRunBinding', () => {
     const summary = renderRunBinding(binding())
     expect(summary).toContain('## Implementation chosen for this run')
     expect(summary).toContain(`- registry revision: ${'a'.repeat(12)}`)
-    expect(summary).toContain('capability `design-ball` → skill `ball-align` [knowledge] — Align a Buckyball Ball across layers')
+    expect(summary).toContain(
+      'capability `design-ball` → skill `ball-align` [knowledge] — Align a Buckyball Ball across layers',
+    )
     expect(summary).toContain(`(content ${'d'.repeat(12)}, contract ${'c'.repeat(12)})`)
     expect(summary).toContain('capability `research` → skill `verify` [execution-provider] — Verify a Ball')
     expect(summary).toContain('not covered by this binding: notes.md')
@@ -60,7 +62,9 @@ describe('renderRunBinding', () => {
 
   test('names a capability that carries no provider skill instead of leaving it out', () => {
     const summary = renderRunBinding(binding({ skills: [] }))
-    expect(summary).toContain('capability `design-ball`: no provider skill — the capability\'s tools are granted without one')
+    expect(summary).toContain(
+      "capability `design-ball`: no provider skill — the capability's tools are granted without one",
+    )
     expect(summary).toContain('capability `research`: no provider skill')
   })
 
@@ -74,16 +78,18 @@ describe('renderRunBinding', () => {
     const record = binding()
     const read: RunBindingRead = {
       snapshotRoot: record.snapshotRoot!,
-      skills: [{
-        name: 'ball-align',
-        role: 'knowledge',
-        readable: false,
-        defects: ['content-mismatch: SKILL.md is not the bound content'],
-      }],
+      skills: [
+        {
+          name: 'ball-align',
+          role: 'knowledge',
+          readable: false,
+          defects: ['content-mismatch: SKILL.md is not the bound content'],
+        },
+      ],
       defects: ['skill "ball-align": content-mismatch: SKILL.md is not the bound content'],
     }
     const refused = renderRunBinding(record, read)
-    expect(refused).toContain('Bound content is not readable: the snapshot no longer matches this run\'s record')
+    expect(refused).toContain("Bound content is not readable: the snapshot no longer matches this run's record")
     expect(refused).toContain('- skill "ball-align": content-mismatch: SKILL.md is not the bound content')
     expect(refused).toContain(record.snapshotRoot!)
   })
@@ -92,6 +98,8 @@ describe('renderRunBinding', () => {
     const summary = renderRunBinding(binding({ snapshotRoot: undefined, skills: [] }))
     expect(summary).not.toContain('bound content snapshot:')
     expect(summary).not.toContain('snapshot path above')
-    expect(summary).toContain('this run bound no content snapshot, so the revision and digests above are what it resolved against')
+    expect(summary).toContain(
+      'this run bound no content snapshot, so the revision and digests above are what it resolved against',
+    )
   })
 })

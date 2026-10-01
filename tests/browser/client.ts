@@ -1,62 +1,89 @@
 import { Context } from '@deepseek-ai/cordis'
-import { ClientSessions } from '../../../../thirdparty/deepseek-harness/packages/api/session-controller/src/client/sessions/service.ts'
-import {
-  FakeApiClient,
-  ok,
-} from '../../../../thirdparty/deepseek-harness/packages/api/session-controller/tests/fake-api.client.ts'
-import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
-import type {
-  SessionPromptRequest,
-  SessionHistoryRecord,
-} from '../../../../thirdparty/deepseek-harness/packages/api/session-controller/src/types.ts'
+import * as React from 'react'
 import shell from '../../canvas-view/src/frontend/client.js?raw'
 
 const ctx = new Context()
-const api = new FakeApiClient()
-const records = new Map<string, SessionHistoryRecord[]>()
-api.onList = async () => ok(await (await fetch('/__fixture/sessions')).json())
-api.onHistory = async ({ sessionId }) => ok({ records: records.get(sessionId) ?? [], hasMore: false })
-api.onPrompt = async value => {
-  const request = value as SessionPromptRequest
-  const content = request.content.map(part => {
-    if (part.type !== 'text') throw new Error('fixture accepts text submissions only')
-    return { type: 'text' as const, text: part.text }
-  })
-  const text = content.map(part => part.text).join('')
-  if (text === 'reject')
-    return { ok: false, error: new RemoteError('gateway/internal', 'Fixture rejected submission', {}) }
-  const rows = records.get(request.sessionId) ?? []
-  const event = {
-    type: 'user/message',
-    seq: rows.length,
-    time: Date.now(),
-    surfaceOp: 'append' as const,
-    data: { id: crypto.randomUUID(), role: 'user', content, source: { kind: 'user', rpcId: request.requestId } },
-  }
-  rows.push({ type: 'event', event })
-  records.set(request.sessionId, rows)
-  await api.pushFollow(request.sessionId, { type: 'event', event })
-  return ok({ accepted: true })
+// canvas-view's bundle reads the shell's services; this fixture boots it with fakes instead of a shell.
+const shellServices = ctx as unknown as { provide(name: string, value: unknown): void }
+const slots: { name: string; id?: string; key?: string }[] = []
+const locales: string[] = []
+shellServices.provide('locale', {
+  bind: () => (key: string) => key,
+  register: (namespace: string) => {
+    locales.push(namespace)
+    return () => {}
+  },
+})
+shellServices.provide('slots', {
+  inject: (_name: string, callback: () => () => void) => callback(),
+  register: (options: { name: string; id?: string; key?: string }) => {
+    slots.push(options)
+    return () => {}
+  },
+})
+// Session Controller face: retain owns a reference, binding only borrows a retained one, and
+// pending input lives in the durable inbox projection instead of the removed snapshot queue.
+const inbox = {
+  getSnapshot: () => ({ 'next-turn': [], 'next-step': [] }),
+  subscribe: () => () => {},
 }
-const sessions = new ClientSessions(ctx, api.sessionRemotes())
+const session = {
+  getSnapshot: () => ({ openState: 'open', openError: null, pendingSubmissions: [] }),
+  subscribe: () => () => {},
+  projections: {
+    faceOf: (key: string) => {
+      if (key !== 'inbox') throw new Error(`fixture: unsupported projection "${key}"`)
+      return inbox
+    },
+  },
+  beginSubmission: () => ({ requestId: 'fixture-request', abandon: () => {} }),
+  prompt: async () => ({ ok: true, value: { accepted: true } }),
+}
+const eventSource = { getSnapshot: () => ({ entries: [] }), subscribe: () => () => {} }
+const retained = new Map<string, { sessionId: string; session: typeof session; eventSource: typeof eventSource; ctx: Context }>()
+const retain = (sessionId: string) => {
+  const binding = { sessionId, session, eventSource, ctx }
+  retained.set(sessionId, binding)
+  return {
+    sessionId,
+    binding,
+    ready: Promise.resolve(binding),
+    release: () => { retained.delete(sessionId) },
+  }
+}
+const retainInfo = {
+  getSnapshot: () => ({ referenceCount: 0, retainedBy: {} }),
+  subscribe: () => () => {},
+}
+shellServices.provide('sessions', {
+  list: retainInfo,
+  searchResultLimit: 20,
+  refresh: async () => {},
+  refreshProjections: async () => {},
+  retain,
+  using: (target: string, _options: unknown, operation: (reference: ReturnType<typeof retain>) => unknown) => {
+    const reference = retain(target)
+    return Promise.resolve(operation(reference)).finally(() => { reference.release() })
+  },
+  // Borrow-only: a binding exists while the bridge holds a retained reference.
+  binding: (sessionId: string) => retained.get(sessionId),
+  retainInfo: () => retainInfo,
+})
+// Shell navigation stays faked for parity even though this bundle retains directly instead.
+shellServices.provide('uiWorkspace', { openSession: () => {} })
+
 let plugin: { apply: (ctx: Context) => void }
 Object.assign(window, {
   __ModuleLoader__: {
-    load: ({ factory }: { factory: () => typeof plugin }) => {
-      plugin = factory()
-    },
-  },
-  fixture: {
-    api,
-    sessions,
-    ctx,
-    failHistory: () => {
-      api.onHistory = async () => ({
-        ok: false,
-        error: new RemoteError('gateway/internal', 'Fixture history unavailable', {}),
+    load: ({ factory }: { factory: (require: (id: string) => unknown) => typeof plugin }) => {
+      // The bundle requires react through the module table; every other request is unsupported here.
+      plugin = factory(id => {
+        if (id === 'react') return React
+        throw new Error(`fixture: the client bundle asked for "${id}", which this fixture does not provide`)
       })
     },
   },
+  fixture: { ctx, slots, locales },
 })
 Function(shell)()
 plugin!.apply(ctx)

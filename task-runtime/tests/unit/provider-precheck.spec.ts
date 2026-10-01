@@ -6,7 +6,11 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { CapabilityConfig } from '../../src/capability.ts'
 import { precheckProviders, providerRefusals, skillSearchRoots } from '../../src/provider-precheck.ts'
-import type { CapabilityProviderPrecheck, EvolutionCommitLedger, ProviderPrecheck } from '../../src/provider-precheck.ts'
+import type {
+  CapabilityProviderPrecheck,
+  EvolutionCommitLedger,
+  ProviderPrecheck,
+} from '../../src/provider-precheck.ts'
 import { executionProviders } from '../../src/sidecar.ts'
 import type { ExecutionProviderVerdict, RejectedProviderVerdict, SkillProviderVerdict } from '../../src/sidecar.ts'
 
@@ -23,7 +27,12 @@ const FIXTURE_SKILLS = fileURLToPath(new URL('../fixtures/skills/', import.meta.
 /** The BB capability rows the fixtures are built against — the real table, narrowed to these skills. */
 const TABLE: Readonly<Record<string, CapabilityConfig>> = {
   'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'] },
-  'verify-ball-functional': { skills: ['verify'], tools: ['filesystem', 'bash', 'jobs'], preset: 'bb-verify', mcpServers: ['bbdev'] },
+  'verify-ball-functional': {
+    skills: ['verify'],
+    tools: ['filesystem', 'bash', 'jobs'],
+    preset: 'bb-verify',
+    mcpServers: ['bbdev'],
+  },
   'integrate-model': { skills: ['workload-tests'] },
 }
 
@@ -56,11 +65,12 @@ async function install(
   name: string,
   options: { at?: 'checkout' | 'home' | 'user'; sidecar?: boolean } = {},
 ): Promise<string> {
-  const root = options.at === 'home'
-    ? join(home, 'skills')
-    : options.at === 'user'
-      ? join(home, '.agents', 'skills')
-      : join(checkout, '.agents', 'skills')
+  const root =
+    options.at === 'home'
+      ? join(home, 'skills')
+      : options.at === 'user'
+        ? join(home, '.agents', 'skills')
+        : join(checkout, '.agents', 'skills')
   const directory = join(root, name)
   await cp(join(FIXTURE_SKILLS, name), directory, { recursive: true })
   if (options.sidecar === false) await rm(join(directory, 'SKILL.contract.json'))
@@ -153,7 +163,7 @@ function codes(verdictValue: RejectedProviderVerdict): string[] {
 }
 
 describe('precheckProviders', () => {
-  test('an execution provider found from the worker\'s own checkout is accepted, with the facts a run records', async () => {
+  test("an execution provider found from the worker's own checkout is accepted, with the facts a run records", async () => {
     const directory = await install('verify')
     const report = await precheck({ capabilities: ['verify-ball-functional'] })
 
@@ -270,7 +280,7 @@ describe('precheckProviders', () => {
     expect(executionProviders([verdictValue])).toEqual([])
   })
 
-  test('overlay roots are searched before the worker\'s own roots: the overlay skill is what is judged', async () => {
+  test("overlay roots are searched before the worker's own roots: the overlay skill is what is judged", async () => {
     // The checkout holds the full execution fixture; the overlay holds a
     // SKILL.md-only copy. Whichever the search reaches first is the verdict the
     // pre-check reports, and the grant registers the overlay first.
@@ -324,7 +334,9 @@ describe('precheckProviders', () => {
     // …and so does a changed declaration in a provider's sidecar, while the
     // bytes a worker reads are untouched.
     const directory = join(checkout, '.agents', 'skills', 'ball-align')
-    await patchSidecar(directory, sidecar => { sidecar.precondition = 'rewritten precondition' })
+    await patchSidecar(directory, sidecar => {
+      sidecar.precondition = 'rewritten precondition'
+    })
     const sidecarChanged = await precheck({ capabilities: ['verify-ball-functional', 'design-ball'] })
     expect(sidecarChanged.revision).not.toBe(first.revision)
   })
@@ -360,7 +372,7 @@ describe('precheckProviders', () => {
     expect(report.roots).toContain(join(home, '.agents', 'skills'))
   })
 
-  test('skillSearchRoots puts the overlay roots in front of the worker\'s own, in order', async () => {
+  test("skillSearchRoots puts the overlay roots in front of the worker's own, in order", async () => {
     const roots = await skillSearchRoots({ cwd: checkout, extraRoots: ['/overlay/a', '/overlay/b'] })
     expect(roots.slice(0, 2)).toEqual(['/overlay/a', '/overlay/b'])
     expect(roots[2]).toBe(join(checkout, '.agents', 'skills'))
@@ -381,12 +393,17 @@ describe('precheckProviders', () => {
 describe('the frontmatter name a discovered SKILL.md declares', () => {
   test('a file that declares another skill is refused, in the words the spawn refuses it with', async () => {
     const directory = await install('ball-align', { sidecar: false })
-    await writeFile(join(directory, 'SKILL.md'), '---\nname: not-ball-align\ndescription: some other skill entirely\n---\n\nbody\n')
+    await writeFile(
+      join(directory, 'SKILL.md'),
+      '---\nname: not-ball-align\ndescription: some other skill entirely\n---\n\nbody\n',
+    )
     const report = await precheck({ capabilities: ['design-ball'] })
 
     const verdictValue = rejected(verdict(report, 'design-ball', 'ball-align'))
     expect(codes(verdictValue)).toEqual(['skill-name-mismatch'])
-    expect(verdictValue.defects[0]!.detail).toContain(`skill file ${join(directory, 'SKILL.md')} declares name "not-ball-align" but the capability grants "ball-align"`)
+    expect(verdictValue.defects[0]!.detail).toContain(
+      `skill file ${join(directory, 'SKILL.md')} declares name "not-ball-align" but the capability grants "ball-align"`,
+    )
     expect(providerRefusals(report)[0]).toContain('capability "design-ball"')
   })
 
@@ -606,7 +623,9 @@ describe('the evolution commit gate', () => {
       table: { 'design-ball': { skills: ['missing-provider-skill'] } },
       commitLedger: ledger(read),
     })
-    expect(codes(rejected(verdict(undiscoveredReport, 'design-ball', 'missing-provider-skill')))).toEqual(['skill-missing'])
+    expect(codes(rejected(verdict(undiscoveredReport, 'design-ball', 'missing-provider-skill')))).toEqual([
+      'skill-missing',
+    ])
     expect(read).toHaveBeenCalledTimes(2)
   })
 
@@ -686,16 +705,19 @@ describe('the evolution commit gate', () => {
     // fail here rather than pass silently.
     const directory = await install('verify')
     const calls: string[] = []
-    const service = new Proxy({}, {
-      get: (_target, property) => {
-        calls.push(String(property))
-        if (property === 'openIntentTargets') return async () => [join(directory, 'SKILL.md')]
-        if (property === 'openIntentCapabilities') return async () => []
-        return () => {
-          throw new Error(`the pre-check called ${String(property)}`)
-        }
+    const service = new Proxy(
+      {},
+      {
+        get: (_target, property) => {
+          calls.push(String(property))
+          if (property === 'openIntentTargets') return async () => [join(directory, 'SKILL.md')]
+          if (property === 'openIntentCapabilities') return async () => []
+          return () => {
+            throw new Error(`the pre-check called ${String(property)}`)
+          }
+        },
       },
-    }) as EvolutionCommitLedger
+    ) as EvolutionCommitLedger
 
     const report = await precheck({ capabilities: ['verify-ball-functional'], commitLedger: service })
     expect(codes(rejected(verdict(report, 'verify-ball-functional', 'verify')))).toEqual(['commit-intent-open'])

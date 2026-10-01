@@ -59,7 +59,8 @@ function sha256Of(text: string): string {
 /** One skill directory as the validator reads it: `SKILL.md`, its frontmatter naming the granted skill, and the identity the loader re-hashes. */
 async function installSkill(
   name: string,
-  sidecar?: { type: 'execution'; capabilities: string[]; requiredTools: string[]; verifierRef: string } | { type: 'knowledge' },
+  sidecar?:
+    { type: 'execution'; capabilities: string[]; requiredTools: string[]; verifierRef: string } | { type: 'knowledge' },
 ): Promise<string> {
   const directory = join(home, 'skills', name)
   await mkdir(directory, { recursive: true })
@@ -67,26 +68,27 @@ async function installSkill(
   await writeFile(join(directory, 'SKILL.md'), skillMd)
   if (sidecar === undefined) return directory
   const content = { skillMdSha256: sha256Of(skillMd), resources: [] }
-  const declared = sidecar.type === 'execution'
-    ? {
-        contractVersion: 1,
-        type: 'execution',
-        capabilities: sidecar.capabilities,
-        precondition: 'the fixture is installed where discovery looks',
-        inputs: [],
-        outputs: [],
-        requiredTools: sidecar.requiredTools,
-        verifier: { ref: sidecar.verifierRef },
-        content,
-      }
-    : {
-        contractVersion: 1,
-        type: 'knowledge',
-        source: 'this test fixture',
-        scope: 'load-time scan behaviour only',
-        content,
-        contentCheck: { kind: 'command', command: 'true' },
-      }
+  const declared =
+    sidecar.type === 'execution'
+      ? {
+          contractVersion: 1,
+          type: 'execution',
+          capabilities: sidecar.capabilities,
+          precondition: 'the fixture is installed where discovery looks',
+          inputs: [],
+          outputs: [],
+          requiredTools: sidecar.requiredTools,
+          verifier: { ref: sidecar.verifierRef },
+          content,
+        }
+      : {
+          contractVersion: 1,
+          type: 'knowledge',
+          source: 'this test fixture',
+          scope: 'load-time scan behaviour only',
+          content,
+          contentCheck: { kind: 'command', command: 'true' },
+        }
   await writeFile(join(directory, 'SKILL.contract.json'), `${JSON.stringify(declared, null, 2)}\n`)
   return directory
 }

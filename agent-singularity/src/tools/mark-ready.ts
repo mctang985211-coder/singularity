@@ -1,8 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-
-const text = (value: string) => [{ type: 'text' as const, text: value }]
+import { sessionId, text } from '../shared.ts'
 
 export function defineMarkReadyTool(ctx: Context) {
   return defineTool({
@@ -12,9 +11,8 @@ export function defineMarkReadyTool(ctx: Context) {
     parameters: {},
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (_args, exec: ToolRunContext) => {
-      const sessionId = exec.agent?.id
-      if (sessionId === undefined) throw new Error('graph_mark_ready: missing agent id')
-      const graph = await ctx.graphs.graphForSession(sessionId)
+      const caller = sessionId(exec, 'graph_mark_ready')
+      const graph = await ctx.graphs.graphForSession(caller)
       await ctx.graphs.markReady(graph.id)
       return `graph ${graph.id} ready`
     },

@@ -22,14 +22,10 @@ import type { ReviewCriterion, ReviewRecord, TaskInstance, TaskRun, TaskSnapshot
 import type { ReplayRunOutcome, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
 import { registryRevision, skillContentDigest } from '@dangosys/dsh-singularity-task-runtime'
 import type { EvolutionProposal } from '../../src/evolution.ts'
-import type {
-  ExperimentLedger,
-  ExperimentRecord,
-  ExperimentSampleRecord,
-  ExperimentSources,
-  ExperimentView,
-} from '../../src/experiment.ts'
-import { directoryDigest, experimentLineage, resumeExperiment, runExperiment } from '../../src/experiment.ts'
+import type { ExperimentLedger, ExperimentSources, ExperimentView } from '../../src/experiment/freeze.ts'
+import type { ExperimentRecord, ExperimentSampleRecord } from '../../src/experiment/spec.ts'
+import { directoryDigest, experimentLineage } from '../../src/experiment/record.ts'
+import { resumeExperiment, runExperiment } from '../../src/experiment/runner.ts'
 import type { ExperimentBudget, FrozenExperiment, SkillContentIdentity } from '../../src/replay.ts'
 import { digestOf, foldExperiments, frozenDigestOf, modelSelectionOf } from '../../src/index.ts'
 
@@ -56,22 +52,24 @@ interface ScriptedOutcome {
 }
 
 /** A little world: one prepared skill proposal, one store, one scripted runtime, one ledger. */
-async function world(options: {
-  outcomes?: ScriptedOutcome[]
-  /** The judge the sample criteria pin (S4-E §Q3). Default `command`; `null` leaves them mode-only. */
-  sampleJudge?: string | null
-  /** The judge vocabulary the freeze reads. Default `command@1`; `null` for a deployment that cannot list its registry. */
-  vocabulary?: { ids: string[]; versions: Record<string, string> } | null
-  /**
-   * What the stub provider pre-check resolves for the samples' rows (K3): the
-   * fixture skill with the declaration digest the production configuration holds
-   * (`null`, the default, is guidance), or `unlisted` for a row that resolves no
-   * skill at all.
-   */
-  provider?: { contractDigest?: string | null; unlisted?: boolean }
-  /** The content identity the prepared proposal records for the candidate (default: the guidance object of the fixture bytes). */
-  candidate?: SkillContentIdentity
-} = {}) {
+async function world(
+  options: {
+    outcomes?: ScriptedOutcome[]
+    /** The judge the sample criteria pin (S4-E §Q3). Default `command`; `null` leaves them mode-only. */
+    sampleJudge?: string | null
+    /** The judge vocabulary the freeze reads. Default `command@1`; `null` for a deployment that cannot list its registry. */
+    vocabulary?: { ids: string[]; versions: Record<string, string> } | null
+    /**
+     * What the stub provider pre-check resolves for the samples' rows (K3): the
+     * fixture skill with the declaration digest the production configuration holds
+     * (`null`, the default, is guidance), or `unlisted` for a row that resolves no
+     * skill at all.
+     */
+    provider?: { contractDigest?: string | null; unlisted?: boolean }
+    /** The content identity the prepared proposal records for the candidate (default: the guidance object of the fixture bytes). */
+    candidate?: SkillContentIdentity
+  } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), 'experiment-orchestrator-'))
   const snapshotDir = join(root, 'snapshot')
   await mkdir(join(snapshotDir, 'nested'), { recursive: true })
@@ -140,15 +138,17 @@ async function world(options: {
       definitionRef: { taskType: 'root', version: 1 },
       objective: input.objective,
       depth: 0,
-      acceptanceCriteria: [{
-        criterionId: input.criterionId,
-        description: 'it holds',
-        verificationMode: 'deterministic',
-        requiredEvidence: [],
-        mandatory: true,
-        command: input.command,
-        ...(options.sampleJudge === null ? {} : { verifierRef: options.sampleJudge ?? 'command' }),
-      }],
+      acceptanceCriteria: [
+        {
+          criterionId: input.criterionId,
+          description: 'it holds',
+          verificationMode: 'deterministic',
+          requiredEvidence: [],
+          mandatory: true,
+          command: input.command,
+          ...(options.sampleJudge === null ? {} : { verifierRef: options.sampleJudge ?? 'command' }),
+        },
+      ],
       requestedCapabilities: [capability],
       decompositionStatus: 'leaf',
       status: input.outcome,
@@ -171,25 +171,46 @@ async function world(options: {
       evidenceRefs: [`e-${input.runId}`],
       anomalies: ['the historical run the sample locates'],
       ...(input.outcome === 'failed' ? { localizedCause: 'the answer file was never produced' } : {}),
-      criteria: [{ criterionId: input.criterionId, verdict: input.outcome === 'verified' ? 'pass' : 'fail', verifierId: 'command' }],
+      criteria: [
+        {
+          criterionId: input.criterionId,
+          verdict: input.outcome === 'verified' ? 'pass' : 'fail',
+          verifierId: 'command',
+        },
+      ],
     } as unknown as ReviewRecord)
   }
-  sample({ taskId: 't-fix', runId: 'r-fix-history', objective: 'the answer file is produced', outcome: 'failed', criterionId: 'ac-fix', command: 'test -f fix.txt' })
-  sample({ taskId: 't-holdout', runId: 'r-holdout-history', objective: 'the held-out answer file is produced', outcome: 'verified', criterionId: 'ac-hold', command: 'test -f holdout.txt' })
+  sample({
+    taskId: 't-fix',
+    runId: 'r-fix-history',
+    objective: 'the answer file is produced',
+    outcome: 'failed',
+    criterionId: 'ac-fix',
+    command: 'test -f fix.txt',
+  })
+  sample({
+    taskId: 't-holdout',
+    runId: 'r-holdout-history',
+    objective: 'the held-out answer file is produced',
+    outcome: 'verified',
+    criterionId: 'ac-hold',
+    command: 'test -f holdout.txt',
+  })
 
-  const snapshot = (): TaskSnapshot => ({
-    version: 1,
-    id: 'store',
-    tasks,
-    runs,
-    edges: [],
-    evidence,
-    handoffs: [],
-    reviews,
-    diagnoses: [],
-    obligations: [],
-    capabilities: {},
-  } as unknown as TaskSnapshot)
+  const snapshot = (): TaskSnapshot =>
+    ({
+      version: 1,
+      id: 'store',
+      tasks,
+      runs,
+      edges: [],
+      evidence,
+      handoffs: [],
+      reviews,
+      diagnoses: [],
+      obligations: [],
+      capabilities: {},
+    }) as unknown as TaskSnapshot
 
   const records: ExperimentRecord[] = []
   const proposals = new Map<string, EvolutionProposal>([[PROPOSAL, proposal]])
@@ -222,16 +243,21 @@ async function world(options: {
     evolution: ledger,
     graphs: { graphForSession: async () => ({ rootSessionId: 's-root' as never }) },
     task: { openStore: async () => snapshot() },
-    verifierVocabulary: async () => (options.vocabulary === null
-      ? undefined
-      : options.vocabulary ?? { ids: ['command'], versions: { command: '1' } }),
+    verifierVocabulary: async () =>
+      options.vocabulary === null
+        ? undefined
+        : (options.vocabulary ?? { ids: ['command'], versions: { command: '1' } }),
     taskRuntime: {
       capabilityProviderReport: async () => ({
         capabilities: unlisted ? [] : [{ capability, skills: [skillVerdict] }],
         revision: registryRevision(table, providerIdentities),
       }),
       listCapabilities: () => table,
-      replayTask: async (_storeId: string, championTaskId: string, taskOptions: ReplayTaskOptions): Promise<ReplayRunOutcome> => {
+      replayTask: async (
+        _storeId: string,
+        championTaskId: string,
+        taskOptions: ReplayTaskOptions,
+      ): Promise<ReplayRunOutcome> => {
         counter += 1
         const scriptedOutcome = scripted.shift() ?? { outcome: 'verified' as const }
         const taskId = `t-replay-${counter}`
@@ -273,12 +299,18 @@ async function world(options: {
           ...(scriptedOutcome.noMetrics === true
             ? {}
             : {
-              metrics: {
-                tokens: scriptedOutcome.tokens === undefined
-                  ? { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 }
-                  : { uncachedInputTokens: scriptedOutcome.tokens, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-              },
-            }),
+                metrics: {
+                  tokens:
+                    scriptedOutcome.tokens === undefined
+                      ? { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 }
+                      : {
+                          uncachedInputTokens: scriptedOutcome.tokens,
+                          outputTokens: 0,
+                          cacheReadTokens: 0,
+                          cacheWriteTokens: 0,
+                        },
+                },
+              }),
         } as unknown as ReviewRecord)
         evidence.push({ evidenceId: `e-${runId}`, taskRunId: runId, taskId })
         return {
@@ -309,7 +341,13 @@ async function world(options: {
     /** The fixture skill's declaration digest in that table (`null` for guidance), as the freeze read it. */
     providerContract,
     capability,
-    spec: (overrides: { selection?: { provider: string; model: string }; repetition?: number; budget?: ExperimentBudget } = {}) => ({
+    spec: (
+      overrides: {
+        selection?: { provider: string; model: string }
+        repetition?: number
+        budget?: ExperimentBudget
+      } = {},
+    ) => ({
       proposalId: PROPOSAL,
       samples: [
         { taskId: 't-fix', role: 'observed-failure' as const },
@@ -328,9 +366,15 @@ function digestOfBytes(text: string): string {
 }
 
 /** The recorded sample of one key, as the ledger holds it. */
-function recordOf(records: readonly ExperimentRecord[], sampleTaskId: string, side: 'baseline' | 'candidate'): ExperimentSampleRecord {
-  const found = records.find((record): record is ExperimentSampleRecord =>
-    record.kind === 'experiment_sample' && record.sampleTaskId === sampleTaskId && record.side === side)
+function recordOf(
+  records: readonly ExperimentRecord[],
+  sampleTaskId: string,
+  side: 'baseline' | 'candidate',
+): ExperimentSampleRecord {
+  const found = records.find(
+    (record): record is ExperimentSampleRecord =>
+      record.kind === 'experiment_sample' && record.sampleTaskId === sampleTaskId && record.side === side,
+  )
   if (found === undefined) throw new Error(`the stub ledger holds no ${sampleTaskId}/${side} record`)
   return found
 }
@@ -338,7 +382,8 @@ function recordOf(records: readonly ExperimentRecord[], sampleTaskId: string, si
 /** The experiment id the stub ledger's own started record names. */
 function experimentIdOfWorld(records: readonly ExperimentRecord[]): string {
   const started = records.find(record => record.kind === 'experiment_started')
-  if (started === undefined || started.kind !== 'experiment_started') throw new Error('the stub ledger holds no started record')
+  if (started === undefined || started.kind !== 'experiment_started')
+    throw new Error('the stub ledger holds no started record')
   return started.experimentId
 }
 
@@ -382,7 +427,9 @@ describe('the two-sided orchestrator', () => {
     const snapshotDigest = result.report.frozen.snapshot.digest
     for (const sample of result.report.samples) {
       for (const detail of [sample.baseline, sample.candidate]) {
-        expect(detail.workspace).toBe(join(w.ledgerRoot, 'sandbox', PROPOSAL, `exp-${result.experimentId}`, sample.taskId, detail.side))
+        expect(detail.workspace).toBe(
+          join(w.ledgerRoot, 'sandbox', PROPOSAL, `exp-${result.experimentId}`, sample.taskId, detail.side),
+        )
         expect(detail.initialDigest).toBe(snapshotDigest)
         expect(await directoryDigest(detail.workspace!)).toBe(snapshotDigest)
       }
@@ -412,8 +459,9 @@ describe('the two-sided orchestrator', () => {
     tampered.runId = 'r-fix-history'
     tampered.reviewRef = 't-fix#r-fix-history'
 
-    await expect(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' }))
-      .rejects.toThrow(/which no run of this experiment's own replay .* created/)
+    await expect(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })).rejects.toThrow(
+      /which no run of this experiment's own replay .* created/,
+    )
     expect(w.calls).toHaveLength(4)
     expect(w.records.filter(record => record.kind === 'experiment_sample')).toHaveLength(4)
     await rm(w.root, { recursive: true, force: true })
@@ -427,9 +475,15 @@ describe('the two-sided orchestrator', () => {
 
     // A process that died between starting the run and recording it: the run is
     // in the store and never settled, and the ledger has no line for the key.
-    w.records.splice(w.records.findIndex(record => record.kind === 'experiment_sample' && record.runId === runId), 1)
+    w.records.splice(
+      w.records.findIndex(record => record.kind === 'experiment_sample' && record.runId === runId),
+      1,
+    )
     w.runs.find(run => run.runId === runId)!.status = 'running'
-    w.reviews.splice(w.reviews.findIndex(review => review.runId === runId), 1)
+    w.reviews.splice(
+      w.reviews.findIndex(review => review.runId === runId),
+      1,
+    )
 
     const resumed = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
     expect(w.calls).toHaveLength(4)
@@ -458,7 +512,10 @@ describe('the two-sided orchestrator', () => {
     })
     await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
     const recorded = recordOf(w.records, 't-holdout', 'candidate')
-    w.records.splice(w.records.findIndex(record => record.kind === 'experiment_sample' && record.runId === recorded.runId), 1)
+    w.records.splice(
+      w.records.findIndex(record => record.kind === 'experiment_sample' && record.runId === recorded.runId),
+      1,
+    )
 
     const resumed = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
     // No new run: the terminal record the store holds is recorded as it stands,
@@ -468,7 +525,10 @@ describe('the two-sided orchestrator', () => {
     expect(recovered.outcome).toBe('verified')
     expect(recovered.runId).toBe(recorded.runId)
     expect(recovered.reviewRef).toBe(`${recovered.taskId}#${recorded.runId}`)
-    expect(recovered.cost).toEqual({ status: 'reported', metrics: expect.objectContaining({ tokens: expect.any(Object) }) })
+    expect(recovered.cost).toEqual({
+      status: 'reported',
+      metrics: expect.objectContaining({ tokens: expect.any(Object) }),
+    })
     expect(resumed.report.verdict).toBe('fixed')
     await rm(w.root, { recursive: true, force: true })
   })
@@ -478,8 +538,13 @@ describe('the two-sided orchestrator', () => {
     await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
     const linesBefore = w.records.length
 
-    await expect(runExperiment(w.sources, { spec: w.spec({ selection: { provider: 'scripted', model: 'other' } }), caller: CALLER, actor: 'root-1' }))
-      .rejects.toThrow(/is already recorded by experiment .* and its record is never overwritten/)
+    await expect(
+      runExperiment(w.sources, {
+        spec: w.spec({ selection: { provider: 'scripted', model: 'other' } }),
+        caller: CALLER,
+        actor: 'root-1',
+      }),
+    ).rejects.toThrow(/is already recorded by experiment .* and its record is never overwritten/)
     expect(w.records).toHaveLength(linesBefore)
     expect(w.calls).toHaveLength(4)
 
@@ -496,7 +561,11 @@ describe('the two-sided orchestrator', () => {
   it('reports the cost a run reported, and unknown — never a zero — when it reported none', async () => {
     const w = await world({
       outcomes: [
-        { outcome: 'failed', criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }], noMetrics: true },
+        {
+          outcome: 'failed',
+          criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }],
+          noMetrics: true,
+        },
         { outcome: 'verified', criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }] },
         { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }] },
         { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }] },
@@ -524,8 +593,9 @@ describe('the two-sided orchestrator', () => {
     // replacement this experiment can evaluate — it says so instead of
     // inventing the content it would run.
     w.proposal.prepared = { ...prepared, skillContent: undefined }
-    await expect(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' }))
-      .rejects.toThrow(/carries no candidate content identity/)
+    await expect(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })).rejects.toThrow(
+      /carries no candidate content identity/,
+    )
     expect(w.calls).toHaveLength(0)
     expect(w.records).toHaveLength(0)
     await rm(w.root, { recursive: true, force: true })
@@ -537,8 +607,9 @@ describe('the two-sided orchestrator', () => {
     await writeFile(outside, 'the production bytes\n', 'utf8')
     await symlink(outside, join(w.snapshotDir, 'shared'))
 
-    await expect(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' }))
-      .rejects.toThrow(/outside the snapshot root/)
+    await expect(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })).rejects.toThrow(
+      /outside the snapshot root/,
+    )
 
     // Nothing ran, nothing was recorded, no side's workspace was built, and the
     // file the link names was never read or written.
@@ -552,12 +623,26 @@ describe('the two-sided orchestrator', () => {
   it('stops starting sides once the settled sides have consumed the frozen token total', async () => {
     const w = await world({
       outcomes: [
-        { outcome: 'failed', criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }], tokens: 10 },
-        { outcome: 'verified', criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
-        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
+        {
+          outcome: 'failed',
+          criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }],
+          tokens: 10,
+        },
+        {
+          outcome: 'verified',
+          criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }],
+          tokens: 10,
+        },
+        {
+          outcome: 'verified',
+          criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }],
+          tokens: 10,
+        },
       ],
     })
-    const message = await refusal(runExperiment(w.sources, { spec: w.spec({ budget: { maxTokens: 30 } }), caller: CALLER, actor: 'root-1' }))
+    const message = await refusal(
+      runExperiment(w.sources, { spec: w.spec({ budget: { maxTokens: 30 } }), caller: CALLER, actor: 'root-1' }),
+    )
     expect(message).toContain('maxTokens 30')
     expect(message).toContain('3 settled side(s) already report 30 tokens')
     expect(message).toContain('no further sample side is started')
@@ -572,7 +657,9 @@ describe('the two-sided orchestrator', () => {
     // A restarted process resumes by id: the total comes back off the ledger
     // (never reset), the settled keys are not run again, and the same ceiling
     // stops the same side.
-    const resumed = await refusal(resumeExperiment(w.sources, { experimentId: experimentIdOfWorld(w.records), caller: CALLER, actor: 'root-1' }))
+    const resumed = await refusal(
+      resumeExperiment(w.sources, { experimentId: experimentIdOfWorld(w.records), caller: CALLER, actor: 'root-1' }),
+    )
     expect(resumed).toContain('maxTokens 30')
     expect(resumed).toContain('3 settled side(s) already report 30 tokens')
     expect(w.calls).toHaveLength(3)
@@ -583,22 +670,47 @@ describe('the two-sided orchestrator', () => {
   it('lets the side the ceiling still had room for run, and records the overspend it really made', async () => {
     const w = await world({
       outcomes: [
-        { outcome: 'failed', criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }], tokens: 10 },
-        { outcome: 'verified', criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
-        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
-        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
+        {
+          outcome: 'failed',
+          criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }],
+          tokens: 10,
+        },
+        {
+          outcome: 'verified',
+          criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }],
+          tokens: 10,
+        },
+        {
+          outcome: 'verified',
+          criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }],
+          tokens: 10,
+        },
+        {
+          outcome: 'verified',
+          criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }],
+          tokens: 10,
+        },
       ],
     })
     // 30 of 35 were spent when the last side started, and the run reported 10
     // more: the experiment finished, and the overspend is recorded as it is.
-    const result = await runExperiment(w.sources, { spec: w.spec({ budget: { maxTokens: 35 } }), caller: CALLER, actor: 'root-1' })
+    const result = await runExperiment(w.sources, {
+      spec: w.spec({ budget: { maxTokens: 35 } }),
+      caller: CALLER,
+      actor: 'root-1',
+    })
     expect(w.calls).toHaveLength(4)
     expect(w.records.filter(record => record.kind === 'experiment_sample')).toHaveLength(4)
     const spent = result.report.samples
       .flatMap(sample => [sample.baseline, sample.candidate])
-      .reduce((sum, detail) => sum + (detail.cost.status === 'reported' && detail.cost.metrics.tokens !== undefined
-        ? Object.values(detail.cost.metrics.tokens).reduce((inner, value) => inner + value, 0)
-        : 0), 0)
+      .reduce(
+        (sum, detail) =>
+          sum +
+          (detail.cost.status === 'reported' && detail.cost.metrics.tokens !== undefined
+            ? Object.values(detail.cost.metrics.tokens).reduce((inner, value) => inner + value, 0)
+            : 0),
+        0,
+      )
     // The total is the truth, not a fit: 40 against a ceiling of 35 is exactly
     // the overspend the promotion gate refuses (never rounded down to 35).
     expect(spent).toBe(40)
@@ -609,22 +721,42 @@ describe('the two-sided orchestrator', () => {
   it('counts a cancelled side as spend, so a resumed experiment does not get its budget back', async () => {
     const w = await world({
       outcomes: [
-        { outcome: 'failed', criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }], tokens: 10 },
-        { outcome: 'verified', criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
-        { outcome: 'cancelled', criteria: [{ criterionId: 'ac-hold', verdict: 'inconclusive', verifierId: 'command' }], tokens: 10 },
-        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
+        {
+          outcome: 'failed',
+          criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }],
+          tokens: 10,
+        },
+        {
+          outcome: 'verified',
+          criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }],
+          tokens: 10,
+        },
+        {
+          outcome: 'cancelled',
+          criteria: [{ criterionId: 'ac-hold', verdict: 'inconclusive', verifierId: 'command' }],
+          tokens: 10,
+        },
+        {
+          outcome: 'verified',
+          criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }],
+          tokens: 10,
+        },
       ],
     })
     // The cancelled side stops the first call where it stands (three records),
     // and its own 10 tokens are part of what the experiment has spent.
-    const stopped = await refusal(runExperiment(w.sources, { spec: w.spec({ budget: { maxTokens: 25 } }), caller: CALLER, actor: 'root-1' }))
+    const stopped = await refusal(
+      runExperiment(w.sources, { spec: w.spec({ budget: { maxTokens: 25 } }), caller: CALLER, actor: 'root-1' }),
+    )
     expect(stopped).toContain('is incomplete')
     expect(w.calls).toHaveLength(3)
     const records = w.records.filter(record => record.kind === 'experiment_sample')
     expect(records).toHaveLength(3)
     expect(recordOf(w.records, 't-holdout', 'baseline').outcome).toBe('cancelled')
 
-    const resumed = await refusal(resumeExperiment(w.sources, { experimentId: experimentIdOfWorld(w.records), caller: CALLER, actor: 'root-1' }))
+    const resumed = await refusal(
+      resumeExperiment(w.sources, { experimentId: experimentIdOfWorld(w.records), caller: CALLER, actor: 'root-1' }),
+    )
     expect(resumed).toContain('maxTokens 25')
     expect(resumed).toContain('3 settled side(s) already report 30 tokens')
     expect(w.calls).toHaveLength(3)
@@ -637,11 +769,13 @@ describe('the two-sided orchestrator', () => {
     // that had one is refused by name at the freeze, not silently run without
     // the window it named.
     const w = await world()
-    const message = await refusal(runExperiment(w.sources, {
-      spec: w.spec({ budget: { wallTimeMs: 60_000 } as never }),
-      caller: CALLER,
-      actor: 'root-1',
-    }))
+    const message = await refusal(
+      runExperiment(w.sources, {
+        spec: w.spec({ budget: { wallTimeMs: 60_000 } as never }),
+        caller: CALLER,
+        actor: 'root-1',
+      }),
+    )
     expect(message).toContain('wallTimeMs')
     expect(message).toMatch(/removed/)
     // Nothing of the refused experiment exists: no ledger line, no run, no task.
@@ -653,11 +787,13 @@ describe('the two-sided orchestrator', () => {
 
   it('refuses an unknown key in the experiment budget, before the first write', async () => {
     const w = await world()
-    const message = await refusal(runExperiment(w.sources, {
-      spec: w.spec({ budget: { maxRuns: 3 } as never }),
-      caller: CALLER,
-      actor: 'root-1',
-    }))
+    const message = await refusal(
+      runExperiment(w.sources, {
+        spec: w.spec({ budget: { maxRuns: 3 } as never }),
+        caller: CALLER,
+        actor: 'root-1',
+      }),
+    )
     expect(message).toContain('unknown key "maxRuns"')
     expect(w.records).toHaveLength(0)
     expect(w.calls).toHaveLength(0)
@@ -700,7 +836,7 @@ describe('the two-sided orchestrator', () => {
     await rm(w.root, { recursive: true, force: true })
   })
 
-  it('freezes the candidate side\'s registry revision by substituting the improved skill\'s own declaration digest (K3)', async () => {
+  it("freezes the candidate side's registry revision by substituting the improved skill's own declaration digest (K3)", async () => {
     const productionContract = 'd'.repeat(64)
     const candidateContract = 'c'.repeat(64)
     const w = await world({
@@ -807,8 +943,10 @@ describe('the two-sided orchestrator', () => {
     const second = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
     expect(w.calls).toHaveLength(8)
     expect(second.experimentId).not.toBe(first.experimentId)
-    const records = w.records.filter((record): record is ExperimentSampleRecord =>
-      record.kind === 'experiment_sample' && record.experimentId === second.experimentId)
+    const records = w.records.filter(
+      (record): record is ExperimentSampleRecord =>
+        record.kind === 'experiment_sample' && record.experimentId === second.experimentId,
+    )
     expect(records).toHaveLength(4)
     for (const record of records) {
       expect(record.preparedContentDigest).toBe(digestOf(second.report.frozen.candidate!))
@@ -816,5 +954,4 @@ describe('the two-sided orchestrator', () => {
     }
     await rm(w.root, { recursive: true, force: true })
   })
-
 })

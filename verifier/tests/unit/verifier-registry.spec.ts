@@ -11,8 +11,8 @@ import type {
   TaskSnapshot,
   VerificationResult,
 } from '../../../task/src/types.ts'
-import type { Verifier, VerifyRequest } from '../../src/types.ts'
-import { LOG_TAIL_MAX_CHARS, LOG_TAIL_MAX_LINES, ReviewVerifier, VerifierRegistry } from '../../src/index.ts'
+import { LOG_TAIL_MAX_CHARS, LOG_TAIL_MAX_LINES, type Verifier, type VerifyRequest } from '../../src/types.ts'
+import { ReviewVerifier, VerifierRegistry } from '../../src/index.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'
 const STORE = 'sg-t-root-session'
@@ -83,19 +83,22 @@ function emptySnapshot(evidence: EvidenceBundle[]): TaskSnapshot {
   }
 }
 
-
 /** A judge whose verdicts the test dictates; registered through the explicit test-double channel. */
 function testDouble(id: string, verify: Verifier['verify'], overrides: Partial<Verifier> = {}): Verifier {
   return { id, supports: mode => mode === 'deterministic', verify, ...overrides }
 }
 
-function harness(options: { task: TaskInstance; run?: TaskRun; members?: TaskInstance[]; evidence?: EvidenceBundle[] }) {
+function harness(options: {
+  task: TaskInstance
+  run?: TaskRun
+  members?: TaskInstance[]
+  evidence?: EvidenceBundle[]
+}) {
   const recorded: EvidenceBundle[] = []
   const warnings: string[] = []
   const taskService = {
     runIn: vi.fn(async (_storeId: string, runId: string) => ({ ...(options.run ?? run()), runId })),
     taskIn: vi.fn(async () => options.task),
-    runMembersIn: vi.fn(async () => options.members ?? []),
     runMemberSlotsIn: vi.fn(async () => options.members ?? []),
     snapshotIn: vi.fn(async () => emptySnapshot(options.evidence ?? [...recorded])),
     recordEvidenceIn: vi.fn(async (_storeId: string, bundle: EvidenceBundle, _actor: string) => {
@@ -105,7 +108,11 @@ function harness(options: { task: TaskInstance; run?: TaskRun; members?: TaskIns
   const ctx = {
     reflect: { provide: () => {} },
     task: taskService,
-    logger: () => ({ warn: (message: string) => { warnings.push(message) } }),
+    logger: () => ({
+      warn: (message: string) => {
+        warnings.push(message)
+      },
+    }),
   }
   return { ctx, taskService, recorded, warnings }
 }
@@ -151,18 +158,18 @@ describe('VerifierRegistry mode dispatch', () => {
     const custom: Verifier = {
       id: 'custom-command',
       supports: mode => mode === 'deterministic',
-      verify: vi.fn(async (req: VerifyRequest) => req.criteria.map(c => ({
-        criterionId: c.criterionId,
-        status: 'pass' as const,
-        verifierId: 'custom-command',
-      }))),
+      verify: vi.fn(async (req: VerifyRequest) =>
+        req.criteria.map(c => ({
+          criterionId: c.criterionId,
+          status: 'pass' as const,
+          verifierId: 'custom-command',
+        })),
+      ),
     }
     await registry.register(custom, { testDouble: true })
     const bundle = await registry.verifyRun(STORE, 'r1')
     expect(custom.verify).toHaveBeenCalledOnce()
-    expect(bundle.verifierResults).toEqual([
-      { criterionId: 'c1', status: 'pass', verifierId: 'custom-command' },
-    ])
+    expect(bundle.verifierResults).toEqual([{ criterionId: 'c1', status: 'pass', verifierId: 'custom-command' }])
   })
 
   test('register rejects duplicate verifier ids and the disposer restores dispatch', async () => {
@@ -170,7 +177,8 @@ describe('VerifierRegistry mode dispatch', () => {
     const replacement: Verifier = {
       id: 'review-2',
       supports: mode => mode === 'review',
-      verify: async req => req.criteria.map(c => ({ criterionId: c.criterionId, status: 'fail' as const, verifierId: 'review-2' })),
+      verify: async req =>
+        req.criteria.map(c => ({ criterionId: c.criterionId, status: 'fail' as const, verifierId: 'review-2' })),
     }
     const dispose = await registry.register(replacement, { testDouble: true })
     expect((await registry.verifyRun(STORE, 'r1')).verifierResults[0]!.verifierId).toBe('review-2')
@@ -197,10 +205,7 @@ describe('VerifierRegistry evidence bundles', () => {
     expect(bundle.artifacts).toEqual([{ artifactId: 'a1', kind: 'patch', uri: 'bb://artifact/a1' }])
     expect(bundle.verifierResults.map(result => result.status)).toEqual(['pass', 'fail'])
     expect(bundle.claims).toHaveLength(bundle.verifierResults.length)
-    expect(bundle.claims.map(claim => claim.claimId)).toEqual([
-      `${bundle.evidenceId}#c1`,
-      `${bundle.evidenceId}#c2`,
-    ])
+    expect(bundle.claims.map(claim => claim.claimId)).toEqual([`${bundle.evidenceId}#c1`, `${bundle.evidenceId}#c2`])
     expect(bundle.claims.map(claim => [claim.criterionId, claim.status, claim.verifierId])).toEqual([
       ['c1', 'pass', 'command'],
       ['c2', 'fail', 'command'],
@@ -223,12 +228,13 @@ describe('VerifierRegistry evidence bundles', () => {
     const absolute: Verifier = {
       id: 'absolute-log',
       supports: mode => mode === 'deterministic',
-      verify: async req => req.criteria.map((c): VerificationResult => ({
-        criterionId: c.criterionId,
-        status: 'pass',
-        verifierId: 'absolute-log',
-        logRef: join(evidenceRoot, STORE, 'r1', 'abs.log'),
-      })),
+      verify: async req =>
+        req.criteria.map((c): VerificationResult => ({
+          criterionId: c.criterionId,
+          status: 'pass',
+          verifierId: 'absolute-log',
+          logRef: join(evidenceRoot, STORE, 'r1', 'abs.log'),
+        })),
     }
     await registry.register(absolute, { testDouble: true })
     const bundle = await registry.verifyRun(STORE, 'r1')
@@ -240,12 +246,13 @@ describe('VerifierRegistry evidence bundles', () => {
     const escaping: Verifier = {
       id: 'escaping-log',
       supports: mode => mode === 'deterministic',
-      verify: async req => req.criteria.map((c): VerificationResult => ({
-        criterionId: c.criterionId,
-        status: 'pass',
-        verifierId: 'escaping-log',
-        logRef: '/tmp/elsewhere.log',
-      })),
+      verify: async req =>
+        req.criteria.map((c): VerificationResult => ({
+          criterionId: c.criterionId,
+          status: 'pass',
+          verifierId: 'escaping-log',
+          logRef: '/tmp/elsewhere.log',
+        })),
     }
     await registry.register(escaping, { testDouble: true })
     await expect(registry.verifyRun(STORE, 'r1')).rejects.toThrow('escapes evidenceRoot')
@@ -331,19 +338,29 @@ describe('VerifierRegistry ready() and the executable selftest gate (V2-1/V2-2, 
     const selfTested: Verifier = {
       id: 'self-tested',
       version: '1',
-      owner: 'tests',
       selftest: {
         samples: [
-          { role: 'positive', name: 'known-good', criterion: criterion({ criterionId: 'selftest-good', command: 'true' }), expect: 'pass' },
-          { role: 'negative', name: 'known-bad', criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }), expect: 'fail' },
+          {
+            role: 'positive',
+            name: 'known-good',
+            criterion: criterion({ criterionId: 'selftest-good', command: 'true' }),
+            expect: 'pass',
+          },
+          {
+            role: 'negative',
+            name: 'known-bad',
+            criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }),
+            expect: 'fail',
+          },
         ],
       },
       supports: mode => mode === 'deterministic',
-      verify: async req => req.criteria.map(c => ({
-        criterionId: c.criterionId,
-        status: c.command === 'true' ? 'pass' as const : 'fail' as const,
-        verifierId: 'self-tested',
-      })),
+      verify: async req =>
+        req.criteria.map(c => ({
+          criterionId: c.criterionId,
+          status: c.command === 'true' ? ('pass' as const) : ('fail' as const),
+          verifierId: 'self-tested',
+        })),
     }
     await registry.register(selfTested)
     expect(warnings).toEqual([])
@@ -356,21 +373,37 @@ describe('VerifierRegistry ready() and the executable selftest gate (V2-1/V2-2, 
       id: 'always-pass',
       selftest: {
         samples: [
-          { role: 'positive', name: 'known-good command', criterion: criterion({ criterionId: 'selftest-good', command: 'true' }), expect: 'pass' },
-          { role: 'negative', name: 'known-bad command', criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }), expect: 'fail' },
+          {
+            role: 'positive',
+            name: 'known-good command',
+            criterion: criterion({ criterionId: 'selftest-good', command: 'true' }),
+            expect: 'pass',
+          },
+          {
+            role: 'negative',
+            name: 'known-bad command',
+            criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }),
+            expect: 'fail',
+          },
         ],
       },
       supports: mode => mode === 'deterministic',
-      verify: async req => req.criteria.map(c => ({
-        criterionId: c.criterionId,
-        status: 'pass' as const,
-        verifierId: 'always-pass',
-      })),
+      verify: async req =>
+        req.criteria.map(c => ({
+          criterionId: c.criterionId,
+          status: 'pass' as const,
+          verifierId: 'always-pass',
+        })),
     }
-    const failure = await registry.register(alwaysPass).then(() => undefined, (error: Error) => error)
+    const failure = await registry.register(alwaysPass).then(
+      () => undefined,
+      (error: Error) => error,
+    )
     expect(failure).toBeInstanceOf(Error)
     expect(failure!.message).toContain('verifier "always-pass" selftest failed')
-    expect(failure!.message).toContain('sample "known-bad command" (role negative) expected "fail" but the judge returned "pass"')
+    expect(failure!.message).toContain(
+      'sample "known-bad command" (role negative) expected "fail" but the judge returned "pass"',
+    )
     expect(registry.verifierIds()).not.toContain('always-pass')
   })
 
@@ -380,19 +413,35 @@ describe('VerifierRegistry ready() and the executable selftest gate (V2-1/V2-2, 
       id: 'always-fail',
       selftest: {
         samples: [
-          { role: 'positive', name: 'known-good command', criterion: criterion({ criterionId: 'selftest-good', command: 'true' }), expect: 'pass' },
-          { role: 'negative', name: 'known-bad command', criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }), expect: 'fail' },
+          {
+            role: 'positive',
+            name: 'known-good command',
+            criterion: criterion({ criterionId: 'selftest-good', command: 'true' }),
+            expect: 'pass',
+          },
+          {
+            role: 'negative',
+            name: 'known-bad command',
+            criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }),
+            expect: 'fail',
+          },
         ],
       },
       supports: mode => mode === 'deterministic',
-      verify: async req => req.criteria.map(c => ({
-        criterionId: c.criterionId,
-        status: 'fail' as const,
-        verifierId: 'always-fail',
-      })),
+      verify: async req =>
+        req.criteria.map(c => ({
+          criterionId: c.criterionId,
+          status: 'fail' as const,
+          verifierId: 'always-fail',
+        })),
     }
-    const failure = await registry.register(alwaysFail).then(() => undefined, (error: Error) => error)
-    expect(failure!.message).toContain('sample "known-good command" (role positive) expected "pass" but the judge returned "fail"')
+    const failure = await registry.register(alwaysFail).then(
+      () => undefined,
+      (error: Error) => error,
+    )
+    expect(failure!.message).toContain(
+      'sample "known-good command" (role positive) expected "pass" but the judge returned "fail"',
+    )
     expect(registry.verifierIds()).not.toContain('always-fail')
   })
 
@@ -402,17 +451,31 @@ describe('VerifierRegistry ready() and the executable selftest gate (V2-1/V2-2, 
       id: 'duplicated-results',
       selftest: {
         samples: [
-          { role: 'positive', name: 'known-good command', criterion: criterion({ criterionId: 'selftest-good', command: 'true' }), expect: 'pass' },
-          { role: 'negative', name: 'known-bad command', criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }), expect: 'fail' },
+          {
+            role: 'positive',
+            name: 'known-good command',
+            criterion: criterion({ criterionId: 'selftest-good', command: 'true' }),
+            expect: 'pass',
+          },
+          {
+            role: 'negative',
+            name: 'known-bad command',
+            criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }),
+            expect: 'fail',
+          },
         ],
       },
       supports: mode => mode === 'deterministic',
-      verify: async req => req.criteria.flatMap(c => [
-        { criterionId: c.criterionId, status: 'pass' as const, verifierId: 'duplicated-results' },
-        { criterionId: c.criterionId, status: 'fail' as const, verifierId: 'duplicated-results' },
-      ]),
+      verify: async req =>
+        req.criteria.flatMap(c => [
+          { criterionId: c.criterionId, status: 'pass' as const, verifierId: 'duplicated-results' },
+          { criterionId: c.criterionId, status: 'fail' as const, verifierId: 'duplicated-results' },
+        ]),
     }
-    const failure = await registry.register(duplicated).then(() => undefined, (error: Error) => error)
+    const failure = await registry.register(duplicated).then(
+      () => undefined,
+      (error: Error) => error,
+    )
     expect(failure!.message).toContain('sample "known-good command" (role positive) produced no valid result')
     expect(failure!.message).toContain('must return exactly one valid result for criterion "selftest-good"')
     expect(registry.verifierIds()).not.toContain('duplicated-results')
@@ -424,105 +487,102 @@ describe('VerifierRegistry ready() and the executable selftest gate (V2-1/V2-2, 
       id: 'broken-samples',
       selftest: {
         samples: [
-          { role: 'positive', name: 'known-good command', criterion: criterion({ criterionId: 'selftest-good', command: 'true' }), expect: 'pass' },
-          { role: 'negative', name: 'known-bad command', criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }), expect: 'fail' },
+          {
+            role: 'positive',
+            name: 'known-good command',
+            criterion: criterion({ criterionId: 'selftest-good', command: 'true' }),
+            expect: 'pass',
+          },
+          {
+            role: 'negative',
+            name: 'known-bad command',
+            criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }),
+            expect: 'fail',
+          },
         ],
       },
       supports: mode => mode === 'deterministic',
-      verify: async () => { throw new Error('sample exploded') },
+      verify: async () => {
+        throw new Error('sample exploded')
+      },
     }
-    const failure = await registry.register(broken).then(() => undefined, (error: Error) => error)
+    const failure = await registry.register(broken).then(
+      () => undefined,
+      (error: Error) => error,
+    )
     expect(failure!.message).toContain('sample "known-good command" (role positive) threw: sample exploded')
     expect(registry.verifierIds()).not.toContain('broken-samples')
   })
 
   test('a registration without executable selftest samples is refused, never warned through', async () => {
     const { registry } = await setup({ task: task([criterion()]) })
-    const undescribed = testDouble('undescribed', async req => req.criteria.map(c => ({
-      criterionId: c.criterionId,
-      status: 'pass' as const,
-      verifierId: 'undescribed',
-    })))
+    const undescribed = testDouble('undescribed', async req =>
+      req.criteria.map(c => ({
+        criterionId: c.criterionId,
+        status: 'pass' as const,
+        verifierId: 'undescribed',
+      })),
+    )
     await expect(registry.register(undescribed)).rejects.toThrow(
       'verifier "undescribed" cannot be registered: no executable selftest samples (KISS §4.3)',
     )
     expect(registry.verifierIds()).not.toContain('undescribed')
   })
 
-  test('a descriptive selftest is refused, never inferred to be a test double', async () => {
+  test('an empty samples declaration is refused by the one-sided rule', async () => {
     const { registry } = await setup({ task: task([criterion()]) })
-    const descriptive = {
-      id: 'descriptive',
-      selftest: { positiveCases: ['true'], negativeCases: ['false'] },
-      supports: () => true,
-      verify: async (req: VerifyRequest) => req.criteria.map(c => ({ criterionId: c.criterionId, status: 'pass' as const, verifierId: 'descriptive' })),
-    } as unknown as Verifier
-    const failure = await registry.register(descriptive).then(() => undefined, (error: Error) => error)
-    expect(failure!.message).toContain('verifier "descriptive" cannot be registered')
-    expect(failure!.message).toContain('selftest.samples must be a non-empty array (got undefined)')
-    expect(registry.verifierIds()).not.toContain('descriptive')
+    const verify = async (req: VerifyRequest) =>
+      req.criteria.map(c => ({
+        criterionId: c.criterionId,
+        status: 'pass' as const,
+        verifierId: 'empty',
+      }))
+    const empty = await registry
+      .register({ id: 'empty', selftest: { samples: [] }, supports: () => true, verify })
+      .then(
+        () => undefined,
+        (error: Error) => error,
+      )
+    expect(empty!.message).toContain('no sample declares role "positive"')
+    expect(empty!.message).toContain('no sample declares role "negative"')
+    expect(registry.verifierIds()).not.toContain('empty')
   })
-
-  test('malformed sample shapes are refused together, before any sample executes', async () => {
-    const { registry } = await setup({ task: task([criterion()]) })
-    const verify = vi.fn(async (req: VerifyRequest) => req.criteria.map(c => ({
-      criterionId: c.criterionId,
-      status: 'pass' as const,
-      verifierId: 'malformed',
-    })))
-    const malformed = {
-      id: 'malformed',
-      selftest: {
-        samples: [
-          { role: 'positive', name: '   ', criterion: criterion({ criterionId: 'selftest-good', command: 'true' }), expect: 'pass' },
-          { role: 'negative', name: 'no criterion', expect: 'fail' },
-          { role: 'negative', name: 'passed negative', criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }), expect: 'pass' },
-        ],
-      },
-      supports: () => true,
-      verify,
-    } as unknown as Verifier
-    const failure = await registry.register(malformed).then(() => undefined, (error: Error) => error)
-    expect(failure!.message).toContain('verifier "malformed" cannot be registered')
-    expect(failure!.message).toContain('sample #0 has no name')
-    expect(failure!.message).toContain('sample "no criterion" has no criterion carrying a criterionId')
-    expect(failure!.message).toContain('sample "passed negative" (role negative) must expect "fail" or "not-pass" (got "pass")')
-    expect(verify).not.toHaveBeenCalled()
-    expect(registry.verifierIds()).not.toContain('malformed')
-  })
-
   test('a selftest declaring samples on only one side is refused', async () => {
     const { registry } = await setup({ task: task([criterion()]) })
-    const good = { role: 'positive' as const, name: 'known-good', criterion: criterion({ criterionId: 'selftest-good', command: 'true' }), expect: 'pass' as const }
-    const bad = { role: 'negative' as const, name: 'known-bad', criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }), expect: 'fail' as const }
-    const verify = async (req: VerifyRequest) => req.criteria.map(c => ({
-      criterionId: c.criterionId,
-      status: 'pass' as const,
-      verifierId: 'one-sided',
-    }))
+    const good = {
+      role: 'positive' as const,
+      name: 'known-good',
+      criterion: criterion({ criterionId: 'selftest-good', command: 'true' }),
+      expect: 'pass' as const,
+    }
+    const bad = {
+      role: 'negative' as const,
+      name: 'known-bad',
+      criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }),
+      expect: 'fail' as const,
+    }
+    const verify = async (req: VerifyRequest) =>
+      req.criteria.map(c => ({
+        criterionId: c.criterionId,
+        status: 'pass' as const,
+        verifierId: 'one-sided',
+      }))
     const positivesOnly = await registry
       .register({ id: 'one-sided', selftest: { samples: [good] }, supports: () => true, verify })
-      .then(() => undefined, (error: Error) => error)
+      .then(
+        () => undefined,
+        (error: Error) => error,
+      )
     expect(positivesOnly!.message).toContain('no sample declares role "negative"')
     const negativesOnly = await registry
       .register({ id: 'other-sided', selftest: { samples: [bad] }, supports: () => true, verify })
-      .then(() => undefined, (error: Error) => error)
+      .then(
+        () => undefined,
+        (error: Error) => error,
+      )
     expect(negativesOnly!.message).toContain('no sample declares role "positive"')
     expect(registry.verifierIds()).not.toContain('one-sided')
     expect(registry.verifierIds()).not.toContain('other-sided')
-  })
-
-  test('an empty samples declaration is refused, naming what was declared', async () => {
-    const { registry } = await setup({ task: task([criterion()]) })
-    const verify = async (req: VerifyRequest) => req.criteria.map(c => ({
-      criterionId: c.criterionId,
-      status: 'pass' as const,
-      verifierId: 'empty',
-    }))
-    const empty = await registry
-      .register({ id: 'empty', selftest: { samples: [] }, supports: () => true, verify })
-      .then(() => undefined, (error: Error) => error)
-    expect(empty!.message).toContain('selftest.samples must be a non-empty array (got an empty array)')
   })
 
   test('a store-reading sample is refused for a judge the registry cannot execute it against', async () => {
@@ -531,15 +591,32 @@ describe('VerifierRegistry ready() and the executable selftest gate (V2-1/V2-2, 
       id: 'store-reader',
       selftest: {
         samples: [
-          { role: 'positive', name: 'with a store view', criterion: criterion({ criterionId: 'selftest-store', verificationMode: 'composite' }), expect: 'pass', store: { children: [] } },
-          { role: 'negative', name: 'known-bad', criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }), expect: 'fail' },
+          {
+            role: 'positive',
+            name: 'with a store view',
+            criterion: criterion({ criterionId: 'selftest-store', verificationMode: 'composite' }),
+            expect: 'pass',
+            store: { children: [] },
+          },
+          {
+            role: 'negative',
+            name: 'known-bad',
+            criterion: criterion({ criterionId: 'selftest-bad', command: 'false' }),
+            expect: 'fail',
+          },
         ],
       },
       supports: () => true,
-      verify: async req => req.criteria.map(c => ({ criterionId: c.criterionId, status: 'pass' as const, verifierId: 'store-reader' })),
+      verify: async req =>
+        req.criteria.map(c => ({ criterionId: c.criterionId, status: 'pass' as const, verifierId: 'store-reader' })),
     }
-    const failure = await registry.register(storeReader).then(() => undefined, (error: Error) => error)
-    expect(failure!.message).toContain('sample "with a store view" declares a store view, which only the registry\'s composite judge can execute')
+    const failure = await registry.register(storeReader).then(
+      () => undefined,
+      (error: Error) => error,
+    )
+    expect(failure!.message).toContain(
+      'sample "with a store view" declares a store view, which only the registry\'s composite judge can execute',
+    )
     expect(registry.verifierIds()).not.toContain('store-reader')
   })
 })
@@ -550,7 +627,8 @@ describe('VerifierRegistry test-double channel (V2-2)', () => {
     const double: Verifier = {
       id: 'plain-double',
       supports: mode => mode === 'deterministic',
-      verify: async req => req.criteria.map(c => ({ criterionId: c.criterionId, status: 'pass' as const, verifierId: 'plain-double' })),
+      verify: async req =>
+        req.criteria.map(c => ({ criterionId: c.criterionId, status: 'pass' as const, verifierId: 'plain-double' })),
     }
     await registry.register(double, { testDouble: true })
     expect(warnings).toHaveLength(1)
@@ -567,9 +645,12 @@ describe('VerifierRegistry test-double channel (V2-2)', () => {
     const double: Verifier = {
       id: 'truthy-double',
       supports: mode => mode === 'deterministic',
-      verify: async req => req.criteria.map(c => ({ criterionId: c.criterionId, status: 'pass' as const, verifierId: 'truthy-double' })),
+      verify: async req =>
+        req.criteria.map(c => ({ criterionId: c.criterionId, status: 'pass' as const, verifierId: 'truthy-double' })),
     }
-    await expect(registry.register(double, { testDouble: 'yes' } as never)).rejects.toThrow('no executable selftest samples')
+    await expect(registry.register(double, { testDouble: 'yes' } as never)).rejects.toThrow(
+      'no executable selftest samples',
+    )
     expect(registry.verifierIds()).not.toContain('truthy-double')
   })
 })
@@ -593,11 +674,17 @@ describe('VerifierRegistry metadata and selftest (KISS §4.3, VRTC plan 2.2)', (
     expect(result!.status).toBe('inconclusive')
   })
 
-  test('both of the review verifier\'s declared samples come back not-pass when executed', async () => {
+  test("both of the review verifier's declared samples come back not-pass when executed", async () => {
     const verifier = new ReviewVerifier()
     expect(verifier.selftest.samples.map(sample => sample.expect)).toEqual(['not-pass', 'not-pass'])
     for (const sample of verifier.selftest.samples) {
-      const [result] = await verifier.verify({ taskId: 't1', runId: 'r1', criteria: [sample.criterion], cwd: '', logDir: '' })
+      const [result] = await verifier.verify({
+        taskId: 't1',
+        runId: 'r1',
+        criteria: [sample.criterion],
+        cwd: '',
+        logDir: '',
+      })
       expect(result!.status, `sample "${sample.name}"`).not.toBe('pass')
     }
   })
@@ -607,21 +694,28 @@ describe('VerifierRegistry verifierRef dispatch (KISS §4.1, VRTC plan 1.4)', ()
   test.each([
     ['no verdict', []],
     ['non-array', null],
-    ['duplicate verdicts', [
-      { criterionId: 'c1', verifierId: 'broken', status: 'pass' },
-      { criterionId: 'c1', verifierId: 'broken', status: 'fail' },
-    ]],
+    [
+      'duplicate verdicts',
+      [
+        { criterionId: 'c1', verifierId: 'broken', status: 'pass' },
+        { criterionId: 'c1', verifierId: 'broken', status: 'fail' },
+      ],
+    ],
     ['wrong criterion', [{ criterionId: 'other', verifierId: 'broken', status: 'pass' }]],
     ['forged verifier', [{ criterionId: 'c1', verifierId: 'command', status: 'pass' }]],
-    ['unknown status', [{ criterionId: 'c1', verifierId: 'broken', status: 'success' }]],
-    ['unknown pass', [{ criterionId: 'c1', verifierId: 'broken', status: 'pass', unknownKind: 'task' }]],
   ])('malformed plugin output (%s) produces verifier UNKNOWN, never a pass', async (_label, output) => {
     const { registry } = await setup({ task: task([criterion({ verifierRef: 'broken' })]) })
-    await registry.register({ id: 'broken', supports: () => true, verify: async () => output as VerificationResult[] }, { testDouble: true })
+    await registry.register(
+      { id: 'broken', supports: () => true, verify: async () => output as VerificationResult[] },
+      { testDouble: true },
+    )
     const bundle = await registry.verifyRun(STORE, 'r1')
     expect(bundle.verifierResults).toHaveLength(1)
     expect(bundle.verifierResults[0]).toMatchObject({
-      criterionId: 'c1', verifierId: 'broken', status: 'inconclusive', unknownKind: 'verifier',
+      criterionId: 'c1',
+      verifierId: 'broken',
+      status: 'inconclusive',
+      unknownKind: 'verifier',
     })
     expect(bundle.claims[0]).toMatchObject({ status: 'inconclusive', unknownKind: 'verifier' })
   })
@@ -634,7 +728,8 @@ describe('VerifierRegistry verifierRef dispatch (KISS §4.1, VRTC plan 1.4)', ()
     const custom: Verifier = {
       id: 'custom-command',
       supports: mode => mode === 'deterministic',
-      verify: async req => req.criteria.map(c => ({ criterionId: c.criterionId, status: 'fail' as const, verifierId: 'custom-command' })),
+      verify: async req =>
+        req.criteria.map(c => ({ criterionId: c.criterionId, status: 'fail' as const, verifierId: 'custom-command' })),
     }
     await registry.register(custom, { testDouble: true })
     const bundle = await registry.verifyRun(STORE, 'r1')
@@ -675,7 +770,9 @@ describe('VerifierRegistry verifierRef dispatch (KISS §4.1, VRTC plan 1.4)', ()
     const broken: Verifier = {
       id: 'broken',
       supports: mode => mode === 'deterministic',
-      verify: async () => { throw new Error('judge exploded') },
+      verify: async () => {
+        throw new Error('judge exploded')
+      },
     }
     await registry.register(broken, { testDouble: true })
     const bundle = await registry.verifyRun(STORE, 'r1')
@@ -693,12 +790,17 @@ describe('VerifierRegistry verifierRef dispatch (KISS §4.1, VRTC plan 1.4)', ()
 describe('VerifierRegistry verifier version identity (V2-3, KISS §8.2)', () => {
   test('a verdict and its claim carry the registered instance version, never the plugin self-report', async () => {
     const { registry } = await setup({ task: task([criterion({ verifierRef: 'versioned' })]) })
-    const forged: Verifier = testDouble('versioned', async req => req.criteria.map(c => ({
-      criterionId: c.criterionId,
-      status: 'pass' as const,
-      verifierId: 'versioned',
-      verifierVersion: 'forged-9',
-    })), { version: '2' })
+    const forged: Verifier = testDouble(
+      'versioned',
+      async req =>
+        req.criteria.map(c => ({
+          criterionId: c.criterionId,
+          status: 'pass' as const,
+          verifierId: 'versioned',
+          verifierVersion: 'forged-9',
+        })),
+      { version: '2' },
+    )
     await registry.register(forged, { testDouble: true })
     const bundle = await registry.verifyRun(STORE, 'r1')
     expect(bundle.verifierResults[0]!.verifierVersion).toBe('2')
@@ -707,12 +809,14 @@ describe('VerifierRegistry verifier version identity (V2-3, KISS §8.2)', () => 
 
   test('an instance that declares no version stamps none, removing a forged one', async () => {
     const { registry } = await setup({ task: task([criterion({ verifierRef: 'versionless' })]) })
-    const forged: Verifier = testDouble('versionless', async req => req.criteria.map(c => ({
-      criterionId: c.criterionId,
-      status: 'pass' as const,
-      verifierId: 'versionless',
-      verifierVersion: 'forged-9',
-    })))
+    const forged: Verifier = testDouble('versionless', async req =>
+      req.criteria.map(c => ({
+        criterionId: c.criterionId,
+        status: 'pass' as const,
+        verifierId: 'versionless',
+        verifierVersion: 'forged-9',
+      })),
+    )
     await registry.register(forged, { testDouble: true })
     const bundle = await registry.verifyRun(STORE, 'r1')
     expect(bundle.verifierResults[0]).not.toHaveProperty('verifierVersion')
@@ -731,53 +835,10 @@ describe('VerifierRegistry protected acceptance inputs (V2-4)', () => {
   const ACCEPTANCE = 'acceptance.sh'
   const ADMITTED = 'exit 0\n'
 
-  /** A judge whose dispatch the malformed-entry tests can assert never happened. */
-  function spyJudge(id: string) {
-    return vi.fn(async (req: VerifyRequest) => req.criteria.map(c => ({
-      criterionId: c.criterionId,
-      status: 'pass' as const,
-      verifierId: id,
-    })))
-  }
-
-  test('a malformed protected input entry yields a readable fail, never a crash', async () => {
-    const judge = spyJudge('spy-judge')
-    const { registry } = await setup({
-      task: task([criterion({
-        verifierRef: 'spy-judge',
-        protectedInputs: [{ path: undefined, sha256: 'x' } as never],
-      })]),
-    })
-    await registry.register(testDouble('spy-judge', judge), { testDouble: true })
-    const bundle = await registry.verifyRun(STORE, 'r1')
-    expect(judge).not.toHaveBeenCalled()
-    const result = bundle.verifierResults[0]!
-    expect(result).toMatchObject({ criterionId: 'c1', status: 'fail', verifierId: 'spy-judge' })
-    expect(result.details).toContain('protected input entry 0 is malformed: path must be a non-empty string')
-    expect(result.unknownKind).toBeUndefined()
-  })
-
-  test('a non-object entry and a non-string digest are named, not thrown', async () => {
-    const judge = spyJudge('spy-judge')
-    const { registry } = await setup({
-      task: task([
-        criterion({ criterionId: 'not-object', verifierRef: 'spy-judge', protectedInputs: [ACCEPTANCE as never] }),
-        criterion({ criterionId: 'bad-digest', verifierRef: 'spy-judge', protectedInputs: [{ path: ACCEPTANCE, sha256: 7 } as never] }),
-      ]),
-    })
-    await registry.register(testDouble('spy-judge', judge), { testDouble: true })
-    const bundle = await registry.verifyRun(STORE, 'r1')
-    expect(judge).not.toHaveBeenCalled()
-    expect(bundle.verifierResults.map(result => [result.criterionId, result.status])).toEqual([
-      ['not-object', 'fail'],
-      ['bad-digest', 'fail'],
-    ])
-    expect(bundle.verifierResults[0]!.details).toContain('protected input entry 0 is malformed: expected an object with a path and a sha256')
-    expect(bundle.verifierResults[1]!.details).toContain('protected input entry 0 is malformed: sha256 must be a non-empty string')
-  })
-
   test('a modified protected input refuses the verdict with a fail naming the path and both digests', async () => {
-    const { registry, cwd } = await setup({ task: task([criterion({ protectedInputs: [{ path: ACCEPTANCE, sha256: sha256(ADMITTED) }] })]) })
+    const { registry, cwd } = await setup({
+      task: task([criterion({ protectedInputs: [{ path: ACCEPTANCE, sha256: sha256(ADMITTED) }] })]),
+    })
     await writeFile(join(cwd, ACCEPTANCE), 'exit 0  # rewritten after admission\n')
     const bundle = await registry.verifyRun(STORE, 'r1', { cwd })
     const result = bundle.verifierResults[0]!
@@ -791,7 +852,9 @@ describe('VerifierRegistry protected acceptance inputs (V2-4)', () => {
   })
 
   test('a missing protected input refuses the verdict, naming the path', async () => {
-    const { registry, cwd } = await setup({ task: task([criterion({ protectedInputs: [{ path: 'gone.sh', sha256: sha256(ADMITTED) }] })]) })
+    const { registry, cwd } = await setup({
+      task: task([criterion({ protectedInputs: [{ path: 'gone.sh', sha256: sha256(ADMITTED) }] })]),
+    })
     const bundle = await registry.verifyRun(STORE, 'r1', { cwd })
     expect(bundle.verifierResults[0]).toMatchObject({ criterionId: 'c1', status: 'fail', verifierId: 'command' })
     expect(bundle.verifierResults[0]!.details).toContain('protected input "gone.sh" is missing or unreadable')
@@ -800,10 +863,12 @@ describe('VerifierRegistry protected acceptance inputs (V2-4)', () => {
 
   test('an unmodified protected input leaves the judgement to the verifier', async () => {
     const { registry, cwd } = await setup({
-      task: task([criterion({
-        command: 'true',
-        protectedInputs: [{ path: ACCEPTANCE, sha256: sha256(ADMITTED) }],
-      })]),
+      task: task([
+        criterion({
+          command: 'true',
+          protectedInputs: [{ path: ACCEPTANCE, sha256: sha256(ADMITTED) }],
+        }),
+      ]),
     })
     await writeFile(join(cwd, ACCEPTANCE), ADMITTED)
     const bundle = await registry.verifyRun(STORE, 'r1', { cwd })
@@ -813,10 +878,12 @@ describe('VerifierRegistry protected acceptance inputs (V2-4)', () => {
   test('a refused protected input never spawns the criterion command', async () => {
     const marker = 'spawned-marker'
     const { registry, cwd } = await setup({
-      task: task([criterion({
-        command: `touch ${marker}`,
-        protectedInputs: [{ path: ACCEPTANCE, sha256: sha256(ADMITTED) }],
-      })]),
+      task: task([
+        criterion({
+          command: `touch ${marker}`,
+          protectedInputs: [{ path: ACCEPTANCE, sha256: sha256(ADMITTED) }],
+        }),
+      ]),
     })
     await writeFile(join(cwd, ACCEPTANCE), 'exit 7\n')
     const bundle = await registry.verifyRun(STORE, 'r1', { cwd })
@@ -827,12 +894,14 @@ describe('VerifierRegistry protected acceptance inputs (V2-4)', () => {
 
   test('every declared input is checked: one refusal names each defect, not just the first', async () => {
     const { registry, cwd } = await setup({
-      task: task([criterion({
-        protectedInputs: [
-          { path: ACCEPTANCE, sha256: sha256(ADMITTED) },
-          { path: 'thresholds.json', sha256: sha256('{"max": 1}') },
-        ],
-      })]),
+      task: task([
+        criterion({
+          protectedInputs: [
+            { path: ACCEPTANCE, sha256: sha256(ADMITTED) },
+            { path: 'thresholds.json', sha256: sha256('{"max": 1}') },
+          ],
+        }),
+      ]),
     })
     await writeFile(join(cwd, ACCEPTANCE), 'exit 0  # rewritten after admission\n')
     const bundle = await registry.verifyRun(STORE, 'r1', { cwd })

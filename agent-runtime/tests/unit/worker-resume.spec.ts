@@ -93,7 +93,10 @@ function request(overrides: Partial<WorkerResumeRequest> = {}): WorkerResumeRequ
 
 /** One refusal raised by an attempt, or `undefined` when it settled. */
 async function refusalOf(attempt: Promise<unknown>): Promise<WorkerResumeRefusal | undefined> {
-  const outcome = await attempt.then(() => undefined, (error: unknown) => error)
+  const outcome = await attempt.then(
+    () => undefined,
+    (error: unknown) => error,
+  )
   expect(outcome).toBeInstanceOf(WorkerResumeRefusal)
   return outcome as WorkerResumeRefusal
 }
@@ -103,7 +106,10 @@ interface HarnessOptions {
   readonly header?: Record<string, unknown> | Error
   /** The Session's own events, as the read path returns them. Defaults to one recorded permission. */
   readonly events?: readonly unknown[]
-  readonly agents?: readonly { readonly id: SessionId; readonly status: 'idle' | 'running' | 'waiting' | 'done' | 'failed' }[]
+  readonly agents?: readonly {
+    readonly id: SessionId
+    readonly status: 'idle' | 'running' | 'waiting' | 'done' | 'failed'
+  }[]
   readonly roots?: readonly SessionId[]
   readonly edges?: readonly { readonly kind: string; readonly from: SessionId; readonly to: SessionId }[]
   /** What the graph read does instead of answering. */
@@ -153,11 +159,19 @@ function harness(options: HarnessOptions = {}): Harness {
   /** The scoped context the real `workerSetup` writes to, with everything it reaches recorded. */
   const agentCtx = {
     tools: {
-      restrict: (filter: unknown) => { restricted.push(filter) },
-      guard: () => { guarded += 1 },
+      restrict: (filter: unknown) => {
+        restricted.push(filter)
+      },
+      guard: () => {
+        guarded += 1
+      },
       schemas: () => [{ name: 'read' }, { name: 'write' }],
     },
-    systemPrompt: { section: (section: unknown) => { sections.push(section) } },
+    systemPrompt: {
+      section: (section: unknown) => {
+        sections.push(section)
+      },
+    },
     get: () => undefined,
   }
   const ctx = {
@@ -170,10 +184,14 @@ function harness(options: HarnessOptions = {}): Harness {
     agentDefaultModel: { currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }) },
     agentPresets: {
       defaultId: 'standard',
-      mount: async (_agentCtx: unknown, preset: string) => { mounted.push(preset) },
+      mount: async (_agentCtx: unknown, preset: string) => {
+        mounted.push(preset)
+      },
     },
     permissionPresets: {
-      set: (session: unknown, preset: string) => { permissions.push([session, preset]) },
+      set: (session: unknown, preset: string) => {
+        permissions.push([session, preset])
+      },
       resolve: () => ({}),
     },
     sessions: {},
@@ -181,7 +199,11 @@ function harness(options: HarnessOptions = {}): Harness {
     sessionQuery: {
       readSession: async () => {
         if (readHeader instanceof Error) throw readHeader
-        return { session: readHeader, inheritedEventCount: 0, events: options.events ?? [permissionEvent('danger-full-access')] }
+        return {
+          session: readHeader,
+          inheritedEventCount: 0,
+          events: options.events ?? [permissionEvent('danger-full-access')],
+        }
       },
     },
     graph: {
@@ -234,7 +256,15 @@ function harness(options: HarnessOptions = {}): Harness {
     roles,
     resumeOptions,
     statuses,
-    composed: { mounted, permissions, sections, restricted, get guarded() { return guarded } },
+    composed: {
+      mounted,
+      permissions,
+      sections,
+      restricted,
+      get guarded() {
+        return guarded
+      },
+    },
     handle,
   }
 }
@@ -267,7 +297,9 @@ describe('the resume entry’s source checks (A4 §F.1)', () => {
   })
 
   test('refuses a Session that does not exist, and never reaches the door', async () => {
-    const missing = Object.assign(new Error('session "s-worker" not found'), { code: 'SESSION_QUERY_SESSION_NOT_FOUND' })
+    const missing = Object.assign(new Error('session "s-worker" not found'), {
+      code: 'SESSION_QUERY_SESSION_NOT_FOUND',
+    })
     const h = harness({ header: missing })
     const refusal = await refusalOf(resumeWorkerAgent(h.deps, request()))
 
@@ -314,7 +346,9 @@ describe('the resume entry’s source checks (A4 §F.1)', () => {
 
   test('refuses a Run that binds another Session', async () => {
     const h = harness()
-    const refusal = await refusalOf(resumeWorkerAgent(h.deps, request({ run: run({ sessionId: 's-other' as SessionId }) })))
+    const refusal = await refusalOf(
+      resumeWorkerAgent(h.deps, request({ run: run({ sessionId: 's-other' as SessionId }) })),
+    )
 
     expect(refusal?.code).toBe('binding-mismatch')
     expect(refusal?.message).toContain('"s-other"')
@@ -339,9 +373,14 @@ describe('the resume entry’s source checks (A4 §F.1)', () => {
 
   test('refuses a grant whose plane is not the one the Run was admitted with', async () => {
     const h = harness()
-    const refusal = await refusalOf(resumeWorkerAgent(h.deps, request({
-      grant: grant({ capabilities: [{ capability: 'design-ball', tools: ['read', 'write'], skills: [] }] }),
-    })))
+    const refusal = await refusalOf(
+      resumeWorkerAgent(
+        h.deps,
+        request({
+          grant: grant({ capabilities: [{ capability: 'design-ball', tools: ['read', 'write'], skills: [] }] }),
+        }),
+      ),
+    )
 
     expect(refusal?.code).toBe('binding-mismatch')
     expect(refusal?.message).toContain('read, write')
@@ -364,9 +403,14 @@ describe('the resume entry’s source checks (A4 §F.1)', () => {
 
   test('refuses a granted MCP plane the Run never recorded', async () => {
     const h = harness()
-    const refusal = await refusalOf(resumeWorkerAgent(h.deps, request({
-      grant: grant({ mcpServers: [{ serverName: 'git', command: 'git-mcp', args: [], env: {}, cwd: '' }] }),
-    })))
+    const refusal = await refusalOf(
+      resumeWorkerAgent(
+        h.deps,
+        request({
+          grant: grant({ mcpServers: [{ serverName: 'git', command: 'git-mcp', args: [], env: {}, cwd: '' }] }),
+        }),
+      ),
+    )
 
     expect(refusal?.code).toBe('binding-mismatch')
     expect(refusal?.message).toContain('mcp:git')

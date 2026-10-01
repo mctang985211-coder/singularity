@@ -5,8 +5,10 @@ import { createServer } from '../../map/node_modules/vite/dist/node/index.js'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import { EnvStore } from '../../../env-builder/lib/index.js'
 import Graph from '../../graph/lib/index.js'
-import Layout, { DEFAULT_ROOT } from '../../layout/lib/index.js'
+import Layout, { DEFAULT_ROOT } from '../../graph/lib/layout.js'
 import Graphs from '../../graphs/lib/index.js'
+import { TaskService } from '../../task/lib/index.js'
+import { TaskRuntime } from '../../task-runtime/lib/index.js'
 import { HitlService } from '../../agent-singularity/lib/index.js'
 import UserQuestionService from '../../../../thirdparty/deepseek-harness/packages/interaction/user-questions/lib/index.js'
 import { apply as graphWeb } from '../../graph-web/lib/index.js'
@@ -54,6 +56,26 @@ ctx.provide('agentRuntime', {
   },
 })
 new Graphs(ctx)
+// graphs activation adopts each new root store through the task plane, so the fixture mounts it.
+ctx.provide('sessionQuery', {
+  readSurface: async sessionId => {
+    const found = sessions.get(sessionId)
+    if (found === undefined) throw new Error(`fixture: session "${sessionId}" has no log`)
+    const { events } = await found.handle.read()
+    return { capturedThroughSeq: events.at(-1)?.seq ?? null }
+  },
+  readSession: async sessionId => {
+    const found = sessions.get(sessionId)
+    if (found === undefined) throw new Error(`fixture: session "${sessionId}" has no log`)
+    const { events } = await found.handle.read()
+    return { session: { id: sessionId }, inheritedEventCount: 0, events }
+  },
+  readEvent: async () => {
+    throw new Error('fixture: reading a single session event is outside browser scenarios')
+  },
+})
+new TaskService(ctx)
+new TaskRuntime(ctx, { runBindingRoot: join(root, 'run-bindings') })
 ctx.provide('sessions', {})
 ctx.provide('webServer', {
   register: route => {
@@ -89,6 +111,8 @@ const server = await createServer({
         import.meta.dirname,
         '../../../../thirdparty/deepseek-harness/packages/api/gateway/src/client/index.ts',
       ),
+      // canvas-view's bundle requires react; the fixture serves the SPA's own copy.
+      react: resolve(import.meta.dirname, '../../map/node_modules/react'),
     },
   },
   server: {
@@ -105,10 +129,12 @@ const server = await createServer({
           const url = new URL(req.url, 'http://fixture')
           try {
             if (url.pathname === '/__fixture/sessions') {
+              // One `session/list` item per graph agent, in the Host row shape the
+              // client catalog consumes (agentAvailable included).
               const items = []
               for (const graph of await ctx.graphs.list()) {
                 for (const agent of (await ctx.graph.snapshotIn(graph.graphStoreId)).agents) {
-                  items.push({ sessionId: agent.id, updatedAt: 1, running: false, blank: true })
+                  items.push({ sessionId: agent.id, updatedAt: 1, running: false, blank: true, agentAvailable: true })
                 }
               }
               res.setHeader('content-type', 'application/json')

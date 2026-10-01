@@ -1,44 +1,13 @@
-/**
- * The one output bound this package has (A2 §D) and the vocabulary a bounded
- * read uses to say what it left out.
- *
- * The bound is **50 000 UTF-8 bytes for a single read** — the same model-facing
- * cap this deployment's own tool-result policy uses
- * (`@deepseek-ai/dsh-spill-policy`'s `maxInlineBytes: 50000`, mounted by the
- * base bundle at `packages/bundle/base/cordis.patch.yml`). Aligning with it is
- * the point: one Singularity read stays inside what the platform already treats
- * as inline content, so a read is never replaced by a spill preview, and a read
- * that asks for a whole record asks for exactly as much as the platform's own
- * tools may put in front of a model. The policy reserves its notice's byte cost
- * out of that budget before filling a preview; the session pages here do the
- * same for their closing lines.
- *
- * The *mechanics* of bounding a body are not this package's invention either.
- * Byte windows, the guarantee that a cut never splits a UTF-8 character, and the
- * wording of what was omitted come from `@deepseek-ai/dsh-output-retention`
- * (`TextRetainer`, `describeOmitted` through `formatRetentionNotice`) — the
- * library whose documented split is "the library owns the omission clause, the
- * tool supplies its own recovery guidance". What has no counterpart there, and
- * therefore lives here, is exactly two things: the **cursor** (`nextOffset`,
- * which lets a caller read on, and which the library deliberately does not
- * model) and the **per-line budget** (`OutputBudget`, which counts lines rather
- * than bytes because a page must never carry half a line).
- *
- * What the bound never does is truncate silently: a record read pages with an
- * explicit continuation offset; a core contract that cannot fit is refused by
- * name (`context-too-large`) rather than cut; a bounded list says in the
- * platform's own words how many entries it did not show, plus where to read
- * them.
- * @module @dangosys/dsh-singularity-context/limits
- */
+/** The one output bound (50 000 UTF-8 bytes per read) and the vocabulary of a bounded read. @module @dangosys/dsh-singularity-context/limits */
 
-import { TextRetainer, formatRetentionNotice, type Omitted, type RetentionNotice } from '@deepseek-ai/dsh-output-retention'
+import {
+  TextRetainer,
+  formatRetentionNotice,
+  type Omitted,
+  type RetentionNotice,
+} from '@deepseek-ai/dsh-output-retention'
 
-/**
- * The outer output bound of one context read, in UTF-8 bytes. Deliberately the
- * deployment's own inline cap rather than a tighter local choice: see the module
- * doc for the reference and for what stays outside the library.
- */
+/** The outer output bound of one context read, in UTF-8 bytes: the deployment's own inline cap. */
 export const CONTEXT_OUTPUT_LIMIT_BYTES = 50_000
 
 /** UTF-8 byte length of `text`. */
@@ -55,15 +24,7 @@ export interface Utf8Slice {
   readonly done: boolean
 }
 
-/**
- * The UTF-8 width of the character starting at UTF-16 index `index`.
- *
- * Widths are read off the code point, so an astral character (a surrogate pair,
- * one character in two code units) is four bytes, and a lone surrogate — text a
- * valid log cannot produce, but a string can hold — is counted as the three bytes
- * the decoder writes for it. `utf8Bytes` on the same character agrees, which is
- * what lets the retained byte count become the cursor below.
- */
+/** The UTF-8 width of the character starting at UTF-16 index `index`, read off its code point. */
 function utf8WidthAt(text: string, index: number): number {
   const code = text.codePointAt(index) as number
   if (code <= 0x7f) return 1
@@ -77,31 +38,12 @@ function codeUnitsAt(text: string, index: number): number {
   return (text.codePointAt(index) as number) > 0xffff ? 2 : 1
 }
 
-/**
- * Take at most `maxBytes` bytes starting at `offsetBytes` from `text`, never
- * splitting a UTF-8 character, and report where the next page starts.
- *
- * The window itself is `TextRetainer({kind: 'head'})` from
- * `@deepseek-ai/dsh-output-retention`: it keeps the first `maxBytes` bytes, trims
- * a partial character at that cut, and reports the exact omitted byte count, so
- * "where did this page end" is read off the library rather than recomputed here.
- * The two things wrapped around it are the ones the library does not own: the
- * cursor (`nextOffset`, derived from the bytes actually retained) and the floor
- * that keeps a caller moving — an offset inside a character starts at the next
- * character, and a page always carries at least that one character, so feeding
- * `nextOffset` back never loops on the same offset.
- *
- * Both walks below advance by **code point**, and the string is cut by **code
- * unit**: a surrogate pair is one character in two units, so counting characters
- * into `String#slice` would start every page after an astral character one unit
- * early — a lone surrogate in the page and a cursor inside a character.
- */
+/** Take at most `maxBytes` bytes from `offsetBytes`, never splitting a character, and report the next offset. */
 export function sliceUtf8(text: string, offsetBytes: number, maxBytes: number): Utf8Slice {
   const start = Math.max(0, Math.trunc(offsetBytes))
   const budget = Math.max(0, Math.trunc(maxBytes))
   // Walk to the first character at or after `start`: `position` is its byte
-  // offset (where the page really begins) and `index` its UTF-16 index (where the
-  // string is cut).
+  // offset (where the page really begins) and `index` its UTF-16 index.
   let position = 0
   let index = 0
   while (index < text.length && position < start) {
@@ -121,16 +63,7 @@ export function sliceUtf8(text: string, offsetBytes: number, maxBytes: number): 
   return { text: retained.text, nextOffset: position + kept, done: !retained.truncated }
 }
 
-/**
- * A byte-metered line list: every line either fits whole — the newline included
- * — or is refused, so no line a caller sees is a cut one. `remaining` is what a
- * caller that wants to bound a *part* of its output (a reference list, say) has
- * left to spend.
- *
- * This is the part of the bounding story `@deepseek-ai/dsh-output-retention`
- * does not model: the library bounds a *byte* window or an *item* count, while a
- * rendered page has to keep whole lines together, so its accounting is by line.
- */
+/** A byte-metered line list: every line fits whole — newline included — or is refused, never cut. */
 export class OutputBudget {
   private readonly lines: string[] = []
   private used = 0
@@ -183,14 +116,7 @@ export interface OmissionReport {
   readonly recovery: string
 }
 
-/**
- * One bounded list's omission line: the platform's standardized clause followed
- * by this read's recovery sentence. `@deepseek-ai/dsh-output-retention`
- * documents that split — the library owns the wording of *what* was omitted,
- * the tool owns *how to read on* ("page through them with the status view",
- * "read them by id") — so this line is composed through
- * {@link formatRetentionNotice} rather than spelled out here.
- */
+/** One bounded list's omission line: the platform's clause plus this read's recovery sentence. */
 export function omissionLine(report: OmissionReport): string {
   const omitted: Omitted = { kind: 'exact', count: report.omitted }
   return formatRetentionNotice(
@@ -204,4 +130,68 @@ export function omissionLine(report: OmissionReport): string {
     },
     () => report.recovery,
   )
+}
+
+/** One budgeted list: its units, the lines they occupy, and what is owed around them. */
+export interface BudgetedList<T> {
+  readonly units: readonly T[]
+  readonly lines: (unit: T) => readonly string[]
+  /** Lines laid out before the units: a heading, a count, a blank separator. */
+  readonly header?: readonly string[]
+  /** Room kept whole for what the caller renders after this list. */
+  readonly reserve?: number
+  /** The lines owed after the units, given how many were shown: a clause, guidance, a footer. */
+  readonly tail?: (shown: number) => readonly string[]
+}
+
+/** The bytes `lines` occupy when appended to a budget that is `empty` (`lines.length` separators, one fewer when empty). */
+function linesWidth(lines: readonly string[], empty: boolean): number {
+  if (lines.length === 0) return 0
+  const body = lines.reduce((total, line) => total + utf8Bytes(line), 0)
+  return body + lines.length - (empty ? 1 : 0)
+}
+
+/** Lay out whole units until the budget (minus `reserve`) runs out, then the tail, dropping units until it fits. */
+export function budgetList<T>(budget: OutputBudget, list: BudgetedList<T>): readonly T[] | undefined {
+  if (budget.addAll(list.header ?? []) > 0) return undefined
+  const rendered = list.units.map(unit => list.lines(unit))
+  const widths = rendered.map((lines, index) => linesWidth(lines, budget.bytes === 0 && index === 0))
+  const room = budget.remaining - (list.reserve ?? 0)
+  let shown = 0
+  let used = 0
+  while (shown < widths.length && used + (widths[shown] as number) <= room) {
+    used += widths[shown] as number
+    shown += 1
+  }
+  if (list.tail !== undefined) {
+    for (;;) {
+      const tail = list.tail(shown)
+      if (linesWidth(tail, budget.bytes === 0 && shown === 0) <= room - used) {
+        for (let index = 0; index < shown; index += 1) budget.addAll(rendered[index] as string[])
+        budget.addAll(tail)
+        return list.units.slice(0, shown)
+      }
+      if (shown === 0) return undefined
+      shown -= 1
+      used -= widths[shown] as number
+    }
+  }
+  for (let index = 0; index < shown; index += 1) budget.addAll(rendered[index] as string[])
+  return list.units.slice(0, shown)
+}
+
+/** One item list's omission clause: the platform's notice plus this read's recovery sentence. */
+export function itemsClause(
+  scope: string,
+  recovery: string,
+  limit: number,
+  omitted: number,
+  kept = limit - omitted,
+): string {
+  return omissionLine({ scope, unit: 'items', kept, limit, omitted, recovery })
+}
+
+/** The least room one item list occupies whole: its heading line and its widest omission clause. */
+export function itemsFloor(title: string, scope: string, recovery: string, count: number): number {
+  return utf8Bytes(`- ${title}:`) + 1 + utf8Bytes(itemsClause(scope, recovery, count, count, 0)) + 1
 }

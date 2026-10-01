@@ -21,12 +21,15 @@ interface Registered {
   path?: string
 }
 
-function harness(surface: Surface, options: { skills?: 'discovery' | 'absent'; discovered?: Record<string, string> } = {}) {
+function harness(
+  surface: Surface,
+  options: { skills?: 'discovery' | 'absent'; discovered?: Record<string, string> } = {},
+) {
   const registered: Registered[] = []
   const schemas = (scope?: unknown) =>
     scope === undefined
-      // The global view also carries the reserved transport, as the real registry does.
-      ? [...surface.global, 'run_code'].map(name => ({ name, description: '', parameters: {} }))
+      ? // The global view also carries the reserved transport, as the real registry does.
+        [...surface.global, 'run_code'].map(name => ({ name, description: '', parameters: {} }))
       : [...surface.global, ...surface.preset, 'run_code'].map(name => ({ name, description: '', parameters: {} }))
   const restrict = vi.fn()
   const mounted: { name: string; config: Record<string, unknown> }[] = []
@@ -37,7 +40,13 @@ function harness(surface: Surface, options: { skills?: 'discovery' | 'absent'; d
           get: vi.fn(async (name: string) =>
             options.discovered?.[name] === undefined
               ? undefined
-              : { name, description: 'discovered', content: options.discovered[name]!, source: 'user-agents', path: `/discovered/${name}/SKILL.md` },
+              : {
+                  name,
+                  description: 'discovered',
+                  content: options.discovered[name]!,
+                  source: 'user-agents',
+                  path: `/discovered/${name}/SKILL.md`,
+                },
           ),
           register: vi.fn((skill: Registered) => {
             registered.push(skill)
@@ -79,10 +88,14 @@ const DESIGN_BALL = {
 describe('resolveGrant', () => {
   test('allows the capability tools plus the baseline the composition offers, sorted', () => {
     const h = harness({ global: ['task_read', 'graph_spawn', 'read', 'bash', 'grep', 'skill'], preset: [] })
-    const resolved = resolveGrant(h.ctx, worker(), grant({
-      capabilities: [DESIGN_BALL],
-      baseline: ['read', 'bash', 'grep', 'skill', 'task_decompose'],
-    }))
+    const resolved = resolveGrant(
+      h.ctx,
+      worker(),
+      grant({
+        capabilities: [DESIGN_BALL],
+        baseline: ['read', 'bash', 'grep', 'skill', 'task_decompose'],
+      }),
+    )
 
     expect(resolved.allow).toEqual(['bash', 'grep', 'read', 'skill'])
     expect(resolved.baselineUnavailable).toEqual(['task_decompose'])
@@ -91,10 +104,14 @@ describe('resolveGrant', () => {
   test('baseline names the composition never mounted are dropped, not demanded', () => {
     // The `bb-verify` node mounts no shell: nothing to revoke, so nothing to reject.
     const h = harness({ global: ['session_event_read'], preset: ['verify_console'] })
-    const resolved = resolveGrant(h.ctx, worker(), grant({
-      capabilities: [{ capability: 'verify-ball-functional', tools: [], skills: ['verify'] }],
-      baseline: ['bash', 'skill', 'session_event_read'],
-    }))
+    const resolved = resolveGrant(
+      h.ctx,
+      worker(),
+      grant({
+        capabilities: [{ capability: 'verify-ball-functional', tools: [], skills: ['verify'] }],
+        baseline: ['bash', 'skill', 'session_event_read'],
+      }),
+    )
 
     expect(resolved.allow).toEqual(['session_event_read'])
     expect(resolved.baselineUnavailable).toEqual(['bash', 'skill'])
@@ -117,19 +134,33 @@ describe('resolveGrant', () => {
 
   test('a capability tool the worker cannot see rejects the grant, naming the capability and the surface', () => {
     const h = harness({ global: ['read'], preset: [] })
-    expect(() => resolveGrant(h.ctx, worker(), grant({
-      capabilities: [{ capability: 'design-ball', tools: ['read', 'write'], skills: [] }],
-    }))).toThrow('agent-runtime: capability "design-ball" grants unavailable tool "write"; this worker\'s visible tools: read')
+    expect(() =>
+      resolveGrant(
+        h.ctx,
+        worker(),
+        grant({
+          capabilities: [{ capability: 'design-ball', tools: ['read', 'write'], skills: [] }],
+        }),
+      ),
+    ).toThrow(
+      'agent-runtime: capability "design-ball" grants unavailable tool "write"; this worker\'s visible tools: read',
+    )
   })
 
   test('every missing capability is named in one rejection', () => {
     const h = harness({ global: ['read'], preset: [] })
-    expect(() => resolveGrant(h.ctx, worker(), grant({
-      capabilities: [
-        { capability: 'a', tools: ['write'], skills: [] },
-        { capability: 'b', tools: ['edit'], skills: [] },
-      ],
-    }))).toThrow('agent-runtime: capabilities "a" grants unavailable tool "write"; "b" grants unavailable tool "edit"')
+    expect(() =>
+      resolveGrant(
+        h.ctx,
+        worker(),
+        grant({
+          capabilities: [
+            { capability: 'a', tools: ['write'], skills: [] },
+            { capability: 'b', tools: ['edit'], skills: [] },
+          ],
+        }),
+      ),
+    ).toThrow('agent-runtime: capabilities "a" grants unavailable tool "write"; "b" grants unavailable tool "edit"')
   })
 })
 
@@ -153,25 +184,35 @@ describe('applyWorkerGrant', () => {
 
   test('a granted skill the deployment can discover is pinned into the worker layer', async () => {
     const h = harness({ global: [], preset: [] }, { discovered: { verify: 'the verify body' } })
-    await applyWorkerGrant(h.ctx, worker(), grant({
-      capabilities: [{ capability: 'verify-ball-functional', tools: [], skills: ['verify'] }],
-    }))
+    await applyWorkerGrant(
+      h.ctx,
+      worker(),
+      grant({
+        capabilities: [{ capability: 'verify-ball-functional', tools: [], skills: ['verify'] }],
+      }),
+    )
 
-    expect(h.registered).toEqual([{
-      name: 'verify',
-      description: 'discovered',
-      content: 'the verify body',
-      source: 'runtime',
-      path: '/discovered/verify/SKILL.md',
-    }])
+    expect(h.registered).toEqual([
+      {
+        name: 'verify',
+        description: 'discovered',
+        content: 'the verify body',
+        source: 'runtime',
+        path: '/discovered/verify/SKILL.md',
+      },
+    ])
     expect(h.skills!.get).toHaveBeenCalledWith('verify', { scope: expect.objectContaining({ id: 'w1' }), cwd: '/work' })
   })
 
   test('a granted skill discovery cannot see is read from its SKILL.md', async () => {
     const h = harness({ global: [], preset: [] }, { discovered: {} })
-    await applyWorkerGrant(h.ctx, worker(root), grant({
-      capabilities: [{ capability: 'design-ball', tools: [], skills: ['ball-align'] }],
-    }))
+    await applyWorkerGrant(
+      h.ctx,
+      worker(root),
+      grant({
+        capabilities: [{ capability: 'design-ball', tools: [], skills: ['ball-align'] }],
+      }),
+    )
 
     expect(h.registered).toHaveLength(1)
     expect(h.registered[0]!.name).toBe('ball-align')
@@ -181,23 +222,45 @@ describe('applyWorkerGrant', () => {
 
   test('a granted skill with no SKILL.md anywhere rejects the spawn, naming the capability and the roots', async () => {
     const h = harness({ global: [], preset: [] }, { discovered: {} })
-    await expect(applyWorkerGrant(h.ctx, worker(root), grant({
-      capabilities: [{ capability: 'design-ball', tools: [], skills: ['ghost-skill'] }],
-    }))).rejects.toThrow(/capability "design-ball" grants skill "ghost-skill" but no SKILL\.md for it is reachable; searched /)
+    await expect(
+      applyWorkerGrant(
+        h.ctx,
+        worker(root),
+        grant({
+          capabilities: [{ capability: 'design-ball', tools: [], skills: ['ghost-skill'] }],
+        }),
+      ),
+    ).rejects.toThrow(
+      /capability "design-ball" grants skill "ghost-skill" but no SKILL\.md for it is reachable; searched /,
+    )
   })
 
   test('a deployment with no skill registry rejects a skill grant instead of silently dropping it', async () => {
     const h = harness({ global: [], preset: [] }, { skills: 'absent' })
-    await expect(applyWorkerGrant(h.ctx, worker(root), grant({
-      capabilities: [{ capability: 'design-ball', tools: [], skills: ['ball-align'] }],
-    }))).rejects.toThrow('capabilities [design-ball] grant skills [ball-align] but the deployment provides no skill registry (ctx.skills)')
+    await expect(
+      applyWorkerGrant(
+        h.ctx,
+        worker(root),
+        grant({
+          capabilities: [{ capability: 'design-ball', tools: [], skills: ['ball-align'] }],
+        }),
+      ),
+    ).rejects.toThrow(
+      'capabilities [design-ball] grant skills [ball-align] but the deployment provides no skill registry (ctx.skills)',
+    )
   })
 
   test('a skill file declaring another name is rejected', async () => {
     const h = harness({ global: [], preset: [] }, { discovered: {} })
-    await expect(applyWorkerGrant(h.ctx, worker(root), grant({
-      capabilities: [{ capability: 'design-ball', tools: [], skills: ['mismatch'] }],
-    }))).rejects.toThrow(/declares name "someone-else" but the capability grants "mismatch"/)
+    await expect(
+      applyWorkerGrant(
+        h.ctx,
+        worker(root),
+        grant({
+          capabilities: [{ capability: 'design-ball', tools: [], skills: ['mismatch'] }],
+        }),
+      ),
+    ).rejects.toThrow(/declares name "someone-else" but the capability grants "mismatch"/)
   })
 })
 
@@ -228,25 +291,34 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true })
 })
 
-
 describe('applyWorkerGrant skill overlay (replay extraSkillRoots)', () => {
   /** One overlay root holding a `verify` candidate skill and an ungranted `overlay-only` skill. */
   function overlayRoot() {
     const dir = mkdtempSync(join(tmpdir(), 'skill-overlay-'))
     mkdirSync(join(dir, 'verify'), { recursive: true })
-    writeFileSync(join(dir, 'verify', 'SKILL.md'), '---\nname: verify\ndescription: candidate verify\n---\n# Candidate\noverlay body\n')
+    writeFileSync(
+      join(dir, 'verify', 'SKILL.md'),
+      '---\nname: verify\ndescription: candidate verify\n---\n# Candidate\noverlay body\n',
+    )
     mkdirSync(join(dir, 'overlay-only'), { recursive: true })
-    writeFileSync(join(dir, 'overlay-only', 'SKILL.md'), '---\nname: overlay-only\ndescription: only in the overlay\n---\nbody\n')
+    writeFileSync(
+      join(dir, 'overlay-only', 'SKILL.md'),
+      '---\nname: overlay-only\ndescription: only in the overlay\n---\nbody\n',
+    )
     return dir
   }
 
   test('an overlay skill shadows the same-name granted skill and covers skills no capability grants', async () => {
     const dir = overlayRoot()
     const h = harness({ global: [], preset: [] }, { discovered: { verify: 'production verify body' } })
-    await applyWorkerGrant(h.ctx, worker(), grant({
-      capabilities: [{ capability: 'verify-ball-functional', tools: [], skills: ['verify'] }],
-      skillRoots: [dir],
-    }))
+    await applyWorkerGrant(
+      h.ctx,
+      worker(),
+      grant({
+        capabilities: [{ capability: 'verify-ball-functional', tools: [], skills: ['verify'] }],
+        skillRoots: [dir],
+      }),
+    )
 
     const names = h.registered.map(skill => skill.name)
     expect(names).toEqual(['overlay-only', 'verify'])
@@ -260,10 +332,14 @@ describe('applyWorkerGrant skill overlay (replay extraSkillRoots)', () => {
   test('a granted skill absent from the overlay roots still resolves through production discovery', async () => {
     const dir = overlayRoot()
     const h = harness({ global: [], preset: [] }, { discovered: { other: 'production other body' } })
-    await applyWorkerGrant(h.ctx, worker(), grant({
-      capabilities: [{ capability: 'x', tools: [], skills: ['other'] }],
-      skillRoots: [dir],
-    }))
+    await applyWorkerGrant(
+      h.ctx,
+      worker(),
+      grant({
+        capabilities: [{ capability: 'x', tools: [], skills: ['other'] }],
+        skillRoots: [dir],
+      }),
+    )
 
     const names = h.registered.map(skill => skill.name).sort()
     expect(names).toEqual(['other', 'overlay-only', 'verify'])
@@ -273,23 +349,29 @@ describe('applyWorkerGrant skill overlay (replay extraSkillRoots)', () => {
 
   test('an unreadable overlay root fails the spawn with the root named', async () => {
     const h = harness({ global: [], preset: [] }, { discovered: {} })
-    await expect(applyWorkerGrant(h.ctx, worker(), grant({ skillRoots: [join(root, 'no-such-dir')] })))
-      .rejects.toThrow(/skill overlay root ".*no-such-dir" is not readable/)
+    await expect(applyWorkerGrant(h.ctx, worker(), grant({ skillRoots: [join(root, 'no-such-dir')] }))).rejects.toThrow(
+      /skill overlay root ".*no-such-dir" is not readable/,
+    )
   })
 
   test('an overlay on a deployment with no skill registry fails instead of being dropped', async () => {
     const dir = overlayRoot()
     const h = harness({ global: [], preset: [] }, { skills: 'absent' })
-    await expect(applyWorkerGrant(h.ctx, worker(), grant({ skillRoots: [dir] })))
-      .rejects.toThrow(/skill overlay roots .* no skill registry/)
+    await expect(applyWorkerGrant(h.ctx, worker(), grant({ skillRoots: [dir] }))).rejects.toThrow(
+      /skill overlay roots .* no skill registry/,
+    )
     rmSync(dir, { recursive: true, force: true })
   })
 
   test('no skillRoots keeps the production resolution untouched', async () => {
     const h = harness({ global: [], preset: [] }, { discovered: { verify: 'production verify body' } })
-    await applyWorkerGrant(h.ctx, worker(), grant({
-      capabilities: [{ capability: 'verify-ball-functional', tools: [], skills: ['verify'] }],
-    }))
+    await applyWorkerGrant(
+      h.ctx,
+      worker(),
+      grant({
+        capabilities: [{ capability: 'verify-ball-functional', tools: [], skills: ['verify'] }],
+      }),
+    )
     expect(h.registered.map(skill => skill.name)).toEqual(['verify'])
     expect(h.registered[0]!.content).toBe('production verify body')
   })
@@ -306,23 +388,29 @@ describe('applyWorkerGrant MCP server mounts', () => {
 
   test('each granted server mounts as one mcp-client instance with failOnStartupError, after the restrict', async () => {
     const h = harness({ global: ['read'], preset: [] })
-    await applyWorkerGrant(h.ctx, worker(), grant({
-      capabilities: [{ capability: 'check-ball-registration', tools: ['read'], skills: [] }],
-      mcpServers: [BB_DEV],
-    }))
+    await applyWorkerGrant(
+      h.ctx,
+      worker(),
+      grant({
+        capabilities: [{ capability: 'check-ball-registration', tools: ['read'], skills: [] }],
+        mcpServers: [BB_DEV],
+      }),
+    )
 
-    expect(h.mounted).toEqual([{
-      name: 'mcp-client',
-      config: {
-        transport: 'stdio',
-        serverName: 'bbdev',
-        command: BB_DEV.command,
-        args: [],
-        env: {},
-        cwd: BB_DEV.cwd,
-        failOnStartupError: true,
+    expect(h.mounted).toEqual([
+      {
+        name: 'mcp-client',
+        config: {
+          transport: 'stdio',
+          serverName: 'bbdev',
+          command: BB_DEV.command,
+          args: [],
+          env: {},
+          cwd: BB_DEV.cwd,
+          failOnStartupError: true,
+        },
       },
-    }])
+    ])
     // The mount runs after the allow-list is computed: own-layer mcp__* names
     // must never reach tools.restrict, which only names the inherited surface.
     expect(h.restrict.mock.invocationCallOrder[0]!).toBeLessThan(h.plugin.mock.invocationCallOrder[0]!)
@@ -338,7 +426,11 @@ describe('applyWorkerGrant MCP server mounts', () => {
 
   test('a grant without mcpServers mounts nothing', async () => {
     const h = harness({ global: ['read'], preset: [] })
-    await applyWorkerGrant(h.ctx, worker(), grant({ capabilities: [{ capability: 'design-ball', tools: ['read'], skills: [] }] }))
+    await applyWorkerGrant(
+      h.ctx,
+      worker(),
+      grant({ capabilities: [{ capability: 'design-ball', tools: ['read'], skills: [] }] }),
+    )
     expect(h.mounted).toEqual([])
   })
 })

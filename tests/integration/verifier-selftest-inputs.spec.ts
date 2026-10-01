@@ -330,7 +330,6 @@ function shellJudge(): Verifier {
   return {
     id,
     version: '2',
-    owner: 'integration-tests',
     selftest: {
       samples: [
         { role: 'positive', name: 'a command that exits zero', criterion: sample('judge-selftest-pass', 'true'), expect: 'pass' },

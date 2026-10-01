@@ -34,13 +34,15 @@ interface SessionStub {
   readSessionError?: boolean
 }
 
-function harness(options: {
-  config?: Partial<Config>
-  verifier?: 'pass' | 'by-objective'
-  spawnError?: string
-  logTail?: string
-  session?: SessionStub
-} = {}) {
+function harness(
+  options: {
+    config?: Partial<Config>
+    verifier?: 'pass' | 'by-objective'
+    spawnError?: string
+    logTail?: string
+    session?: SessionStub
+  } = {},
+) {
   const sessions = new Map<string, StoredSession>()
   // The person's request, on the root session's own durable log: what a root
   // contract's origin is read from (A0 §1.10). The rule is the *existence* of a
@@ -55,7 +57,9 @@ function harness(options: {
       sessions.set(header.id, stored)
       return {
         read: async () => ({ events: stored.events }),
-        append: async (events: SessionEvent[]) => { stored.events.push(...events) },
+        append: async (events: SessionEvent[]) => {
+          stored.events.push(...events)
+        },
         flush: async () => {},
         close: async () => {},
       }
@@ -65,7 +69,9 @@ function harness(options: {
       if (stored === undefined) throw new Error('missing session ' + id)
       return {
         read: async () => ({ events: stored.events }),
-        append: async (events: SessionEvent[]) => { stored.events.push(...events) },
+        append: async (events: SessionEvent[]) => {
+          stored.events.push(...events)
+        },
         flush: async () => {},
         close: async () => {},
       }
@@ -77,39 +83,47 @@ function harness(options: {
   let idleBehavior: ((sessionId: string) => Promise<void>) | undefined
   const parentAgent = { id: ROOT_SESSION }
   const agentRuntime = {
-    spawn: vi.fn(async (_parent: unknown, request: {
-      sessionId: string
-      prompt?: Array<{ type: 'text'; text: string }>
-      taskWorker?: boolean
-      agentPreset?: string
-    }) => {
-      if (options.spawnError !== undefined) throw new Error(options.spawnError)
-      spawned.push({
-        sessionId: request.sessionId,
-        name: request.name,
-        ...(request.prompt === undefined ? {} : { prompt: request.prompt.map(block => block.text).join('\n') }),
-        // A delegated child is spawned as a task worker (A2): its contract and
-        // state are the context assembly's, so the request carries no prompt of
-        // its own and no contract text.
-        ...(request.taskWorker !== undefined ? { taskWorker: request.taskWorker } : {}),
-        ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
-      })
-      // `cancel` converges the agent to idle, as the real loop's does (A3 §3.7):
-      // the wait that saw the abort then reports it.
-      let releaseIdle: (() => void) | undefined
-      const agent = {
-        id: request.sessionId,
-        cancel: vi.fn(() => {
-          cancelled.push(request.sessionId)
-          releaseIdle?.()
-        }),
-        whenIdle: vi.fn(() => new Promise<void>((resolve, reject) => {
-          releaseIdle = resolve
-          void (idleBehavior ?? defaultIdle)(request.sessionId).then(resolve, reject)
-        })),
-      }
-      return { agent, dispose: vi.fn(async () => {}) }
-    }),
+    spawn: vi.fn(
+      async (
+        _parent: unknown,
+        request: {
+          sessionId: string
+          prompt?: Array<{ type: 'text'; text: string }>
+          taskWorker?: boolean
+          agentPreset?: string
+        },
+      ) => {
+        if (options.spawnError !== undefined) throw new Error(options.spawnError)
+        spawned.push({
+          sessionId: request.sessionId,
+          name: request.name,
+          ...(request.prompt === undefined ? {} : { prompt: request.prompt.map(block => block.text).join('\n') }),
+          // A delegated child is spawned as a task worker (A2): its contract and
+          // state are the context assembly's, so the request carries no prompt of
+          // its own and no contract text.
+          ...(request.taskWorker !== undefined ? { taskWorker: request.taskWorker } : {}),
+          ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
+        })
+        // `cancel` converges the agent to idle, as the real loop's does (A3 §3.7):
+        // the wait that saw the abort then reports it.
+        let releaseIdle: (() => void) | undefined
+        const agent = {
+          id: request.sessionId,
+          cancel: vi.fn(() => {
+            cancelled.push(request.sessionId)
+            releaseIdle?.()
+          }),
+          whenIdle: vi.fn(
+            () =>
+              new Promise<void>((resolve, reject) => {
+                releaseIdle = resolve
+                void (idleBehavior ?? defaultIdle)(request.sessionId).then(resolve, reject)
+              }),
+          ),
+        }
+        return { agent, dispose: vi.fn(async () => {}) }
+      },
+    ),
   }
   const graphs = {
     graphForSession: vi.fn(async (_sessionId: string) => ({
@@ -137,7 +151,11 @@ function harness(options: {
         verifierId: 'fake-verifier',
         ...(criterion.command === undefined
           ? {}
-          : { command: criterion.command, exitCode: verdict === 'pass' ? 0 : 1, logRef: `${storeId}/${runId}/${criterion.criterionId}.log` }),
+          : {
+              command: criterion.command,
+              exitCode: verdict === 'pass' ? 0 : 1,
+              logRef: `${storeId}/${runId}/${criterion.criterionId}.log`,
+            }),
       }))
       const bundle: EvidenceBundle = {
         evidenceId: `e-${runId}`,
@@ -217,7 +235,9 @@ function harness(options: {
     cancelled,
     graphs,
     observe: { readSession, snapshot },
-    setIdleBehavior: (behavior: (sessionId: string) => Promise<void>) => { idleBehavior = behavior },
+    setIdleBehavior: (behavior: (sessionId: string) => Promise<void>) => {
+      idleBehavior = behavior
+    },
   }
 }
 
@@ -304,14 +324,18 @@ async function settleRunNested(
   await task.markRunStatusIn(storeId, taskId, runId, 'verifying', actor)
   await task.recordEvidenceIn(storeId, bundle, 'nested-verifier')
   await task.markRunStatusIn(storeId, taskId, runId, 'verified', actor)
-  await task.recordReviewIn(storeId, {
-    taskId,
-    runId,
-    sessionId: actor,
-    outcome: 'verified',
-    evidenceRefs: [evidenceId],
-    anomalies: [],
-  }, actor)
+  await task.recordReviewIn(
+    storeId,
+    {
+      taskId,
+      runId,
+      sessionId: actor,
+      outcome: 'verified',
+      evidenceRefs: [evidenceId],
+      anomalies: [],
+    },
+    actor,
+  )
   return evidenceId
 }
 
@@ -340,11 +364,7 @@ describe('runChildrenCascade review records', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [
-        childSpec('fail-me now'),
-        childSpec('downstream', { dependsOn: [0] }),
-        childSpec('independent'),
-      ],
+      children: [childSpec('fail-me now'), childSpec('downstream', { dependsOn: [0] }), childSpec('independent')],
     })
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked', 'verified'])
     expect(await submitParentResult(h)).toBe('verified')
@@ -360,16 +380,18 @@ describe('runChildrenCascade review records', () => {
     expect(failed.sessionId).toBe(h.spawned[0]!.sessionId)
     expect(failed.localizedCause).toBe('mandatory criteria not satisfied: ac1-1 fail')
     expect(failed.evidenceRefs).toEqual([outcomes[0]!.evidenceId])
-    expect(failed.criteria).toEqual([{
-      criterionId: 'ac1-1',
-      verdict: 'fail',
-      // The deciding judge rides along since S1-V slice 2; the rest of the
-      // record is what it always was.
-      verifierId: 'fake-verifier',
-      command: 'true',
-      exitCode: 1,
-      logRef: `${STORE}/${outcomes[0]!.runId}/ac1-1.log`,
-    }])
+    expect(failed.criteria).toEqual([
+      {
+        criterionId: 'ac1-1',
+        verdict: 'fail',
+        // The deciding judge rides along since S1-V slice 2; the rest of the
+        // record is what it always was.
+        verifierId: 'fake-verifier',
+        command: 'true',
+        exitCode: 1,
+        logRef: `${STORE}/${outcomes[0]!.runId}/ac1-1.log`,
+      },
+    ])
     expect(failed.logTail).toBe(`tail of ${STORE}/${outcomes[0]!.runId}/ac1-1.log`)
     expect(failed.durationMs).toBeGreaterThanOrEqual(0)
 
@@ -386,14 +408,16 @@ describe('runChildrenCascade review records', () => {
     expect(verifiedChild.outcome).toBe('verified')
     expect(verifiedChild.localizedCause).toBeUndefined()
     expect(verifiedChild.evidenceRefs).toEqual([outcomes[2]!.evidenceId])
-    expect(verifiedChild.criteria).toEqual([{
-      criterionId: 'ac3-1',
-      verdict: 'pass',
-      verifierId: 'fake-verifier',
-      command: 'true',
-      exitCode: 0,
-      logRef: `${STORE}/${outcomes[2]!.runId}/ac3-1.log`,
-    }])
+    expect(verifiedChild.criteria).toEqual([
+      {
+        criterionId: 'ac3-1',
+        verdict: 'pass',
+        verifierId: 'fake-verifier',
+        command: 'true',
+        exitCode: 0,
+        logRef: `${STORE}/${outcomes[2]!.runId}/ac3-1.log`,
+      },
+    ])
     expect(verifiedChild.logTail).toBeUndefined()
     expect(verifiedChild.durationMs).toBeGreaterThanOrEqual(0)
 
@@ -404,14 +428,16 @@ describe('runChildrenCascade review records', () => {
     // The root's own criteria are the ones its contract carried (A0 §1.2): the
     // intake no longer expands a fixed composite spec, so what a root review
     // records is the goal's own criterion, not a conjunction standing in for it.
-    expect(root.criteria).toEqual([{
-      criterionId: 'root-ship',
-      verdict: 'pass',
-      verifierId: 'fake-verifier',
-      command: 'true',
-      exitCode: 0,
-      logRef: `${STORE}/${rootRunId}/root-ship.log`,
-    }])
+    expect(root.criteria).toEqual([
+      {
+        criterionId: 'root-ship',
+        verdict: 'pass',
+        verifierId: 'fake-verifier',
+        command: 'true',
+        exitCode: 0,
+        logRef: `${STORE}/${rootRunId}/root-ship.log`,
+      },
+    ])
   })
 
   test('a cancelled run leaves a review without a cause; the siblings it never started leave one blocked', async () => {
@@ -448,14 +474,11 @@ describe('runChildrenCascade review records', () => {
   })
 
   test('a spawn refusal still settles the run with exactly one review carrying the spawn cause', async () => {
-    const h = harness({ spawnError: 'agent-presets: preset "default" not found (available: standard)' })
+    const h = harness({ spawnError: 'Unknown agent preset: default' })
     const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [
-        childSpec('unlucky child'),
-        childSpec('downstream', { dependsOn: [0] }),
-      ],
+      children: [childSpec('unlucky child'), childSpec('downstream', { dependsOn: [0] })],
     })
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked'])
     expect(await submitParentResult(h)).toBe('verified')
@@ -466,7 +489,7 @@ describe('runChildrenCascade review records', () => {
     expect(snapshot.reviews).toHaveLength(3)
     const failed = snapshot.reviews.find(item => item.runId === outcomes[0]!.runId)!
     expect(failed.outcome).toBe('failed')
-    expect(failed.localizedCause).toBe('spawn failed: agent-presets: preset "default" not found (available: standard)')
+    expect(failed.localizedCause).toBe('spawn failed: Unknown agent preset: default')
     expect(failed.evidenceRefs).toEqual([])
     expect(failed.sessionId).toBe((await h.task.runIn(STORE, outcomes[0]!.runId!)).sessionId)
     // the verifier never ran, so there are no criteria and no log tail — only the duration
@@ -485,10 +508,7 @@ describe('runChildrenCascade review records', () => {
 
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [
-        childSpec('splittable child', { decomposable: true }),
-        childSpec('downstream', { dependsOn: [0] }),
-      ],
+      children: [childSpec('splittable child', { decomposable: true }), childSpec('downstream', { dependsOn: [0] })],
     })
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
     expect(await submitParentResult(h)).toBe('verified')
@@ -537,7 +557,11 @@ describe('review dimensions and metrics (P4)', () => {
     const blocked = snapshot.reviews.find(item => item.taskId === outcomes[1]!.taskId)!
     expect(blocked.outcome).toBe('blocked')
     expect(blocked.metrics).toBeUndefined()
-    expect(blocked.dimensions?.outcomeCorrectness).toEqual({ outcome: 'blocked', criteriaCount: 0, unmetCriterionIds: [] })
+    expect(blocked.dimensions?.outcomeCorrectness).toEqual({
+      outcome: 'blocked',
+      criteriaCount: 0,
+      unmetCriterionIds: [],
+    })
   })
 
   test('a session observation fills the token, tool, skill and intervention facts with observed numbers', async () => {
@@ -548,13 +572,17 @@ describe('review dimensions and metrics (P4)', () => {
         tokens: { uncachedInputTokens: 1000, outputTokens: 200, cacheReadTokens: 50, cacheWriteTokens: 10 },
         events: [
           sessionEvent('tool/call', { turn: 1, step: 1, callId: 'c1', name: 'read', arguments: '{}' }, 0),
-          sessionEvent('tool/call', { turn: 1, step: 1, callId: 'c2', name: 'skill', arguments: '{"name":"ball-align"}' }, 1),
+          sessionEvent(
+            'tool/call',
+            { turn: 1, step: 1, callId: 'c2', name: 'skill', arguments: '{"name":"ball-align"}' },
+            1,
+          ),
           sessionEvent('tool/call', { turn: 1, step: 1, callId: 'c3', name: 'ask_user_question', arguments: '{}' }, 2),
           sessionEvent('tool/call', { turn: 1, step: 1, callId: 'c4', name: 'web_search', arguments: '{}' }, 3),
           sessionEvent('tool/call', { turn: 1, step: 1, callId: 'c9', name: 'hitl_approve', arguments: '{}' }, 4),
           sessionEvent('approval/asked', { id: 'a1', toolName: 'hitl_approve', callId: 'c9' }, 5),
-          sessionEvent('tool/result', { turn: 1, step: 1, message: { content: [{ isError: true }] } }, 6),
-          sessionEvent('tool/result', { turn: 1, step: 1, message: { content: [{ isError: false }] } }, 7),
+          sessionEvent('tool/result', { turn: 1, step: 1, message: { isError: true } }, 6),
+          sessionEvent('tool/result', { turn: 1, step: 1, message: { isError: false } }, 7),
           sessionEvent('compaction/start', {}, 8),
         ],
       },
@@ -610,7 +638,12 @@ describe('review dimensions and metrics (P4)', () => {
   })
 
   test('a session log read that throws costs the record nothing', async () => {
-    const h = harness({ session: { readSessionError: true, tokens: { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 } } })
+    const h = harness({
+      session: {
+        readSessionError: true,
+        tokens: { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+    })
     const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
