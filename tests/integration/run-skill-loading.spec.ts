@@ -43,7 +43,7 @@ const PLATFORM_TOOLS = [
 
 /** The baseline plus the row's own labels: what this worker's grant resolves to. */
 const GRANTED_TOOLS = [
-  'bash', 'capability_list', 'context_read', 'edit', 'glob', 'grep', 'job_kill', 'job_list', 'job_output',
+  'bash', 'capability_list', 'task_template_list', 'context_read', 'edit', 'glob', 'grep', 'job_kill', 'job_list', 'job_output',
   'read', 'skill', 'task_cancel', 'task_decompose', 'task_read', 'task_status',
   'task_submit_result', 'task_verify', 'write', 'ask_user_question',
 ]

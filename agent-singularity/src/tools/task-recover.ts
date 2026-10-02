@@ -44,8 +44,8 @@ export function defineTaskRecoverTool(ctx: Context) {
       'the round: the default "recovery" opens the failed source\'s new attempt; a verified source accepts only "improve", one ' +
       'improvement round judged by the same original acceptance criteria. Every rule is ' +
       're-checked below this tool: the source\'s recovery/improvement cap and the store\'s facts are re-read, the evolution ' +
-      'plane verifies that a capability change this diagnosis stands on is approved and ' +
-      'applied (an unapproved, undecided or rolled-back capability means nothing is opened), and the task runtime re-reads the ' +
+      'plane verifies that every shared change this diagnosis stands on is approved and ' +
+      'applied (an unapproved, undecided or rolled-back proposal means nothing is opened), and the task runtime re-reads the ' +
       'store\'s own facts — the failed source, the original contract and criteria, the providers the attempt needs now, the ' +
       'ceilings in force and the attempt\'s own idempotency — before it writes. An in-flight run is never hot-swapped, and a ' +
       'second key while an attempt of the same diagnosis is in flight is refused by name. Repeating the same call returns the ' +

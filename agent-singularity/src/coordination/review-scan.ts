@@ -6,6 +6,7 @@ import type {} from '@dangosys/dsh-singularity-graphs'
 import { rootTaskStoreId, type ReviewRecord, type TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { TerminalReviewFact } from '@dangosys/dsh-singularity-task-runtime'
 import { warnLine } from '../log.ts'
+import { responsibleParentRun } from './handoff-rules.ts'
 import { liveRootAgentOf, ownerSessionOfStore, sameSource } from './identity.ts'
 import { readReviewAgentAttempts, type ReviewAgentAttempt, type ReviewAgentRefusalCode, type ReviewAgentSource } from './ledger.ts'
 import { recordedDiagnosis, runReviewAgentAttempt, sourceRef } from './review-run.ts'
@@ -64,11 +65,7 @@ async function deliverDiagnosis(
     if (task.parentTaskId === undefined) {
       targetSessionId = ownerSessionOfStore(storeId)!
     } else {
-      const sourceRun = snapshot.runs.find(run => run.runId === source.runId)
-      const parent = source.runId === null
-        ? snapshot.runs.find(run => run.taskId === task.parentTaskId
-          && run.batches?.some(batch => batch.memberTaskIds.includes(task.taskId)))
-        : snapshot.runs.find(run => run.runId === sourceRun?.parentRunId)
+      const parent = responsibleParentRun(snapshot, diagnosis)
       if (parent === undefined || parent.taskId !== task.parentTaskId) {
         throw new Error(`the source's delegating run for parent task ${task.parentTaskId} is not recorded`)
       }
@@ -79,7 +76,7 @@ async function deliverDiagnosis(
       `Observation: ${diagnosis.observedFailure}`,
       `Conclusion / next action: ${diagnosis.localizedCause}`,
       `Original review: ${diagnosis.reviewRefs.join(', ')}; evidence: ${diagnosis.evidenceRefs.join(', ') || 'none recorded'}.`,
-      'Read your current task/run state before acting. A diagnosis changes no task state or authority; it grants no task_recover or evolution tool.',
+      'Read your current task/run state before acting. A diagnosis changes no task state or authority. Handle local child repairs in your current run after its batch settles; only established shared changes go to the supervisor.',
     ].join('\n')
     const delivery = await ctx.agentRuntime.ensureAgentMessageDelivered({
       messageId: `m-diagnosis-${diagnosis.diagnosisId}`,
@@ -123,7 +120,7 @@ export async function scanFailedReviewSources(
   const root = liveRootAgentOf(ctx, storeId)
   const attempts = await readReviewAgentAttempts(storeId)
   for (const source of targets) {
-    const mine = attempts.filter(attempt => sameSource(attempt.source, source))
+    const mine = attempts.filter(attempt => attempt.role === 'reviewer' && sameSource(attempt.source, source))
     // The attempt this scan answers with: the source's newest one still open,
     // else its newest at all. An older settled attempt never hides a later open
     const open = mine.filter(attempt => attempt.settlement === undefined).at(-1)

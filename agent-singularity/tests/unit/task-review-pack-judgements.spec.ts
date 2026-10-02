@@ -134,7 +134,7 @@ describe('task_review_pack as a fact sheet, without a trigger decision', () => {
    * it is **pending** — recorded, addressed to nobody yet. An interrupted
    * attempt has no Diagnosis at all, so it cannot be shown as pending either.
    */
-  it('marks every recorded diagnosis as a pending handoff, suggestions or not', async () => {
+  it('marks ordinary child diagnoses parent-owned and shared suggestions pending', async () => {
     const full = failingSnapshot()
     full.diagnoses = [
       {
@@ -156,11 +156,10 @@ describe('task_review_pack as a fact sheet, without a trigger decision', () => {
 
     expect(pack).toContain('proposal prompt_template reviewer: name the empty-input case')
     expect(pack).toContain('handoff: pending')
-    // Two handoffs now: a conclusion without proposals is still a hand-off, and
-    // each diagnosis carries its own pending state.
-    expect(pack.match(/handoff: pending/g)).toHaveLength(2)
+    // Ordinary child repairs are delivered to the parent without starting a supervisor.
+    expect(pack.match(/handoff: pending/g)).toHaveLength(1)
     expect(pack).toContain('- d-no-suggestion [high] no improvement needed [agent s-rev-2]')
-    expect(pack.slice(pack.indexOf('- d-no-suggestion'))).toContain('handoff: pending')
+    expect(pack.slice(pack.indexOf('- d-no-suggestion'))).toContain('handoff: parent-owned')
   })
 
   it('shows an interrupted attempt as interrupted, with no pending handoff invented for it', async () => {

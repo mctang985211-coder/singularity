@@ -35,6 +35,7 @@ const ROOT_CORE_TOOLS = [
   'hitl_approve',
   'task_read',
   'capability_list',
+  'task_template_list',
   'context_read',
   'skill',
   'task_intake',
@@ -810,6 +811,20 @@ describe('the spawn request contract (A2)', () => {
     expect(WORKER_POLICY_TEXT).not.toContain('session_trace')
     expect(WORKER_POLICY_TEXT).not.toContain('## This task is decomposable')
     expect(WORKER_POLICY_TEXT).not.toContain('waiting for a human review')
+  })
+
+  test.each(['reviewer', 'supervisor'] as const)('installs the %s policy; the supervisor can request human approval', async coordinationRole => {
+    const state = await spawnContext()
+    await state.runtime.spawn(state.root, { sessionId: id('child'), name: coordinationRole, prompt: [{ type: 'text', text: 'source facts' }], agentPreset: 'singularity-coordinator', coordinationRole })
+    const { section, session } = await runSetup(state.createCalls[0]!.options)
+    expect(section).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ name: `singularity:${coordinationRole}`, order: 75, interpolate: false }))
+    if (coordinationRole === 'supervisor') {
+      expect(session.append).toHaveBeenCalledExactlyOnceWith('approval/policy', { policy: 'ask' })
+      expect(section.mock.calls[0]![0].text).toContain('evolution_decide and evolution_apply')
+    } else {
+      expect(session.append).not.toHaveBeenCalled()
+      expect(section.mock.calls[0]![0].text).toContain('You do not change files')
+    }
   })
 
   test('a spawn with a prompt but no taskWorker installs no worker policy and no kickoff rewrite', async () => {

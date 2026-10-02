@@ -7,8 +7,9 @@ import type {} from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-graphs'
-import type { EvidenceBundle, RunId, TaskId } from '@dangosys/dsh-singularity-task'
+import type { EvidenceBundle, RunId, TaskId, VerificationMode } from '@dangosys/dsh-singularity-task'
 import type { CapabilityConfig, PermissionSpec } from './capability.ts'
+import type { McpServerTemplate } from './mcp-servers.ts'
 import type { CommitReconcileOutcome, RootAdoption } from './types.ts'
 import type { ProviderPrecheck } from './provider-precheck.ts'
 import type { RootBudgetConfig } from './root-budget.ts'
@@ -20,6 +21,7 @@ export interface RunVerifier {
   logTail?(logRef: string): Promise<string | undefined>
   /** The registered verifier ids; optional on the service, required to validate a criterion's `verifierRef`. */
   verifierIds?(): string[]
+  verifierSupports?(id: string, mode: VerificationMode): boolean
   /**
    * The cordis service lifecycle hook. Optional because a test double is already
    * readied when it is built; the provider pre-check awaits it before reading
@@ -86,6 +88,8 @@ export interface SupervisionConfig {
 }
 
 export interface Config {
+  /** MCP server definitions supplied by this deployment. */
+  mcpServers?: Record<string, McpServerTemplate>
   /**
    * The supervision policy in force: declared by `singularity-agent`, read here for the two per-source round caps. A
    * deployment may state it on this plugin's config, or expose it as the `singularitySupervision` service.
@@ -98,6 +102,8 @@ export interface Config {
   capabilities: Record<string, CapabilityConfig>
   /** Agent preset used when no matched capability names one. */
   defaultPreset?: string
+  /** Directory of immutable <id>@<version>.json task templates. */
+  taskTemplatesRoot?: string
   /** Wall-clock budget for one `verifier.verifyRun` call. */
   verifyTimeoutMs: number
   /** Absolute tree depth a decomposition may reach: a child at `maxDepth + 1` is rejected (root is depth 0). */
@@ -162,9 +168,9 @@ export const DEFAULT_MAX_CHILDREN = 8
 
 export const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true
 
-/** The shipped supervision policy (A7 §1): every terminal review diagnosed, three recovery rounds, two improvement rounds, eight coordination runs. */
+/** The shipped supervision policy (A7 §1): failed terminal reviews diagnosed, three recovery rounds, two improvement rounds, eight coordination runs. */
 export const DEFAULT_SUPERVISION: Readonly<SupervisionConfig> = {
-  autoReview: 'all',
+  autoReview: 'failed',
   maxRecoveryRounds: 3,
   maxImprovementRounds: 2,
   coordinationBudget: 8,
@@ -192,7 +198,12 @@ const Supervision: z<SupervisionConfig> = z.object({
 
 export const ConfigSchema: z<Config> = z.object({
   capabilities: z.dict(Capability).default({}),
+  mcpServers: z.dict(z.object({
+    serverName: z.string(), description: z.string(), command: z.string(),
+    args: z.array(z.string()), env: z.dict(z.string()), cwd: z.string(), toolCallTimeoutMs: z.number(),
+  })).default({}),
   defaultPreset: z.string(),
+  taskTemplatesRoot: z.string(),
   verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),
   maxDepth: z.number().default(DEFAULT_MAX_DEPTH),
   maxChildren: z.number().default(DEFAULT_MAX_CHILDREN),

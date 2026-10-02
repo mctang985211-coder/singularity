@@ -35,7 +35,7 @@ Full guide: [tutorial/TUTORIAL.md](tutorial/TUTORIAL.md).
 
 | Package | Role |
 |---|---|
-| [`@dangosys/dsh-singularity`](bundle/README.md) | Bundle: the workspace's composition rows plus the `bb-verify` / `singularity-reviewer` agent-preset declarations |
+| [`@dangosys/dsh-singularity`](bundle/README.md) | Bundle: the workspace's composition rows plus the `bb-verify` / `singularity-coordinator` agent-preset declarations |
 | [`@dangosys/dsh-singularity-graph`](graph/README.md) | Per-graph plane: agent topology and session canvas geometry; exports `.` and `./layout` |
 | [`@dangosys/dsh-singularity-graphs`](graphs/README.md) | Graph registry and lifecycle — each graph binds one environment and one root session; exactly one is active |
 | [`@dangosys/dsh-singularity-task`](task/README.md) | Event-sourced task store: decomposition tree, dependency DAG, run state machine, proposals, questions, budget extensions; shared `EventStoreSet` factory and types |

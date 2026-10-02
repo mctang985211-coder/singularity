@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { APPLYABLE_TARGET_TYPES, applyTargets, renderProviderRoles } from '@dangosys/dsh-singularity-evolution'
 import type { EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
+import { continueProposalHandoff } from '../coordination/evolution-handoff.ts'
 import { denialReason, message, renderOpenIntentRecovery, sessionId, text } from '../shared.ts'
 
 /** Why a decided PROMOTE proposal still cannot be applied: L4 harness evolution and target types this build has no executor for. */
@@ -86,6 +87,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
             ...(recovered.proposal.targetType === 'capability' ? [`  - capability row ${recovered.proposal.targetId} in the production table`] : []),
             ...recovered.targets.map(target => `  - ${target}`),
             effectNote(recovered.proposal),
+            ...(await continueProposalHandoff(ctx, recovered.proposal, caller)),
           ].join('\n')
         } catch (error) {
           return `evolution_apply rejected: ${message(error)}`
@@ -144,6 +146,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
           ...applied.targets.map(target => `  - ${target}`),
           ...renderProviderRoles(applied.providers ?? []),
           effectNote(applied.proposal),
+          ...(await continueProposalHandoff(ctx, applied.proposal, caller)),
           `human approval: approval:${exec.callId} — rollback with evolution_rollback`,
         ].join('\n')
       } catch (error) {

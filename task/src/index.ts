@@ -47,6 +47,7 @@ import { runIn, taskIn } from './service/checks/primitives.ts'
 export * from './types.ts'
 export { TERMINAL_RUN_STATUSES, isTerminalRunStatus } from './types.ts'
 export * from './contract.ts'
+export * from './template.ts'
 export * from './budget.ts'
 export * from './proposal.ts'
 export * from './question.ts'
@@ -286,7 +287,7 @@ export class TaskService extends Service {
     task: TaskInstance,
     run: TaskRun,
     actor: string,
-    options: { consumption: TaskProposalRootConsumption; manifest?: CapabilityManifest },
+    options: { consumption: TaskProposalRootConsumption; manifest?: CapabilityManifest; obligations?: readonly Obligation[] },
   ): Promise<void> {
     const snapshot = await this.stores.settledSnapshot(storeId)
     const consumption = options.consumption
@@ -326,6 +327,9 @@ export class TaskService extends Service {
         payload: { run },
       }),
     )
+    for (const obligation of options.obligations ?? []) {
+      events.push(event('ObligationRecorded', { taskId: task.taskId, actor, payload: { obligation } }))
+    }
     events.push(event('TaskProposalAdmitted', { taskId: ROOT_PROPOSAL_TASK_ID, actor, payload: consumption }))
     await this.commitIn(storeId, events)
   }

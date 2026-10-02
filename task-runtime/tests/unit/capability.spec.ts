@@ -314,6 +314,7 @@ describe('tool labels', () => {
       'task_cancel',
       'task_verify',
       'capability_list',
+      'task_template_list',
       'task_proposal_read',
       'task_proposal_continue',
       'task_proposal_cancel',
@@ -429,7 +430,7 @@ describe('capability MCP server grants', () => {
   })
 
   test('an unknown server name rejects the whole resolution, naming the vocabulary', () => {
-    expect(() => resolveCapabilities(['typo'], { typo: { mcpServers: ['ghost'] } })).toThrow(
+    expect(() => resolveCapabilities(['typo'], { typo: { mcpServers: ['ghost'] } }, { bbdev: {} as never, waveform: {} as never })).toThrow(
       'capability "typo" declares unknown MCP server "ghost"; known servers: bbdev, waveform',
     )
   })

@@ -673,9 +673,9 @@ var ProposalReviewService = class extends Service {
 
 //#endregion
 //#region src/coordination/supervision.ts
-/** The shipped defaults: every terminal review is diagnosed, three recovery rounds, two improvement rounds, eight coordination runs per store. */
+/** The shipped defaults: failed reviews are diagnosed, three recovery rounds, two improvement rounds, eight coordination runs per store. */
 const DEFAULT_SUPERVISION = {
-	autoReview: "all",
+	autoReview: "failed",
 	maxRecoveryRounds: 3,
 	maxImprovementRounds: 2,
 	coordinationBudget: 8
@@ -882,7 +882,7 @@ function planSupervisorAttempt(input) {
 		kind: "in-flight",
 		attempt: open
 	};
-	const concluded = mine.filter((attempt) => attempt.settlement !== void 0 && attempt.settlement.status !== "interrupted").at(-1);
+	const concluded = mine.filter((attempt) => attempt.settlement?.status === "closed" || attempt.settlement?.status === "recorded" && !input.resumeRecorded).at(-1);
 	if (concluded !== void 0) return {
 		kind: "reuse",
 		attempt: concluded
@@ -996,7 +996,7 @@ async function admitReviewAgent(rootStoreId, work) {
 					if (liveAttempts.has(attempt.sessionId) || claimedHere.has(attempt.sessionId)) continue;
 					const recorded = await hooks?.recorded?.(attempt) === true;
 					const status = recorded ? "recorded" : "interrupted";
-					const note = recorded ? DIAGNOSIS_ALREADY_RECORDED : attempt.started ? STARTED_OWNER_GONE : CLAIM_NEVER_STARTED;
+					const note = recorded ? requestRole === "reviewer" ? DIAGNOSIS_ALREADY_RECORDED : "the proposal or recovery outcome is durable; resume from its recorded facts" : attempt.started ? STARTED_OWNER_GONE : CLAIM_NEVER_STARTED;
 					await settleReviewAgentAttempt({
 						rootStoreId,
 						taskId: attempt.source.taskId,
@@ -1020,6 +1020,7 @@ async function admitReviewAgent(rootStoreId, work) {
 							used,
 							max: reviewAgentBudget()
 						},
+						resumeRecorded: hooks?.resumeRecorded,
 						...hooks?.supervisionRounds === void 0 ? {} : { rounds: hooks.supervisionRounds }
 					}) : planReviewAttempt({
 						attempts,
@@ -1128,74 +1129,10 @@ function reviewerBindingSource() {
 }
 
 //#endregion
-//#region src/coordination/spawn-under-claim.ts
-/** Claim the attempt and spawn its agent, or record the attempt interrupted when the spawn never reached model input. */
-async function spawnUnderClaim(input) {
-	await input.admission.claim(input.request);
-	const prompt = await input.prompt();
-	let spawnFailure;
-	const handle = await input.ctx.agentRuntime.spawn(input.parent, {
-		sessionId: input.sessionId,
-		name: input.name,
-		prompt: [{
-			type: "text",
-			text: prompt
-		}],
-		agentPreset: input.preset,
-		grant: input.grant,
-		beforePrompt: async () => {
-			await input.admission.start({
-				taskId: input.taskId,
-				sessionId: input.sessionId,
-				actor: input.actor
-			});
-			const back = await readReviewerDelegation(input.sessionId);
-			if (back === void 0 || back.rootStoreId !== input.storeId || back.taskId !== input.taskId) throw new Error(`${input.errorLabel} "${input.sessionId}" could not be read back from the ledger (expected task ${input.taskId} in ${input.storeId}); no model input was sent`);
-		},
-		...input.signal === void 0 ? {} : { signal: input.signal }
-	}).catch((error) => {
-		spawnFailure = error instanceof Error ? error.message : String(error);
-	});
-	if (handle === void 0) {
-		await settleReviewAgentAttempt({
-			rootStoreId: input.storeId,
-			taskId: input.taskId,
-			sessionId: input.sessionId,
-			status: "interrupted",
-			note: `${input.failureLabel}: ${spawnFailure ?? "unknown error"}`
-		}).catch(() => void 0);
-		return {
-			kind: "spawn-failed",
-			failure: spawnFailure ?? "unknown error"
-		};
-	}
-	return {
-		kind: "spawned",
-		handle
-	};
-}
-
-//#endregion
-//#region src/coordination/trigger.ts
-/** Run one scan off the caller's path; a rejection is a line under `label`, never a throw nobody awaits. */
-function backgroundScan(log, label, work) {
-	work().catch((error) => {
-		log(`${label}: the scan could not run (${message(error)})`);
-	});
-}
-/** Install one deployment's graph-activation scan: a graph that becomes active has `work` run for it in the background. */
-function installGraphSelectedScan(ctx, options, work) {
-	const dispose = ctx.on("graphs/selected", (graph) => {
-		backgroundScan(options.log, options.label, () => work(graph));
-	});
-	return () => dispose();
-}
-
-//#endregion
 //#region src/coordination/handoff-rules.ts
-/** The preset both coordination roles mount (A5's reviewer and A6's supervisor): */
-const COORDINATION_PRESET = "singularity-reviewer";
-/** The supervisor's whole tool surface. Read-only plus the two entries the hand-off is for: the evolution candidate chain (`propose` → `candidate` → `prepare` → `replay` → `gate` → `list`) and `task_recover`. Absent by */
+/** Shared host preset; runtime installs the actual coordination role. */
+const COORDINATION_PRESET = "singularity-coordinator";
+/** Candidate comparison, existing human approval gates, root recovery and evidence reads. */
 const SUPERVISOR_BASELINE = [
 	"task_recover",
 	"task_review_pack",
@@ -1208,6 +1145,8 @@ const SUPERVISOR_BASELINE = [
 	"evolution_prepare",
 	"evolution_replay",
 	"evolution_gate",
+	"evolution_decide",
+	"evolution_apply",
 	"evolution_list",
 	"read",
 	"glob",
@@ -1278,7 +1217,7 @@ function handoffStateLine(input) {
 	switch (decision.kind) {
 		case "started": return `taken up — this hand-off is delegated to supervisor session ${decision.sessionId} (started ${decision.at}); that coordinator owns the candidate it may open, and a person still decides the promotion`;
 		case "in-flight": return `being taken up right now by supervisor session ${decision.sessionId} — nothing new is started for it`;
-		case "concluded": return decision.status === "closed" ? `settled — supervisor session ${decision.sessionId} closed the hand-off${decision.note === void 0 ? "" : `: ${decision.note}`}; no further supervisor is started for it` : `taken up — this hand-off is delegated to supervisor session ${decision.sessionId}, which ended recorded${decision.note === void 0 ? "" : `: ${decision.note}`}; no further supervisor is started for it`;
+		case "concluded": return decision.status === "closed" ? `settled — supervisor session ${decision.sessionId} closed the hand-off${decision.note === void 0 ? "" : `: ${decision.note}`}; no further supervisor is started for it` : `taken up — this hand-off is delegated to supervisor session ${decision.sessionId}, which ended recorded${decision.note === void 0 ? "" : `: ${decision.note}`}; graph activation resumes unfinished proposal work from its durable status`;
 		case "stopped": return `pending — ${decision.reason}`;
 		case "start": return "pending — no supervisor is delegated to this hand-off yet; the deployment takes it up when it consumes it";
 	}
@@ -1361,6 +1300,19 @@ function handoffSourceOf(diagnosis) {
 		runId: diagnosisRunRef(diagnosis)
 	};
 }
+/** The actual delegating parent of a child diagnosis; roots have no parent. */
+function responsibleParentRun(snapshot, diagnosis) {
+	const task = snapshot.tasks.find((item) => item.taskId === diagnosis.taskId);
+	if (task?.parentTaskId === void 0) return void 0;
+	const source = handoffSourceOf(diagnosis);
+	const sourceRun = snapshot.runs.find((run) => run.runId === source.runId);
+	const parent = source.runId === null ? snapshot.runs.find((run) => run.taskId === task.parentTaskId && run.batches?.some((batch) => batch.memberTaskIds.includes(task.taskId))) : snapshot.runs.find((run) => run.runId === sourceRun?.parentRunId);
+	return parent?.taskId === task.parentTaskId ? parent : void 0;
+}
+/** Ordinary child diagnoses are handled by their parent without another coordination agent. */
+function needsSupervisor(snapshot, diagnosis) {
+	return snapshot.tasks.find((item) => item.taskId === diagnosis.taskId)?.parentTaskId === void 0 || diagnosis.proposals.length > 0;
+}
 /** The ref a reader uses for one source (`<taskId>#<runId>`, or `<taskId>#no-run`). */
 const handoffSourceRef = reviewRef;
 /** The prior round's review record, as the store holds it for one diagnosis's source. */
@@ -1377,29 +1329,92 @@ function reviewFactsFor(snapshot, diagnosis) {
 	const review = sourceReviewOf(snapshot, diagnosis);
 	return review === void 0 ? void 0 : renderSupervisorReviewFacts(review);
 }
-/** The supervisor's first request: which hand-off it is taking up, what the source really is, the prior round's review facts, and what it is expected to do with it. */
+/** Current durable facts accompany the stable supervisor policy. */
 function supervisorPrompt(input) {
 	const { diagnosis } = input;
 	return [
-		"You are the Singularity supervisor: the coordination agent a recorded Diagnosis was handed to. You do not run the goal, and you do not decide promotions — a person does.",
 		`The hand-off is diagnosis ${diagnosis.diagnosisId} about task ${diagnosis.taskId} (source ${input.sourceRef}, whose review settled ${input.sourceOutcome}).`,
 		`Its recorded observation: ${diagnosis.observedFailure}`,
 		`Its recorded conclusion: ${diagnosis.localizedCause}`,
-		...diagnosis.proposals.length === 0 ? ["Its recorded suggestions: none — a conclusion without a suggestion is still a hand-off."] : ["Its recorded suggestions:", ...diagnosis.proposals.map((proposal) => `- ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`)],
-		"",
+		...diagnosis.proposals.map((proposal) => `Suggested ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`),
+		input.parentRun === void 0 ? input.childSource ? "The source is a child; its responsible parent run could not be read. Do not open a root recovery for it." : "The source is the root goal." : `Responsible parent: task ${input.parentRun.taskId}, run ${input.parentRun.runId}, session ${input.parentRun.sessionId} [${input.parentRun.status}]. The parent replans this child; task_recover does not accept child diagnoses.`,
 		"--- prior round review facts (read-only) ---",
-		...input.reviewFacts === void 0 ? ["no review record could be read for this source; read the facts yourself with task_review_pack."] : input.reviewFacts.split("\n"),
+		input.reviewFacts ?? "No review record could be read; read task_review_pack for the exact source.",
 		"--- end of prior round review facts ---",
+		"Existing proposals for this diagnosis:",
+		...input.proposals?.length ? input.proposals.map((proposal) => `${proposal.proposalId} [${proposal.status}]${proposal.decision === void 0 ? "" : ` ${proposal.decision}`}`) : ["none"],
 		"",
-		"Your job, in this order:",
-		"1. Read the facts yourself: task_review_pack for the exact source, task_read/task_status for the task and its siblings, context_read for the sessions and evidence the pack cites.",
-		`2. Decide whether one more round is justified under the original acceptance criteria. If it is, call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "<a key of yours>" }; for a failed source the default mode "recovery" applies, and a verified source accepts only mode "improve". The new attempt keeps the original acceptance criteria, and repeating the key returns the same attempt. A source past its recovery or improvement cap is refused with iteration-cap; there is nothing left to open then, so close instead.`,
-		"3. Create a candidate only if the original evidence establishes a capability or skill gap: evolution_propose (when no proposal names it yet), evolution_candidate for ONE whole capability row plus an optional new execution skill or a same-name update of an existing skill, then evolution_prepare, evolution_replay, and evolution_gate — only when those tools are on your surface. A missing artifact alone does not establish such a gap. A person decides and applies; you never call evolution_decide, evolution_apply or evolution_rollback.",
-		"4. If you decide against further iteration — no justified round, no established gap, or a cap already reached — close the hand-off explicitly: say why in your reply and end it with EXACTLY one fenced json block {\"outcome\":\"closed\",\"reason\":\"...\"}. Closing settles this hand-off and changes no task state.",
-		"5. Not every suggestion is executable: a target type this build has no candidate for stays a recorded suggestion. Nothing you write changes production, and no candidate executes anything by itself.",
-		"",
-		"You have no shell, no file write and no spawn, and no tool outside the list you were granted."
+		"Read task_review_pack, task_read/task_status and the original evidence through context_read. Do not create a duplicate proposal.",
+		`For an established shared gap, cite diagnosis:${diagnosis.diagnosisId} in evolution_propose.sourceRefs. Use only supported candidate targets and only tools actually granted: evolution_candidate → evolution_prepare → evolution_replay → evolution_gate. Missing artifacts alone do not establish a shared gap.`,
+		"A gated proposal continues with evolution_decide to request the human decision. A PROMOTE-decided proposal continues with evolution_apply to request approval for its exact production writes. If approval is denied or unavailable, report proposalId and its current status and stop. A rejected or research-only decision opens no recovery for that change.",
+		input.childSource ? "After a child shared change is applied, finish with the proposal id and evidence. The runtime notifies the responsible parent to read its state and replan. Do not call task_recover for the child." : `Apply any necessary shared changes first. Then, if another round is justified, call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "recovery:${diagnosis.diagnosisId}"${input.sourceOutcome === "verified" ? ", mode: \"improve\"" : ""} }. The original acceptance judges it; repeating the key returns the same attempt. A cap refusal ends iteration.`,
+		"If no justified action remains, explain why and end with one fenced json block {\"outcome\":\"closed\",\"reason\":\"...\"}. Closing changes no task state. Unsupported candidate targets require a concrete explanation rather than invented tool support."
 	].join("\n");
+}
+
+//#endregion
+//#region src/coordination/spawn-under-claim.ts
+/** Claim the attempt and spawn its agent, or record the attempt interrupted when the spawn never reached model input. */
+async function spawnUnderClaim(input) {
+	await input.admission.claim(input.request);
+	const prompt = await input.prompt();
+	let spawnFailure;
+	const handle = await input.ctx.agentRuntime.spawn(input.parent, {
+		sessionId: input.sessionId,
+		name: input.name,
+		prompt: [{
+			type: "text",
+			text: prompt
+		}],
+		agentPreset: input.preset,
+		grant: input.grant,
+		coordinationRole: input.request.role === "supervisor" ? "supervisor" : "reviewer",
+		beforePrompt: async () => {
+			await input.admission.start({
+				taskId: input.taskId,
+				sessionId: input.sessionId,
+				actor: input.actor
+			});
+			const back = await readReviewerDelegation(input.sessionId);
+			if (back === void 0 || back.rootStoreId !== input.storeId || back.taskId !== input.taskId) throw new Error(`${input.errorLabel} "${input.sessionId}" could not be read back from the ledger (expected task ${input.taskId} in ${input.storeId}); no model input was sent`);
+		},
+		...input.signal === void 0 ? {} : { signal: input.signal }
+	}).catch((error) => {
+		spawnFailure = error instanceof Error ? error.message : String(error);
+	});
+	if (handle === void 0) {
+		await settleReviewAgentAttempt({
+			rootStoreId: input.storeId,
+			taskId: input.taskId,
+			sessionId: input.sessionId,
+			status: "interrupted",
+			note: `${input.failureLabel}: ${spawnFailure ?? "unknown error"}`
+		}).catch(() => void 0);
+		return {
+			kind: "spawn-failed",
+			failure: spawnFailure ?? "unknown error"
+		};
+	}
+	return {
+		kind: "spawned",
+		handle
+	};
+}
+
+//#endregion
+//#region src/coordination/trigger.ts
+/** Run one scan off the caller's path; a rejection is a line under `label`, never a throw nobody awaits. */
+function backgroundScan(log, label, work) {
+	work().catch((error) => {
+		log(`${label}: the scan could not run (${message(error)})`);
+	});
+}
+/** Install one deployment's graph-activation scan: a graph that becomes active has `work` run for it in the background. */
+function installGraphSelectedScan(ctx, options, work) {
+	const dispose = ctx.on("graphs/selected", (graph) => {
+		backgroundScan(options.log, options.label, () => work(graph));
+	});
+	return () => dispose();
 }
 
 //#endregion
@@ -1408,26 +1423,39 @@ function supervisorPrompt(input) {
 async function handoffDelegatorOf(ctx, storeId) {
 	return liveRootAgentOf(ctx, storeId);
 }
-/** The store facts a spawn carries: the prior round's review block and the source's rounds, or nothing when the store could not be read (the runtime still caps). */
-async function sourceFactsOf(ctx, storeId, diagnosis) {
-	try {
-		const snapshot = await ctx.task.snapshotIn(storeId);
-		const reviewFacts = reviewFactsFor(snapshot, diagnosis);
-		return {
-			rounds: roundsForDiagnosis(snapshot, diagnosis),
-			...reviewFacts === void 0 ? {} : { reviewFacts }
-		};
-	} catch {
-		return {};
-	}
+/** Proposal state is read from the existing evolution ledger, never mirrored into a second state machine. */
+async function proposalsForDiagnosis(ctx, diagnosisId) {
+	if (ctx.evolution === void 0) return [];
+	return (await ctx.evolution.list()).filter((proposal) => proposal.sourceRefs.includes(`diagnosis:${diagnosisId}`));
+}
+/** An applied child change wakes its actual parent through the existing durable message delivery. */
+async function notifyParentOfApplied(ctx, snapshot, diagnosis, proposals, senderSessionId) {
+	const parent = responsibleParentRun(snapshot, diagnosis);
+	if (parent === void 0) return;
+	for (const proposal of proposals.filter((item) => item.status === "applied")) await ctx.agentRuntime.ensureAgentMessageDelivered({
+		messageId: `m-evolution-${proposal.proposalId}-${parent.runId}`,
+		senderSessionId: SessionId(senderSessionId),
+		targetSessionId: SessionId(parent.sessionId),
+		text: `Evolution proposal ${proposal.proposalId} for child diagnosis ${diagnosis.diagnosisId} is applied. You are its responsible parent task ${parent.taskId}, run ${parent.runId}. Read task_read/task_status and evolution_list before replanning affected work after your current batch settles. Existing runs retain their old bindings; the original acceptance remains in force.`
+	});
 }
 /** Consume one hand-off: decide (rounds, ledger, allowance), then spawn its supervisor under the admission region a review attempt uses; the attempt settles when its session ends. */
 async function startSupervisorHandoff(ctx, input) {
 	const { storeId, diagnosis, delegator } = input;
-	const resolved = input.rounds !== void 0 && input.reviewFacts !== void 0 ? {} : await sourceFactsOf(ctx, storeId, diagnosis);
-	const rounds = input.rounds ?? resolved.rounds;
-	const reviewFacts = input.reviewFacts ?? resolved.reviewFacts;
+	const snapshot = await ctx.task.snapshotIn(storeId);
+	if (!needsSupervisor(snapshot, diagnosis)) return {
+		diagnosisId: diagnosis.diagnosisId,
+		result: "parent",
+		reason: "ordinary child diagnosis belongs to its delegating parent"
+	};
+	const rounds = input.rounds ?? roundsForDiagnosis(snapshot, diagnosis);
+	const reviewFacts = input.reviewFacts ?? reviewFactsFor(snapshot, diagnosis);
 	const source = handoffSourceOf(diagnosis);
+	const childSource = snapshot.tasks.find((task) => task.taskId === diagnosis.taskId)?.parentTaskId !== void 0;
+	const proposals = await proposalsForDiagnosis(ctx, diagnosis.diagnosisId);
+	const recovered = snapshot.runs.some((run) => run.recovery?.sourceDiagnosisId === diagnosis.diagnosisId);
+	const resumeRecorded = !recovered && proposals.some((proposal) => proposal.status !== "rolledback" && !(proposal.status === "decided" && proposal.decision !== "PROMOTE") && !(childSource && proposal.status === "applied"));
+	await notifyParentOfApplied(ctx, snapshot, diagnosis, proposals, delegator.sessionId);
 	const supervisorSessionId = SessionId(randomUUID());
 	const request = {
 		role: "supervisor",
@@ -1440,7 +1468,11 @@ async function startSupervisorHandoff(ctx, input) {
 		sessionId: supervisorSessionId
 	};
 	return await admitReviewAgent(storeId, async (admission) => {
-		const { plan } = await admission.plan(request, rounds === void 0 ? void 0 : { supervisionRounds: rounds });
+		const { plan } = await admission.plan(request, {
+			supervisionRounds: rounds,
+			resumeRecorded,
+			recorded: () => recovered || proposals.length > 0
+		});
 		if (plan.kind === "refused") {
 			if (plan.code === "iteration-cap") return {
 				diagnosisId: diagnosis.diagnosisId,
@@ -1486,6 +1518,9 @@ async function startSupervisorHandoff(ctx, input) {
 				diagnosis,
 				sourceOutcome: input.sourceOutcome,
 				sourceRef: input.sourceRef,
+				childSource,
+				parentRun: responsibleParentRun(snapshot, diagnosis),
+				proposals,
 				...reviewFacts === void 0 ? {} : { reviewFacts }
 			})
 		});
@@ -1514,19 +1549,27 @@ async function watchSupervisorCompletion(input) {
 	let note = "the supervisor ended without issuing task_recover or closing the hand-off";
 	try {
 		await input.agent.whenIdle();
-		const recovery = [...(await input.ctx.task.snapshotIn(input.storeId)).runs].reverse().find((run) => run.recovery !== void 0 && run.recovery.sourceDiagnosisId === input.diagnosis.diagnosisId);
+		const snapshot = await input.ctx.task.snapshotIn(input.storeId);
+		const recovery = [...snapshot.runs].reverse().find((run) => run.recovery !== void 0 && run.recovery.sourceDiagnosisId === input.diagnosis.diagnosisId);
 		if (recovery !== void 0) {
 			status = "recorded";
 			note = `task_recover issued: run ${recovery.runId}`;
 		} else {
-			const close = closeOutcomeOf(lastAssistantText(input.agent.session.snapshotEvents()));
-			if (close !== void 0) {
-				status = "closed";
-				note = close.reason;
+			const proposals = await proposalsForDiagnosis(input.ctx, input.diagnosis.diagnosisId);
+			if (proposals.length > 0) {
+				status = proposals.every((proposal) => proposal.status === "rolledback" || proposal.status === "decided" && proposal.decision !== "PROMOTE") ? "closed" : "recorded";
+				note = proposals.map((proposal) => `proposal ${proposal.proposalId} [${proposal.status}]${proposal.decision === void 0 ? "" : ` ${proposal.decision}`}`).join("; ");
+				await notifyParentOfApplied(input.ctx, snapshot, input.diagnosis, proposals, input.sessionId);
+			} else {
+				const close = closeOutcomeOf(lastAssistantText(input.agent.session.snapshotEvents()));
+				if (close !== void 0) {
+					status = "closed";
+					note = close.reason;
+				}
 			}
 		}
 	} catch (error) {
-		note = `the supervisor session ended and its outcome could not be read (${error instanceof Error ? error.message : String(error)})`;
+		note += `; outcome delivery/read failed (${error instanceof Error ? error.message : String(error)})`;
 	}
 	await settleReviewAgentAttempt({
 		rootStoreId: input.storeId,
@@ -1551,7 +1594,7 @@ async function consumePendingHandoffs(ctx, storeId, options = {}) {
 			skipped
 		};
 	}
-	const pending = [...snapshot.diagnoses];
+	const pending = snapshot.diagnoses.filter((diagnosis) => needsSupervisor(snapshot, diagnosis));
 	if (pending.length === 0) return {
 		storeId,
 		consumptions: []
@@ -1627,6 +1670,22 @@ async function consumeHandoffDiagnosis(ctx, storeId, diagnosisId, options = {}) 
 	options.log?.(`evolution hand-off: ${renderConsumption(consumption)}`);
 	return consumption;
 }
+/** A human decision or apply continues the existing diagnosis hand-off in the caller's graph. */
+async function continueProposalHandoff(ctx, proposal, caller) {
+	const diagnosisIds = proposal.sourceRefs.filter((ref) => ref.startsWith("diagnosis:")).map((ref) => ref.slice(10));
+	if (diagnosisIds.length === 0) return [];
+	try {
+		const graph = await ctx.graphs.graphForSession(SessionId(caller));
+		const results = [];
+		for (const diagnosisId of diagnosisIds) {
+			const consumption = await consumeHandoffDiagnosis(ctx, rootTaskStoreId(graph.rootSessionId), diagnosisId);
+			if (consumption !== void 0) results.push(renderConsumption(consumption));
+		}
+		return results;
+	} catch (error) {
+		return [`proposal ${proposal.proposalId} remains ${proposal.status}; hand-off continuation failed (${error instanceof Error ? error.message : String(error)}); the next graph activation retries it`];
+	}
+}
 /** One consumption as a scan line, naming the session or the reason — never a credential and never a path. */
 function renderConsumption(consumption) {
 	switch (consumption.result) {
@@ -1634,6 +1693,7 @@ function renderConsumption(consumption) {
 		case "existing": return `diagnosis ${consumption.diagnosisId} — already delegated to supervisor session ${consumption.sessionId}; nothing started`;
 		case "in-flight": return `diagnosis ${consumption.diagnosisId} — supervisor session ${consumption.sessionId} is being started right now; nothing started`;
 		case "stopped": return `diagnosis ${consumption.diagnosisId} pending (${consumption.code}) — ${consumption.reason}`;
+		case "parent": return `diagnosis ${consumption.diagnosisId} — ${consumption.reason}; no supervisor started`;
 		case "failed": return `diagnosis ${consumption.diagnosisId} — the supervisor could not be started: ${consumption.reason}`;
 	}
 }
@@ -1747,6 +1807,7 @@ function renderReview(review) {
 }
 /** How far one diagnosis's hand-off has gone (A5 §3, plan F.4): what the ledger, the allowance and the source's rounds answer for it. */
 function handoffMark(diagnosis, handoff, snapshot) {
+	if (!needsSupervisor(snapshot, diagnosis)) return "parent-owned — ordinary child diagnosis is delivered to its delegating parent; no supervisor is needed";
 	return handoffStateLine({
 		diagnosis,
 		attempts: handoff.attempts,
@@ -1856,8 +1917,8 @@ function defineTaskReviewPackTool(ctx) {
 
 //#endregion
 //#region src/coordination/review-run.ts
-/** The preset the review agent mounts (`$DSH_HOME/.agent-presets/singularity-reviewer/`). */
-const REVIEWER_PRESET = "singularity-reviewer";
+/** Shared coordinator composition; runtime installs the reviewer policy. */
+const REVIEWER_PRESET = "singularity-coordinator";
 /** The review agent's whole tool surface. Read-only by construction: */
 const REVIEWER_BASELINE = [
 	"task_review_pack",
@@ -2151,7 +2212,7 @@ async function runReviewAgentAttempt(input) {
 			};
 		}
 		await settleAttempt("recorded");
-		consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error) => {
+		await consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error) => {
 			logOf(ctx, "singularity-agent")?.warn(`evolution hand-off: ${diagnosis.diagnosisId} could not be consumed (${message(error)})`);
 		});
 		return {
@@ -2196,8 +2257,7 @@ async function deliverDiagnosis(ctx, storeId, source, reviewerSessionId, log) {
 		let targetSessionId;
 		if (task.parentTaskId === void 0) targetSessionId = ownerSessionOfStore(storeId);
 		else {
-			const sourceRun = snapshot.runs.find((run) => run.runId === source.runId);
-			const parent = source.runId === null ? snapshot.runs.find((run) => run.taskId === task.parentTaskId && run.batches?.some((batch) => batch.memberTaskIds.includes(task.taskId))) : snapshot.runs.find((run) => run.runId === sourceRun?.parentRunId);
+			const parent = responsibleParentRun(snapshot, diagnosis);
 			if (parent === void 0 || parent.taskId !== task.parentTaskId) throw new Error(`the source's delegating run for parent task ${task.parentTaskId} is not recorded`);
 			targetSessionId = parent.sessionId;
 		}
@@ -2206,7 +2266,7 @@ async function deliverDiagnosis(ctx, storeId, source, reviewerSessionId, log) {
 			`Observation: ${diagnosis.observedFailure}`,
 			`Conclusion / next action: ${diagnosis.localizedCause}`,
 			`Original review: ${diagnosis.reviewRefs.join(", ")}; evidence: ${diagnosis.evidenceRefs.join(", ") || "none recorded"}.`,
-			"Read your current task/run state before acting. A diagnosis changes no task state or authority; it grants no task_recover or evolution tool."
+			"Read your current task/run state before acting. A diagnosis changes no task state or authority. Handle local child repairs in your current run after its batch settles; only established shared changes go to the supervisor."
 		].join("\n");
 		const delivery = await ctx.agentRuntime.ensureAgentMessageDelivered({
 			messageId: `m-diagnosis-${diagnosis.diagnosisId}`,
@@ -2245,7 +2305,7 @@ async function scanFailedReviewSources(ctx, storeId, options = {}) {
 	const root = liveRootAgentOf(ctx, storeId);
 	const attempts = await readReviewAgentAttempts(storeId);
 	for (const source of targets) {
-		const mine = attempts.filter((attempt) => sameSource(attempt.source, source));
+		const mine = attempts.filter((attempt) => attempt.role === "reviewer" && sameSource(attempt.source, source));
 		const open = mine.filter((attempt) => attempt.settlement === void 0).at(-1);
 		const existing = open ?? mine.at(-1);
 		if (existing !== void 0 && open === void 0) {
@@ -2609,7 +2669,8 @@ function defineCapabilityListTool(ctx) {
 		execute: async (_args, exec) => {
 			const capabilities = ctx.taskRuntime.listCapabilities();
 			const names = Object.keys(capabilities);
-			if (names.length === 0) return "no capabilities configured";
+			const servers = Object.entries(ctx.taskRuntime.listMcpServers());
+			if (names.length === 0 && servers.length === 0) return "no capabilities or MCP servers configured";
 			const caller = exec.agent?.id;
 			const report = typeof caller === "string" && caller.length > 0 ? await ctx.taskRuntime.capabilityProviderReport(caller) : void 0;
 			const verdicts = new Map((report?.capabilities ?? []).map((row) => [row.capability, row]));
@@ -2627,6 +2688,10 @@ function defineCapabilityListTool(ctx) {
 			return [
 				`capabilities (${names.length}):`,
 				...lines,
+				"",
+				`registered MCP servers (${servers.length}):`,
+				...servers.map(([name, server]) => `- ${name}: ${server.description} (namespace mcp__${server.serverName}__*)`),
+				"A capability may grant registered servers through an approved Evolution candidate. New server definitions are registered in deployment configuration.",
 				"",
 				`worker baseline (every capability worker keeps these on top of its grants): ${workerBaseline().join(", ")}`,
 				`baseline labels: ${WORKER_BASELINE_LABELS.join(", ")}; task machinery: ${WORKER_BASELINE_TOOLS.join(", ")}`,
@@ -2892,7 +2957,8 @@ function defineEvolutionApplyTool(ctx) {
 					"wrote production targets:",
 					...recovered.proposal.targetType === "capability" ? [`  - capability row ${recovered.proposal.targetId} in the production table`] : [],
 					...recovered.targets.map((target) => `  - ${target}`),
-					effectNote(recovered.proposal)
+					effectNote(recovered.proposal),
+					...await continueProposalHandoff(ctx, recovered.proposal, caller)
 				].join("\n");
 			} catch (error) {
 				return `evolution_apply rejected: ${message(error)}`;
@@ -2937,6 +3003,7 @@ function defineEvolutionApplyTool(ctx) {
 					...applied.targets.map((target) => `  - ${target}`),
 					...renderProviderRoles(applied.providers ?? []),
 					effectNote(applied.proposal),
+					...await continueProposalHandoff(ctx, applied.proposal, caller),
 					`human approval: approval:${exec.callId} — rollback with evolution_rollback`
 				].join("\n");
 			} catch (error) {
@@ -3084,7 +3151,11 @@ function defineEvolutionDecideTool(ctx) {
 			if (outcome !== "allowed-once") return `evolution_decide: no decision recorded — ${denialReason(outcome)}; proposal ${proposal.proposalId} stays gated`;
 			try {
 				const decided = await ctx.evolution.decide(args.proposalId, args.decision, caller, `approval:${exec.callId}`, args.note);
-				return [`proposal ${decided.proposalId} [decided] ${decided.decision}${decided.decisionNote === void 0 ? "" : ` — ${decided.decisionNote}`}`, decided.decision === "PROMOTE" ? "recorded after human approval — nothing applied yet; evolution_apply (second human gate) takes it to production" : "recorded after human approval — the ledger notes the decision only; nothing was applied"].join("\n");
+				return [
+					`proposal ${decided.proposalId} [decided] ${decided.decision}${decided.decisionNote === void 0 ? "" : ` — ${decided.decisionNote}`}`,
+					...await continueProposalHandoff(ctx, decided, caller),
+					decided.decision === "PROMOTE" ? "recorded after human approval — nothing applied yet; evolution_apply (second human gate) takes it to production" : "recorded after human approval — the ledger notes the decision only; nothing was applied"
+				].join("\n");
 			} catch (error) {
 				return `evolution_decide rejected: ${message(error)}`;
 			}
@@ -3942,6 +4013,58 @@ function defineTaskCancelTool(ctx) {
 }
 
 //#endregion
+//#region src/tools/task-template-list.ts
+/** The same creation input is accepted by root intake and each direct child. */
+const templateBindingParameters = {
+	templateRef: {
+		type: "object",
+		additionalProperties: false,
+		description: "Exact reference from task_template_list. Use with templateParameters instead of objective/acceptanceCriteria or other contract fields; the runtime binds the full immutable template contract.",
+		properties: {
+			id: {
+				type: "string",
+				required: true
+			},
+			version: {
+				type: "integer",
+				required: true
+			},
+			digest: {
+				type: "string",
+				required: true
+			}
+		}
+	},
+	templateParameters: {
+		type: "object",
+		additionalProperties: true,
+		description: "Named primitive parameter values satisfying the selected template parametersSchema. {{name}} binds contract strings verbatim; inspect the resulting command and use values appropriate to its syntax."
+	}
+};
+function defineTaskTemplateListTool(ctx) {
+	return defineTool({
+		name: "task_template_list",
+		description: "Find reusable Task contracts before intake or decomposition. Returns each matching id's latest immutable version, exact digest, applicability conditions, parameter schema and complete contract. Read appliesTo to decide whether it fits; bind a suitable template in task_intake/task_decompose. With no suitable template, write a full standard contract.",
+		parameters: { query: {
+			type: "string",
+			description: "Optional whitespace-separated discovery keywords; omit to inspect the full current library. Applicability is decided from appliesTo, not keyword matches."
+		} },
+		output: {
+			schema: { type: "string" },
+			render: (_args, value) => text(value)
+		},
+		execute: async (args) => {
+			try {
+				const matches = await ctx.taskRuntime.findTaskTemplates(args.query);
+				return matches.length === 0 ? "No matching Task template. You may still submit a complete standard contract, preserving the requested objective and acceptance." : JSON.stringify(matches, null, 2);
+			} catch (error) {
+				return `task_template_list failed: ${message(error)}`;
+			}
+		}
+	});
+}
+
+//#endregion
 //#region src/tools/criteria-schema.ts
 /** One closed criterion object; the two members both tools word identically live here. */
 function criterionSchema(wording) {
@@ -4085,7 +4208,7 @@ async function pendingReviewText(input) {
 function defineTaskDecomposeTool(ctx) {
 	return defineTool({
 		name: "task_decompose",
-		description: "Delegate the caller's current task's independently checkable results or distinct responsibilities to child tasks. Each caller owns its full result and may coordinate children that decompose again; define only this level and let each child decide its descendants. The batch is admitted atomically and the runtime then runs them one at a time in dependency order; this call returns at admission and does not wait. Each child is verified against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.",
+		description: "Delegate the caller's current task's independently checkable results or distinct responsibilities to child tasks. Call task_template_list first; use a suitable pinned template and parameters, or write a full standard contract when none applies. Each caller owns its full result and may coordinate children that decompose again; define only this level and let each child decide its descendants. The batch is admitted atomically and the runtime then runs them one at a time in dependency order; this call returns at admission and does not wait. Each child is verified against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.",
 		parameters: {
 			reason: {
 				type: "string",
@@ -4105,20 +4228,19 @@ function defineTaskDecomposeTool(ctx) {
 					type: "object",
 					additionalProperties: false,
 					properties: {
+						...templateBindingParameters,
 						objective: {
 							type: "string",
-							required: true,
 							description: "Complete, self-contained goal of the child task"
 						},
 						acceptanceCriteria: {
 							type: "array",
-							required: true,
-							description: "How a verifier decides the child is done",
+							description: "Required for a free contract; omit when using templateRef. How a verifier decides the child is done",
 							items: criterionSchema({
 								description: "What must hold true",
 								criterionId: "Stable id for this criterion: fixed at admission, and the only id a parent-level childEvidence.criterionId can rely on. Omitted, the runtime generates one from the batch position; declared ids must be unique inside a child. A parent-level childEvidence.criterionId must name an id the child it points to actually declared, which only holds when that child declares the id explicitly here",
 								command: "Shell command; exit code 0 proves the criterion (deterministic modes). Reuse an authoritative checker that already covers this result; do not duplicate its assertions",
-								mode: "Verifier kind; defaults to deterministic when a command is given, review otherwise",
+								mode: "Verifier kind; defaults to deterministic with a command. Mandatory review/formal criteria require an explicit registered verifier that can settle them; the built-in review placeholder is refused.",
 								requiresArtifact: "Artifact/evidence kinds or ids that must already exist in the task store as a verified reference product (a verified run carrying a passing verdict) for this criterion to be judgeable; a missing one blocks the child before spawn and registers an obligation",
 								acceptsArtifact: "Artifact/evidence kinds or ids this criterion consumes as a raw input: existence in the task store is the whole requirement, any run state. Missing blocks the child before spawn and registers an obligation",
 								verifierRef: "Registered verifier id that judges this criterion; must exist in the verifier registry — an unknown id rejects the whole batch at admission and the error lists the registered ids. Omit to dispatch by mode.",
@@ -4375,22 +4497,21 @@ function defineTaskDiagnoseTool(ctx) {
 function defineTaskIntakeTool(ctx) {
 	return defineTool({
 		name: "task_intake",
-		description: "Accept this root session's contract: the objective the graph works toward, the acceptance criteria a verifier will judge it by, the assumptions and constraints it rests on and the capabilities the work needs. Only the root session of a graph may call this — the contract becomes that session's root task, and a worker's task was admitted by its parent already. The runtime also checks where the contract came from: only a message DSH attests as human input counts, so a session whose own log holds none of the user's is refused — the prompts this deployment writes (the graph setup text, a spawn's delegated task) and the notices it sends are attributed to their producers, not to a person. A delegated child session is refused too, and a contract is never intaken for another session's store. The runtime normalizes and judges the contract first, and one rule is the root's own: at least one mandatory criterion must be judged by something other than the composite conjunction, so \"all children verified\" cannot be the only thing standing behind the goal. Where this deployment reviews contracts, the call then answers with a proposal id and nothing activated; the decision is recorded by the review channel and the runtime activates the contract itself — no parameter of this call approves anything, and a contract waiting for a review has no root task, no run and no worker.",
+		description: "Call task_template_list first; bind a suitable pinned template, or write a full standard contract when none applies. Accept this root session's contract: the objective the graph works toward, the acceptance criteria a verifier will judge it by, the assumptions and constraints it rests on and the capabilities the work needs. Only the root session of a graph may call this — the contract becomes that session's root task, and a worker's task was admitted by its parent already. The runtime also checks where the contract came from: only a message DSH attests as human input counts, so a session whose own log holds none of the user's is refused — the prompts this deployment writes (the graph setup text, a spawn's delegated task) and the notices it sends are attributed to their producers, not to a person. A delegated child session is refused too, and a contract is never intaken for another session's store. The runtime normalizes and judges the contract first, and one rule is the root's own: at least one mandatory criterion must be judged by something other than the composite conjunction, so \"all children verified\" cannot be the only thing standing behind the goal. Where this deployment reviews contracts, the call then answers with a proposal id and nothing activated; the decision is recorded by the review channel and the runtime activates the contract itself — no parameter of this call approves anything, and a contract waiting for a review has no root task, no run and no worker.",
 		parameters: {
+			...templateBindingParameters,
 			objective: {
 				type: "string",
-				required: true,
 				description: "The goal of this graph, in the user's terms: what has to exist when the work is done. It stays fixed once the contract is accepted, and it is what every later decomposition is judged against. The objective is the user's request, not this graph's name and not the environment setup work"
 			},
 			acceptanceCriteria: {
 				type: "array",
-				required: true,
 				description: "How the goal is judged, at least one criterion mandatory and aimed at the delivered artifact: a root whose only mandatory criterion is the conjunction of its children has no independent check of the goal it was given",
 				items: criterionSchema({
 					description: "What must hold true of the delivered artifact",
 					criterionId: "Stable id for this criterion; omitted, the runtime generates one from its position (`ac-1`, `ac-2`, …). Declared ids must be unique inside the contract",
 					command: "Shell command the verifier runs; exit code 0 proves the criterion (deterministic modes)",
-					mode: "Verifier kind; defaults to deterministic when a command is given, review otherwise. `composite` is the conjunction of the children this goal later decomposes into: it may be one of the mandatory criteria, never the only one",
+					mode: "Verifier kind; defaults to deterministic with a command. Mandatory review/formal requires an explicit registered settling verifier. `composite` is the conjunction of the children this goal later decomposes into: it may be one of the mandatory criteria, never the only one",
 					requiresArtifact: "Artifact/evidence kinds or ids that must already exist in the task store as a verified reference product for this criterion to be judgeable; a missing one blocks the run and registers an obligation",
 					acceptsArtifact: "Artifact/evidence kinds or ids this criterion consumes as a raw input: existence in the task store is the whole requirement, any run state",
 					verifierRef: "Registered verifier id that judges this criterion; must exist in the verifier registry — an unknown id rejects the whole contract at intake and the error lists the registered ids. Omit to dispatch by mode.",
@@ -4411,7 +4532,7 @@ function defineTaskIntakeTool(ctx) {
 			requiredCapabilities: {
 				type: "array",
 				items: { type: "string" },
-				description: "Capability names the goal needs; call capability_list first to see the names this deployment can grant. A root contract has nobody above it to delegate a gap to, so a name the registry cannot grant refuses the contract by name rather than being recorded as an obligation"
+				description: "Capability names the goal needs; call capability_list to inspect available grants. Missing root capabilities remain in the original contract and become persistent obligations owned by this root session. Plan available work or propose the required capability change before executing work that needs it."
 			},
 			...proposalSubmissionParameters({
 				versionSubject: "intake",
@@ -4706,7 +4827,7 @@ function renderOutcome$1(outcome) {
 function defineTaskRecoverTool(ctx) {
 	return defineTool({
 		name: "task_recover",
-		description: "Open a new attempt at a root goal (a new root Run/Session in the same store), for ONE recorded Diagnosis of that same store. Available to the trusted supervisor coordination session a hand-off was delegated to and to no one else: the caller is read from the live session and checked against the delegation the deployment recorded, so a root, a worker, a reviewer or another graph's supervisor cannot use it, and no authorization is ever passed as an argument. mode selects the round: the default \"recovery\" opens the failed source's new attempt; a verified source accepts only \"improve\", one improvement round judged by the same original acceptance criteria. Every rule is re-checked below this tool: the source's recovery/improvement cap and the store's facts are re-read, the evolution plane verifies that a capability change this diagnosis stands on is approved and applied (an unapproved, undecided or rolled-back capability means nothing is opened), and the task runtime re-reads the store's own facts — the failed source, the original contract and criteria, the providers the attempt needs now, the ceilings in force and the attempt's own idempotency — before it writes. An in-flight run is never hot-swapped, and a second key while an attempt of the same diagnosis is in flight is refused by name. Repeating the same call returns the attempt that key already names instead of starting another; a pure artifact gap needs no proposal and no approval.",
+		description: "Open a new attempt at a root goal (a new root Run/Session in the same store), for ONE recorded Diagnosis of that same store. Available to the trusted supervisor coordination session a hand-off was delegated to and to no one else: the caller is read from the live session and checked against the delegation the deployment recorded, so a root, a worker, a reviewer or another graph's supervisor cannot use it, and no authorization is ever passed as an argument. mode selects the round: the default \"recovery\" opens the failed source's new attempt; a verified source accepts only \"improve\", one improvement round judged by the same original acceptance criteria. Every rule is re-checked below this tool: the source's recovery/improvement cap and the store's facts are re-read, the evolution plane verifies that every shared change this diagnosis stands on is approved and applied (an unapproved, undecided or rolled-back proposal means nothing is opened), and the task runtime re-reads the store's own facts — the failed source, the original contract and criteria, the providers the attempt needs now, the ceilings in force and the attempt's own idempotency — before it writes. An in-flight run is never hot-swapped, and a second key while an attempt of the same diagnosis is in flight is refused by name. Repeating the same call returns the attempt that key already names instead of starting another; a pure artifact gap needs no proposal and no approval.",
 		parameters: {
 			sourceDiagnosisId: {
 				type: "string",
@@ -5091,6 +5212,7 @@ var SingularityAgent = class extends Service {
 		ctx.tools.register(defineApproveTool(ctx));
 		ctx.tools.register(defineTaskReadTool(ctx));
 		ctx.tools.register(defineCapabilityListTool(ctx));
+		ctx.tools.register(defineTaskTemplateListTool(ctx));
 		ctx.tools.register(defineContextReadTool(ctx));
 		ctx.tools.register(defineTaskIntakeTool(ctx));
 		ctx.tools.register(defineTaskDecomposeTool(ctx));

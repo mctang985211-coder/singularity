@@ -55,6 +55,7 @@ export async function spawnUnderClaim(input: ClaimedSpawnRequest): Promise<Claim
     prompt: [{ type: 'text', text: prompt }],
     agentPreset: input.preset,
     grant: input.grant,
+    coordinationRole: input.request.role === 'supervisor' ? 'supervisor' : 'reviewer',
     // The delegation ledger is written between "the agent is a published graph
     // member" and "its first model input" (A2 §D): the read-back is the check.
     beforePrompt: async () => {

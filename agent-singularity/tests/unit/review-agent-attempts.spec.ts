@@ -450,7 +450,7 @@ describe('the source attempt: claim, started, settled', () => {
     let attempts = 0
     const { ctx, spawn } = fixture(async args => {
       attempts += 1
-      if (attempts === 1) throw new Error('Unknown agent preset: singularity-reviewer')
+      if (attempts === 1) throw new Error('Unknown agent preset: singularity-coordinator')
       await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
       return handle(REPLY)
     })

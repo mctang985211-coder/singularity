@@ -944,12 +944,12 @@ describe('task_review_agent', () => {
 
   test('a spawn failure is reported without recording a diagnosis, and leaves the attempt interrupted', async () => {
     const { ctx, recordDiagnosisIn } = fixture(undefined, async () => {
-      throw new Error('Unknown agent preset: singularity-reviewer')
+      throw new Error('Unknown agent preset: singularity-coordinator')
     })
     const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
     expect(recordDiagnosisIn).not.toHaveBeenCalled()
     expect(result).toContain('spawn failed')
-    expect(result).toContain('singularity-reviewer')
+    expect(result).toContain('singularity-coordinator')
     expect(rowsOfKind('claim')).toHaveLength(1)
     expect(rowsOfKind('started')).toHaveLength(0)
     expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })

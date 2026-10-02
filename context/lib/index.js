@@ -1642,8 +1642,8 @@ async function obligationLines(envBuilder, envId, snapshot) {
 		const templates = (await loadObligationTemplates(repoRoot)).flatMap((file) => file.templates);
 		if (templates.length === 0) return header;
 		const coverage = checkObligationCoverage(templates, snapshot);
-		const uncovered = coverage.uncovered.map((template) => `${template.id} ("${template.question}") — satisfied, or forgotten?`);
-		return [...header, `- obligation coverage: ${coverage.covered.length}/${templates.length} covered${uncovered.length === 0 ? "" : `; uncovered: ${uncovered.join("; ")}`}`];
+		const uncovered = coverage.uncovered.map((template) => `${template.id} ("${template.question}") — no passing evidence bound to this criterion id`);
+		return [...header, `- obligation evidence: ${coverage.covered.length}/${templates.length} satisfied${uncovered.length === 0 ? "" : `; unresolved: ${uncovered.join("; ")}`}`];
 	} catch {
 		return header;
 	}

@@ -70,6 +70,8 @@ export interface RootRecoveryRequest {
    * verified source, judged by the same original criteria. The two spend separate per-source caps.
    */
   mode?: RecoveryMode
+  /** Applied evolution proposals consumed by this new attempt, verified by recovery coordination. */
+  proposalIds?: readonly string[]
   /** The verified siblings the new attempt reads at its leading positions, in position order. */
   reuses?: readonly RootRecoveryReuse[]
 }
@@ -82,6 +84,7 @@ const REQUEST_FIELDS: readonly string[] = [
   'requestKey',
   'mode',
   'reuses',
+  'proposalIds',
 ]
 /** The fields one reuse declaration may carry. */
 const REUSE_FIELDS: readonly string[] = [
@@ -112,6 +115,14 @@ export function recoveryRequestDefects(request: unknown): string[] {
   if (!nonBlank(request.requestKey)) defects.push('requestKey must be a non-empty string')
   if (request.mode !== undefined && request.mode !== 'recovery' && request.mode !== 'improve') {
     defects.push('mode must be "recovery" (the default) or "improve"')
+  }
+  if (
+    request.proposalIds !== undefined &&
+    (!Array.isArray(request.proposalIds) ||
+      request.proposalIds.some(id => !nonBlank(id)) ||
+      new Set(request.proposalIds).size !== request.proposalIds.length)
+  ) {
+    defects.push('proposalIds must be an array of unique non-empty proposal ids')
   }
   if (request.reuses !== undefined) {
     if (!Array.isArray(request.reuses)) defects.push('reuses must be an array of declarations')
@@ -187,12 +198,15 @@ export function inFlightRecoveryAttempt(
  * is bound to — the kind of round, the source run it reads and the reuse it declares. A retry
  */
 export function recoveryAttemptDigest(
-  recovery: Pick<RunRecovery, 'sourceRunId' | 'reusedMembers'> & { readonly kind?: RunRecovery['kind'] },
+  recovery: Pick<RunRecovery, 'sourceRunId' | 'reusedMembers' | 'proposalIds'> & {
+    readonly kind?: RunRecovery['kind']
+  },
 ): string {
   return sha256Hex(
     canonicalize({
       kind: recovery.kind ?? 'recovery',
       sourceRunId: recovery.sourceRunId ?? null,
+      ...(recovery.proposalIds?.length ? { proposalIds: [...recovery.proposalIds].sort() } : {}),
       reusedMembers: recovery.reusedMembers.map(member => ({
         childIndex: member.childIndex,
         taskId: member.taskId,
@@ -254,6 +268,7 @@ export function recoverySourceRun(
 export function requestAttemptDigest(request: RootRecoveryRequest): string {
   return recoveryAttemptDigest({
     kind: recoveryKindOf(request.mode),
+    proposalIds: request.proposalIds === undefined ? undefined : [...request.proposalIds],
     ...(request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId }),
     reusedMembers: (request.reuses ?? []).map(declaration => ({
       childIndex: declaration.childIndex,

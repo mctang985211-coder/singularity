@@ -24,6 +24,7 @@ export interface WorkerRole {
   readonly permissionPreset: string
   /** Declare this worker a task worker: its stable policy section is installed. */
   readonly taskWorker: boolean
+  readonly coordinationRole?: 'reviewer' | 'supervisor'
   /** The resolved capability grant, when the run was admitted with one. */
   readonly grant?: WorkerGrant
 }

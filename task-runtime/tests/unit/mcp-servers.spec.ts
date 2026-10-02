@@ -1,6 +1,6 @@
+import { DEPLOYMENT_MCP_SERVERS } from '../../../tests/support/mcp-servers.ts'
 import { describe, expect, test } from 'vitest'
 import {
-  MCP_SERVER_REGISTRY,
   manifestMcpServers,
   resolveMcpServerSpecs,
   type McpEnvBinding,
@@ -35,7 +35,7 @@ describe('manifestMcpServers', () => {
 
 describe('resolveMcpServerSpecs against the shipped registry', () => {
   test('bbdev binds the env checkout into command and cwd, forks included', () => {
-    const specs = resolveMcpServerSpecs(manifest('bbdev'), BINDING)
+    const specs = resolveMcpServerSpecs(manifest('bbdev'), BINDING, DEPLOYMENT_MCP_SERVERS)
     expect(specs).toEqual([
       {
         serverName: 'bbdev',
@@ -51,25 +51,26 @@ describe('resolveMcpServerSpecs against the shipped registry', () => {
     const specs = resolveMcpServerSpecs(
       { capabilities: { a: { mcpServers: ['bbdev'] }, b: { mcpServers: ['bbdev'] } } },
       BINDING,
+      DEPLOYMENT_MCP_SERVERS,
     )
     expect(specs.map(spec => spec.serverName)).toEqual(['bbdev'])
   })
 
   test('an unknown server name throws, naming the registry vocabulary', () => {
-    expect(() => resolveMcpServerSpecs(manifest('ghost'), BINDING)).toThrow(
+    expect(() => resolveMcpServerSpecs(manifest('ghost'), BINDING, DEPLOYMENT_MCP_SERVERS)).toThrow(
       'unknown MCP server "ghost"; known servers: bbdev, waveform',
     )
   })
 
   test('an env-needing server with no binding fails loudly', () => {
-    expect(() => resolveMcpServerSpecs(manifest('bbdev'), undefined)).toThrow(
+    expect(() => resolveMcpServerSpecs(manifest('bbdev'), undefined, DEPLOYMENT_MCP_SERVERS)).toThrow(
       'MCP server "bbdev" needs an env binding ({envRoot}/{repoRoot} template) but this run\'s session has none',
     )
   })
 
   test('a repo the env does not contain fails loudly, naming the repo and the env', () => {
     expect(() =>
-      resolveMcpServerSpecs(manifest('bbdev'), { envRoot: '/env/project9', checkout: () => undefined }),
+      resolveMcpServerSpecs(manifest('bbdev'), { envRoot: '/env/project9', checkout: () => undefined }, DEPLOYMENT_MCP_SERVERS),
     ).toThrow(
       'MCP server "bbdev" binds {repoRoot:buckyball} but this run\'s env (/env/project9) has no "buckyball" checkout',
     )
@@ -122,13 +123,13 @@ describe('resolveMcpServerSpecs template mechanics', () => {
 
 describe('the shipped registry', () => {
   test('every template resolves against a buckyball-bearing env without throwing', () => {
-    for (const name of Object.keys(MCP_SERVER_REGISTRY)) {
-      expect(() => resolveMcpServerSpecs(manifest(name), BINDING), name).not.toThrow()
+    for (const name of Object.keys(DEPLOYMENT_MCP_SERVERS)) {
+      expect(() => resolveMcpServerSpecs(manifest(name), BINDING, DEPLOYMENT_MCP_SERVERS), name).not.toThrow()
     }
   })
 
   test("server names satisfy mcp-client's namespace pattern", () => {
-    for (const template of Object.values(MCP_SERVER_REGISTRY)) {
+    for (const template of Object.values(DEPLOYMENT_MCP_SERVERS)) {
       expect(template.serverName).toMatch(/^[A-Za-z0-9_-]{1,32}$/)
     }
   })

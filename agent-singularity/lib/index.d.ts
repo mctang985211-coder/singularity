@@ -18,7 +18,7 @@ interface SupervisionConfig {
   /** Review-agent runs (reviewers and supervisors together) one root store may start. */
   readonly coordinationBudget: number;
 }
-/** The shipped defaults: every terminal review is diagnosed, three recovery rounds, two improvement rounds, eight coordination runs per store. */
+/** The shipped defaults: failed reviews are diagnosed, three recovery rounds, two improvement rounds, eight coordination runs per store. */
 declare const DEFAULT_SUPERVISION: SupervisionConfig;
 //#endregion
 //#region src/services/hitl.d.ts

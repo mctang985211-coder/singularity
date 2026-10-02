@@ -1,3 +1,5 @@
+import { defaultTaskTemplatesRoot, findTaskTemplates, registerTaskTemplate } from '../task-template.ts'
+import type { TaskTemplate } from '@dangosys/dsh-singularity-task'
 /**
  * The Singularity task runtime service: the class the deployment mounts as `ctx.taskRuntime`.
  * Every method delegates to the function module that owns it (see `./<block>.ts`), so the class
@@ -158,6 +160,8 @@ export class TaskRuntime extends Service {
     svcLifecycle.assertSupervisionConfig(config?.supervision)
     this.config = {
       capabilities: structuredClone(config?.capabilities ?? {}),
+      taskTemplatesRoot: config?.taskTemplatesRoot ?? defaultTaskTemplatesRoot(),
+      mcpServers: structuredClone(config?.mcpServers ?? {}),
       ...(config?.defaultPreset !== undefined ? { defaultPreset: config.defaultPreset } : {}),
       verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
       maxDepth: config?.maxDepth ?? DEFAULT_MAX_DEPTH,
@@ -179,6 +183,15 @@ export class TaskRuntime extends Service {
      * every session this runtime tracks, and the workspace markers this process
      */
     ctx.effect(() => () => this.unload())
+  }
+
+  async findTaskTemplates(query?: string) {
+    return findTaskTemplates(this.config.taskTemplatesRoot, query)
+  }
+
+  async registerTaskTemplate(template: TaskTemplate) {
+    if (this.config.taskTemplatesRoot === undefined) throw new Error('task-runtime: taskTemplatesRoot is not configured')
+    return registerTaskTemplate(this.config.taskTemplatesRoot, template)
   }
 
   async unload(): Promise<void> {
@@ -215,6 +228,10 @@ export class TaskRuntime extends Service {
 
   resolveCapabilities(required: readonly string[]): CapabilityManifest {
     return svcLifecycle.resolveCapabilitiesImpl(this, required)
+  }
+
+  listMcpServers(): Readonly<Record<string, import('../mcp-servers.ts').McpServerTemplate>> {
+    return structuredClone(this.config.mcpServers ?? {})
   }
 
   listCapabilities(): Readonly<Record<string, CapabilityConfig>> {

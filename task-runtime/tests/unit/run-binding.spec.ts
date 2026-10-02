@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import type { CapabilityManifest, RunProviderBinding } from '../../../task/src/index.ts'
 import { canonicalize, sha256Hex } from '../../../task/src/index.ts'
 import type { CapabilityConfig } from '../../src/capability.ts'
-import { MCP_SERVER_REGISTRY } from '../../src/mcp-servers.ts'
+import { DEPLOYMENT_MCP_SERVERS } from '../../../tests/support/mcp-servers.ts'
 import { precheckProviders } from '../../src/provider-precheck.ts'
 import type { ProviderPrecheck } from '../../src/provider-precheck.ts'
 import { bindRunProviders, readRunBinding, RUN_BINDING_SKILLS_DIR } from '../../src/run-binding.ts'
@@ -104,6 +104,7 @@ async function bind(options: {
     runId: options.runId ?? 'r-1',
     manifest: manifest(options.rows),
     providers,
+    mcpRegistry: DEPLOYMENT_MCP_SERVERS,
     table: TABLE,
     root: 'bindingRoot' in options ? options.bindingRoot : root,
   })
@@ -319,6 +320,7 @@ describe('bindRunProviders', () => {
       manifest: manifest({}),
       table: TABLE,
       root,
+      mcpRegistry: DEPLOYMENT_MCP_SERVERS,
     })
     expect(empty!.skills).toEqual([])
     expect(empty!.capabilities).toEqual([])
@@ -339,7 +341,7 @@ describe('bindRunProviders', () => {
     expect(binding.mcpServers[0]!.serverName).toBe('bbdev')
     // The digest tracks the registry template: the same name over an edited
     // template is a different identity, and the record says so.
-    expect(binding.mcpServers[0]!.templateDigest).toBe(sha256Hex(canonicalize(MCP_SERVER_REGISTRY['bbdev'])))
+    expect(binding.mcpServers[0]!.templateDigest).toBe(sha256Hex(canonicalize(DEPLOYMENT_MCP_SERVERS['bbdev'])))
     const edited = await bindRunProviders({
       storeId: 'sg-t-root',
       runId: 'r-edited',
@@ -347,7 +349,7 @@ describe('bindRunProviders', () => {
       providers: await precheck(['verify-ball-functional']),
       table: TABLE,
       root,
-      mcpRegistry: { bbdev: { ...MCP_SERVER_REGISTRY['bbdev'], command: 'somewhere/else.sh' } },
+      mcpRegistry: { bbdev: { ...DEPLOYMENT_MCP_SERVERS['bbdev'], command: 'somewhere/else.sh' } },
     })
     expect(edited!.mcpServers[0]!.templateDigest).not.toBe(binding.mcpServers[0]!.templateDigest)
   })

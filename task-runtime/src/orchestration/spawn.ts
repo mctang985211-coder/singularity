@@ -83,7 +83,7 @@ export async function authorizedGrant(
   const grant = { ...workerGrant(manifest), ...(skillRoots.length === 0 ? {} : { skillRoots: [...skillRoots] }) }
   if (manifestMcpServers(manifest).length === 0) return grant
   const binding = env.resolveMcpEnv === undefined ? undefined : await env.resolveMcpEnv()
-  return { ...grant, mcpServers: resolveMcpServerSpecs(manifest, binding) }
+  return { ...grant, mcpServers: resolveMcpServerSpecs(manifest, binding, env.mcpRegistry ?? {}) }
 }
 
 /**

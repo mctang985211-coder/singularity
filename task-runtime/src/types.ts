@@ -7,7 +7,6 @@ import type {
   AcceptanceCriterion,
   BudgetExtensionProposal,
   CapabilityManifest,
-  ChildEvidenceRef,
   ExecutionPhase,
   Obligation,
   RunId,
@@ -16,6 +15,7 @@ import type {
   RunStatus,
   TaskBudgetExtension,
   TaskContract,
+  TaskContractInput,
   TaskId,
   TaskInstance,
   TaskProposal,
@@ -25,7 +25,6 @@ import type {
   TaskProposalRoot,
   TaskProposalStatus,
   TaskRun,
-  VerificationMode,
 } from '@dangosys/dsh-singularity-task'
 import type { ProviderPrecheck } from './provider-precheck.ts'
 import type { RootBudgetCeilings } from './root-budget.ts'
@@ -44,73 +43,11 @@ export interface CommitReconcileOutcome {
   readonly detail?: string
 }
 
-export interface CriterionSpec {
-  /**
-   * Stable criterion id (T1). Omitted, the runtime generates one from the batch
-   * position (`ac1-1`, `ac2-1`, …) — the scheme every criterion was numbered
-   */
-  criterionId?: string
-  description: string
-  command?: string
-  mode?: VerificationMode
-  mandatory?: boolean
-  requiredEvidence?: string[]
-  /**
-   * Evidence dependencies (KISS §5.1): artifact/evidence kinds or ids that must
-   * exist in the store before this criterion can be judged. Since P4 this
-   */
-  requiresArtifact?: string[]
-  /**
-   * Raw-input counterpart of `requiresArtifact` (P4): artifact/evidence kinds
-   * or ids this criterion consumes, where mere existence in the store is the
-   */
-  acceptsArtifact?: string[]
-  /**
-   * The registered verifier id that judges this criterion (KISS §4.1
-   * `verifier_ref`). Absent dispatches by mode (the current behavior);
-   */
-  verifierRef?: string
-  /**
-   * The parent-level evidence map (KISS §6 C2, P4): which child of the
-   * decomposing task this criterion rests on, by batch position, optionally
-   */
-  childEvidence?: ChildEvidenceRef[]
-  /**
-   * Labels this criterion's judgement heuristic (KISS §5.1, P4): the verdict is
-   * marked as such and never counted as a deterministic pass. Mutually
-   */
-  heuristic?: boolean
-  /**
-   * Acceptance inputs this criterion's verdict rests on that the executing side
-   * must not modify (S1-V slice 2): acceptance scripts, threshold files,
-   */
-  protectedInputs?: readonly string[]
-}
+export type { CriterionSpec } from '@dangosys/dsh-singularity-task'
 
-export interface DecomposeChildSpec {
-  objective: string
-  acceptanceCriteria: readonly CriterionSpec[]
-  requiredCapabilities?: readonly string[]
+export interface DecomposeChildSpec extends TaskContractInput {
   dependsOn?: readonly number[]
-  /**
-   * Assumptions the child task's contract rests on, in the caller's words.
-   * Merged with the dependency-evidence references the orchestrator derives at
-   */
-  assumptions?: readonly string[]
-  /**
-   * Execution scope and limits this child runs under, in the caller's words
-   * (T1). Persisted in the child's contract — so a reader of the store sees the
-   */
-  constraints?: readonly string[]
-  /**
-   * The caller declares this child may decompose itself (RFC §36: the agent
-   * admits it so its own worker keeps the option to split further). A missing
-   */
   decomposable?: boolean
-  /**
-   * Contract-level marker (P4, KISS §6 C2): this child demands independent
-   * parent acceptance — its own criteria must carry a `childEvidence` map, or
-   */
   requiresIndependentAcceptance?: boolean
 }
 
@@ -124,13 +61,7 @@ export interface DecomposeSpec {
   contractVersion?: number
 }
 
-export interface RootContractSpec {
-  objective: string
-  acceptanceCriteria: readonly CriterionSpec[]
-  assumptions?: readonly string[]
-  constraints?: readonly string[]
-  requiredCapabilities?: readonly string[]
-  /** The contract language, as {@link DecomposeSpec.contractVersion}: omitted means this build's version. */
+export interface RootContractSpec extends TaskContractInput {
   contractVersion?: number
 }
 

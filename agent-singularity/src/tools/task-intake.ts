@@ -4,6 +4,7 @@ import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type {} from '@dangosys/dsh-singularity-context'
 import type { RootContractSpec, RootIntakeResult } from '@dangosys/dsh-singularity-task-runtime'
 import { message, sessionId, text } from '../shared.ts'
+import { templateBindingParameters } from './task-template-list.ts'
 import { criterionSchema } from './criteria-schema.ts'
 import { pendingReviewText, proposalSubmissionParameters } from './proposal-shared.ts'
 
@@ -12,6 +13,7 @@ export function defineTaskIntakeTool(ctx: Context) {
   return defineTool({
     name: 'task_intake',
     description:
+      'Call task_template_list first; bind a suitable pinned template, or write a full standard contract when none applies. ' +
       'Accept this root session\'s contract: the objective the graph works toward, the acceptance criteria a verifier will judge it by, ' +
       'the assumptions and constraints it rests on and the capabilities the work needs. Only the root session of a graph may call this — ' +
       'the contract becomes that session\'s root task, and a worker\'s task was admitted by its parent already. The runtime also checks ' +
@@ -25,9 +27,9 @@ export function defineTaskIntakeTool(ctx: Context) {
       'review channel and the runtime activates the contract itself — no parameter of this call approves anything, and a contract ' +
       'waiting for a review has no root task, no run and no worker.',
     parameters: {
+      ...templateBindingParameters,
       objective: {
         type: 'string',
-        required: true,
         description:
           'The goal of this graph, in the user\'s terms: what has to exist when the work is done. It stays fixed once the contract is ' +
           'accepted, and it is what every later decomposition is judged against. The objective is the user\'s request, not this graph\'s ' +
@@ -35,7 +37,6 @@ export function defineTaskIntakeTool(ctx: Context) {
       },
       acceptanceCriteria: {
         type: 'array',
-        required: true,
         description:
           'How the goal is judged, at least one criterion mandatory and aimed at the delivered artifact: a root whose only mandatory ' +
           'criterion is the conjunction of its children has no independent check of the goal it was given',
@@ -46,7 +47,7 @@ export function defineTaskIntakeTool(ctx: Context) {
             'must be unique inside the contract',
           command: 'Shell command the verifier runs; exit code 0 proves the criterion (deterministic modes)',
           mode:
-            'Verifier kind; defaults to deterministic when a command is given, review otherwise. `composite` is the conjunction of ' +
+            'Verifier kind; defaults to deterministic with a command. Mandatory review/formal requires an explicit registered settling verifier. `composite` is the conjunction of ' +
             'the children this goal later decomposes into: it may be one of the mandatory criteria, never the only one',
           requiresArtifact: 'Artifact/evidence kinds or ids that must already exist in the task store as a verified reference product for this criterion to be judgeable; a missing one blocks the run and registers an obligation',
           acceptsArtifact: 'Artifact/evidence kinds or ids this criterion consumes as a raw input: existence in the task store is the whole requirement, any run state',
@@ -80,9 +81,7 @@ export function defineTaskIntakeTool(ctx: Context) {
         type: 'array',
         items: { type: 'string' },
         description:
-          'Capability names the goal needs; call capability_list first to see the names this deployment can grant. A root contract has ' +
-          'nobody above it to delegate a gap to, so a name the registry cannot grant refuses the contract by name rather than being ' +
-          'recorded as an obligation',
+          'Capability names the goal needs; call capability_list to inspect available grants. Missing root capabilities remain in the original contract and become persistent obligations owned by this root session. Plan available work or propose the required capability change before executing work that needs it.',
       },
       ...proposalSubmissionParameters({
         versionSubject: 'intake',

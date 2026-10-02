@@ -68,7 +68,8 @@ export function defineCapabilityListTool(ctx: Context) {
     execute: async (_args, exec) => {
       const capabilities = ctx.taskRuntime.listCapabilities()
       const names = Object.keys(capabilities)
-      if (names.length === 0) return 'no capabilities configured'
+      const servers = Object.entries(ctx.taskRuntime.listMcpServers())
+      if (names.length === 0 && servers.length === 0) return 'no capabilities or MCP servers configured'
       // The provider verdicts come from the same pre-check admission runs, from
       // this caller's own discovery viewpoint: a skill that is missing or
       const caller = exec.agent?.id
@@ -94,6 +95,10 @@ export function defineCapabilityListTool(ctx: Context) {
       return [
         `capabilities (${names.length}):`,
         ...lines,
+        '',
+        `registered MCP servers (${servers.length}):`,
+        ...servers.map(([name, server]) => `- ${name}: ${server.description} (namespace mcp__${server.serverName}__*)`),
+        'A capability may grant registered servers through an approved Evolution candidate. New server definitions are registered in deployment configuration.',
         '',
         `worker baseline (every capability worker keeps these on top of its grants): ${workerBaseline().join(', ')}`,
         `baseline labels: ${WORKER_BASELINE_LABELS.join(', ')}; task machinery: ${WORKER_BASELINE_TOOLS.join(', ')}`,

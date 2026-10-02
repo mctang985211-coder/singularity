@@ -445,7 +445,7 @@ describe('K1-4: a returned parent whose checkout cannot be taken over is refused
     // statement the first process made is the one that stands.
     expect(second.mintedAgent(middleSession)).toBeUndefined()
     expect(second.spawns.filter(spawn => spawn.taskWorker === true)).toEqual([])
-    for (const spawn of second.spawns) expect(spawn.agentPreset).toBe('singularity-reviewer')
+    for (const spawn of second.spawns) expect(spawn.agentPreset).toBe('singularity-coordinator')
     expect(second.relayed.filter(intent => intent.messageId === endMessageId)).toEqual([])
     expect(second.relayed.filter(intent => intent.targetSessionId === middleSession)).toEqual([])
 
@@ -507,7 +507,7 @@ describe('K1-4: a returned parent whose checkout cannot be taken over is refused
     // The same three facts as the case above: no wake, no worker, no resurrection.
     expect(second.mintedAgent(middleSession)).toBeUndefined()
     expect(second.spawns.filter(spawn => spawn.taskWorker === true)).toEqual([])
-    for (const spawn of second.spawns) expect(spawn.agentPreset).toBe('singularity-reviewer')
+    for (const spawn of second.spawns) expect(spawn.agentPreset).toBe('singularity-coordinator')
     expect(second.relayed.filter(intent => intent.targetSessionId === middleSession)).toEqual([])
 
     // The explicit retry re-reads the same facts and refuses the same way.

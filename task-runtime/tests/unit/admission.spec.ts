@@ -202,11 +202,11 @@ describe('checkDecomposition', () => {
     },
   )
 
-  test('accepts review and composite criteria without a command', () => {
+  test('accepts registered review and composite criteria without a command', () => {
     const verdict = checkDecomposition(
       parent(),
       [
-        child({ acceptanceCriteria: [criterion({ verificationMode: 'review', command: undefined })] }),
+        child({ acceptanceCriteria: [criterion({ verificationMode: 'review', command: undefined, verifierRef: 'registered-review' })] }),
         child({
           taskId: 'c2',
           acceptanceCriteria: [criterion({ criterionId: 'ac2-1', verificationMode: 'composite', command: undefined })],
@@ -434,7 +434,7 @@ describe('contractDefects (T1, construction guide §4)', () => {
   test('admits a well-formed criterion list', () => {
     expect(
       contractDefects(
-        [criterion(), criterion({ criterionId: 'ac1-2', verificationMode: 'review', command: undefined })],
+        [criterion(), criterion({ criterionId: 'ac1-2', verificationMode: 'review', command: undefined, verifierRef: 'registered-review' })],
         'child 0',
       ),
     ).toEqual([])
@@ -488,9 +488,8 @@ describe('contractDefects (T1, construction guide §4)', () => {
         `child 0 criterion "ac1-1" (${mode}) requires a command`,
       ])
     }
-    // A review criterion needs no command, and a command that is present but
-    // unusable (blank, or not a command at all) is as missing as an absent one.
-    expect(contractDefects([criterion({ verificationMode: 'review', command: undefined })], 'child 0')).toEqual([])
+    // An explicit registered review judge may settle without a command.
+    expect(contractDefects([criterion({ verificationMode: 'review', command: undefined, verifierRef: 'custom-review' })], 'child 0')).toEqual([])
     expect(contractDefects([criterion({ command: '  ' })], 'child 0')).toEqual([
       'child 0 criterion "ac1-1" (deterministic) requires a command',
     ])
@@ -641,5 +640,22 @@ describe('rootIndependenceDefects', () => {
         [],
       ).ok,
     ).toBe(true)
+  })
+})
+
+
+describe('mandatory criterion settlement', () => {
+  test('refuses the implicit review/formal placeholder while preserving explicit judges and composite', () => {
+    for (const mode of ['review', 'formal'] as const) {
+      expect(contractDefects([criterion({ verificationMode: mode, command: undefined })], 'task')).toEqual([
+        `task criterion "ac1-1" (${mode}) requires an explicit registered verifier that can settle the criterion; the built-in review verifier is a placeholder`,
+      ])
+      expect(contractDefects([criterion({ verificationMode: mode, command: undefined, verifierRef: 'review' })], 'task')).toHaveLength(1)
+      expect(contractDefects([criterion({ verificationMode: mode, command: undefined, verifierRef: 'registered-judge' })], 'task')).toEqual([])
+    }
+    expect(contractDefects([criterion({ verificationMode: 'composite', command: undefined })], 'task')).toEqual([])
+    expect(contractDefects([
+      criterion(), criterion({ criterionId: 'optional', verificationMode: 'review', mandatory: false, command: undefined }),
+    ], 'task')).toEqual([])
   })
 })

@@ -30,7 +30,7 @@ afterEach(() => {
 describe('the supervision settings', () => {
   test('ship the contract defaults', () => {
     expect(DEFAULT_SUPERVISION).toEqual({
-      autoReview: 'all',
+      autoReview: 'failed',
       maxRecoveryRounds: 3,
       maxImprovementRounds: 2,
       coordinationBudget: 8,

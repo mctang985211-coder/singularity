@@ -1,5 +1,5 @@
 import type { CapabilityManifest } from '@dangosys/dsh-singularity-task'
-import { MCP_SERVER_REGISTRY } from './mcp-servers.ts'
+import type { McpServerTemplate } from './mcp-servers.ts'
 
 /**
  * Reject MCP server names outside the registry, the same discipline
@@ -27,7 +27,7 @@ export interface CapabilityConfig {
   /** Permission preset (`permissionPresets` table key) granted when a task requires this capability. */
   permission?: string
   /**
-   * MCP server names (keys of `MCP_SERVER_REGISTRY` in `./mcp-servers.ts`)
+   * MCP server names from the deployment registry
    * granted when a task requires this capability; each mounts as one
    */
   mcpServers?: string[]
@@ -80,6 +80,7 @@ export const WORKER_BASELINE_TOOLS: readonly string[] = [
   'task_cancel',
   'task_verify',
   'capability_list',
+  'task_template_list',
   'task_proposal_read',
   'task_proposal_continue',
   'task_proposal_cancel',
@@ -102,6 +103,7 @@ export function workerBaseline(): string[] {
 export function resolveCapabilities(
   required: readonly string[],
   registry: Readonly<Record<string, CapabilityConfig>>,
+  mcpServers?: Readonly<Record<string, McpServerTemplate>>,
 ): CapabilityManifest {
   const capabilities: CapabilityManifest['capabilities'] = {}
   const missing: string[] = []
@@ -111,8 +113,8 @@ export function resolveCapabilities(
       missing.push(name)
       continue
     }
-    for (const server of entry.mcpServers ?? [])
-      assertKnownName(name, 'MCP server', 'known servers', Object.keys(MCP_SERVER_REGISTRY), server)
+    if (mcpServers !== undefined) for (const server of entry.mcpServers ?? [])
+      assertKnownName(name, 'MCP server', 'known servers', Object.keys(mcpServers), server)
     capabilities[name] = {
       skills: [...(entry.skills ?? [])],
       tools: resolveToolLabels(name, entry.tools ?? []),

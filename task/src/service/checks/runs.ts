@@ -170,6 +170,11 @@ export function assertRunRecovery(snapshot: TaskSnapshot, taskId: TaskId, recove
   ) {
     throw new Error(`${where} request digest must be a non-empty string when present`)
   }
+  if (recovery.proposalIds !== undefined && (!Array.isArray(recovery.proposalIds) ||
+    recovery.proposalIds.some(id => typeof id !== 'string' || id.trim().length === 0) ||
+    new Set(recovery.proposalIds).size !== recovery.proposalIds.length)) {
+    throw new Error(`${where} proposalIds must be an array of unique non-empty strings`)
+  }
   const task = taskIn(snapshot, taskId)
   if (task.parentTaskId !== undefined) {
     throw new Error(

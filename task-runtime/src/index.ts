@@ -9,6 +9,8 @@ import type {} from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import { TaskRuntime } from './service/runtime.ts'
 
+export type { McpServerTemplate } from './mcp-servers.ts'
+export { resolveMcpServerSpecs } from './mcp-servers.ts'
 export type { CapabilityConfig } from './capability.ts'
 export {
   resolveCapabilities,
@@ -139,3 +141,5 @@ declare module '@deepseek-ai/dsh-llm' {
 export { TaskRuntime }
 
 export default TaskRuntime
+
+export * from './task-template.ts'

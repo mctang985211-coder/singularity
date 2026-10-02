@@ -613,6 +613,17 @@ function filesUnder(dir: string): string[] {
 }
 
 describe('A6 recovery entry: the attempt it opens', () => {
+  test('pins the applied proposal ids to the production recovery run and its retry identity', async () => {
+    const h = harness()
+    await storeWithFailedRoot(h)
+    const outcome = await recover(h, { proposalIds: ['p-skill', 'p-capability'] })
+    const stored = (await runsOf(h, 'root')).find(run => run.runId === outcome.runId)
+    expect(stored?.recovery?.proposalIds).toEqual(['p-skill', 'p-capability'])
+    expect((await recover(h, { proposalIds: ['p-capability', 'p-skill'] })).runId).toBe(outcome.runId)
+    await expect(recover(h, { proposalIds: ['p-other'] })).rejects.toThrow('already names a recovery attempt')
+    expect((await runsOf(h, 'root')).filter(run => run.recovery !== undefined)).toHaveLength(1)
+  })
+
   test('opens one new root run in a new session, records the attempt, and leaves the failed facts alone', async () => {
     const h = harness()
     await storeWithFailedRoot(h)

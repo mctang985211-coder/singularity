@@ -1,80 +1,874 @@
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TERMINAL_RUN_STATUSES, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest } from "@dangosys/dsh-singularity-task";
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TERMINAL_RUN_STATUSES, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskProposalId } from "@dangosys/dsh-singularity-task";
-import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { answerMessageText, findSkillFileIn, parseSkillFile, questionMessageText, skillRootsFor, toolCallRefIn } from "@dangosys/dsh-singularity-agent-runtime";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { randomUUID } from "node:crypto";
 import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
 
-//#region src/mcp-servers.ts
-/**
-* The servers a capability may name. `bbdev` is the buckyball checkout's own
-* FastMCP server (45 tools, submit/poll-shaped to stay under the per-call
-*/
-const MCP_SERVER_REGISTRY = {
-	bbdev: {
-		serverName: "bbdev",
-		description: "buckyball bbdev MCP server (build/simulate/validate; submit + task_status poll) from the env checkout",
-		command: "{repoRoot:buckyball}/scripts/claude/run_mcp_server.sh",
-		args: [],
-		cwd: "{repoRoot:buckyball}"
-	},
-	waveform: {
-		serverName: "waveform",
-		description: "buckyball waveform-mcp server (VCD/FST open/read, signal hierarchy, event search) from the env checkout",
-		command: "{repoRoot:buckyball}/thirdparty/waveform-mcp/target/release/waveform-mcp",
-		args: [],
-		cwd: "{repoRoot:buckyball}"
-	}
-};
-/** Every MCP server name one resolved manifest grants, first-declaration order, duplicates dropped. */
-function manifestMcpServers(manifest) {
-	const names = [];
-	for (const entry of Object.values(manifest.capabilities)) for (const name of entry.mcpServers ?? []) if (!names.includes(name)) names.push(name);
-	return names;
+//#region src/helpers.ts
+/** The small primitives every module here shares: error text, waiting, and shape checks. */
+function message(error) {
+	return error instanceof Error ? error.message : String(error);
 }
-const PLACEHOLDER = /\{(envRoot|repoRoot:[^{}]+)\}/g;
-const ANY_PLACEHOLDER_LIKE = /\{[^{}]*\}/;
-/**
-* Substitute the placeholders of one template field. `{envRoot}` is the env
-* root; `{repoRoot:<repo>}` is that env's checkout of `<repo>`. An env-free
-*/
-function substitute(template, binding, serverName) {
-	if (!ANY_PLACEHOLDER_LIKE.test(template)) return template;
-	const leftover = template.replace(PLACEHOLDER, "");
-	if (ANY_PLACEHOLDER_LIKE.test(leftover)) throw new Error(`task-runtime: MCP server "${serverName}" template "${template}" carries a placeholder outside {envRoot}/{repoRoot:<repo>}`);
-	if (binding === void 0) throw new Error(`task-runtime: MCP server "${serverName}" needs an env binding ({envRoot}/{repoRoot} template) but this run's session has none`);
-	return template.replace(PLACEHOLDER, (whole, key) => {
-		if (key === "envRoot") return binding.envRoot;
-		const repo = key.slice(9);
-		const checkout = binding.checkout(repo);
-		if (checkout === void 0) throw new Error(`task-runtime: MCP server "${serverName}" binds {repoRoot:${repo}} but this run's env (${binding.envRoot}) has no "${repo}" checkout`);
-		return checkout;
+function sleep(ms) {
+	return new Promise((resolve$1) => {
+		setTimeout(resolve$1, ms);
 	});
 }
+function now() {
+	return (/* @__PURE__ */ new Date()).toISOString();
+}
+/** Non-blank text: the one check every string field shares, with no rewriting of the value. */
+function nonBlank(value) {
+	return typeof value === "string" && value.trim().length > 0;
+}
+function isPlainObject(value) {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+/** The keys a value carries that a closed field set does not declare, in declaration order. */
+function unknownFieldKeys(value, allowed) {
+	const declared = new Set(allowed);
+	return Object.keys(value).filter((key) => !declared.has(key));
+}
+/** Run `work` after the work already queued under `key`, in call order; the drained entry goes. */
+function enqueueByKey(chains, key, work) {
+	const run = (chains.get(key) ?? Promise.resolve()).then(work, work);
+	const settled = run.then(() => void 0, () => void 0);
+	chains.set(key, settled);
+	settled.then(() => {
+		if (chains.get(key) === settled) chains.delete(key);
+	});
+	return run;
+}
+
+//#endregion
+//#region src/protected-inputs.ts
 /**
-* Materialize one manifest's MCP grants into mount-ready specs.
-* @param manifest - the resolved capability manifest (server names already validated at admission).
+* The authoring form of one criterion's declaration: a non-empty array of
+* non-blank strings, in the order the caller wrote them.
 */
-function resolveMcpServerSpecs(manifest, binding, registry = MCP_SERVER_REGISTRY) {
-	const names = manifestMcpServers(manifest);
-	const specs = [];
-	for (const name of names) {
-		const template = registry[name];
-		if (template === void 0) throw new Error(`task-runtime: capability manifest grants unknown MCP server "${name}"; known servers: ${Object.keys(registry).sort().join(", ")}`);
-		specs.push({
-			serverName: template.serverName,
-			command: substitute(template.command, binding, name),
-			args: (template.args ?? []).map((arg) => substitute(arg, binding, name)),
-			env: Object.fromEntries(Object.entries(template.env ?? {}).map(([key, value]) => [key, substitute(value, binding, name)])),
-			cwd: template.cwd === void 0 ? binding?.envRoot ?? "" : substitute(template.cwd, binding, name),
-			...template.toolCallTimeoutMs === void 0 ? {} : { toolCallTimeoutMs: template.toolCallTimeoutMs }
+function declaredPaths(value) {
+	if (!Array.isArray(value) || value.length === 0) return [];
+	return value.every((item) => nonBlank(item)) ? [...value] : [];
+}
+/**
+* The label one criterion is reported under: the declared id when it has one,
+* its position otherwise — the vocabulary `normalize.ts` names criteria with,
+*/
+function criterionLabel(childLabel$1, criterion, index) {
+	return `${childLabel$1} criterion ${nonBlank(criterion.criterionId) ? JSON.stringify(criterion.criterionId) : index + 1}`;
+}
+/**
+* Fix the byte identity of every declared protected input, against the
+* checkout directory the criterion's judge will run in.
+*/
+async function fixProtectedInputs(paths, cwd, label) {
+	if (paths.length === 0) return {
+		refs: [],
+		reasons: []
+	};
+	if (cwd === void 0) return {
+		refs: [],
+		reasons: [`${label} protectedInputs cannot be fixed: the session's checkout directory cannot be resolved (the session has no readable graph env binding), so the declared paths are refused rather than fixed against the wrong base`]
+	};
+	const refs = [];
+	const reasons = [];
+	const seen = /* @__PURE__ */ new Set();
+	for (const path of paths) {
+		if (seen.has(path)) continue;
+		seen.add(path);
+		try {
+			refs.push({
+				path,
+				sha256: sha256Hex(await readFile(resolve(cwd, path)))
+			});
+		} catch (error) {
+			reasons.push(`${label} protectedInputs path ${JSON.stringify(path)} cannot be read: ${message(error)}`);
+		}
+	}
+	return {
+		refs,
+		reasons
+	};
+}
+/**
+* Fix the declarations of one criterion list, rebuilding only the criteria that
+* declared one: every untouched criterion is carried by reference, and the
+*/
+async function fixCriteriaProtectedInputs(criteria, cwd, label) {
+	const reasons = [];
+	/**
+	* A criterion list that is not an array is a shape defect whichever entry
+	* wrote it (`contractDefects` names it); carrying it here keeps the refusal
+	*/
+	if (!Array.isArray(criteria)) return {
+		criteria,
+		reasons
+	};
+	const fixed = [];
+	for (const [index, criterion] of criteria.entries()) {
+		const paths = declaredPaths(criterion.protectedInputs);
+		if (paths.length === 0) {
+			fixed.push(criterion);
+			continue;
+		}
+		const outcome = await fixProtectedInputs(paths, cwd, criterionLabel(label, criterion, index));
+		reasons.push(...outcome.reasons);
+		/**
+		* The fixed form is the runtime's own normalized shape, which the declared
+		* type cannot express (`CriterionSpec` declares paths): the cast is the
+		*/
+		fixed.push(outcome.reasons.length === 0 ? {
+			...criterion,
+			protectedInputs: outcome.refs
+		} : criterion);
+	}
+	return {
+		criteria: fixed,
+		reasons
+	};
+}
+/**
+* Fix the declared protected inputs of a whole decomposition proposal before
+* anything else reads it: the runtime calls this ahead of the single
+*/
+async function fixSpecProtectedInputs(spec, cwd) {
+	const reasons = [];
+	/**
+	* The spec's own shape is normalization's rule, not this walk's: a proposal
+	* whose `children` (or a child's `acceptanceCriteria`) is not an array is
+	*/
+	if (!Array.isArray(spec?.children)) return {
+		spec,
+		reasons
+	};
+	const children = [];
+	for (const [index, child] of spec.children.entries()) {
+		if (child === null || typeof child !== "object" || !Array.isArray(child.acceptanceCriteria)) {
+			children.push(child);
+			continue;
+		}
+		const outcome = await fixCriteriaProtectedInputs(child.acceptanceCriteria, cwd, `child ${index}`);
+		reasons.push(...outcome.reasons);
+		const touched = outcome.criteria.some((criterion, position) => criterion !== child.acceptanceCriteria[position]);
+		children.push(touched ? {
+			...child,
+			acceptanceCriteria: outcome.criteria
+		} : child);
+	}
+	return {
+		spec: children.some((child, index) => child !== spec.children[index]) ? {
+			...spec,
+			children
+		} : spec,
+		reasons
+	};
+}
+/**
+* Structural defects of the **fixed** form of every criterion's protected
+* inputs: each declaration must be an array of plain objects carrying exactly
+*/
+function protectedInputDefects(criteria, label) {
+	const reasons = [];
+	for (const criterion of criteria) {
+		const where = `${label} criterion ${JSON.stringify(criterion.criterionId)}`;
+		const declared = criterion.protectedInputs;
+		if (declared === void 0) continue;
+		if (!Array.isArray(declared)) {
+			reasons.push(`${where} protectedInputs must be an array of { path, sha256 } entries (declared paths are fixed by admission, never stored as strings)`);
+			continue;
+		}
+		declared.forEach((entry, index) => {
+			const at = `${where} protectedInputs entry ${index}`;
+			if (!isPlainObject(entry)) {
+				reasons.push(`${at} must be an object with only path and sha256`);
+				return;
+			}
+			for (const key of unknownFieldKeys(entry, ["path", "sha256"])) reasons.push(`${at} declares unknown field ${JSON.stringify(key)}`);
+			if (!nonBlank(entry.path)) reasons.push(`${at} path must be a non-empty string`);
+			if (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) reasons.push(`${at} sha256 must be a lowercase 64-character hex digest`);
 		});
 	}
-	return specs;
+	return reasons;
+}
+
+//#endregion
+//#region src/admission.ts
+/** Modes whose criterion is executed by the command verifier and therefore needs `command`. */
+const EXECUTABLE_MODES = [
+	"deterministic",
+	"simulation",
+	"measurement"
+];
+/** Every mode a criterion may declare, in declaration order (`VerificationMode`); the list the mode rule names. */
+const VERIFICATION_MODES = [
+	"deterministic",
+	"simulation",
+	"formal",
+	"measurement",
+	"review",
+	"composite"
+];
+/**
+* Structural reasons one task's parent-acceptance declarations are malformed
+* (P4, KISS §6 C2). Shape only: whether a mapping target exists is judged at
+*/
+function independentAcceptanceDefects(criteria, requiresIndependentAcceptance, label) {
+	const reasons = [];
+	for (const criterion of criteria) {
+		const where = `${label} criterion "${criterion.criterionId}"`;
+		if (criterion.acceptsArtifact !== void 0 && (!Array.isArray(criterion.acceptsArtifact) || criterion.acceptsArtifact.some((ref) => typeof ref !== "string" || ref.trim().length === 0))) reasons.push(`${where} acceptsArtifact must be an array of non-empty strings`);
+		if (criterion.heuristic !== void 0 && typeof criterion.heuristic !== "boolean") reasons.push(`${where} heuristic must be a boolean`);
+		const map = criterion.childEvidence;
+		if (map !== void 0) if (!Array.isArray(map)) reasons.push(`${where} childEvidence must be an array of entries`);
+		else {
+			map.forEach((entry, index) => {
+				const at = `${where} childEvidence entry ${index}`;
+				if (typeof entry !== "object" || entry === null) {
+					reasons.push(`${at} must be an object`);
+					return;
+				}
+				if (!Number.isInteger(entry.childIndex) || entry.childIndex < 0) reasons.push(`${at} childIndex must be a non-negative integer`);
+				if (entry.criterionId !== void 0 && (typeof entry.criterionId !== "string" || entry.criterionId.trim().length === 0)) reasons.push(`${at} criterionId must be a non-empty string`);
+				if (entry.evidenceRef !== void 0 && (typeof entry.evidenceRef !== "string" || entry.evidenceRef.trim().length === 0)) reasons.push(`${at} evidenceRef must be a non-empty string`);
+			});
+			/**
+			* Only the composite verifier reads the map, and a heuristic judgement
+			* is never a mechanical check: a map on any other judge, or beside a
+			*/
+			if (map.length > 0 && criterion.verificationMode !== "composite") reasons.push(`${where} childEvidence requires verificationMode "composite" (the composite verifier is its only judge)`);
+			if (map.length > 0 && criterion.heuristic === true) reasons.push(`${where} cannot be both heuristic and carry a childEvidence map: a heuristic judgement is never a mechanical check`);
+		}
+	}
+	/**
+	* The contract-level marker is a promise that acceptance rests on the task's
+	* own evidence map. A missing, empty, or deleted map must refuse loudly —
+	*/
+	if (requiresIndependentAcceptance === true && !criteria.some((criterion) => (criterion.childEvidence?.length ?? 0) > 0)) reasons.push(`${label} requires independent parent acceptance but no acceptance criterion carries a childEvidence map (the composite conjunction alone cannot stand in for the root goal)`);
+	return reasons;
+}
+/**
+* The one structural rule a **root contract** owes on top of
+* {@link contractDefects} (A0 §1.2): at least one mandatory criterion whose
+*/
+function rootIndependenceDefects(criteria, label) {
+	if (criteria.some((criterion) => criterion.mandatory === true && criterion.verificationMode !== "composite")) return [];
+	return [`${label} requires at least one mandatory acceptance criterion judged by something other than the composite conjunction (verificationMode !== "composite"): a root whose only mandatory criterion is "all children verified" is satisfied by its own decomposition and has no independent check of the goal it was given`];
+}
+/**
+* Whether a criterion declares a command a verifier could actually run. A
+* declared command that is blank — or not text at all — is as missing as an
+*/
+function hasCommand(command) {
+	return typeof command === "string" && command.trim().length > 0;
+}
+/**
+* Structural defects of one task's acceptance contract (T1, construction guide
+* §4): what has to hold before a contract can be admitted at all, whichever
+*/
+function contractDefects(criteria, label) {
+	const reasons = [];
+	if (criteria.length === 0) {
+		reasons.push(`${label} requires at least one acceptance criterion`);
+		return reasons;
+	}
+	const seen = /* @__PURE__ */ new Set();
+	const reportedDuplicate = /* @__PURE__ */ new Set();
+	for (const criterion of criteria) {
+		const where = `${label} criterion "${criterion.criterionId}"`;
+		const description = criterion.description;
+		if (typeof description !== "string" || description.trim().length === 0) reasons.push(`${where} requires a non-empty description`);
+		if (!VERIFICATION_MODES.includes(criterion.verificationMode)) reasons.push(`${where} verificationMode "${String(criterion.verificationMode)}" is not one of ${VERIFICATION_MODES.join(", ")}`);
+		else if (EXECUTABLE_MODES.includes(criterion.verificationMode) && !hasCommand(criterion.command)) reasons.push(`${where} (${criterion.verificationMode}) requires a command`);
+		if (criterion.mandatory && ["review", "formal"].includes(criterion.verificationMode) && (typeof criterion.verifierRef !== "string" || criterion.verifierRef.trim().length === 0 || criterion.verifierRef === "review")) reasons.push(`${where} (${criterion.verificationMode}) requires an explicit registered verifier that can settle the criterion; the built-in review verifier is a placeholder`);
+		/**
+		* Duplicates are refused before the batch is persisted, not at acceptance:
+		* a verdict names its criterion by id, so two criteria sharing one id make
+		*/
+		if (seen.has(criterion.criterionId) && !reportedDuplicate.has(criterion.criterionId)) {
+			reasons.push(`${label} declares criterion id "${criterion.criterionId}" more than once`);
+			reportedDuplicate.add(criterion.criterionId);
+		}
+		seen.add(criterion.criterionId);
+		/**
+		* The fixed form of a criterion's protected acceptance inputs (S1-V slice
+		* 2): the same rule for an ordinary decomposition child and for a replay
+		*/
+		reasons.push(...protectedInputDefects([criterion], label));
+	}
+	if (!criteria.some((criterion) => criterion.mandatory === true)) reasons.push(`${label} requires at least one mandatory acceptance criterion`);
+	return reasons;
+}
+/**
+* How one planned child is named in a refusal: its position always, its id when
+* the batch has one yet ({@link AdmissionChild.taskId}). A batch is judged
+*/
+function childLabel(child, index) {
+	return child.taskId === void 0 ? `child ${index}` : `child ${index} ("${child.taskId}")`;
+}
+/**
+* How one planned child is named inside a dependency message: its id when it
+* has one, its batch position otherwise (`#0` is the first child). The two
+*/
+function childRef(child, index) {
+	return child?.taskId ?? `#${index}`;
+}
+/**
+* Structural admission checks for one decomposition batch (RFC §36). Pure:
+* every rule is validated up front and the caller persists only when the
+*/
+function checkDecomposition(parent, children, existingEdges) {
+	const reasons = [];
+	const policy = parent.decompositionPolicy;
+	if (!policy.allowed) reasons.push(policy.leaf === true ? `task "${parent.taskId}" decomposition is not allowed: it is admitted as leaf and runtime decomposition is off (allowRuntimeDecomposition: false), so only a task admitted decomposable may split` : `task "${parent.taskId}" decomposition is not allowed`);
+	if (policy.maxDepth !== void 0 && parent.depth + 1 > policy.maxDepth) reasons.push(`task "${parent.taskId}" children would exceed maxDepth ${policy.maxDepth} (depth ${parent.depth + 1})`);
+	if (policy.maxChildren !== void 0 && children.length > policy.maxChildren) reasons.push(`task "${parent.taskId}" would have ${children.length} children, above maxChildren ${policy.maxChildren}`);
+	if (children.length === 0) reasons.push(`task "${parent.taskId}" decomposition requires at least one child`);
+	/**
+	* The parent's own parent-acceptance declarations (P4): a stored task's
+	* criteria are immutable, so the marker-plus-map rule is re-checked here on
+	*/
+	reasons.push(...independentAcceptanceDefects(parent.acceptanceCriteria, parent.requiresIndependentAcceptance, `task "${parent.taskId}"`));
+	const plannedEdges = [];
+	children.forEach((child, index) => {
+		const label = childLabel(child, index);
+		if (child.objective.trim().length === 0) reasons.push(`${label} objective must be non-empty`);
+		/**
+		* Two separate judgements, both required: the contract's own structure
+		* ({@link contractDefects}, shared with the replay path) and the P4
+		*/
+		reasons.push(...contractDefects(child.acceptanceCriteria, label));
+		reasons.push(...independentAcceptanceDefects(child.acceptanceCriteria, child.requiresIndependentAcceptance, label));
+		for (const criterion of child.acceptanceCriteria) {
+			/**
+			* `requiresArtifact` gets a shape check here and nothing more: whether the
+			* named artifact exists is a spawn-time question (it needs the store
+			*/
+			if (criterion.requiresArtifact !== void 0 && (!Array.isArray(criterion.requiresArtifact) || criterion.requiresArtifact.some((ref) => typeof ref !== "string" || ref.trim().length === 0))) reasons.push(`${label} criterion "${criterion.criterionId}" requiresArtifact must be an array of non-empty strings`);
+			/**
+			* `verifierRef` gets a shape check here and nothing more: whether the id
+			* is registered is a batch-level question (it needs the verifier
+			*/
+			if (criterion.verifierRef !== void 0 && (typeof criterion.verifierRef !== "string" || criterion.verifierRef.trim().length === 0)) reasons.push(`${label} criterion "${criterion.criterionId}" verifierRef must be a non-empty string`);
+		}
+		for (const dependency of child.dependsOn ?? []) {
+			if (!Number.isInteger(dependency) || dependency < 0 || dependency >= children.length) {
+				reasons.push(`${label} dependsOn index ${dependency} is out of range`);
+				continue;
+			}
+			if (dependency === index) {
+				reasons.push(`${label} cannot depend on itself`);
+				continue;
+			}
+			plannedEdges.push({
+				from: childRef(children[dependency], dependency),
+				to: childRef(child, index)
+			});
+		}
+	});
+	const edges = [...existingEdges, ...plannedEdges];
+	const seen = /* @__PURE__ */ new Set();
+	for (const edge of edges) {
+		const key = `${edge.from}→${edge.to}`;
+		if (seen.has(key)) reasons.push(`dependency "${key}" is declared more than once`);
+		seen.add(key);
+	}
+	for (const edge of plannedEdges) if (reaches(edges, edge.to, edge.from)) reasons.push(`dependency "${edge.from}" → "${edge.to}" creates a cycle`);
+	return reasons.length === 0 ? { ok: true } : {
+		ok: false,
+		reasons
+	};
+}
+
+//#endregion
+//#region src/normalize.ts
+/**
+* The identity one batch is digested over (§4): where it came from, which
+* contract language it is written in, the caller's reason, and the complete
+*/
+function decompositionIdentity(context, reason, children) {
+	return {
+		contractVersion: TASK_CONTRACT_VERSION,
+		storeId: context.storeId,
+		parentTaskId: context.parentTaskId,
+		parentRunId: context.parentRunId,
+		callerSessionId: context.callerSessionId,
+		reason,
+		children: children.map((child) => ({
+			contractDigest: contractDigest(child.contract),
+			dependsOn: child.dependsOn,
+			decomposable: child.decomposable,
+			requiresIndependentAcceptance: child.requiresIndependentAcceptance
+		}))
+	};
+}
+/** The batch fields, and nothing else: a key outside this set is refused. */
+const BATCH_FIELDS = new Set([
+	"contractVersion",
+	"reason",
+	"children"
+]);
+/** The child fields, and nothing else. */
+const CHILD_FIELDS = new Set([
+	"objective",
+	"templateRef",
+	"templateParameters",
+	"acceptanceCriteria",
+	"requiredCapabilities",
+	"dependsOn",
+	"assumptions",
+	"constraints",
+	"decomposable",
+	"requiresIndependentAcceptance"
+]);
+/** The criterion fields, and nothing else. */
+const CRITERION_FIELDS = new Set([
+	"criterionId",
+	"description",
+	"command",
+	"mode",
+	"mandatory",
+	"requiredEvidence",
+	"requiresArtifact",
+	"acceptsArtifact",
+	"verifierRef",
+	"childEvidence",
+	"heuristic",
+	"protectedInputs"
+]);
+/** A declared version value, rendered so a non-number cannot read like a number (`"1"` is not `1`). */
+function declaredText(value) {
+	return typeof value === "number" ? String(value) : JSON.stringify(value) ?? String(value);
+}
+/**
+* A deep copy of declared contract data: primitives are immutable, arrays and
+* plain objects are rebuilt, so a caller mutating its input afterwards cannot
+*/
+function copyValue(value) {
+	if (Array.isArray(value)) return value.map((item) => copyValue(item));
+	if (isPlainObject(value)) {
+		const copy = {};
+		for (const [key, item] of Object.entries(value)) copy[key] = copyValue(item);
+		return copy;
+	}
+	return value;
+}
+/** Report every key a level does not declare. */
+function unknownFields$1(source, allowed, label, reasons) {
+	for (const key of unknownFieldKeys(source, allowed)) reasons.push(`${label} declares unknown field ${JSON.stringify(key)}`);
+}
+/** A required text field; a blank or non-string value is refused with the field named. */
+function text(value, label, reasons) {
+	if (!nonBlank(value)) {
+		reasons.push(`${label} must be a non-empty string`);
+		return "";
+	}
+	return value;
+}
+/**
+* A declared string collection: copied verbatim when it holds nothing but
+* non-blank strings, refused as one defect otherwise — a blank entry is
+*/
+function stringList(value, label, reasons) {
+	if (!Array.isArray(value) || value.some((item) => !nonBlank(item))) {
+		reasons.push(`${label} must be an array of non-empty strings`);
+		return [];
+	}
+	return value.map((item) => item);
+}
+/**
+* A `dependsOn` list: integers only, copied verbatim. Whether an index is in
+* range, points at itself, or closes a cycle is admission's judgement — it
+*/
+function integerList(value, label, reasons) {
+	if (!Array.isArray(value) || value.some((item) => !Number.isInteger(item))) {
+		reasons.push(`${label} must be an array of integers`);
+		return [];
+	}
+	return value.map((item) => item);
+}
+/** A boolean declaration: absent keeps the designed default, anything else is refused. */
+function booleanField(value, fallback, label, reasons) {
+	if (value === void 0) return fallback;
+	if (typeof value !== "boolean") {
+		reasons.push(`${label} must be a boolean`);
+		return fallback;
+	}
+	return value;
+}
+/**
+* A value carried as declared. `command` and the P4 declarations are judged by
+* admission, so this entry only copies them: a shape those rules refuse never
+*/
+function carried(value) {
+	return copyValue(value);
+}
+/**
+* One criterion list. Ids are fixed here — a declared id verbatim, an absent
+* one from `idOf` — because the digest must not depend on spellings and because
+*/
+function normalizeCriteria(raw, label, idOf, reasons) {
+	const criteria = [];
+	const seen = /* @__PURE__ */ new Set();
+	const reportedDuplicate = /* @__PURE__ */ new Set();
+	raw.forEach((value, index) => {
+		const before = reasons.length;
+		const position = `${label} criterion ${index + 1}`;
+		if (!isPlainObject(value)) {
+			reasons.push(`${position} must be an object`);
+			return;
+		}
+		const declaredId = value.criterionId;
+		if (declaredId !== void 0 && !nonBlank(declaredId)) reasons.push(`${position} criterionId must be a non-empty string`);
+		const criterionId = nonBlank(declaredId) ? declaredId : idOf(index);
+		const criterionLabel$1 = `${label} criterion ${JSON.stringify(criterionId)}`;
+		unknownFields$1(value, CRITERION_FIELDS, criterionLabel$1, reasons);
+		if (seen.has(criterionId) && !reportedDuplicate.has(criterionId)) {
+			reasons.push(`${label} declares criterion id ${JSON.stringify(criterionId)} more than once`);
+			reportedDuplicate.add(criterionId);
+		}
+		seen.add(criterionId);
+		const description = text(value.description, `${criterionLabel$1} description`, reasons);
+		const mandatory = booleanField(value.mandatory, true, `${criterionLabel$1} mandatory`, reasons);
+		const requiredEvidence = value.requiredEvidence === void 0 ? [] : stringList(value.requiredEvidence, `${criterionLabel$1} requiredEvidence`, reasons);
+		const command = value.command;
+		const criterion = {
+			criterionId,
+			description,
+			verificationMode: carried(value.mode === void 0 ? command !== void 0 ? "deterministic" : "review" : value.mode),
+			requiredEvidence,
+			mandatory,
+			...command === void 0 ? {} : { command: carried(command) },
+			...value.requiresArtifact === void 0 ? {} : { requiresArtifact: carried(value.requiresArtifact) },
+			...value.acceptsArtifact === void 0 ? {} : { acceptsArtifact: carried(value.acceptsArtifact) },
+			...value.verifierRef === void 0 ? {} : { verifierRef: carried(value.verifierRef) },
+			...value.childEvidence === void 0 ? {} : { childEvidence: carried(value.childEvidence) },
+			...value.heuristic === void 0 ? {} : { heuristic: carried(value.heuristic) },
+			...value.protectedInputs === void 0 ? {} : { protectedInputs: carried(value.protectedInputs) }
+		};
+		if (reasons.length > before) return;
+		criteria.push(criterion);
+	});
+	return criteria;
+}
+/** One batch child, normalized; `undefined` exactly when it contributed a reason. */
+function normalizeChild(raw, index, reasons) {
+	const before = reasons.length;
+	const label = `child ${index}`;
+	if (!isPlainObject(raw)) {
+		reasons.push(`${label} must be an object`);
+		return;
+	}
+	unknownFields$1(raw, CHILD_FIELDS, label, reasons);
+	/**
+	* The objective is stored byte-for-byte: a blank one is refused (nothing can
+	* be verified against it) and a padded one keeps its padding — the contract
+	*/
+	const objective = text(raw.objective, `${label} objective`, reasons);
+	const rawCriteria = raw.acceptanceCriteria;
+	let criteria = [];
+	if (!Array.isArray(rawCriteria)) reasons.push(`${label} acceptanceCriteria must be an array`);
+	else criteria = normalizeCriteria(rawCriteria, label, (criterionIndex) => `ac${index + 1}-${criterionIndex + 1}`, reasons);
+	const requiredCapabilities = raw.requiredCapabilities === void 0 ? [] : stringList(raw.requiredCapabilities, `${label} requiredCapabilities`, reasons);
+	const assumptions = raw.assumptions === void 0 ? [] : stringList(raw.assumptions, `${label} assumptions`, reasons);
+	const constraints = raw.constraints === void 0 ? [] : stringList(raw.constraints, `${label} constraints`, reasons);
+	const dependsOn = raw.dependsOn === void 0 ? [] : integerList(raw.dependsOn, `${label} dependsOn`, reasons);
+	const decomposable = booleanField(raw.decomposable, false, `${label} decomposable`, reasons);
+	const requiresIndependentAcceptance = booleanField(raw.requiresIndependentAcceptance, false, `${label} requiresIndependentAcceptance`, reasons);
+	if (reasons.length > before) return void 0;
+	return {
+		contract: {
+			contractVersion: TASK_CONTRACT_VERSION,
+			objective,
+			acceptanceCriteria: criteria,
+			assumptions,
+			constraints,
+			requiredCapabilities,
+			...raw.templateRef === void 0 ? {} : {
+				templateRef: carried(raw.templateRef),
+				templateParameters: carried(raw.templateParameters ?? {})
+			}
+		},
+		dependsOn,
+		decomposable,
+		requiresIndependentAcceptance
+	};
+}
+/**
+* Normalize one decomposition proposal.
+* Returns every defect it found, never the first: a caller revising a proposal
+*/
+function normalizeDecomposition(spec, context) {
+	const reasons = [];
+	if (!isPlainObject(spec)) return {
+		ok: false,
+		reasons: ["decomposition must be an object with a reason and a children array"]
+	};
+	unknownFields$1(spec, BATCH_FIELDS, "decomposition", reasons);
+	/**
+	* The version gate: absent is the legacy adapter (this build's version is the
+	* one the runtime writes), declared must be a version whose field semantics
+	*/
+	const declaredVersion = spec.contractVersion;
+	if (declaredVersion !== void 0 && declaredVersion !== TASK_CONTRACT_VERSION) reasons.push(`unknown contract version ${declaredText(declaredVersion)}: this runtime writes version ${TASK_CONTRACT_VERSION}`);
+	let reason = "";
+	if (nonBlank(spec.reason)) reason = spec.reason;
+	else reasons.push("decomposition requires a non-blank reason");
+	const children = [];
+	const rawChildren = spec.children;
+	if (rawChildren === void 0 || Array.isArray(rawChildren) && rawChildren.length === 0) reasons.push("decomposition requires at least one child");
+	else if (!Array.isArray(rawChildren)) reasons.push("decomposition children must be an array");
+	else rawChildren.forEach((raw, index) => {
+		const child = normalizeChild(raw, index, reasons);
+		if (child !== void 0) children.push(child);
+	});
+	if (reasons.length > 0) return {
+		ok: false,
+		reasons
+	};
+	const contractVersion = TASK_CONTRACT_VERSION;
+	try {
+		return {
+			ok: true,
+			batch: {
+				contractVersion,
+				reason,
+				children,
+				admission: {
+					proposalDigest: decompositionDigest(decompositionIdentity(context, reason, children)),
+					context: copyValue(context.admissionContext)
+				}
+			}
+		};
+	} catch (error) {
+		/**
+		* `canonicalize` refuses values JSON cannot round-trip (functions, symbols,
+		* `NaN`, class instances): no digest of such a proposal could be compared
+		*/
+		return {
+			ok: false,
+			reasons: [`decomposition content cannot be canonicalized: ${message(error)}`]
+		};
+	}
+}
+/** The root contract's fields, and nothing else: a key outside this set is refused (A0 §2). */
+const ROOT_CONTRACT_FIELDS = new Set([
+	"contractVersion",
+	"objective",
+	"templateRef",
+	"templateParameters",
+	"acceptanceCriteria",
+	"assumptions",
+	"constraints",
+	"requiredCapabilities"
+]);
+/**
+* The criterion id a root contract's criterion gets when it declares none:
+* `ac-<j>`, one flat list.
+*/
+function rootCriterionId(index) {
+	return `ac-${index + 1}`;
+}
+/**
+* Normalize one root contract (A0 §2–§3): the caller's single contract —
+* objective, criteria, assumptions, constraints, declared capabilities — in,
+*/
+function normalizeRootContract(spec) {
+	const reasons = [];
+	if (!isPlainObject(spec)) return {
+		ok: false,
+		reasons: ["root contract must be an object with an objective and an acceptanceCriteria array"]
+	};
+	unknownFields$1(spec, ROOT_CONTRACT_FIELDS, "root contract", reasons);
+	const declaredVersion = spec.contractVersion;
+	if (declaredVersion !== void 0 && declaredVersion !== TASK_CONTRACT_VERSION) reasons.push(`unknown contract version ${declaredText(declaredVersion)}: this runtime writes version ${TASK_CONTRACT_VERSION}`);
+	const label = "root contract";
+	const objective = text(spec.objective, `${label} objective`, reasons);
+	const rawCriteria = spec.acceptanceCriteria;
+	let criteria = [];
+	if (!Array.isArray(rawCriteria)) reasons.push(`${label} acceptanceCriteria must be an array`);
+	else criteria = normalizeCriteria(rawCriteria, label, rootCriterionId, reasons);
+	const assumptions = spec.assumptions === void 0 ? [] : stringList(spec.assumptions, `${label} assumptions`, reasons);
+	const constraints = spec.constraints === void 0 ? [] : stringList(spec.constraints, `${label} constraints`, reasons);
+	const requiredCapabilities = spec.requiredCapabilities === void 0 ? [] : stringList(spec.requiredCapabilities, `${label} requiredCapabilities`, reasons);
+	if (reasons.length > 0) return {
+		ok: false,
+		reasons
+	};
+	return {
+		ok: true,
+		contract: {
+			contractVersion: TASK_CONTRACT_VERSION,
+			objective,
+			acceptanceCriteria: criteria,
+			assumptions,
+			constraints,
+			requiredCapabilities,
+			...spec.templateRef === void 0 ? {} : {
+				templateRef: carried(spec.templateRef),
+				templateParameters: carried(spec.templateParameters ?? {})
+			}
+		}
+	};
+}
+
+//#endregion
+//#region src/task-template.ts
+/** The sole default for production and Evolution: the runtime resolves this once at construction. */
+function defaultTaskTemplatesRoot() {
+	return join(process.env.DSH_HOME || join(homedir(), ".dsh"), "singularity", "task-templates");
+}
+function validId(id) {
+	return typeof id === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(id);
+}
+/** Reject unsupported schema vocabulary rather than claiming to validate it. */
+function parseTaskTemplate(raw) {
+	if (!isPlainObject(raw)) throw new Error("task-template: template must be an object");
+	if (Object.keys(raw).some((key) => ![
+		"id",
+		"version",
+		"appliesTo",
+		"parametersSchema",
+		"contract"
+	].includes(key))) throw new Error("task-template: template declares an unknown field");
+	if (!validId(raw.id) || !Number.isSafeInteger(raw.version) || raw.version < 1) throw new Error("task-template: id must be a filename-safe name and version a positive integer");
+	if (!Array.isArray(raw.appliesTo) || raw.appliesTo.length === 0 || raw.appliesTo.some((item) => !nonBlank(item))) throw new Error(`task-template: ${raw.id} requires non-empty appliesTo conditions`);
+	const schema = raw.parametersSchema;
+	if (!isPlainObject(schema) || schema.type !== "object" || schema.additionalProperties !== false || !isPlainObject(schema.properties) || Object.keys(schema).some((key) => ![
+		"type",
+		"properties",
+		"required",
+		"additionalProperties"
+	].includes(key))) throw new Error(`task-template: ${raw.id} parametersSchema requires object properties and additionalProperties:false`);
+	if (schema.required !== void 0 && (!Array.isArray(schema.required) || schema.required.some((name) => typeof name !== "string" || !Object.hasOwn(schema.properties, name)))) throw new Error(`task-template: ${raw.id} required parameters must name declared properties`);
+	for (const [name, property] of Object.entries(schema.properties)) if (!/^[a-zA-Z0-9_]+$/.test(name) || !isPlainObject(property) || ![
+		"string",
+		"number",
+		"integer",
+		"boolean"
+	].includes(String(property.type)) || Object.keys(property).some((key) => ![
+		"type",
+		"description",
+		"enum"
+	].includes(key)) || property.description !== void 0 && typeof property.description !== "string" || property.enum !== void 0 && (!Array.isArray(property.enum) || property.enum.length === 0 || property.enum.some((value) => !parameterTypeMatches(value, String(property.type))))) throw new Error(`task-template: ${raw.id} parameter ${name} has an unsupported schema`);
+	if (!isPlainObject(raw.contract) || Object.keys(raw.contract).some((key) => ![
+		"objective",
+		"acceptanceCriteria",
+		"assumptions",
+		"constraints",
+		"requiredCapabilities"
+	].includes(key))) throw new Error(`task-template: ${raw.id} contract declares an unknown field`);
+	const normalized = normalizeRootContract(raw.contract);
+	if (!normalized.ok) throw new Error(`task-template: ${raw.id} contract: ${normalized.reasons.join("; ")}`);
+	const defects = contractDefects(normalized.contract.acceptanceCriteria.map(({ protectedInputs: _paths,...criterion }) => criterion), `template ${raw.id}`);
+	if (defects.length > 0) throw new Error(`task-template: ${defects.join("; ")}`);
+	for (const match of canonicalize(raw.contract).matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)) if (!Object.hasOwn(schema.properties, match[1])) throw new Error(`task-template: ${raw.id} references undeclared parameter ${match[1]}`);
+	return structuredClone(raw);
+}
+function parameterTypeMatches(value, type) {
+	if (type === "integer") return Number.isSafeInteger(value);
+	if (type === "number") return typeof value === "number" && Number.isFinite(value);
+	return typeof value === type;
+}
+/** Append one immutable version. An identical repeat returns the same reference. */
+async function registerTaskTemplate(root, input) {
+	const template = parseTaskTemplate(input);
+	const ref = {
+		id: template.id,
+		version: template.version,
+		digest: taskTemplateDigest(template)
+	};
+	await mkdir(root, { recursive: true });
+	const file = join(root, `${ref.id}@${ref.version}.json`);
+	try {
+		await writeFile(file, `${JSON.stringify(template, null, 2)}\n`, { flag: "wx" });
+	} catch (error) {
+		if (error.code !== "EEXIST") throw error;
+		if (taskTemplateDigest(parseTaskTemplate(JSON.parse(await readFile(file, "utf8")))) !== ref.digest) throw new Error(`task-template: ${ref.id}@${ref.version} already exists with different content; publish a new version`);
+	}
+	return ref;
+}
+/** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery. */
+async function findTaskTemplates(root, query) {
+	if (root === void 0) return [];
+	let files;
+	try {
+		files = await readdir(root);
+	} catch (error) {
+		if (error.code === "ENOENT") return [];
+		throw error;
+	}
+	const newest = /* @__PURE__ */ new Map();
+	for (const file of files.filter((file$1) => file$1.endsWith(".json")).sort()) {
+		const template = parseTaskTemplate(JSON.parse(await readFile(join(root, file), "utf8")));
+		if (file !== `${template.id}@${template.version}.json`) throw new Error(`task-template: ${file} must be named ${template.id}@${template.version}.json`);
+		const previous = newest.get(template.id);
+		if (previous === void 0 || previous.template.version < template.version) newest.set(template.id, {
+			template,
+			templateRef: {
+				id: template.id,
+				version: template.version,
+				digest: taskTemplateDigest(template)
+			}
+		});
+	}
+	const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+	return [...newest.values()].filter(({ template }) => {
+		const searchable = `${template.id}\n${template.appliesTo.join("\n")}\n${template.contract.objective}`.toLowerCase();
+		return words.length === 0 || words.some((word) => searchable.includes(word));
+	}).sort((left, right) => left.template.id.localeCompare(right.template.id));
+}
+/** Expand into the same authoring fields as a free contract; no template-specific execution path follows. */
+async function bindTaskTemplate(root, spec) {
+	if (!isPlainObject(spec)) return spec;
+	if (spec.templateRef === void 0) {
+		if (spec.templateParameters !== void 0) throw new Error("task-template: templateParameters requires templateRef");
+		return spec;
+	}
+	const ref = spec.templateRef;
+	if (root === void 0) throw new Error("task-template: taskTemplatesRoot is not configured");
+	if (!isPlainObject(ref) || !validId(ref.id) || !Number.isSafeInteger(ref.version) || ref.version < 1 || typeof ref.digest !== "string" || !/^[a-f0-9]{64}$/.test(ref.digest) || Object.keys(ref).some((key) => ![
+		"id",
+		"version",
+		"digest"
+	].includes(key))) throw new Error("task-template: templateRef requires id, positive version and SHA-256 digest");
+	for (const field of [
+		"objective",
+		"acceptanceCriteria",
+		"assumptions",
+		"constraints",
+		"requiredCapabilities"
+	]) if (Object.hasOwn(spec, field)) throw new Error(`task-template: ${field} cannot override a template contract`);
+	const template = parseTaskTemplate(JSON.parse(await readFile(join(root, `${ref.id}@${ref.version}.json`), "utf8")));
+	if (template.id !== ref.id || template.version !== ref.version || taskTemplateDigest(template) !== ref.digest) throw new Error(`task-template: ${ref.id}@${ref.version} content does not match its pinned reference`);
+	const parameters = spec.templateParameters ?? {};
+	if (!isPlainObject(parameters)) throw new Error("task-template: templateParameters must be an object");
+	for (const name of template.parametersSchema.required ?? []) if (!Object.hasOwn(parameters, name)) throw new Error(`task-template: missing required parameter ${name}`);
+	for (const [name, value] of Object.entries(parameters)) {
+		const property = template.parametersSchema.properties[name];
+		if (!Object.hasOwn(template.parametersSchema.properties, name) || property === void 0 || !parameterTypeMatches(value, property.type) || property.enum !== void 0 && !property.enum.includes(value)) throw new Error(`task-template: parameter ${name} does not satisfy parametersSchema`);
+	}
+	const bind = (value) => {
+		if (typeof value === "string") return value.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, name) => {
+			if (!Object.hasOwn(parameters, name)) throw new Error(`task-template: unbound parameter ${name}`);
+			return String(parameters[name]);
+		});
+		if (Array.isArray(value)) return value.map(bind);
+		if (isPlainObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, bind(item)]));
+		return value;
+	};
+	return {
+		...spec,
+		...bind(template.contract),
+		templateRef: structuredClone(ref),
+		templateParameters: structuredClone(parameters)
+	};
 }
 
 //#endregion
@@ -157,6 +951,7 @@ const WORKER_BASELINE_TOOLS = [
 	"task_cancel",
 	"task_verify",
 	"capability_list",
+	"task_template_list",
 	"task_proposal_read",
 	"task_proposal_continue",
 	"task_proposal_cancel",
@@ -174,7 +969,7 @@ function workerBaseline() {
 * Resolve required capability names against the configured registry.
 * A required name that has an entry contributes its skills/tools/preset to the
 */
-function resolveCapabilities(required, registry) {
+function resolveCapabilities(required, registry, mcpServers) {
 	const capabilities = {};
 	const missing = [];
 	for (const name of required) {
@@ -183,7 +978,7 @@ function resolveCapabilities(required, registry) {
 			missing.push(name);
 			continue;
 		}
-		for (const server of entry.mcpServers ?? []) assertKnownName(name, "MCP server", "known servers", Object.keys(MCP_SERVER_REGISTRY), server);
+		if (mcpServers !== void 0) for (const server of entry.mcpServers ?? []) assertKnownName(name, "MCP server", "known servers", Object.keys(mcpServers), server);
 		capabilities[name] = {
 			skills: [...entry.skills ?? []],
 			tools: resolveToolLabels(name, entry.tools ?? []),
@@ -253,45 +1048,6 @@ function resolvePermission(manifest, resolveSpec) {
 		name,
 		rank: rank(name)
 	})).reduce((strictest, item) => item.rank[0] > strictest.rank[0] || item.rank[0] === strictest.rank[0] && item.rank[1] > strictest.rank[1] ? item : strictest).name;
-}
-
-//#endregion
-//#region src/helpers.ts
-/** The small primitives every module here shares: error text, waiting, and shape checks. */
-function message(error) {
-	return error instanceof Error ? error.message : String(error);
-}
-function sleep(ms) {
-	return new Promise((resolve$1) => {
-		setTimeout(resolve$1, ms);
-	});
-}
-function now() {
-	return (/* @__PURE__ */ new Date()).toISOString();
-}
-/** Non-blank text: the one check every string field shares, with no rewriting of the value. */
-function nonBlank(value) {
-	return typeof value === "string" && value.trim().length > 0;
-}
-function isPlainObject(value) {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
-}
-/** The keys a value carries that a closed field set does not declare, in declaration order. */
-function unknownFieldKeys(value, allowed) {
-	const declared = new Set(allowed);
-	return Object.keys(value).filter((key) => !declared.has(key));
-}
-/** Run `work` after the work already queued under `key`, in call order; the drained entry goes. */
-function enqueueByKey(chains, key, work) {
-	const run = (chains.get(key) ?? Promise.resolve()).then(work, work);
-	const settled = run.then(() => void 0, () => void 0);
-	chains.set(key, settled);
-	settled.then(() => {
-		if (chains.get(key) === settled) chains.delete(key);
-	});
-	return run;
 }
 
 //#endregion
@@ -725,7 +1481,7 @@ function shape(reason) {
 		reason
 	};
 }
-function unknownFields$1(value, allowed, where, carries) {
+function unknownFields(value, allowed, where, carries) {
 	return unknownFieldKeys(value, allowed).sort().map((key) => ({
 		code: "sidecar-unknown-field",
 		reason: `${where} declares unknown field ${JSON.stringify(key)}; ${carries}`
@@ -760,7 +1516,7 @@ function portDefects(value, where) {
 			defects.push(shape(`${at} must be an object carrying name, description, required`));
 			return;
 		}
-		defects.push(...unknownFields$1(port, PORT_FIELDS, at, "a port carries name, description, required"));
+		defects.push(...unknownFields(port, PORT_FIELDS, at, "a port carries name, description, required"));
 		if (!nonBlank(port.name)) defects.push(shape(`${at}.name must be a non-blank string`));
 		if (!nonBlank(port.description)) defects.push(shape(`${at}.description must be a non-blank string`));
 		if (typeof port.required !== "boolean") defects.push(shape(`${at}.required must be a boolean`));
@@ -774,7 +1530,7 @@ function portDefects(value, where) {
 /** The content identity: exact digests, a supported path vocabulary, and one sorted list. */
 function contentDefects$1(value) {
 	if (!isPlainObject(value)) return [shape("sidecar.content must be an object carrying skillMdSha256 and resources")];
-	const defects = unknownFields$1(value, CONTENT_FIELDS, "sidecar.content", "a content identity carries skillMdSha256, resources");
+	const defects = unknownFields(value, CONTENT_FIELDS, "sidecar.content", "a content identity carries skillMdSha256, resources");
 	if (!isSha256Hex(value.skillMdSha256)) defects.push(shape("sidecar.content.skillMdSha256 must be a lowercase 64-character hex digest"));
 	const resources = value.resources;
 	if (!Array.isArray(resources)) {
@@ -789,7 +1545,7 @@ function contentDefects$1(value) {
 			defects.push(shape(`${at} must be an object carrying path, sha256`));
 			return;
 		}
-		defects.push(...unknownFields$1(resource, RESOURCE_FIELDS, at, "a resource identity carries path, sha256"));
+		defects.push(...unknownFields(resource, RESOURCE_FIELDS, at, "a resource identity carries path, sha256"));
 		if (!nonBlank(resource.path) || !isSupportedSkillResourcePath(resource.path)) defects.push(shape(`${at}.path ${described(resource.path)} is not a supported resource path (references/<file> or scripts/<file>)`));
 		else if (seen.has(resource.path)) defects.push(shape(`${at} duplicates ${JSON.stringify(resource.path)}`));
 		else {
@@ -803,13 +1559,13 @@ function contentDefects$1(value) {
 }
 function verifierDefects(value) {
 	if (!isPlainObject(value)) return [shape("sidecar.verifier must be an object carrying a ref")];
-	const defects = unknownFields$1(value, VERIFIER_FIELDS, "sidecar.verifier", "a verifier reference carries ref");
+	const defects = unknownFields(value, VERIFIER_FIELDS, "sidecar.verifier", "a verifier reference carries ref");
 	if (!nonBlank(value.ref)) defects.push(shape("sidecar.verifier.ref must be a non-blank string"));
 	return defects;
 }
 function contentCheckDefects(value) {
 	if (!isPlainObject(value)) return [shape("sidecar.contentCheck must be an object carrying kind and command")];
-	const defects = unknownFields$1(value, CONTENT_CHECK_FIELDS, "sidecar.contentCheck", "a content check carries kind, command");
+	const defects = unknownFields(value, CONTENT_CHECK_FIELDS, "sidecar.contentCheck", "a content check carries kind, command");
 	if (value.kind !== "command") defects.push(shape(`sidecar.contentCheck.kind ${described(value.kind)} is not one of command`));
 	if (!nonBlank(value.command)) defects.push(shape("sidecar.contentCheck.command must be a non-blank string"));
 	return defects;
@@ -835,7 +1591,7 @@ function skillContractDefects(value) {
 		return defects;
 	}
 	if (type === "execution") {
-		defects.push(...unknownFields$1(value, EXECUTION_FIELDS, "sidecar", `an execution sidecar carries ${EXECUTION_FIELDS.join(", ")}`));
+		defects.push(...unknownFields(value, EXECUTION_FIELDS, "sidecar", `an execution sidecar carries ${EXECUTION_FIELDS.join(", ")}`));
 		defects.push(...nameListDefects(value.capabilities, "sidecar.capabilities", "sidecar.capabilities must be a non-empty array of capability names", (name, index) => `sidecar.capabilities[${index}] duplicates ${JSON.stringify(name)}`, 1));
 		if (!nonBlank(value.precondition)) defects.push(shape("sidecar.precondition must be a non-blank string"));
 		defects.push(...portDefects(value.inputs, "sidecar.inputs"));
@@ -845,7 +1601,7 @@ function skillContractDefects(value) {
 		defects.push(...contentDefects$1(value.content));
 		return defects;
 	}
-	defects.push(...unknownFields$1(value, KNOWLEDGE_FIELDS, "sidecar", `a knowledge sidecar carries ${KNOWLEDGE_FIELDS.join(", ")}`));
+	defects.push(...unknownFields(value, KNOWLEDGE_FIELDS, "sidecar", `a knowledge sidecar carries ${KNOWLEDGE_FIELDS.join(", ")}`));
 	if (!nonBlank(value.source)) defects.push(shape("sidecar.source must be a non-blank string"));
 	if (!nonBlank(value.scope)) defects.push(shape("sidecar.scope must be a non-blank string"));
 	defects.push(...contentDefects$1(value.content));
@@ -886,6 +1642,55 @@ function sidecarWithSkillMd(sidecar, skillMdSha256) {
 */
 function serializeSkillSidecar(sidecar) {
 	return `${JSON.stringify(JSON.parse(canonicalize(sidecar)), null, 2)}\n`;
+}
+
+//#endregion
+//#region src/mcp-servers.ts
+/** Every MCP server name one resolved manifest grants, first-declaration order, duplicates dropped. */
+function manifestMcpServers(manifest) {
+	const names = [];
+	for (const entry of Object.values(manifest.capabilities)) for (const name of entry.mcpServers ?? []) if (!names.includes(name)) names.push(name);
+	return names;
+}
+const PLACEHOLDER = /\{(envRoot|repoRoot:[^{}]+)\}/g;
+const ANY_PLACEHOLDER_LIKE = /\{[^{}]*\}/;
+/**
+* Substitute the placeholders of one template field. `{envRoot}` is the env
+* root; `{repoRoot:<repo>}` is that env's checkout of `<repo>`. An env-free
+*/
+function substitute(template, binding, serverName) {
+	if (!ANY_PLACEHOLDER_LIKE.test(template)) return template;
+	const leftover = template.replace(PLACEHOLDER, "");
+	if (ANY_PLACEHOLDER_LIKE.test(leftover)) throw new Error(`task-runtime: MCP server "${serverName}" template "${template}" carries a placeholder outside {envRoot}/{repoRoot:<repo>}`);
+	if (binding === void 0) throw new Error(`task-runtime: MCP server "${serverName}" needs an env binding ({envRoot}/{repoRoot} template) but this run's session has none`);
+	return template.replace(PLACEHOLDER, (whole, key) => {
+		if (key === "envRoot") return binding.envRoot;
+		const repo = key.slice(9);
+		const checkout = binding.checkout(repo);
+		if (checkout === void 0) throw new Error(`task-runtime: MCP server "${serverName}" binds {repoRoot:${repo}} but this run's env (${binding.envRoot}) has no "${repo}" checkout`);
+		return checkout;
+	});
+}
+/**
+* Materialize one manifest's MCP grants into mount-ready specs.
+* @param manifest - the resolved capability manifest (server names already validated at admission).
+*/
+function resolveMcpServerSpecs(manifest, binding, registry) {
+	const names = manifestMcpServers(manifest);
+	const specs = [];
+	for (const name of names) {
+		const template = registry[name];
+		if (template === void 0) throw new Error(`task-runtime: capability manifest grants unknown MCP server "${name}"; known servers: ${Object.keys(registry).sort().join(", ")}`);
+		specs.push({
+			serverName: template.serverName,
+			command: substitute(template.command, binding, name),
+			args: (template.args ?? []).map((arg) => substitute(arg, binding, name)),
+			env: Object.fromEntries(Object.entries(template.env ?? {}).map(([key, value]) => [key, substitute(value, binding, name)])),
+			cwd: template.cwd === void 0 ? binding?.envRoot ?? "" : substitute(template.cwd, binding, name),
+			...template.toolCallTimeoutMs === void 0 ? {} : { toolCallTimeoutMs: template.toolCallTimeoutMs }
+		});
+	}
+	return specs;
 }
 
 //#endregion
@@ -1523,7 +2328,7 @@ async function bindRunProviders(request) {
 		registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, []),
 		capabilities: [...rows].sort(),
 		skills: selected.map(skillBinding),
-		mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? MCP_SERVER_REGISTRY)
+		mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? {})
 	};
 	if (selected.length === 0) return base;
 	const root = request.root;
@@ -2301,9 +3106,9 @@ const DEFAULT_WRITE_DRAIN_TIMEOUT_MS = 3e4;
 const DEFAULT_MAX_DEPTH = 4;
 const DEFAULT_MAX_CHILDREN = 8;
 const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true;
-/** The shipped supervision policy (A7 §1): every terminal review diagnosed, three recovery rounds, two improvement rounds, eight coordination runs. */
+/** The shipped supervision policy (A7 §1): failed terminal reviews diagnosed, three recovery rounds, two improvement rounds, eight coordination runs. */
 const DEFAULT_SUPERVISION = {
-	autoReview: "all",
+	autoReview: "failed",
 	maxRecoveryRounds: 3,
 	maxImprovementRounds: 2,
 	coordinationBudget: 8
@@ -2331,7 +3136,17 @@ const Supervision = z.object({
 });
 const ConfigSchema = z.object({
 	capabilities: z.dict(Capability).default({}),
+	mcpServers: z.dict(z.object({
+		serverName: z.string(),
+		description: z.string(),
+		command: z.string(),
+		args: z.array(z.string()),
+		env: z.dict(z.string()),
+		cwd: z.string(),
+		toolCallTimeoutMs: z.number()
+	})).default({}),
 	defaultPreset: z.string(),
+	taskTemplatesRoot: z.string(),
 	verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),
 	maxDepth: z.number().default(DEFAULT_MAX_DEPTH),
 	maxChildren: z.number().default(DEFAULT_MAX_CHILDREN),
@@ -2802,7 +3617,7 @@ function gate(self) {
 	return self.executionGate;
 }
 function resolveCapabilitiesImpl(self, required) {
-	return resolveCapabilities(required, self.config.capabilities);
+	return resolveCapabilities(required, self.config.capabilities, self.config.mcpServers ?? {});
 }
 function listCapabilities(self) {
 	return structuredClone(self.config.capabilities);
@@ -2839,664 +3654,6 @@ async function assertReplacementRow(self, name, entry, options = {}) {
 	});
 	if (refusals.length === 0) return;
 	throw new Error(`task-runtime: capability "${name}" was not replaced — the row grants providers that are not usable:\n` + refusals.map((line) => `- ${line}`).join("\n"));
-}
-
-//#endregion
-//#region src/protected-inputs.ts
-/**
-* The authoring form of one criterion's declaration: a non-empty array of
-* non-blank strings, in the order the caller wrote them.
-*/
-function declaredPaths(value) {
-	if (!Array.isArray(value) || value.length === 0) return [];
-	return value.every((item) => nonBlank(item)) ? [...value] : [];
-}
-/**
-* The label one criterion is reported under: the declared id when it has one,
-* its position otherwise — the vocabulary `normalize.ts` names criteria with,
-*/
-function criterionLabel(childLabel$1, criterion, index) {
-	return `${childLabel$1} criterion ${nonBlank(criterion.criterionId) ? JSON.stringify(criterion.criterionId) : index + 1}`;
-}
-/**
-* Fix the byte identity of every declared protected input, against the
-* checkout directory the criterion's judge will run in.
-*/
-async function fixProtectedInputs(paths, cwd, label) {
-	if (paths.length === 0) return {
-		refs: [],
-		reasons: []
-	};
-	if (cwd === void 0) return {
-		refs: [],
-		reasons: [`${label} protectedInputs cannot be fixed: the session's checkout directory cannot be resolved (the session has no readable graph env binding), so the declared paths are refused rather than fixed against the wrong base`]
-	};
-	const refs = [];
-	const reasons = [];
-	const seen = /* @__PURE__ */ new Set();
-	for (const path of paths) {
-		if (seen.has(path)) continue;
-		seen.add(path);
-		try {
-			refs.push({
-				path,
-				sha256: sha256Hex(await readFile(resolve(cwd, path)))
-			});
-		} catch (error) {
-			reasons.push(`${label} protectedInputs path ${JSON.stringify(path)} cannot be read: ${message(error)}`);
-		}
-	}
-	return {
-		refs,
-		reasons
-	};
-}
-/**
-* Fix the declarations of one criterion list, rebuilding only the criteria that
-* declared one: every untouched criterion is carried by reference, and the
-*/
-async function fixCriteriaProtectedInputs(criteria, cwd, label) {
-	const reasons = [];
-	/**
-	* A criterion list that is not an array is a shape defect whichever entry
-	* wrote it (`contractDefects` names it); carrying it here keeps the refusal
-	*/
-	if (!Array.isArray(criteria)) return {
-		criteria,
-		reasons
-	};
-	const fixed = [];
-	for (const [index, criterion] of criteria.entries()) {
-		const paths = declaredPaths(criterion.protectedInputs);
-		if (paths.length === 0) {
-			fixed.push(criterion);
-			continue;
-		}
-		const outcome = await fixProtectedInputs(paths, cwd, criterionLabel(label, criterion, index));
-		reasons.push(...outcome.reasons);
-		/**
-		* The fixed form is the runtime's own normalized shape, which the declared
-		* type cannot express (`CriterionSpec` declares paths): the cast is the
-		*/
-		fixed.push(outcome.reasons.length === 0 ? {
-			...criterion,
-			protectedInputs: outcome.refs
-		} : criterion);
-	}
-	return {
-		criteria: fixed,
-		reasons
-	};
-}
-/**
-* Fix the declared protected inputs of a whole decomposition proposal before
-* anything else reads it: the runtime calls this ahead of the single
-*/
-async function fixSpecProtectedInputs(spec, cwd) {
-	const reasons = [];
-	/**
-	* The spec's own shape is normalization's rule, not this walk's: a proposal
-	* whose `children` (or a child's `acceptanceCriteria`) is not an array is
-	*/
-	if (!Array.isArray(spec?.children)) return {
-		spec,
-		reasons
-	};
-	const children = [];
-	for (const [index, child] of spec.children.entries()) {
-		if (child === null || typeof child !== "object" || !Array.isArray(child.acceptanceCriteria)) {
-			children.push(child);
-			continue;
-		}
-		const outcome = await fixCriteriaProtectedInputs(child.acceptanceCriteria, cwd, `child ${index}`);
-		reasons.push(...outcome.reasons);
-		const touched = outcome.criteria.some((criterion, position) => criterion !== child.acceptanceCriteria[position]);
-		children.push(touched ? {
-			...child,
-			acceptanceCriteria: outcome.criteria
-		} : child);
-	}
-	return {
-		spec: children.some((child, index) => child !== spec.children[index]) ? {
-			...spec,
-			children
-		} : spec,
-		reasons
-	};
-}
-/**
-* Structural defects of the **fixed** form of every criterion's protected
-* inputs: each declaration must be an array of plain objects carrying exactly
-*/
-function protectedInputDefects(criteria, label) {
-	const reasons = [];
-	for (const criterion of criteria) {
-		const where = `${label} criterion ${JSON.stringify(criterion.criterionId)}`;
-		const declared = criterion.protectedInputs;
-		if (declared === void 0) continue;
-		if (!Array.isArray(declared)) {
-			reasons.push(`${where} protectedInputs must be an array of { path, sha256 } entries (declared paths are fixed by admission, never stored as strings)`);
-			continue;
-		}
-		declared.forEach((entry, index) => {
-			const at = `${where} protectedInputs entry ${index}`;
-			if (!isPlainObject(entry)) {
-				reasons.push(`${at} must be an object with only path and sha256`);
-				return;
-			}
-			for (const key of unknownFieldKeys(entry, ["path", "sha256"])) reasons.push(`${at} declares unknown field ${JSON.stringify(key)}`);
-			if (!nonBlank(entry.path)) reasons.push(`${at} path must be a non-empty string`);
-			if (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) reasons.push(`${at} sha256 must be a lowercase 64-character hex digest`);
-		});
-	}
-	return reasons;
-}
-
-//#endregion
-//#region src/admission.ts
-/** Modes whose criterion is executed by the command verifier and therefore needs `command`. */
-const EXECUTABLE_MODES = [
-	"deterministic",
-	"simulation",
-	"measurement"
-];
-/** Every mode a criterion may declare, in declaration order (`VerificationMode`); the list the mode rule names. */
-const VERIFICATION_MODES = [
-	"deterministic",
-	"simulation",
-	"formal",
-	"measurement",
-	"review",
-	"composite"
-];
-/**
-* Structural reasons one task's parent-acceptance declarations are malformed
-* (P4, KISS §6 C2). Shape only: whether a mapping target exists is judged at
-*/
-function independentAcceptanceDefects(criteria, requiresIndependentAcceptance, label) {
-	const reasons = [];
-	for (const criterion of criteria) {
-		const where = `${label} criterion "${criterion.criterionId}"`;
-		if (criterion.acceptsArtifact !== void 0 && (!Array.isArray(criterion.acceptsArtifact) || criterion.acceptsArtifact.some((ref) => typeof ref !== "string" || ref.trim().length === 0))) reasons.push(`${where} acceptsArtifact must be an array of non-empty strings`);
-		if (criterion.heuristic !== void 0 && typeof criterion.heuristic !== "boolean") reasons.push(`${where} heuristic must be a boolean`);
-		const map = criterion.childEvidence;
-		if (map !== void 0) if (!Array.isArray(map)) reasons.push(`${where} childEvidence must be an array of entries`);
-		else {
-			map.forEach((entry, index) => {
-				const at = `${where} childEvidence entry ${index}`;
-				if (typeof entry !== "object" || entry === null) {
-					reasons.push(`${at} must be an object`);
-					return;
-				}
-				if (!Number.isInteger(entry.childIndex) || entry.childIndex < 0) reasons.push(`${at} childIndex must be a non-negative integer`);
-				if (entry.criterionId !== void 0 && (typeof entry.criterionId !== "string" || entry.criterionId.trim().length === 0)) reasons.push(`${at} criterionId must be a non-empty string`);
-				if (entry.evidenceRef !== void 0 && (typeof entry.evidenceRef !== "string" || entry.evidenceRef.trim().length === 0)) reasons.push(`${at} evidenceRef must be a non-empty string`);
-			});
-			/**
-			* Only the composite verifier reads the map, and a heuristic judgement
-			* is never a mechanical check: a map on any other judge, or beside a
-			*/
-			if (map.length > 0 && criterion.verificationMode !== "composite") reasons.push(`${where} childEvidence requires verificationMode "composite" (the composite verifier is its only judge)`);
-			if (map.length > 0 && criterion.heuristic === true) reasons.push(`${where} cannot be both heuristic and carry a childEvidence map: a heuristic judgement is never a mechanical check`);
-		}
-	}
-	/**
-	* The contract-level marker is a promise that acceptance rests on the task's
-	* own evidence map. A missing, empty, or deleted map must refuse loudly —
-	*/
-	if (requiresIndependentAcceptance === true && !criteria.some((criterion) => (criterion.childEvidence?.length ?? 0) > 0)) reasons.push(`${label} requires independent parent acceptance but no acceptance criterion carries a childEvidence map (the composite conjunction alone cannot stand in for the root goal)`);
-	return reasons;
-}
-/**
-* The one structural rule a **root contract** owes on top of
-* {@link contractDefects} (A0 §1.2): at least one mandatory criterion whose
-*/
-function rootIndependenceDefects(criteria, label) {
-	if (criteria.some((criterion) => criterion.mandatory === true && criterion.verificationMode !== "composite")) return [];
-	return [`${label} requires at least one mandatory acceptance criterion judged by something other than the composite conjunction (verificationMode !== "composite"): a root whose only mandatory criterion is "all children verified" is satisfied by its own decomposition and has no independent check of the goal it was given`];
-}
-/**
-* Whether a criterion declares a command a verifier could actually run. A
-* declared command that is blank — or not text at all — is as missing as an
-*/
-function hasCommand(command) {
-	return typeof command === "string" && command.trim().length > 0;
-}
-/**
-* Structural defects of one task's acceptance contract (T1, construction guide
-* §4): what has to hold before a contract can be admitted at all, whichever
-*/
-function contractDefects(criteria, label) {
-	const reasons = [];
-	if (criteria.length === 0) {
-		reasons.push(`${label} requires at least one acceptance criterion`);
-		return reasons;
-	}
-	const seen = /* @__PURE__ */ new Set();
-	const reportedDuplicate = /* @__PURE__ */ new Set();
-	for (const criterion of criteria) {
-		const where = `${label} criterion "${criterion.criterionId}"`;
-		const description = criterion.description;
-		if (typeof description !== "string" || description.trim().length === 0) reasons.push(`${where} requires a non-empty description`);
-		if (!VERIFICATION_MODES.includes(criterion.verificationMode)) reasons.push(`${where} verificationMode "${String(criterion.verificationMode)}" is not one of ${VERIFICATION_MODES.join(", ")}`);
-		else if (EXECUTABLE_MODES.includes(criterion.verificationMode) && !hasCommand(criterion.command)) reasons.push(`${where} (${criterion.verificationMode}) requires a command`);
-		/**
-		* Duplicates are refused before the batch is persisted, not at acceptance:
-		* a verdict names its criterion by id, so two criteria sharing one id make
-		*/
-		if (seen.has(criterion.criterionId) && !reportedDuplicate.has(criterion.criterionId)) {
-			reasons.push(`${label} declares criterion id "${criterion.criterionId}" more than once`);
-			reportedDuplicate.add(criterion.criterionId);
-		}
-		seen.add(criterion.criterionId);
-		/**
-		* The fixed form of a criterion's protected acceptance inputs (S1-V slice
-		* 2): the same rule for an ordinary decomposition child and for a replay
-		*/
-		reasons.push(...protectedInputDefects([criterion], label));
-	}
-	if (!criteria.some((criterion) => criterion.mandatory === true)) reasons.push(`${label} requires at least one mandatory acceptance criterion`);
-	return reasons;
-}
-/**
-* How one planned child is named in a refusal: its position always, its id when
-* the batch has one yet ({@link AdmissionChild.taskId}). A batch is judged
-*/
-function childLabel(child, index) {
-	return child.taskId === void 0 ? `child ${index}` : `child ${index} ("${child.taskId}")`;
-}
-/**
-* How one planned child is named inside a dependency message: its id when it
-* has one, its batch position otherwise (`#0` is the first child). The two
-*/
-function childRef(child, index) {
-	return child?.taskId ?? `#${index}`;
-}
-/**
-* Structural admission checks for one decomposition batch (RFC §36). Pure:
-* every rule is validated up front and the caller persists only when the
-*/
-function checkDecomposition(parent, children, existingEdges) {
-	const reasons = [];
-	const policy = parent.decompositionPolicy;
-	if (!policy.allowed) reasons.push(policy.leaf === true ? `task "${parent.taskId}" decomposition is not allowed: it is admitted as leaf and runtime decomposition is off (allowRuntimeDecomposition: false), so only a task admitted decomposable may split` : `task "${parent.taskId}" decomposition is not allowed`);
-	if (policy.maxDepth !== void 0 && parent.depth + 1 > policy.maxDepth) reasons.push(`task "${parent.taskId}" children would exceed maxDepth ${policy.maxDepth} (depth ${parent.depth + 1})`);
-	if (policy.maxChildren !== void 0 && children.length > policy.maxChildren) reasons.push(`task "${parent.taskId}" would have ${children.length} children, above maxChildren ${policy.maxChildren}`);
-	if (children.length === 0) reasons.push(`task "${parent.taskId}" decomposition requires at least one child`);
-	/**
-	* The parent's own parent-acceptance declarations (P4): a stored task's
-	* criteria are immutable, so the marker-plus-map rule is re-checked here on
-	*/
-	reasons.push(...independentAcceptanceDefects(parent.acceptanceCriteria, parent.requiresIndependentAcceptance, `task "${parent.taskId}"`));
-	const plannedEdges = [];
-	children.forEach((child, index) => {
-		const label = childLabel(child, index);
-		if (child.objective.trim().length === 0) reasons.push(`${label} objective must be non-empty`);
-		/**
-		* Two separate judgements, both required: the contract's own structure
-		* ({@link contractDefects}, shared with the replay path) and the P4
-		*/
-		reasons.push(...contractDefects(child.acceptanceCriteria, label));
-		reasons.push(...independentAcceptanceDefects(child.acceptanceCriteria, child.requiresIndependentAcceptance, label));
-		for (const criterion of child.acceptanceCriteria) {
-			/**
-			* `requiresArtifact` gets a shape check here and nothing more: whether the
-			* named artifact exists is a spawn-time question (it needs the store
-			*/
-			if (criterion.requiresArtifact !== void 0 && (!Array.isArray(criterion.requiresArtifact) || criterion.requiresArtifact.some((ref) => typeof ref !== "string" || ref.trim().length === 0))) reasons.push(`${label} criterion "${criterion.criterionId}" requiresArtifact must be an array of non-empty strings`);
-			/**
-			* `verifierRef` gets a shape check here and nothing more: whether the id
-			* is registered is a batch-level question (it needs the verifier
-			*/
-			if (criterion.verifierRef !== void 0 && (typeof criterion.verifierRef !== "string" || criterion.verifierRef.trim().length === 0)) reasons.push(`${label} criterion "${criterion.criterionId}" verifierRef must be a non-empty string`);
-		}
-		for (const dependency of child.dependsOn ?? []) {
-			if (!Number.isInteger(dependency) || dependency < 0 || dependency >= children.length) {
-				reasons.push(`${label} dependsOn index ${dependency} is out of range`);
-				continue;
-			}
-			if (dependency === index) {
-				reasons.push(`${label} cannot depend on itself`);
-				continue;
-			}
-			plannedEdges.push({
-				from: childRef(children[dependency], dependency),
-				to: childRef(child, index)
-			});
-		}
-	});
-	const edges = [...existingEdges, ...plannedEdges];
-	const seen = /* @__PURE__ */ new Set();
-	for (const edge of edges) {
-		const key = `${edge.from}→${edge.to}`;
-		if (seen.has(key)) reasons.push(`dependency "${key}" is declared more than once`);
-		seen.add(key);
-	}
-	for (const edge of plannedEdges) if (reaches(edges, edge.to, edge.from)) reasons.push(`dependency "${edge.from}" → "${edge.to}" creates a cycle`);
-	return reasons.length === 0 ? { ok: true } : {
-		ok: false,
-		reasons
-	};
-}
-
-//#endregion
-//#region src/normalize.ts
-/**
-* The identity one batch is digested over (§4): where it came from, which
-* contract language it is written in, the caller's reason, and the complete
-*/
-function decompositionIdentity(context, reason, children) {
-	return {
-		contractVersion: TASK_CONTRACT_VERSION,
-		storeId: context.storeId,
-		parentTaskId: context.parentTaskId,
-		parentRunId: context.parentRunId,
-		callerSessionId: context.callerSessionId,
-		reason,
-		children: children.map((child) => ({
-			contractDigest: contractDigest(child.contract),
-			dependsOn: child.dependsOn,
-			decomposable: child.decomposable,
-			requiresIndependentAcceptance: child.requiresIndependentAcceptance
-		}))
-	};
-}
-/** The batch fields, and nothing else: a key outside this set is refused. */
-const BATCH_FIELDS = new Set([
-	"contractVersion",
-	"reason",
-	"children"
-]);
-/** The child fields, and nothing else. */
-const CHILD_FIELDS = new Set([
-	"objective",
-	"acceptanceCriteria",
-	"requiredCapabilities",
-	"dependsOn",
-	"assumptions",
-	"constraints",
-	"decomposable",
-	"requiresIndependentAcceptance"
-]);
-/** The criterion fields, and nothing else. */
-const CRITERION_FIELDS = new Set([
-	"criterionId",
-	"description",
-	"command",
-	"mode",
-	"mandatory",
-	"requiredEvidence",
-	"requiresArtifact",
-	"acceptsArtifact",
-	"verifierRef",
-	"childEvidence",
-	"heuristic",
-	"protectedInputs"
-]);
-/** A declared version value, rendered so a non-number cannot read like a number (`"1"` is not `1`). */
-function declaredText(value) {
-	return typeof value === "number" ? String(value) : JSON.stringify(value) ?? String(value);
-}
-/**
-* A deep copy of declared contract data: primitives are immutable, arrays and
-* plain objects are rebuilt, so a caller mutating its input afterwards cannot
-*/
-function copyValue(value) {
-	if (Array.isArray(value)) return value.map((item) => copyValue(item));
-	if (isPlainObject(value)) {
-		const copy = {};
-		for (const [key, item] of Object.entries(value)) copy[key] = copyValue(item);
-		return copy;
-	}
-	return value;
-}
-/** Report every key a level does not declare. */
-function unknownFields(source, allowed, label, reasons) {
-	for (const key of unknownFieldKeys(source, allowed)) reasons.push(`${label} declares unknown field ${JSON.stringify(key)}`);
-}
-/** A required text field; a blank or non-string value is refused with the field named. */
-function text(value, label, reasons) {
-	if (!nonBlank(value)) {
-		reasons.push(`${label} must be a non-empty string`);
-		return "";
-	}
-	return value;
-}
-/**
-* A declared string collection: copied verbatim when it holds nothing but
-* non-blank strings, refused as one defect otherwise — a blank entry is
-*/
-function stringList(value, label, reasons) {
-	if (!Array.isArray(value) || value.some((item) => !nonBlank(item))) {
-		reasons.push(`${label} must be an array of non-empty strings`);
-		return [];
-	}
-	return value.map((item) => item);
-}
-/**
-* A `dependsOn` list: integers only, copied verbatim. Whether an index is in
-* range, points at itself, or closes a cycle is admission's judgement — it
-*/
-function integerList(value, label, reasons) {
-	if (!Array.isArray(value) || value.some((item) => !Number.isInteger(item))) {
-		reasons.push(`${label} must be an array of integers`);
-		return [];
-	}
-	return value.map((item) => item);
-}
-/** A boolean declaration: absent keeps the designed default, anything else is refused. */
-function booleanField(value, fallback, label, reasons) {
-	if (value === void 0) return fallback;
-	if (typeof value !== "boolean") {
-		reasons.push(`${label} must be a boolean`);
-		return fallback;
-	}
-	return value;
-}
-/**
-* A value carried as declared. `command` and the P4 declarations are judged by
-* admission, so this entry only copies them: a shape those rules refuse never
-*/
-function carried(value) {
-	return copyValue(value);
-}
-/**
-* One criterion list. Ids are fixed here — a declared id verbatim, an absent
-* one from `idOf` — because the digest must not depend on spellings and because
-*/
-function normalizeCriteria(raw, label, idOf, reasons) {
-	const criteria = [];
-	const seen = /* @__PURE__ */ new Set();
-	const reportedDuplicate = /* @__PURE__ */ new Set();
-	raw.forEach((value, index) => {
-		const before = reasons.length;
-		const position = `${label} criterion ${index + 1}`;
-		if (!isPlainObject(value)) {
-			reasons.push(`${position} must be an object`);
-			return;
-		}
-		const declaredId = value.criterionId;
-		if (declaredId !== void 0 && !nonBlank(declaredId)) reasons.push(`${position} criterionId must be a non-empty string`);
-		const criterionId = nonBlank(declaredId) ? declaredId : idOf(index);
-		const criterionLabel$1 = `${label} criterion ${JSON.stringify(criterionId)}`;
-		unknownFields(value, CRITERION_FIELDS, criterionLabel$1, reasons);
-		if (seen.has(criterionId) && !reportedDuplicate.has(criterionId)) {
-			reasons.push(`${label} declares criterion id ${JSON.stringify(criterionId)} more than once`);
-			reportedDuplicate.add(criterionId);
-		}
-		seen.add(criterionId);
-		const description = text(value.description, `${criterionLabel$1} description`, reasons);
-		const mandatory = booleanField(value.mandatory, true, `${criterionLabel$1} mandatory`, reasons);
-		const requiredEvidence = value.requiredEvidence === void 0 ? [] : stringList(value.requiredEvidence, `${criterionLabel$1} requiredEvidence`, reasons);
-		const command = value.command;
-		const criterion = {
-			criterionId,
-			description,
-			verificationMode: carried(value.mode === void 0 ? command !== void 0 ? "deterministic" : "review" : value.mode),
-			requiredEvidence,
-			mandatory,
-			...command === void 0 ? {} : { command: carried(command) },
-			...value.requiresArtifact === void 0 ? {} : { requiresArtifact: carried(value.requiresArtifact) },
-			...value.acceptsArtifact === void 0 ? {} : { acceptsArtifact: carried(value.acceptsArtifact) },
-			...value.verifierRef === void 0 ? {} : { verifierRef: carried(value.verifierRef) },
-			...value.childEvidence === void 0 ? {} : { childEvidence: carried(value.childEvidence) },
-			...value.heuristic === void 0 ? {} : { heuristic: carried(value.heuristic) },
-			...value.protectedInputs === void 0 ? {} : { protectedInputs: carried(value.protectedInputs) }
-		};
-		if (reasons.length > before) return;
-		criteria.push(criterion);
-	});
-	return criteria;
-}
-/** One batch child, normalized; `undefined` exactly when it contributed a reason. */
-function normalizeChild(raw, index, reasons) {
-	const before = reasons.length;
-	const label = `child ${index}`;
-	if (!isPlainObject(raw)) {
-		reasons.push(`${label} must be an object`);
-		return;
-	}
-	unknownFields(raw, CHILD_FIELDS, label, reasons);
-	/**
-	* The objective is stored byte-for-byte: a blank one is refused (nothing can
-	* be verified against it) and a padded one keeps its padding — the contract
-	*/
-	const objective = text(raw.objective, `${label} objective`, reasons);
-	const rawCriteria = raw.acceptanceCriteria;
-	let criteria = [];
-	if (!Array.isArray(rawCriteria)) reasons.push(`${label} acceptanceCriteria must be an array`);
-	else criteria = normalizeCriteria(rawCriteria, label, (criterionIndex) => `ac${index + 1}-${criterionIndex + 1}`, reasons);
-	const requiredCapabilities = raw.requiredCapabilities === void 0 ? [] : stringList(raw.requiredCapabilities, `${label} requiredCapabilities`, reasons);
-	const assumptions = raw.assumptions === void 0 ? [] : stringList(raw.assumptions, `${label} assumptions`, reasons);
-	const constraints = raw.constraints === void 0 ? [] : stringList(raw.constraints, `${label} constraints`, reasons);
-	const dependsOn = raw.dependsOn === void 0 ? [] : integerList(raw.dependsOn, `${label} dependsOn`, reasons);
-	const decomposable = booleanField(raw.decomposable, false, `${label} decomposable`, reasons);
-	const requiresIndependentAcceptance = booleanField(raw.requiresIndependentAcceptance, false, `${label} requiresIndependentAcceptance`, reasons);
-	if (reasons.length > before) return void 0;
-	return {
-		contract: {
-			contractVersion: TASK_CONTRACT_VERSION,
-			objective,
-			acceptanceCriteria: criteria,
-			assumptions,
-			constraints,
-			requiredCapabilities
-		},
-		dependsOn,
-		decomposable,
-		requiresIndependentAcceptance
-	};
-}
-/**
-* Normalize one decomposition proposal.
-* Returns every defect it found, never the first: a caller revising a proposal
-*/
-function normalizeDecomposition(spec, context) {
-	const reasons = [];
-	if (!isPlainObject(spec)) return {
-		ok: false,
-		reasons: ["decomposition must be an object with a reason and a children array"]
-	};
-	unknownFields(spec, BATCH_FIELDS, "decomposition", reasons);
-	/**
-	* The version gate: absent is the legacy adapter (this build's version is the
-	* one the runtime writes), declared must be a version whose field semantics
-	*/
-	const declaredVersion = spec.contractVersion;
-	if (declaredVersion !== void 0 && declaredVersion !== TASK_CONTRACT_VERSION) reasons.push(`unknown contract version ${declaredText(declaredVersion)}: this runtime writes version ${TASK_CONTRACT_VERSION}`);
-	let reason = "";
-	if (nonBlank(spec.reason)) reason = spec.reason;
-	else reasons.push("decomposition requires a non-blank reason");
-	const children = [];
-	const rawChildren = spec.children;
-	if (rawChildren === void 0 || Array.isArray(rawChildren) && rawChildren.length === 0) reasons.push("decomposition requires at least one child");
-	else if (!Array.isArray(rawChildren)) reasons.push("decomposition children must be an array");
-	else rawChildren.forEach((raw, index) => {
-		const child = normalizeChild(raw, index, reasons);
-		if (child !== void 0) children.push(child);
-	});
-	if (reasons.length > 0) return {
-		ok: false,
-		reasons
-	};
-	const contractVersion = TASK_CONTRACT_VERSION;
-	try {
-		return {
-			ok: true,
-			batch: {
-				contractVersion,
-				reason,
-				children,
-				admission: {
-					proposalDigest: decompositionDigest(decompositionIdentity(context, reason, children)),
-					context: copyValue(context.admissionContext)
-				}
-			}
-		};
-	} catch (error) {
-		/**
-		* `canonicalize` refuses values JSON cannot round-trip (functions, symbols,
-		* `NaN`, class instances): no digest of such a proposal could be compared
-		*/
-		return {
-			ok: false,
-			reasons: [`decomposition content cannot be canonicalized: ${message(error)}`]
-		};
-	}
-}
-/** The root contract's fields, and nothing else: a key outside this set is refused (A0 §2). */
-const ROOT_CONTRACT_FIELDS = new Set([
-	"contractVersion",
-	"objective",
-	"acceptanceCriteria",
-	"assumptions",
-	"constraints",
-	"requiredCapabilities"
-]);
-/**
-* The criterion id a root contract's criterion gets when it declares none:
-* `ac-<j>`, one flat list.
-*/
-function rootCriterionId(index) {
-	return `ac-${index + 1}`;
-}
-/**
-* Normalize one root contract (A0 §2–§3): the caller's single contract —
-* objective, criteria, assumptions, constraints, declared capabilities — in,
-*/
-function normalizeRootContract(spec) {
-	const reasons = [];
-	if (!isPlainObject(spec)) return {
-		ok: false,
-		reasons: ["root contract must be an object with an objective and an acceptanceCriteria array"]
-	};
-	unknownFields(spec, ROOT_CONTRACT_FIELDS, "root contract", reasons);
-	const declaredVersion = spec.contractVersion;
-	if (declaredVersion !== void 0 && declaredVersion !== TASK_CONTRACT_VERSION) reasons.push(`unknown contract version ${declaredText(declaredVersion)}: this runtime writes version ${TASK_CONTRACT_VERSION}`);
-	const label = "root contract";
-	const objective = text(spec.objective, `${label} objective`, reasons);
-	const rawCriteria = spec.acceptanceCriteria;
-	let criteria = [];
-	if (!Array.isArray(rawCriteria)) reasons.push(`${label} acceptanceCriteria must be an array`);
-	else criteria = normalizeCriteria(rawCriteria, label, rootCriterionId, reasons);
-	const assumptions = spec.assumptions === void 0 ? [] : stringList(spec.assumptions, `${label} assumptions`, reasons);
-	const constraints = spec.constraints === void 0 ? [] : stringList(spec.constraints, `${label} constraints`, reasons);
-	const requiredCapabilities = spec.requiredCapabilities === void 0 ? [] : stringList(spec.requiredCapabilities, `${label} requiredCapabilities`, reasons);
-	if (reasons.length > 0) return {
-		ok: false,
-		reasons
-	};
-	return {
-		ok: true,
-		contract: {
-			contractVersion: TASK_CONTRACT_VERSION,
-			objective,
-			acceptanceCriteria: criteria,
-			assumptions,
-			constraints,
-			requiredCapabilities
-		}
-	};
 }
 
 //#endregion
@@ -4021,6 +4178,14 @@ async function submitRootProposalOnce(self, storeId, rootSessionId, spec, option
 	};
 }
 async function deriveRootContract(self, spec, envPath) {
+	try {
+		spec = await bindTaskTemplate(self.config.taskTemplatesRoot, spec);
+	} catch (error) {
+		return {
+			ok: false,
+			refusal: rootRefusal([message(error)])
+		};
+	}
 	const fixed = await fixCriteriaProtectedInputs(Array.isArray(spec?.acceptanceCriteria) ? spec.acceptanceCriteria : [], envPath, "root contract");
 	const normalized = normalizeRootContract(fixed.reasons.length === 0 ? {
 		...spec,
@@ -4058,16 +4223,6 @@ async function checkRootContract(self, request) {
 	};
 	const manifests = rootManifests(self, contract);
 	const manifest = manifests[0];
-	if (manifest.missing.length > 0) {
-		const detail = `${label} is missing [${manifest.missing.join(", ")}] and a root has no parent to delegate them to`;
-		return {
-			ok: false,
-			refusal: {
-				error: rootRefusal([detail]),
-				reasons: [detail]
-			}
-		};
-	}
 	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), { ...request.envPath === void 0 ? {} : { cwd: request.envPath } });
 	const refusals = providerRefusals(precheck);
 	if (refusals.length > 0) return {
@@ -4194,6 +4349,7 @@ async function activateRootContract(self, request) {
 	}
 	try {
 		const providerBinding = await bindRunProviders({
+			mcpRegistry: self.config.mcpServers,
 			storeId,
 			runId,
 			manifest,
@@ -4202,10 +4358,7 @@ async function activateRootContract(self, request) {
 		});
 		const task = {
 			taskId,
-			definitionRef: {
-				taskType: "root",
-				version: 1
-			},
+			...taskContractIdentity(contract),
 			objective: contract.objective,
 			depth: 0,
 			acceptanceCriteria: contract.acceptanceCriteria,
@@ -4237,9 +4390,16 @@ async function activateRootContract(self, request) {
 			rootRunId: runId,
 			admittedAt: now()
 		};
+		const obligations = manifest.missing.map((capability) => ({
+			obligationId: `ob-root-${taskId}-${capability}`,
+			sourceTaskId: taskId,
+			goal: `Resolve capability ${capability} required by: ${contract.objective}`,
+			criterion: `Root session ${rootSessionId} must arrange an available provider or propose the missing capability before executing work that requires ${capability}. Keep the original objective and acceptance.`
+		}));
 		await self.context.task.admitRootProposalIn(storeId, task, run, rootSessionId, {
 			consumption,
-			manifest
+			manifest,
+			obligations
 		});
 	} catch (error) {
 		/**
@@ -4258,13 +4418,13 @@ async function activateRootContract(self, request) {
 	});
 	self.startedSessions.add(rootSessionId);
 	self.executionGate.setPhase(rootSessionId, "active");
-	self.notifyWhenReady(rootSessionId, `the root contract of this session was activated: task ${taskId}, run ${runId} (proposal ${proposal.proposalId}, policy ${proposal.policy}). This session may now decompose, submit its own result, or cancel.`);
+	self.notifyWhenReady(rootSessionId, `the root contract of this session was activated: task ${taskId}, run ${runId} (proposal ${proposal.proposalId}, policy ${proposal.policy}). This session may now decompose, submit its own result, or cancel.` + (manifest.missing.length === 0 ? "" : ` Missing capabilities [${manifest.missing.join(", ")}] are recorded as obligations owned by this root session. Plan available work or propose the required capability change; do not execute missing capabilities or weaken the goal. If the gap prevents delivery, submit its original evidence so verification and diagnosis can hand it to supervision.`));
 	return {
 		proposalId: proposal.proposalId,
 		status: "activated",
 		taskId,
 		runId,
-		detail: `proposal "${proposal.proposalId}" is activated as root task ${taskId} with run ${runId}`
+		detail: `proposal "${proposal.proposalId}" is activated as root task ${taskId} with run ${runId}` + (manifest.missing.length === 0 ? "" : `; root session ${rootSessionId} owns missing-capability obligations [${manifest.missing.join(", ")}]`)
 	};
 }
 function rootSubmissionDetail(self, proposal, existing) {
@@ -5106,7 +5266,24 @@ async function deriveBatch(self, identity, spec) {
 	* protected acceptance inputs are read against, the children's MCP servers
 	*/
 	const envPath = await self.envPathForSession(identity.callerSessionId);
-	const fixed = await fixSpecProtectedInputs(spec, envPath);
+	let bound;
+	try {
+		bound = Array.isArray(spec?.children) ? {
+			...spec,
+			children: await Promise.all(spec.children.map((child) => bindTaskTemplate(self.config.taskTemplatesRoot, child)))
+		} : spec;
+	} catch (error) {
+		const failure = error instanceof Error ? error : new Error(String(error));
+		return {
+			ok: false,
+			refusal: {
+				error: failure,
+				reasons: [failure.message],
+				gaps: []
+			}
+		};
+	}
+	const fixed = await fixSpecProtectedInputs(bound, envPath);
 	const normalized = normalizeDecomposition(fixed.spec, {
 		...identity,
 		admissionContext: self.admissionContext()
@@ -5298,10 +5475,7 @@ async function admitPrecheckedBatch(self, request) {
 	if (workspacePath !== void 0) await self.assertWorkspaceHeldBy(workspacePath, storeId, parentTask, parentRun.runId);
 	const children = batch.children.map((child, index) => ({
 		taskId: childTaskIds[index],
-		definitionRef: {
-			taskType: "subtask",
-			version: 1
-		},
+		...taskContractIdentity(child.contract),
 		parentTaskId,
 		objective: child.contract.objective,
 		depth: parentTask.depth + 1,
@@ -5887,7 +6061,7 @@ async function authorizedGrant(env, manifest, skillRoots = []) {
 	const binding = env.resolveMcpEnv === void 0 ? void 0 : await env.resolveMcpEnv();
 	return {
 		...grant,
-		mcpServers: resolveMcpServerSpecs(manifest, binding)
+		mcpServers: resolveMcpServerSpecs(manifest, binding, env.mcpRegistry ?? {})
 	};
 }
 /**
@@ -5961,7 +6135,8 @@ const REQUEST_FIELDS = [
 	"sourceDiagnosisId",
 	"requestKey",
 	"mode",
-	"reuses"
+	"reuses",
+	"proposalIds"
 ];
 /** The fields one reuse declaration may carry. */
 const REUSE_FIELDS = [
@@ -5986,6 +6161,7 @@ function recoveryRequestDefects(request) {
 	if (!nonBlank(request.sourceDiagnosisId)) defects.push("sourceDiagnosisId must be a non-empty diagnosis id");
 	if (!nonBlank(request.requestKey)) defects.push("requestKey must be a non-empty string");
 	if (request.mode !== void 0 && request.mode !== "recovery" && request.mode !== "improve") defects.push("mode must be \"recovery\" (the default) or \"improve\"");
+	if (request.proposalIds !== void 0 && (!Array.isArray(request.proposalIds) || request.proposalIds.some((id) => !nonBlank(id)) || new Set(request.proposalIds).size !== request.proposalIds.length)) defects.push("proposalIds must be an array of unique non-empty proposal ids");
 	if (request.reuses !== void 0) if (!Array.isArray(request.reuses)) defects.push("reuses must be an array of declarations");
 	else {
 		const claimed = /* @__PURE__ */ new Set();
@@ -6037,6 +6213,7 @@ function recoveryAttemptDigest(recovery) {
 	return sha256Hex(canonicalize({
 		kind: recovery.kind ?? "recovery",
 		sourceRunId: recovery.sourceRunId ?? null,
+		...recovery.proposalIds?.length ? { proposalIds: [...recovery.proposalIds].sort() } : {},
 		reusedMembers: recovery.reusedMembers.map((member) => ({
 			childIndex: member.childIndex,
 			taskId: member.taskId,
@@ -6072,6 +6249,7 @@ function recoverySourceRun(source, request, snapshot, kind) {
 function requestAttemptDigest(request) {
 	return recoveryAttemptDigest({
 		kind: recoveryKindOf(request.mode),
+		proposalIds: request.proposalIds === void 0 ? void 0 : [...request.proposalIds],
 		...request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId },
 		reusedMembers: (request.reuses ?? []).map((declaration) => ({
 			childIndex: declaration.childIndex,
@@ -6432,6 +6610,7 @@ async function startRecoveryAttempt(self, input) {
 	const recovery = {
 		kind,
 		sourceDiagnosisId: request.sourceDiagnosisId,
+		...request.proposalIds?.length ? { proposalIds: [...request.proposalIds] } : {},
 		requestKey: request.requestKey,
 		...input.sourceRun === void 0 ? {} : { sourceRunId: input.sourceRun.runId },
 		requestedAt: now(),
@@ -6462,6 +6641,7 @@ async function startRecoveryAttempt(self, input) {
 	let binding;
 	try {
 		binding = await bindRunProviders({
+			mcpRegistry: self.config.mcpServers,
 			storeId,
 			runId,
 			manifest,
@@ -7452,6 +7632,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 			providers = fresh;
 		}
 		binding = await bindRunProviders({
+			mcpRegistry: env.mcpRegistry,
 			storeId: batch.storeId,
 			runId: run.runId,
 			manifest,
@@ -7826,6 +8007,7 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 	let contentBinding;
 	try {
 		contentBinding = await bindRunProviders({
+			mcpRegistry: env.mcpRegistry,
 			storeId,
 			runId: run.runId,
 			manifest: init.manifest,
@@ -7975,7 +8157,7 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 		...self.config.capabilities,
 		...options.overlay?.capabilityOverrides ?? {}
 	};
-	const manifest = resolveCapabilities(effective.requiredCapabilities, table);
+	const manifest = resolveCapabilities(effective.requiredCapabilities, table, self.config.mcpServers ?? {});
 	if (manifest.missing.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(", ")}] under the overlay`);
 	/**
 	* The checkout this replay's everything resolves against: the workspace the
@@ -8027,7 +8209,7 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 	};
 	const task = {
 		taskId: `t-${randomUUID()}`,
-		definitionRef: { ...champion.definitionRef },
+		...taskContractIdentity(contract),
 		objective: contract.objective,
 		depth: 0,
 		acceptanceCriteria: contract.acceptanceCriteria,
@@ -8970,6 +9152,7 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace) {
 			if (presets === void 0) throw new Error("task-runtime: permissionPresets service is not loaded; cannot rank declared permissions");
 			return presets.resolve(name);
 		},
+		mcpRegistry: self.config.mcpServers,
 		resolveMcpEnv: async () => {
 			/**
 			* The same graph env the verifier's cwd comes from; absent in test
@@ -9162,9 +9345,12 @@ async function assertKnownVerifierRefs(self, declared, what) {
 	const registered = await registeredVerifierIdsImpl(self);
 	if (registered === void 0) throw new VerifierUnavailableError(`task-runtime: cannot validate verifierRef on ${what}: the verifier service is not loaded or cannot list its registry`);
 	const unknown = refs.filter((item) => !registered.includes(item.criterion.verifierRef));
-	if (unknown.length === 0) return;
+	const verifier = runVerifier(self);
+	const unsupported = refs.filter((item) => verifier?.verifierSupports?.(item.criterion.verifierRef, item.criterion.verificationMode) === false && registered.includes(item.criterion.verifierRef));
+	if (unknown.length === 0 && unsupported.length === 0) return;
 	const detail = unknown.map((item) => `child ${item.childIndex} criterion "${item.criterion.criterionId}" references unknown verifier "${item.criterion.verifierRef}"`).join("; ");
-	throw new Error(`task-runtime: admission rejected ${what}: ${detail}; registered verifiers: ${registered.join(", ")}`);
+	const unsupportedDetail = unsupported.map((item) => `child ${item.childIndex} criterion "${item.criterion.criterionId}" verifier "${item.criterion.verifierRef}" does not support mode "${item.criterion.verificationMode}"`).join("; ");
+	throw new Error(`task-runtime: admission rejected ${what}: ${[detail, unsupportedDetail].filter(Boolean).join("; ")}; registered verifiers: ${registered.join(", ")}`);
 }
 function liveAgent(self, sessionId) {
 	const agent = agentOrUndefined(self, sessionId);
@@ -9227,6 +9413,8 @@ var TaskRuntime = class extends Service {
 		assertSupervisionConfig(config?.supervision);
 		this.config = {
 			capabilities: structuredClone(config?.capabilities ?? {}),
+			taskTemplatesRoot: config?.taskTemplatesRoot ?? defaultTaskTemplatesRoot(),
+			mcpServers: structuredClone(config?.mcpServers ?? {}),
 			...config?.defaultPreset !== void 0 ? { defaultPreset: config.defaultPreset } : {},
 			verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
 			maxDepth: config?.maxDepth ?? DEFAULT_MAX_DEPTH,
@@ -9249,6 +9437,13 @@ var TaskRuntime = class extends Service {
 		* every session this runtime tracks, and the workspace markers this process
 		*/
 		ctx.effect(() => () => this.unload());
+	}
+	async findTaskTemplates(query) {
+		return findTaskTemplates(this.config.taskTemplatesRoot, query);
+	}
+	async registerTaskTemplate(template) {
+		if (this.config.taskTemplatesRoot === void 0) throw new Error("task-runtime: taskTemplatesRoot is not configured");
+		return registerTaskTemplate(this.config.taskTemplatesRoot, template);
 	}
 	async unload() {
 		return unload(this);
@@ -9276,6 +9471,9 @@ var TaskRuntime = class extends Service {
 	}
 	resolveCapabilities(required) {
 		return resolveCapabilitiesImpl(this, required);
+	}
+	listMcpServers() {
+		return structuredClone(this.config.mcpServers ?? {});
 	}
 	listCapabilities() {
 		return listCapabilities(this);
@@ -9649,37 +9847,22 @@ async function loadObligationTemplates(repoRoot) {
 	}
 	return files;
 }
-/** The text a recorded obligation carries, for mention matching. */
-function obligationText(obligation) {
-	return `${obligation.goal}\n${obligation.criterion}`;
-}
-/**
-* Compare one template set against the current task graph. An entry is covered
-* when a task requested one of its typical capabilities (`via capability
-*/
+/** A domain obligation is satisfied only by a matching criterion in the latest verified run's evidence. */
 function checkObligationCoverage(templates, snapshot) {
-	const requested = new Set(snapshot.tasks.flatMap((task) => task.requestedCapabilities));
-	const obligations = snapshot.obligations;
 	const covered = [];
 	const uncovered = [];
 	for (const template of templates) {
-		const capability = template.typicalCapabilities.find((name) => requested.has(name));
-		if (capability !== void 0) {
-			covered.push({
-				template,
-				via: `capability ${capability}`
-			});
-			continue;
-		}
-		const obligation = obligations.find((item) => obligationText(item).includes(template.id) || obligationText(item).includes(template.question));
-		if (obligation !== void 0) {
-			covered.push({
-				template,
-				via: `obligation ${obligation.obligationId}`
-			});
-			continue;
-		}
-		uncovered.push(template);
+		const evidence = snapshot.tasks.flatMap((task) => {
+			if (task.status !== "verified" || !task.acceptanceCriteria.some((criterion) => criterion.criterionId === template.id)) return [];
+			const runId = task.runIds.at(-1);
+			if (!snapshot.runs.some((run) => run.runId === runId && run.status === "verified")) return [];
+			return snapshot.evidence.filter((bundle) => bundle.taskRunId === runId && bundle.taskId === task.taskId && bundle.verifierResults.some((result) => result.criterionId === template.id && result.status === "pass"));
+		})[0];
+		if (evidence === void 0) uncovered.push(template);
+		else covered.push({
+			template,
+			via: `evidence ${evidence.evidenceId}`
+		});
 	}
 	return {
 		covered,
@@ -9692,4 +9875,4 @@ function checkObligationCoverage(templates, snapshot) {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, driveBatch, escalationHint, executionProviders, findRepoRoot, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, normalizeDecomposition, openProposalOf, optionalService, owedBatchResults, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, normalizeDecomposition, openProposalOf, optionalService, owedBatchResults, parseObligationTemplates, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

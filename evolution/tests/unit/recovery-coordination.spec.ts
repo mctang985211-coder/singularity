@@ -447,10 +447,25 @@ describe('the recovery coordination entry', () => {
           () => '',
           error => String(error),
         )
-      expect(refusal, state).toContain('capability change this hand-off depends on')
+      expect(refusal, state).toContain('shared change this hand-off depends on')
       expect(refusal, state).toContain(expected)
       expect(f.recoverRootTask, state).not.toHaveBeenCalled()
     }
+  })
+
+  it('passes applied proposal ids into the production recovery request', async () => {
+    const f = await fixture()
+    vi.spyOn(f.svc, 'list').mockResolvedValue([{ proposalId: 'p-skill', targetType: 'skill', targetId: 'method', baseVersion: 'v1', level: 'L1', rationale: 'verified repair', sourceRefs: [`diagnosis:${DIAGNOSIS}`], status: 'applied', decision: 'PROMOTE', applied: { targets: ['skills/method/SKILL.md'], approvalRef: 'approval:apply' }, history: [] }])
+    await f.svc.coordinateRecovery({ sourceDiagnosisId: DIAGNOSIS, requestKey: 'after-apply' }, { sessionId: SUPERVISOR })
+    expect(f.recoverRootTask).toHaveBeenCalledWith(STORE, expect.objectContaining({ proposalIds: ['p-skill'], sourceDiagnosisId: DIAGNOSIS }), expect.anything())
+  })
+
+  it('refuses a skill candidate until its production change is applied', async () => {
+    const f = await fixture({ ledger: async svc => {
+      await svc.propose({ proposalId: 'p-skill', targetType: 'skill', targetId: 'method', baseVersion: 'v1', level: 'L1', rationale: 'evidence-backed repair', sourceRefs: [`diagnosis:${DIAGNOSIS}`] }, ROOT_SESSION)
+    } })
+    await expect(f.svc.coordinateRecovery({ sourceDiagnosisId: DIAGNOSIS, requestKey: 'skill-recovery' }, { sessionId: SUPERVISOR })).rejects.toThrow('shared change this hand-off depends on')
+    expect(f.recoverRootTask).not.toHaveBeenCalled()
   })
 
   it("opens the attempt of a pure artifact gap: no proposal at all, the source's own rows resolve", async () => {

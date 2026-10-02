@@ -91,6 +91,8 @@ export interface SpawnRequest {
   readonly cwd?: string
   /** Declare the child a task worker: install the stable policy section and default the kickoff. */
   readonly taskWorker?: boolean
+  /** Coordination roles install their own stable policy instead of a preset persona. */
+  readonly coordinationRole?: 'reviewer' | 'supervisor'
   /** One awaited door between publication + announcement and the first model input. */
   readonly beforePrompt?: () => Promise<void>
   readonly signal?: AbortSignal

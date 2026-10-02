@@ -1,3 +1,4 @@
+import { DEPLOYMENT_MCP_SERVERS } from '../support/mcp-servers.ts'
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
@@ -206,7 +207,7 @@ async function harness(options: { capabilities?: Record<string, CapabilityConfig
   // whose registry is merely still loading.
   await verifier.ready()
   const config: Partial<Config> = { capabilities: { ...DEFAULT_ROWS, ...(options.capabilities ?? {}) } }
-  const runtime = new TaskRuntime(ctx, config as Config)
+  const runtime = new TaskRuntime(ctx, { mcpServers: DEPLOYMENT_MCP_SERVERS, ...config } as Config)
   if (options.mountAgent === true) {
     // The read core and its assembly, mounted where the deployment's bundle mounts
     // them: the plugin's tool adapters read through this service (A2).

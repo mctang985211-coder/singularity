@@ -6,7 +6,7 @@ import type { Diagnosis, ReviewDimensions, ReviewMetrics, ReviewRecord, TaskId, 
 import { JUDGED_DIMENSIONS, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import { readReviewAgentAttempts } from '../coordination/ledger.ts'
 import type { ReviewAgentAttempt, ReviewAgentSource } from '../coordination/ledger.ts'
-import { handoffFactsOf, handoffStateLine, roundsForDiagnosis } from '../coordination/handoff-rules.ts'
+import { handoffFactsOf, handoffStateLine, needsSupervisor, roundsForDiagnosis } from '../coordination/handoff-rules.ts'
 import type { HandoffFacts } from '../coordination/handoff-rules.ts'
 import { reviewRef } from '../coordination/identity.ts'
 import { sessionId, text } from '../shared.ts'
@@ -145,6 +145,7 @@ function renderReview(review: ReviewRecord): string[] {
 
 /** How far one diagnosis's hand-off has gone (A5 §3, plan F.4): what the ledger, the allowance and the source's rounds answer for it. */
 function handoffMark(diagnosis: Diagnosis, handoff: HandoffFacts, snapshot: TaskSnapshot): string {
+  if (!needsSupervisor(snapshot, diagnosis)) return 'parent-owned — ordinary child diagnosis is delivered to its delegating parent; no supervisor is needed'
   return handoffStateLine({
     diagnosis,
     attempts: handoff.attempts,

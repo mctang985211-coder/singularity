@@ -637,7 +637,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     // batch — read the record, continue it, withdraw it — and nothing else.
     const names = h.visible(worker)
     for (const kept of [
-      'task_read', 'task_status', 'task_decompose', 'task_submit_result', 'task_cancel', 'capability_list',
+      'task_read', 'task_status', 'task_decompose', 'task_submit_result', 'task_cancel', 'capability_list', 'task_template_list',
       'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
     ]) {
       expect(names, kept).toContain(kept)

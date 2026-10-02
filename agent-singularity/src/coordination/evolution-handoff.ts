@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
+import type { EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
 import type { Diagnosis, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { warnLine } from '../log.ts'
 import {
@@ -24,6 +25,8 @@ import {
   renderSupervisorReviewFacts,
   reviewFactsFor,
   roundsForDiagnosis,
+  responsibleParentRun,
+  needsSupervisor,
   supervisorGrant,
   supervisorHandoffDigest,
   supervisorPrompt,
@@ -47,8 +50,14 @@ export type HandoffConsumption =
   | { readonly diagnosisId: string; readonly result: 'started'; readonly sessionId: string }
   | { readonly diagnosisId: string; readonly result: 'existing'; readonly sessionId: string }
   | { readonly diagnosisId: string; readonly result: 'in-flight'; readonly sessionId: string }
-  | { readonly diagnosisId: string; readonly result: 'stopped'; readonly code: HandoffStopCode; readonly reason: string }
+  | {
+      readonly diagnosisId: string
+      readonly result: 'stopped'
+      readonly code: HandoffStopCode
+      readonly reason: string
+    }
   | { readonly diagnosisId: string; readonly result: 'failed'; readonly reason: string }
+  | { readonly diagnosisId: string; readonly result: 'parent'; readonly reason: string }
 
 /** The spawned supervisor handle, as the completion watcher needs it. */
 type SpawnedHandle = Extract<ClaimedSpawn, { kind: 'spawned' }>['handle']
@@ -72,21 +81,32 @@ export interface SupervisorHandoffRequest {
   readonly agentPreset?: string
 }
 
-/** The store facts a spawn carries: the prior round's review block and the source's rounds, or nothing when the store could not be read (the runtime still caps). */
-async function sourceFactsOf(
+/** Proposal state is read from the existing evolution ledger, never mirrored into a second state machine. */
+export async function proposalsForDiagnosis(ctx: Context, diagnosisId: string): Promise<EvolutionProposal[]> {
+  if (ctx.evolution === undefined) return []
+  return (await ctx.evolution.list()).filter(proposal => proposal.sourceRefs.includes(`diagnosis:${diagnosisId}`))
+}
+
+/** An applied child change wakes its actual parent through the existing durable message delivery. */
+async function notifyParentOfApplied(
   ctx: Context,
-  storeId: string,
+  snapshot: TaskSnapshot,
   diagnosis: Diagnosis,
-): Promise<{ readonly reviewFacts?: string; readonly rounds?: SupervisionRounds }> {
-  try {
-    const snapshot: TaskSnapshot = await ctx.task.snapshotIn(storeId)
-    const reviewFacts = reviewFactsFor(snapshot, diagnosis)
-    return {
-      rounds: roundsForDiagnosis(snapshot, diagnosis),
-      ...(reviewFacts === undefined ? {} : { reviewFacts }),
-    }
-  } catch {
-    return {}
+  proposals: readonly EvolutionProposal[],
+  senderSessionId: string,
+): Promise<void> {
+  const parent = responsibleParentRun(snapshot, diagnosis)
+  if (parent === undefined) return
+  for (const proposal of proposals.filter(item => item.status === 'applied')) {
+    await ctx.agentRuntime.ensureAgentMessageDelivered({
+      messageId: `m-evolution-${proposal.proposalId}-${parent.runId}`,
+      senderSessionId: SessionId(senderSessionId),
+      targetSessionId: SessionId(parent.sessionId),
+      text:
+        `Evolution proposal ${proposal.proposalId} for child diagnosis ${diagnosis.diagnosisId} is applied. ` +
+        `You are its responsible parent task ${parent.taskId}, run ${parent.runId}. Read task_read/task_status and evolution_list ` +
+        'before replanning affected work after your current batch settles. Existing runs retain their old bindings; the original acceptance remains in force.',
+    })
   }
 }
 
@@ -96,12 +116,29 @@ export async function startSupervisorHandoff(
   input: SupervisorHandoffRequest,
 ): Promise<HandoffConsumption> {
   const { storeId, diagnosis, delegator } = input
-  const resolved = input.rounds !== undefined && input.reviewFacts !== undefined
-    ? {}
-    : await sourceFactsOf(ctx, storeId, diagnosis)
-  const rounds = input.rounds ?? resolved.rounds
-  const reviewFacts = input.reviewFacts ?? resolved.reviewFacts
+  const snapshot: TaskSnapshot = await ctx.task.snapshotIn(storeId)
+  if (!needsSupervisor(snapshot, diagnosis)) {
+    return {
+      diagnosisId: diagnosis.diagnosisId,
+      result: 'parent',
+      reason: 'ordinary child diagnosis belongs to its delegating parent',
+    }
+  }
+  const rounds = input.rounds ?? roundsForDiagnosis(snapshot, diagnosis)
+  const reviewFacts = input.reviewFacts ?? reviewFactsFor(snapshot, diagnosis)
   const source = handoffSourceOf(diagnosis)
+  const childSource = snapshot.tasks.find(task => task.taskId === diagnosis.taskId)?.parentTaskId !== undefined
+  const proposals = await proposalsForDiagnosis(ctx, diagnosis.diagnosisId)
+  const recovered = snapshot.runs.some(run => run.recovery?.sourceDiagnosisId === diagnosis.diagnosisId)
+  const resumeRecorded =
+    !recovered &&
+    proposals.some(
+      proposal =>
+        proposal.status !== 'rolledback' &&
+        !(proposal.status === 'decided' && proposal.decision !== 'PROMOTE') &&
+        !(childSource && proposal.status === 'applied'),
+    )
+  await notifyParentOfApplied(ctx, snapshot, diagnosis, proposals, delegator.sessionId)
   const supervisorSessionId = SessionId(randomUUID())
   const request: ReviewAgentAttemptRequest = {
     role: 'supervisor',
@@ -114,20 +151,26 @@ export async function startSupervisorHandoff(
     sessionId: supervisorSessionId,
   }
   return await admitReviewAgent(storeId, async admission => {
-    const { plan } = await admission.plan(request, rounds === undefined ? undefined : { supervisionRounds: rounds })
+    const { plan } = await admission.plan(request, {
+      supervisionRounds: rounds,
+      resumeRecorded,
+      recorded: () => recovered || proposals.length > 0,
+    })
     if (plan.kind === 'refused') {
       if (plan.code === 'iteration-cap') {
         return {
           diagnosisId: diagnosis.diagnosisId,
           result: 'stopped',
           code: 'iteration-cap',
-          reason: plan.reason ?? "the source's rounds are spent; nothing was started and no supervisor is delegated for it",
+          reason:
+            plan.reason ?? "the source's rounds are spent; nothing was started and no supervisor is delegated for it",
         }
       }
-      const reason = plan.code === 'budget-exhausted'
-        ? `the store's coordination allowance is spent (${plan.budget.used}/${plan.budget.max}) — nothing was started and the hand-off stays pending`
-        : `diagnosis ${diagnosis.diagnosisId} already has a supervisor claim with another hand-off content ` +
-          `(session ${plan.attempt?.sessionId ?? 'unknown'}); one diagnosis is not two hand-offs, so nothing was started`
+      const reason =
+        plan.code === 'budget-exhausted'
+          ? `the store's coordination allowance is spent (${plan.budget.used}/${plan.budget.max}) — nothing was started and the hand-off stays pending`
+          : `diagnosis ${diagnosis.diagnosisId} already has a supervisor claim with another hand-off content ` +
+            `(session ${plan.attempt?.sessionId ?? 'unknown'}); one diagnosis is not two hand-offs, so nothing was started`
       const code: HandoffStopCode = plan.code === 'budget-exhausted' ? 'budget-exhausted' : 'handoff-conflict'
       return { diagnosisId: diagnosis.diagnosisId, result: 'stopped', code, reason }
     }
@@ -152,12 +195,16 @@ export async function startSupervisorHandoff(
       signal: input.signal,
       errorLabel: 'evolution hand-off: the delegation of supervisor session',
       failureLabel: 'the supervisor could not be spawned',
-      prompt: () => supervisorPrompt({
-        diagnosis,
-        sourceOutcome: input.sourceOutcome,
-        sourceRef: input.sourceRef,
-        ...(reviewFacts === undefined ? {} : { reviewFacts }),
-      }),
+      prompt: () =>
+        supervisorPrompt({
+          diagnosis,
+          sourceOutcome: input.sourceOutcome,
+          sourceRef: input.sourceRef,
+          childSource,
+          parentRun: responsibleParentRun(snapshot, diagnosis),
+          proposals,
+          ...(reviewFacts === undefined ? {} : { reviewFacts }),
+        }),
     })
     if (spawned.kind === 'spawn-failed') {
       return { diagnosisId: diagnosis.diagnosisId, result: 'failed', reason: spawned.failure }
@@ -193,14 +240,31 @@ async function watchSupervisorCompletion(input: {
       status = 'recorded'
       note = `task_recover issued: run ${recovery.runId}`
     } else {
-      const close = closeOutcomeOf(lastAssistantText(input.agent.session.snapshotEvents()))
-      if (close !== undefined) {
-        status = 'closed'
-        note = close.reason
+      const proposals = await proposalsForDiagnosis(input.ctx, input.diagnosis.diagnosisId)
+      if (proposals.length > 0) {
+        status = proposals.every(
+          proposal =>
+            proposal.status === 'rolledback' || (proposal.status === 'decided' && proposal.decision !== 'PROMOTE'),
+        )
+          ? 'closed'
+          : 'recorded'
+        note = proposals
+          .map(
+            proposal =>
+              `proposal ${proposal.proposalId} [${proposal.status}]${proposal.decision === undefined ? '' : ` ${proposal.decision}`}`,
+          )
+          .join('; ')
+        await notifyParentOfApplied(input.ctx, snapshot, input.diagnosis, proposals, input.sessionId)
+      } else {
+        const close = closeOutcomeOf(lastAssistantText(input.agent.session.snapshotEvents()))
+        if (close !== undefined) {
+          status = 'closed'
+          note = close.reason
+        }
       }
     }
   } catch (error) {
-    note = `the supervisor session ended and its outcome could not be read (${error instanceof Error ? error.message : String(error)})`
+    note += `; outcome delivery/read failed (${error instanceof Error ? error.message : String(error)})`
   }
   await settleReviewAgentAttempt({
     rootStoreId: input.storeId,
@@ -234,11 +298,11 @@ export async function consumePendingHandoffs(
     log?.(`evolution hand-off: store ${storeId} — ${skipped}`)
     return { storeId, consumptions: [], skipped }
   }
-  const pending = [...snapshot.diagnoses]
+  const pending = snapshot.diagnoses.filter(diagnosis => needsSupervisor(snapshot, diagnosis))
   if (pending.length === 0) return { storeId, consumptions: [] }
   const delegator = await handoffDelegatorOf(ctx, storeId)
   if (delegator === undefined) {
-    const skipped = 'the graph\'s root session for this store is not live, so no supervisor could be started'
+    const skipped = "the graph's root session for this store is not live, so no supervisor could be started"
     for (const diagnosis of pending) log?.(`evolution hand-off: ${diagnosis.diagnosisId} pending — ${skipped}`)
     return {
       storeId,
@@ -300,7 +364,9 @@ export async function consumeHandoffDiagnosis(
   try {
     snapshot = await ctx.task.snapshotIn(storeId)
   } catch (error) {
-    options.log?.(`evolution hand-off: store ${storeId} could not be read (${error instanceof Error ? error.message : String(error)})`)
+    options.log?.(
+      `evolution hand-off: store ${storeId} could not be read (${error instanceof Error ? error.message : String(error)})`,
+    )
     return undefined
   }
   const diagnosis = snapshot.diagnoses.find(item => item.diagnosisId === diagnosisId)
@@ -310,12 +376,39 @@ export async function consumeHandoffDiagnosis(
   }
   const delegator = await handoffDelegatorOf(ctx, storeId)
   if (delegator === undefined) {
-    options.log?.(`evolution hand-off: ${diagnosisId} pending — the graph's root session is not live, so no supervisor was started`)
+    options.log?.(
+      `evolution hand-off: ${diagnosisId} pending — the graph's root session is not live, so no supervisor was started`,
+    )
     return undefined
   }
   const consumption = await consumeWithFacts(ctx, snapshot, storeId, diagnosis, delegator)
   options.log?.(`evolution hand-off: ${renderConsumption(consumption)}`)
   return consumption
+}
+
+/** A human decision or apply continues the existing diagnosis hand-off in the caller's graph. */
+export async function continueProposalHandoff(
+  ctx: Context,
+  proposal: EvolutionProposal,
+  caller: string,
+): Promise<string[]> {
+  const diagnosisIds = proposal.sourceRefs
+    .filter(ref => ref.startsWith('diagnosis:'))
+    .map(ref => ref.slice('diagnosis:'.length))
+  if (diagnosisIds.length === 0) return []
+  try {
+    const graph = await ctx.graphs.graphForSession(SessionId(caller))
+    const results: string[] = []
+    for (const diagnosisId of diagnosisIds) {
+      const consumption = await consumeHandoffDiagnosis(ctx, rootTaskStoreId(graph.rootSessionId), diagnosisId)
+      if (consumption !== undefined) results.push(renderConsumption(consumption))
+    }
+    return results
+  } catch (error) {
+    return [
+      `proposal ${proposal.proposalId} remains ${proposal.status}; hand-off continuation failed (${error instanceof Error ? error.message : String(error)}); the next graph activation retries it`,
+    ]
+  }
 }
 
 /** One consumption as a scan line, naming the session or the reason — never a credential and never a path. */
@@ -329,14 +422,22 @@ export function renderConsumption(consumption: HandoffConsumption): string {
       return `diagnosis ${consumption.diagnosisId} — supervisor session ${consumption.sessionId} is being started right now; nothing started`
     case 'stopped':
       return `diagnosis ${consumption.diagnosisId} pending (${consumption.code}) — ${consumption.reason}`
+    case 'parent':
+      return `diagnosis ${consumption.diagnosisId} — ${consumption.reason}; no supervisor started`
     case 'failed':
       return `diagnosis ${consumption.diagnosisId} — the supervisor could not be started: ${consumption.reason}`
   }
 }
 
 /** Install the hand-off trigger of this deployment: a graph that is explicitly activated scans its store for pending hand-offs — what a process that booted over a store with a pending hand-off does. */
-export function installSupervisorHandoffTrigger(ctx: Context, options: { readonly log?: (line: string) => void } = {}): () => void {
+export function installSupervisorHandoffTrigger(
+  ctx: Context,
+  options: { readonly log?: (line: string) => void } = {},
+): () => void {
   const log = options.log ?? warnLine(ctx)
-  return installGraphSelectedScan(ctx, { log, label: 'evolution hand-off' }, async graph =>
-    await consumePendingHandoffs(ctx, rootTaskStoreId(graph.rootSessionId), { log }))
+  return installGraphSelectedScan(
+    ctx,
+    { log, label: 'evolution hand-off' },
+    async graph => await consumePendingHandoffs(ctx, rootTaskStoreId(graph.rootSessionId), { log }),
+  )
 }

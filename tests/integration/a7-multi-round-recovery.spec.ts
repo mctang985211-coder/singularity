@@ -345,12 +345,12 @@ describe('A7: the multi-round supervisor-iteration loop', () => {
       evolution: { ledgerRoot },
       // One improvement round, so the round after it is where the cap's own
       // refusal is read; the shipped caps are pinned in the second case.
-      supervision: { maxImprovementRounds: IMPROVEMENT_ROUNDS },
+      supervision: { autoReview: 'all', maxImprovementRounds: IMPROVEMENT_ROUNDS },
     })
     // The A5 automatic trigger is the deployment's own composition, and the
     // scripted harness mounts none: without this install, a terminal review is
     // only a record and no round of the iteration starts. The shipped policy
-    // (`autoReview: 'all'`) accepts the verified rounds too, which is what opens
+    // (explicit `autoReview: 'all'`) accepts the verified rounds too, which is what opens
     // the improvement rounds after round 3.
     installReviewAgentAutoTrigger(h.ctx)
     const root = await h.begin(ROOT_CONTRACT)

@@ -1,4 +1,5 @@
 import type { DecompositionAdmission, TaskContract } from './contract.ts'
+import type { TaskTemplateRef, TemplateParameters } from './template.ts'
 import type { TaskBudgetExtensionClaim, TaskBudgetExtensionIndex } from './budget.ts'
 import type {
   TaskProposal,
@@ -68,7 +69,11 @@ type DecompositionStatus = 'leaf' | 'decomposable' | 'decomposing' | 'decomposed
 export interface TaskInstance {
   // (§5.2)
   taskId: TaskId
-  definitionRef: { taskType: string; version: number }
+  definitionRef: { taskType: string; version: number; digest?: string }
+  templateRef?: TaskTemplateRef
+  templateParameters?: TemplateParameters
+  /** Final normalized contract identity. Absent on legacy instances. */
+  contractDigest?: string
   parentTaskId?: TaskId
   /** The task's goal: the projection of {@link contract} (or, on a task created before the contract existed, the whole of what the store holds). */
   objective: string
@@ -232,6 +237,8 @@ export interface RunRecovery {
   requestKey: string
   /** The source run the task's previous attempt was, when it had one: the failed run a `recovery` recovers, the verified run an `improvement` re-earns the criteria from. A task that failed without a run (a rejected admission, a blocked task) names none, and nothing is invented for it. */
   sourceRunId?: RunId
+  /** Applied Evolution proposals whose change this production attempt consumes. */
+  proposalIds?: string[]
   /** When the attempt was opened. */
   requestedAt: string
   /** The identity of the **request** this attempt answers: the source run it names and the citations its caller declared, over their canonical form (`requestAttemptDigest`). */

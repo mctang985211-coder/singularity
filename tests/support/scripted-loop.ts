@@ -85,6 +85,7 @@ import { defineEvolutionProposeTool } from '../../agent-singularity/src/tools/ev
 import { defineEvolutionReplayTool } from '../../agent-singularity/src/tools/evolution-replay.ts'
 import { defineEvolutionRollbackTool } from '../../agent-singularity/src/tools/evolution-rollback.ts'
 import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
+import { defineTaskTemplateListTool } from '../../agent-singularity/src/tools/task-template-list.ts'
 import { defineContextReadTool } from '../../agent-singularity/src/tools/context-read.ts'
 import { defineTaskAnswerTool } from '../../agent-singularity/src/tools/task-answer.ts'
 import { defineTaskAskParentTool } from '../../agent-singularity/src/tools/task-ask-parent.ts'
@@ -107,7 +108,7 @@ import { graphRegistry, sessionQueryReads } from './context-plane.ts'
 
 /** The root agent's allow-list, exactly as `agent-runtime` composes it. Exported so a fixture that mounts no loop still composes the deployment's root surface. */
 export const ROOT_TOOLS = [
-  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
+  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'task_template_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
   'task_submit_result', 'task_answer', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'task_budget_extend', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
@@ -141,7 +142,7 @@ export const OTHER_TOOLS = [
 
 /** The tools this fixture registers for real; every other name is a stand-in. */
 const REAL_TOOLS = [
-  'task_read', 'task_status', 'context_read', 'capability_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel',
+  'task_read', 'task_status', 'context_read', 'capability_list', 'task_template_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel',
   // The recovery adapter (A6): its subject is what the tool, the evolution entry
   // and the runtime decide together, so a spec that mounts the evolution plane
   // gets the deployment's own definition (see `options.evolution`).
@@ -927,6 +928,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
     ctx.tools.register(defineTaskStatusTool(ctx))
     ctx.tools.register(defineContextReadTool(ctx))
     ctx.tools.register(defineCapabilityListTool(ctx))
+    ctx.tools.register(defineTaskTemplateListTool(ctx))
     // The real root intake (A0 stage C): a spec that drives the root's own turn
     // reaches activation through the deployment's tool, not through a service call
     // the tool would have made.

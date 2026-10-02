@@ -15,10 +15,11 @@ import type {
   TaskProposalDecomposition,
   TaskRun,
 } from '@dangosys/dsh-singularity-task'
-import { batchIdFor, blockingQuestionsOf } from '@dangosys/dsh-singularity-task'
+import { batchIdFor, blockingQuestionsOf, taskContractIdentity } from '@dangosys/dsh-singularity-task'
 import { checkDecomposition } from '../admission.ts'
 import { providerRefusals } from '../provider-precheck.ts'
 import { checkBatchAdmission, hasRootLimits, resolveRootBudget } from '../root-budget.ts'
+import { bindTaskTemplate } from '../task-template.ts'
 import { normalizeDecomposition } from '../normalize.ts'
 import type { DecompositionIdentityContext, NormalizedBatch } from '../normalize.ts'
 import { fixSpecProtectedInputs } from '../protected-inputs.ts'
@@ -44,7 +45,16 @@ export async function deriveBatch(
    * protected acceptance inputs are read against, the children's MCP servers
    */
   const envPath = await self.envPathForSession(identity.callerSessionId)
-  const fixed = await fixSpecProtectedInputs(spec, envPath)
+  let bound: DecomposeSpec
+  try {
+    bound = Array.isArray(spec?.children)
+      ? { ...spec, children: await Promise.all(spec.children.map(child => bindTaskTemplate(self.config.taskTemplatesRoot, child))) }
+      : spec
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error))
+    return { ok: false, refusal: { error: failure, reasons: [failure.message], gaps: [] } }
+  }
+  const fixed = await fixSpecProtectedInputs(bound, envPath)
   const normalized = normalizeDecomposition(fixed.spec, {
     ...identity,
     admissionContext: self.admissionContext(),
@@ -308,7 +318,7 @@ export async function admitPrecheckedBatch(
 
   const children: TaskInstance[] = batch.children.map((child, index) => ({
     taskId: childTaskIds[index]!,
-    definitionRef: { taskType: 'subtask', version: 1 },
+    ...taskContractIdentity(child.contract),
     parentTaskId,
     /**
      * The projections are generated from the contract, never written beside

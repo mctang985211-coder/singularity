@@ -673,9 +673,9 @@ describe('A6 EVO-3: the capability chain, from the failing source to the recover
     const notApplied = await h.ctx.evolution
       .coordinateRecovery({ sourceDiagnosisId: diagnosis.diagnosisId, requestKey: 'k-chain' }, { sessionId: supervisor })
       .then(() => '', error => String(error))
-    expect(notApplied).toContain('capability change this hand-off depends on')
+    expect(notApplied).toContain('shared change this hand-off depends on')
     expect(notApplied).toContain('is gated')
-    expect(notApplied).toContain('is opened only after a person approves it and the apply commits it')
+    expect(notApplied).toContain('is opened only after a person approves it and apply commits it')
     expect((await h.snapshot(STORE)).runs).toHaveLength(runsBeforeApply)
 
     // ── a person decides and applies, through the deployment's own tools ─────

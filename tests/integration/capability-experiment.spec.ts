@@ -67,7 +67,7 @@ const STORE_ENTRY: CapabilityConfig = { skills: [STORE_SKILL], tools: ['filesyst
 const SELECTION = modelSelectionOf({ provider: 'scripted', model: 'run-stack' })!
 
 /** The refusal a recovery gets while the capability it stands on is not yet in force. */
-const RowInForce = 'capability change this hand-off depends on'
+const RowInForce = 'shared change this hand-off depends on'
 
 /** The candidate skill's `SKILL.md`: a loadable object whose body is what the scripted worker does. */
 function skillText(body: string): string {
@@ -773,7 +773,7 @@ describe('A6 EVO-3/EVO-4: a rolled-back capability is not in force for a recover
       { sourceDiagnosisId: 'd-cap', requestKey: 'k-rolled-back' },
       { sessionId: supervisor },
     ).then(() => '', error => String(error))
-    expect(refused).toContain('capability change this hand-off depends on')
+    expect(refused).toContain('shared change this hand-off depends on')
     expect(refused).toContain('rolled back')
     expect(refused).toContain('nothing was started')
     expect((await f.h.snapshot(f.storeId)).runs).toHaveLength(runsBefore)

@@ -183,6 +183,10 @@ export function contractDefects(criteria: readonly AcceptanceCriterion[], label:
       // nothing to run, and a criterion that can never be judged is not a task.
       reasons.push(`${where} (${criterion.verificationMode}) requires a command`)
     }
+    if (criterion.mandatory && ['review', 'formal'].includes(criterion.verificationMode) &&
+      (typeof criterion.verifierRef !== 'string' || criterion.verifierRef.trim().length === 0 || criterion.verifierRef === 'review')) {
+      reasons.push(`${where} (${criterion.verificationMode}) requires an explicit registered verifier that can settle the criterion; the built-in review verifier is a placeholder`)
+    }
     /**
      * Duplicates are refused before the batch is persisted, not at acceptance:
      * a verdict names its criterion by id, so two criteria sharing one id make

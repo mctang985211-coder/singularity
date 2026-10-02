@@ -574,11 +574,25 @@ async function handInRoot(boot: Boot, sessionId: string = ROOT): Promise<void> {
  */
 async function spawned(boot: Boot, count: number): Promise<void> {
   try {
-    await vi.waitFor(() => expect(boot.spawns).toHaveLength(count), { timeout: 20_000, interval: 25 })
+    await vi.waitFor(
+      async () => {
+        expect(boot.spawns).toHaveLength(count)
+        // The request is recorded before spawn creates the durable Session. A
+        // crash in this test must leave a log the reopening process can adopt.
+        for (const spawn of boot.spawns) {
+          await expect(boot.ctx.sessionQuery.readSession(SessionId(spawn.sessionId))).resolves.toMatchObject({
+            session: { id: spawn.sessionId },
+          })
+        }
+      },
+      { timeout: 20_000, interval: 25 },
+    )
   } catch (error) {
     const snapshot = await boot.snapshot()
     const causes = snapshot.reviews.map(item => item.localizedCause ?? item.outcome).join('; ')
-    throw new Error(`no worker was spawned: the store's reviews say ${causes === '' ? 'nothing yet' : causes} (${String(error)})`)
+    throw new Error(
+      `no worker was spawned: the store's reviews say ${causes === '' ? 'nothing yet' : causes} (${String(error)})`,
+    )
   }
 }
 

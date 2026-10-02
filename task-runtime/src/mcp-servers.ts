@@ -1,5 +1,5 @@
 /**
- * The MCP server registry: the code-level table a capability's `mcpServers`
+ * The deployment MCP registry: the table a capability's `mcpServers`
  * names resolve against, and the per-env materialization of those names into
  */
 
@@ -29,34 +29,11 @@ export interface McpServerTemplate {
   /** What the server covers, for `capability_list` and table reviewers. */
   description: string
   command: string
-  args?: readonly string[]
-  env?: Readonly<Record<string, string>>
+  args?: string[]
+  env?: Record<string, string>
   cwd?: string
   /** Per-tool-call deadline handed to mcp-client; defaults to the client default (60 s). */
   toolCallTimeoutMs?: number
-}
-
-/**
- * The servers a capability may name. `bbdev` is the buckyball checkout's own
- * FastMCP server (45 tools, submit/poll-shaped to stay under the per-call
- */
-export const MCP_SERVER_REGISTRY: Readonly<Record<string, McpServerTemplate>> = {
-  bbdev: {
-    serverName: 'bbdev',
-    description:
-      'buckyball bbdev MCP server (build/simulate/validate; submit + task_status poll) from the env checkout',
-    command: '{repoRoot:buckyball}/scripts/claude/run_mcp_server.sh',
-    args: [],
-    cwd: '{repoRoot:buckyball}',
-  },
-  waveform: {
-    serverName: 'waveform',
-    description:
-      'buckyball waveform-mcp server (VCD/FST open/read, signal hierarchy, event search) from the env checkout',
-    command: '{repoRoot:buckyball}/thirdparty/waveform-mcp/target/release/waveform-mcp',
-    args: [],
-    cwd: '{repoRoot:buckyball}',
-  },
 }
 
 /** Every MCP server name one resolved manifest grants, first-declaration order, duplicates dropped. */
@@ -108,7 +85,7 @@ function substitute(template: string, binding: McpEnvBinding | undefined, server
 export function resolveMcpServerSpecs(
   manifest: { capabilities: Record<string, { mcpServers?: string[] }> },
   binding: McpEnvBinding | undefined,
-  registry: Readonly<Record<string, McpServerTemplate>> = MCP_SERVER_REGISTRY,
+  registry: Readonly<Record<string, McpServerTemplate>>,
 ): McpServerSpec[] {
   const names = manifestMcpServers(manifest)
   const specs: McpServerSpec[] = []

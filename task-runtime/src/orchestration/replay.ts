@@ -95,6 +95,7 @@ export async function runReplayTask(
   let contentBinding: RunProviderBinding | undefined
   try {
     contentBinding = await bindRunProviders({
+      mcpRegistry: env.mcpRegistry,
       storeId,
       runId: run.runId,
       manifest: init.manifest,

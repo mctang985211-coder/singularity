@@ -28,7 +28,7 @@
       "patch": [
         "./cordis.patch.yml",
         "./presets/bb-verify.patch.yml",
-        "./presets/singularity-reviewer.patch.yml"
+        "./presets/singularity-coordinator.patch.yml"
       ]
     }
   },

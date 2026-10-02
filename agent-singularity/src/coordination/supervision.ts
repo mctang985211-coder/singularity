@@ -17,9 +17,9 @@ export interface SupervisionConfig {
   readonly coordinationBudget: number
 }
 
-/** The shipped defaults: every terminal review is diagnosed, three recovery rounds, two improvement rounds, eight coordination runs per store. */
+/** The shipped defaults: failed reviews are diagnosed, three recovery rounds, two improvement rounds, eight coordination runs per store. */
 export const DEFAULT_SUPERVISION: SupervisionConfig = {
-  autoReview: 'all',
+  autoReview: 'failed',
   maxRecoveryRounds: 3,
   maxImprovementRounds: 2,
   coordinationBudget: 8,

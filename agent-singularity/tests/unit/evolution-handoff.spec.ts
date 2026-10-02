@@ -1,33 +1,4 @@
-/**
- * A6 interface ④, unit level: the hand-off rules, the supervisor role in the
- * coordination ledger, and the consumption entry.
- *
- * What these cases pin:
- *
- * 1. **Every diagnosis is a hand-off.** A conclusion without suggestions still
- *    starts a supervisor, no evolution service needs to be mounted, and the only
- *    named stops left are the store's allowance, the source's round cap and a
- *    conflicting hand-off content.
- * 2. **One hand-off, one supervisor.** A repeat returns the identity the ledger
- *    already holds (after a "restart" too), a claim that never reached model
- *    input or a started supervisor no process runs is recovered `interrupted`
- *    and re-delegable, and a diagnosis asked for under another hand-off content
- *    is refused by name.
- * 3. **The attempt settles.** A supervisor that issued a recovery settles
- *    `recorded` naming the run, one that closed explicitly settles `closed` with
- *    its reason, and one that ended with neither settles `interrupted`.
- * 4. **The coordinator's plane.** The grant carries the candidate chain,
- *    `task_recover` and the read tools, and carries no business write, no shell,
- *    no spawn and no decide/apply/rollback.
- * 5. **The first request.** It names the real source, its outcome, the diagnosis,
- *    the prior round's review facts as read-only text, and the close path.
- *
- * The ledger here is the real file (`$DSH_HOME/review-agents/agents.jsonl`) and
- * the reviews are driven through the real entry; only the agent plane is a stub,
- * because what a coordinator *is* is its delegation row, its grant and its first
- * request.
- * @module tests/unit/evolution-handoff
- */
+/** Coordination grants, durable proposal continuation, parent routing and attempt settlement. */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -101,6 +72,7 @@ function fixture(options: {
   runs?: readonly unknown[]
   reviews?: readonly unknown[]
   tasks?: readonly unknown[]
+  proposals?: readonly unknown[]
 } = {}) {
   const reply = options.reply === null ? undefined : options.reply ?? CLOSE_REPLY
   const spawns: { sessionId: string; name: string; prompt: string; agentPreset: string; grant: unknown }[] = []
@@ -118,10 +90,12 @@ function fixture(options: {
       if (name === 'graphs') return { list: async () => [{ rootSessionId: ROOT }] }
       return undefined
     },
+    evolution: options.proposals === undefined ? undefined : { list: async () => options.proposals },
     task: {
       snapshotIn: async (storeId: string) => structuredClone(snapshots.get(storeId) ?? { diagnoses: [], reviews: [], runs: [], tasks: [] }),
     },
     agentRuntime: {
+      ensureAgentMessageDelivered: vi.fn(async () => ({ status: 'delivered' })),
       spawn: vi.fn(async (_parent: unknown, request: Record<string, unknown>) => {
         const name = String(request.name)
         spawns.push({
@@ -298,14 +272,14 @@ describe('the hand-off rules', () => {
     expect(supervisorHandoffDigest('sg-t-other', diagnosis())).not.toBe(digest)
   })
 
-  it('gives the coordinator the candidate chain and the recovery entry — never a decision, an apply or a write', () => {
+  it('gives the coordinator the candidate chain and the recovery entry — including human-gated decision and apply, without business writes', () => {
     const grant = supervisorGrant()
     expect(grant.keepPresetTools).toBe(false)
     expect([...grant.baseline].sort()).toEqual([...SUPERVISOR_BASELINE].sort())
-    for (const allowed of ['task_recover', 'evolution_propose', 'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'task_review_pack', 'context_read']) {
+    for (const allowed of ['task_recover', 'evolution_propose', 'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'task_review_pack', 'context_read']) {
       expect(grant.baseline, allowed).toContain(allowed)
     }
-    for (const forbidden of ['evolution_decide', 'evolution_apply', 'evolution_rollback', 'bash', 'write', 'edit', 'jobs', 'subagent', 'graph_spawn', 'hitl_approve', 'task_decompose', 'task_submit_result']) {
+    for (const forbidden of ['evolution_rollback', 'bash', 'write', 'edit', 'jobs', 'subagent', 'graph_spawn', 'hitl_approve', 'task_decompose', 'task_submit_result']) {
       expect(grant.baseline, forbidden).not.toContain(forbidden)
     }
     // One persona for both coordination roles: the plane is the grant's, and a
@@ -335,21 +309,20 @@ describe('the hand-off rules', () => {
   it('states the hand-off, the real source, the prior facts and the close path in the first request', () => {
     const facts = 'review t-root#r-1 [failed]\ncriteria (1/2 passed): c1 pass; c2 fail'
     const prompt = supervisorPrompt({ diagnosis: diagnosis(), sourceRef: 't-root#r-1', sourceOutcome: 'failed', reviewFacts: facts })
-    expect(prompt).toContain('supervisor')
     expect(prompt).toContain('diagnosis d-1 about task t-root')
     expect(prompt).toContain('source t-root#r-1, whose review settled failed')
     expect(prompt).toContain('capability new-row')
     expect(prompt).toContain('--- prior round review facts (read-only) ---')
     expect(prompt).toContain('criteria (1/2 passed)')
-    expect(prompt).toContain('mode "improve"')
+    expect(prompt).toContain('Apply any necessary shared changes first')
     expect(prompt).toContain('{"outcome":"closed","reason":"..."}')
     expect(prompt).toContain('task_recover')
     expect(prompt).toContain('evolution_replay')
-    expect(prompt).toContain('you never call evolution_decide, evolution_apply or evolution_rollback')
+    expect(prompt).toContain('evolution_decide to request the human decision')
 
     const bare = supervisorPrompt({ diagnosis: diagnosis({ proposals: [] }), sourceRef: 't-root#r-1', sourceOutcome: 'verified' })
-    expect(bare).toContain('Its recorded suggestions: none')
-    expect(bare).toContain('no review record could be read for this source')
+    expect(bare).toContain('Existing proposals for this diagnosis:')
+    expect(bare).toContain('No review record could be read')
   })
 })
 
@@ -706,7 +679,7 @@ describe('the supervisor role in the coordination ledger', () => {
         if (name === 'agents') return { get: () => undefined }
         return undefined
       },
-      task: { snapshotIn: async () => ({ diagnoses: [diagnosis()], reviews: [] }) },
+      task: { snapshotIn: async () => ({ diagnoses: [diagnosis()], reviews: [], tasks: [], runs: [] }) },
       agentRuntime: { spawn: vi.fn() },
     } as unknown as Context
     const report = await consumePendingHandoffs(ctx, STORE)
@@ -722,5 +695,66 @@ describe('the consumption as a caller renders it', () => {
     expect(renderConsumption({ diagnosisId: 'd-1', result: 'stopped', code: 'iteration-cap', reason: 'capped' }))
       .toBe('diagnosis d-1 pending (iteration-cap) — capped')
     expect(renderConsumption({ diagnosisId: 'd-1', result: 'failed', reason: 'boom' })).toContain('could not be started: boom')
+  })
+})
+
+describe('durable candidate continuation and parent routing', () => {
+  it('leaves four ordinary child diagnoses to their parents and preserves the root allowance', async () => {
+    const children = Array.from({ length: 4 }, (_, index) => diagnosis({ diagnosisId: `d-child-${index}`, taskId: `t-child-${index}`, proposals: [] }))
+    const f = fixture({ tasks: [{ taskId: 't-root' }, ...children.map(item => ({ taskId: item.taskId, parentTaskId: 't-root' }))] })
+    f.snapshots.get(STORE)!.diagnoses.push(...children, diagnosis())
+    const report = await consumePendingHandoffs(f.ctx, STORE)
+    expect(report.consumptions).toHaveLength(1)
+    expect(f.spawns).toHaveLength(1)
+    expect((await readReviewAgentAttempts(STORE)).map(attempt => attempt.source.taskId)).toEqual(['t-root'])
+  })
+
+  it('records a gated candidate and picks up the same proposal after activation', async () => {
+    const proposals = [{ proposalId: 'p-1', status: 'gated', sourceRefs: ['diagnosis:d-1'] }]
+    const f = fixture({ reply: null, proposals })
+    const request = { storeId: STORE, diagnosis: diagnosis(), delegator: { sessionId: ROOT, agent: f.rootAgent as never }, sourceRef: 't-root#r-1', sourceOutcome: 'failed' }
+    await startSupervisorHandoff(f.ctx, request)
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(1))
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded', note: 'proposal p-1 [gated]' })
+    const restarted = fixture({ reply: null, proposals })
+    await startSupervisorHandoff(restarted.ctx, { ...request, delegator: { sessionId: ROOT, agent: restarted.rootAgent as never } })
+    expect(restarted.spawns).toHaveLength(1)
+    expect(restarted.spawns[0]!.prompt).toContain('p-1 [gated]')
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(2))
+    expect(rowsOfKind('settled').every(row => row.status === 'recorded')).toBe(true)
+  })
+
+  it('reads a crashed supervisor candidate from the proposal ledger before admitting a successor', async () => {
+    writeFileSync(reviewAgentLedgerFile(), [
+      { formatVersion: 2, kind: 'claim', role: 'supervisor', rootStoreId: STORE, taskId: 't-root', runId: 'r-1', requestKey: null, reason: null, diagnosisId: 'd-1', handoffDigest: supervisorHandoffDigest(STORE, diagnosis()), sessionId: 'crashed', actor: ROOT, at: '2026-10-01T00:00:00.000Z' },
+      { formatVersion: 2, kind: 'started', rootStoreId: STORE, taskId: 't-root', sessionId: 'crashed', actor: ROOT, at: '2026-10-01T00:00:00.000Z' },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n')
+    const f = fixture({ reply: null, proposals: [{ proposalId: 'p-1', status: 'decided', decision: 'PROMOTE', sourceRefs: ['diagnosis:d-1'] }] })
+    await startSupervisorHandoff(f.ctx, { storeId: STORE, diagnosis: diagnosis(), delegator: { sessionId: ROOT, agent: f.rootAgent as never }, sourceRef: 't-root#r-1', sourceOutcome: 'failed' })
+    expect(rowsOfKind('settled')[0]).toMatchObject({ sessionId: 'crashed', status: 'recorded' })
+    expect(f.spawns[0]!.prompt).toContain('p-1 [decided] PROMOTE')
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(2))
+  })
+
+  it('settles a human REJECT decision without another supervisor', async () => {
+    const f = fixture({ reply: null, proposals: [{ proposalId: 'p-1', status: 'decided', decision: 'REJECT', sourceRefs: ['diagnosis:d-1'] }] })
+    const request = { storeId: STORE, diagnosis: diagnosis(), delegator: { sessionId: ROOT, agent: f.rootAgent as never }, sourceRef: 't-root#r-1', sourceOutcome: 'failed' }
+    await startSupervisorHandoff(f.ctx, request)
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(1))
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'closed', note: 'proposal p-1 [decided] REJECT' })
+    expect((await startSupervisorHandoff(f.ctx, request)).result).toBe('existing')
+    expect(f.spawns).toHaveLength(1)
+  })
+
+  it('delivers an applied child proposal to its recorded delegating parent run', async () => {
+    const child = diagnosis({ taskId: 't-child', reviewRefs: ['t-child#r-child'] })
+    const f = fixture({ reply: null, tasks: [{ taskId: 't-child', parentTaskId: 't-parent' }], runs: [
+      { taskId: 't-child', runId: 'r-child', parentRunId: 'r-parent', sessionId: 's-child' },
+      { taskId: 't-parent', runId: 'r-parent', sessionId: 's-parent', status: 'running' },
+    ], proposals: [{ proposalId: 'p-1', status: 'applied', sourceRefs: ['diagnosis:d-1'] }] })
+    await startSupervisorHandoff(f.ctx, { storeId: STORE, diagnosis: child, delegator: { sessionId: ROOT, agent: f.rootAgent as never }, sourceRef: 't-child#r-child', sourceOutcome: 'failed' })
+    expect(f.ctx.agentRuntime.ensureAgentMessageDelivered).toHaveBeenCalledWith(expect.objectContaining({ targetSessionId: 's-parent', messageId: 'm-evolution-p-1-r-parent', text: expect.stringContaining('run r-parent') }))
+    expect(f.spawns[0]!.prompt).toContain('task_recover does not accept child diagnoses')
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(1))
   })
 })

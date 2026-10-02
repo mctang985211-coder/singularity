@@ -237,6 +237,10 @@ export class VerifierRegistry extends Service {
     return [...this.verifiers.keys()].sort()
   }
 
+  verifierSupports(id: string, mode: VerificationMode): boolean {
+    return this.verifiers.get(id)?.supports(mode) ?? false
+  }
+
   /** The version each registered verifier declares, by id; an instance declaring none is absent from the map. */
   verifierVersions(): Record<string, string> {
     const versions: Record<string, string> = {}

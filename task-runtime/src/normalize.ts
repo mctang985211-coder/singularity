@@ -80,6 +80,8 @@ const BATCH_FIELDS: ReadonlySet<string> = new Set(['contractVersion', 'reason', 
 /** The child fields, and nothing else. */
 const CHILD_FIELDS: ReadonlySet<string> = new Set([
   'objective',
+  'templateRef',
+  'templateParameters',
   'acceptanceCriteria',
   'requiredCapabilities',
   'dependsOn',
@@ -308,6 +310,10 @@ function normalizeChild(raw: unknown, index: number, reasons: string[]): Normali
       assumptions,
       constraints,
       requiredCapabilities,
+      ...(raw.templateRef === undefined ? {} : {
+        templateRef: carried<TaskContract['templateRef']>(raw.templateRef),
+        templateParameters: carried<NonNullable<TaskContract['templateParameters']>>(raw.templateParameters ?? {}),
+      }),
     },
     dependsOn,
     decomposable,
@@ -383,6 +389,8 @@ export function normalizeDecomposition(spec: unknown, context: NormalizationCont
 const ROOT_CONTRACT_FIELDS: ReadonlySet<string> = new Set([
   'contractVersion',
   'objective',
+  'templateRef',
+  'templateParameters',
   'acceptanceCriteria',
   'assumptions',
   'constraints',
@@ -444,6 +452,10 @@ export function normalizeRootContract(spec: unknown): RootNormalizationResult {
       assumptions,
       constraints,
       requiredCapabilities,
+      ...(spec.templateRef === undefined ? {} : {
+        templateRef: carried<TaskContract['templateRef']>(spec.templateRef),
+        templateParameters: carried<NonNullable<TaskContract['templateParameters']>>(spec.templateParameters ?? {}),
+      }),
     },
   }
 }

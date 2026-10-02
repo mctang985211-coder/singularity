@@ -539,6 +539,9 @@ var VerifierRegistry = class extends Service {
 	verifierIds() {
 		return [...this.verifiers.keys()].sort();
 	}
+	verifierSupports(id, mode) {
+		return this.verifiers.get(id)?.supports(mode) ?? false;
+	}
 	/** The version each registered verifier declares, by id; an instance declaring none is absent from the map. */
 	verifierVersions() {
 		const versions = {};

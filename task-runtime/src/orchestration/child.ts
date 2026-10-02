@@ -404,6 +404,7 @@ async function startChildRound(
       providers = fresh
     }
     binding = await bindRunProviders({
+      mcpRegistry: env.mcpRegistry,
       storeId: batch.storeId,
       runId: run.runId,
       manifest,

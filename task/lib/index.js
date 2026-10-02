@@ -108,6 +108,26 @@ function contractDigest(contract) {
 function decompositionDigest(identity) {
 	return sha256(canonicalize(identity));
 }
+/** Persist the final contract identity and its actual source on every production instance. */
+function taskContractIdentity(contract) {
+	const digest = contractDigest(contract);
+	return {
+		contractDigest: digest,
+		definitionRef: contract.templateRef === void 0 ? {
+			taskType: `contract:${digest}`,
+			version: contract.contractVersion,
+			digest
+		} : {
+			taskType: contract.templateRef.id,
+			version: contract.templateRef.version,
+			digest: contract.templateRef.digest
+		},
+		...contract.templateRef === void 0 ? {} : {
+			templateRef: structuredClone(contract.templateRef),
+			templateParameters: structuredClone(contract.templateParameters ?? {})
+		}
+	};
+}
 
 //#endregion
 //#region src/proposal.ts
@@ -386,6 +406,8 @@ function assertContract(taskId, contract, task) {
 	if (task.objective !== contract.objective) throw new Error(`task: task "${taskId}" objective disagrees with its contract objective`);
 	if (canonicalize(task.acceptanceCriteria) !== canonicalize(contract.acceptanceCriteria)) throw new Error(`task: task "${taskId}" acceptance criteria disagree with its contract`);
 	if (canonicalize(task.requestedCapabilities) !== canonicalize(contract.requiredCapabilities)) throw new Error(`task: task "${taskId}" requested capabilities disagree with its contract`);
+	if (task.contractDigest !== void 0 && task.contractDigest !== contractDigest(contract)) throw new Error(`task: task "${taskId}" contractDigest disagrees with its contract`);
+	for (const field of ["templateRef", "templateParameters"]) if (canonicalize(task[field] ?? null) !== canonicalize(contract[field] ?? null)) throw new Error(`task: task "${taskId}" ${field} disagrees with its contract`);
 }
 /** The contract fields one normalized contract must carry, checked the same way wherever a contract is stored — on a task (T1) and on each child of a proposal's batch (T2). */
 function assertContractFields(where, contract) {
@@ -397,6 +419,14 @@ function assertContractFields(where, contract) {
 	];
 	for (const [name, value] of lists) if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`task: ${where} contract ${name} must be an array of strings`);
 	if (typeof contract.objective !== "string") throw new Error(`task: ${where} contract objective must be a string`);
+	const ref = contract.templateRef;
+	if (ref !== void 0 && (!isRecord(ref) || typeof ref.id !== "string" || !Number.isSafeInteger(ref.version) || ref.version < 1 || typeof ref.digest !== "string" || !/^[a-f0-9]{64}$/.test(ref.digest))) throw new Error(`task: ${where} templateRef must pin an id, positive version and SHA-256 digest`);
+	const parameters = contract.templateParameters;
+	if (ref === void 0 !== (parameters === void 0) || parameters !== void 0 && (!isRecord(parameters) || Object.values(parameters).some((value) => ![
+		"string",
+		"number",
+		"boolean"
+	].includes(typeof value) || typeof value === "number" && !Number.isFinite(value)))) throw new Error(`task: ${where} templateRef and primitive templateParameters must be recorded together`);
 }
 /** The batch record a decomposition carries is the identity a later review gate binds an approval to, so a malformed one is refused rather than stored: an empty proposal digest or a non-numeric limit would make the record unusable exactly … */
 function assertAdmission(taskId, admission) {
@@ -496,6 +526,7 @@ function assertRunRecovery(snapshot, taskId, recovery) {
 	]) if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${where} requires a non-empty ${name}`);
 	if (recovery.sourceRunId !== void 0 && (typeof recovery.sourceRunId !== "string" || recovery.sourceRunId.length === 0)) throw new Error(`${where} source run id must be a non-empty string when present`);
 	if (recovery.requestDigest !== void 0 && (typeof recovery.requestDigest !== "string" || recovery.requestDigest.trim().length === 0)) throw new Error(`${where} request digest must be a non-empty string when present`);
+	if (recovery.proposalIds !== void 0 && (!Array.isArray(recovery.proposalIds) || recovery.proposalIds.some((id) => typeof id !== "string" || id.trim().length === 0) || new Set(recovery.proposalIds).size !== recovery.proposalIds.length)) throw new Error(`${where} proposalIds must be an array of unique non-empty strings`);
 	const task = taskIn(snapshot, taskId);
 	if (task.parentTaskId !== void 0) throw new Error(`${where} names task "${taskId}", which has a parent; a recovery attempt is opened for the store's own root task`);
 	if (!snapshot.diagnoses.some((diagnosis) => diagnosis.diagnosisId === recovery.sourceDiagnosisId && diagnosis.taskId === taskId)) throw new Error(`${where} cites diagnosis "${recovery.sourceDiagnosisId}", which this store holds no record of for task "${taskId}"; a recovery is asked for by a diagnosis of the failing task and by nothing else`);
@@ -1840,6 +1871,12 @@ var EventStoreSet = class {
 };
 
 //#endregion
+//#region src/template.ts
+function taskTemplateDigest(template) {
+	return sha256Hex(canonicalize(template));
+}
+
+//#endregion
 //#region src/index.ts
 function now() {
 	return (/* @__PURE__ */ new Date()).toISOString();
@@ -2025,6 +2062,11 @@ var TaskService = class extends Service {
 			sessionId: run.sessionId,
 			actor,
 			payload: { run }
+		}));
+		for (const obligation of options.obligations ?? []) events.push(event("ObligationRecorded", {
+			taskId: task.taskId,
+			actor,
+			payload: { obligation }
 		}));
 		events.push(event("TaskProposalAdmitted", {
 			taskId: ROOT_PROPOSAL_TASK_ID,
@@ -2325,4 +2367,4 @@ var TaskService = class extends Service {
 var src_default = TaskService;
 
 //#endregion
-export { BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, EventStoreSet, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskService, TaskState, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, definedKeys, describeBudgetExtension, describeBudgetReading, isTerminalRunStatus, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskProposalId };
+export { BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, EventStoreSet, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskService, TaskState, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, definedKeys, describeBudgetExtension, describeBudgetReading, isTerminalRunStatus, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest };

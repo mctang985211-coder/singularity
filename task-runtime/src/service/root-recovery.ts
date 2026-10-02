@@ -405,6 +405,7 @@ export async function startRecoveryAttempt(
   const recovery: RunRecovery = {
     kind,
     sourceDiagnosisId: request.sourceDiagnosisId,
+    ...(request.proposalIds?.length ? { proposalIds: [...request.proposalIds] } : {}),
     requestKey: request.requestKey,
     // The resolved run, which an improvement that named none derives from the
     // store: the record names the round it reads, not merely what the caller said.
@@ -430,6 +431,7 @@ export async function startRecoveryAttempt(
   let binding: RunProviderBinding | undefined
   try {
     binding = await bindRunProviders({
+      mcpRegistry: self.config.mcpServers,
       storeId,
       runId,
       manifest,

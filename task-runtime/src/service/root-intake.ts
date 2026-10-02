@@ -25,6 +25,7 @@ import {
   TASK_CONTRACT_VERSION,
   admissionContextDigest,
   contractDigest,
+  taskContractIdentity,
   reviewContextDigest,
   rootProposalDigest,
   rootProposalId,
@@ -34,6 +35,7 @@ import { capabilitySnapshot } from '../capability.ts'
 import { contractDefects, rootIndependenceDefects } from '../admission.ts'
 import { providerContentIdentities, providerRefusals } from '../provider-precheck.ts'
 import { bindRunProviders, readRunBinding } from '../run-binding.ts'
+import { bindTaskTemplate } from '../task-template.ts'
 import { normalizeRootContract } from '../normalize.ts'
 import { isOpenProposal, reviewContextDelta, reviewContextOf, rootProposalRequestKey } from '../proposal.ts'
 import { fixCriteriaProtectedInputs } from '../protected-inputs.ts'
@@ -637,6 +639,11 @@ export async function deriveRootContract(
   spec: RootContractSpec,
   envPath: string | undefined,
 ): Promise<{ ok: true; contract: TaskContract } | { ok: false; refusal: Error }> {
+  try {
+    spec = await bindTaskTemplate(self.config.taskTemplatesRoot, spec)
+  } catch (error) {
+    return { ok: false, refusal: rootRefusal([message(error)]) }
+  }
   const declared = Array.isArray(spec?.acceptanceCriteria) ? spec.acceptanceCriteria : []
   const fixed = await fixCriteriaProtectedInputs(declared, envPath, 'root contract')
   const presented = fixed.reasons.length === 0 ? { ...spec, acceptanceCriteria: fixed.criteria } : spec
@@ -671,10 +678,6 @@ export async function checkRootContract(self: TaskRuntime, request: CheckRootCon
   }
   const manifests = rootManifests(self, contract)
   const manifest = manifests[0] as CapabilityManifest
-  if (manifest.missing.length > 0) {
-    const detail = `${label} is missing [${manifest.missing.join(', ')}] and a root has no parent to delegate them to`
-    return { ok: false, refusal: { error: rootRefusal([detail]), reasons: [detail] } }
-  }
   const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
     ...(request.envPath === undefined ? {} : { cwd: request.envPath }),
   })
@@ -836,6 +839,7 @@ export async function activateRootContract(
   }
   try {
     const providerBinding = await bindRunProviders({
+      mcpRegistry: self.config.mcpServers,
       storeId,
       runId,
       manifest,
@@ -844,7 +848,7 @@ export async function activateRootContract(
     })
     const task: TaskInstance = {
       taskId,
-      definitionRef: { taskType: 'root', version: 1 },
+      ...taskContractIdentity(contract),
       objective: contract.objective,
       depth: 0,
       acceptanceCriteria: contract.acceptanceCriteria,
@@ -880,7 +884,13 @@ export async function activateRootContract(
       rootRunId: runId,
       admittedAt: now(),
     }
-    await self.context.task.admitRootProposalIn(storeId, task, run, rootSessionId, { consumption, manifest })
+    const obligations = manifest.missing.map(capability => ({
+      obligationId: `ob-root-${taskId}-${capability}`,
+      sourceTaskId: taskId,
+      goal: `Resolve capability ${capability} required by: ${contract.objective}`,
+      criterion: `Root session ${rootSessionId} must arrange an available provider or propose the missing capability before executing work that requires ${capability}. Keep the original objective and acceptance.`,
+    }))
+    await self.context.task.admitRootProposalIn(storeId, task, run, rootSessionId, { consumption, manifest, obligations })
   } catch (error) {
     /**
      * Nothing was committed (the commit is all-or-nothing), so the claim this
@@ -899,14 +909,16 @@ export async function activateRootContract(
   self.notifyWhenReady(
     rootSessionId,
     `the root contract of this session was activated: task ${taskId}, run ${runId} (proposal ${proposal.proposalId}, policy ${proposal.policy}). ` +
-      'This session may now decompose, submit its own result, or cancel.',
+      'This session may now decompose, submit its own result, or cancel.' +
+      (manifest.missing.length === 0 ? '' : ` Missing capabilities [${manifest.missing.join(', ')}] are recorded as obligations owned by this root session. Plan available work or propose the required capability change; do not execute missing capabilities or weaken the goal. If the gap prevents delivery, submit its original evidence so verification and diagnosis can hand it to supervision.`),
   )
   return {
     proposalId: proposal.proposalId,
     status: 'activated',
     taskId,
     runId,
-    detail: `proposal "${proposal.proposalId}" is activated as root task ${taskId} with run ${runId}`,
+    detail: `proposal "${proposal.proposalId}" is activated as root task ${taskId} with run ${runId}` +
+      (manifest.missing.length === 0 ? '' : `; root session ${rootSessionId} owns missing-capability obligations [${manifest.missing.join(', ')}]`),
   }
 }
 

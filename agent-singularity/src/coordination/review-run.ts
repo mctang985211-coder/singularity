@@ -32,8 +32,8 @@ import {
 import { spawnUnderClaim } from './spawn-under-claim.ts'
 import { buildReviewPack } from '../tools/task-review-pack.ts'
 
-/** The preset the review agent mounts (`$DSH_HOME/.agent-presets/singularity-reviewer/`). */
-export const REVIEWER_PRESET = 'singularity-reviewer'
+/** Shared coordinator composition; runtime installs the reviewer policy. */
+export const REVIEWER_PRESET = 'singularity-coordinator'
 
 /** The review agent's whole tool surface. Read-only by construction: */
 export const REVIEWER_BASELINE: readonly string[] = [
@@ -382,9 +382,8 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
       }
     }
     await settleAttempt('recorded')
-    // The hand-off (A6): every recorded diagnosis is one — suggestions or not —
-    // and this is the one place that knows the record just became durable.
-    void consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error: unknown) => {
+    // Consume shared or root work after the diagnosis is durable; ordinary child work stays with its parent.
+    await consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error: unknown) => {
       logOf(ctx, 'singularity-agent')?.warn(
         `evolution hand-off: ${diagnosis.diagnosisId} could not be consumed (${message(error)})`,
       )

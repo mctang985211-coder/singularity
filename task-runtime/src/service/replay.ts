@@ -1,3 +1,4 @@
+import { taskContractIdentity } from '@dangosys/dsh-singularity-task'
 /**
  * Replay: the replay entry and its workspace claim.
  */
@@ -46,7 +47,7 @@ export async function replayTask(
     requiredCapabilities: champion.requestedCapabilities,
   }
   const table = { ...self.config.capabilities, ...(options.overlay?.capabilityOverrides ?? {}) }
-  const manifest = resolveCapabilities(effective.requiredCapabilities, table)
+  const manifest = resolveCapabilities(effective.requiredCapabilities, table, self.config.mcpServers ?? {})
   if (manifest.missing.length > 0) {
     throw new Error(
       `task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(', ')}] under the overlay`,
@@ -112,7 +113,7 @@ export async function replayTask(
   }
   const task: TaskInstance = {
     taskId: `t-${randomUUID()}`,
-    definitionRef: { ...champion.definitionRef },
+    ...taskContractIdentity(contract),
     objective: contract.objective,
     depth: 0,
     acceptanceCriteria: contract.acceptanceCriteria,

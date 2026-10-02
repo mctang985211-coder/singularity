@@ -214,7 +214,7 @@ export function gate(self: TaskRuntime): ExecutionGate {
 }
 
 export function resolveCapabilitiesImpl(self: TaskRuntime, required: readonly string[]): CapabilityManifest {
-  return resolveCapabilities(required, self.config.capabilities)
+  return resolveCapabilities(required, self.config.capabilities, self.config.mcpServers ?? {})
 }
 
 export function listCapabilities(self: TaskRuntime): Readonly<Record<string, CapabilityConfig>> {

@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { DecomposeSpec, ProposalContinuation, ProposalSubmission } from '@dangosys/dsh-singularity-task-runtime'
 import { message, sessionId, text } from '../shared.ts'
+import { templateBindingParameters } from './task-template-list.ts'
 import { criterionSchema } from './criteria-schema.ts'
 import { pendingReviewText, proposalSubmissionParameters } from './proposal-shared.ts'
 
@@ -11,6 +12,7 @@ export function defineTaskDecomposeTool(ctx: Context) {
     name: 'task_decompose',
     description:
       'Delegate the caller\'s current task\'s independently checkable results or distinct responsibilities to child tasks. ' +
+      'Call task_template_list first; use a suitable pinned template and parameters, or write a full standard contract when none applies. ' +
       'Each caller owns its full result and may coordinate children that decompose again; define only this level and let each child decide its descendants. ' +
       'The batch is admitted atomically and the runtime then runs them ' +
       'one at a time in dependency order; this call returns at admission and does not wait. Each child is verified ' +
@@ -31,11 +33,11 @@ export function defineTaskDecomposeTool(ctx: Context) {
           type: 'object',
           additionalProperties: false,
           properties: {
-            objective: { type: 'string', required: true, description: 'Complete, self-contained goal of the child task' },
+            ...templateBindingParameters,
+            objective: { type: 'string', description: 'Complete, self-contained goal of the child task' },
             acceptanceCriteria: {
               type: 'array',
-              required: true,
-              description: 'How a verifier decides the child is done',
+              description: 'Required for a free contract; omit when using templateRef. How a verifier decides the child is done',
               items: criterionSchema({
                 description: 'What must hold true',
                 criterionId:
@@ -44,7 +46,7 @@ export function defineTaskDecomposeTool(ctx: Context) {
                   'A parent-level childEvidence.criterionId must name an id the child it points to actually declared, ' +
                   'which only holds when that child declares the id explicitly here',
                 command: 'Shell command; exit code 0 proves the criterion (deterministic modes). Reuse an authoritative checker that already covers this result; do not duplicate its assertions',
-                mode: 'Verifier kind; defaults to deterministic when a command is given, review otherwise',
+                mode: 'Verifier kind; defaults to deterministic with a command. Mandatory review/formal criteria require an explicit registered verifier that can settle them; the built-in review placeholder is refused.',
                 requiresArtifact: 'Artifact/evidence kinds or ids that must already exist in the task store as a verified reference product (a verified run carrying a passing verdict) for this criterion to be judgeable; a missing one blocks the child before spawn and registers an obligation',
                 acceptsArtifact: 'Artifact/evidence kinds or ids this criterion consumes as a raw input: existence in the task store is the whole requirement, any run state. Missing blocks the child before spawn and registers an obligation',
                 verifierRef: 'Registered verifier id that judges this criterion; must exist in the verifier registry — an unknown id rejects the whole batch at admission and the error lists the registered ids. Omit to dispatch by mode.',

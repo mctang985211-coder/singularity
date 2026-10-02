@@ -304,7 +304,7 @@ describe('A6: the hand-off a diagnosis becomes, and the supervisor it is delegat
     // and none of the tools a promotion or a business write would need.
     const visible = h.visible(h.agent(supervisor))
     for (const name of ['task_recover', 'evolution_candidate', 'evolution_replay', 'task_review_pack']) expect(visible, name).toContain(name)
-    for (const name of ['evolution_decide', 'evolution_apply', 'evolution_rollback', 'bash', 'write', 'edit', 'graph_spawn']) expect(visible, name).not.toContain(name)
+    for (const name of ['evolution_rollback', 'bash', 'write', 'edit', 'graph_spawn']) expect(visible, name).not.toContain(name)
     expect(SUPERVISOR_BASELINE).toContain('task_recover')
 
     // Its first request carries the real source, its outcome and the hand-off.

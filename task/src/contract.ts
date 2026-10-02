@@ -2,6 +2,7 @@
 
 import { createHash } from 'node:crypto'
 import type { AcceptanceCriterion } from './types.ts'
+import type { TaskTemplateRef, TemplateParameters } from './template.ts'
 
 /** The normalized contract version this build writes. Separate from a task template's own generation number and from the event envelope's `schemaVersion` (the store's wire format): this one versions the contract data definition, and an entry … */
 export const TASK_CONTRACT_VERSION = 1 as const
@@ -22,6 +23,9 @@ export interface TaskContract {
   constraints: string[]
   /** Capability *requirements* by name (never a skill id): the runtime resolves these against its registry. */
   requiredCapabilities: string[]
+  /** Immutable provenance of a template instance; omitted for a free contract. */
+  templateRef?: TaskTemplateRef
+  templateParameters?: TemplateParameters
 }
 
 /** The limits one decomposition batch was admitted under (§4). Recorded with the batch, never derived from the contract: a contract's own text has no field that can raise a limit, and the runtime resolves every value here from its … */
@@ -122,4 +126,19 @@ export function contractDigest(contract: TaskContract): string {
 /** The whole-batch proposal identity: SHA-256 over {@link canonicalize} of the normalized proposal. */
 export function decompositionDigest(identity: DecompositionIdentity): string {
   return sha256(canonicalize(identity))
+}
+
+/** Persist the final contract identity and its actual source on every production instance. */
+export function taskContractIdentity(contract: TaskContract) {
+  const digest = contractDigest(contract)
+  return {
+    contractDigest: digest,
+    definitionRef: contract.templateRef === undefined
+      ? { taskType: `contract:${digest}`, version: contract.contractVersion, digest }
+      : { taskType: contract.templateRef.id, version: contract.templateRef.version, digest: contract.templateRef.digest },
+    ...(contract.templateRef === undefined ? {} : {
+      templateRef: structuredClone(contract.templateRef),
+      templateParameters: structuredClone(contract.templateParameters ?? {}),
+    }),
+  }
 }

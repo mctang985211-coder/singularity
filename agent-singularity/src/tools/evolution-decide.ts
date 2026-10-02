@@ -2,6 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { EVOLUTION_DECISIONS, renderProviderRoles } from '@dangosys/dsh-singularity-evolution'
+import { continueProposalHandoff } from '../coordination/evolution-handoff.ts'
 import { denialReason, message, sessionId, text } from '../shared.ts'
 
 export function defineEvolutionDecideTool(ctx: Context) {
@@ -75,6 +76,7 @@ export function defineEvolutionDecideTool(ctx: Context) {
         const decided = await ctx.evolution.decide(args.proposalId, args.decision, caller, `approval:${exec.callId}`, args.note)
         return [
           `proposal ${decided.proposalId} [decided] ${decided.decision}${decided.decisionNote === undefined ? '' : ` — ${decided.decisionNote}`}`,
+          ...(await continueProposalHandoff(ctx, decided, caller)),
           decided.decision === 'PROMOTE'
             ? 'recorded after human approval — nothing applied yet; evolution_apply (second human gate) takes it to production'
             : 'recorded after human approval — the ledger notes the decision only; nothing was applied',

@@ -27,6 +27,7 @@ import type {
   ToolCallRef,
 } from './messages.ts'
 import { rootPromptText } from './prompts/root.prompts.ts'
+import { REVIEWER_POLICY_TEXT, SUPERVISOR_POLICY_TEXT } from './prompts/coordination.prompts.ts'
 import { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
 import { sealRawSessionReads } from './raw-session-guard.ts'
 import type { GraphScope, RootRequest, RuntimePromptSource, SpawnRequest, WorkerResumeRequest } from './types.ts'
@@ -229,6 +230,7 @@ export class AgentRuntime extends Service {
             agentPreset,
             permissionPreset: request.permissionPreset ?? WORKER_DEFAULT_PERMISSION_PRESET,
             taskWorker: request.taskWorker === true,
+            ...(request.coordinationRole === undefined ? {} : { coordinationRole: request.coordinationRole }),
             ...(request.grant === undefined ? {} : { grant: request.grant }),
           }),
         })
@@ -445,6 +447,7 @@ const ROOT_CORE_TOOLS = [
   'hitl_approve',
   'task_read',
   'capability_list',
+  'task_template_list',
   'context_read',
   'skill',
   'task_intake',
@@ -509,6 +512,15 @@ function workerSetup(ctx: Context, role: WorkerRole): AgentSetup {
   return async (agentCtx, agent) => {
     await ctx.agentPresets.mount(agentCtx, role.agentPreset)
     ctx.permissionPresets.set(agent.session, role.permissionPreset)
+    if (role.coordinationRole !== undefined) {
+      if (role.coordinationRole === 'supervisor') setApprovalPolicy(agent.session, 'ask')
+      agentCtx.systemPrompt.section({
+        name: `singularity:${role.coordinationRole}`,
+        order: 75,
+        text: role.coordinationRole === 'reviewer' ? REVIEWER_POLICY_TEXT : SUPERVISOR_POLICY_TEXT,
+        interpolate: false,
+      })
+    }
     if (role.taskWorker) {
       agentCtx.systemPrompt.section({
         name: 'singularity:worker',

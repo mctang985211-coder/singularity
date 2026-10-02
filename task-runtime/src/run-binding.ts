@@ -17,7 +17,7 @@ import type {
 import { SKILL_SIDECAR_FILE, skillContractDefects, skillContractDigest, skillContentDigest } from './skill-contract.ts'
 import type { SkillSidecar } from './skill-contract.ts'
 import type { CapabilityConfig } from './capability.ts'
-import { MCP_SERVER_REGISTRY, manifestMcpServers, type McpServerTemplate } from './mcp-servers.ts'
+import { manifestMcpServers, type McpServerTemplate } from './mcp-servers.ts'
 import type { ProviderPrecheck } from './provider-precheck.ts'
 import type { AcceptedSkillProviderVerdict, SkillDefect } from './sidecar.ts'
 import { loadSkillSidecar, registryRevision } from './sidecar.ts'
@@ -225,7 +225,7 @@ export async function bindRunProviders(request: RunBindingRequest): Promise<RunP
     registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, []),
     capabilities: [...rows].sort(),
     skills: selected.map(skillBinding),
-    mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? MCP_SERVER_REGISTRY),
+    mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? {}),
   }
   if (selected.length === 0) return base
   const root = request.root

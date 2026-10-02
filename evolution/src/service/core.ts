@@ -843,6 +843,7 @@ export class EvolutionServiceCore extends Service {
           sourceDiagnosisId: request.sourceDiagnosisId,
           requestKey: request.requestKey,
           ...(request.mode !== undefined ? { mode: request.mode } : {}),
+          proposalIds: answered.recovery?.proposalIds,
         },
         caller,
         delegation,
@@ -862,7 +863,7 @@ export class EvolutionServiceCore extends Service {
     // The chain's capability gate (A6): a change this hand-off stands on must be
     // applied; chain off, a proposal can authorize nothing, so none blocks the attempt.
     if (chainOn) {
-      for (const proposal of associated.filter(item => item.targetType === 'capability')) {
+      for (const proposal of associated) {
         if (
           proposal.status === 'applied' &&
           proposal.applied !== undefined &&
@@ -877,15 +878,15 @@ export class EvolutionServiceCore extends Service {
               ? 'rolled back'
               : proposal.status
         throw new Error(
-          `evolution: the capability change this hand-off depends on (proposal "${proposal.proposalId}" → row "${proposal.targetId}") is ` +
-            `${state}; a recovery whose gap is that capability is opened only after a person approves it and the apply commits it into the ` +
-            'registry — nothing was started, and no run was opened',
+          `evolution: the shared change this hand-off depends on (proposal "${proposal.proposalId}" ${proposal.targetType} "${proposal.targetId}") is ` +
+            `${state}; a recovery that depends on this change is opened only after a person approves it and apply commits it into ` +
+            'production — nothing was started, and no run was opened',
         )
       }
       if (associated.length > 0) {
         coordination.push(
           `this ledger holds ${associated.length} proposal(s) for the diagnosis, ` +
-            `${associated.filter(item => item.targetType === 'capability').length} of them capability changes, all in force`,
+            'all applied and in force',
         )
       }
     } else if (associated.length > 0) {
@@ -946,6 +947,7 @@ export class EvolutionServiceCore extends Service {
         sourceRunId,
         sourceDiagnosisId: request.sourceDiagnosisId,
         requestKey: request.requestKey,
+        ...(chainOn && associated.length ? { proposalIds: associated.map(proposal => proposal.proposalId) } : {}),
         ...(request.mode !== undefined ? { mode: request.mode } : {}),
       },
       caller,

@@ -1,5 +1,7 @@
 # Singularity 核心功能构建评审：verify / supervisor 的错位与构建缺口
 
+施工进展与验证口径见 [Task / Skill 自改进实现](2026-10-03-task-skill-implementation.md)；本页的源码结论保留为施工前审计记录。
+
 > 来源：kimi-code session `6f117dc6-ad24-4028-95fa-301dd937e0c8`（2026-10-02 ~ 10-03，工作区 `/home/roxy/code`）。
 > 方法：该 session 内共 12 轮对话，累计派出 40+ 只读子代理逐段核对 `packages/singularity/` 源码（含一次 17 分片的全文档落地核查），本文全部代码结论有 `文件:行` 支撑，关键引用已二次抽查。
 

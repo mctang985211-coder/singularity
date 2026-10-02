@@ -51,6 +51,7 @@ const ALWAYS_TOOLS = [
   'hitl_approve',
   'task_read',
   'capability_list',
+  'task_template_list',
   'context_read',
   'task_intake',
   'task_decompose',
@@ -158,12 +159,12 @@ describe('SingularityAgent assembly', () => {
 
   it('resolves the supervision block over its shipped defaults, and refuses an unknown member of it by name', async () => {
     // The shipped default composes the shipped supervision policy: every
-    // terminal review is diagnosed on its own, three recovery rounds, two
+    // failed terminal review is diagnosed on its own, three recovery rounds, two
     // improvement rounds, eight coordination runs per store.
     await mount()
     expect(supervisionSettings()).toEqual(DEFAULT_SUPERVISION)
     expect(DEFAULT_SUPERVISION).toEqual({
-      autoReview: 'all',
+      autoReview: 'failed',
       maxRecoveryRounds: 3,
       maxImprovementRounds: 2,
       coordinationBudget: 8,

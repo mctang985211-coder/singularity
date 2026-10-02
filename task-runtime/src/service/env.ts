@@ -174,6 +174,7 @@ export async function orchestrateEnv(
         throw new Error('task-runtime: permissionPresets service is not loaded; cannot rank declared permissions')
       return presets.resolve(name)
     },
+    mcpRegistry: self.config.mcpServers,
     resolveMcpEnv: async () => {
       /**
        * The same graph env the verifier's cwd comes from; absent in test
@@ -443,14 +444,21 @@ export async function assertKnownVerifierRefs(
     )
   }
   const unknown = refs.filter(item => !registered.includes(item.criterion.verifierRef as string))
-  if (unknown.length === 0) return
+  const verifier = runVerifier(self)
+  const unsupported = refs.filter(item => verifier?.verifierSupports?.(
+    item.criterion.verifierRef as string, item.criterion.verificationMode,
+  ) === false && registered.includes(item.criterion.verifierRef as string))
+  if (unknown.length === 0 && unsupported.length === 0) return
   const detail = unknown
     .map(
       item =>
         `child ${item.childIndex} criterion "${item.criterion.criterionId}" references unknown verifier "${item.criterion.verifierRef}"`,
     )
     .join('; ')
-  throw new Error(`task-runtime: admission rejected ${what}: ${detail}; registered verifiers: ${registered.join(', ')}`)
+  const unsupportedDetail = unsupported.map(item =>
+    `child ${item.childIndex} criterion "${item.criterion.criterionId}" verifier "${item.criterion.verifierRef}" does not support mode "${item.criterion.verificationMode}"`,
+  ).join('; ')
+  throw new Error(`task-runtime: admission rejected ${what}: ${[detail, unsupportedDetail].filter(Boolean).join('; ')}; registered verifiers: ${registered.join(', ')}`)
 }
 
 export function liveAgent(self: TaskRuntime, sessionId: string): Agent {

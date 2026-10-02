@@ -26,12 +26,9 @@ import {
  *
  * The contract these cases are the evidence for:
  *
- * 1. **Every terminal review is accepted on its own.** A review that settled
- *    `failed` — the child's run whose criterion did not hold — is accepted, and
- *    so is a review that settled `verified`: the shipped policy is
- *    `supervision.autoReview: 'all'`. A deployment that names `'failed'` keeps
- *    the old selective behavior, and one that names `'off'` accepts nothing; the
- *    cases that need either state it in their fixture.
+ * 1. Failed reviews are accepted automatically. Successes require explicit
+ *    `autoReview: 'all'` or a review call. Ordinary child diagnoses go to their
+ *    recorded delegating parent; only shared changes consume a supervisor.
  * 2. **The settlement does not wait for the reviewer.** The review record is
  *    written inside the terminal transition; the acceptance happens after it, on
  *    the reviewer's own time — so the batch settles and the store is final while
@@ -88,16 +85,12 @@ function reviewerSpawns(h: ScriptedLoop): readonly { sessionId: string; name: st
   return h.spawns.filter(spawn => spawn.name.startsWith('review '))
 }
 
-/** The supervisor spawns of one loop, in order — the hand-off every recorded diagnosis is delegated to. */
+/** Supervisor spawns for shared changes. */
 function supervisorSpawns(h: ScriptedLoop): readonly { sessionId: string; name: string }[] {
   return h.spawns.filter(spawn => spawn.name.startsWith('supervisor for '))
 }
 
-/**
- * One store's **reviewer** attempts, in ledger order: the ledger holds a
- * supervisor row for the same diagnosis too (every recorded diagnosis is a
- * hand-off), so a case about the review chain filters to its own role.
- */
+/** Review attempts alone; shared-change supervisors have separate ledger rows. */
 async function reviewerAttempts(storeId: string) {
   return (await readReviewAgentAttempts(storeId)).filter(attempt => attempt.role === 'reviewer')
 }
@@ -281,10 +274,8 @@ describe('a failed review is accepted on its own (A5)', () => {
       sessionId: reviewer,
       started: true,
     })
-    // The recorded diagnosis is itself a hand-off: the consumption delegated it
-    // to a supervisor, which is the store's second coordination run.
-    await vi.waitFor(() => expect(supervisorSpawns(h)).toHaveLength(1), { timeout: 30_000, interval: 25 })
-    expect(await countReviewAgentRuns(root.storeId)).toBe(2)
+    expect(supervisorSpawns(h)).toEqual([])
+    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
 
     // The reviewer's own first request: the source, its real outcome, and the
     // pack the judgement rests on — read off the adapter, not off the prompt the
@@ -359,11 +350,9 @@ describe('a failed review is accepted on its own (A5)', () => {
     expect((await h.snapshot(root.storeId)).diagnoses).toHaveLength(1)
   }, 60_000)
 
-  it('accepts a review that settled verified on its own under the shipped policy (autoReview: all)', async () => {
-    // The default is `all`: a verified terminal review is the automatic trigger's
-    // business exactly as a failed one is, so a reviewer is accepted, claimed and
-    // spawned with no tool call and no model request asking for it.
-    const { h, tree, root } = await oneChild('true')
+  it('accepts a verified review when autoReview: all is explicitly configured', async () => {
+    // This deployment requests successful postmortems explicitly.
+    const { h, tree, root } = await oneChild('true', { supervision: { autoReview: 'all' } })
     const snapshot = await vi.waitFor(async () => {
       const current = await h.snapshot(root.storeId)
       expect(current.reviews.find(review => review.taskId === tree.childTaskId)?.outcome).toBe('verified')
@@ -387,10 +376,9 @@ describe('a failed review is accepted on its own (A5)', () => {
       sessionId: reviewer,
       started: true,
     })
-    // The diagnosis this reviewer records is handed to its supervisor too: the
-    // same two coordination runs a failed round spends.
-    await vi.waitFor(() => expect(supervisorSpawns(h)).toHaveLength(1), { timeout: 30_000, interval: 25 })
-    expect(await countReviewAgentRuns(root.storeId)).toBe(2)
+    expect(supervisorSpawns(h)).toEqual([])
+    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
+
     // The reviewer's own first request carries the real outcome: it is a
     // postmortem of a success, judged from the same pack shape a failure's is.
     const input = await vi.waitFor(() => {
@@ -413,7 +401,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     // 'failed'` keeps a success out of the automatic chain. The whole batch is
     // over by now — the review was recorded before it ended — and nothing was
     // accepted: one worker, no reviewer, no ledger row.
-    const { h, tree, root } = await oneChild('true', { supervision: { autoReview: 'failed' } })
+    const { h, tree, root } = await oneChild('true')
     const snapshot = await vi.waitFor(async () => {
       const current = await h.snapshot(root.storeId)
       expect(current.reviews.find(review => review.taskId === tree.childTaskId)?.outcome).toBe('verified')
@@ -490,7 +478,6 @@ describe('a failed review is accepted on its own (A5)', () => {
 
   it('reviews a verified source on an explicit call, and only on an explicit call under autoReview: failed', async () => {
     const parked = Promise.withResolvers<void>()
-    const supervisorUp = Promise.withResolvers<void>()
     const focus = 'the user asked what went well in the release work'
     // The success postmortem, answered in the A5 shape: a real observation of a
     // source that did not fail, a conclusion of "no improvement needed", and no
@@ -503,13 +490,8 @@ describe('a failed review is accepted on its own (A5)', () => {
       supervision: { autoReview: 'failed' },
       park: () => parked.promise,
       reviewer: [{ text: successReply }],
-      // The supervisor stays open, so the pack reads the delegation while it is
-      // still the hand-off's owner.
-      supervisor: [{ hang: true }],
       tail: () => [
         { tool: 'task_review_agent', args: () => ({ taskId: tree.childTaskId, runId: tree.childRunId, reason: focus }) },
-        // The pack reads the hand-off after its supervisor really started.
-        { waitFor: () => supervisorUp.promise },
         { tool: 'task_review_pack', args: () => ({ taskId: tree.childTaskId, runId: tree.childRunId }) },
         { text: 'root: the postmortem is on the record' },
       ],
@@ -529,17 +511,8 @@ describe('a failed review is accepted on its own (A5)', () => {
     parked.resolve()
     await vi.waitFor(() => expect(reviewerSpawns(h)).toHaveLength(1), { timeout: 30_000, interval: 25 })
     const reviewer = String(reviewerSpawns(h)[0]!.sessionId)
-    // The verified diagnosis is a hand-off: wait for its supervisor (which stays
-    // open) — and for the ledger to show its started row — before letting the
-    // root's pack read the record.
-    await vi.waitFor(() => expect(supervisorSpawns(h)).toHaveLength(1), { timeout: 30_000, interval: 25 })
-    const supervisor = String(supervisorSpawns(h)[0]!.sessionId)
-    await vi.waitFor(async () => {
-      const row = (await readReviewAgentAttempts(root.storeId)).find(attempt => attempt.role === 'supervisor')
-      expect(row?.sessionId).toBe(supervisor)
-      expect(row?.started).toBe(true)
-    }, { timeout: 30_000, interval: 25 })
-    supervisorUp.resolve()
+    await vi.waitFor(async () => expect((await reviewerAttempts(root.storeId))[0]?.settlement?.status).toBe('recorded'))
+    expect(supervisorSpawns(h)).toEqual([])
 
     // The explicit call is admitted on its own: the reason it named is durable in
     // the attempt, and the reviewer's own first request carries it beside the
@@ -579,9 +552,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     expect(after.reviews).toEqual(before.reviews)
     expect(after.reviews.find(review => review.taskId === tree.childTaskId)?.outcome).toBe('verified')
 
-    // The pack reads the conclusion back and reports the diagnosis as the
-    // hand-off it is: a conclusion without suggestions is still one (A5 §3 as
-    // amended), and the supervisor that owns it is named.
+    // A successful child conclusion remains parent-owned and spends no supervisor.
     const pack = await vi.waitFor(() => {
       const call = h.calls.find(item => item.name === 'task_review_pack' && item.result !== undefined)
       expect(call).toBeDefined()
@@ -589,7 +560,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     }, { timeout: 30_000, interval: 25 })
     expect(pack).toContain('no improvement needed')
     expect(pack).toContain('review attempts (1):')
-    expect(pack).toContain('handoff: taken up — this hand-off is delegated to supervisor session')
+    expect(pack).toContain('handoff: parent-owned')
   }, 60_000)
 
   it('settles exactly as before in a deployment that mounts no trigger at all', async () => {
@@ -688,14 +659,13 @@ describe('a failed review is accepted on its own (A5)', () => {
 
     // One source, one attempt: the automatic claim is the attempt both entries
     // share, and the reviewer the automatic trigger started is the only one. The
-    // diagnosis that attempt recorded is a hand-off of its own, so the store
-    // spent two coordination runs: the reviewer's and its supervisor's.
+    // ordinary child diagnosis is handled by its parent, spending one coordination run.
     const attempts = await reviewerAttempts(root.storeId)
     expect(attempts).toHaveLength(1)
     expect(attempts[0]!.sessionId).toBe(String(reviewerSpawns(h)[0]!.sessionId))
     expect(reviewerSpawns(h)).toHaveLength(1)
-    await vi.waitFor(() => expect(supervisorSpawns(h)).toHaveLength(1), { timeout: 30_000, interval: 25 })
-    expect(await countReviewAgentRuns(root.storeId)).toBe(2)
+    expect(supervisorSpawns(h)).toEqual([])
+    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
   }, 60_000)
 
   it('retries a source the automatic trigger had to skip on a graph activation, and only reads what it started', async () => {
@@ -726,16 +696,15 @@ describe('a failed review is accepted on its own (A5)', () => {
     const attempts = await reviewerAttempts(root.storeId)
     expect(attempts).toHaveLength(1)
     expect(attempts[0]).toMatchObject({ source: { taskId: tree.childTaskId, runId: tree.childRunId }, started: true })
-    // The recorded diagnosis is handed to its supervisor (a second coordination
-    // run), and that delegation is what the second activation reads.
-    await vi.waitFor(() => expect(supervisorSpawns(h)).toHaveLength(1), { timeout: 30_000, interval: 25 })
+    await vi.waitFor(async () => expect((await reviewerAttempts(root.storeId))[0]?.settlement?.status).toBe('recorded'))
+    expect(supervisorSpawns(h)).toEqual([])
 
     // A second activation only reads: the attempt already exists, and nothing is
     // claimed or spawned again.
     h.ctx.emit('graphs/selected', graph as never)
     await vi.waitFor(() => expect(lines.filter(line => line.includes(tree.childTaskId))).not.toEqual([]))
     expect(reviewerSpawns(h)).toHaveLength(1)
-    expect(await countReviewAgentRuns(root.storeId)).toBe(2)
+    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
     expect(await reviewerAttempts(root.storeId)).toHaveLength(1)
     expect(lines.some(line => line.includes('already has an attempt'))).toBe(true)
   }, 60_000)
@@ -884,13 +853,8 @@ describe('a failed review is accepted on its own (A5)', () => {
     // The attempt really reached its diagnosis and its terminal fact…
     await vi.waitFor(async () => expect((await reviewerAttempts(root.storeId))[0]?.settlement?.status).toBe('recorded'))
     expect((await h.snapshot(root.storeId)).diagnoses).toHaveLength(1)
-    // The recorded diagnosis is a hand-off: its supervisor is started, and it
-    // settles (interrupted — it issued nothing) before the ledger is cut below.
-    await vi.waitFor(() => expect(supervisorSpawns(h)).toHaveLength(1), { timeout: 30_000, interval: 25 })
-    await vi.waitFor(async () => {
-      const supervisor = (await readReviewAgentAttempts(root.storeId)).find(attempt => attempt.role === 'supervisor')
-      expect(supervisor?.settlement).toBeDefined()
-    }, { timeout: 30_000, interval: 25 })
+    expect(supervisorSpawns(h)).toEqual([])
+    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
 
     // …and then the process died in the window between the two writes: the store
     // holds the diagnosis, the ledger holds no terminal row for the attempt. The
@@ -915,17 +879,15 @@ describe('a failed review is accepted on its own (A5)', () => {
     }
 
     // The recovery is one terminal row for the reviewer — not one per call — and
-    // nothing else moved: one claim and one started row per role (the reviewer's
-    // and the hand-off's supervisor), one reviewer, one diagnosis, and the two
-    // coordination runs the store spent.
+    // nothing else moved: one claim, one started row, one reviewer and one diagnosis.
     const settled = ledgerRows().filter(row => row.kind === 'settled')
     expect(settled).toHaveLength(1)
     expect(settled[0]).toMatchObject({ status: 'recorded', sessionId: reviewer })
-    expect(ledgerRows().filter(row => row.kind === 'claim')).toHaveLength(2)
-    expect(ledgerRows().filter(row => row.kind === 'started')).toHaveLength(2)
+    expect(ledgerRows().filter(row => row.kind === 'claim')).toHaveLength(1)
+    expect(ledgerRows().filter(row => row.kind === 'started')).toHaveLength(1)
     expect(reviewerSpawns(h)).toHaveLength(1)
     expect((await h.snapshot(root.storeId)).diagnoses).toHaveLength(1)
-    expect(await countReviewAgentRuns(root.storeId)).toBe(2)
+    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
   }, 60_000)
 })
 
@@ -971,7 +933,7 @@ describe('the two triggers are the deployment\'s own composition (A5)', () => {
     const failed = await failedTask(stack)
     // Nobody asked for a review: the composition's own installation accepted the
     // source when its failed review was recorded, and the diagnosis it recorded
-    // was handed to its own supervisor — the two coordination runs of the store.
+    // goes to its parent without starting a supervisor.
     await vi.waitFor(() => expect(reviewers(stack)).toHaveLength(1), { timeout: 30_000, interval: 25 })
     const reviewer = String(reviewers(stack)[0]!.sessionId)
     const attempts = (await readReviewAgentAttempts(failed.storeId)).filter(attempt => attempt.role === 'reviewer')

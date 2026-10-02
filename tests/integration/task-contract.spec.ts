@@ -325,7 +325,7 @@ async function expectCreatedTask(h: Generation, root: Root, objective: string, c
   const child = taskWithObjective(snapshot, objective)
   expect(child.parentTaskId).toBe(root.taskId)
   expect(child.objective).toBe(objective)
-  expect(child.definitionRef).toEqual({ taskType: 'subtask', version: 1 })
+  expect(child.definitionRef).toEqual({ taskType: `contract:${child.contractDigest}`, version: 1, digest: child.contractDigest })
   expect(child.status).toBe('verified')
   expect(child.acceptanceCriteria.map(criterion => criterion.criterionId)).toEqual([criterionId])
   expect(child.contract?.contractVersion).toBe(1)
@@ -333,7 +333,7 @@ async function expectCreatedTask(h: Generation, root: Root, objective: string, c
 
   const created = payloadOf(h, 'TaskCreated', child.taskId)?.task
   expect(created?.objective).toBe(objective)
-  expect(created?.definitionRef).toEqual({ taskType: 'subtask', version: 1 })
+  expect(created?.definitionRef).toEqual(child.definitionRef)
   expect(created?.contract?.objective).toBe(objective)
   // The verdicts are the real verifiers': the command verifier judged the
   // child's deterministic criterion and the root's own independent one, the

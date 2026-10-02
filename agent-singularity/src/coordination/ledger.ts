@@ -74,10 +74,7 @@ export interface ReviewAgentSettledRecord {
 }
 
 /** Every row the ledger file may hold. */
-export type ReviewAgentLedgerRow =
-  | ReviewAgentClaimRecord
-  | ReviewAgentStartedRecord
-  | ReviewAgentSettledRecord
+export type ReviewAgentLedgerRow = ReviewAgentClaimRecord | ReviewAgentStartedRecord | ReviewAgentSettledRecord
 
 /** One started review agent as a caller submits it (the store id, the format version and the time are the ledger's). */
 export interface ReviewAgentRunStart {
@@ -144,7 +141,8 @@ export interface ReviewAgentAttempt {
 }
 
 /** Why an admission refuses to start an attempt by name. */
-export type ReviewAgentRefusalCode = 'request-key-conflict' | 'request-key-required' | 'budget-exhausted' | 'iteration-cap'
+export type ReviewAgentRefusalCode =
+  'request-key-conflict' | 'request-key-required' | 'budget-exhausted' | 'iteration-cap'
 
 /** The store's review-agent allowance as the admission read it. */
 export interface ReviewAgentBudget {
@@ -159,7 +157,14 @@ export type ReviewAgentPlan =
   /** Another attempt of the same source is not settled: the request is not accepted, nothing is written for it. */
   | { readonly kind: 'in-flight'; readonly attempt: ReviewAgentAttempt }
   /** Refused by name before any claim or spawn. */
-  | { readonly kind: 'refused'; readonly code: ReviewAgentRefusalCode; readonly attempt: ReviewAgentAttempt | undefined; readonly attempts: readonly ReviewAgentAttempt[]; readonly budget: ReviewAgentBudget; readonly reason?: string }
+  | {
+      readonly kind: 'refused'
+      readonly code: ReviewAgentRefusalCode
+      readonly attempt: ReviewAgentAttempt | undefined
+      readonly attempts: readonly ReviewAgentAttempt[]
+      readonly budget: ReviewAgentBudget
+      readonly reason?: string
+    }
   /** A new attempt: claim it, then spawn. */
   | { readonly kind: 'start'; readonly budget: ReviewAgentBudget }
 
@@ -167,7 +172,9 @@ export type ReviewAgentPlan =
 export interface ReviewAgentPlanHooks {
   /** Whether the store already holds this attempt's diagnosis. An attempt whose diagnosis is on the record ended `recorded`, whatever terminal row the ledger is missing — the store is the record of the judgement. */
   readonly recorded?: (attempt: ReviewAgentAttempt) => boolean | Promise<boolean>
-  /** The hand-off source's round facts, when the caller read them: a capped source plans nothing (see {@link planSupervisorAttempt}). */
+  /** Existing proposal facts show an unfinished operation after the previous coordinator stopped. */
+  readonly resumeRecorded?: boolean
+  /** The hand-off source's round facts; a capped source plans nothing. */
   readonly supervisionRounds?: SupervisionRounds
 }
 
@@ -259,25 +266,36 @@ function startedRowsOf(rows: readonly ReviewAgentLedgerRow[], rootStoreId: strin
 function attemptsOf(rows: readonly ReviewAgentLedgerRow[], rootStoreId: string): ReviewAgentAttempt[] {
   const startedSessions = new Set(startedRowsOf(rows, rootStoreId).map(row => row.sessionId))
   const settled = new Map<string, ReviewAgentSettlement>()
-  for (const row of storeRows(rows, rootStoreId, (candidate): candidate is ReviewAgentSettledRecord => candidate.formatVersion === 2 && candidate.kind === 'settled')) {
+  for (const row of storeRows(
+    rows,
+    rootStoreId,
+    (candidate): candidate is ReviewAgentSettledRecord => candidate.formatVersion === 2 && candidate.kind === 'settled',
+  )) {
     if (!settled.has(row.sessionId)) {
-      settled.set(row.sessionId, { status: row.status, ...(row.note === undefined ? {} : { note: row.note }), at: row.at })
+      settled.set(row.sessionId, {
+        status: row.status,
+        ...(row.note === undefined ? {} : { note: row.note }),
+        at: row.at,
+      })
     }
   }
-  return storeRows(rows, rootStoreId, (candidate): candidate is ReviewAgentClaimRecord => candidate.formatVersion === 2 && candidate.kind === 'claim')
-    .map(row => ({
-      role: roleOf(row.role),
-      source: { taskId: row.taskId, runId: row.runId },
-      requestKey: row.requestKey,
-      reason: row.reason,
-      ...(row.diagnosisId === undefined ? {} : { diagnosisId: row.diagnosisId }),
-      ...(row.handoffDigest === undefined ? {} : { handoffDigest: row.handoffDigest }),
-      sessionId: row.sessionId,
-      actor: row.actor,
-      at: row.at,
-      started: startedSessions.has(row.sessionId),
-      settlement: settled.get(row.sessionId),
-    }))
+  return storeRows(
+    rows,
+    rootStoreId,
+    (candidate): candidate is ReviewAgentClaimRecord => candidate.formatVersion === 2 && candidate.kind === 'claim',
+  ).map(row => ({
+    role: roleOf(row.role),
+    source: { taskId: row.taskId, runId: row.runId },
+    requestKey: row.requestKey,
+    reason: row.reason,
+    ...(row.diagnosisId === undefined ? {} : { diagnosisId: row.diagnosisId }),
+    ...(row.handoffDigest === undefined ? {} : { handoffDigest: row.handoffDigest }),
+    sessionId: row.sessionId,
+    actor: row.actor,
+    at: row.at,
+    started: startedSessions.has(row.sessionId),
+    settlement: settled.get(row.sessionId),
+  }))
 }
 
 /** The role a row or a request belongs to: an older row carries none and is a reviewer's. */
@@ -300,7 +318,8 @@ export function planReviewAttempt(input: {
   const mine = attemptsOfRole(input.attempts, 'reviewer').filter(attempt => sameSource(attempt.source, request.source))
   const same = mine.find(attempt => attempt.requestKey === request.requestKey)
   if (same !== undefined) {
-    if (same.reason !== request.reason) return { kind: 'refused', code: 'request-key-conflict', attempt: same, attempts: mine, budget }
+    if (same.reason !== request.reason)
+      return { kind: 'refused', code: 'request-key-conflict', attempt: same, attempts: mine, budget }
     return { kind: 'reuse', attempt: same }
   }
   const open = mine.find(attempt => attempt.settlement === undefined)
@@ -308,7 +327,8 @@ export function planReviewAttempt(input: {
   if (mine.length > 0 && request.requestKey === null) {
     return { kind: 'refused', code: 'request-key-required', attempt: mine.at(-1), attempts: mine, budget }
   }
-  if (budget.used >= budget.max) return { kind: 'refused', code: 'budget-exhausted', attempt: undefined, attempts: mine, budget }
+  if (budget.used >= budget.max)
+    return { kind: 'refused', code: 'budget-exhausted', attempt: undefined, attempts: mine, budget }
   return { kind: 'start', budget }
 }
 
@@ -318,9 +338,12 @@ export function planSupervisorAttempt(input: {
   readonly request: ReviewAgentAttemptRequest
   readonly budget: ReviewAgentBudget
   readonly rounds?: SupervisionRounds
+  readonly resumeRecorded?: boolean
 }): ReviewAgentPlan {
   const { request, budget } = input
-  const mine = attemptsOfRole(input.attempts, 'supervisor').filter(attempt => attempt.diagnosisId === request.diagnosisId)
+  const mine = attemptsOfRole(input.attempts, 'supervisor').filter(
+    attempt => attempt.diagnosisId === request.diagnosisId,
+  )
   const conflicting = mine.find(attempt => attempt.handoffDigest !== request.handoffDigest)
   if (conflicting !== undefined) {
     return { kind: 'refused', code: 'request-key-conflict', attempt: conflicting, attempts: mine, budget }
@@ -329,14 +352,20 @@ export function planSupervisorAttempt(input: {
   if (takenUp !== undefined) return { kind: 'reuse', attempt: takenUp }
   const open = mine.find(attempt => attempt.settlement === undefined)
   if (open !== undefined) return { kind: 'in-flight', attempt: open }
-  // The hand-off reached its outcome: the supervisor that owns it stays its identity, and nothing is started again.
-  const concluded = mine.filter(attempt => attempt.settlement !== undefined && attempt.settlement.status !== 'interrupted').at(-1)
+  // Closed outcomes and completed recovery keep their identity; unfinished durable proposals may continue.
+  const concluded = mine
+    .filter(
+      attempt =>
+        attempt.settlement?.status === 'closed' || (attempt.settlement?.status === 'recorded' && !input.resumeRecorded),
+    )
+    .at(-1)
   if (concluded !== undefined) return { kind: 'reuse', attempt: concluded }
   const cap = input.rounds === undefined ? undefined : roundCapRefusal(input.rounds)
   if (cap !== undefined) {
     return { kind: 'refused', code: 'iteration-cap', reason: cap.reason, attempt: undefined, attempts: mine, budget }
   }
-  if (budget.used >= budget.max) return { kind: 'refused', code: 'budget-exhausted', attempt: undefined, attempts: mine, budget }
+  if (budget.used >= budget.max)
+    return { kind: 'refused', code: 'budget-exhausted', attempt: undefined, attempts: mine, budget }
   return { kind: 'start', budget }
 }
 
@@ -353,7 +382,10 @@ export async function readReviewAgentAttempts(rootStoreId: string): Promise<Revi
 }
 
 /** The supervisor one hand-off is delegated to, as the ledger holds it: the newest started attempt that is still open or ended with an outcome; an interrupted attempt is a failure, not the hand-off's owner. */
-export async function readSupervisorHandoff(rootStoreId: string, diagnosisId: string): Promise<ReviewAgentAttempt | undefined> {
+export async function readSupervisorHandoff(
+  rootStoreId: string,
+  diagnosisId: string,
+): Promise<ReviewAgentAttempt | undefined> {
   const attempts = await readReviewAgentAttempts(rootStoreId)
   return attempts
     .filter(attempt => attempt.role === 'supervisor' && attempt.diagnosisId === diagnosisId && attempt.started)
@@ -432,7 +464,7 @@ export async function admitReviewAgent<T>(
   const key = budgetKey(rootStoreId)
   const previous = regions.get(key) ?? Promise.resolve()
   const result = previous.then(async () => {
-    const rows = await readLedgerRows() ?? []
+    const rows = (await readLedgerRows()) ?? []
     const started = startedRowsOf(rows, rootStoreId).length
     // One region's own view of the store: the rows it read, plus every row its
     // doors write while it holds the region. A caller that decides twice inside
@@ -463,8 +495,12 @@ export async function admitReviewAgent<T>(
           const recorded = (await hooks?.recorded?.(attempt)) === true
           const status: ReviewAgentSettlementStatus = recorded ? 'recorded' : 'interrupted'
           const note = recorded
-            ? DIAGNOSIS_ALREADY_RECORDED
-            : attempt.started ? STARTED_OWNER_GONE : CLAIM_NEVER_STARTED
+            ? requestRole === 'reviewer'
+              ? DIAGNOSIS_ALREADY_RECORDED
+              : 'the proposal or recovery outcome is durable; resume from its recorded facts'
+            : attempt.started
+              ? STARTED_OWNER_GONE
+              : CLAIM_NEVER_STARTED
           await settleReviewAgentAttempt({
             rootStoreId,
             taskId: attempt.source.taskId,
@@ -476,14 +512,16 @@ export async function admitReviewAgent<T>(
           Object.assign(attempt, { settlement })
           recovered.push(attempt)
         }
-        const plan = requestRole === 'supervisor'
-          ? planSupervisorAttempt({
-            attempts,
-            request,
-            budget: { used, max: reviewAgentBudget() },
-            ...(hooks?.supervisionRounds === undefined ? {} : { rounds: hooks.supervisionRounds }),
-          })
-          : planReviewAttempt({ attempts, request, budget: { used, max: reviewAgentBudget() } })
+        const plan =
+          requestRole === 'supervisor'
+            ? planSupervisorAttempt({
+                attempts,
+                request,
+                budget: { used, max: reviewAgentBudget() },
+                resumeRecorded: hooks?.resumeRecorded,
+                ...(hooks?.supervisionRounds === undefined ? {} : { rounds: hooks.supervisionRounds }),
+              })
+            : planReviewAttempt({ attempts, request, budget: { used, max: reviewAgentBudget() } })
         return { plan, recovered }
       },
       claim: async request => {
@@ -582,7 +620,10 @@ export interface SupervisorDelegationRecord extends ReviewerBindingRecord {
 }
 
 /** The supervisor delegation of one (session, diagnosis) pair, as the ledger holds it, or `undefined` when no started row names both. */
-export async function readSupervisorDelegation(sessionId: string, diagnosisId: string): Promise<SupervisorDelegationRecord | undefined> {
+export async function readSupervisorDelegation(
+  sessionId: string,
+  diagnosisId: string,
+): Promise<SupervisorDelegationRecord | undefined> {
   let rows: ReviewAgentLedgerRow[] | undefined
   try {
     rows = await readLedgerRows()

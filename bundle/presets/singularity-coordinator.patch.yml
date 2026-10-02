@@ -1,0 +1,11 @@
+# Shared host composition; agent-runtime installs the reviewer or supervisor policy at spawn.
+# Tools are restricted by the coordination role's grant.
+- insert:
+    - id: preset-singularity-coordinator
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: singularity-coordinator
+        name: singularity-coordinator
+        description: Singularity coordination host for reviewer and supervisor roles.
+        order: 20
+        plugins: []

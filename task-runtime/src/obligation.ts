@@ -5,7 +5,7 @@
 
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import type { Obligation, TaskSnapshot } from '@dangosys/dsh-singularity-task'
+import type { TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { message, nonBlank } from './helpers.ts'
 
 /** One known obligation of a domain pack: a question plus what would answer it. */
@@ -110,37 +110,23 @@ export async function loadObligationTemplates(repoRoot: string): Promise<Obligat
   return files
 }
 
-/** The text a recorded obligation carries, for mention matching. */
-function obligationText(obligation: Obligation): string {
-  return `${obligation.goal}\n${obligation.criterion}`
-}
-
-/**
- * Compare one template set against the current task graph. An entry is covered
- * when a task requested one of its typical capabilities (`via capability
- */
+/** A domain obligation is satisfied only by a matching criterion in the latest verified run's evidence. */
 export function checkObligationCoverage(
   templates: readonly ObligationTemplate[],
   snapshot: TaskSnapshot,
 ): ObligationCoverage {
-  const requested = new Set(snapshot.tasks.flatMap(task => task.requestedCapabilities))
-  const obligations = snapshot.obligations
   const covered: ObligationCoverage['covered'] = []
   const uncovered: ObligationTemplate[] = []
   for (const template of templates) {
-    const capability = template.typicalCapabilities.find(name => requested.has(name))
-    if (capability !== undefined) {
-      covered.push({ template, via: `capability ${capability}` })
-      continue
-    }
-    const obligation = obligations.find(
-      item => obligationText(item).includes(template.id) || obligationText(item).includes(template.question),
-    )
-    if (obligation !== undefined) {
-      covered.push({ template, via: `obligation ${obligation.obligationId}` })
-      continue
-    }
-    uncovered.push(template)
+    const evidence = snapshot.tasks.flatMap(task => {
+      if (task.status !== 'verified' || !task.acceptanceCriteria.some(criterion => criterion.criterionId === template.id)) return []
+      const runId = task.runIds.at(-1)
+      if (!snapshot.runs.some(run => run.runId === runId && run.status === 'verified')) return []
+      return snapshot.evidence.filter(bundle => bundle.taskRunId === runId && bundle.taskId === task.taskId &&
+        bundle.verifierResults.some(result => result.criterionId === template.id && result.status === 'pass'))
+    })[0]
+    if (evidence === undefined) uncovered.push(template)
+    else covered.push({ template, via: `evidence ${evidence.evidenceId}` })
   }
   return { covered, uncovered }
 }

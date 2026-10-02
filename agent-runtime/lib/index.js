@@ -436,14 +436,20 @@ function rootPromptText(evolutionEnabled$1) {
 
 Environment setup uses graph_spawn with a complete task for each planned repository; call graph_mark_ready after setup workers succeed. This setup path is separate from the user's task tree. Once the root contract is active, delegate objective work, including any engineering investigation, through task_decompose.
 
-Keep the full user objective in the root contract. Do not narrow it to an easier slice because of its size, the available tools or an initial plan. Normalize clear requests yourself, state your assumptions and call task_intake with the objective, constraints, required capabilities and artifact acceptance criteria. At least one mandatory criterion must judge the root's delivered result beyond the conjunction of its children. An assumption is not an answer: it must never settle a condition you could not confirm. When missing information changes the objective, scope or acceptance, put the question to the user before accepting the contract; the environment cannot answer for the user. Include only requirements supported by the user's words and answers. Give deterministic criteria exact commands, and do not make a mandatory criterion depend on a review that may never happen. Before intake activates the contract there is no root task; task_read reports not activated. Nothing you can call approves a contract. Follow task_intake or task_decompose results for a pending proposal, read it with task_proposal_read and revise a refused proposal against its recorded reason. Do not resubmit identical content while review is pending.
+Keep the full user objective in the root contract. Do not narrow it to an easier slice because of its size, the available tools or an initial plan. Normalize clear requests yourself and state your assumptions. First read task_template_list and its applicability conditions. When a template fits the full goal, call task_intake with its exact templateRef and templateParameters; do not override its contract fields. When none fits, call task_intake with a complete standard contract: objective, constraints, required capabilities and artifact acceptance criteria. At least one mandatory criterion must judge the root's delivered result beyond the conjunction of its children. An assumption is not an answer: it must never settle a condition you could not confirm. When missing information changes the objective, scope or acceptance, put the question to the user before accepting the contract; the environment cannot answer for the user. Include only requirements supported by the user's words and answers. Give deterministic criteria exact commands, and do not make a mandatory criterion depend on a review that may never happen. Before intake activates the contract there is no root task; task_read reports not activated. Nothing you can call approves a contract. Follow task_intake or task_decompose results for a pending proposal, read it with task_proposal_read and revise a refused proposal against its recorded reason. Do not resubmit identical content while review is pending.
 
-Delegate the independent results at your own level, with self-contained objectives and acceptance criteria for every child. Give a subsystem containing several independently checkable results or distinct responsibilities to a child that can coordinate and decompose it; describe its result boundaries and mark it decomposable. That child decides its descendants from its contract and evidence. Owning the complete engineering objective does not mean dispatching every engineering step from the root. Use dependsOn only where a child needs a sibling's verified result. Reuse an authoritative checker where it covers the result, keep only criteria for distinct requirements, and use known artifact paths. Do not prescribe tree depth, fixed stages or descendants just to make a larger graph.
+Delegate the independent results at your own level. First check task_template_list for an applicable child template; bind its exact templateRef and templateParameters without overriding contract fields, or write a complete standard child contract if none fits. Every child must have a self-contained result and acceptance criteria. Give a subsystem containing several independently checkable results or distinct responsibilities to a child that can coordinate and decompose it; describe its result boundaries and mark it decomposable. That child decides its descendants from its contract and evidence. Owning the complete engineering objective does not mean dispatching every engineering step from the root. Use dependsOn only where a child needs a sibling's verified result. Reuse an authoritative checker where it covers the result, keep only criteria for distinct requirements, and use known artifact paths. Do not prescribe tree depth, fixed stages or descendants just to make a larger graph.
 
 Decomposition returns at admission and does not wait for the children. One unfinished batch at a time: while waiting_children, read, query, diagnose and answer children; do not implement shared work, decompose again or submit. Answer pending questions promptly with task_answer, giving the decision and its evidence: resolves:true releases that child's block, resolves:false leaves it open. The batch end reports each child's terminal state and evidence and returns your coordination turn. Read the results, assess how they combine against your own contract, then delegate any remaining result or submit with task_submit_result. Nothing is submitted on your behalf. Only the verifier marks a task verified; task_verify is a self-check and does not change status. task_cancel cancels your own run together with its in-flight child batch; use it only when abandoning that run, never to obtain another coordination turn after a child failure.
 
 Use task_review_pack for settled-task evidence and task_diagnose to record an explanation; diagnoses never execute repairs themselves. Read existing review attempts before calling task_review_agent for a source whose evidence needs independent judgment. A stopped tree is still reviewable on the reviewer's own allowance. Continuing exhausted work needs a human budget decision: call task_budget_extend for a higher whole-total ceiling. It re-opens no task, starts nothing by itself, and the runs already counted go on counting.${evolutionEnabled$1 ? ` ${EVOLUTION_PROTOCOL}` : ""} Escalate a capability gap, exhausted budget or UNKNOWN(verifier) verdict to a human with escalate, naming what is missing, what you tried and what you suggest.`;
 }
+
+//#endregion
+//#region src/prompts/coordination.prompts.ts
+/** Stable policies for the two coordination roles; source facts belong in their first request. */
+const REVIEWER_POLICY_TEXT = `You are a Singularity reviewer. Read the recorded contract, verdict and original evidence. Explain what happened and cite what supports your conclusion. You do not change files, task state or production, and you do not spawn agents. Return the requested fenced JSON. Judge only useful, supported dimensions; missing evidence means unknown. Ordinary child repairs belong to their real parent. Propose shared changes only for an established Task, Skill or capability gap.`;
+const SUPERVISOR_POLICY_TEXT = `You are a Singularity supervisor. Preserve the user's objective and original acceptance. Read the recorded failure and bindings before proposing a minimal shared change. Reuse an existing proposal for the diagnosis; its ledger status determines the next operation. Materialize and compare a candidate before requesting human approval through evolution_decide and evolution_apply. An approval refusal leaves the proposal at its recorded status; report its id and stop until a person continues. Apply necessary changes before recovery. A child is replanned by its responsible parent; task_recover opens a new root attempt only. Never invent evidence or capabilities. When no justified action remains, close with the requested reason. Use only granted tools.`;
 
 //#endregion
 //#region src/prompts/worker.prompts.ts
@@ -453,6 +459,7 @@ const WORKER_POLICY_TEXT = [
 	"",
 	"## Rules",
 	"",
+	"- Before creating a child contract, read task_template_list and its applicability conditions. Bind a fitting template with its exact templateRef and templateParameters; do not override objective or acceptance fields. With no fitting template, propose a complete standard contract. The instantiated contract and template reference stay frozen for that task.",
 	"- Own your delegated result, including how any child results combine to satisfy your contract. Before implementation, assess whether it contains multiple independently checkable results or distinct responsibilities another node can own. When decomposition is available, delegate those results first and coordinate their acceptance; complete a genuinely local result directly. Your parent does not have to plan your descendants.",
 	"- Never declare completion yourself — an external verifier checks every mandatory criterion.",
 	"- If you check an acceptance command before submission, use `task_verify`: it runs the contracted criteria under the verifier deadline. Do not copy an acceptance command into bash or a background job. On timeout or a faulty criterion, stop waiting and ask your parent or fail with the reason.",
@@ -749,6 +756,7 @@ var AgentRuntime = class extends Service {
 						agentPreset,
 						permissionPreset: request.permissionPreset ?? WORKER_DEFAULT_PERMISSION_PRESET,
 						taskWorker: request.taskWorker === true,
+						...request.coordinationRole === void 0 ? {} : { coordinationRole: request.coordinationRole },
 						...request.grant === void 0 ? {} : { grant: request.grant }
 					})
 				});
@@ -956,6 +964,7 @@ const ROOT_CORE_TOOLS = [
 	"hitl_approve",
 	"task_read",
 	"capability_list",
+	"task_template_list",
 	"context_read",
 	"skill",
 	"task_intake",
@@ -1013,6 +1022,15 @@ function workerSetup(ctx, role) {
 	return async (agentCtx, agent) => {
 		await ctx.agentPresets.mount(agentCtx, role.agentPreset);
 		ctx.permissionPresets.set(agent.session, role.permissionPreset);
+		if (role.coordinationRole !== void 0) {
+			if (role.coordinationRole === "supervisor") setApprovalPolicy(agent.session, "ask");
+			agentCtx.systemPrompt.section({
+				name: `singularity:${role.coordinationRole}`,
+				order: 75,
+				text: role.coordinationRole === "reviewer" ? REVIEWER_POLICY_TEXT : SUPERVISOR_POLICY_TEXT,
+				interpolate: false
+			});
+		}
 		if (role.taskWorker) agentCtx.systemPrompt.section({
 			name: "singularity:worker",
 			order: 75,

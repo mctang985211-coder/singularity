@@ -1,6 +1,6 @@
 /** Contract and admission-limit shape checks. @module @dangosys/dsh-singularity-task/service/checks/contract */
 
-import { TASK_CONTRACT_VERSION, canonicalize, type DecompositionAdmission, type TaskContract } from '../../contract.ts'
+import { TASK_CONTRACT_VERSION, canonicalize, contractDigest, type DecompositionAdmission, type TaskContract } from '../../contract.ts'
 import type { TaskId, TaskInstance } from '../../types.ts'
 import { isRecord } from './primitives.ts'
 
@@ -15,6 +15,14 @@ export function assertContract(taskId: TaskId, contract: TaskContract, task: Tas
   }
   if (canonicalize(task.requestedCapabilities) !== canonicalize(contract.requiredCapabilities)) {
     throw new Error(`task: task "${taskId}" requested capabilities disagree with its contract`)
+  }
+  if (task.contractDigest !== undefined && task.contractDigest !== contractDigest(contract)) {
+    throw new Error(`task: task "${taskId}" contractDigest disagrees with its contract`)
+  }
+  for (const field of ['templateRef', 'templateParameters'] as const) {
+    if (canonicalize(task[field] ?? null) !== canonicalize(contract[field] ?? null)) {
+      throw new Error(`task: task "${taskId}" ${field} disagrees with its contract`)
+    }
   }
 }
 
@@ -37,6 +45,17 @@ export function assertContractFields(where: string, contract: TaskContract): voi
   }
   if (typeof contract.objective !== 'string') {
     throw new Error(`task: ${where} contract objective must be a string`)
+  }
+  const ref = contract.templateRef
+  if (ref !== undefined && (!isRecord(ref) || typeof ref.id !== 'string' || !Number.isSafeInteger(ref.version) ||
+    ref.version < 1 || typeof ref.digest !== 'string' || !/^[a-f0-9]{64}$/.test(ref.digest))) {
+    throw new Error(`task: ${where} templateRef must pin an id, positive version and SHA-256 digest`)
+  }
+  const parameters = contract.templateParameters
+  if ((ref === undefined) !== (parameters === undefined) || (parameters !== undefined &&
+    (!isRecord(parameters) || Object.values(parameters).some(value =>
+      !['string', 'number', 'boolean'].includes(typeof value) || (typeof value === 'number' && !Number.isFinite(value)))))) {
+    throw new Error(`task: ${where} templateRef and primitive templateParameters must be recorded together`)
   }
 }
 

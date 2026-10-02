@@ -97,13 +97,27 @@ describe('checkObligationCoverage', () => {
     childTaskIds: [],
   })
 
-  test('a capability the graph requested covers the template entry (hit)', () => {
+  test('requesting a capability does not satisfy an obligation', () => {
     const coverage = checkObligationCoverage(
       [template()],
       snapshot({ tasks: [taskRequesting(['run-bemu-regression'])] }),
     )
-    expect(coverage.uncovered).toEqual([])
-    expect(coverage.covered).toEqual([{ template: template(), via: 'capability run-bemu-regression' }])
+    expect(coverage.covered).toEqual([])
+    expect(coverage.uncovered).toEqual([template()])
+  })
+
+  test('only the latest verified run with an explicit matching criterion and passing evidence satisfies it', () => {
+    const task = { ...taskRequesting(['run-bemu-regression']), runIds: ['r-old', 'r-new'], acceptanceCriteria: [{
+      criterionId: template().id, description: 'golden regression', verificationMode: 'deterministic' as const,
+      requiredEvidence: [], mandatory: true, command: 'golden-test',
+    }] }
+    const run = { runId: 'r-new', taskId: 't1', status: 'verified' } as TaskSnapshot['runs'][number]
+    const evidence = { evidenceId: 'e-new', taskId: 't1', taskRunId: 'r-new', artifacts: [], claims: [],
+      generatedAt: '2026-10-03', verifierResults: [{ criterionId: template().id, status: 'pass' as const, verifierId: 'command' }] }
+    const store = snapshot({ tasks: [task], runs: [run], evidence: [evidence] })
+    expect(checkObligationCoverage([template()], store).covered).toEqual([{ template: template(), via: 'evidence e-new' }])
+    expect(checkObligationCoverage([template()], { ...store, evidence: [{ ...evidence, taskRunId: 'r-old' }] }).covered).toEqual([])
+    expect(checkObligationCoverage([template()], { ...store, runs: [{ ...run, status: 'failed' }] }).covered).toEqual([])
   })
 
   test('a template entry no capability and no obligation covers is reported, not blocked (miss)', () => {
@@ -115,7 +129,7 @@ describe('checkObligationCoverage', () => {
     expect(coverage.uncovered.map(item => item.id)).toEqual(['ppa-reachability'])
   })
 
-  test('a recorded obligation naming the entry covers it even with no capable task', () => {
+  test('recording a gap keeps the obligation unresolved', () => {
     const ppa = template({ id: 'ppa-reachability', question: 'PPA 可达性怎么判？', typicalCapabilities: [] })
     const coverage = checkObligationCoverage(
       [ppa],
@@ -130,8 +144,8 @@ describe('checkObligationCoverage', () => {
         ],
       }),
     )
-    expect(coverage.uncovered).toEqual([])
-    expect(coverage.covered[0]!.via).toBe('obligation o1')
+    expect(coverage.covered).toEqual([])
+    expect(coverage.uncovered).toEqual([ppa])
   })
 })
 

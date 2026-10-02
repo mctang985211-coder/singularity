@@ -1,5 +1,7 @@
 # Singularity 复核：先修 supervisor 闭环，再让 Task/Skill 驱动生长
 
+施工进展与验证口径见 [Task / Skill 自改进实现](2026-10-03-task-skill-implementation.md)；本页的源码结论保留为施工前审计记录。
+
 日期：2026-10-03。复核对象：[原评审](2026-10-03-verify-supervisor-core-gaps-review.md)。
 方法：三个 GPT-6 Sol、xhigh 子代理分别只读检查 supervisor/verify、Task/DAG、Evolution/KISS，主代理复查接线并运行定向测试。源码基线：Singularity `d7f7e2273875727d5a405d5106d6e1083f710c07`；外层 harness `145f505bbaf72f4e1a8cfc67c8819908cf82338c`。文中源码路径相对 `packages/singularity/`；部署配置例外标为 harness 路径。
 

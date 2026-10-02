@@ -142,6 +142,7 @@ declare class VerifierRegistry extends Service {
   private executeSamples;
   /** The registered verifier ids, sorted — the vocabulary a criterion's `verifierRef` may name. */
   verifierIds(): string[];
+  verifierSupports(id: string, mode: VerificationMode): boolean;
   /** The version each registered verifier declares, by id; an instance declaring none is absent from the map. */
   verifierVersions(): Record<string, string>;
   /** Best-effort warn through the cordis logger when one is mounted; tests and minimal contexts may not have it. */

@@ -2,6 +2,90 @@ import { Context, Events, Service } from "@deepseek-ai/cordis";
 import { SessionEventMap, SessionEventType, SessionId } from "@deepseek-ai/dsh-session";
 import { SessionHandle } from "@deepseek-ai/dsh-session-persistence";
 
+//#region src/template.d.ts
+interface CriterionSpec {
+  /**
+   * Stable criterion id (T1). Omitted, the runtime generates one from the batch
+   * position (`ac1-1`, `ac2-1`, …) — the scheme every criterion was numbered
+   */
+  criterionId?: string;
+  description: string;
+  command?: string;
+  mode?: VerificationMode;
+  mandatory?: boolean;
+  requiredEvidence?: string[];
+  /**
+   * Evidence dependencies (KISS §5.1): artifact/evidence kinds or ids that must
+   * exist in the store before this criterion can be judged. Since P4 this
+   */
+  requiresArtifact?: string[];
+  /**
+   * Raw-input counterpart of `requiresArtifact` (P4): artifact/evidence kinds
+   * or ids this criterion consumes, where mere existence in the store is the
+   */
+  acceptsArtifact?: string[];
+  /**
+   * The registered verifier id that judges this criterion (KISS §4.1
+   * `verifier_ref`). Absent dispatches by mode (the current behavior);
+   */
+  verifierRef?: string;
+  /**
+   * The parent-level evidence map (KISS §6 C2, P4): which child of the
+   * decomposing task this criterion rests on, by batch position, optionally
+   */
+  childEvidence?: ChildEvidenceRef[];
+  /**
+   * Labels this criterion's judgement heuristic (KISS §5.1, P4): the verdict is
+   * marked as such and never counted as a deterministic pass. Mutually
+   */
+  heuristic?: boolean;
+  /**
+   * Acceptance inputs this criterion's verdict rests on that the executing side
+   * must not modify (S1-V slice 2): acceptance scripts, threshold files,
+   */
+  protectedInputs?: readonly string[];
+}
+type TemplateParameter = string | number | boolean;
+type TemplateParameters = Record<string, TemplateParameter>;
+interface TaskTemplateRef {
+  id: string;
+  version: number;
+  digest: string;
+}
+/** The deliberately small supported JSON Schema vocabulary for template parameters. */
+interface TemplateParametersSchema {
+  type: 'object';
+  properties: Record<string, {
+    type: 'string' | 'number' | 'integer' | 'boolean';
+    description?: string;
+    enum?: TemplateParameter[];
+  }>;
+  required?: string[];
+  additionalProperties: false;
+}
+interface TaskTemplateContract {
+  objective: string;
+  acceptanceCriteria: readonly CriterionSpec[];
+  assumptions?: readonly string[];
+  constraints?: readonly string[];
+  requiredCapabilities?: readonly string[];
+}
+interface TaskTemplate {
+  id: string;
+  version: number;
+  /** Conditions the caller must check before choosing this template. */
+  appliesTo: string[];
+  parametersSchema: TemplateParametersSchema;
+  /** Complete authoring contract; {{name}} placeholders bind declared primitive parameters. */
+  contract: TaskTemplateContract;
+}
+/** Creation accepts either a full contract or a pinned template plus parameters. */
+interface TaskContractInput extends Partial<TaskTemplateContract> {
+  templateRef?: TaskTemplateRef;
+  templateParameters?: TemplateParameters;
+}
+declare function taskTemplateDigest(template: TaskTemplate): string;
+//#endregion
 //#region src/contract.d.ts
 /** The normalized contract version this build writes. Separate from a task template's own generation number and from the event envelope's `schemaVersion` (the store's wire format): this one versions the contract data definition, and an entry … */
 declare const TASK_CONTRACT_VERSION: 1;
@@ -20,6 +104,9 @@ interface TaskContract {
   constraints: string[];
   /** Capability *requirements* by name (never a skill id): the runtime resolves these against its registry. */
   requiredCapabilities: string[];
+  /** Immutable provenance of a template instance; omitted for a free contract. */
+  templateRef?: TaskTemplateRef;
+  templateParameters?: TemplateParameters;
 }
 /** The limits one decomposition batch was admitted under (§4). Recorded with the batch, never derived from the contract: a contract's own text has no field that can raise a limit, and the runtime resolves every value here from its … */
 interface AdmissionContext {
@@ -71,6 +158,17 @@ declare function sha256Hex(bytes: Uint8Array | string): string;
 declare function contractDigest(contract: TaskContract): string;
 /** The whole-batch proposal identity: SHA-256 over {@link canonicalize} of the normalized proposal. */
 declare function decompositionDigest(identity: DecompositionIdentity): string;
+/** Persist the final contract identity and its actual source on every production instance. */
+declare function taskContractIdentity(contract: TaskContract): {
+  templateRef?: TaskTemplateRef | undefined;
+  templateParameters?: TemplateParameters | undefined;
+  contractDigest: string;
+  definitionRef: {
+    taskType: string;
+    version: number;
+    digest: string;
+  };
+};
 //#endregion
 //#region src/budget.d.ts
 /** Approved budget extensions (K4): one durable record per approved raise of the tree's own budget. @module @dangosys/dsh-singularity-task/budget */
@@ -501,7 +599,12 @@ interface TaskInstance {
   definitionRef: {
     taskType: string;
     version: number;
+    digest?: string;
   };
+  templateRef?: TaskTemplateRef;
+  templateParameters?: TemplateParameters;
+  /** Final normalized contract identity. Absent on legacy instances. */
+  contractDigest?: string;
   parentTaskId?: TaskId;
   /** The task's goal: the projection of {@link contract} (or, on a task created before the contract existed, the whole of what the store holds). */
   objective: string;
@@ -633,6 +736,8 @@ interface RunRecovery {
   requestKey: string;
   /** The source run the task's previous attempt was, when it had one: the failed run a `recovery` recovers, the verified run an `improvement` re-earns the criteria from. A task that failed without a run (a rejected admission, a blocked task) names none, and nothing is invented for it. */
   sourceRunId?: RunId;
+  /** Applied Evolution proposals whose change this production attempt consumes. */
+  proposalIds?: string[];
   /** When the attempt was opened. */
   requestedAt: string;
   /** The identity of the **request** this attempt answers: the source run it names and the citations its caller declared, over their canonical form (`requestAttemptDigest`). */
@@ -1284,6 +1389,7 @@ declare class TaskService extends Service {
   admitRootProposalIn(storeId: string, task: TaskInstance, run: TaskRun, actor: string, options: {
     consumption: TaskProposalRootConsumption;
     manifest?: CapabilityManifest;
+    obligations?: readonly Obligation[];
   }): Promise<void>;
   addDependencyIn(storeId: string, edge: DependencyEdge, actor: string): Promise<void>;
   /** One run starts on a task that may run — a first run, or a new attempt at a task that failed (`TaskRetried`, then `TaskStarted`, in one commit). */
@@ -1324,4 +1430,4 @@ declare class TaskService extends Service {
   private proposalEnvelopeTaskIn;
 }
 //#endregion
-export { AcceptanceCriterion, AdmissionContext, ArtifactRef, BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, BudgetExtensionProposal, BudgetExtensionRequest, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DecompositionIdentity, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, type EventStoreConfig, EventStoreSet, type EventStoreState, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, RootProposalIdentity, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunProviderBinding, RunRecovery, RunSkillBinding, RunStatus, type StoreEntry, type StoreOpenMode, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskBudgetExtension, TaskBudgetExtensionClaim, TaskBudgetExtensionIndex, TaskContract, TaskContractVersion, TaskEvent, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskState, TaskStatus, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, definedKeys, describeBudgetExtension, describeBudgetReading, isTerminalRunStatus, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskProposalId };
+export { AcceptanceCriterion, AdmissionContext, ArtifactRef, BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, BudgetExtensionProposal, BudgetExtensionRequest, CapabilityManifest, ChildEvidenceRef, CriterionSpec, DecompositionAdmission, DecompositionIdentity, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, type EventStoreConfig, EventStoreSet, type EventStoreState, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, RootProposalIdentity, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunProviderBinding, RunRecovery, RunSkillBinding, RunStatus, type StoreEntry, type StoreOpenMode, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskBudgetExtension, TaskBudgetExtensionClaim, TaskBudgetExtensionIndex, TaskContract, TaskContractInput, TaskContractVersion, TaskEvent, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskState, TaskStatus, TaskTemplate, TaskTemplateContract, TaskTemplateRef, TemplateParameter, TemplateParameters, TemplateParametersSchema, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, definedKeys, describeBudgetExtension, describeBudgetReading, isTerminalRunStatus, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest };

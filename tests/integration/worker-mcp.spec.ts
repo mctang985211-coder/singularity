@@ -13,7 +13,8 @@ import type { Agent, ToolDefinition } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { McpServerSpec, WorkerGrant } from '../../agent-runtime/src/types.ts'
-import { workerBaseline } from '../../task-runtime/src/capability.ts'
+import { resolveCapabilities, workerBaseline } from '../../task-runtime/src/capability.ts'
+import { authorizedGrant } from '../../task-runtime/src/orchestration/spawn.ts'
 
 /**
  * The MCP grant axis for real: a spawned worker's grant carries a resolved
@@ -27,7 +28,7 @@ import { workerBaseline } from '../../task-runtime/src/capability.ts'
  */
 
 const ROOT_TOOLS = [
-  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
+  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'task_template_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
   'task_submit_result', 'task_answer', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'task_budget_extend', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
@@ -72,6 +73,7 @@ afterEach(async () => {
 
 interface Harness {
   visible(agent: Agent): string[]
+  call(agent: Agent, name: string, args: unknown): Promise<unknown>
   reachable(sessionId: SessionId): Agent | undefined
   spawn(grant: WorkerGrant): Promise<Agent>
   spawnError(grant: WorkerGrant): Promise<Error>
@@ -157,6 +159,7 @@ async function harness(): Promise<Harness> {
 
   return {
     visible: agent => ctx.tools.schemas(agent).map(schema => schema.name).sort(),
+    call: (agent, name, args) => ctx.tools.get(name, agent)!.execute(args, { agent, signal: new AbortController().signal } as never),
     reachable: sessionId => agents.get(sessionId),
     async spawn(grant) {
       const { agent } = await spawn(grant)
@@ -176,7 +179,7 @@ async function harness(): Promise<Harness> {
 /** The grant the orchestrator forwards for an MCP-bearing capability (workerBaseline() keeps the fixture honest). */
 function grantOf(mcpServers: readonly McpServerSpec[]): WorkerGrant {
   return {
-    capabilities: [{ capability: 'verify-ball-functional', tools: [], skills: [] }],
+    capabilities: [{ capability: 'echo-test', tools: [], skills: [] }],
     baseline: workerBaseline(),
     keepPresetTools: false,
     mcpServers,
@@ -184,9 +187,15 @@ function grantOf(mcpServers: readonly McpServerSpec[]): WorkerGrant {
 }
 
 describe('worker MCP grant (spawn-level mount)', () => {
-  it('mounts the fixture server on the worker: mcp__ tools visible there, nowhere else', async () => {
+  it('resolves a configured external capability and executes its real MCP tool on the worker', async () => {
     const h = await harness()
-    const child = await h.spawn(grantOf([echoSpec(cwd)]))
+    const registry = { echo: { serverName: 'echo-fixture', description: 'External echo service', command: process.execPath, args: [ECHO_FIXTURE], cwd } }
+    const manifest = resolveCapabilities(['echo-test'], { 'echo-test': { mcpServers: ['echo'] } }, registry)
+    const grant = await authorizedGrant({ mcpRegistry: registry } as never, manifest)
+    const child = await h.spawn(grant)
+    expect(await h.call(child, 'mcp__echo-fixture__echo', { text: 'task capability reached external MCP' })).toEqual({
+      content: [{ type: 'text', text: 'echo: task capability reached external MCP' }],
+    })
 
     const names = h.visible(child)
     expect(names).toContain('mcp__echo-fixture__echo')

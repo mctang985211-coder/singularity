@@ -4111,19 +4111,20 @@ var EvolutionServiceCore = class extends Service {
 				sourceRunId,
 				sourceDiagnosisId: request.sourceDiagnosisId,
 				requestKey: request.requestKey,
-				...request.mode !== void 0 ? { mode: request.mode } : {}
+				...request.mode !== void 0 ? { mode: request.mode } : {},
+				proposalIds: answered.recovery?.proposalIds
 			}, caller, delegation, coordination);
 		}
 		if (source.status === "running" || source.status === "verifying") throw new Error(`evolution: root task "${source.taskId}" is ${source.status}; a recovery opens a new attempt after the old one settled and never hot-swaps a live run — nothing was started`);
 		const chainOn = this.evolutionChainOn();
 		const associated = (await this.list()).filter((proposal) => proposal.sourceRefs.includes(`diagnosis:${diagnosis.diagnosisId}`));
 		if (chainOn) {
-			for (const proposal of associated.filter((item) => item.targetType === "capability")) {
+			for (const proposal of associated) {
 				if (proposal.status === "applied" && proposal.applied !== void 0 && proposal.rolledback === void 0) continue;
 				const state = proposal.status === "decided" && proposal.decision === "PROMOTE" ? "PROMOTE-decided but not applied" : proposal.status === "rolledback" ? "rolled back" : proposal.status;
-				throw new Error(`evolution: the capability change this hand-off depends on (proposal "${proposal.proposalId}" → row "${proposal.targetId}") is ${state}; a recovery whose gap is that capability is opened only after a person approves it and the apply commits it into the registry — nothing was started, and no run was opened`);
+				throw new Error(`evolution: the shared change this hand-off depends on (proposal "${proposal.proposalId}" ${proposal.targetType} "${proposal.targetId}") is ${state}; a recovery that depends on this change is opened only after a person approves it and apply commits it into production — nothing was started, and no run was opened`);
 			}
-			if (associated.length > 0) coordination.push(`this ledger holds ${associated.length} proposal(s) for the diagnosis, ${associated.filter((item) => item.targetType === "capability").length} of them capability changes, all in force`);
+			if (associated.length > 0) coordination.push(`this ledger holds ${associated.length} proposal(s) for the diagnosis, all applied and in force`);
 		} else if (associated.length > 0) coordination.push(`the evolution chain is off in this deployment, so the ${associated.length} proposal(s) this ledger holds for the diagnosis are not consulted`);
 		if (associated.length === 0) {
 			const requested = source.requestedCapabilities ?? [];
@@ -4150,6 +4151,7 @@ var EvolutionServiceCore = class extends Service {
 			sourceRunId,
 			sourceDiagnosisId: request.sourceDiagnosisId,
 			requestKey: request.requestKey,
+			...chainOn && associated.length ? { proposalIds: associated.map((proposal) => proposal.proposalId) } : {},
 			...request.mode !== void 0 ? { mode: request.mode } : {}
 		}, caller, delegation, coordination);
 	}

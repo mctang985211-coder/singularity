@@ -151,6 +151,7 @@ export interface OrchestrateEnv {
    * (`mcp-servers.ts`): the caller session's graph env, or `undefined` when
    */
   resolveMcpEnv?(): Promise<McpEnvBinding | undefined>
+  mcpRegistry?: Readonly<Record<string, import('../mcp-servers.ts').McpServerTemplate>>
   verifyTimeoutMs: number
   /** The resolved per-run budget; which member is enforced in flight, checked post-hoc, or declared only is documented on {@link BudgetConfig}. */
   budget?: BudgetConfig

@@ -57,6 +57,7 @@ import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
 import { SingularityContextService } from '../../context/src/index.ts'
 import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
+import { defineTaskTemplateListTool } from '../../agent-singularity/src/tools/task-template-list.ts'
 import { defineContextReadTool } from '../../agent-singularity/src/tools/context-read.ts'
 import { defineTaskCancelTool } from '../../agent-singularity/src/tools/task-cancel.ts'
 import { defineTaskDecomposeTool } from '../../agent-singularity/src/tools/task-decompose.ts'
@@ -78,7 +79,7 @@ const FIXTURE_SKILLS = fileURLToPath(new URL('../../task-runtime/tests/fixtures/
 
 /** Exactly the root agent's allow-list, so the root composition is the deployment's own. */
 export const ROOT_TOOLS = [
-  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
+  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'task_template_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
   'task_submit_result', 'task_answer', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'task_budget_extend', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
@@ -96,7 +97,7 @@ export const GLOBAL_TOOLS = [
 ]
 
 /** The tools a stack can mount for real ({@link RunStackOptions.tools}); the stand-ins skip these names. */
-const REAL_TOOLS = ['task_read', 'task_status', 'context_read', 'capability_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel']
+const REAL_TOOLS = ['task_read', 'task_status', 'context_read', 'capability_list', 'task_template_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel']
 
 /** What the `standard`-style preset contributes on its own plane. */
 export const PRESET_TOOLS = ['bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'skill', 'job_output', 'job_list', 'job_kill', 'ask_user_question', 'web_fetch', 'subagent_fetchless']
@@ -490,6 +491,7 @@ class RunStackImpl implements RunStack {
       ctx.tools.register(defineTaskStatusTool(ctx))
       ctx.tools.register(defineContextReadTool(ctx))
       ctx.tools.register(defineCapabilityListTool(ctx))
+      ctx.tools.register(defineTaskTemplateListTool(ctx))
       ctx.tools.register(defineTaskIntakeTool(ctx))
       ctx.tools.register(defineTaskDecomposeTool(ctx))
       ctx.tools.register(defineTaskSubmitResultTool(ctx))

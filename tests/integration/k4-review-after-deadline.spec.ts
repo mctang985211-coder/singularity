@@ -213,15 +213,11 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
     const diagnosis = after.diagnoses.find(item => String(item.producedBy.sessionId) === reviewerSession)!
     expect(diagnosis.taskId).toBe(stop.childTaskId)
     expect(diagnosis.judgements.find(judgement => judgement.dimension === 'task_specification')!.verdict).toBe('inadequate')
-    // The recorded diagnosis is a hand-off: its supervisor is delegated too —
-    // one more spawn, one more published node, and still no business Run.
-    await vi.waitFor(
-      () => expect(h.spawns.filter(spawn => String(spawn.name ?? '').startsWith('supervisor for '))).toHaveLength(1),
-      { timeout: 30_000, interval: 25 },
-    )
+    // Ordinary child diagnoses stay with the responsible parent; no supervisor is spent.
+    expect(h.spawns.filter(spawn => String(spawn.name ?? '').startsWith('supervisor for '))).toEqual([])
 
     // Publishing the node is each spawn's whole graph effect…
-    expect(h.graphCommits.slice(graphBefore).map(commit => commit.kind)).toEqual(['agent/add', 'edge/add', 'agent/add', 'edge/add'])
+    expect(h.graphCommits.slice(graphBefore).map(commit => commit.kind)).toEqual(['agent/add', 'edge/add'])
     // …and no business Run follows the review: the store holds the same tree it
     // held before the call, with the stopped root and its failed child.
     expect(after.runs).toHaveLength(before.runs.length)
@@ -305,9 +301,8 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
     expect(reviewerSpawns(h)[0]!.name).toBe(`review ${stop.childTaskId}`)
 
     // The source's one default attempt: claimed, started, and attributed to the
-    // graph's own root — the parent a reviewer is spawned from. (The ledger holds
-    // the diagnosis's own supervisor row beside it: a recorded diagnosis is a
-    // hand-off, and this case is about the review chain.)
+    // graph's own root — the parent a reviewer is spawned from. The child diagnosis
+    // is delivered to its real parent without a supervisor attempt.
     const attempt = await vi.waitFor(async () => {
       const found = (await readReviewAgentAttempts(storeId)).filter(item => item.role === 'reviewer')
       expect(found).toHaveLength(1)
@@ -321,11 +316,8 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
       sessionId: reviewer,
       started: true,
     })
-    await vi.waitFor(
-      () => expect(h.spawns.filter(spawn => String(spawn.name ?? '').startsWith('supervisor for '))).toHaveLength(1),
-      { timeout: 30_000, interval: 25 },
-    )
-    expect(await countReviewAgentRuns(storeId)).toBe(2)
+    expect(h.spawns.filter(spawn => String(spawn.name ?? '').startsWith('supervisor for '))).toEqual([])
+    expect(await countReviewAgentRuns(storeId)).toBe(1)
     // The delegation the assembly would read is durable before the reviewer's
     // first request, exactly as an explicit call's is.
     expect(await readReviewerDelegation(reviewer)).toMatchObject({ rootStoreId: storeId, taskId: stop.childTaskId })

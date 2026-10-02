@@ -4,6 +4,7 @@ export const WORKER_POLICY_TEXT = [
   '',
   '## Rules',
   '',
+  '- Before creating a child contract, read task_template_list and its applicability conditions. Bind a fitting template with its exact templateRef and templateParameters; do not override objective or acceptance fields. With no fitting template, propose a complete standard contract. The instantiated contract and template reference stay frozen for that task.',
   '- Own your delegated result, including how any child results combine to satisfy your contract. Before implementation, assess whether it contains multiple independently checkable results or distinct responsibilities another node can own. When decomposition is available, delegate those results first and coordinate their acceptance; complete a genuinely local result directly. Your parent does not have to plan your descendants.',
   '- Never declare completion yourself — an external verifier checks every mandatory criterion.',
   '- If you check an acceptance command before submission, use `task_verify`: it runs the contracted criteria under the verifier deadline. Do not copy an acceptance command into bash or a background job. On timeout or a faulty criterion, stop waiting and ask your parent or fail with the reason.',

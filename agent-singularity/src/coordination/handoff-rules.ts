@@ -1,16 +1,16 @@
 /** The A6 hand-off rules: what a recorded Diagnosis becomes, decided from facts alone — every diagnosis is a hand-off, and the deployment's supervision policy says what it may spend. @module @dangosys/dsh-singularity-agent/handoff-rules */
 
 import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
-import type { Diagnosis, ReviewRecord, TaskSnapshot } from '@dangosys/dsh-singularity-task'
+import type { Diagnosis, ReviewRecord, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { canonicalize, sha256Hex } from '@dangosys/dsh-singularity-task'
 import { reviewRef } from './identity.ts'
 import { countReviewAgentRuns, reviewAgentBudget, type ReviewAgentAttempt, type ReviewAgentBudget } from './ledger.ts'
 import { roundCapRefusal, sourceRoundsOf, type SupervisionRounds } from './supervision.ts'
 
-/** The preset both coordination roles mount (A5's reviewer and A6's supervisor): */
-export const COORDINATION_PRESET = 'singularity-reviewer'
+/** Shared host preset; runtime installs the actual coordination role. */
+export const COORDINATION_PRESET = 'singularity-coordinator'
 
-/** The supervisor's whole tool surface. Read-only plus the two entries the hand-off is for: the evolution candidate chain (`propose` → `candidate` → `prepare` → `replay` → `gate` → `list`) and `task_recover`. Absent by */
+/** Candidate comparison, existing human approval gates, root recovery and evidence reads. */
 export const SUPERVISOR_BASELINE: readonly string[] = [
   'task_recover',
   'task_review_pack',
@@ -23,6 +23,8 @@ export const SUPERVISOR_BASELINE: readonly string[] = [
   'evolution_prepare',
   'evolution_replay',
   'evolution_gate',
+  'evolution_decide',
+  'evolution_apply',
   'evolution_list',
   'read',
   'glob',
@@ -69,7 +71,13 @@ export type HandoffDecision =
   /** A supervisor is being started for it right now (a claim of this process). */
   | { readonly kind: 'in-flight'; readonly sessionId: string }
   /** The hand-off's supervisor ended with an outcome: a recovery/improvement was issued, or the hand-off was closed. */
-  | { readonly kind: 'concluded'; readonly sessionId: string; readonly status: 'recorded' | 'closed'; readonly note?: string; readonly at: string }
+  | {
+      readonly kind: 'concluded'
+      readonly sessionId: string
+      readonly status: 'recorded' | 'closed'
+      readonly note?: string
+      readonly at: string
+    }
   /** Nothing was started, and this is why — the hand-off stays pending. */
   | { readonly kind: 'stopped'; readonly code: HandoffStopCode; readonly reason: string }
 
@@ -81,7 +89,9 @@ export function handoffDecision(input: {
   /** The source's round facts, when the caller read them; absent leaves the caps to the ledger/runtime. */
   readonly rounds?: SupervisionRounds
 }): HandoffDecision {
-  const attempts = input.attempts.filter(attempt => attempt.role === 'supervisor' && attempt.diagnosisId === input.diagnosis.diagnosisId)
+  const attempts = input.attempts.filter(
+    attempt => attempt.role === 'supervisor' && attempt.diagnosisId === input.diagnosis.diagnosisId,
+  )
   const started = attempts.filter(attempt => attempt.started && attempt.settlement === undefined).at(-1)
   if (started !== undefined) return { kind: 'started', sessionId: started.sessionId, at: started.at }
   const open = attempts.find(attempt => attempt.settlement === undefined)
@@ -125,16 +135,18 @@ export function handoffStateLine(input: {
   const decision = handoffDecision(input)
   switch (decision.kind) {
     case 'started':
-      return `taken up — this hand-off is delegated to supervisor session ${decision.sessionId} (started ${decision.at}); ` +
+      return (
+        `taken up — this hand-off is delegated to supervisor session ${decision.sessionId} (started ${decision.at}); ` +
         'that coordinator owns the candidate it may open, and a person still decides the promotion'
+      )
     case 'in-flight':
       return `being taken up right now by supervisor session ${decision.sessionId} — nothing new is started for it`
     case 'concluded':
       return decision.status === 'closed'
         ? `settled — supervisor session ${decision.sessionId} closed the hand-off` +
-          `${decision.note === undefined ? '' : `: ${decision.note}`}; no further supervisor is started for it`
+            `${decision.note === undefined ? '' : `: ${decision.note}`}; no further supervisor is started for it`
         : `taken up — this hand-off is delegated to supervisor session ${decision.sessionId}, which ended recorded` +
-          `${decision.note === undefined ? '' : `: ${decision.note}`}; no further supervisor is started for it`
+            `${decision.note === undefined ? '' : `: ${decision.note}`}; graph activation resumes unfinished proposal work from its durable status`
     case 'stopped':
       return `pending — ${decision.reason}`
     case 'start':
@@ -166,8 +178,12 @@ export function closeOutcomeOf(reply: string | undefined): { readonly reason: st
 export function lastAssistantText(events: readonly { type: string; data?: unknown }[]): string | undefined {
   const event = [...events].reverse().find(item => item.type === 'assistant/message')
   if (event === undefined) return undefined
-  const message = (event.data as { message?: { content?: readonly { type: string; text?: string }[] } } | undefined)?.message
-  const content = (message?.content ?? []).filter(block => block.type === 'text').map(block => block.text ?? '').join('\n')
+  const message = (event.data as { message?: { content?: readonly { type: string; text?: string }[] } } | undefined)
+    ?.message
+  const content = (message?.content ?? [])
+    .filter(block => block.type === 'text')
+    .map(block => block.text ?? '')
+    .join('\n')
   return content.length === 0 ? undefined : content
 }
 
@@ -195,10 +211,11 @@ function metricsLine(review: ReviewRecord): string | undefined {
   if (metrics.tokens !== undefined) {
     parts.push(
       `tokens in ${metrics.tokens.uncachedInputTokens}/out ${metrics.tokens.outputTokens}/cache ` +
-      `${metrics.tokens.cacheReadTokens}+${metrics.tokens.cacheWriteTokens}`,
+        `${metrics.tokens.cacheReadTokens}+${metrics.tokens.cacheWriteTokens}`,
     )
   }
-  if (metrics.toolCalls !== undefined) parts.push(`toolCalls ${metrics.toolCalls.calls} (${metrics.toolCalls.failures} failed)`)
+  if (metrics.toolCalls !== undefined)
+    parts.push(`toolCalls ${metrics.toolCalls.calls} (${metrics.toolCalls.failures} failed)`)
   if (metrics.humanInterventions !== undefined) parts.push(`humanInterventions ${metrics.humanInterventions}`)
   if (metrics.retries !== undefined) parts.push(`retries ${metrics.retries}`)
   if (metrics.evidenceLogs !== undefined) parts.push(`evidenceLogs ${metrics.evidenceLogs}`)
@@ -207,16 +224,18 @@ function metricsLine(review: ReviewRecord): string | undefined {
 
 /** One hand-off's content identity: what the claim promises about the diagnosis it was started for. */
 export function supervisorHandoffDigest(storeId: string, diagnosis: Diagnosis): string {
-  return sha256Hex(canonicalize({
-    storeId,
-    diagnosisId: diagnosis.diagnosisId,
-    taskId: diagnosis.taskId,
-    proposals: diagnosis.proposals.map(proposal => ({
-      targetType: proposal.targetType,
-      targetId: proposal.targetId,
-      rationale: proposal.rationale,
-    })),
-  }))
+  return sha256Hex(
+    canonicalize({
+      storeId,
+      diagnosisId: diagnosis.diagnosisId,
+      taskId: diagnosis.taskId,
+      proposals: diagnosis.proposals.map(proposal => ({
+        targetType: proposal.targetType,
+        targetId: proposal.targetId,
+        rationale: proposal.rationale,
+      })),
+    }),
+  )
 }
 
 /** One hand-off's source task and the run its diagnosis is about, or `null` for the no-run case. */
@@ -234,6 +253,28 @@ function diagnosisRunRef(diagnosis: Diagnosis): string | null {
 /** The hand-off's source: the task and run the Diagnosis is about — the delegation's own fields. */
 export function handoffSourceOf(diagnosis: Diagnosis): { readonly taskId: string; readonly runId: string | null } {
   return { taskId: diagnosis.taskId, runId: diagnosisRunRef(diagnosis) }
+}
+
+/** The actual delegating parent of a child diagnosis; roots have no parent. */
+export function responsibleParentRun(snapshot: TaskSnapshot, diagnosis: Diagnosis): TaskRun | undefined {
+  const task = snapshot.tasks.find(item => item.taskId === diagnosis.taskId)
+  if (task?.parentTaskId === undefined) return undefined
+  const source = handoffSourceOf(diagnosis)
+  const sourceRun = snapshot.runs.find(run => run.runId === source.runId)
+  const parent =
+    source.runId === null
+      ? snapshot.runs.find(
+          run =>
+            run.taskId === task.parentTaskId && run.batches?.some(batch => batch.memberTaskIds.includes(task.taskId)),
+        )
+      : snapshot.runs.find(run => run.runId === sourceRun?.parentRunId)
+  return parent?.taskId === task.parentTaskId ? parent : undefined
+}
+
+/** Ordinary child diagnoses are handled by their parent without another coordination agent. */
+export function needsSupervisor(snapshot: TaskSnapshot, diagnosis: Diagnosis): boolean {
+  const task = snapshot.tasks.find(item => item.taskId === diagnosis.taskId)
+  return task?.parentTaskId === undefined || diagnosis.proposals.length > 0
 }
 
 /** The ref a reader uses for one source (`<taskId>#<runId>`, or `<taskId>#no-run`). */
@@ -256,37 +297,46 @@ export function reviewFactsFor(snapshot: TaskSnapshot, diagnosis: Diagnosis): st
   return review === undefined ? undefined : renderSupervisorReviewFacts(review)
 }
 
-/** The supervisor's first request: which hand-off it is taking up, what the source really is, the prior round's review facts, and what it is expected to do with it. */
+/** Current durable facts accompany the stable supervisor policy. */
 export function supervisorPrompt(input: {
   readonly diagnosis: Diagnosis
   readonly sourceOutcome: string
   readonly sourceRef: string
-  /** The prior round's review facts, read-only; absent says so rather than inventing facts. */
   readonly reviewFacts?: string
+  readonly parentRun?: TaskRun
+  readonly childSource?: boolean
+  readonly proposals?: readonly { proposalId: string; status: string; decision?: string }[]
 }): string {
   const { diagnosis } = input
   return [
-    'You are the Singularity supervisor: the coordination agent a recorded Diagnosis was handed to. You do not run the goal, and you do not decide promotions — a person does.',
     `The hand-off is diagnosis ${diagnosis.diagnosisId} about task ${diagnosis.taskId} (source ${input.sourceRef}, whose review settled ${input.sourceOutcome}).`,
     `Its recorded observation: ${diagnosis.observedFailure}`,
     `Its recorded conclusion: ${diagnosis.localizedCause}`,
-    ...(diagnosis.proposals.length === 0
-      ? ['Its recorded suggestions: none — a conclusion without a suggestion is still a hand-off.']
-      : ['Its recorded suggestions:', ...diagnosis.proposals.map(proposal => `- ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`)]),
-    '',
+    ...diagnosis.proposals.map(
+      proposal => `Suggested ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`,
+    ),
+    input.parentRun === undefined
+      ? input.childSource
+        ? 'The source is a child; its responsible parent run could not be read. Do not open a root recovery for it.'
+        : 'The source is the root goal.'
+      : `Responsible parent: task ${input.parentRun.taskId}, run ${input.parentRun.runId}, session ${input.parentRun.sessionId} [${input.parentRun.status}]. The parent replans this child; task_recover does not accept child diagnoses.`,
     '--- prior round review facts (read-only) ---',
-    ...(input.reviewFacts === undefined
-      ? ['no review record could be read for this source; read the facts yourself with task_review_pack.']
-      : input.reviewFacts.split('\n')),
+    input.reviewFacts ?? 'No review record could be read; read task_review_pack for the exact source.',
     '--- end of prior round review facts ---',
+    'Existing proposals for this diagnosis:',
+    ...(input.proposals?.length
+      ? input.proposals.map(
+          proposal =>
+            `${proposal.proposalId} [${proposal.status}]${proposal.decision === undefined ? '' : ` ${proposal.decision}`}`,
+        )
+      : ['none']),
     '',
-    'Your job, in this order:',
-    '1. Read the facts yourself: task_review_pack for the exact source, task_read/task_status for the task and its siblings, context_read for the sessions and evidence the pack cites.',
-    `2. Decide whether one more round is justified under the original acceptance criteria. If it is, call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "<a key of yours>" }; for a failed source the default mode "recovery" applies, and a verified source accepts only mode "improve". The new attempt keeps the original acceptance criteria, and repeating the key returns the same attempt. A source past its recovery or improvement cap is refused with iteration-cap; there is nothing left to open then, so close instead.`,
-    '3. Create a candidate only if the original evidence establishes a capability or skill gap: evolution_propose (when no proposal names it yet), evolution_candidate for ONE whole capability row plus an optional new execution skill or a same-name update of an existing skill, then evolution_prepare, evolution_replay, and evolution_gate — only when those tools are on your surface. A missing artifact alone does not establish such a gap. A person decides and applies; you never call evolution_decide, evolution_apply or evolution_rollback.',
-    '4. If you decide against further iteration — no justified round, no established gap, or a cap already reached — close the hand-off explicitly: say why in your reply and end it with EXACTLY one fenced json block {"outcome":"closed","reason":"..."}. Closing settles this hand-off and changes no task state.',
-    '5. Not every suggestion is executable: a target type this build has no candidate for stays a recorded suggestion. Nothing you write changes production, and no candidate executes anything by itself.',
-    '',
-    'You have no shell, no file write and no spawn, and no tool outside the list you were granted.',
+    'Read task_review_pack, task_read/task_status and the original evidence through context_read. Do not create a duplicate proposal.',
+    `For an established shared gap, cite diagnosis:${diagnosis.diagnosisId} in evolution_propose.sourceRefs. Use only supported candidate targets and only tools actually granted: evolution_candidate → evolution_prepare → evolution_replay → evolution_gate. Missing artifacts alone do not establish a shared gap.`,
+    'A gated proposal continues with evolution_decide to request the human decision. A PROMOTE-decided proposal continues with evolution_apply to request approval for its exact production writes. If approval is denied or unavailable, report proposalId and its current status and stop. A rejected or research-only decision opens no recovery for that change.',
+    input.childSource
+      ? 'After a child shared change is applied, finish with the proposal id and evidence. The runtime notifies the responsible parent to read its state and replan. Do not call task_recover for the child.'
+      : `Apply any necessary shared changes first. Then, if another round is justified, call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "recovery:${diagnosis.diagnosisId}"${input.sourceOutcome === 'verified' ? ', mode: "improve"' : ''} }. The original acceptance judges it; repeating the key returns the same attempt. A cap refusal ends iteration.`,
+    'If no justified action remains, explain why and end with one fenced json block {"outcome":"closed","reason":"..."}. Closing changes no task state. Unsupported candidate targets require a concrete explanation rather than invented tool support.',
   ].join('\n')
 }
