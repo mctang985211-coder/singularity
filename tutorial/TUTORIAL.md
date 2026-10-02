@@ -139,9 +139,7 @@ pnpm build    # 期望退出码 0
 
 ## 10. 退役
 
-本环境的组件是**副本**（`environment/project1/tutorial/kanban` 是一个普通 git 仓库），不是指向真实检出目录的符号链接。因此与 README 中 `bb-local`（project46 的 buckyball 是符号链接）的警告相反：**对这个图执行 UI Delete 是安全的**——env-clean 只会在副本里执行清理，不会碰到任何真实仓库。
-
-删除图（UI 上 Delete → Confirm delete，或 `POST /singularity/graphs/<id>/delete`）会停止会话并清理绑定；此后该 env 会重新出现在可选环境列表里。想彻底清掉，可在图删除后删掉 `environment/project1` 目录与 manifest 条目（或保留它，下次教程直接 `--id project1` 复用）。
+本环境的组件是**副本**（`environment/project1/tutorial/kanban` 是一个普通 git 仓库）。删除图（UI 上 Delete → Confirm delete，或 `POST /singularity/graphs/<id>/delete`）只停止会话、解绑 env 并归档图记录——不会 spawn 清理会话，也不会碰检出目录，所以无论组件是副本还是符号链接都可以安全删除；此后该 env 会重新出现在可选环境列表里。想彻底清掉，可在图删除后删掉 `environment/project1` 目录与 manifest 条目（或保留它，下次教程直接 `--id project1` 复用）。
 
 ## 11. 常见问题
 

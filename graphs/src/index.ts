@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { EventStoreSet } from '@dangosys/dsh-singularity-task'
-import { cleanPromptText, type EnvRecord, type EnvStore } from '@dangosys/dsh-env-builder'
+import type { EnvRecord, EnvStore } from '@dangosys/dsh-env-builder'
 import type {} from '@dangosys/dsh-singularity-graph'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
@@ -309,32 +309,9 @@ export class GraphsService extends Service {
         await taskRuntime.cancelGraph(rootTaskStoreId(graph.rootSessionId), 'graph removed')
       }
       await this.ctx.agentRuntime.stopGraph(scope)
-      const root = await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, {
-        graphStoreId: graph.graphStoreId,
-        layoutStoreId: graph.layoutStoreId,
-      })
-      let stop!: () => void
-      let timer!: ReturnType<typeof setTimeout>
-      const cleaned = new Promise<void>((resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`graphs: env clean timed out for "${graph.envId}"`)), 10 * 60 * 1000)
-        stop = this.ctx.on('envBuilder/cleaned', (envId: string) => {
-          if (envId === graph.envId) resolve()
-        })
-      })
-      try {
-        await Promise.all([
-          this.ctx.agentRuntime.spawn(root.agent, {
-            sessionId: SessionId(randomUUID()),
-            name: 'env-clean',
-            prompt: [{ type: 'text', text: cleanPromptText(graph.envId) }],
-          }),
-          cleaned,
-        ])
-      } finally {
-        clearTimeout(timer)
-        stop()
-        await this.ctx.agentRuntime.stopGraph(scope)
-      }
+      // Deletion unbinds and archives only: the checkout is never cleaned here, so a broken
+      // or symlinked environment can neither hang the request nor be written through.
+      this.ctx.envBuilder.store.markClean(graph.envId)
       const snapshot = await this.ctx.graph.snapshotIn(graph.graphStoreId)
       const archive: GraphArchive = { graph, agentIds: snapshot.agents.map(agent => agent.id), archivedAt: Date.now() }
       await this.commit([{ kind: 'graph/remove', id, archive }])

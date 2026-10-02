@@ -1,7 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
-import { EnvRecord } from "@dangosys/dsh-env-builder";
 import * as _dangosys_dsh_singularity_graph0 from "@dangosys/dsh-singularity-graph";
+import { EnvRecord } from "@dangosys/dsh-env-builder";
 
 //#region src/types.d.ts
 interface GraphRecord {

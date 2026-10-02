@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -236,30 +236,17 @@ describe('graphs boot recovery', () => {
 })
 
 describe('graphs removal lifecycle', () => {
-  it('waits for all previous workers to stop before launching cleanup, then archives after cleaning', async () => {
-    const { ctx, service, store, agents, runtime, graph, layout, taskRuntime } = harness()
+  it('stops the graph, unbinds its environment without a cleanup agent, and archives it', async () => {
+    const { service, store, agents, runtime, graph, layout, taskRuntime } = harness()
     const { graph: created } = await service.create({ createEnv: true, repos: ['acme/widget'] })
     const workerId = 'old-worker' as SessionId
     agents.push({ id: workerId })
     store.attachSession(created.envId, workerId)
     runtime.ensureRoot.mockClear()
-    const stopped = Promise.withResolvers<void>()
-    runtime.stopAgents.mockImplementationOnce(async () => {
-      await stopped.promise
-    })
-    let cleanupId: SessionId
-    runtime.spawn.mockImplementationOnce(async (_parent, options) => {
-      cleanupId = options.sessionId
-      agents.push({ id: cleanupId })
-      store.attachSession(created.envId, cleanupId)
-      store.markClean(created.envId)
-      ctx.emit('envBuilder/cleaned', created.envId)
-      return { agent: { id: cleanupId } }
-    })
 
-    const removing = service.remove(created.id)
-    await vi.waitFor(() => expect(runtime.stopAgents).toHaveBeenCalledOnce())
-    expect(runtime.stopAgents.mock.calls[0][0]).toEqual([created.rootSessionId, workerId])
+    await service.remove(created.id)
+
+    expect(runtime.stopAgents).toHaveBeenCalledExactlyOnceWith([created.rootSessionId, workerId])
     expect(runtime.stopGraph).toHaveBeenCalledExactlyOnceWith({
       graphStoreId: created.graphStoreId,
       layoutStoreId: created.layoutStoreId,
@@ -267,42 +254,67 @@ describe('graphs removal lifecycle', () => {
     // The task tree is cancelled before the graph is stopped, named by the store
     // the removed graph owns.
     expect(taskRuntime.cancelGraph).toHaveBeenCalledExactlyOnceWith(`sg-t-${created.rootSessionId}`, 'graph removed')
+    // Deletion unbinds and archives only: it resumes no root and spawns no agent of its own.
     expect(runtime.ensureRoot).not.toHaveBeenCalled()
     expect(runtime.spawn).not.toHaveBeenCalled()
-    stopped.resolve()
-    await removing
-
-    expect(runtime.spawn).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ id: created.rootSessionId }),
-      expect.objectContaining({ name: 'env-clean' }),
-    )
-    expect(runtime.stopAgents).toHaveBeenCalledTimes(2)
-    expect(runtime.stopAgents.mock.calls[1][0]).toEqual([created.rootSessionId, workerId, cleanupId!])
     expect(await service.snapshot()).toMatchObject({
       graphs: [],
-      archives: [{ graph: created, agentIds: [created.rootSessionId, workerId, cleanupId!] }],
+      archives: [{ graph: created, agentIds: [created.rootSessionId, workerId] }],
     })
     expect(store.get(created.envId).sessionIds).toEqual([])
-    expect(ctx.events._hooks['envBuilder/cleaned']).toHaveLength(0)
+    expect(store.get(created.envId).running).toBe(false)
     expect(graph.clearActive).toHaveBeenCalledOnce()
     expect(layout.clearActive).toHaveBeenCalledOnce()
   })
 
-  it('disposes the cleanup timer and listener without archiving if cleanup spawn fails', async () => {
-    const { ctx, service, store, runtime, graph, layout, taskRuntime } = harness()
+  it('deletes without waiting on a cleanup agent whose session would grow the env on every retry', async () => {
+    const { service, store, runtime, agents } = harness()
     const { graph: created } = await service.create({ createEnv: true, repos: ['acme/widget'] })
-    vi.useFakeTimers()
-    const timerCount = vi.getTimerCount()
-    runtime.spawn.mockRejectedValueOnce(new Error('cleanup spawn failed'))
-    await expect(service.remove(created.id)).rejects.toThrow('cleanup spawn failed')
+    // The old path spawned an env-clean worker and waited ten minutes for it to call
+    // env_mark_clean; the worker's session stayed bound to the env, so every attempt
+    // left sessionCount one higher while the request never returned.
+    runtime.spawn.mockImplementation(async (_parent, options) => {
+      agents.push({ id: options.sessionId })
+      store.attachSession(created.envId, options.sessionId)
+      return { agent: { id: options.sessionId } }
+    })
 
-    expect(vi.getTimerCount()).toBe(timerCount)
-    expect(ctx.events._hooks['envBuilder/cleaned']).toHaveLength(0)
-    expect(runtime.stopAgents).toHaveBeenCalledTimes(2)
-    expect(taskRuntime.cancelGraph).toHaveBeenCalledOnce()
-    expect(await service.snapshot()).toMatchObject({ graphs: [created], archives: [] })
-    expect(store.get(created.envId).sessionIds).toEqual([created.rootSessionId])
-    expect(graph.clearActive).not.toHaveBeenCalled()
-    expect(layout.clearActive).not.toHaveBeenCalled()
+    vi.useFakeTimers()
+    let outcome: 'done' | 'error' | 'pending' = 'pending'
+    void service.remove(created.id).then(
+      () => {
+        outcome = 'done'
+      },
+      () => {
+        outcome = 'error'
+      },
+    )
+    await vi.advanceTimersByTimeAsync(45_000)
+
+    expect(outcome).toBe('done')
+    expect(runtime.spawn).not.toHaveBeenCalled()
+    expect(store.get(created.envId).sessionIds).toEqual([])
+    expect((await service.snapshot()).graphs).toEqual([])
+  })
+
+  it('unbinds a symlinked environment without touching its real checkout', async () => {
+    const { service, store, deleteEnv } = harness()
+    const env = store.create('bb-local')
+    store.planComponent(env.id, 'DangoSys/buckyball')
+    const real = join(root, 'real-buckyball')
+    mkdirSync(real)
+    writeFileSync(join(real, 'HEAD.txt'), 'live work')
+    symlinkSync(real, join(store.get(env.id).path, 'buckyball'))
+    store.setComponentStatus(env.id, 'DangoSys/buckyball', 'ready')
+
+    const { graph: created } = await service.create({ envId: env.id })
+    store.attachSession(env.id, 'stale-no-cwd-session')
+
+    await service.remove(created.id)
+
+    expect(readFileSync(join(real, 'HEAD.txt'), 'utf8')).toBe('live work')
+    expect(deleteEnv).not.toHaveBeenCalled()
+    expect(store.get(env.id).sessionIds).toEqual([])
+    expect(store.get(env.id).running).toBe(false)
   })
 })
