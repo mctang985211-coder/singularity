@@ -317,4 +317,21 @@ describe('graphs removal lifecycle', () => {
     expect(store.get(env.id).sessionIds).toEqual([])
     expect(store.get(env.id).running).toBe(false)
   })
+
+  it('deletes the selected graph even when the successor’s activation fails', async () => {
+    const { service, runtime } = harness()
+    const { graph: first } = await service.create({ createEnv: true, repos: ['acme/widget'] })
+    const { graph: second } = await service.create({ createEnv: true, repos: ['acme/widget'] })
+    await service.select(first.id)
+    // The successor's root cannot be taken over (its MCP server cannot start); that
+    // failure belongs to the successor and must not hold or fail this delete.
+    runtime.ensureRoot.mockRejectedValue(new Error('agent-runtime: session "s-x" could not be taken over safely'))
+
+    await service.remove(first.id)
+
+    const snapshot = await service.snapshot()
+    expect(snapshot.graphs.map(graph => graph.id)).toEqual([second.id])
+    expect(snapshot.selectedId).toBe(second.id)
+    await vi.waitFor(() => expect(runtime.ensureRoot).toHaveBeenCalled())
+  })
 })

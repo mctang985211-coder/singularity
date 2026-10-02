@@ -9,6 +9,8 @@ import type {
   GraphSnapshot,
   GraphsResponse,
   LayoutSnapshot,
+  ModelRef,
+  ModelsResponse,
   ProposalDecision,
   RecoveryResponse,
   ReviewResponse,
@@ -95,6 +97,18 @@ export function fetchGraphEnvs(): Promise<{ envs: GraphEnv[] }> {
 
 export function createGraph(body: CreateGraphBody): Promise<GraphEntry> {
   return post<GraphEntry>('/singularity/graphs', body)
+}
+
+export function fetchModels(): Promise<ModelsResponse> {
+  return request<ModelsResponse>('/singularity/models')
+}
+
+export function patchGraphModel(id: string, model: ModelRef | null): Promise<unknown> {
+  return request<unknown>(`/singularity/graphs/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model }),
+  })
 }
 
 export function selectGraph(id: string): Promise<GraphEntry> {

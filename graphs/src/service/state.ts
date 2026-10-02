@@ -67,6 +67,16 @@ export class GraphsState {
         this.value = { ...this.value, graphs }
         return
       }
+      case 'graph/model': {
+        const idx = this.value.graphs.findIndex(g => g.id === event.id)
+        if (idx < 0) throw new Error(`graphs: unknown graph "${event.id}"`)
+        const { model: _cleared, ...bare } = this.value.graphs[idx]
+        const next = event.model === null ? bare : { ...bare, model: event.model }
+        const graphs = [...this.value.graphs]
+        graphs[idx] = next
+        this.value = { ...this.value, graphs }
+        return
+      }
       case 'graph/remove': {
         if (!this.value.graphs.some(g => g.id === event.id)) {
           throw new Error(`graphs: unknown graph "${event.id}"`)

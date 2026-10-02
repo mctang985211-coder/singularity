@@ -331,7 +331,8 @@ declare class AgentRuntime extends Service {
   private closing;
   private readonly resuming;
   constructor(ctx: Context);
-  ensureRoot(sessionId: SessionId, scope: GraphScope): Promise<AgentHandle>;
+  /** Recover a persisted root; `agentOptions` overrides the deployment default selection for its resumed turns. */
+  ensureRoot(sessionId: SessionId, scope: GraphScope, agentOptions?: AgentOptions$1): Promise<AgentHandle>;
   private resumeRoot;
   createRoot(request: RootRequest): Promise<AgentHandle>;
   spawn(parent: Agent, request: SpawnRequest): Promise<AgentHandle>;

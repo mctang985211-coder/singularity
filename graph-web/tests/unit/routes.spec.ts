@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { apply } from '../../src/index.ts'
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void
@@ -332,5 +332,75 @@ describe('singularity console routes', () => {
     forwards[0]!({ proposalId: 'p-1' } as never)
     expect(res.body).toContain('event: evolution')
     expect(res.body).toContain('"id":"p-1"')
+  })
+})
+
+describe('singularity model catalog and graph model pin', () => {
+  it('GET /singularity/models lists the registered routes and the deployment default, isolating a failed route', async () => {
+    const { ctx, handlers } = mockCtx({
+      llm: {
+        listProviders: () => [
+          { id: 'p1', name: 'Provider One' },
+          { id: 'p2', name: 'Provider Two' },
+        ],
+        listModels: async (id: string) => {
+          if (id === 'p2') throw new Error('route p2 unreachable')
+          return [{ id: 'm1', name: 'Model One' }]
+        },
+      },
+      agentDefaultModel: { currentSelection: () => ({ provider: 'p1', model: 'm1', reasoningEffort: 'high' }) },
+    })
+    apply(ctx as never)
+    const res = mockRes()
+    await handlers.get('/singularity/models')!(mockReq('GET', '/singularity/models'), res as never)
+
+    expect(res.statusCode).toBe(200)
+    expect(json(res)).toEqual({
+      providers: [
+        { id: 'p1', displayName: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] },
+        { id: 'p2', displayName: 'Provider Two', models: [], error: 'route p2 unreachable' },
+      ],
+      default: { provider: 'p1', model: 'm1', reasoningEffort: 'high' },
+    })
+  })
+
+  it('POST /singularity/graphs forwards the create body, model pin included, to the service', async () => {
+    const create = vi.fn(async (body: { model?: unknown }) => ({
+      graph: { id: 'graph1', model: body.model },
+      reused: false,
+    }))
+    const { ctx, handlers } = mockCtx({ graphs: { create } })
+    apply(ctx as never)
+    const body = { createEnv: true, repos: ['acme/widget'], model: { provider: 'p1', model: 'm1' } }
+    const res = mockRes()
+    await handlers.get('/singularity/graphs')!(mockReq('POST', '/singularity/graphs', body), res as never)
+
+    expect(res.statusCode).toBe(200)
+    expect(create).toHaveBeenCalledExactlyOnceWith(body)
+    expect(json(res)).toEqual({ id: 'graph1', model: { provider: 'p1', model: 'm1' }, reused: false })
+  })
+
+  it('PATCH /singularity/graphs/:id pins or clears the model, refusing a body without one', async () => {
+    const setModel = vi.fn(async (id: string, model: unknown) => ({ id, model }))
+    const { ctx, handlers } = mockCtx({ graphs: { setModel } })
+    apply(ctx as never)
+    const serve = handlers.get('/singularity/graphs/*')!
+
+    const pinned = mockRes()
+    await serve(
+      mockReq('PATCH', '/singularity/graphs/graph1', { model: { provider: 'p1', model: 'm1' } }),
+      pinned as never,
+    )
+    expect(pinned.statusCode).toBe(200)
+    expect(setModel).toHaveBeenLastCalledWith('graph1', { provider: 'p1', model: 'm1' })
+
+    const cleared = mockRes()
+    await serve(mockReq('PATCH', '/singularity/graphs/graph1', { model: null }), cleared as never)
+    expect(setModel).toHaveBeenLastCalledWith('graph1', null)
+
+    const missing = mockRes()
+    await serve(mockReq('PATCH', '/singularity/graphs/graph1', {}), missing as never)
+    expect(missing.statusCode).toBe(400)
+    expect(setModel).toHaveBeenCalledTimes(2)
   })
 })

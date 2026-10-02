@@ -5605,4 +5605,89 @@ describe('A3 coordination', () => {
     expect((await h.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.taskId)).toHaveLength(1)
     expect(await h.runtime.redeliverBatchResult(STORE, batchId)).toBe('already-present')
   })
+
+  test('a graph model pin reaches a worker spawn as agentOptions', async () => {
+    const h = harness()
+    await createRoot(h)
+    h.graphs.graphForSession.mockResolvedValue({
+      id: 'g1',
+      name: 'graph',
+      envId: 'env1',
+      rootSessionId: ROOT_SESSION,
+      graphStoreId: 'sg-g-root',
+      layoutStoreId: 'sg-l-root',
+      createdAt: 0,
+      ready: true,
+      model: { provider: 'p1', model: 'm1', reasoningEffort: 'high' },
+    })
+    const env = await (
+      h.runtime as unknown as {
+        orchestrateEnv(sessionId: string, actor: string): Promise<{
+          spawn(request: { sessionId: string; name: string; taskWorker?: boolean }): Promise<unknown>
+        }>
+      }
+    ).orchestrateEnv(ROOT_SESSION, 'model-pin')
+
+    await env.spawn({ sessionId: 'child-pinned', name: 'worker', taskWorker: true })
+
+    expect(h.spawned.at(-1)).toMatchObject({
+      sessionId: 'child-pinned',
+      agentOptions: { provider: 'p1', model: 'm1', reasoningEffort: 'high' },
+    })
+  })
+
+  test('a graph without a pin leaves the worker spawn request without agentOptions', async () => {
+    const h = harness()
+    await createRoot(h)
+    const env = await (
+      h.runtime as unknown as {
+        orchestrateEnv(sessionId: string, actor: string): Promise<{
+          spawn(request: { sessionId: string; name: string; taskWorker?: boolean }): Promise<unknown>
+        }>
+      }
+    ).orchestrateEnv(ROOT_SESSION, 'no-pin')
+
+    await env.spawn({ sessionId: 'child-plain', name: 'worker', taskWorker: true })
+
+    const spawned = h.spawned.at(-1)!
+    expect(spawned.sessionId).toBe('child-plain')
+    expect('agentOptions' in spawned).toBe(false)
+  })
+
+  test("a run's frozen selection wins over the graph pin", async () => {
+    const h = harness()
+    await createRoot(h)
+    h.graphs.graphForSession.mockResolvedValue({
+      id: 'g1',
+      name: 'graph',
+      envId: 'env1',
+      rootSessionId: ROOT_SESSION,
+      graphStoreId: 'sg-g-root',
+      layoutStoreId: 'sg-l-root',
+      createdAt: 0,
+      ready: true,
+      model: { provider: 'p1', model: 'm1' },
+    })
+    const env = await (
+      h.runtime as unknown as {
+        orchestrateEnv(sessionId: string, actor: string): Promise<{
+          spawn(request: {
+            sessionId: string
+            name: string
+            taskWorker?: boolean
+            agentOptions?: { provider?: string; model?: string }
+          }): Promise<unknown>
+        }>
+      }
+    ).orchestrateEnv(ROOT_SESSION, 'frozen')
+
+    await env.spawn({
+      sessionId: 'child-bound',
+      name: 'worker',
+      taskWorker: true,
+      agentOptions: { provider: 'frozen', model: 'fz' },
+    })
+
+    expect(h.spawned.at(-1)!.agentOptions).toEqual({ provider: 'frozen', model: 'fz' })
+  })
 })

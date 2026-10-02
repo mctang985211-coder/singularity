@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
 import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
+import { graphAgentOptions } from '@dangosys/dsh-singularity-graphs'
 import type { ReviewParentAgent } from './identity.ts'
 import {
   readReviewerDelegation,
@@ -48,6 +49,7 @@ export interface ClaimedSpawnRequest {
 export async function spawnUnderClaim(input: ClaimedSpawnRequest): Promise<ClaimedSpawn> {
   await input.admission.claim(input.request)
   const prompt = await input.prompt()
+  const pinned = graphAgentOptions(await input.ctx.graphs.graphForSession(input.parent.id))
   let spawnFailure: string | undefined
   const handle = await input.ctx.agentRuntime.spawn(input.parent, {
     sessionId: input.sessionId,
@@ -55,6 +57,7 @@ export async function spawnUnderClaim(input: ClaimedSpawnRequest): Promise<Claim
     prompt: [{ type: 'text', text: prompt }],
     agentPreset: input.preset,
     grant: input.grant,
+    ...(pinned === undefined ? {} : { agentOptions: pinned }),
     // The delegation ledger is written between "the agent is a published graph
     // member" and "its first model input" (A2 §D): the read-back is the check.
     beforePrompt: async () => {

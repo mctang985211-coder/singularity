@@ -8,6 +8,8 @@ import type {
   GraphEntry,
   GraphSnapshot,
   LayoutSnapshot,
+  ModelRef,
+  ModelsResponse,
   ProposalDecision,
   TaskSnapshotWire,
 } from './types'
@@ -20,9 +22,11 @@ import {
   fetchGraph,
   fetchGraphs,
   fetchHitl,
+  fetchModels,
   fetchTask,
   INITIAL_GRAPH_ID,
   openEvents,
+  patchGraphModel,
   putLayout,
   selectGraph,
   setStoreOverride,
@@ -82,6 +86,8 @@ interface Store {
   graphsSelectedId: string | null
   graphsLoading: boolean
   graphsError: string | null
+  models: ModelsResponse | null
+  modelsError: string | null
   task: TaskSnapshotWire | null
   taskLoading: boolean
   taskError: string | null
@@ -109,6 +115,8 @@ interface Store {
   switchGraph: (id: string) => Promise<void>
   createGraph: (body: CreateGraphBody) => Promise<string>
   removeGraph: (id: string) => Promise<void>
+  loadModels: () => Promise<void>
+  updateGraphModel: (id: string, model: ModelRef | null) => Promise<void>
   taskStoreId: () => string | null
   loadTask: () => Promise<void>
   setSelectedRun: (id: string | null) => void
@@ -209,6 +217,8 @@ export const useStore = create<Store>((set, get) => ({
   graphsSelectedId: null,
   graphsLoading: false,
   graphsError: null,
+  models: null,
+  modelsError: null,
   task: null,
   taskLoading: false,
   taskError: null,
@@ -398,6 +408,20 @@ export const useStore = create<Store>((set, get) => ({
       return
     }
     await get().switchGraph(next)
+  },
+  async loadModels() {
+    if (get().models !== null) return
+    set({ modelsError: null })
+    try {
+      const data = await fetchModels()
+      set({ models: data })
+    } catch (error) {
+      set({ modelsError: message(error) })
+    }
+  },
+  async updateGraphModel(id, model) {
+    await patchGraphModel(id, model)
+    await get().loadGraphs()
   },
   taskStoreId() {
     const meta = get().graphMeta

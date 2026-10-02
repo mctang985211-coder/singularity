@@ -787,6 +787,27 @@ body,
   color: color-mix(in srgb, var(--color-warm) 80%, var(--color-ink));
 }
 
+.sg-model-chip {
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font: 700 10px var(--font-sans);
+  background: var(--color-wash);
+  color: var(--color-ink-faint);
+  white-space: nowrap;
+}
+
+.sg-model-note {
+  border-radius: 8px;
+  background: var(--color-wash);
+  color: var(--color-ink-muted);
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .sg-head-btn {
   height: 30px;
   border: 1px solid var(--color-line);

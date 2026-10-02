@@ -138,6 +138,7 @@ describe('graph-web routes and SSE', () => {
     expect(handlers.has('/singularity/layout')).toBe(true)
     expect(handlers.has('/singularity/events')).toBe(true)
     expect(handlers.has('/singularity/graphs')).toBe(true)
+    expect(handlers.has('/singularity/models')).toBe(true)
     expect(handlers.has('/singularity/graph-envs')).toBe(true)
     expect(handlers.has('/singularity/repo-check')).toBe(true)
     expect(handlers.has('/singularity/hitl')).toBe(true)

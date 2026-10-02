@@ -118,6 +118,7 @@ function fixture(options: {
       if (name === 'graphs') return { list: async () => [{ rootSessionId: ROOT }] }
       return undefined
     },
+    graphs: { graphForSession: async () => ({ id: 'g1', rootSessionId: ROOT }) },
     task: {
       snapshotIn: async (storeId: string) => structuredClone(snapshots.get(storeId) ?? { diagnoses: [], reviews: [], runs: [], tasks: [] }),
     },

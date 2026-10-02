@@ -2,8 +2,15 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import * as _dangosys_dsh_singularity_graph0 from "@dangosys/dsh-singularity-graph";
 import { EnvRecord } from "@dangosys/dsh-env-builder";
+import { AgentOptions } from "@dangosys/dsh-singularity-agent-runtime";
 
 //#region src/types.d.ts
+/** A model pinned on a graph; absent means the graph follows the deployment default selection. */
+interface GraphModel {
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort?: string;
+}
 interface GraphRecord {
   readonly id: string;
   readonly name: string;
@@ -13,6 +20,8 @@ interface GraphRecord {
   readonly layoutStoreId: string;
   readonly createdAt: number;
   readonly ready: boolean;
+  /** Pinned model applied to agents this graph spawns after the pin; absent = deployment default. */
+  readonly model?: GraphModel;
 }
 interface GraphArchive {
   readonly graph: GraphRecord;
@@ -35,6 +44,10 @@ type GraphsEvent = {
   readonly kind: 'graph/ready';
   readonly id: string;
 } | {
+  readonly kind: 'graph/model';
+  readonly id: string;
+  readonly model: GraphModel | null;
+} | {
   readonly kind: 'graph/remove';
   readonly id: string;
   readonly archive: GraphArchive;
@@ -49,6 +62,8 @@ interface CreateGraphRequest {
   readonly workspace?: string;
   /** With createEnv, skip reuse matching and always create a fresh environment. */
   readonly fresh?: boolean;
+  /** Model pinned for the new graph; absent follows the deployment default selection. */
+  readonly model?: GraphModel;
 }
 interface CreateGraphResult {
   readonly graph: GraphRecord;
@@ -69,6 +84,23 @@ declare class GraphsState {
   selected(): GraphRecord | undefined;
   boundEnvIds(): Set<string>;
 }
+//#endregion
+//#region src/model.d.ts
+/** The `ctx.llm` reads model validation uses: registered routes and the models one route serves. */
+interface ModelCatalogReader {
+  listProviders(): readonly {
+    id: string;
+    name: string;
+  }[];
+  listModels(provider: string): Promise<readonly {
+    id: string;
+    name: string;
+  }[]>;
+}
+/** Agent options for the model a graph pins, or `undefined` when it follows the deployment default. */
+declare function graphAgentOptions(graph: Pick<GraphRecord, 'model'>): AgentOptions | undefined;
+/** Refuse a model whose provider route is not registered, or whose route does not advertise that model. */
+declare function assertModelServiceable(llm: ModelCatalogReader, model: GraphModel): Promise<void>;
 //#endregion
 //#region src/index.d.ts
 declare module '@deepseek-ai/dsh-session/types' {
@@ -116,6 +148,10 @@ declare class GraphsService extends Service {
   private assertReusable;
   private workspaceTaken;
   markReady(id: string): Promise<GraphRecord>;
+  /** Pin, replace, or clear (null) one graph's model. Only later spawns read it; existing sessions keep theirs. */
+  setModel(id: string, model: GraphModel | null): Promise<GraphRecord>;
+  /** Refuse a pin the current provider registry cannot serve; the message names the offending field. */
+  private assertModel;
   graphForSession(sessionId: SessionId): Promise<GraphRecord>;
   remove(id: string): Promise<void>;
   /** Resolved lazily: task-runtime injects graphs, so a hard inject here would deadlock the plugin loader. */
@@ -128,4 +164,4 @@ declare class GraphsService extends Service {
   private state;
 }
 //#endregion
-export { CreateGraphRequest, CreateGraphResult, GraphArchive, GraphRecord, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, isReusableEnv };
+export { CreateGraphRequest, CreateGraphResult, GraphArchive, GraphModel, GraphRecord, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState, type ModelCatalogReader, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertModelServiceable, graphAgentOptions, isReusableEnv };

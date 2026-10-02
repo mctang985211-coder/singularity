@@ -2,7 +2,7 @@
  * @module dsh-singularity-agent-runtime */
 
 import { Context, Service } from '@deepseek-ai/cordis'
-import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -110,7 +110,8 @@ export class AgentRuntime extends Service {
     )
   }
 
-  async ensureRoot(sessionId: SessionId, scope: GraphScope): Promise<AgentHandle> {
+  /** Recover a persisted root; `agentOptions` overrides the deployment default selection for its resumed turns. */
+  async ensureRoot(sessionId: SessionId, scope: GraphScope, agentOptions?: AgentOptions): Promise<AgentHandle> {
     if (this.closing) throw new Error('agent-runtime: closing')
     const pending = this.resuming.get(sessionId)
     if (pending !== undefined) {
@@ -119,14 +120,14 @@ export class AgentRuntime extends Service {
       }
       return pending.handle
     }
-    const handle = this.inGraph(scope, () => this.resumeRoot(sessionId, scope)).finally(() =>
+    const handle = this.inGraph(scope, () => this.resumeRoot(sessionId, scope, agentOptions)).finally(() =>
       this.resuming.delete(sessionId),
     )
     this.resuming.set(sessionId, { scope, handle })
     return handle
   }
 
-  private async resumeRoot(sessionId: SessionId, scope: GraphScope): Promise<AgentHandle> {
+  private async resumeRoot(sessionId: SessionId, scope: GraphScope, agentOptions?: AgentOptions): Promise<AgentHandle> {
     const existing = this.handles.get(sessionId)
     if (existing !== undefined) {
       const known = this.scope(sessionId)
@@ -153,7 +154,9 @@ export class AgentRuntime extends Service {
     try {
       const handle = await this.ctx.agents.resume({
         resumeSessionId: sessionId,
-        agentOptions: this.ctx.agentDefaultModel.currentSelection(),
+        agentOptions: agentOptions === undefined
+          ? this.ctx.agentDefaultModel.currentSelection()
+          : { ...this.ctx.agentDefaultModel.currentSelection(), ...agentOptions },
         setup: rootSetup(this.ctx, agentPreset),
       })
       this.handles.set(sessionId, handle)

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { graphAgentOptions } from '@dangosys/dsh-singularity-graphs'
 import { sessionId, text } from '../shared.ts'
 
 export function defineSpawnTool(ctx: Context) {
@@ -23,11 +24,13 @@ export function defineSpawnTool(ctx: Context) {
       const graph = await ctx.graphs.graphForSession(caller)
       if (graph.ready)
         throw new Error(`graph_spawn: graph ${graph.id} is ready; delegate objective work with task_decompose`)
+      const pinned = graphAgentOptions(graph)
       const handle = await ctx.agentRuntime.spawn(exec.agent!, {
         sessionId: SessionId(randomUUID()),
         name: args.name,
         prompt: [{ type: 'text', text: args.task }],
         signal: exec.signal,
+        ...(pinned === undefined ? {} : { agentOptions: pinned }),
       })
       const cancel = () => handle.agent.cancel({ kind: 'parent' })
       exec.signal.addEventListener('abort', cancel, { once: true })

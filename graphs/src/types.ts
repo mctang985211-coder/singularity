@@ -1,5 +1,12 @@
 import type { SessionId } from '@deepseek-ai/dsh-session'
 
+/** A model pinned on a graph; absent means the graph follows the deployment default selection. */
+export interface GraphModel {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+}
+
 export interface GraphRecord {
   readonly id: string
   readonly name: string
@@ -9,6 +16,8 @@ export interface GraphRecord {
   readonly layoutStoreId: string
   readonly createdAt: number
   readonly ready: boolean
+  /** Pinned model applied to agents this graph spawns after the pin; absent = deployment default. */
+  readonly model?: GraphModel
 }
 
 export interface GraphArchive {
@@ -28,6 +37,7 @@ export type GraphsEvent =
   | { readonly kind: 'graph/add'; readonly graph: GraphRecord }
   | { readonly kind: 'graph/select'; readonly id: string }
   | { readonly kind: 'graph/ready'; readonly id: string }
+  | { readonly kind: 'graph/model'; readonly id: string; readonly model: GraphModel | null }
   | { readonly kind: 'graph/remove'; readonly id: string; readonly archive: GraphArchive }
 
 export interface CreateGraphRequest {
@@ -40,6 +50,8 @@ export interface CreateGraphRequest {
   readonly workspace?: string
   /** With createEnv, skip reuse matching and always create a fresh environment. */
   readonly fresh?: boolean
+  /** Model pinned for the new graph; absent follows the deployment default selection. */
+  readonly model?: GraphModel
 }
 
 export interface CreateGraphResult {
