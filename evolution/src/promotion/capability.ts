@@ -52,7 +52,7 @@ export interface CapabilityPromotionSources extends SkillPromotionSources {
   /** The store as it stands right now — the effective capability table, the verifier vocabulary and every skill root. */
   store(): Promise<CapabilityStoreView>
   /** The row's own admission pre-check refusals (`precheckReplacedCapabilityRow`), one entry per refusal. */
-  rowRefusals(row: CapabilityRow, sandboxSkillRoot: string | undefined): Promise<readonly string[]>
+  rowRefusals(row: CapabilityRow, sandboxSkillRoot: string | undefined, mcpServers?: Readonly<Record<string, import('@dangosys/dsh-singularity-task-runtime').McpServerTemplate>>): Promise<readonly string[]>
 }
 
 /** Whether one frozen capability identity is the row the candidate prepared: name, digest and canonical bytes must all agree. */
@@ -157,7 +157,7 @@ export async function assertCapabilitySideBinding(input: {
     )
   }
   for (const server of binding.mcpServers) {
-    if (server.templateDigest === null) {
+    if (server.templateDigest === null || expected.mcpBindings?.find(item => item.serverName === server.serverName)?.templateDigest !== server.templateDigest) {
       throw new Error(
         `evolution: run "${run.runId}" of the ${where} bound MCP server "${server.serverName}" with no resolvable template — the run ` +
           'recorded no identity for the server it was granted, so the frozen server plane cannot be compared',
@@ -253,10 +253,10 @@ export async function assertCapabilityPromotionEvidence(
   }
   await assertCapabilityCandidateAdmissible(
     store,
-    { row: prepared.row, ...(prepared.skill === undefined ? {} : { skill: prepared.skill }) },
+    { row: prepared.row, ...(prepared.skill === undefined ? {} : { skill: prepared.skill }), ...(prepared.mcpServers === undefined ? {} : { mcpServers: prepared.mcpServers.definitions }) },
     current,
   )
-  const refusals = await sources.rowRefusals(prepared.row, prepared.skillRoot)
+  const refusals = await sources.rowRefusals(prepared.row, prepared.skillRoot, prepared.mcpServers?.definitions)
   if (refusals.length > 0) {
     throw capabilityRefusal(
       'skill-candidate-invalid',
@@ -306,6 +306,8 @@ export async function assertCapabilityPromotionEvidence(
         '— the row this candidate would roll back to is not the row the experiment evaluated against',
     )
   }
+  if ((capability.mcpServers?.digest ?? null) !== (prepared.mcpServers?.digest ?? null))
+    throw capabilityRefusal('capability-evidence-drifted', 'experiment MCP definitions do not match the prepared candidate')
   const preparedSkill = proposal.prepared?.skillContent
   if ((frozen.candidate === undefined) !== (preparedSkill === undefined)) {
     throw capabilityRefusal(
@@ -354,16 +356,28 @@ export async function assertCapabilityPromotionEvidence(
         'the promotion is refused rather than granted on unverifiable evidence',
     )
   }
+  const registry = { ...store.mcpServers, ...prepared.mcpServers?.definitions }
+  for (const sample of frozen.samples) {
+    for (const side of [sample.provider, sample.candidateProvider]) {
+      for (const server of side?.mcpBindings ?? []) {
+        const current = registry[server.serverName]
+        if (current === undefined || sha256Hex(canonicalJson(current)) !== server.templateDigest)
+          throw capabilityRefusal('capability-server-changed', `MCP server ${server.serverName} no longer matches the frozen template`)
+      }
+    }
+  }
   for (const sample of report.samples) {
     const frozenSample = frozenSampleOf(report, sample.taskId)
     const candidateLabel = `sample "${sample.taskId}" candidate side`
-    // 7. The candidate side: a real run, verified, every frozen criterion passed.
+    // 7. A verified candidate must pass required acceptance. The cost objective
+    // preserves optional verdicts through the same recomputed comparer below.
     const candidateTask = assertSideEvidence({
       sample: frozenSample,
       detail: sample.candidate,
       experimentId: view.experimentId,
       snapshot,
       where: candidateLabel,
+      ...(frozen.objective === undefined ? {} : { objective: frozen.objective }),
     })
     assertJudgeUnchanged(frozenSample, sample.candidate, candidateLabel, vocabulary)
     assertCostWithinDeclaredBudget(report, candidateLabel, sample.candidate)
@@ -374,12 +388,15 @@ export async function assertCapabilityPromotionEvidence(
           'frozen acceptance, never an admission that merely went through; the promotion is refused',
       )
     }
-    const failed = sample.candidate.criteria.filter(criterion => criterion.verdict !== 'pass')
+    const required = frozen.objective === 'tool-call-reduction'
+      ? snapshot.tasks.find(task => task.taskId === sample.taskId)!.acceptanceCriteria.filter(criterion => criterion.mandatory)
+      : frozenSample.criteria
+    const failed = required.filter(criterion => sample.candidate.criteria.find(item => item.criterionId === criterion.criterionId)?.verdict !== 'pass')
     if (failed.length > 0) {
       throw capabilityRefusal(
         'capability-candidate-not-verified',
-        `the candidate side of ${candidateLabel} reports ${failed.map(criterion => `"${criterion.criterionId}" ${criterion.verdict}`).join(', ')} — ` +
-          'every frozen criterion must pass on the candidate side before the candidate may be promoted',
+        `the candidate side of ${candidateLabel} did not pass ${failed.map(criterion => `"${criterion.criterionId}"`).join(', ')} — ` +
+          'required frozen acceptance must pass on the candidate side before the candidate may be promoted',
       )
     }
     if (sample.candidate.initialDigest !== frozen.snapshot.digest) {
@@ -429,6 +446,7 @@ export async function assertCapabilityPromotionEvidence(
         sample: frozenSample,
         detail: sample.baseline,
         where: baselineLabel,
+        ...(frozen.objective === undefined ? {} : { objective: frozen.objective }),
         proposalId: proposal.proposalId,
       })
       const lineage = experimentLineage(view.experimentId, sample.taskId, 'baseline')
@@ -508,10 +526,10 @@ export async function assertCapabilityPromotionEvidence(
     )
   }
   const degraded = report.samples.filter(sample => sample.verdict === 'regressed')
-  if (report.verdict !== 'fixed') {
+  if (report.verdict !== (frozen.objective === 'tool-call-reduction' ? 'improved' : 'fixed')) {
     throw capabilityRefusal(
       'capability-not-fixed',
-      `the two-sided capability experiment "${view.experimentId}" did not show a clean fix — ` +
+      `the two-sided capability experiment "${view.experimentId}" did not show a clean ${frozen.objective === 'tool-call-reduction' ? 'improvement' : 'fix'} — ` +
         `${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples)
           .map(line => `- ${line}`)
           .join('\n')}` +

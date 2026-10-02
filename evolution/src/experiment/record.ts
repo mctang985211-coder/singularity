@@ -99,8 +99,8 @@ export function reviewRefOf(review: ReviewRecord): string {
   return `${review.taskId}#${review.runId ?? 'no-run'}`
 }
 
-/** What one side cost, as the run's own review record reported it. `unknown` is never a zero. */
-export function costOf(review: ReviewRecord | undefined): ExperimentCost {
+/** Read reported cost; a supplied snapshot requires complete tool-call counters from the whole executed Run subtree. */
+export function costOf(review: ReviewRecord | undefined, snapshot?: TaskSnapshot): ExperimentCost {
   if (review === undefined) {
     return { status: 'unknown', reason: 'the run settled no review record, so no cost was reported for it' }
   }
@@ -114,7 +114,34 @@ export function costOf(review: ReviewRecord | undefined): ExperimentCost {
       reason: "the run's review record carries metrics but no token and no tool-call counters",
     }
   }
-  return { status: 'reported', metrics: structuredClone(metrics) }
+  if (snapshot === undefined) return { status: 'reported', metrics: structuredClone(metrics) }
+  const root = snapshot.runs.find(run => run.runId === review.runId && run.taskId === review.taskId)
+  if (root === undefined) return { status: 'unknown', reason: 'the measured side has no Run in its task store' }
+  const runIds = new Set([root.runId])
+  let size = 0
+  while (size !== runIds.size) {
+    size = runIds.size
+    for (const run of snapshot.runs) {
+      if (run.parentRunId !== undefined && runIds.has(run.parentRunId)) runIds.add(run.runId)
+    }
+  }
+  let calls = 0
+  let failures = 0
+  for (const run of snapshot.runs.filter(item => runIds.has(item.runId))) {
+    const record = snapshot.reviews.find(item => item.runId === run.runId && item.taskId === run.taskId)
+    const counters = record?.metrics?.toolCalls
+    if (!TERMINAL_RUN_STATUSES.has(run.status) || counters === undefined ||
+        !Number.isSafeInteger(counters.calls) || counters.calls < 0 ||
+        !Number.isSafeInteger(counters.failures) || counters.failures < 0) {
+      return { status: 'unknown', reason: `Run ${run.runId} in the executed subtree has no complete terminal tool-call counters` }
+    }
+    calls += counters.calls
+    failures += counters.failures
+  }
+  if (!Number.isSafeInteger(calls) || !Number.isSafeInteger(failures)) {
+    return { status: 'unknown', reason: 'the executed subtree tool-call counters exceed safe integer range' }
+  }
+  return { status: 'reported', metrics: { ...structuredClone(metrics), toolCalls: { calls, failures } } }
 }
 
 /** The evidence ids of one run: the review record's own list, or the store's verdict evidence when the review carries none. */
@@ -295,7 +322,7 @@ export function recoveredSampleRecord(input: {
     evidenceRefs: facts.evidenceRefs,
     workspace: input.workspace,
     initialDigest: input.view.frozen.snapshot.digest,
-    cost: costOf(facts.review),
+    cost: costOf(facts.review, input.view.frozen.objective === 'tool-call-reduction' ? input.snapshot : undefined),
     ...(facts.interruptedReason === undefined ? {} : { reason: facts.interruptedReason }),
     actor: input.actor,
   })
@@ -357,7 +384,7 @@ export function buildExperimentReport(view: ExperimentView): ExperimentReport {
       role: sample.role,
       baseline,
       candidate,
-      verdict: compareExperimentSides(sample.role, baseline, candidate),
+      verdict: compareExperimentSides(sample.role, baseline, candidate, view.frozen.objective),
     }
   })
   const at = [view.at, ...view.samples.map(record => record.at)].reduce((left, right) => (left > right ? left : right))
@@ -369,7 +396,7 @@ export function buildExperimentReport(view: ExperimentView): ExperimentReport {
     frozen: view.frozen,
     frozenDigest: view.frozenDigest,
     samples,
-    verdict: overallExperimentVerdict(samples),
+    verdict: overallExperimentVerdict(samples, view.frozen.objective),
   }
   assertExperimentReport(report)
   return report

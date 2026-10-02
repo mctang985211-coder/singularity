@@ -1,3 +1,4 @@
+import { parseMcpServerRegistry } from '../mcp-servers.ts'
 import { defaultTaskTemplatesRoot, findTaskTemplates, registerTaskTemplate } from '../task-template.ts'
 import type { TaskTemplate } from '@dangosys/dsh-singularity-task'
 /**
@@ -43,6 +44,7 @@ import type {
   BudgetConfig,
   ChildOutcome,
   OrchestrateEnv,
+  ReplayOverlay,
   ReplayRunOutcome,
   SessionObservation,
   TerminalReviewFact,
@@ -125,7 +127,7 @@ export class TaskRuntime extends Service {
 
   readonly sessionWorkspaces = new Map<string, string>()
 
-  readonly sessionExecutionBindings = new Map<string, { agentOptions?: AgentOptions }>()
+  readonly sessionExecutionBindings = new Map<string, { agentOptions?: AgentOptions; taskTemplatesRoot?: string; overlay?: ReplayOverlay }>()
 
   readonly executionGate: ExecutionGate
 
@@ -161,7 +163,7 @@ export class TaskRuntime extends Service {
     this.config = {
       capabilities: structuredClone(config?.capabilities ?? {}),
       taskTemplatesRoot: config?.taskTemplatesRoot ?? defaultTaskTemplatesRoot(),
-      mcpServers: structuredClone(config?.mcpServers ?? {}),
+      mcpServers: parseMcpServerRegistry(config?.mcpServers ?? {}),
       ...(config?.defaultPreset !== undefined ? { defaultPreset: config.defaultPreset } : {}),
       verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
       maxDepth: config?.maxDepth ?? DEFAULT_MAX_DEPTH,
@@ -185,8 +187,12 @@ export class TaskRuntime extends Service {
     ctx.effect(() => () => this.unload())
   }
 
-  async findTaskTemplates(query?: string) {
-    return findTaskTemplates(this.config.taskTemplatesRoot, query)
+  taskTemplatesRootFor(sessionId?: string): string | undefined {
+    return (sessionId === undefined ? undefined : this.sessionExecutionBindings.get(sessionId)?.taskTemplatesRoot) ?? this.config.taskTemplatesRoot
+  }
+
+  async findTaskTemplates(query?: string, callerSessionId?: string) {
+    return findTaskTemplates(this.taskTemplatesRootFor(callerSessionId), query)
   }
 
   async registerTaskTemplate(template: TaskTemplate) {
@@ -241,7 +247,7 @@ export class TaskRuntime extends Service {
   async applyCapabilityRow(
     name: string,
     entry: CapabilityConfig | null,
-    options: { commitTargets?: readonly string[]; commitRow?: string } = {},
+    options: { commitTargets?: readonly string[]; commitRow?: string; mcpServers?: Record<string, import('../mcp-servers.ts').McpServerTemplate | null> } = {},
   ): Promise<void> {
     return svcLifecycle.applyCapabilityRow(this, name, entry, options)
   }
@@ -372,8 +378,8 @@ export class TaskRuntime extends Service {
     return svcAdmission.deriveBatch(this, identity, spec)
   }
 
-  manifestsOf(batch: NormalizedBatch): CapabilityManifest[] {
-    return svcAdmission.manifestsOf(this, batch)
+  manifestsOf(batch: NormalizedBatch, callerSessionId?: string): CapabilityManifest[] {
+    return svcAdmission.manifestsOf(this, batch, callerSessionId)
   }
 
   storedBatchOf(proposal: TaskProposal): NormalizedBatch {
@@ -662,8 +668,8 @@ export class TaskRuntime extends Service {
     return svcEnv.contractRefusal(parentTaskId, reasons)
   }
 
-  async orchestrateEnv(callerSessionId: string, actor: string, workspace?: string): Promise<OrchestrateEnv> {
-    return svcEnv.orchestrateEnv(this, callerSessionId, actor, workspace)
+  async orchestrateEnv(callerSessionId: string, actor: string, workspace?: string, overlay?: ReplayOverlay): Promise<OrchestrateEnv> {
+    return svcEnv.orchestrateEnv(this, callerSessionId, actor, workspace, overlay)
   }
 
   watchRun(storeId: string, runId: RunId, callback: (status: RunStatus) => void): () => void {
@@ -694,8 +700,9 @@ export class TaskRuntime extends Service {
     capabilities: readonly string[],
     view: SkillDiscoveryView,
     table: Readonly<Record<string, CapabilityConfig>> = this.config.capabilities,
+    mcpRegistry: Readonly<Record<string, import('../mcp-servers.ts').McpServerTemplate>> = this.config.mcpServers ?? {},
   ): Promise<ProviderPrecheck> {
-    return svcEnv.providerPrecheck(this, capabilities, view, table)
+    return svcEnv.providerPrecheck(this, capabilities, view, table, mcpRegistry)
   }
 
   async capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheck> {

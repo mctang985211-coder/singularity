@@ -2,6 +2,7 @@
  * Runtime lifecycle: construction, provider load, capability rows and gates.
  */
 
+import { parseMcpServerRegistry, type McpServerTemplate } from '../mcp-servers.ts'
 import type { TaskRuntime } from './runtime.ts'
 import { dirname, resolve } from 'node:path'
 import type { CapabilityManifest } from '@dangosys/dsh-singularity-task'
@@ -225,15 +226,23 @@ export async function applyCapabilityRow(
   self: TaskRuntime,
   name: string,
   entry: CapabilityConfig | null,
-  options: { commitTargets?: readonly string[]; commitRow?: string } = {},
+  options: { commitTargets?: readonly string[]; commitRow?: string; mcpServers?: Record<string, McpServerTemplate | null> } = {},
 ): Promise<void> {
+  const registry = { ...self.config.mcpServers }
+  for (const [key, definition] of Object.entries(options.mcpServers ?? {})) {
+    if (definition === null) delete registry[key]
+    else registry[key] = definition
+  }
+  const parsed = parseMcpServerRegistry(registry)
   if (entry === null) {
     const rest = { ...self.config.capabilities }
     delete rest[name]
     self.config.capabilities = rest
+    self.config.mcpServers = parsed
     return
   }
-  await assertReplacementRow(self, name, entry, options)
+  await assertReplacementRow(self, name, entry, { ...options, mcpServers: parsed })
+  self.config.mcpServers = parsed
   self.config.capabilities = { ...self.config.capabilities, [name]: structuredClone(entry) }
 }
 
@@ -241,7 +250,7 @@ export async function assertReplacementRow(
   self: TaskRuntime,
   name: string,
   entry: CapabilityConfig,
-  options: { commitTargets?: readonly string[]; commitRow?: string } = {},
+  options: { commitTargets?: readonly string[]; commitRow?: string; mcpServers?: Record<string, McpServerTemplate | null> } = {},
 ): Promise<void> {
   const verifierRefs = await self.registeredVerifierIds()
   const ledger = self.softService<EvolutionCommitLedger>('evolution')
@@ -268,6 +277,7 @@ export async function assertReplacementRow(
     name,
     entry,
     table: self.config.capabilities,
+    mcpRegistry: parseMcpServerRegistry(options.mcpServers ?? self.config.mcpServers ?? {}),
     // The deployment's own viewpoint, the same one the evolution gate and the
     // load-time report ask from: this process knows its own skill roots.
     view: { cwd: process.cwd() },

@@ -15,7 +15,7 @@
 
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import type { CapabilityConfig } from '../../task-runtime/src/index.ts'
+import type { McpServerTemplate, CapabilityConfig } from '../../task-runtime/src/index.ts'
 
 /** The one line of the second document a case checks was left alone — never printed by production code. */
 export const FIXTURE_API_KEY = 'sk-fixture-do-not-print-me'
@@ -38,6 +38,7 @@ function rowLine(name: string, entry: CapabilityConfig): string {
 export async function writeCapabilityConfig(
   file: string,
   rows: Readonly<Record<string, CapabilityConfig>> = {},
+  mcpServers: Readonly<Record<string, McpServerTemplate>> = {},
 ): Promise<string> {
   await mkdir(dirname(file), { recursive: true })
   const text = [
@@ -49,6 +50,7 @@ export async function writeCapabilityConfig(
     '- id: task-runtime',
     '  config:',
     '    # capability name → skills / tool labels / agent preset / MCP servers',
+    ...(Object.keys(mcpServers).length === 0 ? [] : ['    mcpServers:', ...Object.entries(mcpServers).map(([name, definition]) => `      ${JSON.stringify(name)}: ${JSON.stringify(definition)}`)]),
     '    capabilities:',
     ...Object.entries(rows).map(([name, entry]) => rowLine(name, entry)),
     '    defaultPreset: standard',

@@ -1286,7 +1286,7 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
   }
 
   it.each(['agent_preset', 'task_definition', 'workflow_policy'] as const)(
-    'refuses a %s PROMOTE with no evaluator, leaving the ledger and production untouched',
+    'refuses an unsupported or unprepared %s PROMOTE without writes',
     async targetType => {
       const f = await fixture()
       await f.svc.propose(
@@ -1302,7 +1302,7 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
         'root-1',
       )
       const message = await refusal(f.svc.checkPromotion('x1'))
-      expect(message).toContain(`targets "${targetType}", which has no evaluator in this build`)
+      expect(message).toContain(targetType === 'task_definition' ? 'task_definition has no prepared templates' : `targets "${targetType}", which has no evaluator in this build`)
       expect(await f.ledgerKinds()).not.toContain('decided')
     },
   )

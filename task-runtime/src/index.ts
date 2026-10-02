@@ -10,7 +10,7 @@ import type {} from '@dangosys/dsh-singularity-graphs'
 import { TaskRuntime } from './service/runtime.ts'
 
 export type { McpServerTemplate } from './mcp-servers.ts'
-export { resolveMcpServerSpecs } from './mcp-servers.ts'
+export { resolveMcpServerSpecs, parseMcpServerRegistry } from './mcp-servers.ts'
 export type { CapabilityConfig } from './capability.ts'
 export {
   resolveCapabilities,
@@ -26,7 +26,7 @@ export { WorkspaceBusyError, WorkspaceRegistry } from './workspace.ts'
 export type { WorkspaceOwner } from './workspace.ts'
 export { resolveRootBudget, checkRunStart } from './root-budget.ts'
 export { fixProtectedInputs, fixSpecProtectedInputs, protectedInputDefects } from './protected-inputs.ts'
-export { decompositionIdentity, normalizeDecomposition } from './normalize.ts'
+export { decompositionIdentity, normalizeDecomposition, normalizeRootContract } from './normalize.ts'
 export type { NormalizedBatch } from './normalize.ts'
 export {
   checkObligationCoverage,
@@ -64,7 +64,7 @@ export {
 export { priorRoundNotice, priorRoundNoticeForRun } from './service/root-recovery.ts'
 export { readVerifiedFile, walkVerified } from './verified-read.ts'
 export type { RunBindingRead } from './run-binding.ts'
-export { bindRunProviders } from './run-binding.ts'
+export { bindRunProviders, mcpServerBindings } from './run-binding.ts'
 export type { CapabilityProviderPrecheck, ProviderPrecheck } from './provider-precheck.ts'
 export {
   optionalService,

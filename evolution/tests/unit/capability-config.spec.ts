@@ -23,7 +23,7 @@
  * - the write is atomic and can be interrupted at the seam (`before-write`), so a
  *   crash leaves the old file or the new one and the commit intent stays open.
  */
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -83,6 +83,35 @@ function statesFor(text: string, path: string, name: string, entry: CapabilityCo
 const NEVER: CapabilityTableStates = { beforeSha256: '0'.repeat(64), afterSha256: '1'.repeat(64) }
 
 describe('the capability table text', () => {
+  it('atomically writes a skill-free MCP row with definitions and removes only its new definitions on rollback', async () => {
+    const path = await file()
+    const before = await readFile(path, 'utf8')
+    const entry = { mcpServers: ['echo'] }
+    const mcpServers = { echo: { serverName: 'echo-fixture', description: 'echo', command: 'node', args: ['server.mjs'] } }
+    const identity = capabilityTableIdentity({ text: before, file: path, name: ROW, entry, restored: null, mcpServers })
+    const input = { file: path, name: ROW, entry, mcpServers, states: { beforeSha256: identity.baselineSha256, afterSha256: identity.applySha256 } }
+    await writeCapabilityRowToConfig(input)
+    const applied = await readFile(path, 'utf8')
+    expect(rowOf(applied, ROW)).toEqual(entry)
+    expect(applied).toContain('"echo": {"args":["server.mjs"],"command":"node","description":"echo","serverName":"echo-fixture"}')
+    expect(textDigest(applied)).toBe(identity.applySha256)
+    await writeCapabilityRowToConfig(input)
+    expect(await readFile(path, 'utf8')).toBe(applied)
+    await writeCapabilityRowToConfig({ file: path, name: ROW, entry: null, mcpServers: { echo: null }, states: { beforeSha256: identity.applySha256, afterSha256: identity.rollbackSha256 } })
+    expect(await readFile(path, 'utf8')).toBe(before)
+  })
+
+  it('preserves existing server definitions and the second document while adding and removing a candidate', async () => {
+    const path = await file()
+    const unrelated = { other: { serverName: 'other', description: 'other', command: 'node' } }
+    await writeCapabilityConfig(path, { 'store-row': { skills: ['store-skill'] } }, unrelated)
+    const before = await readFile(path, 'utf8')
+    const added = applyCapabilityRowToConfig({ text: before, file: path, name: ROW, entry: { mcpServers: ['echo'] }, mcpServers: { echo: { serverName: 'echo', description: 'echo', command: 'node' } } })
+    const removed = applyCapabilityRowToConfig({ text: added, file: path, name: ROW, entry: null, mcpServers: { echo: null } })
+    expect(removed).toBe(before)
+    expect(added.split('---')[1]).toBe(before.split('---')[1])
+  })
+
   it('replaces one row, leaves every other byte alone, and reads the row back', async () => {
     const path = await file()
     const before = await readFile(path, 'utf8')
@@ -209,6 +238,28 @@ describe('the capability table text', () => {
       }),
     ).rejects.toThrow('the process died here')
     expect(await readFile(path, 'utf8')).toBe(before)
+  })
+
+  it.each(['apply', 'rollback'] as const)('verifies an already installed %s without replacing the config file', async direction => {
+    const path = await file()
+    const before = await readFile(path, 'utf8')
+    const states = statesFor(before, path, ROW, ENTRY)
+    await writeCapabilityRowToConfig({ file: path, name: ROW, entry: ENTRY, states })
+    const entry = direction === 'apply' ? ENTRY : null
+    const rollbackStates = statesFor(await readFile(path, 'utf8'), path, ROW, null)
+    if (direction === 'rollback') await writeCapabilityRowToConfig({ file: path, name: ROW, entry, states: rollbackStates })
+    const installed = await readFile(path, 'utf8')
+    const inode = (await stat(path)).ino
+    const stages: string[] = []
+    const verified = await writeCapabilityRowToConfig({
+      file: path, name: ROW, entry,
+      states: direction === 'apply' ? states : rollbackStates,
+      probe: stage => stages.push(stage),
+    })
+    expect(verified.direction).toBe(direction === 'apply' ? 'written' : 'removed')
+    expect(stages).toEqual(['before-write'])
+    expect((await stat(path)).ino).toBe(inode)
+    expect(await readFile(path, 'utf8')).toBe(installed)
   })
 
   it('verifies the file one last time at the staged seam, immediately before the rename', async () => {

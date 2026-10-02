@@ -304,10 +304,11 @@ describe('SingularityAgent assembly', () => {
     expect(candidate.parameters.required).toContain('versionSet')
     const mutation = candidate.parameters.properties.mutationJson!
     expect(mutation.type).toBe('string')
-    expect(mutation.description).toContain('{rows,skill?}')
-    expect(candidate.description).toContain('ONE JSON string')
-    expect(candidate.description).toContain('SKILL.contract.json')
-    expect(candidate.description).toContain('resources:[]')
+    expect(candidate.description).toContain('Task:')
+    expect(candidate.description).toContain('Skill:')
+    expect(candidate.description).toContain('Capability:')
+    expect(candidate.description).toContain('mcpServers?')
+    expect(candidate.description).toContain('derived by this tool')
   })
 
   it('describes all nine evolution tools in whole-object terms, with no single-file claim left', async () => {
@@ -321,24 +322,12 @@ describe('SingularityAgent assembly', () => {
       const tool = tools.get(name) as unknown as { description: string }
       expect(tool.description, name).not.toMatch(/single-file|single file/i)
     }
-    const apply = tools.get('evolution_apply') as unknown as { description: string }
-    expect(apply.description).toContain('the `SKILL.md` and, for an execution skill, the `SKILL.contract.json` beside it')
-    expect(apply.description).toContain('one whole capability row with an optional new execution skill')
-    const rollback = tools.get('evolution_rollback') as unknown as { description: string }
-    expect(rollback.description).toContain('the `SKILL.md`, plus the `SKILL.contract.json` when it declares an')
-    expect(rollback.description).toContain('restores a committed capability row')
-    const prepare = tools.get('evolution_prepare') as unknown as { description: string }
-    expect(prepare.description).toContain('the model never submits a sidecar')
-    const replay = tools.get('evolution_replay') as unknown as { description: string }
-    expect(replay.description).toContain('the `SKILL.contract.json` beside it')
-    const list = tools.get('evolution_list') as unknown as { description: string }
-    expect(list.description).toContain('every production file it commits')
-    expect(list.description).toContain('applied skill object or capability row')
-    const propose = tools.get('evolution_propose') as unknown as { description: string }
-    expect(propose.description).toContain('one whole capability row with an optional NEW execution skill')
-    const gate = tools.get('evolution_gate') as unknown as { description: string }
-    expect(gate.description).toContain('skill or capability candidate')
-    const decide = tools.get('evolution_decide') as unknown as { description: string }
-    expect(decide.description).toContain('a capability promotion moves exactly one whole row')
+    for (const name of ['evolution_prepare', 'evolution_apply', 'evolution_rollback', 'evolution_decide']) {
+      const tool = tools.get(name) as unknown as { description: string }
+      expect(tool.description, name).toMatch(/Task template|Task candidate/)
+      expect(tool.description, name).toContain('Skill')
+      expect(tool.description, name).toContain('capability')
+    }
+
   })
 })

@@ -1,3 +1,5 @@
+import { assertMcpServerIdentity, assertCapabilityRow, capabilityRowDigest } from '../capability-candidate.ts'
+import { assertTemplateIdentity } from '../task-definition.ts'
 /** The experiment comparer and the schema validators the report read path runs.
  * @module dsh-singularity-evolution/replay/comparer */
 
@@ -7,6 +9,7 @@ import type {
   ExperimentAdmissionSource,
   ExperimentBudget,
   ExperimentCost,
+  ExperimentObjective,
   ExperimentCriterionDetail,
   ExperimentReport,
   ExperimentSampleComparison,
@@ -41,7 +44,7 @@ import {
   OUTCOME_RANK,
 } from './contract.ts'
 
-/** One side as the v1 comparer reads it: the same outcome rank and criterion semantics, so v1's rules stay the rules. */
+/** Acceptance comparisons use the existing replay outcome and criterion rules. */
 function asReplaySide(side: ExperimentSideComparison): ReplaySideSummary {
   return {
     // The comparer never reads the task identity (its answer is over outcomes
@@ -63,7 +66,18 @@ export function compareExperimentSides(
   role: ExperimentSampleRole,
   baseline: ExperimentSideComparison,
   candidate: ExperimentSideComparison,
+  objective?: ExperimentObjective,
 ): ExperimentSampleVerdict {
+  if (objective === 'tool-call-reduction') {
+    const relation = compareReplaySides(asReplaySide(baseline), asReplaySide(candidate)).relation
+    if (baseline.outcome !== 'verified' || relation === 'inconclusive') return 'inconclusive'
+    if (candidate.outcome !== 'verified' || relation === 'worse') return 'regressed'
+    const before = baseline.cost?.status === 'reported' ? baseline.cost.metrics.toolCalls?.calls : undefined
+    const after = candidate.cost?.status === 'reported' ? candidate.cost.metrics.toolCalls?.calls : undefined
+    if (!Number.isSafeInteger(before) || !Number.isSafeInteger(after) || before! < 0 || after! < 0) return 'inconclusive'
+    if (after! > before!) return role === 'observed-success' ? 'not-improved' : 'regressed'
+    return role === 'observed-success' ? (after! < before! ? 'improved' : 'not-improved') : 'maintained'
+  }
   // A6: the runtime's own admission refusal, before any outcome ranking. A
   // candidate that produced no run did not fix anything.
   if (candidate.outcome === 'not-admitted') return role === 'observed-failure' ? 'not-fixed' : 'inconclusive'
@@ -84,11 +98,17 @@ export function compareExperimentSides(
   return relation === 'worse' ? 'regressed' : 'maintained'
 }
 
-/** The overall verdict over every sample, from the sample verdicts alone: any non-fixed sample makes the experiment not-fixed. */
+/** Aggregate the frozen objective's observed target and guard samples. */
 export function overallExperimentVerdict(
   samples: readonly Pick<ExperimentSampleComparison, 'role' | 'verdict'>[],
+  objective?: ExperimentObjective,
 ): ExperimentVerdict {
   if (samples.some(sample => sample.verdict === 'inconclusive')) return 'inconclusive'
+  if (objective === 'tool-call-reduction') {
+    if (samples.some(sample => sample.verdict === 'regressed')) return 'regressed'
+    const successes = samples.filter(sample => sample.role === 'observed-success')
+    return successes.length > 0 && successes.every(sample => sample.verdict === 'improved') ? 'improved' : 'not-improved'
+  }
   if (samples.some(sample => sample.verdict === 'both-failed')) return 'both-failed'
   const failures = samples.filter(sample => sample.role === 'observed-failure')
   const fixedAll = failures.length > 0 && failures.every(sample => sample.verdict === 'fixed')
@@ -122,10 +142,13 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
   if (typeof value.proposalId !== 'string' || value.proposalId.length === 0) {
     throw new Error('evolution: experiment report frozen.proposalId must be a non-empty string')
   }
+  if (value.objective !== undefined && value.objective !== 'tool-call-reduction') {
+    throw new Error('evolution: experiment report frozen.objective must be tool-call-reduction when declared')
+  }
   if (!Number.isInteger(value.repetition) || (value.repetition as number) < 0) {
     throw new Error('evolution: experiment report frozen.repetition must be a non-negative integer')
   }
-  if (value.candidate === undefined && value.capability === undefined) {
+  if (value.candidate === undefined && value.capability === undefined && value.taskDefinition === undefined) {
     throw new Error(
       'evolution: experiment report frozen must name the candidate it evaluates — a skill object identity (frozen.candidate) or a ' +
         'capability candidate (frozen.capability, with frozen.candidate only when the candidate carries a new skill); a block that ' +
@@ -133,6 +156,12 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
     )
   }
   if (value.candidate !== undefined) assertIdentity(value.candidate, 'frozen.candidate')
+  if (value.taskDefinition !== undefined) {
+    if (!isRecord(value.taskDefinition)) throw new Error('evolution: frozen.taskDefinition must name prepared templates')
+    assertTemplateIdentity(value.taskDefinition.candidate)
+    if (value.taskDefinition.baseline !== null) assertTemplateIdentity(value.taskDefinition.baseline)
+    if (!isRecord(value.taskDefinition.libraries) || !isHex64(value.taskDefinition.libraries.baseline) || !isHex64(value.taskDefinition.libraries.candidate)) throw new Error('evolution: frozen template library digest missing')
+  }
   if (value.capability !== undefined) assertFrozenCapability(value.capability)
   if (value.productionBaseline !== undefined) {
     if (value.candidate === undefined) {
@@ -176,12 +205,14 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
   }
   const taskIds = new Set<string>()
   value.samples.forEach((sample, index) =>
-    assertFrozenSample(sample, `frozen.samples[${index}]`, taskIds, value.capability !== undefined),
+    assertFrozenSample(sample, `frozen.samples[${index}]`, taskIds, value.capability !== undefined || value.taskDefinition !== undefined),
   )
   const roles = value.samples.map(sample => (sample as FrozenSample).role)
-  if (!roles.includes('observed-failure')) {
+  const requiredRole = value.objective === 'tool-call-reduction' ? 'observed-success' : 'observed-failure'
+  const incompatibleRole = value.objective === 'tool-call-reduction' ? 'observed-failure' : 'observed-success'
+  if (!roles.includes(requiredRole) || roles.includes(incompatibleRole)) {
     throw new Error(
-      'evolution: an experiment frozen block needs at least one observed-failure sample (§F.2: the target failure must be reproduced)',
+      `evolution: an experiment frozen block needs at least one ${requiredRole} sample and no ${incompatibleRole} samples for its objective`,
     )
   }
   if (!roles.includes('holdout')) {
@@ -199,6 +230,7 @@ function assertFrozenCapability(value: unknown): asserts value is FrozenCapabili
         "the candidate installs, the registry row it moves, and the proposal's source refs",
     )
   }
+  if (isRecord(value) && value.mcpServers !== undefined) assertMcpServerIdentity(value.mcpServers)
   assertFrozenCapabilityRow(value.row, 'frozen.capability.row')
   if (value.baseline !== null) assertFrozenCapabilityRow(value.baseline, 'frozen.capability.baseline')
   if (!Array.isArray(value.sourceRefs) || value.sourceRefs.some(ref => typeof ref !== 'string' || ref.length === 0)) {
@@ -214,15 +246,27 @@ function assertFrozenCapabilityRow(value: unknown, field: string): asserts value
     typeof value.name !== 'string' ||
     value.name.length === 0 ||
     !isHex64(value.digest) ||
-    !isRecord(value.entry) ||
-    !Array.isArray(value.entry.skills) ||
-    (value.entry.skills as unknown[]).some(skill => typeof skill !== 'string' || skill.length === 0)
+    !isRecord(value.entry)
   ) {
     throw new Error(
       `evolution: experiment report ${field} must be one whole capability row { name, entry, digest } — the name, the row itself ` +
         '(at least its skills) and the SHA-256 of its canonical bytes',
     )
   }
+  const entry = assertCapabilityRow(field, value.entry)
+  if (capabilityRowDigest(entry) !== value.digest) throw new Error(`evolution: ${field} row digest does not match its entry`)
+}
+
+function assertFrozenMcpBindings(value: { mcpServers: unknown[]; mcpBindings?: unknown }, field: string): void {
+  if (value.mcpServers.length === 0 && value.mcpBindings === undefined) return
+  if (!Array.isArray(value.mcpBindings) || value.mcpBindings.length !== value.mcpServers.length)
+    throw new Error(`evolution: ${field} must freeze the exact MCP template bindings`)
+  for (const binding of value.mcpBindings) {
+    if (!isRecord(binding) || typeof binding.serverName !== 'string' || !value.mcpServers.includes(binding.serverName) || !isHex64(binding.templateDigest))
+      throw new Error(`evolution: ${field} holds an invalid MCP template binding`)
+  }
+  if (new Set(value.mcpBindings.map(binding => binding.serverName)).size !== value.mcpServers.length)
+    throw new Error(`evolution: ${field} repeats MCP template bindings`)
 }
 
 /** One side's frozen provider identity of a capability sample (A6). */
@@ -243,6 +287,7 @@ function assertFrozenCapabilitySide(value: unknown, field: string): asserts valu
         '(capabilities, registryRevision, mcpServers, preset, skills)',
     )
   }
+  assertFrozenMcpBindings(value, field)
   const names = new Set<string>()
   for (const skill of value.skills) {
     assertFrozenProviderSkill(skill, `${field}.skills[${(skill as { name?: unknown }).name as string}]`)
@@ -386,6 +431,7 @@ function assertFrozenProviderIdentity(value: unknown, field: string): asserts va
     )
   }
   if (!Array.isArray(value.skills)) throw new Error(`evolution: experiment report ${field}.skills must be an array`)
+  assertFrozenMcpBindings(value, field)
   const names = new Set<string>()
   for (const skill of value.skills) {
     assertFrozenProviderSkill(skill, `${field}.skills[${(skill as { name?: unknown }).name as string}]`)
@@ -743,14 +789,14 @@ export function assertExperimentReport(report: unknown): asserts report is Exper
         `evolution: experiment report ${field} sides share one workspace "${baseline.workspace}" — two sides need two workspaces`,
       )
     }
-    const computed = compareExperimentSides(frozenSample.role, baseline, candidate)
+    const computed = compareExperimentSides(frozenSample.role, baseline, candidate, frozen.objective)
     if (entry.verdict !== computed) {
       throw new Error(
         `evolution: experiment report ${field}.verdict "${String(entry.verdict)}" does not match its own evidence ("${computed}")`,
       )
     }
   })
-  const computedVerdict = overallExperimentVerdict(reportSamples as ExperimentSampleComparison[])
+  const computedVerdict = overallExperimentVerdict(reportSamples as ExperimentSampleComparison[], frozen.objective)
   if (report.verdict !== computedVerdict) {
     throw new Error(
       `evolution: experiment report.verdict "${String(report.verdict)}" does not match its samples ("${computedVerdict}")`,

@@ -1,3 +1,4 @@
+import { DEPLOYMENT_MCP_SERVERS } from '../../../tests/support/mcp-servers.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
@@ -99,7 +100,7 @@ async function installSkill(
  * cordis's hook, so no `.ready()`-style shortcut is taken here: the test runs
  * what a deployment runs.
  */
-function harness(capabilities: Record<string, CapabilityConfig>) {
+function harness(capabilities: Record<string, CapabilityConfig>, mcpServers: import('../../src/config.ts').Config['mcpServers'] = {}) {
   const ctx = new Context()
   contexts.push(ctx)
   ctx.provide('verifier', { ready: async () => {}, verifierIds: () => [...VERIFIERS] } as never)
@@ -112,7 +113,7 @@ function harness(capabilities: Record<string, CapabilityConfig>) {
       if (message.type === 'warn') warnings.push(String(message.args[0]))
     },
   })
-  return { runtime: new TaskRuntime(ctx, { capabilities } as never), warnings }
+  return { runtime: new TaskRuntime(ctx, { capabilities, mcpServers } as never), warnings }
 }
 
 describe('load-time provider scan (S1-C item 3)', () => {
@@ -182,7 +183,7 @@ describe('load-time provider scan (S1-C item 3)', () => {
     })
     const { runtime, warnings } = harness({
       'fixture-capability': { skills: [EXECUTION_SKILL], tools: ['filesystem', 'bash'], mcpServers: ['bbdev'] },
-    })
+    }, DEPLOYMENT_MCP_SERVERS)
     await runtime[Service.init]()
 
     const report = await runtime.providerLoadReport()

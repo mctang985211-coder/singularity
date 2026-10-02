@@ -1,9 +1,9 @@
-import { lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { TERMINAL_RUN_STATUSES, canonicalize, rootTaskStoreId, sha256Hex, sha256Hex as sha256Hex$1, taskTemplateDigest } from "@dangosys/dsh-singularity-task";
+import { link, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { SKILL_SIDECAR_FILE, bindTaskTemplate, capabilityToolQuery, findTaskTemplates, inFlightRecoveryAttempt, loadSkillSidecar, mcpServerBindings, normalizeRootContract, optionalService, parseMcpServerRegistry, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, readVerifiedFile, recoveryAttemptWithKey, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, serializeSkillSidecar, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified } from "@dangosys/dsh-singularity-task-runtime";
+import { existsSync } from "node:fs";
 import { SessionId } from "@deepseek-ai/dsh-session";
-import { TERMINAL_RUN_STATUSES, rootTaskStoreId, sha256Hex, sha256Hex as sha256Hex$1 } from "@dangosys/dsh-singularity-task";
-import { SKILL_SIDECAR_FILE, capabilityToolQuery, inFlightRecoveryAttempt, loadSkillSidecar, optionalService, precheckProviders, precheckReplacedCapabilityRow, readVerifiedFile, recoveryAttemptWithKey, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, serializeSkillSidecar, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified } from "@dangosys/dsh-singularity-task-runtime";
 import { randomBytes } from "node:crypto";
 import { Context, Service } from "@deepseek-ai/cordis";
 
@@ -47,6 +47,7 @@ function compareReplaySides(champion, candidate) {
 const EXPERIMENT_COMPARER_VERSION = "experiment-comparer@2";
 const EXPERIMENT_SAMPLE_ROLES = [
 	"observed-failure",
+	"observed-success",
 	"observed-regression",
 	"holdout"
 ];
@@ -63,6 +64,8 @@ const EXPERIMENT_SAMPLE_VERDICTS = [
 	"fixed",
 	"both-failed",
 	"not-fixed",
+	"improved",
+	"not-improved",
 	"maintained",
 	"regressed",
 	"inconclusive"
@@ -72,6 +75,8 @@ const EXPERIMENT_VERDICTS = [
 	"fixed-with-regression",
 	"not-fixed",
 	"both-failed",
+	"improved",
+	"not-improved",
 	"regressed",
 	"inconclusive"
 ];
@@ -185,8 +190,522 @@ function tableChangedRefusal(file, detail) {
 }
 
 //#endregion
+//#region src/capability-candidate.ts
+/** The keys a capability row may declare — the whole vocabulary `CapabilityConfig` has. */
+const ROW_KEYS = [
+	"skills",
+	"tools",
+	"preset",
+	"permission",
+	"mcpServers"
+];
+/** The keys one capability mutation may declare: the rows, and the optional new skill. */
+const MUTATION_KEYS = [
+	"rows",
+	"skill",
+	"mcpServers"
+];
+/** The keys one carried new skill may declare. */
+const SKILL_KEYS = [
+	"name",
+	"content",
+	"sidecar"
+];
+/** The refusal of one rule, carrying its machine-readable code as the message's second word. */
+function capabilityRefusal(code, detail) {
+	return codedRefusal(code, detail);
+}
+/** The same refusal, as the one function every rule in this module reports through. */
+function refusal$1(code, detail) {
+	return capabilityRefusal(code, detail);
+}
+function nonEmpty$2(value, field) {
+	return nonEmpty$1(value, field, (detail) => refusal$1("capability-row-invalid", detail));
+}
+/** A single safe path segment: the skill-name rule every other entry of this plane uses. */
+function assertSegment$1(value, field) {
+	return assertSegment(value, field, (detail) => refusal$1("capability-row-invalid", detail));
+}
+function mcpServerIdentity(value) {
+	const definitions = parseMcpServerRegistry(value);
+	return {
+		definitions,
+		digest: digestOf(definitions)
+	};
+}
+function assertMcpServerIdentity(value) {
+	if (!isRecord(value)) throw refusal$1("capability-server-invalid", "MCP identity must be an object");
+	const identity = mcpServerIdentity(value.definitions);
+	if (value.digest !== identity.digest) throw refusal$1("capability-server-drifted", "MCP identity digest does not match its definitions");
+	return identity;
+}
+/** The canonical bytes of one row — what a sandbox freezes and an intent's source holds. */
+function capabilityRowBytes(entry) {
+	return canonicalJson(entry);
+}
+/** SHA-256 of {@link capabilityRowBytes}: the identity a row is compared by, everywhere. */
+function capabilityRowDigest(entry) {
+	return digestOf(entry);
+}
+/** The frozen identity of one row, as a prepared record and a commit intent name it. */
+function capabilityRowIdentity(row) {
+	return {
+		name: row.name,
+		entry: row.entry,
+		digest: capabilityRowDigest(row.entry)
+	};
+}
+/** The table a candidate would produce: the store's rows with this one row folded in. */
+function capabilityTableWith(table, row) {
+	return {
+		...table,
+		[row.name]: row.entry
+	};
+}
+/** Validate one capability row's shape and return it normalized — the whole row, no inherited field and no unknown key. */
+function assertCapabilityRow(where, value) {
+	if (!isRecord(value)) throw refusal$1("capability-row-invalid", `${where} must be an object carrying the row's own fields (${ROW_KEYS.join(", ")})`);
+	for (const key of Object.keys(value)) if (!ROW_KEYS.includes(key)) throw refusal$1("capability-row-invalid", `${where} declares unknown field ${JSON.stringify(key)}; a capability row carries ${ROW_KEYS.join(", ")}`);
+	const names = (field, list, minItems) => {
+		if (list === void 0) return void 0;
+		if (!Array.isArray(list)) throw refusal$1("capability-row-invalid", `${where}.${field} must be an array`);
+		const seen = /* @__PURE__ */ new Set();
+		for (const item of list) {
+			if (typeof item !== "string" || item.trim().length === 0) throw refusal$1("capability-row-invalid", `${where}.${field} must hold non-empty strings`);
+			if (seen.has(item)) throw refusal$1("capability-row-invalid", `${where}.${field} lists ${JSON.stringify(item)} twice`);
+			seen.add(item);
+		}
+		if (list.length < minItems) throw refusal$1("capability-row-invalid", `${where}.${field} must name at least ${minItems} entry`);
+		return [...list];
+	};
+	const skills = names("skills", value.skills, 0);
+	const entry = skills === void 0 ? {} : { skills };
+	const tools = names("tools", value.tools, 0);
+	if (tools !== void 0) entry.tools = tools;
+	const mcpServers = names("mcpServers", value.mcpServers, 0);
+	if (mcpServers !== void 0) entry.mcpServers = mcpServers;
+	for (const field of ["preset", "permission"]) {
+		const declared = value[field];
+		if (declared === void 0) continue;
+		if (typeof declared !== "string" || declared.trim().length === 0) throw refusal$1("capability-row-invalid", `${where}.${field} must be a non-empty string`);
+		entry[field] = declared;
+	}
+	if ((skills?.length ?? 0) + (tools?.length ?? 0) + (mcpServers?.length ?? 0) === 0) throw refusal$1("capability-row-invalid", `${where} must grant a skill, native tool or MCP server`);
+	return entry;
+}
+/** The declaration of one carried new skill, validated: shape, loader acceptance, then the rules a new object must satisfy. */
+function assertCarriedSkill(row, value) {
+	if (!isRecord(value)) throw refusal$1("skill-invalid", "the candidate's skill must be an object carrying name, content and sidecar");
+	for (const key of Object.keys(value)) if (!SKILL_KEYS.includes(key)) throw refusal$1("skill-invalid", `the candidate's skill declares unknown field ${JSON.stringify(key)}; it carries ${SKILL_KEYS.join(", ")}`);
+	const name = assertSegment$1(value.name, "skill.name");
+	if (typeof value.content !== "string" || value.content.length === 0) throw refusal$1("skill-invalid", "skill.content must be the whole non-empty SKILL.md text");
+	const content = value.content;
+	const defects = skillContractDefects(value.sidecar);
+	if (defects.length > 0) throw refusal$1("skill-sidecar-invalid", `the declaration of the new skill "${name}" is not one this build reads — ${defects.map((defect) => `${defect.code}: ${defect.reason}`).join("; ")}`);
+	const sidecar = value.sidecar;
+	if (sidecar.type !== "execution") throw refusal$1("skill-sidecar-not-execution", `the new skill "${name}" carries a ${sidecar.type} declaration, and a capability candidate's skill is the execution provider its row grants — a knowledge or guidance object claims no capability and no verifier, so it is not the object this row would install`);
+	if (sidecar.content.resources.length > 0) throw refusal$1("skill-resources-nonempty", `the new skill "${name}" declares ${sidecar.content.resources.length} resource(s) (${sidecar.content.resources.map((resource) => JSON.stringify(resource.path)).join(", ")}), and this build's candidate is SKILL.md plus the SKILL.contract.json beside it with \`resources: []\` — resources need an executor that writes them, so the candidate is refused before anything is written`);
+	const digest = sha256Hex(content);
+	if (sidecar.content.skillMdSha256 !== digest) throw refusal$1("skill-content-mismatch", `the new skill "${name}" declares content.skillMdSha256 ${sidecar.content.skillMdSha256}, but the submitted SKILL.md hashes to ${digest} — the declaration must be the identity of the bytes it authorises`);
+	if (!sidecar.capabilities.includes(row.name)) throw refusal$1("skill-capabilities-missing-row", `the new skill "${name}" declares capabilities [${sidecar.capabilities.join(", ")}], which does not include the row "${row.name}" this candidate writes — a provider the candidate's own capability does not carry would be granted by nothing`);
+	if (!(row.entry.skills ?? []).includes(name)) throw refusal$1("capability-row-grants-no-skill", `the row "${row.name}" grants [${(row.entry.skills ?? []).join(", ")}], which does not include the new skill "${name}" this candidate carries — the row is what grants the provider, so a candidate that writes a skill nothing grants is refused`);
+	return {
+		name,
+		content,
+		sidecar
+	};
+}
+/** Validate one whole capability mutation and return it normalized. The entry carries one row and an optional new skill. */
+function validateCapabilityMutation(mutation) {
+	if (!isRecord(mutation)) throw refusal$1("capability-row-missing", "a capability mutation must be an object carrying exactly one row under `rows`");
+	for (const key of Object.keys(mutation)) if (!MUTATION_KEYS.includes(key)) throw refusal$1("capability-row-invalid", `a capability mutation declares unknown key ${JSON.stringify(key)}; it carries ${MUTATION_KEYS.join(", ")}`);
+	const rows = mutation.rows;
+	if (!isRecord(rows)) throw refusal$1("capability-row-missing", "a capability mutation carries `rows` — an object holding exactly one capability row");
+	const names = Object.keys(rows);
+	if (names.length === 0) throw refusal$1("capability-row-missing", "a capability mutation carries no row: exactly one capability row is the unit this build prepares");
+	if (names.length > 1) throw refusal$1("capability-row-multiple", `a capability mutation carries ${names.length} rows (${names.map((name) => JSON.stringify(name)).join(", ")}); exactly one whole row is the unit this build prepares, and a candidate that moved several rows is refused rather than split`);
+	const row = {
+		name: nonEmpty$2(names[0], "row name"),
+		entry: assertCapabilityRow(`row "${names[0]}"`, rows[names[0]])
+	};
+	const skill = mutation.skill === void 0 ? void 0 : assertCarriedSkill(row, mutation.skill);
+	const mcpServers = mutation.mcpServers === void 0 ? void 0 : parseMcpServerRegistry(mutation.mcpServers);
+	if (mcpServers !== void 0) {
+		if (Object.keys(mcpServers).length === 0) throw refusal$1("capability-server-invalid", "mcpServers must carry at least one definition");
+		for (const name of Object.keys(mcpServers)) if (!(row.entry.mcpServers ?? []).includes(name)) throw refusal$1("capability-server-ungranted", `server ${name} is not granted by row ${row.name}`);
+	}
+	return {
+		row,
+		...skill === void 0 ? {} : { skill },
+		...mcpServers === void 0 ? {} : { mcpServers }
+	};
+}
+/** The real DSH tools and MCP servers a store's current capability table authorizes. */
+function authorizedToolPlane(table, registry) {
+	const tools = /* @__PURE__ */ new Set();
+	const servers = /* @__PURE__ */ new Set();
+	const query = capabilityToolQuery(table, registry);
+	for (const name of Object.keys(table)) {
+		const answer = query(name);
+		if (!answer.known) continue;
+		for (const tool of answer.tools) tools.add(tool);
+		for (const server of answer.mcpServers) servers.add(server);
+	}
+	return {
+		tools,
+		servers
+	};
+}
+/** Whether one tool a declaration requires is inside the store's authorized plane (`mcp__<server>__<tool>` counts when the server is mounted). */
+function insidePlane(plane, tool) {
+	if (plane.tools.has(tool)) return true;
+	return [...plane.servers].some((server) => tool.startsWith(`mcp__${server}__`) && tool.length > `mcp__${server}__`.length);
+}
+/** Whether one candidate row may be written at all: no tool the store has not granted and no unknown MCP server. */
+function assertCapabilityRowAdmissible(store, row, baseline, definitions = {}) {
+	const answer = capabilityToolQuery(capabilityTableWith(store.table, row), parseMcpServerRegistry({
+		...store.mcpServers,
+		...definitions
+	}))(row.name);
+	if (!answer.known) throw refusal$1("capability-row-invalid", `the row "${row.name}" does not resolve: ${answer.reason}`);
+	const plane = authorizedToolPlane(store.table, store.mcpServers ?? {});
+	const newTools = answer.tools.filter((tool) => !plane.tools.has(tool));
+	if (newTools.length > 0) throw refusal$1("capability-new-tool", `the row "${row.name}" grants tool(s) this store's capability table does not authorize (${newTools.map((tool) => JSON.stringify(tool)).join(", ")}); this build composes granted capabilities and never authorizes a new tool — a provider that needs one is refused by name`);
+	for (const field of ["preset", "permission"]) {
+		if (row.entry[field] === baseline?.[field]) continue;
+		throw refusal$1("capability-policy-change", `the row "${row.name}" declares ${field} ${row.entry[field] === void 0 ? "(none)" : JSON.stringify(row.entry[field])}, while the store's row reads ${baseline?.[field] === void 0 ? "(none)" : JSON.stringify(baseline?.[field])} — a capability candidate composes granted capabilities and adds a provider, and never moves the permission or preset a worker runs under`);
+	}
+}
+/** The `SKILL.md` discovery finds for one skill name under `roots`, or `undefined` */
+async function discoverSkill(roots, name) {
+	for (const root of [...new Set(roots)]) {
+		let walked;
+		try {
+			walked = await walkVerified(root, join(name, "SKILL.md"));
+		} catch {
+			continue;
+		}
+		if (!walked.missing) return walked.abs;
+	}
+}
+/** Every skill object discovery can see, read through the walk-verified read (a link that escapes or loops is refused by name). */
+async function existingSkills(roots) {
+	const found = [];
+	for (const root of [...new Set(roots)]) {
+		let entries;
+		try {
+			entries = await readdir(root, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+			let walked;
+			try {
+				walked = await walkVerified(root, join(entry.name, "SKILL.md"));
+			} catch {
+				continue;
+			}
+			if (walked.missing) continue;
+			const bytes = await readFile(walked.abs);
+			found.push({
+				name: entry.name,
+				body: skillBody(bytes.toString("utf8"))
+			});
+		}
+	}
+	return found;
+}
+/** Whether the declared verifier is one this deployment can judge a run with: it must be registered, else the row is refused by name. */
+function assertVerifierRegistered(store, name, ref) {
+	const vocabulary = store.verifierVocabulary;
+	if (vocabulary === void 0) throw refusal$1("skill-verifier-unregistered", `the new skill "${name}" declares execution verifier ${JSON.stringify(ref)}, and this deployment cannot list its verifier registry (no verifier service, or \`verifierIds()\` unavailable) — the ref is refused rather than assumed registered`);
+	const registered = [...vocabulary.ids].sort();
+	if (!vocabulary.ids.includes(ref)) throw refusal$1("skill-verifier-unregistered", `the new skill "${name}" declares execution verifier ${JSON.stringify(ref)}, which is not registered; registered verifiers: ${registered.length === 0 ? "none" : registered.join(", ")} — a candidate does not register its own judge`);
+	const version = vocabulary.versions[ref];
+	if (typeof version !== "string" || version.trim().length === 0) throw refusal$1("skill-verifier-unregistered", `the new skill "${name}" declares execution verifier ${JSON.stringify(ref)}, which the registry lists without a declared version — a judge no evidence can be pinned to is not one this build promotes against`);
+}
+/** Every rule the capability candidate itself must satisfy against the store it will be written to. */
+async function assertCapabilityCandidateAdmissible(store, candidate, baseline) {
+	for (const key of Object.keys(candidate.mcpServers ?? {})) if (store.mcpServers?.[key] !== void 0) throw refusal$1("capability-server-conflict", `MCP server ${key} already exists in the deployment registry`);
+	assertCapabilityRowAdmissible(store, candidate.row, baseline, candidate.mcpServers);
+	const skill = candidate.skill;
+	if (skill === void 0) return;
+	assertVerifierRegistered(store, skill.name, skill.sidecar.type === "execution" ? skill.sidecar.verifier.ref : "");
+	const plane = authorizedToolPlane(capabilityTableWith(store.table, candidate.row), {
+		...store.mcpServers,
+		...candidate.mcpServers
+	});
+	const unauthorized = skill.sidecar.type === "execution" ? skill.sidecar.requiredTools.filter((tool) => !insidePlane(plane, tool)) : [];
+	if (unauthorized.length > 0) throw refusal$1("skill-tool-unauthorized", `the new skill "${skill.name}" requires tool(s) this store's capability table does not authorize (${unauthorized.map((tool) => JSON.stringify(tool)).sort().join(", ")}); this build composes the tools a deployment already grants, and a provider that needs a new one is refused by name rather than granted`);
+	const body = skillBody(skill.content);
+	const existing = await existingSkills([store.skillRoot, ...store.skillRoots]);
+	if (existing.find((entry) => entry.name === skill.name) !== void 0) throw refusal$1("skill-name-taken", `the candidate's new skill is named "${skill.name}", which is already a skill object this store's discovery finds — a new directory may not cover a same-name production object; improving that object is the same-name update (a \`skill\` candidate), not a new skill`);
+	const renamed = body.length === 0 ? void 0 : existing.find((entry) => entry.body === body);
+	if (renamed !== void 0) throw refusal$1("skill-renamed-production", `the candidate's new skill "${skill.name}" carries the same body as the production skill "${renamed.name}" — a renamed copy is not a new object, and an existing object is improved through the same-name path rather than around it`);
+}
+/** The body of one `SKILL.md`: everything after its frontmatter block, trimmed. */
+function skillBody(content) {
+	const lines = content.split("\n");
+	if (lines[0]?.trim() !== "---") return content.trim();
+	const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+	return end === -1 ? content.trim() : lines.slice(end + 1).join("\n").trim();
+}
+/** The candidate-side overlay of one prepared capability proposal (A6 interface): the frozen row override and the sandbox skill roots. */
+function capabilityOverlay(proposal, roots) {
+	const prepared = proposal.prepared;
+	const row = prepared?.capabilityRow;
+	if (prepared?.sandbox == null || row === void 0) throw refusal$1("capability-overlay-unprepared", `proposal "${proposal.proposalId}" carries no prepared capability candidate — an overlay is the identity prepare froze, so a proposal without one has nothing to mount`);
+	return {
+		capabilityOverrides: { [row.name]: row.entry },
+		...prepared.mcpServers === void 0 ? {} : { mcpServers: prepared.mcpServers.definitions },
+		extraSkillRoots: prepared.skillContent === void 0 ? [] : [join(roots.root, prepared.sandbox, "skills")]
+	};
+}
+/** Read one prepared capability candidate back from its sandbox and verify it against the identity prepare froze. */
+async function readPreparedCapability(root, proposal) {
+	const prepared = proposal.prepared;
+	const identity = prepared?.capabilityRow;
+	if (prepared?.sandbox == null || identity === void 0) throw refusal$1("capability-unprepared", `proposal "${proposal.proposalId}" has no materialized capability candidate — nothing this proposal names was ever prepared, so there is nothing to evaluate, promote or write`);
+	const sandbox = prepared.sandbox;
+	const rowRel = `${sandbox}/capability/${identity.name}.json`;
+	const rowBytes = await readVerifiedFile(root, rowRel);
+	const digest = sha256Hex(rowBytes);
+	if (digest !== identity.digest) throw refusal$1("capability-row-drifted", `the frozen row "${rowRel}" no longer hashes to the identity prepare recorded (sha256 ${digest} != ${identity.digest}) — propose a new candidate and re-evaluate it; recorded identities are never re-digested`);
+	let parsed;
+	try {
+		parsed = JSON.parse(rowBytes.toString("utf8"));
+	} catch (error) {
+		throw refusal$1("capability-row-invalid", `the frozen row "${rowRel}" is not readable JSON (${error instanceof Error ? error.message : String(error)})`);
+	}
+	const entry = assertCapabilityRow(`the frozen row "${identity.name}"`, parsed);
+	if (capabilityRowDigest(entry) !== identity.digest) throw refusal$1("capability-row-drifted", `the frozen row "${rowRel}" holds data that hashes to ${capabilityRowDigest(entry)}, not the ${identity.digest} prepare recorded`);
+	const result = {
+		row: {
+			name: identity.name,
+			entry
+		},
+		rowBytes
+	};
+	if (prepared.capabilityBaseline != null) {
+		const baselineRel = `${sandbox}/champion/capability/${identity.name}.json`;
+		const bytes = await readVerifiedFile(root, baselineRel);
+		const baselineDigest = sha256Hex(bytes);
+		if (baselineDigest !== prepared.capabilityBaseline.digest) throw refusal$1("capability-row-drifted", `the champion row "${baselineRel}" no longer hashes to the identity prepare recorded (sha256 ${baselineDigest} != ${prepared.capabilityBaseline.digest}) — the row this candidate would restore cannot be re-proved, so nothing is promoted`);
+		result.baseline = {
+			entry: prepared.capabilityBaseline.entry,
+			bytes
+		};
+	}
+	if (prepared.mcpServers !== void 0) {
+		const bytes = await readVerifiedFile(root, `${sandbox}/mcp-servers.json`);
+		if (sha256Hex(bytes) !== prepared.mcpServers.digest) throw refusal$1("capability-server-drifted", "frozen MCP definitions changed");
+		result.mcpServers = mcpServerIdentity(JSON.parse(bytes.toString("utf8")));
+		if (result.mcpServers.digest !== prepared.mcpServers.digest) throw refusal$1("capability-server-drifted", "MCP definitions are not the prepared identity");
+	}
+	const content = prepared.skillContent;
+	if (content === void 0) return result;
+	const directory = `${sandbox}/skills/${content.name}`;
+	const skillMd = await readVerifiedFile(root, `${directory}/SKILL.md`);
+	const skillMdDigest = sha256Hex(skillMd);
+	if (skillMdDigest !== content.sha256) throw refusal$1("capability-skill-drifted", `the new skill's "${directory}/SKILL.md" no longer matches the identity prepare recorded (sha256 ${skillMdDigest} != ${content.sha256}) — propose a new candidate and re-evaluate it`);
+	if (content.contract === void 0) throw refusal$1("capability-skill-drifted", `the prepared identity of the new skill "${content.name}" records no declaration, and a capability candidate's skill is an execution provider with its SKILL.contract.json beside it — the object prepare froze is not one this build writes`);
+	const sidecarBytes = await readVerifiedFile(root, `${directory}/${SKILL_SIDECAR_FILE}`);
+	const sidecarDigest = sha256Hex(sidecarBytes);
+	if (sidecarDigest !== content.contract.sha256) throw refusal$1("capability-skill-drifted", `the new skill's "${directory}/${SKILL_SIDECAR_FILE}" no longer matches the identity prepare recorded (sha256 ${sidecarDigest} != ${content.contract.sha256}) — propose a new candidate and re-evaluate it`);
+	const sidecar = JSON.parse(sidecarBytes.toString("utf8"));
+	const defects = skillContractDefects(sidecar);
+	if (defects.length > 0) throw refusal$1("skill-sidecar-invalid", `the frozen declaration of the new skill "${content.name}" is not one this build reads — ${defects.map((defect) => `${defect.code}: ${defect.reason}`).join("; ")}`);
+	return {
+		...result,
+		skill: {
+			name: content.name,
+			content: skillMd.toString("utf8"),
+			sidecar,
+			skillMd,
+			sidecarBytes
+		},
+		skillRoot: join(root, sandbox, "skills"),
+		skillDirectory: join(root, directory)
+	};
+}
+
+//#endregion
+//#region src/task-definition.ts
+function validateTaskDefinitionMutation(raw) {
+	if (!isRecord(raw)) throw new Error("evolution: task_definition mutation must be an object");
+	assertOnlyKeys(raw, ["template", "criterionRepair"], "task_definition mutation");
+	const template = parseTaskTemplate(raw.template);
+	if (raw.criterionRepair !== void 0) {
+		if (!isRecord(raw.criterionRepair)) throw new Error("evolution: criterionRepair requires positive and negative existing examples");
+		assertOnlyKeys(raw.criterionRepair, ["positive", "negative"], "criterionRepair");
+		for (const label of ["positive", "negative"]) {
+			const example = raw.criterionRepair[label];
+			if (!isRecord(example)) throw new Error(`evolution: criterionRepair.${label} must be an existing example`);
+			assertOnlyKeys(example, [
+				"taskId",
+				"sourceDir",
+				"parameters"
+			], `criterionRepair.${label}`);
+			nonEmpty$1(example.taskId, `criterionRepair.${label}.taskId`);
+			nonEmpty$1(example.sourceDir, `criterionRepair.${label}.sourceDir`);
+			if (!isRecord(example.parameters)) throw new Error(`evolution: criterionRepair.${label}.parameters must be an object`);
+		}
+		if (raw.criterionRepair.positive.taskId === raw.criterionRepair.negative.taskId) throw new Error("evolution: criterion repair requires distinct positive and negative examples");
+	}
+	return {
+		template,
+		...raw.criterionRepair === void 0 ? {} : { criterionRepair: structuredClone(raw.criterionRepair) }
+	};
+}
+function templateBytes(template) {
+	return Buffer.from(`${JSON.stringify(template, null, 2)}\n`);
+}
+function templateIdentity(template) {
+	return {
+		template,
+		digest: taskTemplateDigest(template),
+		sha256: sha256Hex(templateBytes(template))
+	};
+}
+function assertTemplateIdentity(raw) {
+	if (!isRecord(raw)) throw new Error("evolution: template identity must be an object");
+	const template = parseTaskTemplate(raw.template);
+	if (raw.digest !== taskTemplateDigest(template) || raw.sha256 !== sha256Hex(templateBytes(template))) throw new Error("evolution: template identity does not match canonical TaskTemplate content");
+}
+async function prepareTaskDefinition(root, library, proposal) {
+	const mutation = validateTaskDefinitionMutation(proposal.mutation);
+	const candidate = mutation.template;
+	if (candidate.id !== proposal.targetId) throw new Error("evolution: template id must match task_definition targetId");
+	const baseline = (await findTaskTemplates(library)).find((item) => item.template.id === candidate.id)?.template;
+	if (candidate.version !== (baseline?.version ?? 0) + 1 || proposal.baseVersion !== (baseline === void 0 ? "absent" : String(baseline.version))) throw new Error("evolution: template candidate must append the next version of the current baseVersion");
+	const repaired = baseline !== void 0 && canonicalize(baseline.contract.acceptanceCriteria) !== canonicalize(candidate.contract.acceptanceCriteria);
+	if (repaired && mutation.criterionRepair === void 0) throw new Error("evolution: changing child criteria requires existing positive and negative examples plus the independent parent oracle");
+	if (!repaired && mutation.criterionRepair !== void 0) throw new Error("evolution: criterionRepair is only required when child criteria change");
+	const sandbox = `sandbox/${proposal.proposalId}`;
+	const files = [];
+	for (const side of ["baseline", "candidate"]) {
+		const destination = join(root, sandbox, "task-templates", side);
+		await mkdir(destination, { recursive: true });
+		for (const file of (await readdir(library).catch((error) => {
+			if (error.code === "ENOENT") return [];
+			throw error;
+		})).filter((file$1) => file$1.endsWith(".json"))) {
+			const bytes = await readVerifiedFile(library, file);
+			const template = parseTaskTemplate(JSON.parse(bytes.toString()));
+			if (file !== `${template.id}@${template.version}.json`) throw new Error("evolution: template library filename mismatch");
+			await writeFile(join(destination, file), bytes);
+			files.push(`task-templates/${side}/${file}`);
+		}
+	}
+	const candidateFile = `task-templates/candidate/${candidate.id}@${candidate.version}.json`;
+	await writeFile(join(root, sandbox, candidateFile), templateBytes(candidate));
+	files.push(candidateFile);
+	if (baseline !== void 0) {
+		const rollback = {
+			...baseline,
+			version: candidate.version + 1
+		};
+		const rollbackFile = `task-templates/rollback/${rollback.id}@${rollback.version}.json`;
+		await mkdir(join(root, sandbox, "task-templates/rollback"), { recursive: true });
+		await writeFile(join(root, sandbox, rollbackFile), templateBytes(rollback));
+		files.push(rollbackFile);
+	}
+	return {
+		sandbox,
+		mechanical: true,
+		champion: baseline === void 0 ? "absent" : "captured",
+		templateCandidate: templateIdentity(candidate),
+		templateBaseline: baseline === void 0 ? null : templateIdentity(baseline),
+		templateLibraries: {
+			baseline: await templateLibraryDigest(join(root, sandbox, "task-templates/baseline")),
+			candidate: await templateLibraryDigest(join(root, sandbox, "task-templates/candidate"))
+		},
+		files
+	};
+}
+async function readTaskDefinition(root, proposal) {
+	const prepared = proposal.prepared;
+	const candidate = prepared?.templateCandidate;
+	const baseline = prepared?.templateBaseline;
+	if (prepared?.sandbox == null || candidate === void 0 || baseline === void 0) throw new Error("evolution: task_definition has no prepared templates");
+	for (const [side, identity] of [["candidate", candidate], ["baseline", baseline]]) {
+		if (identity === null) continue;
+		assertTemplateIdentity(identity);
+		if (sha256Hex(await readVerifiedFile(root, `${prepared.sandbox}/task-templates/${side}/${identity.template.id}@${identity.template.version}.json`)) !== identity.sha256) throw new Error("evolution: prepared TaskTemplate bytes changed");
+	}
+	if (prepared.templateLibraries === void 0) throw new Error("evolution: prepared template libraries have no frozen digests");
+	for (const side of ["baseline", "candidate"]) if (await templateLibraryDigest(join(root, prepared.sandbox, "task-templates", side)) !== prepared.templateLibraries[side]) throw new Error("evolution: frozen template library changed");
+	return {
+		candidate: structuredClone(candidate),
+		baseline: structuredClone(baseline),
+		libraries: { ...prepared.templateLibraries }
+	};
+}
+async function assertTemplateBaseline(library, proposal, applied = false) {
+	const identity = applied ? proposal.prepared?.templateCandidate : proposal.prepared?.templateBaseline;
+	if (identity === void 0) throw new Error("evolution: no frozen template baseline");
+	if (((await findTaskTemplates(library)).find((item) => item.template.id === proposal.prepared.templateCandidate.template.id)?.templateRef.digest ?? null) !== (identity?.digest ?? null)) throw new Error("evolution: template library changed since the frozen baseline; nothing was appended");
+}
+function templateCommitRequest(root, library, proposal, direction, actor, approvalRef) {
+	const prepared = proposal.prepared;
+	if (direction === "rollback" && prepared.templateBaseline === null) {
+		const candidate = prepared.templateCandidate;
+		return {
+			proposalId: proposal.proposalId,
+			direction,
+			actor,
+			approvalRef,
+			files: [{
+				target: resolve(library, `${candidate.template.id}@${candidate.template.version}.json`),
+				baselineSha256: candidate.sha256,
+				contentSha256: null
+			}]
+		};
+	}
+	const template = direction === "apply" ? prepared.templateCandidate.template : {
+		...prepared.templateBaseline.template,
+		version: prepared.templateCandidate.template.version + 1
+	};
+	const identity = templateIdentity(template);
+	const side = direction === "apply" ? "candidate" : "rollback";
+	return {
+		proposalId: proposal.proposalId,
+		direction,
+		actor,
+		approvalRef,
+		files: [{
+			target: resolve(library, `${template.id}@${template.version}.json`),
+			baselineSha256: null,
+			contentSha256: identity.sha256,
+			source: `${prepared.sandbox}/task-templates/${side}/${template.id}@${template.version}.json`
+		}]
+	};
+}
+function independentOracleCriteria(task) {
+	return task.acceptanceCriteria.filter((criterion) => criterion.mandatory && criterion.verificationMode === "deterministic" && criterion.command && !criterion.heuristic && !criterion.childEvidence?.length);
+}
+function oracleContractDigest(task) {
+	return sha256Hex(canonicalize({
+		acceptanceCriteria: independentOracleCriteria(task),
+		requiredCapabilities: task.requestedCapabilities
+	}));
+}
+async function templateLibraryDigest(directory) {
+	const files = (await readdir(directory)).sort();
+	const identities = [];
+	for (const file of files) {
+		const bytes = await readVerifiedFile(directory, file);
+		const template = parseTaskTemplate(JSON.parse(bytes.toString()));
+		if (file !== `${template.id}@${template.version}.json`) throw new Error("evolution: frozen template library filename mismatch");
+		identities.push(`${file}:${sha256Hex(bytes)}`);
+	}
+	return sha256Hex(identities.join("\n"));
+}
+
+//#endregion
 //#region src/replay/comparer.ts
-/** One side as the v1 comparer reads it: the same outcome rank and criterion semantics, so v1's rules stay the rules. */
+/** Acceptance comparisons use the existing replay outcome and criterion rules. */
 function asReplaySide(side) {
 	return {
 		taskId: "",
@@ -200,7 +719,17 @@ function asReplaySide(side) {
 	};
 }
 /** One sample's mechanical verdict. An unrankable side (cancelled / interrupted) */
-function compareExperimentSides(role, baseline, candidate) {
+function compareExperimentSides(role, baseline, candidate, objective) {
+	if (objective === "tool-call-reduction") {
+		const relation$1 = compareReplaySides(asReplaySide(baseline), asReplaySide(candidate)).relation;
+		if (baseline.outcome !== "verified" || relation$1 === "inconclusive") return "inconclusive";
+		if (candidate.outcome !== "verified" || relation$1 === "worse") return "regressed";
+		const before = baseline.cost?.status === "reported" ? baseline.cost.metrics.toolCalls?.calls : void 0;
+		const after = candidate.cost?.status === "reported" ? candidate.cost.metrics.toolCalls?.calls : void 0;
+		if (!Number.isSafeInteger(before) || !Number.isSafeInteger(after) || before < 0 || after < 0) return "inconclusive";
+		if (after > before) return role === "observed-success" ? "not-improved" : "regressed";
+		return role === "observed-success" ? after < before ? "improved" : "not-improved" : "maintained";
+	}
 	if (candidate.outcome === "not-admitted") return role === "observed-failure" ? "not-fixed" : "inconclusive";
 	if (baseline.outcome === "not-admitted") {
 		if (candidate.outcome !== "verified") return role === "observed-failure" ? "both-failed" : "inconclusive";
@@ -217,9 +746,14 @@ function compareExperimentSides(role, baseline, candidate) {
 	if (baselineRank !== 1) return "inconclusive";
 	return relation === "worse" ? "regressed" : "maintained";
 }
-/** The overall verdict over every sample, from the sample verdicts alone: any non-fixed sample makes the experiment not-fixed. */
-function overallExperimentVerdict(samples) {
+/** Aggregate the frozen objective's observed target and guard samples. */
+function overallExperimentVerdict(samples, objective) {
 	if (samples.some((sample) => sample.verdict === "inconclusive")) return "inconclusive";
+	if (objective === "tool-call-reduction") {
+		if (samples.some((sample) => sample.verdict === "regressed")) return "regressed";
+		const successes = samples.filter((sample) => sample.role === "observed-success");
+		return successes.length > 0 && successes.every((sample) => sample.verdict === "improved") ? "improved" : "not-improved";
+	}
 	if (samples.some((sample) => sample.verdict === "both-failed")) return "both-failed";
 	const failures = samples.filter((sample) => sample.role === "observed-failure");
 	const fixedAll = failures.length > 0 && failures.every((sample) => sample.verdict === "fixed");
@@ -244,9 +778,16 @@ function assertIdentity(value, field) {
 function assertFrozenExperiment(value) {
 	if (!isRecord(value)) throw new Error("evolution: experiment report frozen must be an object");
 	if (typeof value.proposalId !== "string" || value.proposalId.length === 0) throw new Error("evolution: experiment report frozen.proposalId must be a non-empty string");
+	if (value.objective !== void 0 && value.objective !== "tool-call-reduction") throw new Error("evolution: experiment report frozen.objective must be tool-call-reduction when declared");
 	if (!Number.isInteger(value.repetition) || value.repetition < 0) throw new Error("evolution: experiment report frozen.repetition must be a non-negative integer");
-	if (value.candidate === void 0 && value.capability === void 0) throw new Error("evolution: experiment report frozen must name the candidate it evaluates — a skill object identity (frozen.candidate) or a capability candidate (frozen.capability, with frozen.candidate only when the candidate carries a new skill); a block that names neither is not an experiment this build can re-read");
+	if (value.candidate === void 0 && value.capability === void 0 && value.taskDefinition === void 0) throw new Error("evolution: experiment report frozen must name the candidate it evaluates — a skill object identity (frozen.candidate) or a capability candidate (frozen.capability, with frozen.candidate only when the candidate carries a new skill); a block that names neither is not an experiment this build can re-read");
 	if (value.candidate !== void 0) assertIdentity(value.candidate, "frozen.candidate");
+	if (value.taskDefinition !== void 0) {
+		if (!isRecord(value.taskDefinition)) throw new Error("evolution: frozen.taskDefinition must name prepared templates");
+		assertTemplateIdentity(value.taskDefinition.candidate);
+		if (value.taskDefinition.baseline !== null) assertTemplateIdentity(value.taskDefinition.baseline);
+		if (!isRecord(value.taskDefinition.libraries) || !isHex64(value.taskDefinition.libraries.baseline) || !isHex64(value.taskDefinition.libraries.candidate)) throw new Error("evolution: frozen template library digest missing");
+	}
 	if (value.capability !== void 0) assertFrozenCapability(value.capability);
 	if (value.productionBaseline !== void 0) {
 		if (value.candidate === void 0) throw new Error("evolution: experiment report frozen.productionBaseline names the object a skill candidate replaces, but this block carries no frozen.candidate — a capability candidate's production baseline is the registry row it moves (frozen.capability.baseline), never a skill object it does not touch");
@@ -259,24 +800,35 @@ function assertFrozenExperiment(value) {
 	if (!isRecord(value.overlay) || typeof value.overlay.baseline !== "string" || value.overlay.baseline.length === 0 || typeof value.overlay.candidate !== "string" || value.overlay.candidate.length === 0) throw new Error("evolution: experiment report frozen.overlay must name what each side ran under");
 	if (!Array.isArray(value.samples) || value.samples.length === 0) throw new Error("evolution: experiment report frozen.samples must be a non-empty array");
 	const taskIds = /* @__PURE__ */ new Set();
-	value.samples.forEach((sample, index) => assertFrozenSample(sample, `frozen.samples[${index}]`, taskIds, value.capability !== void 0));
+	value.samples.forEach((sample, index) => assertFrozenSample(sample, `frozen.samples[${index}]`, taskIds, value.capability !== void 0 || value.taskDefinition !== void 0));
 	const roles = value.samples.map((sample) => sample.role);
-	if (!roles.includes("observed-failure")) throw new Error("evolution: an experiment frozen block needs at least one observed-failure sample (§F.2: the target failure must be reproduced)");
+	const requiredRole = value.objective === "tool-call-reduction" ? "observed-success" : "observed-failure";
+	const incompatibleRole = value.objective === "tool-call-reduction" ? "observed-failure" : "observed-success";
+	if (!roles.includes(requiredRole) || roles.includes(incompatibleRole)) throw new Error(`evolution: an experiment frozen block needs at least one ${requiredRole} sample and no ${incompatibleRole} samples for its objective`);
 	if (!roles.includes("holdout")) throw new Error("evolution: an experiment frozen block needs at least one holdout sample (§F.2: the candidate must not be selected on every case)");
 }
 /** One capability candidate's frozen identity (A6): the row, the row it replaces, and the gap it came from. */
 function assertFrozenCapability(value) {
 	if (!isRecord(value)) throw new Error("evolution: experiment report frozen.capability must be the capability candidate { row, baseline, sourceRefs } — the whole row the candidate installs, the registry row it moves, and the proposal's source refs");
+	if (isRecord(value) && value.mcpServers !== void 0) assertMcpServerIdentity(value.mcpServers);
 	assertFrozenCapabilityRow(value.row, "frozen.capability.row");
 	if (value.baseline !== null) assertFrozenCapabilityRow(value.baseline, "frozen.capability.baseline");
 	if (!Array.isArray(value.sourceRefs) || value.sourceRefs.some((ref) => typeof ref !== "string" || ref.length === 0)) throw new Error("evolution: experiment report frozen.capability.sourceRefs must be an array of non-empty source refs");
 }
 function assertFrozenCapabilityRow(value, field) {
-	if (!isRecord(value) || typeof value.name !== "string" || value.name.length === 0 || !isHex64(value.digest) || !isRecord(value.entry) || !Array.isArray(value.entry.skills) || value.entry.skills.some((skill) => typeof skill !== "string" || skill.length === 0)) throw new Error(`evolution: experiment report ${field} must be one whole capability row { name, entry, digest } — the name, the row itself (at least its skills) and the SHA-256 of its canonical bytes`);
+	if (!isRecord(value) || typeof value.name !== "string" || value.name.length === 0 || !isHex64(value.digest) || !isRecord(value.entry)) throw new Error(`evolution: experiment report ${field} must be one whole capability row { name, entry, digest } — the name, the row itself (at least its skills) and the SHA-256 of its canonical bytes`);
+	if (capabilityRowDigest(assertCapabilityRow(field, value.entry)) !== value.digest) throw new Error(`evolution: ${field} row digest does not match its entry`);
+}
+function assertFrozenMcpBindings(value, field) {
+	if (value.mcpServers.length === 0 && value.mcpBindings === void 0) return;
+	if (!Array.isArray(value.mcpBindings) || value.mcpBindings.length !== value.mcpServers.length) throw new Error(`evolution: ${field} must freeze the exact MCP template bindings`);
+	for (const binding of value.mcpBindings) if (!isRecord(binding) || typeof binding.serverName !== "string" || !value.mcpServers.includes(binding.serverName) || !isHex64(binding.templateDigest)) throw new Error(`evolution: ${field} holds an invalid MCP template binding`);
+	if (new Set(value.mcpBindings.map((binding) => binding.serverName)).size !== value.mcpServers.length) throw new Error(`evolution: ${field} repeats MCP template bindings`);
 }
 /** One side's frozen provider identity of a capability sample (A6). */
 function assertFrozenCapabilitySide(value, field) {
 	if (!isRecord(value) || !Array.isArray(value.capabilities) || value.capabilities.some((item) => typeof item !== "string" || item.length === 0) || typeof value.registryRevision !== "string" || value.registryRevision.length === 0 || !Array.isArray(value.mcpServers) || value.mcpServers.some((item) => typeof item !== "string" || item.length === 0) || value.preset !== null && (typeof value.preset !== "string" || value.preset.length === 0) || !Array.isArray(value.skills)) throw new Error(`evolution: experiment report ${field} must be one capability side's frozen identity (capabilities, registryRevision, mcpServers, preset, skills)`);
+	assertFrozenMcpBindings(value, field);
 	const names = /* @__PURE__ */ new Set();
 	for (const skill of value.skills) {
 		assertFrozenProviderSkill(skill, `${field}.skills[${skill.name}]`);
@@ -328,6 +880,7 @@ function assertFrozenProviderIdentity(value, field) {
 	if (!Array.isArray(value.mcpServers) || value.mcpServers.some((item) => typeof item !== "string" || item.length === 0)) throw new Error(`evolution: experiment report ${field}.mcpServers must be an array of MCP server names`);
 	if (value.preset !== null && (typeof value.preset !== "string" || value.preset.length === 0)) throw new Error(`evolution: experiment report ${field}.preset must be the declared preset or null (the deployment default governs)`);
 	if (!Array.isArray(value.skills)) throw new Error(`evolution: experiment report ${field}.skills must be an array`);
+	assertFrozenMcpBindings(value, field);
 	const names = /* @__PURE__ */ new Set();
 	for (const skill of value.skills) {
 		assertFrozenProviderSkill(skill, `${field}.skills[${skill.name}]`);
@@ -455,935 +1008,12 @@ function assertExperimentReport(report) {
 		if (baseline.side !== "baseline" || candidate.side !== "candidate") throw new Error(`evolution: experiment report ${field} must carry one baseline and one candidate side`);
 		if (baseline.role !== frozenSample.role || candidate.role !== frozenSample.role) throw new Error(`evolution: experiment report ${field} sides must carry the sample's role`);
 		if (baseline.workspace === candidate.workspace) throw new Error(`evolution: experiment report ${field} sides share one workspace "${baseline.workspace}" — two sides need two workspaces`);
-		const computed = compareExperimentSides(frozenSample.role, baseline, candidate);
+		const computed = compareExperimentSides(frozenSample.role, baseline, candidate, frozen.objective);
 		if (entry.verdict !== computed) throw new Error(`evolution: experiment report ${field}.verdict "${String(entry.verdict)}" does not match its own evidence ("${computed}")`);
 	});
-	const computedVerdict = overallExperimentVerdict(reportSamples);
+	const computedVerdict = overallExperimentVerdict(reportSamples, frozen.objective);
 	if (report.verdict !== computedVerdict) throw new Error(`evolution: experiment report.verdict "${String(report.verdict)}" does not match its samples ("${computedVerdict}")`);
 	if (!EXPERIMENT_VERDICTS.includes(report.verdict)) throw new Error(`evolution: experiment report.verdict must be one of ${EXPERIMENT_VERDICTS.join(" / ")}`);
-}
-
-//#endregion
-//#region src/capability-candidate.ts
-/** The keys a capability row may declare — the whole vocabulary `CapabilityConfig` has. */
-const ROW_KEYS = [
-	"skills",
-	"tools",
-	"preset",
-	"permission",
-	"mcpServers"
-];
-/** The keys one capability mutation may declare: the rows, and the optional new skill. */
-const MUTATION_KEYS = ["rows", "skill"];
-/** The keys one carried new skill may declare. */
-const SKILL_KEYS = [
-	"name",
-	"content",
-	"sidecar"
-];
-/** The refusal of one rule, carrying its machine-readable code as the message's second word. */
-function capabilityRefusal(code, detail) {
-	return codedRefusal(code, detail);
-}
-/** The same refusal, as the one function every rule in this module reports through. */
-function refusal$1(code, detail) {
-	return capabilityRefusal(code, detail);
-}
-function nonEmpty$2(value, field) {
-	return nonEmpty$1(value, field, (detail) => refusal$1("capability-row-invalid", detail));
-}
-/** A single safe path segment: the skill-name rule every other entry of this plane uses. */
-function assertSegment$1(value, field) {
-	return assertSegment(value, field, (detail) => refusal$1("capability-row-invalid", detail));
-}
-/** The canonical bytes of one row — what a sandbox freezes and an intent's source holds. */
-function capabilityRowBytes(entry) {
-	return canonicalJson(entry);
-}
-/** SHA-256 of {@link capabilityRowBytes}: the identity a row is compared by, everywhere. */
-function capabilityRowDigest(entry) {
-	return digestOf(entry);
-}
-/** The frozen identity of one row, as a prepared record and a commit intent name it. */
-function capabilityRowIdentity(row) {
-	return {
-		name: row.name,
-		entry: row.entry,
-		digest: capabilityRowDigest(row.entry)
-	};
-}
-/** The table a candidate would produce: the store's rows with this one row folded in. */
-function capabilityTableWith(table, row) {
-	return {
-		...table,
-		[row.name]: row.entry
-	};
-}
-/** Validate one capability row's shape and return it normalized — the whole row, no inherited field and no unknown key. */
-function assertCapabilityRow(where, value) {
-	if (!isRecord(value)) throw refusal$1("capability-row-invalid", `${where} must be an object carrying the row's own fields (${ROW_KEYS.join(", ")})`);
-	for (const key of Object.keys(value)) if (!ROW_KEYS.includes(key)) throw refusal$1("capability-row-invalid", `${where} declares unknown field ${JSON.stringify(key)}; a capability row carries ${ROW_KEYS.join(", ")}`);
-	const names = (field, list, minItems) => {
-		if (list === void 0) return void 0;
-		if (!Array.isArray(list)) throw refusal$1("capability-row-invalid", `${where}.${field} must be an array`);
-		const seen = /* @__PURE__ */ new Set();
-		for (const item of list) {
-			if (typeof item !== "string" || item.trim().length === 0) throw refusal$1("capability-row-invalid", `${where}.${field} must hold non-empty strings`);
-			if (seen.has(item)) throw refusal$1("capability-row-invalid", `${where}.${field} lists ${JSON.stringify(item)} twice`);
-			seen.add(item);
-		}
-		if (list.length < minItems) throw refusal$1("capability-row-invalid", `${where}.${field} must name at least ${minItems} entry`);
-		return [...list];
-	};
-	const skills = names("skills", value.skills, 1);
-	if (skills === void 0) throw refusal$1("capability-row-invalid", `${where} declares no skills — a capability row that grants nothing is not a candidate this build prepares`);
-	const entry = { skills };
-	const tools = names("tools", value.tools, 0);
-	if (tools !== void 0) entry.tools = tools;
-	const mcpServers = names("mcpServers", value.mcpServers, 0);
-	if (mcpServers !== void 0) entry.mcpServers = mcpServers;
-	for (const field of ["preset", "permission"]) {
-		const declared = value[field];
-		if (declared === void 0) continue;
-		if (typeof declared !== "string" || declared.trim().length === 0) throw refusal$1("capability-row-invalid", `${where}.${field} must be a non-empty string`);
-		entry[field] = declared;
-	}
-	return entry;
-}
-/** The declaration of one carried new skill, validated: shape, loader acceptance, then the rules a new object must satisfy. */
-function assertCarriedSkill(row, value) {
-	if (!isRecord(value)) throw refusal$1("skill-invalid", "the candidate's skill must be an object carrying name, content and sidecar");
-	for (const key of Object.keys(value)) if (!SKILL_KEYS.includes(key)) throw refusal$1("skill-invalid", `the candidate's skill declares unknown field ${JSON.stringify(key)}; it carries ${SKILL_KEYS.join(", ")}`);
-	const name = assertSegment$1(value.name, "skill.name");
-	if (typeof value.content !== "string" || value.content.length === 0) throw refusal$1("skill-invalid", "skill.content must be the whole non-empty SKILL.md text");
-	const content = value.content;
-	const defects = skillContractDefects(value.sidecar);
-	if (defects.length > 0) throw refusal$1("skill-sidecar-invalid", `the declaration of the new skill "${name}" is not one this build reads — ${defects.map((defect) => `${defect.code}: ${defect.reason}`).join("; ")}`);
-	const sidecar = value.sidecar;
-	if (sidecar.type !== "execution") throw refusal$1("skill-sidecar-not-execution", `the new skill "${name}" carries a ${sidecar.type} declaration, and a capability candidate's skill is the execution provider its row grants — a knowledge or guidance object claims no capability and no verifier, so it is not the object this row would install`);
-	if (sidecar.content.resources.length > 0) throw refusal$1("skill-resources-nonempty", `the new skill "${name}" declares ${sidecar.content.resources.length} resource(s) (${sidecar.content.resources.map((resource) => JSON.stringify(resource.path)).join(", ")}), and this build's candidate is SKILL.md plus the SKILL.contract.json beside it with \`resources: []\` — resources need an executor that writes them, so the candidate is refused before anything is written`);
-	const digest = sha256Hex(content);
-	if (sidecar.content.skillMdSha256 !== digest) throw refusal$1("skill-content-mismatch", `the new skill "${name}" declares content.skillMdSha256 ${sidecar.content.skillMdSha256}, but the submitted SKILL.md hashes to ${digest} — the declaration must be the identity of the bytes it authorises`);
-	if (!sidecar.capabilities.includes(row.name)) throw refusal$1("skill-capabilities-missing-row", `the new skill "${name}" declares capabilities [${sidecar.capabilities.join(", ")}], which does not include the row "${row.name}" this candidate writes — a provider the candidate's own capability does not carry would be granted by nothing`);
-	if (!row.entry.skills.includes(name)) throw refusal$1("capability-row-grants-no-skill", `the row "${row.name}" grants [${row.entry.skills.join(", ")}], which does not include the new skill "${name}" this candidate carries — the row is what grants the provider, so a candidate that writes a skill nothing grants is refused`);
-	return {
-		name,
-		content,
-		sidecar
-	};
-}
-/** Validate one whole capability mutation and return it normalized. The entry carries one row and an optional new skill. */
-function validateCapabilityMutation(mutation) {
-	if (!isRecord(mutation)) throw refusal$1("capability-row-missing", "a capability mutation must be an object carrying exactly one row under `rows`");
-	for (const key of Object.keys(mutation)) if (!MUTATION_KEYS.includes(key)) throw refusal$1("capability-row-invalid", `a capability mutation declares unknown key ${JSON.stringify(key)}; it carries ${MUTATION_KEYS.join(", ")}`);
-	const rows = mutation.rows;
-	if (!isRecord(rows)) throw refusal$1("capability-row-missing", "a capability mutation carries `rows` — an object holding exactly one capability row");
-	const names = Object.keys(rows);
-	if (names.length === 0) throw refusal$1("capability-row-missing", "a capability mutation carries no row: exactly one capability row is the unit this build prepares");
-	if (names.length > 1) throw refusal$1("capability-row-multiple", `a capability mutation carries ${names.length} rows (${names.map((name) => JSON.stringify(name)).join(", ")}); exactly one whole row is the unit this build prepares, and a candidate that moved several rows is refused rather than split`);
-	const row = {
-		name: nonEmpty$2(names[0], "row name"),
-		entry: assertCapabilityRow(`row "${names[0]}"`, rows[names[0]])
-	};
-	const skill = mutation.skill === void 0 ? void 0 : assertCarriedSkill(row, mutation.skill);
-	return {
-		row,
-		...skill === void 0 ? {} : { skill }
-	};
-}
-/** The real DSH tools and MCP servers a store's current capability table authorizes. */
-function authorizedToolPlane(table) {
-	const tools = /* @__PURE__ */ new Set();
-	const servers = /* @__PURE__ */ new Set();
-	const query = capabilityToolQuery(table);
-	for (const name of Object.keys(table)) {
-		const answer = query(name);
-		if (!answer.known) continue;
-		for (const tool of answer.tools) tools.add(tool);
-		for (const server of answer.mcpServers) servers.add(server);
-	}
-	return {
-		tools,
-		servers
-	};
-}
-/** Whether one tool a declaration requires is inside the store's authorized plane (`mcp__<server>__<tool>` counts when the server is mounted). */
-function insidePlane(plane, tool) {
-	if (plane.tools.has(tool)) return true;
-	return [...plane.servers].some((server) => tool.startsWith(`mcp__${server}__`) && tool.length > `mcp__${server}__`.length);
-}
-/** Whether one candidate row may be written at all: no tool the store has not granted and no unknown MCP server. */
-function assertCapabilityRowAdmissible(store, row, baseline) {
-	const answer = capabilityToolQuery(capabilityTableWith(store.table, row))(row.name);
-	if (!answer.known) throw refusal$1("capability-row-invalid", `the row "${row.name}" does not resolve: ${answer.reason}`);
-	const plane = authorizedToolPlane(store.table);
-	const newTools = answer.tools.filter((tool) => !plane.tools.has(tool));
-	if (newTools.length > 0) throw refusal$1("capability-new-tool", `the row "${row.name}" grants tool(s) this store's capability table does not authorize (${newTools.map((tool) => JSON.stringify(tool)).join(", ")}); this build composes granted capabilities and never authorizes a new tool — a provider that needs one is refused by name`);
-	const newServers = answer.mcpServers.filter((server) => !plane.servers.has(server));
-	if (newServers.length > 0) throw refusal$1("capability-new-server", `the row "${row.name}" mounts MCP server(s) this store's capability table does not mount (${newServers.map((server) => JSON.stringify(server)).join(", ")}); mounting a new server plane is a tool grant this build refuses by name`);
-	for (const field of ["preset", "permission"]) {
-		if (row.entry[field] === baseline?.[field]) continue;
-		throw refusal$1("capability-policy-change", `the row "${row.name}" declares ${field} ${row.entry[field] === void 0 ? "(none)" : JSON.stringify(row.entry[field])}, while the store's row reads ${baseline?.[field] === void 0 ? "(none)" : JSON.stringify(baseline?.[field])} — a capability candidate composes granted capabilities and adds a provider, and never moves the permission or preset a worker runs under`);
-	}
-	const sorted = (list) => JSON.stringify([...list ?? []].sort());
-	if (sorted(row.entry.mcpServers) !== sorted(baseline?.mcpServers)) throw refusal$1("capability-policy-change", `the row "${row.name}" mounts MCP servers ${sorted(row.entry.mcpServers)}, while the store's row mounts ${sorted(baseline?.mcpServers)} — a capability candidate never changes the server plane a worker is granted`);
-}
-/** The `SKILL.md` discovery finds for one skill name under `roots`, or `undefined` */
-async function discoverSkill(roots, name) {
-	for (const root of [...new Set(roots)]) {
-		let walked;
-		try {
-			walked = await walkVerified(root, join(name, "SKILL.md"));
-		} catch {
-			continue;
-		}
-		if (!walked.missing) return walked.abs;
-	}
-}
-/** Every skill object discovery can see, read through the walk-verified read (a link that escapes or loops is refused by name). */
-async function existingSkills(roots) {
-	const found = [];
-	for (const root of [...new Set(roots)]) {
-		let entries;
-		try {
-			entries = await readdir(root, { withFileTypes: true });
-		} catch {
-			continue;
-		}
-		for (const entry of entries) {
-			if (!entry.isDirectory()) continue;
-			let walked;
-			try {
-				walked = await walkVerified(root, join(entry.name, "SKILL.md"));
-			} catch {
-				continue;
-			}
-			if (walked.missing) continue;
-			const bytes = await readFile(walked.abs);
-			found.push({
-				name: entry.name,
-				body: skillBody(bytes.toString("utf8"))
-			});
-		}
-	}
-	return found;
-}
-/** Whether the declared verifier is one this deployment can judge a run with: it must be registered, else the row is refused by name. */
-function assertVerifierRegistered(store, name, ref) {
-	const vocabulary = store.verifierVocabulary;
-	if (vocabulary === void 0) throw refusal$1("skill-verifier-unregistered", `the new skill "${name}" declares execution verifier ${JSON.stringify(ref)}, and this deployment cannot list its verifier registry (no verifier service, or \`verifierIds()\` unavailable) — the ref is refused rather than assumed registered`);
-	const registered = [...vocabulary.ids].sort();
-	if (!vocabulary.ids.includes(ref)) throw refusal$1("skill-verifier-unregistered", `the new skill "${name}" declares execution verifier ${JSON.stringify(ref)}, which is not registered; registered verifiers: ${registered.length === 0 ? "none" : registered.join(", ")} — a candidate does not register its own judge`);
-	const version = vocabulary.versions[ref];
-	if (typeof version !== "string" || version.trim().length === 0) throw refusal$1("skill-verifier-unregistered", `the new skill "${name}" declares execution verifier ${JSON.stringify(ref)}, which the registry lists without a declared version — a judge no evidence can be pinned to is not one this build promotes against`);
-}
-/** Every rule the capability candidate itself must satisfy against the store it will be written to. */
-async function assertCapabilityCandidateAdmissible(store, candidate, baseline) {
-	assertCapabilityRowAdmissible(store, candidate.row, baseline);
-	const skill = candidate.skill;
-	if (skill === void 0) return;
-	assertVerifierRegistered(store, skill.name, skill.sidecar.type === "execution" ? skill.sidecar.verifier.ref : "");
-	const plane = authorizedToolPlane(store.table);
-	const unauthorized = skill.sidecar.type === "execution" ? skill.sidecar.requiredTools.filter((tool) => !insidePlane(plane, tool)) : [];
-	if (unauthorized.length > 0) throw refusal$1("skill-tool-unauthorized", `the new skill "${skill.name}" requires tool(s) this store's capability table does not authorize (${unauthorized.map((tool) => JSON.stringify(tool)).sort().join(", ")}); this build composes the tools a deployment already grants, and a provider that needs a new one is refused by name rather than granted`);
-	const body = skillBody(skill.content);
-	const existing = await existingSkills([store.skillRoot, ...store.skillRoots]);
-	if (existing.find((entry) => entry.name === skill.name) !== void 0) throw refusal$1("skill-name-taken", `the candidate's new skill is named "${skill.name}", which is already a skill object this store's discovery finds — a new directory may not cover a same-name production object; improving that object is the same-name update (a \`skill\` candidate), not a new skill`);
-	const renamed = body.length === 0 ? void 0 : existing.find((entry) => entry.body === body);
-	if (renamed !== void 0) throw refusal$1("skill-renamed-production", `the candidate's new skill "${skill.name}" carries the same body as the production skill "${renamed.name}" — a renamed copy is not a new object, and an existing object is improved through the same-name path rather than around it`);
-}
-/** The body of one `SKILL.md`: everything after its frontmatter block, trimmed. */
-function skillBody(content) {
-	const lines = content.split("\n");
-	if (lines[0]?.trim() !== "---") return content.trim();
-	const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
-	return end === -1 ? content.trim() : lines.slice(end + 1).join("\n").trim();
-}
-/** The candidate-side overlay of one prepared capability proposal (A6 interface): the frozen row override and the sandbox skill roots. */
-function capabilityOverlay(proposal, roots) {
-	const prepared = proposal.prepared;
-	const row = prepared?.capabilityRow;
-	if (prepared?.sandbox == null || row === void 0) throw refusal$1("capability-overlay-unprepared", `proposal "${proposal.proposalId}" carries no prepared capability candidate — an overlay is the identity prepare froze, so a proposal without one has nothing to mount`);
-	return {
-		capabilityOverrides: { [row.name]: row.entry },
-		extraSkillRoots: prepared.skillContent === void 0 ? [] : [join(roots.root, prepared.sandbox, "skills")]
-	};
-}
-/** Read one prepared capability candidate back from its sandbox and verify it against the identity prepare froze. */
-async function readPreparedCapability(root, proposal) {
-	const prepared = proposal.prepared;
-	const identity = prepared?.capabilityRow;
-	if (prepared?.sandbox == null || identity === void 0) throw refusal$1("capability-unprepared", `proposal "${proposal.proposalId}" has no materialized capability candidate — nothing this proposal names was ever prepared, so there is nothing to evaluate, promote or write`);
-	const sandbox = prepared.sandbox;
-	const rowRel = `${sandbox}/capability/${identity.name}.json`;
-	const rowBytes = await readVerifiedFile(root, rowRel);
-	const digest = sha256Hex(rowBytes);
-	if (digest !== identity.digest) throw refusal$1("capability-row-drifted", `the frozen row "${rowRel}" no longer hashes to the identity prepare recorded (sha256 ${digest} != ${identity.digest}) — propose a new candidate and re-evaluate it; recorded identities are never re-digested`);
-	let parsed;
-	try {
-		parsed = JSON.parse(rowBytes.toString("utf8"));
-	} catch (error) {
-		throw refusal$1("capability-row-invalid", `the frozen row "${rowRel}" is not readable JSON (${error instanceof Error ? error.message : String(error)})`);
-	}
-	const entry = assertCapabilityRow(`the frozen row "${identity.name}"`, parsed);
-	if (capabilityRowDigest(entry) !== identity.digest) throw refusal$1("capability-row-drifted", `the frozen row "${rowRel}" holds data that hashes to ${capabilityRowDigest(entry)}, not the ${identity.digest} prepare recorded`);
-	const result = {
-		row: {
-			name: identity.name,
-			entry
-		},
-		rowBytes
-	};
-	if (prepared.capabilityBaseline != null) {
-		const baselineRel = `${sandbox}/champion/capability/${identity.name}.json`;
-		const bytes = await readVerifiedFile(root, baselineRel);
-		const baselineDigest = sha256Hex(bytes);
-		if (baselineDigest !== prepared.capabilityBaseline.digest) throw refusal$1("capability-row-drifted", `the champion row "${baselineRel}" no longer hashes to the identity prepare recorded (sha256 ${baselineDigest} != ${prepared.capabilityBaseline.digest}) — the row this candidate would restore cannot be re-proved, so nothing is promoted`);
-		result.baseline = {
-			entry: prepared.capabilityBaseline.entry,
-			bytes
-		};
-	}
-	const content = prepared.skillContent;
-	if (content === void 0) return result;
-	const directory = `${sandbox}/skills/${content.name}`;
-	const skillMd = await readVerifiedFile(root, `${directory}/SKILL.md`);
-	const skillMdDigest = sha256Hex(skillMd);
-	if (skillMdDigest !== content.sha256) throw refusal$1("capability-skill-drifted", `the new skill's "${directory}/SKILL.md" no longer matches the identity prepare recorded (sha256 ${skillMdDigest} != ${content.sha256}) — propose a new candidate and re-evaluate it`);
-	if (content.contract === void 0) throw refusal$1("capability-skill-drifted", `the prepared identity of the new skill "${content.name}" records no declaration, and a capability candidate's skill is an execution provider with its SKILL.contract.json beside it — the object prepare froze is not one this build writes`);
-	const sidecarBytes = await readVerifiedFile(root, `${directory}/${SKILL_SIDECAR_FILE}`);
-	const sidecarDigest = sha256Hex(sidecarBytes);
-	if (sidecarDigest !== content.contract.sha256) throw refusal$1("capability-skill-drifted", `the new skill's "${directory}/${SKILL_SIDECAR_FILE}" no longer matches the identity prepare recorded (sha256 ${sidecarDigest} != ${content.contract.sha256}) — propose a new candidate and re-evaluate it`);
-	const sidecar = JSON.parse(sidecarBytes.toString("utf8"));
-	const defects = skillContractDefects(sidecar);
-	if (defects.length > 0) throw refusal$1("skill-sidecar-invalid", `the frozen declaration of the new skill "${content.name}" is not one this build reads — ${defects.map((defect) => `${defect.code}: ${defect.reason}`).join("; ")}`);
-	return {
-		...result,
-		skill: {
-			name: content.name,
-			content: skillMd.toString("utf8"),
-			sidecar,
-			skillMd,
-			sidecarBytes
-		},
-		skillRoot: join(root, sandbox, "skills"),
-		skillDirectory: join(root, directory)
-	};
-}
-
-//#endregion
-//#region src/commit.ts
-/** Replace `target` with exactly `bytes`, atomically: the staging files a dead process left behind are swept first. */
-async function writeFileAtomic(target, bytes, onStaged) {
-	const directory = dirname(target);
-	const staging = join(directory, `.${basename(target)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
-	let handle;
-	try {
-		await mkdir(directory, { recursive: true });
-		await sweepStaging(directory, target);
-		handle = await open(staging, "wx");
-		await handle.writeFile(bytes);
-		await handle.sync();
-		await handle.close();
-		handle = void 0;
-		await onStaged?.();
-		await rename(staging, target);
-		try {
-			await syncDirectory(directory);
-		} catch (error) {
-			throw new Error(`evolution: the directory "${directory}" of the production target "${target}" could not be fsynced after the atomic rename (${error instanceof Error ? error.message : String(error)}) — the rename may or may not be durable, so this is not a settled commit: the commit intent stays open, no completion is recorded, and the state must not be treated as settled; production holds one of the two complete versions and a reconciliation settles the intent by name`);
-		}
-	} catch (error) {
-		if (handle !== void 0) await handle.close().catch(() => {});
-		await rm(staging, { force: true }).catch(() => {});
-		throw error;
-	}
-}
-/** Remove every entry beside `target` whose name begins with this target's own staging prefix. */
-async function sweepStaging(directory, target) {
-	const prefix = `.${basename(target)}.tmp-`;
-	const entries = await readdir(directory, { withFileTypes: true }).catch((error) => {
-		throw new Error(`evolution: the production directory "${directory}" could not be read to sweep the staging files of "${target}" (${error instanceof Error ? error.message : String(error)}) — a leftover of a killed attempt cannot be accounted for, so the commit stops by name before it stages anything`);
-	});
-	for (const entry of entries) {
-		if (!entry.name.startsWith(prefix) || entry.isDirectory()) continue;
-		const leftover = join(directory, entry.name);
-		try {
-			await rm(leftover, { force: true });
-		} catch (error) {
-			throw new Error(`evolution: the stale staging file "${leftover}" beside the production target "${target}" could not be removed (${error instanceof Error ? error.message : String(error)}) — the commit stops by name before it stages anything rather than stage its own bytes beside a leftover it cannot account for`);
-		}
-	}
-}
-/** Persist one commit and carry it out, in the order the recovery rule fixes, so a dead process settles from what production holds. */
-async function commitIntent(host, request, bytes) {
-	if (request.files.length === 0 && request.capability === void 0) throw new Error(`evolution: the ${request.direction} for proposal "${request.proposalId}" names nothing to commit — a commit replaces the fixed file set of one skill object (SKILL.md, and SKILL.contract.json when the object carries an execution sidecar) and/or moves exactly one capability row, so a request with nothing in it records nothing and writes nothing`);
-	if (bytes.length !== request.files.length) throw new Error(`evolution: the ${request.direction} for proposal "${request.proposalId}" carries ${bytes.length} file(s) of verified bytes for ${request.files.length} target file(s) — the bytes and the intent's files are the same list in the same order, so a mismatch stops by name with nothing written`);
-	request.files.forEach((file, index) => {
-		const provided = bytes[index];
-		if (file.contentSha256 === null) {
-			if (provided !== void 0) throw new Error(`evolution: the ${request.direction} for proposal "${request.proposalId}" carries bytes for "${file.target}" while its intent records that this direction removes the file — a removal writes nothing, so the bytes and the record disagree: nothing was written`);
-			return;
-		}
-		const digest = provided === void 0 ? void 0 : sha256Hex$1(provided);
-		if (digest !== file.contentSha256) throw new Error(`evolution: the bytes this ${request.direction} would write to "${file.target}" hash to sha256 ${digest ?? "(none provided)"}, not the content identity ${file.contentSha256} its commit records — nothing was written`);
-	});
-	const targets = request.files.map((file) => productionRelative(host, file.target));
-	const sources = request.files.map((file) => file.source === void 0 ? void 0 : ledgerRelative(host, request, file.source));
-	for (const file of request.files) {
-		if (file.source === void 0) continue;
-		try {
-			await host.readSource(file.source, file.contentSha256);
-		} catch (error) {
-			throw new Error(`evolution: the recoverable source "${file.source}" of the ${request.direction} for proposal "${request.proposalId}" does not hold the bytes its commit recorded (${error instanceof Error ? error.message : String(error)}) — the source an intent names must be re-verifiable before the intent is recorded, so the commit stops by name: no line is recorded and nothing is written`);
-		}
-	}
-	if (request.capability !== void 0 && request.capability.source !== void 0) await assertCapabilitySource(host, request, request.capability);
-	for (const [index, file] of request.files.entries()) {
-		if (file.source === void 0) continue;
-		await syncSource(host, request, file, sources[index]);
-	}
-	if (request.capability !== void 0 && request.capability.source !== void 0) await syncSourceRelative(host, request, request.capability.source, `capability row "${request.capability.name}"`);
-	const intent = {
-		intentId: `${request.proposalId}/${request.direction}`,
-		proposalId: request.proposalId,
-		direction: request.direction,
-		approvalRef: request.approvalRef,
-		files: request.files.map((file) => ({ ...file })),
-		...request.capability === void 0 ? {} : { capability: { ...request.capability } },
-		actor: request.actor,
-		at: (/* @__PURE__ */ new Date()).toISOString()
-	};
-	const refusal$2 = await host.objectWriteRefusal(intent);
-	if (refusal$2 !== null) throw new Error(`evolution: the ${request.direction} of proposal "${request.proposalId}" cannot write the skill object "${dirname(intent.files[0].target)}" — ${refusal$2}; a commit replaces one complete object and nothing beside it, so the commit stops by name: nothing was written and no commit intent was recorded`);
-	await host.append({
-		formatVersion: 4,
-		kind: "commit_intent",
-		...intent
-	});
-	host.probe("intent-recorded");
-	const tableRefusal$1 = await host.tableWriteRefusal(intent);
-	if (tableRefusal$1 !== null) throw new Error(`evolution: ${tableRefusal$1}; nothing was written for the ${request.direction} of proposal "${request.proposalId}", its commit intent "${intent.intentId}" is recorded and stays open and no completion is recorded, so the table keeps exactly the bytes it holds now and the row this commit was to install is not in it`);
-	await installDirection(host, intent, bytes, targets);
-	await host.verifyCommitted(intent);
-	host.probe("commit-verified");
-	await appendCompletion(host, intent);
-}
-/** Settle one open intent against the filesystem and the registry, or stop by name. */
-async function reconcileIntent(host, intent) {
-	const targets = intent.files.map((file) => file.target);
-	const outcome = (result, detail) => ({
-		intentId: intent.intentId,
-		proposalId: intent.proposalId,
-		direction: intent.direction,
-		targets,
-		result,
-		...detail === void 0 ? {} : { detail }
-	});
-	const bytes = [];
-	for (const file of intent.files) {
-		if (file.source === void 0) {
-			bytes.push(void 0);
-			continue;
-		}
-		try {
-			bytes.push(await host.readSource(file.source, file.contentSha256));
-		} catch (error) {
-			return outcome("blocked", `evolution: the recoverable source "${file.source}" of commit intent "${intent.intentId}" for the file "${file.target}" is no longer readable as the bytes it committed (${error instanceof Error ? error.message : String(error)}) — the source bytes cannot be re-verified under ${host.root}, so the commit stops by name and the intent stays open; nothing was written`);
-		}
-	}
-	let rowEntry = null;
-	if (intent.capability !== void 0 && intent.capability.contentSha256 !== null) try {
-		rowEntry = await committedRow(host, intent.capability);
-	} catch (error) {
-		return outcome("blocked", `evolution: the capability row "${intent.capability.name}" of commit intent "${intent.intentId}" cannot be re-read from its recoverable bytes (${error instanceof Error ? error.message : String(error)}) — the row cannot be re-verified, so the commit stops by name and the intent stays open; nothing was written`);
-	}
-	let rowState = intent.capability === void 0 ? "content" : "baseline";
-	if (intent.capability !== void 0) {
-		const seen = await currentCapabilityRow(host, intent);
-		if (seen === void 0) rowState = "unreadable";
-		else rowState = seen.digest === intent.capability.baselineSha256 ? "baseline" : seen.digest === intent.capability.contentSha256 ? "content" : "other";
-	}
-	if (rowState === "unreadable") return outcome("blocked", `evolution: the capability registry cannot be read for the row "${intent.capability.name}" of commit intent "${intent.intentId}" — whether the row the intent records is in place cannot be established, so the commit stops by name and the intent stays open; nothing was written`);
-	if (rowState === "other") return outcome("blocked", `evolution: the capability registry row "${intent.capability.name}" of commit intent "${intent.intentId}" reads as neither the row recorded before the commit (sha256 ${intent.capability.baselineSha256 ?? "absent"}) nor the row it committed (sha256 ${intent.capability.contentSha256 ?? "absent"}) — a third party changed it, so the commit stops by name and the intent stays open; nothing is overwritten and the completion is never recorded`);
-	const relatives = [];
-	const states = [];
-	const digests = [];
-	for (const file of intent.files) {
-		let relative$1;
-		let current;
-		try {
-			relative$1 = productionRelative(host, file.target);
-			current = await host.readProduction(relative$1);
-		} catch (error) {
-			return outcome("blocked", `evolution: the production file "${file.target}" of commit intent "${intent.intentId}" cannot be read as a regular file (${error instanceof ProductionReadError ? error.reason : error.message}) — the commit stops by name and the intent stays open; nothing was written`);
-		}
-		relatives.push(relative$1);
-		digests.push(current?.sha256 ?? "absent");
-		const digest = current?.sha256 ?? null;
-		states.push(digest === file.baselineSha256 ? "baseline" : digest === file.contentSha256 ? "content" : "other");
-	}
-	const foreign = intent.files.findIndex((_file, index) => states[index] === "other");
-	if (foreign >= 0) {
-		const file = intent.files[foreign];
-		const absent = digests[foreign] === "absent";
-		return outcome("blocked", `evolution: the production file "${file.target}" of commit intent "${intent.intentId}" ${absent ? "is missing" : `holds sha256 ${digests[foreign]}`} — it holds neither the state before the commit (${file.baselineSha256 === null ? "absent" : `sha256 ${file.baselineSha256}`}) nor the state it committed (${file.contentSha256 === null ? "absent" : `sha256 ${file.contentSha256}`}); a third party ${absent ? "removed" : "changed"} it, so the commit stops by name and the intent stays open; nothing is ${absent ? "recreated" : "overwritten"} and the completion is never recorded`);
-	}
-	if (intent.files.length > 0) {
-		const refusal$2 = await host.objectWriteRefusal(intent);
-		if (refusal$2 !== null) return outcome("blocked", `evolution: the ${intent.direction} of proposal "${intent.proposalId}" cannot write the skill object "${dirname(intent.files[0].target)}" of commit intent "${intent.intentId}" — ${refusal$2}; a commit replaces one complete object and nothing beside it, so nothing is written and the intent stays open until a human settles what the directory holds`);
-	}
-	const tableRefusal$1 = await host.tableWriteRefusal(intent);
-	if (tableRefusal$1 !== null) return outcome("blocked", `evolution: ${tableRefusal$1}; nothing was written for the ${intent.direction} of proposal "${intent.proposalId}" and commit intent "${intent.intentId}" stays open — a commit writes its row into that file only while it reads as a state the prepare froze, and a human settles the table (or restores it, and this recovery is run again)`);
-	if (!(states.every((state) => state === "content") && rowState === "content")) {
-		const writeFiles = async () => {
-			for (const [index, file] of intent.files.entries()) {
-				if (states[index] === "content") continue;
-				await installFile(host, intent, file, relatives[index], bytes[index]);
-			}
-		};
-		if (intent.direction === "apply") {
-			await writeFiles();
-			if (intent.capability !== void 0 && rowState !== "content") await installCapability(host, intent, rowEntry);
-		} else {
-			if (intent.capability !== void 0 && rowState !== "content") await installCapability(host, intent, rowEntry);
-			await writeFiles();
-		}
-		for (const file of intent.files) {
-			if (file.contentSha256 === null) continue;
-			await sweepStaging(dirname(file.target), file.target);
-			await syncTargetDirectory(host, intent, file.target);
-		}
-		await host.verifyCommitted(intent);
-		host.probe("commit-verified");
-		await appendCompletion(host, intent);
-		return outcome("completed-redone");
-	}
-	for (const file of intent.files) {
-		if (file.contentSha256 === null) continue;
-		await sweepStaging(dirname(file.target), file.target);
-	}
-	for (const file of intent.files) await syncTargetDirectory(host, intent, file.target);
-	await host.verifyCommitted(intent);
-	host.probe("commit-verified");
-	await appendCompletion(host, intent);
-	return outcome("completed-written");
-}
-/** Make one production target's directory durable before a completion is recorded. */
-async function syncTargetDirectory(host, intent, target) {
-	const directory = dirname(target);
-	try {
-		await syncDirectory(directory);
-	} catch (error) {
-		throw new Error(`evolution: the directory "${directory}" of the production target "${target}" could not be fsynced before recording the completion of commit intent "${intent.intentId}" (${error instanceof Error ? error.message : String(error)}) — the rename that put the committed content there may not be durable, so the completion is not recorded, the intent stays open and the state must not be treated as settled; a reconciliation that can make the directory durable records the completion then`);
-	}
-}
-/** Carry out one commit — a fresh one, or the half a redo found missing — in the intent's own order. */
-async function installDirection(host, intent, bytes, relativeTargets) {
-	const files = async () => {
-		for (const [index, file] of intent.files.entries()) await installFile(host, intent, file, relativeTargets[index], bytes[index]);
-	};
-	const row = async () => {
-		if (intent.capability === void 0) return;
-		await installCapability(host, intent, intent.capability.contentSha256 === null ? null : await committedRow(host, intent.capability));
-	};
-	if (intent.direction === "apply") {
-		await files();
-		await row();
-		return;
-	}
-	await row();
-	await files();
-}
-/** One file of one commit: an atomic replace and its read-back when the direction writes it. */
-async function installFile(host, intent, file, relativeTarget, bytes) {
-	if (file.contentSha256 === null) {
-		await removeFile(host, intent, file.target);
-		return;
-	}
-	if (bytes === void 0) throw new Error(`evolution: the ${intent.direction} of proposal "${intent.proposalId}" reaches "${file.target}" with no bytes to install while its intent records content — nothing was written`);
-	await writeFileAtomic(file.target, bytes, () => host.probe("write-staged", file.target));
-	const readback = await host.readProduction(relativeTarget);
-	if (readback === null || readback.sha256 !== file.contentSha256) throw new Error(`evolution: the production file "${file.target}" does not hold the committed content after the atomic replace (sha256 ${readback?.sha256 ?? "missing"} != ${file.contentSha256}) — the intent stays open and a reconciliation reports what production actually carries by name`);
-	host.probe("write-renamed", file.target);
-}
-/** Remove one production file this direction ends without — only ever a file the intent names. */
-async function removeFile(host, intent, target) {
-	const directory = dirname(target);
-	try {
-		await rm(target, { force: true });
-	} catch (error) {
-		throw new Error(`evolution: the production file "${target}" could not be removed for the ${intent.direction} of commit intent "${intent.intentId}" (${error instanceof Error ? error.message : String(error)}) — the intent stays open and the state must not be treated as settled`);
-	}
-	let directoryGone = false;
-	if (directory !== host.skillRoot) directoryGone = await rmdir(directory).then(() => true, () => false);
-	try {
-		await syncDirectory(directoryGone ? dirname(directory) : directory);
-	} catch (error) {
-		throw new Error(`evolution: the directory "${directoryGone ? dirname(directory) : directory}" could not be fsynced after removing "${target}" for the ${intent.direction} of commit intent "${intent.intentId}" (${error instanceof Error ? error.message : String(error)}) — the removal may not be durable, so the completion is not recorded and the intent stays open`);
-	}
-	const readback = await host.readProduction(productionRelative(host, target));
-	if (readback !== null) throw new Error(`evolution: the production file "${target}" still holds sha256 ${readback.sha256} after the ${intent.direction} of commit intent "${intent.intentId}" removed it — the intent stays open and a reconciliation reports what production actually carries by name`);
-}
-/** Install (or remove) the one capability row a commit carries, once the registry reads as the intent expected. */
-async function installCapability(host, intent, entry) {
-	const capability = intent.capability;
-	const seam = host.capability;
-	if (seam === void 0) throw new Error(`evolution: the ${intent.direction} of proposal "${intent.proposalId}" carries capability row "${capability.name}" and this host offers no registry seam to move it — the row cannot be installed, so the commit stops by name with nothing recorded as applied`);
-	const seen = await currentCapabilityRow(host, intent);
-	if (seen === void 0) throw new Error(`evolution: the capability registry cannot be read for the row "${capability.name}" of the ${intent.direction} of proposal "${intent.proposalId}" — the row this commit would move cannot be compared against the one its intent recorded, so nothing was written`);
-	if (seen.digest !== capability.baselineSha256) throw new Error(`evolution: the capability registry row "${capability.name}" of the ${intent.direction} of proposal "${intent.proposalId}" reads ${seen.digest === null ? "no row at all" : `as ${seen.digest}`}, not the state before the commit (${capability.baselineSha256 ?? "no row"}) — a third party moved it, so nothing was written and no completion is recorded; create a new candidate from the current registry state and re-evaluate it`);
-	try {
-		await seam.apply(intent, entry);
-	} catch (error) {
-		throw new Error(`evolution: the capability registry row "${capability.name}" of the ${intent.direction} of proposal "${intent.proposalId}" could not be written (${error instanceof Error ? error.message : String(error)}) — nothing was recorded as applied and the commit intent stays open, because the provider this commit installs is not the one the deployment would resolve`);
-	}
-	const after = await currentCapabilityRow(host, intent);
-	if (after === void 0 || after.digest !== capability.contentSha256) throw new Error(`evolution: the capability registry row "${capability.name}" does not read as the row this ${intent.direction} committed after the write (${after?.digest === void 0 || after.digest === null ? "no row" : after.digest} != ${capability.contentSha256 ?? "no row"}) — the completion is not recorded and the intent stays open`);
-}
-/** The registry row a commit's own recoverable bytes hold, parsed and verified against the intent's digests. */
-async function committedRow(host, capability) {
-	const source = capability.source;
-	if (source === void 0) throw new Error(`the capability row "${capability.name}" is recorded with content ${capability.contentSha256} and no recoverable source — the row cannot be read back, and an intent must name the bytes a recovery would write again`);
-	const bytes = await host.readSource(source, capability.contentSha256);
-	let parsed;
-	try {
-		parsed = JSON.parse(bytes.toString("utf8"));
-	} catch (error) {
-		throw new Error(`the capability row source "${source}" is not readable JSON (${error instanceof Error ? error.message : String(error)})`);
-	}
-	const entry = parsed;
-	if (capabilityRowDigest(entry) !== capability.contentSha256) throw new Error(`the capability row source "${source}" holds a row that hashes to ${capabilityRowDigest(entry)}, not the ${capability.contentSha256} its commit recorded — a row whose bytes and identity disagree is not one this commit may install`);
-	return entry;
-}
-/** The registry row as it reads now, digested — `{ digest: null }` for a name the registry does not hold, `undefined` when it cannot be read. */
-async function currentCapabilityRow(host, intent) {
-	const capability = intent.capability;
-	if (capability === void 0) return void 0;
-	const seam = host.capability;
-	if (seam === void 0) return void 0;
-	try {
-		const entry = await seam.read(capability.name);
-		return { digest: entry === null ? null : capabilityRowDigest(entry) };
-	} catch {
-		return;
-	}
-}
-/** Read and verify a capability row's recoverable bytes before the intent that names them is recorded. */
-async function assertCapabilitySource(host, request, capability) {
-	try {
-		await committedRow(host, capability);
-	} catch (error) {
-		throw new Error(`evolution: the recoverable source "${capability.source}" of the capability row "${capability.name}" in the ${request.direction} for proposal "${request.proposalId}" does not hold the row its commit recorded (${error instanceof Error ? error.message : String(error)}) — the source an intent names must be re-verifiable before the intent is recorded, so the commit stops by name: no line is recorded and nothing is written`);
-	}
-}
-/** Close one intent: the completion line, written for the intent's own grant and direction. */
-async function appendCompletion(host, intent) {
-	await host.append({
-		formatVersion: 4,
-		kind: intent.direction === "apply" ? "applied" : "rolledback",
-		proposalId: intent.proposalId,
-		targets: intent.files.map((file) => file.target),
-		approvalRef: intent.approvalRef,
-		intentId: intent.intentId,
-		actor: intent.actor,
-		at: (/* @__PURE__ */ new Date()).toISOString()
-	});
-}
-/** One commit target relative to the production skill root: the shape the intent records. */
-function productionRelative(host, target) {
-	const rel = relative(host.skillRoot, resolve(target));
-	if (rel.length === 0 || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`evolution: the commit target "${target}" is not inside the production skill root ${host.skillRoot} — a commit replaces the fixed file set of one skill object under that root (SKILL.md, and SKILL.contract.json when the object carries an execution sidecar) and nothing else`);
-	return rel;
-}
-/** The check that the recoverable source an intent will name for one file stands under the ledger root. */
-function ledgerRelative(host, request, source) {
-	const rel = relative(host.root, resolve(host.root, source));
-	if (rel.length === 0 || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`evolution: the recoverable source "${source}" of the ${request.direction} for proposal "${request.proposalId}" is not inside the ledger root ${host.root} — a commit names the bytes it could write again from under that root and nothing else, so it stops by name before the intent is recorded and nothing is written`);
-	return rel;
-}
-/** Make one file's recoverable source durable *before* the intent that names it is recorded. */
-async function syncSource(host, request, file, sourceRelative) {
-	await syncSourceRelative(host, request, sourceRelative, `"${file.source}"`);
-}
-/** The same durability rule for any source a commit names — a file's bytes or a capability row's. */
-async function syncSourceRelative(host, request, sourceRelative, label) {
-	const source = resolve(host.root, sourceRelative);
-	let handle;
-	try {
-		handle = await open(source, "r");
-		await handle.sync();
-	} catch (error) {
-		throw new Error(`evolution: the recoverable source ${label} of the ${request.direction} for proposal "${request.proposalId}" could not be fsynced at "${source}" (${error instanceof Error ? error.message : String(error)}) — the source must be durable, bytes and path, before the intent that names it is recorded, so the commit stops by name: no line is recorded and nothing is written`);
-	} finally {
-		await handle?.close().catch(() => {});
-	}
-	for (const directory of sourceDirectories(host.root, source)) try {
-		await syncDirectory(directory);
-	} catch (error) {
-		throw new Error(`evolution: the directory "${directory}" holding the recoverable source ${label} of the ${request.direction} for proposal "${request.proposalId}" could not be fsynced (${error instanceof Error ? error.message : String(error)}) — the source must be durable, bytes and path, before the intent that names it is recorded, so the commit stops by name: no line is recorded and nothing is written`);
-	}
-}
-/** The directories that make a source's *path* durable, inside-out: the one that holds it first, up to the ledger root. */
-function sourceDirectories(root, source) {
-	const directories = [];
-	for (let directory = dirname(source);; directory = dirname(directory)) {
-		directories.push(directory);
-		if (directory === root || dirname(directory) === directory) break;
-	}
-	return directories;
-}
-/** fsync one directory so an entry created or renamed inside it is durable. */
-async function syncDirectory(directory) {
-	const handle = await open(directory, "r");
-	try {
-		await handle.sync();
-	} finally {
-		await handle.close().catch(() => {});
-	}
-}
-
-//#endregion
-//#region src/capability-config.ts
-function asLines(text) {
-	const trailingNewline = text.endsWith("\n");
-	return {
-		lines: text.split("\n"),
-		trailingNewline
-	};
-}
-/** The indentation of a line, or `-1` for a blank one (`\t` is refused by the callers that care). */
-function indentOf(line) {
-	if (line.trim().length === 0) return -1;
-	return line.length - line.trimStart().length;
-}
-/** One refusal of this module, naming the file and never quoting it. */
-function refusal(file, detail) {
-	return tableRefusal(file, detail);
-}
-/** The refusal a table that is not a frozen state is reported by (EVO-2 内容漂移), naming the file and never quoting it. */
-function tableChanged(file, detail) {
-	return tableChangedRefusal(file, detail);
-}
-/** The `- id: task-runtime` entry's `capabilities:` block inside the first YAML document. */
-function capabilitiesBlock(lines, file) {
-	const separator = lines.findIndex((line) => line.trim() === "---");
-	const first = separator < 0 ? lines.length : separator;
-	let header = -1;
-	for (let index = 0; index < first; index += 1) {
-		const line = lines[index];
-		if (!/^- id:\s*task-runtime\s*$/.test(line)) continue;
-		let end = first;
-		for (let next = index + 1; next < first; next += 1) if (/^- /.test(lines[next])) {
-			end = next;
-			break;
-		}
-		for (let cursor = index + 1; cursor < end; cursor += 1) {
-			if (/^\s*capabilities:\s*$/.test(lines[cursor])) {
-				header = cursor;
-				break;
-			}
-			if (/^\s*capabilities:\s*\S/.test(lines[cursor])) throw refusal(file, "the task-runtime entry declares `capabilities:` inline, and this writer edits a block mapping (nothing was written)");
-		}
-		if (header >= 0) {
-			const indent = indentOf(lines[header]);
-			let to = header + 1;
-			for (; to < end; to += 1) {
-				const line$1 = lines[to];
-				if (indentOf(line$1) <= indent && line$1.trim().length > 0) break;
-			}
-			return {
-				header,
-				indent,
-				from: header + 1,
-				to
-			};
-		}
-		throw refusal(file, "its task-runtime entry declares no `capabilities:` mapping, so the row this commit moves has nowhere to be written (nothing was written)");
-	}
-	throw refusal(file, "it holds no `- id: task-runtime` entry in its first document, so the capability table this deployment loads cannot be located (nothing was written)");
-}
-/** The row one name maps to inside the file, or `undefined` when the file holds no such row. */
-function capabilityRowRegion(text, file, name) {
-	const { lines } = asLines(text);
-	const block = capabilitiesBlock(lines, file);
-	const rowPattern = /* @__PURE__ */ new RegExp(`^\\s*("?)([^:\\s][^:]*?)\\1:\\s*`);
-	let insertAt = block.to;
-	let indent;
-	for (let index = block.from; index < block.to; index += 1) {
-		const line = lines[index];
-		const match = rowPattern.exec(line);
-		if (match === null) continue;
-		const rowIndent = line.slice(0, indentOf(line));
-		if (indent === void 0 && indentOf(line) > block.indent) indent = rowIndent;
-		if (rowIndent !== indent) continue;
-		const rowName = match[2];
-		if (rowName !== name) continue;
-		let end = index + 1;
-		while (end < block.to && indentOf(lines[end]) > indentOf(line)) end += 1;
-		return {
-			name: rowName,
-			start: index,
-			end,
-			indent: rowIndent,
-			insertAt: block.to
-		};
-	}
-	return {
-		name,
-		start: block.to,
-		end: block.to,
-		indent: indent ?? " ".repeat(block.indent + 4),
-		insertAt
-	};
-}
-/** The row region's own text, as the file spells it right now. */
-function capabilityRowText(text, file, name) {
-	const { lines } = asLines(text);
-	const region = capabilityRowRegion(text, file, name);
-	if (region === void 0 || region.start === region.end) return null;
-	return lines.slice(region.start, region.end).join("\n");
-}
-/** The one line this module writes for one row: `<indent>"<name>": <canonical json>` */
-function renderCapabilityRow(name, entry, indent) {
-	return `${indent}${JSON.stringify(name)}: ${canonicalJson(entry)}`;
-}
-/** The file's text with one row written, removed, or added. Pure: the caller writes it. */
-function applyCapabilityRowToConfig(input) {
-	const { text, file, name, entry } = input;
-	const { lines, trailingNewline } = asLines(text);
-	const region = capabilityRowRegion(text, file, name);
-	if (region === void 0) throw refusal(file, "no capabilities block was found (nothing was written)");
-	const rendered = entry === null ? void 0 : renderCapabilityRow(name, entry, region.indent);
-	const before = lines.slice(0, region.start);
-	const after = lines.slice(region.end);
-	const body = entry === null ? [] : [rendered];
-	const edited = [
-		...before,
-		...body,
-		...after
-	];
-	return trailingNewline && edited[edited.length - 1] === "" ? edited.slice(0, -1).join("\n") + "\n" : edited.join("\n");
-}
-/** Freeze one table file's composed identity for one candidate (pure): the file as prepare read it and the files apply and rollback leave. */
-function capabilityTableIdentity(input) {
-	const { text, file, name, entry, restored } = input;
-	const digest = (value) => sha256Hex(Buffer.from(value, "utf8"));
-	const applied = applyCapabilityRowToConfig({
-		text,
-		file,
-		name,
-		entry
-	});
-	return {
-		baselineSha256: digest(text),
-		applySha256: digest(applied),
-		rollbackSha256: digest(applyCapabilityRowToConfig({
-			text: applied,
-			file,
-			name,
-			entry: restored
-		}))
-	};
-}
-/** The named reason one whole-file digest is not a state a capability write may overwrite, or `null` when it is one of the two states. */
-function capabilityTableDrift(input) {
-	const { name, seen, states } = input;
-	if (seen === states.beforeSha256 || seen === states.afterSha256) return null;
-	return `it reads sha256 ${seen}, which is neither the whole-file state this write starts from (sha256 ${states.beforeSha256}) nor the state its own write leaves (sha256 ${states.afterSha256}) — the row "${name}" is not written over a third party's move of the file, and the bytes that move left are exactly the bytes it keeps`;
-}
-/** The row one rendered or read line holds, parsed back from the scalar this module renders. */
-function parsedRow(file, name, line) {
-	const separator = line.indexOf(": ");
-	if (separator < 0) throw refusal(file, `its row "${name}" carries no value on the same line (nothing was written)`);
-	let parsed;
-	try {
-		parsed = JSON.parse(line.slice(separator + 2));
-	} catch (error) {
-		throw refusal(file, `its row "${name}" does not hold the json this writer reads rows as (${error instanceof Error ? error.message : String(error)}) — a row this build writes is \`"<name>": <canonical json>\`, and a row in another style is not one it will edit (nothing was written)`);
-	}
-	return assertCapabilityRow(`the row "${name}" of ${file}`, parsed);
-}
-/** Persist one capability row into the deployment's config file, or refuse by name with nothing written. */
-async function writeCapabilityRowToConfig(input) {
-	const { file, name, entry, states, probe } = input;
-	let current;
-	try {
-		current = await readFile(file, "utf8");
-	} catch (error) {
-		throw refusal(file, `it cannot be read (${error instanceof Error ? error.message : String(error)}) — nothing was written`);
-	}
-	const region = capabilityRowRegion(current, file, name);
-	if (region === void 0) throw refusal(file, "no capabilities block was found (nothing was written)");
-	const rendered = entry === null ? void 0 : renderCapabilityRow(name, entry, region.indent);
-	if (rendered !== void 0) {
-		const parsed = parsedRow(file, name, rendered);
-		if (capabilityRowDigest(parsed) !== capabilityRowDigest(entry)) throw refusal(file, `the row "${name}" cannot be rendered without changing it (the text reads back as ${capabilityRowDigest(parsed)}, not as ${capabilityRowDigest(entry)}); nothing was written`);
-	}
-	const next = applyCapabilityRowToConfig({
-		text: current,
-		file,
-		name,
-		entry
-	});
-	probe?.("before-write", name);
-	let reread;
-	try {
-		reread = await readFile(file, "utf8");
-	} catch (error) {
-		throw refusal(file, `it could not be read again before the write (${error instanceof Error ? error.message : String(error)}) — nothing was written`);
-	}
-	if (reread !== current) throw tableChanged(file, `it changed between the read this write's edit was computed from and the write itself — the write that landed in that window is not one this commit may carry over, so the row "${name}" was not written into it and the file is left exactly as that write left it`);
-	const drift = capabilityTableDrift({
-		name,
-		seen: sha256Hex(Buffer.from(reread, "utf8")),
-		states
-	});
-	if (drift !== null) throw tableChanged(file, `${drift}; nothing was written`);
-	const verifyStaged = async () => {
-		probe?.("staged", name);
-		let staged;
-		try {
-			staged = await readFile(file, "utf8");
-		} catch (error) {
-			throw refusal(file, `it could not be read again immediately before the rename (${error instanceof Error ? error.message : String(error)}) — nothing was written, and the staged bytes of the row "${name}" are removed`);
-		}
-		const changed = capabilityTableDrift({
-			name,
-			seen: sha256Hex(Buffer.from(staged, "utf8")),
-			states
-		});
-		if (changed !== null) throw tableChanged(file, `${changed}; the write that landed in the window between this edit and the rename is not one this commit may carry over, so the staged bytes of the row "${name}" were removed and the file keeps exactly what that write left`);
-	};
-	await writeFileAtomic(file, Buffer.from(next, "utf8"), verifyStaged);
-	probe?.("written", name);
-	let back;
-	try {
-		back = await readFile(file, "utf8");
-	} catch (error) {
-		throw refusal(file, `it could not be read back after the write (${error instanceof Error ? error.message : String(error)}) — the row may be written, so the commit intent stays open and the next reconciliation re-runs the same edit`);
-	}
-	if (back !== next) throw refusal(file, "it changed between the write and the read back — the row may be written, so the commit intent stays open and no completion is recorded");
-	const written = capabilityRowText(back, file, name);
-	if (entry === null) {
-		if (written !== null) throw refusal(file, `the row "${name}" is still there after removing it — the commit is not settled`);
-		return {
-			file,
-			name,
-			direction: "removed",
-			rowDigest: null,
-			textDigest: null
-		};
-	}
-	const expected = renderCapabilityRow(name, entry, region.indent);
-	if (written !== expected) throw refusal(file, `the row "${name}" does not read back as the text this write left — the commit is not settled`);
-	return {
-		file,
-		name,
-		direction: "written",
-		rowDigest: capabilityRowDigest(parsedRow(file, name, written)),
-		textDigest: sha256Hex(Buffer.from(expected, "utf8"))
-	};
 }
 
 //#endregion
@@ -1398,6 +1028,7 @@ function safeSegment(value, field) {
 /** The specification's own shape, before anything is read or frozen. */
 function validateSpec(spec) {
 	nonEmpty(spec.proposalId, "proposalId");
+	if (spec.objective !== void 0 && spec.objective !== "tool-call-reduction") throw new Error("experiment: objective must be tool-call-reduction when declared");
 	if (spec.model === null || typeof spec.model !== "object" || typeof spec.model.provider !== "string" || spec.model.provider.length === 0 || typeof spec.model.model !== "string" || spec.model.model.length === 0) throw new Error("experiment: model must be the structured selection { provider, model } the runs are placed under — a bare string names no route a spawn can be given, so nothing may be frozen under it");
 	if (typeof spec.snapshot?.sourceDir !== "string" || spec.snapshot.sourceDir.trim().length === 0) throw new Error("experiment: snapshot.sourceDir must be the directory both sides are built from");
 	if (!Number.isInteger(spec.repetition) || spec.repetition < 0) throw new Error("experiment: repetition must be the experiment's non-negative integer repeat index");
@@ -1421,6 +1052,7 @@ function assertSampleRole(sample, task, review) {
 //#region src/experiment/freeze.ts
 /** The idempotency key's content member (K3, A6): the digest of the candidate's complete identity. */
 function preparedContentDigestOf(frozen) {
+	if (frozen.taskDefinition !== void 0) return digestOf(frozen.taskDefinition);
 	if (frozen.capability !== void 0) return digestOf({
 		capability: frozen.capability,
 		...frozen.candidate === void 0 ? {} : { candidate: frozen.candidate }
@@ -1435,10 +1067,15 @@ function isExperimentRecord(record) {
 /** The proposal this experiment may evaluate, and the candidate identity it runs against. */
 async function experimentCandidate(sources, proposalId) {
 	const proposal = await sources.evolution.get(proposalId);
-	if (proposal.targetType !== "skill" && proposal.targetType !== "capability") throw new Error(`proposal ${proposalId} targets "${proposal.targetType}"; the two-sided experiment evaluates a skill candidate or a capability candidate (A6) only`);
+	if (proposal.targetType !== "skill" && proposal.targetType !== "capability" && proposal.targetType !== "task_definition") throw new Error(`proposal ${proposalId} targets "${proposal.targetType}"; the two-sided experiment evaluates a skill candidate or a capability candidate (A6) only`);
 	if (proposal.status !== "prepared") throw new Error(`proposal ${proposalId} is ${proposal.status}; only a prepared proposal can be evaluated`);
 	const prepared = proposal.prepared;
 	if (prepared === void 0 || prepared.sandbox === null || !prepared.mechanical) throw new Error(`proposal ${proposalId} has no materialized candidate; prepare it before evaluating it`);
+	if (proposal.targetType === "task_definition") return {
+		proposal,
+		sandbox: prepared.sandbox,
+		taskDefinition: await sources.evolution.readTaskDefinitionCandidate(proposalId)
+	};
 	if (proposal.targetType === "capability") {
 		if (prepared.capabilityRow === void 0) throw new Error(`proposal ${proposalId} carries no frozen capability row — a capability prepare records the row it installs and the row it moves, so a proposal without them has nothing this experiment could compare`);
 		const verified = await sources.evolution.readCapabilityCandidate(proposalId);
@@ -1465,7 +1102,8 @@ async function experimentCandidate(sources, proposalId) {
 					digest: prepared.capabilityRow.digest
 				},
 				baseline,
-				sourceRefs: [...proposal.sourceRefs]
+				sourceRefs: [...proposal.sourceRefs],
+				...verified.mcpServers === void 0 ? {} : { mcpServers: verified.mcpServers }
 			},
 			...prepared.skillContent === void 0 ? {} : { candidate: prepared.skillContent },
 			overlay: capabilityOverlay(proposal, { root: sources.evolution.root })
@@ -1540,9 +1178,11 @@ async function frozenProviderIdentity(input) {
 			table,
 			skills,
 			candidate,
-			where
+			where,
+			mcpRegistry: sources.taskRuntime.listMcpServers?.()
 		}),
 		mcpServers,
+		...mcpServers.length === 0 ? {} : { mcpBindings: mcpServerBindings(resolveCapabilities(rows, table, sources.taskRuntime.listMcpServers?.() ?? {}), sources.taskRuntime.listMcpServers?.() ?? {}) },
 		preset: declaredPresets.size === 0 ? null : [...declaredPresets][0],
 		skills
 	};
@@ -1572,13 +1212,14 @@ function frozenCapabilitySideOf(input) {
 		capabilities: [...rows],
 		registryRevision: precheck.revision,
 		mcpServers: [...new Set(rows.flatMap((row) => table[row]?.mcpServers ?? []))].sort(),
+		...rows.some((row) => (table[row]?.mcpServers?.length ?? 0) > 0) ? { mcpBindings: mcpServerBindings(resolveCapabilities(rows, table, input.mcpRegistry ?? {}), input.mcpRegistry ?? {}) } : {},
 		preset: declaredPresets.size === 0 ? null : [...declaredPresets][0],
 		skills
 	};
 }
 /** Every provider one pre-check refused, as a refusal line names it — the one rendering the freeze and the admission record share. */
 function refusedProviderLines(precheck) {
-	return precheck.capabilities.flatMap((row) => row.skills.filter((skill) => !skill.valid).map((skill) => `${row.capability}: skill "${skill.name}" (${(skill.defects ?? []).map((defect) => `${defect.code}: ${defect.detail}`).join("; ")})`));
+	return precheck.capabilities.flatMap((row) => [...(row.refusals ?? []).map((item) => `${row.capability}: ${item.code}: ${item.detail}`), ...row.skills.filter((skill) => !skill.valid).map((skill) => `${row.capability}: skill "${skill.name}" (${(skill.defects ?? []).map((defect) => `${defect.code}: ${defect.detail}`).join("; ")})`)]);
 }
 /** What the two sides of one **capability** sample are frozen against (A6). */
 async function frozenCapabilitySample(input) {
@@ -1587,20 +1228,27 @@ async function frozenCapabilitySample(input) {
 	const table = sources.taskRuntime.listCapabilities?.();
 	if (table === void 0) throw new Error(`${where} cannot fix the provider identities a capability experiment compares: this deployment's task runtime exposes no capability table (listCapabilities), so which rows, servers and skills each side resolves to is not knowable before it runs — the experiment is refused rather than run under identities nobody can compare against`);
 	const rows = [...new Set(input.required)].sort();
+	const mcpRegistry = sources.taskRuntime.listMcpServers?.() ?? {};
+	const overlayRegistry = {
+		...mcpRegistry,
+		...overlay.mcpServers
+	};
 	const overlayTable = {
 		...table,
 		...overlay.capabilityOverrides
 	};
-	const overlayManifest = resolveCapabilities(rows, overlayTable);
+	const overlayManifest = resolveCapabilities(rows, overlayTable, overlayRegistry);
 	if (overlayManifest.missing.length > 0) throw new Error(`${where} requires ${overlayManifest.missing.length > 1 ? "capabilities" : "capability"} [${overlayManifest.missing.join(", ")}], which the candidate overlay does not resolve — the candidate side could not run the case the candidate is evaluated on, so the experiment is refused before it runs`);
 	if (sources.taskRuntime.precheckCapabilityTable === void 0) throw new Error(`${where} cannot fix the provider identity the candidate overlay produces: this deployment's task runtime exposes no capability pre-check over a table the caller names, so what the candidate side would load cannot be frozen before it runs`);
 	const candidateProvider = frozenCapabilitySideOf({
 		precheck: await sources.taskRuntime.precheckCapabilityTable({
 			capabilities: rows,
 			table: overlayTable,
+			mcpRegistry: overlayRegistry,
 			extraRoots: [...overlay.extraSkillRoots]
 		}),
 		table: overlayTable,
+		mcpRegistry: overlayRegistry,
 		rows,
 		where: `${where} candidate side`
 	});
@@ -1629,6 +1277,7 @@ async function frozenCapabilitySample(input) {
 		precheck,
 		table,
 		rows,
+		mcpRegistry,
 		where: `${where} production side`
 	});
 	return {
@@ -1637,6 +1286,7 @@ async function frozenCapabilitySample(input) {
 			registryRevision: productionSide.registryRevision,
 			candidateRegistryRevision: productionSide.registryRevision,
 			mcpServers: productionSide.mcpServers,
+			...productionSide.mcpBindings === void 0 ? {} : { mcpBindings: productionSide.mcpBindings },
 			preset: productionSide.preset,
 			skills: productionSide.skills
 		},
@@ -1651,7 +1301,7 @@ function candidateRegistryRevisionOf(input) {
 	return registryRevision(table, skills.map((skill) => ({
 		name: skill.name,
 		contractDigest: skill.name === candidate.name ? candidateDigest : skill.contractDigest
-	})));
+	})), input.mcpRegistry);
 }
 /** Freeze one sample from its store record: what the case is, the acceptance the replay mirrors into both sides, and the provider identities. */
 function frozenSampleOf(sample, task, review, providers, vocabulary) {
@@ -1688,8 +1338,10 @@ function frozenIdentityOf(identity) {
 function freezeExperiment(input) {
 	const candidate = input.candidate;
 	const capability = input.capability;
+	const taskDefinition = input.taskDefinition;
 	const frozen = {
 		proposalId: input.proposalId,
+		...input.spec.objective === void 0 ? {} : { objective: input.spec.objective },
 		repetition: input.spec.repetition,
 		...candidate === void 0 ? {} : { candidate: frozenIdentityOf(candidate) },
 		...input.productionBaseline === void 0 ? {} : { productionBaseline: frozenIdentityOf(input.productionBaseline) },
@@ -1704,8 +1356,10 @@ function freezeExperiment(input) {
 				entry: structuredClone(capability.baseline.entry),
 				digest: capability.baseline.digest
 			},
-			sourceRefs: [...capability.sourceRefs]
+			sourceRefs: [...capability.sourceRefs],
+			...capability.mcpServers === void 0 ? {} : { mcpServers: structuredClone(capability.mcpServers) }
 		} },
+		...taskDefinition === void 0 ? {} : { taskDefinition: structuredClone(taskDefinition) },
 		model: {
 			provider: input.spec.model.provider,
 			model: input.spec.model.model,
@@ -1721,12 +1375,47 @@ function freezeExperiment(input) {
 		},
 		comparerVersion: EXPERIMENT_COMPARER_VERSION,
 		overlay: {
-			baseline: "none — the baseline runs under the production configuration",
-			candidate: capability === void 0 ? `extraSkillRoots: [${input.sandbox}/skills] — the complete candidate object: ${candidate.contract === void 0 ? `the guidance object "${candidate.name}" (SKILL.md alone, no sidecar)` : `the execution object "${candidate.name}" (SKILL.md plus the derived SKILL.contract.json)`}, loaded whole through the runtime's own discovery` : `capabilityOverrides: { "${capability.row.name}": the prepared row }${candidate === void 0 ? " and no extra skill root — a row-only candidate adds no object" : `, extraSkillRoots: [${input.sandbox}/skills] — the new execution object "${candidate.name}" (SKILL.md plus the SKILL.contract.json beside it), loaded whole through the runtime's own discovery`}`
+			baseline: taskDefinition === void 0 ? "none — the baseline runs under the production configuration" : "session template library: frozen baseline",
+			candidate: taskDefinition !== void 0 ? "session template library: appended candidate, only new child contracts use it" : capability === void 0 ? `extraSkillRoots: [${input.sandbox}/skills] — the complete candidate object: ${candidate.contract === void 0 ? `the guidance object "${candidate.name}" (SKILL.md alone, no sidecar)` : `the execution object "${candidate.name}" (SKILL.md plus the derived SKILL.contract.json)`}, loaded whole through the runtime's own discovery` : `capabilityOverrides: { "${capability.row.name}": the prepared row }${candidate === void 0 ? " and no extra skill root — a row-only candidate adds no object" : `, extraSkillRoots: [${input.sandbox}/skills] — the new execution object "${candidate.name}" (SKILL.md plus the SKILL.contract.json beside it), loaded whole through the runtime's own discovery`}`
 		}
 	};
 	assertFrozenExperiment(frozen);
 	return frozen;
+}
+/** Criterion repair examples keep the existing outer oracle and its historical labels. */
+async function freezeCriterionRepair(definition, proposal, snapshot, samples, vocabulary) {
+	const repair = validateTaskDefinitionMutation(proposal.mutation).criterionRepair;
+	if (repair === void 0) return;
+	const parent = snapshot.tasks.find((task) => task.taskId === samples[0]?.taskId);
+	if (parent === void 0) throw new Error("evolution: criterion repair requires a parent oracle sample");
+	if (independentOracleCriteria(parent).length === 0) throw new Error("evolution: criterion repair needs independent command acceptance on the source parent");
+	if (vocabulary === void 0) throw new Error("evolution: criterion repair verifier vocabulary is unavailable");
+	const guardVerifierVersions = {};
+	for (const criterion of [...independentOracleCriteria(parent), ...definition.candidate.template.contract.acceptanceCriteria]) {
+		const ref = criterion.verifierRef;
+		if (ref === void 0 || vocabulary.versions[ref] === void 0) throw new Error("evolution: criterion guards must pin a registered versioned verifier");
+		guardVerifierVersions[ref] = vocabulary.versions[ref];
+	}
+	const examples = {};
+	for (const label of ["positive", "negative"]) {
+		const input = repair[label];
+		const task = snapshot.tasks.find((item) => item.taskId === input.taskId);
+		const review = task === void 0 ? void 0 : latestReview(snapshot, task);
+		const expected = label === "positive" ? "verified" : "failed";
+		if (task === void 0 || task.status !== expected || review?.outcome !== expected || !review.criteria?.length || review.criteria.some((criterion) => criterion.verdict === "inconclusive") || label === "negative" && !review.criteria.some((criterion) => criterion.verdict === "fail")) throw new Error(`evolution: ${label} criterion example must be an existing definitive ${expected} Run`);
+		if (oracleContractDigest(task) !== oracleContractDigest(parent)) throw new Error("evolution: criterion examples must be judged by the fixed independent parent oracle");
+		const judged = independentOracleCriteria(task).map((criterion) => review.criteria.find((item) => item.criterionId === criterion.criterionId)?.verdict);
+		if (judged.length === 0 || judged.some((verdict) => verdict === void 0 || verdict === "inconclusive") || (label === "positive" ? judged.some((verdict) => verdict !== "pass") : !judged.includes("fail"))) throw new Error("evolution: criterion example labels must come from the independent parent acceptance");
+		examples[label] = {
+			...input,
+			sourceDir: resolve(input.sourceDir),
+			snapshotDigest: await directoryDigest(input.sourceDir),
+			contractDigest: oracleContractDigest(task)
+		};
+	}
+	if (examples.positive.snapshotDigest === examples.negative.snapshotDigest) throw new Error("evolution: positive and negative criterion examples require distinct existing inputs");
+	definition.criterionRepair = examples;
+	definition.guardVerifierVersions = guardVerifierVersions;
 }
 
 //#endregion
@@ -1891,8 +1580,8 @@ function latestReview(snapshot, task) {
 function reviewRefOf(review) {
 	return `${review.taskId}#${review.runId ?? "no-run"}`;
 }
-/** What one side cost, as the run's own review record reported it. `unknown` is never a zero. */
-function costOf(review) {
+/** Read reported cost; a supplied snapshot requires complete tool-call counters from the whole executed Run subtree. */
+function costOf(review, snapshot) {
 	if (review === void 0) return {
 		status: "unknown",
 		reason: "the run settled no review record, so no cost was reported for it"
@@ -1906,9 +1595,45 @@ function costOf(review) {
 		status: "unknown",
 		reason: "the run's review record carries metrics but no token and no tool-call counters"
 	};
-	return {
+	if (snapshot === void 0) return {
 		status: "reported",
 		metrics: structuredClone(metrics)
+	};
+	const root = snapshot.runs.find((run) => run.runId === review.runId && run.taskId === review.taskId);
+	if (root === void 0) return {
+		status: "unknown",
+		reason: "the measured side has no Run in its task store"
+	};
+	const runIds = new Set([root.runId]);
+	let size = 0;
+	while (size !== runIds.size) {
+		size = runIds.size;
+		for (const run of snapshot.runs) if (run.parentRunId !== void 0 && runIds.has(run.parentRunId)) runIds.add(run.runId);
+	}
+	let calls = 0;
+	let failures = 0;
+	for (const run of snapshot.runs.filter((item) => runIds.has(item.runId))) {
+		const counters = snapshot.reviews.find((item) => item.runId === run.runId && item.taskId === run.taskId)?.metrics?.toolCalls;
+		if (!TERMINAL_RUN_STATUSES.has(run.status) || counters === void 0 || !Number.isSafeInteger(counters.calls) || counters.calls < 0 || !Number.isSafeInteger(counters.failures) || counters.failures < 0) return {
+			status: "unknown",
+			reason: `Run ${run.runId} in the executed subtree has no complete terminal tool-call counters`
+		};
+		calls += counters.calls;
+		failures += counters.failures;
+	}
+	if (!Number.isSafeInteger(calls) || !Number.isSafeInteger(failures)) return {
+		status: "unknown",
+		reason: "the executed subtree tool-call counters exceed safe integer range"
+	};
+	return {
+		status: "reported",
+		metrics: {
+			...structuredClone(metrics),
+			toolCalls: {
+				calls,
+				failures
+			}
+		}
 	};
 }
 /** The evidence ids of one run: the review record's own list, or the store's verdict evidence when the review carries none. */
@@ -2018,7 +1743,7 @@ function recoveredSampleRecord(input) {
 		evidenceRefs: facts.evidenceRefs,
 		workspace: input.workspace,
 		initialDigest: input.view.frozen.snapshot.digest,
-		cost: costOf(facts.review),
+		cost: costOf(facts.review, input.view.frozen.objective === "tool-call-reduction" ? input.snapshot : void 0),
 		...facts.interruptedReason === void 0 ? {} : { reason: facts.interruptedReason },
 		actor: input.actor
 	});
@@ -2065,7 +1790,7 @@ function buildExperimentReport(view) {
 			role: sample.role,
 			baseline,
 			candidate,
-			verdict: compareExperimentSides(sample.role, baseline, candidate)
+			verdict: compareExperimentSides(sample.role, baseline, candidate, view.frozen.objective)
 		};
 	});
 	const at = [view.at, ...view.samples.map((record) => record.at)].reduce((left, right) => left > right ? left : right);
@@ -2077,7 +1802,7 @@ function buildExperimentReport(view) {
 		frozen: view.frozen,
 		frozenDigest: view.frozenDigest,
 		samples,
-		verdict: overallExperimentVerdict(samples)
+		verdict: overallExperimentVerdict(samples, view.frozen.objective)
 	};
 	assertExperimentReport(report);
 	return report;
@@ -2261,234 +1986,6 @@ function foldExperiments(records, proposals) {
 }
 
 //#endregion
-//#region src/experiment/runner.ts
-/** Run — or continue — the frozen two-sided experiment, and return the report the ledger records recompute to. */
-async function runExperiment(sources, request) {
-	const { spec, caller, actor } = request;
-	validateSpec(spec);
-	const { sandbox, candidate, capability, overlay, proposal } = await experimentCandidate(sources, spec.proposalId);
-	const { storeId, snapshot } = await experimentStore(sources, caller);
-	const vocabulary = await sources.verifierVocabulary?.();
-	const samples = [];
-	for (const sample of spec.samples) {
-		const task = snapshot.tasks.find((item) => item.taskId === sample.taskId);
-		if (task === void 0) throw new Error(`unknown sample task "${sample.taskId}" in this graph's task store`);
-		if (task.status !== "verified" && task.status !== "failed") throw new Error(`sample "${sample.taskId}" is ${task.status}; only a terminal (verified or failed) sample can be evaluated`);
-		const review = latestReview(snapshot, task);
-		if (review === void 0) throw new Error(`sample "${sample.taskId}" has no review record on its latest run; there is no case to reproduce`);
-		assertSampleRole(sample, task, review);
-		const providers = capability === void 0 ? { provider: await frozenProviderIdentity({
-			sources,
-			caller,
-			sampleTaskId: sample.taskId,
-			required: task.requestedCapabilities,
-			candidate,
-			where: `sample "${sample.taskId}"`
-		}) } : await frozenCapabilitySample({
-			sources,
-			caller,
-			sampleTaskId: sample.taskId,
-			required: task.requestedCapabilities,
-			overlay
-		});
-		samples.push(frozenSampleOf(sample, task, review, providers, vocabulary));
-	}
-	const frozen = freezeExperiment({
-		proposalId: spec.proposalId,
-		spec,
-		...candidate === void 0 ? {} : { candidate },
-		...proposal.prepared?.skillBaseline == null ? {} : { productionBaseline: proposal.prepared.skillBaseline },
-		...capability === void 0 ? {} : { capability },
-		sandbox,
-		snapshotDigest: await directoryDigest(spec.snapshot.sourceDir),
-		samples
-	});
-	const agentOptions = agentOptionsOf(frozen.model);
-	const frozenDigest = frozenDigestOf(frozen);
-	const experimentId = experimentIdOf(spec.proposalId, frozenDigest);
-	const sandboxRel = `${sandbox}/exp-${experimentId}`;
-	const recorded = /* @__PURE__ */ new Map();
-	for (const previous of await sources.evolution.experiments(spec.proposalId)) for (const record of previous.samples) recorded.set(experimentSampleKey(record), record);
-	for (const sample of frozen.samples) for (const side of EXPERIMENT_SIDES) {
-		const key = experimentSampleKeyOf({
-			proposalId: spec.proposalId,
-			frozen
-		}, sample.taskId, side);
-		const prior = recorded.get(experimentSampleKey(key));
-		if (prior !== void 0 && prior.experimentId !== experimentId) throw sameKeyRefusal(key, prior, experimentId);
-	}
-	await sources.evolution.recordExperimentStart({
-		formatVersion: 4,
-		kind: "experiment_started",
-		proposalId: spec.proposalId,
-		experimentId,
-		frozen,
-		frozenDigest,
-		budget: { ...frozen.budget },
-		report: experimentReportPath(spec.proposalId, experimentId),
-		storeId,
-		actor,
-		at: (/* @__PURE__ */ new Date()).toISOString()
-	});
-	const view = await sources.evolution.experiment(experimentId);
-	const budget = view.frozen.budget;
-	let spentTokens = reportedTokensSpent(view.samples);
-	let settledSides = view.samples.length;
-	let started = 0;
-	try {
-		sampleLoop: for (const sample of view.frozen.samples) for (const side of EXPERIMENT_SIDES) {
-			const key = experimentSampleKeyOf(view, sample.taskId, side);
-			const lineage = experimentLineage(view.experimentId, sample.taskId, side);
-			const workspace = resolve(sources.evolution.root, sandboxRel, sample.taskId, side);
-			const prior = recorded.get(experimentSampleKey(key));
-			if (prior !== void 0) {
-				assertRecordedRunOrigin(snapshot, lineage, key, prior);
-				continue;
-			}
-			if (request.signal?.aborted) break sampleLoop;
-			const inFlight = snapshot.tasks.find((item) => item.objective.startsWith(`[${lineage}] `));
-			if (inFlight !== void 0) {
-				const recovered = recoveredSampleRecord({
-					view,
-					sample,
-					side,
-					task: inFlight,
-					snapshot,
-					workspace,
-					actor
-				});
-				await sources.evolution.recordExperimentSample(recovered);
-				recorded.set(experimentSampleKey(key), recovered);
-				spentTokens += tokensOfRecord(recovered) ?? 0;
-				settledSides += 1;
-				continue;
-			}
-			assertBudgetAllowsStart({
-				experimentId: view.experimentId,
-				budget,
-				spentTokens,
-				settledSides,
-				where: `sample "${sample.taskId}" ${side} side`
-			});
-			const real = await buildWorkspace(spec.snapshot.sourceDir, workspace, view.frozen.snapshot.digest);
-			if (side === "baseline" && sample.admission !== void 0) {
-				const refusal$2 = await refusedBaselineRun({
-					sources,
-					storeId,
-					sample,
-					lineage,
-					workspace: real,
-					agentOptions,
-					caller,
-					...request.signal === void 0 ? {} : { signal: request.signal }
-				});
-				const admitted = sampleRecord({
-					view,
-					sample,
-					side,
-					outcome: "not-admitted",
-					criteria: [],
-					evidenceRefs: [],
-					workspace: real,
-					cost: {
-						status: "unknown",
-						reason: "the runtime refused this side at admission, so no run exists and no cost was reported for it"
-					},
-					admission: {
-						source: sample.admission.source,
-						proposalId: view.proposalId,
-						sourceRefs: [...view.frozen.capability?.sourceRefs ?? []],
-						required: [...sample.admission.required],
-						missing: [...sample.admission.missing],
-						reason: refusal$2
-					},
-					actor
-				});
-				await sources.evolution.recordExperimentSample(admitted);
-				recorded.set(experimentSampleKey(key), admitted);
-				settledSides += 1;
-				continue;
-			}
-			const outcome = await sources.taskRuntime.replayTask(storeId, sample.taskId, {
-				lineage,
-				workspace: { path: real },
-				agentOptions: { ...agentOptions },
-				...side === "candidate" ? { overlay: overlay ?? { extraSkillRoots: [resolve(sources.evolution.root, sandbox, "skills")] } } : {},
-				...request.signal === void 0 ? {} : { signal: request.signal }
-			}, caller);
-			if (outcome.workspace !== void 0 && outcome.workspace !== real) throw new Error(`the replay of "${sample.taskId}" reported workspace "${outcome.workspace}" but was given "${real}"; a side's frozen input and the directory its run went through must be the same directory`);
-			const after = await sources.task.openStore(storeId);
-			const replayed = after.tasks.find((item) => item.taskId === outcome.taskId);
-			if (replayed === void 0) throw new Error(`the replay of "${sample.taskId}" created task "${outcome.taskId}", which the store does not hold`);
-			const facts = runFactsOf(after, replayed, outcome);
-			const fresh = sampleRecord({
-				view,
-				sample,
-				side,
-				outcome: facts.outcome,
-				...facts.taskId === void 0 ? {} : { taskId: facts.taskId },
-				...facts.runId === void 0 ? {} : { runId: facts.runId },
-				...facts.review === void 0 ? {} : { review: facts.review },
-				criteria: facts.criteria,
-				evidenceRefs: facts.evidenceRefs,
-				workspace: real,
-				initialDigest: view.frozen.snapshot.digest,
-				cost: costOf(facts.review),
-				...facts.interruptedReason === void 0 ? {} : { reason: facts.interruptedReason },
-				actor
-			});
-			await sources.evolution.recordExperimentSample(fresh);
-			recorded.set(experimentSampleKey(key), fresh);
-			spentTokens += tokensOfRecord(fresh) ?? 0;
-			settledSides += 1;
-			started += 1;
-			if (facts.outcome === "cancelled") break sampleLoop;
-		}
-	} catch (error) {
-		const message$1 = error instanceof Error ? error.message : String(error);
-		if (started === 0) throw error instanceof Error ? error : new Error(message$1);
-		throw new Error(`${message$1} (the experiment stopped; ${started} sample run(s) it started settled and stay in the ledger and the task store as evidence — resume experiment ${experimentId} to continue it)`);
-	}
-	const finalView = await sources.evolution.experiment(experimentId);
-	let report;
-	try {
-		report = buildExperimentReport(finalView);
-	} catch (error) {
-		throw new Error(`${error instanceof Error ? error.message : String(error)} — resume experiment ${experimentId} to continue it`);
-	}
-	const abs = resolve(sources.evolution.root, finalView.report);
-	await mkdir(dirname(abs), { recursive: true });
-	await writeFile(abs, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-	return {
-		proposalId: finalView.proposalId,
-		experimentId,
-		report,
-		reportPath: finalView.report,
-		experiment: finalView
-	};
-}
-/** Resume a frozen experiment by id: its specification *is* the frozen block, so the id alone is unambiguous. */
-async function resumeExperiment(sources, request) {
-	const view = await sources.evolution.experiment(request.experimentId);
-	return runExperiment(sources, {
-		spec: {
-			proposalId: view.proposalId,
-			samples: view.frozen.samples.map((sample) => ({
-				taskId: sample.taskId,
-				role: sample.role
-			})),
-			snapshot: { sourceDir: view.frozen.snapshot.sourceDir },
-			model: view.frozen.model,
-			budget: view.frozen.budget,
-			repetition: view.frozen.repetition
-		},
-		caller: request.caller,
-		actor: request.actor,
-		...request.signal === void 0 ? {} : { signal: request.signal }
-	});
-}
-
-//#endregion
 //#region src/promotion/shared.ts
 /** Whether two object identities are the same identity, member by member (K3): name, SKILL.md digest and sidecar identity. */
 function sameIdentity(left, right) {
@@ -2510,9 +2007,11 @@ function noEvaluatorRefusal(proposal) {
 function noExperimentRefusal(proposal) {
 	return /* @__PURE__ */ new Error(`evolution: skill proposal "${proposal.proposalId}" carries no two-sided experiment — a PROMOTE needs both sides of every frozen sample run as this experiment's own new runs; evaluate the candidate with evolution_replay before promoting it`);
 }
-/** One verdict's refusal text: the six outcomes §F.2 makes distinguishable, each named for what it means. */
+/** Refusal text for each categorical experiment verdict. */
 const VERDICT_REFUSALS = {
 	fixed: "",
+	improved: "",
+	"not-improved": "the candidate did not reduce measured tool calls on every observed-success sample",
 	"fixed-with-regression": "the target failure is fixed, but a regression or holdout sample degraded under the candidate",
 	regressed: "a regression or holdout sample degraded and the target failure is not fixed",
 	"not-fixed": "the candidate did not fix the target failure",
@@ -2545,6 +2044,7 @@ function assertSideEvidence(input) {
 	if (review.taskId !== task.taskId) throw new Error(`evolution: the review record for run "${runId}" belongs to task "${review.taskId}", not the replayed task "${task.taskId}" the experiment report's ${where} cites`);
 	if (review.outcome !== detail.outcome) throw new Error(`evolution: the experiment report's ${where} reports outcome "${detail.outcome}" but the store's review record for run "${runId}" settled "${review.outcome}" — the report and the store disagree about what ran`);
 	if (detail.reviewRef !== `${task.taskId}#${runId}`) throw new Error(`evolution: the experiment report's ${where} cites review ref "${String(detail.reviewRef)}" but its run "${runId}" settles as "${task.taskId}#${runId}" — the reference a promotion reads must name the record that exists`);
+	if (input.objective === "tool-call-reduction" && canonicalJson(detail.cost) !== canonicalJson(costOf(review, snapshot))) throw new Error(`evolution: the experiment report's ${where} cost disagrees with the executed Run subtree's review counters`);
 	const recorded = review.criteria ?? [];
 	const reported = detail.criteria;
 	if (recorded.length > 0) {
@@ -2709,7 +2209,7 @@ async function assertSideProviderBinding(input) {
 	}
 	const servers = [...binding.mcpServers].map((server) => server.serverName).sort();
 	if (servers.join(", ") !== [...expected.mcpServers].sort().join(", ")) throw new Error(`evolution: run "${run.runId}" of the ${where} bound MCP servers [${servers.join(", ") || "none"}] but the experiment froze [${expected.mcpServers.join(", ") || "none"}] — the granted server plane moved since the freeze`);
-	for (const server of binding.mcpServers) if (server.templateDigest === null) throw new Error(`evolution: run "${run.runId}" of the ${where} bound MCP server "${server.serverName}" with no resolvable template — the run recorded no identity for the server it was granted, so the frozen server plane cannot be compared`);
+	for (const server of binding.mcpServers) if (server.templateDigest === null || expected.mcpBindings?.find((item) => item.serverName === server.serverName)?.templateDigest !== server.templateDigest) throw new Error(`evolution: run "${run.runId}" of the ${where} bound MCP server "${server.serverName}" with no resolvable template — the run recorded no identity for the server it was granted, so the frozen server plane cannot be compared`);
 	if (expected.preset !== null && run.agentPreset !== expected.preset) throw new Error(`evolution: run "${run.runId}" of the ${where} ran under agent preset ${run.agentPreset === void 0 ? "(none)" : `"${run.agentPreset}"`}, but the frozen provider identity declares "${expected.preset}" — the preset plane this side ran under is not the frozen one`);
 	const frozenSkills = new Map(expected.skills.map((skill) => [skill.name, skill]));
 	const boundSkills = new Map(binding.skills.map((skill) => [skill.name, skill]));
@@ -2881,7 +2381,8 @@ async function assertSkillPromotionEvidence(sources, proposal) {
 				detail,
 				experimentId: experiment.experimentId,
 				snapshot,
-				where: label
+				where: label,
+				...frozen.objective === void 0 ? {} : { objective: frozen.objective }
 			});
 			assertJudgeUnchanged(frozenSample, detail, label, vocabulary);
 			assertCostWithinDeclaredBudget(report, label, detail);
@@ -2919,7 +2420,7 @@ async function assertSkillPromotionEvidence(sources, proposal) {
 	assertExperimentCostWithinBudget(report);
 	const currentSelection = sources.modelSelection();
 	if (currentSelection.provider !== frozen.model.provider || currentSelection.model !== frozen.model.model || currentSelection.reasoningEffort !== frozen.model.reasoningEffort || currentSelection.maxTokens !== frozen.model.maxTokens) throw new Error(`evolution: the experiment froze model selection "${frozen.model.label}"${frozen.model.reasoningEffort === void 0 ? "" : ` (effort ${frozen.model.reasoningEffort})`}${frozen.model.maxTokens === void 0 ? "" : ` (maxTokens ${frozen.model.maxTokens})`}, but this deployment resolves "${currentSelection.label}"${currentSelection.reasoningEffort === void 0 ? "" : ` (effort ${currentSelection.reasoningEffort})`}${currentSelection.maxTokens === void 0 ? "" : ` (maxTokens ${currentSelection.maxTokens})`} now — the runs on record were not run under the selection this promotion would be judged against`);
-	if (report.verdict !== "fixed") throw new Error(`evolution: the two-sided experiment "${experiment.experimentId}" did not show a clean fix — ${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples).map((line) => `- ${line}`).join("\n")}`);
+	if (report.verdict !== (frozen.objective === "tool-call-reduction" ? "improved" : "fixed")) throw new Error(`evolution: the two-sided experiment "${experiment.experimentId}" did not show a clean ${frozen.objective === "tool-call-reduction" ? "improvement" : "fix"} — ${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples).map((line) => `- ${line}`).join("\n")}`);
 	return {
 		experimentId: view.experimentId,
 		report,
@@ -2964,7 +2465,7 @@ async function assertCapabilitySideBinding(input) {
 	if (binding.registryRevision !== expected.registryRevision) throw new Error(`evolution: run "${run.runId}" of the ${where} bound registry revision ${binding.registryRevision}, but the experiment froze ${expected.registryRevision} for the ${detail.side} side — a row, a tool label or a provider contract moved since the freeze, so the ${detail.side} side did not run under the configuration the experiment froze for it`);
 	const servers = [...binding.mcpServers].map((server) => server.serverName).sort();
 	if (servers.join(", ") !== [...expected.mcpServers].sort().join(", ")) throw new Error(`evolution: run "${run.runId}" of the ${where} bound MCP servers [${servers.join(", ") || "none"}] but the experiment froze [${expected.mcpServers.join(", ") || "none"}] — the granted server plane moved since the freeze`);
-	for (const server of binding.mcpServers) if (server.templateDigest === null) throw new Error(`evolution: run "${run.runId}" of the ${where} bound MCP server "${server.serverName}" with no resolvable template — the run recorded no identity for the server it was granted, so the frozen server plane cannot be compared`);
+	for (const server of binding.mcpServers) if (server.templateDigest === null || expected.mcpBindings?.find((item) => item.serverName === server.serverName)?.templateDigest !== server.templateDigest) throw new Error(`evolution: run "${run.runId}" of the ${where} bound MCP server "${server.serverName}" with no resolvable template — the run recorded no identity for the server it was granted, so the frozen server plane cannot be compared`);
 	if (expected.preset !== null && run.agentPreset !== expected.preset) throw new Error(`evolution: run "${run.runId}" of the ${where} ran under agent preset ${run.agentPreset === void 0 ? "(none)" : `"${run.agentPreset}"`}, but the frozen provider identity declares "${expected.preset}" — the preset plane this side ran under is not the frozen one`);
 	const frozenSkills = new Map(expected.skills.map((skill) => [skill.name, skill]));
 	const boundSkills = new Map(binding.skills.map((skill) => [skill.name, skill]));
@@ -3007,9 +2508,10 @@ async function assertCapabilityPromotionEvidence(sources, proposal) {
 	if (currentDigest !== preparedDigest) throw capabilityRefusal("capability-registry-changed", `the capability registry row "${prepared.row.name}" reads ${currentDigest ?? "no row"}, not the state prepare recorded (${preparedDigest ?? "no row"}) — a row a third party moved is a conflict, so create a new candidate from the current registry state and re-evaluate it; nothing was promoted`);
 	await assertCapabilityCandidateAdmissible(store, {
 		row: prepared.row,
-		...prepared.skill === void 0 ? {} : { skill: prepared.skill }
+		...prepared.skill === void 0 ? {} : { skill: prepared.skill },
+		...prepared.mcpServers === void 0 ? {} : { mcpServers: prepared.mcpServers.definitions }
 	}, current);
-	const refusals = await sources.rowRefusals(prepared.row, prepared.skillRoot);
+	const refusals = await sources.rowRefusals(prepared.row, prepared.skillRoot, prepared.mcpServers?.definitions);
 	if (refusals.length > 0) throw capabilityRefusal("skill-candidate-invalid", `capability candidate "${proposal.proposalId}" grants providers this deployment refuses:\n${refusals.map((line) => `- ${line}`).join("\n")}`);
 	const preparedRow = {
 		...prepared.row,
@@ -3023,6 +2525,7 @@ async function assertCapabilityPromotionEvidence(sources, proposal) {
 	const recordedBaseline = baseline;
 	if (capability.baseline === null !== (recordedBaseline === null)) throw capabilityRefusal("capability-evidence-drifted", `experiment "${view.experimentId}" froze ${capability.baseline === null ? "no baseline row" : `baseline row ${capability.baseline.digest}`} , but proposal "${proposal.proposalId}" was prepared against ${recordedBaseline === null ? "no row" : `row ${recordedBaseline.digest}`} — the candidate was evaluated against another registry state`);
 	if (capability.baseline !== null && recordedBaseline !== null && !sameCapabilityRow(capability.baseline, recordedBaseline)) throw capabilityRefusal("capability-evidence-drifted", `experiment "${view.experimentId}" froze baseline row ${capability.baseline.digest}, but prepare recorded ${recordedBaseline.digest} — the row this candidate would roll back to is not the row the experiment evaluated against`);
+	if ((capability.mcpServers?.digest ?? null) !== (prepared.mcpServers?.digest ?? null)) throw capabilityRefusal("capability-evidence-drifted", "experiment MCP definitions do not match the prepared candidate");
 	const preparedSkill = proposal.prepared?.skillContent;
 	if (frozen.candidate === void 0 !== (preparedSkill === void 0)) throw capabilityRefusal("capability-evidence-drifted", `experiment "${view.experimentId}" froze ${frozen.candidate === void 0 ? "no new skill object" : `the new skill ${identityLabel(frozen.candidate)}`}, but proposal "${proposal.proposalId}" prepares ${preparedSkill === void 0 ? "no new skill object" : identityLabel(preparedSkill)} — the candidate the experiment evaluated is not the candidate this promotion would write`);
 	if (frozen.candidate !== void 0 && preparedSkill !== void 0 && !sameIdentity(frozen.candidate, preparedSkill)) throw capabilityRefusal("capability-evidence-drifted", `experiment "${view.experimentId}" froze candidate ${identityLabel(frozen.candidate)} but proposal "${proposal.proposalId}" now prepares ${identityLabel(preparedSkill)} — the evidence belongs to different candidate bytes; propose a new candidate and evaluate it`);
@@ -3034,6 +2537,14 @@ async function assertCapabilityPromotionEvidence(sources, proposal) {
 	const snapshot = await sources.task.openStore(storeId);
 	const vocabulary = await sources.verifierVocabulary();
 	if (vocabulary === void 0) throw capabilityRefusal("capability-evidence-unverifiable", "the verifier registry cannot be listed in this context, so the judges behind the experiment's verdicts cannot be re-checked — the promotion is refused rather than granted on unverifiable evidence");
+	const registry = {
+		...store.mcpServers,
+		...prepared.mcpServers?.definitions
+	};
+	for (const sample of frozen.samples) for (const side of [sample.provider, sample.candidateProvider]) for (const server of side?.mcpBindings ?? []) {
+		const current$1 = registry[server.serverName];
+		if (current$1 === void 0 || sha256Hex(canonicalJson(current$1)) !== server.templateDigest) throw capabilityRefusal("capability-server-changed", `MCP server ${server.serverName} no longer matches the frozen template`);
+	}
 	for (const sample of report.samples) {
 		const frozenSample = frozenSampleOf$1(report, sample.taskId);
 		const candidateLabel = `sample "${sample.taskId}" candidate side`;
@@ -3042,13 +2553,14 @@ async function assertCapabilityPromotionEvidence(sources, proposal) {
 			detail: sample.candidate,
 			experimentId: view.experimentId,
 			snapshot,
-			where: candidateLabel
+			where: candidateLabel,
+			...frozen.objective === void 0 ? {} : { objective: frozen.objective }
 		});
 		assertJudgeUnchanged(frozenSample, sample.candidate, candidateLabel, vocabulary);
 		assertCostWithinDeclaredBudget(report, candidateLabel, sample.candidate);
 		if (sample.candidate.outcome !== "verified") throw capabilityRefusal("capability-candidate-not-verified", `the candidate side of ${candidateLabel} settled "${sample.candidate.outcome}" — a capability fix is a run that passed the frozen acceptance, never an admission that merely went through; the promotion is refused`);
-		const failed = sample.candidate.criteria.filter((criterion) => criterion.verdict !== "pass");
-		if (failed.length > 0) throw capabilityRefusal("capability-candidate-not-verified", `the candidate side of ${candidateLabel} reports ${failed.map((criterion) => `"${criterion.criterionId}" ${criterion.verdict}`).join(", ")} — every frozen criterion must pass on the candidate side before the candidate may be promoted`);
+		const failed = (frozen.objective === "tool-call-reduction" ? snapshot.tasks.find((task) => task.taskId === sample.taskId).acceptanceCriteria.filter((criterion) => criterion.mandatory) : frozenSample.criteria).filter((criterion) => sample.candidate.criteria.find((item) => item.criterionId === criterion.criterionId)?.verdict !== "pass");
+		if (failed.length > 0) throw capabilityRefusal("capability-candidate-not-verified", `the candidate side of ${candidateLabel} did not pass ${failed.map((criterion) => `"${criterion.criterionId}"`).join(", ")} — required frozen acceptance must pass on the candidate side before the candidate may be promoted`);
 		if (sample.candidate.initialDigest !== frozen.snapshot.digest) throw capabilityRefusal("capability-evidence-drifted", `the candidate side of ${candidateLabel} ran from workspace digest ${sample.candidate.initialDigest}, not the frozen snapshot ${frozen.snapshot.digest} — both sides of a sample start from the same frozen input`);
 		await assertSideModelBinding({
 			sources,
@@ -3074,6 +2586,7 @@ async function assertCapabilityPromotionEvidence(sources, proposal) {
 				sample: frozenSample,
 				detail: sample.baseline,
 				where: baselineLabel,
+				...frozen.objective === void 0 ? {} : { objective: frozen.objective },
 				proposalId: proposal.proposalId
 			});
 			const lineage = experimentLineage(view.experimentId, sample.taskId, "baseline");
@@ -3119,7 +2632,7 @@ async function assertCapabilityPromotionEvidence(sources, proposal) {
 	const currentSelection = sources.modelSelection();
 	if (currentSelection.provider !== frozen.model.provider || currentSelection.model !== frozen.model.model || currentSelection.reasoningEffort !== frozen.model.reasoningEffort || currentSelection.maxTokens !== frozen.model.maxTokens) throw capabilityRefusal("capability-evidence-drifted", `the experiment froze model selection "${frozen.model.label}", but this deployment resolves "${currentSelection.label}" now — the runs on record were not run under the selection this promotion would be judged against`);
 	const degraded = report.samples.filter((sample) => sample.verdict === "regressed");
-	if (report.verdict !== "fixed") throw capabilityRefusal("capability-not-fixed", `the two-sided capability experiment "${view.experimentId}" did not show a clean fix — ${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples).map((line) => `- ${line}`).join("\n")}` + (degraded.length === 0 ? "" : ` — degraded sample(s): ${degraded.map((sample) => sample.taskId).join(", ")}`));
+	if (report.verdict !== (frozen.objective === "tool-call-reduction" ? "improved" : "fixed")) throw capabilityRefusal("capability-not-fixed", `the two-sided capability experiment "${view.experimentId}" did not show a clean ${frozen.objective === "tool-call-reduction" ? "improvement" : "fix"} — ${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples).map((line) => `- ${line}`).join("\n")}` + (degraded.length === 0 ? "" : ` — degraded sample(s): ${degraded.map((sample) => sample.taskId).join(", ")}`));
 	return {
 		rowName: prepared.row.name,
 		rowDigest: proposal.prepared.capabilityRow.digest,
@@ -3131,10 +2644,1099 @@ async function assertCapabilityPromotionEvidence(sources, proposal) {
 }
 
 //#endregion
+//#region src/experiment/task-definition.ts
+function criterionGuardLineage(experimentId, label, oracle = false) {
+	return `evolution-experiment:${experimentId}:criterion-${label}${oracle ? "-oracle" : ""}:candidate`;
+}
+async function criterionGuardContract(root, view, label) {
+	const definition = view.frozen.taskDefinition;
+	const candidate = definition.candidate;
+	const normalized = normalizeRootContract(await bindTaskTemplate(root, {
+		templateRef: {
+			id: candidate.template.id,
+			version: candidate.template.version,
+			digest: candidate.digest
+		},
+		templateParameters: definition.criterionRepair[label].parameters
+	}));
+	if (!normalized.ok) throw new Error(`evolution: criterion example parameters rejected: ${normalized.reasons.join("; ")}`);
+	return normalized.contract;
+}
+async function runCriterionGuards(sources, view, caller, _actor, agentOptions, signal) {
+	const repair = view.frozen.taskDefinition?.criterionRepair;
+	if (repair === void 0) return;
+	if (view.storeId === void 0) throw new Error("evolution: criterion repair experiment has no task store");
+	const candidateRoot = resolve(sources.evolution.root, `sandbox/${view.proposalId}/task-templates/candidate`);
+	for (const label of ["positive", "negative"]) {
+		const example = repair[label];
+		let snapshot = await sources.task.openStore(view.storeId);
+		const source = snapshot.tasks.find((task) => task.taskId === example.taskId);
+		if (source === void 0 || oracleContractDigest(source) !== example.contractDigest || await directoryDigest(example.sourceDir) !== example.snapshotDigest) throw new Error("evolution: frozen criterion example or its independent oracle changed");
+		const expected = label === "positive" ? "verified" : "failed";
+		for (const oracle of [true, false]) {
+			const lineage = criterionGuardLineage(view.experimentId, label, oracle);
+			const existing = snapshot.tasks.find((task) => task.objective.startsWith(`[${lineage}] `));
+			if (existing !== void 0) {
+				if (existing.status !== expected || latestReview(snapshot, existing)?.outcome !== expected) throw new Error(`evolution: ${label} criterion promotion guard failed under ${oracle ? "independent parent oracle" : "candidate child criteria"}`);
+				continue;
+			}
+			if (signal?.aborted) throw new Error("evolution: criterion guard interrupted");
+			const workspace = await buildWorkspace(example.sourceDir, resolve(sources.evolution.root, `sandbox/${view.proposalId}/exp-${view.experimentId}/criterion-${label}${oracle ? "-oracle" : ""}`), example.snapshotDigest);
+			const contract = oracle ? {
+				objective: source.objective,
+				acceptanceCriteria: independentOracleCriteria(source),
+				requiredCapabilities: source.requestedCapabilities
+			} : await criterionGuardContract(candidateRoot, view, label);
+			const outcome = await sources.taskRuntime.replayTask(view.storeId, example.taskId, {
+				lineage,
+				spawn: false,
+				workspace: { path: workspace },
+				...contract === void 0 ? {} : { contract: {
+					objective: contract.objective,
+					acceptanceCriteria: contract.acceptanceCriteria,
+					requiredCapabilities: contract.requiredCapabilities
+				} },
+				...agentOptions === void 0 ? {} : { agentOptions },
+				...signal === void 0 ? {} : { signal }
+			}, caller);
+			if (outcome.status !== expected) throw new Error(`evolution: ${label} criterion promotion guard failed under ${oracle ? "independent parent oracle" : "candidate child criteria"}: expected ${expected}, got ${outcome.status}`);
+			snapshot = await sources.task.openStore(view.storeId);
+		}
+	}
+}
+
+//#endregion
+//#region src/promotion/task-definition.ts
+async function assertTaskDefinitionPromotion(sources, proposal) {
+	const { view, report } = await experimentEvidence(sources, proposal);
+	const frozen = report.frozen;
+	const definition = frozen.taskDefinition;
+	if (definition === void 0 || definition.candidate.digest !== proposal.prepared?.templateCandidate?.digest || (definition.baseline?.digest ?? null) !== (proposal.prepared?.templateBaseline?.digest ?? null)) throw new Error("evolution: experiment did not evaluate the prepared TaskTemplate and its frozen baseline");
+	if (report.verdict !== "fixed" && report.verdict !== "improved") throw new Error(`evolution: TaskTemplate promotion requires a clean independent parent result, got ${report.verdict}`);
+	if (view.storeId === void 0) throw new Error("evolution: template experiment has no task store");
+	const snapshot = await sources.task.openStore(view.storeId);
+	const vocabulary = await sources.verifierVocabulary();
+	if (vocabulary === void 0) throw new Error("evolution: template oracle verifier registry unavailable");
+	const sandbox = `sandbox/${proposal.proposalId}`;
+	for (const side of ["baseline", "candidate"]) if (await templateLibraryDigest(resolve(sources.root, sandbox, "task-templates", side)) !== definition.libraries[side]) throw new Error("evolution: evaluated template library changed");
+	let candidateBound = false;
+	for (const comparison of report.samples) {
+		const sample = frozen.samples.find((item) => item.taskId === comparison.taskId);
+		for (const side of ["baseline", "candidate"]) {
+			const detail = comparison[side];
+			const where = `template sample ${comparison.taskId} ${side}`;
+			const task = assertSideEvidence({
+				sample,
+				detail,
+				snapshot,
+				experimentId: view.experimentId,
+				where,
+				...frozen.objective === void 0 ? {} : { objective: frozen.objective }
+			});
+			assertJudgeUnchanged(sample, detail, where, vocabulary);
+			assertCostWithinDeclaredBudget(report, where, detail);
+			if (detail.initialDigest !== frozen.snapshot.digest) throw new Error("evolution: template parent replay input was not frozen");
+			await assertSideModelBinding({
+				sources,
+				detail,
+				task,
+				snapshot,
+				selection: frozen.model,
+				where
+			});
+			const run = snapshot.runs.find((item) => item.runId === detail.runId);
+			if (run === void 0 || run.taskTemplatesRoot !== resolve(sources.root, sandbox, "task-templates", side)) throw new Error("evolution: replay did not bind its own frozen template library");
+			await assertCapabilitySideBinding({
+				sample,
+				detail,
+				run,
+				frozen,
+				where
+			});
+			if (task !== void 0) {
+				const expected = side === "candidate" ? definition.candidate : definition.baseline;
+				for (const descendant of subtreeOf(snapshot, task.taskId).filter((item) => item.taskId !== task.taskId)) {
+					if (expected === null) {
+						if (descendant.templateRef?.id === definition.candidate.template.id) throw new Error("evolution: absent baseline created a child with the candidate template");
+						continue;
+					}
+					if (descendant.templateRef?.id !== expected.template.id) continue;
+					if (descendant.templateRef.digest !== expected.digest || descendant.templateRef.version !== expected.template.version) throw new Error("evolution: new child used another template version");
+					if (side === "candidate") candidateBound = true;
+				}
+			}
+		}
+		await assertSampleInputsIntact({
+			sample,
+			snapshot,
+			productionWorkspace: frozen.snapshot.sourceDir
+		});
+	}
+	if (!candidateBound) throw new Error("evolution: candidate parent replay created no child bound to the new TaskTemplate");
+	const repair = validateTaskDefinitionMutation(proposal.mutation).criterionRepair;
+	if (repair === void 0 !== (definition.criterionRepair === void 0)) throw new Error("evolution: criterion repair examples were not frozen");
+	if (repair !== void 0 && definition.criterionRepair !== void 0) for (const label of ["positive", "negative"]) {
+		const example = definition.criterionRepair[label];
+		if (canonicalize({
+			...repair[label],
+			sourceDir: resolve(repair[label].sourceDir)
+		}) !== canonicalize({
+			taskId: example.taskId,
+			sourceDir: example.sourceDir,
+			parameters: example.parameters
+		})) throw new Error("evolution: criterion repair evaluated other examples");
+		const source = snapshot.tasks.find((task) => task.taskId === example.taskId);
+		if (source === void 0 || oracleContractDigest(source) !== example.contractDigest || await directoryDigest(example.sourceDir) !== example.snapshotDigest) throw new Error("evolution: frozen criterion example changed");
+		for (const oracle of [true, false]) {
+			const lineage = criterionGuardLineage(view.experimentId, label, oracle);
+			const task = snapshot.tasks.find((item) => item.objective.startsWith(`[${lineage}] `));
+			const review = task === void 0 ? void 0 : latestReview(snapshot, task);
+			const run = snapshot.runs.find((item) => item.runId === review?.runId);
+			const expected = label === "positive" ? "verified" : "failed";
+			if (task === void 0 || task.status !== expected || review?.outcome !== expected || review.taskId !== task.taskId || run?.taskId !== task.taskId || run.status !== expected || !isNoWorkerRun(run) || !review.evidenceRefs?.length || !review.criteria?.length || review.criteria.some((criterion) => criterion.verdict === "inconclusive")) throw new Error(`evolution: ${label} criterion promotion guard has no definitive ${expected} evidence`);
+			for (const ref of review.evidenceRefs) {
+				const bundle = snapshot.evidence.find((item) => item.evidenceId === ref);
+				if (bundle?.taskRunId !== run.runId || bundle.taskId !== task.taskId) throw new Error("evolution: criterion guard evidence belongs to another Task or Run");
+				for (const criterion of review.criteria) if (!bundle.verifierResults.some((result) => result.criterionId === criterion.criterionId && result.status === criterion.verdict && result.verifierId === criterion.verifierId && result.verifierVersion === criterion.verifierVersion)) throw new Error("evolution: criterion guard verdict has no matching verifier evidence");
+			}
+			const contract = oracle ? {
+				acceptanceCriteria: independentOracleCriteria(source),
+				requiredCapabilities: source.requestedCapabilities
+			} : await criterionGuardContract(resolve(sources.root, sandbox, "task-templates/candidate"), view, label);
+			const actual = task.acceptanceCriteria.map(({ protectedInputs: _inputs,...criterion }) => criterion);
+			const wanted = contract.acceptanceCriteria.map(({ protectedInputs: _inputs,...criterion }) => criterion);
+			if (canonicalize(actual) !== canonicalize(wanted) || canonicalize(task.requestedCapabilities) !== canonicalize(contract.requiredCapabilities ?? [])) throw new Error("evolution: criterion guard judged a different contract");
+			for (const criterion of contract.acceptanceCriteria) {
+				const fixed = task.acceptanceCriteria.find((item) => item.criterionId === criterion.criterionId);
+				if (canonicalize((criterion.protectedInputs ?? []).map((input) => typeof input === "string" ? input : input.path)) !== canonicalize((fixed.protectedInputs ?? []).map((input) => input.path)) || oracle && canonicalize(criterion.protectedInputs ?? []) !== canonicalize(fixed.protectedInputs ?? [])) throw new Error("evolution: criterion guard protected input binding changed");
+				for (const input of fixed.protectedInputs ?? []) await assertProtectedInputIntact(task.taskId, input, example.sourceDir);
+			}
+			const required = contract.acceptanceCriteria.filter((criterion) => criterion.mandatory);
+			if (review.criteria.length !== wanted.length || wanted.some((criterion) => !review.criteria.some((item) => item.criterionId === criterion.criterionId)) || label === "positive" && required.some((criterion) => review.criteria.find((item) => item.criterionId === criterion.criterionId)?.verdict !== "pass") || label === "negative" && !required.some((criterion) => review.criteria.find((item) => item.criterionId === criterion.criterionId)?.verdict === "fail")) throw new Error("evolution: criterion guard outcome disagrees with its mandatory criterion evidence");
+			for (const criterion of review.criteria) {
+				const version = criterion.verifierId === void 0 ? void 0 : vocabulary.versions[criterion.verifierId];
+				if (version === void 0 || criterion.verifierVersion !== version || definition.guardVerifierVersions?.[criterion.verifierId] !== version) throw new Error("evolution: criterion guard verifier changed");
+			}
+		}
+	}
+	assertExperimentCostWithinBudget(report);
+	const current = sources.modelSelection();
+	if (current.provider !== frozen.model.provider || current.model !== frozen.model.model || current.reasoningEffort !== frozen.model.reasoningEffort || current.maxTokens !== frozen.model.maxTokens) throw new Error("evolution: deployment model changed since template evaluation");
+}
+
+//#endregion
+//#region src/commit.ts
+/** Replace `target` with exactly `bytes`, atomically: the staging files a dead process left behind are swept first. */
+async function writeFileAtomic(target, bytes, onStaged, appendOnly = false) {
+	const directory = dirname(target);
+	const staging = join(directory, `.${basename(target)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
+	let handle;
+	try {
+		await mkdir(directory, { recursive: true });
+		await sweepStaging(directory, target);
+		handle = await open(staging, "wx");
+		await handle.writeFile(bytes);
+		await handle.sync();
+		await handle.close();
+		handle = void 0;
+		await onStaged?.();
+		if (appendOnly) {
+			await link(staging, target);
+			await rm(staging);
+		} else await rename(staging, target);
+		try {
+			await syncDirectory(directory);
+		} catch (error) {
+			throw new Error(`evolution: the directory "${directory}" of the production target "${target}" could not be fsynced after the atomic rename (${error instanceof Error ? error.message : String(error)}) — the rename may or may not be durable, so this is not a settled commit: the commit intent stays open, no completion is recorded, and the state must not be treated as settled; production holds one of the two complete versions and a reconciliation settles the intent by name`);
+		}
+	} catch (error) {
+		if (handle !== void 0) await handle.close().catch(() => {});
+		await rm(staging, { force: true }).catch(() => {});
+		throw error;
+	}
+}
+/** Remove every entry beside `target` whose name begins with this target's own staging prefix. */
+async function sweepStaging(directory, target) {
+	const prefix = `.${basename(target)}.tmp-`;
+	const entries = await readdir(directory, { withFileTypes: true }).catch((error) => {
+		throw new Error(`evolution: the production directory "${directory}" could not be read to sweep the staging files of "${target}" (${error instanceof Error ? error.message : String(error)}) — a leftover of a killed attempt cannot be accounted for, so the commit stops by name before it stages anything`);
+	});
+	for (const entry of entries) {
+		if (!entry.name.startsWith(prefix) || entry.isDirectory()) continue;
+		const leftover = join(directory, entry.name);
+		try {
+			await rm(leftover, { force: true });
+		} catch (error) {
+			throw new Error(`evolution: the stale staging file "${leftover}" beside the production target "${target}" could not be removed (${error instanceof Error ? error.message : String(error)}) — the commit stops by name before it stages anything rather than stage its own bytes beside a leftover it cannot account for`);
+		}
+	}
+}
+/** Persist one commit and carry it out, in the order the recovery rule fixes, so a dead process settles from what production holds. */
+async function commitIntent(host, request, bytes) {
+	if (request.files.length === 0 && request.capability === void 0) throw new Error(`evolution: the ${request.direction} for proposal "${request.proposalId}" names nothing to commit — a commit replaces the fixed file set of one skill object (SKILL.md, and SKILL.contract.json when the object carries an execution sidecar) and/or moves exactly one capability row, so a request with nothing in it records nothing and writes nothing`);
+	if (bytes.length !== request.files.length) throw new Error(`evolution: the ${request.direction} for proposal "${request.proposalId}" carries ${bytes.length} file(s) of verified bytes for ${request.files.length} target file(s) — the bytes and the intent's files are the same list in the same order, so a mismatch stops by name with nothing written`);
+	request.files.forEach((file, index) => {
+		const provided = bytes[index];
+		if (file.contentSha256 === null) {
+			if (provided !== void 0) throw new Error(`evolution: the ${request.direction} for proposal "${request.proposalId}" carries bytes for "${file.target}" while its intent records that this direction removes the file — a removal writes nothing, so the bytes and the record disagree: nothing was written`);
+			return;
+		}
+		const digest = provided === void 0 ? void 0 : sha256Hex$1(provided);
+		if (digest !== file.contentSha256) throw new Error(`evolution: the bytes this ${request.direction} would write to "${file.target}" hash to sha256 ${digest ?? "(none provided)"}, not the content identity ${file.contentSha256} its commit records — nothing was written`);
+	});
+	const targets = request.files.map((file) => productionRelative(host, file.target));
+	const sources = request.files.map((file) => file.source === void 0 ? void 0 : ledgerRelative(host, request, file.source));
+	for (const file of request.files) {
+		if (file.source === void 0) continue;
+		try {
+			await host.readSource(file.source, file.contentSha256);
+		} catch (error) {
+			throw new Error(`evolution: the recoverable source "${file.source}" of the ${request.direction} for proposal "${request.proposalId}" does not hold the bytes its commit recorded (${error instanceof Error ? error.message : String(error)}) — the source an intent names must be re-verifiable before the intent is recorded, so the commit stops by name: no line is recorded and nothing is written`);
+		}
+	}
+	if (request.capability?.mcpServers !== void 0) await host.readSource(request.capability.mcpSource, request.capability.mcpServers.digest);
+	if (request.capability !== void 0 && request.capability.source !== void 0) await assertCapabilitySource(host, request, request.capability);
+	for (const [index, file] of request.files.entries()) {
+		if (file.source === void 0) continue;
+		await syncSource(host, request, file, sources[index]);
+	}
+	if (request.capability !== void 0 && request.capability.source !== void 0) await syncSourceRelative(host, request, request.capability.source, `capability row "${request.capability.name}"`);
+	if (request.capability?.mcpServers !== void 0) await syncSourceRelative(host, request, request.capability.mcpSource, "MCP definitions");
+	const intent = {
+		intentId: `${request.proposalId}/${request.direction}`,
+		proposalId: request.proposalId,
+		direction: request.direction,
+		approvalRef: request.approvalRef,
+		files: request.files.map((file) => ({ ...file })),
+		...request.capability === void 0 ? {} : { capability: { ...request.capability } },
+		actor: request.actor,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	};
+	const refusal$2 = await host.objectWriteRefusal(intent);
+	if (refusal$2 !== null) throw new Error(`evolution: the ${request.direction} of proposal "${request.proposalId}" cannot write the skill object "${dirname(intent.files[0].target)}" — ${refusal$2}; a commit replaces one complete object and nothing beside it, so the commit stops by name: nothing was written and no commit intent was recorded`);
+	await host.append({
+		formatVersion: 4,
+		kind: "commit_intent",
+		...intent
+	});
+	host.probe("intent-recorded");
+	const tableRefusal$1 = await host.tableWriteRefusal(intent);
+	if (tableRefusal$1 !== null) throw new Error(`evolution: ${tableRefusal$1}; nothing was written for the ${request.direction} of proposal "${request.proposalId}", its commit intent "${intent.intentId}" is recorded and stays open and no completion is recorded, so the table keeps exactly the bytes it holds now and the row this commit was to install is not in it`);
+	await installDirection(host, intent, bytes, targets);
+	await host.verifyCommitted(intent);
+	host.probe("commit-verified");
+	await appendCompletion(host, intent);
+}
+/** Settle one open intent against the filesystem and the registry, or stop by name. */
+async function reconcileIntent(host, intent) {
+	const targets = intent.files.map((file) => file.target);
+	const outcome = (result, detail) => ({
+		intentId: intent.intentId,
+		proposalId: intent.proposalId,
+		direction: intent.direction,
+		targets,
+		result,
+		...detail === void 0 ? {} : { detail }
+	});
+	const bytes = [];
+	for (const file of intent.files) {
+		if (file.source === void 0) {
+			bytes.push(void 0);
+			continue;
+		}
+		try {
+			bytes.push(await host.readSource(file.source, file.contentSha256));
+		} catch (error) {
+			return outcome("blocked", `evolution: the recoverable source "${file.source}" of commit intent "${intent.intentId}" for the file "${file.target}" is no longer readable as the bytes it committed (${error instanceof Error ? error.message : String(error)}) — the source bytes cannot be re-verified under ${host.root}, so the commit stops by name and the intent stays open; nothing was written`);
+		}
+	}
+	if (intent.capability?.mcpServers !== void 0) try {
+		await host.readSource(intent.capability.mcpSource, intent.capability.mcpServers.digest);
+	} catch (error) {
+		return outcome("blocked", `evolution: the recoverable MCP source "${intent.capability.mcpSource}" of commit intent "${intent.intentId}" cannot be re-verified (${error instanceof Error ? error.message : String(error)}); the intent stays open and nothing was written`);
+	}
+	let rowEntry = null;
+	if (intent.capability !== void 0 && intent.capability.contentSha256 !== null) try {
+		rowEntry = await committedRow(host, intent.capability);
+	} catch (error) {
+		return outcome("blocked", `evolution: the capability row "${intent.capability.name}" of commit intent "${intent.intentId}" cannot be re-read from its recoverable bytes (${error instanceof Error ? error.message : String(error)}) — the row cannot be re-verified, so the commit stops by name and the intent stays open; nothing was written`);
+	}
+	let rowState = intent.capability === void 0 ? "content" : "baseline";
+	if (intent.capability !== void 0) {
+		const seen = await currentCapabilityRow(host, intent);
+		if (seen === void 0) rowState = "unreadable";
+		else rowState = seen.digest === intent.capability.baselineSha256 ? "baseline" : seen.digest === intent.capability.contentSha256 ? "content" : "other";
+	}
+	if (rowState === "unreadable") return outcome("blocked", `evolution: the capability registry cannot be read for the row "${intent.capability.name}" of commit intent "${intent.intentId}" — whether the row the intent records is in place cannot be established, so the commit stops by name and the intent stays open; nothing was written`);
+	if (rowState === "other") return outcome("blocked", `evolution: the capability registry row "${intent.capability.name}" of commit intent "${intent.intentId}" reads as neither the row recorded before the commit (sha256 ${intent.capability.baselineSha256 ?? "absent"}) nor the row it committed (sha256 ${intent.capability.contentSha256 ?? "absent"}) — a third party changed it, so the commit stops by name and the intent stays open; nothing is overwritten and the completion is never recorded`);
+	const relatives = [];
+	const states = [];
+	const digests = [];
+	for (const file of intent.files) {
+		let relative$1;
+		let current;
+		try {
+			relative$1 = productionRelative(host, file.target);
+			current = await host.readProduction(relative$1);
+		} catch (error) {
+			return outcome("blocked", `evolution: the production file "${file.target}" of commit intent "${intent.intentId}" cannot be read as a regular file (${error instanceof ProductionReadError ? error.reason : error.message}) — the commit stops by name and the intent stays open; nothing was written`);
+		}
+		relatives.push(relative$1);
+		digests.push(current?.sha256 ?? "absent");
+		const digest = current?.sha256 ?? null;
+		states.push(digest === file.baselineSha256 ? "baseline" : digest === file.contentSha256 ? "content" : "other");
+	}
+	const foreign = intent.files.findIndex((_file, index) => states[index] === "other");
+	if (foreign >= 0) {
+		const file = intent.files[foreign];
+		const absent = digests[foreign] === "absent";
+		return outcome("blocked", `evolution: the production file "${file.target}" of commit intent "${intent.intentId}" ${absent ? "is missing" : `holds sha256 ${digests[foreign]}`} — it holds neither the state before the commit (${file.baselineSha256 === null ? "absent" : `sha256 ${file.baselineSha256}`}) nor the state it committed (${file.contentSha256 === null ? "absent" : `sha256 ${file.contentSha256}`}); a third party ${absent ? "removed" : "changed"} it, so the commit stops by name and the intent stays open; nothing is ${absent ? "recreated" : "overwritten"} and the completion is never recorded`);
+	}
+	if (intent.files.length > 0) {
+		const refusal$2 = await host.objectWriteRefusal(intent);
+		if (refusal$2 !== null) return outcome("blocked", `evolution: the ${intent.direction} of proposal "${intent.proposalId}" cannot write the skill object "${dirname(intent.files[0].target)}" of commit intent "${intent.intentId}" — ${refusal$2}; a commit replaces one complete object and nothing beside it, so nothing is written and the intent stays open until a human settles what the directory holds`);
+	}
+	const tableRefusal$1 = await host.tableWriteRefusal(intent);
+	if (tableRefusal$1 !== null) return outcome("blocked", `evolution: ${tableRefusal$1}; nothing was written for the ${intent.direction} of proposal "${intent.proposalId}" and commit intent "${intent.intentId}" stays open — a commit writes its row into that file only while it reads as a state the prepare froze, and a human settles the table (or restores it, and this recovery is run again)`);
+	if (!(states.every((state) => state === "content") && rowState === "content")) {
+		const writeFiles = async () => {
+			for (const [index, file] of intent.files.entries()) {
+				if (states[index] === "content") continue;
+				await installFile(host, intent, file, relatives[index], bytes[index]);
+			}
+		};
+		if (intent.direction === "apply") {
+			await writeFiles();
+			if (intent.capability !== void 0 && rowState !== "content") await installCapability(host, intent, rowEntry);
+		} else {
+			if (intent.capability !== void 0 && rowState !== "content") await installCapability(host, intent, rowEntry);
+			await writeFiles();
+		}
+		for (const file of intent.files) {
+			if (file.contentSha256 === null) continue;
+			await sweepStaging(dirname(file.target), file.target);
+			await syncTargetDirectory(host, intent, file.target);
+		}
+		await host.verifyCommitted(intent);
+		host.probe("commit-verified");
+		await appendCompletion(host, intent);
+		return outcome("completed-redone");
+	}
+	for (const file of intent.files) {
+		if (file.contentSha256 === null) continue;
+		await sweepStaging(dirname(file.target), file.target);
+	}
+	for (const file of intent.files) await syncTargetDirectory(host, intent, file.target);
+	await host.verifyCommitted(intent);
+	host.probe("commit-verified");
+	await appendCompletion(host, intent);
+	return outcome("completed-written");
+}
+/** Make one production target's directory durable before a completion is recorded. */
+async function syncTargetDirectory(host, intent, target) {
+	const directory = dirname(target);
+	try {
+		await syncDirectory(directory);
+	} catch (error) {
+		throw new Error(`evolution: the directory "${directory}" of the production target "${target}" could not be fsynced before recording the completion of commit intent "${intent.intentId}" (${error instanceof Error ? error.message : String(error)}) — the rename that put the committed content there may not be durable, so the completion is not recorded, the intent stays open and the state must not be treated as settled; a reconciliation that can make the directory durable records the completion then`);
+	}
+}
+/** Carry out one commit — a fresh one, or the half a redo found missing — in the intent's own order. */
+async function installDirection(host, intent, bytes, relativeTargets) {
+	const files = async () => {
+		for (const [index, file] of intent.files.entries()) await installFile(host, intent, file, relativeTargets[index], bytes[index]);
+	};
+	const row = async () => {
+		if (intent.capability === void 0) return;
+		await installCapability(host, intent, intent.capability.contentSha256 === null ? null : await committedRow(host, intent.capability));
+	};
+	if (intent.direction === "apply") {
+		await files();
+		await row();
+		return;
+	}
+	await row();
+	await files();
+}
+/** One file of one commit: an atomic replace and its read-back when the direction writes it. */
+async function installFile(host, intent, file, relativeTarget, bytes) {
+	if (file.contentSha256 === null) {
+		await removeFile(host, intent, file.target);
+		return;
+	}
+	if (bytes === void 0) throw new Error(`evolution: the ${intent.direction} of proposal "${intent.proposalId}" reaches "${file.target}" with no bytes to install while its intent records content — nothing was written`);
+	await writeFileAtomic(file.target, bytes, () => host.probe("write-staged", file.target), host.taskTemplatesRoot !== void 0 && dirname(file.target) === host.taskTemplatesRoot);
+	const readback = await host.readProduction(relativeTarget);
+	if (readback === null || readback.sha256 !== file.contentSha256) throw new Error(`evolution: the production file "${file.target}" does not hold the committed content after the atomic replace (sha256 ${readback?.sha256 ?? "missing"} != ${file.contentSha256}) — the intent stays open and a reconciliation reports what production actually carries by name`);
+	host.probe("write-renamed", file.target);
+}
+/** Remove one production file this direction ends without — only ever a file the intent names. */
+async function removeFile(host, intent, target) {
+	const directory = dirname(target);
+	try {
+		await rm(target, { force: true });
+	} catch (error) {
+		throw new Error(`evolution: the production file "${target}" could not be removed for the ${intent.direction} of commit intent "${intent.intentId}" (${error instanceof Error ? error.message : String(error)}) — the intent stays open and the state must not be treated as settled`);
+	}
+	let directoryGone = false;
+	if (directory !== host.skillRoot && directory !== host.taskTemplatesRoot) directoryGone = await rmdir(directory).then(() => true, () => false);
+	try {
+		await syncDirectory(directoryGone ? dirname(directory) : directory);
+	} catch (error) {
+		throw new Error(`evolution: the directory "${directoryGone ? dirname(directory) : directory}" could not be fsynced after removing "${target}" for the ${intent.direction} of commit intent "${intent.intentId}" (${error instanceof Error ? error.message : String(error)}) — the removal may not be durable, so the completion is not recorded and the intent stays open`);
+	}
+	const readback = await host.readProduction(productionRelative(host, target));
+	if (readback !== null) throw new Error(`evolution: the production file "${target}" still holds sha256 ${readback.sha256} after the ${intent.direction} of commit intent "${intent.intentId}" removed it — the intent stays open and a reconciliation reports what production actually carries by name`);
+}
+/** Install (or remove) the one capability row a commit carries, once the registry reads as the intent expected. */
+async function installCapability(host, intent, entry) {
+	const capability = intent.capability;
+	const seam = host.capability;
+	if (seam === void 0) throw new Error(`evolution: the ${intent.direction} of proposal "${intent.proposalId}" carries capability row "${capability.name}" and this host offers no registry seam to move it — the row cannot be installed, so the commit stops by name with nothing recorded as applied`);
+	const seen = await currentCapabilityRow(host, intent);
+	if (seen === void 0) throw new Error(`evolution: the capability registry cannot be read for the row "${capability.name}" of the ${intent.direction} of proposal "${intent.proposalId}" — the row this commit would move cannot be compared against the one its intent recorded, so nothing was written`);
+	if (seen.digest !== capability.baselineSha256) throw new Error(`evolution: the capability registry row "${capability.name}" of the ${intent.direction} of proposal "${intent.proposalId}" reads ${seen.digest === null ? "no row at all" : `as ${seen.digest}`}, not the state before the commit (${capability.baselineSha256 ?? "no row"}) — a third party moved it, so nothing was written and no completion is recorded; create a new candidate from the current registry state and re-evaluate it`);
+	try {
+		await seam.apply(intent, entry);
+	} catch (error) {
+		throw new Error(`evolution: the capability registry row "${capability.name}" of the ${intent.direction} of proposal "${intent.proposalId}" could not be written (${error instanceof Error ? error.message : String(error)}) — nothing was recorded as applied and the commit intent stays open, because the provider this commit installs is not the one the deployment would resolve`);
+	}
+	const after = await currentCapabilityRow(host, intent);
+	if (after === void 0 || after.digest !== capability.contentSha256) throw new Error(`evolution: the capability registry row "${capability.name}" does not read as the row this ${intent.direction} committed after the write (${after?.digest === void 0 || after.digest === null ? "no row" : after.digest} != ${capability.contentSha256 ?? "no row"}) — the completion is not recorded and the intent stays open`);
+}
+/** The registry row a commit's own recoverable bytes hold, parsed and verified against the intent's digests. */
+async function committedRow(host, capability) {
+	const source = capability.source;
+	if (source === void 0) throw new Error(`the capability row "${capability.name}" is recorded with content ${capability.contentSha256} and no recoverable source — the row cannot be read back, and an intent must name the bytes a recovery would write again`);
+	const bytes = await host.readSource(source, capability.contentSha256);
+	let parsed;
+	try {
+		parsed = JSON.parse(bytes.toString("utf8"));
+	} catch (error) {
+		throw new Error(`the capability row source "${source}" is not readable JSON (${error instanceof Error ? error.message : String(error)})`);
+	}
+	const entry = parsed;
+	if (capabilityRowDigest(entry) !== capability.contentSha256) throw new Error(`the capability row source "${source}" holds a row that hashes to ${capabilityRowDigest(entry)}, not the ${capability.contentSha256} its commit recorded — a row whose bytes and identity disagree is not one this commit may install`);
+	return entry;
+}
+/** The registry row as it reads now, digested — `{ digest: null }` for a name the registry does not hold, `undefined` when it cannot be read. */
+async function currentCapabilityRow(host, intent) {
+	const capability = intent.capability;
+	if (capability === void 0) return void 0;
+	const seam = host.capability;
+	if (seam === void 0) return void 0;
+	try {
+		const entry = await seam.read(capability.name);
+		return { digest: entry === null ? null : capabilityRowDigest(entry) };
+	} catch {
+		return;
+	}
+}
+/** Read and verify a capability row's recoverable bytes before the intent that names them is recorded. */
+async function assertCapabilitySource(host, request, capability) {
+	try {
+		await committedRow(host, capability);
+	} catch (error) {
+		throw new Error(`evolution: the recoverable source "${capability.source}" of the capability row "${capability.name}" in the ${request.direction} for proposal "${request.proposalId}" does not hold the row its commit recorded (${error instanceof Error ? error.message : String(error)}) — the source an intent names must be re-verifiable before the intent is recorded, so the commit stops by name: no line is recorded and nothing is written`);
+	}
+}
+/** Close one intent: the completion line, written for the intent's own grant and direction. */
+async function appendCompletion(host, intent) {
+	await host.append({
+		formatVersion: 4,
+		kind: intent.direction === "apply" ? "applied" : "rolledback",
+		proposalId: intent.proposalId,
+		targets: intent.files.map((file) => file.target),
+		approvalRef: intent.approvalRef,
+		intentId: intent.intentId,
+		actor: intent.actor,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	});
+}
+/** One commit target relative to the production skill root: the shape the intent records. */
+function productionRelative(host, target) {
+	if (host.taskTemplatesRoot !== void 0 && dirname(resolve(target)) === host.taskTemplatesRoot && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*@[1-9][0-9]*\.json$/.test(basename(target))) return resolve(target);
+	const rel = relative(host.skillRoot, resolve(target));
+	if (rel.length === 0 || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`evolution: the commit target "${target}" is not inside the production skill root ${host.skillRoot} — a commit replaces the fixed file set of one skill object under that root (SKILL.md, and SKILL.contract.json when the object carries an execution sidecar) and nothing else`);
+	return rel;
+}
+/** The check that the recoverable source an intent will name for one file stands under the ledger root. */
+function ledgerRelative(host, request, source) {
+	const rel = relative(host.root, resolve(host.root, source));
+	if (rel.length === 0 || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`evolution: the recoverable source "${source}" of the ${request.direction} for proposal "${request.proposalId}" is not inside the ledger root ${host.root} — a commit names the bytes it could write again from under that root and nothing else, so it stops by name before the intent is recorded and nothing is written`);
+	return rel;
+}
+/** Make one file's recoverable source durable *before* the intent that names it is recorded. */
+async function syncSource(host, request, file, sourceRelative) {
+	await syncSourceRelative(host, request, sourceRelative, `"${file.source}"`);
+}
+/** The same durability rule for any source a commit names — a file's bytes or a capability row's. */
+async function syncSourceRelative(host, request, sourceRelative, label) {
+	const source = resolve(host.root, sourceRelative);
+	let handle;
+	try {
+		handle = await open(source, "r");
+		await handle.sync();
+	} catch (error) {
+		throw new Error(`evolution: the recoverable source ${label} of the ${request.direction} for proposal "${request.proposalId}" could not be fsynced at "${source}" (${error instanceof Error ? error.message : String(error)}) — the source must be durable, bytes and path, before the intent that names it is recorded, so the commit stops by name: no line is recorded and nothing is written`);
+	} finally {
+		await handle?.close().catch(() => {});
+	}
+	for (const directory of sourceDirectories(host.root, source)) try {
+		await syncDirectory(directory);
+	} catch (error) {
+		throw new Error(`evolution: the directory "${directory}" holding the recoverable source ${label} of the ${request.direction} for proposal "${request.proposalId}" could not be fsynced (${error instanceof Error ? error.message : String(error)}) — the source must be durable, bytes and path, before the intent that names it is recorded, so the commit stops by name: no line is recorded and nothing is written`);
+	}
+}
+/** The directories that make a source's *path* durable, inside-out: the one that holds it first, up to the ledger root. */
+function sourceDirectories(root, source) {
+	const directories = [];
+	for (let directory = dirname(source);; directory = dirname(directory)) {
+		directories.push(directory);
+		if (directory === root || dirname(directory) === directory) break;
+	}
+	return directories;
+}
+/** fsync one directory so an entry created or renamed inside it is durable. */
+async function syncDirectory(directory) {
+	const handle = await open(directory, "r");
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+
+//#endregion
+//#region src/capability-config.ts
+function asLines(text) {
+	const trailingNewline = text.endsWith("\n");
+	return {
+		lines: text.split("\n"),
+		trailingNewline
+	};
+}
+/** The indentation of a line, or `-1` for a blank one (`\t` is refused by the callers that care). */
+function indentOf(line) {
+	if (line.trim().length === 0) return -1;
+	return line.length - line.trimStart().length;
+}
+/** One refusal of this module, naming the file and never quoting it. */
+function refusal(file, detail) {
+	return tableRefusal(file, detail);
+}
+/** The refusal a table that is not a frozen state is reported by (EVO-2 内容漂移), naming the file and never quoting it. */
+function tableChanged(file, detail) {
+	return tableChangedRefusal(file, detail);
+}
+/** The `- id: task-runtime` entry's `capabilities:` block inside the first YAML document. */
+function capabilitiesBlock(lines, file) {
+	const separator = lines.findIndex((line) => line.trim() === "---");
+	const first = separator < 0 ? lines.length : separator;
+	let header = -1;
+	for (let index = 0; index < first; index += 1) {
+		const line = lines[index];
+		if (!/^- id:\s*task-runtime\s*$/.test(line)) continue;
+		let end = first;
+		for (let next = index + 1; next < first; next += 1) if (/^- /.test(lines[next])) {
+			end = next;
+			break;
+		}
+		for (let cursor = index + 1; cursor < end; cursor += 1) {
+			if (/^\s*capabilities:\s*$/.test(lines[cursor])) {
+				header = cursor;
+				break;
+			}
+			if (/^\s*capabilities:\s*\S/.test(lines[cursor])) throw refusal(file, "the task-runtime entry declares `capabilities:` inline, and this writer edits a block mapping (nothing was written)");
+		}
+		if (header >= 0) {
+			const indent = indentOf(lines[header]);
+			let to = header + 1;
+			for (; to < end; to += 1) {
+				const line$1 = lines[to];
+				if (indentOf(line$1) <= indent && line$1.trim().length > 0) break;
+			}
+			return {
+				header,
+				indent,
+				from: header + 1,
+				to
+			};
+		}
+		throw refusal(file, "its task-runtime entry declares no `capabilities:` mapping, so the row this commit moves has nowhere to be written (nothing was written)");
+	}
+	throw refusal(file, "it holds no `- id: task-runtime` entry in its first document, so the capability table this deployment loads cannot be located (nothing was written)");
+}
+/** The row one name maps to inside the file, or `undefined` when the file holds no such row. */
+function capabilityRowRegion(text, file, name) {
+	const { lines } = asLines(text);
+	const block = capabilitiesBlock(lines, file);
+	const rowPattern = /* @__PURE__ */ new RegExp(`^\\s*("?)([^:\\s][^:]*?)\\1:\\s*`);
+	let insertAt = block.to;
+	let indent;
+	for (let index = block.from; index < block.to; index += 1) {
+		const line = lines[index];
+		const match = rowPattern.exec(line);
+		if (match === null) continue;
+		const rowIndent = line.slice(0, indentOf(line));
+		if (indent === void 0 && indentOf(line) > block.indent) indent = rowIndent;
+		if (rowIndent !== indent) continue;
+		const rowName = match[2];
+		if (rowName !== name) continue;
+		let end = index + 1;
+		while (end < block.to && indentOf(lines[end]) > indentOf(line)) end += 1;
+		return {
+			name: rowName,
+			start: index,
+			end,
+			indent: rowIndent,
+			insertAt: block.to
+		};
+	}
+	return {
+		name,
+		start: block.to,
+		end: block.to,
+		indent: indent ?? " ".repeat(block.indent + 4),
+		insertAt
+	};
+}
+/** The row region's own text, as the file spells it right now. */
+function capabilityRowText(text, file, name) {
+	const { lines } = asLines(text);
+	const region = capabilityRowRegion(text, file, name);
+	if (region === void 0 || region.start === region.end) return null;
+	return lines.slice(region.start, region.end).join("\n");
+}
+/** The one line this module writes for one row: `<indent>"<name>": <canonical json>` */
+function renderCapabilityRow(name, entry, indent) {
+	return `${indent}${JSON.stringify(name)}: ${canonicalJson(entry)}`;
+}
+/** The file's text with one row written, removed, or added. Pure: the caller writes it. */
+function applyCapabilityRowToConfig(input) {
+	const { text, file, name, entry } = input;
+	const { lines, trailingNewline } = asLines(text);
+	const region = capabilityRowRegion(text, file, name);
+	if (region === void 0) throw refusal(file, "no capabilities block was found (nothing was written)");
+	const rendered = entry === null ? void 0 : renderCapabilityRow(name, entry, region.indent);
+	const before = lines.slice(0, region.start);
+	const after = lines.slice(region.end);
+	const body = entry === null ? [] : [rendered];
+	const edited = [
+		...before,
+		...body,
+		...after
+	];
+	return applyMcpServersToConfig(trailingNewline && edited[edited.length - 1] === "" ? edited.slice(0, -1).join("\n") + "\n" : edited.join("\n"), file, input.mcpServers ?? {});
+}
+/** Edit the same task-runtime configuration document; row and definitions share one atomic write. */
+function applyMcpServersToConfig(text, file, definitions) {
+	if (Object.keys(definitions).length === 0) return text;
+	parseMcpServerRegistry(Object.fromEntries(Object.entries(definitions).filter(([, value]) => value !== null)));
+	const lines = [...asLines(text).lines];
+	const capability = capabilitiesBlock(lines, file);
+	const runtime = lines.findIndex((line) => /^- id:\s*task-runtime\s*$/.test(line));
+	let end = runtime + 1;
+	while (end < lines.length && !/^- |^---\s*$/.test(lines[end])) end++;
+	let header = -1;
+	for (let i = runtime + 1; i < end; i++) if (/^\s*mcpServers:\s*$/.test(lines[i])) header = i;
+	else if (/^\s*mcpServers:\s*\S/.test(lines[i])) throw refusal(file, "mcpServers must be a block mapping");
+	if (header < 0) {
+		if (Object.values(definitions).every((value) => value === null)) return text;
+		header = capability.header;
+		lines.splice(header, 0, `${" ".repeat(capability.indent)}mcpServers:`);
+	}
+	const indent = indentOf(lines[header]);
+	let to = header + 1;
+	while (to < lines.length && (indentOf(lines[to]) > indent || lines[to].trim().length === 0)) to++;
+	const body = lines.slice(header + 1, to);
+	const existingRow = body.find((line) => line.trim().length > 0 && !line.trimStart().startsWith("#"));
+	const rowIndent = " ".repeat(existingRow === void 0 ? indent + 4 : indentOf(existingRow));
+	for (const [name, definition] of Object.entries(definitions)) {
+		let start = body.findIndex((line) => {
+			if (indentOf(line) <= indent) return false;
+			const match = /^\s*(?:"([^"]+)"|'([^']+)'|([^:\s]+)):\s*/.exec(line);
+			return (match?.[1] ?? match?.[2] ?? match?.[3]) === name;
+		});
+		let stop = start + 1;
+		if (start >= 0) while (stop < body.length && indentOf(body[stop]) > indentOf(body[start])) stop++;
+		else start = stop = body.length;
+		body.splice(start, stop - start, ...definition === null ? [] : [`${rowIndent}${JSON.stringify(name)}: ${canonicalJson(definition)}`]);
+	}
+	if (body.every((line) => line.trim().length === 0)) lines.splice(header, to - header);
+	else lines.splice(header + 1, to - header - 1, ...body);
+	return lines.join("\n");
+}
+/** Freeze one table file's composed identity for one candidate (pure): the file as prepare read it and the files apply and rollback leave. */
+function capabilityTableIdentity(input) {
+	const { text, file, name, entry, restored } = input;
+	const digest = (value) => sha256Hex(Buffer.from(value, "utf8"));
+	const applied = applyCapabilityRowToConfig({
+		text,
+		file,
+		name,
+		entry,
+		...input.mcpServers === void 0 ? {} : { mcpServers: input.mcpServers }
+	});
+	return {
+		baselineSha256: digest(text),
+		applySha256: digest(applied),
+		rollbackSha256: digest(applyCapabilityRowToConfig({
+			text: applied,
+			file,
+			name,
+			entry: restored,
+			mcpServers: Object.fromEntries(Object.keys(input.mcpServers ?? {}).map((key) => [key, null]))
+		}))
+	};
+}
+/** The named reason one whole-file digest is not a state a capability write may overwrite, or `null` when it is one of the two states. */
+function capabilityTableDrift(input) {
+	const { name, seen, states } = input;
+	if (seen === states.beforeSha256 || seen === states.afterSha256) return null;
+	return `it reads sha256 ${seen}, which is neither the whole-file state this write starts from (sha256 ${states.beforeSha256}) nor the state its own write leaves (sha256 ${states.afterSha256}) — the row "${name}" is not written over a third party's move of the file, and the bytes that move left are exactly the bytes it keeps`;
+}
+/** The row one rendered or read line holds, parsed back from the scalar this module renders. */
+function parsedRow(file, name, line) {
+	const separator = line.indexOf(": ");
+	if (separator < 0) throw refusal(file, `its row "${name}" carries no value on the same line (nothing was written)`);
+	let parsed;
+	try {
+		parsed = JSON.parse(line.slice(separator + 2));
+	} catch (error) {
+		throw refusal(file, `its row "${name}" does not hold the json this writer reads rows as (${error instanceof Error ? error.message : String(error)}) — a row this build writes is \`"<name>": <canonical json>\`, and a row in another style is not one it will edit (nothing was written)`);
+	}
+	return assertCapabilityRow(`the row "${name}" of ${file}`, parsed);
+}
+/** Persist one capability row into the deployment's config file, or refuse by name with nothing written. */
+async function writeCapabilityRowToConfig(input) {
+	const { file, name, entry, states, probe } = input;
+	let current;
+	try {
+		current = await readFile(file, "utf8");
+	} catch (error) {
+		throw refusal(file, `it cannot be read (${error instanceof Error ? error.message : String(error)}) — nothing was written`);
+	}
+	const region = capabilityRowRegion(current, file, name);
+	if (region === void 0) throw refusal(file, "no capabilities block was found (nothing was written)");
+	const rendered = entry === null ? void 0 : renderCapabilityRow(name, entry, region.indent);
+	if (rendered !== void 0) {
+		const parsed = parsedRow(file, name, rendered);
+		if (capabilityRowDigest(parsed) !== capabilityRowDigest(entry)) throw refusal(file, `the row "${name}" cannot be rendered without changing it (the text reads back as ${capabilityRowDigest(parsed)}, not as ${capabilityRowDigest(entry)}); nothing was written`);
+	}
+	const next = applyCapabilityRowToConfig({
+		text: current,
+		file,
+		name,
+		entry,
+		...input.mcpServers === void 0 ? {} : { mcpServers: input.mcpServers }
+	});
+	probe?.("before-write", name);
+	let reread;
+	try {
+		reread = await readFile(file, "utf8");
+	} catch (error) {
+		throw refusal(file, `it could not be read again before the write (${error instanceof Error ? error.message : String(error)}) — nothing was written`);
+	}
+	if (reread !== current) throw tableChanged(file, `it changed between the read this write's edit was computed from and the write itself — the write that landed in that window is not one this commit may carry over, so the row "${name}" was not written into it and the file is left exactly as that write left it`);
+	const drift = capabilityTableDrift({
+		name,
+		seen: sha256Hex(Buffer.from(reread, "utf8")),
+		states
+	});
+	if (drift !== null) throw tableChanged(file, `${drift}; nothing was written`);
+	const verifyStaged = async () => {
+		probe?.("staged", name);
+		let staged;
+		try {
+			staged = await readFile(file, "utf8");
+		} catch (error) {
+			throw refusal(file, `it could not be read again immediately before the rename (${error instanceof Error ? error.message : String(error)}) — nothing was written, and the staged bytes of the row "${name}" are removed`);
+		}
+		const changed = capabilityTableDrift({
+			name,
+			seen: sha256Hex(Buffer.from(staged, "utf8")),
+			states
+		});
+		if (changed !== null) throw tableChanged(file, `${changed}; the write that landed in the window between this edit and the rename is not one this commit may carry over, so the staged bytes of the row "${name}" were removed and the file keeps exactly what that write left`);
+	};
+	if (next !== current) {
+		await writeFileAtomic(file, Buffer.from(next, "utf8"), verifyStaged);
+		probe?.("written", name);
+	}
+	let back;
+	try {
+		back = await readFile(file, "utf8");
+	} catch (error) {
+		throw refusal(file, `it could not be read back after the write (${error instanceof Error ? error.message : String(error)}) — the row may be written, so the commit intent stays open and the next reconciliation re-runs the same edit`);
+	}
+	if (back !== next) throw refusal(file, "it changed between the write and the read back — the row may be written, so the commit intent stays open and no completion is recorded");
+	const written = capabilityRowText(back, file, name);
+	if (entry === null) {
+		if (written !== null) throw refusal(file, `the row "${name}" is still there after removing it — the commit is not settled`);
+		return {
+			file,
+			name,
+			direction: "removed",
+			rowDigest: null,
+			textDigest: null
+		};
+	}
+	const expected = renderCapabilityRow(name, entry, region.indent);
+	if (written !== expected) throw refusal(file, `the row "${name}" does not read back as the text this write left — the commit is not settled`);
+	return {
+		file,
+		name,
+		direction: "written",
+		rowDigest: capabilityRowDigest(parsedRow(file, name, written)),
+		textDigest: sha256Hex(Buffer.from(expected, "utf8"))
+	};
+}
+
+//#endregion
+//#region src/experiment/runner.ts
+/** Run — or continue — the frozen two-sided experiment, and return the report the ledger records recompute to. */
+async function runExperiment(sources, request) {
+	const { spec, caller, actor } = request;
+	validateSpec(spec);
+	const { sandbox, candidate, capability, taskDefinition, overlay, proposal } = await experimentCandidate(sources, spec.proposalId);
+	const { storeId, snapshot } = await experimentStore(sources, caller);
+	const vocabulary = await sources.verifierVocabulary?.();
+	const samples = [];
+	for (const sample of spec.samples) {
+		const task = snapshot.tasks.find((item) => item.taskId === sample.taskId);
+		if (task === void 0) throw new Error(`unknown sample task "${sample.taskId}" in this graph's task store`);
+		if (task.status !== "verified" && task.status !== "failed") throw new Error(`sample "${sample.taskId}" is ${task.status}; only a terminal (verified or failed) sample can be evaluated`);
+		const review = latestReview(snapshot, task);
+		if (review === void 0) throw new Error(`sample "${sample.taskId}" has no review record on its latest run; there is no case to reproduce`);
+		assertSampleRole(sample, task, review);
+		const providers = capability === void 0 && taskDefinition === void 0 ? { provider: await frozenProviderIdentity({
+			sources,
+			caller,
+			sampleTaskId: sample.taskId,
+			required: task.requestedCapabilities,
+			candidate,
+			where: `sample "${sample.taskId}"`
+		}) } : await frozenCapabilitySample({
+			sources,
+			caller,
+			sampleTaskId: sample.taskId,
+			required: task.requestedCapabilities,
+			overlay: overlay ?? {
+				capabilityOverrides: {},
+				extraSkillRoots: []
+			}
+		});
+		samples.push(frozenSampleOf(sample, task, review, providers, vocabulary));
+	}
+	if (taskDefinition !== void 0) await freezeCriterionRepair(taskDefinition, proposal, snapshot, samples, vocabulary);
+	const frozen = freezeExperiment({
+		proposalId: spec.proposalId,
+		spec,
+		...candidate === void 0 ? {} : { candidate },
+		...proposal.prepared?.skillBaseline == null ? {} : { productionBaseline: proposal.prepared.skillBaseline },
+		...capability === void 0 ? {} : { capability },
+		...taskDefinition === void 0 ? {} : { taskDefinition },
+		sandbox,
+		snapshotDigest: await directoryDigest(spec.snapshot.sourceDir),
+		samples
+	});
+	const agentOptions = agentOptionsOf(frozen.model);
+	const frozenDigest = frozenDigestOf(frozen);
+	const experimentId = experimentIdOf(spec.proposalId, frozenDigest);
+	const sandboxRel = `${sandbox}/exp-${experimentId}`;
+	const recorded = /* @__PURE__ */ new Map();
+	for (const previous of await sources.evolution.experiments(spec.proposalId)) for (const record of previous.samples) recorded.set(experimentSampleKey(record), record);
+	for (const sample of frozen.samples) for (const side of EXPERIMENT_SIDES) {
+		const key = experimentSampleKeyOf({
+			proposalId: spec.proposalId,
+			frozen
+		}, sample.taskId, side);
+		const prior = recorded.get(experimentSampleKey(key));
+		if (prior !== void 0 && prior.experimentId !== experimentId) throw sameKeyRefusal(key, prior, experimentId);
+	}
+	await sources.evolution.recordExperimentStart({
+		formatVersion: 4,
+		kind: "experiment_started",
+		proposalId: spec.proposalId,
+		experimentId,
+		frozen,
+		frozenDigest,
+		budget: { ...frozen.budget },
+		report: experimentReportPath(spec.proposalId, experimentId),
+		storeId,
+		actor,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	});
+	const view = await sources.evolution.experiment(experimentId);
+	const budget = view.frozen.budget;
+	let spentTokens = reportedTokensSpent(view.samples);
+	let settledSides = view.samples.length;
+	let started = 0;
+	try {
+		sampleLoop: for (const sample of view.frozen.samples) for (const side of EXPERIMENT_SIDES) {
+			const key = experimentSampleKeyOf(view, sample.taskId, side);
+			const lineage = experimentLineage(view.experimentId, sample.taskId, side);
+			const workspace = resolve(sources.evolution.root, sandboxRel, sample.taskId, side);
+			const prior = recorded.get(experimentSampleKey(key));
+			if (prior !== void 0) {
+				assertRecordedRunOrigin(snapshot, lineage, key, prior);
+				continue;
+			}
+			if (request.signal?.aborted) break sampleLoop;
+			const inFlight = snapshot.tasks.find((item) => item.objective.startsWith(`[${lineage}] `));
+			if (inFlight !== void 0) {
+				const recovered = recoveredSampleRecord({
+					view,
+					sample,
+					side,
+					task: inFlight,
+					snapshot,
+					workspace,
+					actor
+				});
+				await sources.evolution.recordExperimentSample(recovered);
+				recorded.set(experimentSampleKey(key), recovered);
+				spentTokens += tokensOfRecord(recovered) ?? 0;
+				settledSides += 1;
+				continue;
+			}
+			assertBudgetAllowsStart({
+				experimentId: view.experimentId,
+				budget,
+				spentTokens,
+				settledSides,
+				where: `sample "${sample.taskId}" ${side} side`
+			});
+			const real = await buildWorkspace(spec.snapshot.sourceDir, workspace, view.frozen.snapshot.digest);
+			if (side === "baseline" && sample.admission !== void 0) {
+				const refusal$2 = await refusedBaselineRun({
+					sources,
+					storeId,
+					sample,
+					lineage,
+					workspace: real,
+					agentOptions,
+					caller,
+					...request.signal === void 0 ? {} : { signal: request.signal }
+				});
+				const admitted = sampleRecord({
+					view,
+					sample,
+					side,
+					outcome: "not-admitted",
+					criteria: [],
+					evidenceRefs: [],
+					workspace: real,
+					cost: {
+						status: "unknown",
+						reason: "the runtime refused this side at admission, so no run exists and no cost was reported for it"
+					},
+					admission: {
+						source: sample.admission.source,
+						proposalId: view.proposalId,
+						sourceRefs: [...view.frozen.capability?.sourceRefs ?? []],
+						required: [...sample.admission.required],
+						missing: [...sample.admission.missing],
+						reason: refusal$2
+					},
+					actor
+				});
+				await sources.evolution.recordExperimentSample(admitted);
+				recorded.set(experimentSampleKey(key), admitted);
+				settledSides += 1;
+				continue;
+			}
+			if (side === "candidate" && view.frozen.taskDefinition?.criterionRepair !== void 0) await runCriterionGuards(sources, view, caller, actor, agentOptions, request.signal);
+			const outcome = await sources.taskRuntime.replayTask(storeId, sample.taskId, {
+				lineage,
+				workspace: { path: real },
+				agentOptions: { ...agentOptions },
+				...taskDefinition !== void 0 ? { overlay: { taskTemplatesRoot: resolve(sources.evolution.root, sandbox, "task-templates", side) } } : side === "candidate" ? { overlay: overlay ?? { extraSkillRoots: [resolve(sources.evolution.root, sandbox, "skills")] } } : {},
+				...request.signal === void 0 ? {} : { signal: request.signal }
+			}, caller);
+			if (outcome.workspace !== void 0 && outcome.workspace !== real) throw new Error(`the replay of "${sample.taskId}" reported workspace "${outcome.workspace}" but was given "${real}"; a side's frozen input and the directory its run went through must be the same directory`);
+			const after = await sources.task.openStore(storeId);
+			const replayed = after.tasks.find((item) => item.taskId === outcome.taskId);
+			if (replayed === void 0) throw new Error(`the replay of "${sample.taskId}" created task "${outcome.taskId}", which the store does not hold`);
+			const facts = runFactsOf(after, replayed, outcome);
+			const fresh = sampleRecord({
+				view,
+				sample,
+				side,
+				outcome: facts.outcome,
+				...facts.taskId === void 0 ? {} : { taskId: facts.taskId },
+				...facts.runId === void 0 ? {} : { runId: facts.runId },
+				...facts.review === void 0 ? {} : { review: facts.review },
+				criteria: facts.criteria,
+				evidenceRefs: facts.evidenceRefs,
+				workspace: real,
+				initialDigest: view.frozen.snapshot.digest,
+				cost: costOf(facts.review, view.frozen.objective === "tool-call-reduction" ? after : void 0),
+				...facts.interruptedReason === void 0 ? {} : { reason: facts.interruptedReason },
+				actor
+			});
+			await sources.evolution.recordExperimentSample(fresh);
+			recorded.set(experimentSampleKey(key), fresh);
+			spentTokens += tokensOfRecord(fresh) ?? 0;
+			settledSides += 1;
+			started += 1;
+			if (facts.outcome === "cancelled") break sampleLoop;
+		}
+	} catch (error) {
+		const message$1 = error instanceof Error ? error.message : String(error);
+		if (started === 0) throw error instanceof Error ? error : new Error(message$1);
+		throw new Error(`${message$1} (the experiment stopped; ${started} sample run(s) it started settled and stay in the ledger and the task store as evidence — resume experiment ${experimentId} to continue it)`);
+	}
+	const finalView = await sources.evolution.experiment(experimentId);
+	let report;
+	try {
+		report = buildExperimentReport(finalView);
+	} catch (error) {
+		throw new Error(`${error instanceof Error ? error.message : String(error)} — resume experiment ${experimentId} to continue it`);
+	}
+	const abs = resolve(sources.evolution.root, finalView.report);
+	await mkdir(dirname(abs), { recursive: true });
+	await writeFile(abs, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+	return {
+		proposalId: finalView.proposalId,
+		experimentId,
+		report,
+		reportPath: finalView.report,
+		experiment: finalView
+	};
+}
+/** Resume a frozen experiment by id: its specification *is* the frozen block, so the id alone is unambiguous. */
+async function resumeExperiment(sources, request) {
+	const view = await sources.evolution.experiment(request.experimentId);
+	return runExperiment(sources, {
+		spec: {
+			proposalId: view.proposalId,
+			samples: view.frozen.samples.map((sample) => ({
+				taskId: sample.taskId,
+				role: sample.role
+			})),
+			snapshot: { sourceDir: view.frozen.snapshot.sourceDir },
+			model: view.frozen.model,
+			...view.frozen.objective === void 0 ? {} : { objective: view.frozen.objective },
+			budget: view.frozen.budget,
+			repetition: view.frozen.repetition
+		},
+		caller: request.caller,
+		actor: request.actor,
+		...request.signal === void 0 ? {} : { signal: request.signal }
+	});
+}
+
+//#endregion
 //#region src/ledger/records.ts
 /** Validate a candidate's mutation. This build has exactly two candidate lifecycles: a same-name SKILL.md replacement and one capability row. */
 function validateMutation(targetType, mutation) {
 	if (!isRecord(mutation)) throw new Error("evolution: mutation must be an object");
+	if (targetType === "task_definition") {
+		validateTaskDefinitionMutation(mutation);
+		return;
+	}
 	if (targetType === "capability") {
 		validateCapabilityMutation(mutation);
 		return;
@@ -3194,11 +3796,15 @@ function validateCommitIntent(record) {
 			if (typeof file.source !== "string" || file.source.trim().length === 0) throw new Error(`evolution: ${at$1} has no source — a file this commit writes must name the recoverable bytes a recovery would write again`);
 		} else if (file.source !== void 0) throw new Error(`evolution: ${at$1} names the source ${JSON.stringify(file.source)} while it removes the file — a removal has no bytes to write again`);
 		if (file.target !== resolve(file.target)) throw new Error(`evolution: ${at$1} names target "${file.target}" — an intent names the absolute production paths it commits`);
-		if (basename(file.target) !== (index === 0 ? "SKILL.md" : SKILL_SIDECAR_FILE)) throw new Error(`evolution: ${at$1} names target "${file.target}" — the file set of one skill object is ordered and fixed: SKILL.md first, and, when the object carries an execution sidecar, ${SKILL_SIDECAR_FILE} second`);
+		if (!(files.length === 1 && (file.baselineSha256 === null || file.contentSha256 === null) && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*@[1-9][0-9]*\.json$/.test(basename(file.target))) && basename(file.target) !== (index === 0 ? "SKILL.md" : SKILL_SIDECAR_FILE)) throw new Error(`evolution: ${at$1} names target "${file.target}" — the file set of one skill object is ordered and fixed: SKILL.md first, and, when the object carries an execution sidecar, ${SKILL_SIDECAR_FILE} second`);
 		if (index > 0 && dirname(file.target) !== dirname(files[0].target)) throw new Error(`evolution: ${at$1} names target "${file.target}" beside "${files[0].target}" — the files of one skill object live in one directory, the one a loader reads whole`);
 	});
 	const capability = record.capability;
 	if (capability === void 0) return;
+	if (capability.mcpServers !== void 0) {
+		assertMcpServerIdentity(capability.mcpServers);
+		if (typeof capability.mcpSource !== "string" || !capability.mcpSource) throw new Error("evolution: MCP commit identity requires a recoverable source");
+	}
 	const at = `commit_intent record for proposal "${record.proposalId}" capability row`;
 	if (!isRecord(capability) || typeof capability.name !== "string" || capability.name.trim().length === 0) throw new Error(`evolution: ${at} names no row — a capability commit carries the one row it moves, by name`);
 	for (const [field, value] of [["baselineSha256", capability.baselineSha256], ["contentSha256", capability.contentSha256]]) if (value !== null && (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value))) throw new Error(`evolution: ${at} "${capability.name}" has no valid ${field} (${JSON.stringify(value ?? null)}) — the row's two states are the canonical digests the registry must hold before and after the write, or \`null\` for "no row of this name"`);
@@ -3308,7 +3914,11 @@ const EVOLUTION_DECISIONS = [
 	"KEEP_FOR_FURTHER_RESEARCH"
 ];
 /** The target types `evolution_apply`/`evolution_rollback` move mechanically: a skill object or a capability row. */
-const APPLYABLE_TARGET_TYPES = ["skill", "capability"];
+const APPLYABLE_TARGET_TYPES = [
+	"skill",
+	"capability",
+	"task_definition"
+];
 /** One accepted verdict as a promotion report entry: the role, the content it was taken from, and the verifier ref only an execution provider has. */
 function promotionProviderOf(verdict) {
 	return {
@@ -3352,7 +3962,13 @@ function assertTransition(current, kind) {
 	throw new Error(`evolution: proposal "${current.proposalId}" is ${current.status}; cannot record "${kind}"${hint}`);
 }
 /** The production write targets of an apply (and its matching rollback), for the commit's fixed file set and for audit. */
-function applyTargets(proposal, roots) {
+function applyTargets(proposal, roots, direction = "apply") {
+	if (proposal.targetType === "task_definition") {
+		const candidate = proposal.prepared?.templateCandidate?.template;
+		if (candidate === void 0 || roots.taskTemplatesRoot === void 0) return [];
+		const version = direction === "rollback" && proposal.prepared?.templateBaseline != null ? candidate.version + 1 : candidate.version;
+		return [join(roots.taskTemplatesRoot(), `${candidate.id}@${version}.json`)];
+	}
 	if (proposal.targetType === "capability") {
 		const content = proposal.prepared?.skillContent;
 		if (content === void 0) return [];
@@ -3378,6 +3994,7 @@ function fold(records) {
 			const current$1 = proposals.get(record.proposalId);
 			if (current$1 === void 0) throw new Error(`evolution: unknown proposal "${record.proposalId}"`);
 			validateCommitIntent(record);
+			if ((record.capability?.mcpServers?.digest ?? null) !== (current$1.prepared?.mcpServers?.digest ?? null)) throw new Error(`evolution: commit intent MCP definitions differ from proposal ${record.proposalId} prepared identity`);
 			const intent = {
 				intentId: record.intentId,
 				proposalId: record.proposalId,
@@ -3424,7 +4041,7 @@ function fold(records) {
 		});
 		switch (record.kind) {
 			case "candidate":
-				if (current.targetType !== "skill" && current.targetType !== "capability") throw new Error(`evolution: candidate record for "${record.proposalId}" targets "${current.targetType}" — this build's candidate lifecycles are a SKILL.md replacement of an existing skill object and one whole capability row with an optional new execution skill, and no other target type has an evaluator here`);
+				if (current.targetType !== "skill" && current.targetType !== "capability" && current.targetType !== "task_definition") throw new Error(`evolution: candidate record for "${record.proposalId}" targets "${current.targetType}" — this build's candidate lifecycles are a SKILL.md replacement of an existing skill object and one whole capability row with an optional new execution skill, and no other target type has an evaluator here`);
 				validateVersionSet(record.versionSet);
 				validateMutation(current.targetType, record.mutation);
 				current.mutation = structuredClone(record.mutation);
@@ -3432,9 +4049,24 @@ function fold(records) {
 				break;
 			case "prepared": {
 				const capabilityPrepare = current.targetType === "capability";
-				const champion = capabilityPrepare ? "absent" : "captured";
+				const champion = capabilityPrepare || current.targetType === "task_definition" && record.templateBaseline === null ? "absent" : "captured";
 				if (record.mechanical !== true || record.champion !== champion || typeof record.sandbox !== "string" || record.sandbox.length === 0) throw new Error(`evolution: prepared record for "${record.proposalId}" is not a materialized prepare of its own candidate type (mechanical=${String(record.mechanical)}, champion=${JSON.stringify(record.champion ?? null)}, sandbox=${JSON.stringify(record.sandbox ?? null)}, targetType=${JSON.stringify(current.targetType)}) — this build prepares a replacement of one existing skill object (champion "captured") or one capability row with an optional new skill object (champion "absent", A6), and nothing else`);
 				if (!Array.isArray(record.files) || record.files.some((file) => typeof file !== "string")) throw new Error(`evolution: prepared record for "${record.proposalId}" has a non-string file list`);
+				if (current.targetType === "task_definition") {
+					assertTemplateIdentity(record.templateCandidate);
+					if (record.templateBaseline !== null) assertTemplateIdentity(record.templateBaseline);
+					if (record.templateCandidate.template.id !== current.targetId || record.templateBaseline !== null && record.templateBaseline.template.id !== current.targetId || record.templateCandidate.template.version !== (record.templateBaseline?.template.version ?? 0) + 1) throw new Error("evolution: prepared template target/version mismatch");
+					current.prepared = {
+						sandbox: record.sandbox,
+						mechanical: true,
+						champion,
+						templateCandidate: record.templateCandidate,
+						templateBaseline: record.templateBaseline,
+						templateLibraries: record.templateLibraries,
+						files: [...record.files]
+					};
+					break;
+				}
 				if (capabilityPrepare) {
 					const capabilityRow = preparedRowIdentity(record.capabilityRow, "capabilityRow", record.proposalId);
 					if (record.capabilityBaseline === void 0) throw new Error(`evolution: prepared record for "${record.proposalId}" records no capabilityBaseline — every capability prepare records the row the registry held, or \`null\` for the absence it read, so "this candidate adds the row" and "this candidate replaces it" can never be confused`);
@@ -3455,6 +4087,7 @@ function fold(records) {
 						...skillContent$1 === void 0 ? {} : { skillBaseline: null },
 						capabilityRow,
 						capabilityBaseline,
+						...record.mcpServers === void 0 ? {} : { mcpServers: assertMcpServerIdentity(record.mcpServers) },
 						...capabilityTable === void 0 ? {} : { capabilityTable },
 						files: [...record.files]
 					};
@@ -3574,6 +4207,10 @@ async function verifierVocabularyOf(ctx) {
 		ids: vocabulary.ids,
 		versions: vocabulary.versions
 	};
+}
+/** Deployment server definitions, read freshly for every candidate or commit. */
+function effectiveMcpServersOf(ctx) {
+	return optionalService(ctx, "taskRuntime")?.listMcpServers?.() ?? {};
 }
 
 //#endregion
@@ -3706,7 +4343,7 @@ var EvolutionServiceCore = class extends Service {
 		return resolved;
 	}
 	/** One provider candidate judged by the unified validator, with the sources this deployment can see. */
-	async providerVerdict(candidate, table = this.effectiveCapabilities()) {
+	async providerVerdict(candidate, table = this.effectiveCapabilities(), mcpRegistry = this.effectiveMcpServers()) {
 		const verifierRefs = await registeredVerifierIds(this.ctx);
 		if (verifierRefs === void 0 && candidate.directory !== void 0) {
 			const loaded = await loadSkillSidecar(candidate.directory);
@@ -3714,12 +4351,12 @@ var EvolutionServiceCore = class extends Service {
 		}
 		return validateSkillProvider(candidate, {
 			verifierRefs: verifierRefs === void 0 ? [] : [...verifierRefs],
-			capabilityTools: this.capabilityToolAnswer(table)
+			capabilityTools: this.capabilityToolAnswer(table, mcpRegistry)
 		});
 	}
 	/** The capability table this service judges providers against: by default the effective table, never a cached copy. */
-	capabilityToolAnswer(table = this.effectiveCapabilities()) {
-		if (table !== void 0) return capabilityToolQuery(table);
+	capabilityToolAnswer(table = this.effectiveCapabilities(), mcpRegistry = this.effectiveMcpServers()) {
+		if (table !== void 0) return capabilityToolQuery(table, mcpRegistry);
 		return () => ({
 			known: false,
 			reason: "the effective capability registry cannot be read in this context (no task-runtime service), so the tools this capability grants cannot be resolved"
@@ -3728,6 +4365,9 @@ var EvolutionServiceCore = class extends Service {
 	/** The effective capability table, or `undefined` when this context cannot read one (no task-runtime service). */
 	effectiveCapabilities() {
 		return effectiveCapabilitiesOf(this.ctx);
+	}
+	effectiveMcpServers() {
+		return effectiveMcpServersOf(this.ctx);
 	}
 	/** Settle every open commit intent, in ledger order (K2) — the explicit startup entry. */
 	async reconcile() {
@@ -3778,17 +4418,15 @@ var EvolutionServiceCore = class extends Service {
 		return outcome.result === "completed-redone" ? "redone" : "written";
 	}
 	/** The production paths a commit of this proposal may write: for a skill object its files, for a capability its new skill. */
-	commitTargets(proposal) {
-		const name = proposal.targetType === "capability" ? proposal.prepared?.skillContent?.name : proposal.mutation.name;
-		if (name === void 0) return [];
-		const targets = [resolveWithin(this.skillRoot, productionSkillRelative(name))];
-		if (proposal.prepared?.skillContent?.contract !== void 0) targets.push(resolveWithin(this.skillRoot, productionSidecarRelative(name)));
-		return targets;
+	taskTemplatesRoot() {
+		const root = optionalService(this.ctx, "taskRuntime")?.config.taskTemplatesRoot;
+		if (root === void 0) throw new Error("evolution: runtime taskTemplatesRoot is unavailable");
+		return resolve(root);
 	}
 	/** A fresh commit of `proposal` refuses, by name, a production **directory** another open intent targets. */
 	assertTargetUncommitted(proposal) {
-		if (proposal.targetType !== "skill" && proposal.targetType !== "capability" || proposal.mutation === void 0) return;
-		const directories = new Set(this.commitTargets(proposal).map((target) => dirname(target)));
+		if (proposal.targetType !== "skill" && proposal.targetType !== "capability" && proposal.targetType !== "task_definition" || proposal.mutation === void 0) return;
+		const directories = new Set(applyTargets(proposal, this).map((target) => dirname(target)));
 		const rowName = proposal.prepared?.capabilityRow?.name;
 		for (const other of fold(this.records).values()) {
 			const intent = other.openIntent;
@@ -3800,9 +4438,11 @@ var EvolutionServiceCore = class extends Service {
 	}
 	/** The narrow host the commit path runs on (see `commit.ts`): the roots, the record funnel, the source reads and the write refusals. */
 	commitHost() {
+		const taskLibrary = optionalService(this.ctx, "taskRuntime")?.config?.taskTemplatesRoot;
 		return {
 			root: this.root,
 			skillRoot: this.skillRoot,
+			taskTemplatesRoot: taskLibrary === void 0 ? void 0 : resolve(taskLibrary),
 			append: (record) => this.append(record),
 			readSource: async (source, sha256) => {
 				const bytes = await readVerifiedFile(this.root, source);
@@ -3812,12 +4452,28 @@ var EvolutionServiceCore = class extends Service {
 			},
 			readProduction: async (relative$1) => {
 				try {
-					return await readProductionSkill(this.skillRoot, relative$1);
+					const library = optionalService(this.ctx, "taskRuntime")?.config?.taskTemplatesRoot;
+					return library !== void 0 && dirname(relative$1) === resolve(library) ? await readProductionSkill(resolve(library), basename(relative$1)) : await readProductionSkill(this.skillRoot, relative$1);
 				} catch (error) {
 					throw new ProductionReadError(error.message.replace(/^(evolution|verified-read): /, ""));
 				}
 			},
-			objectWriteRefusal: (intent) => objectWriteRefusal(intent),
+			objectWriteRefusal: async (intent) => {
+				const proposal = await this.get(intent.proposalId);
+				if (proposal.targetType !== "task_definition") return objectWriteRefusal(intent);
+				const request = templateCommitRequest(this.root, this.taskTemplatesRoot(), proposal, intent.direction, intent.actor, intent.approvalRef);
+				if (JSON.stringify(intent.files) !== JSON.stringify(request.files)) return "evolution: template intent does not match its prepared append";
+				const prepared = proposal.prepared;
+				const candidate = prepared.templateCandidate;
+				const baseline = prepared.templateBaseline;
+				const before = intent.direction === "apply" ? baseline?.digest ?? null : candidate.digest;
+				const installed = intent.direction === "apply" ? candidate.digest : baseline === null ? null : templateIdentity({
+					...baseline.template,
+					version: candidate.template.version + 1
+				}).digest;
+				const current = (await findTaskTemplates(this.taskTemplatesRoot())).find((item) => item.template.id === candidate.template.id)?.templateRef.digest ?? null;
+				return current === before || current === installed ? null : "evolution: template library changed since the frozen baseline or intended installed version; nothing was appended";
+			},
 			tableWriteRefusal: (intent) => this.tableWriteRefusal(intent),
 			verifyCommitted: (intent) => this.verifyCommitted(intent),
 			capability: {
@@ -3829,7 +4485,10 @@ var EvolutionServiceCore = class extends Service {
 				apply: async (intent, entry) => {
 					const runtime = optionalService(this.ctx, "taskRuntime");
 					if (runtime?.applyCapabilityRow === void 0) throw new Error("this deployment offers no capability-registry entry (taskRuntime.applyCapabilityRow), so the row this commit carries cannot be installed");
+					await this.persistCapabilityRowText(intent);
+					const definitions = await this.committedMcpServers(intent);
 					await runtime.applyCapabilityRow(intent.capability.name, entry, {
+						...definitions === void 0 ? {} : { mcpServers: definitions },
 						commitTargets: intent.files.map((file) => file.target),
 						commitRow: intent.capability.name
 					});
@@ -3844,7 +4503,7 @@ var EvolutionServiceCore = class extends Service {
 		await this.verifyCommittedRow(intent);
 		await this.persistCapabilityRowText(intent);
 	}
-	/** The capability table's **own text** (A6): the durable half of a capability commit, written after the row is installed. */
+	/** The capability table's **own text** (A6): the durable half of a capability commit, written together with MCP definitions before the runtime registry moves. */
 	async persistCapabilityRowText(intent) {
 		const capability = intent.capability;
 		if (capability === void 0) return;
@@ -3856,15 +4515,31 @@ var EvolutionServiceCore = class extends Service {
 			file: this.capabilityConfigPath,
 			name: capability.name,
 			entry,
+			...capability.mcpServers === void 0 ? {} : { mcpServers: await this.committedMcpServers(intent) },
 			states: capabilityTableStates(intent.direction, table),
 			...this.capabilityConfigProbe === void 0 ? {} : { probe: this.capabilityConfigProbe }
 		});
 		if (written.direction === "written" && written.rowDigest !== capabilityRowDigest(entry)) throw new Error(`evolution: the capability row "${capability.name}" written into "${written.file}" reads back as ${written.rowDigest}, not as the row this ${intent.direction} committed (sha256 ${capabilityRowDigest(entry)}); nothing is recorded as settled and the intent stays open`);
 	}
+	/** Re-read the intent's frozen definitions for both installation and removal. */
+	async committedMcpServers(intent) {
+		const capability = intent.capability;
+		if (capability?.mcpServers === void 0) return void 0;
+		const bytes = await this.commitHost().readSource(capability.mcpSource, capability.mcpServers.digest);
+		const identity = assertMcpServerIdentity({
+			definitions: JSON.parse(bytes.toString("utf8")),
+			digest: capability.mcpServers.digest
+		});
+		return Object.fromEntries(Object.entries(identity.definitions).map(([key, value]) => [key, intent.direction === "apply" ? value : null]));
+	}
 	/** The capability table half of the commit path's **before** picture (A6, EVO-2): the row and the file digest a write must find. */
 	async tableWriteRefusal(intent) {
 		const capability = intent.capability;
 		if (capability === void 0) return null;
+		for (const [key, definition] of Object.entries(capability.mcpServers?.definitions ?? {})) {
+			const actual = this.effectiveMcpServers()[key];
+			if (actual !== void 0 && canonicalJson(actual) !== canonicalJson(definition)) return `capability-server-changed: MCP server ${key} differs from this intent's frozen definition`;
+		}
 		const file = this.capabilityConfigPath;
 		if (file === void 0) return null;
 		const table = (await this.get(intent.proposalId)).prepared?.capabilityTable;
@@ -3885,6 +4560,19 @@ var EvolutionServiceCore = class extends Service {
 	/** The file half of {@link verifyCommitted}. A direction that ends with files removed must find them gone. */
 	async verifyCommittedFiles(intent) {
 		if (intent.files.length === 0) return;
+		if ((await this.get(intent.proposalId)).targetType === "task_definition") {
+			for (const file of intent.files) {
+				if (file.contentSha256 === null) {
+					if (await readProductionSkill(this.taskTemplatesRoot(), basename(file.target)) !== null) throw new Error("evolution: initial template rollback did not remove its candidate file");
+					continue;
+				}
+				const bytes = await readVerifiedFile(this.taskTemplatesRoot(), basename(file.target));
+				const template = parseTaskTemplate(JSON.parse(bytes.toString()));
+				if (basename(file.target) !== `${template.id}@${template.version}.json` || sha256Hex(bytes) !== file.contentSha256) throw new Error("evolution: committed template identity mismatch");
+				if ((await findTaskTemplates(this.taskTemplatesRoot())).find((item) => item.template.id === template.id)?.template.version !== template.version) throw new Error("evolution: a newer template superseded the open commit; its intent remains unsettled");
+			}
+			return;
+		}
 		if (intent.files.every((file) => file.contentSha256 === null)) {
 			for (const file of intent.files) {
 				const current = await readProductionSkill(this.skillRoot, relative(this.skillRoot, file.target));
@@ -3919,6 +4607,8 @@ var EvolutionServiceCore = class extends Service {
 		if (intent.capability === void 0) return;
 		const table = this.effectiveCapabilities();
 		if (table === void 0) throw new Error(`evolution: the effective capability registry cannot be read in this context after the ${intent.direction} of proposal "${intent.proposalId}", so whether the row "${intent.capability.name}" is in place cannot be established — the commit intent stays open and no completion is recorded`);
+		const definitions = await this.committedMcpServers(intent);
+		for (const [key, expected] of Object.entries(definitions ?? {})) if (canonicalJson(this.effectiveMcpServers()[key] ?? null) !== canonicalJson(expected)) throw new Error(`evolution: MCP registry ${key} does not match the committed definition; intent stays open`);
 		const entry = table[intent.capability.name] ?? null;
 		const digest = entry === null ? null : capabilityRowDigest(entry);
 		if (digest !== intent.capability.contentSha256) throw new Error(`evolution: the capability registry row "${intent.capability.name}" reads ${digest === null ? "no row" : `sha256 ${digest}`} after the ${intent.direction} of proposal "${intent.proposalId}", not the ${intent.capability.contentSha256 === null ? "removed row" : `sha256 ${intent.capability.contentSha256}`} this direction recorded — the commit intent stays open and no completion is recorded`);
@@ -4139,7 +4829,7 @@ var EvolutionServiceCore = class extends Service {
 					}
 				})();
 				if (table === void 0) throw new Error(`evolution: the recovery of "${source.taskId}" carries no candidate in this ledger, so it is a pure artifact gap — and the capability table that gap's production needs cannot be read in this context; nothing was started rather than assuming the rows resolve`);
-				const unresolved = requested.filter((name) => !capabilityToolQuery(table)(name).known);
+				const unresolved = requested.filter((name) => !capabilityToolQuery(table, this.effectiveMcpServers())(name).known);
 				if (unresolved.length > 0) throw new Error(`evolution: the recovery of "${source.taskId}" carries no candidate in this ledger and the capability the production needs is still missing ([${unresolved.join(", ")}] resolve to no row in this deployment's table); a pure artifact gap is recoverable, a capability gap is not — nothing was started`);
 				coordination.push(`this ledger holds no proposal for the diagnosis; the row(s) the source uses ([${requested.join(", ")}]) resolve in the current table`);
 			}
@@ -4157,6 +4847,7 @@ var EvolutionServiceCore = class extends Service {
 	}
 	/** The commit request one apply/rollback binds, read off the prepared record. */
 	commitRequest(proposal, direction, actor, approvalRef) {
+		if (proposal.targetType === "task_definition") return templateCommitRequest(this.root, this.taskTemplatesRoot(), proposal, direction, actor, approvalRef);
 		if (proposal.targetType === "capability") return this.capabilityCommitRequest(proposal, direction, actor, approvalRef);
 		if (proposal.targetType !== "skill") throw new Error(`evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}" — this build writes and restores the fixed file set of one skill object and moves one capability row, so there is no executor to ${direction} an applied ${proposal.targetType} record`);
 		const prepared = proposal.prepared;
@@ -4168,7 +4859,7 @@ var EvolutionServiceCore = class extends Service {
 		const contentContract = content.contract;
 		const baselineContract = baseline.contract;
 		if (contentContract === void 0 !== (baselineContract === void 0)) throw new Error(`evolution: proposal "${proposal.proposalId}" records a candidate object and a production baseline of different shapes (${contentContract === void 0 ? "guidance" : "execution"} vs ${baselineContract === void 0 ? "guidance" : "execution"}) — a commit moves one object between two versions of the same shape`);
-		const targets = this.commitTargets(proposal);
+		const targets = applyTargets(proposal, this);
 		const files = [direction === "apply" ? {
 			target: targets[0],
 			baselineSha256: baseline.sha256,
@@ -4217,11 +4908,15 @@ var EvolutionServiceCore = class extends Service {
 			contentSha256: baseline === null ? null : baseline.digest,
 			...baseline === null ? {} : { source: `${sandbox}/champion/capability/${prepared.capabilityRow.name}.json` }
 		};
+		if (prepared.mcpServers !== void 0) {
+			capability.mcpServers = prepared.mcpServers;
+			capability.mcpSource = `${sandbox}/mcp-servers.json`;
+		}
 		const files = [];
 		const content = prepared.skillContent;
 		if (content !== void 0) {
 			if (content.contract === void 0) throw new Error(`evolution: capability proposal "${proposal.proposalId}" records a new skill without a declaration, and a capability candidate's skill is an execution provider — the object prepare froze is not one this build writes`);
-			const targets = this.commitTargets(proposal);
+			const targets = applyTargets(proposal, this);
 			files.push(direction === "apply" ? {
 				target: targets[0],
 				baselineSha256: null,
@@ -4357,7 +5052,7 @@ var EvolutionService = class extends EvolutionServiceCore {
 	/** Move proposed → candidate, recording the complete version set the candidate aligns to. */
 	async candidate(proposalId, versionSet, actor, mutation) {
 		const current = await this.assertNext(proposalId, "candidate");
-		if (current.targetType !== "skill" && current.targetType !== "capability") throw new Error(`evolution: proposal "${proposalId}" targets "${current.targetType}", which cannot become a candidate in this build — the candidate lifecycles here are a SKILL.md replacement of an existing skill object (evolution_prepare → the two-sided experiment evolution_replay → evolution_gate → evolution_apply) and one whole capability row with an optional new execution skill (A6), so its proposal stays a recorded proposal`);
+		if (current.targetType !== "skill" && current.targetType !== "capability" && current.targetType !== "task_definition") throw new Error(`evolution: proposal "${proposalId}" targets "${current.targetType}", which cannot become a candidate in this build — the candidate lifecycles here are a SKILL.md replacement of an existing skill object (evolution_prepare → the two-sided experiment evolution_replay → evolution_gate → evolution_apply) and one whole capability row with an optional new execution skill (A6), so its proposal stays a recorded proposal`);
 		validateVersionSet(versionSet);
 		validateMutation(current.targetType, mutation);
 		await this.append({
@@ -4377,6 +5072,18 @@ var EvolutionService = class extends EvolutionServiceCore {
 		const mutation = current.mutation;
 		validateMutation(current.targetType, mutation);
 		assertSegment(proposalId, "proposalId");
+		if (current.targetType === "task_definition") {
+			const prepared = await prepareTaskDefinition(this.root, this.taskTemplatesRoot(), current);
+			await this.append({
+				formatVersion: 4,
+				kind: "prepared",
+				proposalId,
+				...prepared,
+				actor,
+				at: (/* @__PURE__ */ new Date()).toISOString()
+			});
+			return this.get(proposalId);
+		}
 		if (current.targetType === "capability") return this.prepareCapability(current, actor);
 		const { name } = mutation;
 		const directory = join(this.skillRoot, name);
@@ -4431,7 +5138,8 @@ var EvolutionService = class extends EvolutionServiceCore {
 			file: this.capabilityConfigPath,
 			name: candidate.row.name,
 			entry: candidate.row.entry,
-			restored: baselineEntry
+			restored: baselineEntry,
+			...candidate.mcpServers === void 0 ? {} : { mcpServers: candidate.mcpServers }
 		});
 		const dir = join(this.root, "sandbox", proposalId);
 		const sandbox = `sandbox/${proposalId}`;
@@ -4445,12 +5153,13 @@ var EvolutionService = class extends EvolutionServiceCore {
 			files.push(rel);
 		};
 		await write(rowRelative, capabilityRowBytes(candidate.row.entry));
+		if (candidate.mcpServers !== void 0) await write("mcp-servers.json", canonicalJson(candidate.mcpServers));
 		if (baselineEntry !== null) await write(championRelative, capabilityRowBytes(baselineEntry));
 		if (candidate.skill !== void 0) {
 			await write(`skills/${candidate.skill.name}/SKILL.md`, Buffer.from(candidate.skill.content, "utf8"));
 			await write(`skills/${candidate.skill.name}/${SKILL_SIDECAR_FILE}`, serializeSkillSidecar(candidate.skill.sidecar));
 		}
-		const refusals = await this.capabilityRowRefusals(candidate.row, candidate.skill === void 0 ? void 0 : join(dir, "skills")).catch(async (error) => {
+		const refusals = await this.capabilityRowRefusals(candidate.row, candidate.skill === void 0 ? void 0 : join(dir, "skills"), candidate.mcpServers).catch(async (error) => {
 			await rm(dir, {
 				recursive: true,
 				force: true
@@ -4495,6 +5204,7 @@ var EvolutionService = class extends EvolutionServiceCore {
 			...skillContent === void 0 ? {} : { skillBaseline: null },
 			capabilityRow,
 			capabilityBaseline,
+			...candidate.mcpServers === void 0 ? {} : { mcpServers: mcpServerIdentity(candidate.mcpServers) },
 			...capabilityTable === void 0 ? {} : { capabilityTable },
 			files,
 			actor,
@@ -4518,6 +5228,7 @@ var EvolutionService = class extends EvolutionServiceCore {
 		const vocabulary = await verifierVocabularyOf(this.ctx);
 		return {
 			table,
+			mcpServers: this.effectiveMcpServers(),
 			...vocabulary === void 0 ? {} : { verifierVocabulary: vocabulary },
 			skillRoots: await this.skillDiscoveryRoots(),
 			skillRoot: this.skillRoot
@@ -4528,7 +5239,7 @@ var EvolutionService = class extends EvolutionServiceCore {
 		return [this.skillRoot, ...await skillSearchRoots({ cwd: process.cwd() })];
 	}
 	/** The row as it would read after the write, judged by the admission pre-check. */
-	async capabilityRowRefusals(row, sandboxSkillRoot) {
+	async capabilityRowRefusals(row, sandboxSkillRoot, mcpServers) {
 		const table = this.effectiveCapabilities();
 		if (table === void 0) throw new Error("evolution: the effective capability registry cannot be read in this context, so the capability row cannot be pre-checked — nothing was changed");
 		const verifierRefs = await registeredVerifierIds(this.ctx);
@@ -4536,6 +5247,10 @@ var EvolutionService = class extends EvolutionServiceCore {
 			name: row.name,
 			entry: row.entry,
 			table,
+			mcpRegistry: {
+				...this.effectiveMcpServers(),
+				...mcpServers
+			},
 			view: {
 				cwd: process.cwd(),
 				...sandboxSkillRoot === void 0 ? {} : { extraRoots: [sandboxSkillRoot] }
@@ -4550,7 +5265,7 @@ var EvolutionService = class extends EvolutionServiceCore {
 		const current = await this.assertNext(proposalId, "gated");
 		validateGateAnswers(answers);
 		let experimentReport;
-		if (current.targetType === "skill" || current.targetType === "capability") {
+		if (current.targetType === "skill" || current.targetType === "capability" || current.targetType === "task_definition") {
 			const [experiment] = await this.experiments(proposalId);
 			if (experiment === void 0) throw new Error(`evolution: ${current.targetType} proposal "${proposalId}" has no two-sided experiment — the gate answers must rest on both sides of every frozen sample, so evaluate the candidate with evolution_replay before gating it`);
 			try {
@@ -4621,7 +5336,7 @@ var EvolutionService = class extends EvolutionServiceCore {
 			const promotion = await this.checkPromotion(proposalId);
 			await this.checkProductionBaseline(proposalId);
 			const request = this.commitRequest(proposal, "apply", actor, approvalRef);
-			const bytes = proposal.targetType === "capability" ? await capabilityBytes(this.root, proposal, "apply") : await (async () => {
+			const bytes = proposal.targetType === "task_definition" ? [await readVerifiedFile(this.root, request.files[0].source)] : proposal.targetType === "capability" ? await capabilityBytes(this.root, proposal, "apply") : await (async () => {
 				const candidate = await readVerifiedSkillCandidate(this.root, this.skillRoot, proposal);
 				return [candidate.skillMd, ...candidate.sidecar === void 0 ? [] : [candidate.sidecar]];
 			})();
@@ -4637,6 +5352,11 @@ var EvolutionService = class extends EvolutionServiceCore {
 	async checkPromotion(proposalId) {
 		const proposal = await this.get(proposalId);
 		await this.assertSupportedSource(proposal);
+		if (proposal.targetType === "task_definition") {
+			await readTaskDefinition(this.root, proposal);
+			await assertTaskDefinitionPromotion(this.promotionSources(), proposal);
+			return { providers: [] };
+		}
 		if (proposal.targetType === "capability") return this.checkCapabilityPromotion(proposal);
 		if (proposal.targetType !== "skill") throw noEvaluatorRefusal(proposal);
 		if (proposal.prepared?.mechanical !== true || proposal.prepared.sandbox == null) throw new Error(`evolution: skill proposal "${proposal.proposalId}" has no materialized candidate — nothing this proposal names was ever evaluated; record a structured candidate and prepare it (evolution_candidate / evolution_prepare) before promoting it`);
@@ -4656,7 +5376,10 @@ var EvolutionService = class extends EvolutionServiceCore {
 			name: prepared.skill.name,
 			directory: prepared.skillDirectory,
 			sidecar: prepared.skill.sidecar
-		}, capabilityTableWith(table, prepared.row));
+		}, capabilityTableWith(table, prepared.row), {
+			...this.effectiveMcpServers(),
+			...prepared.mcpServers?.definitions
+		});
 		if (!verdict.valid) throw new Error(`evolution: the new skill "${prepared.skill.name}" of capability candidate "${proposal.proposalId}" is not a usable provider — ${verdict.defects.map((item) => `${item.code}: ${item.detail}`).join("; ")}; a promotion installs only a provider a worker could load and whose verifier and tools the deployment can grant`);
 		return { providers: [promotionProviderOf(verdict)] };
 	}
@@ -4665,7 +5388,7 @@ var EvolutionService = class extends EvolutionServiceCore {
 		return {
 			...this.promotionSources(),
 			store: () => this.capabilityStore(),
-			rowRefusals: (row, sandboxSkillRoot) => this.capabilityRowRefusals(row, sandboxSkillRoot)
+			rowRefusals: (row, sandboxSkillRoot, mcpServers) => this.capabilityRowRefusals(row, sandboxSkillRoot, mcpServers)
 		};
 	}
 	/** The services the promotion gate re-reads from this context: the experiments, the task store, the judges and the session plane. */
@@ -4729,6 +5452,9 @@ var EvolutionService = class extends EvolutionServiceCore {
 	async readSkillCandidate(proposalId) {
 		return readVerifiedSkillCandidate(this.root, this.skillRoot, await this.get(proposalId));
 	}
+	async readTaskDefinitionCandidate(proposalId) {
+		return readTaskDefinition(this.root, await this.get(proposalId));
+	}
 	/** Read a prepared **capability** candidate back out of its sandbox and verify it. */
 	async readCapabilityCandidate(proposalId) {
 		return readPreparedCapability(this.root, await this.get(proposalId));
@@ -4736,6 +5462,7 @@ var EvolutionService = class extends EvolutionServiceCore {
 	/** The production-baseline check (P3), on the apply seams only: production must still hold the object prepare read. */
 	async checkProductionBaseline(proposalId) {
 		const proposal = await this.get(proposalId);
+		if (proposal.targetType === "task_definition") return assertTemplateBaseline(this.taskTemplatesRoot(), proposal);
 		if (proposal.targetType === "capability") return this.assertCapabilityBaseline(proposal);
 		await this.assertProductionBaseline(proposal);
 	}
@@ -4806,6 +5533,14 @@ var EvolutionService = class extends EvolutionServiceCore {
 			}
 			this.assertTargetUncommitted(proposal);
 			const request = this.commitRequest(proposal, "rollback", actor, approvalRef);
+			if (proposal.targetType === "task_definition") {
+				await assertTemplateBaseline(this.taskTemplatesRoot(), proposal, true);
+				await commitIntent(this.commitHost(), request, request.files[0].source === void 0 ? [void 0] : [await readVerifiedFile(this.root, request.files[0].source)]);
+				return {
+					targets: request.files.map((file) => file.target),
+					proposal: await this.get(proposalId)
+				};
+			}
 			if (proposal.targetType === "capability") {
 				await this.assertCapabilityApplied(proposal, request);
 				await commitIntent(this.commitHost(), request, await capabilityBytes(this.root, proposal, "rollback"));
@@ -4856,7 +5591,7 @@ var EvolutionService = class extends EvolutionServiceCore {
 	/** Settle every open commit intent, in ledger order (K2) — the explicit startup entry. */
 	/** The two-sided experiment entry (§F.2). The orchestrator itself lives in `experiment/`. */
 	async runExperiment(spec, caller, actor, options = {}) {
-		await this.assertSupportedSource(await this.get(spec.proposalId), await this.storeOfSession(String(caller)));
+		await this.assertSupportedSource(await this.get(spec.proposalId), await this.storeOfSession(String(caller)), spec);
 		return runExperiment(this.experimentSources(), {
 			spec,
 			caller,
@@ -4867,7 +5602,7 @@ var EvolutionService = class extends EvolutionServiceCore {
 	/** Continue a frozen experiment by id. Its specification *is* the recorded spec. */
 	async resumeExperiment(experimentId, caller, actor, options = {}) {
 		const experiment = await this.experiment(experimentId);
-		await this.assertSupportedSource(await this.get(experiment.proposalId), experiment.storeId ?? await this.storeOfSession(String(caller)));
+		await this.assertSupportedSource(await this.get(experiment.proposalId), experiment.storeId ?? await this.storeOfSession(String(caller)), experiment.frozen);
 		return resumeExperiment(this.experimentSources(), {
 			experimentId,
 			caller,
@@ -4876,10 +5611,12 @@ var EvolutionService = class extends EvolutionServiceCore {
 		});
 	}
 	/** Re-read the proposal's Diagnosis against the experiment's own task store before any executable step. */
-	async assertSupportedSource(proposal, storeId) {
+	async assertSupportedSource(proposal, storeId, specification) {
 		const diagnosisIds = proposal.sourceRefs.filter((ref) => ref.startsWith("diagnosis:")).map((ref) => ref.slice(10));
 		if (diagnosisIds.length === 0) return;
-		const experimentStoreId = storeId ?? (await this.experiments(proposal.proposalId))[0]?.storeId;
+		const experiment = specification === void 0 ? (await this.experiments(proposal.proposalId))[0] : void 0;
+		const experimentStoreId = storeId ?? experiment?.storeId;
+		const spec = specification ?? experiment?.frozen;
 		if (experimentStoreId === void 0) return;
 		const task = optionalService(this.ctx, "task");
 		if (task === void 0) return;
@@ -4895,7 +5632,7 @@ var EvolutionService = class extends EvolutionServiceCore {
 				const runId = ref.slice(separator + 1);
 				return snapshot.runs.some((run) => run.runId === runId && run.taskId === source.taskId && run.status === "verified");
 			});
-			if (source.status === "verified" || successfulRun) throw new Error(`evolution: diagnosis "${diagnosisId}" names a successful source task/run, and this build has no frozen metric or comparator for "faster or cheaper"; its suggestion remains recorded, with zero experiment, promotion, application or new business Run`);
+			if ((source.status === "verified" || successfulRun) && (spec?.objective !== "tool-call-reduction" || !spec.samples.some((sample) => sample.taskId === source.taskId && sample.role === "observed-success"))) throw new Error(`evolution: diagnosis "${diagnosisId}" names a successful source task/run; its frozen experiment must declare objective tool-call-reduction and include that source as an observed-success sample`);
 		}
 	}
 	/** The services one experiment runs on, resolved softly: the ledger, the task store, the runtime seam and the judge vocabulary. */
@@ -4916,11 +5653,13 @@ var EvolutionService = class extends EvolutionServiceCore {
 				replayTask: (storeId, championTaskId, options, callerSessionId) => taskRuntime.replayTask(storeId, championTaskId, options, callerSessionId),
 				capabilityProviderReport: (sessionId, capabilities) => taskRuntime.capabilityProviderReport(sessionId, capabilities),
 				...typeof taskRuntime.listCapabilities === "function" ? { listCapabilities: () => taskRuntime.listCapabilities() } : {},
+				listMcpServers: () => this.effectiveMcpServers(),
 				precheckCapabilityTable: async (request) => {
 					const verifierRefs = await registeredVerifierIds(this.ctx);
 					return precheckProviders({
 						capabilities: request.capabilities,
 						table: request.table,
+						mcpRegistry: request.mcpRegistry ?? this.effectiveMcpServers(),
 						view: { extraRoots: [...request.extraRoots] },
 						...verifierRefs === void 0 ? {} : { verifierRefs },
 						commitLedger: this
@@ -4934,4 +5673,4 @@ var EvolutionService = class extends EvolutionServiceCore {
 var evolution_default = EvolutionService;
 
 //#endregion
-export { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EXPERIMENT_ADMISSION_SOURCES, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, OUTCOME_RANK, agentOptionsOf, applyTargets, assertAdmissionRecord, assertBudgetAllowsStart, assertCapabilityCandidateAdmissible, assertCapabilityRow, assertExperimentReport, assertExperimentSample, assertExperimentStartRecord, assertFrozenExperiment, assertRecordedRunOrigin, assertSampleCriteria, assertSampleRole, buildExperimentReport, buildWorkspace, candidateRegistryRevisionOf, canonicalJson, capabilityOverlay, capabilityRefusal, capabilityRowBytes, capabilityRowDigest, capabilityRowIdentity, capabilityTableWith, compareExperimentSides, compareReplaySides, costOf, criteriaOf, criterionDetail, evolution_default as default, digestOf, directoryDigest, discoverSkill, evidenceRefsOf, experimentCandidate, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentStore, foldExperiments, freezeExperiment, frozenCapabilitySample, frozenCapabilitySideOf, frozenCriterionOf, frozenDigestOf, frozenIdentityOf, frozenProviderIdentity, frozenSampleOf, isExperimentRecord, latestReview, modelSelectionOf, nonEmpty, overallExperimentVerdict, preparedContentDigestOf, protectedInputsDigest, readPreparedCapability, recoveredSampleRecord, refusedBaselineRun, refusedProviderLines, renderProviderRoles, reportedTokensSpent, resolveLink, resumeExperiment, reviewRefOf, runExperiment, runFactsOf, safeSegment, sameKeyRefusal, sampleRecord, sideDetailOf, tokensOfRecord, validateCapabilityMutation, validateSpec, walkSnapshotInput };
+export { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EXPERIMENT_ADMISSION_SOURCES, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, OUTCOME_RANK, agentOptionsOf, applyTargets, assertAdmissionRecord, assertBudgetAllowsStart, assertCapabilityCandidateAdmissible, assertCapabilityRow, assertExperimentReport, assertExperimentSample, assertExperimentStartRecord, assertFrozenExperiment, assertMcpServerIdentity, assertRecordedRunOrigin, assertSampleCriteria, assertSampleRole, assertTemplateBaseline, assertTemplateIdentity, buildExperimentReport, buildWorkspace, candidateRegistryRevisionOf, canonicalJson, capabilityOverlay, capabilityRefusal, capabilityRowBytes, capabilityRowDigest, capabilityRowIdentity, capabilityTableWith, compareExperimentSides, compareReplaySides, costOf, criteriaOf, criterionDetail, evolution_default as default, digestOf, directoryDigest, discoverSkill, evidenceRefsOf, experimentCandidate, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentStore, foldExperiments, freezeCriterionRepair, freezeExperiment, frozenCapabilitySample, frozenCapabilitySideOf, frozenCriterionOf, frozenDigestOf, frozenIdentityOf, frozenProviderIdentity, frozenSampleOf, independentOracleCriteria, isExperimentRecord, latestReview, mcpServerIdentity, modelSelectionOf, nonEmpty, oracleContractDigest, overallExperimentVerdict, prepareTaskDefinition, preparedContentDigestOf, protectedInputsDigest, readPreparedCapability, readTaskDefinition, recoveredSampleRecord, refusedBaselineRun, refusedProviderLines, renderProviderRoles, reportedTokensSpent, resolveLink, resumeExperiment, reviewRefOf, runExperiment, runFactsOf, safeSegment, sameKeyRefusal, sampleRecord, sideDetailOf, templateBytes, templateCommitRequest, templateIdentity, templateLibraryDigest, tokensOfRecord, validateCapabilityMutation, validateSpec, validateTaskDefinitionMutation, walkSnapshotInput };

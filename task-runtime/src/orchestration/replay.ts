@@ -68,6 +68,7 @@ export async function runReplayTask(
     sessionId,
     ...(init.championRunId === undefined ? {} : { parentRunId: init.championRunId }),
     capabilitySnapshot: capabilitySnapshot(init.manifest),
+    ...(init.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: init.taskTemplatesRoot }),
     ...(init.agentPreset === undefined ? {} : { agentPreset: init.agentPreset }),
     executionPhase: init.spawn ? 'active' : 'submitted',
     ...(birthSubmission === undefined ? {} : { submission: birthSubmission }),
@@ -86,6 +87,7 @@ export async function runReplayTask(
    */
   const bound: OrchestrateEnv = {
     ...env,
+    ...(init.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: init.taskTemplatesRoot }),
     ...(init.agentOptions === undefined ? {} : { agentOptions: init.agentOptions }),
   }
   /**
@@ -141,6 +143,7 @@ export async function runReplayTask(
        * The experiment's frozen selection (absent for an ordinary replay): the
        * agent runtime creates this worker under it, and the deployment remembers
        */
+      ...(bound.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: bound.taskTemplatesRoot }),
       ...(bound.agentOptions === undefined ? {} : { agentOptions: bound.agentOptions }),
       ...(advance === undefined ? {} : { signal: advance }),
     })

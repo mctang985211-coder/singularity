@@ -2,7 +2,7 @@
  * @module dsh-singularity-evolution/commit */
 
 import { randomBytes } from 'node:crypto'
-import { mkdir, open, readdir, rename, rm, rmdir } from 'node:fs/promises'
+import { link, mkdir, open, readdir, rename, rm, rmdir } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
@@ -56,6 +56,7 @@ export interface CommitHost {
   readonly root: string
   /** Production skill root: a commit's target must sit under it. */
   readonly skillRoot: string
+  readonly taskTemplatesRoot?: string
   /** Append one record through the service's funnel (format check, staged fold, durable write). */
   append(record: EvolutionRecord): Promise<void>
   /** Read the recoverable bytes a commit names and verify them against the digest the intent records. */
@@ -92,6 +93,7 @@ export async function writeFileAtomic(
   target: string,
   bytes: Buffer,
   onStaged?: () => void | Promise<void>,
+  appendOnly = false,
 ): Promise<void> {
   const directory = dirname(target)
   const staging = join(directory, `.${basename(target)}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`)
@@ -105,7 +107,10 @@ export async function writeFileAtomic(
     await handle.close()
     handle = undefined
     await onStaged?.()
-    await rename(staging, target)
+    if (appendOnly) {
+      await link(staging, target)
+      await rm(staging)
+    } else await rename(staging, target)
     try {
       await syncDirectory(directory)
     } catch (error) {
@@ -204,6 +209,7 @@ export async function commitIntent(
       )
     }
   }
+  if (request.capability?.mcpServers !== undefined) await host.readSource(request.capability.mcpSource!, request.capability.mcpServers.digest)
   // The same rule for the row's own recoverable bytes: a capability intent that
   // names a source must be able to read the row it installs back from it.
   if (request.capability !== undefined && request.capability.source !== undefined) {
@@ -216,6 +222,7 @@ export async function commitIntent(
   if (request.capability !== undefined && request.capability.source !== undefined) {
     await syncSourceRelative(host, request, request.capability.source, `capability row "${request.capability.name}"`)
   }
+  if (request.capability?.mcpServers !== undefined) await syncSourceRelative(host, request, request.capability.mcpSource!, 'MCP definitions')
   const intent: CommitIntentView = {
     intentId: `${request.proposalId}/${request.direction}`,
     proposalId: request.proposalId,
@@ -278,6 +285,17 @@ export async function reconcileIntent(host: CommitHost, intent: CommitIntentView
         `evolution: the recoverable source "${file.source}" of commit intent "${intent.intentId}" for the file "${file.target}" is no ` +
           `longer readable as the bytes it committed (${error instanceof Error ? error.message : String(error)}) — the source bytes cannot ` +
           `be re-verified under ${host.root}, so the commit stops by name and the intent stays open; nothing was written`,
+      )
+    }
+  }
+  if (intent.capability?.mcpServers !== undefined) {
+    try {
+      await host.readSource(intent.capability.mcpSource!, intent.capability.mcpServers.digest)
+    } catch (error) {
+      return outcome(
+        'blocked',
+        `evolution: the recoverable MCP source "${intent.capability.mcpSource}" of commit intent "${intent.intentId}" cannot be ` +
+          `re-verified (${error instanceof Error ? error.message : String(error)}); the intent stays open and nothing was written`,
       )
     }
   }
@@ -490,7 +508,7 @@ async function installFile(
         'intent records content — nothing was written',
     )
   }
-  await writeFileAtomic(file.target, bytes, () => host.probe('write-staged', file.target))
+  await writeFileAtomic(file.target, bytes, () => host.probe('write-staged', file.target), host.taskTemplatesRoot !== undefined && dirname(file.target) === host.taskTemplatesRoot)
   const readback = await host.readProduction(relativeTarget)
   if (readback === null || readback.sha256 !== file.contentSha256) {
     throw new Error(
@@ -515,7 +533,7 @@ async function removeFile(host: CommitHost, intent: CommitIntentView, target: st
     )
   }
   let directoryGone = false
-  if (directory !== host.skillRoot) {
+  if (directory !== host.skillRoot && directory !== host.taskTemplatesRoot) {
     directoryGone = await rmdir(directory).then(
       () => true,
       () => false,
@@ -669,6 +687,7 @@ async function appendCompletion(host: CommitHost, intent: CommitIntentView): Pro
 
 /** One commit target relative to the production skill root: the shape the intent records. */
 function productionRelative(host: CommitHost, target: string): string {
+  if (host.taskTemplatesRoot !== undefined && dirname(resolve(target)) === host.taskTemplatesRoot && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*@[1-9][0-9]*\.json$/.test(basename(target))) return resolve(target)
   const rel = relative(host.skillRoot, resolve(target))
   if (rel.length === 0 || rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(

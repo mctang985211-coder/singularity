@@ -198,10 +198,7 @@ const Supervision: z<SupervisionConfig> = z.object({
 
 export const ConfigSchema: z<Config> = z.object({
   capabilities: z.dict(Capability).default({}),
-  mcpServers: z.dict(z.object({
-    serverName: z.string(), description: z.string(), command: z.string(),
-    args: z.array(z.string()), env: z.dict(z.string()), cwd: z.string(), toolCallTimeoutMs: z.number(),
-  })).default({}),
+  mcpServers: z.dict(z.any()).default({}),
   defaultPreset: z.string(),
   taskTemplatesRoot: z.string(),
   verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),

@@ -5,25 +5,26 @@
  * The K2/K3 open-intent gate matches a provider by the *directory* an intent's
  * file set lives in, so a capability commit that moves **one row and no file**
  * (an L1 candidate composing capabilities the store already grants) is invisible
- * to ordinary admission: its row lands in the in-process registry before the
- * deployment's own table file is written (that write is the commit's last
- * durable step), and when that write is refused the row stays usable by
- * everything that resolves against the table. This spec pins that it does not:
+ * to ordinary admission. The durable table is published before the in-process
+ * registry, and the row-keyed open-intent gate covers either side of an
+ * interrupted publication. This spec pins both protections:
  *
  * 1. **A refused config write leaves no usable row.** A capability apply that
- *    stops at the table-file seam (a third party's bytes landed under it) records
- *    the row in the process and nothing in the file; the row is then refused by
- *    name at every admission read — the pre-check's row-keyed verdict, the
- *    report the model reads, and a real batch that requires it, which is
- *    rejected before a task, a run or an event exists.
+ *    stops at the table-file seam (a third party's bytes landed under it) leaves
+ *    no row in the process and preserves the third party's file. The report
+ *    refuses the open row by name, and a real batch requiring the absent row is
+ *    rejected before a task, a run or evidence exists.
  * 2. **The write's last observation is the one before the rename.** A third
  *    party's write injected at the staged seam (after the drift gate, before the
  *    rename) is refused as `capability-table-changed`: its bytes are what the
  *    file keeps, and no row it would have overwritten becomes usable.
- * 3. **The settled state admits, the rollback removes.** A completed apply has
+ * 3. **A published row under an open intent stays unusable.** If the row and
+ *    file landed but the completion did not, a real batch is rejected by the
+ *    open-intent gate before any task, run or evidence exists.
+ * 4. **The settled state admits, the rollback removes.** A completed apply has
  *    the row in the registry, in the file, and admissible; the person's rollback
  *    takes it out of all three.
- * 4. **A restart does not clear an open intent.** A second deployment booted over
+ * 5. **A restart does not clear an open intent.** A second deployment booted over
  *    the same directory — the same table the file holds, a new service instance
  *    over the same ledger — still refuses the row the open intent names; only the
  *    explicit reconciliation settles it, and the row is admitted afterwards.
@@ -192,7 +193,7 @@ const SAMPLES = [
  */
 async function boot(
   workspace: string,
-  options: { probe?: TableProbe; chain?: 'fresh' | 'reuse' } = {},
+  options: { probe?: TableProbe; commitProbe?: (stage: string) => void; chain?: 'fresh' | 'reuse' } = {},
 ): Promise<Fixture> {
   let h!: RunStack
   h = await startRunStack({
@@ -246,6 +247,7 @@ async function boot(
     modelSelection: () => SELECTION,
     capabilityConfig: configFile,
     ...(options.probe === undefined ? {} : { capabilityConfigProbe: options.probe as never }),
+    ...(options.commitProbe === undefined ? {} : { commitProbe: options.commitProbe }),
   })
   if (options.chain === 'reuse') {
     return {
@@ -378,10 +380,9 @@ describe('A6 EVO-2: a capability row under an open commit intent', () => {
     const refusal = await refusalOf(f.evolution.apply(PROPOSAL, ROOT, 'approval:apply'))
     expect(rewritten).toBe(true)
     expect(refusal).toContain('capability-table-changed')
-    // The half-product the open intent is the record of: the row is in the
-    // process's table — the mirror is written before the file — and the
-    // deployment's file keeps exactly the third party's bytes.
-    expect(f.h.runtime.listCapabilities()[ROW]).toEqual(ROW_ENTRY)
+    // The config-first publication stops before the runtime table moves, and
+    // the deployment's file keeps exactly the third party's bytes.
+    expect(f.h.runtime.listCapabilities()[ROW]).toBeUndefined()
     expect(await readFile(f.configFile, 'utf8')).toBe(thirdParty)
     expect(await applied(f)).toHaveLength(0)
     expect((await f.evolution.get(PROPOSAL)).openIntent?.intentId).toBe(`${PROPOSAL}/apply`)
@@ -406,8 +407,8 @@ describe('A6 EVO-2: a capability row under an open commit intent', () => {
         requiredCapabilities: [ROW],
       }],
     }))
-    expect(batchRefusal).toContain('commit-intent-open')
-    expect(batchRefusal).toContain(`capability "${ROW}"`)
+    expect(batchRefusal).toContain('capability gap')
+    expect(batchRefusal).toContain(ROW)
     const afterAdmission = await f.h.snapshot(root.storeId)
     expect(afterAdmission.tasks).toHaveLength(beforeAdmission.tasks.length)
     expect(afterAdmission.runs).toHaveLength(beforeAdmission.runs.length)
@@ -436,13 +437,44 @@ describe('A6 EVO-2: a capability row under an open commit intent', () => {
     expect(rewritten).toBe(true)
     expect(refusal).toContain('capability-table-changed')
     // The verification ran after the seam and immediately before the rename: the
-    // file keeps the third party's bytes exactly, and the row this commit
-    // installed is not usable.
+    // file keeps the third party's bytes exactly, and the runtime row has not
+    // been installed.
     expect(await readFile(f.configFile, 'utf8')).toBe(thirdParty)
-    expect(f.h.runtime.listCapabilities()[ROW]).toEqual(ROW_ENTRY)
+    expect(f.h.runtime.listCapabilities()[ROW]).toBeUndefined()
     expect(await applied(f)).toHaveLength(0)
     expect((await f.evolution.get(PROPOSAL)).openIntent?.intentId).toBe(`${PROPOSAL}/apply`)
     expect(rowRefusals(await f.h.runtime.capabilityProviderReport(ROOT, [ROW]), ROW)).toEqual(['commit-intent-open'])
+  })
+
+  it('refuses a published row before its completion is recorded, without admitting a batch', async () => {
+    const f = await boot(workspaceDirectory(), {
+      commitProbe: stage => {
+        if (stage === 'commit-verified') throw new Error('fixture: the process died before the completion was recorded')
+      },
+    })
+    expect(await refusalOf(f.evolution.apply(PROPOSAL, ROOT, 'approval:apply'))).toContain('fixture: the process died')
+    expect(f.h.runtime.listCapabilities()[ROW]).toEqual(ROW_ENTRY)
+    expect(await readFile(f.configFile, 'utf8')).toContain(`"${ROW}": {"skills":["${SKILL}"],"tools":["filesystem"]}`)
+    expect(await applied(f)).toHaveLength(0)
+    expect((await f.evolution.get(PROPOSAL)).openIntent?.intentId).toBe(`${PROPOSAL}/apply`)
+    expect(rowRefusals(await f.h.runtime.capabilityProviderReport(ROOT, [ROW]), ROW)).toEqual(['commit-intent-open'])
+
+    const root = f.root!
+    const before = await f.h.snapshot(root.storeId)
+    const refusal = await refusalOf(f.h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT, {
+      reason: 'the child needs the published row',
+      children: [{
+        objective: `use ${ROW}`,
+        acceptanceCriteria: [{ description: `the ${ROW} provider runs`, command: 'true' }],
+        requiredCapabilities: [ROW],
+      }],
+    }))
+    expect(refusal).toContain('commit-intent-open')
+    expect(refusal).toContain(`capability "${ROW}"`)
+    const after = await f.h.snapshot(root.storeId)
+    expect(after.tasks).toHaveLength(before.tasks.length)
+    expect(after.runs).toHaveLength(before.runs.length)
+    expect(after.evidence).toHaveLength(before.evidence.length)
   })
 
   it('admits the row after the settled apply, and takes it out of table and file on the rollback', async () => {
@@ -473,10 +505,11 @@ describe('A6 EVO-2: a capability row under an open commit intent', () => {
     expect(rolledFile).not.toContain(`"${ROW}"`)
     expect(rolledFile).toBe(baseline)
 
-    // Nothing grants the row any more: no row-level refusal (the intent is
-    // settled) and no provider either.
+    // The intent is settled and nothing grants the row any more: admission
+    // identifies an unknown capability rather than an open commit.
+    expect((await f.evolution.get(PROPOSAL)).openIntent).toBeUndefined()
     const afterRollback = await f.h.runtime.capabilityProviderReport(ROOT, [ROW])
-    expect(rowRefusals(afterRollback, ROW)).toEqual([])
+    expect(rowRefusals(afterRollback, ROW)).toEqual(['capability-unknown'])
     expect(afterRollback.capabilities.flatMap(row => row.skills)).toEqual([])
   })
 
@@ -490,8 +523,10 @@ describe('A6 EVO-2: a capability row under an open commit intent', () => {
         throw new Error('fixture: the process died before the table file was written')
       },
     })
+    const baseline = await readFile(f.configFile, 'utf8')
     expect(await refusalOf(f.evolution.apply(PROPOSAL, ROOT, 'approval:apply'))).toContain('fixture: the process died')
-    expect(f.h.runtime.listCapabilities()[ROW]).toEqual(ROW_ENTRY)
+    expect(f.h.runtime.listCapabilities()[ROW]).toBeUndefined()
+    expect(await readFile(f.configFile, 'utf8')).toBe(baseline)
     expect(await applied(f)).toHaveLength(0)
 
     // The restart: the first image is gone (its descriptors with it) and a second

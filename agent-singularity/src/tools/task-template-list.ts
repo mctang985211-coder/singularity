@@ -1,7 +1,7 @@
 import { defineTool, type ParameterSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import { message, text } from '../shared.ts'
+import { message, sessionId, text } from '../shared.ts'
 
 /** The same creation input is accepted by root intake and each direct child. */
 export const templateBindingParameters = {
@@ -30,9 +30,9 @@ export function defineTaskTemplateListTool(ctx: Context) {
       query: { type: 'string', description: 'Optional whitespace-separated discovery keywords; omit to inspect the full current library. Applicability is decided from appliesTo, not keyword matches.' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => text(value) },
-    execute: async args => {
+    execute: async (args, exec) => {
       try {
-        const matches = await ctx.taskRuntime.findTaskTemplates(args.query)
+        const matches = await ctx.taskRuntime.findTaskTemplates(args.query, sessionId(exec, 'task_template_list'))
         return matches.length === 0
           ? 'No matching Task template. You may still submit a complete standard contract, preserving the requested objective and acceptance.'
           : JSON.stringify(matches, null, 2)

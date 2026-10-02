@@ -176,7 +176,7 @@ describe('evolution_replay tool', () => {
     // The capability target type is no longer what this tool refuses: what it
     // refuses here is the sample derivation, which happens before anything is
     // read from the ledger — the fixture store holds no failed case to reproduce.
-    expect(refused).toMatch(/none of taskIds has a failed latest review/)
+    expect(refused).toMatch(/at least one observed-failure/)
     expect(refused).not.toMatch(/prepared skill object candidate only/)
     expect(replayTask).not.toHaveBeenCalled()
     expect(existsSync(join(svc.root, 'sandbox'))).toBe(false)
@@ -353,7 +353,7 @@ describe('evolution_replay tool', () => {
       exec('root-1'),
     )) as string
     expect(noFailure).toContain('evolution_replay rejected:')
-    expect(noFailure).toContain('no observed failure for this candidate to fix')
+    expect(noFailure).toContain('at least one observed-failure')
 
     const noHoldout = (await replayTool.execute({ proposalId: 's1', taskIds: ['t-fail'] }, exec('root-1'))) as string
     expect(noHoldout).toContain('holdoutTaskIds must name at least one task that did not select this candidate')

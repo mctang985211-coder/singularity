@@ -1,10 +1,11 @@
+import type { TaskDefinitionIdentity } from './task-definition.ts'
 /** The evolution plane's public vocabulary: lifecycle levels and records, the decisions and the provider roles a promotion reports.
  * @module dsh-singularity-evolution/types */
 
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
 import type { SkillProviderVerdict } from '@dangosys/dsh-singularity-task-runtime'
-import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
-import type { CapabilityRowIdentity } from './capability-candidate.ts'
+import type { McpServerTemplate, CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
+import type { McpServerIdentity, CapabilityRowIdentity } from './capability-candidate.ts'
 import type { SkillContentIdentity } from './replay.ts'
 import type { ModelSelection } from './replay.ts'
 import type { CommitFile, CommitStage } from './commit.ts'
@@ -24,7 +25,7 @@ export const EVOLUTION_LEVELS: readonly EvolutionLevel[] = ['L1', 'L2', 'L3', 'L
 export const EVOLUTION_DECISIONS: readonly EvolutionDecision[] = ['PROMOTE', 'REJECT', 'KEEP_FOR_FURTHER_RESEARCH']
 
 /** The target types `evolution_apply`/`evolution_rollback` move mechanically: a skill object or a capability row. */
-export const APPLYABLE_TARGET_TYPES: readonly ProposalTargetType[] = ['skill', 'capability']
+export const APPLYABLE_TARGET_TYPES: readonly ProposalTargetType[] = ['skill', 'capability', 'task_definition']
 
 /** The skill mutation: the full `SKILL.md` text for the one skill object this build moves. */
 export interface SkillMutation {
@@ -42,6 +43,9 @@ export interface PreparedView {
   mechanical: boolean
   champion: ChampionState
   /** The content identity recorded for the materialized candidate object (P2) — the digest a promotion re-reads. */
+  templateCandidate?: TaskDefinitionIdentity
+  templateBaseline?: TaskDefinitionIdentity | null
+  templateLibraries?: { baseline: string; candidate: string }
   skillContent?: SkillContentIdentity
   /** The content identity of the production object as it stood at prepare (P3) — `null` when there was none. */
   skillBaseline?: SkillContentIdentity | null
@@ -51,6 +55,7 @@ export interface PreparedView {
   capabilityBaseline?: CapabilityRowIdentity | null
   /** The capability table file's **composed identity**, frozen at prepare (A6, plan §F.4) so a third-party edit is a named stop. */
   capabilityTable?: CapabilityTableIdentity
+  mcpServers?: McpServerIdentity
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[]
 }
@@ -110,6 +115,9 @@ export type EvolutionRecord =
       /** `captured` for a same-name skill update, `absent` for a capability candidate's new skill object (A6). */
       champion: ChampionState
       /** The content identity of the materialized candidate `SKILL.md` (P2) — the digest a promotion re-reads. */
+      templateCandidate?: TaskDefinitionIdentity
+      templateBaseline?: TaskDefinitionIdentity | null
+      templateLibraries?: { baseline: string; candidate: string }
       skillContent?: SkillContentIdentity
       /** The content identity of the production `SKILL.md` as it stood at prepare (P3). */
       skillBaseline?: SkillContentIdentity | null
@@ -119,6 +127,7 @@ export type EvolutionRecord =
       capabilityBaseline?: CapabilityRowIdentity | null
       /** The composed identity of the deployment's capability table file, frozen at prepare so a third-party edit is a named stop (A6). */
       capabilityTable?: CapabilityTableIdentity
+      mcpServers?: McpServerIdentity
       /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
       files: string[]
       actor: string
@@ -199,6 +208,8 @@ export interface CommitCapability {
   contentSha256: string | null
   /** The recoverable row bytes, relative to the ledger root; absent when this direction removes the row. */
   source?: string
+  mcpServers?: McpServerIdentity
+  mcpSource?: string
 }
 
 /** Folded view of one open `commit_intent` record, as {@link EvolutionProposal} exposes it. */
@@ -252,6 +263,7 @@ export interface PromotionCheck {
 /** The task runtime as a promotion check reads it: the effective capability registry, resolved softly. */
 export interface CapabilityRegistrySource {
   listCapabilities?(): Readonly<Record<string, CapabilityConfig>>
+  listMcpServers?(): Readonly<Record<string, McpServerTemplate>>
 }
 
 /** The task runtime as a *commit* reads and moves it (A6): the one entry that reads and installs one capability row. */
@@ -260,7 +272,7 @@ export interface CapabilityRowWriter {
   applyCapabilityRow?(
     name: string,
     entry: CapabilityConfig | null,
-    options?: { commitTargets?: readonly string[]; commitRow?: string },
+    options?: { commitTargets?: readonly string[]; commitRow?: string; mcpServers?: Record<string, McpServerTemplate | null> },
   ): Promise<void>
 }
 

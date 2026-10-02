@@ -5,7 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { optionalService, registeredVerifierVocabulary } from '@dangosys/dsh-singularity-task-runtime'
-import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
+import type { McpServerTemplate, CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import type { CapabilityRegistrySource } from '../types.ts'
 
 /** The effective capability table, or `undefined` when this context cannot read one (no task-runtime service). */
@@ -35,4 +35,10 @@ export async function verifierVocabularyOf(
 ): Promise<{ ids: readonly string[]; versions: Readonly<Record<string, string>> } | undefined> {
   const vocabulary = await registeredVerifierVocabulary(ctx)
   return vocabulary === undefined ? undefined : { ids: vocabulary.ids, versions: vocabulary.versions }
+}
+
+/** Deployment server definitions, read freshly for every candidate or commit. */
+export function effectiveMcpServersOf(ctx: Context): Readonly<Record<string, McpServerTemplate>> {
+  const runtime = optionalService<CapabilityRegistrySource>(ctx, 'taskRuntime')
+  return runtime?.listMcpServers?.() ?? {}
 }

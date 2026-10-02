@@ -7,15 +7,15 @@ export function defineEvolutionCandidateTool(ctx: Context) {
   return defineTool({
     name: 'evolution_candidate',
     description:
-      'Record a proposed change as a candidate. mutationJson is ONE JSON string, not a nested tool argument: ' +
-      'for an existing skill use {"name":"existing-name","content":"the whole SKILL.md"}; for a capability use ' +
-      '{"rows":{"row-name":{"skills":["skill-name"],"tools":[]}},"skill":optionalNewSkill}. ' +
-      'A new skill is {name,content,sidecar}; sidecar becomes SKILL.contract.json and supplies only semantic fields: ' +
-      '{"precondition":"task is present","inputs":[],"outputs":[],"requiredTools":["read","write"],"verifier":{"ref":"command"}}. ' +
-      'The tool derives contractVersion:1, type:"execution", capabilities:[the sole row name], ' +
-      'content.skillMdSha256 from the exact SKILL.md text, and resources:[]. Do not submit those derived fields. ' +
-      'The row may grant only existing authorized tools; a new skill must use a ' +
-      'registered verifier. No production write occurs here. Next: evolution_prepare, evolution_replay, evolution_gate.',
+      'Record one candidate as mutationJson (a JSON string). Task: {template:<complete canonical TaskTemplate>,criterionRepair?:' +
+      '{positive:{taskId,sourceDir,parameters},negative:{taskId,sourceDir,parameters}}}; changed child criteria need both fixed ' +
+      'examples under the original independent parent oracle. Skill: {name,content:<whole SKILL.md>}. Capability: ' +
+      '{rows:{<name>:<whole row>},mcpServers?:{<id>:{serverName,description,command,args?,env?,cwd?,toolCallTimeoutMs?}},skill?:' +
+      '{name,content,sidecar:{precondition,inputs,outputs,requiredTools,verifier:{ref}}}}. A row may grant skills, native tool ' +
+      'labels or MCP ids and need not contain a Skill. New definitions must be granted by that row; use their serverName in ' +
+      'mcp__<serverName>__<tool> names. Native tools must already be authorized; existing permission and preset stay fixed. ' +
+      'New Skill sidecar contractVersion, type, capabilities, content hashes and resources are derived by this tool. No ' +
+      'production changes. Next: evolution_prepare, evolution_replay, evolution_gate.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Proposal to move into candidate' },
       versionSet: {
@@ -28,7 +28,7 @@ export function defineEvolutionCandidateTool(ctx: Context) {
         type: 'string',
         required: true,
         description:
-          'JSON text of exactly one complete mutation: {name,content} or {rows,skill?}. ' +
+          'JSON text of one complete Task template, Skill or capability mutation as described above. ' +
           'If skill is present, its sidecar is an object, not quoted JSON; supply only precondition, inputs, outputs, requiredTools and verifier:{ref}.',
       },
     },

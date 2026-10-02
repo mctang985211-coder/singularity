@@ -662,7 +662,7 @@ class ReviewDesk implements ScriptedReview {
 
   constructor(private readonly answer_: ScriptedLoopOptions['approvalAnswer']) {}
 
-  async request(request: { toolName?: string; reason?: string; agent?: { id?: string } }): Promise<ApprovalOutcome> {
+  async request(request: { toolName?: string; reason?: string; agent?: { id?: string }; signal?: AbortSignal }): Promise<ApprovalOutcome> {
     const index = this.asks.length
     this.asks.push({
       sessionId: String(request.agent?.id ?? ''),
@@ -671,7 +671,17 @@ class ReviewDesk implements ScriptedReview {
     })
     const decided = await this.answer_?.(this.asks[index]!, index)
     if (decided !== undefined) return decided
-    return await new Promise<ApprovalOutcome>(resolve => { this.held.set(index, resolve) })
+    if (request.signal?.aborted) return 'cancelled'
+    return await new Promise<ApprovalOutcome>(resolve => {
+      const settle = (outcome: ApprovalOutcome) => {
+        this.held.delete(index)
+        request.signal?.removeEventListener('abort', cancel)
+        resolve(outcome)
+      }
+      const cancel = () => settle('cancelled')
+      this.held.set(index, settle)
+      request.signal?.addEventListener('abort', cancel, { once: true })
+    })
   }
 
   answer(index: number, outcome: ApprovalOutcome): void {

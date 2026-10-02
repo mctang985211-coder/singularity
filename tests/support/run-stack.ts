@@ -105,6 +105,7 @@ export const PRESET_TOOLS = ['bash', 'read', 'write', 'edit', 'read_image', 'glo
 export interface RunStackOptions {
   /** The capability table admissions resolve against. Defaults to no capabilities. */
   readonly capabilities?: Readonly<Record<string, CapabilityConfig>>
+  readonly mcpServers?: Config['mcpServers']
   /** Root sessions of this deployment, in order; the first is the primary. Defaults to `['s-root']`. */
   readonly roots?: readonly string[]
   /**
@@ -361,6 +362,7 @@ class RunStackImpl implements RunStack {
     this.agentRuntime = new RecordingAgentRuntime(this.ctx, this.sessionRoot, () => this.primary, request => this.recordSpawnRequest(request))
     this.runtime = new TaskRuntime(this.ctx, {
       capabilities: { ...(this.options.capabilities ?? {}) },
+      mcpServers: { ...this.options.mcpServers },
       ...(this.options.maxDepth === undefined ? {} : { maxDepth: this.options.maxDepth }),
       ...(this.options.rootBudget === undefined ? {} : { rootBudget: { ...this.options.rootBudget } }),
       runBindingRoot: this.options.runBindingRoot ?? join(this.home, 'singularity', 'run-bindings'),

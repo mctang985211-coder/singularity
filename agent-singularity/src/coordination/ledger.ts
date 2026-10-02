@@ -492,6 +492,13 @@ export async function admitReviewAgent<T>(
           }
           if (attempt.settlement !== undefined) continue
           if (liveAttempts.has(attempt.sessionId) || claimedHere.has(attempt.sessionId)) continue
+          // The owner may have settled after this admission read its snapshot.
+          // Its live marker disappears only after the terminal row is durable.
+          const latest = (await readReviewAgentAttempts(rootStoreId)).find(item => item.sessionId === attempt.sessionId)
+          if (latest?.settlement !== undefined) {
+            Object.assign(attempt, { settlement: latest.settlement })
+            continue
+          }
           const recorded = (await hooks?.recorded?.(attempt)) === true
           const status: ReviewAgentSettlementStatus = recorded ? 'recorded' : 'interrupted'
           const note = recorded

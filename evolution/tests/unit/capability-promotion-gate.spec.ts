@@ -333,10 +333,10 @@ describe('capability promotion: every missing piece is a named refusal with zero
     const f = await fixture({ sourceStatus: 'verified' })
     expect((await f.svc.get('cap1')).sourceRefs).toEqual(['diagnosis:d1'])
     const promotion = await refusalOf(f.svc.checkPromotion('cap1'))
-    expect(promotion).toMatch(/successful source.*frozen.*comparator/i)
+    expect(promotion).toMatch(/successful source.*tool-call-reduction.*observed-success/i)
     await f.svc.gate('cap1', gateAnswers([f.experiment.reportPath]), 'root-1')
     expect(await refusalOf(f.svc.decide('cap1', 'PROMOTE', 'root-1', 'approval:decide'))).toMatch(
-      /successful source.*frozen.*comparator/i,
+      /successful source.*tool-call-reduction.*observed-success/i,
     )
     await assertZeroWrites(f)
   })
@@ -347,7 +347,7 @@ describe('capability promotion: every missing piece is a named refusal with zero
     await f.svc.decide('cap1', 'PROMOTE', 'root-1', 'approval:decide')
     f.sourceTask!.status = 'verified'
     expect(await refusalOf(f.svc.apply('cap1', 'root-1', 'approval:apply'))).toMatch(
-      /successful source.*frozen.*comparator/i,
+      /successful source.*tool-call-reduction.*observed-success/i,
     )
     const lines = await ledgerLines(f.root)
     expect(lines.some(line => line.kind === 'commit_intent' || line.kind === 'applied')).toBe(false)

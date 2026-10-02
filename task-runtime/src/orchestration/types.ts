@@ -87,6 +87,7 @@ export interface SpawnChildRequest {
    * The model selection the child's agent is created under, replacing the
    * deployment's own default for this worker alone (`AgentRuntime.spawn` merges
    */
+  taskTemplatesRoot?: string
   agentOptions?: AgentOptions
   signal?: AbortSignal
 }
@@ -195,6 +196,7 @@ export interface OrchestrateEnv {
    * The model selection every worker this orchestration spawns is created under,
    * when the run it serves is bound to one. A replay carries the experiment's
    */
+  taskTemplatesRoot?: string
   agentOptions?: AgentOptions
   /**
    * The provider pre-check, for the one case that has no verdict to carry: a
@@ -437,11 +439,15 @@ export interface OwedBatchResult {
  * replay run, never to the runtime's configuration. The evolution replay is
  */
 export interface ReplayOverlay {
+  /** Frozen library for this replay and descendants; production config is unchanged. */
+  taskTemplatesRoot?: string
   /**
    * Whole-row capability replacements: an entry overrides the same-named row of
    * the configured table for this run's capability resolution (the same
    */
   capabilityOverrides?: Record<string, CapabilityConfig>
+  /** Candidate definitions resolved for this replay only. */
+  mcpServers?: Record<string, import('../mcp-servers.ts').McpServerTemplate>
   /**
    * Extra skill roots forwarded to the worker grant (`WorkerGrant.skillRoots`):
    * every `<root>/<name>/SKILL.md` found is registered into the worker's own
@@ -475,6 +481,7 @@ export interface ReplayRunInit {
    * The model selection this replay's worker is created under (S4-E §Q3), already
    * resolved by the caller from the deployment's real configuration and registry:
    */
+  taskTemplatesRoot?: string
   agentOptions?: AgentOptions
   /** false: deterministic criteria replay — no worker is spawned, the verifier alone settles the run. */
   spawn: boolean

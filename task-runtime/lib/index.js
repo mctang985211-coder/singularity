@@ -9,6 +9,121 @@ import { SessionId } from "@deepseek-ai/dsh-session";
 import { randomUUID } from "node:crypto";
 import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
 
+//#region src/mcp-servers.ts
+/** Parse deployment and candidate definitions through one schema and namespace policy. */
+function parseMcpServerRegistry(value) {
+	const record = (item) => item !== null && typeof item === "object" && !Array.isArray(item);
+	const fail = (where, detail) => {
+		throw new Error(`task-runtime: MCP ${where} ${detail}`);
+	};
+	const string = (item, where, nonempty = false) => {
+		if (typeof item !== "string" || item.includes("\0") || nonempty && item.trim().length === 0) fail(where, "must be a string without NUL bytes" + (nonempty ? " and must be non-empty" : ""));
+		return item;
+	};
+	if (!record(value)) fail("registry", "must be an object");
+	const registry = {};
+	const namespaces = /* @__PURE__ */ new Set();
+	const fields = [
+		"serverName",
+		"description",
+		"command",
+		"args",
+		"env",
+		"cwd",
+		"toolCallTimeoutMs"
+	];
+	for (const [key, raw] of Object.entries(value)) {
+		if (!/^[A-Za-z0-9_-]+$/.test(key) || [
+			"__proto__",
+			"constructor",
+			"prototype"
+		].includes(key)) fail(`registry key ${JSON.stringify(key)}`, "must be a safe name");
+		if (!record(raw)) fail(`server ${key}`, "must be an object");
+		const item = raw;
+		for (const field of Object.keys(item)) if (!fields.includes(field)) fail(`server ${key}`, `declares unknown field ${field}`);
+		const serverName = string(item.serverName, `${key}.serverName`, true);
+		if (!/^[A-Za-z0-9_-]{1,32}$/.test(serverName)) fail(`${key}.serverName`, "must match [A-Za-z0-9_-]{1,32}");
+		if (namespaces.has(serverName)) fail(`${key}.serverName`, `duplicates namespace ${serverName}`);
+		namespaces.add(serverName);
+		const template = {
+			serverName,
+			description: string(item.description, `${key}.description`, true),
+			command: string(item.command, `${key}.command`, true)
+		};
+		if (item.args !== void 0) {
+			if (!Array.isArray(item.args)) fail(`${key}.args`, "must be an array");
+			template.args = item.args.map((arg) => string(arg, `${key}.args`));
+		}
+		if (item.env !== void 0) {
+			if (!record(item.env)) fail(`${key}.env`, "must be an object");
+			template.env = Object.fromEntries(Object.entries(item.env).map(([name, val]) => {
+				if (!name || /[=\0]/.test(name)) fail(`${key}.env`, "has an invalid variable name");
+				return [name, string(val, `${key}.env.${name}`)];
+			}));
+		}
+		if (item.cwd !== void 0) template.cwd = string(item.cwd, `${key}.cwd`, true);
+		if (item.toolCallTimeoutMs !== void 0) {
+			if (!Number.isSafeInteger(item.toolCallTimeoutMs) || item.toolCallTimeoutMs <= 0) fail(`${key}.toolCallTimeoutMs`, "must be a positive safe integer");
+			template.toolCallTimeoutMs = item.toolCallTimeoutMs;
+		}
+		for (const field of [
+			template.command,
+			...template.args ?? [],
+			...Object.values(template.env ?? {}),
+			...template.cwd === void 0 ? [] : [template.cwd]
+		]) if (ANY_PLACEHOLDER_LIKE.test(field.replace(PLACEHOLDER, ""))) fail(`server ${key}`, "carries an unknown environment placeholder");
+		registry[key] = template;
+	}
+	return registry;
+}
+/** Every MCP server name one resolved manifest grants, first-declaration order, duplicates dropped. */
+function manifestMcpServers(manifest) {
+	const names = [];
+	for (const entry of Object.values(manifest.capabilities)) for (const name of entry.mcpServers ?? []) if (!names.includes(name)) names.push(name);
+	return names;
+}
+const PLACEHOLDER = /\{(envRoot|repoRoot:[^{}]+)\}/g;
+const ANY_PLACEHOLDER_LIKE = /\{[^{}]*\}/;
+/**
+* Substitute the placeholders of one template field. `{envRoot}` is the env
+* root; `{repoRoot:<repo>}` is that env's checkout of `<repo>`. An env-free
+*/
+function substitute(template, binding, serverName) {
+	if (!ANY_PLACEHOLDER_LIKE.test(template)) return template;
+	const leftover = template.replace(PLACEHOLDER, "");
+	if (ANY_PLACEHOLDER_LIKE.test(leftover)) throw new Error(`task-runtime: MCP server "${serverName}" template "${template}" carries a placeholder outside {envRoot}/{repoRoot:<repo>}`);
+	if (binding === void 0) throw new Error(`task-runtime: MCP server "${serverName}" needs an env binding ({envRoot}/{repoRoot} template) but this run's session has none`);
+	return template.replace(PLACEHOLDER, (whole, key) => {
+		if (key === "envRoot") return binding.envRoot;
+		const repo = key.slice(9);
+		const checkout = binding.checkout(repo);
+		if (checkout === void 0) throw new Error(`task-runtime: MCP server "${serverName}" binds {repoRoot:${repo}} but this run's env (${binding.envRoot}) has no "${repo}" checkout`);
+		return checkout;
+	});
+}
+/**
+* Materialize one manifest's MCP grants into mount-ready specs.
+* @param manifest - the resolved capability manifest (server names already validated at admission).
+*/
+function resolveMcpServerSpecs(manifest, binding, registry) {
+	const names = manifestMcpServers(manifest);
+	const specs = [];
+	for (const name of names) {
+		const template = registry[name];
+		if (template === void 0) throw new Error(`task-runtime: capability manifest grants unknown MCP server "${name}"; known servers: ${Object.keys(registry).sort().join(", ")}`);
+		specs.push({
+			serverName: template.serverName,
+			command: substitute(template.command, binding, name),
+			args: (template.args ?? []).map((arg) => substitute(arg, binding, name)),
+			env: Object.fromEntries(Object.entries(template.env ?? {}).map(([key, value]) => [key, substitute(value, binding, name)])),
+			cwd: template.cwd === void 0 ? binding?.envRoot ?? "" : substitute(template.cwd, binding, name),
+			...template.toolCallTimeoutMs === void 0 ? {} : { toolCallTimeoutMs: template.toolCallTimeoutMs }
+		});
+	}
+	return specs;
+}
+
+//#endregion
 //#region src/helpers.ts
 /** The small primitives every module here shares: error text, waiting, and shape checks. */
 function message(error) {
@@ -1645,55 +1760,6 @@ function serializeSkillSidecar(sidecar) {
 }
 
 //#endregion
-//#region src/mcp-servers.ts
-/** Every MCP server name one resolved manifest grants, first-declaration order, duplicates dropped. */
-function manifestMcpServers(manifest) {
-	const names = [];
-	for (const entry of Object.values(manifest.capabilities)) for (const name of entry.mcpServers ?? []) if (!names.includes(name)) names.push(name);
-	return names;
-}
-const PLACEHOLDER = /\{(envRoot|repoRoot:[^{}]+)\}/g;
-const ANY_PLACEHOLDER_LIKE = /\{[^{}]*\}/;
-/**
-* Substitute the placeholders of one template field. `{envRoot}` is the env
-* root; `{repoRoot:<repo>}` is that env's checkout of `<repo>`. An env-free
-*/
-function substitute(template, binding, serverName) {
-	if (!ANY_PLACEHOLDER_LIKE.test(template)) return template;
-	const leftover = template.replace(PLACEHOLDER, "");
-	if (ANY_PLACEHOLDER_LIKE.test(leftover)) throw new Error(`task-runtime: MCP server "${serverName}" template "${template}" carries a placeholder outside {envRoot}/{repoRoot:<repo>}`);
-	if (binding === void 0) throw new Error(`task-runtime: MCP server "${serverName}" needs an env binding ({envRoot}/{repoRoot} template) but this run's session has none`);
-	return template.replace(PLACEHOLDER, (whole, key) => {
-		if (key === "envRoot") return binding.envRoot;
-		const repo = key.slice(9);
-		const checkout = binding.checkout(repo);
-		if (checkout === void 0) throw new Error(`task-runtime: MCP server "${serverName}" binds {repoRoot:${repo}} but this run's env (${binding.envRoot}) has no "${repo}" checkout`);
-		return checkout;
-	});
-}
-/**
-* Materialize one manifest's MCP grants into mount-ready specs.
-* @param manifest - the resolved capability manifest (server names already validated at admission).
-*/
-function resolveMcpServerSpecs(manifest, binding, registry) {
-	const names = manifestMcpServers(manifest);
-	const specs = [];
-	for (const name of names) {
-		const template = registry[name];
-		if (template === void 0) throw new Error(`task-runtime: capability manifest grants unknown MCP server "${name}"; known servers: ${Object.keys(registry).sort().join(", ")}`);
-		specs.push({
-			serverName: template.serverName,
-			command: substitute(template.command, binding, name),
-			args: (template.args ?? []).map((arg) => substitute(arg, binding, name)),
-			env: Object.fromEntries(Object.entries(template.env ?? {}).map(([key, value]) => [key, substitute(value, binding, name)])),
-			cwd: template.cwd === void 0 ? binding?.envRoot ?? "" : substitute(template.cwd, binding, name),
-			...template.toolCallTimeoutMs === void 0 ? {} : { toolCallTimeoutMs: template.toolCallTimeoutMs }
-		});
-	}
-	return specs;
-}
-
-//#endregion
 //#region src/verified-read.ts
 /** Resolve `rel` under `base`, refusing anything that would land outside. */
 function resolveWithin(base, rel) {
@@ -1746,11 +1812,11 @@ async function readVerifiedFile(root, rel) {
 * A capability table as a query, going through `resolveCapabilities` — the same
 * resolution admission performs — so the pre-check sees exactly the grant a
 */
-function capabilityToolQuery(capabilities) {
+function capabilityToolQuery(capabilities, mcpRegistry) {
 	return (capability) => {
 		let manifest;
 		try {
-			manifest = resolveCapabilities([capability], capabilities);
+			manifest = resolveCapabilities([capability], capabilities, mcpRegistry);
 		} catch (error) {
 			return {
 				known: false,
@@ -1765,15 +1831,15 @@ function capabilityToolQuery(capabilities) {
 		return {
 			known: true,
 			tools: entry.tools,
-			mcpServers: entry.mcpServers ?? []
+			mcpServers: (entry.mcpServers ?? []).map((key) => mcpRegistry === void 0 ? key : mcpRegistry[key].serverName)
 		};
 	};
 }
 /** Build the pre-check context from a capability table and the registered verifier ids. */
-function skillValidationContext(capabilities, verifierRefs) {
+function skillValidationContext(capabilities, verifierRefs, mcpRegistry) {
 	return {
 		verifierRefs: [...verifierRefs].sort(),
-		capabilityTools: capabilityToolQuery(capabilities)
+		capabilityTools: capabilityToolQuery(capabilities, mcpRegistry)
 	};
 }
 /**
@@ -2168,7 +2234,7 @@ async function validateSkillProvider(candidate, context) {
 * The registry revision: SHA-256 over {@link canonicalize} of the capability
 * table (each row sorted by name, carrying its skills, the tool labels it
 */
-function registryRevision(capabilities, providers) {
+function registryRevision(capabilities, providers, mcpRegistry) {
 	return sha256Hex(canonicalize({
 		capabilities: Object.keys(capabilities).sort().map((name) => {
 			const entry = capabilities[name];
@@ -2186,7 +2252,8 @@ function registryRevision(capabilities, providers) {
 		providers: providers.map((provider) => ({
 			name: provider.name,
 			contractDigest: provider.contractDigest
-		})).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+		})).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0),
+		...mcpRegistry === void 0 || Object.keys(mcpRegistry).length === 0 ? {} : { mcpRegistry }
 	}));
 }
 
@@ -2325,7 +2392,7 @@ async function bindRunProviders(request) {
 	if (request.providers === void 0 && rows.length > 0) return void 0;
 	const selected = selectedProviders(request.providers, rows, (row) => request.manifest.capabilities[row]?.skills ?? []);
 	const base = {
-		registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, []),
+		registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, [], request.mcpRegistry),
 		capabilities: [...rows].sort(),
 		skills: selected.map(skillBinding),
 		mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? {})
@@ -3136,15 +3203,7 @@ const Supervision = z.object({
 });
 const ConfigSchema = z.object({
 	capabilities: z.dict(Capability).default({}),
-	mcpServers: z.dict(z.object({
-		serverName: z.string(),
-		description: z.string(),
-		command: z.string(),
-		args: z.array(z.string()),
-		env: z.dict(z.string()),
-		cwd: z.string(),
-		toolCallTimeoutMs: z.number()
-	})).default({}),
+	mcpServers: z.dict(z.any()).default({}),
 	defaultPreset: z.string(),
 	taskTemplatesRoot: z.string(),
 	verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),
@@ -3264,7 +3323,7 @@ function openCommitRefusal(name, directory) {
 * (A6): row-keyed, not directory-keyed, because a row-only capability commit has
 */
 function openCapabilityRowRefusal(name) {
-	return defect("commit-intent-open", `capability "${name}" is the target of an open evolution commit intent: an apply or rollback persisted that intent and never recorded its completion, so the row the deployment's table reads now may not be the row it keeps — a capability commit installs the row in the process before it writes the deployment's own table file, and the completion is what claims both halves landed. The row is refused whole rather than admitted as a half-product: it stays refused until a reconciliation settles that commit (the deployment reconciles at startup, or an apply/rollback retry settles it)`);
+	return defect("commit-intent-open", `capability "${name}" is the target of an open evolution commit intent: an apply or rollback persisted that intent and never recorded its completion. A capability commit persists the deployment configuration before updating the runtime registry, and its completion confirms both steps. The row stays refused until reconciliation settles the commit (the deployment reconciles at startup, or an apply/rollback retry settles it)`);
 }
 /**
 * The refusal of every skill candidate on a deployment whose evolution ledger
@@ -3347,7 +3406,7 @@ function providerContentIdentities(capabilities) {
 async function precheckProviders(request) {
 	const roots = await skillSearchRoots(request.view);
 	const verifierRefs = request.verifierRefs;
-	const context = skillValidationContext(request.table, verifierRefs ?? []);
+	const context = skillValidationContext(request.table, verifierRefs ?? [], request.mcpRegistry);
 	const commitGate = await readCommitGate(request.commitLedger);
 	const capabilities = [];
 	for (const capability of request.capabilities) {
@@ -3361,6 +3420,18 @@ async function precheckProviders(request) {
 				capability,
 				skills: [],
 				refusals: rowRefusals
+			});
+			continue;
+		}
+		const resolved = context.capabilityTools(capability);
+		if (!resolved.known) {
+			capabilities.push({
+				capability,
+				skills: [],
+				refusals: [{
+					code: "capability-unknown",
+					detail: resolved.reason
+				}]
 			});
 			continue;
 		}
@@ -3408,7 +3479,7 @@ async function precheckProviders(request) {
 		capabilities,
 		roots,
 		...verifierRefs === void 0 ? {} : { verifierRefs: [...verifierRefs] },
-		revision: registryRevision(request.table, providers)
+		revision: registryRevision(request.table, providers, request.mcpRegistry)
 	};
 }
 /**
@@ -3422,6 +3493,7 @@ async function precheckReplacedCapabilityRow(request) {
 			...request.table,
 			[request.name]: request.entry
 		},
+		...request.mcpRegistry === void 0 ? {} : { mcpRegistry: request.mcpRegistry },
 		view: request.view,
 		...request.verifierRefs === void 0 ? {} : { verifierRefs: request.verifierRefs },
 		...request.commitLedger === void 0 ? {} : { commitLedger: request.commitLedger }
@@ -3623,13 +3695,22 @@ function listCapabilities(self) {
 	return structuredClone(self.config.capabilities);
 }
 async function applyCapabilityRow(self, name, entry, options = {}) {
+	const registry = { ...self.config.mcpServers };
+	for (const [key, definition] of Object.entries(options.mcpServers ?? {})) if (definition === null) delete registry[key];
+	else registry[key] = definition;
+	const parsed = parseMcpServerRegistry(registry);
 	if (entry === null) {
 		const rest = { ...self.config.capabilities };
 		delete rest[name];
 		self.config.capabilities = rest;
+		self.config.mcpServers = parsed;
 		return;
 	}
-	await assertReplacementRow(self, name, entry, options);
+	await assertReplacementRow(self, name, entry, {
+		...options,
+		mcpServers: parsed
+	});
+	self.config.mcpServers = parsed;
 	self.config.capabilities = {
 		...self.config.capabilities,
 		[name]: structuredClone(entry)
@@ -3648,6 +3729,7 @@ async function assertReplacementRow(self, name, entry, options = {}) {
 		name,
 		entry,
 		table: self.config.capabilities,
+		mcpRegistry: parseMcpServerRegistry(options.mcpServers ?? self.config.mcpServers ?? {}),
 		view: { cwd: process.cwd() },
 		...verifierRefs === void 0 ? {} : { verifierRefs },
 		...commitLedger === void 0 ? {} : { commitLedger }
@@ -4651,7 +4733,7 @@ async function submitProposalOnce(self, storeId, parentTaskId, parentRunId, call
 			proposal: stored,
 			parentTask,
 			batch: storedBatch,
-			manifests: self.manifestsOf(storedBatch)
+			manifests: self.manifestsOf(storedBatch, callerSessionId)
 		}) : void 0;
 		return {
 			proposalId: stored.proposalId,
@@ -5270,7 +5352,7 @@ async function deriveBatch(self, identity, spec) {
 	try {
 		bound = Array.isArray(spec?.children) ? {
 			...spec,
-			children: await Promise.all(spec.children.map((child) => bindTaskTemplate(self.config.taskTemplatesRoot, child)))
+			children: await Promise.all(spec.children.map((child) => bindTaskTemplate(self.taskTemplatesRootFor(identity.callerSessionId), child)))
 		} : spec;
 	} catch (error) {
 		const failure = error instanceof Error ? error : new Error(String(error));
@@ -5303,8 +5385,17 @@ async function deriveBatch(self, identity, spec) {
 		...envPath === void 0 ? {} : { envPath }
 	};
 }
-function manifestsOf(self, batch) {
-	return batch.children.map((child) => self.resolveCapabilities(child.contract.requiredCapabilities));
+function manifestsOf(self, batch, callerSessionId) {
+	const overlay = callerSessionId === void 0 ? void 0 : self.sessionExecutionBindings.get(callerSessionId)?.overlay;
+	const table = {
+		...self.config.capabilities,
+		...overlay?.capabilityOverrides
+	};
+	const registry = {
+		...self.config.mcpServers,
+		...overlay?.mcpServers
+	};
+	return batch.children.map((child) => resolveCapabilities(child.contract.requiredCapabilities, table, registry));
 }
 function storedBatchOf(proposal) {
 	if (proposal.kind === "root")
@@ -5378,7 +5469,7 @@ async function checkDerivedBatch(self, request) {
 			gaps: []
 		}
 	};
-	const manifests = manifestsOf(self, batch);
+	const manifests = manifestsOf(self, batch, identity.callerSessionId);
 	const rejected = batch.children.map((child, index) => ({
 		child,
 		index,
@@ -5409,7 +5500,17 @@ async function checkDerivedBatch(self, request) {
 	* Provider pre-check (S1-C item 1): every skill the matched capabilities
 	* grant must be discoverable from the viewpoint of the workers about to be
 	*/
-	const precheck = await self.providerPrecheck([...new Set(manifests.flatMap((manifest) => Object.keys(manifest.capabilities)))], { ...request.envPath === void 0 ? {} : { cwd: request.envPath } });
+	const overlay = self.sessionExecutionBindings.get(identity.callerSessionId)?.overlay;
+	const precheck = await self.providerPrecheck([...new Set(manifests.flatMap((manifest) => Object.keys(manifest.capabilities)))], {
+		...request.envPath === void 0 ? {} : { cwd: request.envPath },
+		...overlay?.extraSkillRoots === void 0 ? {} : { extraRoots: [...overlay.extraSkillRoots] }
+	}, {
+		...self.config.capabilities,
+		...overlay?.capabilityOverrides
+	}, {
+		...self.config.mcpServers,
+		...overlay?.mcpServers
+	});
 	const refusals = providerRefusals(precheck);
 	if (refusals.length > 0) return {
 		ok: false,
@@ -7610,6 +7711,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 		taskId: item.taskId,
 		sessionId,
 		parentRunId: parentRun.runId,
+		...env.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: env.taskTemplatesRoot },
 		capabilitySnapshot: capabilitySnapshot(manifest),
 		...agentPreset === void 0 ? {} : { agentPreset },
 		executionPhase: "active",
@@ -7705,6 +7807,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 			...agentPreset === void 0 ? {} : { agentPreset },
 			...permissionPreset === void 0 ? {} : { permissionPreset },
 			...env.workerCwd === void 0 ? {} : { cwd: env.workerCwd },
+			...env.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: env.taskTemplatesRoot },
 			...env.agentOptions === void 0 ? {} : { agentOptions: env.agentOptions },
 			signal: batch.signal
 		});
@@ -7984,6 +8087,7 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 		sessionId,
 		...init.championRunId === void 0 ? {} : { parentRunId: init.championRunId },
 		capabilitySnapshot: capabilitySnapshot(init.manifest),
+		...init.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: init.taskTemplatesRoot },
 		...init.agentPreset === void 0 ? {} : { agentPreset: init.agentPreset },
 		executionPhase: init.spawn ? "active" : "submitted",
 		...birthSubmission === void 0 ? {} : { submission: birthSubmission },
@@ -7998,6 +8102,7 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 	*/
 	const bound = {
 		...env,
+		...init.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: init.taskTemplatesRoot },
 		...init.agentOptions === void 0 ? {} : { agentOptions: init.agentOptions }
 	};
 	/**
@@ -8047,6 +8152,7 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 			...init.agentPreset === void 0 ? {} : { agentPreset: init.agentPreset },
 			...permissionPreset === void 0 ? {} : { permissionPreset },
 			...bound.workerCwd === void 0 ? {} : { cwd: bound.workerCwd },
+			...bound.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: bound.taskTemplatesRoot },
 			...bound.agentOptions === void 0 ? {} : { agentOptions: bound.agentOptions },
 			...advance === void 0 ? {} : { signal: advance }
 		});
@@ -8157,7 +8263,11 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 		...self.config.capabilities,
 		...options.overlay?.capabilityOverrides ?? {}
 	};
-	const manifest = resolveCapabilities(effective.requiredCapabilities, table, self.config.mcpServers ?? {});
+	const mcpRegistry = parseMcpServerRegistry({
+		...self.config.mcpServers,
+		...options.overlay?.mcpServers
+	});
+	const manifest = resolveCapabilities(effective.requiredCapabilities, table, mcpRegistry);
 	if (manifest.missing.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(", ")}] under the overlay`);
 	/**
 	* The checkout this replay's everything resolves against: the workspace the
@@ -8172,7 +8282,7 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
 		...envPath === void 0 ? {} : { cwd: envPath },
 		...options.overlay?.extraSkillRoots === void 0 ? {} : { extraRoots: [...options.overlay.extraSkillRoots] }
-	}, table);
+	}, table, mcpRegistry);
 	const refusals = providerRefusals(precheck);
 	if (refusals.length > 0) throw new Error(`task-runtime: provider pre-check rejected replay of "${championTaskId}":\n- ${refusals.join("\n- ")}`);
 	/**
@@ -8240,7 +8350,7 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 	const controller = new AbortController();
 	const run = async () => {
 		try {
-			const outcome = await runReplayTask(await self.orchestrateEnv(callerSessionId, callerSessionId, named), storeId, {
+			const outcome = await runReplayTask(await self.orchestrateEnv(callerSessionId, callerSessionId, named, options.overlay ?? {}), storeId, {
 				task,
 				manifest,
 				providers: precheck,
@@ -8248,6 +8358,7 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 				agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, self.config.defaultPreset),
 				...options.overlay?.extraSkillRoots === void 0 ? {} : { skillRoots: [...options.overlay.extraSkillRoots] },
 				...options.agentOptions === void 0 ? {} : { agentOptions: { ...options.agentOptions } },
+				...options.overlay?.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: options.overlay.taskTemplatesRoot },
 				spawn,
 				championRunId
 			}, {
@@ -8782,6 +8893,10 @@ async function wakeUnclaimedQuestionMessages(self, storeId, deliveries) {
 //#region src/service/sessions.ts
 async function resumeAdoptedWorkerSession(self, request) {
 	const sessionId = request.run.sessionId;
+	if (request.run.taskTemplatesRoot !== void 0) self.sessionExecutionBindings.set(sessionId, {
+		...self.sessionExecutionBindings.get(sessionId),
+		taskTemplatesRoot: request.run.taskTemplatesRoot
+	});
 	const continuing = self.startedSessions.has(sessionId);
 	/**
 	* A session already live here is one this process holds: the resume is not
@@ -9103,7 +9218,7 @@ async function envPathForSession(self, sessionId) {
 function contractRefusal(parentTaskId, reasons) {
 	return /* @__PURE__ */ new Error(`task-runtime: contract rejected decomposition of "${parentTaskId}":\n- ${reasons.join("\n- ")}`);
 }
-async function orchestrateEnv(self, callerSessionId, actor, workspace) {
+async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOverlay) {
 	/**
 	* A session this process already spawned into a named workspace keeps
 	* working in it: the replay's own decomposition builds its env here, and the
@@ -9115,6 +9230,15 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace) {
 	* model selection of the experiment it belongs to. The same session-level
 	*/
 	const binding = self.sessionExecutionBindings.get(callerSessionId);
+	const overlay = replayOverlay ?? binding?.overlay;
+	const table = {
+		...self.config.capabilities,
+		...overlay?.capabilityOverrides
+	};
+	const mcpRegistry = {
+		...self.config.mcpServers,
+		...overlay?.mcpServers
+	};
 	return {
 		task: self.context.task,
 		actor,
@@ -9127,10 +9251,14 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace) {
 		workspaces: self.workspaces,
 		...workspacePath === void 0 ? {} : { workspacePath },
 		...named === void 0 ? {} : { workerCwd: named },
+		...binding?.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: binding.taskTemplatesRoot },
 		...binding?.agentOptions === void 0 ? {} : { agentOptions: binding.agentOptions },
 		writeDrainTimeoutMs: self.config.writeDrainTimeoutMs,
 		...self.config.rootBudget === void 0 ? {} : { rootBudget: { ...self.config.rootBudget } },
-		precheck: (capabilities, cwd) => providerPrecheck(self, capabilities, { ...cwd === void 0 ? {} : { cwd } }),
+		precheck: (capabilities, cwd) => providerPrecheck(self, capabilities, {
+			...cwd === void 0 ? {} : { cwd },
+			...overlay?.extraSkillRoots === void 0 ? {} : { extraRoots: [...overlay.extraSkillRoots] }
+		}, table, mcpRegistry),
 		notify: (sessionId, text$1) => {
 			self.notify(sessionId, text$1);
 		},
@@ -9152,7 +9280,7 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace) {
 			if (presets === void 0) throw new Error("task-runtime: permissionPresets service is not loaded; cannot rank declared permissions");
 			return presets.resolve(name);
 		},
-		mcpRegistry: self.config.mcpServers,
+		mcpRegistry,
 		resolveMcpEnv: async () => {
 			/**
 			* The same graph env the verifier's cwd comes from; absent in test
@@ -9185,7 +9313,13 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace) {
 			* What the session *runs under* is remembered the same way (S4-E §Q3): a
 			* replay's worker carries the experiment's frozen selection, and the
 			*/
-			if (request.agentOptions !== void 0) self.sessionExecutionBindings.set(request.sessionId, { agentOptions: request.agentOptions });
+			const taskTemplatesRoot = request.taskTemplatesRoot ?? binding?.taskTemplatesRoot;
+			const agentOptions = request.agentOptions ?? binding?.agentOptions;
+			if (agentOptions !== void 0 || taskTemplatesRoot !== void 0 || overlay !== void 0) self.sessionExecutionBindings.set(request.sessionId, {
+				...agentOptions === void 0 ? {} : { agentOptions },
+				...taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot },
+				...overlay === void 0 ? {} : { overlay: structuredClone(overlay) }
+			});
 			return self.context.agentRuntime.spawn(parent, {
 				sessionId: SessionId(request.sessionId),
 				name: request.name,
@@ -9321,12 +9455,13 @@ function runVerifier(self) {
 async function registeredVerifierIdsImpl(self) {
 	return registeredVerifierIds(self.context);
 }
-async function providerPrecheck(self, capabilities, view, table = self.config.capabilities) {
+async function providerPrecheck(self, capabilities, view, table = self.config.capabilities, mcpRegistry = self.config.mcpServers ?? {}) {
 	const verifierRefs = await registeredVerifierIdsImpl(self);
 	const commitLedger = self.softService("evolution");
 	return precheckProviders({
 		capabilities,
 		table,
+		mcpRegistry,
 		view,
 		...verifierRefs === void 0 ? {} : { verifierRefs },
 		...commitLedger === void 0 ? {} : { commitLedger }
@@ -9414,7 +9549,7 @@ var TaskRuntime = class extends Service {
 		this.config = {
 			capabilities: structuredClone(config?.capabilities ?? {}),
 			taskTemplatesRoot: config?.taskTemplatesRoot ?? defaultTaskTemplatesRoot(),
-			mcpServers: structuredClone(config?.mcpServers ?? {}),
+			mcpServers: parseMcpServerRegistry(config?.mcpServers ?? {}),
 			...config?.defaultPreset !== void 0 ? { defaultPreset: config.defaultPreset } : {},
 			verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
 			maxDepth: config?.maxDepth ?? DEFAULT_MAX_DEPTH,
@@ -9438,8 +9573,11 @@ var TaskRuntime = class extends Service {
 		*/
 		ctx.effect(() => () => this.unload());
 	}
-	async findTaskTemplates(query) {
-		return findTaskTemplates(this.config.taskTemplatesRoot, query);
+	taskTemplatesRootFor(sessionId) {
+		return (sessionId === void 0 ? void 0 : this.sessionExecutionBindings.get(sessionId)?.taskTemplatesRoot) ?? this.config.taskTemplatesRoot;
+	}
+	async findTaskTemplates(query, callerSessionId) {
+		return findTaskTemplates(this.taskTemplatesRootFor(callerSessionId), query);
 	}
 	async registerTaskTemplate(template) {
 		if (this.config.taskTemplatesRoot === void 0) throw new Error("task-runtime: taskTemplatesRoot is not configured");
@@ -9535,8 +9673,8 @@ var TaskRuntime = class extends Service {
 	async deriveBatch(identity, spec) {
 		return deriveBatch(this, identity, spec);
 	}
-	manifestsOf(batch) {
-		return manifestsOf(this, batch);
+	manifestsOf(batch, callerSessionId) {
+		return manifestsOf(this, batch, callerSessionId);
 	}
 	storedBatchOf(proposal) {
 		return storedBatchOf(proposal);
@@ -9726,8 +9864,8 @@ var TaskRuntime = class extends Service {
 	contractRefusal(parentTaskId, reasons) {
 		return contractRefusal(parentTaskId, reasons);
 	}
-	async orchestrateEnv(callerSessionId, actor, workspace) {
-		return orchestrateEnv(this, callerSessionId, actor, workspace);
+	async orchestrateEnv(callerSessionId, actor, workspace, overlay) {
+		return orchestrateEnv(this, callerSessionId, actor, workspace, overlay);
 	}
 	watchRun(storeId, runId, callback) {
 		return watchRun(this, storeId, runId, callback);
@@ -9747,8 +9885,8 @@ var TaskRuntime = class extends Service {
 	async registeredVerifierIds() {
 		return registeredVerifierIdsImpl(this);
 	}
-	async providerPrecheck(capabilities, view, table = this.config.capabilities) {
-		return providerPrecheck(this, capabilities, view, table);
+	async providerPrecheck(capabilities, view, table = this.config.capabilities, mcpRegistry = this.config.mcpServers ?? {}) {
+		return providerPrecheck(this, capabilities, view, table, mcpRegistry);
 	}
 	async capabilityProviderReport(sessionId, capabilities) {
 		return capabilityProviderReport(this, sessionId, capabilities);
@@ -9875,4 +10013,4 @@ function checkObligationCoverage(templates, snapshot) {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, normalizeDecomposition, openProposalOf, optionalService, owedBatchResults, parseObligationTemplates, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

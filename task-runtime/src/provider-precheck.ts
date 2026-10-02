@@ -3,6 +3,7 @@
  * every skill a matched capability declares, ask the question the spawn would
  */
 
+import type { McpServerTemplate } from './mcp-servers.ts'
 import { dirname, join, resolve } from 'node:path'
 import { message } from './helpers.ts'
 import { findSkillFileIn, skillRootsFor } from '@dangosys/dsh-singularity-agent-runtime'
@@ -191,9 +192,8 @@ function openCapabilityRowRefusal(name: string): SkillDefect {
   return defect(
     'commit-intent-open',
     `capability "${name}" is the target of an open evolution commit intent: an apply or rollback persisted that intent and never recorded ` +
-      "its completion, so the row the deployment's table reads now may not be the row it keeps — a capability commit installs the row in " +
-      "the process before it writes the deployment's own table file, and the completion is what claims both halves landed. The row is " +
-      'refused whole rather than admitted as a half-product: it stays refused until a reconciliation settles that commit (the deployment ' +
+      'its completion. A capability commit persists the deployment configuration before updating the runtime registry, and its completion ' +
+      'confirms both steps. The row stays refused until reconciliation settles the commit (the deployment ' +
       'reconciles at startup, or an apply/rollback retry settles it)',
   )
 }
@@ -293,6 +293,7 @@ interface ProviderPrecheckRequest {
    */
   readonly capabilities: readonly string[]
   /** The capability table the rows were resolved from; its identity is part of {@link ProviderPrecheck.revision}. */
+  readonly mcpRegistry?: Readonly<Record<string, McpServerTemplate>>
   readonly table: Readonly<Record<string, CapabilityConfig>>
   /** Where discovery looks. */
   readonly view: SkillDiscoveryView
@@ -384,7 +385,7 @@ export function providerContentIdentities(
 export async function precheckProviders(request: ProviderPrecheckRequest): Promise<ProviderPrecheck> {
   const roots = await skillSearchRoots(request.view)
   const verifierRefs = request.verifierRefs
-  const context = skillValidationContext(request.table, verifierRefs ?? [])
+  const context = skillValidationContext(request.table, verifierRefs ?? [], request.mcpRegistry)
   const commitGate = await readCommitGate(request.commitLedger)
   const capabilities: CapabilityProviderPrecheck[] = []
   for (const capability of request.capabilities) {
@@ -395,6 +396,11 @@ export async function precheckProviders(request: ProviderPrecheckRequest): Promi
     const rowRefusals = capabilityRowRefusals(commitGate, capability)
     if (rowRefusals.length > 0) {
       capabilities.push({ capability, skills: [], refusals: rowRefusals })
+      continue
+    }
+    const resolved = context.capabilityTools(capability)
+    if (!resolved.known) {
+      capabilities.push({ capability, skills: [], refusals: [{ code: 'capability-unknown', detail: resolved.reason }] })
       continue
     }
     const declared = request.table[capability]?.skills ?? []
@@ -435,7 +441,7 @@ export async function precheckProviders(request: ProviderPrecheckRequest): Promi
     capabilities,
     roots,
     ...(verifierRefs === undefined ? {} : { verifierRefs: [...verifierRefs] }),
-    revision: registryRevision(request.table, providers),
+    revision: registryRevision(request.table, providers, request.mcpRegistry),
   }
 }
 
@@ -449,6 +455,7 @@ export async function precheckReplacedCapabilityRow(request: {
   /** The row's entry as it will read after the replacement. */
   readonly entry: CapabilityConfig
   /** The table the row is folded into — the replacement table, then. */
+  readonly mcpRegistry?: Readonly<Record<string, McpServerTemplate>>
   readonly table: Readonly<Record<string, CapabilityConfig>>
   /** Where discovery looks; a deployment's own process viewpoint or a worker's checkout. */
   readonly view: SkillDiscoveryView
@@ -460,6 +467,7 @@ export async function precheckReplacedCapabilityRow(request: {
   const precheck = await precheckProviders({
     capabilities: [request.name],
     table: { ...request.table, [request.name]: request.entry },
+    ...(request.mcpRegistry === undefined ? {} : { mcpRegistry: request.mcpRegistry }),
     view: request.view,
     ...(request.verifierRefs === undefined ? {} : { verifierRefs: request.verifierRefs }),
     ...(request.commitLedger === undefined ? {} : { commitLedger: request.commitLedger }),

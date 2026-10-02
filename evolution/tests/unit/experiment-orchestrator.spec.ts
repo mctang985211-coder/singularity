@@ -49,6 +49,7 @@ interface ScriptedOutcome {
   noMetrics?: boolean
   /** The tokens the run's review reports (default 10: the fixture's own bucket split). */
   tokens?: number
+  toolCalls?: number
 }
 
 /** A little world: one prepared skill proposal, one store, one scripted runtime, one ledger. */
@@ -300,6 +301,7 @@ async function world(
             ? {}
             : {
                 metrics: {
+                  ...(scriptedOutcome.toolCalls === undefined ? {} : { toolCalls: { calls: scriptedOutcome.toolCalls, failures: 0 } }),
                   tokens:
                     scriptedOutcome.tokens === undefined
                       ? { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 }
@@ -398,6 +400,28 @@ async function refusal(action: Promise<unknown>): Promise<string> {
 }
 
 describe('the two-sided orchestrator', () => {
+  it('resumes the frozen cost objective without opening new sides or reverting to failure repair', async () => {
+    const w = await world({ outcomes: [
+      { outcome: 'verified', toolCalls: 8, criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }] },
+      { outcome: 'verified', toolCalls: 3, criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }] },
+      { outcome: 'verified', toolCalls: 4, criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }] },
+      { outcome: 'verified', toolCalls: 4, criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }] },
+    ] })
+    w.tasks.find(task => task.taskId === 't-fix')!.status = 'verified'
+    w.runs.find(run => run.runId === 'r-fix-history')!.status = 'verified'
+    const review = w.reviews.find(review => review.runId === 'r-fix-history')!
+    review.outcome = 'verified'
+    review.criteria[0]!.verdict = 'pass'
+    const spec = { ...w.spec(), objective: 'tool-call-reduction' as const, samples: [
+      { taskId: 't-fix', role: 'observed-success' as const }, { taskId: 't-holdout', role: 'holdout' as const },
+    ] }
+    const result = await runExperiment(w.sources, { spec, caller: CALLER, actor: 'root-1' })
+    expect(result.report.verdict).toBe('improved')
+    const resumed = await resumeExperiment(w.sources, { experimentId: result.experimentId, caller: CALLER, actor: 'root-1' })
+    expect(resumed.report).toEqual(result.report)
+    expect(w.calls).toHaveLength(4)
+  })
+
   it('runs both sides from one frozen snapshot, and reuses every key on a repeat call', async () => {
     const w = await world({
       outcomes: [

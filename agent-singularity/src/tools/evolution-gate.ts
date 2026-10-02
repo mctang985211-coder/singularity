@@ -10,10 +10,10 @@ export function defineEvolutionGateTool(ctx: Context) {
     name: 'evolution_gate',
     description:
       'Answer the minimal Validation Gate for a candidate (status: gated). The six questions (细化想法4 §32): ' +
-      '1. Target failure fixed? 2. Original acceptance maintained? 3. Existing regression maintained? ' +
+      '1. Target failure fixed (or frozen tool-call objective improved)? 2. Original acceptance maintained? 3. Existing regression maintained? ' +
       '4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? ' +
       'All six answers are required, and the regression side must cite evidence ids (from this graph\'s task store) or ' +
-      'file paths whose existence is checked — cited evidence is never executed. A skill or capability candidate must pass ' +
+      'file paths whose existence is checked — cited evidence is never executed. A Task template, Skill or capability candidate must pass ' +
       'evolution_prepare (sandbox materialization) and then evolution_replay (the two-sided experiment: a new baseline run ' +
       'and a new candidate run per frozen sample, the production object and the prepared object each loaded whole), and its ' +
       'report path must be one of the regressionEvidenceRefs — the gate refuses either candidate whose experiment is not ' +
@@ -24,7 +24,7 @@ export function defineEvolutionGateTool(ctx: Context) {
       'Next step is evolution_decide, which always asks a human.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Candidate to gate' },
-      targetFailureFixed: { type: 'string', required: true, description: 'Answer to "1. Target failure fixed?"' },
+      targetFailureFixed: { type: 'string', required: true, description: 'Target failure fixed, or verified source improved under the frozen tool-call-reduction objective; cite the mechanical report verdict' },
       originalAcceptanceMaintained: { type: 'string', required: true, description: 'Answer to "2. Original acceptance maintained?"' },
       existingRegressionMaintained: { type: 'string', required: true, description: 'Answer to "3. Existing regression maintained?"' },
       noUnacceptableSideEffects: { type: 'string', required: true, description: 'Answer to "4. No unacceptable side effects?"' },

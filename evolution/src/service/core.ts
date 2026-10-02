@@ -1,3 +1,5 @@
+import { findTaskTemplates, parseTaskTemplate } from '@dangosys/dsh-singularity-task-runtime'
+import { templateCommitRequest, templateIdentity } from '../task-definition.ts'
 /** The EvolutionService core: ledger plumbing, open-intent handling and the durable commit host.
  * @module dsh-singularity-evolution/service/core */
 
@@ -27,8 +29,8 @@ import type {
   SkillProviderVerdict,
 } from '@dangosys/dsh-singularity-task-runtime'
 import { inFlightRecoveryAttempt, recoveryAttemptWithKey } from '@dangosys/dsh-singularity-task-runtime'
-import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
-import { capabilityRowDigest, validateCapabilityMutation } from '../capability-candidate.ts'
+import type { McpServerTemplate, CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
+import { assertMcpServerIdentity, capabilityRowDigest, validateCapabilityMutation } from '../capability-candidate.ts'
 import { canonicalJson, modelSelectionOf } from '../replay.ts'
 import type { ModelSelection } from '../replay.ts'
 import type { CommitFile, CommitHost, CommitRequest, CommitStage, ReconcileOutcome } from '../commit.ts'
@@ -40,7 +42,7 @@ import type { ExperimentSampleRecord, ExperimentStartedRecord } from '../experim
 import { assertExperimentStartRecord, foldExperiments } from '../experiment/record.ts'
 import { fold } from '../ledger/fold.ts'
 import { objectWriteRefusal } from './writes.ts'
-import { effectiveCapabilitiesOf } from './sources.ts'
+import { effectiveCapabilitiesOf, effectiveMcpServersOf } from './sources.ts'
 import type {
   RecoveryCoordinationCaller,
   RecoveryCoordinationOutcome,
@@ -53,7 +55,7 @@ import {
   recoveryCoordinationDefects,
   recoverySourceRunId,
 } from '../ledger/records.ts'
-import { assertTransition } from '../ledger/state-machine.ts'
+import { applyTargets, assertTransition } from '../ledger/state-machine.ts'
 import { productionSidecarRelative, productionSkillRelative, readProductionSkill } from './skill-files.ts'
 import { ledgerDirectories, ProductionReadError, resolveWithin } from '../shared.ts'
 import type {
@@ -150,6 +152,7 @@ export class EvolutionServiceCore extends Service {
   protected async providerVerdict(
     candidate: SkillProviderCandidate,
     table: Readonly<Record<string, CapabilityConfig>> | undefined = this.effectiveCapabilities(),
+    mcpRegistry: Readonly<Record<string, McpServerTemplate>> = this.effectiveMcpServers(),
   ): Promise<SkillProviderVerdict> {
     const verifierRefs = await registeredVerifierIds(this.ctx)
     if (verifierRefs === undefined && candidate.directory !== undefined) {
@@ -160,15 +163,16 @@ export class EvolutionServiceCore extends Service {
     }
     return validateSkillProvider(candidate, {
       verifierRefs: verifierRefs === undefined ? [] : [...verifierRefs],
-      capabilityTools: this.capabilityToolAnswer(table),
+      capabilityTools: this.capabilityToolAnswer(table, mcpRegistry),
     })
   }
 
   /** The capability table this service judges providers against: by default the effective table, never a cached copy. */
   protected capabilityToolAnswer(
     table: Readonly<Record<string, CapabilityConfig>> | undefined = this.effectiveCapabilities(),
+    mcpRegistry: Readonly<Record<string, McpServerTemplate>> = this.effectiveMcpServers(),
   ): CapabilityToolQuery {
-    if (table !== undefined) return capabilityToolQuery(table)
+    if (table !== undefined) return capabilityToolQuery(table, mcpRegistry)
     return () => ({
       known: false,
       reason:
@@ -180,6 +184,10 @@ export class EvolutionServiceCore extends Service {
   /** The effective capability table, or `undefined` when this context cannot read one (no task-runtime service). */
   protected effectiveCapabilities(): Readonly<Record<string, CapabilityConfig>> | undefined {
     return effectiveCapabilitiesOf(this.ctx)
+  }
+
+  protected effectiveMcpServers(): Readonly<Record<string, McpServerTemplate>> {
+    return effectiveMcpServersOf(this.ctx)
   }
 
   /** Settle every open commit intent, in ledger order (K2) — the explicit startup entry. */
@@ -238,24 +246,18 @@ export class EvolutionServiceCore extends Service {
   }
 
   /** The production paths a commit of this proposal may write: for a skill object its files, for a capability its new skill. */
-  protected commitTargets(proposal: EvolutionProposal): string[] {
-    const name =
-      proposal.targetType === 'capability'
-        ? proposal.prepared?.skillContent?.name
-        : (proposal.mutation as SkillMutation).name
-    if (name === undefined) return []
-    const targets = [resolveWithin(this.skillRoot, productionSkillRelative(name))]
-    if (proposal.prepared?.skillContent?.contract !== undefined) {
-      targets.push(resolveWithin(this.skillRoot, productionSidecarRelative(name)))
-    }
-    return targets
+  taskTemplatesRoot(): string {
+    const runtime = optionalService<{ config: { taskTemplatesRoot?: string } }>(this.ctx, 'taskRuntime')
+    const root = runtime?.config.taskTemplatesRoot
+    if (root === undefined) throw new Error('evolution: runtime taskTemplatesRoot is unavailable')
+    return resolve(root)
   }
 
   /** A fresh commit of `proposal` refuses, by name, a production **directory** another open intent targets. */
   protected assertTargetUncommitted(proposal: EvolutionProposal): void {
-    if ((proposal.targetType !== 'skill' && proposal.targetType !== 'capability') || proposal.mutation === undefined)
+    if ((proposal.targetType !== 'skill' && proposal.targetType !== 'capability' && proposal.targetType !== 'task_definition') || proposal.mutation === undefined)
       return
-    const directories = new Set(this.commitTargets(proposal).map(target => dirname(target)))
+    const directories = new Set(applyTargets(proposal, this).map(target => dirname(target)))
     const rowName = proposal.prepared?.capabilityRow?.name
     for (const other of fold(this.records).values()) {
       const intent = other.openIntent
@@ -284,9 +286,11 @@ export class EvolutionServiceCore extends Service {
 
   /** The narrow host the commit path runs on (see `commit.ts`): the roots, the record funnel, the source reads and the write refusals. */
   protected commitHost(): CommitHost {
+    const taskLibrary = optionalService<{ config?: { taskTemplatesRoot?: string } }>(this.ctx, 'taskRuntime')?.config?.taskTemplatesRoot
     return {
       root: this.root,
       skillRoot: this.skillRoot,
+      taskTemplatesRoot: taskLibrary === undefined ? undefined : resolve(taskLibrary),
       append: record => this.append(record),
       readSource: async (source, sha256) => {
         const bytes = await readVerifiedFile(this.root, source)
@@ -301,12 +305,33 @@ export class EvolutionServiceCore extends Service {
       },
       readProduction: async relative => {
         try {
-          return await readProductionSkill(this.skillRoot, relative)
+          const library = optionalService<{ config?: { taskTemplatesRoot?: string } }>(this.ctx, 'taskRuntime')?.config?.taskTemplatesRoot
+          return library !== undefined && dirname(relative) === resolve(library)
+            ? await readProductionSkill(resolve(library), basename(relative))
+            : await readProductionSkill(this.skillRoot, relative)
         } catch (error) {
           throw new ProductionReadError((error as Error).message.replace(/^(evolution|verified-read): /, ''))
         }
       },
-      objectWriteRefusal: intent => objectWriteRefusal(intent),
+      objectWriteRefusal: async intent => {
+        const proposal = await this.get(intent.proposalId)
+        if (proposal.targetType !== 'task_definition') return objectWriteRefusal(intent)
+        const request = templateCommitRequest(this.root, this.taskTemplatesRoot(), proposal, intent.direction, intent.actor, intent.approvalRef)
+        if (JSON.stringify(intent.files) !== JSON.stringify(request.files))
+          return 'evolution: template intent does not match its prepared append'
+        const prepared = proposal.prepared!
+        const candidate = prepared.templateCandidate!
+        const baseline = prepared.templateBaseline!
+        const before = intent.direction === 'apply' ? baseline?.digest ?? null : candidate.digest
+        const installed = intent.direction === 'apply'
+          ? candidate.digest
+          : baseline === null ? null : templateIdentity({ ...baseline.template, version: candidate.template.version + 1 }).digest
+        const current = (await findTaskTemplates(this.taskTemplatesRoot()))
+          .find(item => item.template.id === candidate.template.id)?.templateRef.digest ?? null
+        return current === before || current === installed
+          ? null
+          : 'evolution: template library changed since the frozen baseline or intended installed version; nothing was appended'
+      },
       tableWriteRefusal: intent => this.tableWriteRefusal(intent),
       verifyCommitted: intent => this.verifyCommitted(intent),
       capability: {
@@ -328,7 +353,10 @@ export class EvolutionServiceCore extends Service {
                 'cannot be installed',
             )
           }
+          await this.persistCapabilityRowText(intent)
+          const definitions = await this.committedMcpServers(intent)
           await runtime.applyCapabilityRow(intent.capability!.name, entry, {
+            ...(definitions === undefined ? {} : { mcpServers: definitions }),
             commitTargets: intent.files.map(file => file.target),
             commitRow: intent.capability!.name,
           })
@@ -345,7 +373,7 @@ export class EvolutionServiceCore extends Service {
     await this.persistCapabilityRowText(intent)
   }
 
-  /** The capability table's **own text** (A6): the durable half of a capability commit, written after the row is installed. */
+  /** The capability table's **own text** (A6): the durable half of a capability commit, written together with MCP definitions before the runtime registry moves. */
   protected async persistCapabilityRowText(intent: CommitIntentView): Promise<void> {
     const capability = intent.capability
     if (capability === undefined) return
@@ -372,6 +400,7 @@ export class EvolutionServiceCore extends Service {
       file: this.capabilityConfigPath,
       name: capability.name,
       entry,
+      ...(capability.mcpServers === undefined ? {} : { mcpServers: await this.committedMcpServers(intent) }),
       states: capabilityTableStates(intent.direction, table),
       ...(this.capabilityConfigProbe === undefined ? {} : { probe: this.capabilityConfigProbe }),
     })
@@ -384,10 +413,24 @@ export class EvolutionServiceCore extends Service {
     }
   }
 
+  /** Re-read the intent's frozen definitions for both installation and removal. */
+  protected async committedMcpServers(intent: CommitIntentView): Promise<Record<string, McpServerTemplate | null> | undefined> {
+    const capability = intent.capability
+    if (capability?.mcpServers === undefined) return undefined
+    const bytes = await this.commitHost().readSource(capability.mcpSource!, capability.mcpServers.digest)
+    const identity = assertMcpServerIdentity({ definitions: JSON.parse(bytes.toString('utf8')), digest: capability.mcpServers.digest })
+    return Object.fromEntries(Object.entries(identity.definitions).map(([key, value]) => [key, intent.direction === 'apply' ? value : null]))
+  }
+
   /** The capability table half of the commit path's **before** picture (A6, EVO-2): the row and the file digest a write must find. */
   protected async tableWriteRefusal(intent: CommitIntentView): Promise<string | null> {
     const capability = intent.capability
     if (capability === undefined) return null
+    for (const [key, definition] of Object.entries(capability.mcpServers?.definitions ?? {})) {
+      const actual = this.effectiveMcpServers()[key]
+      if (actual !== undefined && canonicalJson(actual) !== canonicalJson(definition))
+        return `capability-server-changed: MCP server ${key} differs from this intent's frozen definition`
+    }
     const file = this.capabilityConfigPath
     // A deployment that names no table file refuses further along (the table write
     // itself names the missing configuration); there is nothing to compare here.
@@ -422,6 +465,21 @@ export class EvolutionServiceCore extends Service {
   /** The file half of {@link verifyCommitted}. A direction that ends with files removed must find them gone. */
   protected async verifyCommittedFiles(intent: CommitIntentView): Promise<void> {
     if (intent.files.length === 0) return
+    const proposalForFiles = await this.get(intent.proposalId)
+    if (proposalForFiles.targetType === 'task_definition') {
+      for (const file of intent.files) {
+        if (file.contentSha256 === null) {
+          if (await readProductionSkill(this.taskTemplatesRoot(), basename(file.target)) !== null) throw new Error('evolution: initial template rollback did not remove its candidate file')
+          continue
+        }
+        const bytes = await readVerifiedFile(this.taskTemplatesRoot(), basename(file.target))
+        const template = parseTaskTemplate(JSON.parse(bytes.toString()))
+        if (basename(file.target) !== `${template.id}@${template.version}.json` || sha256Hex(bytes) !== file.contentSha256) throw new Error('evolution: committed template identity mismatch')
+        const current = (await findTaskTemplates(this.taskTemplatesRoot())).find(item => item.template.id === template.id)
+        if (current?.template.version !== template.version) throw new Error('evolution: a newer template superseded the open commit; its intent remains unsettled')
+      }
+      return
+    }
     if (intent.files.every(file => file.contentSha256 === null)) {
       for (const file of intent.files) {
         const current = await readProductionSkill(this.skillRoot, relative(this.skillRoot, file.target))
@@ -496,6 +554,11 @@ export class EvolutionServiceCore extends Service {
           `"${intent.proposalId}", so whether the row "${intent.capability.name}" is in place cannot be established — the commit intent ` +
           'stays open and no completion is recorded',
       )
+    }
+    const definitions = await this.committedMcpServers(intent)
+    for (const [key, expected] of Object.entries(definitions ?? {})) {
+      const actual = this.effectiveMcpServers()[key] ?? null
+      if (canonicalJson(actual) !== canonicalJson(expected)) throw new Error(`evolution: MCP registry ${key} does not match the committed definition; intent stays open`)
     }
     const entry = table[intent.capability.name] ?? null
     const digest = entry === null ? null : capabilityRowDigest(entry)
@@ -919,7 +982,7 @@ export class EvolutionServiceCore extends Service {
               "capability table that gap's production needs cannot be read in this context; nothing was started rather than assuming the rows resolve",
           )
         }
-        const unresolved = requested.filter(name => !capabilityToolQuery(table)(name).known)
+        const unresolved = requested.filter(name => !capabilityToolQuery(table, this.effectiveMcpServers())(name).known)
         if (unresolved.length > 0) {
           throw new Error(
             `evolution: the recovery of "${source.taskId}" carries no candidate in this ledger and the capability the production needs is still ` +
@@ -963,6 +1026,7 @@ export class EvolutionServiceCore extends Service {
     actor: string,
     approvalRef: string,
   ): CommitRequest {
+    if (proposal.targetType === 'task_definition') return templateCommitRequest(this.root, this.taskTemplatesRoot(), proposal, direction, actor, approvalRef)
     if (proposal.targetType === 'capability')
       return this.capabilityCommitRequest(proposal, direction, actor, approvalRef)
     if (proposal.targetType !== 'skill') {
@@ -1003,7 +1067,7 @@ export class EvolutionServiceCore extends Service {
           '— a commit moves one object between two versions of the same shape',
       )
     }
-    const targets = this.commitTargets(proposal)
+    const targets = applyTargets(proposal, this)
     const skillMd: CommitFile =
       direction === 'apply'
         ? {
@@ -1077,6 +1141,10 @@ export class EvolutionServiceCore extends Service {
               ? {}
               : { source: `${sandbox}/champion/capability/${prepared.capabilityRow.name}.json` }),
           }
+    if (prepared.mcpServers !== undefined) {
+      capability.mcpServers = prepared.mcpServers
+      capability.mcpSource = `${sandbox}/mcp-servers.json`
+    }
     const files: CommitFile[] = []
     const content = prepared.skillContent
     if (content !== undefined) {
@@ -1086,7 +1154,7 @@ export class EvolutionServiceCore extends Service {
             'skill is an execution provider — the object prepare froze is not one this build writes',
         )
       }
-      const targets = this.commitTargets(proposal)
+      const targets = applyTargets(proposal, this)
       files.push(
         direction === 'apply'
           ? {

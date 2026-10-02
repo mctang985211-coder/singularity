@@ -11,6 +11,7 @@ import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type {
   ExperimentBudget,
   ExperimentCriterionDetail,
+  ExperimentObjective,
   ExperimentResult,
   ExperimentSampleSpec,
   ModelSelection,
@@ -34,7 +35,7 @@ async function callerWorkspace(ctx: Context, caller: SessionId): Promise<string>
   if (typeof path !== 'string' || path.length === 0) {
     throw new Error(
       `this deployment cannot name the workspace of session "${caller}", which the experiment would freeze as its input ` +
-      'snapshot — name the caller\'s env workspace (S4-E item 2) before evaluating a skill or capability candidate',
+      'snapshot — name the caller\'s env workspace before evaluating a Task template, Skill or capability candidate',
     )
   }
   return path
@@ -47,7 +48,7 @@ function latestReview(snapshot: TaskSnapshot, task: TaskInstance): ReviewRecord 
 }
 
 /** The role one named task has, from the store's own history: its latest review decides whether the case is a failure the candidate is meant to fix or a passing case it must not break. The caller names tasks; */
-function roleOf(snapshot: TaskSnapshot, taskId: string): ExperimentSampleSpec['role'] {
+function roleOf(snapshot: TaskSnapshot, taskId: string, objective?: ExperimentObjective): ExperimentSampleSpec['role'] {
   const task = snapshot.tasks.find(item => item.taskId === taskId)
   if (task === undefined) throw new Error(`unknown task "${taskId}" in this graph's task store`)
   if (task.status !== 'verified' && task.status !== 'failed') {
@@ -56,7 +57,7 @@ function roleOf(snapshot: TaskSnapshot, taskId: string): ExperimentSampleSpec['r
   const review = latestReview(snapshot, task)
   if (review === undefined) throw new Error(`task "${taskId}" has no review record on its latest run; there is no case to reproduce`)
   if (review.outcome === 'failed') return 'observed-failure'
-  if (review.outcome === 'verified') return 'observed-regression'
+  if (review.outcome === 'verified') return objective === 'tool-call-reduction' ? 'observed-success' : 'observed-regression'
   throw new Error(
     `task "${taskId}" is ${task.status} but its latest review record is "${review.outcome}"; a sample must be the case its ` +
     'role names, and only a failed or verified record names one',
@@ -68,6 +69,7 @@ function deriveExperimentSamples(
   snapshot: TaskSnapshot,
   taskIds: readonly string[],
   holdoutTaskIds: readonly string[],
+  objective?: ExperimentObjective,
 ): ExperimentSampleSpec[] {
   const named = [...taskIds, ...holdoutTaskIds]
   if (new Set(named).size !== named.length) {
@@ -75,8 +77,7 @@ function deriveExperimentSamples(
   }
   if (taskIds.length === 0) {
     throw new Error(
-      'taskIds must name the samples the candidate is evaluated against: at least one task whose latest review is failed ' +
-      '(the observed failure it is meant to fix) and any verified tasks it must not break',
+      'taskIds must name the observed samples the candidate is evaluated against',
     )
   }
   if (holdoutTaskIds.length === 0) {
@@ -86,13 +87,13 @@ function deriveExperimentSamples(
     )
   }
   const samples: ExperimentSampleSpec[] = [
-    ...taskIds.map(taskId => ({ taskId, role: roleOf(snapshot, taskId) })),
+    ...taskIds.map(taskId => ({ taskId, role: roleOf(snapshot, taskId, objective) })),
     ...holdoutTaskIds.map(taskId => ({ taskId, role: 'holdout' as const })),
   ]
-  if (!samples.some(sample => sample.role === 'observed-failure')) {
+  const requiredRole = objective === 'tool-call-reduction' ? 'observed-success' : 'observed-failure'
+  if (!samples.some(sample => sample.role === requiredRole)) {
     throw new Error(
-      'none of taskIds has a failed latest review, so there is no observed failure for this candidate to fix — name the task ' +
-      'whose recorded failure this candidate addresses (a candidate with no reproduced failure cannot be evaluated as a fix)',
+      `taskIds must include at least one ${requiredRole} for the experiment objective`,
     )
   }
   return samples
@@ -119,11 +120,14 @@ function renderExperiment(result: ExperimentResult, targetId: string): string {
   const baseline = report.frozen.productionBaseline
   const candidate = report.frozen.candidate
   const capability = report.frozen.capability
+  const definition = report.frozen.taskDefinition
   const skillIdentity = candidate === undefined
     ? undefined
     : `${candidate.contract === undefined ? 'guidance' : 'execution'} sha256 ${candidate.sha256}` +
       `${candidate.contract === undefined ? '' : ` sidecar sha256 ${candidate.contract.sha256}`}`
-  const candidateIdentity = capability !== undefined
+  const candidateIdentity = definition !== undefined
+    ? `TaskTemplate ${definition.candidate.template.id}@${definition.candidate.template.version} sha256:${definition.candidate.digest}`
+    : capability !== undefined
     ? `capability row "${capability.row.name}" sha256 ${capability.row.digest}` +
       ` (the table held ${capability.baseline === null ? 'no such row' : `row sha256 ${capability.baseline.digest}`})` +
       `${skillIdentity === undefined ? '' : ` and a new skill, ${skillIdentity}`}`
@@ -134,15 +138,20 @@ function renderExperiment(result: ExperimentResult, targetId: string): string {
       'identity is not one this build evaluated, and its record is read back through evolution_list',
     )
   }
-  const baselineIdentity = capability === undefined
+  const baselineIdentity = definition !== undefined
+    ? `template baseline ${definition.baseline === null ? 'absent' : `${definition.baseline.template.id}@${definition.baseline.template.version} sha256:${definition.baseline.digest}`}; fixed original parent oracle; only new children use the side library`
+    : capability === undefined
     ? `production baseline ${baseline?.sha256 ?? 'not recorded'}${baseline?.contract === undefined ? '' : ` sidecar sha256 ${baseline.contract.sha256}`}`
     : `row this candidate moves: ${capability.baseline === null ? 'none (a new row)' : `sha256 ${capability.baseline.digest}`}`
   return [
-    `proposal ${report.proposalId} [experiment] ${capability === undefined ? 'skill' : 'capability'} ${targetId} — verdict: ${report.verdict}`,
+    `proposal ${report.proposalId} [experiment] ${definition !== undefined ? 'task_definition' : capability === undefined ? 'skill' : 'capability'} ${targetId} — verdict: ${report.verdict}`,
     `samples (${report.samples.length}):`,
     ...report.samples.map(sample =>
       `  ${sample.taskId} [${sample.role}] baseline ${sample.baseline.outcome} → candidate ${sample.candidate.outcome} ` +
-      `(${renderExperimentCriterionDiff(sample.baseline.criteria, sample.candidate.criteria)}) — ${sample.verdict}`),
+      `(${renderExperimentCriterionDiff(sample.baseline.criteria, sample.candidate.criteria)}) — ${sample.verdict}` +
+      (report.frozen.objective === 'tool-call-reduction'
+        ? `; subtree toolCalls ${sample.baseline.cost.status === 'reported' ? sample.baseline.cost.metrics.toolCalls?.calls ?? 'unknown' : 'unknown'} → ${sample.candidate.cost.status === 'reported' ? sample.candidate.cost.metrics.toolCalls?.calls ?? 'unknown' : 'unknown'}`
+        : '')),
     'every side above is a new run this experiment started — the baseline under the production configuration (the production ' +
     'object, or the production table for a capability sample, whose frozen identity is read again at every promotion gate), the ' +
     "candidate on the prepared object's bytes (the prepared `SKILL.md`, the sidecar derived from production for an execution " +
@@ -159,7 +168,7 @@ function renderExperiment(result: ExperimentResult, targetId: string): string {
 /** The experiment one call runs: the derived samples, the caller's frozen input, and the model selection it runs under. */
 async function runExperimentFor(
   ctx: Context,
-  args: { proposalId: string; taskIds: readonly string[]; holdoutTaskIds: readonly string[]; repetition?: number; budget?: ExperimentBudget },
+  args: { proposalId: string; taskIds: readonly string[]; holdoutTaskIds: readonly string[]; objective?: ExperimentObjective; repetition?: number; budget?: ExperimentBudget },
   caller: SessionId,
   signal: AbortSignal,
 ): Promise<ExperimentResult> {
@@ -172,7 +181,8 @@ async function runExperimentFor(
   }
   return ctx.evolution.runExperiment({
     proposalId: args.proposalId,
-    samples: deriveExperimentSamples(snapshot, args.taskIds, args.holdoutTaskIds),
+    samples: deriveExperimentSamples(snapshot, args.taskIds, args.holdoutTaskIds, args.objective),
+    ...(args.objective === undefined ? {} : { objective: args.objective }),
     snapshot: { sourceDir: await callerWorkspace(ctx, caller) },
     model: modelSelection(ctx),
     budget: { ...(args.budget ?? {}) },
@@ -184,29 +194,23 @@ export function defineEvolutionReplayTool(ctx: Context) {
   return defineTool({
     name: 'evolution_replay',
     description:
-      'Evaluate a prepared candidate — a **skill** candidate (an existing skill\'s whole object: `SKILL.md` and, for an ' +
-      'execution skill, the `SKILL.contract.json` beside it) or a **capability** candidate (one whole capability row plus the ' +
-      'new execution skill it grants, when it carries one) — with the two-sided experiment. Every named task is run twice — a ' +
-      'new baseline run under the production configuration (the production object; for a capability sample, the production table ' +
-      'offered the same case through the runtime\'s ordinary admission, so a sample the table cannot admit is recorded as that ' +
-      'real refusal, with no invented run) and a new candidate run on the prepared bytes (the prepared `SKILL.md`, and for a ' +
-      'capability candidate the frozen row its overlay mounts) — each in its own workspace built from the caller session\'s env ' +
-      'workspace (the frozen input snapshot), all under one frozen identity (samples, snapshot digest, candidate content, model, ' +
-      'budget, comparer). Sample roles are derived from the store\'s history: a task whose latest review is failed is the ' +
-      'observed failure, a verified one is an observed regression, and holdoutTaskIds are the held-out cases; a call with no ' +
-      'failed sample, or with an empty holdout, is refused — the experiment requires both. The historical record locates each ' +
-      'case and is never a baseline. This is the only evaluation this build has: a proposal targeting anything but a skill ' +
-      'replacement or a capability candidate is refused by name. Writes the report under sandbox/<proposalId>/ and records the ' +
-      'ledger entries; cite the report path in evolution_gate\'s regressionEvidenceRefs. Repeating the same call reuses the ' +
-      'settled runs — it never re-runs or overwrites one; a higher `repetition` freezes a new experiment.',
+      'Compare a prepared Task template, Skill or capability candidate with its frozen baseline. Both sides execute through ' +
+      'the same runtime and original acceptance in separate copies of the caller workspace. Task replay freezes the complete ' +
+      'template library for each side; new children must use the candidate template while the parent oracle stays fixed. ' +
+      'Capability replay mounts the candidate row, MCP definitions and optional Skill; a baseline admission refusal is recorded ' +
+      'as that refusal. Samples, inputs, model, budget and comparer are frozen. Omit objective for observed failure repair. ' +
+      'For a verified source use tool-call-reduction: both sides pass, every observed sample uses fewer tool calls over its ' +
+      'complete executed Run subtree, and holdouts pass without cost growth. Missing counters are inconclusive. Every experiment ' +
+      'requires nonempty holdoutTaskIds. Cite the sandbox report in evolution_gate.regressionEvidenceRefs. The same call reuses ' +
+      'settled Runs; a higher repetition freezes a new experiment.',
     parameters: {
-      proposalId: { type: 'string', required: true, description: 'Prepared candidate to evaluate: a skill or capability candidate' },
+      proposalId: { type: 'string', required: true, description: 'Prepared Task template, Skill or capability candidate' },
+      objective: { type: 'string', enum: ['tool-call-reduction'], description: 'Verified-source optimization: fewer tool calls across the complete executed Run subtree while retaining frozen acceptance. Omit for failure repair.' },
       taskIds: {
         type: 'array',
         items: { type: 'string' },
         required: true,
-        description: 'Sample task ids from this graph\'s task store: at least one whose latest review is failed (the observed ' +
-          'failure the candidate is meant to fix) plus any verified regressions it must not break',
+        description: 'Observed task ids: a failed target plus verified regressions for failure repair; verified sources for objective tool-call-reduction',
       },
       holdoutTaskIds: {
         type: 'array',
@@ -242,20 +246,17 @@ export function defineEvolutionReplayTool(ctx: Context) {
       const holdoutTaskIds = ((args.holdoutTaskIds as unknown[] | undefined) ?? []).map(id => String(id))
       try {
         const proposal = await ctx.evolution.get(args.proposalId)
-        if (proposal.targetType !== 'skill' && proposal.targetType !== 'capability') {
+        if (proposal.targetType !== 'skill' && proposal.targetType !== 'capability' && proposal.targetType !== 'task_definition') {
           throw new Error(
-            `proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared **skill** candidate ` +
-            '(a new baseline run on the production object and a new candidate run on the prepared object, each loaded whole: the ' +
-            'SKILL.md, and the SKILL.contract.json beside it when the skill declares an execution provider) or a prepared ' +
-            '**capability** candidate (the same two-sided run, the candidate side mounting the frozen capability row and its new ' +
-            "skill; a baseline the production table cannot admit is recorded as the runtime's own refusal, never as an invented " +
-            'run). No other target type has an evaluator in this build, so its proposal stays a record',
+            `proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared Task template, ` +
+            'Skill or capability candidate; this target has no evaluator, so its proposal stays a record',
           )
         }
         const result = await runExperimentFor(ctx, {
           proposalId: args.proposalId,
           taskIds,
           holdoutTaskIds,
+          ...(args.objective === undefined ? {} : { objective: args.objective }),
           ...(args.repetition === undefined ? {} : { repetition: args.repetition }),
           ...(args.budget === undefined ? {} : { budget: args.budget }),
         }, caller, exec.signal)

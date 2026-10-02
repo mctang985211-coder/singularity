@@ -18,6 +18,7 @@ import type {
 import { batchIdFor, blockingQuestionsOf, taskContractIdentity } from '@dangosys/dsh-singularity-task'
 import { checkDecomposition } from '../admission.ts'
 import { providerRefusals } from '../provider-precheck.ts'
+import { resolveCapabilities } from '../capability.ts'
 import { checkBatchAdmission, hasRootLimits, resolveRootBudget } from '../root-budget.ts'
 import { bindTaskTemplate } from '../task-template.ts'
 import { normalizeDecomposition } from '../normalize.ts'
@@ -48,7 +49,7 @@ export async function deriveBatch(
   let bound: DecomposeSpec
   try {
     bound = Array.isArray(spec?.children)
-      ? { ...spec, children: await Promise.all(spec.children.map(child => bindTaskTemplate(self.config.taskTemplatesRoot, child))) }
+      ? { ...spec, children: await Promise.all(spec.children.map(child => bindTaskTemplate(self.taskTemplatesRootFor(identity.callerSessionId), child))) }
       : spec
   } catch (error) {
     const failure = error instanceof Error ? error : new Error(String(error))
@@ -66,8 +67,11 @@ export async function deriveBatch(
   return { ok: true, batch: normalized.batch, ...(envPath === undefined ? {} : { envPath }) }
 }
 
-export function manifestsOf(self: TaskRuntime, batch: NormalizedBatch): CapabilityManifest[] {
-  return batch.children.map(child => self.resolveCapabilities(child.contract.requiredCapabilities))
+export function manifestsOf(self: TaskRuntime, batch: NormalizedBatch, callerSessionId?: string): CapabilityManifest[] {
+  const overlay = callerSessionId === undefined ? undefined : self.sessionExecutionBindings.get(callerSessionId)?.overlay
+  const table = { ...self.config.capabilities, ...overlay?.capabilityOverrides }
+  const registry = { ...self.config.mcpServers, ...overlay?.mcpServers }
+  return batch.children.map(child => resolveCapabilities(child.contract.requiredCapabilities, table, registry))
 }
 
 export function storedBatchOf(proposal: TaskProposal): NormalizedBatch {
@@ -199,7 +203,7 @@ export async function checkDerivedBatch(
     }
   }
 
-  const manifests = manifestsOf(self, batch)
+  const manifests = manifestsOf(self, batch, identity.callerSessionId)
   const rejected = batch.children
     .map((child, index) => ({ child, index, manifest: manifests[index]! }))
     .filter(({ child, manifest }) => manifest.missing.length > 0 && !child.decomposable)
@@ -238,9 +242,15 @@ export async function checkDerivedBatch(
    * Provider pre-check (S1-C item 1): every skill the matched capabilities
    * grant must be discoverable from the viewpoint of the workers about to be
    */
+  const overlay = self.sessionExecutionBindings.get(identity.callerSessionId)?.overlay
   const precheck = await self.providerPrecheck(
     [...new Set(manifests.flatMap(manifest => Object.keys(manifest.capabilities)))],
-    { ...(request.envPath === undefined ? {} : { cwd: request.envPath }) },
+    {
+      ...(request.envPath === undefined ? {} : { cwd: request.envPath }),
+      ...(overlay?.extraSkillRoots === undefined ? {} : { extraRoots: [...overlay.extraSkillRoots] }),
+    },
+    { ...self.config.capabilities, ...overlay?.capabilityOverrides },
+    { ...self.config.mcpServers, ...overlay?.mcpServers },
   )
   const refusals = providerRefusals(precheck)
   if (refusals.length > 0) {

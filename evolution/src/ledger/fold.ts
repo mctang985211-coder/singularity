@@ -1,3 +1,5 @@
+import { assertTemplateIdentity } from '../task-definition.ts'
+import { assertMcpServerIdentity } from '../capability-candidate.ts'
 /** Folding the append-only ledger into the proposal map: the one fold every read path of this plane goes through.
  * @module dsh-singularity-evolution/ledger/fold */
 
@@ -29,6 +31,8 @@ export function fold(records: readonly EvolutionRecord[]): Map<string, Evolution
       const current = proposals.get(record.proposalId)
       if (current === undefined) throw new Error(`evolution: unknown proposal "${record.proposalId}"`)
       validateCommitIntent(record)
+      if ((record.capability?.mcpServers?.digest ?? null) !== (current.prepared?.mcpServers?.digest ?? null))
+        throw new Error(`evolution: commit intent MCP definitions differ from proposal ${record.proposalId} prepared identity`)
       const intent: CommitIntentView = {
         intentId: record.intentId,
         proposalId: record.proposalId,
@@ -83,7 +87,7 @@ export function fold(records: readonly EvolutionRecord[]): Map<string, Evolution
     switch (record.kind) {
       case 'candidate': {
         // One candidate lifecycle per admissible target type (S4-E 收尾, A6): a skill replacement or one capability row.
-        if (current.targetType !== 'skill' && current.targetType !== 'capability') {
+        if (current.targetType !== 'skill' && current.targetType !== 'capability' && current.targetType !== 'task_definition') {
           throw new Error(
             `evolution: candidate record for "${record.proposalId}" targets "${current.targetType}" — this build's candidate ` +
               'lifecycles are a SKILL.md replacement of an existing skill object and one whole capability row with an optional new ' +
@@ -99,7 +103,7 @@ export function fold(records: readonly EvolutionRecord[]): Map<string, Evolution
       case 'prepared': {
         // One prepared shape per candidate lifecycle: the materialized skill
         const capabilityPrepare = current.targetType === 'capability'
-        const champion = capabilityPrepare ? 'absent' : 'captured'
+        const champion = capabilityPrepare || (current.targetType === 'task_definition' && record.templateBaseline === null) ? 'absent' : 'captured'
         if (
           record.mechanical !== true ||
           record.champion !== champion ||
@@ -116,6 +120,13 @@ export function fold(records: readonly EvolutionRecord[]): Map<string, Evolution
         }
         if (!Array.isArray(record.files) || record.files.some(file => typeof file !== 'string')) {
           throw new Error(`evolution: prepared record for "${record.proposalId}" has a non-string file list`)
+        }
+        if (current.targetType === 'task_definition') {
+          assertTemplateIdentity(record.templateCandidate)
+          if (record.templateBaseline !== null) assertTemplateIdentity(record.templateBaseline)
+          if (record.templateCandidate.template.id !== current.targetId || (record.templateBaseline !== null && record.templateBaseline.template.id !== current.targetId) || record.templateCandidate.template.version !== (record.templateBaseline?.template.version ?? 0) + 1) throw new Error('evolution: prepared template target/version mismatch')
+          current.prepared = { sandbox: record.sandbox, mechanical: true, champion, templateCandidate: record.templateCandidate, templateBaseline: record.templateBaseline, templateLibraries: record.templateLibraries, files: [...record.files] }
+          break
         }
         if (capabilityPrepare) {
           // The capability half (A6): the frozen row is required, the row the registry held is optional (`null` when it held none).
@@ -166,6 +177,7 @@ export function fold(records: readonly EvolutionRecord[]): Map<string, Evolution
             ...(skillContent === undefined ? {} : { skillBaseline: null }),
             capabilityRow,
             capabilityBaseline,
+            ...(record.mcpServers === undefined ? {} : { mcpServers: assertMcpServerIdentity(record.mcpServers) }),
             ...(capabilityTable === undefined ? {} : { capabilityTable }),
             files: [...record.files],
           }

@@ -292,7 +292,7 @@ export async function submitProposalOnce(
             proposal: stored,
             parentTask,
             batch: storedBatch,
-            manifests: self.manifestsOf(storedBatch),
+            manifests: self.manifestsOf(storedBatch, callerSessionId),
           })
         : undefined
     return {

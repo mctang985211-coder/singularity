@@ -1,3 +1,4 @@
+import { runCriterionGuards } from './task-definition.ts'
 /** The experiment runner: run or resume the two sides of one frozen experiment.
  * @module dsh-singularity-evolution/experiment/runner */
 
@@ -33,6 +34,7 @@ import {
 } from './record.ts'
 import type { ExperimentSources, SampleProviders } from './freeze.ts'
 import {
+  freezeCriterionRepair,
   experimentCandidate,
   freezeExperiment,
   frozenCapabilitySample,
@@ -45,7 +47,7 @@ import { buildWorkspace } from './workspace.ts'
 export async function runExperiment(sources: ExperimentSources, request: ExperimentRequest): Promise<ExperimentResult> {
   const { spec, caller, actor } = request
   validateSpec(spec)
-  const { sandbox, candidate, capability, overlay, proposal } = await experimentCandidate(sources, spec.proposalId)
+  const { sandbox, candidate, capability, taskDefinition, overlay, proposal } = await experimentCandidate(sources, spec.proposalId)
   const { storeId, snapshot } = await experimentStore(sources, caller)
   // The judge vocabulary the criteria are frozen against, read before anything
   const vocabulary = await sources.verifierVocabulary?.()
@@ -65,7 +67,7 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
     assertSampleRole(sample, task, review)
     // Before anything runs: what each side of this sample must bind, read
     const providers: SampleProviders =
-      capability === undefined
+      capability === undefined && taskDefinition === undefined
         ? {
             provider: await frozenProviderIdentity({
               sources,
@@ -81,16 +83,18 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
             caller,
             sampleTaskId: sample.taskId,
             required: task.requestedCapabilities,
-            overlay: overlay!,
+            overlay: overlay ?? { capabilityOverrides: {}, extraSkillRoots: [] },
           })
     samples.push(frozenSampleOf(sample, task, review, providers, vocabulary))
   }
+  if (taskDefinition !== undefined) await freezeCriterionRepair(taskDefinition, proposal, snapshot, samples, vocabulary)
   const frozen = freezeExperiment({
     proposalId: spec.proposalId,
     spec,
     ...(candidate === undefined ? {} : { candidate }),
     ...(proposal.prepared?.skillBaseline == null ? {} : { productionBaseline: proposal.prepared.skillBaseline }),
     ...(capability === undefined ? {} : { capability }),
+    ...(taskDefinition === undefined ? {} : { taskDefinition }),
     sandbox,
     snapshotDigest: await directoryDigest(spec.snapshot.sourceDir),
     samples,
@@ -204,6 +208,9 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
           settledSides += 1
           continue
         }
+        if (side === 'candidate' && view.frozen.taskDefinition?.criterionRepair !== undefined) {
+          await runCriterionGuards(sources, view, caller, actor, agentOptions, request.signal)
+        }
         const outcome = await sources.taskRuntime.replayTask(
           storeId,
           sample.taskId,
@@ -211,7 +218,9 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
             lineage,
             workspace: { path: real },
             agentOptions: { ...agentOptions },
-            ...(side === 'candidate'
+            ...(taskDefinition !== undefined
+              ? { overlay: { taskTemplatesRoot: resolve(sources.evolution.root, sandbox, 'task-templates', side) } }
+              : side === 'candidate'
               ? { overlay: overlay ?? { extraSkillRoots: [resolve(sources.evolution.root, sandbox, 'skills')] } }
               : {}),
             ...(request.signal === undefined ? {} : { signal: request.signal }),
@@ -244,7 +253,7 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
           evidenceRefs: facts.evidenceRefs,
           workspace: real,
           initialDigest: view.frozen.snapshot.digest,
-          cost: costOf(facts.review),
+          cost: costOf(facts.review, view.frozen.objective === 'tool-call-reduction' ? after : undefined),
           ...(facts.interruptedReason === undefined ? {} : { reason: facts.interruptedReason }),
           actor,
         })
@@ -293,6 +302,7 @@ export async function resumeExperiment(
     samples: view.frozen.samples.map(sample => ({ taskId: sample.taskId, role: sample.role })),
     snapshot: { sourceDir: view.frozen.snapshot.sourceDir },
     model: view.frozen.model,
+    ...(view.frozen.objective === undefined ? {} : { objective: view.frozen.objective }),
     budget: view.frozen.budget,
     repetition: view.frozen.repetition,
   }

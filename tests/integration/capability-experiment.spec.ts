@@ -33,13 +33,15 @@ import { tmpdir } from 'node:os'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { CapabilityConfig, Config } from '../../task-runtime/src/index.ts'
+import type { McpServerTemplate, CapabilityConfig, Config } from '../../task-runtime/src/index.ts'
 import { SKILL_SIDECAR_FILE, serializeSkillSidecar } from '../../task-runtime/src/index.ts'
 import { EvolutionService } from '../../evolution/src/index.ts'
 import type { GateAnswers, ProposeInput } from '../../evolution/src/index.ts'
+import type { CommitStage } from '../../evolution/src/commit.ts'
 import { modelSelectionOf } from '../../evolution/src/index.ts'
 import type { AcceptanceCriterion } from '../../task/src/index.ts'
 import { supervisorDelegationSource } from '../../agent-singularity/src/coordination/ledger.ts'
@@ -63,6 +65,10 @@ const ANSWER = 'fixed.txt'
 const STORE_ROW = 'capability-experiment-store-row'
 const STORE_SKILL = 'capability-experiment-store-skill'
 const STORE_ENTRY: CapabilityConfig = { skills: [STORE_SKILL], tools: ['filesystem'] }
+const ECHO_TEMPLATE: McpServerTemplate = { serverName: 'echo-fixture', description: 'External echo candidate', command: process.execPath, args: [fileURLToPath(new URL('./fixtures/echo-mcp-server.mjs', import.meta.url))] }
+const UNRELATED_MCP: Record<string, McpServerTemplate> = { unrelated: { ...ECHO_TEMPLATE, serverName: 'unrelated-echo' } }
+const MCP_ROW: CapabilityConfig = { mcpServers: ['echo'] }
+const MCP_BASELINE: CapabilityConfig = { tools: ['filesystem'] }
 
 const SELECTION = modelSelectionOf({ provider: 'scripted', model: 'run-stack' })!
 
@@ -205,6 +211,7 @@ interface Fixture {
   snapshotDir: string
   /** The deployment's own `config.yml`, whose capability table a commit writes (A6). */
   configFile: string
+  mcpCalls: string[]
 }
 
 /**
@@ -214,20 +221,32 @@ interface Fixture {
  * execution skill it grants — and two terminal samples, the failed case the
  * candidate is meant to fix and a holdout.
  */
-async function fixture(options: { rootBudget?: Config['rootBudget']; rowOnly?: boolean } = {}): Promise<Fixture> {
+async function fixture(options: {
+  rootBudget?: Config['rootBudget']
+  rowOnly?: boolean
+  mcp?: boolean | 'with-skill'
+  commitProbe?: (stage: CommitStage, target?: string) => void
+  capabilityConfigProbe?: (stage: 'before-write' | 'staged' | 'written', row: string) => void
+} = {}): Promise<Fixture> {
+  const mcpCalls: string[] = []
+  const mcpSkill = options.mcp === 'with-skill'
+  const productionRows = { [STORE_ROW]: STORE_ENTRY, ...(options.mcp ? { [ROW]: MCP_BASELINE } : {}) }
   const rowOnly = options.rowOnly === true
   // The provider a row-only candidate's row grants: the **production** execution
   // object itself (no new skill is carried), whose body names the file its worker
   // writes — so the case's verdict rests on the object the row really loads.
   const rowOnlySkill = 'capability-row-only-skill'
   const rowOnlyText = skillText(`WRITE:${ANSWER}`).replace(SKILL, rowOnlySkill)
-  const rowOf = (): Record<string, CapabilityConfig> => rowOnly
+  const rowOf = (): Record<string, CapabilityConfig> => options.mcp
+    ? { [ROW]: mcpSkill ? { skills: [SKILL], tools: ['filesystem'], mcpServers: ['echo'] } : MCP_ROW }
+    : rowOnly
     ? { [ROW]: { skills: [rowOnlySkill], tools: ['filesystem'] } }
     : { [ROW]: { skills: [SKILL], tools: ['filesystem'] } }
   let h!: RunStack
   h = await startRunStack({
     roots: [ROOT],
-    capabilities: { [STORE_ROW]: STORE_ENTRY },
+    capabilities: productionRows,
+    ...(options.mcp ? { mcpServers: UNRELATED_MCP } : {}),
     ...(options.rootBudget === undefined ? {} : { rootBudget: { ...options.rootBudget } }),
     worker: async (sessionId: SessionId, agent: Agent) => {
       const { task, run } = await h.runtime.runForSession(sessionId)
@@ -237,6 +256,20 @@ async function fixture(options: { rootBudget?: Config['rootBudget']; rowOnly?: b
       // to load the row's provider.
       if (task.parentTaskId !== undefined || (run.parentRunId === undefined && run.recovery === undefined)) return
       const request = h.spawns.find(item => String(item.sessionId) === String(sessionId))
+      if (options.mcp) {
+        if (request?.grant?.mcpServers?.some(server => server.serverName === ECHO_TEMPLATE.serverName)) {
+          if (mcpSkill) {
+            const roots = [...(request.grant.skillRoots ?? []), join(h.home, 'skills')]
+            const bodies = await Promise.all(roots.map(root => readFile(join(root, SKILL, 'SKILL.md'), 'utf8').catch(() => '')))
+            if (!bodies.some(body => body.includes(`WRITE:${ANSWER}`))) throw new Error('candidate skill was not loaded')
+          }
+          const result = await h.call(agent, 'mcp__echo-fixture__echo', { text: 'capability candidate reached MCP' })
+          if (result.isError) throw new Error(result.text)
+          mcpCalls.push(result.text)
+          await writeFile(join(agent.session.header.cwd, ANSWER), result.text)
+        }
+        return
+      }
       const roots = [...(request?.grant?.skillRoots ?? []), join(h.home, 'skills')]
       const names = [SKILL, rowOnlySkill]
       for (const root of roots) {
@@ -277,12 +310,14 @@ async function fixture(options: { rootBudget?: Config['rootBudget']; rowOnly?: b
   // The capability table's own file (A6): the apply writes the row it commits
   // here before it records the completion, so a restart loads what the commit
   // installed.
-  const configFile = await writeCapabilityConfig(join(h.workspace, 'config.yml'), { [STORE_ROW]: STORE_ENTRY })
+  const configFile = await writeCapabilityConfig(join(h.workspace, 'config.yml'), productionRows, options.mcp ? UNRELATED_MCP : {})
   const evolution = new EvolutionService(h.ctx, {
     root: join(h.workspace, 'evolution'),
     skillRoot,
     modelSelection: () => SELECTION,
     capabilityConfig: configFile,
+    ...(options.commitProbe === undefined ? {} : { commitProbe: options.commitProbe }),
+    ...(options.capabilityConfigProbe === undefined ? {} : { capabilityConfigProbe: options.capabilityConfigProbe }),
     // The hand-off consumption and the recovery entry read the coordinator's
     // delegation from the coordination ledger (A6); this deployment turns the
     // chain on, which is what the consumption reads.
@@ -290,7 +325,13 @@ async function fixture(options: { rootBudget?: Config['rootBudget']; rowOnly?: b
   })
   h.ctx.provide('singularityEvolution', { enabled: true })
   await evolution.propose(proposal, ROOT)
-  await evolution.candidate(PROPOSAL, { capabilityTable: 'config.yml#doc' }, ROOT, rowOnly
+  await evolution.candidate(PROPOSAL, { capabilityTable: 'config.yml#doc' }, ROOT, options.mcp
+    ? {
+      rows: rowOf(),
+      mcpServers: { echo: ECHO_TEMPLATE },
+      ...(mcpSkill ? { skill: { name: SKILL, content: CANDIDATE_TEXT, sidecar: sidecar(CANDIDATE_TEXT) } } : {}),
+    }
+    : rowOnly
     ? { rows: rowOf() }
     : { rows: rowOf(), skill: { name: SKILL, content: CANDIDATE_TEXT, sidecar: sidecar(CANDIDATE_TEXT) } })
   await evolution.prepare(PROPOSAL, ROOT)
@@ -313,10 +354,10 @@ async function fixture(options: { rootBudget?: Config['rootBudget']; rowOnly?: b
     taskId: 't-cap-holdout',
     runId: 'r-cap-holdout-history',
     objective: 'a held-out case the candidate must not break',
-    acceptance: criterion('ac-cap-holdout', `test -f ${ANSWER}`),
+    acceptance: criterion('ac-cap-holdout', options.mcp ? 'test -f input.txt' : `test -f ${ANSWER}`),
     outcome: 'verified',
   })
-  return { h, evolution, storeId: first.storeId, snapshotDir, configFile }
+  return { h, evolution, storeId: first.storeId, snapshotDir, configFile, mcpCalls }
 }
 
 afterEach(async () => {
@@ -324,7 +365,7 @@ afterEach(async () => {
 })
 
 describe('A6: the two-sided capability experiment on the real deployment', () => {
-  it('keeps a verified source suggestion without starting an experiment or a new business Run', async () => {
+  it('refuses a verified source without a frozen tool-call objective before starting any business Run', async () => {
     const f = await fixture()
     await f.h.task.recordDiagnosisIn(f.storeId, {
       diagnosisId: 'd-cap',
@@ -339,7 +380,7 @@ describe('A6: the two-sided capability experiment on the real deployment', () =>
     }, 'tester')
     const before = await f.h.snapshot(f.storeId)
     const result = await f.evolution.runExperiment(experimentSpec(f), ROOT, ROOT).then(() => '', error => String(error))
-    expect(result).toMatch(/successful source.*frozen.*comparator/i)
+    expect(result).toMatch(/successful source.*tool-call-reduction.*observed-success/i)
     expect((await f.h.snapshot(f.storeId)).runs).toEqual(before.runs)
     expect(await f.evolution.experiments(PROPOSAL)).toEqual([])
   })
@@ -360,7 +401,7 @@ describe('A6: the two-sided capability experiment on the real deployment', () =>
     }, 'tester')
     const before = (await f.h.snapshot(f.storeId)).runs
     const result = await f.evolution.resumeExperiment(experiment.experimentId, ROOT, ROOT).then(() => '', error => String(error))
-    expect(result).toMatch(/successful source.*frozen.*comparator/i)
+    expect(result).toMatch(/successful source.*tool-call-reduction.*observed-success/i)
     expect((await f.h.snapshot(f.storeId)).runs).toEqual(before)
   })
 
@@ -1012,4 +1053,157 @@ describe('A6 EVO-5: both recovery entries at the states a deployment refuses in'
     expect(await budgetFacts(f)).toEqual(before)
     ledgerKeepsNoRunAccount(await ledgerLines(f))
   }, 120_000)
+})
+
+
+describe('capability candidates carrying new external MCP definitions', () => {
+  it('calls the real server only in isolated candidates, publishes row and definitions together, and rolls them back', async () => {
+    const f = await fixture({ mcp: true })
+    const before = await readFile(f.configFile, 'utf8')
+    const prepared = await f.evolution.get(PROPOSAL)
+    expect(prepared.prepared!.capabilityRow!.entry).toEqual(MCP_ROW)
+    expect(prepared.prepared!.skillContent).toBeUndefined()
+    expect(prepared.prepared!.mcpServers!.definitions).toEqual({ echo: ECHO_TEMPLATE })
+    expect(f.h.runtime.listMcpServers()).toEqual(UNRELATED_MCP)
+    expect(f.h.runtime.listCapabilities()[ROW]).toEqual(MCP_BASELINE)
+    const result = await f.evolution.runExperiment(experimentSpec(f), ROOT, ROOT)
+    expect(result.report.verdict).toBe('fixed')
+    expect(result.report.samples.map(sample => sample.baseline.outcome)).toEqual(['failed', 'verified'])
+    expect(result.report.samples.every(sample => sample.candidate.outcome === 'verified')).toBe(true)
+    expect(f.mcpCalls).toHaveLength(2)
+    for (const call of f.mcpCalls) expect(call).toContain('echo: capability candidate reached MCP')
+    expect(await readFile(f.configFile, 'utf8')).toBe(before)
+    expect(f.h.runtime.listMcpServers()).toEqual(UNRELATED_MCP)
+    const snapshot = await f.h.snapshot(f.storeId)
+    const oldBindings = snapshot.runs.map(run => ({ runId: run.runId, binding: run.providerBinding }))
+    const candidateRun = snapshot.runs.find(run => run.runId === result.report.samples[0]!.candidate.runId)!
+    expect(candidateRun.providerBinding!.skills).toEqual([])
+    expect(candidateRun.providerBinding!.mcpServers).toEqual(result.report.frozen.samples[0]!.candidateProvider!.mcpBindings)
+    await f.evolution.gate(PROPOSAL, gateAnswers([result.reportPath]), ROOT)
+    await f.evolution.decide(PROPOSAL, 'PROMOTE', ROOT, 'approval:mcp-decide')
+    await f.evolution.apply(PROPOSAL, ROOT, 'approval:mcp-apply')
+    expect(f.h.runtime.listCapabilities()[ROW]).toEqual(MCP_ROW)
+    expect(f.h.runtime.listMcpServers()).toEqual({ ...UNRELATED_MCP, echo: ECHO_TEMPLATE })
+    const installed = await readFile(f.configFile, 'utf8')
+    expect(installed).toContain('"echo":')
+    expect(installed).toContain(`"${ROW}": {"mcpServers":["echo"]}`)
+    expect(installed.split('---')[1]).toBe(before.split('---')[1])
+    await f.evolution.rollback(PROPOSAL, ROOT, 'approval:mcp-rollback')
+    expect(f.h.runtime.listCapabilities()[ROW]).toEqual(MCP_BASELINE)
+    expect(f.h.runtime.listMcpServers()).toEqual(UNRELATED_MCP)
+    const restored = await readFile(f.configFile, 'utf8')
+    expect(restored).not.toContain('"echo":')
+    expect(restored).toContain('"unrelated":')
+    expect((await f.h.snapshot(f.storeId)).runs.map(run => ({ runId: run.runId, binding: run.providerBinding }))).toEqual(oldBindings)
+  })
+
+  it.each(['apply', 'rollback'] as const)('reconciles an interrupted %s from the config loaded by a fresh runtime', async direction => {
+    let interrupt = false
+    const f = await fixture({ mcp: true, capabilityConfigProbe: stage => {
+      if (interrupt && stage === 'written') { interrupt = false; throw new Error('simulated stop after atomic config write') }
+    } })
+    const result = await f.evolution.runExperiment(experimentSpec(f), ROOT, ROOT)
+    await f.evolution.gate(PROPOSAL, gateAnswers([result.reportPath]), ROOT)
+    await f.evolution.decide(PROPOSAL, 'PROMOTE', ROOT, 'approval:mcp-decide')
+    if (direction === 'rollback') await f.evolution.apply(PROPOSAL, ROOT, 'approval:mcp-apply')
+    interrupt = true
+    await expect(f.evolution[direction](PROPOSAL, ROOT, `approval:mcp-${direction}`)).rejects.toThrow('simulated stop')
+    expect((await f.evolution.get(PROPOSAL)).openIntent?.direction).toBe(direction)
+    const text = await readFile(f.configFile, 'utf8')
+    const rowLine = text.split('\n').find(line => line.trimStart().startsWith(`"${ROW}":`))!
+    const entry = JSON.parse(rowLine.slice(rowLine.indexOf(': ') + 2)) as CapabilityConfig
+    const echoLine = text.split('\n').find(line => line.trimStart().startsWith('"echo":'))
+    const definitions = { ...UNRELATED_MCP, ...(echoLine === undefined ? {} : { echo: JSON.parse(echoLine.slice(echoLine.indexOf(': ') + 2)) as McpServerTemplate }) }
+    await f.h.ctx.fiber.dispose()
+    const reopened = await startRunStack({ workspace: f.h.workspace, roots: [ROOT], capabilities: { [STORE_ROW]: STORE_ENTRY, [ROW]: entry }, mcpServers: definitions })
+    const evolution = new EvolutionService(reopened.ctx, { root: join(f.h.workspace, 'evolution'), skillRoot: join(f.h.home, 'skills'), capabilityConfig: f.configFile, modelSelection: () => SELECTION })
+    expect(await evolution.reconcile()).toEqual([expect.objectContaining({ direction, result: 'completed-written' })])
+    expect((await evolution.get(PROPOSAL)).openIntent).toBeUndefined()
+    expect((await evolution.get(PROPOSAL)).status).toBe(direction === 'apply' ? 'applied' : 'rolledback')
+    expect(reopened.runtime.listMcpServers()).toEqual(direction === 'apply' ? { ...UNRELATED_MCP, echo: ECHO_TEMPLATE } : UNRELATED_MCP)
+    expect(await evolution.reconcile()).toEqual([])
+    await reopened.ctx.fiber.dispose()
+  })
+
+  it('blocks combined skill and MCP reconciliation before any write when the definition source changed', async () => {
+    const f = await fixture({ mcp: 'with-skill', commitProbe: stage => {
+      if (stage === 'intent-recorded') throw new Error('simulated stop before production writes')
+    } })
+    const result = await f.evolution.runExperiment(experimentSpec(f), ROOT, ROOT)
+    expect(f.mcpCalls).toHaveLength(2)
+    await f.evolution.gate(PROPOSAL, gateAnswers([result.reportPath]), ROOT)
+    await f.evolution.decide(PROPOSAL, 'PROMOTE', ROOT, 'approval:mcp-decide')
+    const configBefore = await readFile(f.configFile, 'utf8')
+    await expect(f.evolution.apply(PROPOSAL, ROOT, 'approval:mcp-apply')).rejects.toThrow('simulated stop')
+    const intent = (await f.evolution.get(PROPOSAL)).openIntent!
+    expect(intent.files).toHaveLength(2)
+    const source = join(f.h.workspace, 'evolution', intent.capability!.mcpSource!)
+    const sourceBefore = await readFile(source)
+    await writeFile(source, JSON.stringify({ echo: { ...ECHO_TEMPLATE, command: 'tampered-server' } }))
+    await f.h.ctx.fiber.dispose()
+    const reopened = await startRunStack({
+      workspace: f.h.workspace,
+      roots: [ROOT],
+      capabilities: { [STORE_ROW]: STORE_ENTRY, [ROW]: MCP_BASELINE },
+      mcpServers: UNRELATED_MCP,
+    })
+    const skillRoot = join(f.h.home, 'skills')
+    const evolution = new EvolutionService(reopened.ctx, {
+      root: join(f.h.workspace, 'evolution'), skillRoot, capabilityConfig: f.configFile, modelSelection: () => SELECTION,
+    })
+    const ledgerBefore = await readFile(join(evolution.root, 'proposals.jsonl'), 'utf8')
+    const outcomes = await evolution.reconcile()
+    expect(outcomes).toEqual([expect.objectContaining({ result: 'blocked' })])
+    expect(outcomes[0]!.detail).toContain(intent.capability!.mcpSource!)
+    expect(existsSync(join(skillRoot, SKILL))).toBe(false)
+    expect(await readFile(f.configFile, 'utf8')).toBe(configBefore)
+    expect(reopened.runtime.listCapabilities()[ROW]).toEqual(MCP_BASELINE)
+    expect(reopened.runtime.listMcpServers()).toEqual(UNRELATED_MCP)
+    expect(await readFile(join(evolution.root, 'proposals.jsonl'), 'utf8')).toBe(ledgerBefore)
+    expect((await evolution.get(PROPOSAL)).openIntent?.intentId).toBe(intent.intentId)
+
+    await writeFile(source, sourceBefore)
+    expect(await evolution.reconcile()).toEqual([expect.objectContaining({ result: 'completed-redone' })])
+    expect((await evolution.get(PROPOSAL)).openIntent).toBeUndefined()
+    expect(await readFile(join(skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE_TEXT)
+    expect(await readFile(join(skillRoot, SKILL, SKILL_SIDECAR_FILE), 'utf8')).toBe(serializeSkillSidecar(sidecar(CANDIDATE_TEXT) as never))
+    expect(reopened.runtime.listCapabilities()[ROW]).toEqual({ skills: [SKILL], tools: ['filesystem'], mcpServers: ['echo'] })
+    expect(reopened.runtime.listMcpServers()).toEqual({ ...UNRELATED_MCP, echo: ECHO_TEMPLATE })
+    await reopened.ctx.fiber.dispose()
+  })
+
+  it('refuses frozen-definition tampering before any replay starts', async () => {
+    const f = await fixture({ mcp: true })
+    await writeFile(join(f.h.workspace, 'evolution', 'sandbox', PROPOSAL, 'mcp-servers.json'), JSON.stringify({ echo: { ...ECHO_TEMPLATE, command: 'different-server' } }))
+    const before = f.h.spawns.length
+    await expect(f.evolution.runExperiment(experimentSpec(f), ROOT, ROOT)).rejects.toThrow('capability-server-drifted')
+    expect(f.h.spawns).toHaveLength(before)
+    expect(f.h.runtime.listMcpServers()).toEqual(UNRELATED_MCP)
+  })
+
+  it('refuses a template digest different from the actual MCP-bound candidate run', async () => {
+    const f = await fixture({ mcp: true })
+    const result = await f.evolution.runExperiment(experimentSpec(f), ROOT, ROOT)
+    const snapshot = await f.h.snapshot(f.storeId)
+    const candidate = snapshot.runs.find(run => run.runId === result.report.samples[0]!.candidate.runId)!
+    const openStore = f.h.task.openStore.bind(f.h.task)
+    vi.spyOn(f.h.task, 'openStore').mockImplementation(async store => {
+      const current = await openStore(store)
+      return { ...current, runs: current.runs.map(run => run.runId !== candidate.runId ? run : { ...run, providerBinding: { ...run.providerBinding!, mcpServers: [{ serverName: 'echo', templateDigest: '0'.repeat(64) }] } }) }
+    })
+    await expect(f.evolution.checkPromotion(PROPOSAL)).rejects.toThrow(/MCP|server/)
+    expect(f.h.runtime.listMcpServers()).toEqual(UNRELATED_MCP)
+  })
+
+  it('refuses a server key installed by another capability after the experiment froze', async () => {
+    const f = await fixture({ mcp: true })
+    await f.evolution.runExperiment(experimentSpec(f), ROOT, ROOT)
+    const before = await readFile(f.configFile, 'utf8')
+    const moved = { ...ECHO_TEMPLATE, command: 'third-party-server' }
+    await f.h.runtime.applyCapabilityRow('third-party', { mcpServers: ['echo'] }, { mcpServers: { echo: moved } })
+    await expect(f.evolution.checkPromotion(PROPOSAL)).rejects.toThrow('capability-server-conflict')
+    expect(f.h.runtime.listMcpServers().echo).toEqual(moved)
+    expect(f.h.runtime.listCapabilities()[ROW]).toEqual(MCP_BASELINE)
+    expect(await readFile(f.configFile, 'utf8')).toBe(before)
+  })
 })

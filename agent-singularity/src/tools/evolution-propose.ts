@@ -22,14 +22,10 @@ export function defineEvolutionProposeTool(ctx: Context) {
   return defineTool({
     name: 'evolution_propose',
     description:
-      'Register an EvolutionProposal in the evolution ledger (status: proposed). Pure bookkeeping: nothing here executes ' +
-      'or changes production. This build admits an existing skill under its own name (the whole loadable object) or one ' +
-      'whole capability row with an optional NEW execution skill. Both go through evolution_candidate, evolution_prepare, ' +
-      'evolution_replay (the two-sided experiment), evolution_gate, and a human-approved evolution_decide plus ' +
-      'evolution_apply. Other target types stay recorded suggestions and are never opened as candidates, so they are ' +
-      'never evaluated and never promoted. ' +
-      'Fill targetType/targetId/rationale manually, or pass fromDiagnosis to transcribe one proposal out of a recorded ' +
-      'diagnosis (task_diagnose). baseVersion, level, and at least one sourceRef (diagnosisId / reviewRef / evidenceId) are required.',
+      'Record an evidenced shared change as a proposal. Executable targets are Task templates, existing Skills and one whole ' +
+      'capability row with optional new MCP definitions and an optional new execution Skill. Use evolution_candidate, ' +
+      'evolution_prepare, evolution_replay and evolution_gate before the human decisions through evolution_decide and ' +
+      'evolution_apply. Other target types remain suggestions. Existing Task contracts and Run bindings stay fixed.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Unique id for this proposal; a duplicate id is rejected' },
       level: {
@@ -38,7 +34,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
         enum: ['L1', 'L2', 'L3', 'L4'],
         description: 'Evolution level (L1 execution adaptation / L2 capability / L3 workflow / L4 harness); every level goes through human review, with no exemption',
       },
-      baseVersion: { type: 'string', required: true, description: 'Version of the target this proposal starts from' },
+      baseVersion: { type: 'string', required: true, description: 'Current target version; a first Task template uses absent with candidate version 1' },
       targetType: { type: 'string', enum: PROPOSAL_TARGET_TYPES, description: 'The mutation surface the proposal points at (required unless fromDiagnosis)' },
       targetId: { type: 'string', description: 'Name of the concrete target (required unless fromDiagnosis)' },
       rationale: { type: 'string', description: 'Why this change would address the diagnosed cause (required unless fromDiagnosis)' },
@@ -113,10 +109,11 @@ export function defineEvolutionProposeTool(ctx: Context) {
           'recomputed, so a content update cannot move a capability, a required tool or a verifier)'
         const capabilityReplacement =
           'ledger entry only — nothing was executed or changed; next: evolution_candidate with mutationJson as JSON text carrying exactly one whole ' +
-          'capability row { rows } and optionally a NEW execution skill { name, content, sidecar semantic fields }; the row may use only ' +
-          'already authorized tools and may not change permission or preset'
+          'capability row { rows }, optional new MCP launch definitions { mcpServers }, and optionally a NEW execution skill { name, content, sidecar semantic fields }; ' +
+          'the definitions and granted capability are evaluated together; permission and preset stay fixed'
+        const taskReplacement = 'ledger entry only — next: evolution_candidate with mutationJson {template,criterionRepair?}; submit one complete canonical TaskTemplate. Changing child criteria requires fixed positive and negative examples under the original independent parent oracle.'
         const recordedSuggestion =
-          `ledger entry only — nothing was executed or changed; this build promotes an existing skill or one capability row ` +
+          `ledger entry only — nothing was executed or changed; this build promotes a Task template, an existing Skill or one capability row ` +
           `with an optional new execution skill, so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become ` +
           'a candidate, is never evaluated, and is never promoted'
         return [
@@ -124,7 +121,8 @@ export function defineEvolutionProposeTool(ctx: Context) {
           `rationale: ${proposal.rationale}`,
           `sourceRefs: [${proposal.sourceRefs.join(', ')}]`,
           proposal.targetType === 'skill' ? skillReplacement
-            : proposal.targetType === 'capability' ? capabilityReplacement : recordedSuggestion,
+            : proposal.targetType === 'capability' ? capabilityReplacement
+              : proposal.targetType === 'task_definition' ? taskReplacement : recordedSuggestion,
         ].join('\n')
       } catch (error) {
         return `evolution_propose rejected: ${message(error)}`

@@ -9,5 +9,6 @@ export * from './experiment/runner.ts'
 export * from './experiment/workspace.ts'
 export * from './replay.ts'
 export * from './capability-candidate.ts'
+export * from './task-definition.ts'
 
 export { default } from './evolution.ts'

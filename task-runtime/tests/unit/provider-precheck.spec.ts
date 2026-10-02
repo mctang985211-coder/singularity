@@ -109,6 +109,7 @@ async function rename(directory: string, name: string): Promise<void> {
 
 interface PrecheckOptions {
   capabilities?: readonly string[]
+  mcpRegistry?: Readonly<Record<string, import('../../src/mcp-servers.ts').McpServerTemplate>>
   table?: Readonly<Record<string, CapabilityConfig>>
   cwd?: string | undefined
   extraRoots?: readonly string[]
@@ -122,6 +123,7 @@ async function precheck(options: PrecheckOptions = {}): Promise<ProviderPrecheck
   return precheckProviders({
     capabilities: options.capabilities ?? ['design-ball'],
     table: options.table ?? TABLE,
+    ...(options.mcpRegistry === undefined ? {} : { mcpRegistry: options.mcpRegistry }),
     view: {
       ...(cwd === undefined ? {} : { cwd }),
       ...(options.extraRoots === undefined ? {} : { extraRoots: [...options.extraRoots] }),
@@ -722,5 +724,34 @@ describe('the evolution commit gate', () => {
     const report = await precheck({ capabilities: ['verify-ball-functional'], commitLedger: service })
     expect(codes(rejected(verdict(report, 'verify-ball-functional', 'verify')))).toEqual(['commit-intent-open'])
     expect([...new Set(calls)].sort()).toEqual(['openIntentCapabilities', 'openIntentTargets'])
+  })
+})
+
+
+describe('provider pre-check against the explicit MCP registry', () => {
+  const echo = { serverName: 'echo-fixture', description: 'echo', command: 'node' }
+  test('accepts a registered MCP row without requiring any skill and refuses the same row with an unknown server', async () => {
+    const request = { capabilities: ['external'], table: { external: { mcpServers: ['echo'] } } }
+    const admitted = await precheck({ ...request, mcpRegistry: { echo } })
+    expect(admitted.capabilities[0]!.skills).toEqual([])
+    expect(providerRefusals(admitted)).toEqual([])
+    const refused = await precheck({ ...request, mcpRegistry: {} })
+    expect(providerRefusals(refused).join(' ')).toContain('unknown MCP server "echo"')
+  })
+
+  test('uses the actual server namespace in execution provider tool coverage', async () => {
+    const directory = await install('verify')
+    await patchSidecar(directory, sidecar => { sidecar.requiredTools = ['mcp__actual-server__bbdev_bemu_sim'] })
+    const request = { capabilities: ['verify-ball-functional'], mcpRegistry: { bbdev: { ...echo, serverName: 'actual-server' } } }
+    expect(providerRefusals(await precheck(request))).toEqual([])
+    await patchSidecar(directory, sidecar => { sidecar.requiredTools = ['mcp__bbdev__bbdev_bemu_sim'] })
+    expect(providerRefusals(await precheck(request)).join(' ')).toContain('tool-not-covered')
+  })
+
+  test('moves the registry revision when the resolved template changes', async () => {
+    const request = { capabilities: ['external'], table: { external: { mcpServers: ['echo'] } } }
+    const before = await precheck({ ...request, mcpRegistry: { echo } })
+    const after = await precheck({ ...request, mcpRegistry: { echo: { ...echo, command: 'different-node' } } })
+    expect(before.revision).not.toBe(after.revision)
   })
 })

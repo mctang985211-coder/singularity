@@ -1,11 +1,14 @@
+import { validateTaskDefinitionMutation, oracleContractDigest, independentOracleCriteria } from '../task-definition.ts'
+import type { FrozenTaskDefinition } from '../task-definition.ts'
+import { directoryDigest, latestReview } from './record.ts'
 /** Freezing one proposal into an experiment: the candidate's identity, the frozen samples, the judge vocabulary and both sides' sources.
  * @module dsh-singularity-evolution/experiment/freeze */
 
 import { resolve } from 'node:path'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { AcceptanceCriterion, ReviewRecord, TaskInstance, TaskSnapshot } from '@dangosys/dsh-singularity-task'
-import type { CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
-import { registryRevision, resolveCapabilities } from '@dangosys/dsh-singularity-task-runtime'
+import type { McpServerTemplate, CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
+import { mcpServerBindings, registryRevision, resolveCapabilities } from '@dangosys/dsh-singularity-task-runtime'
 import type { EvolutionProposal } from '../evolution.ts'
 import type { PreparedCapability } from '../capability-candidate.ts'
 import { capabilityOverlay, capabilityRowIdentity } from '../capability-candidate.ts'
@@ -35,7 +38,9 @@ import type {
 export function preparedContentDigestOf(frozen: {
   candidate?: SkillContentIdentity
   capability?: FrozenCapability
+  taskDefinition?: FrozenTaskDefinition
 }): string {
+  if (frozen.taskDefinition !== undefined) return digestOf(frozen.taskDefinition)
   if (frozen.capability !== undefined) {
     return digestOf({
       capability: frozen.capability,
@@ -80,6 +85,7 @@ export interface ExperimentLedger {
   readSkillCandidate(proposalId: string): Promise<{ skillMd: Buffer; sidecar?: Buffer }>
   /** Read a prepared **capability** candidate back out of its sandbox and verify it. */
   readCapabilityCandidate(proposalId: string): Promise<PreparedCapability>
+  readTaskDefinitionCandidate(proposalId: string): Promise<FrozenTaskDefinition>
   /** One experiment's folded view; throws on an unknown id. */
   experiment(experimentId: string): Promise<ExperimentView>
   /** Every experiment folded under one proposal, newest first. One call answers the whole family. */
@@ -102,7 +108,7 @@ export interface PrecheckSkillVerdict {
 
 /** The runtime's provider pre-check as the freeze consumes it (`TaskRuntime.capabilityProviderReport`). */
 export interface ProviderPrecheckView {
-  readonly capabilities: readonly { readonly capability: string; readonly skills: readonly PrecheckSkillVerdict[] }[]
+  readonly capabilities: readonly { readonly capability: string; readonly skills: readonly PrecheckSkillVerdict[]; readonly refusals?: readonly { code: string; detail: string }[] }[]
   readonly revision: string
 }
 
@@ -125,9 +131,11 @@ export interface ExperimentSources {
       capabilities: readonly string[]
       table: Readonly<Record<string, CapabilityConfig>>
       extraRoots: readonly string[]
+      mcpRegistry?: Readonly<Record<string, McpServerTemplate>>
     }): Promise<ProviderPrecheckView>
     /** The effective capability table, as the runtime holds it — the rows a pre-check covered and the servers they grant. */
     listCapabilities?(): Readonly<Record<string, CapabilityConfig>>
+    listMcpServers?(): Readonly<Record<string, McpServerTemplate>>
   }
   /** The registered judge vocabulary at freeze time (S4-E §Q3), or `undefined` */
   verifierVocabulary?(): Promise<VerifierVocabularyView | undefined>
@@ -141,8 +149,9 @@ export interface ExperimentCandidate {
   candidate?: SkillContentIdentity
   /** The capability candidate's frozen identity (A6); absent for a skill candidate. */
   capability?: FrozenCapability
+  taskDefinition?: FrozenTaskDefinition
   /** The candidate-side overlay of a capability candidate: the row override and the sandbox skill root. */
-  overlay?: { capabilityOverrides: Record<string, CapabilityConfig>; extraSkillRoots: string[] }
+  overlay?: { capabilityOverrides: Record<string, CapabilityConfig>; extraSkillRoots: string[]; mcpServers?: Record<string, McpServerTemplate> }
 }
 
 /** The proposal this experiment may evaluate, and the candidate identity it runs against. */
@@ -151,7 +160,7 @@ export async function experimentCandidate(
   proposalId: string,
 ): Promise<ExperimentCandidate> {
   const proposal = await sources.evolution.get(proposalId)
-  if (proposal.targetType !== 'skill' && proposal.targetType !== 'capability') {
+  if (proposal.targetType !== 'skill' && proposal.targetType !== 'capability' && proposal.targetType !== 'task_definition') {
     throw new Error(
       `proposal ${proposalId} targets "${proposal.targetType}"; the two-sided experiment evaluates a skill candidate or a ` +
         'capability candidate (A6) only',
@@ -165,6 +174,7 @@ export async function experimentCandidate(
   if (prepared === undefined || prepared.sandbox === null || !prepared.mechanical) {
     throw new Error(`proposal ${proposalId} has no materialized candidate; prepare it before evaluating it`)
   }
+  if (proposal.targetType === 'task_definition') return { proposal, sandbox: prepared.sandbox, taskDefinition: await sources.evolution.readTaskDefinitionCandidate(proposalId) }
   if (proposal.targetType === 'capability') {
     if (prepared.capabilityRow === undefined) {
       throw new Error(
@@ -206,6 +216,7 @@ export async function experimentCandidate(
         row: { name: prepared.capabilityRow.name, entry: verified.row.entry, digest: prepared.capabilityRow.digest },
         baseline,
         sourceRefs: [...proposal.sourceRefs],
+        ...(verified.mcpServers === undefined ? {} : { mcpServers: verified.mcpServers }),
       },
       ...(prepared.skillContent === undefined ? {} : { candidate: prepared.skillContent }),
       overlay: capabilityOverlay(proposal, { root: sources.evolution.root }),
@@ -371,8 +382,9 @@ export async function frozenProviderIdentity(input: {
   return {
     capabilities: rows,
     registryRevision: precheck.revision,
-    candidateRegistryRevision: candidateRegistryRevisionOf({ table, skills, candidate, where }),
+    candidateRegistryRevision: candidateRegistryRevisionOf({ table, skills, candidate, where, mcpRegistry: sources.taskRuntime.listMcpServers?.() }),
     mcpServers,
+    ...(mcpServers.length === 0 ? {} : { mcpBindings: mcpServerBindings(resolveCapabilities(rows, table, sources.taskRuntime.listMcpServers?.() ?? {}), sources.taskRuntime.listMcpServers?.() ?? {}) }),
     preset: declaredPresets.size === 0 ? null : [...declaredPresets][0]!,
     skills,
   }
@@ -384,6 +396,7 @@ export function frozenCapabilitySideOf(input: {
   table: Readonly<Record<string, CapabilityConfig>>
   rows: readonly string[]
   where: string
+  mcpRegistry?: Readonly<Record<string, McpServerTemplate>>
 }): FrozenCapabilitySide {
   const { precheck, table, rows, where } = input
   const refused = refusedProviderLines(precheck)
@@ -430,6 +443,7 @@ export function frozenCapabilitySideOf(input: {
     capabilities: [...rows],
     registryRevision: precheck.revision,
     mcpServers: [...new Set(rows.flatMap(row => table[row]?.mcpServers ?? []))].sort(),
+    ...(rows.some(row => (table[row]?.mcpServers?.length ?? 0) > 0) ? { mcpBindings: mcpServerBindings(resolveCapabilities(rows, table, input.mcpRegistry ?? {}), input.mcpRegistry ?? {}) } : {}),
     preset: declaredPresets.size === 0 ? null : [...declaredPresets][0]!,
     skills,
   }
@@ -437,14 +451,15 @@ export function frozenCapabilitySideOf(input: {
 
 /** Every provider one pre-check refused, as a refusal line names it — the one rendering the freeze and the admission record share. */
 export function refusedProviderLines(precheck: ProviderPrecheckView): string[] {
-  return precheck.capabilities.flatMap(row =>
-    row.skills
+  return precheck.capabilities.flatMap(row => [
+    ...(row.refusals ?? []).map(item => `${row.capability}: ${item.code}: ${item.detail}`),
+    ...row.skills
       .filter(skill => !skill.valid)
       .map(
         skill =>
           `${row.capability}: skill "${skill.name}" (${(skill.defects ?? []).map(defect => `${defect.code}: ${defect.detail}`).join('; ')})`,
       ),
-  )
+  ])
 }
 
 /** What the two sides of one **capability** sample are frozen against (A6). */
@@ -453,7 +468,7 @@ export async function frozenCapabilitySample(input: {
   caller: SessionId
   sampleTaskId: string
   required: readonly string[]
-  overlay: { capabilityOverrides: Record<string, CapabilityConfig>; extraSkillRoots: string[] }
+  overlay: { capabilityOverrides: Record<string, CapabilityConfig>; extraSkillRoots: string[]; mcpServers?: Record<string, McpServerTemplate> }
 }): Promise<{
   provider?: FrozenProviderIdentity
   admission?: FrozenSampleAdmission
@@ -470,8 +485,10 @@ export async function frozenCapabilitySample(input: {
     )
   }
   const rows = [...new Set(input.required)].sort()
+  const mcpRegistry = sources.taskRuntime.listMcpServers?.() ?? {}
+  const overlayRegistry = { ...mcpRegistry, ...overlay.mcpServers }
   const overlayTable = { ...table, ...overlay.capabilityOverrides }
-  const overlayManifest = resolveCapabilities(rows, overlayTable)
+  const overlayManifest = resolveCapabilities(rows, overlayTable, overlayRegistry)
   if (overlayManifest.missing.length > 0) {
     throw new Error(
       `${where} requires ${overlayManifest.missing.length > 1 ? 'capabilities' : 'capability'} ` +
@@ -489,9 +506,11 @@ export async function frozenCapabilitySample(input: {
     precheck: await sources.taskRuntime.precheckCapabilityTable({
       capabilities: rows,
       table: overlayTable,
+      mcpRegistry: overlayRegistry,
       extraRoots: [...overlay.extraSkillRoots],
     }),
     table: overlayTable,
+    mcpRegistry: overlayRegistry,
     rows,
     where: `${where} candidate side`,
   })
@@ -523,7 +542,7 @@ export async function frozenCapabilitySample(input: {
       candidateProvider,
     }
   }
-  const productionSide = frozenCapabilitySideOf({ precheck, table, rows, where: `${where} production side` })
+  const productionSide = frozenCapabilitySideOf({ precheck, table, rows, mcpRegistry, where: `${where} production side` })
   return {
     provider: {
       capabilities: rows,
@@ -531,6 +550,7 @@ export async function frozenCapabilitySample(input: {
       // A capability sample's candidate side is the overlay, frozen as the production side's own revision.
       candidateRegistryRevision: productionSide.registryRevision,
       mcpServers: productionSide.mcpServers,
+      ...(productionSide.mcpBindings === undefined ? {} : { mcpBindings: productionSide.mcpBindings }),
       preset: productionSide.preset,
       skills: productionSide.skills,
     },
@@ -544,6 +564,7 @@ export function candidateRegistryRevisionOf(input: {
   skills: readonly FrozenProviderSkill[]
   candidate: SkillContentIdentity
   where: string
+  mcpRegistry?: Readonly<Record<string, McpServerTemplate>>
 }): string {
   const { table, skills, candidate, where } = input
   if (!skills.some(skill => skill.name === candidate.name)) {
@@ -560,6 +581,7 @@ export function candidateRegistryRevisionOf(input: {
       name: skill.name,
       contractDigest: skill.name === candidate.name ? candidateDigest : skill.contractDigest,
     })),
+    input.mcpRegistry,
   )
 }
 
@@ -615,14 +637,17 @@ export function freezeExperiment(input: {
   candidate?: SkillContentIdentity
   productionBaseline?: SkillContentIdentity
   capability?: FrozenCapability
+  taskDefinition?: FrozenTaskDefinition
   sandbox: string
   snapshotDigest: string
   samples: FrozenSample[]
 }): FrozenExperiment {
   const candidate = input.candidate
   const capability = input.capability
+  const taskDefinition = input.taskDefinition
   const frozen: FrozenExperiment = {
     proposalId: input.proposalId,
+    ...(input.spec.objective === undefined ? {} : { objective: input.spec.objective }),
     repetition: input.spec.repetition,
     ...(candidate === undefined ? {} : { candidate: frozenIdentityOf(candidate) }),
     ...(input.productionBaseline === undefined
@@ -646,8 +671,10 @@ export function freezeExperiment(input: {
                     digest: capability.baseline.digest,
                   },
             sourceRefs: [...capability.sourceRefs],
+            ...(capability.mcpServers === undefined ? {} : { mcpServers: structuredClone(capability.mcpServers) }),
           },
         }),
+    ...(taskDefinition === undefined ? {} : { taskDefinition: structuredClone(taskDefinition) }),
     model: {
       provider: input.spec.model.provider,
       model: input.spec.model.model,
@@ -660,9 +687,9 @@ export function freezeExperiment(input: {
     snapshot: { sourceDir: resolve(input.spec.snapshot.sourceDir), digest: input.snapshotDigest },
     comparerVersion: EXPERIMENT_COMPARER_VERSION,
     overlay: {
-      baseline: 'none — the baseline runs under the production configuration',
+      baseline: taskDefinition === undefined ? 'none — the baseline runs under the production configuration' : 'session template library: frozen baseline',
       candidate:
-        capability === undefined
+        taskDefinition !== undefined ? 'session template library: appended candidate, only new child contracts use it' : capability === undefined
           ? `extraSkillRoots: [${input.sandbox}/skills] — the complete candidate object: ` +
             `${
               candidate!.contract === undefined
@@ -681,4 +708,35 @@ export function freezeExperiment(input: {
   }
   assertFrozenExperiment(frozen)
   return frozen
+}
+
+/** Criterion repair examples keep the existing outer oracle and its historical labels. */
+export async function freezeCriterionRepair(definition: FrozenTaskDefinition, proposal: EvolutionProposal, snapshot: TaskSnapshot, samples: FrozenSample[], vocabulary: VerifierVocabularyView | undefined): Promise<void> {
+  const repair = validateTaskDefinitionMutation(proposal.mutation).criterionRepair
+  if (repair === undefined) return
+  const parent = snapshot.tasks.find(task => task.taskId === samples[0]?.taskId)
+  if (parent === undefined) throw new Error('evolution: criterion repair requires a parent oracle sample')
+  if (independentOracleCriteria(parent).length === 0) throw new Error('evolution: criterion repair needs independent command acceptance on the source parent')
+  if (vocabulary === undefined) throw new Error('evolution: criterion repair verifier vocabulary is unavailable')
+  const guardVerifierVersions: Record<string, string> = {}
+  for (const criterion of [...independentOracleCriteria(parent), ...definition.candidate.template.contract.acceptanceCriteria]) {
+    const ref = criterion.verifierRef
+    if (ref === undefined || vocabulary.versions[ref] === undefined) throw new Error('evolution: criterion guards must pin a registered versioned verifier')
+    guardVerifierVersions[ref] = vocabulary.versions[ref]!
+  }
+  const examples = {} as NonNullable<FrozenTaskDefinition['criterionRepair']>
+  for (const label of ['positive', 'negative'] as const) {
+    const input = repair[label]
+    const task = snapshot.tasks.find(item => item.taskId === input.taskId)
+    const review = task === undefined ? undefined : latestReview(snapshot, task)
+    const expected = label === 'positive' ? 'verified' : 'failed'
+    if (task === undefined || task.status !== expected || review?.outcome !== expected || !review.criteria?.length || review.criteria.some(criterion => criterion.verdict === 'inconclusive') || (label === 'negative' && !review.criteria.some(criterion => criterion.verdict === 'fail'))) throw new Error(`evolution: ${label} criterion example must be an existing definitive ${expected} Run`)
+    if (oracleContractDigest(task) !== oracleContractDigest(parent)) throw new Error('evolution: criterion examples must be judged by the fixed independent parent oracle')
+    const judged = independentOracleCriteria(task).map(criterion => review.criteria!.find(item => item.criterionId === criterion.criterionId)?.verdict)
+    if (judged.length === 0 || judged.some(verdict => verdict === undefined || verdict === 'inconclusive') || (label === 'positive' ? judged.some(verdict => verdict !== 'pass') : !judged.includes('fail'))) throw new Error('evolution: criterion example labels must come from the independent parent acceptance')
+    examples[label] = { ...input, sourceDir: resolve(input.sourceDir), snapshotDigest: await directoryDigest(input.sourceDir), contractDigest: oracleContractDigest(task) }
+  }
+  if (examples.positive.snapshotDigest === examples.negative.snapshotDigest) throw new Error('evolution: positive and negative criterion examples require distinct existing inputs')
+  definition.criterionRepair = examples
+  definition.guardVerifierVersions = guardVerifierVersions
 }

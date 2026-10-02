@@ -7,6 +7,7 @@ import type {
   ExperimentAdmissionRefusal,
   ExperimentBudget,
   ExperimentCost,
+  ExperimentObjective,
   ExperimentSampleRole,
   ExperimentSide,
   ExperimentSideDetail,
@@ -25,6 +26,7 @@ export interface ExperimentSampleSpec {
 /** The experiment a caller freezes before anything runs (§F.2). Everything here is frozen into the report's identity block. */
 export interface ExperimentSpec {
   proposalId: string
+  objective?: ExperimentObjective
   samples: ExperimentSampleSpec[]
   /** The directory whose recursive content is the frozen input both workspaces are built from. */
   snapshot: { sourceDir: string }
@@ -123,6 +125,9 @@ export function safeSegment(value: unknown, field: string): string {
 /** The specification's own shape, before anything is read or frozen. */
 export function validateSpec(spec: ExperimentSpec): void {
   nonEmpty(spec.proposalId, 'proposalId')
+  if (spec.objective !== undefined && spec.objective !== 'tool-call-reduction') {
+    throw new Error('experiment: objective must be tool-call-reduction when declared')
+  }
   if (
     spec.model === null ||
     typeof spec.model !== 'object' ||

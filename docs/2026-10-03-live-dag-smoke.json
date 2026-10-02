@@ -1,0 +1,146 @@
+{
+  "model": "deepseek/deepseek-v4.1-flash",
+  "plan": {
+    "reason": "The root objective splits into two independently checkable artifacts: squares.json (elementwise squares of numbers.json, judged by the trusted checker checks/verify-squares.mjs) and summary.json (count and sum of those squares, judged by checks/verify-summary.mjs). The summary consumes squares.json, so it depends on the verified squares result. Each child gets its own self-contained contract and its consumed checker declared as a protected input so the bytes cannot change.",
+    "children": [
+      {
+        "objective": "Produce squares.json in the working checkout: read numbers.json (already present, containing [3,7,-2]) and write squares.json holding the elementwise squares of that array, i.e. [9,49,4]. The delivered file must be valid JSON containing exactly the squared array in the same order as numbers.json. Do not modify numbers.json or any checker file.",
+        "constraints": [
+          "Work only with ordinary filesystem/bash tools within the checkout.",
+          "Do not modify any file under checks/ (in particular checks/verify-squares.mjs and checks/verify-combined.mjs).",
+          "Do not modify numbers.json.",
+          "The delivered artifact is squares.json; it must be created at the checkout root path squares.json."
+        ],
+        "assumptions": [
+          "numbers.json exists at the checkout root with the array [3,7,-2].",
+          "A node runtime is available to run the trusted checker."
+        ],
+        "requiredCapabilities": [
+          "local-files"
+        ],
+        "decomposable": false,
+        "acceptanceCriteria": [
+          {
+            "criterionId": "squares-checker-passes",
+            "description": "The trusted checker accepts the delivered squares.json: it contains the elementwise squares of numbers.json in order.",
+            "mode": "deterministic",
+            "command": "node checks/verify-squares.mjs",
+            "protectedInputs": [
+              "checks/verify-squares.mjs"
+            ],
+            "requiredEvidence": [
+              "command output of node checks/verify-squares.mjs showing success"
+            ]
+          }
+        ]
+      },
+      {
+        "objective": "Produce summary.json in the working checkout: read the verified squares.json and write summary.json containing the count of the squared elements and their sum (for squares [9,49,4] this is count 3 and sum 62). The delivered file must be valid JSON with fields for the count and the sum of the squares. Do not modify squares.json, numbers.json, or any checker file.",
+        "constraints": [
+          "Depends on the sibling result that delivers and verifies squares.json; consume that verified artifact rather than recomputing from numbers.json.",
+          "Do not modify squares.json, numbers.json, or any file under checks/ (in particular checks/verify-summary.mjs and checks/verify-combined.mjs).",
+          "Work only with ordinary filesystem/bash tools within the checkout.",
+          "The delivered artifact is summary.json; it must be created at the checkout root path summary.json."
+        ],
+        "assumptions": [
+          "squares.json is delivered and verified by the sibling task before this task starts.",
+          "A node runtime is available to run the trusted checker."
+        ],
+        "requiredCapabilities": [
+          "local-files"
+        ],
+        "decomposable": false,
+        "dependsOn": [
+          0
+        ],
+        "acceptanceCriteria": [
+          {
+            "criterionId": "summary-checker-passes",
+            "description": "The trusted checker accepts the delivered summary.json: it reports the count and the sum of the elements of squares.json.",
+            "mode": "deterministic",
+            "command": "node checks/verify-summary.mjs",
+            "protectedInputs": [
+              "checks/verify-summary.mjs"
+            ],
+            "requiredEvidence": [
+              "command output of node checks/verify-summary.mjs showing success"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "requests": [
+    {
+      "sessionId": "s-cf8ee0dc-d2c8-4c01-90d6-605e80098998",
+      "tools": [
+        "task_read",
+        "read"
+      ]
+    },
+    {
+      "sessionId": "s-cf8ee0dc-d2c8-4c01-90d6-605e80098998",
+      "tools": [
+        "write"
+      ]
+    },
+    {
+      "sessionId": "s-cf8ee0dc-d2c8-4c01-90d6-605e80098998",
+      "tools": [
+        "task_verify"
+      ]
+    },
+    {
+      "sessionId": "s-cf8ee0dc-d2c8-4c01-90d6-605e80098998",
+      "tools": [
+        "task_submit_result"
+      ]
+    },
+    {
+      "sessionId": "s-2e2a8a3e-f583-447d-9329-0f34989a815f",
+      "tools": [
+        "task_read",
+        "task_status"
+      ]
+    },
+    {
+      "sessionId": "s-2e2a8a3e-f583-447d-9329-0f34989a815f",
+      "tools": [
+        "read",
+        "read",
+        "read"
+      ]
+    },
+    {
+      "sessionId": "s-2e2a8a3e-f583-447d-9329-0f34989a815f",
+      "tools": [
+        "write"
+      ]
+    },
+    {
+      "sessionId": "s-2e2a8a3e-f583-447d-9329-0f34989a815f",
+      "tools": [
+        "task_verify"
+      ]
+    },
+    {
+      "sessionId": "s-2e2a8a3e-f583-447d-9329-0f34989a815f",
+      "tools": [
+        "task_submit_result"
+      ]
+    }
+  ],
+  "runStatuses": [
+    "verified",
+    "verified",
+    "verified"
+  ],
+  "edges": [
+    {
+      "from": "t-e772f567-6e80-4cea-9c4f-48577b249e74",
+      "to": "t-597332ab-335d-4236-8bfa-1325701ecf78"
+    }
+  ],
+  "rootVerdict": "task_submit_result verified: run \"r-72760048-3fd1-46f4-8876-f92a39dec6f3\" submitted and verified.",
+  "verificationScope": "Real model calls with production prompt and tool schemas; generated contracts executed by TaskRuntime and AgentRuntime scopes with real read/write tools and protected command verifiers. Model request loop and approval desk were controlled by the smoke runner; this is not a long-term autonomous self-development evaluation."
+}

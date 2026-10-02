@@ -1,3 +1,4 @@
+import { validateTaskDefinitionMutation } from '../task-definition.ts'
 /** Record payload validation for the ledger's own lines, shared by the write doors and the fold.
  * @module dsh-singularity-evolution/ledger/records */
 
@@ -6,7 +7,7 @@ import type { ProposalTargetType, TaskSnapshot } from '@dangosys/dsh-singularity
 import { SKILL_SIDECAR_FILE } from '@dangosys/dsh-singularity-task-runtime'
 import type { RootRecoveryOutcome } from '@dangosys/dsh-singularity-task-runtime'
 import type { CapabilityRowIdentity } from '../capability-candidate.ts'
-import { assertCapabilityRow, capabilityRowDigest, validateCapabilityMutation } from '../capability-candidate.ts'
+import { assertMcpServerIdentity, assertCapabilityRow, capabilityRowDigest, validateCapabilityMutation } from '../capability-candidate.ts'
 import type { SkillContentIdentity } from '../replay.ts'
 import type { CapabilityTableIdentity, CapabilityTableStates } from '../capability-config.ts'
 
@@ -19,6 +20,10 @@ export function validateMutation(
   mutation: unknown,
 ): asserts mutation is Record<string, unknown> {
   if (!isRecord(mutation)) throw new Error('evolution: mutation must be an object')
+  if (targetType === 'task_definition') {
+    validateTaskDefinitionMutation(mutation)
+    return
+  }
   if (targetType === 'capability') {
     validateCapabilityMutation(mutation)
     return
@@ -147,7 +152,7 @@ export function validateCommitIntent(record: CommitIntentRecord): void {
         `evolution: ${at} names target "${file.target}" — an intent names the absolute production paths it commits`,
       )
     }
-    if (basename(file.target) !== (index === 0 ? 'SKILL.md' : SKILL_SIDECAR_FILE)) {
+    if (!(files.length === 1 && (file.baselineSha256 === null || file.contentSha256 === null) && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*@[1-9][0-9]*\.json$/.test(basename(file.target))) && basename(file.target) !== (index === 0 ? 'SKILL.md' : SKILL_SIDECAR_FILE)) {
       throw new Error(
         `evolution: ${at} names target "${file.target}" — the file set of one skill object is ordered and fixed: SKILL.md first, ` +
           `and, when the object carries an execution sidecar, ${SKILL_SIDECAR_FILE} second`,
@@ -162,6 +167,10 @@ export function validateCommitIntent(record: CommitIntentRecord): void {
   })
   const capability = record.capability
   if (capability === undefined) return
+  if (capability.mcpServers !== undefined) {
+    assertMcpServerIdentity(capability.mcpServers)
+    if (typeof capability.mcpSource !== 'string' || !capability.mcpSource) throw new Error('evolution: MCP commit identity requires a recoverable source')
+  }
   const at = `commit_intent record for proposal "${record.proposalId}" capability row`
   if (!isRecord(capability) || typeof capability.name !== 'string' || capability.name.trim().length === 0) {
     throw new Error(`evolution: ${at} names no row — a capability commit carries the one row it moves, by name`)

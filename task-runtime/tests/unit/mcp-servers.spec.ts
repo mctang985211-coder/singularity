@@ -2,6 +2,7 @@ import { DEPLOYMENT_MCP_SERVERS } from '../../../tests/support/mcp-servers.ts'
 import { describe, expect, test } from 'vitest'
 import {
   manifestMcpServers,
+  parseMcpServerRegistry,
   resolveMcpServerSpecs,
   type McpEnvBinding,
 } from '../../src/mcp-servers.ts'
@@ -10,6 +11,34 @@ const BINDING: McpEnvBinding = {
   envRoot: '/env/project1',
   checkout: repo => (repo === 'buckyball' ? '/env/project1/mctang985211-coder/buckyball' : undefined),
 }
+
+describe('McpServerTemplate admission', () => {
+  const template = { serverName: 'echo-fixture', description: 'External echo', command: 'node', args: ['server.mjs'] }
+  test('shares the deployment schema and keeps registry keys separate from namespaces', () => {
+    const registry = parseMcpServerRegistry({ echo: template })
+    expect(registry).toEqual({ echo: template })
+    expect(resolveMcpServerSpecs(manifest('echo'), undefined, registry)[0]!.serverName).toBe('echo-fixture')
+  })
+  test.each([
+    [{ extra: true }, 'unknown field'],
+    [{ serverName: 'invalid.name' }, 'serverName'],
+    [{ serverName: 'x'.repeat(33) }, 'serverName'],
+    [{ command: '' }, 'command'],
+    [{ command: 'node\0' }, 'NUL'],
+    [{ args: [1] }, 'args'],
+    [{ env: { X: 1 } }, 'env'],
+    [{ env: { 'X=Y': 'value' } }, 'variable name'],
+    [{ cwd: '' }, 'cwd'],
+    [{ toolCallTimeoutMs: 0 }, 'positive'],
+    [{ toolCallTimeoutMs: 1.5 }, 'integer'],
+    [{ args: ['{unknownRoot}'] }, 'placeholder'],
+  ])('refuses malformed template %j', (override, refusal) => {
+    expect(() => parseMcpServerRegistry({ echo: { ...template, ...override } })).toThrow(refusal)
+  })
+  test('refuses duplicate namespaces across independently named definitions', () => {
+    expect(() => parseMcpServerRegistry({ echo: template, other: template })).toThrow('duplicates namespace')
+  })
+})
 
 function manifest(...servers: string[]) {
   return { capabilities: { 'cap-x': { mcpServers: [...servers] } } }

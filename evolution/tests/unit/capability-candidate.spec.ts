@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { CapabilityConfig, SkillSidecar } from '@dangosys/dsh-singularity-task-runtime'
+import type { McpServerTemplate, CapabilityConfig, SkillSidecar } from '@dangosys/dsh-singularity-task-runtime'
 import { SKILL_SIDECAR_FILE, serializeSkillSidecar } from '@dangosys/dsh-singularity-task-runtime'
 import { EvolutionService } from '../../src/evolution.ts'
 import type { Config, GateAnswers, ProposeInput } from '../../src/evolution.ts'
@@ -135,6 +135,7 @@ async function fixture(
     /** The table file's own write seam (`Config.capabilityConfigProbe`): throwing stops the commit exactly where it stands. */
     capabilityConfigProbe?: (stage: 'before-write' | 'staged' | 'written', row: string) => void
     installProductionSkill?: boolean
+    mcpServers?: Record<string, McpServerTemplate>
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'evolution-capability-'))
@@ -154,6 +155,7 @@ async function fixture(
     await writeFile(join(skillRoot, NEW_SKILL, 'SKILL.md'), skillText(NEW_SKILL, '# already there'))
   }
   const registry: Record<string, CapabilityConfig> = options.registry ?? { [STORE_ROW]: STORE_ENTRY }
+  const mcpServers = options.mcpServers ?? {}
   const applies: { name: string; entry: CapabilityConfig | null }[] = []
   // The experiment evidence a promotion gate reads: the store rows the fixture
   // records through the service's own write path, and the session logs its sides'
@@ -165,6 +167,7 @@ async function fixture(
     effect: () => {},
     taskRuntime: {
       listCapabilities: () => structuredClone(registry),
+      listMcpServers: () => structuredClone(mcpServers),
       applyCapabilityRow: async (name: string, entry: CapabilityConfig | null) => {
         applies.push({ name, entry: entry === null ? null : structuredClone(entry) })
         if (entry === null) delete registry[name]
@@ -192,12 +195,12 @@ async function fixture(
     // The capability table's own file (A6): the commit writes the row it installs
     // into this file before it records the completion, so a case reads back both
     // what the registry took and what a restart would load.
-    capabilityConfig: await writeCapabilityConfig(join(dir, 'config.yml'), registry),
+    capabilityConfig: await writeCapabilityConfig(join(dir, 'config.yml'), registry, mcpServers),
     ...(options.commitProbe === undefined ? {} : { commitProbe: options.commitProbe }),
     ...(options.capabilityConfigProbe === undefined ? {} : { capabilityConfigProbe: options.capabilityConfigProbe }),
   }
   const svc = new EvolutionService(ctx, config)
-  return { svc, ctx, root, skillRoot, home, registry, applies, config, rows, sessions }
+  return { svc, ctx, root, skillRoot, home, registry, applies, config, rows, sessions, mcpServers }
 }
 
 /**
@@ -829,13 +832,12 @@ describe('capability candidate: the table file a third party moved', () => {
     expect(message).toContain('capability-table-changed')
     expect(rewritten).toBe(true)
     // The write never landed: what the third party wrote is what the file holds,
-    // the row this commit installed never reached it, and no completion closed
-    // the intent (the commit's earlier steps did install the registry row — the
-    // half-product the open intent is the record of).
+    // no registry update follows a refused atomic config write, and the open
+    // intent retains the unfinished skill files for reconciliation.
     const held = await readFile(table, 'utf8')
     expect(held).toBe(thirdParty)
     expect(held).not.toContain(`"${NEW_ROW}"`)
-    expect(registry[NEW_ROW]).toEqual({ skills: [NEW_SKILL], tools: ['filesystem'] })
+    expect(registry[NEW_ROW]).toBeUndefined()
     expect((await ledgerLines(root)).some(line => line.kind === 'applied')).toBe(false)
     expect((await svc.get('cap1')).openIntent?.intentId).toBe('cap1/apply')
   })
@@ -870,7 +872,7 @@ describe('capability candidate: the table file a third party moved', () => {
     expect(await readFile(table, 'utf8')).toBe(thirdParty)
     expect((await ledgerLines(root)).some(line => line.kind === 'applied')).toBe(false)
     expect((await svc.get('cap1')).openIntent?.intentId).toBe('cap1/apply')
-    expect(registry[NEW_ROW]).toEqual({ skills: [NEW_SKILL], tools: ['filesystem'] })
+    expect(registry[NEW_ROW]).toBeUndefined()
   })
 
   it('lands on exactly the states prepare froze when nothing moves: apply, then rollback', async () => {
@@ -892,5 +894,64 @@ describe('capability candidate: the table file a third party moved', () => {
     // deployment had is byte for byte the file it has again.
     expect(rolled).toBe(before)
     expect((await ledgerLines(root)).filter(line => line.kind === 'rolledback')).toHaveLength(1)
+  })
+})
+
+
+describe('capability MCP definition admission', () => {
+  const echo: McpServerTemplate = { serverName: 'echo-fixture', description: 'echo', command: 'node', args: ['server.mjs'] }
+
+  it('freezes an execution capability without any skill and leaves production unchanged', async () => {
+    const f = await fixture()
+    await f.svc.propose(capabilityProposal, 'root-1')
+    await f.svc.candidate('cap1', VERSION_SET, 'root-1', { rows: { [NEW_ROW]: { mcpServers: ['echo'] } }, mcpServers: { echo } })
+    const prepared = await f.svc.prepare('cap1', 'root-1')
+    expect(prepared.prepared!.capabilityRow!.entry).toEqual({ mcpServers: ['echo'] })
+    expect(prepared.prepared!.skillContent).toBeUndefined()
+    expect(prepared.prepared!.mcpServers!.definitions).toEqual({ echo })
+    expect(capabilityOverlay(prepared, { root: f.root })).toEqual({ capabilityOverrides: { [NEW_ROW]: { mcpServers: ['echo'] } }, extraSkillRoots: [], mcpServers: { echo } })
+    expect(f.registry[NEW_ROW]).toBeUndefined()
+    expect(f.mcpServers).toEqual({})
+    expect(await f.svc.readCapabilityCandidate('cap1')).toMatchObject({ mcpServers: prepared.prepared!.mcpServers })
+  })
+
+  it('can grant an existing deployment server even when no previous capability grants it', async () => {
+    const f = await fixture({ mcpServers: { echo } })
+    await f.svc.propose(capabilityProposal, 'root-1')
+    await f.svc.candidate('cap1', VERSION_SET, 'root-1', { rows: { [NEW_ROW]: { mcpServers: ['echo'] } } })
+    expect((await f.svc.prepare('cap1', 'root-1')).status).toBe('prepared')
+  })
+
+  it.each([
+    ['same key', { echo }, { echo: { ...echo, serverName: 'changed' } }, 'capability-server-conflict'],
+    ['same namespace', { other: echo }, { echo }, 'duplicates namespace'],
+  ] as const)('refuses a %s conflict without changing production', async (_label, deployment, definitions, reason) => {
+    const f = await fixture({ mcpServers: { ...deployment } })
+    await f.svc.propose(capabilityProposal, 'root-1')
+    await f.svc.candidate('cap1', VERSION_SET, 'root-1', { rows: { [NEW_ROW]: { mcpServers: ['echo'] } }, mcpServers: definitions })
+    await expect(f.svc.prepare('cap1', 'root-1')).rejects.toThrow(reason)
+    expect(f.registry[NEW_ROW]).toBeUndefined()
+    expect(f.mcpServers).toEqual(deployment)
+  })
+
+  it('refuses an ungranted definition at candidate recording', async () => {
+    const f = await fixture()
+    await f.svc.propose(capabilityProposal, 'root-1')
+    await expect(f.svc.candidate('cap1', VERSION_SET, 'root-1', { rows: { [NEW_ROW]: { tools: ['filesystem'] } }, mcpServers: { echo } })).rejects.toThrow('capability-server-ungranted')
+  })
+
+  it.each([
+    ['mcp__echo-fixture__echo', true],
+    ['mcp__echo__echo', false],
+  ] as const)('resolves required MCP tool %s against the template namespace', async (tool, accepted) => {
+    const f = await fixture()
+    await f.svc.propose(capabilityProposal, 'root-1')
+    await f.svc.candidate('cap1', VERSION_SET, 'root-1', {
+      rows: { [NEW_ROW]: { skills: [NEW_SKILL], mcpServers: ['echo'] } },
+      mcpServers: { echo },
+      skill: { name: NEW_SKILL, content: CANDIDATE_TEXT, sidecar: executionSidecar(CANDIDATE_TEXT, { requiredTools: [tool] }) },
+    })
+    if (accepted) expect((await f.svc.prepare('cap1', 'root-1')).status).toBe('prepared')
+    else await expect(f.svc.prepare('cap1', 'root-1')).rejects.toThrow('skill-tool-unauthorized')
   })
 })

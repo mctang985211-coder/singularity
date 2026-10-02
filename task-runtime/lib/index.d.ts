@@ -1,5 +1,5 @@
 import * as _dangosys_dsh_singularity_task0 from "@dangosys/dsh-singularity-task";
-import { AcceptanceCriterion, AdmissionContext, BudgetExtensionProposal, CapabilityManifest, CriterionSpec, DecompositionAdmission, DecompositionIdentity, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionRecord, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RunId, RunMemberReuse, RunMemberReuseRefusal, RunProviderBinding, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractInput, TaskContractVersion, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalPolicy, TaskProposalRoot, TaskProposalStatus, TaskRun, TaskService, TaskSnapshot, TaskTemplate, TaskTemplateRef } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, AdmissionContext, BudgetExtensionProposal, CapabilityManifest, CriterionSpec, DecompositionAdmission, DecompositionIdentity, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionRecord, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunProviderBinding, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractInput, TaskContractVersion, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalPolicy, TaskProposalRoot, TaskProposalStatus, TaskRun, TaskService, TaskSnapshot, TaskTemplate, TaskTemplateRef } from "@dangosys/dsh-singularity-task";
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { AgentMessageIntent, AgentOptions, McpServerSpec, MessageDeliveryReport, MessageDeliveryStatus, SessionOwnLog, ToolCallBody, ToolCallRef, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
@@ -53,6 +53,8 @@ interface McpServerTemplate {
   /** Per-tool-call deadline handed to mcp-client; defaults to the client default (60 s). */
   toolCallTimeoutMs?: number;
 }
+/** Parse deployment and candidate definitions through one schema and namespace policy. */
+declare function parseMcpServerRegistry(value: unknown): Record<string, McpServerTemplate>;
 /**
  * Materialize one manifest's MCP grants into mount-ready specs.
  * @param manifest - the resolved capability manifest (server names already validated at admission).
@@ -413,7 +415,7 @@ interface SkillValidationContext {
  * A capability table as a query, going through `resolveCapabilities` — the same
  * resolution admission performs — so the pre-check sees exactly the grant a
  */
-declare function capabilityToolQuery(capabilities: Readonly<Record<string, CapabilityConfig>>): CapabilityToolQuery;
+declare function capabilityToolQuery(capabilities: Readonly<Record<string, CapabilityConfig>>, mcpRegistry?: Readonly<Record<string, McpServerTemplate>>): CapabilityToolQuery;
 /** What a skill directory honestly held when it was read. */
 interface LoadedSkillSidecar {
   /** The skill directory that was read, as given. */
@@ -541,7 +543,7 @@ declare function validateSkillProvider(candidate: SkillProviderCandidate, contex
  * The registry revision: SHA-256 over {@link canonicalize} of the capability
  * table (each row sorted by name, carrying its skills, the tool labels it
  */
-declare function registryRevision(capabilities: Readonly<Record<string, CapabilityConfig>>, providers: readonly SkillProviderIdentity[]): string;
+declare function registryRevision(capabilities: Readonly<Record<string, CapabilityConfig>>, providers: readonly SkillProviderIdentity[], mcpRegistry?: Readonly<Record<string, McpServerTemplate>>): string;
 //#endregion
 //#region src/provider-precheck.d.ts
 /**
@@ -638,6 +640,7 @@ interface ProviderPrecheckRequest {
    */
   readonly capabilities: readonly string[];
   /** The capability table the rows were resolved from; its identity is part of {@link ProviderPrecheck.revision}. */
+  readonly mcpRegistry?: Readonly<Record<string, McpServerTemplate>>;
   readonly table: Readonly<Record<string, CapabilityConfig>>;
   /** Where discovery looks. */
   readonly view: SkillDiscoveryView;
@@ -672,6 +675,7 @@ declare function precheckReplacedCapabilityRow(request: {
   /** The row's entry as it will read after the replacement. */
   readonly entry: CapabilityConfig;
   /** The table the row is folded into — the replacement table, then. */
+  readonly mcpRegistry?: Readonly<Record<string, McpServerTemplate>>;
   readonly table: Readonly<Record<string, CapabilityConfig>>;
   /** Where discovery looks; a deployment's own process viewpoint or a worker's checkout. */
   readonly view: SkillDiscoveryView;
@@ -710,6 +714,8 @@ interface RunBindingRequest {
   /** The MCP template registry the granted server names resolve against (tests pass their own). */
   mcpRegistry?: Readonly<Record<string, McpServerTemplate>>;
 }
+/** The granted MCP servers' identity: the registry key and the template it resolved to, or `null` when the registry holds no such key. */
+declare function mcpServerBindings(manifest: CapabilityManifest, registry: Readonly<Record<string, McpServerTemplate>>): RunMcpServerBinding[];
 /**
  * Bind one run's content: identify the providers its admission judged,
  * materialize their admitted bytes, and verify the snapshot against the record
@@ -780,6 +786,18 @@ type NormalizationResult = {
  * Returns every defect it found, never the first: a caller revising a proposal
  */
 declare function normalizeDecomposition(spec: unknown, context: NormalizationContext): NormalizationResult;
+type RootNormalizationResult = {
+  ok: true;
+  contract: TaskContract;
+} | {
+  ok: false;
+  reasons: string[];
+};
+/**
+ * Normalize one root contract (A0 §2–§3): the caller's single contract —
+ * objective, criteria, assumptions, constraints, declared capabilities — in,
+ */
+declare function normalizeRootContract(spec: unknown): RootNormalizationResult;
 //#endregion
 //#region src/root-budget.d.ts
 /**
@@ -991,6 +1009,7 @@ interface SpawnChildRequest {
    * The model selection the child's agent is created under, replacing the
    * deployment's own default for this worker alone (`AgentRuntime.spawn` merges
    */
+  taskTemplatesRoot?: string;
   agentOptions?: AgentOptions;
   signal?: AbortSignal;
 }
@@ -1093,6 +1112,7 @@ interface OrchestrateEnv {
    * The model selection every worker this orchestration spawns is created under,
    * when the run it serves is bound to one. A replay carries the experiment's
    */
+  taskTemplatesRoot?: string;
   agentOptions?: AgentOptions;
   /**
    * The provider pre-check, for the one case that has no verdict to carry: a
@@ -1254,11 +1274,15 @@ interface OwedBatchResult {
  * replay run, never to the runtime's configuration. The evolution replay is
  */
 interface ReplayOverlay {
+  /** Frozen library for this replay and descendants; production config is unchanged. */
+  taskTemplatesRoot?: string;
   /**
    * Whole-row capability replacements: an entry overrides the same-named row of
    * the configured table for this run's capability resolution (the same
    */
   capabilityOverrides?: Record<string, CapabilityConfig>;
+  /** Candidate definitions resolved for this replay only. */
+  mcpServers?: Record<string, McpServerTemplate>;
   /**
    * Extra skill roots forwarded to the worker grant (`WorkerGrant.skillRoots`):
    * every `<root>/<name>/SKILL.md` found is registered into the worker's own
@@ -1998,6 +2022,8 @@ declare class TaskRuntime extends Service {
   readonly sessionWorkspaces: Map<string, string>;
   readonly sessionExecutionBindings: Map<string, {
     agentOptions?: AgentOptions;
+    taskTemplatesRoot?: string;
+    overlay?: ReplayOverlay;
   }>;
   readonly executionGate: ExecutionGate;
   readonly closingStores: Set<string>;
@@ -2008,7 +2034,8 @@ declare class TaskRuntime extends Service {
   rootBudgetApproval?: RootBudgetApproval;
   readonly terminalReviewListeners: Set<(fact: TerminalReviewFact) => void | Promise<void>>;
   constructor(ctx: Context, config?: Config);
-  findTaskTemplates(query?: string): Promise<TaskTemplateMatch[]>;
+  taskTemplatesRootFor(sessionId?: string): string | undefined;
+  findTaskTemplates(query?: string, callerSessionId?: string): Promise<TaskTemplateMatch[]>;
   registerTaskTemplate(template: TaskTemplate): Promise<_dangosys_dsh_singularity_task0.TaskTemplateRef>;
   unload(): Promise<void>;
   [Service.init](): Promise<void>;
@@ -2024,6 +2051,7 @@ declare class TaskRuntime extends Service {
   applyCapabilityRow(name: string, entry: CapabilityConfig | null, options?: {
     commitTargets?: readonly string[];
     commitRow?: string;
+    mcpServers?: Record<string, McpServerTemplate | null>;
   }): Promise<void>;
   adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption>;
   initializeStoreGates(storeId: string): Promise<void>;
@@ -2064,7 +2092,7 @@ declare class TaskRuntime extends Service {
     ok: false;
     refusal: DecompositionRefusal;
   }>;
-  manifestsOf(batch: NormalizedBatch): CapabilityManifest[];
+  manifestsOf(batch: NormalizedBatch, callerSessionId?: string): CapabilityManifest[];
   storedBatchOf(proposal: TaskProposal): NormalizedBatch;
   assertDecomposableRun(storeId: string, parentTask: TaskInstance, parentRun: TaskRun, callerSessionId: string, signal?: AbortSignal): Promise<void>;
   inFlightProposalsOf(storeId: string, parentRunId: RunId): Promise<TaskProposalDecomposition[]>;
@@ -2157,14 +2185,14 @@ declare class TaskRuntime extends Service {
   admissionContext(): AdmissionContext;
   envPathForSession(sessionId: string): Promise<string | undefined>;
   contractRefusal(parentTaskId: TaskId, reasons: readonly string[]): Error;
-  orchestrateEnv(callerSessionId: string, actor: string, workspace?: string): Promise<OrchestrateEnv>;
+  orchestrateEnv(callerSessionId: string, actor: string, workspace?: string, overlay?: ReplayOverlay): Promise<OrchestrateEnv>;
   watchRun(storeId: string, runId: RunId, callback: (status: RunStatus) => void): () => void;
   sessionBoundInProcess(storeId: string, runId: RunId): string | undefined;
   releaseRunWorkspaceLayer(storeId: string, runId: RunId, sessionId: string): Promise<void>;
   observeSession(sessionId: string): Promise<SessionObservation | undefined>;
   softService<T>(name: string): T | undefined;
   registeredVerifierIds(): Promise<readonly string[] | undefined>;
-  providerPrecheck(capabilities: readonly string[], view: SkillDiscoveryView, table?: Readonly<Record<string, CapabilityConfig>>): Promise<ProviderPrecheck>;
+  providerPrecheck(capabilities: readonly string[], view: SkillDiscoveryView, table?: Readonly<Record<string, CapabilityConfig>>, mcpRegistry?: Readonly<Record<string, McpServerTemplate>>): Promise<ProviderPrecheck>;
   capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheck>;
   readRunBinding(binding: RunProviderBinding): Promise<RunBindingRead | undefined>;
   assertKnownVerifierRefs(declared: readonly {
@@ -2341,4 +2369,4 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 //#endregion
-export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, type McpServerTemplate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskRuntime, TaskRuntime as default, TaskTemplateMatch, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, normalizeDecomposition, openProposalOf, optionalService, owedBatchResults, parseObligationTemplates, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, type McpServerTemplate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskRuntime, TaskRuntime as default, TaskTemplateMatch, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

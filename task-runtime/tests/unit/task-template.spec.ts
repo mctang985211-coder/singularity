@@ -47,7 +47,7 @@ describe('immutable task templates enter the existing contract path', () => {
     expect(await findTaskTemplates(root, 'unrelated')).toEqual([])
     expect(await findTaskTemplates(undefined)).toEqual([])
     const h = harness({ config: { taskTemplatesRoot: root } })
-    const listed = await defineTaskTemplateListTool({ taskRuntime: h.runtime } as never).execute!({ query: 'project' }, {} as never)
+    const listed = await defineTaskTemplateListTool({ taskRuntime: h.runtime } as never).execute!({ query: 'project' }, { agent: { id: ROOT_SESSION } } as never)
     expect(JSON.parse(listed as string)).toEqual([{ templateRef: second, template: template(2) }])
     expect(parseTaskTemplate(JSON.parse(await readFile(join(root, 'verify-project@1.json'), 'utf8')))).toEqual(template())
   })

@@ -22,6 +22,12 @@ export async function resumeAdoptedWorkerSession(
   request: AdoptedWorkerResumeRequest,
 ): Promise<AdoptedWorkerResume> {
   const sessionId = request.run.sessionId
+  if (request.run.taskTemplatesRoot !== undefined) {
+    self.sessionExecutionBindings.set(sessionId, {
+      ...self.sessionExecutionBindings.get(sessionId),
+      taskTemplatesRoot: request.run.taskTemplatesRoot,
+    })
+  }
   const continuing = self.startedSessions.has(sessionId)
   /**
    * A session already live here is one this process holds: the resume is not

@@ -9,17 +9,10 @@ export function defineEvolutionDecideTool(ctx: Context) {
   return defineTool({
     name: 'evolution_decide',
     description:
-      'Close a gated EvolutionProposal with a human decision (status: decided). Always asks a human through the native ' +
-      'approval seam first — every level L1–L4, no exemption — and records the decision (PROMOTE / REJECT / ' +
-      'KEEP_FOR_FURTHER_RESEARCH) only after an explicit approve. A reject, cancel, or unavailable answerer records ' +
-      'nothing and leaves the proposal gated. A PROMOTE is checked before the human is asked: the candidate\'s whole ' +
-      'content identity (the `SKILL.md` bytes, plus the derived sidecar and its declaration digest when the object declares ' +
-      'an execution provider), its provider verdict (role, registered verifier, granted tools) and the completed two-sided ' +
-      'experiment must still hold. An existing skill may not change role, weaken its verifier or grow a capability through ' +
-      'a content update; a capability promotion moves exactly one whole row, optionally with a new execution skill, and ' +
-      'cannot add unauthorized tools or change permission or preset. A recorded PROMOTE still applies ' +
-      'nothing by itself: the change takes effect only through evolution_apply, which asks the human a second time, names ' +
-      'every production file it writes, and leaves a run already bound to the previous version on its own snapshot.',
+      'Decide a gated proposal after human approval: PROMOTE, REJECT or KEEP_FOR_FURTHER_RESEARCH. A PROMOTE rechecks ' +
+      'the frozen Task template, Skill or capability candidate and its completed experiment before showing the exact mutation ' +
+      'and evidence to the person. This records a decision only; evolution_apply requests the production write separately. ' +
+      'A refused approval leaves the proposal gated.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Gated proposal to decide' },
       decision: { type: 'string', required: true, enum: EVOLUTION_DECISIONS, description: 'Decision to record after human approval' },
@@ -51,6 +44,9 @@ export function defineEvolutionDecideTool(ctx: Context) {
       const reason = [
         `Evolution decision for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
         `rationale: ${proposal.rationale}`,
+        `evaluated mutation: ${JSON.stringify(proposal.mutation)}`,
+        ...(proposal.prepared?.mcpServers === undefined ? [] : [`MCP definitions sha256:${proposal.prepared.mcpServers.digest}`]),
+        ...(proposal.prepared?.capabilityTable === undefined ? [] : [`deployment config baseline sha256:${proposal.prepared.capabilityTable.baselineSha256}; apply sha256:${proposal.prepared.capabilityTable.applySha256}; rollback sha256:${proposal.prepared.capabilityTable.rollbackSha256}`]),
         `version set: ${Object.entries(proposal.versionSet!).map(([key, value]) => `${key}=${value}`).join(', ')}`,
         `gate: 1. Target failure fixed? ${gate.targetFailureFixed}`,
         `gate: 2. Original acceptance maintained? ${gate.originalAcceptanceMaintained}`,

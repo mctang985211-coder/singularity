@@ -1,3 +1,4 @@
+import { parseMcpServerRegistry } from '../mcp-servers.ts'
 import { taskContractIdentity } from '@dangosys/dsh-singularity-task'
 /**
  * Replay: the replay entry and its workspace claim.
@@ -47,7 +48,8 @@ export async function replayTask(
     requiredCapabilities: champion.requestedCapabilities,
   }
   const table = { ...self.config.capabilities, ...(options.overlay?.capabilityOverrides ?? {}) }
-  const manifest = resolveCapabilities(effective.requiredCapabilities, table, self.config.mcpServers ?? {})
+  const mcpRegistry = parseMcpServerRegistry({ ...self.config.mcpServers, ...options.overlay?.mcpServers })
+  const manifest = resolveCapabilities(effective.requiredCapabilities, table, mcpRegistry)
   if (manifest.missing.length > 0) {
     throw new Error(
       `task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(', ')}] under the overlay`,
@@ -70,6 +72,7 @@ export async function replayTask(
       ...(options.overlay?.extraSkillRoots === undefined ? {} : { extraRoots: [...options.overlay.extraSkillRoots] }),
     },
     table,
+    mcpRegistry,
   )
   const refusals = providerRefusals(precheck)
   if (refusals.length > 0) {
@@ -154,7 +157,7 @@ export async function replayTask(
   const run = async (): Promise<ReplayRunOutcome> => {
     try {
       const outcome = await runReplayTask(
-        await self.orchestrateEnv(callerSessionId, callerSessionId, named),
+        await self.orchestrateEnv(callerSessionId, callerSessionId, named, options.overlay ?? {}),
         storeId,
         {
           task,
@@ -172,6 +175,7 @@ export async function replayTask(
            * frozen selection, forwarded verbatim — the orchestration carries it to
            */
           ...(options.agentOptions === undefined ? {} : { agentOptions: { ...options.agentOptions } }),
+          ...(options.overlay?.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: options.overlay.taskTemplatesRoot }),
           spawn,
           championRunId,
         },

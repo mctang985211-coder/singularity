@@ -647,16 +647,13 @@ describe('AgentRuntime root lifecycle', () => {
     const { restrict, section } = await assemble(state.resumeOptions[0])
     expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
     const prompt = promptTextOf(section)
-    expect(prompt).toContain('Use evolution_propose and evolution_candidate')
-    expect(prompt).toContain('new baseline and candidate runs on frozen inputs, judges, model and budget')
-    expect(prompt).toContain('one whole capability row with an optional new execution skill')
-    expect(prompt).toContain('Keep the existing role, verifier and capabilities of a skill')
-    expect(prompt).toContain('use only authorized tools without changing permissions or presets')
-    expect(prompt).toContain('Decisions require human approval')
-    expect(prompt).toContain('evolution_apply with a second approval')
-    expect(prompt).toContain('Read the ledger with evolution_list')
-    expect(prompt).toContain('an existing execution contract is derived at prepare')
-    expect(prompt).toContain('A new execution provider needs the capability row that grants it')
+    for (const name of ['evolution_propose', 'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list']) {
+      expect(prompt).toContain(name)
+    }
+    expect(prompt).toContain('Task template, Skill or capability')
+    expect(prompt).toContain('MCP server launch definitions')
+    expect(prompt).toContain('original independent acceptance')
+    expect(prompt).toContain('human approval')
     expect(prompt).not.toMatch(/single-file|single file|candidate.vs.champion|v1 replay/i)
     // The domain reference map is a deployed skill, not part of the general root prompt.
     expect(prompt).not.toContain('Buckyball')
@@ -707,7 +704,7 @@ describe('AgentRuntime root lifecycle', () => {
 
     expect(openAllow).toContain('task_intake')
     expect(promptTextOf(openAssembly.section)).toContain('call task_intake')
-    expect(promptTextOf(openAssembly.section)).toContain('Use evolution_propose and evolution_candidate')
+    expect(promptTextOf(openAssembly.section)).toContain('evolution_candidate')
   })
 
   test('ensureRoot returns an interrupted running root to idle before resuming it', async () => {
@@ -761,9 +758,9 @@ describe('AgentRuntime root lifecycle', () => {
     const { restrict, section } = await assemble(state.createOptions[0])
     expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
     const prompt = promptTextOf(section)
-    expect(prompt).toContain('Use evolution_propose and evolution_candidate')
+    expect(prompt).toContain('evolution_candidate')
     expect(prompt).toContain('evolution_propose')
-    expect(prompt).toContain('Read the ledger with evolution_list')
+    expect(prompt).toContain('evolution_list')
     expect(prompt).not.toContain('Buckyball')
   })
 })

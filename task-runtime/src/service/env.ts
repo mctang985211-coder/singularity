@@ -16,13 +16,14 @@ import type {
   TaskId,
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
+import type { McpServerTemplate } from '../mcp-servers.ts'
 import type { CapabilityConfig } from '../capability.ts'
 import type { JobsView } from '../gate.ts'
 import { optionalService, precheckProviders, registeredVerifierIds } from '../provider-precheck.ts'
 import type { EvolutionCommitLedger, ProviderPrecheck, SkillDiscoveryView } from '../provider-precheck.ts'
 import { readRunBinding } from '../run-binding.ts'
 import type { RunBindingRead } from '../run-binding.ts'
-import { VerifierUnavailableError, type OrchestrateEnv, type SessionObservation } from '../orchestration/types.ts'
+import { VerifierUnavailableError, type OrchestrateEnv, type ReplayOverlay, type SessionObservation } from '../orchestration/types.ts'
 import { message } from '../helpers.ts'
 import { releaseLayer } from '../workspace.ts'
 import type {
@@ -114,6 +115,7 @@ export async function orchestrateEnv(
   callerSessionId: string,
   actor: string,
   workspace?: string,
+  replayOverlay?: ReplayOverlay,
 ): Promise<OrchestrateEnv> {
   /**
    * A session this process already spawned into a named workspace keeps
@@ -126,6 +128,9 @@ export async function orchestrateEnv(
    * model selection of the experiment it belongs to. The same session-level
    */
   const binding = self.sessionExecutionBindings.get(callerSessionId)
+  const overlay = replayOverlay ?? binding?.overlay
+  const table = { ...self.config.capabilities, ...overlay?.capabilityOverrides }
+  const mcpRegistry = { ...self.config.mcpServers, ...overlay?.mcpServers }
   return {
     task: self.context.task,
     actor,
@@ -138,10 +143,14 @@ export async function orchestrateEnv(
     workspaces: self.workspaces,
     ...(workspacePath === undefined ? {} : { workspacePath }),
     ...(named === undefined ? {} : { workerCwd: named }),
+    ...(binding?.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: binding.taskTemplatesRoot }),
     ...(binding?.agentOptions === undefined ? {} : { agentOptions: binding.agentOptions }),
     writeDrainTimeoutMs: self.config.writeDrainTimeoutMs,
     ...(self.config.rootBudget === undefined ? {} : { rootBudget: { ...self.config.rootBudget } }),
-    precheck: (capabilities, cwd) => providerPrecheck(self, capabilities, { ...(cwd === undefined ? {} : { cwd }) }),
+    precheck: (capabilities, cwd) => providerPrecheck(self, capabilities, {
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(overlay?.extraSkillRoots === undefined ? {} : { extraRoots: [...overlay.extraSkillRoots] }),
+    }, table, mcpRegistry),
     notify: (sessionId, text) => {
       self.notify(sessionId, text)
     },
@@ -174,7 +183,7 @@ export async function orchestrateEnv(
         throw new Error('task-runtime: permissionPresets service is not loaded; cannot rank declared permissions')
       return presets.resolve(name)
     },
-    mcpRegistry: self.config.mcpServers,
+    mcpRegistry,
     resolveMcpEnv: async () => {
       /**
        * The same graph env the verifier's cwd comes from; absent in test
@@ -207,8 +216,14 @@ export async function orchestrateEnv(
        * What the session *runs under* is remembered the same way (S4-E §Q3): a
        * replay's worker carries the experiment's frozen selection, and the
        */
-      if (request.agentOptions !== undefined) {
-        self.sessionExecutionBindings.set(request.sessionId, { agentOptions: request.agentOptions })
+      const taskTemplatesRoot = request.taskTemplatesRoot ?? binding?.taskTemplatesRoot
+      const agentOptions = request.agentOptions ?? binding?.agentOptions
+      if (agentOptions !== undefined || taskTemplatesRoot !== undefined || overlay !== undefined) {
+        self.sessionExecutionBindings.set(request.sessionId, {
+          ...(agentOptions === undefined ? {} : { agentOptions }),
+          ...(taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot }),
+          ...(overlay === undefined ? {} : { overlay: structuredClone(overlay) }),
+        })
       }
       return self.context.agentRuntime.spawn(parent, {
         sessionId: SessionId(request.sessionId),
@@ -403,12 +418,14 @@ export async function providerPrecheck(
   capabilities: readonly string[],
   view: SkillDiscoveryView,
   table: Readonly<Record<string, CapabilityConfig>> = self.config.capabilities,
+  mcpRegistry: Readonly<Record<string, McpServerTemplate>> = self.config.mcpServers ?? {},
 ): Promise<ProviderPrecheck> {
   const verifierRefs = await registeredVerifierIdsImpl(self)
   const commitLedger = self.softService<EvolutionCommitLedger>('evolution')
   return precheckProviders({
     capabilities,
     table,
+    mcpRegistry,
     view,
     ...(verifierRefs === undefined ? {} : { verifierRefs }),
     ...(commitLedger === undefined ? {} : { commitLedger }),

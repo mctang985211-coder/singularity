@@ -715,7 +715,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     expect(h.spawned[before + 1]!.agentOptions).toBeUndefined()
   })
 
-  test('a replayed worker\u2019s own decomposition is spawned under the same frozen options', async () => {
+  test('a replayed worker keeps its frozen model through library restoration and passes both bindings to children', async () => {
     const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
     const before = h.spawned.length
@@ -725,6 +725,12 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
         await h.runtime.submitResult(sessionId, { summary: 'done' })
         return
       }
+      await h.runtime.resumeAdoptedWorkerSession({
+        storeId: bound.storeId,
+        run: bound.run,
+        grant: h.spawned.find(spawn => spawn.sessionId === sessionId)!.grant!,
+        taskWorker: true,
+      })
       await decomposeAndSettle(h, bound.storeId, bound.task.taskId, bound.run.runId, sessionId, {
         reason: 'the replayed work is not atomic',
         children: [childSpec('the child of the replayed work')],
@@ -740,6 +746,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       {
         lineage: 'evolution-replay:sub-execution',
         agentOptions: { ...FROZEN_OPTIONS },
+        overlay: { taskTemplatesRoot: '/sandbox/sub-execution/task-templates' },
       },
       ROOT_SESSION,
     )
@@ -753,5 +760,6 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     // same way.
     expect(child!.agentOptions).toEqual(FROZEN_OPTIONS)
     expect(child!.sessionId).not.toBe(worker!.sessionId)
+    expect((await h.runtime.runForSession(child!.sessionId)).run.taskTemplatesRoot).toBe('/sandbox/sub-execution/task-templates')
   })
 })

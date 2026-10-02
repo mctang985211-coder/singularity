@@ -3,6 +3,7 @@
  * (guide §2.3/§2.4, S1-C): config load, provider replacement and candidate
  */
 
+import type { McpServerTemplate } from './mcp-servers.ts'
 import { lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { parseSkillFile } from '@dangosys/dsh-singularity-agent-runtime'
@@ -78,11 +79,11 @@ export interface SkillValidationContext {
  * A capability table as a query, going through `resolveCapabilities` — the same
  * resolution admission performs — so the pre-check sees exactly the grant a
  */
-export function capabilityToolQuery(capabilities: Readonly<Record<string, CapabilityConfig>>): CapabilityToolQuery {
+export function capabilityToolQuery(capabilities: Readonly<Record<string, CapabilityConfig>>, mcpRegistry?: Readonly<Record<string, McpServerTemplate>>): CapabilityToolQuery {
   return capability => {
     let manifest
     try {
-      manifest = resolveCapabilities([capability], capabilities)
+      manifest = resolveCapabilities([capability], capabilities, mcpRegistry)
     } catch (error) {
       return { known: false, reason: message(error) }
     }
@@ -90,7 +91,7 @@ export function capabilityToolQuery(capabilities: Readonly<Record<string, Capabi
     if (entry === undefined) {
       return { known: false, reason: `capability "${capability}" is not in the capability table` }
     }
-    return { known: true, tools: entry.tools, mcpServers: entry.mcpServers ?? [] }
+    return { known: true, tools: entry.tools, mcpServers: (entry.mcpServers ?? []).map(key => mcpRegistry === undefined ? key : mcpRegistry[key]!.serverName) }
   }
 }
 
@@ -98,8 +99,9 @@ export function capabilityToolQuery(capabilities: Readonly<Record<string, Capabi
 export function skillValidationContext(
   capabilities: Readonly<Record<string, CapabilityConfig>>,
   verifierRefs: readonly string[],
+  mcpRegistry?: Readonly<Record<string, McpServerTemplate>>,
 ): SkillValidationContext {
-  return { verifierRefs: [...verifierRefs].sort(), capabilityTools: capabilityToolQuery(capabilities) }
+  return { verifierRefs: [...verifierRefs].sort(), capabilityTools: capabilityToolQuery(capabilities, mcpRegistry) }
 }
 
 /** What a skill directory honestly held when it was read. */
@@ -770,6 +772,7 @@ export async function validateSkillProvider(
 export function registryRevision(
   capabilities: Readonly<Record<string, CapabilityConfig>>,
   providers: readonly SkillProviderIdentity[],
+  mcpRegistry?: Readonly<Record<string, McpServerTemplate>>,
 ): string {
   const table = Object.keys(capabilities)
     .sort()
@@ -793,5 +796,5 @@ export function registryRevision(
   const sidecars = providers
     .map(provider => ({ name: provider.name, contractDigest: provider.contractDigest }))
     .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
-  return sha256Hex(canonicalize({ capabilities: table, providers: sidecars }))
+  return sha256Hex(canonicalize({ capabilities: table, providers: sidecars, ...(mcpRegistry === undefined || Object.keys(mcpRegistry).length === 0 ? {} : { mcpRegistry }) }))
 }

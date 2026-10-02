@@ -54,7 +54,13 @@ export function assertTransition(current: EvolutionProposal, kind: EvolutionStat
 }
 
 /** The production write targets of an apply (and its matching rollback), for the commit's fixed file set and for audit. */
-export function applyTargets(proposal: EvolutionProposal, roots: { skillRoot: string }): string[] {
+export function applyTargets(proposal: EvolutionProposal, roots: { skillRoot: string; taskTemplatesRoot?: () => string }, direction: 'apply' | 'rollback' = 'apply'): string[] {
+  if (proposal.targetType === 'task_definition') {
+    const candidate = proposal.prepared?.templateCandidate?.template
+    if (candidate === undefined || roots.taskTemplatesRoot === undefined) return []
+    const version = direction === 'rollback' && proposal.prepared?.templateBaseline != null ? candidate.version + 1 : candidate.version
+    return [join(roots.taskTemplatesRoot(), `${candidate.id}@${version}.json`)]
+  }
   if (proposal.targetType === 'capability') {
     const content = proposal.prepared?.skillContent
     if (content === undefined) return []

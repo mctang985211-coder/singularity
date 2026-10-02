@@ -207,7 +207,7 @@ describe('evolution tools', () => {
     const tool = defineEvolutionProposeTool(ctx)
     const result = (await tool.execute({ ...proposal }, exec('root-1'))) as string
     expect(result).toContain('proposal p1 registered [proposed] L2 task_definition build:1 (base v3)')
-    expect(result).toContain('nothing was executed or changed')
+    expect(result).toContain('ledger entry only')
     expect((await svc.get('p1')).status).toBe('proposed')
   })
 

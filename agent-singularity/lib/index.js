@@ -994,6 +994,11 @@ async function admitReviewAgent(rootStoreId, work) {
 					} else if (attempt.diagnosisId !== request.diagnosisId) continue;
 					if (attempt.settlement !== void 0) continue;
 					if (liveAttempts.has(attempt.sessionId) || claimedHere.has(attempt.sessionId)) continue;
+					const latest = (await readReviewAgentAttempts(rootStoreId)).find((item) => item.sessionId === attempt.sessionId);
+					if (latest?.settlement !== void 0) {
+						Object.assign(attempt, { settlement: latest.settlement });
+						continue;
+					}
 					const recorded = await hooks?.recorded?.(attempt) === true;
 					const status = recorded ? "recorded" : "interrupted";
 					const note = recorded ? requestRole === "reviewer" ? DIAGNOSIS_ALREADY_RECORDED : "the proposal or recovery outcome is durable; resume from its recorded facts" : attempt.started ? STARTED_OWNER_GONE : CLAIM_NEVER_STARTED;
@@ -1346,6 +1351,7 @@ function supervisorPrompt(input) {
 		"",
 		"Read task_review_pack, task_read/task_status and the original evidence through context_read. Do not create a duplicate proposal.",
 		`For an established shared gap, cite diagnosis:${diagnosis.diagnosisId} in evolution_propose.sourceRefs. Use only supported candidate targets and only tools actually granted: evolution_candidate → evolution_prepare → evolution_replay → evolution_gate. Missing artifacts alone do not establish a shared gap.`,
+		...input.sourceOutcome === "verified" ? [`For this successful source, evolution_replay must declare objective: "tool-call-reduction", include task ${diagnosis.taskId} in taskIds, and name independent verified holdoutTaskIds. The experiment requires unchanged acceptance and lower complete Run subtree tool-call counts; unknown counters prove no improvement.`] : [],
 		"A gated proposal continues with evolution_decide to request the human decision. A PROMOTE-decided proposal continues with evolution_apply to request approval for its exact production writes. If approval is denied or unavailable, report proposalId and its current status and stop. A rejected or research-only decision opens no recovery for that change.",
 		input.childSource ? "After a child shared change is applied, finish with the proposal id and evidence. The runtime notifies the responsible parent to read its state and replan. Do not call task_recover for the child." : `Apply any necessary shared changes first. Then, if another round is justified, call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "recovery:${diagnosis.diagnosisId}"${input.sourceOutcome === "verified" ? ", mode: \"improve\"" : ""} }. The original acceptance judges it; repeating the key returns the same attempt. A cap refusal ends iteration.`,
 		"If no justified action remains, explain why and end with one fenced json block {\"outcome\":\"closed\",\"reason\":\"...\"}. Closing changes no task state. Unsupported candidate targets require a concrete explanation rather than invented tool support."
@@ -1534,7 +1540,8 @@ async function startSupervisorHandoff(ctx, input) {
 			storeId,
 			diagnosis,
 			sessionId: supervisorSessionId,
-			agent: spawned.handle.agent
+			agent: spawned.handle.agent,
+			...input.signal === void 0 ? {} : { signal: input.signal }
 		});
 		return {
 			diagnosisId: diagnosis.diagnosisId,
@@ -1547,37 +1554,61 @@ async function startSupervisorHandoff(ctx, input) {
 async function watchSupervisorCompletion(input) {
 	let status = "interrupted";
 	let note = "the supervisor ended without issuing task_recover or closing the hand-off";
+	const cancel = () => input.agent.cancel({ kind: "parent" });
+	input.signal?.addEventListener("abort", cancel, { once: true });
+	let waiting = true;
+	let unloaded = false;
+	let resolveCompleted;
+	const completed = new Promise((resolve$1) => {
+		resolveCompleted = resolve$1;
+	});
+	let disposeWait;
 	try {
+		disposeWait = input.ctx.effect(() => async () => {
+			if (!waiting) return;
+			unloaded = true;
+			cancel();
+			await completed;
+		}, "singularityAgent: supervisor wait");
+		if (input.signal?.aborted === true) cancel();
 		await input.agent.whenIdle();
-		const snapshot = await input.ctx.task.snapshotIn(input.storeId);
-		const recovery = [...snapshot.runs].reverse().find((run) => run.recovery !== void 0 && run.recovery.sourceDiagnosisId === input.diagnosis.diagnosisId);
-		if (recovery !== void 0) {
-			status = "recorded";
-			note = `task_recover issued: run ${recovery.runId}`;
-		} else {
-			const proposals = await proposalsForDiagnosis(input.ctx, input.diagnosis.diagnosisId);
-			if (proposals.length > 0) {
-				status = proposals.every((proposal) => proposal.status === "rolledback" || proposal.status === "decided" && proposal.decision !== "PROMOTE") ? "closed" : "recorded";
-				note = proposals.map((proposal) => `proposal ${proposal.proposalId} [${proposal.status}]${proposal.decision === void 0 ? "" : ` ${proposal.decision}`}`).join("; ");
-				await notifyParentOfApplied(input.ctx, snapshot, input.diagnosis, proposals, input.sessionId);
+		if (unloaded || input.signal?.aborted === true) note = unloaded ? "the plugin was unloaded before the supervisor completed" : "the supervisor was cancelled";
+		else {
+			const snapshot = await input.ctx.task.snapshotIn(input.storeId);
+			const recovery = [...snapshot.runs].reverse().find((run) => run.recovery !== void 0 && run.recovery.sourceDiagnosisId === input.diagnosis.diagnosisId);
+			if (recovery !== void 0) {
+				status = "recorded";
+				note = `task_recover issued: run ${recovery.runId}`;
 			} else {
-				const close = closeOutcomeOf(lastAssistantText(input.agent.session.snapshotEvents()));
-				if (close !== void 0) {
-					status = "closed";
-					note = close.reason;
+				const proposals = await proposalsForDiagnosis(input.ctx, input.diagnosis.diagnosisId);
+				if (proposals.length > 0) {
+					status = proposals.every((proposal) => proposal.status === "rolledback" || proposal.status === "decided" && proposal.decision !== "PROMOTE") ? "closed" : "recorded";
+					note = proposals.map((proposal) => `proposal ${proposal.proposalId} [${proposal.status}]${proposal.decision === void 0 ? "" : ` ${proposal.decision}`}`).join("; ");
+					await notifyParentOfApplied(input.ctx, snapshot, input.diagnosis, proposals, input.sessionId);
+				} else {
+					const close = closeOutcomeOf(lastAssistantText(input.agent.session.snapshotEvents()));
+					if (close !== void 0) {
+						status = "closed";
+						note = close.reason;
+					}
 				}
 			}
 		}
 	} catch (error) {
 		note += `; outcome delivery/read failed (${error instanceof Error ? error.message : String(error)})`;
+	} finally {
+		await settleReviewAgentAttempt({
+			rootStoreId: input.storeId,
+			taskId: input.diagnosis.taskId,
+			sessionId: input.sessionId,
+			status,
+			note
+		}).catch(() => void 0);
+		waiting = false;
+		resolveCompleted();
+		input.signal?.removeEventListener("abort", cancel);
+		if (!unloaded) await disposeWait?.();
 	}
-	await settleReviewAgentAttempt({
-		rootStoreId: input.storeId,
-		taskId: input.diagnosis.taskId,
-		sessionId: input.sessionId,
-		status,
-		note
-	}).catch(() => void 0);
 }
 /** Every pending hand-off of one store, consumed in the order the diagnoses were written: every recorded diagnosis is one, suggestions or not. */
 async function consumePendingHandoffs(ctx, storeId, options = {}) {
@@ -2171,6 +2202,7 @@ async function runReviewAgentAttempt(input) {
 			cancel();
 			await completed;
 		}, "singularityAgent: review agent wait");
+		if (input.signal?.aborted === true) cancel();
 		await handle.agent.whenIdle();
 		const parsed = input.signal?.aborted === true || unloaded ? {
 			ok: false,
@@ -2212,7 +2244,7 @@ async function runReviewAgentAttempt(input) {
 			};
 		}
 		await settleAttempt("recorded");
-		await consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error) => {
+		if (!unloaded && input.signal?.aborted !== true) await consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error) => {
 			logOf(ctx, "singularity-agent")?.warn(`evolution hand-off: ${diagnosis.diagnosisId} could not be consumed (${message(error)})`);
 		});
 		return {
@@ -2918,18 +2950,19 @@ function defineEscalateTool(ctx) {
 /** Why a decided PROMOTE proposal still cannot be applied: L4 harness evolution and target types this build has no executor for. */
 function manualGuidance(proposal) {
 	if (proposal.level === "L4") return "L4 harness evolution has no executor in evolution_apply: supervisor implementation and validation must precede human review through the harness change workflow";
-	if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) return `this build writes an existing skill object or one capability row with an optional new execution skill, so a decided "${proposal.targetType}" proposal has no executor here — its ledger record stays readable and nothing writes it`;
+	if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) return `this build writes a Task template, an existing Skill or one capability row with optional MCP definitions and Skill, so a decided "${proposal.targetType}" proposal has no executor here — its ledger record stays readable and nothing writes it`;
 	return null;
 }
 /** How the approved production write takes effect. */
 function effectNote(proposal) {
-	if (proposal.targetType === "capability") return "effective for new admissions — the committed capability row and optional new execution skill are available to the runtime; a run already bound to the previous capability snapshot keeps that snapshot";
+	if (proposal.targetType === "task_definition") return "effective for new task instances — the library serves the published template; existing task contracts and Run bindings stay fixed";
+	if (proposal.targetType === "capability") return "effective for new admissions — the committed capability row, MCP definitions and optional new execution Skill are available to the runtime; a run already bound to the previous capability snapshot keeps that snapshot";
 	return "effective immediately — the skill filesystem watches the skill root, so the write is live; the skill directory is admitted again now that its commit intent is closed, and a run already bound to the previous version keeps loading the snapshot it was bound to";
 }
 function defineEvolutionApplyTool(ctx) {
 	return defineTool({
 		name: "evolution_apply",
-		description: "Apply a PROMOTE-decided EvolutionProposal to production (status: applied). At L1–L3 it commits either a same-name improvement of an existing skill object (the `SKILL.md` and, for an execution skill, the `SKILL.contract.json` beside it) or one whole capability row with an optional new execution skill (both skill files). Other target types and L4 lack executors and are refused with instructions. Always asks a human through the native approval seam first — a second gate after evolution_decide — naming the capability row and each skill file path it will write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. A skill apply additionally re-verifies before the human is asked, and again after the grant, the candidate's whole content identity and the production baseline recorded at prepare (the production file set must still be those exact bytes — a sidecar that appeared where the baseline had none, changed or disappeared refuses — so a stale candidate never overwrites a production skill that changed). The candidate sidecar is never the model's text: it must equal the production declaration with only content.skillMdSha256 rewritten, so a skill promotion cannot escalate requiredTools, swap a verifier, move capabilities or change the object's role; a candidate directory carrying any other entry (a resource, a stray file) is refused by name rather than reported as a provider production never received. A capability apply checks the frozen row and whole table identity before writing the row. The write is one commit: a durable commit intent — proposal, direction, this approval, every production file with the content identity each must hold before and after the write, and the bytes to write again — is recorded before production changes, then each file is replaced atomically (a temp file in the same directory, fsynced and renamed over the target; never truncated, never half-written), and only after every rename has been read back and the committed row and optional skill verified is the completion recorded. A failure at any stage leaves exactly one open intent rather than a half-committed object (a directory holding the new `SKILL.md` beside the old sidecar included), and the skill directory stays closed to new admission until that intent is settled; calling this tool again while an intent is open settles it instead of starting a second write: no approval is asked again (the intent already binds the grant it was authorised by, and the promotion gate is not re-run because the recorded intent already names the approved content), and the answer reports the intent id and whether the commit was redone (production still held the pre-commit state) or only completed (production already held the committed content). A source that is gone or changed, a target a third party rewrote, or a directory holding an entry the committed object does not name, refuses by name with the intent left open. evolution_rollback restores the champion snapshot.",
+		description: "Apply a PROMOTE-decided Task template, Skill or capability candidate at L1–L3. Recheck the frozen candidate, experiment and production baseline before and after human approval. Review shows the exact mutation, definitions and targets. One existing durable commit writes production; retry settles its open intent without asking again. New admissions consume the published version; existing Task contracts and Run bindings stay fixed. evolution_rollback restores the baseline.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
@@ -2979,12 +3012,15 @@ function defineEvolutionApplyTool(ctx) {
 				`Evolution apply for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
 				`rationale: ${proposal.rationale}`,
 				"recorded decision: PROMOTE",
+				`evaluated mutation: ${JSON.stringify(proposal.mutation)}`,
+				...proposal.prepared?.mcpServers === void 0 ? [] : [`MCP definitions sha256:${proposal.prepared.mcpServers.digest}`],
+				...proposal.prepared?.capabilityTable === void 0 ? [] : [`deployment config baseline sha256:${proposal.prepared.capabilityTable.baselineSha256}; apply sha256:${proposal.prepared.capabilityTable.applySha256}; rollback sha256:${proposal.prepared.capabilityTable.rollbackSha256}`],
 				"this writes production targets:",
 				...proposal.targetType === "capability" ? [`  - capability row ${proposal.targetId} in the production table`] : [],
 				...targets.map((target) => `  - ${target}`),
 				...renderProviderRoles(promotion.providers),
 				effectNote(proposal),
-				proposal.targetType === "capability" ? "rollback: evolution_rollback restores the prepared row baseline and removes any new skill" : "rollback: evolution_rollback restores the champion snapshot from the sandbox"
+				proposal.targetType === "capability" ? "rollback: evolution_rollback restores the row baseline and removes new MCP definitions and any new Skill" : proposal.targetType === "task_definition" ? "rollback: append the previous template content as a new version, or remove a first publication; existing contracts stay fixed" : "rollback: evolution_rollback restores the champion snapshot from the sandbox"
 			].join("\n");
 			const outcome = await ctx.approval.request({
 				agent,
@@ -3018,7 +3054,7 @@ function defineEvolutionApplyTool(ctx) {
 function defineEvolutionCandidateTool(ctx) {
 	return defineTool({
 		name: "evolution_candidate",
-		description: "Record a proposed change as a candidate. mutationJson is ONE JSON string, not a nested tool argument: for an existing skill use {\"name\":\"existing-name\",\"content\":\"the whole SKILL.md\"}; for a capability use {\"rows\":{\"row-name\":{\"skills\":[\"skill-name\"],\"tools\":[]}},\"skill\":optionalNewSkill}. A new skill is {name,content,sidecar}; sidecar becomes SKILL.contract.json and supplies only semantic fields: {\"precondition\":\"task is present\",\"inputs\":[],\"outputs\":[],\"requiredTools\":[\"read\",\"write\"],\"verifier\":{\"ref\":\"command\"}}. The tool derives contractVersion:1, type:\"execution\", capabilities:[the sole row name], content.skillMdSha256 from the exact SKILL.md text, and resources:[]. Do not submit those derived fields. The row may grant only existing authorized tools; a new skill must use a registered verifier. No production write occurs here. Next: evolution_prepare, evolution_replay, evolution_gate.",
+		description: "Record one candidate as mutationJson (a JSON string). Task: {template:<complete canonical TaskTemplate>,criterionRepair?:{positive:{taskId,sourceDir,parameters},negative:{taskId,sourceDir,parameters}}}; changed child criteria need both fixed examples under the original independent parent oracle. Skill: {name,content:<whole SKILL.md>}. Capability: {rows:{<name>:<whole row>},mcpServers?:{<id>:{serverName,description,command,args?,env?,cwd?,toolCallTimeoutMs?}},skill?:{name,content,sidecar:{precondition,inputs,outputs,requiredTools,verifier:{ref}}}}. A row may grant skills, native tool labels or MCP ids and need not contain a Skill. New definitions must be granted by that row; use their serverName in mcp__<serverName>__<tool> names. Native tools must already be authorized; existing permission and preset stay fixed. New Skill sidecar contractVersion, type, capabilities, content hashes and resources are derived by this tool. No production changes. Next: evolution_prepare, evolution_replay, evolution_gate.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -3034,7 +3070,7 @@ function defineEvolutionCandidateTool(ctx) {
 			mutationJson: {
 				type: "string",
 				required: true,
-				description: "JSON text of exactly one complete mutation: {name,content} or {rows,skill?}. If skill is present, its sidecar is an object, not quoted JSON; supply only precondition, inputs, outputs, requiredTools and verifier:{ref}."
+				description: "JSON text of one complete Task template, Skill or capability mutation as described above. If skill is present, its sidecar is an object, not quoted JSON; supply only precondition, inputs, outputs, requiredTools and verifier:{ref}."
 			}
 		},
 		output: {
@@ -3088,7 +3124,7 @@ function defineEvolutionCandidateTool(ctx) {
 function defineEvolutionDecideTool(ctx) {
 	return defineTool({
 		name: "evolution_decide",
-		description: "Close a gated EvolutionProposal with a human decision (status: decided). Always asks a human through the native approval seam first — every level L1–L4, no exemption — and records the decision (PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH) only after an explicit approve. A reject, cancel, or unavailable answerer records nothing and leaves the proposal gated. A PROMOTE is checked before the human is asked: the candidate's whole content identity (the `SKILL.md` bytes, plus the derived sidecar and its declaration digest when the object declares an execution provider), its provider verdict (role, registered verifier, granted tools) and the completed two-sided experiment must still hold. An existing skill may not change role, weaken its verifier or grow a capability through a content update; a capability promotion moves exactly one whole row, optionally with a new execution skill, and cannot add unauthorized tools or change permission or preset. A recorded PROMOTE still applies nothing by itself: the change takes effect only through evolution_apply, which asks the human a second time, names every production file it writes, and leaves a run already bound to the previous version on its own snapshot.",
+		description: "Decide a gated proposal after human approval: PROMOTE, REJECT or KEEP_FOR_FURTHER_RESEARCH. A PROMOTE rechecks the frozen Task template, Skill or capability candidate and its completed experiment before showing the exact mutation and evidence to the person. This records a decision only; evolution_apply requests the production write separately. A refused approval leaves the proposal gated.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -3131,6 +3167,9 @@ function defineEvolutionDecideTool(ctx) {
 			const reason = [
 				`Evolution decision for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
 				`rationale: ${proposal.rationale}`,
+				`evaluated mutation: ${JSON.stringify(proposal.mutation)}`,
+				...proposal.prepared?.mcpServers === void 0 ? [] : [`MCP definitions sha256:${proposal.prepared.mcpServers.digest}`],
+				...proposal.prepared?.capabilityTable === void 0 ? [] : [`deployment config baseline sha256:${proposal.prepared.capabilityTable.baselineSha256}; apply sha256:${proposal.prepared.capabilityTable.applySha256}; rollback sha256:${proposal.prepared.capabilityTable.rollbackSha256}`],
 				`version set: ${Object.entries(proposal.versionSet).map(([key, value]) => `${key}=${value}`).join(", ")}`,
 				`gate: 1. Target failure fixed? ${gate.targetFailureFixed}`,
 				`gate: 2. Original acceptance maintained? ${gate.originalAcceptanceMaintained}`,
@@ -3168,7 +3207,7 @@ function defineEvolutionDecideTool(ctx) {
 function defineEvolutionGateTool(ctx) {
 	return defineTool({
 		name: "evolution_gate",
-		description: "Answer the minimal Validation Gate for a candidate (status: gated). The six questions (细化想法4 §32): 1. Target failure fixed? 2. Original acceptance maintained? 3. Existing regression maintained? 4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? All six answers are required, and the regression side must cite evidence ids (from this graph's task store) or file paths whose existence is checked — cited evidence is never executed. A skill or capability candidate must pass evolution_prepare (sandbox materialization) and then evolution_replay (the two-sided experiment: a new baseline run and a new candidate run per frozen sample, the production object and the prepared object each loaded whole), and its report path must be one of the regressionEvidenceRefs — the gate refuses either candidate whose experiment is not complete. A capability sample without a provider records the runtime's real not-admitted baseline. Other target types cannot become candidates and have no gate to answer. Records the ledger entry only; nothing is promoted or changed, and evolution_decide re-checks the candidate's whole content identity and its provider verdict before a PROMOTE can be recorded. Next step is evolution_decide, which always asks a human.",
+		description: "Answer the minimal Validation Gate for a candidate (status: gated). The six questions (细化想法4 §32): 1. Target failure fixed (or frozen tool-call objective improved)? 2. Original acceptance maintained? 3. Existing regression maintained? 4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? All six answers are required, and the regression side must cite evidence ids (from this graph's task store) or file paths whose existence is checked — cited evidence is never executed. A Task template, Skill or capability candidate must pass evolution_prepare (sandbox materialization) and then evolution_replay (the two-sided experiment: a new baseline run and a new candidate run per frozen sample, the production object and the prepared object each loaded whole), and its report path must be one of the regressionEvidenceRefs — the gate refuses either candidate whose experiment is not complete. A capability sample without a provider records the runtime's real not-admitted baseline. Other target types cannot become candidates and have no gate to answer. Records the ledger entry only; nothing is promoted or changed, and evolution_decide re-checks the candidate's whole content identity and its provider verdict before a PROMOTE can be recorded. Next step is evolution_decide, which always asks a human.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -3178,7 +3217,7 @@ function defineEvolutionGateTool(ctx) {
 			targetFailureFixed: {
 				type: "string",
 				required: true,
-				description: "Answer to \"1. Target failure fixed?\""
+				description: "Target failure fixed, or verified source improved under the frozen tool-call-reduction objective; cite the mechanical report verdict"
 			},
 			originalAcceptanceMaintained: {
 				type: "string",
@@ -3260,7 +3299,7 @@ const TARGET_TYPES = [
 function defineEvolutionListTool(ctx) {
 	return defineTool({
 		name: "evolution_list",
-		description: "Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an applied skill object or capability row, optionally with a new execution skill; other target types stay proposed). A skill object has `SKILL.md` plus `SKILL.contract.json` when it is an execution provider. The ledger records proposals, sandbox materializations, human decisions, human-approved applies/rollbacks, and the commit intent behind each production write: a proposal whose commit was interrupted reports that intent — its id, direction, every production file it commits and when it was recorded — and stays in the status its lifecycle had reached, until a reconciliation or a retry of the apply/rollback settles it.",
+		description: "Read the existing proposal ledger, optionally filtering status or target. Shows Task template, Skill and capability candidates, frozen identities, experiment evidence, decisions, production writes and open commit intents. Follow the recorded status; reuse an existing proposal and settle its open intent before starting another write.",
 		parameters: {
 			status: {
 				type: "string",
@@ -3306,7 +3345,11 @@ function defineEvolutionListTool(ctx) {
 				if (proposal.mutation !== void 0) lines.push(`  mutation: ${proposal.targetType} mutation recorded`);
 				if (proposal.prepared !== void 0) {
 					const view = proposal.prepared;
-					if (proposal.targetType === "capability") {
+					if (proposal.targetType === "task_definition") {
+						lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, frozen template libraries)`);
+						lines.push(`  candidate template: ${view.templateCandidate.template.id}@${view.templateCandidate.template.version} sha256:${view.templateCandidate.digest}`);
+						lines.push(view.templateBaseline == null ? "  template baseline: absent" : `  template baseline: ${view.templateBaseline.template.id}@${view.templateBaseline.template.version} sha256:${view.templateBaseline.digest}`);
+					} else if (proposal.targetType === "capability") {
 						const row = view.capabilityRow;
 						const baseline = view.capabilityBaseline;
 						lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, capability row${view.skillContent === void 0 ? "" : " + new execution skill"})`);
@@ -3314,6 +3357,7 @@ function defineEvolutionListTool(ctx) {
 						lines.push(`  production row baseline: ${baseline === null ? "absent" : `${baseline.name} sha256:${baseline.digest.slice(0, 12)}…`}`);
 						lines.push(view.skillContent === void 0 ? "  no new skill object" : `  new execution skill: ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}… (SKILL.md + SKILL.contract.json)`);
 						if (view.skillContent !== void 0) lines.push("  production skill baseline: absent");
+						if (view.mcpServers !== void 0) lines.push(`  candidate MCP definitions sha256:${view.mcpServers.digest}: ${JSON.stringify(view.mcpServers.definitions)}`);
 					} else {
 						const shape = view.skillContent.contract === void 0 ? "guidance (SKILL.md)" : "execution provider (SKILL.md + SKILL.contract.json)";
 						lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${shape}, champion snapshot captured, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…, production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…)`);
@@ -3338,11 +3382,11 @@ function defineEvolutionListTool(ctx) {
 function defineEvolutionPrepareTool(ctx) {
 	return defineTool({
 		name: "evolution_prepare",
-		description: "Materialize a candidate's structured mutation into the proposal sandbox (status: prepared). A skill candidate is prepared as the complete object it improves: a guidance skill is its `SKILL.md` alone, and an execution skill is `SKILL.md` plus the `SKILL.contract.json` beside it, derived from the production declaration with only content.skillMdSha256 recomputed — the model never submits a sidecar. A capability candidate (A6) is prepared as its whole row, plus the new execution skill that row grants when it carries one; the baseline a later apply compares against is then the row the registry held, or its recorded absence. For an existing skill, one verified read of the production target comes first — it yields both the champion/ snapshot and the baseline identity a later apply compares against — and a target that is not there, or is not the loadable object its files claim (a defective declaration, an undeclared file), is refused by name before any sandbox or ledger write, never prepared against nothing. A knowledge sidecar, an object declaring resources and a proposal of any other kind are refused by name too; for an existing skill, production fixes the shape: this path cannot add a `SKILL.contract.json` to a skill that has none, and it never changes the object's role. Writes go only to the proposal sandbox (<ledger root>/sandbox/<proposalId>/: `skills/<name>/SKILL.md` — plus `skills/<name>/SKILL.contract.json` for an execution object — and the same paths under `champion/` for the production bytes the snapshot captures). Nothing here touches production; the next step is evolution_replay, the two-sided experiment.",
+		description: "Freeze the candidate and its production baseline in the proposal sandbox. A Task candidate freezes both template libraries; a Skill freezes SKILL.md and its existing execution declaration; a capability freezes its whole row, optional MCP launch definitions and optional new execution Skill. No production changes. Next: evolution_replay, then evolution_gate.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
-			description: "Skill or capability candidate carrying a mutation, to materialize into its sandbox"
+			description: "Task template, Skill or capability candidate to freeze"
 		} },
 		output: {
 			schema: { type: "string" },
@@ -3353,6 +3397,13 @@ function defineEvolutionPrepareTool(ctx) {
 			try {
 				const prepared = await ctx.evolution.prepare(args.proposalId, caller);
 				const view = prepared.prepared;
+				if (view.templateCandidate !== void 0) return [
+					`proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
+					...view.files.map((file) => `  wrote ${file}`),
+					`candidate template: ${view.templateCandidate.template.id}@${view.templateCandidate.template.version} sha256:${view.templateCandidate.digest}`,
+					view.templateBaseline == null ? "template baseline: absent" : `template baseline: ${view.templateBaseline.template.id}@${view.templateBaseline.template.version} sha256:${view.templateBaseline.digest}`,
+					"sandbox only — production was not touched; next: evolution_replay (the two-sided experiment), then evolution_gate"
+				].join("\n");
 				if (view.capabilityRow !== void 0) {
 					const rowBaseline = view.capabilityBaseline ?? null;
 					return [
@@ -3360,6 +3411,7 @@ function defineEvolutionPrepareTool(ctx) {
 						...view.files.map((file) => `  wrote ${file}`),
 						`candidate row: ${view.capabilityRow.name} sha256:${view.capabilityRow.digest.slice(0, 12)}…`,
 						rowBaseline === null ? "registry baseline: the table held no such row, so this candidate adds it" : `registry baseline: row sha256:${rowBaseline.digest.slice(0, 12)}… (an apply refuses if the registry row changed since this read)`,
+						...view.mcpServers === void 0 ? [] : [`candidate MCP definitions sha256:${view.mcpServers.digest}: ${JSON.stringify(view.mcpServers.definitions)}`],
 						view.skillContent === void 0 ? "candidate object: the row alone — no new skill object is materialized" : "candidate object: a new execution provider (SKILL.md + SKILL.contract.json) the row grants, judged by a registered verifier with resources: []",
 						"sandbox only — production was not touched; next: evolution_replay (the two-sided experiment), then evolution_gate"
 					].join("\n");
@@ -3401,7 +3453,7 @@ function isProposalTargetType(value) {
 function defineEvolutionProposeTool(ctx) {
 	return defineTool({
 		name: "evolution_propose",
-		description: "Register an EvolutionProposal in the evolution ledger (status: proposed). Pure bookkeeping: nothing here executes or changes production. This build admits an existing skill under its own name (the whole loadable object) or one whole capability row with an optional NEW execution skill. Both go through evolution_candidate, evolution_prepare, evolution_replay (the two-sided experiment), evolution_gate, and a human-approved evolution_decide plus evolution_apply. Other target types stay recorded suggestions and are never opened as candidates, so they are never evaluated and never promoted. Fill targetType/targetId/rationale manually, or pass fromDiagnosis to transcribe one proposal out of a recorded diagnosis (task_diagnose). baseVersion, level, and at least one sourceRef (diagnosisId / reviewRef / evidenceId) are required.",
+		description: "Record an evidenced shared change as a proposal. Executable targets are Task templates, existing Skills and one whole capability row with optional new MCP definitions and an optional new execution Skill. Use evolution_candidate, evolution_prepare, evolution_replay and evolution_gate before the human decisions through evolution_decide and evolution_apply. Other target types remain suggestions. Existing Task contracts and Run bindings stay fixed.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -3422,7 +3474,7 @@ function defineEvolutionProposeTool(ctx) {
 			baseVersion: {
 				type: "string",
 				required: true,
-				description: "Version of the target this proposal starts from"
+				description: "Current target version; a first Task template uses absent with candidate version 1"
 			},
 			targetType: {
 				type: "string",
@@ -3495,13 +3547,14 @@ function defineEvolutionProposeTool(ctx) {
 					sourceRefs
 				}, caller);
 				const skillReplacement = "ledger entry only — nothing was executed or changed; next: evolution_candidate with mutationJson as JSON text carrying the full replacement text of the existing skill's SKILL.md — the only input a candidate submits, because an execution skill's SKILL.contract.json is derived from production at evolution_prepare (only its content.skillMdSha256 is recomputed, so a content update cannot move a capability, a required tool or a verifier)";
-				const capabilityReplacement = "ledger entry only — nothing was executed or changed; next: evolution_candidate with mutationJson as JSON text carrying exactly one whole capability row { rows } and optionally a NEW execution skill { name, content, sidecar semantic fields }; the row may use only already authorized tools and may not change permission or preset";
-				const recordedSuggestion = `ledger entry only — nothing was executed or changed; this build promotes an existing skill or one capability row with an optional new execution skill, so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become a candidate, is never evaluated, and is never promoted`;
+				const capabilityReplacement = "ledger entry only — nothing was executed or changed; next: evolution_candidate with mutationJson as JSON text carrying exactly one whole capability row { rows }, optional new MCP launch definitions { mcpServers }, and optionally a NEW execution skill { name, content, sidecar semantic fields }; the definitions and granted capability are evaluated together; permission and preset stay fixed";
+				const taskReplacement = "ledger entry only — next: evolution_candidate with mutationJson {template,criterionRepair?}; submit one complete canonical TaskTemplate. Changing child criteria requires fixed positive and negative examples under the original independent parent oracle.";
+				const recordedSuggestion = `ledger entry only — nothing was executed or changed; this build promotes a Task template, an existing Skill or one capability row with an optional new execution skill, so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become a candidate, is never evaluated, and is never promoted`;
 				return [
 					`proposal ${proposal.proposalId} registered [proposed] ${proposal.level} ${proposal.targetType} ${proposal.targetId} (base ${proposal.baseVersion})`,
 					`rationale: ${proposal.rationale}`,
 					`sourceRefs: [${proposal.sourceRefs.join(", ")}]`,
-					proposal.targetType === "skill" ? skillReplacement : proposal.targetType === "capability" ? capabilityReplacement : recordedSuggestion
+					proposal.targetType === "skill" ? skillReplacement : proposal.targetType === "capability" ? capabilityReplacement : proposal.targetType === "task_definition" ? taskReplacement : recordedSuggestion
 				].join("\n");
 			} catch (error) {
 				return `evolution_propose rejected: ${message(error)}`;
@@ -3525,7 +3578,7 @@ async function callerWorkspace(ctx, caller) {
 	} catch (error) {
 		throw new Error(`cannot resolve the caller session's workspace: ${message(error)}`);
 	}
-	if (typeof path !== "string" || path.length === 0) throw new Error(`this deployment cannot name the workspace of session "${caller}", which the experiment would freeze as its input snapshot — name the caller's env workspace (S4-E item 2) before evaluating a skill or capability candidate`);
+	if (typeof path !== "string" || path.length === 0) throw new Error(`this deployment cannot name the workspace of session "${caller}", which the experiment would freeze as its input snapshot — name the caller's env workspace before evaluating a Task template, Skill or capability candidate`);
 	return path;
 }
 /** The task's latest review record — the record a sample's role is read from. */
@@ -3534,30 +3587,31 @@ function latestReview(snapshot, task) {
 	return snapshot.reviews.find((item) => item.runId === runId);
 }
 /** The role one named task has, from the store's own history: its latest review decides whether the case is a failure the candidate is meant to fix or a passing case it must not break. The caller names tasks; */
-function roleOf(snapshot, taskId) {
+function roleOf(snapshot, taskId, objective) {
 	const task = snapshot.tasks.find((item) => item.taskId === taskId);
 	if (task === void 0) throw new Error(`unknown task "${taskId}" in this graph's task store`);
 	if (task.status !== "verified" && task.status !== "failed") throw new Error(`task "${taskId}" is ${task.status}; only a terminal (verified or failed) task carries the history a role is read from`);
 	const review = latestReview(snapshot, task);
 	if (review === void 0) throw new Error(`task "${taskId}" has no review record on its latest run; there is no case to reproduce`);
 	if (review.outcome === "failed") return "observed-failure";
-	if (review.outcome === "verified") return "observed-regression";
+	if (review.outcome === "verified") return objective === "tool-call-reduction" ? "observed-success" : "observed-regression";
 	throw new Error(`task "${taskId}" is ${task.status} but its latest review record is "${review.outcome}"; a sample must be the case its role names, and only a failed or verified record names one`);
 }
 /** The samples one skill experiment runs, derived from the call's task lists and the store's history. Observed and holdout are both required and both non-empty (§F.2): */
-function deriveExperimentSamples(snapshot, taskIds, holdoutTaskIds) {
+function deriveExperimentSamples(snapshot, taskIds, holdoutTaskIds, objective) {
 	const named = [...taskIds, ...holdoutTaskIds];
 	if (new Set(named).size !== named.length) throw new Error("taskIds and holdoutTaskIds must not overlap or repeat");
-	if (taskIds.length === 0) throw new Error("taskIds must name the samples the candidate is evaluated against: at least one task whose latest review is failed (the observed failure it is meant to fix) and any verified tasks it must not break");
+	if (taskIds.length === 0) throw new Error("taskIds must name the observed samples the candidate is evaluated against");
 	if (holdoutTaskIds.length === 0) throw new Error("holdoutTaskIds must name at least one task that did not select this candidate — the two-sided experiment evaluates the observed cases and the held-out ones together, and an empty holdout proves nothing about what the candidate may break");
 	const samples = [...taskIds.map((taskId) => ({
 		taskId,
-		role: roleOf(snapshot, taskId)
+		role: roleOf(snapshot, taskId, objective)
 	})), ...holdoutTaskIds.map((taskId) => ({
 		taskId,
 		role: "holdout"
 	}))];
-	if (!samples.some((sample) => sample.role === "observed-failure")) throw new Error("none of taskIds has a failed latest review, so there is no observed failure for this candidate to fix — name the task whose recorded failure this candidate addresses (a candidate with no reproduced failure cannot be evaluated as a fix)");
+	const requiredRole = objective === "tool-call-reduction" ? "observed-success" : "observed-failure";
+	if (!samples.some((sample) => sample.role === requiredRole)) throw new Error(`taskIds must include at least one ${requiredRole} for the experiment objective`);
 	return samples;
 }
 /** The experiment's criterion diff: the baseline run's verdict → the candidate run's, per criterion that moved. */
@@ -3580,14 +3634,15 @@ function renderExperiment(result, targetId) {
 	const baseline = report.frozen.productionBaseline;
 	const candidate = report.frozen.candidate;
 	const capability = report.frozen.capability;
+	const definition = report.frozen.taskDefinition;
 	const skillIdentity = candidate === void 0 ? void 0 : `${candidate.contract === void 0 ? "guidance" : "execution"} sha256 ${candidate.sha256}${candidate.contract === void 0 ? "" : ` sidecar sha256 ${candidate.contract.sha256}`}`;
-	const candidateIdentity = capability !== void 0 ? `capability row "${capability.row.name}" sha256 ${capability.row.digest} (the table held ${capability.baseline === null ? "no such row" : `row sha256 ${capability.baseline.digest}`})${skillIdentity === void 0 ? "" : ` and a new skill, ${skillIdentity}`}` : skillIdentity;
+	const candidateIdentity = definition !== void 0 ? `TaskTemplate ${definition.candidate.template.id}@${definition.candidate.template.version} sha256:${definition.candidate.digest}` : capability !== void 0 ? `capability row "${capability.row.name}" sha256 ${capability.row.digest} (the table held ${capability.baseline === null ? "no such row" : `row sha256 ${capability.baseline.digest}`})${skillIdentity === void 0 ? "" : ` and a new skill, ${skillIdentity}`}` : skillIdentity;
 	if (candidateIdentity === void 0) throw new Error(`experiment ${result.experimentId} carries neither a skill object identity nor a capability row — a report without a candidate identity is not one this build evaluated, and its record is read back through evolution_list`);
-	const baselineIdentity = capability === void 0 ? `production baseline ${baseline?.sha256 ?? "not recorded"}${baseline?.contract === void 0 ? "" : ` sidecar sha256 ${baseline.contract.sha256}`}` : `row this candidate moves: ${capability.baseline === null ? "none (a new row)" : `sha256 ${capability.baseline.digest}`}`;
+	const baselineIdentity = definition !== void 0 ? `template baseline ${definition.baseline === null ? "absent" : `${definition.baseline.template.id}@${definition.baseline.template.version} sha256:${definition.baseline.digest}`}; fixed original parent oracle; only new children use the side library` : capability === void 0 ? `production baseline ${baseline?.sha256 ?? "not recorded"}${baseline?.contract === void 0 ? "" : ` sidecar sha256 ${baseline.contract.sha256}`}` : `row this candidate moves: ${capability.baseline === null ? "none (a new row)" : `sha256 ${capability.baseline.digest}`}`;
 	return [
-		`proposal ${report.proposalId} [experiment] ${capability === void 0 ? "skill" : "capability"} ${targetId} — verdict: ${report.verdict}`,
+		`proposal ${report.proposalId} [experiment] ${definition !== void 0 ? "task_definition" : capability === void 0 ? "skill" : "capability"} ${targetId} — verdict: ${report.verdict}`,
 		`samples (${report.samples.length}):`,
-		...report.samples.map((sample) => `  ${sample.taskId} [${sample.role}] baseline ${sample.baseline.outcome} → candidate ${sample.candidate.outcome} (${renderExperimentCriterionDiff(sample.baseline.criteria, sample.candidate.criteria)}) — ${sample.verdict}`),
+		...report.samples.map((sample) => `  ${sample.taskId} [${sample.role}] baseline ${sample.baseline.outcome} → candidate ${sample.candidate.outcome} (${renderExperimentCriterionDiff(sample.baseline.criteria, sample.candidate.criteria)}) — ${sample.verdict}` + (report.frozen.objective === "tool-call-reduction" ? `; subtree toolCalls ${sample.baseline.cost.status === "reported" ? sample.baseline.cost.metrics.toolCalls?.calls ?? "unknown" : "unknown"} → ${sample.candidate.cost.status === "reported" ? sample.candidate.cost.metrics.toolCalls?.calls ?? "unknown" : "unknown"}` : "")),
 		"every side above is a new run this experiment started — the baseline under the production configuration (the production object, or the production table for a capability sample, whose frozen identity is read again at every promotion gate), the candidate on the prepared object's bytes (the prepared `SKILL.md`, the sidecar derived from production for an execution skill, and, for a capability candidate, the frozen row the candidate overlay mounts); the sample's historical record only locates the case",
 		`report: ${result.reportPath}`,
 		`experiment ${result.experimentId} (repetition ${report.frozen.repetition}, frozen ${report.frozenDigest}); candidate ${candidateIdentity}; ` + baselineIdentity + `; model ${report.frozen.model.label}; budget ${budget}; snapshot ${report.frozen.snapshot.digest}; comparer ${report.frozen.comparerVersion}`,
@@ -3605,7 +3660,8 @@ async function runExperimentFor(ctx, args, caller, signal) {
 	}
 	return ctx.evolution.runExperiment({
 		proposalId: args.proposalId,
-		samples: deriveExperimentSamples(snapshot, args.taskIds, args.holdoutTaskIds),
+		samples: deriveExperimentSamples(snapshot, args.taskIds, args.holdoutTaskIds, args.objective),
+		...args.objective === void 0 ? {} : { objective: args.objective },
 		snapshot: { sourceDir: await callerWorkspace(ctx, caller) },
 		model: modelSelection(ctx),
 		budget: { ...args.budget ?? {} },
@@ -3615,18 +3671,23 @@ async function runExperimentFor(ctx, args, caller, signal) {
 function defineEvolutionReplayTool(ctx) {
 	return defineTool({
 		name: "evolution_replay",
-		description: "Evaluate a prepared candidate — a **skill** candidate (an existing skill's whole object: `SKILL.md` and, for an execution skill, the `SKILL.contract.json` beside it) or a **capability** candidate (one whole capability row plus the new execution skill it grants, when it carries one) — with the two-sided experiment. Every named task is run twice — a new baseline run under the production configuration (the production object; for a capability sample, the production table offered the same case through the runtime's ordinary admission, so a sample the table cannot admit is recorded as that real refusal, with no invented run) and a new candidate run on the prepared bytes (the prepared `SKILL.md`, and for a capability candidate the frozen row its overlay mounts) — each in its own workspace built from the caller session's env workspace (the frozen input snapshot), all under one frozen identity (samples, snapshot digest, candidate content, model, budget, comparer). Sample roles are derived from the store's history: a task whose latest review is failed is the observed failure, a verified one is an observed regression, and holdoutTaskIds are the held-out cases; a call with no failed sample, or with an empty holdout, is refused — the experiment requires both. The historical record locates each case and is never a baseline. This is the only evaluation this build has: a proposal targeting anything but a skill replacement or a capability candidate is refused by name. Writes the report under sandbox/<proposalId>/ and records the ledger entries; cite the report path in evolution_gate's regressionEvidenceRefs. Repeating the same call reuses the settled runs — it never re-runs or overwrites one; a higher `repetition` freezes a new experiment.",
+		description: "Compare a prepared Task template, Skill or capability candidate with its frozen baseline. Both sides execute through the same runtime and original acceptance in separate copies of the caller workspace. Task replay freezes the complete template library for each side; new children must use the candidate template while the parent oracle stays fixed. Capability replay mounts the candidate row, MCP definitions and optional Skill; a baseline admission refusal is recorded as that refusal. Samples, inputs, model, budget and comparer are frozen. Omit objective for observed failure repair. For a verified source use tool-call-reduction: both sides pass, every observed sample uses fewer tool calls over its complete executed Run subtree, and holdouts pass without cost growth. Missing counters are inconclusive. Every experiment requires nonempty holdoutTaskIds. Cite the sandbox report in evolution_gate.regressionEvidenceRefs. The same call reuses settled Runs; a higher repetition freezes a new experiment.",
 		parameters: {
 			proposalId: {
 				type: "string",
 				required: true,
-				description: "Prepared candidate to evaluate: a skill or capability candidate"
+				description: "Prepared Task template, Skill or capability candidate"
+			},
+			objective: {
+				type: "string",
+				enum: ["tool-call-reduction"],
+				description: "Verified-source optimization: fewer tool calls across the complete executed Run subtree while retaining frozen acceptance. Omit for failure repair."
 			},
 			taskIds: {
 				type: "array",
 				items: { type: "string" },
 				required: true,
-				description: "Sample task ids from this graph's task store: at least one whose latest review is failed (the observed failure the candidate is meant to fix) plus any verified regressions it must not break"
+				description: "Observed task ids: a failed target plus verified regressions for failure repair; verified sources for objective tool-call-reduction"
 			},
 			holdoutTaskIds: {
 				type: "array",
@@ -3663,11 +3724,12 @@ function defineEvolutionReplayTool(ctx) {
 			const holdoutTaskIds = (args.holdoutTaskIds ?? []).map((id) => String(id));
 			try {
 				const proposal = await ctx.evolution.get(args.proposalId);
-				if (proposal.targetType !== "skill" && proposal.targetType !== "capability") throw new Error(`proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared **skill** candidate (a new baseline run on the production object and a new candidate run on the prepared object, each loaded whole: the SKILL.md, and the SKILL.contract.json beside it when the skill declares an execution provider) or a prepared **capability** candidate (the same two-sided run, the candidate side mounting the frozen capability row and its new skill; a baseline the production table cannot admit is recorded as the runtime's own refusal, never as an invented run). No other target type has an evaluator in this build, so its proposal stays a record`);
+				if (proposal.targetType !== "skill" && proposal.targetType !== "capability" && proposal.targetType !== "task_definition") throw new Error(`proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared Task template, Skill or capability candidate; this target has no evaluator, so its proposal stays a record`);
 				return renderExperiment(await runExperimentFor(ctx, {
 					proposalId: args.proposalId,
 					taskIds,
 					holdoutTaskIds,
+					...args.objective === void 0 ? {} : { objective: args.objective },
 					...args.repetition === void 0 ? {} : { repetition: args.repetition },
 					...args.budget === void 0 ? {} : { budget: args.budget }
 				}, caller, exec.signal), proposal.targetId);
@@ -3682,13 +3744,14 @@ function defineEvolutionReplayTool(ctx) {
 //#region src/tools/evolution-rollback.ts
 /** What a restored object means for production, stated honestly in the output: */
 function restoreNote(targetType) {
-	if (targetType === "capability") return "the production capability row was restored or removed to its prepared baseline, and any new skill was removed; new admissions read that state while runs already bound to the applied snapshot keep their snapshot";
+	if (targetType === "task_definition") return "new task instances use the restored library state; existing Task contracts and Run bindings stay fixed";
+	if (targetType === "capability") return "the capability row and MCP definitions were restored or removed to their prepared baseline, and any new Skill was removed; new admissions read that state while runs already bound to the applied snapshot keep their snapshot";
 	return "the restored object is what the skill filesystem now serves and what the next admission loads, and the skill directory is admitted again now that its commit intent is closed; a run already bound to the applied version keeps loading the snapshot it was bound to";
 }
 function defineEvolutionRollbackTool(ctx) {
 	return defineTool({
 		name: "evolution_rollback",
-		description: "Roll back an applied EvolutionProposal (status: rolledback). Restores the production baseline fixed at prepare — the production file set of the applied skill object (the `SKILL.md`, plus the `SKILL.contract.json` when it declares an execution provider), put back byte for byte, or restores a committed capability row and removes its optional new execution skill. An applied record of any other target type has no executor here and is refused. Always asks a human through the native approval seam first — reject / cancel / unavailable writes nothing and the proposal stays applied. Only an applied proposal can be rolled back; a rolled-back proposal keeps its full ledger history. The restore is one commit, in the same order as apply: a durable commit intent (proposal, direction, this approval, every production file with the content identity each must hold before and after the restore, and the champion snapshot as the recoverable bytes for each file) is recorded before production changes, each file is then replaced atomically, and only after every target has been read back and the committed row and optional skill verified is the completion recorded — so a failure at any stage leaves one open intent and affected production closed to new admission rather than a half-commit. A rollback restores this proposal's own baseline and refuses by name, with nothing written, a target that a later proposal (or any other writer) has changed since this version was applied (both files must still hold what this proposal applied, and the directory must hold that object's own files with no entry the object does not name), and a champion snapshot that no longer hashes to the baseline recorded at prepare. Calling this tool again while an intent is open settles it instead of asking for a second approval: the answer reports the intent id and whether the write was redone or only its completion recorded.",
+		description: "Roll back an applied Task template, Skill or capability proposal after human approval. Restore its frozen baseline through the existing durable commit. Template updates append the old content at the next version; a first publication is removed. Capability rollback restores the row and removes new MCP definitions and any new Skill. Existing Task contracts and Run bindings stay fixed. Retry settles an open intent without asking again.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
@@ -3722,13 +3785,15 @@ function defineEvolutionRollbackTool(ctx) {
 				return `evolution_rollback rejected: ${message(error)}`;
 			}
 			if (proposal.status !== "applied") return `evolution_rollback rejected: proposal ${proposal.proposalId} is ${proposal.status}; only an applied proposal can be rolled back`;
-			const targets = applyTargets(proposal, ctx.evolution);
-			if (targets.length === 0 && proposal.targetType !== "capability") return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build restores an existing skill object or a capability row with an optional new execution skill, so there is no executor for this target type`;
+			const targets = applyTargets(proposal, ctx.evolution, "rollback");
+			if (targets.length === 0 && proposal.targetType !== "capability") return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build restores a Task template, Skill or capability candidate, so there is no executor for this target type`;
 			const reason = [
 				`Evolution rollback for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
 				`rationale: ${proposal.rationale}`,
+				`applied mutation: ${JSON.stringify(proposal.mutation)}`,
+				...proposal.prepared?.capabilityTable === void 0 ? [] : [`deployment config baseline sha256:${proposal.prepared.capabilityTable.baselineSha256}; apply sha256:${proposal.prepared.capabilityTable.applySha256}; rollback sha256:${proposal.prepared.capabilityTable.rollbackSha256}`],
 				`applied at: ${[...proposal.targetType === "capability" ? [`capability row ${proposal.targetId}`] : [], ...proposal.applied.targets].join(", ")} (approval ${proposal.applied.approvalRef})`,
-				proposal.targetType === "capability" ? "this restores the prepared capability row baseline and removes any new skill from production targets:" : "this restores the champion snapshot over production targets:",
+				proposal.targetType === "capability" ? "this restores the capability row baseline and removes new MCP definitions and any new Skill from production targets:" : proposal.targetType === "task_definition" ? "this restores the template library state; prior contracts stay fixed:" : "this restores the champion snapshot over production targets:",
 				...proposal.targetType === "capability" ? [`  - capability row ${proposal.targetId} in the production table`] : [],
 				...targets.map((target) => `  - ${target}`)
 			].join("\n");
@@ -4053,9 +4118,9 @@ function defineTaskTemplateListTool(ctx) {
 			schema: { type: "string" },
 			render: (_args, value) => text(value)
 		},
-		execute: async (args) => {
+		execute: async (args, exec) => {
 			try {
-				const matches = await ctx.taskRuntime.findTaskTemplates(args.query);
+				const matches = await ctx.taskRuntime.findTaskTemplates(args.query, sessionId(exec, "task_template_list"));
 				return matches.length === 0 ? "No matching Task template. You may still submit a complete standard contract, preserving the requested objective and acceptance." : JSON.stringify(matches, null, 2);
 			} catch (error) {
 				return `task_template_list failed: ${message(error)}`;

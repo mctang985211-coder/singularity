@@ -35,6 +35,7 @@ import { configureSupervision } from '../../src/coordination/supervision.ts'
 
 const ROOT = 's-root'
 const STORE = `sg-t-${ROOT}`
+const fixtureDisposals: (() => Promise<void>)[] = []
 
 /** The close every stub supervisor's last message carries unless a case says otherwise. */
 const CLOSE_REPLY = 'no further round is justified.\n```json\n{"outcome":"closed","reason":"no further round is justified"}\n```'
@@ -73,6 +74,8 @@ function fixture(options: {
   reviews?: readonly unknown[]
   tasks?: readonly unknown[]
   proposals?: readonly unknown[]
+  idle?: Promise<void>
+  cancel?: () => void
 } = {}) {
   const reply = options.reply === null ? undefined : options.reply ?? CLOSE_REPLY
   const spawns: { sessionId: string; name: string; prompt: string; agentPreset: string; grant: unknown }[] = []
@@ -84,7 +87,13 @@ function fixture(options: {
     tasks: [...(options.tasks ?? [])],
   })
   const rootAgent = { id: ROOT }
+  const waits: (() => Promise<void>)[] = []
   const ctx = {
+    effect: (install: () => () => Promise<void>) => {
+      const dispose = install()
+      waits.push(dispose)
+      return dispose
+    },
     get(name: string): unknown {
       if (name === 'agents') return { get: (id: string) => (id === ROOT ? rootAgent : undefined) }
       if (name === 'graphs') return { list: async () => [{ rootSessionId: ROOT }] }
@@ -113,15 +122,17 @@ function fixture(options: {
         return {
           agent: {
             id: String(request.sessionId),
-            cancel: () => {},
-            whenIdle: async () => {},
+            cancel: options.cancel ?? (() => {}),
+            whenIdle: async () => { await options.idle },
             session: { snapshotEvents: () => events },
           },
         }
       }),
     },
   }
-  return { ctx: ctx as unknown as Context, spawns, snapshots, rootAgent }
+  const unload = async () => { await Promise.all(waits.map(dispose => dispose())) }
+  fixtureDisposals.push(unload)
+  return { ctx: ctx as unknown as Context, spawns, snapshots, rootAgent, unload }
 }
 
 function ledgerRows(): Record<string, unknown>[] {
@@ -150,7 +161,8 @@ beforeEach(() => {
   delete process.env.SINGULARITY_REVIEW_AGENT_BUDGET
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all(fixtureDisposals.splice(0).map(dispose => dispose()))
   configureSupervision(undefined)
   if (previousLedger === undefined) delete process.env.SINGULARITY_REVIEW_LEDGER_DIR
   else process.env.SINGULARITY_REVIEW_LEDGER_DIR = previousLedger
@@ -327,6 +339,26 @@ describe('the hand-off rules', () => {
 })
 
 describe('the supervisor role in the coordination ledger', () => {
+  it('cancels its owned wait on unload and persists settlement before disposal completes', async () => {
+    let finish!: () => void
+    const idle = new Promise<void>(resolve => { finish = resolve })
+    const cancel = vi.fn(() => finish())
+    const f = fixture({ idle, cancel })
+    const readSnapshot = vi.spyOn(f.ctx.task, 'snapshotIn')
+    const started = await startSupervisorHandoff(f.ctx, {
+      storeId: STORE, diagnosis: diagnosis(), delegator: { sessionId: ROOT, agent: f.rootAgent as never },
+      sourceRef: 't-root#r-1', sourceOutcome: 'failed',
+    })
+    expect(started.result).toBe('started')
+    expect(rowsOfKind('settled')).toHaveLength(0)
+    await f.unload()
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(readSnapshot).toHaveBeenCalledOnce()
+    expect(rowsOfKind('settled')).toEqual([expect.objectContaining({ status: 'interrupted', note: expect.stringContaining('unloaded') })])
+    const rows = ledgerRows()
+    expect(rows.map(row => row.kind)).toEqual(['claim', 'started', 'settled'])
+  })
+
   it('plans by diagnosis, not by review source: a reviewer attempt never dedupes a hand-off and the other way round', async () => {
     // Two coordination runs of one store, both from the same allowance.
     vi.stubEnv('SINGULARITY_REVIEW_AGENT_BUDGET', '2')
@@ -373,30 +405,72 @@ describe('the supervisor role in the coordination ledger', () => {
   })
 
   it('answers a repeat from the ledger, after a restart too, and records no second spawn', async () => {
-    const first = fixture()
-    const started = await startSupervisorHandoff(first.ctx, {
+    let finish!: () => void
+    const idle = new Promise<void>(resolve => { finish = resolve })
+    const cancel = vi.fn(() => finish())
+    const first = fixture({ idle, cancel })
+    const request = {
       storeId: STORE,
       diagnosis: diagnosis(),
       delegator: { sessionId: ROOT, agent: first.rootAgent as never },
       sourceRef: 't-root#r-1',
       sourceOutcome: 'failed',
-    })
+    }
+    const started = await startSupervisorHandoff(first.ctx, request)
     expect(started).toMatchObject({ result: 'started' })
     expect(first.spawns).toHaveLength(1)
     expect(first.spawns[0]!.agentPreset).toBe(COORDINATION_PRESET)
 
-    // A second call in the same process, and a second process's read of the same
-    // file, both answer with the same supervisor session.
-    const again = await startSupervisorHandoff(fixture().ctx, {
-      storeId: STORE,
-      diagnosis: diagnosis(),
-      delegator: { sessionId: ROOT, agent: first.rootAgent as never },
-      sourceRef: 't-root#r-1',
-      sourceOutcome: 'failed',
-    })
+    // Repeat while the first supervisor is genuinely still running.
+    const again = await startSupervisorHandoff(first.ctx, request)
     expect(again).toEqual({ diagnosisId: 'd-1', result: 'existing', sessionId: (started as { sessionId: string }).sessionId })
-    expect(ledgerRows().filter(row => row.kind === 'started')).toHaveLength(1)
-    expect(ledgerRows().filter(row => row.kind === 'claim')).toHaveLength(1)
+    expect(rowsOfKind('settled')).toHaveLength(0)
+    expect(first.spawns).toHaveLength(1)
+
+    // A restart reads a naturally completed, durably closed hand-off. Unload
+    // must not turn a still-running supervisor into the close we then reuse.
+    finish()
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toEqual([
+      expect.objectContaining({ sessionId: (started as { sessionId: string }).sessionId, status: 'closed' }),
+    ]))
+    await first.unload()
+    expect(cancel).not.toHaveBeenCalled()
+    const restarted = fixture()
+    expect(await startSupervisorHandoff(restarted.ctx, {
+      ...request, delegator: { sessionId: ROOT, agent: restarted.rootAgent as never },
+    })).toEqual(again)
+    expect(restarted.spawns).toHaveLength(0)
+    expect(rowsOfKind('started')).toHaveLength(1)
+    expect(rowsOfKind('claim')).toHaveLength(1)
+  })
+
+  it('reuses a supervisor that settles after admission reads its ledger snapshot', async () => {
+    let finish!: () => void
+    const idle = new Promise<void>(resolve => { finish = resolve })
+    const f = fixture({ idle, cancel: () => finish() })
+    const started = await startSupervisorHandoff(f.ctx, {
+      storeId: STORE, diagnosis: diagnosis(), delegator: { sessionId: ROOT, agent: f.rootAgent as never },
+      sourceRef: 't-root#r-1', sourceOutcome: 'failed',
+    })
+    expect(started.result).toBe('started')
+    await admitReviewAgent(STORE, async admission => {
+      // This admission has read the still-open attempt. Its owner completes
+      // before plan runs, so the original snapshot lacks the terminal row.
+      finish()
+      await vi.waitFor(() => expect(rowsOfKind('settled')).toEqual([
+        expect.objectContaining({ sessionId: (started as { sessionId: string }).sessionId, status: 'closed' }),
+      ]))
+      await f.unload()
+      const { plan } = await admission.plan({
+        role: 'supervisor', source: { taskId: 't-root', runId: 'r-1' }, requestKey: null, reason: null,
+        diagnosisId: 'd-1', handoffDigest: supervisorHandoffDigest(STORE, diagnosis()), actor: ROOT, sessionId: 's-repeat',
+      })
+      expect(plan).toMatchObject({ kind: 'reuse', attempt: { sessionId: (started as { sessionId: string }).sessionId, settlement: { status: 'closed' } } })
+    })
+    expect(f.spawns).toHaveLength(1)
+    expect(rowsOfKind('claim')).toHaveLength(1)
+    expect(rowsOfKind('started')).toHaveLength(1)
+    expect(rowsOfKind('settled')).toHaveLength(1)
   })
 
   it('settles a supervisor that issued a recovery as recorded, naming the run, and keeps answering with it', async () => {

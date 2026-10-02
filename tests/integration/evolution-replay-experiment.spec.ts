@@ -504,7 +504,7 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     const spawnsBefore = f.h.spawns.length
     const answer = await f.replay({ proposalId: PROPOSAL, taskIds: ['t-holdout'], holdoutTaskIds: ['t-regression'], budget: BUDGET })
     expect(answer).toContain('evolution_replay rejected:')
-    expect(answer).toContain('no observed failure for this candidate to fix')
+    expect(answer).toContain('at least one observed-failure')
     expect(await ledgerLines(f)).toHaveLength(3)
     const after = await f.h.snapshot(f.storeId)
     expect(after.tasks).toHaveLength(before.tasks.length)
@@ -611,16 +611,11 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     const spawnsBefore = f.h.spawns.length
     const linesBefore = await ledgerLines(f)
     const answer = await f.replay({ proposalId: PRESET_PROPOSAL, taskIds: ['t-fix'], holdoutTaskIds: ['t-holdout'] })
-    // The model-facing entry refuses by name: this build evaluates a prepared
-    // skill *object* candidate only — one file or two, whole — and the proposal
-    // stays a record.
+    // Unsupported preset changes stay records and never start an experiment.
     expect(answer).toContain('evolution_replay rejected:')
     expect(answer).toContain(`"agent_preset"`)
-    // The two candidate kinds this build evaluates are named, and this is neither:
-    // a preset has no evaluator, so its proposal stays a record.
-    expect(answer).toContain('this tool evaluates a prepared **skill** candidate')
-    expect(answer).toContain('a prepared **capability** candidate')
-    expect(answer).toContain('No other target type has an evaluator in this build')
+    expect(answer).toContain('this tool evaluates a prepared Task template, Skill or capability candidate')
+    expect(answer).toContain('this target has no evaluator')
     expect((await f.evolution.get(PRESET_PROPOSAL)).status).toBe('proposed')
     // Nothing ran and nothing was written: no run, no spawn, no ledger line, no
     // experiment and no report.

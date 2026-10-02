@@ -12,14 +12,9 @@ export function defineEvolutionListTool(ctx: Context) {
   return defineTool({
     name: 'evolution_list',
     description:
-      'Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, ' +
-      'each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an ' +
-      'applied skill object or capability row, optionally with a new execution skill; other target types stay proposed). ' +
-      'A skill object has `SKILL.md` plus `SKILL.contract.json` when it is an execution provider. The ledger records proposals, sandbox ' +
-      'materializations, human decisions, human-approved ' +
-      'applies/rollbacks, and the commit intent behind each production write: a proposal whose commit was interrupted ' +
-      'reports that intent — its id, direction, every production file it commits and when it was recorded — and stays in ' +
-      'the status its lifecycle had reached, until a reconciliation or a retry of the apply/rollback settles it.',
+      'Read the existing proposal ledger, optionally filtering status or target. Shows Task template, Skill and capability ' +
+      'candidates, frozen identities, experiment evidence, decisions, production writes and open commit intents. ' +
+      'Follow the recorded status; reuse an existing proposal and settle its open intent before starting another write.',
     parameters: {
       status: { type: 'string', enum: ['proposed', 'candidate', 'prepared', 'gated', 'decided', 'applied', 'rolledback'], description: 'Only proposals in this status' },
       targetType: { type: 'string', enum: TARGET_TYPES, description: 'Only proposals pointing at this mutation surface' },
@@ -47,7 +42,11 @@ export function defineEvolutionListTool(ctx: Context) {
         }
         if (proposal.prepared !== undefined) {
           const view = proposal.prepared
-          if (proposal.targetType === 'capability') {
+          if (proposal.targetType === 'task_definition') {
+            lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, frozen template libraries)`)
+            lines.push(`  candidate template: ${view.templateCandidate!.template.id}@${view.templateCandidate!.template.version} sha256:${view.templateCandidate!.digest}`)
+            lines.push(view.templateBaseline == null ? '  template baseline: absent' : `  template baseline: ${view.templateBaseline.template.id}@${view.templateBaseline.template.version} sha256:${view.templateBaseline.digest}`)
+          } else if (proposal.targetType === 'capability') {
             const row = view.capabilityRow!
             const baseline = view.capabilityBaseline
             lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox!} (${view.files.length} files, capability row${view.skillContent === undefined ? '' : ' + new execution skill'})`)
@@ -57,6 +56,7 @@ export function defineEvolutionListTool(ctx: Context) {
               ? '  no new skill object'
               : `  new execution skill: ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}… (SKILL.md + SKILL.contract.json)`)
             if (view.skillContent !== undefined) lines.push('  production skill baseline: absent')
+            if (view.mcpServers !== undefined) lines.push(`  candidate MCP definitions sha256:${view.mcpServers.digest}: ${JSON.stringify(view.mcpServers.definitions)}`)
           } else {
             const shape = view.skillContent!.contract === undefined
               ? 'guidance (SKILL.md)'

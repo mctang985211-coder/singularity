@@ -1,3 +1,6 @@
+import { canonicalJson } from './replay.ts'
+import { prepareTaskDefinition, readTaskDefinition, assertTemplateBaseline } from './task-definition.ts'
+import { assertTaskDefinitionPromotion } from './promotion/task-definition.ts'
 /** The evolution plane service: the proposal lifecycle, its two-sided experiment, the promotion gate and the durable apply/rollback commit.
  * @module dsh-singularity-evolution/evolution */
 
@@ -20,13 +23,14 @@ import {
   skillContractDigest,
 } from '@dangosys/dsh-singularity-task-runtime'
 import type { ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
-import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
+import type { McpServerTemplate, CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import type { CapabilityRow, CapabilityStoreView, PreparedCapability } from './capability-candidate.ts'
 import {
   assertCapabilityCandidateAdmissible,
   capabilityRowBytes,
   capabilityRowDigest,
   capabilityRowIdentity,
+  mcpServerIdentity,
   capabilityTableWith,
   discoverSkill,
   readPreparedCapability,
@@ -106,7 +110,7 @@ export class EvolutionService extends EvolutionServiceCore {
     mutation: unknown,
   ): Promise<EvolutionProposal> {
     const current = await this.assertNext(proposalId, 'candidate')
-    if (current.targetType !== 'skill' && current.targetType !== 'capability') {
+    if (current.targetType !== 'skill' && current.targetType !== 'capability' && current.targetType !== 'task_definition') {
       throw new Error(
         `evolution: proposal "${proposalId}" targets "${current.targetType}", which cannot become a candidate in this build — ` +
           'the candidate lifecycles here are a SKILL.md replacement of an existing skill object (evolution_prepare → the two-sided ' +
@@ -136,6 +140,11 @@ export class EvolutionService extends EvolutionServiceCore {
     validateMutation(current.targetType, mutation)
     assertSegment(proposalId, 'proposalId')
     // The two candidate lifecycles materialize different objects and share
+    if (current.targetType === 'task_definition') {
+      const prepared = await prepareTaskDefinition(this.root, this.taskTemplatesRoot(), current)
+      await this.append({ formatVersion: 4, kind: 'prepared', proposalId, ...prepared, actor, at: new Date().toISOString() })
+      return this.get(proposalId)
+    }
     if (current.targetType === 'capability') return this.prepareCapability(current, actor)
     const { name } = mutation as unknown as SkillMutation
     const directory = join(this.skillRoot, name)
@@ -251,6 +260,7 @@ export class EvolutionService extends EvolutionServiceCore {
             name: candidate.row.name,
             entry: candidate.row.entry,
             restored: baselineEntry,
+            ...(candidate.mcpServers === undefined ? {} : { mcpServers: candidate.mcpServers }),
           })
     const dir = join(this.root, 'sandbox', proposalId)
     const sandbox = `sandbox/${proposalId}`
@@ -264,6 +274,7 @@ export class EvolutionService extends EvolutionServiceCore {
       files.push(rel)
     }
     await write(rowRelative, capabilityRowBytes(candidate.row.entry))
+    if (candidate.mcpServers !== undefined) await write('mcp-servers.json', canonicalJson(candidate.mcpServers))
     if (baselineEntry !== null) await write(championRelative, capabilityRowBytes(baselineEntry))
     if (candidate.skill !== undefined) {
       await write(`skills/${candidate.skill.name}/SKILL.md`, Buffer.from(candidate.skill.content, 'utf8'))
@@ -275,6 +286,7 @@ export class EvolutionService extends EvolutionServiceCore {
     const refusals = await this.capabilityRowRefusals(
       candidate.row,
       candidate.skill === undefined ? undefined : join(dir, 'skills'),
+      candidate.mcpServers,
     ).catch(async (error: unknown) => {
       // The pre-check itself could not run (an unreadable registry, a ledger
       await rm(dir, { recursive: true, force: true })
@@ -321,6 +333,7 @@ export class EvolutionService extends EvolutionServiceCore {
       ...(skillContent === undefined ? {} : { skillBaseline: null }),
       capabilityRow,
       capabilityBaseline,
+      ...(candidate.mcpServers === undefined ? {} : { mcpServers: mcpServerIdentity(candidate.mcpServers) }),
       ...(capabilityTable === undefined ? {} : { capabilityTable }),
       files,
       actor,
@@ -357,6 +370,7 @@ export class EvolutionService extends EvolutionServiceCore {
     const vocabulary = await verifierVocabularyOf(this.ctx)
     return {
       table,
+      mcpServers: this.effectiveMcpServers(),
       ...(vocabulary === undefined ? {} : { verifierVocabulary: vocabulary }),
       skillRoots: await this.skillDiscoveryRoots(),
       skillRoot: this.skillRoot,
@@ -372,6 +386,7 @@ export class EvolutionService extends EvolutionServiceCore {
   private async capabilityRowRefusals(
     row: CapabilityRow,
     sandboxSkillRoot: string | undefined,
+    mcpServers?: Readonly<Record<string, McpServerTemplate>>,
   ): Promise<readonly string[]> {
     const table = this.effectiveCapabilities()
     if (table === undefined) {
@@ -385,6 +400,7 @@ export class EvolutionService extends EvolutionServiceCore {
       name: row.name,
       entry: row.entry,
       table,
+      mcpRegistry: { ...this.effectiveMcpServers(), ...mcpServers },
       view: { cwd: process.cwd(), ...(sandboxSkillRoot === undefined ? {} : { extraRoots: [sandboxSkillRoot] }) },
       ...(verifierRefs === undefined ? {} : { verifierRefs }),
       commitLedger: this,
@@ -402,7 +418,7 @@ export class EvolutionService extends EvolutionServiceCore {
     const current = await this.assertNext(proposalId, 'gated')
     validateGateAnswers(answers)
     let experimentReport: string | undefined
-    if (current.targetType === 'skill' || current.targetType === 'capability') {
+    if (current.targetType === 'skill' || current.targetType === 'capability' || current.targetType === 'task_definition') {
       const [experiment] = await this.experiments(proposalId)
       if (experiment === undefined) {
         throw new Error(
@@ -501,7 +517,9 @@ export class EvolutionService extends EvolutionServiceCore {
       const request = this.commitRequest(proposal, 'apply', actor, approvalRef)
       // P2: read the candidate object once, verify every digest prepare
       const bytes =
-        proposal.targetType === 'capability'
+        proposal.targetType === 'task_definition'
+          ? [await readVerifiedFile(this.root, request.files[0]!.source!)]
+          : proposal.targetType === 'capability'
           ? await capabilityBytes(this.root, proposal, 'apply')
           : await (async () => {
               const candidate = await readVerifiedSkillCandidate(this.root, this.skillRoot, proposal)
@@ -520,6 +538,11 @@ export class EvolutionService extends EvolutionServiceCore {
   async checkPromotion(proposalId: string): Promise<PromotionCheck> {
     const proposal = await this.get(proposalId)
     await this.assertSupportedSource(proposal)
+    if (proposal.targetType === 'task_definition') {
+      await readTaskDefinition(this.root, proposal)
+      await assertTaskDefinitionPromotion(this.promotionSources(), proposal)
+      return { providers: [] }
+    }
     if (proposal.targetType === 'capability') return this.checkCapabilityPromotion(proposal)
     if (proposal.targetType !== 'skill') throw noEvaluatorRefusal(proposal)
     if (proposal.prepared?.mechanical !== true || proposal.prepared.sandbox == null) {
@@ -550,6 +573,7 @@ export class EvolutionService extends EvolutionServiceCore {
     const verdict = await this.providerVerdict(
       { name: prepared.skill.name, directory: prepared.skillDirectory, sidecar: prepared.skill.sidecar },
       capabilityTableWith(table, prepared.row),
+      { ...this.effectiveMcpServers(), ...prepared.mcpServers?.definitions },
     )
     if (!verdict.valid) {
       throw new Error(
@@ -566,7 +590,7 @@ export class EvolutionService extends EvolutionServiceCore {
     return {
       ...this.promotionSources(),
       store: () => this.capabilityStore(),
-      rowRefusals: (row, sandboxSkillRoot) => this.capabilityRowRefusals(row, sandboxSkillRoot),
+      rowRefusals: (row, sandboxSkillRoot, mcpServers) => this.capabilityRowRefusals(row, sandboxSkillRoot, mcpServers),
     }
   }
 
@@ -690,6 +714,10 @@ export class EvolutionService extends EvolutionServiceCore {
     return readVerifiedSkillCandidate(this.root, this.skillRoot, await this.get(proposalId))
   }
 
+  async readTaskDefinitionCandidate(proposalId: string) {
+    return readTaskDefinition(this.root, await this.get(proposalId))
+  }
+
   /** Read a prepared **capability** candidate back out of its sandbox and verify it. */
   async readCapabilityCandidate(proposalId: string): Promise<PreparedCapability> {
     return readPreparedCapability(this.root, await this.get(proposalId))
@@ -698,6 +726,7 @@ export class EvolutionService extends EvolutionServiceCore {
   /** The production-baseline check (P3), on the apply seams only: production must still hold the object prepare read. */
   async checkProductionBaseline(proposalId: string): Promise<void> {
     const proposal = await this.get(proposalId)
+    if (proposal.targetType === 'task_definition') return assertTemplateBaseline(this.taskTemplatesRoot(), proposal)
     if (proposal.targetType === 'capability') return this.assertCapabilityBaseline(proposal)
     await this.assertProductionBaseline(proposal)
   }
@@ -834,6 +863,11 @@ export class EvolutionService extends EvolutionServiceCore {
       }
       this.assertTargetUncommitted(proposal)
       const request = this.commitRequest(proposal, 'rollback', actor, approvalRef)
+      if (proposal.targetType === 'task_definition') {
+        await assertTemplateBaseline(this.taskTemplatesRoot(), proposal, true)
+        await commitIntent(this.commitHost(), request, request.files[0]!.source === undefined ? [undefined] : [await readVerifiedFile(this.root, request.files[0]!.source!)])
+        return { targets: request.files.map(file => file.target), proposal: await this.get(proposalId) }
+      }
       if (proposal.targetType === 'capability') {
         await this.assertCapabilityApplied(proposal, request)
         await commitIntent(this.commitHost(), request, await capabilityBytes(this.root, proposal, 'rollback'))
@@ -918,7 +952,7 @@ export class EvolutionService extends EvolutionServiceCore {
     actor: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<ExperimentResult> {
-    await this.assertSupportedSource(await this.get(spec.proposalId), await this.storeOfSession(String(caller)))
+    await this.assertSupportedSource(await this.get(spec.proposalId), await this.storeOfSession(String(caller)), spec)
     return runExperiment(this.experimentSources(), {
       spec,
       caller,
@@ -938,6 +972,7 @@ export class EvolutionService extends EvolutionServiceCore {
     await this.assertSupportedSource(
       await this.get(experiment.proposalId),
       experiment.storeId ?? (await this.storeOfSession(String(caller))),
+      experiment.frozen,
     )
     return resumeExperiment(this.experimentSources(), {
       experimentId,
@@ -948,12 +983,18 @@ export class EvolutionService extends EvolutionServiceCore {
   }
 
   /** Re-read the proposal's Diagnosis against the experiment's own task store before any executable step. */
-  private async assertSupportedSource(proposal: EvolutionProposal, storeId?: string): Promise<void> {
+  private async assertSupportedSource(
+    proposal: EvolutionProposal,
+    storeId?: string,
+    specification?: Pick<ExperimentSpec, 'objective' | 'samples'>,
+  ): Promise<void> {
     const diagnosisIds = proposal.sourceRefs
       .filter(ref => ref.startsWith('diagnosis:'))
       .map(ref => ref.slice('diagnosis:'.length))
     if (diagnosisIds.length === 0) return
-    const experimentStoreId = storeId ?? (await this.experiments(proposal.proposalId))[0]?.storeId
+    const experiment = specification === undefined ? (await this.experiments(proposal.proposalId))[0] : undefined
+    const experimentStoreId = storeId ?? experiment?.storeId
+    const spec = specification ?? experiment?.frozen
     if (experimentStoreId === undefined) return
     const task = optionalService<{ openStore(storeId: string): Promise<TaskSnapshot> }>(this.ctx, 'task')
     if (task === undefined) return
@@ -976,10 +1017,12 @@ export class EvolutionService extends EvolutionServiceCore {
           run => run.runId === runId && run.taskId === source.taskId && run.status === 'verified',
         )
       })
-      if (source.status === 'verified' || successfulRun) {
+      if ((source.status === 'verified' || successfulRun) &&
+          (spec?.objective !== 'tool-call-reduction' ||
+           !spec.samples.some(sample => sample.taskId === source.taskId && sample.role === 'observed-success'))) {
         throw new Error(
-          `evolution: diagnosis "${diagnosisId}" names a successful source task/run, and this build has no frozen metric or comparator ` +
-            'for "faster or cheaper"; its suggestion remains recorded, with zero experiment, promotion, application or new business Run',
+          `evolution: diagnosis "${diagnosisId}" names a successful source task/run; its frozen experiment must declare ` +
+            'objective tool-call-reduction and include that source as an observed-success sample',
         )
       }
     }
@@ -1011,16 +1054,19 @@ export class EvolutionService extends EvolutionServiceCore {
                 (taskRuntime as { listCapabilities(): Readonly<Record<string, CapabilityConfig>> }).listCapabilities(),
             }
           : {}),
+        listMcpServers: () => this.effectiveMcpServers(),
         /** The runtime's own provider pre-check over the overlay table (A6): the candidate's composed table. */
         precheckCapabilityTable: async (request: {
           capabilities: readonly string[]
           table: Readonly<Record<string, CapabilityConfig>>
           extraRoots: readonly string[]
+          mcpRegistry?: Readonly<Record<string, McpServerTemplate>>
         }) => {
           const verifierRefs = await registeredVerifierIds(this.ctx)
           return precheckProviders({
             capabilities: request.capabilities,
             table: request.table,
+            mcpRegistry: request.mcpRegistry ?? this.effectiveMcpServers(),
             view: { extraRoots: [...request.extraRoots] },
             ...(verifierRefs === undefined ? {} : { verifierRefs }),
             commitLedger: this,

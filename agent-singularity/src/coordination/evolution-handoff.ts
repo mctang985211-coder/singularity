@@ -215,6 +215,7 @@ export async function startSupervisorHandoff(
       diagnosis,
       sessionId: supervisorSessionId,
       agent: spawned.handle.agent,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
     })
     return { diagnosisId: diagnosis.diagnosisId, result: 'started', sessionId: supervisorSessionId }
   })
@@ -227,52 +228,76 @@ async function watchSupervisorCompletion(input: {
   readonly diagnosis: Diagnosis
   readonly sessionId: string
   readonly agent: SpawnedHandle['agent']
+  readonly signal?: AbortSignal
 }): Promise<void> {
   let status: ReviewAgentSettlementStatus = 'interrupted'
   let note = 'the supervisor ended without issuing task_recover or closing the hand-off'
+  const cancel = () => input.agent.cancel({ kind: 'parent' })
+  input.signal?.addEventListener('abort', cancel, { once: true })
+  let waiting = true
+  let unloaded = false
+  let resolveCompleted!: () => void
+  const completed = new Promise<void>(resolve => { resolveCompleted = resolve })
+  let disposeWait: (() => void | Promise<void>) | undefined
   try {
+    disposeWait = input.ctx.effect(() => async () => {
+      if (!waiting) return
+      unloaded = true
+      cancel()
+      await completed
+    }, 'singularityAgent: supervisor wait')
+    if (input.signal?.aborted === true) cancel()
     await input.agent.whenIdle()
-    const snapshot: TaskSnapshot = await input.ctx.task.snapshotIn(input.storeId)
-    const recovery = [...snapshot.runs]
-      .reverse()
-      .find(run => run.recovery !== undefined && run.recovery.sourceDiagnosisId === input.diagnosis.diagnosisId)
-    if (recovery !== undefined) {
-      status = 'recorded'
-      note = `task_recover issued: run ${recovery.runId}`
+    if (unloaded || input.signal?.aborted === true) {
+      note = unloaded ? 'the plugin was unloaded before the supervisor completed' : 'the supervisor was cancelled'
     } else {
-      const proposals = await proposalsForDiagnosis(input.ctx, input.diagnosis.diagnosisId)
-      if (proposals.length > 0) {
-        status = proposals.every(
-          proposal =>
-            proposal.status === 'rolledback' || (proposal.status === 'decided' && proposal.decision !== 'PROMOTE'),
-        )
-          ? 'closed'
-          : 'recorded'
-        note = proposals
-          .map(
-            proposal =>
-              `proposal ${proposal.proposalId} [${proposal.status}]${proposal.decision === undefined ? '' : ` ${proposal.decision}`}`,
-          )
-          .join('; ')
-        await notifyParentOfApplied(input.ctx, snapshot, input.diagnosis, proposals, input.sessionId)
+      const snapshot: TaskSnapshot = await input.ctx.task.snapshotIn(input.storeId)
+      const recovery = [...snapshot.runs]
+        .reverse()
+        .find(run => run.recovery !== undefined && run.recovery.sourceDiagnosisId === input.diagnosis.diagnosisId)
+      if (recovery !== undefined) {
+        status = 'recorded'
+        note = `task_recover issued: run ${recovery.runId}`
       } else {
-        const close = closeOutcomeOf(lastAssistantText(input.agent.session.snapshotEvents()))
-        if (close !== undefined) {
-          status = 'closed'
-          note = close.reason
+        const proposals = await proposalsForDiagnosis(input.ctx, input.diagnosis.diagnosisId)
+        if (proposals.length > 0) {
+          status = proposals.every(
+            proposal =>
+              proposal.status === 'rolledback' || (proposal.status === 'decided' && proposal.decision !== 'PROMOTE'),
+          )
+            ? 'closed'
+            : 'recorded'
+          note = proposals
+            .map(
+              proposal =>
+                `proposal ${proposal.proposalId} [${proposal.status}]${proposal.decision === undefined ? '' : ` ${proposal.decision}`}`,
+            )
+            .join('; ')
+          await notifyParentOfApplied(input.ctx, snapshot, input.diagnosis, proposals, input.sessionId)
+        } else {
+          const close = closeOutcomeOf(lastAssistantText(input.agent.session.snapshotEvents()))
+          if (close !== undefined) {
+            status = 'closed'
+            note = close.reason
+          }
         }
       }
     }
   } catch (error) {
     note += `; outcome delivery/read failed (${error instanceof Error ? error.message : String(error)})`
+  } finally {
+    await settleReviewAgentAttempt({
+      rootStoreId: input.storeId,
+      taskId: input.diagnosis.taskId,
+      sessionId: input.sessionId,
+      status,
+      note,
+    }).catch(() => undefined)
+    waiting = false
+    resolveCompleted()
+    input.signal?.removeEventListener('abort', cancel)
+    if (!unloaded) await disposeWait?.()
   }
-  await settleReviewAgentAttempt({
-    rootStoreId: input.storeId,
-    taskId: input.diagnosis.taskId,
-    sessionId: input.sessionId,
-    status,
-    note,
-  }).catch(() => undefined)
 }
 
 /** What one store's scan consumed, and what it left alone. */

@@ -1,3 +1,6 @@
+import type { McpServerIdentity } from '../capability-candidate.ts'
+import type { RunMcpServerBinding } from '@dangosys/dsh-singularity-task'
+import type { FrozenTaskDefinition } from '../task-definition.ts'
 /** The experiment contract: its frozen and reported schema, the comparison verdicts and the digest primitives.
  * @module dsh-singularity-evolution/replay/contract */
 
@@ -92,10 +95,11 @@ export function compareReplaySides(
 export const EXPERIMENT_COMPARER_VERSION = 'experiment-comparer@2'
 
 /** Why a sample is in the experiment: the role it was chosen for. */
-export type ExperimentSampleRole = 'observed-failure' | 'observed-regression' | 'holdout'
+export type ExperimentSampleRole = 'observed-failure' | 'observed-success' | 'observed-regression' | 'holdout'
 
 export const EXPERIMENT_SAMPLE_ROLES: readonly ExperimentSampleRole[] = [
   'observed-failure',
+  'observed-success',
   'observed-regression',
   'holdout',
 ]
@@ -136,28 +140,32 @@ export interface ExperimentAdmissionRefusal {
   reason: string
 }
 
-/** One sample's mechanical verdict (§F.2): the six outcomes the comparer distinguishes. */
+/** One sample's mechanical verdict under its frozen repair or cost objective. */
 export type ExperimentSampleVerdict =
-  'fixed' | 'both-failed' | 'not-fixed' | 'maintained' | 'regressed' | 'inconclusive'
+  'fixed' | 'both-failed' | 'not-fixed' | 'improved' | 'not-improved' | 'maintained' | 'regressed' | 'inconclusive'
 
 export const EXPERIMENT_SAMPLE_VERDICTS: readonly ExperimentSampleVerdict[] = [
   'fixed',
   'both-failed',
   'not-fixed',
+  'improved',
+  'not-improved',
   'maintained',
   'regressed',
   'inconclusive',
 ]
 
-/** The experiment's overall verdict — the six mechanically distinguishable outcomes of its samples. */
+/** The experiment's categorical verdict, recomputed from every sample. */
 export type ExperimentVerdict =
-  'fixed' | 'fixed-with-regression' | 'not-fixed' | 'both-failed' | 'regressed' | 'inconclusive'
+  'fixed' | 'fixed-with-regression' | 'not-fixed' | 'both-failed' | 'improved' | 'not-improved' | 'regressed' | 'inconclusive'
 
 export const EXPERIMENT_VERDICTS: readonly ExperimentVerdict[] = [
   'fixed',
   'fixed-with-regression',
   'not-fixed',
   'both-failed',
+  'improved',
+  'not-improved',
   'regressed',
   'inconclusive',
 ]
@@ -170,8 +178,11 @@ export interface ExperimentBudget {
   note?: string
 }
 
-/** What one side cost, as the run's own ReviewRecord reported it. */
+/** A side's reported metrics. The tool-call objective sums toolCalls over every actual Run descendant; other fields retain their ReviewRecord scope. */
 export type ExperimentCost = { status: 'reported'; metrics: ReviewMetrics } | { status: 'unknown'; reason: string }
+
+/** Omission retains failure repair. Tool-call reduction compares complete executed Run subtrees. */
+export type ExperimentObjective = 'tool-call-reduction'
 
 /** One criterion's verdict on one side, with the verifier that decided it (v1's report dropped the verifier identity; every generation since keeps it). */
 export interface ExperimentCriterionDetail {
@@ -316,6 +327,8 @@ export interface FrozenProviderIdentity {
   candidateRegistryRevision: string
   /** The MCP server names those rows grant, sorted. Every side must bind exactly these, with a resolved template. */
   mcpServers: string[]
+  /** Exact definitions each server resolved to before either side starts. */
+  mcpBindings?: RunMcpServerBinding[]
   /** The preset those rows declare — one worker, one preset — or `null` when none is declared. */
   preset: string | null
   /** Every skill the rows' providers resolved to at freeze, sorted by name. */
@@ -330,6 +343,8 @@ export interface FrozenCapabilitySide {
   registryRevision: string
   /** The MCP server names those rows grant, sorted. */
   mcpServers: string[]
+  /** Exact definitions each server resolved to before either side starts. */
+  mcpBindings?: RunMcpServerBinding[]
   /** The preset those rows declare — one worker, one preset — or `null` when none declares one. */
   preset: string | null
   /** Every skill the rows' providers resolved to, sorted by name. */
@@ -356,6 +371,7 @@ export interface FrozenCapabilityRow {
 
 /** The capability candidate one experiment evaluates (A6): the row it installs and the new skill when it carries one. */
 export interface FrozenCapability {
+  mcpServers?: McpServerIdentity
   row: FrozenCapabilityRow
   /** The row the registry held at prepare, or `null` when it held none. */
   baseline: FrozenCapabilityRow | null
@@ -382,6 +398,7 @@ export interface FrozenSample {
 /** The identity block fixed before the first run (§F.2). Everything a reader needs to reproduce the comparison. */
 export interface FrozenExperiment {
   proposalId: string
+  objective?: ExperimentObjective
   /** The repetition index this experiment froze. A higher index is a *different* experiment. */
   repetition: number
   /** The candidate object's content identity the candidate side runs against (the candidate half of the report's identity). */
@@ -390,6 +407,7 @@ export interface FrozenExperiment {
   productionBaseline?: SkillContentIdentity
   /** The capability candidate this experiment evaluates (A6); absent for a skill experiment. */
   capability?: FrozenCapability
+  taskDefinition?: FrozenTaskDefinition
   /** The model selection every run of this experiment is placed under (S4-E §Q3). */
   model: ModelSelection
   budget: ExperimentBudget
@@ -443,8 +461,9 @@ export function protectedInputsDigest(inputs: readonly { path: string; sha256: s
   return sha256Hex(lines.join('\n'))
 }
 
-/** The comparison-relevant half of one side: exactly what the v1 comparer reads. */
+/** The outcome, acceptance verdicts and optional measured cost the frozen objective compares. */
 export interface ExperimentSideComparison {
   outcome: ExperimentOutcome
   criteria: ExperimentCriterionDetail[]
+  cost?: ExperimentCost
 }

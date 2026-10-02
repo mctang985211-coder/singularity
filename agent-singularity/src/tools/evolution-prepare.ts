@@ -6,23 +6,11 @@ export function defineEvolutionPrepareTool(ctx: Context) {
   return defineTool({
     name: 'evolution_prepare',
     description:
-      "Materialize a candidate's structured mutation into the proposal sandbox (status: prepared). A skill candidate is prepared " +
-      'as the complete object it improves: a guidance skill is its `SKILL.md` alone, and an execution skill is ' +
-      '`SKILL.md` plus the `SKILL.contract.json` beside it, derived from the production declaration with only ' +
-      'content.skillMdSha256 recomputed — the model never submits a sidecar. A capability candidate (A6) is prepared as its whole ' +
-      'row, plus the new execution skill that row grants when it carries one; the baseline a later apply compares against is then ' +
-      'the row the registry held, or its recorded absence. For an existing skill, one verified read of the production target ' +
-      'comes first — it yields both the champion/ snapshot and the baseline identity a later apply compares against — and a ' +
-      'target that is not there, or is not the loadable object its files claim (a defective declaration, an undeclared ' +
-      'file), is refused by name before any sandbox or ledger write, never prepared against nothing. A knowledge sidecar, an ' +
-      'object declaring resources and a proposal of any other kind are refused by name too; for an existing skill, production fixes the shape: this ' +
-      'path cannot add a `SKILL.contract.json` to a skill that has none, and it never changes the object\'s role. Writes go ' +
-      'only to the proposal sandbox ' +
-      '(<ledger root>/sandbox/<proposalId>/: `skills/<name>/SKILL.md` — plus `skills/<name>/SKILL.contract.json` for an ' +
-      'execution object — and the same paths under `champion/` for the production bytes the snapshot captures). Nothing ' +
-      'here touches production; the next step is evolution_replay, the two-sided experiment.',
+      'Freeze the candidate and its production baseline in the proposal sandbox. A Task candidate freezes both template libraries; ' +
+      'a Skill freezes SKILL.md and its existing execution declaration; a capability freezes its whole row, optional MCP launch ' +
+      'definitions and optional new execution Skill. No production changes. Next: evolution_replay, then evolution_gate.',
     parameters: {
-      proposalId: { type: 'string', required: true, description: 'Skill or capability candidate carrying a mutation, to materialize into its sandbox' },
+      proposalId: { type: 'string', required: true, description: 'Task template, Skill or capability candidate to freeze' },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
@@ -30,6 +18,15 @@ export function defineEvolutionPrepareTool(ctx: Context) {
       try {
         const prepared = await ctx.evolution.prepare(args.proposalId, caller)
         const view = prepared.prepared!
+        if (view.templateCandidate !== undefined) {
+          return [
+            `proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
+            ...view.files.map(file => `  wrote ${file}`),
+            `candidate template: ${view.templateCandidate.template.id}@${view.templateCandidate.template.version} sha256:${view.templateCandidate.digest}`,
+            view.templateBaseline == null ? 'template baseline: absent' : `template baseline: ${view.templateBaseline.template.id}@${view.templateBaseline.template.version} sha256:${view.templateBaseline.digest}`,
+            'sandbox only — production was not touched; next: evolution_replay (the two-sided experiment), then evolution_gate',
+          ].join('\n')
+        }
         if (view.capabilityRow !== undefined) {
           // The A6 arm: one capability row, plus the new execution skill when the
           // candidate carries one. The production baseline this arm compares
@@ -41,6 +38,7 @@ export function defineEvolutionPrepareTool(ctx: Context) {
             rowBaseline === null
               ? 'registry baseline: the table held no such row, so this candidate adds it'
               : `registry baseline: row sha256:${rowBaseline.digest.slice(0, 12)}… (an apply refuses if the registry row changed since this read)`,
+            ...(view.mcpServers === undefined ? [] : [`candidate MCP definitions sha256:${view.mcpServers.digest}: ${JSON.stringify(view.mcpServers.definitions)}`]),
             view.skillContent === undefined
               ? 'candidate object: the row alone — no new skill object is materialized'
               : 'candidate object: a new execution provider (SKILL.md + SKILL.contract.json) the row grants, judged by a registered ' +

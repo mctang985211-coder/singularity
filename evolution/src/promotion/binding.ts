@@ -14,11 +14,12 @@ import type {
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
 import type { EvolutionProposal } from '../evolution.ts'
-import { experimentLineage, evidenceRefsOf } from '../experiment/record.ts'
+import { costOf, experimentLineage, evidenceRefsOf } from '../experiment/record.ts'
 import type { ExperimentView } from '../experiment/freeze.ts'
 import { buildExperimentReport } from '../experiment/record.ts'
 import type {
   ExperimentReport,
+  ExperimentObjective,
   ExperimentSide,
   ExperimentSideDetail,
   FrozenCriterion,
@@ -27,7 +28,7 @@ import type {
   ModelSelection,
   SkillContentIdentity,
 } from '../replay.ts'
-import { assertExperimentReport, digestOf, protectedInputsDigest } from '../replay.ts'
+import { assertExperimentReport, canonicalJson, digestOf, protectedInputsDigest } from '../replay.ts'
 import { sha256Hex } from '@dangosys/dsh-singularity-task'
 import type { SkillPromotionSources, VerifierVocabulary } from './shared.ts'
 import { identityLabel, noExperimentRefusal, reportBytes } from './shared.ts'
@@ -39,6 +40,7 @@ export function assertSideEvidence(input: {
   experimentId: string
   snapshot: TaskSnapshot
   where: string
+  objective?: ExperimentObjective
 }): TaskInstance | undefined {
   const { sample, detail, experimentId, snapshot, where } = input
   if (detail.outcome === 'interrupted') return undefined
@@ -88,6 +90,9 @@ export function assertSideEvidence(input: {
       `evolution: the experiment report's ${where} cites review ref "${String(detail.reviewRef)}" but its run "${runId}" settles ` +
         `as "${task.taskId}#${runId}" — the reference a promotion reads must name the record that exists`,
     )
+  }
+  if (input.objective === 'tool-call-reduction' && canonicalJson(detail.cost) !== canonicalJson(costOf(review, snapshot))) {
+    throw new Error(`evolution: the experiment report's ${where} cost disagrees with the executed Run subtree's review counters`)
   }
   const recorded: readonly ReviewCriterion[] = review.criteria ?? []
   const reported: readonly ReviewCriterion[] = detail.criteria
@@ -482,7 +487,7 @@ export async function assertSideProviderBinding(input: {
     )
   }
   for (const server of binding.mcpServers) {
-    if (server.templateDigest === null) {
+    if (server.templateDigest === null || expected.mcpBindings?.find(item => item.serverName === server.serverName)?.templateDigest !== server.templateDigest) {
       throw new Error(
         `evolution: run "${run.runId}" of the ${where} bound MCP server "${server.serverName}" with no resolvable template — the run ` +
           'recorded no identity for the server it was granted, so the frozen server plane cannot be compared',

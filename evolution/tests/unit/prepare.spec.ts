@@ -71,28 +71,21 @@ describe('EvolutionService mutation schemas', () => {
   })
 })
 
-/**
- * S4-E 收尾: the candidate lifecycle is a single-file skill replacement and
- * nothing else. `evolution_propose` (and a Diagnosis) may still record any
- * targetType as a suggestion, but a recorded suggestion never becomes a
- * candidate: the first durable write is refused by name, so no non-skill
- * proposal reaches a sandbox, an experiment or a promotion in this build
- * (§F.2; A6 adds the capability lifecycle beside it, with its own rules and its
- * own gate — `capability-candidate.spec.ts`). Every other proposal stays
- * `proposed` forever, which is the expected end state.
- */
 describe('EvolutionService candidate admission (S4-E 收尾, A6)', () => {
   it.each([
     ['agent_preset', presetProposal, { presetId: 'bb-verify', files: [{ path: 'preset.yml', content: 'x' }] }],
     ['task_definition', proposal, { baseVersion: 'v3', definition: { objective: 'new' } }],
-  ] as const)('refuses a %s candidate by name, before the first ledger write', async (targetType, input, mutation) => {
+  ] as const)('refuses an unsupported or malformed %s candidate before the first ledger write', async (targetType, input, mutation) => {
     const svc = await service()
     await svc.propose(input, 'root-1')
     const before = await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')
 
     const message = await refusalOf(svc.candidate(input.proposalId, VERSION_SET, 'root-1', mutation))
-    expect(message).toContain('cannot become a candidate in this build')
-    expect(message).toContain(`"${targetType}"`)
+    if (targetType === 'task_definition') expect(message).toContain('unknown key "baseVersion"')
+    else {
+      expect(message).toContain('cannot become a candidate in this build')
+      expect(message).toContain(`"${targetType}"`)
+    }
     // Nothing was appended, nothing was materialized, and the proposal stays the
     // recorded suggestion it was.
     expect(await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).toBe(before)

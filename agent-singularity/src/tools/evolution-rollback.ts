@@ -6,8 +6,9 @@ import { denialReason, message, renderOpenIntentRecovery, sessionId, text } from
 
 /** What a restored object means for production, stated honestly in the output: */
 function restoreNote(targetType: string): string {
+  if (targetType === 'task_definition') return 'new task instances use the restored library state; existing Task contracts and Run bindings stay fixed'
   if (targetType === 'capability') {
-    return 'the production capability row was restored or removed to its prepared baseline, and any new skill was removed; ' +
+    return 'the capability row and MCP definitions were restored or removed to their prepared baseline, and any new Skill was removed; ' +
       'new admissions read that state while runs already bound to the applied snapshot keep their snapshot'
   }
   return 'the restored object is what the skill filesystem now serves and what the next admission loads, and the skill ' +
@@ -19,25 +20,10 @@ export function defineEvolutionRollbackTool(ctx: Context) {
   return defineTool({
     name: 'evolution_rollback',
     description:
-      'Roll back an applied EvolutionProposal (status: rolledback). Restores the production baseline fixed at prepare — the ' +
-      'production file set of the applied skill object (the `SKILL.md`, plus the `SKILL.contract.json` when it declares an ' +
-      'execution provider), put back byte for byte, or restores a committed capability row and removes its optional new ' +
-      'execution skill. An applied record of any ' +
-      'other target type has no executor here and is refused. Always asks a human through the native approval seam first — ' +
-      'reject / cancel / unavailable writes nothing and the proposal stays applied. Only an applied proposal can be rolled ' +
-      'back; a rolled-back proposal keeps its full ledger history. The restore is one commit, in the same order as apply: ' +
-      'a durable commit intent (proposal, direction, this approval, every production file with the content identity each ' +
-      'must hold before and after the restore, and the champion snapshot as the recoverable bytes for each file) is ' +
-      'recorded before production changes, each file is then replaced atomically, and only after every target has been read ' +
-      'back and the committed row and optional skill verified is the completion recorded — so a failure at any stage ' +
-      'leaves one open intent and affected production closed to new admission rather than a half-commit. A rollback ' +
-      'restores this proposal\'s own baseline and ' +
-      'refuses by name, with nothing written, a target that a later proposal (or any other writer) has changed since this ' +
-      'version was applied (both files must still hold what this proposal applied, and the directory must hold that ' +
-      'object\'s own files with no entry the object does not name), and a champion snapshot that no longer ' +
-      'hashes to the baseline recorded at prepare. Calling ' +
-      'this tool again while an intent is open settles it instead of asking for a second approval: the answer reports the ' +
-      'intent id and whether the write was redone or only its completion recorded.',
+      'Roll back an applied Task template, Skill or capability proposal after human approval. Restore its frozen baseline ' +
+      'through the existing durable commit. Template updates append the old content at the next version; a first publication ' +
+      'is removed. Capability rollback restores the row and removes new MCP definitions and any new Skill. Existing Task ' +
+      'contracts and Run bindings stay fixed. Retry settles an open intent without asking again.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Applied proposal to roll back' },
     },
@@ -72,17 +58,21 @@ export function defineEvolutionRollbackTool(ctx: Context) {
       if (proposal.status !== 'applied') {
         return `evolution_rollback rejected: proposal ${proposal.proposalId} is ${proposal.status}; only an applied proposal can be rolled back`
       }
-      const targets = applyTargets(proposal, ctx.evolution)
+      const targets = applyTargets(proposal, ctx.evolution, 'rollback')
       if (targets.length === 0 && proposal.targetType !== 'capability') {
-        return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build restores an existing skill object or a capability row with an optional new execution skill, so there is no executor for this target type`
+        return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build restores a Task template, Skill or capability candidate, so there is no executor for this target type`
       }
       const reason = [
         `Evolution rollback for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
         `rationale: ${proposal.rationale}`,
+        `applied mutation: ${JSON.stringify(proposal.mutation)}`,
+        ...(proposal.prepared?.capabilityTable === undefined ? [] : [`deployment config baseline sha256:${proposal.prepared.capabilityTable.baselineSha256}; apply sha256:${proposal.prepared.capabilityTable.applySha256}; rollback sha256:${proposal.prepared.capabilityTable.rollbackSha256}`]),
         `applied at: ${[...(proposal.targetType === 'capability' ? [`capability row ${proposal.targetId}`] : []), ...proposal.applied!.targets].join(', ')} (approval ${proposal.applied!.approvalRef})`,
         proposal.targetType === 'capability'
-          ? 'this restores the prepared capability row baseline and removes any new skill from production targets:'
-          : 'this restores the champion snapshot over production targets:',
+          ? 'this restores the capability row baseline and removes new MCP definitions and any new Skill from production targets:'
+          : proposal.targetType === 'task_definition'
+            ? 'this restores the template library state; prior contracts stay fixed:'
+            : 'this restores the champion snapshot over production targets:',
         ...(proposal.targetType === 'capability' ? [`  - capability row ${proposal.targetId} in the production table`] : []),
         ...targets.map(target => `  - ${target}`),
       ].join('\n')

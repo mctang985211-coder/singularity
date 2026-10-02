@@ -378,6 +378,7 @@ async function startChildRound(
     taskId: item.taskId,
     sessionId,
     parentRunId: parentRun.runId,
+    ...(env.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: env.taskTemplatesRoot }),
     capabilitySnapshot: capabilitySnapshot(manifest),
     ...(agentPreset === undefined ? {} : { agentPreset }),
     // Born active (§1.1): this run decides its own work until it submits or
@@ -483,6 +484,7 @@ async function startChildRound(
        * What this batch runs *under*, not only where it runs (S4-E §Q3): a child of
        * an experiment's worker is part of the same run of the experiment, so it is
        */
+      ...(env.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: env.taskTemplatesRoot }),
       ...(env.agentOptions === undefined ? {} : { agentOptions: env.agentOptions }),
       signal: batch.signal,
     })

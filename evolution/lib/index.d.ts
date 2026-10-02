@@ -1,6 +1,7 @@
+import * as _dangosys_dsh_singularity_task0 from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, ProposalTargetType, ReviewCriterion, ReviewMetrics, ReviewRecord, RunMcpServerBinding, TaskInstance, TaskSnapshot, TaskTemplate, TemplateParameters } from "@dangosys/dsh-singularity-task";
+import { CapabilityConfig, CapabilityToolQuery, McpServerTemplate, ReplayRunOutcome, ReplayTaskOptions, RootRecoveryOutcome, RootRecoveryRequest, SkillProviderCandidate, SkillProviderVerdict, SkillSidecar } from "@dangosys/dsh-singularity-task-runtime";
 import { SessionId } from "@deepseek-ai/dsh-session";
-import { AcceptanceCriterion, ProposalTargetType, ReviewCriterion, ReviewMetrics, ReviewRecord, TaskInstance, TaskSnapshot } from "@dangosys/dsh-singularity-task";
-import { CapabilityConfig, CapabilityToolQuery, ReplayRunOutcome, ReplayTaskOptions, RootRecoveryOutcome, RootRecoveryRequest, SkillProviderCandidate, SkillProviderVerdict, SkillSidecar } from "@dangosys/dsh-singularity-task-runtime";
 import { Context, Service } from "@deepseek-ai/cordis";
 
 //#region src/capability-candidate.d.ts
@@ -23,6 +24,7 @@ interface CapabilitySkill {
 interface CapabilityCandidate {
   row: CapabilityRow;
   skill?: CapabilitySkill;
+  mcpServers?: Record<string, McpServerTemplate>;
 }
 /** The frozen identity of one capability row: its name, the row itself, and the digest of its canonical bytes. */
 interface CapabilityRowIdentity {
@@ -30,10 +32,17 @@ interface CapabilityRowIdentity {
   entry: CapabilityConfig;
   digest: string;
 }
+interface McpServerIdentity {
+  definitions: Record<string, McpServerTemplate>;
+  digest: string;
+}
+declare function mcpServerIdentity(value: unknown): McpServerIdentity;
+declare function assertMcpServerIdentity(value: unknown): McpServerIdentity;
 /** The overlay a candidate-side evaluation mounts on this candidate (A6 interface): the table override and the sandbox skill roots. */
 interface CapabilityOverlay {
   capabilityOverrides: Record<string, CapabilityConfig>;
   extraSkillRoots: string[];
+  mcpServers?: Record<string, McpServerTemplate>;
 }
 /** The canonical bytes of one row — what a sandbox freezes and an intent's source holds. */
 declare function capabilityRowBytes(entry: CapabilityConfig): string;
@@ -50,6 +59,7 @@ declare function validateCapabilityMutation(mutation: unknown): CapabilityCandid
 /** The store view the candidate's rules read: the effective capability table, the verifier vocabulary and every skill root. */
 interface CapabilityStoreView {
   readonly table: Readonly<Record<string, CapabilityConfig>>;
+  readonly mcpServers?: Readonly<Record<string, McpServerTemplate>>;
   /** `undefined` when the deployment cannot list its verifiers — an execution provider is then refused rather than assumed registered. */
   readonly verifierVocabulary?: {
     readonly ids: readonly string[];
@@ -73,6 +83,7 @@ interface PreparedCapability {
   /** The candidate row, read back from the sandbox and verified against `prepared.capabilityRow`. */
   row: CapabilityRow;
   rowBytes: Buffer;
+  mcpServers?: McpServerIdentity;
   /** The row the store held at prepare, with its frozen champion bytes — `undefined` when the store held none. */
   baseline?: {
     entry: CapabilityConfig;
@@ -141,7 +152,7 @@ declare function compareReplaySides(champion: ReplaySideSummary, candidate: Repl
 /** The comparer a report names, and the only one this build can re-check: `experiment-comparer@2`. */
 declare const EXPERIMENT_COMPARER_VERSION = "experiment-comparer@2";
 /** Why a sample is in the experiment: the role it was chosen for. */
-type ExperimentSampleRole = 'observed-failure' | 'observed-regression' | 'holdout';
+type ExperimentSampleRole = 'observed-failure' | 'observed-success' | 'observed-regression' | 'holdout';
 declare const EXPERIMENT_SAMPLE_ROLES: readonly ExperimentSampleRole[];
 /** Which side of one sample's comparison a run is: the frozen baseline, or the candidate. */
 type ExperimentSide = 'baseline' | 'candidate';
@@ -166,11 +177,11 @@ interface ExperimentAdmissionRefusal {
   /** The runtime's own refusal text, verbatim. */
   reason: string;
 }
-/** One sample's mechanical verdict (§F.2): the six outcomes the comparer distinguishes. */
-type ExperimentSampleVerdict = 'fixed' | 'both-failed' | 'not-fixed' | 'maintained' | 'regressed' | 'inconclusive';
+/** One sample's mechanical verdict under its frozen repair or cost objective. */
+type ExperimentSampleVerdict = 'fixed' | 'both-failed' | 'not-fixed' | 'improved' | 'not-improved' | 'maintained' | 'regressed' | 'inconclusive';
 declare const EXPERIMENT_SAMPLE_VERDICTS: readonly ExperimentSampleVerdict[];
-/** The experiment's overall verdict — the six mechanically distinguishable outcomes of its samples. */
-type ExperimentVerdict = 'fixed' | 'fixed-with-regression' | 'not-fixed' | 'both-failed' | 'regressed' | 'inconclusive';
+/** The experiment's categorical verdict, recomputed from every sample. */
+type ExperimentVerdict = 'fixed' | 'fixed-with-regression' | 'not-fixed' | 'both-failed' | 'improved' | 'not-improved' | 'regressed' | 'inconclusive';
 declare const EXPERIMENT_VERDICTS: readonly ExperimentVerdict[];
 /** The budget the caller freezes with the experiment (§F.2: samples, inputs, judges and token ceiling). */
 interface ExperimentBudget {
@@ -179,7 +190,7 @@ interface ExperimentBudget {
   /** Free text: what the budget was derived from and why it is judged enough. */
   note?: string;
 }
-/** What one side cost, as the run's own ReviewRecord reported it. */
+/** A side's reported metrics. The tool-call objective sums toolCalls over every actual Run descendant; other fields retain their ReviewRecord scope. */
 type ExperimentCost = {
   status: 'reported';
   metrics: ReviewMetrics;
@@ -187,6 +198,8 @@ type ExperimentCost = {
   status: 'unknown';
   reason: string;
 };
+/** Omission retains failure repair. Tool-call reduction compares complete executed Run subtrees. */
+type ExperimentObjective = 'tool-call-reduction';
 /** One criterion's verdict on one side, with the verifier that decided it (v1's report dropped the verifier identity; every generation since keeps it). */
 interface ExperimentCriterionDetail {
   criterionId: string;
@@ -291,6 +304,8 @@ interface FrozenProviderIdentity {
   candidateRegistryRevision: string;
   /** The MCP server names those rows grant, sorted. Every side must bind exactly these, with a resolved template. */
   mcpServers: string[];
+  /** Exact definitions each server resolved to before either side starts. */
+  mcpBindings?: RunMcpServerBinding[];
   /** The preset those rows declare — one worker, one preset — or `null` when none is declared. */
   preset: string | null;
   /** Every skill the rows' providers resolved to at freeze, sorted by name. */
@@ -304,6 +319,8 @@ interface FrozenCapabilitySide {
   registryRevision: string;
   /** The MCP server names those rows grant, sorted. */
   mcpServers: string[];
+  /** Exact definitions each server resolved to before either side starts. */
+  mcpBindings?: RunMcpServerBinding[];
   /** The preset those rows declare — one worker, one preset — or `null` when none declares one. */
   preset: string | null;
   /** Every skill the rows' providers resolved to, sorted by name. */
@@ -327,6 +344,7 @@ interface FrozenCapabilityRow {
 }
 /** The capability candidate one experiment evaluates (A6): the row it installs and the new skill when it carries one. */
 interface FrozenCapability {
+  mcpServers?: McpServerIdentity;
   row: FrozenCapabilityRow;
   /** The row the registry held at prepare, or `null` when it held none. */
   baseline: FrozenCapabilityRow | null;
@@ -354,6 +372,7 @@ interface FrozenSample {
 /** The identity block fixed before the first run (§F.2). Everything a reader needs to reproduce the comparison. */
 interface FrozenExperiment {
   proposalId: string;
+  objective?: ExperimentObjective;
   /** The repetition index this experiment froze. A higher index is a *different* experiment. */
   repetition: number;
   /** The candidate object's content identity the candidate side runs against (the candidate half of the report's identity). */
@@ -362,6 +381,7 @@ interface FrozenExperiment {
   productionBaseline?: SkillContentIdentity;
   /** The capability candidate this experiment evaluates (A6); absent for a skill experiment. */
   capability?: FrozenCapability;
+  taskDefinition?: FrozenTaskDefinition;
   /** The model selection every run of this experiment is placed under (S4-E §Q3). */
   model: ModelSelection;
   budget: ExperimentBudget;
@@ -402,23 +422,109 @@ declare function protectedInputsDigest(inputs: readonly {
   path: string;
   sha256: string;
 }[]): string;
-/** The comparison-relevant half of one side: exactly what the v1 comparer reads. */
+/** The outcome, acceptance verdicts and optional measured cost the frozen objective compares. */
 interface ExperimentSideComparison {
   outcome: ExperimentOutcome;
   criteria: ExperimentCriterionDetail[];
+  cost?: ExperimentCost;
 }
 //#endregion
 //#region src/replay/comparer.d.ts
 /** One sample's mechanical verdict. An unrankable side (cancelled / interrupted) */
-declare function compareExperimentSides(role: ExperimentSampleRole, baseline: ExperimentSideComparison, candidate: ExperimentSideComparison): ExperimentSampleVerdict;
-/** The overall verdict over every sample, from the sample verdicts alone: any non-fixed sample makes the experiment not-fixed. */
-declare function overallExperimentVerdict(samples: readonly Pick<ExperimentSampleComparison, 'role' | 'verdict'>[]): ExperimentVerdict;
+declare function compareExperimentSides(role: ExperimentSampleRole, baseline: ExperimentSideComparison, candidate: ExperimentSideComparison, objective?: ExperimentObjective): ExperimentSampleVerdict;
+/** Aggregate the frozen objective's observed target and guard samples. */
+declare function overallExperimentVerdict(samples: readonly Pick<ExperimentSampleComparison, 'role' | 'verdict'>[], objective?: ExperimentObjective): ExperimentVerdict;
 /** Validate a frozen identity block: every member present and shaped, the digests consistent. */
 declare function assertFrozenExperiment(value: unknown): asserts value is FrozenExperiment;
 /** The runtime's own refusal, as the report carries it for a `not-admitted` side (A6). */
 declare function assertAdmissionRecord(value: unknown, field: string): asserts value is ExperimentAdmissionRefusal;
 /** Validate a v3 report against itself — and further than a shape check: every cited identity must recompute to the same digest. */
 declare function assertExperimentReport(report: unknown): asserts report is ExperimentReport;
+//#endregion
+//#region src/commit.d.ts
+/** The durable stages of one commit, observed through the commit probe and never on disk. */
+type CommitStage = 'intent-recorded' | 'write-staged' | 'write-renamed' | 'commit-verified';
+/** One file of one commit: where it goes, the bytes production must hold before and after, and where its recoverable source lives. */
+interface CommitFile {
+  /** Absolute production path this commit replaces, creates or removes. */
+  readonly target: string;
+  /** The digest this file must hold before the write — the state a reconciliation redoes the write from; `null` when it must not exist. */
+  readonly baselineSha256: string | null;
+  /** The digest this file must hold after the write; always the digest of the bytes being committed, `null` when the commit removes it. */
+  readonly contentSha256: string | null;
+  /** The recoverable bytes for this file, relative to the ledger root; absent when this direction removes the file. */
+  readonly source?: string;
+}
+/** One commit's request: what the intent line will say, and what the writes will do. */
+interface CommitRequest {
+  readonly proposalId: string;
+  readonly direction: CommitDirection;
+  /** The human grant behind this commit, recorded on the intent and on the completion that closes it. */
+  readonly approvalRef: string;
+  /** The object's fixed files, in commit order (`SKILL.md` first, the sidecar second when there is one); empty for a row-only capability commit. */
+  readonly files: readonly CommitFile[];
+  /** The one capability row this commit also moves (A6); absent for a skill commit. */
+  readonly capability?: CommitCapability;
+  /** The actor the completion record is written for. */
+  readonly actor: string;
+}
+/** The capability-registry half of a commit host (A6): required exactly when a commit carries a capability row. */
+interface CommitCapabilityHost {
+  /** The row the registry holds for `name` right now, or `null` when it holds none. */
+  read(name: string): Promise<CapabilityConfig | null>;
+  /** Install (`entry`) or remove (`null`) one capability row, inside the commit's own order. */
+  apply(intent: CommitIntentView, entry: CapabilityConfig | null): Promise<void>;
+}
+/** What the commit path needs from the evolution service, and no more: the roots, the record funnel, the source reads and the write refusals. */
+interface CommitHost {
+  /** Absolute ledger root: `source` resolves against it and is confined to it. */
+  readonly root: string;
+  /** Production skill root: a commit's target must sit under it. */
+  readonly skillRoot: string;
+  readonly taskTemplatesRoot?: string;
+  /** Append one record through the service's funnel (format check, staged fold, durable write). */
+  append(record: EvolutionRecord): Promise<void>;
+  /** Read the recoverable bytes a commit names and verify them against the digest the intent records. */
+  readSource(source: string, sha256: string): Promise<Buffer>;
+  /** The service's walk-verified production read: `null` when nothing is there, a throw for a symlink or a non-file. */
+  readProduction(relative: string): Promise<{
+    bytes: Buffer;
+    sha256: string;
+  } | null>;
+  /** The named reason this commit must not write the directory its file set lives in, or `null` when it may. */
+  objectWriteRefusal(intent: CommitIntentView): Promise<string | null>;
+  /** The named reason this commit must not write anything because the capability table moved, or `null` when it may. */
+  tableWriteRefusal(intent: CommitIntentView): Promise<string | null>;
+  /** Called after every file has been written and read back (and the row installed), to verify the whole object. */
+  verifyCommitted(intent: CommitIntentView): Promise<void>;
+  /** The capability-registry seam; present exactly on a host that can move a row (A6). */
+  readonly capability?: CommitCapabilityHost;
+  /** The typed test seam ({@link Config.commitProbe}); a production deployment never sets one. */
+  probe(stage: CommitStage, target?: string): void;
+}
+/** What one reconciliation of an open intent settled to. */
+interface ReconcileOutcome {
+  intentId: string;
+  proposalId: string;
+  direction: CommitDirection;
+  /** The absolute production targets the intent committed, in intent order — the whole fixed file set. */
+  targets: readonly string[];
+  /** `completed-redone`: production still held the pre-commit state, so the same write was carried out again. */
+  result: 'completed-redone' | 'completed-written' | 'blocked';
+  /** The named reason, present on `blocked`: what a human must settle before this commit can proceed. */
+  detail?: string;
+}
+//#endregion
+//#region src/capability-config.d.ts
+/** One table file's **composed identity**, frozen when a capability candidate is prepared. */
+interface CapabilityTableIdentity {
+  /** SHA-256 of the whole file as prepare read it. */
+  readonly baselineSha256: string;
+  /** SHA-256 of the whole file the apply leaves (this candidate's row written in). */
+  readonly applySha256: string;
+  /** SHA-256 of the whole file the rollback leaves (the row it restores written in, or the row it removes). */
+  readonly rollbackSha256: string;
+}
 //#endregion
 //#region src/experiment/spec.d.ts
 /** One sample as the caller's specification names it. */
@@ -429,6 +535,7 @@ interface ExperimentSampleSpec {
 /** The experiment a caller freezes before anything runs (§F.2). Everything here is frozen into the report's identity block. */
 interface ExperimentSpec {
   proposalId: string;
+  objective?: ExperimentObjective;
   samples: ExperimentSampleSpec[];
   /** The directory whose recursive content is the frozen input both workspaces are built from. */
   snapshot: {
@@ -519,388 +626,40 @@ declare function validateSpec(spec: ExperimentSpec): void;
 /** The role a sample must have been chosen for, against the historical record it carries. */
 declare function assertSampleRole(sample: ExperimentSampleSpec, task: TaskInstance, review: ReviewRecord): void;
 //#endregion
-//#region src/experiment/freeze.d.ts
-/** The idempotency key's content member (K3, A6): the digest of the candidate's complete identity. */
-declare function preparedContentDigestOf(frozen: {
-  candidate?: SkillContentIdentity;
-  capability?: FrozenCapability;
-}): string;
-/** True for a record of the experiment family — the lines the proposal fold must leave alone. */
-declare function isExperimentRecord(record: {
-  kind: string;
-}): record is ExperimentRecord;
-/** One experiment's folded view: its started record plus every sample record written under it. */
-interface ExperimentView {
-  experimentId: string;
-  proposalId: string;
-  frozen: FrozenExperiment;
-  frozenDigest: string;
-  budget: ExperimentBudget;
-  report: string;
-  /** The task store this experiment's runs were created in (see {@link ExperimentStartedRecord.storeId}). */
-  storeId?: string;
-  /** The `experiment_started` record's own timestamp. */
-  at: string;
-  /** Sample records in ledger order. */
-  samples: ExperimentSampleRecord[];
-}
-/** The ledger as this module uses it: the proposal it evaluates, the candidate's files, the experiment views and the ledger root. */
-interface ExperimentLedger {
-  /** Absolute ledger directory; the sandbox, the workspaces and the report live under it. */
-  readonly root: string;
-  get(proposalId: string): Promise<EvolutionProposal>;
-  /** Read the prepared candidate object's files — `SKILL.md`, and the sidecar when it carries one. */
-  readSkillCandidate(proposalId: string): Promise<{
-    skillMd: Buffer;
-    sidecar?: Buffer;
-  }>;
-  /** Read a prepared **capability** candidate back out of its sandbox and verify it. */
-  readCapabilityCandidate(proposalId: string): Promise<PreparedCapability>;
-  /** One experiment's folded view; throws on an unknown id. */
-  experiment(experimentId: string): Promise<ExperimentView>;
-  /** Every experiment folded under one proposal, newest first. One call answers the whole family. */
-  experiments(proposalId: string): Promise<ExperimentView[]>;
-  /** Record the frozen experiment (idempotent by identity: an identical record is a no-op, a different one refuses). */
-  recordExperimentStart(record: ExperimentStartedRecord): Promise<void>;
-  /** Record one sample side. A key that is already recorded refuses a different content by name. */
-  recordExperimentSample(record: ExperimentSampleRecord): Promise<void>;
-}
-/** One accepted provider verdict, as a freeze reads it off the runtime's own pre-check (the members it records, and no more). */
-interface PrecheckSkillVerdict {
-  readonly valid: boolean;
-  readonly name: string;
-  readonly role?: string;
-  readonly contractDigest?: string | null;
-  readonly contentDigest?: string;
-  readonly defects?: readonly {
-    readonly code: string;
-    readonly detail: string;
-  }[];
-}
-/** The runtime's provider pre-check as the freeze consumes it (`TaskRuntime.capabilityProviderReport`). */
-interface ProviderPrecheckView {
-  readonly capabilities: readonly {
-    readonly capability: string;
-    readonly skills: readonly PrecheckSkillVerdict[];
-  }[];
-  readonly revision: string;
-}
-/** The services one experiment reads, as the caller's context holds them. */
-interface ExperimentSources {
-  readonly evolution: ExperimentLedger;
-  readonly graphs: {
-    graphForSession(sessionId: SessionId): Promise<{
-      readonly rootSessionId: SessionId;
-    }>;
-  };
-  readonly task: {
-    openStore(storeId: string): Promise<TaskSnapshot>;
-  };
-  readonly taskRuntime: {
-    replayTask(storeId: string, championTaskId: string, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>;
-    /** The runtime's own provider pre-check for one session's viewpoint (S4-E §Q3). */
-    capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheckView>;
-    /** The runtime's own pre-check over a capability table the experiment names (A6). */
-    precheckCapabilityTable?(request: {
-      capabilities: readonly string[];
-      table: Readonly<Record<string, CapabilityConfig>>;
-      extraRoots: readonly string[];
-    }): Promise<ProviderPrecheckView>;
-    /** The effective capability table, as the runtime holds it — the rows a pre-check covered and the servers they grant. */
-    listCapabilities?(): Readonly<Record<string, CapabilityConfig>>;
-  };
-  /** The registered judge vocabulary at freeze time (S4-E §Q3), or `undefined` */
-  verifierVocabulary?(): Promise<VerifierVocabularyView | undefined>;
-}
-/** What one experiment call evaluates: the proposal, its sandbox, and the identity it froze the candidate as. */
-interface ExperimentCandidate {
-  proposal: EvolutionProposal;
-  sandbox: string;
-  /** The skill object the candidate side runs (a skill candidate, or a capability candidate's new skill). */
-  candidate?: SkillContentIdentity;
-  /** The capability candidate's frozen identity (A6); absent for a skill candidate. */
-  capability?: FrozenCapability;
-  /** The candidate-side overlay of a capability candidate: the row override and the sandbox skill root. */
-  overlay?: {
-    capabilityOverrides: Record<string, CapabilityConfig>;
-    extraSkillRoots: string[];
-  };
-}
-/** The proposal this experiment may evaluate, and the candidate identity it runs against. */
-declare function experimentCandidate(sources: ExperimentSources, proposalId: string): Promise<ExperimentCandidate>;
-/** The registered judge vocabulary one freeze reads: the ids and declared versions the runs are judged by. */
-interface VerifierVocabularyView {
-  readonly ids: readonly string[];
-  readonly versions: Readonly<Record<string, string>>;
-}
-/** One criterion's frozen judge identity (S4-E §Q3), read from the criterion's verifier ref and the live vocabulary. */
-declare function frozenCriterionOf(criterion: AcceptanceCriterion, where: string, vocabulary: VerifierVocabularyView | undefined): FrozenCriterion;
-/** The provider identity the production baseline side of one sample must bind, read from the runtime's own pre-check. */
-declare function frozenProviderIdentity(input: {
-  sources: ExperimentSources;
-  caller: SessionId;
-  sampleTaskId: string;
-  required: readonly string[];
-  /** The candidate object this experiment prepares to promote: what its side's registry revision substitutes. */
-  candidate: SkillContentIdentity;
-  where: string;
-}): Promise<FrozenProviderIdentity>;
-/** One frozen side identity built from one pre-check's verdicts, refusing a deployment whose providers are unusable or whose roles are unknown. */
-declare function frozenCapabilitySideOf(input: {
-  precheck: ProviderPrecheckView;
-  table: Readonly<Record<string, CapabilityConfig>>;
-  rows: readonly string[];
-  where: string;
-}): FrozenCapabilitySide;
-/** Every provider one pre-check refused, as a refusal line names it — the one rendering the freeze and the admission record share. */
-declare function refusedProviderLines(precheck: ProviderPrecheckView): string[];
-/** What the two sides of one **capability** sample are frozen against (A6). */
-declare function frozenCapabilitySample(input: {
-  sources: ExperimentSources;
-  caller: SessionId;
-  sampleTaskId: string;
-  required: readonly string[];
-  overlay: {
-    capabilityOverrides: Record<string, CapabilityConfig>;
-    extraSkillRoots: string[];
-  };
-}): Promise<{
-  provider?: FrozenProviderIdentity;
-  admission?: FrozenSampleAdmission;
-  candidateProvider: FrozenCapabilitySide;
-}>;
-/** The registry revision the **candidate** side of one sample must bind (K3): the composed table's own revision. */
-declare function candidateRegistryRevisionOf(input: {
-  table: Readonly<Record<string, CapabilityConfig>>;
-  skills: readonly FrozenProviderSkill[];
-  candidate: SkillContentIdentity;
-  where: string;
-}): string;
-/** What one sample's two sides are frozen against: a skill sample's production identity, or a capability sample's production/overlay pair. */
-type SampleProviders = Pick<FrozenSample, 'provider' | 'admission' | 'candidateProvider'>;
-/** Freeze one sample from its store record: what the case is, the acceptance the replay mirrors into both sides, and the provider identities. */
-declare function frozenSampleOf(sample: ExperimentSampleSpec, task: TaskInstance, review: ReviewRecord, providers: SampleProviders, vocabulary: VerifierVocabularyView | undefined): FrozenSample;
-/** One content identity as a frozen block carries it: the whole object's identity, copied member by member (never shared). */
-declare function frozenIdentityOf(identity: SkillContentIdentity): SkillContentIdentity;
-/** Build the frozen identity block (§F.2), then check it against the schema the report reader uses. */
-declare function freezeExperiment(input: {
-  proposalId: string;
-  spec: ExperimentSpec;
-  candidate?: SkillContentIdentity;
-  productionBaseline?: SkillContentIdentity;
-  capability?: FrozenCapability;
-  sandbox: string;
-  snapshotDigest: string;
-  samples: FrozenSample[];
-}): FrozenExperiment;
-//#endregion
-//#region src/experiment/record.d.ts
-/** What one experiment call produced. */
-interface ExperimentResult {
-  proposalId: string;
-  experimentId: string;
-  /** The report as recorded; its bytes are exactly the file at {@link ExperimentResult.reportPath}. */
-  report: ExperimentReport;
-  /** Report path relative to the ledger root. */
-  reportPath: string;
-  /** The folded ledger view the report was recomputed from. */
-  experiment: ExperimentView;
-}
-/** The lineage tag one sample side's replayed task carries — how a run is found again after a crash. */
-declare function experimentLineage(experimentId: string, sampleTaskId: string, side: ExperimentSide): string;
-/** The experiment id: a digest of the proposal and the frozen block, so a differently frozen experiment never shares one. */
-declare function experimentIdOf(proposalId: string, frozenDigest: string): string;
-/** The report path one experiment's evidence lands at, relative to the ledger root. */
-declare function experimentReportPath(proposalId: string, experimentId: string): string;
-/** The one string form of a sample key (map key, refusals, the ledger's own uniqueness check). */
-declare function experimentSampleKey(key: ExperimentKey): string;
-/** The recursive content digest of a directory — the input snapshot identity the freeze fixes. */
-declare function directoryDigest(directory: string): Promise<string>;
-/** The task's latest review record — its terminal outcome is what makes a sample a sample. */
-declare function latestReview(snapshot: TaskSnapshot, task: TaskInstance): ReviewRecord | undefined;
-declare function reviewRefOf(review: ReviewRecord): string;
-/** What one side cost, as the run's own review record reported it. `unknown` is never a zero. */
-declare function costOf(review: ReviewRecord | undefined): ExperimentCost;
-/** The evidence ids of one run: the review record's own list, or the store's verdict evidence when the review carries none. */
-declare function evidenceRefsOf(snapshot: TaskSnapshot, runId: string | undefined, review: ReviewRecord | undefined): string[];
-/** The review record's criteria, or the run's own verdicts when the review carries none. */
-declare function criteriaOf(review: ReviewRecord | undefined, outcome: ReplayRunOutcome | undefined): ReviewCriterion[];
-/** One criterion as the report carries it: the verdict plus the verifier that decided it (v1's report dropped the identity). */
-declare function criterionDetail(criterion: ReviewCriterion): ExperimentSideDetail['criteria'][number];
-/** What reading one run out of the store produced — the one place store facts.
- * A terminal settlement is recorded as it stands; a run with no terminal status is an interruption. */
-interface RunFacts {
-  outcome: ExperimentSideDetail['outcome'];
-  taskId?: string;
-  runId?: string;
-  review?: ReviewRecord;
-  criteria: ReviewCriterion[];
-  evidenceRefs: string[];
-  terminal: boolean;
-  detail: string;
-  /** Why a terminal side still records `interrupted`: a blocked run is a dead end the experiment has no outcome for. */
-  interruptedReason?: string;
-}
-declare function runFactsOf(snapshot: TaskSnapshot, task: TaskInstance, settled: ReplayRunOutcome | undefined): RunFacts;
-/** The one ledger line a sample side writes, from the facts its run settled to. */
-declare function sampleRecord(input: {
-  view: ExperimentView;
-  sample: FrozenSample;
-  side: ExperimentSide;
-  outcome: ExperimentSideDetail['outcome'];
-  taskId?: string;
-  runId?: string;
-  review?: ReviewRecord;
-  criteria: ReviewCriterion[];
-  evidenceRefs: string[];
-  workspace: string;
-  initialDigest?: string;
-  cost: ExperimentCost;
-  reason?: string;
-  /** The runtime's own admission refusal, for a side the runtime refused before a run existed (A6). */
-  admission?: ExperimentAdmissionRefusal;
-  actor: string;
-}): ExperimentSampleRecord;
-/** One sample side that has a run in the store but no record: a process died mid-experiment. */
-declare function recoveredSampleRecord(input: {
-  view: ExperimentView;
-  sample: FrozenSample;
-  side: ExperimentSide;
-  task: TaskInstance;
-  snapshot: TaskSnapshot;
-  workspace: string;
-  actor: string;
-}): ExperimentSampleRecord;
-/** One side's detail as the report carries it, read off the ledger record and nothing else. */
-declare function sideDetailOf(view: ExperimentView, sample: FrozenSample, side: ExperimentSide): ExperimentSideDetail;
-/** The key one frozen sample's side has under one experiment. */
-declare function experimentSampleKeyOf(view: Pick<ExperimentView, 'proposalId' | 'frozen'>, sampleTaskId: string, side: ExperimentSide): ExperimentKey;
-/** Build the v3 report from the ledger records alone — the same records always reproduce the same bytes. */
-declare function buildExperimentReport(view: ExperimentView): ExperimentReport;
-/** The store one experiment reads: the caller's graph root, exactly as the v1 replay resolves it. */
-declare function experimentStore(sources: ExperimentSources, caller: SessionId): Promise<{
-  storeId: string;
-  snapshot: TaskSnapshot;
-}>;
-/** The token total one settled side reported: the four buckets the run's own review record carries. */
-declare function tokensOfRecord(record: ExperimentSampleRecord): number | undefined;
-/** The known token total of a set of settled sides: every reported four-bucket sum, added up. */
-declare function reportedTokensSpent(records: readonly ExperimentSampleRecord[]): number;
-/** Whether the frozen budget still leaves room for one more side to start (S4-E §F.2). */
-declare function assertBudgetAllowsStart(input: {
-  experimentId: string;
-  budget: ExperimentBudget;
-  spentTokens: number;
-  settledSides: number;
-  /** The side this start would be, for the refusal to name what it declines. */
-  where: string;
-}): void;
-/** Attempt one capability sample's baseline side for real, and return the runtime's own refusal. */
-declare function refusedBaselineRun(input: {
-  sources: ExperimentSources;
-  storeId: string;
-  sample: FrozenSample;
-  lineage: string;
-  workspace: string;
-  agentOptions: ReplayTaskOptions['agentOptions'];
-  caller: SessionId;
-  signal?: AbortSignal;
-}): Promise<string>;
-/** A recorded sample that cites a run this experiment did not create is refused by name. */
-declare function assertRecordedRunOrigin(snapshot: TaskSnapshot, lineage: string, key: ExperimentKey, record: ExperimentSampleRecord): void;
-/** One sample key a different frozen experiment already spent (§F.2: a re-run needs an explicit new experiment). */
-declare function sameKeyRefusal(key: ExperimentKey, prior: ExperimentSampleRecord, experimentId: string): Error;
-/** Validate one `experiment_started` line in its own right: the proposal it names and the sandbox it froze. */
-declare function assertExperimentStartRecord(record: ExperimentStartedRecord, proposals: ReadonlyMap<string, EvolutionProposal>): void;
-declare function assertSampleCriteria(criteria: unknown, field: string): asserts criteria is ReviewCriterion[];
-declare function assertExperimentSample(record: ExperimentSampleRecord, view: ExperimentView | undefined, key: ExperimentKey): void;
-/** Fold the ledger's experiment family: every `experiment_started` opens an experiment, every sample record joins one. */
-declare function foldExperiments(records: readonly {
-  kind: string;
-}[], proposals: ReadonlyMap<string, EvolutionProposal>): Map<string, ExperimentView>;
-//#endregion
-//#region src/commit.d.ts
-/** The durable stages of one commit, observed through the commit probe and never on disk. */
-type CommitStage = 'intent-recorded' | 'write-staged' | 'write-renamed' | 'commit-verified';
-/** One file of one commit: where it goes, the bytes production must hold before and after, and where its recoverable source lives. */
-interface CommitFile {
-  /** Absolute production path this commit replaces, creates or removes. */
-  readonly target: string;
-  /** The digest this file must hold before the write — the state a reconciliation redoes the write from; `null` when it must not exist. */
-  readonly baselineSha256: string | null;
-  /** The digest this file must hold after the write; always the digest of the bytes being committed, `null` when the commit removes it. */
-  readonly contentSha256: string | null;
-  /** The recoverable bytes for this file, relative to the ledger root; absent when this direction removes the file. */
-  readonly source?: string;
-}
-/** One commit's request: what the intent line will say, and what the writes will do. */
-interface CommitRequest {
-  readonly proposalId: string;
-  readonly direction: CommitDirection;
-  /** The human grant behind this commit, recorded on the intent and on the completion that closes it. */
-  readonly approvalRef: string;
-  /** The object's fixed files, in commit order (`SKILL.md` first, the sidecar second when there is one); empty for a row-only capability commit. */
-  readonly files: readonly CommitFile[];
-  /** The one capability row this commit also moves (A6); absent for a skill commit. */
-  readonly capability?: CommitCapability;
-  /** The actor the completion record is written for. */
+//#region src/ledger/records.d.ts
+/** One recorded supervisor delegation, as the ledger that owns it answers this plane's lookup. */
+interface SupervisorDelegation {
+  readonly rootStoreId: string;
+  readonly taskId: string;
+  readonly diagnosisId: string;
+  readonly sessionId: string;
   readonly actor: string;
+  readonly at: string;
 }
-/** The capability-registry half of a commit host (A6): required exactly when a commit carries a capability row. */
-interface CommitCapabilityHost {
-  /** The row the registry holds for `name` right now, or `null` when it holds none. */
-  read(name: string): Promise<CapabilityConfig | null>;
-  /** Install (`entry`) or remove (`null`) one capability row, inside the commit's own order. */
-  apply(intent: CommitIntentView, entry: CapabilityConfig | null): Promise<void>;
+/** One recovery-coordination request, as the tool adapter hands it over (plan §F.4's `task_recover` payload). */
+interface RecoveryCoordinationRequest {
+  /** The diagnosis the recovery is asked for; it must be a record of the caller's own store. */
+  sourceDiagnosisId: string;
+  /** The caller's key: one key names one attempt of one diagnosis. */
+  requestKey: string;
+  /** Recovery retries a failed source; improve opens an improvement round on a verified one (runtime default: recovery). */
+  mode?: 'recovery' | 'improve';
 }
-/** What the commit path needs from the evolution service, and no more: the roots, the record funnel, the source reads and the write refusals. */
-interface CommitHost {
-  /** Absolute ledger root: `source` resolves against it and is confined to it. */
-  readonly root: string;
-  /** Production skill root: a commit's target must sit under it. */
-  readonly skillRoot: string;
-  /** Append one record through the service's funnel (format check, staged fold, durable write). */
-  append(record: EvolutionRecord): Promise<void>;
-  /** Read the recoverable bytes a commit names and verify them against the digest the intent records. */
-  readSource(source: string, sha256: string): Promise<Buffer>;
-  /** The service's walk-verified production read: `null` when nothing is there, a throw for a symlink or a non-file. */
-  readProduction(relative: string): Promise<{
-    bytes: Buffer;
-    sha256: string;
-  } | null>;
-  /** The named reason this commit must not write the directory its file set lives in, or `null` when it may. */
-  objectWriteRefusal(intent: CommitIntentView): Promise<string | null>;
-  /** The named reason this commit must not write anything because the capability table moved, or `null` when it may. */
-  tableWriteRefusal(intent: CommitIntentView): Promise<string | null>;
-  /** Called after every file has been written and read back (and the row installed), to verify the whole object. */
-  verifyCommitted(intent: CommitIntentView): Promise<void>;
-  /** The capability-registry seam; present exactly on a host that can move a row (A6). */
-  readonly capability?: CommitCapabilityHost;
-  /** The typed test seam ({@link Config.commitProbe}); a production deployment never sets one. */
-  probe(stage: CommitStage, target?: string): void;
+/** Who asks for a recovery: the **supervisor** session of that hand-off, as a live session with an abort signal. */
+interface RecoveryCoordinationCaller {
+  readonly sessionId: string;
+  readonly signal?: AbortSignal;
 }
-/** What one reconciliation of an open intent settled to. */
-interface ReconcileOutcome {
-  intentId: string;
-  proposalId: string;
-  direction: CommitDirection;
-  /** The absolute production targets the intent committed, in intent order — the whole fixed file set. */
-  targets: readonly string[];
-  /** `completed-redone`: production still held the pre-commit state, so the same write was carried out again. */
-  result: 'completed-redone' | 'completed-written' | 'blocked';
-  /** The named reason, present on `blocked`: what a human must settle before this commit can proceed. */
-  detail?: string;
-}
-//#endregion
-//#region src/capability-config.d.ts
-/** One table file's **composed identity**, frozen when a capability candidate is prepared. */
-interface CapabilityTableIdentity {
-  /** SHA-256 of the whole file as prepare read it. */
-  readonly baselineSha256: string;
-  /** SHA-256 of the whole file the apply leaves (this candidate's row written in). */
-  readonly applySha256: string;
-  /** SHA-256 of the whole file the rollback leaves (the row it restores written in, or the row it removes). */
-  readonly rollbackSha256: string;
+/** What one coordination answered (A6): the runtime's own recovery outcome, the hand-off it was authorized by and what this plane checked. */
+interface RecoveryCoordinationOutcome extends RootRecoveryOutcome {
+  /** The supervisor delegation this call was authorized by. */
+  readonly handoff: {
+    readonly sessionId: string;
+    readonly actor: string;
+    readonly diagnosisId: string;
+  };
+  /** What this plane checked and found, in the caller's own words. */
+  readonly coordination: readonly string[];
 }
 //#endregion
 //#region src/types.d.ts
@@ -925,6 +684,12 @@ interface PreparedView {
   mechanical: boolean;
   champion: ChampionState;
   /** The content identity recorded for the materialized candidate object (P2) — the digest a promotion re-reads. */
+  templateCandidate?: TaskDefinitionIdentity;
+  templateBaseline?: TaskDefinitionIdentity | null;
+  templateLibraries?: {
+    baseline: string;
+    candidate: string;
+  };
   skillContent?: SkillContentIdentity;
   /** The content identity of the production object as it stood at prepare (P3) — `null` when there was none. */
   skillBaseline?: SkillContentIdentity | null;
@@ -934,6 +699,7 @@ interface PreparedView {
   capabilityBaseline?: CapabilityRowIdentity | null;
   /** The capability table file's **composed identity**, frozen at prepare (A6, plan §F.4) so a third-party edit is a named stop. */
   capabilityTable?: CapabilityTableIdentity;
+  mcpServers?: McpServerIdentity;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[];
 }
@@ -988,6 +754,12 @@ type EvolutionRecord = {
   /** `captured` for a same-name skill update, `absent` for a capability candidate's new skill object (A6). */
   champion: ChampionState;
   /** The content identity of the materialized candidate `SKILL.md` (P2) — the digest a promotion re-reads. */
+  templateCandidate?: TaskDefinitionIdentity;
+  templateBaseline?: TaskDefinitionIdentity | null;
+  templateLibraries?: {
+    baseline: string;
+    candidate: string;
+  };
   skillContent?: SkillContentIdentity;
   /** The content identity of the production `SKILL.md` as it stood at prepare (P3). */
   skillBaseline?: SkillContentIdentity | null;
@@ -997,6 +769,7 @@ type EvolutionRecord = {
   capabilityBaseline?: CapabilityRowIdentity | null;
   /** The composed identity of the deployment's capability table file, frozen at prepare so a third-party edit is a named stop (A6). */
   capabilityTable?: CapabilityTableIdentity;
+  mcpServers?: McpServerIdentity;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[];
   actor: string;
@@ -1074,6 +847,8 @@ interface CommitCapability {
   contentSha256: string | null;
   /** The recoverable row bytes, relative to the ledger root; absent when this direction removes the row. */
   source?: string;
+  mcpServers?: McpServerIdentity;
+  mcpSource?: string;
 }
 /** Folded view of one open `commit_intent` record, as {@link EvolutionProposal} exposes it. */
 interface CommitIntentView {
@@ -1184,41 +959,368 @@ interface Config {
   capabilityConfigProbe?: (stage: 'before-write' | 'staged' | 'written', row: string) => void;
 }
 //#endregion
-//#region src/ledger/records.d.ts
-/** One recorded supervisor delegation, as the ledger that owns it answers this plane's lookup. */
-interface SupervisorDelegation {
-  readonly rootStoreId: string;
-  readonly taskId: string;
-  readonly diagnosisId: string;
-  readonly sessionId: string;
-  readonly actor: string;
-  readonly at: string;
+//#region src/task-definition.d.ts
+interface CriterionRepairExample {
+  taskId: string;
+  sourceDir: string;
+  parameters: TemplateParameters;
 }
-/** One recovery-coordination request, as the tool adapter hands it over (plan §F.4's `task_recover` payload). */
-interface RecoveryCoordinationRequest {
-  /** The diagnosis the recovery is asked for; it must be a record of the caller's own store. */
-  sourceDiagnosisId: string;
-  /** The caller's key: one key names one attempt of one diagnosis. */
-  requestKey: string;
-  /** Recovery retries a failed source; improve opens an improvement round on a verified one (runtime default: recovery). */
-  mode?: 'recovery' | 'improve';
-}
-/** Who asks for a recovery: the **supervisor** session of that hand-off, as a live session with an abort signal. */
-interface RecoveryCoordinationCaller {
-  readonly sessionId: string;
-  readonly signal?: AbortSignal;
-}
-/** What one coordination answered (A6): the runtime's own recovery outcome, the hand-off it was authorized by and what this plane checked. */
-interface RecoveryCoordinationOutcome extends RootRecoveryOutcome {
-  /** The supervisor delegation this call was authorized by. */
-  readonly handoff: {
-    readonly sessionId: string;
-    readonly actor: string;
-    readonly diagnosisId: string;
+interface TaskDefinitionMutation {
+  template: TaskTemplate;
+  criterionRepair?: {
+    positive: CriterionRepairExample;
+    negative: CriterionRepairExample;
   };
-  /** What this plane checked and found, in the caller's own words. */
-  readonly coordination: readonly string[];
 }
+interface TaskDefinitionIdentity {
+  template: TaskTemplate;
+  digest: string;
+  sha256: string;
+}
+interface FrozenCriterionExample extends CriterionRepairExample {
+  snapshotDigest: string;
+  contractDigest: string;
+}
+interface FrozenTaskDefinition {
+  candidate: TaskDefinitionIdentity;
+  baseline: TaskDefinitionIdentity | null;
+  libraries: {
+    baseline: string;
+    candidate: string;
+  };
+  criterionRepair?: {
+    positive: FrozenCriterionExample;
+    negative: FrozenCriterionExample;
+  };
+  guardVerifierVersions?: Record<string, string>;
+}
+declare function validateTaskDefinitionMutation(raw: unknown): TaskDefinitionMutation;
+declare function templateBytes(template: TaskTemplate): Buffer;
+declare function templateIdentity(template: TaskTemplate): TaskDefinitionIdentity;
+declare function assertTemplateIdentity(raw: unknown): asserts raw is TaskDefinitionIdentity;
+declare function prepareTaskDefinition(root: string, library: string, proposal: EvolutionProposal): Promise<PreparedView>;
+declare function readTaskDefinition(root: string, proposal: EvolutionProposal): Promise<FrozenTaskDefinition>;
+declare function assertTemplateBaseline(library: string, proposal: EvolutionProposal, applied?: boolean): Promise<void>;
+declare function templateCommitRequest(root: string, library: string, proposal: EvolutionProposal, direction: 'apply' | 'rollback', actor: string, approvalRef: string): CommitRequest;
+declare function independentOracleCriteria(task: TaskSnapshot['tasks'][number]): _dangosys_dsh_singularity_task0.AcceptanceCriterion[];
+declare function oracleContractDigest(task: TaskSnapshot['tasks'][number]): string;
+declare function templateLibraryDigest(directory: string): Promise<string>;
+//#endregion
+//#region src/experiment/freeze.d.ts
+/** The idempotency key's content member (K3, A6): the digest of the candidate's complete identity. */
+declare function preparedContentDigestOf(frozen: {
+  candidate?: SkillContentIdentity;
+  capability?: FrozenCapability;
+  taskDefinition?: FrozenTaskDefinition;
+}): string;
+/** True for a record of the experiment family — the lines the proposal fold must leave alone. */
+declare function isExperimentRecord(record: {
+  kind: string;
+}): record is ExperimentRecord;
+/** One experiment's folded view: its started record plus every sample record written under it. */
+interface ExperimentView {
+  experimentId: string;
+  proposalId: string;
+  frozen: FrozenExperiment;
+  frozenDigest: string;
+  budget: ExperimentBudget;
+  report: string;
+  /** The task store this experiment's runs were created in (see {@link ExperimentStartedRecord.storeId}). */
+  storeId?: string;
+  /** The `experiment_started` record's own timestamp. */
+  at: string;
+  /** Sample records in ledger order. */
+  samples: ExperimentSampleRecord[];
+}
+/** The ledger as this module uses it: the proposal it evaluates, the candidate's files, the experiment views and the ledger root. */
+interface ExperimentLedger {
+  /** Absolute ledger directory; the sandbox, the workspaces and the report live under it. */
+  readonly root: string;
+  get(proposalId: string): Promise<EvolutionProposal>;
+  /** Read the prepared candidate object's files — `SKILL.md`, and the sidecar when it carries one. */
+  readSkillCandidate(proposalId: string): Promise<{
+    skillMd: Buffer;
+    sidecar?: Buffer;
+  }>;
+  /** Read a prepared **capability** candidate back out of its sandbox and verify it. */
+  readCapabilityCandidate(proposalId: string): Promise<PreparedCapability>;
+  readTaskDefinitionCandidate(proposalId: string): Promise<FrozenTaskDefinition>;
+  /** One experiment's folded view; throws on an unknown id. */
+  experiment(experimentId: string): Promise<ExperimentView>;
+  /** Every experiment folded under one proposal, newest first. One call answers the whole family. */
+  experiments(proposalId: string): Promise<ExperimentView[]>;
+  /** Record the frozen experiment (idempotent by identity: an identical record is a no-op, a different one refuses). */
+  recordExperimentStart(record: ExperimentStartedRecord): Promise<void>;
+  /** Record one sample side. A key that is already recorded refuses a different content by name. */
+  recordExperimentSample(record: ExperimentSampleRecord): Promise<void>;
+}
+/** One accepted provider verdict, as a freeze reads it off the runtime's own pre-check (the members it records, and no more). */
+interface PrecheckSkillVerdict {
+  readonly valid: boolean;
+  readonly name: string;
+  readonly role?: string;
+  readonly contractDigest?: string | null;
+  readonly contentDigest?: string;
+  readonly defects?: readonly {
+    readonly code: string;
+    readonly detail: string;
+  }[];
+}
+/** The runtime's provider pre-check as the freeze consumes it (`TaskRuntime.capabilityProviderReport`). */
+interface ProviderPrecheckView {
+  readonly capabilities: readonly {
+    readonly capability: string;
+    readonly skills: readonly PrecheckSkillVerdict[];
+    readonly refusals?: readonly {
+      code: string;
+      detail: string;
+    }[];
+  }[];
+  readonly revision: string;
+}
+/** The services one experiment reads, as the caller's context holds them. */
+interface ExperimentSources {
+  readonly evolution: ExperimentLedger;
+  readonly graphs: {
+    graphForSession(sessionId: SessionId): Promise<{
+      readonly rootSessionId: SessionId;
+    }>;
+  };
+  readonly task: {
+    openStore(storeId: string): Promise<TaskSnapshot>;
+  };
+  readonly taskRuntime: {
+    replayTask(storeId: string, championTaskId: string, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>;
+    /** The runtime's own provider pre-check for one session's viewpoint (S4-E §Q3). */
+    capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheckView>;
+    /** The runtime's own pre-check over a capability table the experiment names (A6). */
+    precheckCapabilityTable?(request: {
+      capabilities: readonly string[];
+      table: Readonly<Record<string, CapabilityConfig>>;
+      extraRoots: readonly string[];
+      mcpRegistry?: Readonly<Record<string, McpServerTemplate>>;
+    }): Promise<ProviderPrecheckView>;
+    /** The effective capability table, as the runtime holds it — the rows a pre-check covered and the servers they grant. */
+    listCapabilities?(): Readonly<Record<string, CapabilityConfig>>;
+    listMcpServers?(): Readonly<Record<string, McpServerTemplate>>;
+  };
+  /** The registered judge vocabulary at freeze time (S4-E §Q3), or `undefined` */
+  verifierVocabulary?(): Promise<VerifierVocabularyView | undefined>;
+}
+/** What one experiment call evaluates: the proposal, its sandbox, and the identity it froze the candidate as. */
+interface ExperimentCandidate {
+  proposal: EvolutionProposal;
+  sandbox: string;
+  /** The skill object the candidate side runs (a skill candidate, or a capability candidate's new skill). */
+  candidate?: SkillContentIdentity;
+  /** The capability candidate's frozen identity (A6); absent for a skill candidate. */
+  capability?: FrozenCapability;
+  taskDefinition?: FrozenTaskDefinition;
+  /** The candidate-side overlay of a capability candidate: the row override and the sandbox skill root. */
+  overlay?: {
+    capabilityOverrides: Record<string, CapabilityConfig>;
+    extraSkillRoots: string[];
+    mcpServers?: Record<string, McpServerTemplate>;
+  };
+}
+/** The proposal this experiment may evaluate, and the candidate identity it runs against. */
+declare function experimentCandidate(sources: ExperimentSources, proposalId: string): Promise<ExperimentCandidate>;
+/** The registered judge vocabulary one freeze reads: the ids and declared versions the runs are judged by. */
+interface VerifierVocabularyView {
+  readonly ids: readonly string[];
+  readonly versions: Readonly<Record<string, string>>;
+}
+/** One criterion's frozen judge identity (S4-E §Q3), read from the criterion's verifier ref and the live vocabulary. */
+declare function frozenCriterionOf(criterion: AcceptanceCriterion, where: string, vocabulary: VerifierVocabularyView | undefined): FrozenCriterion;
+/** The provider identity the production baseline side of one sample must bind, read from the runtime's own pre-check. */
+declare function frozenProviderIdentity(input: {
+  sources: ExperimentSources;
+  caller: SessionId;
+  sampleTaskId: string;
+  required: readonly string[];
+  /** The candidate object this experiment prepares to promote: what its side's registry revision substitutes. */
+  candidate: SkillContentIdentity;
+  where: string;
+}): Promise<FrozenProviderIdentity>;
+/** One frozen side identity built from one pre-check's verdicts, refusing a deployment whose providers are unusable or whose roles are unknown. */
+declare function frozenCapabilitySideOf(input: {
+  precheck: ProviderPrecheckView;
+  table: Readonly<Record<string, CapabilityConfig>>;
+  rows: readonly string[];
+  where: string;
+  mcpRegistry?: Readonly<Record<string, McpServerTemplate>>;
+}): FrozenCapabilitySide;
+/** Every provider one pre-check refused, as a refusal line names it — the one rendering the freeze and the admission record share. */
+declare function refusedProviderLines(precheck: ProviderPrecheckView): string[];
+/** What the two sides of one **capability** sample are frozen against (A6). */
+declare function frozenCapabilitySample(input: {
+  sources: ExperimentSources;
+  caller: SessionId;
+  sampleTaskId: string;
+  required: readonly string[];
+  overlay: {
+    capabilityOverrides: Record<string, CapabilityConfig>;
+    extraSkillRoots: string[];
+    mcpServers?: Record<string, McpServerTemplate>;
+  };
+}): Promise<{
+  provider?: FrozenProviderIdentity;
+  admission?: FrozenSampleAdmission;
+  candidateProvider: FrozenCapabilitySide;
+}>;
+/** The registry revision the **candidate** side of one sample must bind (K3): the composed table's own revision. */
+declare function candidateRegistryRevisionOf(input: {
+  table: Readonly<Record<string, CapabilityConfig>>;
+  skills: readonly FrozenProviderSkill[];
+  candidate: SkillContentIdentity;
+  where: string;
+  mcpRegistry?: Readonly<Record<string, McpServerTemplate>>;
+}): string;
+/** What one sample's two sides are frozen against: a skill sample's production identity, or a capability sample's production/overlay pair. */
+type SampleProviders = Pick<FrozenSample, 'provider' | 'admission' | 'candidateProvider'>;
+/** Freeze one sample from its store record: what the case is, the acceptance the replay mirrors into both sides, and the provider identities. */
+declare function frozenSampleOf(sample: ExperimentSampleSpec, task: TaskInstance, review: ReviewRecord, providers: SampleProviders, vocabulary: VerifierVocabularyView | undefined): FrozenSample;
+/** One content identity as a frozen block carries it: the whole object's identity, copied member by member (never shared). */
+declare function frozenIdentityOf(identity: SkillContentIdentity): SkillContentIdentity;
+/** Build the frozen identity block (§F.2), then check it against the schema the report reader uses. */
+declare function freezeExperiment(input: {
+  proposalId: string;
+  spec: ExperimentSpec;
+  candidate?: SkillContentIdentity;
+  productionBaseline?: SkillContentIdentity;
+  capability?: FrozenCapability;
+  taskDefinition?: FrozenTaskDefinition;
+  sandbox: string;
+  snapshotDigest: string;
+  samples: FrozenSample[];
+}): FrozenExperiment;
+/** Criterion repair examples keep the existing outer oracle and its historical labels. */
+declare function freezeCriterionRepair(definition: FrozenTaskDefinition, proposal: EvolutionProposal, snapshot: TaskSnapshot, samples: FrozenSample[], vocabulary: VerifierVocabularyView | undefined): Promise<void>;
+//#endregion
+//#region src/experiment/record.d.ts
+/** What one experiment call produced. */
+interface ExperimentResult {
+  proposalId: string;
+  experimentId: string;
+  /** The report as recorded; its bytes are exactly the file at {@link ExperimentResult.reportPath}. */
+  report: ExperimentReport;
+  /** Report path relative to the ledger root. */
+  reportPath: string;
+  /** The folded ledger view the report was recomputed from. */
+  experiment: ExperimentView;
+}
+/** The lineage tag one sample side's replayed task carries — how a run is found again after a crash. */
+declare function experimentLineage(experimentId: string, sampleTaskId: string, side: ExperimentSide): string;
+/** The experiment id: a digest of the proposal and the frozen block, so a differently frozen experiment never shares one. */
+declare function experimentIdOf(proposalId: string, frozenDigest: string): string;
+/** The report path one experiment's evidence lands at, relative to the ledger root. */
+declare function experimentReportPath(proposalId: string, experimentId: string): string;
+/** The one string form of a sample key (map key, refusals, the ledger's own uniqueness check). */
+declare function experimentSampleKey(key: ExperimentKey): string;
+/** The recursive content digest of a directory — the input snapshot identity the freeze fixes. */
+declare function directoryDigest(directory: string): Promise<string>;
+/** The task's latest review record — its terminal outcome is what makes a sample a sample. */
+declare function latestReview(snapshot: TaskSnapshot, task: TaskInstance): ReviewRecord | undefined;
+declare function reviewRefOf(review: ReviewRecord): string;
+/** Read reported cost; a supplied snapshot requires complete tool-call counters from the whole executed Run subtree. */
+declare function costOf(review: ReviewRecord | undefined, snapshot?: TaskSnapshot): ExperimentCost;
+/** The evidence ids of one run: the review record's own list, or the store's verdict evidence when the review carries none. */
+declare function evidenceRefsOf(snapshot: TaskSnapshot, runId: string | undefined, review: ReviewRecord | undefined): string[];
+/** The review record's criteria, or the run's own verdicts when the review carries none. */
+declare function criteriaOf(review: ReviewRecord | undefined, outcome: ReplayRunOutcome | undefined): ReviewCriterion[];
+/** One criterion as the report carries it: the verdict plus the verifier that decided it (v1's report dropped the identity). */
+declare function criterionDetail(criterion: ReviewCriterion): ExperimentSideDetail['criteria'][number];
+/** What reading one run out of the store produced — the one place store facts.
+ * A terminal settlement is recorded as it stands; a run with no terminal status is an interruption. */
+interface RunFacts {
+  outcome: ExperimentSideDetail['outcome'];
+  taskId?: string;
+  runId?: string;
+  review?: ReviewRecord;
+  criteria: ReviewCriterion[];
+  evidenceRefs: string[];
+  terminal: boolean;
+  detail: string;
+  /** Why a terminal side still records `interrupted`: a blocked run is a dead end the experiment has no outcome for. */
+  interruptedReason?: string;
+}
+declare function runFactsOf(snapshot: TaskSnapshot, task: TaskInstance, settled: ReplayRunOutcome | undefined): RunFacts;
+/** The one ledger line a sample side writes, from the facts its run settled to. */
+declare function sampleRecord(input: {
+  view: ExperimentView;
+  sample: FrozenSample;
+  side: ExperimentSide;
+  outcome: ExperimentSideDetail['outcome'];
+  taskId?: string;
+  runId?: string;
+  review?: ReviewRecord;
+  criteria: ReviewCriterion[];
+  evidenceRefs: string[];
+  workspace: string;
+  initialDigest?: string;
+  cost: ExperimentCost;
+  reason?: string;
+  /** The runtime's own admission refusal, for a side the runtime refused before a run existed (A6). */
+  admission?: ExperimentAdmissionRefusal;
+  actor: string;
+}): ExperimentSampleRecord;
+/** One sample side that has a run in the store but no record: a process died mid-experiment. */
+declare function recoveredSampleRecord(input: {
+  view: ExperimentView;
+  sample: FrozenSample;
+  side: ExperimentSide;
+  task: TaskInstance;
+  snapshot: TaskSnapshot;
+  workspace: string;
+  actor: string;
+}): ExperimentSampleRecord;
+/** One side's detail as the report carries it, read off the ledger record and nothing else. */
+declare function sideDetailOf(view: ExperimentView, sample: FrozenSample, side: ExperimentSide): ExperimentSideDetail;
+/** The key one frozen sample's side has under one experiment. */
+declare function experimentSampleKeyOf(view: Pick<ExperimentView, 'proposalId' | 'frozen'>, sampleTaskId: string, side: ExperimentSide): ExperimentKey;
+/** Build the v3 report from the ledger records alone — the same records always reproduce the same bytes. */
+declare function buildExperimentReport(view: ExperimentView): ExperimentReport;
+/** The store one experiment reads: the caller's graph root, exactly as the v1 replay resolves it. */
+declare function experimentStore(sources: ExperimentSources, caller: SessionId): Promise<{
+  storeId: string;
+  snapshot: TaskSnapshot;
+}>;
+/** The token total one settled side reported: the four buckets the run's own review record carries. */
+declare function tokensOfRecord(record: ExperimentSampleRecord): number | undefined;
+/** The known token total of a set of settled sides: every reported four-bucket sum, added up. */
+declare function reportedTokensSpent(records: readonly ExperimentSampleRecord[]): number;
+/** Whether the frozen budget still leaves room for one more side to start (S4-E §F.2). */
+declare function assertBudgetAllowsStart(input: {
+  experimentId: string;
+  budget: ExperimentBudget;
+  spentTokens: number;
+  settledSides: number;
+  /** The side this start would be, for the refusal to name what it declines. */
+  where: string;
+}): void;
+/** Attempt one capability sample's baseline side for real, and return the runtime's own refusal. */
+declare function refusedBaselineRun(input: {
+  sources: ExperimentSources;
+  storeId: string;
+  sample: FrozenSample;
+  lineage: string;
+  workspace: string;
+  agentOptions: ReplayTaskOptions['agentOptions'];
+  caller: SessionId;
+  signal?: AbortSignal;
+}): Promise<string>;
+/** A recorded sample that cites a run this experiment did not create is refused by name. */
+declare function assertRecordedRunOrigin(snapshot: TaskSnapshot, lineage: string, key: ExperimentKey, record: ExperimentSampleRecord): void;
+/** One sample key a different frozen experiment already spent (§F.2: a re-run needs an explicit new experiment). */
+declare function sameKeyRefusal(key: ExperimentKey, prior: ExperimentSampleRecord, experimentId: string): Error;
+/** Validate one `experiment_started` line in its own right: the proposal it names and the sandbox it froze. */
+declare function assertExperimentStartRecord(record: ExperimentStartedRecord, proposals: ReadonlyMap<string, EvolutionProposal>): void;
+declare function assertSampleCriteria(criteria: unknown, field: string): asserts criteria is ReviewCriterion[];
+declare function assertExperimentSample(record: ExperimentSampleRecord, view: ExperimentView | undefined, key: ExperimentKey): void;
+/** Fold the ledger's experiment family: every `experiment_started` opens an experiment, every sample record joins one. */
+declare function foldExperiments(records: readonly {
+  kind: string;
+}[], proposals: ReadonlyMap<string, EvolutionProposal>): Map<string, ExperimentView>;
 //#endregion
 //#region src/service/core.d.ts
 declare class EvolutionServiceCore extends Service {
@@ -1248,11 +1350,12 @@ declare class EvolutionServiceCore extends Service {
   /** The model selection this deployment's runs share — the one the experiment freezes and a promotion re-reads. */
   modelSelection(): ModelSelection;
   /** One provider candidate judged by the unified validator, with the sources this deployment can see. */
-  protected providerVerdict(candidate: SkillProviderCandidate, table?: Readonly<Record<string, CapabilityConfig>> | undefined): Promise<SkillProviderVerdict>;
+  protected providerVerdict(candidate: SkillProviderCandidate, table?: Readonly<Record<string, CapabilityConfig>> | undefined, mcpRegistry?: Readonly<Record<string, McpServerTemplate>>): Promise<SkillProviderVerdict>;
   /** The capability table this service judges providers against: by default the effective table, never a cached copy. */
-  protected capabilityToolAnswer(table?: Readonly<Record<string, CapabilityConfig>> | undefined): CapabilityToolQuery;
+  protected capabilityToolAnswer(table?: Readonly<Record<string, CapabilityConfig>> | undefined, mcpRegistry?: Readonly<Record<string, McpServerTemplate>>): CapabilityToolQuery;
   /** The effective capability table, or `undefined` when this context cannot read one (no task-runtime service). */
   protected effectiveCapabilities(): Readonly<Record<string, CapabilityConfig>> | undefined;
+  protected effectiveMcpServers(): Readonly<Record<string, McpServerTemplate>>;
   /** Settle every open commit intent, in ledger order (K2) — the explicit startup entry. */
   reconcile(): Promise<ReconcileOutcome[]>;
   /** The production targets a commit has left open (K2), in ledger order — the admission gate's per-directory blocker. */
@@ -1264,15 +1367,17 @@ declare class EvolutionServiceCore extends Service {
   /** Settle one open intent for a caller that named it (an apply/rollback retry), reporting whether it was redone or written. */
   protected settleOpenIntent(intent: CommitIntentView): Promise<'redone' | 'written'>;
   /** The production paths a commit of this proposal may write: for a skill object its files, for a capability its new skill. */
-  protected commitTargets(proposal: EvolutionProposal): string[];
+  taskTemplatesRoot(): string;
   /** A fresh commit of `proposal` refuses, by name, a production **directory** another open intent targets. */
   protected assertTargetUncommitted(proposal: EvolutionProposal): void;
   /** The narrow host the commit path runs on (see `commit.ts`): the roots, the record funnel, the source reads and the write refusals. */
   protected commitHost(): CommitHost;
   /** The whole-object verification a commit runs after its last file is written. */
   protected verifyCommitted(intent: CommitIntentView): Promise<void>;
-  /** The capability table's **own text** (A6): the durable half of a capability commit, written after the row is installed. */
+  /** The capability table's **own text** (A6): the durable half of a capability commit, written together with MCP definitions before the runtime registry moves. */
   protected persistCapabilityRowText(intent: CommitIntentView): Promise<void>;
+  /** Re-read the intent's frozen definitions for both installation and removal. */
+  protected committedMcpServers(intent: CommitIntentView): Promise<Record<string, McpServerTemplate | null> | undefined>;
   /** The capability table half of the commit path's **before** picture (A6, EVO-2): the row and the file digest a write must find. */
   protected tableWriteRefusal(intent: CommitIntentView): Promise<string | null>;
   /** The file half of {@link verifyCommitted}. A direction that ends with files removed must find them gone. */
@@ -1325,7 +1430,8 @@ declare class EvolutionServiceCore extends Service {
 /** The production write targets of an apply (and its matching rollback), for the commit's fixed file set and for audit. */
 declare function applyTargets(proposal: EvolutionProposal, roots: {
   skillRoot: string;
-}): string[];
+  taskTemplatesRoot?: () => string;
+}, direction?: 'apply' | 'rollback'): string[];
 //#endregion
 //#region src/evolution.d.ts
 declare class EvolutionService extends EvolutionServiceCore {
@@ -1365,6 +1471,7 @@ declare class EvolutionService extends EvolutionServiceCore {
     skillMd: Buffer;
     sidecar?: Buffer;
   }>;
+  readTaskDefinitionCandidate(proposalId: string): Promise<FrozenTaskDefinition>;
   /** Read a prepared **capability** candidate back out of its sandbox and verify it. */
   readCapabilityCandidate(proposalId: string): Promise<PreparedCapability>;
   /** The production-baseline check (P3), on the apply seams only: production must still hold the object prepare read. */
@@ -1433,4 +1540,4 @@ declare function walkSnapshotInput(root: string, visit: (entry: SnapshotInputEnt
 /** Build one side's workspace from the frozen snapshot, then prove it holds the frozen digest. */
 declare function buildWorkspace(sourceDir: string, target: string, snapshotDigest: string): Promise<string>;
 //#endregion
-export { APPLYABLE_TARGET_TYPES, type ApplyOutcome, CapabilityRow, CapabilityRowIdentity, CapabilitySkill, CapabilityStoreView, type CommitCapability, type CommitDirection, type CommitIntentRecord, type CommitIntentView, type Config, EVOLUTION_DECISIONS, EXPERIMENT_ADMISSION_SOURCES, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, EvolutionService as default, type EvolutionStatus, ExperimentAdmissionRefusal, ExperimentAdmissionSource, ExperimentBudget, ExperimentCandidate, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCapability, FrozenCapabilityRow, FrozenCapabilitySide, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, FrozenSampleAdmission, type GateAnswers, ModelSelection, OUTCOME_RANK, PrecheckSkillVerdict, PreparedCapability, type PreparedView, type PromotionCheck, type ProposeInput, ProviderPrecheckView, type RecoveryCoordinationCaller, type RecoveryCoordinationOutcome, type RecoveryCoordinationRequest, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, RunFacts, SampleProviders, SideRelation, SkillContentIdentity, SkillContractIdentity, type SkillMutation, type SupervisorDelegation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertAdmissionRecord, assertBudgetAllowsStart, assertCapabilityCandidateAdmissible, assertCapabilityRow, assertExperimentReport, assertExperimentSample, assertExperimentStartRecord, assertFrozenExperiment, assertRecordedRunOrigin, assertSampleCriteria, assertSampleRole, buildExperimentReport, buildWorkspace, candidateRegistryRevisionOf, canonicalJson, capabilityOverlay, capabilityRefusal, capabilityRowBytes, capabilityRowDigest, capabilityRowIdentity, capabilityTableWith, compareExperimentSides, compareReplaySides, costOf, criteriaOf, criterionDetail, digestOf, directoryDigest, discoverSkill, evidenceRefsOf, experimentCandidate, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentStore, foldExperiments, freezeExperiment, frozenCapabilitySample, frozenCapabilitySideOf, frozenCriterionOf, frozenDigestOf, frozenIdentityOf, frozenProviderIdentity, frozenSampleOf, isExperimentRecord, latestReview, modelSelectionOf, nonEmpty, overallExperimentVerdict, preparedContentDigestOf, protectedInputsDigest, readPreparedCapability, recoveredSampleRecord, refusedBaselineRun, refusedProviderLines, renderProviderRoles, reportedTokensSpent, resolveLink, resumeExperiment, reviewRefOf, runExperiment, runFactsOf, safeSegment, sameKeyRefusal, sampleRecord, sideDetailOf, tokensOfRecord, validateCapabilityMutation, validateSpec, walkSnapshotInput };
+export { APPLYABLE_TARGET_TYPES, type ApplyOutcome, CapabilityRow, CapabilityRowIdentity, CapabilitySkill, CapabilityStoreView, type CommitCapability, type CommitDirection, type CommitIntentRecord, type CommitIntentView, type Config, CriterionRepairExample, EVOLUTION_DECISIONS, EXPERIMENT_ADMISSION_SOURCES, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, EvolutionService as default, type EvolutionStatus, ExperimentAdmissionRefusal, ExperimentAdmissionSource, ExperimentBudget, ExperimentCandidate, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentObjective, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCapability, FrozenCapabilityRow, FrozenCapabilitySide, FrozenCriterion, FrozenCriterionExample, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, FrozenSampleAdmission, FrozenTaskDefinition, type GateAnswers, McpServerIdentity, ModelSelection, OUTCOME_RANK, PrecheckSkillVerdict, PreparedCapability, type PreparedView, type PromotionCheck, type ProposeInput, ProviderPrecheckView, type RecoveryCoordinationCaller, type RecoveryCoordinationOutcome, type RecoveryCoordinationRequest, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, RunFacts, SampleProviders, SideRelation, SkillContentIdentity, SkillContractIdentity, type SkillMutation, type SupervisorDelegation, TaskDefinitionIdentity, TaskDefinitionMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertAdmissionRecord, assertBudgetAllowsStart, assertCapabilityCandidateAdmissible, assertCapabilityRow, assertExperimentReport, assertExperimentSample, assertExperimentStartRecord, assertFrozenExperiment, assertMcpServerIdentity, assertRecordedRunOrigin, assertSampleCriteria, assertSampleRole, assertTemplateBaseline, assertTemplateIdentity, buildExperimentReport, buildWorkspace, candidateRegistryRevisionOf, canonicalJson, capabilityOverlay, capabilityRefusal, capabilityRowBytes, capabilityRowDigest, capabilityRowIdentity, capabilityTableWith, compareExperimentSides, compareReplaySides, costOf, criteriaOf, criterionDetail, digestOf, directoryDigest, discoverSkill, evidenceRefsOf, experimentCandidate, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentStore, foldExperiments, freezeCriterionRepair, freezeExperiment, frozenCapabilitySample, frozenCapabilitySideOf, frozenCriterionOf, frozenDigestOf, frozenIdentityOf, frozenProviderIdentity, frozenSampleOf, independentOracleCriteria, isExperimentRecord, latestReview, mcpServerIdentity, modelSelectionOf, nonEmpty, oracleContractDigest, overallExperimentVerdict, prepareTaskDefinition, preparedContentDigestOf, protectedInputsDigest, readPreparedCapability, readTaskDefinition, recoveredSampleRecord, refusedBaselineRun, refusedProviderLines, renderProviderRoles, reportedTokensSpent, resolveLink, resumeExperiment, reviewRefOf, runExperiment, runFactsOf, safeSegment, sameKeyRefusal, sampleRecord, sideDetailOf, templateBytes, templateCommitRequest, templateIdentity, templateLibraryDigest, tokensOfRecord, validateCapabilityMutation, validateSpec, validateTaskDefinitionMutation, walkSnapshotInput };

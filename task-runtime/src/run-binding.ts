@@ -135,7 +135,7 @@ function selectedProviders(
 }
 
 /** The granted MCP servers' identity: the registry key and the template it resolved to, or `null` when the registry holds no such key. */
-function mcpServerBindings(
+export function mcpServerBindings(
   manifest: CapabilityManifest,
   registry: Readonly<Record<string, McpServerTemplate>>,
 ): RunMcpServerBinding[] {
@@ -222,7 +222,7 @@ export async function bindRunProviders(request: RunBindingRequest): Promise<RunP
   if (request.providers === undefined && rows.length > 0) return undefined
   const selected = selectedProviders(request.providers, rows, row => request.manifest.capabilities[row]?.skills ?? [])
   const base: RunProviderBinding = {
-    registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, []),
+    registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, [], request.mcpRegistry),
     capabilities: [...rows].sort(),
     skills: selected.map(skillBinding),
     mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? {}),

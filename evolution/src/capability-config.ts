@@ -2,7 +2,7 @@
  * @module dsh-singularity-evolution/capability-config */
 
 import { readFile } from 'node:fs/promises'
-import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
+import { parseMcpServerRegistry, type McpServerTemplate, type CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import { canonicalJson } from './replay.ts'
 import { writeFileAtomic } from './commit.ts'
 import { sha256Hex } from '@dangosys/dsh-singularity-task'
@@ -155,6 +155,7 @@ export function applyCapabilityRowToConfig(input: {
   readonly file: string
   readonly name: string
   readonly entry: CapabilityConfig | null
+  readonly mcpServers?: Readonly<Record<string, McpServerTemplate | null>>
 }): string {
   const { text, file, name, entry } = input
   const { lines, trailingNewline } = asLines(text)
@@ -169,7 +170,48 @@ export function applyCapabilityRowToConfig(input: {
   // dropping it and re-adding the newline keeps every other byte in place.
   const joined =
     trailingNewline && edited[edited.length - 1] === '' ? edited.slice(0, -1).join('\n') + '\n' : edited.join('\n')
-  return joined
+  return applyMcpServersToConfig(joined, file, input.mcpServers ?? {})
+}
+
+/** Edit the same task-runtime configuration document; row and definitions share one atomic write. */
+function applyMcpServersToConfig(text: string, file: string, definitions: Readonly<Record<string, McpServerTemplate | null>>): string {
+  if (Object.keys(definitions).length === 0) return text
+  parseMcpServerRegistry(Object.fromEntries(Object.entries(definitions).filter(([, value]) => value !== null)))
+  const lines = [...asLines(text).lines]
+  const capability = capabilitiesBlock(lines, file)
+  const runtime = lines.findIndex(line => /^- id:\s*task-runtime\s*$/.test(line))
+  let end = runtime + 1
+  while (end < lines.length && !/^- |^---\s*$/.test(lines[end]!)) end++
+  let header = -1
+  for (let i = runtime + 1; i < end; i++) {
+    if (/^\s*mcpServers:\s*$/.test(lines[i]!)) header = i
+    else if (/^\s*mcpServers:\s*\S/.test(lines[i]!)) throw refusal(file, 'mcpServers must be a block mapping')
+  }
+  if (header < 0) {
+    if (Object.values(definitions).every(value => value === null)) return text
+    header = capability.header
+    lines.splice(header, 0, `${' '.repeat(capability.indent)}mcpServers:`)
+  }
+  const indent = indentOf(lines[header]!)
+  let to = header + 1
+  while (to < lines.length && (indentOf(lines[to]!) > indent || lines[to]!.trim().length === 0)) to++
+  const body = lines.slice(header + 1, to)
+  const existingRow = body.find(line => line.trim().length > 0 && !line.trimStart().startsWith('#'))
+  const rowIndent = ' '.repeat(existingRow === undefined ? indent + 4 : indentOf(existingRow))
+  for (const [name, definition] of Object.entries(definitions)) {
+    let start = body.findIndex(line => {
+      if (indentOf(line) <= indent) return false
+      const match = /^\s*(?:"([^"]+)"|'([^']+)'|([^:\s]+)):\s*/.exec(line)
+      return (match?.[1] ?? match?.[2] ?? match?.[3]) === name
+    })
+    let stop = start + 1
+    if (start >= 0) while (stop < body.length && indentOf(body[stop]!) > indentOf(body[start]!)) stop++
+    else start = stop = body.length
+    body.splice(start, stop - start, ...(definition === null ? [] : [`${rowIndent}${JSON.stringify(name)}: ${canonicalJson(definition)}`]))
+  }
+  if (body.every(line => line.trim().length === 0)) lines.splice(header, to - header)
+  else lines.splice(header + 1, to - header - 1, ...body)
+  return lines.join('\n')
 }
 
 /** One table file's **composed identity**, frozen when a capability candidate is prepared. */
@@ -198,14 +240,15 @@ export function capabilityTableIdentity(input: {
   readonly entry: CapabilityConfig
   /** The row a rollback restores, or `null` when this candidate adds the row and its rollback removes it. */
   readonly restored: CapabilityConfig | null
+  readonly mcpServers?: Readonly<Record<string, McpServerTemplate>>
 }): CapabilityTableIdentity {
   const { text, file, name, entry, restored } = input
   const digest = (value: string): string => sha256Hex(Buffer.from(value, 'utf8'))
-  const applied = applyCapabilityRowToConfig({ text, file, name, entry })
+  const applied = applyCapabilityRowToConfig({ text, file, name, entry, ...(input.mcpServers === undefined ? {} : { mcpServers: input.mcpServers }) })
   return {
     baselineSha256: digest(text),
     applySha256: digest(applied),
-    rollbackSha256: digest(applyCapabilityRowToConfig({ text: applied, file, name, entry: restored })),
+    rollbackSha256: digest(applyCapabilityRowToConfig({ text: applied, file, name, entry: restored, mcpServers: Object.fromEntries(Object.keys(input.mcpServers ?? {}).map(key => [key, null])) })),
   }
 }
 
@@ -257,6 +300,7 @@ export async function writeCapabilityRowToConfig(input: {
   readonly file: string
   readonly name: string
   readonly entry: CapabilityConfig | null
+  readonly mcpServers?: Readonly<Record<string, McpServerTemplate | null>>
   /** The two whole-file states this write may find, as the proposal's prepare froze them. */
   readonly states: CapabilityTableStates
   readonly probe?: (stage: 'before-write' | 'staged' | 'written', row: string) => void
@@ -285,7 +329,7 @@ export async function writeCapabilityRowToConfig(input: {
       )
     }
   }
-  const next = applyCapabilityRowToConfig({ text: current, file, name, entry })
+  const next = applyCapabilityRowToConfig({ text: current, file, name, entry, ...(input.mcpServers === undefined ? {} : { mcpServers: input.mcpServers }) })
   probe?.('before-write', name)
   // The window between the read this edit was computed from and the rename is closed by this re-read of the file.
   let reread: string
@@ -328,8 +372,10 @@ export async function writeCapabilityRowToConfig(input: {
       )
     }
   }
-  await writeFileAtomic(file, Buffer.from(next, 'utf8'), verifyStaged)
-  probe?.('written', name)
+  if (next !== current) {
+    await writeFileAtomic(file, Buffer.from(next, 'utf8'), verifyStaged)
+    probe?.('written', name)
+  }
   let back: string
   try {
     back = await readFile(file, 'utf8')

@@ -3,9 +3,10 @@
 
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
+import type { McpServerTemplate, CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import {
   capabilityToolQuery,
+  parseMcpServerRegistry,
   readVerifiedFile,
   skillContractDefects,
   SKILL_SIDECAR_FILE,
@@ -21,7 +22,7 @@ import { assertSegment as sharedSegment, codedRefusal, isRecord, nonEmpty as sha
 const ROW_KEYS: readonly string[] = ['skills', 'tools', 'preset', 'permission', 'mcpServers']
 
 /** The keys one capability mutation may declare: the rows, and the optional new skill. */
-const MUTATION_KEYS: readonly string[] = ['rows', 'skill']
+const MUTATION_KEYS: readonly string[] = ['rows', 'skill', 'mcpServers']
 
 /** The keys one carried new skill may declare. */
 const SKILL_KEYS: readonly string[] = ['name', 'content', 'sidecar']
@@ -64,6 +65,7 @@ export interface CapabilitySkill {
 interface CapabilityCandidate {
   row: CapabilityRow
   skill?: CapabilitySkill
+  mcpServers?: Record<string, McpServerTemplate>
 }
 
 /** The frozen identity of one capability row: its name, the row itself, and the digest of its canonical bytes. */
@@ -73,10 +75,25 @@ export interface CapabilityRowIdentity {
   digest: string
 }
 
+export interface McpServerIdentity { definitions: Record<string, McpServerTemplate>; digest: string }
+
+export function mcpServerIdentity(value: unknown): McpServerIdentity {
+  const definitions = parseMcpServerRegistry(value)
+  return { definitions, digest: digestOf(definitions) }
+}
+
+export function assertMcpServerIdentity(value: unknown): McpServerIdentity {
+  if (!isRecord(value)) throw refusal('capability-server-invalid', 'MCP identity must be an object')
+  const identity = mcpServerIdentity(value.definitions)
+  if (value.digest !== identity.digest) throw refusal('capability-server-drifted', 'MCP identity digest does not match its definitions')
+  return identity
+}
+
 /** The overlay a candidate-side evaluation mounts on this candidate (A6 interface): the table override and the sandbox skill roots. */
 interface CapabilityOverlay {
   capabilityOverrides: Record<string, CapabilityConfig>
   extraSkillRoots: string[]
+  mcpServers?: Record<string, McpServerTemplate>
 }
 
 /** The canonical bytes of one row — what a sandbox freezes and an intent's source holds. */
@@ -134,14 +151,8 @@ export function assertCapabilityRow(where: string, value: unknown): CapabilityCo
       throw refusal('capability-row-invalid', `${where}.${field} must name at least ${minItems} entry`)
     return [...list]
   }
-  const skills = names('skills', value.skills, 1)
-  if (skills === undefined) {
-    throw refusal(
-      'capability-row-invalid',
-      `${where} declares no skills — a capability row that grants nothing is not a candidate this build prepares`,
-    )
-  }
-  const entry: CapabilityConfig = { skills }
+  const skills = names('skills', value.skills, 0)
+  const entry: CapabilityConfig = skills === undefined ? {} : { skills }
   const tools = names('tools', value.tools, 0)
   if (tools !== undefined) entry.tools = tools
   const mcpServers = names('mcpServers', value.mcpServers, 0)
@@ -154,6 +165,8 @@ export function assertCapabilityRow(where: string, value: unknown): CapabilityCo
     }
     entry[field] = declared
   }
+  if ((skills?.length ?? 0) + (tools?.length ?? 0) + (mcpServers?.length ?? 0) === 0)
+    throw refusal('capability-row-invalid', `${where} must grant a skill, native tool or MCP server`)
   return entry
 }
 
@@ -215,10 +228,10 @@ function assertCarriedSkill(row: CapabilityRow, value: unknown): CapabilitySkill
         "candidate writes — a provider the candidate's own capability does not carry would be granted by nothing",
     )
   }
-  if (!row.entry.skills!.includes(name)) {
+  if (!(row.entry.skills ?? []).includes(name)) {
     throw refusal(
       'capability-row-grants-no-skill',
-      `the row "${row.name}" grants [${row.entry.skills!.join(', ')}], which does not include the new skill "${name}" this candidate carries — ` +
+      `the row "${row.name}" grants [${(row.entry.skills ?? []).join(', ')}], which does not include the new skill "${name}" this candidate carries — ` +
         'the row is what grants the provider, so a candidate that writes a skill nothing grants is refused',
     )
   }
@@ -267,17 +280,23 @@ export function validateCapabilityMutation(mutation: unknown): CapabilityCandida
     entry: assertCapabilityRow(`row "${names[0]!}"`, rows[names[0]!]),
   }
   const skill = mutation.skill === undefined ? undefined : assertCarriedSkill(row, mutation.skill)
-  return { row, ...(skill === undefined ? {} : { skill }) }
+  const mcpServers = mutation.mcpServers === undefined ? undefined : parseMcpServerRegistry(mutation.mcpServers)
+  if (mcpServers !== undefined) {
+    if (Object.keys(mcpServers).length === 0) throw refusal('capability-server-invalid', 'mcpServers must carry at least one definition')
+    for (const name of Object.keys(mcpServers)) if (!(row.entry.mcpServers ?? []).includes(name))
+      throw refusal('capability-server-ungranted', `server ${name} is not granted by row ${row.name}`)
+  }
+  return { row, ...(skill === undefined ? {} : { skill }), ...(mcpServers === undefined ? {} : { mcpServers }) }
 }
 
 /** The real DSH tools and MCP servers a store's current capability table authorizes. */
-function authorizedToolPlane(table: Readonly<Record<string, CapabilityConfig>>): {
+function authorizedToolPlane(table: Readonly<Record<string, CapabilityConfig>>, registry?: Readonly<Record<string, McpServerTemplate>>): {
   tools: Set<string>
   servers: Set<string>
 } {
   const tools = new Set<string>()
   const servers = new Set<string>()
-  const query = capabilityToolQuery(table)
+  const query = capabilityToolQuery(table, registry)
   for (const name of Object.keys(table)) {
     const answer = query(name)
     if (!answer.known) continue
@@ -298,6 +317,7 @@ function insidePlane(plane: { tools: Set<string>; servers: Set<string> }, tool: 
 /** The store view the candidate's rules read: the effective capability table, the verifier vocabulary and every skill root. */
 export interface CapabilityStoreView {
   readonly table: Readonly<Record<string, CapabilityConfig>>
+  readonly mcpServers?: Readonly<Record<string, McpServerTemplate>>
   /** `undefined` when the deployment cannot list its verifiers — an execution provider is then refused rather than assumed registered. */
   readonly verifierVocabulary?: { readonly ids: readonly string[]; readonly versions: Readonly<Record<string, string>> }
   /** Every root discovery searches, in order (the production root first when the caller has it). */
@@ -311,13 +331,15 @@ function assertCapabilityRowAdmissible(
   store: CapabilityStoreView,
   row: CapabilityRow,
   baseline: CapabilityConfig | null,
+  definitions: Record<string, McpServerTemplate> = {},
 ): void {
   const replacement = capabilityTableWith(store.table, row)
-  const answer = capabilityToolQuery(replacement)(row.name)
+  const registry = parseMcpServerRegistry({ ...store.mcpServers, ...definitions })
+  const answer = capabilityToolQuery(replacement, registry)(row.name)
   if (!answer.known) {
     throw refusal('capability-row-invalid', `the row "${row.name}" does not resolve: ${answer.reason}`)
   }
-  const plane = authorizedToolPlane(store.table)
+  const plane = authorizedToolPlane(store.table, store.mcpServers ?? {})
   const newTools = answer.tools.filter(tool => !plane.tools.has(tool))
   if (newTools.length > 0) {
     throw refusal(
@@ -325,14 +347,6 @@ function assertCapabilityRowAdmissible(
       `the row "${row.name}" grants tool(s) this store's capability table does not authorize ` +
         `(${newTools.map(tool => JSON.stringify(tool)).join(', ')}); this build composes granted capabilities and never authorizes a new tool — ` +
         'a provider that needs one is refused by name',
-    )
-  }
-  const newServers = answer.mcpServers.filter(server => !plane.servers.has(server))
-  if (newServers.length > 0) {
-    throw refusal(
-      'capability-new-server',
-      `the row "${row.name}" mounts MCP server(s) this store's capability table does not mount ` +
-        `(${newServers.map(server => JSON.stringify(server)).join(', ')}); mounting a new server plane is a tool grant this build refuses by name`,
     )
   }
   for (const field of ['preset', 'permission'] as const) {
@@ -344,14 +358,7 @@ function assertCapabilityRowAdmissible(
         'capabilities and adds a provider, and never moves the permission or preset a worker runs under',
     )
   }
-  const sorted = (list: readonly string[] | undefined): string => JSON.stringify([...(list ?? [])].sort())
-  if (sorted(row.entry.mcpServers) !== sorted(baseline?.mcpServers)) {
-    throw refusal(
-      'capability-policy-change',
-      `the row "${row.name}" mounts MCP servers ${sorted(row.entry.mcpServers)}, while the store's row mounts ${sorted(baseline?.mcpServers)} — ` +
-        'a capability candidate never changes the server plane a worker is granted',
-    )
-  }
+
 }
 
 /** One existing production object's `SKILL.md`, as the name and body a new candidate must not repeat. */
@@ -434,11 +441,13 @@ export async function assertCapabilityCandidateAdmissible(
   candidate: CapabilityCandidate,
   baseline: CapabilityConfig | null,
 ): Promise<void> {
-  assertCapabilityRowAdmissible(store, candidate.row, baseline)
+  for (const key of Object.keys(candidate.mcpServers ?? {})) if (store.mcpServers?.[key] !== undefined)
+    throw refusal('capability-server-conflict', `MCP server ${key} already exists in the deployment registry`)
+  assertCapabilityRowAdmissible(store, candidate.row, baseline, candidate.mcpServers)
   const skill = candidate.skill
   if (skill === undefined) return
   assertVerifierRegistered(store, skill.name, skill.sidecar.type === 'execution' ? skill.sidecar.verifier.ref : '')
-  const plane = authorizedToolPlane(store.table)
+  const plane = authorizedToolPlane(capabilityTableWith(store.table, candidate.row), { ...store.mcpServers, ...candidate.mcpServers })
   const unauthorized =
     skill.sidecar.type === 'execution' ? skill.sidecar.requiredTools.filter(tool => !insidePlane(plane, tool)) : []
   if (unauthorized.length > 0) {
@@ -498,6 +507,7 @@ export function capabilityOverlay(proposal: EvolutionProposal, roots: { root: st
   }
   return {
     capabilityOverrides: { [row.name]: row.entry },
+    ...(prepared.mcpServers === undefined ? {} : { mcpServers: prepared.mcpServers.definitions }),
     extraSkillRoots: prepared.skillContent === undefined ? [] : [join(roots.root, prepared.sandbox, 'skills')],
   }
 }
@@ -507,6 +517,7 @@ export interface PreparedCapability {
   /** The candidate row, read back from the sandbox and verified against `prepared.capabilityRow`. */
   row: CapabilityRow
   rowBytes: Buffer
+  mcpServers?: McpServerIdentity
   /** The row the store held at prepare, with its frozen champion bytes — `undefined` when the store held none. */
   baseline?: { entry: CapabilityConfig; bytes: Buffer }
   /** The new skill, when the candidate carries one: the declaration and the exact bytes prepare froze. */
@@ -568,6 +579,12 @@ export async function readPreparedCapability(root: string, proposal: EvolutionPr
       )
     }
     result.baseline = { entry: prepared.capabilityBaseline.entry, bytes }
+  }
+  if (prepared.mcpServers !== undefined) {
+    const bytes = await readVerifiedFile(root, `${sandbox}/mcp-servers.json`)
+    if (sha256Hex(bytes) !== prepared.mcpServers.digest) throw refusal('capability-server-drifted', 'frozen MCP definitions changed')
+    result.mcpServers = mcpServerIdentity(JSON.parse(bytes.toString('utf8')))
+    if (result.mcpServers.digest !== prepared.mcpServers.digest) throw refusal('capability-server-drifted', 'MCP definitions are not the prepared identity')
   }
   const content = prepared.skillContent
   if (content === undefined) return result

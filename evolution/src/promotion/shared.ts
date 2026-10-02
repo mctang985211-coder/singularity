@@ -84,9 +84,11 @@ export function noExperimentRefusal(proposal: EvolutionProposal): Error {
   )
 }
 
-/** One verdict's refusal text: the six outcomes §F.2 makes distinguishable, each named for what it means. */
+/** Refusal text for each categorical experiment verdict. */
 export const VERDICT_REFUSALS: Readonly<Record<ExperimentVerdict, string>> = {
   fixed: '',
+  improved: '',
+  'not-improved': 'the candidate did not reduce measured tool calls on every observed-success sample',
   'fixed-with-regression':
     'the target failure is fixed, but a regression or holdout sample degraded under the candidate',
   regressed: 'a regression or holdout sample degraded and the target failure is not fixed',

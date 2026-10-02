@@ -86,6 +86,7 @@ export async function assertSkillPromotionEvidence(
         experimentId: experiment.experimentId,
         snapshot,
         where: label,
+        ...(frozen.objective === undefined ? {} : { objective: frozen.objective }),
       })
       assertJudgeUnchanged(frozenSample, detail, label, vocabulary)
       assertCostWithinDeclaredBudget(report, label, detail)
@@ -136,9 +137,9 @@ export async function assertSkillPromotionEvidence(
     )
   }
   // 8. The verdict.
-  if (report.verdict !== 'fixed') {
+  if (report.verdict !== (frozen.objective === 'tool-call-reduction' ? 'improved' : 'fixed')) {
     throw new Error(
-      `evolution: the two-sided experiment "${experiment.experimentId}" did not show a clean fix — ` +
+      `evolution: the two-sided experiment "${experiment.experimentId}" did not show a clean ${frozen.objective === 'tool-call-reduction' ? 'improvement' : 'fix'} — ` +
         `${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples)
           .map(line => `- ${line}`)
           .join('\n')}`,

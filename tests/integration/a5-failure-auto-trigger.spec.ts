@@ -591,7 +591,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     expect(settled.reviews.find(review => review.taskId === tree.childTaskId)?.outcome).toBe('failed')
     // The reviewer never answered — and that is the state the settled store is
     // in: one claim, one started row, no settlement.
-    expect(h.requestsOf(reviewer)).toHaveLength(1)
+    await vi.waitFor(() => expect(h.requestsOf(reviewer)).toHaveLength(1), { timeout: 30_000, interval: 25 })
     const attempt = (await reviewerAttempts(root.storeId))[0]!
     expect(attempt.sessionId).toBe(reviewer)
     expect(attempt.started).toBe(true)

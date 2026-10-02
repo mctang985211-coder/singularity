@@ -441,7 +441,7 @@ it('refuses a skill call the two-sided experiment cannot honour, without running
     // names no failure is refused by name before anything runs.
     const noFailure = await replay.execute({ proposalId: 'p-skill-3', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
     expect(noFailure).toContain('evolution_replay rejected:')
-    expect(noFailure).toContain('no observed failure for this candidate to fix')
+    expect(noFailure).toContain('at least one observed-failure')
     const noHoldout = await replay.execute({ proposalId: 'p-skill-3', taskIds: ['t-fail'] }, exec('root-1'))
     expect(noHoldout).toContain('holdoutTaskIds must name at least one task that did not select this candidate')
     expect(replayTask).not.toHaveBeenCalled()

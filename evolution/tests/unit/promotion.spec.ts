@@ -560,21 +560,17 @@ describe('evolution_apply / evolution_rollback tools', () => {
       'L4 harness evolution has no executor',
     )
 
-    // A task_definition PROMOTE can no longer be *recorded* — `candidate`
-    // refuses the target type by name and the fold refuses the same hand-written
-    // shape at its first line — so the only thing an older ledger's decided
-    // record reaches is that entry refusal: no human is asked and nothing is
-    // written.
+    // Old placeholder Task mutations are not canonical templates and cannot reach approval.
     const roots: ProductionRoots = { root: svc.root, skillRoot }
     await svc.propose(proposal, 'root-1')
     const legacyLedger = await legacyDecidedLedger(svc, 'p1', roots)
-    await expect(legacyLedger.list()).rejects.toThrow('targets "task_definition"')
+    await expect(legacyLedger.list()).rejects.toThrow('unknown key "baseVersion"')
     const viaTool = (await defineEvolutionApplyTool({ ...(ctx as object), evolution: legacyLedger } as never).execute(
       { proposalId: 'p1' },
       exec('root-1'),
     )) as string
     expect(viaTool).toContain('evolution_apply rejected:')
-    expect(viaTool).toContain('targets "task_definition"')
+    expect(viaTool).toContain('unknown key "baseVersion"')
 
     expect(approval.request).not.toHaveBeenCalled()
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_OLD)

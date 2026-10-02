@@ -44,6 +44,7 @@ import type { TerminalReviewFact } from '@dangosys/dsh-singularity-task-runtime'
 
 const ROOT = 'root-1'
 const STORE = `sg-t-${ROOT}`
+const fixtureDisposals: (() => Promise<void>)[] = []
 
 function failedReview(overrides: Record<string, unknown> = {}) {
   return {
@@ -110,10 +111,14 @@ function handle(reply: string | undefined, options: { hang?: boolean } = {}) {
   const events = reply === undefined
     ? []
     : [{ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: reply }] } } }]
+  let releaseIdle: (() => void) | undefined
+  const idle = options.hang === true
+    ? new Promise<void>(resolve => { releaseIdle = resolve })
+    : Promise.resolve()
   return {
     agent: {
-      cancel: vi.fn(),
-      whenIdle: options.hang === true ? () => new Promise<void>(() => {}) : async () => {},
+      cancel: vi.fn(() => releaseIdle?.()),
+      whenIdle: () => idle,
       session: { snapshotEvents: () => events },
     },
   }
@@ -142,8 +147,13 @@ function fixture(
   const listeners: ((fact: TerminalReviewFact) => void)[] = []
   const events: { event: string; listener: (payload: never) => void }[] = []
   const off = vi.fn()
+  const waits: (() => Promise<void>)[] = []
   const ctx = {
-    effect: (install: () => () => Promise<void>) => install(),
+    effect: (install: () => () => Promise<void>) => {
+      const dispose = install()
+      waits.push(dispose)
+      return dispose
+    },
     task: {
       openStore: async (_storeId: string) => structuredClone(state.snapshot),
       snapshotIn: async (_storeId: string) => structuredClone(state.snapshot),
@@ -164,6 +174,7 @@ function fixture(
       return vi.fn()
     },
   }
+  fixtureDisposals.push(async () => { await Promise.all(waits.map(dispose => dispose())) })
   return { ctx: ctx as unknown as Context, spawn, relay, delivered, state, listeners, events, off }
 }
 
@@ -199,7 +210,8 @@ beforeEach(() => {
   configureSupervision({ autoReview: 'failed', coordinationBudget: 1 })
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all(fixtureDisposals.splice(0).map(dispose => dispose()))
   configureSupervision(undefined)
   if (previousLedger === undefined) delete process.env.SINGULARITY_REVIEW_LEDGER_DIR
   else process.env.SINGULARITY_REVIEW_LEDGER_DIR = previousLedger
@@ -656,6 +668,7 @@ describe('the automatic trigger as the assembly installs it', () => {
 
     listeners[0]!({ storeId: STORE, taskId: 't1', runId: 'r1', outcome: 'failed' })
     await vi.waitFor(async () => expect(await countReviewAgentRuns(STORE)).toBe(1))
+    await vi.waitFor(() => expect(lines.some(line => line.includes('t1#r1 accepted — reviewer session'))).toBe(true))
     const claim = rowsOfKind('claim')
     expect(claim).toHaveLength(1)
     expect(claim[0]).toMatchObject({ taskId: 't1', runId: 'r1', requestKey: null, reason: null })
@@ -670,7 +683,9 @@ describe('the automatic trigger as the assembly installs it', () => {
     // attempt is only read.
     const activation = events[0]!.listener as unknown as (graph: { rootSessionId: string }) => void
     activation({ rootSessionId: ROOT })
-    await vi.waitFor(() => expect(lines.some(line => line.includes('t1#r1'))).toBe(true))
+    // The first scan already logged this source. Wait for the activation's own
+    // completed read before teardown can replace the ledger and supervision.
+    await vi.waitFor(() => expect(lines.some(line => line.includes('t1#r1 already has an attempt'))).toBe(true))
     expect(rowsOfKind('claim')).toHaveLength(1)
     expect(spawn).toHaveBeenCalledOnce()
 
@@ -684,11 +699,14 @@ describe('the automatic trigger as the assembly installs it', () => {
       await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
       return handle(undefined)
     })
-    const dispose = installReviewAgentAutoTrigger(all.ctx, { log: () => undefined })
+    const lines: string[] = []
+    const dispose = installReviewAgentAutoTrigger(all.ctx, { log: line => lines.push(line) })
     all.listeners[0]!({ storeId: STORE, taskId: 't1', runId: 'r1', outcome: 'failed' })
     await vi.waitFor(async () => expect(await countReviewAgentRuns(STORE)).toBe(1))
+    await vi.waitFor(() => expect(lines.some(line => line.includes('t1#r1 accepted, but the reviewer did not finish'))).toBe(true))
     all.listeners[0]!({ storeId: STORE, taskId: 't3', runId: 'r3', outcome: 'verified' })
     await vi.waitFor(async () => expect(await countReviewAgentRuns(STORE)).toBe(2))
+    await vi.waitFor(() => expect(lines.some(line => line.includes('t3#r3 accepted, but the reviewer did not finish'))).toBe(true))
     expect(rowsOfKind('claim').map(row => `${String(row.taskId)}#${String(row.runId)}`)).toEqual(['t1#r1', 't3#r3'])
     dispose()
   })

@@ -271,6 +271,8 @@ export interface TaskRun {
   agentPreset?: string
   /** What this run was bound to and loaded (S1-C item 4). Absent on every run created before the field existed, and on a run whose caller assembled its plan without an admission-time pre-check: neither loaded content this build can vouch for … */
   providerBinding?: RunProviderBinding
+  /** Frozen replay template library, inherited by descendants and restored on adoption. */
+  taskTemplatesRoot?: string
   /** Where this run sits in the A3 coordination protocol. A new run is born `active`, or `submitted` when it has no worker at all (a `spawn: false` replay). */
   executionPhase?: ExecutionPhase
   /** The batch this run is waiting on: the one still open, the id {@link batchIdFor} derives from this run and the proposal it consumed. */

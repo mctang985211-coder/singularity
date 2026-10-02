@@ -22,7 +22,8 @@
  * @module tests/support/assembly-stack
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { vi } from 'vitest'
@@ -33,6 +34,10 @@ import { AgentRegistry, assembleContextFor } from '../../../../thirdparty/deepse
 import SessionStore, { SessionId, SESSION_FORMAT_VERSION } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { SessionEvent } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
+import Loader from '../../../../thirdparty/deepseek-harness/vendor/loader/lib/index.js'
+import SessionProjectionRegistry from '../../../../thirdparty/deepseek-harness/packages/session/session-projection/lib/index.js'
+import AgentPresetRegistry from '../../../../thirdparty/deepseek-harness/packages/preset/agent-preset-registry/lib/index.js'
+import AgentPreset from '../../../../thirdparty/deepseek-harness/packages/preset/agent-preset/lib/index.js'
 import JsonlSessionPersistence from '../../../../thirdparty/deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
 import { SessionQueryError } from '../../../../thirdparty/deepseek-harness/packages/session-query/session-query/lib/index.js'
 import { createUserMessage, freezeMessage, MessageId } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
@@ -66,6 +71,8 @@ export interface GraphSpec {
 }
 
 export interface AssemblyStackOptions {
+  /** Load the shipped coordinator patch through the real preset registry instead of the usual empty preset seam. */
+  readonly coordinatorPreset?: boolean
   /** The graphs this deployment starts with. Defaults to one graph rooted at `s-root`. */
   readonly graphs?: readonly GraphSpec[]
   /** The checkout every session of this deployment works in. Defaults to a fresh directory inside its workspace. */
@@ -219,7 +226,16 @@ export class AssemblyStack {
       return handle
     }
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) })
-    ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
+    if (this.options.coordinatorPreset) {
+      await ctx.plugin(Loader)
+      await ctx.plugin(SessionProjectionRegistry)
+      await ctx.plugin(AgentPresetRegistry, { default: 'singularity-coordinator' })
+      const { load } = createRequire(new URL('../../../../thirdparty/deepseek-harness/packages/preset/agent-preset-registry/package.json', import.meta.url))('js-yaml')
+      const patch = load(readFileSync(new URL('../../bundle/presets/singularity-coordinator.patch.yml', import.meta.url), 'utf8'))
+      await ctx.plugin(AgentPreset, patch[0].insert[0].config)
+    } else {
+      ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
+    }
     ctx.provide('permissionPresets', { set: vi.fn(), resolve: () => ({}) })
     ctx.provide('layout', { setIn: async () => {} })
     ctx.provide('approval', { request: this.approvalRequest })

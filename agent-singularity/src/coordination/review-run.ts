@@ -340,6 +340,7 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
       cancel()
       await completed
     }, 'singularityAgent: review agent wait')
+    if (input.signal?.aborted === true) cancel()
     await handle.agent.whenIdle()
     const parsed = input.signal?.aborted === true || unloaded
       ? {
@@ -383,7 +384,7 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
     }
     await settleAttempt('recorded')
     // Consume shared or root work after the diagnosis is durable; ordinary child work stays with its parent.
-    await consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error: unknown) => {
+    if (!unloaded && input.signal?.aborted !== true) await consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error: unknown) => {
       logOf(ctx, 'singularity-agent')?.warn(
         `evolution hand-off: ${diagnosis.diagnosisId} could not be consumed (${message(error)})`,
       )
