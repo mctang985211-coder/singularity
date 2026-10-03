@@ -11,6 +11,7 @@ const LAYOUT_PATH = "/singularity/layout";
 const EVENTS_PATH = "/singularity/events";
 const MAP_PATH = "/singularity/map";
 const GRAPHS_PATH = "/singularity/graphs";
+const MODELS_PATH = "/singularity/models";
 const GRAPH_ENVS_PATH = "/singularity/graph-envs";
 const REPO_CHECK_PATH = "/singularity/repo-check";
 const HITL_PATH = "/singularity/hitl";
@@ -292,9 +293,16 @@ function registerGraphs(ctx) {
 			try {
 				const url = urlOf(req);
 				const parts = url.pathname.slice(GRAPHS_PATH.length + 1).split("/").filter(Boolean);
-				if (parts.length !== 2) throw new Error(`graphs: unknown path ${url.pathname}`);
 				const [id, action] = parts;
-				if (id.length === 0) throw new Error("graphs: missing graph id");
+				if (id === void 0 || id.length === 0) throw new Error("graphs: missing graph id");
+				if (parts.length === 1) {
+					if (!guardMethod(req, res, "PATCH")) return;
+					const body = await readJson(req);
+					if (body.model === void 0) throw new Error("graphs: model is required (pass null to follow the deployment default)");
+					sendJson(res, 200, await ctx.graphs.setModel(id, body.model));
+					return;
+				}
+				if (parts.length !== 2) throw new Error(`graphs: unknown path ${url.pathname}`);
 				if (action === "select" || action === "ready" || action === "delete") {
 					if (!guardMethod(req, res, "POST")) return;
 					if (action === "select") sendJson(res, 200, await ctx.graphs.select(id));
@@ -370,6 +378,53 @@ function registerMapStatic(ctx) {
 		stopRedirect();
 		stopStatic();
 	};
+}
+
+//#endregion
+//#region src/web/api/models.ts
+function registerModels(ctx) {
+	return ctx.webServer.register({
+		kind: "exact",
+		path: MODELS_PATH,
+		handler: async (req, res) => {
+			if (!guardMethod(req, res, "GET")) return;
+			try {
+				const llm = ctx.get("llm");
+				const defaults = ctx.get("agentDefaultModel");
+				const providers = await Promise.all(llm.listProviders().map(async (route) => {
+					try {
+						const models = await llm.listModels(route.id);
+						return {
+							id: route.id,
+							displayName: route.name,
+							models: models.map((model) => ({
+								id: model.id,
+								name: model.name
+							}))
+						};
+					} catch (error) {
+						return {
+							id: route.id,
+							displayName: route.name,
+							models: [],
+							error: messageOf(error)
+						};
+					}
+				}));
+				const selection = defaults.currentSelection();
+				sendJson(res, 200, {
+					providers,
+					default: {
+						provider: selection.provider,
+						model: selection.model,
+						...selection.reasoningEffort === void 0 ? {} : { reasoningEffort: selection.reasoningEffort }
+					}
+				});
+			} catch (error) {
+				fail(res, error);
+			}
+		}
+	});
 }
 
 //#endregion
@@ -603,7 +658,9 @@ const inject = [
 	"graphs",
 	"envBuilder",
 	"webServer",
-	"hitl"
+	"hitl",
+	"llm",
+	"agentDefaultModel"
 ];
 function apply(ctx) {
 	const broadcast = new GraphBroadcast(ctx);
@@ -619,6 +676,7 @@ function apply(ctx) {
 		const graph = registerGraph(ctx);
 		const layout = registerLayout(ctx);
 		const graphs = registerGraphs(ctx);
+		const models = registerModels(ctx);
 		const graphEnvs = registerGraphEnvs(ctx);
 		const hitl = registerHitl(ctx);
 		const task = registerTask(ctx);
@@ -632,6 +690,7 @@ function apply(ctx) {
 			graph();
 			layout();
 			graphs();
+			models();
 			graphEnvs();
 			hitl();
 			task();

@@ -13,6 +13,7 @@ import { registerEvolution } from './web/api/evolution.ts'
 import { registerGraphEnvs } from './web/api/graph-envs.ts'
 import { registerGraphs } from './web/api/graphs.ts'
 import { registerMapStatic } from './web/api/map-static.ts'
+import { registerModels } from './web/api/models.ts'
 import { registerProposalDecide, registerRecovery, registerReview, registerTask } from './web/api/task.ts'
 import { GraphBroadcast } from './web/libs/broadcast.ts'
 
@@ -24,7 +25,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'graph-web'
-export const inject = ['graph', 'layout', 'graphs', 'envBuilder', 'webServer', 'hitl']
+export const inject = ['graph', 'layout', 'graphs', 'envBuilder', 'webServer', 'hitl', 'llm', 'agentDefaultModel']
 
 export function apply(ctx: Context): void {
   const broadcast = new GraphBroadcast(ctx)
@@ -40,6 +41,7 @@ export function apply(ctx: Context): void {
     const graph = registerGraph(ctx)
     const layout = registerLayout(ctx)
     const graphs = registerGraphs(ctx)
+    const models = registerModels(ctx)
     const graphEnvs = registerGraphEnvs(ctx)
     const hitl = registerHitl(ctx)
     const task = registerTask(ctx)
@@ -53,6 +55,7 @@ export function apply(ctx: Context): void {
       graph()
       layout()
       graphs()
+      models()
       graphEnvs()
       hitl()
       task()

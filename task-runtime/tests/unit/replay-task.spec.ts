@@ -719,6 +719,8 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   test('a replayed worker keeps its frozen model through library restoration and passes both bindings to children', async () => {
     const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
+    const graph = await h.graphs.graphForSession(ROOT_SESSION)
+    h.graphs.graphForSession.mockResolvedValue({ ...graph, model: { provider: 'graph-provider', model: 'graph-model' } })
     const before = h.spawned.length
     h.setIdleBehavior(async sessionId => {
       const bound = await h.runtime.runForSession(sessionId)

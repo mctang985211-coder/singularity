@@ -35,6 +35,37 @@ describe('graph_spawn', () => {
     expect(result).toContain('tests passed')
   })
 
+  it('inherits the graph model pin as agentOptions on the worker spawn', async () => {
+    const worker = {
+      id: 'worker-1',
+      cancel: vi.fn(),
+      whenIdle: vi.fn(async () => {}),
+      session: {
+        snapshotEvents: () => [
+          { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'done' }] } } },
+        ],
+      },
+    }
+    const spawn = vi.fn(async () => ({ agent: worker }))
+    const graphForSession = vi.fn(async () => ({
+      id: 'graph-1',
+      ready: false,
+      model: { provider: 'p1', model: 'm1', reasoningEffort: 'high' },
+    }))
+    const tool = defineSpawnTool({ agentRuntime: { spawn }, graphs: { graphForSession } } as never)
+    const parent = { id: 'root-1' }
+
+    await tool.execute({ name: 'setup', task: 'Prepare' }, {
+      agent: parent,
+      signal: new AbortController().signal,
+    } as never)
+
+    expect(spawn).toHaveBeenCalledWith(
+      parent,
+      expect.objectContaining({ agentOptions: { provider: 'p1', model: 'm1', reasoningEffort: 'high' } }),
+    )
+  })
+
   it('rejects a ready graph before creating any worker', async () => {
     const spawn = vi.fn()
     const graphForSession = vi.fn(async () => ({ id: 'graph-1', ready: true }))

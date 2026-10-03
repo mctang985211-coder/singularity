@@ -238,13 +238,13 @@ function handle(reply: string | undefined, options: { hang?: boolean } = {}) {
   }
 }
 
-function fixture(handleValue: unknown, spawnImpl?: () => Promise<unknown>) {
+function fixture(handleValue: unknown, spawnImpl?: () => Promise<unknown>, graphValue: unknown = graph) {
   const spawn = vi.fn(spawnImpl ?? (async () => handleValue))
   const recordDiagnosisIn = vi.fn(async () => {})
   const snapshot = structuredClone(store)
   const ctx = {
     effect: (install: () => () => Promise<void>) => install(),
-    graphs: { graphForSession: async (_sessionId: string) => graph },
+    graphs: { graphForSession: async (_sessionId: string) => graphValue },
     task: {
       openStore: async (_storeId: string) => structuredClone(snapshot),
       snapshotIn: async (_storeId: string) => structuredClone(snapshot),
@@ -261,12 +261,16 @@ function fixture(handleValue: unknown, spawnImpl?: () => Promise<unknown>) {
  * runs it (after publication and the spawn announcement, before the first
  * model input). A rejection fails the spawn with zero model input.
  */
-function fixtureWithBeforePrompt(handleValue: unknown) {
-  return fixture(handleValue, async (...args: unknown[]) => {
-    const request = args[1] as { beforePrompt?: () => Promise<void> }
-    await request.beforePrompt?.()
-    return handleValue
-  })
+function fixtureWithBeforePrompt(handleValue: unknown, graphValue: unknown = graph) {
+  return fixture(
+    handleValue,
+    async (...args: unknown[]) => {
+      const request = args[1] as { beforePrompt?: () => Promise<void> }
+      await request.beforePrompt?.()
+      return handleValue
+    },
+    graphValue,
+  )
 }
 
 const exec = { agent: { id: 'root-1' }, signal: new AbortController().signal }
@@ -595,6 +599,8 @@ describe('task_review_agent', () => {
     const request = spawn.mock.calls[0]![1] as Record<string, unknown>
     expect(request.agentPreset).toBe(REVIEWER_PRESET)
     expect(request.grant).toEqual(reviewerGrant())
+    // A graph with no pin leaves the spawn request exactly as the deployment default has it.
+    expect(request.agentOptions).toBeUndefined()
     // The permission preset must stay at the spawn default (`read-only` bundles `approval: ask`).
     expect(request.permissionPreset).toBeUndefined()
     // The grant actually restricts: resolve the exact grant the tool passed.
@@ -630,6 +636,15 @@ describe('task_review_agent', () => {
     expect(result).toContain('judgements (agent')
     expect(result).toContain('skill_fit: inadequate — the skill was never loaded refs [ev-1]')
     expect(result).toContain('recorded')
+  })
+
+  test('spawns the reviewer under the graph model pin as agentOptions', async () => {
+    const pinned = { ...graph, model: { provider: 'p1', model: 'm1', reasoningEffort: 'high' } }
+    const { ctx, spawn } = fixtureWithBeforePrompt(handle(REPLY), pinned)
+    await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)
+
+    const request = spawn.mock.calls[0]![1] as Record<string, unknown>
+    expect(request.agentOptions).toEqual({ provider: 'p1', model: 'm1', reasoningEffort: 'high' })
   })
 
   /**

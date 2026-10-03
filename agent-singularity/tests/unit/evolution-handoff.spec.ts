@@ -100,6 +100,7 @@ function fixture(options: {
       return undefined
     },
     evolution: options.proposals === undefined ? undefined : { list: async () => options.proposals },
+    graphs: { graphForSession: async () => ({ id: 'g1', rootSessionId: ROOT }) },
     task: {
       snapshotIn: async (storeId: string) => structuredClone(snapshots.get(storeId) ?? { diagnoses: [], reviews: [], runs: [], tasks: [] }),
     },

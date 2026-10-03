@@ -49,6 +49,30 @@ export interface AgentData extends AgentNode {
 // Wire forks for the operator console (graphs list, task snapshot, evolution): browser-local copies
 // with the same rule as above, optional where the projection may omit or later extend a field.
 
+/** A pinned model choice; omitted on a graph or create body means follow the deployment default. */
+export interface ModelRef {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+}
+
+export interface ModelOption {
+  readonly id: string
+  readonly name: string
+}
+
+export interface ModelProvider {
+  readonly id: string
+  readonly displayName: string
+  readonly models: readonly ModelOption[]
+  readonly error?: string
+}
+
+export interface ModelsResponse {
+  readonly providers: readonly ModelProvider[]
+  readonly default: ModelRef
+}
+
 export interface GraphEntry {
   readonly id: string
   readonly name: string
@@ -59,6 +83,7 @@ export interface GraphEntry {
   readonly layoutStoreId?: string
   readonly createdAt?: number
   readonly repos?: readonly string[]
+  readonly model?: ModelRef
 }
 
 export interface GraphsResponse {
@@ -81,6 +106,7 @@ export interface CreateGraphBody {
   readonly envId?: string
   readonly createEnv?: true
   readonly repos?: readonly string[]
+  readonly model?: ModelRef
 }
 
 export type RunStatus = 'running' | 'blocked' | 'failed' | 'verified' | 'cancelled'

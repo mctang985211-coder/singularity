@@ -17,6 +17,7 @@ import type {
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
 import type { McpServerTemplate } from '../mcp-servers.ts'
+import { graphAgentOptions } from '@dangosys/dsh-singularity-graphs'
 import type { CapabilityConfig } from '../capability.ts'
 import type { JobsView } from '../gate.ts'
 import { optionalService, precheckProviders, registeredVerifierIds } from '../provider-precheck.ts'
@@ -204,7 +205,7 @@ export async function orchestrateEnv(
         },
       }
     },
-    spawn: request => {
+    spawn: async request => {
       const parent = liveAgent(self, callerSessionId)
       /**
        * The session this spawn creates works where the spawn says it does, and
@@ -217,14 +218,18 @@ export async function orchestrateEnv(
        * replay's worker carries the experiment's frozen selection, and the
        */
       const taskTemplatesRoot = request.taskTemplatesRoot ?? binding?.taskTemplatesRoot
-      const agentOptions = request.agentOptions ?? binding?.agentOptions
-      if (agentOptions !== undefined || taskTemplatesRoot !== undefined || overlay !== undefined) {
+      const frozenAgentOptions = request.agentOptions ?? binding?.agentOptions
+      if (frozenAgentOptions !== undefined || taskTemplatesRoot !== undefined || overlay !== undefined) {
         self.sessionExecutionBindings.set(request.sessionId, {
-          ...(agentOptions === undefined ? {} : { agentOptions }),
+          ...(frozenAgentOptions === undefined ? {} : { agentOptions: frozenAgentOptions }),
           ...(taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot }),
           ...(overlay === undefined ? {} : { overlay: structuredClone(overlay) }),
         })
       }
+      // The run's frozen selection, when there is one, is the more specific choice;
+      // otherwise the model the caller's graph pins applies.
+      const agentOptions = frozenAgentOptions
+        ?? graphAgentOptions(await self.context.graphs.graphForSession(SessionId(callerSessionId)))
       return self.context.agentRuntime.spawn(parent, {
         sessionId: SessionId(request.sessionId),
         name: request.name,
@@ -236,7 +241,7 @@ export async function orchestrateEnv(
          * The agent runtime merges this over the deployment's default selection,
          * which is the whole point of carrying it: the worker's loop is created on
          */
-        ...(request.agentOptions !== undefined ? { agentOptions: request.agentOptions } : {}),
+        ...(agentOptions !== undefined ? { agentOptions } : {}),
         ...(request.grant !== undefined ? { grant: request.grant } : {}),
         ...(request.signal !== undefined ? { signal: request.signal } : {}),
       })

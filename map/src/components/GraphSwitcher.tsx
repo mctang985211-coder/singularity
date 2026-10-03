@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { fetchGraphEnvs } from '../api'
 import { useStore } from '../store'
-import type { CreateGraphBody, GraphEnv } from '../types'
+import type { CreateGraphBody, GraphEnv, ModelRef } from '../types'
+import ModelPicker from './ModelPicker'
 
 const NEW_ENV = '__new__'
 
@@ -16,6 +17,13 @@ function parseRepos(raw: string): string[] {
     .filter(ref => ref.length > 0)
 }
 
+function modelLabel(model: ModelRef | undefined): string {
+  if (model === undefined) return 'Default'
+  return model.reasoningEffort === undefined
+    ? `${model.provider}/${model.model}`
+    : `${model.provider}/${model.model} · ${model.reasoningEffort}`
+}
+
 export default function GraphSwitcher() {
   const graphId = useStore(s => s.graphId)
   const graph = useStore(s => s.graph)
@@ -26,6 +34,7 @@ export default function GraphSwitcher() {
   const switchGraph = useStore(s => s.switchGraph)
   const createGraph = useStore(s => s.createGraph)
   const removeGraph = useStore(s => s.removeGraph)
+  const updateGraphModel = useStore(s => s.updateGraphModel)
   const loadGraphs = useStore(s => s.loadGraphs)
   const [createOpen, setCreateOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -35,11 +44,15 @@ export default function GraphSwitcher() {
   const [envs, setEnvs] = useState<GraphEnv[] | null>(null)
   const [envId, setEnvId] = useState('')
   const [repos, setRepos] = useState('')
+  const [createModel, setCreateModel] = useState<ModelRef | null>(null)
+  const [editOpen, setEditOpen] = useState(false)
+  const [editModel, setEditModel] = useState<ModelRef | null>(null)
 
   const current = graphs.find(entry => entry.id === graphId)
 
   useEffect(() => {
     setConfirmDelete(false)
+    setEditOpen(false)
   }, [graphId])
 
   useEffect(() => {
@@ -54,6 +67,7 @@ export default function GraphSwitcher() {
       return
     }
     setActionError(null)
+    setEditOpen(false)
     setCreateOpen(true)
     if (envs !== null && envs.length > 0) return
     try {
@@ -84,10 +98,11 @@ export default function GraphSwitcher() {
         if (envId.length === 0) throw new Error('map: pick an environment')
         body = { ...(trimmed.length === 0 ? {} : { name: trimmed }), envId }
       }
-      await createGraph(body)
+      await createGraph({ ...body, ...(createModel === null ? {} : { model: createModel }) })
       setCreateOpen(false)
       setName('')
       setRepos('')
+      setCreateModel(null)
     } catch (error) {
       setActionError(message(error))
     } finally {
@@ -121,6 +136,28 @@ export default function GraphSwitcher() {
       .finally(() => setBusy(false))
   }
 
+  const toggleEdit = () => {
+    if (editOpen) {
+      setEditOpen(false)
+      return
+    }
+    if (current === undefined) return
+    setActionError(null)
+    setCreateOpen(false)
+    setEditModel(current.model ?? null)
+    setEditOpen(true)
+  }
+
+  const saveModel = () => {
+    if (graphId === null || busy) return
+    setBusy(true)
+    setActionError(null)
+    void updateGraphModel(graphId, editModel)
+      .then(() => setEditOpen(false))
+      .catch(error => setActionError(message(error)))
+      .finally(() => setBusy(false))
+  }
+
   const error = actionError ?? graphsError
 
   return (
@@ -141,17 +178,28 @@ export default function GraphSwitcher() {
           <option key={entry.id} value={entry.id}>
             {entry.name}
             {entry.ready ? '' : ' · setup'}
+            {' · '}
+            {modelLabel(entry.model)}
           </option>
         ))}
       </select>
       {current !== undefined && (
         <span className={`sg-pill ${current.ready ? 'ready' : 'setup'}`}>{current.ready ? 'ready' : 'setup'}</span>
       )}
+      {current !== undefined && <span className="sg-model-chip">{modelLabel(current.model)}</span>}
       <button type="button" className="sg-head-btn" disabled={loading} onClick={() => void loadGraphs()}>
         {loading ? '…' : '⟳'}
       </button>
       <button type="button" className="sg-head-btn" disabled={busy} onClick={() => void openCreate()}>
         New
+      </button>
+      <button
+        type="button"
+        className="sg-head-btn"
+        disabled={graphId === null || busy}
+        onClick={toggleEdit}
+      >
+        Model
       </button>
       <button
         type="button"
@@ -199,6 +247,7 @@ export default function GraphSwitcher() {
               />
             </label>
           )}
+          <ModelPicker value={createModel} onChange={setCreateModel} disabled={busy} />
           <div className="sg-create-actions">
             <button type="button" className="sg-head-btn" disabled={busy} onClick={() => setCreateOpen(false)}>
               Cancel
@@ -208,6 +257,20 @@ export default function GraphSwitcher() {
             </button>
           </div>
         </form>
+      )}
+      {editOpen && current !== undefined && (
+        <div className="sg-create-card">
+          <h3>Model for {current.name}</h3>
+          <ModelPicker value={editModel} onChange={setEditModel} disabled={busy} />
+          <div className="sg-create-actions">
+            <button type="button" className="sg-head-btn" disabled={busy} onClick={() => setEditOpen(false)}>
+              Cancel
+            </button>
+            <button type="button" className="primary" disabled={busy} onClick={saveModel}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
       )}
       {error !== null && (
         <div className="sg-head-error" role="alert">

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { EvidenceBundle, VerificationResult } from '../../../task/src/index.ts'
 import { pinSkillHome } from '../support/skill-roots.ts'
 import type { DecomposeSpec, ChildOutcome } from '../../src/index.ts'
+import { orchestrateEnv } from '../../src/service/env.ts'
 import {
   DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
   DEFAULT_MAX_CHILDREN,
@@ -70,6 +71,49 @@ function leafWorkerDecomposition(h: Harness, children: DecomposeSpec['children']
 }
 
 describe('TaskRuntime.decomposeAndRun orchestration', () => {
+  test('a graph model pin reaches the worker spawn', async () => {
+    const h = harness()
+    await createRoot(h)
+    const graph = await h.graphs.graphForSession(ROOT_SESSION)
+    h.graphs.graphForSession.mockResolvedValue({
+      ...graph, model: { provider: 'p1', model: 'm1', reasoningEffort: 'high' },
+    })
+    const env = await orchestrateEnv(h.runtime, ROOT_SESSION, 'model-pin')
+
+    await env.spawn({ sessionId: 'child-pinned', name: 'worker', taskWorker: true })
+
+    expect(h.spawned.at(-1)).toMatchObject({
+      sessionId: 'child-pinned',
+      agentOptions: { provider: 'p1', model: 'm1', reasoningEffort: 'high' },
+    })
+  })
+
+  test('a graph without a pin leaves the worker spawn without agentOptions', async () => {
+    const h = harness()
+    await createRoot(h)
+    const env = await orchestrateEnv(h.runtime, ROOT_SESSION, 'no-pin')
+
+    await env.spawn({ sessionId: 'child-plain', name: 'worker', taskWorker: true })
+
+    expect(h.spawned.at(-1)!.sessionId).toBe('child-plain')
+    expect('agentOptions' in h.spawned.at(-1)!).toBe(false)
+  })
+
+  test('a frozen run model takes precedence over the graph pin', async () => {
+    const h = harness()
+    await createRoot(h)
+    const graph = await h.graphs.graphForSession(ROOT_SESSION)
+    h.graphs.graphForSession.mockResolvedValue({ ...graph, model: { provider: 'p1', model: 'm1' } })
+    const env = await orchestrateEnv(h.runtime, ROOT_SESSION, 'frozen')
+
+    await env.spawn({
+      sessionId: 'child-bound', name: 'worker', taskWorker: true,
+      agentOptions: { provider: 'frozen', model: 'fz' },
+    })
+
+    expect(h.spawned.at(-1)!.agentOptions).toEqual({ provider: 'frozen', model: 'fz' })
+  })
+
   test('spawns children in dependency order and records evidence before verified', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
@@ -1299,6 +1343,28 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect((await h.task.snapshotIn(STORE)).evidence.filter(item => item.taskRunId === childRunId)).toHaveLength(0)
     expect((await h.task.runIn(STORE, childRunId)).status).toBe('failed')
     expect(runEventKinds(h, childRunId)).toEqual(['TaskStarted', 'TaskVerifying', 'TaskFailed', 'ReviewRecorded'])
+  })
+
+  test('cancelGraph records cancellation when the worker is still spawning', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    const spawning = Promise.withResolvers<void>()
+    vi.spyOn(h.runtime.context.agentRuntime, 'spawn').mockImplementation((_parent, request) =>
+      new Promise<never>((_resolve, reject) => {
+        request.signal!.addEventListener('abort', () => reject(request.signal!.reason), { once: true })
+        spawning.resolve()
+      }),
+    )
+    await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work', children: [childSpec('child still spawning')],
+    })
+    await spawning.promise
+
+    await h.runtime.cancelGraph(STORE, 'cancel during spawn')
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.runs.map(run => run.status)).toEqual(['cancelled', 'cancelled'])
+    expect(snapshot.reviews.map(review => review.outcome)).toEqual(['cancelled', 'cancelled'])
   })
 
   test('cancelGraph settles the parent run and every session of the store', async () => {

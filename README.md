@@ -53,7 +53,7 @@ Each package README carries its own service state, web APIs and design notes.
 
 ## Real-environment binding
 
-An environment's component directory may be a symlink to a real checkout instead of a clone: this harness runs `environment/project46` (label `bb-local`) with `DangoSys/buckyball` linked to the live Buckyball checkout, so a graph binds to real work with no copy. **Never UI-Delete a graph whose env is such a symlink** — deletion triggers env-clean, which would `git reset --hard` through the link into the real checkout.
+An environment's component directory may be a symlink to a real checkout instead of a clone: this harness runs `environment/project46` (label `bb-local`) with `DangoSys/buckyball` linked to the live Buckyball checkout, so a graph binds to real work with no copy. Graph deletion only stops sessions, unbinds the env and archives the graph record — it never spawns a cleanup session and never touches the checkout, so symlinked envs are safe to delete.
 
 ## Develop
 

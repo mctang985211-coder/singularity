@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { EventStoreSet, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
-import { cleanPromptText } from "@dangosys/dsh-env-builder";
 
 //#region src/service/state.ts
 /** Whether an existing environment can be bound by a new graph: it has repositories, no graph, and no sessions. */
@@ -68,6 +67,22 @@ var GraphsState = class GraphsState {
 				};
 				return;
 			}
+			case "graph/model": {
+				const idx = this.value.graphs.findIndex((g) => g.id === event.id);
+				if (idx < 0) throw new Error(`graphs: unknown graph "${event.id}"`);
+				const { model: _cleared,...bare } = this.value.graphs[idx];
+				const next = event.model === null ? bare : {
+					...bare,
+					model: event.model
+				};
+				const graphs = [...this.value.graphs];
+				graphs[idx] = next;
+				this.value = {
+					...this.value,
+					graphs
+				};
+				return;
+			}
 			case "graph/remove": {
 				if (!this.value.graphs.some((g) => g.id === event.id)) throw new Error(`graphs: unknown graph "${event.id}"`);
 				const graphs = this.value.graphs.filter((g) => g.id !== event.id);
@@ -96,6 +111,24 @@ var GraphsState = class GraphsState {
 		return new Set(this.value.graphs.map((g) => g.envId));
 	}
 };
+
+//#endregion
+//#region src/model.ts
+/** Agent options for the model a graph pins, or `undefined` when it follows the deployment default. */
+function graphAgentOptions(graph) {
+	const model = graph.model;
+	if (model === void 0) return void 0;
+	return {
+		provider: model.provider,
+		model: model.model,
+		...model.reasoningEffort === void 0 ? {} : { reasoningEffort: model.reasoningEffort }
+	};
+}
+/** Refuse a model whose provider route is not registered, or whose route does not advertise that model. */
+async function assertModelServiceable(llm, model) {
+	if (!llm.listProviders().some((route) => route.id === model.provider)) throw new Error(`graphs: model.provider "${model.provider}" is not a registered provider route`);
+	if (!(await llm.listModels(model.provider)).some((entry) => entry.id === model.model)) throw new Error(`graphs: model.model "${model.model}" is not served by provider "${model.provider}"`);
+}
 
 //#endregion
 //#region src/prompts/setup.prompts.ts
@@ -202,6 +235,8 @@ var GraphsService = class extends Service {
 	async create(request) {
 		return this.transition(async () => {
 			await this.ready;
+			if (request.model !== void 0) await this.assertModel(request.model);
+			const modelOptions = request.model === void 0 ? void 0 : graphAgentOptions({ model: request.model });
 			let createdEnvId;
 			let attached;
 			let rootAgentId;
@@ -233,7 +268,8 @@ var GraphsService = class extends Service {
 					scope: {
 						graphStoreId,
 						layoutStoreId
-					}
+					},
+					...modelOptions === void 0 ? {} : { agentOptions: modelOptions }
 				});
 				rootAgentId = handle.agent.id;
 				this.ctx.envBuilder.store.attachSession(envId, handle.agent.id);
@@ -250,7 +286,8 @@ var GraphsService = class extends Service {
 					graphStoreId,
 					layoutStoreId,
 					createdAt: Date.now(),
-					ready: false
+					ready: false,
+					...request.model === void 0 ? {} : { model: request.model }
 				};
 				await this.commit([{
 					kind: "graph/add",
@@ -340,6 +377,26 @@ var GraphsService = class extends Service {
 		}]);
 		return (await this.state()).get(id);
 	}
+	/** Pin, replace, or clear (null) one graph's model. Only later spawns read it; existing sessions keep theirs. */
+	async setModel(id, model) {
+		return this.transition(async () => {
+			await this.ready;
+			await this.get(id);
+			if (model !== null) await this.assertModel(model);
+			await this.commit([{
+				kind: "graph/model",
+				id,
+				model
+			}]);
+			return (await this.state()).get(id);
+		});
+	}
+	/** Refuse a pin the current provider registry cannot serve; the message names the offending field. */
+	async assertModel(model) {
+		const llm = this.ctx.get("llm");
+		if (llm === void 0) throw new Error("graphs: llm service is not loaded; cannot validate a model pin");
+		await assertModelServiceable(llm, model);
+	}
 	async graphForSession(sessionId) {
 		for (const graph of (await this.state()).snapshot().graphs) if ((await this.ctx.graph.snapshotIn(graph.graphStoreId)).agents.some((agent) => agent.id === sessionId)) return graph;
 		throw new SessionNotInGraphError(sessionId);
@@ -354,32 +411,7 @@ var GraphsService = class extends Service {
 			const taskRuntime = this.taskRuntime();
 			if (taskRuntime !== void 0) await taskRuntime.cancelGraph(rootTaskStoreId(graph.rootSessionId), "graph removed");
 			await this.ctx.agentRuntime.stopGraph(scope);
-			const root = await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, {
-				graphStoreId: graph.graphStoreId,
-				layoutStoreId: graph.layoutStoreId
-			});
-			let stop;
-			let timer;
-			const cleaned = new Promise((resolve, reject) => {
-				timer = setTimeout(() => reject(/* @__PURE__ */ new Error(`graphs: env clean timed out for "${graph.envId}"`)), 600 * 1e3);
-				stop = this.ctx.on("envBuilder/cleaned", (envId) => {
-					if (envId === graph.envId) resolve();
-				});
-			});
-			try {
-				await Promise.all([this.ctx.agentRuntime.spawn(root.agent, {
-					sessionId: SessionId(randomUUID()),
-					name: "env-clean",
-					prompt: [{
-						type: "text",
-						text: cleanPromptText(graph.envId)
-					}]
-				}), cleaned]);
-			} finally {
-				clearTimeout(timer);
-				stop();
-				await this.ctx.agentRuntime.stopGraph(scope);
-			}
+			this.ctx.envBuilder.store.markClean(graph.envId);
 			const archive = {
 				graph,
 				agentIds: (await this.ctx.graph.snapshotIn(graph.graphStoreId)).agents.map((agent) => agent.id),
@@ -391,7 +423,7 @@ var GraphsService = class extends Service {
 				archive
 			}]);
 			const selected = (await this.state()).selected();
-			if (selected !== void 0) await this.activate(selected);
+			if (selected !== void 0) Promise.resolve().then(() => this.activate(selected)).catch(() => {});
 			else {
 				this.ctx.graph.clearActive();
 				this.ctx.layout.clearActive();
@@ -404,10 +436,13 @@ var GraphsService = class extends Service {
 	}
 	/** One graph becomes this process's running environment: recovery barrier, then store and env switch (A2 §E). */
 	async activate(graph) {
-		await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, {
+		const modelOptions = graphAgentOptions(graph);
+		const scope = {
 			graphStoreId: graph.graphStoreId,
 			layoutStoreId: graph.layoutStoreId
-		});
+		};
+		if (modelOptions === void 0) await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, scope);
+		else await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, scope, modelOptions);
 		const taskRuntime = this.taskRuntime();
 		if (taskRuntime === void 0) throw new Error("graphs: taskRuntime service is not loaded; cannot recover the root store");
 		await taskRuntime.adoptRoot(rootTaskStoreId(graph.rootSessionId), graph.rootSessionId);
@@ -433,4 +468,4 @@ var GraphsService = class extends Service {
 var src_default = GraphsService;
 
 //#endregion
-export { GraphsService, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, src_default as default, isReusableEnv };
+export { GraphsService, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertModelServiceable, src_default as default, graphAgentOptions, isReusableEnv };

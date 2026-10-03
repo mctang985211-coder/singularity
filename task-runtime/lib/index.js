@@ -8025,7 +8025,10 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 				item,
 				run,
 				dependencyTaskIds
-			}, {
+			}, batch.signal.aborted ? {
+				status: "cancelled",
+				anomalies: [`worker spawn cancelled: ${message(error)}`]
+			} : {
 				status: "failed",
 				localizedCause: `spawn failed: ${message(error)}`
 			})
@@ -9362,6 +9365,19 @@ async function ancestorTaskIdFor(self, storeId, taskId) {
 }
 
 //#endregion
+//#region ../graphs/lib/index.js
+/** Agent options for the model a graph pins, or `undefined` when it follows the deployment default. */
+function graphAgentOptions(graph) {
+	const model = graph.model;
+	if (model === void 0) return void 0;
+	return {
+		provider: model.provider,
+		model: model.model,
+		...model.reasoningEffort === void 0 ? {} : { reasoningEffort: model.reasoningEffort }
+	};
+}
+
+//#endregion
 //#region src/service/env.ts
 const HUMAN_TOOLS = new Set([
 	"hitl_ask",
@@ -9513,7 +9529,7 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 				}
 			};
 		},
-		spawn: (request) => {
+		spawn: async (request) => {
 			const parent = liveAgent(self, callerSessionId);
 			/**
 			* The session this spawn creates works where the spawn says it does, and
@@ -9526,12 +9542,13 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 			* replay's worker carries the experiment's frozen selection, and the
 			*/
 			const taskTemplatesRoot = request.taskTemplatesRoot ?? binding?.taskTemplatesRoot;
-			const agentOptions = request.agentOptions ?? binding?.agentOptions;
-			if (agentOptions !== void 0 || taskTemplatesRoot !== void 0 || overlay !== void 0) self.sessionExecutionBindings.set(request.sessionId, {
-				...agentOptions === void 0 ? {} : { agentOptions },
+			const frozenAgentOptions = request.agentOptions ?? binding?.agentOptions;
+			if (frozenAgentOptions !== void 0 || taskTemplatesRoot !== void 0 || overlay !== void 0) self.sessionExecutionBindings.set(request.sessionId, {
+				...frozenAgentOptions === void 0 ? {} : { agentOptions: frozenAgentOptions },
 				...taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot },
 				...overlay === void 0 ? {} : { overlay: structuredClone(overlay) }
 			});
+			const agentOptions = frozenAgentOptions ?? graphAgentOptions(await self.context.graphs.graphForSession(SessionId(callerSessionId)));
 			return self.context.agentRuntime.spawn(parent, {
 				sessionId: SessionId(request.sessionId),
 				name: request.name,
@@ -9539,7 +9556,7 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 				...request.agentPreset !== void 0 ? { agentPreset: request.agentPreset } : {},
 				...request.permissionPreset !== void 0 ? { permissionPreset: request.permissionPreset } : {},
 				...request.cwd !== void 0 ? { cwd: request.cwd } : {},
-				...request.agentOptions !== void 0 ? { agentOptions: request.agentOptions } : {},
+				...agentOptions !== void 0 ? { agentOptions } : {},
 				...request.grant !== void 0 ? { grant: request.grant } : {},
 				...request.signal !== void 0 ? { signal: request.signal } : {}
 			});

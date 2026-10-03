@@ -9,6 +9,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, canonicalize, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
 import { CONTEXT_OUTPUT_LIMIT_BYTES, ReviewerBindingError } from "@dangosys/dsh-singularity-context";
 import { SessionId } from "@deepseek-ai/dsh-session";
+import { graphAgentOptions } from "@dangosys/dsh-singularity-graphs";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
 //#region src/services/hitl.ts
@@ -1365,6 +1366,7 @@ function supervisorPrompt(input) {
 async function spawnUnderClaim(input) {
 	await input.admission.claim(input.request);
 	const prompt = await input.prompt();
+	const pinned = graphAgentOptions(await input.ctx.graphs.graphForSession(input.parent.id));
 	let spawnFailure;
 	const handle = await input.ctx.agentRuntime.spawn(input.parent, {
 		sessionId: input.sessionId,
@@ -1376,6 +1378,7 @@ async function spawnUnderClaim(input) {
 		agentPreset: input.preset,
 		grant: input.grant,
 		coordinationRole: input.request.role === "supervisor" ? "supervisor" : "reviewer",
+		...pinned === void 0 ? {} : { agentOptions: pinned },
 		beforePrompt: async () => {
 			await input.admission.start({
 				taskId: input.taskId,
@@ -3869,6 +3872,7 @@ function defineSpawnTool(ctx) {
 			const caller = sessionId(exec, "graph_spawn");
 			const graph = await ctx.graphs.graphForSession(caller);
 			if (graph.ready) throw new Error(`graph_spawn: graph ${graph.id} is ready; delegate objective work with task_decompose`);
+			const pinned = graphAgentOptions(graph);
 			const handle = await ctx.agentRuntime.spawn(exec.agent, {
 				sessionId: SessionId(randomUUID()),
 				name: args.name,
@@ -3876,7 +3880,8 @@ function defineSpawnTool(ctx) {
 					type: "text",
 					text: args.task
 				}],
-				signal: exec.signal
+				signal: exec.signal,
+				...pinned === void 0 ? {} : { agentOptions: pinned }
 			});
 			const cancel = () => handle.agent.cancel({ kind: "parent" });
 			exec.signal.addEventListener("abort", cancel, { once: true });

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { EventStoreSet } from '@dangosys/dsh-singularity-task'
-import { cleanPromptText, type EnvRecord, type EnvStore } from '@dangosys/dsh-env-builder'
+import type { EnvRecord, EnvStore } from '@dangosys/dsh-env-builder'
 import type {} from '@dangosys/dsh-singularity-graph'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
@@ -13,15 +13,19 @@ import type {
   CreateGraphRequest,
   CreateGraphResult,
   GraphArchive,
+  GraphModel,
   GraphRecord,
   GraphsEvent,
   GraphsSnapshot,
 } from './types.ts'
 import { GraphsState, isReusableEnv } from './service/state.ts'
+import { assertModelServiceable, graphAgentOptions, type ModelCatalogReader } from './model.ts'
 import { setupPromptText } from './prompts/setup.prompts.ts'
 
 export * from './types.ts'
 export { GraphsState, isReusableEnv } from './service/state.ts'
+export { assertModelServiceable, graphAgentOptions } from './model.ts'
+export type { ModelCatalogReader } from './model.ts'
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
@@ -137,6 +141,8 @@ export class GraphsService extends Service {
   async create(request: CreateGraphRequest): Promise<CreateGraphResult> {
     return this.transition(async () => {
       await this.ready
+      if (request.model !== undefined) await this.assertModel(request.model)
+      const modelOptions = request.model === undefined ? undefined : graphAgentOptions({ model: request.model })
       let createdEnvId: string | undefined
       let attached: { envId: string; sessionId: SessionId } | undefined
       let rootAgentId: SessionId | undefined
@@ -171,6 +177,7 @@ export class GraphsService extends Service {
           sessionId: rootSessionId,
           cwd: store.get(envId).path,
           scope: { graphStoreId, layoutStoreId },
+          ...(modelOptions === undefined ? {} : { agentOptions: modelOptions }),
         })
         rootAgentId = handle.agent.id
         // The graph registers before it recovers (A2 §E): a barrier failure leaves it selected and visible, retryable.
@@ -187,6 +194,7 @@ export class GraphsService extends Service {
           layoutStoreId,
           createdAt: Date.now(),
           ready: false,
+          ...(request.model === undefined ? {} : { model: request.model }),
         }
         await this.commit([{ kind: 'graph/add', graph }])
         committed = true
@@ -291,6 +299,24 @@ export class GraphsService extends Service {
     return (await this.state()).get(id)
   }
 
+  /** Pin, replace, or clear (null) one graph's model. Only later spawns read it; existing sessions keep theirs. */
+  async setModel(id: string, model: GraphModel | null): Promise<GraphRecord> {
+    return this.transition(async () => {
+      await this.ready
+      await this.get(id)
+      if (model !== null) await this.assertModel(model)
+      await this.commit([{ kind: 'graph/model', id, model }])
+      return (await this.state()).get(id)
+    })
+  }
+
+  /** Refuse a pin the current provider registry cannot serve; the message names the offending field. */
+  private async assertModel(model: GraphModel): Promise<void> {
+    const llm = this.ctx.get('llm') as ModelCatalogReader | undefined
+    if (llm === undefined) throw new Error('graphs: llm service is not loaded; cannot validate a model pin')
+    await assertModelServiceable(llm, model)
+  }
+
   async graphForSession(sessionId: SessionId): Promise<GraphRecord> {
     for (const graph of (await this.state()).snapshot().graphs) {
       const snapshot = await this.ctx.graph.snapshotIn(graph.graphStoreId)
@@ -309,37 +335,16 @@ export class GraphsService extends Service {
         await taskRuntime.cancelGraph(rootTaskStoreId(graph.rootSessionId), 'graph removed')
       }
       await this.ctx.agentRuntime.stopGraph(scope)
-      const root = await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, {
-        graphStoreId: graph.graphStoreId,
-        layoutStoreId: graph.layoutStoreId,
-      })
-      let stop!: () => void
-      let timer!: ReturnType<typeof setTimeout>
-      const cleaned = new Promise<void>((resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`graphs: env clean timed out for "${graph.envId}"`)), 10 * 60 * 1000)
-        stop = this.ctx.on('envBuilder/cleaned', (envId: string) => {
-          if (envId === graph.envId) resolve()
-        })
-      })
-      try {
-        await Promise.all([
-          this.ctx.agentRuntime.spawn(root.agent, {
-            sessionId: SessionId(randomUUID()),
-            name: 'env-clean',
-            prompt: [{ type: 'text', text: cleanPromptText(graph.envId) }],
-          }),
-          cleaned,
-        ])
-      } finally {
-        clearTimeout(timer)
-        stop()
-        await this.ctx.agentRuntime.stopGraph(scope)
-      }
+      // Deletion unbinds and archives only: the checkout is never cleaned here, so a broken
+      // or symlinked environment can neither hang the request nor be written through.
+      this.ctx.envBuilder.store.markClean(graph.envId)
       const snapshot = await this.ctx.graph.snapshotIn(graph.graphStoreId)
       const archive: GraphArchive = { graph, agentIds: snapshot.agents.map(agent => agent.id), archivedAt: Date.now() }
       await this.commit([{ kind: 'graph/remove', id, archive }])
       const selected = (await this.state()).selected()
-      if (selected !== undefined) await this.activate(selected)
+      // Successor activation is its own concern: a successor whose sessions cannot resume
+      // (e.g. its MCP server cannot start) must neither hold this request nor fail the delete.
+      if (selected !== undefined) void Promise.resolve().then(() => this.activate(selected)).catch(() => {})
       else {
         this.ctx.graph.clearActive()
         this.ctx.layout.clearActive()
@@ -354,10 +359,10 @@ export class GraphsService extends Service {
 
   /** One graph becomes this process's running environment: recovery barrier, then store and env switch (A2 §E). */
   private async activate(graph: GraphRecord): Promise<void> {
-    await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, {
-      graphStoreId: graph.graphStoreId,
-      layoutStoreId: graph.layoutStoreId,
-    })
+    const modelOptions = graphAgentOptions(graph)
+    const scope = { graphStoreId: graph.graphStoreId, layoutStoreId: graph.layoutStoreId }
+    if (modelOptions === undefined) await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, scope)
+    else await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, scope, modelOptions)
     const taskRuntime = this.taskRuntime()
     if (taskRuntime === undefined) {
       throw new Error('graphs: taskRuntime service is not loaded; cannot recover the root store')

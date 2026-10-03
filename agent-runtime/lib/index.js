@@ -632,21 +632,22 @@ var AgentRuntime = class extends Service {
 			this.scopes.clear();
 		}, "agentRuntime: dispose");
 	}
-	async ensureRoot(sessionId, scope) {
+	/** Recover a persisted root; `agentOptions` overrides the deployment default selection for its resumed turns. */
+	async ensureRoot(sessionId, scope, agentOptions) {
 		if (this.closing) throw new Error("agent-runtime: closing");
 		const pending = this.resuming.get(sessionId);
 		if (pending !== void 0) {
 			if (pending.scope.graphStoreId !== scope.graphStoreId || pending.scope.layoutStoreId !== scope.layoutStoreId) throw new Error("agent-runtime: concurrent root scope mismatch");
 			return pending.handle;
 		}
-		const handle = this.inGraph(scope, () => this.resumeRoot(sessionId, scope)).finally(() => this.resuming.delete(sessionId));
+		const handle = this.inGraph(scope, () => this.resumeRoot(sessionId, scope, agentOptions)).finally(() => this.resuming.delete(sessionId));
 		this.resuming.set(sessionId, {
 			scope,
 			handle
 		});
 		return handle;
 	}
-	async resumeRoot(sessionId, scope) {
+	async resumeRoot(sessionId, scope, agentOptions) {
 		const existing = this.handles.get(sessionId);
 		if (existing !== void 0) {
 			const known = this.scope(sessionId);
@@ -667,7 +668,10 @@ var AgentRuntime = class extends Service {
 		try {
 			const handle = await this.ctx.agents.resume({
 				resumeSessionId: sessionId,
-				agentOptions: this.ctx.agentDefaultModel.currentSelection(),
+				agentOptions: agentOptions === void 0 ? this.ctx.agentDefaultModel.currentSelection() : {
+					...this.ctx.agentDefaultModel.currentSelection(),
+					...agentOptions
+				},
 				setup: rootSetup(this.ctx, agentPreset)
 			});
 			this.handles.set(sessionId, handle);

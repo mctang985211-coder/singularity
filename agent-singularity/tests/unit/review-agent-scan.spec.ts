@@ -162,6 +162,7 @@ function fixture(
       },
     },
     agentRuntime: { spawn, ensureAgentMessageDelivered: relay },
+    graphs: { graphForSession: async (sessionId: string) => ({ id: 'g1', rootSessionId: sessionId }) },
     agents: { get: (id: string) => (liveParent ? { id } : undefined) },
     taskRuntime: {
       registerTerminalReviewListener: (listener: (fact: TerminalReviewFact) => void) => {

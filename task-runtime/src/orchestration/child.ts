@@ -496,7 +496,9 @@ async function startChildRound(
         env,
         batch.storeId,
         { item, run, dependencyTaskIds },
-        { status: 'failed', localizedCause: `spawn failed: ${message(error)}` },
+        batch.signal.aborted
+          ? { status: 'cancelled', anomalies: [`worker spawn cancelled: ${message(error)}`] }
+          : { status: 'failed', localizedCause: `spawn failed: ${message(error)}` },
       ),
     }
   }
