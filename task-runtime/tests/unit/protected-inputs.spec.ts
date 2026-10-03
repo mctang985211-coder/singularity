@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../support/skill-roots.ts'
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -7,7 +8,7 @@ import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-se
 import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, VerificationResult } from '../../../task/src/index.ts'
 import { TaskService, contractDigest, rootTaskStoreId } from '../../../task/src/index.ts'
 import { requestedSession } from '../support/person-request.ts'
-import type { ChildOutcome, Config, DecomposeSpec, RootContractSpec } from '../../src/index.ts'
+import type { ChildOutcome, DecomposeSpec, RootContractSpec } from '../../src/index.ts'
 import {
   TaskRuntime,
   contractDefects,
@@ -194,7 +195,7 @@ function harness(options: { checkout?: string } = {}) {
   // deployment under test, never to the developer's own `~/.dsh`.
   const runtime = new TaskRuntime(
     ctx as never,
-    { runBindingRoot: join(options.checkout ?? tmpdir(), 'run-bindings') } as Config,
+    { capabilities: TASK_GUIDANCE, runBindingRoot: join(options.checkout ?? tmpdir(), 'run-bindings') },
   )
   // A3's worker protocol: a worker hands its result in through the explicit
   // submission entry and then goes idle — an idle is not a completion.
@@ -240,7 +241,7 @@ function taskEvents(h: Harness): TaskEvent[] {
  * mandatory criterion judged by something other than the composite conjunction.
  */
 const ROOT_CONTRACT: RootContractSpec = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-ship', description: 'the release is shipped', command: 'true' }],
 }
 
@@ -253,10 +254,10 @@ async function intakeRoot(h: Harness): Promise<{ taskId: string; runId: string }
 
 function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
     ...overrides,
-  } as DecomposeSpec['children'][number]
+  } as NonNullable<DecomposeSpec['children']>[number]
 }
 
 /** A criterion with one declared protected input, in the authoring (spec) form the tool sends. */
@@ -385,13 +386,13 @@ describe('fixSpecProtectedInputs', () => {
       reason: 'split the work',
       children: [
         {
-          objective: 'child a',
+          objective: 'child a', requiredCapabilities: ['execute-task'],
           acceptanceCriteria: [
             declaredCriterion('ac1', 'check.sh'),
             { criterionId: 'ac2', description: 'docs build', command: 'true' },
           ],
         },
-        { objective: 'child b', acceptanceCriteria: [{ description: 'plain', command: 'true' }] },
+        { objective: 'child b', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'plain', command: 'true' }] },
       ],
     } as unknown as DecomposeSpec
   }
@@ -399,21 +400,21 @@ describe('fixSpecProtectedInputs', () => {
   test('replaces the declared string form with the fixed identity, rebuilding only what it touches', async () => {
     writeFileSync(join(checkout, 'check.sh'), 'exit 0\n')
     const spec = declaredSpec()
-    const untouchedCriterion = spec.children[0]!.acceptanceCriteria[1]
-    const untouchedChild = spec.children[1]
+    const untouchedCriterion = spec.children![0]!.acceptanceCriteria[1]
+    const untouchedChild = spec.children![1]
 
     const { spec: fixed, reasons } = await fixSpecProtectedInputs(spec, checkout)
 
     expect(reasons).toEqual([])
-    expect(fixed.children[0]!.acceptanceCriteria[0]!.protectedInputs).toEqual([
+    expect(fixed.children![0]!.acceptanceCriteria[0]!.protectedInputs).toEqual([
       fixedRef('check.sh', join(checkout, 'check.sh')),
     ])
     // the criterion that declared nothing and the child that declared nothing
     // are carried by reference: only the touched objects are rebuilt
-    expect(fixed.children[0]!.acceptanceCriteria[1]).toBe(untouchedCriterion)
-    expect(fixed.children[1]).toBe(untouchedChild)
+    expect(fixed.children![0]!.acceptanceCriteria[1]).toBe(untouchedCriterion)
+    expect(fixed.children![1]).toBe(untouchedChild)
     // the caller's input is never mutated
-    expect(spec.children[0]!.acceptanceCriteria[0]!.protectedInputs).toEqual(['check.sh'])
+    expect(spec.children![0]!.acceptanceCriteria[0]!.protectedInputs).toEqual(['check.sh'])
   })
 
   test('leaves the already-fixed form and every malformed declaration exactly as declared', async () => {
@@ -429,7 +430,7 @@ describe('fixSpecProtectedInputs', () => {
         reason: 'split the work',
         children: [
           {
-            objective: 'child a',
+            objective: 'child a', requiredCapabilities: ['execute-task'],
             acceptanceCriteria: [{ description: 'x', command: 'true', protectedInputs: declared }],
           },
         ],
@@ -438,7 +439,7 @@ describe('fixSpecProtectedInputs', () => {
       const { spec: fixed, reasons } = await fixSpecProtectedInputs(spec, checkout)
 
       expect(reasons, name).toEqual([])
-      expect(fixed.children[0]!.acceptanceCriteria[0]!.protectedInputs, name).toEqual(declared)
+      expect(fixed.children![0]!.acceptanceCriteria[0]!.protectedInputs, name).toEqual(declared)
     }
   })
 
@@ -447,7 +448,7 @@ describe('fixSpecProtectedInputs', () => {
       reason: 'split the work',
       children: [
         {
-          objective: 'child a',
+          objective: 'child a', requiredCapabilities: ['execute-task'],
           acceptanceCriteria: [
             declaredCriterion('ac1', 'missing-a.sh'),
             { description: 'b', command: 'true', protectedInputs: ['missing-b.sh'] },
@@ -519,7 +520,7 @@ describe('the fixed-form rule is shared by normalization and admission', () => {
         reason: 'split the work',
         children: [
           {
-            objective: 'child a',
+            objective: 'child a', requiredCapabilities: ['execute-task'],
             acceptanceCriteria: [{ description: 'suite passes', command: 'true', protectedInputs: fixedForm }],
           },
         ],
@@ -585,7 +586,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     // the runtime wrote the identity the pure entry computes over the fixed
     // proposal: the fixed digest, not a later read, is what it covers
     const fixed = await fixSpecProtectedInputs(spec, checkout)
-    const expected = normalizeDecomposition(fixed.spec, {
+    const expected = normalizeDecomposition({ ...fixed.spec, children: fixed.spec.children!.map(child => ({ ...child, templateScope: [] })) }, {
       storeId: STORE,
       parentTaskId: rootTaskId,
       parentRunId: rootRunId,
@@ -725,7 +726,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
       [{ reason: 'split the work', children: 'child a' }, /decomposition children must be an array/],
       [{ reason: 'split the work', children: [null] }, /child 0 must be an object/],
       [
-        { reason: 'split the work', children: [{ objective: 'child a', acceptanceCriteria: 'nope' }] },
+        { reason: 'split the work', children: [{ objective: 'child a', requiredCapabilities: ['execute-task'], acceptanceCriteria: 'nope' }] },
         /child 0 acceptanceCriteria must be an array/,
       ],
     ]
@@ -765,7 +766,7 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
         objective: 'broken champion',
         depth: 0,
         acceptanceCriteria: [criterion as unknown as AcceptanceCriterion],
-        requestedCapabilities: [],
+        requestedCapabilities: ['execute-task'],
         decompositionStatus: 'leaf',
         status: 'created',
         runIds: [],
@@ -823,7 +824,7 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
         contract: {
           objective: 'candidate work',
           acceptanceCriteria: [candidateCriterion('ac1', 'candidate-check.sh') as unknown as AcceptanceCriterion],
-          requiredCapabilities: [],
+          requiredCapabilities: ['execute-task'],
         },
       },
       ROOT_SESSION,
@@ -883,7 +884,7 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
           contract: {
             objective: 'candidate work',
             acceptanceCriteria: [declaredCriterion('ac1', 'missing-candidate.sh') as unknown as AcceptanceCriterion],
-            requiredCapabilities: [],
+            requiredCapabilities: ['execute-task'],
           },
         },
         ROOT_SESSION,
@@ -909,7 +910,7 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
           contract: {
             objective: 'candidate work',
             acceptanceCriteria: [candidateCriterion('ac1', 'candidate-check.sh') as unknown as AcceptanceCriterion],
-            requiredCapabilities: [],
+            requiredCapabilities: ['execute-task'],
           },
         },
         ROOT_SESSION,

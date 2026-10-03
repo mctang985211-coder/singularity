@@ -1,6 +1,7 @@
 import { parseMcpServerRegistry } from '../mcp-servers.ts'
-import { defaultTaskTemplatesRoot, findTaskTemplates, registerTaskTemplate } from '../task-template.ts'
-import type { TaskTemplate } from '@dangosys/dsh-singularity-task'
+import { defaultTaskTemplatesRoot, findTaskTemplates, registerTaskTemplate, taskTemplatePage } from '../task-template.ts'
+import type { TaskTemplateQuery } from '../task-template.ts'
+import type { TaskTemplate, TemplateScope } from '@dangosys/dsh-singularity-task'
 /**
  * The Singularity task runtime service: the class the deployment mounts as `ctx.taskRuntime`.
  * Every method delegates to the function module that owns it (see `./<block>.ts`), so the class
@@ -8,6 +9,8 @@ import type { TaskTemplate } from '@dangosys/dsh-singularity-task'
 
 import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
+import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
 import type { AgentOptions } from '@dangosys/dsh-singularity-agent-runtime'
@@ -145,7 +148,7 @@ export class TaskRuntime extends Service {
 
   readonly terminalReviewListeners = new Set<(fact: TerminalReviewFact) => void | Promise<void>>()
 
-  constructor(ctx: Context, config?: Config) {
+  constructor(ctx: Context, config?: Partial<Config>) {
     super(ctx, 'taskRuntime')
     const rootBudget = config?.rootBudget === undefined ? undefined : { ...config.rootBudget }
     /**
@@ -192,7 +195,39 @@ export class TaskRuntime extends Service {
   }
 
   async findTaskTemplates(query?: string, callerSessionId?: string) {
-    return findTaskTemplates(this.taskTemplatesRootFor(callerSessionId), query)
+    const caller = callerSessionId === undefined ? undefined : await this.templateCaller(callerSessionId)
+    return findTaskTemplates(caller?.root ?? this.config.taskTemplatesRoot, query, caller?.scope)
+  }
+
+  /** Pure store reads: catalog queries never adopt a Run or alter its gate. */
+  async templateCaller(sessionId: string): Promise<{ root: string | undefined; scope?: TemplateScope }> {
+    const binding = this.sessions.get(sessionId)
+    const graph = binding === undefined ? await this.context.graphs.graphForSession(SessionId(sessionId)) : undefined
+    const storeId = binding?.storeId ?? rootTaskStoreId(graph!.rootSessionId)
+    const snapshot = await this.context.task.openStore(storeId).catch(error => {
+      if (graph?.rootSessionId === sessionId && error instanceof Error && /does not exist/.test(error.message)) return undefined
+      throw error
+    })
+    let run = snapshot?.runs.filter(item => item.sessionId === sessionId).at(-1)
+    let task = run === undefined ? undefined : snapshot?.tasks.find(item => item.taskId === run?.taskId)
+    if (task === undefined && graph?.rootSessionId !== sessionId) {
+      // Coordination sessions have no business Run. The existing read core checks their recorded delegation.
+      const core = this.softService<{ resolveCaller(id: string): Promise<{ kind: string; storeId?: string; task?: TaskInstance }> }>('singularityContext')
+      const delegated = await core?.resolveCaller(sessionId)
+      if (delegated?.kind !== 'reviewer' || delegated.storeId !== storeId || delegated.task === undefined)
+        throw new Error('task-template: caller has no bound Task, valid delegation or root intake authority')
+      task = delegated.task
+      run = snapshot?.runs.filter(item => item.taskId === task!.taskId).at(-1)
+    }
+    return {
+      root: run?.taskTemplatesRoot ?? this.taskTemplatesRootFor(sessionId),
+      ...(task === undefined ? {} : { scope: task.contract?.templateScope ?? [] }),
+    }
+  }
+
+  async listTaskTemplates(request: TaskTemplateQuery, callerSessionId: string) {
+    const caller = await this.templateCaller(callerSessionId)
+    return taskTemplatePage(caller.root, request, caller.scope)
   }
 
   async registerTaskTemplate(template: TaskTemplate) {

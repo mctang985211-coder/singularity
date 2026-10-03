@@ -1,9 +1,9 @@
 /** The immutable half of a caller's context: root briefing, contract, handoff (A2 §D/§9). @module @dangosys/dsh-singularity-context/reads-contract */
 
 import type { TaskInstance } from '@dangosys/dsh-singularity-task'
-import type { LoadedCaller, ReadOnlyTaskRuntime } from '../bindings/types.ts'
+import type { LoadedCaller } from '../bindings/types.ts'
 import { CONTEXT_OUTPUT_LIMIT_BYTES, OutputBudget, budgetList, itemsClause, itemsFloor, utf8Bytes } from '../limits.ts'
-import { refused, read, type ProjectedRead } from '../refusals.ts'
+import { message, refused, read, type ProjectedRead } from '../refusals.ts'
 import {
   constraintItems,
   contractBody,
@@ -13,7 +13,7 @@ import {
   handoffReferences,
   rootAncestor,
 } from '../render/fields.ts'
-import { bindingLines } from '../render/records.ts'
+import { bindingLines, renderRunBinding } from '../render/records.ts'
 import type { ReadDeps } from '../types.ts'
 import { resolveProjectionTarget, storeSource, taskPageHint, tooLarge } from './guards.ts'
 
@@ -36,32 +36,6 @@ function referenceList(
       count === entries.length ? [] : [itemsClause(scope, recovery, entries.length, entries.length - count)],
   })
   return shown !== undefined
-}
-
-/** The decomposition guidance a worker's projection carries; a replay never sees it. */
-function workerDecompositionLines(taskRuntime: ReadOnlyTaskRuntime, task: TaskInstance): string[] {
-  const decomposable = task.decompositionStatus === 'decomposable'
-  const runtimeSplit = taskRuntime.allowsRuntimeDecomposition()
-  if (!decomposable && !runtimeSplit) return []
-  const lines: string[] = [
-    "## Own this task's decomposition",
-    '',
-    decomposable
-      ? '- This task was admitted as decomposable: you own the result and the decision to delegate its separate result or responsibility boundaries.'
-      : "- This deployment admits a task's own decomposition even when its parent did not mark it decomposable.",
-    "- For multiple independently checkable results or distinct responsibilities, call `task_decompose` before implementing them. Give each child a complete objective, result boundary and acceptance criteria; retain this task's full acceptance and judge how their verified results combine. A single end-to-end criterion does not make the implementation one local result.",
-    '- A child with its own separate results can decompose again. Define only your own child contracts; let each child decide its descendants. Complete a genuinely local result here rather than adding nodes just for depth.',
-    '- The call must clear admission. Use its refusal to fix the violated rule, not to weaken acceptance. One batch at a time is the rule; this task may split again once its own batch ends.',
-    '- While `waiting_children`, read, query and answer child questions; writes, shell commands, another decomposition and your submission are refused. The batch end hands this task back to you: read the child results, coordinate any remaining work and hand this task in yourself with `task_submit_result`. Nothing is submitted on your behalf.',
-  ]
-  lines.push(
-    '',
-    '- A decomposition can come back waiting for a human review: it answers with a proposal id and admits nothing, so no child exists ' +
-      'and nothing is spawned until the review decides. Read the batch as it was recorded with `task_proposal_read`; do not re-submit the ' +
-      'same batch while it waits, because the same request is answered with the same proposal. If the review refuses it, revise the batch ' +
-      'from the reason on the record and decompose again — a revision is a new proposal, never a re-run of the refused one.',
-  )
-  return lines
 }
 
 /** The immutable half of the context one role is assembled with (A2 §D/§9). */
@@ -148,17 +122,29 @@ export async function contractProjection(deps: ReadDeps, loaded: LoadedCaller): 
 
   // Blocks owed after the bounded lists are measured before them: the lists hand
   // their room forward, so a long reference list is cut and named instead.
-  const summaryLines =
-    run?.providerBinding === undefined
-      ? []
-      : [
-          '',
-          '## Implementation chosen for this run',
-          ...(await bindingLines(deps.taskRuntime, run.providerBinding)).filter(line => line.length > 0),
-        ]
+  const summaryLines: string[] = role === 'reviewer' && run?.providerBinding !== undefined
+    ? await bindingLines(deps.taskRuntime, run.providerBinding) : []
+  if (role !== 'reviewer') {
+    if (run?.providerBinding === undefined || run.providerBinding.skills.length === 0) {
+      return refused('unreadable', `task "${task.taskId}" has no bound guidance Skill; its model request cannot execute unguided work.`)
+    }
+    let bound
+    try { bound = await deps.taskRuntime.readRunBinding(run.providerBinding) }
+    catch (error) { return refused('unreadable', `task "${task.taskId}" cannot load its frozen guidance Skill: ${message(error)}`) }
+    if (bound === undefined || bound.defects.length > 0 ||
+      bound.skills.length === 0 || bound.skills.some(skill => !skill.readable || !skill.instructions?.trim())) {
+      return refused('unreadable', `task "${task.taskId}" cannot load its frozen guidance Skill: ${bound?.defects.join('; ') || 'no readable bound instruction body'}`)
+    }
+    summaryLines.push(
+      '', ...renderRunBinding(run.providerBinding, bound).split('\n'),
+      '', '## Guidance loaded for this run',
+      'These are the complete instructions from this Run’s frozen Skill snapshot. Follow them for this task; loading other Skills does not change the contract or tool permissions.',
+      ...bound.skills.flatMap(skill => [
+        '', `### Skill ${skill.name}`, `Resources: ${bound.snapshotRoot}/${skill.name}`, '', skill.instructions!,
+      ]),
+    )
+  }
   const summaryFloor = summaryLines.length === 0 ? 0 : utf8Bytes(summaryLines.join('\n')) + 2
-  const decomposition = role === 'worker' ? workerDecompositionLines(deps.taskRuntime, task) : []
-  const decompositionFloor = decomposition.length === 0 ? 0 : utf8Bytes(['', ...decomposition].join('\n')) + 2
 
   if (role === 'worker') {
     const handoff = handoffFor(snapshot, task.taskId)
@@ -179,7 +165,7 @@ export async function contractProjection(deps: ReadDeps, loaded: LoadedCaller): 
         'read them by id',
         references.evidence.length,
       )
-      const tail = decompositionFloor + summaryFloor
+      const tail = summaryFloor
       if (
         !referenceList(
           budget,
@@ -204,9 +190,6 @@ export async function contractProjection(deps: ReadDeps, loaded: LoadedCaller): 
       ) {
         return tooLarge('the handoff references', taskPageHint(task.taskId))
       }
-    }
-    if (decomposition.length > 0 && budget.addAll(['', ...decomposition]) > 0) {
-      return tooLarge('the decomposition guidance', taskPageHint(task.taskId))
     }
   }
 

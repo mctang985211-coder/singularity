@@ -15,6 +15,7 @@
   },
   "files": [
     "lib/",
+    "skills/",
     "cordis.patch.yml"
   ],
   "scripts": {

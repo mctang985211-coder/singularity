@@ -20,7 +20,7 @@ import { checkDecomposition } from '../admission.ts'
 import { providerRefusals } from '../provider-precheck.ts'
 import { resolveCapabilities } from '../capability.ts'
 import { checkBatchAdmission, hasRootLimits, resolveRootBudget } from '../root-budget.ts'
-import { bindTaskTemplate } from '../task-template.ts'
+import { bindTaskDecomposition, bindTaskTemplate } from '../task-template.ts'
 import { normalizeDecomposition } from '../normalize.ts'
 import type { DecompositionIdentityContext, NormalizedBatch } from '../normalize.ts'
 import { fixSpecProtectedInputs } from '../protected-inputs.ts'
@@ -48,9 +48,11 @@ export async function deriveBatch(
   const envPath = await self.envPathForSession(identity.callerSessionId)
   let bound: DecomposeSpec
   try {
-    bound = Array.isArray(spec?.children)
-      ? { ...spec, children: await Promise.all(spec.children.map(child => bindTaskTemplate(self.taskTemplatesRootFor(identity.callerSessionId), child))) }
-      : spec
+    const { root, scope } = await self.templateCaller(identity.callerSessionId)
+    const expanded = await bindTaskDecomposition(root, spec, scope)
+    bound = Array.isArray(expanded?.children)
+      ? { ...expanded, children: await Promise.all(expanded.children.map(child => bindTaskTemplate(root, child, scope))) }
+      : expanded
   } catch (error) {
     const failure = error instanceof Error ? error : new Error(String(error))
     return { ok: false, refusal: { error: failure, reasons: [failure.message], gaps: [] } }
@@ -87,6 +89,10 @@ export function storedBatchOf(proposal: TaskProposal): NormalizedBatch {
   return {
     contractVersion: proposal.identity.contractVersion,
     reason: proposal.identity.reason,
+    ...(proposal.identity.templateRef === undefined ? {} : {
+      templateRef: structuredClone(proposal.identity.templateRef),
+      templateParameters: structuredClone(proposal.identity.templateParameters ?? {}),
+    }),
     children: proposal.batch.map(child => ({
       contract: structuredClone(child.contract),
       dependsOn: [...child.dependsOn],
@@ -252,7 +258,9 @@ export async function checkDerivedBatch(
     { ...self.config.capabilities, ...overlay?.capabilityOverrides },
     { ...self.config.mcpServers, ...overlay?.mcpServers },
   )
-  const refusals = providerRefusals(precheck)
+  const refusals = manifests.flatMap((manifest, childIndex) =>
+    providerRefusals(precheck, Object.keys(manifest.capabilities)).map(reason => `child ${childIndex}: ${reason}`),
+  )
   if (refusals.length > 0) {
     return {
       ok: false,

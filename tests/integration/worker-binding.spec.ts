@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 import { DEPLOYMENT_MCP_SERVERS } from '../support/mcp-servers.ts'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile, rm, writeFile } from 'node:fs/promises'
@@ -191,7 +192,7 @@ async function harness(options: { capabilities?: Record<string, { skills?: strin
   await writeEvidenceVerifier(ctx, task)
 
   const config: Partial<Config> = {
-    capabilities: options.capabilities ?? { 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } },
+    capabilities: { ...TASK_GUIDANCE, ...(options.capabilities ?? { 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } }) },
     ...(options.bindingRoot === undefined ? {} : { runBindingRoot: options.bindingRoot }),
   }
   const runtime = new TaskRuntime(ctx, { mcpServers: DEPLOYMENT_MCP_SERVERS, ...config } as Config)
@@ -316,7 +317,7 @@ async function registeredSkill(h: Harness, agent: Agent, name: string): Promise<
  * the contract is stated here rather than defaulted.
  */
 function rootContract(objective: string): RootContractSpec {
-  return {
+  return { requiredCapabilities: ['execute-task'],
     objective,
     acceptanceCriteria: [
       { criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' },
@@ -446,13 +447,11 @@ describe('the binding record (S1-C)', () => {
     const h = await harness()
     const { taskId, runId: rootRunId } = await activateRoot(h)
     const rootRun = await h.task.runIn(STORE, rootRunId)
-    // The root grants no capability, so it binds no provider — and says so with
-    // empty lists rather than inventing content: `capabilitySnapshot` is empty
-    // for the same reason.
-    expect(rootRun.capabilitySnapshot).toEqual([])
-    expect(rootRun.providerBinding!.skills).toEqual([])
+    // The root explicitly selects its Task method and freezes those instructions.
+    expect(rootRun.capabilitySnapshot).toEqual(['task-execution'])
+    expect(rootRun.providerBinding!.skills.map(skill => skill.name)).toEqual(['task-execution'])
     expect(rootRun.providerBinding!.mcpServers).toEqual([])
-    expect(rootRun.providerBinding!.snapshotRoot).toBeUndefined()
+    expect(rootRun.providerBinding!.snapshotRoot).toBeDefined()
     expect(rootRun.providerBinding!.registryRevision).toMatch(/^[0-9a-f]{64}$/)
 
     const batch = await h.runtime.decomposeAndRun(STORE, taskId, rootRunId, ROOT_SESSION, {
@@ -537,7 +536,7 @@ describe('the binding record (S1-C)', () => {
       objective: 'ship the release',
       depth: 0,
       acceptanceCriteria: [{ criterionId: 'root-children-verified', description: 'all mandatory children verified', verificationMode: 'composite', requiredEvidence: [], mandatory: true }],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'decomposable',
       status: 'created',
       runIds: [],

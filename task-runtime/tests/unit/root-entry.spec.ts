@@ -1,6 +1,6 @@
+import { TASK_GUIDANCE } from '../support/skill-roots.ts'
 import { describe, expect, test } from 'vitest'
 import { rootTaskStoreId } from '../../../task/src/index.ts'
-import type { Config } from '../../src/index.ts'
 import { TaskRuntime } from '../../src/index.ts'
 import { harness, createRoot, STORE, ROOT_SESSION, taskEvents } from './orchestrate.fixture.ts'
 
@@ -47,7 +47,7 @@ describe('TaskRuntime.intakeRootContract', () => {
     const h = harness()
     await expect(
       h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
-        objective: 'the goal nobody stated',
+        objective: 'the goal nobody stated', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [
           {
             criterionId: 'root-children-verified',
@@ -76,7 +76,7 @@ describe('TaskRuntime.adoptRoot', () => {
     const h2 = harness()
     h2.sessions.clear()
     for (const [id, stored] of h.sessions) h2.sessions.set(id, stored)
-    const runtime2 = new TaskRuntime(h2.ctx as never, {} as Config)
+    const runtime2 = new TaskRuntime(h2.ctx as never, { capabilities: TASK_GUIDANCE })
     const reopened = await runtime2.adoptRoot(STORE, ROOT_SESSION)
     expect(reopened).toMatchObject({ adopted: true, taskId: first.taskId, runId: first.runId, phase: 'active' })
     // Adoption binds the session and opens its gate, exactly as the activation did.
@@ -103,7 +103,7 @@ describe('TaskRuntime.adoptRoot', () => {
     const h2 = harness()
     h2.sessions.clear()
     for (const [id, stored] of h.sessions) h2.sessions.set(id, stored)
-    const runtime2 = new TaskRuntime(h2.ctx as never, {} as Config)
+    const runtime2 = new TaskRuntime(h2.ctx as never, { capabilities: TASK_GUIDANCE })
     await h2.task.openStore(STORE)
     const adopted = await runtime2.adoptRoot(STORE, ROOT_SESSION)
     expect(adopted).toMatchObject({ adopted: true, taskId, runId, phase: 'terminal' })
@@ -119,14 +119,16 @@ describe('TaskRuntime.adoptRoot', () => {
 describe('TaskRuntime.listCapabilities', () => {
   test('ships no table of its own: an unconfigured runtime lists none, and hands out a copy', () => {
     const h = harness()
-    const listed = h.runtime.listCapabilities()
+    const runtime = new TaskRuntime(h.ctx as never, {})
+    const listed = runtime.listCapabilities()
     expect(listed).toEqual({})
     ;(listed as Record<string, unknown>)['design-chip'] = {}
-    expect(h.runtime.listCapabilities()).toEqual({})
+    expect(runtime.listCapabilities()).toEqual({})
   })
 
   test('reflects a configured registry instead of any code default', () => {
     const h = harness({ config: { capabilities: { research: { skills: ['web'] } } } })
-    expect(h.runtime.listCapabilities()).toEqual({ research: { skills: ['web'] } })
+    const runtime = new TaskRuntime(h.ctx as never, { capabilities: { research: { skills: ['web'] } } })
+    expect(runtime.listCapabilities()).toEqual({ research: { skills: ['web'] } })
   })
 })

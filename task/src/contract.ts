@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto'
 import type { AcceptanceCriterion } from './types.ts'
-import type { TaskTemplateRef, TemplateParameters } from './template.ts'
+import type { TaskTemplateRef, TemplateParameters, TemplateScope } from './template.ts'
 
 /** The normalized contract version this build writes. Separate from a task template's own generation number and from the event envelope's `schemaVersion` (the store's wire format): this one versions the contract data definition, and an entry … */
 export const TASK_CONTRACT_VERSION = 1 as const
@@ -26,6 +26,7 @@ export interface TaskContract {
   /** Immutable provenance of a template instance; omitted for a free contract. */
   templateRef?: TaskTemplateRef
   templateParameters?: TemplateParameters
+  templateScope?: TemplateScope
 }
 
 /** The limits one decomposition batch was admitted under (§4). Recorded with the batch, never derived from the contract: a contract's own text has no field that can raise a limit, and the runtime resolves every value here from its … */
@@ -64,6 +65,8 @@ interface DecompositionChildIdentity {
 /** Everything a batch proposal's identity covers (§4): where it came from (store, parent task and run, caller), which contract language it is written in, why it was proposed, and the complete ordered children. */
 export interface DecompositionIdentity {
   contractVersion: TaskContractVersion
+  templateRef?: TaskTemplateRef
+  templateParameters?: TemplateParameters
   storeId: string
   parentTaskId: string
   parentRunId: string

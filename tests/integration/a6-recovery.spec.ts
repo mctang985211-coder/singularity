@@ -42,7 +42,7 @@ afterEach(async () => {
 
 /** One child spec carrying exactly the criteria a case is about. */
 function child(objective: string, criteria: readonly Record<string, unknown>[], extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return { objective, acceptanceCriteria: criteria, ...extra }
+  return { objective, requiredCapabilities: ['execute-task'], acceptanceCriteria: criteria, ...extra }
 }
 
 function commandCriterion(criterionId: string, command = 'true', extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -56,7 +56,7 @@ function batch(reason: string, children: readonly Record<string, unknown>[]): Re
 /** The root contract both cases run under: the goal's own check and the map over the attempt's members. */
 function rootContract(map: readonly Record<string, unknown>[]): Record<string, unknown> {
   return {
-    objective: 'ship the release',
+    objective: 'ship the release', requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [
       commandCriterion('root-goal'),
       {

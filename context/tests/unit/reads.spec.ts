@@ -43,7 +43,7 @@ async function seedOversizedStatusEntry(
   const taskId = 't-m-bigstatus'
   // Read the scope first: without the oversized entry the page is complete, so
   // the index the entry will sort to is counted off the ids it must fall among.
-  const before = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', limit: 100 }))
+  const before = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph', limit: 100 }))
   const ids = [...before.text.matchAll(/^- (t-[a-z0-9-]+) /gm)].map(match => match[1] as string)
   const index = ids.filter(id => id < taskId).length
   stack.member(chain.graph, 's-worker-bigstatus')
@@ -194,7 +194,8 @@ describe("the caller's contract and its root briefing", () => {
   })
 
   test("a worker's own run carries its phase and its bound content, re-checked by name", async () => {
-    const { stack } = await chainStack()
+    const stack = new FixtureStack()
+    await seedChain(stack, 's-root', true)
     const read = expectOk(await stack.service.taskRead('s-c1'))
     expect(read.text).toContain('objective: child one: build the bridge')
     expect(read.text).toContain('run r-c1 [running] — phase active')
@@ -204,6 +205,16 @@ describe("the caller's contract and its root briefing", () => {
     expect(read.text).toContain('Bound content is not readable')
     expect(read.text).toContain('content-mismatch')
     expect(read.source).toContain('store sg-t-s-root')
+    await stack.task.markRunStatusIn('sg-t-s-root', 't-c1', 'r-c1', 'cancelled', 's-root', { reason: 'historical run stopped by its owner' })
+    const historical = expectOk(await stack.service.contextRead('s-root', { kind: 'run', ref: 'r-c1' })).text
+    expect(historical).toContain('run r-c1 of task t-c1 [cancelled]')
+    expect(historical).toContain('content-mismatch')
+    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', taskId: 't-c1', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
+    const reviewed = expectOk(await stack.service.contractProjection('s-review')).text
+    expect(reviewed).toContain('objective: child one: build the bridge')
+    expect(reviewed).toContain('no business Run')
+    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'run', ref: 'r-c1' })).text).toContain('content-mismatch')
+    expect(expectRefused(await stack.service.contractProjection('s-c1'), 'unreadable')).toContain('content-mismatch')
   })
 
   test("a replay task's briefing is its own objective, never the root's", async () => {
@@ -245,7 +256,7 @@ describe('reading a sibling dependency by reference', () => {
     expect(status.text).toContain('you')
   })
 
-  test('the default view leaves unrelated history out, while the graph scope still offers it', async () => {
+  test('workers retain ancestors and dependencies while the root can inspect unrelated history', async () => {
     const { stack } = await chainStack()
     const related = expectOk(await stack.service.taskStatus('s-g1')).text
     expect(related).toContain('t-g1')
@@ -258,9 +269,11 @@ describe('reading a sibling dependency by reference', () => {
     expect(related).toContain('one read of store sg-t-s-root')
     expect(related).toContain('not a consistent snapshot')
     const graph = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph' })).text
-    for (const taskId of ['t-root', 't-c1', 't-c2', 't-g1', 't-replay']) expect(graph).toContain(taskId)
-    // The same records are readable by reference, which is what keeps the
-    // default view a projection rather than an authorization.
+    for (const taskId of ['t-root', 't-c1', 't-c2', 't-g1']) expect(graph).toContain(taskId)
+    expect(graph).not.toContain('t-replay')
+    const root = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph' })).text
+    expect(root).toContain('t-replay')
+    // Ancestor context remains available inside the worker read boundary.
     expect(expectOk(await stack.service.contextRead('s-g1', { kind: 'task', ref: 't-root' })).text).toContain(
       'build the release',
     )
@@ -306,7 +319,7 @@ describe('reading a sibling dependency by reference', () => {
       reason: 'dependency t-c2 did not verify',
     })
     const review = expectOk(
-      await stack.service.contextRead('s-c1', { kind: 'review', ref: { taskId: 't-blocked', runId: null } }),
+      await stack.service.contextRead('s-root', { kind: 'review', ref: { taskId: 't-blocked', runId: null } }),
     )
     expect(review.text).toContain('(no run — the task blocked before any run started) [blocked]')
     expect(review.text).toContain('dependency t-c2 did not verify')
@@ -500,7 +513,7 @@ describe('the output bound', () => {
       if (calls > 1) throw new Error('the log stopped answering mid-read')
       return await real(request, signal)
     }
-    const result = await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-flaky', limit: 100 })
+    const result = await stack.service.contextRead('s-root', { kind: 'session', ref: 's-flaky', limit: 100 })
     // The first window really did succeed — the failure is the second read — and
     // the events the first window carried are not handed back as a page.
     expect(calls).toBe(2)
@@ -519,7 +532,7 @@ describe('the output bound', () => {
     // Nothing was read, so there is no page to report — an empty page here would
     // claim `hasMore` at the same offset and be read again forever.
     const detail = expectRefused(
-      await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-stalled' }),
+      await stack.service.contextRead('s-root', { kind: 'session', ref: 's-stalled' }),
       'unreadable',
     )
     expect(detail).toContain('seq 0')
@@ -530,7 +543,7 @@ describe('the output bound', () => {
     const { stack, chain } = await chainStack()
     stack.member(chain.graph, 's-big-event')
     stack.sessionLog('s-big-event', ['x'.repeat(OVER_BOUND_BYTES)])
-    const result = await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-big-event', limit: 1 })
+    const result = await stack.service.contextRead('s-root', { kind: 'session', ref: 's-big-event', limit: 1 })
     // The refusal names the seq, the size of the event's own text, the fact that
     // an offset addresses whole events, and the one deliberate way past it.
     const detail = expectRefused(result, 'context-too-large')
@@ -547,7 +560,7 @@ describe('the output bound', () => {
     const { stack, chain } = await chainStack()
     stack.member(chain.graph, 's-mixed-events')
     stack.sessionLog('s-mixed-events', ['a short event', 'y'.repeat(OVER_BOUND_BYTES)])
-    const page = expectOk(await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-mixed-events', limit: 2 }))
+    const page = expectOk(await stack.service.contextRead('s-root', { kind: 'session', ref: 's-mixed-events', limit: 2 }))
     expect(page.text).toContain('seq 0 | user/message')
     expect(page.text).not.toContain('yyy')
     // The page ends *before* the oversized event: the next offset is that
@@ -559,7 +572,7 @@ describe('the output bound', () => {
     // A follow-up read at that seq hits the whole-event refusal and names the one
     // offset that moves past it — the caller's choice, not the read's.
     const detail = expectRefused(
-      await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-mixed-events', offset: 1, limit: 2 }),
+      await stack.service.contextRead('s-root', { kind: 'session', ref: 's-mixed-events', offset: 1, limit: 2 }),
       'context-too-large',
     )
     expect(detail).toContain('seq 1')
@@ -579,7 +592,7 @@ describe('the output bound', () => {
       const session = `s-size-${size}`
       stack.member(chain.graph, session)
       stack.sessionLog(session, ['A'.repeat(size), 'B'.repeat(OVER_BOUND_BYTES)])
-      const result = await stack.service.contextRead('s-g1', { kind: 'session', ref: session, limit: 2 })
+      const result = await stack.service.contextRead('s-root', { kind: 'session', ref: session, limit: 2 })
       if (!result.ok) {
         // A first event that cannot be carried is refused by name, never cut.
         expect(result.refusal, `size ${size}`).toBe('context-too-large')
@@ -602,7 +615,7 @@ describe('the output bound', () => {
     // name, never passed to DSH as if the session were the caller's.
     stack.breakGraphView(new Error('the graph store is not readable'), chain.graph)
     const detail = expectRefused(
-      await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-c1' }),
+      await stack.service.contextRead('s-root', { kind: 'session', ref: 's-c1' }),
       'unreadable',
     )
     expect(detail).toContain('membership of session "s-c1"')
@@ -671,12 +684,12 @@ describe('one session event by its {sessionId, seq} reference', () => {
       expect(Buffer.byteLength(visible, 'utf8')).toBeGreaterThan(CONTEXT_OUTPUT_LIMIT_BYTES)
       for (const character of ['汉', '"', '\\', '\n', '\u0007']) expect(visible).toContain(character)
 
-      const wide = await walkEvent(stack, 's-g1', 's-long', 0, 4_096)
+      const wide = await walkEvent(stack, 's-root', 's-long', 0, 4_096)
       expect(wide.pages).toBeGreaterThan(1)
       expect(wide.text).toBe(visible)
       // The same walk at the clamp floor: four bytes a page, one character at a
       // time, still whole, still strictly advancing.
-      const narrow = await walkEvent(stack, 's-g1', 's-long', 0, 4)
+      const narrow = await walkEvent(stack, 's-root', 's-long', 0, 4)
       expect(narrow.pages).toBeGreaterThan(1_000)
       expect(narrow.text).toBe(visible)
     },
@@ -695,11 +708,11 @@ describe('one session event by its {sessionId, seq} reference', () => {
     expect(visible).toBe(seeded)
 
     // Four bytes a page: exactly one astral character at a time.
-    const narrow = await walkEvent(stack, 's-g1', 's-astral', 0, 4)
+    const narrow = await walkEvent(stack, 's-root', 's-astral', 0, 4)
     expect(narrow.pages).toBeGreaterThan(300)
     expect(narrow.text).toBe(visible)
     // And a page wider than one character must still cut on a character boundary.
-    const wide = await walkEvent(stack, 's-g1', 's-astral', 0, 33)
+    const wide = await walkEvent(stack, 's-root', 's-astral', 0, 33)
     expect(wide.pages).toBeGreaterThan(1)
     expect(wide.text).toBe(visible)
   })
@@ -716,7 +729,7 @@ describe('one session event by its {sessionId, seq} reference', () => {
       stack.member(chain.graph, session)
       stack.sessionLog(session, [body])
       const visible = extractSessionEventText(await loggedEvent(stack, session, 0))
-      const walk = await walkEvent(stack, 's-g1', session, 0)
+      const walk = await walkEvent(stack, 's-root', session, 0)
       expect(walk.pages).toBeGreaterThan(1)
       expect(walk.text).toBe(visible)
     }
@@ -731,7 +744,7 @@ describe('one session event by its {sessionId, seq} reference', () => {
     // so an offset handed back never stalls on the same byte again.
     const floor = eventPage(
       expectOk(
-        await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-clamped', seq: 0 }, limit: 1 }),
+        await stack.service.contextRead('s-root', { kind: 'session', ref: { sessionId: 's-clamped', seq: 0 }, limit: 1 }),
       ).text,
     )
     expect(Buffer.byteLength(floor.body, 'utf8')).toBe(4)
@@ -740,7 +753,7 @@ describe('one session event by its {sessionId, seq} reference', () => {
     // so a huge limit still yields a body smaller than the bound — and the page
     // says there is more, so the body below is a page, not the whole event.
     const capped = expectOk(
-      await stack.service.contextRead('s-g1', {
+      await stack.service.contextRead('s-root', {
         kind: 'session',
         ref: { sessionId: 's-clamped', seq: 0 },
         limit: 999_999,
@@ -752,7 +765,7 @@ describe('one session event by its {sessionId, seq} reference', () => {
     // A limit below the floor is raised to it: still a page, never an empty one.
     const zero = eventPage(
       expectOk(
-        await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-clamped', seq: 0 }, limit: 0 }),
+        await stack.service.contextRead('s-root', { kind: 'session', ref: { sessionId: 's-clamped', seq: 0 }, limit: 0 }),
       ).text,
     )
     expect(Buffer.byteLength(zero.body, 'utf8')).toBe(4)
@@ -765,13 +778,13 @@ describe('one session event by its {sessionId, seq} reference', () => {
     stack.sessionLog('s-hand', ['a short event', 'y'.repeat(OVER_BOUND_BYTES)])
     // A page that stops before the event names it, its size, and the reference
     // that reads its text — never "skip it to get its body".
-    const page = expectOk(await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-hand', limit: 2 }))
+    const page = expectOk(await stack.service.contextRead('s-root', { kind: 'session', ref: 's-hand', limit: 2 }))
     expect(page.text).toContain('ref:{"sessionId":"s-hand","seq":1}')
     expect(page.text).toContain(String(OVER_BOUND_BYTES))
     // The refusal when the event is the page's first names the same reference,
     // and moving past the event stays the caller's explicit choice.
     const refused = expectRefused(
-      await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-hand', offset: 1, limit: 2 }),
+      await stack.service.contextRead('s-root', { kind: 'session', ref: 's-hand', offset: 1, limit: 2 }),
       'context-too-large',
     )
     expect(refused).toContain('ref:{"sessionId":"s-hand","seq":1}')
@@ -779,7 +792,7 @@ describe('one session event by its {sessionId, seq} reference', () => {
     expect(refused).toContain('offset 2')
     // The handed-back reference really is the door to that event's text: walked
     // to its end, it restores the whole event.
-    const walk = await walkEvent(stack, 's-g1', 's-hand', 1)
+    const walk = await walkEvent(stack, 's-root', 's-hand', 1)
     expect(walk.text).toBe('y'.repeat(OVER_BOUND_BYTES))
   })
 })
@@ -797,7 +810,7 @@ describe('the refusals of a session event read', () => {
     const counter = trackEventReads(stack)
     expect(
       expectRefused(
-        await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: other.rootSession, seq: 0 } }),
+        await stack.service.contextRead('s-root', { kind: 'session', ref: { sessionId: other.rootSession, seq: 0 } }),
         'cross-graph',
       ),
     ).toContain('not a published member')
@@ -806,7 +819,7 @@ describe('the refusals of a session event read', () => {
     // door checks the graph store exactly as the listing does.
     stack.breakGraphView(new Error('the graph store is not readable'), chain.graph)
     const detail = expectRefused(
-      await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-c1', seq: 0 } }),
+      await stack.service.contextRead('s-root', { kind: 'session', ref: { sessionId: 's-c1', seq: 0 } }),
       'unreadable',
     )
     expect(detail).toContain('membership of session "s-c1"')
@@ -819,7 +832,7 @@ describe('the refusals of a session event read', () => {
     // s-c1's log holds seq 0 and 1 and nothing else.
     expect(
       expectRefused(
-        await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-c1', seq: 5 } }),
+        await stack.service.contextRead('s-root', { kind: 'session', ref: { sessionId: 's-c1', seq: 5 } }),
         'stale-reference',
       ),
     ).toContain('seq 5')
@@ -827,7 +840,7 @@ describe('the refusals of a session event read', () => {
     query.readEvent = async () => {
       throw new Error('the log stopped answering')
     }
-    const result = await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-c1', seq: 0 } })
+    const result = await stack.service.contextRead('s-root', { kind: 'session', ref: { sessionId: 's-c1', seq: 0 } })
     expect(expectRefused(result, 'unreadable')).toContain('the log stopped answering')
     // A failed read is a refusal, not a page: no partial body, no JSON wrapper.
     expect('text' in result).toBe(false)
@@ -845,7 +858,7 @@ describe('the refusals of a session event read', () => {
       return request.seq === 0 ? { ...window, target: (await real({ ...request, seq: 1 }, signal)).target } : window
     }
     const detail = expectRefused(
-      await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-c1', seq: 0 } }),
+      await stack.service.contextRead('s-root', { kind: 'session', ref: { sessionId: 's-c1', seq: 0 } }),
       'stale-reference',
     )
     expect(detail).toContain('seq 1')
@@ -862,7 +875,7 @@ describe('the refusals of a session event read', () => {
     for (const offset of [1, 2, total, 999_999]) {
       expect(
         expectRefused(
-          await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-bytes', seq: 0 }, offset }),
+          await stack.service.contextRead('s-root', { kind: 'session', ref: { sessionId: 's-bytes', seq: 0 }, offset }),
           'stale-reference',
         ),
       ).toContain(String(offset))
@@ -870,7 +883,7 @@ describe('the refusals of a session event read', () => {
     // Byte 3 is the boundary after that character: a page from there is the rest of the text.
     const tail = eventPage(
       expectOk(
-        await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-bytes', seq: 0 }, offset: 3 }),
+        await stack.service.contextRead('s-root', { kind: 'session', ref: { sessionId: 's-bytes', seq: 0 }, offset: 3 }),
       ).text,
     )
     expect(tail.offset).toBe(3)
@@ -884,7 +897,7 @@ describe('the refusals of a session event read', () => {
     // one page that exists is offset 0's, and any later byte is past its end.
     stack.sessionLog('s-empty-event', [''])
     const result = expectOk(
-      await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-empty-event', seq: 0 } }),
+      await stack.service.contextRead('s-root', { kind: 'session', ref: { sessionId: 's-empty-event', seq: 0 } }),
     )
     const parsed = eventPage(result.text)
     expect(parsed.body).toBe('')
@@ -895,7 +908,7 @@ describe('the refusals of a session event read', () => {
     expect(parsed.note as string).toContain('offset = 1')
     expect(
       expectRefused(
-        await stack.service.contextRead('s-g1', {
+        await stack.service.contextRead('s-root', {
           kind: 'session',
           ref: { sessionId: 's-empty-event', seq: 0 },
           offset: 5,
@@ -909,22 +922,22 @@ describe('the refusals of a session event read', () => {
 describe('task_status pagination', () => {
   test('entries sort by task id, offset and limit page them, and the tail says there is no more', async () => {
     const { stack } = await chainStack()
-    const first = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', limit: 2 }))
+    const first = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph', limit: 2 }))
     expect(first.hasMore).toBe(true)
     expect(first.nextOffset).toBe(2)
     const ids = [...first.text.matchAll(/^- (t-[a-z0-9]+) /gm)].map(match => match[1])
     expect(ids).toEqual(['t-c1', 't-c2'])
-    const second = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', offset: 2, limit: 2 }))
+    const second = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph', offset: 2, limit: 2 }))
     const secondIds = [...second.text.matchAll(/^- (t-[a-z0-9]+) /gm)].map(match => match[1])
     expect(secondIds).toEqual(['t-g1', 't-replay'])
     expect(second.hasMore).toBe(true)
     expect(second.nextOffset).toBe(4)
-    const last = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', offset: 4, limit: 2 }))
+    const last = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph', offset: 4, limit: 2 }))
     expect([...last.text.matchAll(/^- (t-[a-z0-9]+) /gm)].map(match => match[1])).toEqual(['t-root'])
     expect(last.hasMore).toBe(false)
     expect(last.text).toContain('this is the end of the scope')
     // An offset past the end is an empty page, not a refusal.
-    const past = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', offset: 50 }))
+    const past = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph', offset: 50 }))
     expect(past.hasMore).toBe(false)
     expect(past.text).toContain('this is the end of the scope')
   })
@@ -935,7 +948,7 @@ describe('task_status pagination', () => {
     // The listing starts at the entry that cannot be shown: a page of zero
     // entries at this offset would report the same offset again, so it is a
     // refusal that names the entry and both ways past it.
-    const result = await stack.service.taskStatus('s-g1', { scope: 'graph', offset: index, limit: 1 })
+    const result = await stack.service.taskStatus('s-root', { scope: 'graph', offset: index, limit: 1 })
     const detail = expectRefused(result, 'context-too-large')
     expect(detail).toContain(taskId)
     expect(detail).toContain(String(lineBytes))
@@ -951,7 +964,7 @@ describe('task_status pagination', () => {
   test("a page that meets an over-bound entry stops before it, at that entry's own index", async () => {
     const { stack, chain } = await chainStack()
     const { taskId, index } = await seedOversizedStatusEntry(stack, chain)
-    const page = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', offset: 0, limit: 100 }))
+    const page = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph', offset: 0, limit: 100 }))
     const shownIds = [...page.text.matchAll(/^- (t-[a-z0-9-]+) /gm)].map(match => match[1] as string)
     // Every entry before the oversized one is shown — none is skipped for the one
     // that does not fit — and the page ends exactly at its index.
@@ -968,13 +981,13 @@ describe('task_status pagination', () => {
 
   test('a limit outside 1–100 is clamped, and the result says so', async () => {
     const { stack } = await chainStack()
-    const clamped = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', limit: 1_000 }))
+    const clamped = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph', limit: 1_000 }))
     expect(clamped.text).toContain('limit 100 (requested offset 0, limit 1000: both are clamped into their ranges)')
-    const zero = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', limit: 0 }))
+    const zero = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph', limit: 0 }))
     expect(zero.text).toContain('limit 1')
-    const negative = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', offset: -5, limit: 2 }))
+    const negative = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph', offset: -5, limit: 2 }))
     expect(negative.text).toContain('offset 0')
-    const inRange = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', limit: 3 }))
+    const inRange = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph', limit: 3 }))
     expect(inRange.text).toContain('scope: graph · offset 0 · limit 3')
     expect(inRange.text).not.toContain('clamped')
   })
@@ -995,7 +1008,7 @@ describe('the obligation footer', () => {
   test('an absent env builder omits the coverage line rather than failing a read', async () => {
     const { stack } = await chainStack()
     await stack.oblige({ obligationId: 'o-1', taskId: 't-c2', sessionId: 's-c2' })
-    const text = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph' })).text
+    const text = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph' })).text
     expect(text).toContain('- obligations: 1 recorded')
     expect(text).not.toContain('obligation coverage')
   })
@@ -1004,7 +1017,7 @@ describe('the obligation footer', () => {
     const { stack } = await chainStack()
     await stack.oblige({ obligationId: 'o-1', taskId: 't-c2', sessionId: 's-c2' })
     stack.mountEnvBuilder()
-    const text = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph' })).text
+    const text = expectOk(await stack.service.taskStatus('s-root', { scope: 'graph' })).text
     expect(text).toContain('- obligations: 1 recorded')
   })
 })
@@ -1042,92 +1055,38 @@ describe('the not-activated view', () => {
   })
 })
 
-/**
- * The decomposition guidance in the worker's contract projection (A2, migrated
- * from the old spawn prompt's conditional rules): the decomposable block when
- * the task was admitted to split, the runtime-split rule when the deployment
- * admits a run's own decomposition, the review-wait rule behind either, and
- * never any of it for a replay or a reviewer. K1 §2 changed what the guidance may
- * claim: one unfinished batch at a time instead of a once-per-task limit, and a
- * batch end that hands the task back rather than submitting for it. The
- * unconditional rules are the agent runtime's worker policy section — the
- * projection does not repeat them.
- */
-describe('the decomposition guidance in the contract projection', () => {
-  test('a decomposable task reads its own block and the review rule, without the runtime-split door when the switch is off', async () => {
+/** The Task method comes from its explicit bound Skill, never synthesized by the read. */
+describe('the bound guidance in the contract projection', () => {
+  test('loads the complete relevant method for a coordinating child and an atomic leaf', async () => {
     const stack = new FixtureStack()
-    stack.graph({ id: 'g-x', rootSessionId: 's-xroot', members: ['s-xw'] })
-    stack.sessionLog('s-xroot', ['request'])
-    stack.sessionLog('s-xw', ['request'])
+    await seedChain(stack)
+    const child = expectOk(await stack.service.contractProjection('s-c1')).text
+    const leaf = expectOk(await stack.service.contractProjection('s-g1')).text
+    expect(child).toContain('## Guidance loaded for this run')
+    expect(child).toContain('### Skill bridge-construction')
+    expect(child).toContain('Delegate the deck as a separate result')
+    expect(leaf).toContain('### Skill deck-construction')
+    expect(leaf).toContain('Check dimensions and fastening')
+    expect(leaf).not.toContain('Delegate the deck')
     stack.runtimeDecomposition = false
-    await stack.seed({ taskId: 't-xroot', sessionId: 's-xroot', runId: 'r-xroot', objective: 'the root goal' })
-    await stack.seed({
-      taskId: 't-xw',
-      sessionId: 's-xw',
-      runId: 'r-xw',
-      objective: 'the decomposable child',
-      parentTaskId: 't-xroot',
-      depth: 1,
-      decomposable: true,
-    })
-    const text = expectOk(await stack.service.contractProjection('s-xw')).text
-    expect(text).toContain("## Own this task's decomposition")
-    expect(text).toContain('was admitted as decomposable')
-    expect(text).toContain('`task_decompose`')
-    expect(text).toContain('multiple independently checkable results or distinct responsibilities')
-    expect(text).toContain('call `task_decompose` before implementing them')
-    expect(text).toContain("retain this task's full acceptance")
-    expect(text).toContain('let each child decide its descendants')
-    expect(text).toContain('Complete a genuinely local result here')
-    expect(text).not.toContain('Do not carry the work to completion yourself')
-    expect(text).toContain('The batch end hands this task back to you')
-    expect(text).toContain('hand this task in yourself with `task_submit_result`')
-    // K1 §2: nothing is submitted on a parent's behalf, so no guidance block may
-    // claim the nested verification would settle this task.
-    expect(text).not.toContain('the nested verification settles this task')
-    expect(text).toContain('waiting for a human review')
-    expect(text).toContain('`task_proposal_read`')
-    expect(text).toContain('a revision is a new proposal')
-    expect(text).not.toContain('even when its parent did not mark it decomposable')
-    expect(text).not.toContain("admits a task's own decomposition")
+    expect(expectOk(await stack.service.contractProjection('s-c1')).text).toBe(child)
   })
 
-  test('a leaf worker reads the runtime-split rule and the review rule when the deployment admits it, and neither when it does not', async () => {
+  test('refuses an executing Task without bound guidance and a damaged snapshot', async () => {
     const stack = new FixtureStack()
-    const chain = await seedChain(stack)
-
-    const on = expectOk(await stack.service.contractProjection('s-c1')).text
-    expect(on).toContain("## Own this task's decomposition")
-    expect(on).toContain("admits a task's own decomposition")
-    expect(on).toContain('Use its refusal to fix the violated rule, not to weaken acceptance')
-    expect(on).toContain('One batch at a time is the rule')
-    expect(on).toContain('may split again once its own batch ends')
-    // K1 §2: the once-per-task decomposition limit is gone; the guidance must not
-    // carry it forward.
-    expect(on).not.toContain('split only once')
-    expect(on).toContain('waiting for a human review')
-    expect(on).not.toContain('was admitted as decomposable')
-
-    stack.runtimeDecomposition = false
-    const off = expectOk(await stack.service.contractProjection('s-c1')).text
-    expect(off).not.toContain('task_decompose')
-    expect(off).not.toContain('decompos')
-    expect(off).not.toContain('waiting for a human review')
-
-    // A replay re-runs the one task as contracted: no decomposition guidance
-    // whatever the switch says.
-    stack.runtimeDecomposition = true
-    const replay = expectOk(await stack.service.contractProjection(chain.replaySession)).text
-    expect(replay).not.toContain("## Own this task's decomposition")
-    expect(replay).not.toContain('waiting for a human review')
+    await seedChain(stack, 's-root', true)
+    expect(expectRefused(await stack.service.contractProjection('s-c1'), 'unreadable')).toContain('content-mismatch')
+    stack.member('g-s-root', 's-unguided')
+    stack.sessionLog('s-unguided', ['build a separate deck'])
+    await stack.seed({ taskId: 't-unguided', sessionId: 's-unguided', runId: 'r-unguided',
+      objective: 'build a separate deck', parentTaskId: 't-root', depth: 1 })
+    expect(expectRefused(await stack.service.contractProjection('s-unguided'), 'unreadable')).toContain('no bound guidance Skill')
   })
 
   test("the unconditional worker rules are the agent runtime's policy section, not this projection", async () => {
     const stack = new FixtureStack()
     await seedChain(stack)
     const text = expectOk(await stack.service.contractProjection('s-c1')).text
-    // One rule, one home: the stable policy (submission, idle, self-check) is
-    // not repeated in the projection the contract owns.
     expect(text).not.toContain('Going idle is not a submission')
     expect(text).not.toContain('`task_verify` is only a self-check')
     expect(text).not.toContain('never declare completion yourself — an external verifier')

@@ -15,7 +15,7 @@ import {
 
 describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
   test('a batch admitted with contracts persists them, with the batch identity and limits on the parent event', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const spec: DecomposeSpec = {
       reason: 'split the work',
@@ -33,6 +33,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
     const child = await h.task.taskIn(STORE, outcomes[0]!.taskId)
     expect(child.contract).toEqual({
       contractVersion: 1,
+      templateScope: [],
       objective: 'child a',
       acceptanceCriteria: [
         {
@@ -65,7 +66,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
     // The runtime writes the same batch identity the pure normalization entry
     // computes for the same proposal and parent — the ids it minted per child
     // are not part of it.
-    const expected = normalizeDecomposition(spec, {
+    const expected = normalizeDecomposition({ ...spec, children: spec.children!.map(child => ({ ...child, templateScope: [] })) }, {
       storeId: STORE,
       parentTaskId: rootTaskId,
       parentRunId: rootRunId,
@@ -122,7 +123,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
         {
           reason: 'split the work',
           children: children({
-            objective: 'child a',
+            objective: 'child a', requiredCapabilities: ['execute-task'],
             acceptanceCriteria: [{ description: 'child a works', command: 'true' }],
             skills: ['ball-align'],
           }),
@@ -134,7 +135,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
         {
           reason: 'split the work',
           children: children({
-            objective: 'child a',
+            objective: 'child a', requiredCapabilities: ['execute-task'],
             acceptanceCriteria: [
               { description: 'first', criterionId: 'dup', command: 'true' },
               { description: 'second', criterionId: 'dup', command: 'true' },
@@ -157,7 +158,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
         {
           reason: 'split the work',
           children: children({
-            objective: 'child a',
+            objective: 'child a', requiredCapabilities: ['execute-task'],
             acceptanceCriteria: [{ description: 'nothing is required', command: 'true', mandatory: false }],
           }),
         },
@@ -168,7 +169,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
         {
           reason: 'split the work',
           children: children({
-            objective: 'child a',
+            objective: 'child a', requiredCapabilities: ['execute-task'],
             acceptanceCriteria: [{ description: 'child a works', command: 'true', mode: null }],
           }),
         },
@@ -179,7 +180,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
         {
           reason: 'split the work',
           children: children({
-            objective: 'child a',
+            objective: 'child a', requiredCapabilities: ['execute-task'],
             acceptanceCriteria: [{ description: 'child a works', command: 'true', mode: 0 }],
           }),
         },

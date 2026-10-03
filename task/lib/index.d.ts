@@ -47,6 +47,12 @@ interface CriterionSpec {
 }
 type TemplateParameter = string | number | boolean;
 type TemplateParameters = Record<string, TemplateParameter>;
+/** Catalog prefixes are part of a task's contract; an empty scope sees only explicit general templates. */
+type CatalogPath = string[];
+type TemplateScope = CatalogPath[];
+declare function parseCatalogPath(raw: unknown): CatalogPath;
+declare function catalogPathWithin(path: readonly string[], prefix: readonly string[]): boolean;
+declare function parseTemplateScope(raw: unknown): TemplateScope;
 interface TaskTemplateRef {
   id: string;
   version: number;
@@ -73,14 +79,26 @@ interface TaskTemplateContract {
 interface TaskTemplate {
   id: string;
   version: number;
+  catalogPath: CatalogPath;
   /** Conditions the caller must check before choosing this template. */
   appliesTo: string[];
   parametersSchema: TemplateParametersSchema;
   /** Complete authoring contract; {{name}} placeholders bind declared primitive parameters. */
   contract: TaskTemplateContract;
+  /** A reusable direct-child proposal, expanded through the same task_decompose admission. */
+  decomposition?: {
+    contractVersion?: 1;
+    reason: string;
+    children: (TaskContractInput & {
+      dependsOn?: number[];
+      decomposable?: boolean;
+      requiresIndependentAcceptance?: boolean;
+    })[];
+  };
 }
 /** Creation accepts either a full contract or a pinned template plus parameters. */
 interface TaskContractInput extends Partial<TaskTemplateContract> {
+  templateScope?: TemplateScope;
   templateRef?: TaskTemplateRef;
   templateParameters?: TemplateParameters;
 }
@@ -107,6 +125,7 @@ interface TaskContract {
   /** Immutable provenance of a template instance; omitted for a free contract. */
   templateRef?: TaskTemplateRef;
   templateParameters?: TemplateParameters;
+  templateScope?: TemplateScope;
 }
 /** The limits one decomposition batch was admitted under (§4). Recorded with the batch, never derived from the contract: a contract's own text has no field that can raise a limit, and the runtime resolves every value here from its … */
 interface AdmissionContext {
@@ -141,6 +160,8 @@ interface DecompositionChildIdentity {
 /** Everything a batch proposal's identity covers (§4): where it came from (store, parent task and run, caller), which contract language it is written in, why it was proposed, and the complete ordered children. */
 interface DecompositionIdentity {
   contractVersion: TaskContractVersion;
+  templateRef?: TaskTemplateRef;
+  templateParameters?: TemplateParameters;
   storeId: string;
   parentTaskId: string;
   parentRunId: string;
@@ -1432,4 +1453,4 @@ declare class TaskService extends Service {
   private proposalEnvelopeTaskIn;
 }
 //#endregion
-export { AcceptanceCriterion, AdmissionContext, ArtifactRef, BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, BudgetExtensionProposal, BudgetExtensionRequest, CapabilityManifest, ChildEvidenceRef, CriterionSpec, DecompositionAdmission, DecompositionIdentity, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, type EventStoreConfig, EventStoreSet, type EventStoreState, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, RootProposalIdentity, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunProviderBinding, RunRecovery, RunSkillBinding, RunStatus, type StoreEntry, type StoreOpenMode, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskBudgetExtension, TaskBudgetExtensionClaim, TaskBudgetExtensionIndex, TaskContract, TaskContractInput, TaskContractVersion, TaskEvent, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskState, TaskStatus, TaskTemplate, TaskTemplateContract, TaskTemplateRef, TemplateParameter, TemplateParameters, TemplateParametersSchema, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, definedKeys, describeBudgetExtension, describeBudgetReading, isTerminalRunStatus, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest };
+export { AcceptanceCriterion, AdmissionContext, ArtifactRef, BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, BudgetExtensionProposal, BudgetExtensionRequest, CapabilityManifest, CatalogPath, ChildEvidenceRef, CriterionSpec, DecompositionAdmission, DecompositionIdentity, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, type EventStoreConfig, EventStoreSet, type EventStoreState, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, RootProposalIdentity, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunProviderBinding, RunRecovery, RunSkillBinding, RunStatus, type StoreEntry, type StoreOpenMode, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskBudgetExtension, TaskBudgetExtensionClaim, TaskBudgetExtensionIndex, TaskContract, TaskContractInput, TaskContractVersion, TaskEvent, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskState, TaskStatus, TaskTemplate, TaskTemplateContract, TaskTemplateRef, TemplateParameter, TemplateParameters, TemplateParametersSchema, TemplateScope, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, decompositionDigest, definedKeys, describeBudgetExtension, describeBudgetReading, isTerminalRunStatus, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest };

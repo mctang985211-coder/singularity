@@ -27,14 +27,14 @@ interface ChildSpec {
 /** One child spec: a goal a command settles, so the child is an ordinary admitted task. */
 const children = (objective: string): ChildSpec[] => [
   {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ description: `${objective} works`, command: 'false' }],
   },
 ]
 
 /** The root contract every case runs under (A0 §1.2). */
 const ROOT_CONTRACT = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
 
@@ -227,6 +227,7 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
 
     // The narrow half: the same terminal phase still refuses a write, before its
     // body ever runs.
+    await vi.waitFor(() => expect(h.calls.find(call => call.name === 'graph_spawn')?.result).toBeDefined())
     const write = h.calls.find(call => call.name === 'graph_spawn')!
     expect(write.sessionId).toBe(String(ROOT))
     expect(write.result?.isError).toBe(true)

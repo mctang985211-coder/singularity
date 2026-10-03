@@ -51,7 +51,7 @@ const STORE = rootTaskStoreId(String(ROOT))
 
 /** The root contract every case runs under: the goal's own check and the map over the member that fails. */
 const ROOT_CONTRACT = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [
     { criterionId: 'root-goal', description: 'the release is shipped', command: 'true' },
     {
@@ -183,7 +183,7 @@ function script(
           tool: 'task_decompose',
           args: {
             reason: 're-run the failed position',
-            children: [{ objective: 'the member, again', acceptanceCriteria: [{ criterionId: 'member-0', description: 'it holds', command: 'true' }] }],
+            children: [{ objective: 'the member, again', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ criterionId: 'member-0', description: 'it holds', command: 'true' }] }],
           },
         },
         { text: 'attempt: the replacement is running' },
@@ -206,11 +206,11 @@ function script(
           tool: 'task_decompose',
           args: {
             reason: 'split the work',
-            children: [{ objective: 'the member that fails', acceptanceCriteria: [{ criterionId: 'member-0', description: 'it holds', command: 'false' }] }],
+            children: [{ objective: 'the member that fails', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ criterionId: 'member-0', description: 'it holds', command: 'false' }] }],
           },
         },
         { text: 'root: the batch is running' },
-        { waitFor: () => cells.batchDone },
+        { waitFor: async () => { await cells.batchDone; await waitForHandback(loop, sessionId) } },
         { tool: 'task_submit_result', args: { summary: 'root: handed in' } },
         { text: 'root: handed in' },
         ...review,

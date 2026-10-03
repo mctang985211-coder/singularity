@@ -10,21 +10,28 @@ Task 规定结果，Skill 提供方法，Tool/MCP 提供动作。父节点优先
 
 ## Task 模板与 DAG
 
-- 模板是 `<id>@<version>.json`，含适用条件、参数 schema 和完整契约。库默认在 `$DSH_HOME/singularity/task-templates`，未设置 DSH_HOME 时在 `~/.dsh/singularity/task-templates`。`task_template_list` 是唯一模型检索入口。
+- 模板是 `<id>@<version>.json`，含必填 `catalogPath`、适用条件、参数 schema、完整契约和可选直接子节点 `decomposition` 配方。库默认在 `$DSH_HOME/singularity/task-templates`，未设置 DSH_HOME 时在 `~/.dsh/singularity/task-templates`。`task_template_list` 是唯一模型检索入口。
+- root 选择 `templateScope` 分类前缀，child 继承或收窄；`general` 分类保持可见。目录由同一模板库计算，不另建索引或 Task 管理器。`task_template_list` 先给有界摘要和分页，再按精确引用读取全文；每次可执行模型请求先装配范围内摘要。
+- 全部实例进入同一持久 Task 图；实例不自动成为通用模板，只有经 Evolution 对照验证和审批后才发布可复用定义。
 - 实例固定模板引用、参数与最终 contractDigest；无适用模板可提交标准契约，两者共用 normalize/admission。旧 Task 契约、旧 Run 的 Skill/MCP/模型绑定保持固定。
+- worker／reviewer 的 Task、状态、Run 与 session 读取限定为职责子树、祖先和直接依赖；root／supervisor 保留其图的全局视野。模板分类范围与执行实例视野分别约束检索和运行上下文。
 - 原子叶以明确输入产出一个可独立验收的结果；一次执行可调用多个工具。节点只写自己的直接子任务，按真实产物声明兄弟依赖，不把工具调用转换成 Task。现有拓扑保持父子分解树与同批兄弟依赖 DAG，不新增通用图编译器。
+- Supervisor 可经 `task_definition` 改进 Task 内容与 `decomposition.children[].dependsOn` 前后关系。配方通过同一 `task_decompose` 展开、归一化、准入与调度，冻结引用和参数进入提案身份。晋升核对真实工具调用／返回、批次消费、子合同及依赖边；仅写 JSON 或伪造引用不能晋升。旧图不原地接线，批准后由负责父节点或新 root Run 消费新定义。
 - `task_definition` 候选为 `{template,criterionRepair?}`。两侧冻结完整同格式模板库及摘要，session overlay 继承到新后代；父/根原验收保持不变，新 child 必须实际消费候选版本。
 - 首次发布采用 `baseVersion: 'absent'`、version 1；更新追加 N+1。更新回滚追加原内容为 N+2，首次发布回滚移除新 v1；历史实例及实验记录保留。发布与回滚复用已有 file commit 和重启对账。
 - 修改 child 判据须提供已有固定正反例，同原独立 oracle 的终态记录交叉验证，再重放 oracle 与候选判据；恒真候选不能洗白负例。该检查只证明冻结样本，不声称证明所有未来输入。已接受根契约的原地改题入口未开放。
 
 ## Skill、外部工具与 MCP
 
-- 已有 Skill 同名更新沿原候选、双侧实验、人审和提交路径执行。
+- 每个可执行 Task（root、协调父节点、原子叶）必须经 `requiredCapabilities` 选择至少一份可读、非空指导 Skill；根准入、子节点、恢复和重放共用检查。Skill 正文从该 Run 的冻结快照完整进入模型请求，缺失或篡改时拒绝执行。包内提供 `task-coordination` 与 `task-execution` 的基本方法，业务能力仍显式配置；叶节点应选择其结果对应的方法。
+- 已有 Skill 同名更新沿原候选、双侧实验、人审和提交路径执行。Supervisor 优先改 Task 定义、DAG 配方和绑定 Skill 内容，录得工具能力缺口后再改 Tool／MCP。
 - capability 候选为 `{rows,skill?,mcpServers?}`，恰好一个整行变更，可只授予已有 native tools 或 MCP，不强迫生成 Skill。新 execution Skill 仍使用 SKILL.md 与既有侧车格式。
 - 删除核心 BB server 表。部署 `mcpServers` 是唯一注册来源，同一 parser 校验部署和候选；新增定义包含 serverName、description、command、args/env/cwd 与可选调用时限。capability 引用 registry id，实际工具名使用 `mcp__<serverName>__<tool>`。
 - 候选配置复用 session binding 传给实际新后代：准入、Skill discovery、MCP 解析与调用均使用该侧 overlay，基线和生产配置独立。中断实验沿已有 ledger 结算，再由新的冻结 replay 重入；不声称中断 side 透明续跑。候选 registry 在隔离实验中挂载，真实启动 stdio server 并调用工具。摘要、registry revision 与 Run binding 冻结并在晋升前重读；审批呈现完整 mutation、启动定义、配置摘要和实际写入目标。
 - 行与新定义一次写入部署配置，再更新 runtime registry；复用已有 commit intent、原子文件替换与 reconcile。回滚恢复行并移除新定义与可选新 Skill，已有 Run 保持实际绑定。开放 intent 阻断相关新准入。
 - Native tools 必须已有授权；发布新 verifier、permission、preset/runtime policy 与任意资源包仍没有执行器，不伪装为已有自动能力。
+
+部署显式选择指导方法，例如 `coordinate-tasks: {skills: [task-coordination]}` 与 `execute-task: {skills: [task-execution]}`；领域任务可选择已有领域 Skill。包内方法的存在不自动授予 capability。旧格式模板不能混入新目录；备份旧库后重新发布带 `catalogPath` 的模板并重新计算引用，历史契约与引用仍保留作诊断。未绑定指导的历史 Run 可以读取，但不能沿用旧绑定继续执行，需要有指导的新 Task。
 
 ## 验收与成功优化
 
@@ -41,3 +48,9 @@ Task 规定结果，Skill 提供方法，Tool/MCP 提供动作。父节点优先
 真实模型 `deepseek/deepseek-v4.1-flash` 使用生产 prompt 与工具 schema，生成两个原子叶、一个真实产物依赖：`[3,7,-2] → [9,49,4] → {count:3,sum:62}`。TaskRuntime/AgentRuntime 执行实际 read/write 与受保护 command verifier，根和两叶均 verified。计划与执行记录见 [live DAG smoke](2026-10-03-live-dag-smoke.json)。
 
 集成中的演化模型和审批回应为可控脚本，MCP 是实际 stdio 子进程；真实模型 smoke 的请求循环由 runner 控制。上述证据证明机制可执行和一个小 DAG 可完成，长期真实模型自主自改进的质量仍需业务任务实测。
+
+第三轮实现将方法从硬编码 root prompt 移入正式 Skill，并补齐每 Task 指导、分类范围、请求前摘要、DAG 配方执行与晋升校验。构建和声明生成通过，unit 2253 通过；最终串行 integration 627 通过、6 按配置跳过（含 opt-in live 用例，已另行启用通过）。469 个手写源文件（含测试）全部 ≤2000 行，持久化 schema 与 diff 检查通过。独立包 `tsc --noEmit` 仍会报告源码／lib 重复声明与旧测试类型问题，未将其计为通过。
+
+真实模型增长验证：两组独立输入分别完成 5 个 Task、深度 2 的责任树与产物依赖 DAG；根、中间节点、原子叶全部 verified。同一 `transform-numbers` 配方和 `summarize-transforms` 模板被再次消费，每个 Run 绑定指导，30 个无关 web 模板未进入请求。结果 `[3,7,-2] → {count:3,sumSquares:62,sumAbsolute:12}`、`[2,-5] → {count:2,sumSquares:29,sumAbsolute:7}`，实际请求分别 38／36 次。证据见 [live Task growth](2026-10-03-live-task-growth.json)，可按其命令启用复验。
+
+第三轮备份：Singularity 与外层 harness 均使用 `backup/self-develop-20261003-round3`。Supervisor 内容／依赖修复、Skill 更新和 MCP 注册发布由脚本驱动真实工具与审批链验证；真实模型验证了递归 Task 生长和复用，尚未证明长期真实模型自主 Supervisor 的收益。

@@ -1,12 +1,13 @@
 /** Independent process fixture. Every runtime import is the deployment's built lib. */
 import assert from 'node:assert/strict'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context, Service } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import LlmRuntime, {
   LlmAdapter,
   createUserMessage,
 } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
+import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
 import SessionStore, { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import SessionProjectionRegistry from '../../../../thirdparty/deepseek-harness/packages/session/session-projection/lib/index.js'
 import SystemPrompt from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
@@ -31,7 +32,8 @@ assert.ok(directory)
 const realNow = Date.now
 Date.now = () => realNow() + Number(process.env.G_CONTINUE_CLOCK_ADVANCE_MS ?? 0)
 process.env.DSH_HOME = join(directory, 'home')
-mkdirSync(process.env.DSH_HOME, { recursive: true })
+mkdirSync(join(process.env.DSH_HOME, 'skills', 'task-execution'), { recursive: true })
+copyFileSync(new URL('../../agent-runtime/skills/task-execution/SKILL.md', import.meta.url), join(process.env.DSH_HOME, 'skills', 'task-execution', 'SKILL.md'))
 const ctx = new Context()
 const requests = []
 const calls = []
@@ -93,7 +95,7 @@ class FrozenProvider extends LlmAdapter {
         message.content.some(block => block.type === 'text' && block.text === goal),
       )
       response = userGoal
-        ? toolChunks('task_intake', { objective: goal, acceptanceCriteria: [criterion] })
+        ? toolChunks('task_intake', { objective: goal, requiredCapabilities: ['execute-task'], acceptanceCriteria: [criterion] })
         : textChunks('environment ready')
     } else if (run.status !== 'running') {
       response = textChunks('result accepted')
@@ -127,17 +129,17 @@ class FrozenProvider extends LlmAdapter {
           requestKey: 'release-parts',
           children: [
             {
-              objective: 'prepare release evidence',
+              objective: 'prepare release evidence', requiredCapabilities: ['execute-task'],
               acceptanceCriteria: [{ description: 'evidence is written', command: 'test -f sibling.txt' }],
             },
-            { objective: 'coordinate release artifact', acceptanceCriteria: [criterion] },
+            { objective: 'coordinate release artifact', requiredCapabilities: ['execute-task'], acceptanceCriteria: [criterion] },
           ],
         })
       } else if (task.objective === 'coordinate release artifact' && task.childTaskIds.length === 0) {
         response = toolChunks('task_decompose', {
           reason: 'The artifact has a distinct verifiable result.',
           requestKey: 'release-artifact',
-          children: [{ objective: 'write release artifact', acceptanceCriteria: [criterion] }],
+          children: [{ objective: 'write release artifact', requiredCapabilities: ['execute-task'], acceptanceCriteria: [criterion] }],
         })
       } else if (
         task.objective === 'prepare release evidence' &&
@@ -196,6 +198,7 @@ await ctx.plugin(LlmRuntime)
 await ctx.plugin(SessionStore)
 await ctx.plugin(SessionProjectionRegistry)
 await ctx.plugin(SystemPrompt, {})
+await ctx.plugin(SkillRegistry, {})
 await ctx.plugin(ToolRuntime)
 await ctx.plugin(AgentRegistry)
 new JsonlSessionPersistence(ctx, { root: join(directory, 'sessions'), compression: 'none' })
@@ -231,7 +234,7 @@ if (mode === 'retry-wake') {
 new TaskService(ctx)
 const verifier = new VerifierRegistry(ctx, { evidenceRoot: join(directory, 'evidence') })
 await verifier.ready()
-runtime = new TaskRuntime(ctx, { capabilities: {}, runBindingRoot: join(directory, 'bindings') })
+runtime = new TaskRuntime(ctx, { capabilities: { 'execute-task': { skills: ['task-execution'] } }, runBindingRoot: join(directory, 'bindings') })
 await runtime[Service.init]()
 await ctx.plugin(AgentLoop, { agents: [] })
 const graphs = new GraphsService(ctx)
@@ -245,10 +248,10 @@ const singularity = new SingularityAgent(ctx, { evolution: 'off', supervision: {
 await singularity[Service.init]()
 ctx.tools.register({
   name: 'skill',
-  description: 'This fixture has no capability skills.',
+  description: 'Read the task execution method selected by this Task.',
   parameters: { type: 'object', properties: {} },
   output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-  execute: async () => 'No capability skills are needed for the release fixture.',
+  execute: async () => readFileSync(join(process.env.DSH_HOME, 'skills', 'task-execution', 'SKILL.md'), 'utf8'),
 })
 ctx.tools.register({
   name: 'read',

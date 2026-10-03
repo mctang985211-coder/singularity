@@ -424,6 +424,8 @@ declare class SingularityContextService extends Service {
   contractFor(caller: LoadedCaller): Promise<ProjectedRead>;
   dynamicFor(caller: LoadedCaller): Promise<ProjectedRead>;
   questionsFor(caller: LoadedCaller): Promise<ProjectedRead>;
+  /** Retrieve the current visible catalog before the model decides its next children. */
+  templatesFor(caller: LoadedCaller): Promise<string>;
   private bindingDeps;
   private readDeps;
   /** The env builder this deployment mounts, when it mounts one. */

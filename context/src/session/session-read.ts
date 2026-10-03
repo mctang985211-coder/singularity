@@ -20,7 +20,7 @@ export async function sessionRead(
 ): Promise<ProjectedRead> {
   const resolution = loaded.resolution as Exclude<CallerResolution, { kind: 'unbound' }>
   signal?.throwIfAborted()
-  const gate = await sessionMembershipRefusal(deps, resolution, sessionId)
+  const gate = await sessionMembershipRefusal(deps, loaded, sessionId)
   if (gate !== undefined) return gate
   const offset = Math.max(0, Math.trunc(requestedOffset ?? 0))
   const requestedEvents = Math.trunc(requestedLimit ?? SESSION_LIMIT_DEFAULT)

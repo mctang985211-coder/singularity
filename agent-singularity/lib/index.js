@@ -1145,6 +1145,7 @@ const SUPERVISOR_BASELINE = [
 	"task_status",
 	"context_read",
 	"capability_list",
+	"task_template_list",
 	"evolution_propose",
 	"evolution_candidate",
 	"evolution_prepare",
@@ -2752,7 +2753,7 @@ const DECLARED$2 = [
 function defineContextReadTool(ctx) {
 	return defineTool({
 		name: "context_read",
-		description: `Read one record of the caller's own graph domain by its reference. Kinds and their references: \`task\` (a task id), \`run\` (a run id), \`evidence\` (an evidence id), \`diagnosis\` (a diagnosis id), \`review\` (\`{taskId, runId}\` — a review has no id of its own; use runId null for a task that blocked before any run), and \`session\`, which has two forms. \`session\` with a session id pages that session's log by DSH event seq: \`offset\` is an event seq and \`limit\` an event count (default 20, at most 100). An event too large for a listing page is never cut: the listing stops at that event's seq and names the exact \`{sessionId, seq}\` reference to read it with. \`session\` with \`{sessionId, seq}\` reads that one event's visible text (the same text the listing renders), paged in UTF-8 BYTES: \`offset\` is a byte offset into that text (default 0) and \`limit\` the page size in bytes (default the bound, clamped into 4..${CONTEXT_OUTPUT_LIMIT_BYTES}). A successful single-event page is a JSON object carrying sessionId, seq, offset, nextOffset, hasMore and body (this page's fragment, so concatenating the pages' body values by nextOffset restores the whole text); its last page says how to return to the listing. Task-class records are read whole and paged in UTF-8 BYTES: \`offset\` is a byte offset into the record text and \`limit\` is the page size in bytes (the whole answer never exceeds ${CONTEXT_OUTPUT_LIMIT_BYTES} bytes); an oversized record answers the first page with the next byte offset to continue from. The reference never widens the domain: an id this graph's store does not hold, a stale reference, an unreadable record and a session of another graph each come back as a named refusal (not-found, stale-reference, unreadable, cross-graph, context-too-large).`,
+		description: `Read one record of the caller's own graph domain by its reference. Kinds and their references: Workers and delegated reviewers can read their task branch, ancestor context and dependency neighbours; roots and supervisors retain their domain view. \`task\` (a task id), \`run\` (a run id), \`evidence\` (an evidence id), \`diagnosis\` (a diagnosis id), \`review\` (\`{taskId, runId}\` — a review has no id of its own; use runId null for a task that blocked before any run), and \`session\`, which has two forms. \`session\` with a session id pages that session's log by DSH event seq: \`offset\` is an event seq and \`limit\` an event count (default 20, at most 100). An event too large for a listing page is never cut: the listing stops at that event's seq and names the exact \`{sessionId, seq}\` reference to read it with. \`session\` with \`{sessionId, seq}\` reads that one event's visible text (the same text the listing renders), paged in UTF-8 BYTES: \`offset\` is a byte offset into that text (default 0) and \`limit\` the page size in bytes (default the bound, clamped into 4..${CONTEXT_OUTPUT_LIMIT_BYTES}). A successful single-event page is a JSON object carrying sessionId, seq, offset, nextOffset, hasMore and body (this page's fragment, so concatenating the pages' body values by nextOffset restores the whole text); its last page says how to return to the listing. Task-class records are read whole and paged in UTF-8 BYTES: \`offset\` is a byte offset into the record text and \`limit\` is the page size in bytes (the whole answer never exceeds ${CONTEXT_OUTPUT_LIMIT_BYTES} bytes); an oversized record answers the first page with the next byte offset to continue from. The reference never widens the domain: an id this graph's store does not hold, a stale reference, an unreadable record and a session of another graph each come back as a named refusal (not-found, stale-reference, unreadable, cross-graph, context-too-large).`,
 		parameters: {
 			kind: {
 				type: "string",
@@ -4081,6 +4082,14 @@ function defineTaskCancelTool(ctx) {
 //#region src/tools/task-template-list.ts
 /** The same creation input is accepted by root intake and each direct child. */
 const templateBindingParameters = {
+	templateScope: {
+		type: "array",
+		items: {
+			type: "array",
+			items: { type: "string" }
+		},
+		description: "Catalog prefixes for this task. The root selects relevant branches from the user goal; a child may inherit by omitting this field or narrow its parent scope. [] permits only explicit general templates. This grants no tools or capabilities."
+	},
 	templateRef: {
 		type: "object",
 		additionalProperties: false,
@@ -4109,19 +4118,34 @@ const templateBindingParameters = {
 function defineTaskTemplateListTool(ctx) {
 	return defineTool({
 		name: "task_template_list",
-		description: "Find reusable Task contracts before intake or decomposition. Returns each matching id's latest immutable version, exact digest, applicability conditions, parameter schema and complete contract. Read appliesTo to decide whether it fits; bind a suitable template in task_intake/task_decompose. With no suitable template, write a full standard contract.",
-		parameters: { query: {
-			type: "string",
-			description: "Optional whitespace-separated discovery keywords; omit to inspect the full current library. Applicability is decided from appliesTo, not keyword matches."
-		} },
+		description: "Browse the caller-visible Task catalog and finite summary pages. Select catalogPath from the user goal before root intake; child queries stay within inherited branches plus general. Read an exact templateRef for the complete contract, parameter schema and optional direct-child decomposition. Choose a fitting reference and parameters or write a complete standard contract.",
+		parameters: {
+			query: {
+				type: "string",
+				description: "Optional discovery keywords within the visible scope; appliesTo decides applicability."
+			},
+			catalogPath: {
+				type: "array",
+				items: { type: "string" },
+				description: "Catalog branch to browse; cannot widen an admitted task scope."
+			},
+			templateRef: templateBindingParameters.templateRef,
+			offset: {
+				type: "integer",
+				description: "Page offset; use nextOffset from the previous response."
+			},
+			limit: {
+				type: "integer",
+				description: "Page size from 1 to 20; default 10."
+			}
+		},
 		output: {
 			schema: { type: "string" },
 			render: (_args, value) => text(value)
 		},
 		execute: async (args, exec) => {
 			try {
-				const matches = await ctx.taskRuntime.findTaskTemplates(args.query, sessionId(exec, "task_template_list"));
-				return matches.length === 0 ? "No matching Task template. You may still submit a complete standard contract, preserving the requested objective and acceptance." : JSON.stringify(matches, null, 2);
+				return JSON.stringify(await ctx.taskRuntime.listTaskTemplates(args, sessionId(exec, "task_template_list")), null, 2);
 			} catch (error) {
 				return `task_template_list failed: ${message(error)}`;
 			}
@@ -4273,12 +4297,13 @@ async function pendingReviewText(input) {
 function defineTaskDecomposeTool(ctx) {
 	return defineTool({
 		name: "task_decompose",
-		description: "Delegate the caller's current task's independently checkable results or distinct responsibilities to child tasks. Call task_template_list first; use a suitable pinned template and parameters, or write a full standard contract when none applies. Each caller owns its full result and may coordinate children that decompose again; define only this level and let each child decide its descendants. The batch is admitted atomically and the runtime then runs them one at a time in dependency order; this call returns at admission and does not wait. Each child is verified against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.",
+		description: "Delegate the caller's current task's independently checkable results or distinct responsibilities to child tasks. Call task_template_list first; use a suitable pinned template and parameters, or write a full standard contract when none applies. A template carrying decomposition can supply this batch: pass its exact templateRef and templateParameters at the top level, omitting reason and children. The runtime expands its direct children and dependsOn through the same admission path. Each caller owns its full result and may coordinate children that decompose again; define only this level and let each child decide its descendants. The batch is admitted atomically and the runtime then runs them one at a time in dependency order; this call returns at admission and does not wait. Each child is verified against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.",
 		parameters: {
+			templateRef: templateBindingParameters.templateRef,
+			templateParameters: templateBindingParameters.templateParameters,
 			reason: {
 				type: "string",
-				required: true,
-				description: "Why this delegation is needed; recorded in each child handoff"
+				description: "Required for a free batch; omit when binding a decomposition template. Why this delegation is needed; recorded in each child handoff"
 			},
 			...proposalSubmissionParameters({
 				versionSubject: "batch",
@@ -4287,8 +4312,7 @@ function defineTaskDecomposeTool(ctx) {
 			}),
 			children: {
 				type: "array",
-				required: true,
-				description: "Child tasks to admit and run",
+				description: "Required for a free batch; omit when binding a decomposition template. Child tasks to admit and run",
 				items: {
 					type: "object",
 					additionalProperties: false,
@@ -4412,7 +4436,7 @@ function admittedText(taskId, batchId, childTaskIds) {
 		"",
 		`The runtime owns batch ${batchId} now: it starts the children one at a time in dependency order and drives the batch to its end. This call returns at admission and does not wait for the batch.`,
 		"You are in phase waiting_children: read and query with `task_read`/`task_status` (and diagnose or inspect), or end the run together with its batch with `task_cancel` if abandoning this run. Writes, shell commands, another decomposition and a submission of your own are refused while the children run — do not start work that would collide with theirs in the shared checkout.",
-		"The batch end reaches you as a message naming each child's terminal state and evidence, and it hands your execution back: nothing is submitted on your behalf. Back in phase active you continue your own work, admit another batch with `task_decompose`, or hand this task in yourself with `task_submit_result` — only that submission starts its acceptance."
+		"After handling any pending child question, end this turn and let the batch-end message resume you; repeated polling does not advance child execution.\nThe batch end reaches you as a message naming each child's terminal state and evidence, and it hands your execution back: nothing is submitted on your behalf. Back in phase active you continue your own work, admit another batch with `task_decompose`, or hand this task in yourself with `task_submit_result` — only that submission starts its acceptance."
 	].join("\n");
 }
 
@@ -5080,12 +5104,12 @@ function defineTaskReviewAgentTool(ctx) {
 function defineTaskStatusTool(ctx) {
 	return defineTool({
 		name: "task_status",
-		description: "The caller's project status, paged. Scope `related` (the default) covers the caller's own task, its direct children and the tasks directly adjacent to it through a dependency edge; scope `graph` is the whole domain overview, sorted by task id. Each line carries the task status, its latest run with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, the terminal review outcome and the diagnosis count. Entries are sorted by task id and paged with `offset` (from 0) and `limit` (default 20, at most 100); the answer states whether more entries follow and the offset to continue with. Pages are observations, not a consistent snapshot across calls. Before any root contract has been accepted the answer is the named not-activated state (with whatever proposal is still open).",
+		description: "The caller's project status, paged. Scope `related` (the default) covers the caller's own task, its direct children and the tasks directly adjacent to it through a dependency edge; scope `graph` lists the caller's readable domain, sorted by task id. Workers and delegated reviewers remain within their task branch, ancestor context and dependency neighbours; roots and supervisors retain their domain view. Each line carries the task status, its latest run with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, the terminal review outcome and the diagnosis count. Entries are sorted by task id and paged with `offset` (from 0) and `limit` (default 20, at most 100); the answer states whether more entries follow and the offset to continue with. Pages are observations, not a consistent snapshot across calls. Before any root contract has been accepted the answer is the named not-activated state (with whatever proposal is still open).",
 		parameters: {
 			scope: {
 				type: "string",
 				enum: ["related", "graph"],
-				description: "related (default): the caller's own task, its direct children and its direct dependency neighbours; graph: every task in the domain"
+				description: "related (default): own task, direct children and dependency neighbours; graph: readable branch for workers/reviewers, whole domain for roots/supervisors"
 			},
 			offset: {
 				type: "number",

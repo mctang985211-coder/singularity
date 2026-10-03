@@ -188,6 +188,15 @@ export class SingularityContextService extends Service {
     return await questionProjection(this.readDeps(), caller)
   }
 
+  /** Retrieve the current visible catalog before the model decides its next children. */
+  async templatesFor(caller: LoadedCaller): Promise<string> {
+    if (caller.resolution.kind === 'worker' && !this.ctx.taskRuntime.allowsRuntimeDecomposition()) return ''
+    const page = await this.ctx.taskRuntime.listTaskTemplates({ limit: 10 }, caller.resolution.sessionId)
+    return '# Visible Task templates\n' + JSON.stringify(page) +
+      '\nUse task_template_list for another page, a narrower catalogPath, or the full exact templateRef. ' +
+      'Choose an applicable template and parameters, or a complete standard contract when none applies. Instance history is recorded automatically; reusable templates are published selectively through Evolution.'
+  }
+
   private bindingDeps(): BindingDeps {
     return {
       task: this.ctx.task,

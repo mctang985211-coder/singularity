@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../support/skill-roots.ts'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { EvidenceBundle, ReviewRecord, TaskRun, VerificationResult } from '../../../task/src/index.ts'
@@ -88,6 +89,7 @@ function harness(
         _parent: unknown,
         request: {
           sessionId: string
+          name: string
           prompt?: Array<{ type: 'text'; text: string }>
           taskWorker?: boolean
           agentPreset?: string
@@ -219,7 +221,7 @@ function harness(
     ctx.sessionProjections = { snapshot }
     ctx.sessionQuery = { readSession }
   }
-  const runtime = new TaskRuntime(ctx as never, options.config as Config | undefined)
+  const runtime = new TaskRuntime(ctx as never, { ...options.config, capabilities: { ...TASK_GUIDANCE, ...options.config?.capabilities } })
   /** A3's worker protocol: hand the result in through the submission entry, then idle. */
   const defaultIdle = async (sessionId: string): Promise<void> => {
     await runtime.submitResult(sessionId, { summary: `done: ${sessionId}` })
@@ -245,10 +247,10 @@ type Harness = ReturnType<typeof harness>
 
 function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
     ...overrides,
-  } as DecomposeSpec['children'][number]
+  } as NonNullable<DecomposeSpec['children']>[number]
 }
 
 /**
@@ -259,7 +261,7 @@ function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
  * mandatory criterion judged by something other than the composite conjunction.
  */
 const ROOT_CONTRACT: RootContractSpec = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-ship', description: 'the release is shipped', command: 'true' }],
 }
 
@@ -547,8 +549,8 @@ describe('review dimensions and metrics (P4)', () => {
       taskSpecification: { objectivePresent: true, criteriaCount: 1, criteriaWithCommand: 1 },
       acceptance: { criteria: [{ criterionId: 'ac1-1', mode: 'deterministic', hasCommand: true, mandatory: true }] },
       decomposition: { depth: 1, decompositionStatus: 'leaf', childCount: 0, incomingEdges: 0, outgoingEdges: 1 },
-      capabilityCoverage: { closure: 'closed', granted: [], missing: [] },
-      skillFit: { granted: [] },
+      capabilityCoverage: { closure: 'closed', granted: ['task-execution'], missing: [] },
+      skillFit: { granted: ['task-execution'] },
       toolFit: { granted: [] },
     })
     expect(failed.dimensions?.contextEfficiency).toBeUndefined()
@@ -581,8 +583,8 @@ describe('review dimensions and metrics (P4)', () => {
           sessionEvent('tool/call', { turn: 1, step: 1, callId: 'c4', name: 'web_search', arguments: '{}' }, 3),
           sessionEvent('tool/call', { turn: 1, step: 1, callId: 'c9', name: 'hitl_approve', arguments: '{}' }, 4),
           sessionEvent('approval/asked', { id: 'a1', toolName: 'hitl_approve', callId: 'c9' }, 5),
-          sessionEvent('tool/result', { turn: 1, step: 1, message: { isError: true } }, 6),
-          sessionEvent('tool/result', { turn: 1, step: 1, message: { isError: false } }, 7),
+          sessionEvent('tool/result', { turn: 1, step: 1, message: { source: { kind: 'tool', callId: 'c1' }, isError: true } }, 6),
+          sessionEvent('tool/result', { turn: 1, step: 1, message: { source: { kind: 'tool', callId: 'c2' }, isError: false } }, 7),
           sessionEvent('compaction/start', {}, 8),
         ],
       },

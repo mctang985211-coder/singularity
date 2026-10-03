@@ -63,12 +63,12 @@ afterEach(async () => {
 
 /** One child spec: a goal and a criterion the real command verifier settles. */
 const children = (objective: string): DecomposeSpec['children'] => [{
-  objective,
+  objective, requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
 }]
 
 const ROOT_CONTRACT: RootContractSpec = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
 

@@ -127,6 +127,11 @@ async function assembleSingularityContext(service, assembly, context, next) {
 	const caller = await service.load(sessionId, context.signal);
 	switch (caller.resolution.kind) {
 		case "worker": {
+			if (caller.resolution.run.executionPhase === "active") try {
+				withRuntimeContext(assembly, "singularity:task-templates", await service.templatesFor(caller));
+			} catch (error) {
+				throw new AssemblyRefusalError("unreadable", `task-template-catalog-unreadable: ${error instanceof Error ? error.message : String(error)}`);
+			}
 			const contract = await service.contractFor(caller);
 			if (!contract.ok) throwRefusal(contract);
 			const dynamic = await service.dynamicFor(caller);
@@ -139,6 +144,11 @@ async function assembleSingularityContext(service, assembly, context, next) {
 			return next();
 		}
 		case "root": {
+			if (caller.resolution.run === void 0 || caller.resolution.run.executionPhase === "active") try {
+				withRuntimeContext(assembly, "singularity:task-templates", await service.templatesFor(caller));
+			} catch (error) {
+				throw new AssemblyRefusalError("unreadable", `task-template-catalog-unreadable: ${error instanceof Error ? error.message : String(error)}`);
+			}
 			if (caller.resolution.task === void 0) return next();
 			const contract = await service.contractFor(caller);
 			if (!contract.ok) throwRefusal(contract);
@@ -760,7 +770,7 @@ function renderRunBinding(binding, read$1) {
 		"",
 		`- registry revision: ${shortDigest(binding.registryRevision)}`,
 		...lines,
-		...binding.snapshotRoot === void 0 ? ["- a skill named here is read with the `skill` tool when you need its body; this run bound no content snapshot, so the revision and digests above are what it resolved against"] : [`- bound content snapshot: ${binding.snapshotRoot}`, "- a skill named here is read with the `skill` tool when you need its body; the revision, digests and snapshot path above are what this run is bound to"]
+		...binding.snapshotRoot === void 0 ? ["- this run bound no content snapshot; it cannot supply guidance to a model request"] : [`- bound content snapshot: ${binding.snapshotRoot}`, "- the contract context loads the full Skill instructions from this frozen snapshot before task execution"]
 	];
 	if (read$1 !== void 0 && read$1.defects.length > 0) header.push("", "Bound content is not readable: the snapshot no longer matches this run's record, and the production skill path is not a substitute for it.", ...read$1.defects.map((defect) => `- ${defect}`));
 	return header.join("\n");
@@ -934,15 +944,48 @@ function resolveProjectionTarget(loaded, spec) {
 		...loaded.snapshot === void 0 ? {} : { snapshot: loaded.snapshot }
 	};
 }
+/** Task ownership bounds worker/reviewer reads; dependencies and ancestor context remain reachable. */
+function readableTaskIds(loaded) {
+	const { resolution, snapshot } = loaded;
+	if (resolution.kind !== "worker" && resolution.kind !== "reviewer") return void 0;
+	const own = resolution.task;
+	if (own === void 0 || snapshot === void 0) return /* @__PURE__ */ new Set();
+	const branch = /* @__PURE__ */ new Set();
+	const pending = [own.taskId];
+	while (pending.length > 0) {
+		const id = pending.pop();
+		if (branch.has(id)) continue;
+		branch.add(id);
+		pending.push(...snapshot.tasks.filter((task) => task.parentTaskId === id).map((task) => task.taskId));
+	}
+	const visible = new Set(branch);
+	for (const edge of snapshot.edges) {
+		if (branch.has(edge.to)) visible.add(edge.from);
+		if (branch.has(edge.from)) visible.add(edge.to);
+	}
+	let parent = own.parentTaskId;
+	const ancestors = /* @__PURE__ */ new Set();
+	while (parent !== void 0 && !ancestors.has(parent)) {
+		ancestors.add(parent);
+		visible.add(parent);
+		parent = snapshot.tasks.find((task) => task.taskId === parent)?.parentTaskId;
+	}
+	return visible;
+}
 /** The membership gate both session reads pass before DSH is asked anything. */
-async function sessionMembershipRefusal(deps, resolution, sessionId) {
+async function sessionMembershipRefusal(deps, loaded, sessionId) {
+	const resolution = loaded.resolution;
 	let member;
 	try {
 		member = await isGraphMember(deps.graphs, resolution.graph.id, sessionId);
 	} catch (error) {
 		return refused("unreadable", `the membership of session "${sessionId}" in graph "${resolution.graph.id}" could not be read: ${message(error)}. A session reference is checked against the graph's published members before its log is read.`);
 	}
-	if (member) return void 0;
+	if (member) {
+		const allowed = readableTaskIds(loaded);
+		if (allowed !== void 0 && sessionId !== resolution.sessionId && !loaded.snapshot?.runs.some((run) => run.sessionId === sessionId && allowed.has(run.taskId))) return refused("not-found", `session "${sessionId}" is outside the caller's task branch and dependency context; nothing was read`);
+		return;
+	}
 	return refused("cross-graph", `session "${sessionId}" is not a published member of graph "${resolution.graph.id}"; a session reference reads the caller's own domain, and a session id is not a key to another graph.`);
 }
 /** What an open root proposal means; none of the three is terminal, and two still await activation. */
@@ -986,23 +1029,6 @@ function referenceList(budget, title, entries, scope, recovery, follow = 0) {
 		reserve: follow,
 		tail: (count) => count === entries.length ? [] : [itemsClause(scope, recovery, entries.length, entries.length - count)]
 	}) !== void 0;
-}
-/** The decomposition guidance a worker's projection carries; a replay never sees it. */
-function workerDecompositionLines(taskRuntime, task) {
-	const decomposable = task.decompositionStatus === "decomposable";
-	const runtimeSplit = taskRuntime.allowsRuntimeDecomposition();
-	if (!decomposable && !runtimeSplit) return [];
-	const lines = [
-		"## Own this task's decomposition",
-		"",
-		decomposable ? "- This task was admitted as decomposable: you own the result and the decision to delegate its separate result or responsibility boundaries." : "- This deployment admits a task's own decomposition even when its parent did not mark it decomposable.",
-		"- For multiple independently checkable results or distinct responsibilities, call `task_decompose` before implementing them. Give each child a complete objective, result boundary and acceptance criteria; retain this task's full acceptance and judge how their verified results combine. A single end-to-end criterion does not make the implementation one local result.",
-		"- A child with its own separate results can decompose again. Define only your own child contracts; let each child decide its descendants. Complete a genuinely local result here rather than adding nodes just for depth.",
-		"- The call must clear admission. Use its refusal to fix the violated rule, not to weaken acceptance. One batch at a time is the rule; this task may split again once its own batch ends.",
-		"- While `waiting_children`, read, query and answer child questions; writes, shell commands, another decomposition and your submission are refused. The batch end hands this task back to you: read the child results, coordinate any remaining work and hand this task in yourself with `task_submit_result`. Nothing is submitted on your behalf."
-	];
-	lines.push("", "- A decomposition can come back waiting for a human review: it answers with a proposal id and admits nothing, so no child exists and nothing is spawned until the review decides. Read the batch as it was recorded with `task_proposal_read`; do not re-submit the same batch while it waits, because the same request is answered with the same proposal. If the review refuses it, revise the batch from the reason on the record and decompose again — a revision is a new proposal, never a re-run of the refused one.");
-	return lines;
 }
 /** The immutable half of the context one role is assembled with (A2 §D/§9). */
 async function contractProjection(deps, loaded) {
@@ -1056,14 +1082,25 @@ async function contractProjection(deps, loaded) {
 		const label = ["", `- this session has no business Run: the contract above belongs to the task it was delegated to review (delegated by session ${resolution.delegation.actor}, recorded ${resolution.delegation.at}), and reading it is not executing it.`];
 		if (budget.addAll(label) > 0) return tooLarge("the review-only label", taskPageHint(task.taskId));
 	}
-	const summaryLines = run?.providerBinding === void 0 ? [] : [
-		"",
-		"## Implementation chosen for this run",
-		...(await bindingLines(deps.taskRuntime, run.providerBinding)).filter((line) => line.length > 0)
-	];
+	const summaryLines = role === "reviewer" && run?.providerBinding !== void 0 ? await bindingLines(deps.taskRuntime, run.providerBinding) : [];
+	if (role !== "reviewer") {
+		if (run?.providerBinding === void 0 || run.providerBinding.skills.length === 0) return refused("unreadable", `task "${task.taskId}" has no bound guidance Skill; its model request cannot execute unguided work.`);
+		let bound;
+		try {
+			bound = await deps.taskRuntime.readRunBinding(run.providerBinding);
+		} catch (error) {
+			return refused("unreadable", `task "${task.taskId}" cannot load its frozen guidance Skill: ${message(error)}`);
+		}
+		if (bound === void 0 || bound.defects.length > 0 || bound.skills.length === 0 || bound.skills.some((skill) => !skill.readable || !skill.instructions?.trim())) return refused("unreadable", `task "${task.taskId}" cannot load its frozen guidance Skill: ${bound?.defects.join("; ") || "no readable bound instruction body"}`);
+		summaryLines.push("", ...renderRunBinding(run.providerBinding, bound).split("\n"), "", "## Guidance loaded for this run", "These are the complete instructions from this Run’s frozen Skill snapshot. Follow them for this task; loading other Skills does not change the contract or tool permissions.", ...bound.skills.flatMap((skill) => [
+			"",
+			`### Skill ${skill.name}`,
+			`Resources: ${bound.snapshotRoot}/${skill.name}`,
+			"",
+			skill.instructions
+		]));
+	}
 	const summaryFloor = summaryLines.length === 0 ? 0 : utf8Bytes(summaryLines.join("\n")) + 2;
-	const decomposition = role === "worker" ? workerDecompositionLines(deps.taskRuntime, task) : [];
-	const decompositionFloor = decomposition.length === 0 ? 0 : utf8Bytes(["", ...decomposition].join("\n")) + 2;
 	if (role === "worker") {
 		const handoff = handoffFor(snapshot, task.taskId);
 		if (handoff === void 0) {
@@ -1080,11 +1117,10 @@ async function contractProjection(deps, loaded) {
 			]) > 0) return tooLarge("the handoff", taskPageHint(task.taskId));
 			const references = handoffReferences(handoff);
 			const evidenceFloor = itemsFloor("relevant evidence", "handoff evidence references", "read them by id", references.evidence.length);
-			const tail = decompositionFloor + summaryFloor;
+			const tail = summaryFloor;
 			if (!referenceList(budget, "relevant artifacts", references.artifacts, "handoff artifact references", "read them by id", evidenceFloor + tail)) return tooLarge("the handoff references", taskPageHint(task.taskId));
 			if (!referenceList(budget, "relevant evidence", references.evidence, "handoff evidence references", "read them by id", tail)) return tooLarge("the handoff references", taskPageHint(task.taskId));
 		}
-		if (decomposition.length > 0 && budget.addAll(["", ...decomposition]) > 0) return tooLarge("the decomposition guidance", taskPageHint(task.taskId));
 	}
 	if (summaryLines.length > 0 && budget.addAll(summaryLines) > 0) return tooLarge("the run binding summary", taskPageHint(task.taskId));
 	return read(budget.text(), storeSource(resolution.graph, resolution.storeId, "projected the caller's immutable contract"));
@@ -1298,14 +1334,14 @@ function onCharacterBoundary(text, offsetBytes) {
 }
 /** One session *event*'s visible text, paged in UTF-8 bytes (A2 §D, Q3 closure). */
 async function sessionEventRead(deps, loaded, ref, requestedOffset, requestedLimit, signal) {
-	const resolution = loaded.resolution;
+	loaded.resolution;
 	signal?.throwIfAborted();
 	const sessionId = ref.sessionId;
 	const seq = ref.seq;
 	const offset = requestedOffset ?? 0;
 	const requestedBytes = Math.trunc(requestedLimit ?? CONTEXT_OUTPUT_LIMIT_BYTES);
 	const limit = Math.min(CONTEXT_OUTPUT_LIMIT_BYTES, Math.max(SESSION_EVENT_PAGE_MIN_BYTES, requestedBytes));
-	const gate = await sessionMembershipRefusal(deps, resolution, sessionId);
+	const gate = await sessionMembershipRefusal(deps, loaded, sessionId);
 	if (gate !== void 0) return gate;
 	let window;
 	try {
@@ -1362,7 +1398,7 @@ async function sessionEventRead(deps, loaded, ref, requestedOffset, requestedLim
 async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLimit, signal) {
 	const resolution = loaded.resolution;
 	signal?.throwIfAborted();
-	const gate = await sessionMembershipRefusal(deps, resolution, sessionId);
+	const gate = await sessionMembershipRefusal(deps, loaded, sessionId);
 	if (gate !== void 0) return gate;
 	const offset = Math.max(0, Math.trunc(requestedOffset ?? 0));
 	const requestedEvents = Math.trunc(requestedLimit ?? SESSION_LIMIT_DEFAULT);
@@ -1549,7 +1585,15 @@ async function contextRead(deps, loaded, query, signal) {
 	}
 	const snapshot = loaded.snapshot;
 	if (snapshot === void 0) return refused("not-activated", `store "${resolution.storeId}" of graph "${resolution.graph.id}" does not exist yet, so it holds no ${kind} record to read.`);
-	const found = locateRecord(snapshot, kind, query.ref);
+	const allowed = readableTaskIds(loaded);
+	const found = locateRecord(allowed === void 0 ? snapshot : {
+		...snapshot,
+		tasks: snapshot.tasks.filter((record) => allowed.has(record.taskId)),
+		runs: snapshot.runs.filter((record) => allowed.has(record.taskId)),
+		evidence: snapshot.evidence.filter((record) => allowed.has(record.taskId)),
+		reviews: snapshot.reviews.filter((record) => allowed.has(record.taskId)),
+		diagnoses: snapshot.diagnoses.filter((record) => allowed.has(record.taskId))
+	}, kind, query.ref);
 	if ("refusal" in found) return refused(found.refusal, found.detail);
 	const recordText = await recordTextOf(deps, snapshot, kind, found.record);
 	const offset = Math.max(0, Math.trunc(query.offset ?? 0));
@@ -1663,10 +1707,11 @@ async function taskStatus(deps, loaded, query) {
 	if (snapshot === void 0) return refused("not-activated", `store "${resolution.storeId}" of graph "${resolution.graph.id}" does not exist yet, so there is no task tree to read.`);
 	const self = target.task;
 	if (scope === "related" && self === void 0) return refused("unbound", `session "${resolution.sessionId}" has no task of its own in store "${resolution.storeId}", so there is no related scope for it; ask for scope:"graph" to read the whole domain.`);
-	const entries = scope === "graph" ? [...snapshot.tasks].sort((left, right) => byString(left.taskId, right.taskId)).map((task) => ({
+	const allowed = readableTaskIds(loaded);
+	const entries = (scope === "graph" ? [...snapshot.tasks].sort((left, right) => byString(left.taskId, right.taskId)).map((task) => ({
 		task,
 		roles: []
-	})) : relatedEntries(snapshot, self);
+	})) : relatedEntries(snapshot, self)).filter((entry) => allowed === void 0 || allowed.has(entry.task.taskId));
 	const page = entries.slice(offset, offset + limit);
 	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
 	const marker = recoveryMarker(resolution.recovery);
@@ -1674,11 +1719,12 @@ async function taskStatus(deps, loaded, query) {
 		"# Task status",
 		`graph: ${resolution.graph.id} "${resolution.graph.name}" — store ${resolution.storeId}`,
 		`scope: ${scope} · offset ${offset} · limit ${limit}` + (clamped ? ` (requested offset ${requestedOffset}, limit ${requestedLimit}: both are clamped into their ranges)` : ""),
+		...allowed === void 0 ? [] : ["read boundary: own branch, ancestor context and dependency neighbours"],
 		`entries in scope: ${entries.length}`,
 		...marker === void 0 ? [] : [marker, RECOVERY_NOTE]
 	];
 	if (budget.addAll(header) > 0) return tooLarge("the status header", "Ask for a smaller page (a lower `limit`) or the `related` scope.");
-	const obligations = await obligationLines(deps.envBuilder, resolution.graph.envId, snapshot);
+	const obligations = allowed === void 0 ? await obligationLines(deps.envBuilder, resolution.graph.envId, snapshot) : [];
 	const shown = budgetList(budget, {
 		units: page,
 		lines: (entry) => [taskSummaryLine(snapshot, entry.task, entry.roles)],
@@ -1771,6 +1817,12 @@ var SingularityContextService = class extends Service {
 	}
 	async questionsFor(caller) {
 		return await questionProjection(this.readDeps(), caller);
+	}
+	/** Retrieve the current visible catalog before the model decides its next children. */
+	async templatesFor(caller) {
+		if (caller.resolution.kind === "worker" && !this.ctx.taskRuntime.allowsRuntimeDecomposition()) return "";
+		const page = await this.ctx.taskRuntime.listTaskTemplates({ limit: 10 }, caller.resolution.sessionId);
+		return "# Visible Task templates\n" + JSON.stringify(page) + "\nUse task_template_list for another page, a narrower catalogPath, or the full exact templateRef. Choose an applicable template and parameters, or a complete standard contract when none applies. Instance history is recorded automatically; reusable templates are published selectively through Evolution.";
 	}
 	bindingDeps() {
 		return {

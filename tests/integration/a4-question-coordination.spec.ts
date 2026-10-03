@@ -3,7 +3,7 @@ import { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { blockingQuestionsOf, questionIdOf, sha256Hex } from '../../task/src/index.ts'
 import type { TaskEvent } from '../../task/src/index.ts'
-import { settleRunFromRuntime } from '../../task-runtime/src/index.ts'
+import { bindRunProviders, resolveCapabilities, settleRunFromRuntime } from '../../task-runtime/src/index.ts'
 import type { DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import {
   disposeScriptedLoops,
@@ -61,13 +61,13 @@ afterEach(async () => {
 
 /** One child spec: a goal and a criterion a command can settle. */
 const children = (objective: string): DecomposeSpec['children'] => [{
-  objective,
+  objective, requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
 }]
 
 /** The root contract every case runs under (A0 §1.2): one goal, one criterion a command settles. */
 const ROOT_CONTRACT: RootContractSpec = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
 
@@ -719,7 +719,7 @@ async function writeChampion(h: ScriptedLoop, storeId: string): Promise<string> 
     objective: 'champion work',
     depth: 0,
     acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -854,18 +854,26 @@ describe('questions inside a replay (A4 §F.1)', () => {
       objective: 'replay child work',
       depth: 1,
       acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'leaf',
       status: 'created',
       runIds: [],
       childTaskIds: [],
     }, 'tester')
     await h.task.admitTaskIn(root.storeId, 't-replay-child', 'tester', { decompositionStatus: 'leaf' })
+    const providerBinding = await bindRunProviders({
+      storeId: root.storeId,
+      runId: 'r-replay-child',
+      manifest: resolveCapabilities(['execute-task'], h.runtime.listCapabilities()),
+      providers: await h.runtime.capabilityProviderReport(String(ROOT), ['execute-task']),
+      root: h.runtime.config.runBindingRoot,
+    })
     await h.task.startRunIn(root.storeId, {
       runId: 'r-replay-child',
       taskId: 't-replay-child',
       sessionId: REPLAY_CHILD,
-      capabilitySnapshot: [],
+      capabilitySnapshot: ['task-execution'],
+      providerBinding,
       artifacts: [],
       verifierResults: [],
       executionPhase: 'active',
@@ -883,6 +891,10 @@ describe('questions inside a replay (A4 §F.1)', () => {
       setup: async () => {},
     })
     expect(String(made.agent.id)).toBe(REPLAY_CHILD)
+    await h.ctx.graph.commitIn('sg-g-root', [
+      { kind: 'agent/add', agent: { id: SessionId(REPLAY_CHILD), name: 'Replay child', status: 'idle' } },
+      { kind: 'edge/add', edge: { id: `${replaySession}->${REPLAY_CHILD}`, kind: 'spawn', from: SessionId(replaySession), to: SessionId(REPLAY_CHILD) } },
+    ])
     const child = await h.runtime.runForSession(REPLAY_CHILD)
     expect(child.run.runId).toBe(childRunId)
     expect(child.task.parentTaskId).toBe(replayRun.taskId)

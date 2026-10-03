@@ -62,7 +62,7 @@ const criterion = (command: string, description = `the command ${command} exits 
 
 /** The root contract these cases run under (A0 §1.2): a goal, a criterion, and the hard constraints. */
 function rootContract(objective: string, constraints: readonly string[] = []) {
-  return {
+  return { requiredCapabilities: ['execute-task'],
     objective,
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
     constraints: [...constraints],
@@ -136,7 +136,7 @@ async function failedTask(stack: AssemblyStack, rootSession: string): Promise<{ 
   const root = await stack.runtime.intakeRootContract(storeId, rootSession, rootContract('ship the release'))
   const batch = await stack.runtime.decomposeAndRun(storeId, root.taskId, root.runId, rootSession, {
     reason: 'split the work',
-    children: [{ objective: 'child that fails', acceptanceCriteria: [criterion('false')] }],
+    children: [{ requiredCapabilities: ['execute-task'], objective: 'child that fails', acceptanceCriteria: [criterion('false')] }],
   } as never)
   const outcomes = await stack.runtime.awaitBatch(storeId, batch.batchId)
   expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
@@ -177,7 +177,7 @@ async function threeLayers(stack: AssemblyStack): Promise<{
   ]))
   const batch = await stack.runtime.decomposeAndRun(storeId, root.taskId, root.runId, rootSession, {
     reason: 'split the work',
-    children: [{
+    children: [{ requiredCapabilities: ['execute-task'],
       objective: 'child: build the bridge',
       acceptanceCriteria: [criterion('true')],
     }],
@@ -208,7 +208,7 @@ describe('the assembled request of a three-layer chain (A2-1)', () => {
         if (bound === undefined || bound.task.depth !== 1) return
         await stack.call(sessionId, 'task_decompose', {
           reason: 'the deck is a separate deliverable',
-          children: [{ objective: 'grandchild: build the deck', acceptanceCriteria: [criterion('true')] }],
+          children: [{ requiredCapabilities: ['execute-task'], objective: 'grandchild: build the deck', acceptanceCriteria: [criterion('true')] }],
         })
       },
     })
@@ -289,7 +289,7 @@ describe('two graphs in one checkout (A2-2)', () => {
       objective: 'the other graph work',
       depth: 0,
       acceptanceCriteria: [{ criterionId: 'ac-other', description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'leaf',
       status: 'created',
       runIds: [],
@@ -362,7 +362,7 @@ describe('a restarted process (A2-3)', () => {
         if (bound === undefined || bound.task.depth !== 1) return
         await first.call(sessionId, 'task_decompose', {
           reason: 'the deck is a separate deliverable',
-          children: [{ objective: 'grandchild: build the deck', acceptanceCriteria: [criterion('true')] }],
+          children: [{ requiredCapabilities: ['execute-task'], objective: 'grandchild: build the deck', acceptanceCriteria: [criterion('true')] }],
         })
       },
     })
@@ -406,7 +406,7 @@ describe('a replay\'s briefing (A2-3)', () => {
       objective: 'champion work',
       depth: 0,
       acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'leaf',
       status: 'created',
       runIds: [],
@@ -576,7 +576,7 @@ describe('a binding that cannot be read refuses the request (Q1)', () => {
         if (bound === undefined || bound.task.depth !== 1) return
         await stack.call(sessionId, 'task_decompose', {
           reason: 'the deck is a separate deliverable',
-          children: [{ objective: 'grandchild: build the deck', acceptanceCriteria: [criterion('true')] }],
+          children: [{ requiredCapabilities: ['execute-task'], objective: 'grandchild: build the deck', acceptanceCriteria: [criterion('true')] }],
         })
       },
     })
@@ -639,7 +639,7 @@ describe('a binding that cannot be read refuses the request (Q1)', () => {
         if (bound === undefined || bound.task.depth !== 1) return
         await first.call(sessionId, 'task_decompose', {
           reason: 'the deck is a separate deliverable',
-          children: [{ objective: 'grandchild: build the deck', acceptanceCriteria: [criterion('true')] }],
+          children: [{ requiredCapabilities: ['execute-task'], objective: 'grandchild: build the deck', acceptanceCriteria: [criterion('true')] }],
         })
       },
     })

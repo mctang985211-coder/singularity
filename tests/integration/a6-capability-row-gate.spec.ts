@@ -262,7 +262,7 @@ async function boot(
     }
   }
   const root = await h.root(ROOT, {
-    objective: 'gate the capability row',
+    objective: 'gate the capability row', requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: 'delivered', command: 'true' }],
   })
   const snapshotDir = join(workspace, 'snapshot')

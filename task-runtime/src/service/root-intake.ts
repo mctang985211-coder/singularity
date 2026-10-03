@@ -681,7 +681,7 @@ export async function checkRootContract(self: TaskRuntime, request: CheckRootCon
   const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
     ...(request.envPath === undefined ? {} : { cwd: request.envPath }),
   })
-  const refusals = providerRefusals(precheck)
+  const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities))
   if (refusals.length > 0) {
     return {
       ok: false,
@@ -820,6 +820,7 @@ export async function continueRootProposalIn(
     proposal,
     contract,
     manifests,
+    providers,
   })
 }
 
@@ -843,6 +844,7 @@ export async function activateRootContract(
       storeId,
       runId,
       manifest,
+      providers: request.providers,
       table: self.config.capabilities,
       root: self.config.runBindingRoot,
     })

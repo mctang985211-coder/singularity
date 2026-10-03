@@ -35,10 +35,12 @@ function template(command: string, version = 1): TaskTemplate {
   return {
     id: ID,
     version,
+    catalogPath: ['general'],
     appliesTo: ['produce the answer'],
     parametersSchema: { type: 'object', properties: {}, additionalProperties: false },
     contract: {
       objective: 'produce answer.txt containing 42',
+      requiredCapabilities: ['execute-task'],
       acceptanceCriteria: [{ criterionId: 'child', description: 'answer is 42', command, verifierRef: 'command' }],
     },
   }
@@ -65,7 +67,7 @@ async function historicalExample(h: ScriptedLoop, id: string, sourceDir: string,
           requiredEvidence: [],
         },
       ],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'leaf',
       status: 'created',
       runIds: [],
@@ -147,7 +149,7 @@ async function fixture(command = GOAL, initial = false) {
                 .filter(call => call.sessionId === sessionId && call.name === 'task_template_list')
                 .at(-1)
               const result = list?.result?.text ?? ''
-              const match = result.startsWith('[') ? JSON.parse(result)[0] : undefined
+              const match = result.startsWith('{') ? JSON.parse(result).entries?.find((item: { kind: string }) => item.kind === 'template') : undefined
               return {
                 contractVersion: 1,
                 reason: 'produce answer with the current reusable child contract',
@@ -192,7 +194,7 @@ async function fixture(command = GOAL, initial = false) {
     },
   })
   if (!initial) await h.runtime.registerTaskTemplate(template('test "$(cat answer.txt)" = 41'))
-  const source = await h.begin({ objective: 'deliver the answer', acceptanceCriteria: criteria })
+  const source = await h.begin({ objective: 'deliver the answer', acceptanceCriteria: criteria, requiredCapabilities: ['execute-task'] })
   await h.agent(ROOT).whenIdle()
   await vi.waitFor(
     async () =>

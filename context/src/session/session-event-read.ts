@@ -32,7 +32,7 @@ export async function sessionEventRead(
   const offset = requestedOffset ?? 0
   const requestedBytes = Math.trunc(requestedLimit ?? CONTEXT_OUTPUT_LIMIT_BYTES)
   const limit = Math.min(CONTEXT_OUTPUT_LIMIT_BYTES, Math.max(SESSION_EVENT_PAGE_MIN_BYTES, requestedBytes))
-  const gate = await sessionMembershipRefusal(deps, resolution, sessionId)
+  const gate = await sessionMembershipRefusal(deps, loaded, sessionId)
   if (gate !== undefined) return gate
 
   let window: Awaited<ReturnType<ReadDeps['sessionQuery']['readEvent']>>

@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -79,7 +80,7 @@ const STORE = rootTaskStoreId(ROOT)
 
 /** One child spec: a goal and a criterion a command settles. */
 const children = (objective: string, extra: Partial<DecomposeSpec['children'][number]> = {}): DecomposeSpec['children'] => [{
-  objective,
+  objective, requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
   ...extra,
 }]
@@ -177,7 +178,8 @@ function workspace(): string {
 /** Boot one deployment over one directory: everything the loader mounts, except the loop and the review channel. */
 async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   const home = join(dir, 'home')
-  mkdirSync(home, { recursive: true })
+  mkdirSync(join(home, 'skills', 'task-execution'), { recursive: true })
+  copyFileSync(new URL('../../agent-runtime/skills/task-execution/SKILL.md', import.meta.url), join(home, 'skills', 'task-execution', 'SKILL.md'))
   vi.stubEnv('DSH_HOME', home)
   vi.stubEnv('HOME', home)
   const ctx = new Context()
@@ -349,7 +351,7 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   const resumedSessions = new Set<string>()
   const agentRuntime = new AgentRuntime(ctx)
   await ctx.plugin(TaskRuntime, {
-    capabilities: {},
+    capabilities: TASK_GUIDANCE,
     ...(options.generatedTaskReview === undefined ? {} : { generatedTaskReview: options.generatedTaskReview }),
     ...(options.rootBudget === undefined ? {} : { rootBudget: { ...options.rootBudget } }),
     ...(options.maxChildren === undefined ? {} : { maxChildren: options.maxChildren }),
@@ -578,11 +580,15 @@ async function spawned(boot: Boot, count: number): Promise<void> {
       async () => {
         expect(boot.spawns).toHaveLength(count)
         // The request is recorded before spawn creates the durable Session. A
-        // crash in this test must leave a log the reopening process can adopt.
+        // crash in this test must leave the Session and its graph publication
+        // that the reopening process can adopt without creating a member.
         for (const spawn of boot.spawns) {
           await expect(boot.ctx.sessionQuery.readSession(SessionId(spawn.sessionId))).resolves.toMatchObject({
             session: { id: spawn.sessionId },
           })
+          const graph = await boot.ctx.graph.snapshotIn('sg-g-root')
+          expect(graph.agents.some(agent => agent.id === spawn.sessionId)).toBe(true)
+          expect(graph.edges.some(edge => edge.kind === 'spawn' && edge.to === spawn.sessionId)).toBe(true)
         }
       },
       { timeout: 20_000, interval: 25 },
@@ -605,7 +611,7 @@ async function spawned(boot: Boot, count: number): Promise<void> {
  */
 function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [
       // The goal's own independent check (A0 §1.2's structural rule needs at
       // least one of these) …

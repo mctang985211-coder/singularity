@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -18,7 +19,7 @@ import { batchIdFor } from '../../task/src/proposal.ts'
 import type { TaskEvent, TaskInstance, TaskSnapshot } from '../../task/src/index.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
-import type { Config, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
+import type { DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
@@ -89,7 +90,7 @@ afterEach(async () => {
 
 /** One child spec carrying exactly the criteria a case is about. */
 function child(objective: string, criteria: readonly Record<string, unknown>[], extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return { objective, acceptanceCriteria: criteria, ...extra }
+  return { objective, requiredCapabilities: ['execute-task'], acceptanceCriteria: criteria, ...extra }
 }
 
 /** A criterion a command settles — the plain shape every child in this file carries. */
@@ -105,7 +106,7 @@ function batch(reason: string, children: readonly Record<string, unknown>[]): Re
 /** The root contract K1-1 runs under: the goal's own check, plus the conjunction over the run's members. */
 function rootContract(objective = 'ship the release'): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [
       { criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' },
       { criterionId: 'root-members', description: 'every member of this run verified', mode: 'composite', mandatory: true },
@@ -573,10 +574,10 @@ async function bootOver(dir: string, options: ReopenOptions = {}): Promise<Reope
   }
 
   await ctx.plugin(TaskRuntime, {
-    capabilities: {},
+    capabilities: TASK_GUIDANCE,
     ...(options.rootBudget === undefined ? {} : { rootBudget: { ...options.rootBudget } }),
     runBindingRoot: join(home, 'run-bindings'),
-  } as Config)
+  })
   const runtime = ctx.get('taskRuntime') as TaskRuntime
 
   ctx.agents.setFactory({
@@ -780,7 +781,7 @@ async function writeChampion(boot: ReopenBoot): Promise<{ taskId: string; runId:
     objective: 'champion work',
     depth: 0,
     acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -1027,7 +1028,7 @@ describe('K1-3: the evidence a parent rests on is the run\'s accumulated members
           { text: 'worker: handed in' },
         ],
     })
-    const root = await h.begin({ objective: 'ship the release', acceptanceCriteria: criteria as never })
+    const root = await h.begin({ objective: 'ship the release', requiredCapabilities: ['execute-task'], acceptanceCriteria: criteria as never })
     await answered(h, 'task_decompose', 0)
     await spawned(h, 2)
     const firstBatch = await batchIdOf(h, root.storeId, root.runId)
@@ -1341,6 +1342,7 @@ describe('K1-4: the windows a restart opens around a batch end', () => {
     await vi.waitFor(async () => expect(runOf(await a.snapshot(), childTaskId).executionPhase).toBe('active'))
     expect(runOf(await a.snapshot(), root.taskId).executionPhase).toBe('waiting_children')
     const crashed = runOf(await a.snapshot(), childTaskId)
+    await vi.waitFor(async () => expect((await a.ctx.graph.snapshotIn('sg-g-root')).agents.some(agent => String(agent.id) === crashed.sessionId)).toBe(true))
     await a.crash()
 
     // G §5.25 (CONT-1): the in-flight child is continued, not cancelled — the same
@@ -1436,6 +1438,13 @@ describe('K1-4: the windows a restart opens around a batch end', () => {
       expect(runOf(snapshot, replayTaskId).executionPhase).toBe('active')
     })
     const crashedRun = runOf(await a.snapshot(), replayTaskId)
+    // Admission records a Run before spawn finishes its durable Session and graph publication.
+    await vi.waitFor(async () => {
+      await expect(a.ctx.sessionQuery.readSession(SessionId(crashedRun.sessionId))).resolves.toMatchObject({ session: { id: crashedRun.sessionId } })
+      const graph = await a.ctx.graph.snapshotIn('sg-g-root')
+      expect(graph.agents.some(agent => String(agent.id) === crashedRun.sessionId)).toBe(true)
+      expect(graph.edges.some(edge => edge.kind === 'spawn' && String(edge.to) === crashedRun.sessionId)).toBe(true)
+    }, { timeout: 20_000, interval: 25 })
     await a.crash()
 
     // The next process continues the run it finds in flight, without executing it

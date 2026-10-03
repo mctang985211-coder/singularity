@@ -49,6 +49,28 @@ export interface CriterionSpec {
 export type TemplateParameter = string | number | boolean
 export type TemplateParameters = Record<string, TemplateParameter>
 
+/** Catalog prefixes are part of a task's contract; an empty scope sees only explicit general templates. */
+export type CatalogPath = string[]
+export type TemplateScope = CatalogPath[]
+
+export function parseCatalogPath(raw: unknown): CatalogPath {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 8 || raw.some(segment =>
+    typeof segment !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(segment)))
+    throw new Error('task-template: catalogPath requires 1–8 category names of at most 64 characters')
+  return [...raw]
+}
+
+export function catalogPathWithin(path: readonly string[], prefix: readonly string[]): boolean {
+  return prefix.length <= path.length && prefix.every((segment, index) => segment === path[index])
+}
+
+export function parseTemplateScope(raw: unknown): TemplateScope {
+  if (!Array.isArray(raw) || raw.length > 20) throw new Error('task-template: templateScope must be an array of at most 20 catalog paths')
+  const paths = raw.map(parseCatalogPath)
+  return paths.filter((path, index) => !paths.some((prefix, other) =>
+    other !== index && catalogPathWithin(path, prefix) && (prefix.length < path.length || other < index)))
+}
+
 export interface TaskTemplateRef {
   id: string
   version: number
@@ -78,15 +100,27 @@ export interface TaskTemplateContract {
 export interface TaskTemplate {
   id: string
   version: number
+  catalogPath: CatalogPath
   /** Conditions the caller must check before choosing this template. */
   appliesTo: string[]
   parametersSchema: TemplateParametersSchema
   /** Complete authoring contract; {{name}} placeholders bind declared primitive parameters. */
   contract: TaskTemplateContract
+  /** A reusable direct-child proposal, expanded through the same task_decompose admission. */
+  decomposition?: {
+    contractVersion?: 1
+    reason: string
+    children: (TaskContractInput & {
+      dependsOn?: number[]
+      decomposable?: boolean
+      requiresIndependentAcceptance?: boolean
+    })[]
+  }
 }
 
 /** Creation accepts either a full contract or a pinned template plus parameters. */
 export interface TaskContractInput extends Partial<TaskTemplateContract> {
+  templateScope?: TemplateScope
   templateRef?: TaskTemplateRef
   templateParameters?: TemplateParameters
 }

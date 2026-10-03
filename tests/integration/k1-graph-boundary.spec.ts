@@ -52,12 +52,12 @@ const criterion = (criterionId: string, command = 'true'): CriterionSpec => ({ c
 
 /** One child spec for a batch. */
 function child(objective: string, criteria: readonly CriterionSpec[], extra: Partial<DecomposeChildSpec> = {}): DecomposeChildSpec {
-  return { objective, acceptanceCriteria: criteria, ...extra }
+  return { requiredCapabilities: ['execute-task'], objective, acceptanceCriteria: criteria, ...extra }
 }
 
 /** One root contract: the goal's own check, plus the conjunction (with the map the case declares). */
 function rootContract(objective: string, childEvidence?: readonly ChildEvidenceRef[]): RootContractSpec {
-  return {
+  return { requiredCapabilities: ['execute-task'],
     objective,
     acceptanceCriteria: [
       { criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' },

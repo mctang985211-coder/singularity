@@ -44,13 +44,13 @@ async function chain(stack: AssemblyStack): Promise<{ storeId: string; workerSes
   const rootSession = stack.roots[0]!
   const storeId = stack.storeIdOf(rootSession)
   await stack.seedLog(rootSession, ['ship the release'])
-  const root = await stack.runtime.intakeRootContract(storeId, rootSession, {
+  const root = await stack.runtime.intakeRootContract(storeId, rootSession, { requiredCapabilities: ['execute-task'],
     objective: 'ship the release',
     acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
   })
   const batch = await stack.runtime.decomposeAndRun(storeId, root.taskId, root.runId, rootSession, {
     reason: 'split the work',
-    children: [{
+    children: [{ requiredCapabilities: ['execute-task'],
       objective: 'implement the feature',
       // This fixture settles a contract for prompt/permission assertions; it tests no engineering result.
       acceptanceCriteria: [{ description: 'fixture acceptance passes', command: 'true' }],
@@ -98,9 +98,9 @@ describe('the assembled request a worker receives', () => {
     // The stable role policy is the agent runtime's section, ahead of the contract,
     // and it is not a second copy of it.
     expect(prompt).toContain('You are a Singularity task worker.')
-    expect(prompt).toContain('Before implementation, assess whether it contains multiple independently checkable results')
-    expect(prompt).toContain('Your parent does not have to plan your descendants')
-    expect(prompt).toContain('retain this task\'s full acceptance')
+    expect(prompt).toContain('Follow them for the delegated work. Own your result and its acceptance')
+    expect(prompt).toContain('### Skill task-execution')
+    expect(prompt).toContain('the complete instructions from this Run’s frozen Skill snapshot')
     expect(prompt.indexOf('You are a Singularity task worker.')).toBeLessThan(prompt.indexOf('# Immutable context (contract)'))
     // The stable policy names no raw cross-session reader (A2): history is read
     // with `context_read`.
@@ -117,9 +117,9 @@ describe('the assembled request a worker receives', () => {
     const rootPrompt = await stack.prompt('s-root')
     expect(rootPrompt).toContain('## Your contract (graph root)')
     expect(rootPrompt).toContain('objective: ship the release')
-    expect(rootPrompt).toContain('Keep the full user objective in the root contract')
-    expect(rootPrompt).toContain('does not mean dispatching every engineering step from the root')
-    expect(rootPrompt).toContain('task_cancel cancels your own run together')
+    expect(rootPrompt).toContain('coordinate the user\'s complete objective through task workers')
+    expect(rootPrompt).toContain('Before intake, load task-coordination with skill and follow its method')
+    expect(rootPrompt).toContain('Every business Task, including your root contract, must select at least one relevant guidance Skill')
     expect(rootPrompt).not.toContain('role: worker')
     expect(rootPrompt).not.toContain('You are a Singularity task worker.')
   })

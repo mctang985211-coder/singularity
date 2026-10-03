@@ -166,7 +166,7 @@ async function applySkillVersion(h: RunStack, name: string, content: string, pro
  */
 function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
 }

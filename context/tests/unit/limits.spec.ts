@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from 'vitest'
 import { CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, sliceUtf8, utf8Bytes } from '../../src/index.ts'
-import { FixtureStack, seedChain, type Chain } from '../support/stack.ts'
+import { FixtureStack, GUIDANCE_BINDINGS, seedChain, type Chain } from '../support/stack.ts'
 import { expectOk, expectRefused } from '../support/stack.ts'
 
 async function chainStack(): Promise<{ stack: FixtureStack; chain: Chain }> {
@@ -51,6 +51,7 @@ describe('the output bound', () => {
       sessionId: 's-refs',
       runId: 'r-refs',
       objective: 'a task with a very long reference list',
+      providerBinding: GUIDANCE_BINDINGS['reference-integration'],
       parentTaskId: 't-root',
       depth: 1,
     })
@@ -95,6 +96,7 @@ describe('the output bound', () => {
       sessionId: 's-narrow',
       runId: 'r-narrow',
       objective: 'a task with many narrow references',
+      providerBinding: GUIDANCE_BINDINGS['reference-integration'],
       parentTaskId: 't-root',
       depth: 1,
     })

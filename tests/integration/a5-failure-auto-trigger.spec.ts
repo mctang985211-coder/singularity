@@ -54,13 +54,13 @@ const ROOT = 's-root' as SessionId
 
 /** The root contract every case runs under. */
 const ROOT_CONTRACT = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
 
 /** One child whose own criterion a command settles — the shape the failing/verified cases differ in. */
 function child(objective: string, command: string): Record<string, unknown> {
-  return { objective, acceptanceCriteria: [{ description: `${objective} works`, command }] }
+  return { objective, requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: `${objective} works`, command }] }
 }
 
 /** The reviewer's answer: the observation and conclusion it reached, plus the one dimension it judged. */
@@ -744,7 +744,11 @@ describe('a failed review is accepted on its own (A5)', () => {
     // invented nothing: the attempt is still open and no Diagnosis exists.
     await vi.waitFor(() => expect(reviewerSpawns(h)).toHaveLength(1), { timeout: 30_000, interval: 25 })
     const reviewer = String(reviewerSpawns(h)[0]!.sessionId)
-    const attempt = (await readReviewAgentAttempts(root.storeId))[0]!
+    const attempt = await vi.waitFor(async () => {
+      const found = (await readReviewAgentAttempts(root.storeId))[0]!
+      expect(found.started).toBe(true)
+      return found
+    })
     expect(attempt).toMatchObject({
       source: { taskId: tree.childTaskId, runId: tree.childRunId },
       requestKey: null,
@@ -904,12 +908,12 @@ describe('the two triggers are the deployment\'s own composition (A5)', () => {
     const storeId = stack.storeIdOf(String(ROOT))
     await stack.seedLog(String(ROOT), ['ship the release'])
     const root = await stack.runtime.intakeRootContract(storeId, String(ROOT), {
-      objective: 'ship the release',
+      objective: 'ship the release', requiredCapabilities: ['execute-task'],
       acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is delivered', command: 'true' }],
     })
     const batch = await stack.runtime.decomposeAndRun(storeId, root.taskId, root.runId, String(ROOT), {
       reason: 'split the work',
-      children: [{ objective: 'child that fails', acceptanceCriteria: [criterion('false')] }],
+      children: [{ objective: 'child that fails', requiredCapabilities: ['execute-task'], acceptanceCriteria: [criterion('false')] }],
     } as never)
     const outcomes = await stack.runtime.awaitBatch(storeId, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])

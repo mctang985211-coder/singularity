@@ -49,7 +49,7 @@ interface RunBindingRequest {
   manifest: CapabilityManifest
   /**
    * The admission-time pre-check this run's verdicts come from. Absent when the
-   * caller assembled the plan itself (a hand-built cascade): then no binding is
+   * caller must supply a fresh pre-check before this run can execute.
    */
   providers?: ProviderPrecheck
   /** The capability table the run resolved against; its revision is recorded when no pre-check carries one. */
@@ -217,17 +217,18 @@ async function materializeProvider(provider: SelectedProvider, snapshotRoot: str
  * Bind one run's content: identify the providers its admission judged,
  * materialize their admitted bytes, and verify the snapshot against the record
  */
-export async function bindRunProviders(request: RunBindingRequest): Promise<RunProviderBinding | undefined> {
+export async function bindRunProviders(request: RunBindingRequest): Promise<RunProviderBinding> {
   const rows = Object.keys(request.manifest.capabilities)
-  if (request.providers === undefined && rows.length > 0) return undefined
   const selected = selectedProviders(request.providers, rows, row => request.manifest.capabilities[row]?.skills ?? [])
+  if (selected.length === 0) {
+    throw new Error(`run "${request.runId}" has no admitted guidance Skill; every task must select readable instructions through requiredCapabilities`)
+  }
   const base: RunProviderBinding = {
     registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, [], request.mcpRegistry),
     capabilities: [...rows].sort(),
     skills: selected.map(skillBinding),
     mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? {}),
   }
-  if (selected.length === 0) return base
   const root = request.root
   if (root === undefined) {
     throw new Error(
@@ -276,6 +277,8 @@ interface RunBindingSkillRead {
   readonly readable: boolean
   /** Every reason this skill's content is not readable as recorded, each naming its code. */
   readonly defects: readonly string[]
+  /** Present only when the bound instruction bytes read back without defects. */
+  readonly instructions?: string
 }
 
 /** What re-reading one run's binding found. */
@@ -354,7 +357,10 @@ export async function readRunBinding(binding: RunProviderBinding): Promise<RunBi
         }
       }
     }
-    skills.push({ name: skill.name, role: skill.role, readable: defects.length === 0, defects })
+    skills.push({
+      name: skill.name, role: skill.role, readable: defects.length === 0, defects,
+      ...(defects.length > 0 || loaded.instructions === undefined ? {} : { instructions: loaded.instructions }),
+    })
   }
   const defects = [
     ...rootDefects,

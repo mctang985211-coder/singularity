@@ -52,11 +52,11 @@ export function renderRunBinding(binding: RunProviderBinding | undefined, read?:
     // summary act on it, and a binding that names no snapshot says so.
     ...(binding.snapshotRoot === undefined
       ? [
-          '- a skill named here is read with the `skill` tool when you need its body; this run bound no content snapshot, so the revision and digests above are what it resolved against',
+          '- this run bound no content snapshot; it cannot supply guidance to a model request',
         ]
       : [
           `- bound content snapshot: ${binding.snapshotRoot}`,
-          '- a skill named here is read with the `skill` tool when you need its body; the revision, digests and snapshot path above are what this run is bound to',
+          '- the contract context loads the full Skill instructions from this frozen snapshot before task execution',
         ]),
   ]
   if (read !== undefined && read.defects.length > 0) {

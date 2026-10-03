@@ -183,7 +183,7 @@ describe('projections are stable', () => {
 })
 
 describe('refusals of a read that cannot answer', () => {
-  test('a reviewer whose delegated task vanished still reads the whole delegated domain by reference', async () => {
+  test('a reviewer whose delegated task vanished cannot widen its read boundary', async () => {
     const { stack } = await chainStack()
     stack.bindingSource(
       stack.ledger({
@@ -196,11 +196,8 @@ describe('refusals of a read that cannot answer', () => {
     // The contract reads refuse, because the delegation names a task the store
     // does not hold…
     expect(expectRefused(await stack.service.taskRead('s-review'), 'not-found')).toContain('does not hold')
-    // …while the domain itself is unchanged: a delegation never narrows a graph
-    // to one task.
-    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'task', ref: 't-g1' })).text).toContain(
-      'objective: grandchild: build the deck',
-    )
+    expect(expectRefused(await stack.service.contextRead('s-review', { kind: 'task', ref: 't-g1' }), 'not-found'))
+      .toContain('no task')
   })
 
   test('a member has no related scope and is told which scope answers', async () => {

@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../support/skill-roots.ts'
 /**
  * The T2/T3 proposal lifecycle, end to end through the real runtime and store:
  * the review policy's two modes, the pure pre-check's ordering, the approval's
@@ -282,7 +283,10 @@ export function harness(
   taskService = new TaskService(ctx as never)
   ctx.task = taskService
   ctx.verifier = verifier
-  const runtime = new TaskRuntime(ctx as never, options.config as Config | undefined)
+  const runtime = new TaskRuntime(ctx as never, {
+    ...options.config,
+    capabilities: { ...TASK_GUIDANCE, ...options.config?.capabilities },
+  })
   const defaultIdle = async (sessionId: string): Promise<void> => {
     await runtime.submitResult(sessionId, { summary: `done: ${sessionId}` })
   }
@@ -323,7 +327,7 @@ export type Harness = ReturnType<typeof harness>
  */
 export function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
 }
@@ -360,10 +364,10 @@ export function consumedBatch(proposal: TaskProposal): TaskProposalBatchConsumpt
 
 export function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
     ...overrides,
-  } as DecomposeSpec['children'][number]
+  } as NonNullable<DecomposeSpec['children']>[number]
 }
 
 export function batchSpec(children: DecomposeSpec['children'], reason = 'split the work'): DecomposeSpec {

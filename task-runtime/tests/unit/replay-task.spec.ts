@@ -34,7 +34,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
 
   test('a capability override applies for the replay run only, and the replay task stands apart from the champion', async () => {
     pinSkillHome('verify')
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { championTaskId, championRunId } = await champion(h)
     const before = await h.task.taskIn(STORE, championTaskId)
 
@@ -88,7 +88,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   })
 
   test('extra skill roots are forwarded to the worker grant, and the prompt never invites a split', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
     await h.runtime.replayTask(
       STORE,
@@ -100,7 +100,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       ROOT_SESSION,
     )
     const spawn = h.spawned[h.spawned.length - 1]!
-    expect(spawn.grant!.skillRoots).toEqual(['/sandbox/p2/skills'])
+    expect(spawn.grant!.skillRoots).toContain('/sandbox/p2/skills')
     // the overlay did not change the capability resolution
     expect(spawn.agentPreset).toBe('standard')
     // A replay never invites a split (its projection carries no decomposition
@@ -116,7 +116,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
 
   test("a spawning replay binds its own content: the overlay root stays first and the run's snapshot follows it", async () => {
     const home = pinSkillHome('verify')
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
     // The candidate skill a skill replay passes: a sandbox directory the overlay
     // root exposes, with no sidecar (loadable guidance for the row under test).
@@ -157,7 +157,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   })
 
   test("the replay renders the champion's own declarations and persists the same two lists", async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const assumptions = ['a cycle-accurate reference model exists']
     const constraints = ['no network access', 'finish inside ten minutes']
     const { championTaskId } = await champion(h, 'champion work', { assumptions, constraints })
@@ -192,7 +192,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   })
 
   test("a capability override granting an MCP server binds it against the replay run's env", async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     h.ctx.envBuilder = {
       store: {
         get: (envId: string) => ({
@@ -207,7 +207,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       championTaskId,
       {
         lineage: 'evolution-replay:p-mcp',
-        overlay: { capabilityOverrides: { research: { preset: 'standard', mcpServers: ['bbdev'] } } },
+        overlay: { capabilityOverrides: { research: { skills: ['task-execution'], preset: 'standard', mcpServers: ['bbdev'] } } },
       },
       ROOT_SESSION,
     )
@@ -293,7 +293,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   })
 
   test('a presetOverride wins over the capability resolution; absent it, the capability preset stands', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const first = await champion(h)
     await h.runtime.replayTask(
       STORE,
@@ -306,14 +306,14 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     )
     expect(h.spawned[h.spawned.length - 1]!.agentPreset).toBe('custom-preset')
 
-    const h2 = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h2 = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const second = await champion(h2)
     await h2.runtime.replayTask(STORE, second.championTaskId, { lineage: 'evolution-replay:p4' }, ROOT_SESSION)
     expect(h2.spawned[h2.spawned.length - 1]!.agentPreset).toBe('standard')
   })
 
   test('spawn: false runs the deterministic criteria replay: no worker, the verifier settles the candidate contract', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
     const spawnedBefore = h.spawned.length
 
@@ -353,7 +353,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   })
 
   test('a failing replay settles failed with the lineage tag and a localized cause', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } }, verifier: 'by-objective' })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } }, verifier: 'by-objective' })
     const { championTaskId } = await champion(h, 'champion work')
     const outcome = await h.runtime.replayTask(
       STORE,
@@ -387,7 +387,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   })
 
   test('replay uses the same preset conflict rule before creating a candidate task', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
     const original = await h.task.taskIn(STORE, championTaskId)
     const before = await h.task.snapshotIn(STORE)
@@ -403,7 +403,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
             acceptanceCriteria: original.acceptanceCriteria,
             requiredCapabilities: ['research', 'verify'],
           },
-          overlay: { capabilityOverrides: { verify: { preset: 'bb-verify' } } },
+          overlay: { capabilityOverrides: { verify: { skills: ['task-execution'], preset: 'bb-verify' } } },
         },
         ROOT_SESSION,
       ),
@@ -414,13 +414,13 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
 
   test('rejects a non-terminal champion, an unknown task, and a capability gap under the overlay', async () => {
     // a still-running root is not a replayable champion
-    const running = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const running = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { taskId: runningRootId } = await createRoot(running)
     await expect(
       running.runtime.replayTask(STORE, runningRootId, { lineage: 'evolution-replay:p7' }, ROOT_SESSION),
     ).rejects.toThrow(/is running; only a terminal/)
 
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
     await expect(
       h.runtime.replayTask(STORE, 't-ghost', { lineage: 'evolution-replay:p7' }, ROOT_SESSION),
@@ -456,7 +456,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
 
   test('a spawn refusal fails the replay run with the cause and the lineage tag', async () => {
     const options: { config?: Partial<Config>; spawnError?: string } = {
-      config: { capabilities: { research: { preset: 'standard' } } },
+      config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } },
     }
     const h = harness(options)
     const { championTaskId } = await champion(h)
@@ -501,7 +501,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     }
 
     test('refuses a candidate whose every criterion is optional, naming the rule, and persists nothing', async () => {
-      const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+      const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
       const { championTaskId } = await champion(h)
       const before = await h.task.snapshotIn(STORE)
       const spawnCount = h.spawned.length
@@ -536,7 +536,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     })
 
     test('refuses a candidate with one criterion id declared twice, naming the duplicate, and persists nothing', async () => {
-      const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+      const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
       const { championTaskId } = await champion(h)
       const before = await h.task.snapshotIn(STORE)
       const spawnCount = h.spawned.length
@@ -580,7 +580,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
 
     test("persists the effective candidate contract: the tagged objective, the candidate's criteria and capabilities, the champion's declarations", async () => {
       const h = harness({
-        config: { capabilities: { research: { preset: 'standard' }, verify: { preset: 'bb-verify' } } },
+        config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' }, verify: { skills: ['task-execution'], preset: 'bb-verify' } } },
       })
       const assumptions = ['a cycle-accurate reference model exists']
       const constraints = ['no network access']
@@ -609,6 +609,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       // this is what both a `task_read` and the run's own criteria see.
       expect(replayTask.contract).toEqual({
         contractVersion: 1,
+        templateScope: [],
         objective: '[evolution-replay:candidate] candidate definition replay',
         acceptanceCriteria: [
           {
@@ -628,7 +629,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     })
 
     test('replays a champion created before contracts existed, with empty assumptions and constraints', async () => {
-      const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+      const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
       // Raw store calls, the shape the legacy-style tests use: a task admitted
       // and settled before the contract existed carries none.
       const { taskId: championTaskId, runId: championRunId } = await createAcceptanceParent(h, [
@@ -685,7 +686,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   const FROZEN_OPTIONS = { provider: 'frozen-provider', model: 'frozen-model' }
 
   test('a replay carries its frozen agent options into the worker spawn; absent them the spawn is unchanged', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
     const before = h.spawned.length
 
@@ -716,7 +717,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   })
 
   test('a replayed worker keeps its frozen model through library restoration and passes both bindings to children', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { championTaskId } = await champion(h)
     const before = h.spawned.length
     h.setIdleBehavior(async sessionId => {

@@ -230,7 +230,7 @@ export async function recoverRootTaskOnce(
   const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
     ...(envPath === undefined ? {} : { cwd: envPath }),
   })
-  const refusals = providerRefusals(precheck)
+  const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities))
   if (refusals.length > 0) {
     throw new Error(
       `task-runtime: the recovery of "${sourceTaskId}" was refused by the provider pre-check:\n- ${refusals.join('\n- ')}`,

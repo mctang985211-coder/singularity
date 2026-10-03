@@ -49,14 +49,14 @@ interface ChildSpec {
 
 const children = (objective: string): ChildSpec[] => [
   {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
   },
 ]
 
 /** The root contract every case runs under (A0 §1.2). */
 const ROOT_CONTRACT = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
 

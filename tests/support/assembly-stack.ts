@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 /**
  * A deployment whose model loop is the only thing missing: the real
  * `JsonlSessionPersistence` and the bytes it writes, the real `SystemPrompt`
@@ -22,7 +23,7 @@
  * @module tests/support/assembly-stack
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -174,7 +175,8 @@ export class AssemblyStack {
     this.home = join(this.dir, 'home')
     this.checkout = options.checkout ?? join(this.dir, 'env')
     mkdirSync(this.home, { recursive: true })
-    mkdirSync(join(this.home, 'skills'), { recursive: true })
+    mkdirSync(join(this.home, 'skills', 'task-execution'), { recursive: true })
+    copyFileSync(new URL('../../agent-runtime/skills/task-execution/SKILL.md', import.meta.url), join(this.home, 'skills', 'task-execution', 'SKILL.md'))
     mkdirSync(this.checkout, { recursive: true })
     this.previousHome = process.env.DSH_HOME
     vi.stubEnv('DSH_HOME', this.home)
@@ -193,6 +195,7 @@ export class AssemblyStack {
     this.verifier = new VerifierRegistry(this.ctx, { evidenceRoot: join(this.dir, 'evidence') })
     this.agentRuntime = new AgentRuntime(this.ctx)
     this.runtime = new TaskRuntime(this.ctx, {
+      capabilities: { ...TASK_GUIDANCE },
       ...(options.review === undefined ? {} : { generatedTaskReview: options.review }),
       ...(options.rootBudget === undefined ? {} : { rootBudget: { ...options.rootBudget } }),
       runBindingRoot: join(this.home, 'run-bindings'),

@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../support/skill-roots.ts'
 import { describe, expect, test, vi } from 'vitest'
 import { join } from 'node:path'
 import type { EvidenceBundle, VerificationResult } from '../../../task/src/index.ts'
@@ -277,7 +278,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     await expect(
       decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
         reason: 'split the work',
-        children: [childSpec('gap child', { requiredCapabilities: ['no-such-cap'] })],
+        children: [childSpec('gap child', { requiredCapabilities: ['no-such-cap', 'execute-task'] })],
       }),
     ).rejects.toThrow(/capability gap/)
 
@@ -339,8 +340,8 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const h = harness({
       config: {
         capabilities: {
-          loose: { permission: 'danger-full-access' },
-          strict: { permission: 'workspace-write' },
+          loose: { skills: ['task-execution'], permission: 'danger-full-access' },
+          strict: { skills: ['task-execution'], permission: 'workspace-write' },
         },
       },
     })
@@ -434,15 +435,14 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     ])
   })
 
-  test('a child with no capabilities still carries the baseline grant', async () => {
+  test('a child without guidance is refused before spawn', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [childSpec('plain child')],
-    })
-
-    expect(h.spawned[0]!.grant).toEqual({ capabilities: [], baseline: workerBaseline(), keepPresetTools: false })
+      children: [childSpec('plain child', { requiredCapabilities: [] })],
+    })).rejects.toThrow('provide no readable guidance Skill')
+    expect(h.spawned).toHaveLength(0)
   })
 
   test('the preset tool plane stays only for a capability that names its own preset', async () => {
@@ -466,7 +466,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const h = harness({
       config: {
         capabilities: {
-          research: { preset: 'standard' },
+          research: { skills: ['task-execution'], preset: 'standard' },
           verify: { preset: 'bb-verify' },
         },
       },
@@ -508,7 +508,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('an unknown capability permission preset fails the run before spawn, naming the preset and capability', async () => {
-    const h = harness({ config: { capabilities: { audited: { permission: 'nope' } } } })
+    const h = harness({ config: { capabilities: { audited: { skills: ['task-execution'], permission: 'nope' } } } })
     h.ctx.permissionPresets = {
       resolve: (name: string) => {
         throw new Error(`permission: unknown preset "${name}" (known: workspace-write, danger-full-access)`)
@@ -538,7 +538,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('a dangling capability preset fails the run before spawn, naming the preset and its capability', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'ghost' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'ghost' } } } })
     h.ctx.agentPresets = {
       resolve: async (id?: string) => {
         throw new Error(`Unknown agent preset: ${id}`)
@@ -572,7 +572,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     await expect(
       decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
         reason: 'split the work',
-        children: [childSpec('fine'), childSpec('gap child', { requiredCapabilities: ['no-such-cap'] })],
+        children: [childSpec('fine'), childSpec('gap child', { requiredCapabilities: ['no-such-cap', 'execute-task'] })],
       }),
     ).rejects.toThrow(/capability gap/)
 
@@ -587,7 +587,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [childSpec('gap child', { requiredCapabilities: ['no-such-cap'], decomposable: true })],
+      children: [childSpec('gap child', { requiredCapabilities: ['no-such-cap', 'execute-task'], decomposable: true })],
     })
 
     expect(outcomes[0]!.status).toBe('verified')
@@ -996,7 +996,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const h2 = harness()
     h2.sessions.clear()
     for (const [id, stored] of h.sessions) h2.sessions.set(id, stored)
-    const runtime2 = new TaskRuntime(h2.ctx as never)
+    const runtime2 = new TaskRuntime(h2.ctx as never, { capabilities: { ...TASK_GUIDANCE } })
     const childSession = h.spawned[0]!.sessionId
     const bound = await runtime2.runForSession(childSession)
     expect(bound.task.taskId).toBe(outcomes[0]!.taskId)
@@ -1087,7 +1087,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('an env without the bound repo fails the spawn, naming the repo and the env root', async () => {
-    const h = harness({ config: { capabilities: { 'check-ball-registration': { mcpServers: ['bbdev'] } } } })
+    const h = harness({ config: { capabilities: { 'check-ball-registration': { skills: ['task-execution'], mcpServers: ['bbdev'] } } } })
     h.ctx.envBuilder = { store: { get: (envId: string) => ({ path: `/fake/env/${envId}`, components: [] }) } }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {

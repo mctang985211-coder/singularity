@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
@@ -50,7 +51,8 @@ const WORKER_LOG = [
   { type: 'tool/call', data: { turn: 1, step: 1, callId: 'c4', name: 'web_search', arguments: '{}' } },
   { type: 'tool/call', data: { turn: 1, step: 1, callId: 'c9', name: 'hitl_approve', arguments: '{}' } },
   { type: 'approval/asked', data: { id: 'a1', toolName: 'hitl_approve', callId: 'c9' } },
-  { type: 'tool/result', data: { turn: 1, step: 1, message: { isError: true } } },
+  { type: 'tool/result', data: { turn: 1, step: 1, message: { source: { kind: 'tool', callId: 'c1' }, isError: true } } },
+  { type: 'tool/result', data: { turn: 1, step: 1, message: { source: { kind: 'tool', callId: 'c2' }, isError: false } } },
   { type: 'compaction/start', data: {} },
   // The provider usage the token projection folds; one call's buckets.
   { type: 'assistant/message', data: { turn: 1, step: 1, message: {}, usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 50, cacheWriteTokens: 3 } } },
@@ -175,7 +177,7 @@ function harness() {
     },
   } as never)
 
-  const runtime = new TaskRuntime(ctx, { capabilities: CAPABILITIES } as Config)
+  const runtime = new TaskRuntime(ctx, { capabilities: { ...TASK_GUIDANCE, ...CAPABILITIES } } as Config)
   return { ctx, task, runtime, log, spawned, readSession, snapshot, foldTokenUsage: () => foldTokenUsage(workerSessionEvents) }
 }
 
@@ -188,7 +190,7 @@ function harness() {
  * composite conjunction and a fixture that supplied one silently would hide that.
  */
 function rootContract(objective: string): RootContractSpec {
-  return {
+  return { requiredCapabilities: ['execute-task'],
     objective,
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
@@ -275,7 +277,7 @@ describe('review record metrics and dimensions, end to end', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const { batchId } = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [{ objective: 'child work', acceptanceCriteria: [{ description: 'the child works', command: 'true' }] }],
+      children: [{ requiredCapabilities: ['execute-task'], objective: 'child work', acceptanceCriteria: [{ description: 'the child works', command: 'true' }] }],
     })
     await h.runtime.awaitBatch(STORE, batchId)
 

@@ -13,13 +13,16 @@ export function defineTaskDecomposeTool(ctx: Context) {
     description:
       'Delegate the caller\'s current task\'s independently checkable results or distinct responsibilities to child tasks. ' +
       'Call task_template_list first; use a suitable pinned template and parameters, or write a full standard contract when none applies. ' +
+      'A template carrying decomposition can supply this batch: pass its exact templateRef and templateParameters at the top level, omitting reason and children. The runtime expands its direct children and dependsOn through the same admission path. ' +
       'Each caller owns its full result and may coordinate children that decompose again; define only this level and let each child decide its descendants. ' +
       'The batch is admitted atomically and the runtime then runs them ' +
       'one at a time in dependency order; this call returns at admission and does not wait. Each child is verified ' +
       'against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead ' +
       'come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.',
     parameters: {
-      reason: { type: 'string', required: true, description: 'Why this delegation is needed; recorded in each child handoff' },
+      templateRef: templateBindingParameters.templateRef,
+      templateParameters: templateBindingParameters.templateParameters,
+      reason: { type: 'string', description: 'Required for a free batch; omit when binding a decomposition template. Why this delegation is needed; recorded in each child handoff' },
       ...proposalSubmissionParameters({
         versionSubject: 'batch',
         revisionSubject: 'batch',
@@ -27,8 +30,7 @@ export function defineTaskDecomposeTool(ctx: Context) {
       }),
       children: {
         type: 'array',
-        required: true,
-        description: 'Child tasks to admit and run',
+        description: 'Required for a free batch; omit when binding a decomposition template. Child tasks to admit and run',
         items: {
           type: 'object',
           additionalProperties: false,
@@ -183,9 +185,9 @@ function admittedText(taskId: string, batchId: string, childTaskIds: readonly st
     'run together with its batch with `task_cancel` if abandoning this run. ' +
     'Writes, shell commands, another decomposition and a submission of your own are refused while the ' +
     'children run — do not start work that would collide with theirs in the shared checkout.',
+    'After handling any pending child question, end this turn and let the batch-end message resume you; repeated polling does not advance child execution.\n' +
     'The batch end reaches you as a message naming each child\'s terminal state and evidence, and it hands your execution back: ' +
     'nothing is submitted on your behalf. Back in phase active you continue your own work, admit another batch with ' +
     '`task_decompose`, or hand this task in yourself with `task_submit_result` — only that submission starts its acceptance.',
   ].join('\n')
 }
-

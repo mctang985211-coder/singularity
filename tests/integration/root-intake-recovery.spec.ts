@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -275,7 +276,7 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   const spawns: SpawnRecord[] = []
   const agentRuntime = new AgentRuntime(ctx)
   await ctx.plugin(TaskRuntime, {
-    capabilities: {},
+    capabilities: TASK_GUIDANCE,
     ...(options.generatedTaskReview === undefined ? {} : { generatedTaskReview: options.generatedTaskReview }),
     runBindingRoot: join(home, 'run-bindings'),
   } as Config)
@@ -474,7 +475,7 @@ async function statusOf(boot_: Boot, proposalId: string, expected: string): Prom
  */
 function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
 }
@@ -755,7 +756,7 @@ describe('root intake recovery from the real session log (A0 §1.4, §3 stage B)
     // decomposes, its child verifies, and the old root's own conjunction closes it.
     const admitted = await b.runtime.decomposeAndRun(STORE, seeded.taskId, seeded.runId, ROOT, {
       reason: 'the old graph keeps working',
-      children: [{ objective: 'legacy child', acceptanceCriteria: [{ description: 'the legacy child works', command: 'true' }] }],
+      children: [{ objective: 'legacy child', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'the legacy child works', command: 'true' }] }],
     } satisfies DecomposeSpec)
     if (admitted.status !== 'admitted') throw new Error(`the legacy batch was not admitted: ${admitted.detail}`)
     const outcomes = await b.runtime.awaitBatch(STORE, admitted.batchId)

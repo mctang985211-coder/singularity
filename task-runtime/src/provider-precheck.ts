@@ -505,10 +505,19 @@ function precheckRefusals(precheck: ProviderPrecheck): PrecheckRefusal[] {
  * Every refused provider of one pre-check, one line each, naming the capability
  * that declares it, the skill, the directory when one was found, and every
  */
-export function providerRefusals(precheck: ProviderPrecheck): string[] {
-  return precheckRefusals(precheck).map(
+export function providerRefusals(precheck: ProviderPrecheck, taskCapabilities?: readonly string[]): string[] {
+  const selected = taskCapabilities === undefined
+    ? precheck
+    : { ...precheck, capabilities: precheck.capabilities.filter(row => taskCapabilities.includes(row.capability)) }
+  const refusals = precheckRefusals(selected).map(
     entry => `${entry.head}: ${entry.defects.map(item => `${item.code}: ${item.detail}`).join('; ')}`,
   )
+  if (taskCapabilities !== undefined && !selected.capabilities.some(row => row.skills.some(skill => skill.valid))) {
+    refusals.push(
+      `task capabilities [${taskCapabilities.join(', ')}] provide no readable guidance Skill; select at least one relevant Skill through requiredCapabilities before executing this task`,
+    )
+  }
+  return refusals
 }
 
 /**

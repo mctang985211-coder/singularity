@@ -104,6 +104,25 @@ const SESSION_TEXT = (text: string, seq: number, time: number): SessionEvent =>
 
 const hex = (seed: number): string => seed.toString(16).padStart(64, '0')
 
+/** Explicit read-plane responses for the standard chain's admitted methods. */
+const guidanceBodies: Readonly<Record<string, string>> = {
+  'release-coordination': 'Coordinate the release by checking the bridge and truss results against the release build. Retain the public API and accepted thresholds.',
+  'bridge-construction': 'Build the bridge around its span and verified truss inputs. Delegate the deck as a separate result, then check its load and assembly evidence.',
+  'truss-construction': 'Build the truss from the accepted dimensions. Verify joints and load support before publishing the truss artifact for the bridge.',
+  'deck-construction': 'Build the deck from the verified truss and specified deck material. Check dimensions and fastening before publishing the deck artifact.',
+  'champion-replay': 'Reproduce the champion from the recorded inputs and compare its output under the unchanged champion acceptance. Record the replay evidence.',
+  'reference-integration': 'Resolve the handed-off artifact and evidence references by their recorded identities. Integrate their results under the accepted release contract and cite the supporting records.',
+}
+
+export const GUIDANCE_BINDINGS: Readonly<Record<keyof typeof guidanceBodies, RunProviderBinding>> = Object.fromEntries(
+  Object.entries(guidanceBodies).map(([name, instructions]) => [name, {
+    registryRevision: hex(31), capabilities: [name], mcpServers: [],
+    snapshotRoot: `/fixture/run-bindings/${name}/skills`,
+    skills: [{ name, role: 'guidance', capabilities: [name], description: name,
+      contractDigest: null, contentDigest: sha256Hex(instructions), uncovered: [] }],
+  }]),
+)
+
 /** A run binding whose snapshot the fixture's runtime stub reports as unreadable, and one it reports as fine. */
 export const BINDING_WITH_SNAPSHOT: RunProviderBinding = {
   registryRevision: hex(11),
@@ -238,6 +257,14 @@ export class FixtureStack {
       readRunBinding: async (binding: RunProviderBinding): Promise<RunBindingRead | undefined> => {
         this.observed.readRunBinding(binding)
         if (binding.snapshotRoot === undefined) return undefined
+        const admitted = Object.values(GUIDANCE_BINDINGS).find(candidate =>
+          candidate.snapshotRoot === binding.snapshotRoot && JSON.stringify(candidate) === JSON.stringify(binding))
+        if (admitted !== undefined) return {
+          snapshotRoot: binding.snapshotRoot,
+          skills: admitted.skills.map(skill => ({ name: skill.name, role: skill.role,
+            readable: true, defects: [], instructions: guidanceBodies[skill.name] })),
+          defects: [],
+        }
         const skills = binding.skills.map(skill => ({
           name: skill.name,
           role: skill.role,
@@ -431,7 +458,7 @@ export class FixtureStack {
       objective: spec.objective,
       depth: spec.depth ?? 0,
       acceptanceCriteria: criteria,
-      requestedCapabilities: [],
+      requestedCapabilities: [...(spec.providerBinding?.capabilities ?? [])],
       decompositionStatus: spec.decomposable === true ? 'decomposable' : 'leaf',
       status: 'created',
       runIds: [],
@@ -442,7 +469,7 @@ export class FixtureStack {
         acceptanceCriteria: criteria,
         assumptions: [...(spec.assumptions ?? [])],
         constraints: [...(spec.constraints ?? [])],
-        requiredCapabilities: [],
+        requiredCapabilities: [...(spec.providerBinding?.capabilities ?? [])],
       },
     }
     await this.task.createTaskIn(storeId, task, spec.sessionId)
@@ -454,7 +481,7 @@ export class FixtureStack {
       taskId: spec.taskId,
       sessionId: spec.sessionId,
       ...(spec.parentRunId === undefined ? {} : { parentRunId: spec.parentRunId }),
-      capabilitySnapshot: [],
+      capabilitySnapshot: spec.providerBinding?.skills.map(skill => skill.name) ?? [],
       ...(spec.providerBinding === undefined ? {} : { providerBinding: spec.providerBinding }),
       ...(spec.phaseUnknown === true ? {} : { executionPhase: spec.phase ?? 'active' }),
       artifacts: [],
@@ -899,7 +926,7 @@ export interface Chain {
   readonly replaySession: string
 }
 
-export async function seedChain(stack: FixtureStack, rootSession = 's-root'): Promise<Chain> {
+export async function seedChain(stack: FixtureStack, rootSession = 's-root', brokenChildBinding = false): Promise<Chain> {
   const storeId = rootTaskStoreId(rootSession)
   const graphId = `g-${rootSession}`
   stack.graph({
@@ -934,7 +961,7 @@ export async function seedChain(stack: FixtureStack, rootSession = 's-root'): Pr
         protectedInputs: [{ path: 'release/thresholds.json', sha256: hex(77) }],
       },
     ],
-    providerBinding: BINDING_WITHOUT_SNAPSHOT,
+    providerBinding: GUIDANCE_BINDINGS['release-coordination'],
   })
   await stack.seed({
     taskId: 't-c1',
@@ -944,13 +971,14 @@ export async function seedChain(stack: FixtureStack, rootSession = 's-root'): Pr
     parentTaskId: 't-root',
     depth: 1,
     constraints: ['no new dependency'],
-    providerBinding: BINDING_WITH_SNAPSHOT,
+    providerBinding: brokenChildBinding ? BINDING_WITH_SNAPSHOT : GUIDANCE_BINDINGS['bridge-construction'],
   })
   await stack.seed({
     taskId: 't-c2',
     sessionId: 's-c2',
     runId: 'r-c2',
     objective: 'sibling: build the truss',
+    providerBinding: GUIDANCE_BINDINGS['truss-construction'],
     parentTaskId: 't-root',
     depth: 1,
   })
@@ -959,6 +987,7 @@ export async function seedChain(stack: FixtureStack, rootSession = 's-root'): Pr
     sessionId: 's-g1',
     runId: 'r-g1',
     objective: 'grandchild: build the deck',
+    providerBinding: GUIDANCE_BINDINGS['deck-construction'],
     parentTaskId: 't-c1',
     depth: 2,
     dependencies: ['t-c2'],
@@ -1005,6 +1034,7 @@ export async function seedChain(stack: FixtureStack, rootSession = 's-root'): Pr
     sessionId: 's-replay',
     runId: 'r-replay',
     objective: 'replay the champion candidate',
+    providerBinding: GUIDANCE_BINDINGS['champion-replay'],
     parentRunId: 'r-root',
   })
   return {

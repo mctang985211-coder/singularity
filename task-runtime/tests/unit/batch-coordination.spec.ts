@@ -1085,7 +1085,7 @@ describe('A3 coordination', () => {
   })
 
   test('cancelGraph stops a replay this process is driving', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { taskId: rootTaskId } = await createRoot(h)
     // A terminal champion to replay: a verified task with its own run.
     const championTaskId = 't-champion'
@@ -1341,7 +1341,7 @@ describe('A3 coordination', () => {
             command: 'true',
           },
         ],
-        requestedCapabilities: [],
+        requestedCapabilities: ['execute-task'],
         decompositionStatus: 'leaf',
         status: 'created',
         runIds: [],
@@ -1397,7 +1397,7 @@ describe('A3 coordination', () => {
             command: 'true',
           },
         ],
-        requestedCapabilities: [],
+        requestedCapabilities: ['execute-task'],
         decompositionStatus: 'leaf',
         status: 'created',
         runIds: [],
@@ -1452,7 +1452,7 @@ describe('A3 coordination', () => {
             command: 'true',
           },
         ],
-        requestedCapabilities: [],
+        requestedCapabilities: ['execute-task'],
         decompositionStatus: 'leaf',
         status: 'created',
         runIds: [],
@@ -1523,7 +1523,7 @@ describe('A3 coordination', () => {
     await expect(h.runtime.reconcileStore(STORE)).rejects.toThrow('no capability manifest')
   })
   test('recovery settles a dead process\u2019s run even while this process drives a replay of the same store', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const h = harness({ config: { capabilities: { research: { skills: ['task-execution'], preset: 'standard' } } } })
     const { taskId, runId } = await createRoot(h)
     // A verified champion to replay: the replay's worker never returns, so its
     // driver is in flight for the whole case.
@@ -1551,7 +1551,7 @@ describe('A3 coordination', () => {
             command: 'true',
           },
         ],
-        requestedCapabilities: [],
+        requestedCapabilities: ['execute-task'],
         decompositionStatus: 'leaf',
         status: 'created',
         runIds: [],

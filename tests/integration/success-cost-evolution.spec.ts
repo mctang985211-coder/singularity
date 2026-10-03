@@ -80,7 +80,7 @@ async function fixture(candidateReads = 0, candidateFails = false, decomposed = 
           { tool: 'evolution_propose', args: { proposalId: PROPOSAL, targetType: capability ? 'capability' : 'skill', targetId: capability ? ROW : SKILL,
             baseVersion: 'v1', level: 'L2', rationale: 'remove redundant calls', sourceRefs: [`diagnosis:${diagnosisId}`] } },
           { tool: 'evolution_candidate', args: { proposalId: PROPOSAL, versionSet: { skill: 'v2' },
-            mutationJson: JSON.stringify(capability ? { rows: { [ROW]: { tools: ['filesystem'] } } } : { name: SKILL, content: candidateBody }) } },
+            mutationJson: JSON.stringify(capability ? { rows: { [ROW]: { skills: ['task-execution'], tools: ['filesystem'] } } } : { name: SKILL, content: candidateBody }) } },
           { tool: 'evolution_prepare', args: { proposalId: PROPOSAL } },
           { tool: 'evolution_replay', args: { proposalId: PROPOSAL, objective: 'tool-call-reduction',
             taskIds: [taskId], holdoutTaskIds: [HOLDOUT] } },
@@ -222,8 +222,8 @@ describe('verified-source measured cost optimization', () => {
     expect(final.runs.find(run => run.runId === f.runId)?.status).toBe('verified')
     expect(final.reviews.find(review => review.runId === attempt.runId)?.criteria.map(item => item.verdict)).toEqual(capability ? ['pass', 'fail'] : ['pass'])
     if (capability) {
-      expect(attempt.providerBinding?.skills).toEqual([])
-      expect(f.h.runtime.listCapabilities()[ROW]).toEqual({ tools: ['filesystem'] })
+      expect(attempt.providerBinding?.skills.map(skill => skill.name)).toEqual(['task-execution'])
+      expect(f.h.runtime.listCapabilities()[ROW]).toEqual({ skills: ['task-execution'], tools: ['filesystem'] })
     } else {
       expect(attempt.providerBinding?.skills.find(skill => skill.name === SKILL)?.contentDigest)
         .toBe(skillContentDigest({ skillMdSha256: (await f.h.ctx.evolution.get(PROPOSAL)).prepared!.skillContent!.sha256, resources: [] }))

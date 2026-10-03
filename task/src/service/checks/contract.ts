@@ -3,6 +3,7 @@
 import { TASK_CONTRACT_VERSION, canonicalize, contractDigest, type DecompositionAdmission, type TaskContract } from '../../contract.ts'
 import type { TaskId, TaskInstance } from '../../types.ts'
 import { isRecord } from './primitives.ts'
+import { parseTemplateScope } from '../../template.ts'
 
 /** A task's contract is either absent — a task created before the contract existed — or the single source its projection fields are generated from. */
 export function assertContract(taskId: TaskId, contract: TaskContract, task: TaskInstance): void {
@@ -28,6 +29,7 @@ export function assertContract(taskId: TaskId, contract: TaskContract, task: Tas
 
 /** The contract fields one normalized contract must carry, checked the same way wherever a contract is stored — on a task (T1) and on each child of a proposal's batch (T2). */
 export function assertContractFields(where: string, contract: TaskContract): void {
+  if (contract.templateScope !== undefined) parseTemplateScope(contract.templateScope)
   if (contract.contractVersion !== TASK_CONTRACT_VERSION) {
     throw new Error(
       `task: ${where} declares contract version ${String(contract.contractVersion)}; this build stores version ${TASK_CONTRACT_VERSION}`,

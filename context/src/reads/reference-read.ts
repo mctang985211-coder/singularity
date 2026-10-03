@@ -21,7 +21,7 @@ import {
 import type { ContextReadQuery, ReadDeps, ReviewReference, SessionEventReference } from '../types.ts'
 import { sessionEventRead } from '../session/session-event-read.ts'
 import { sessionRead } from '../session/session-read.ts'
-import { storeSource, TASK_PAGE_MIN_BYTES, unboundRead } from './guards.ts'
+import { readableTaskIds, storeSource, TASK_PAGE_MIN_BYTES, unboundRead } from './guards.ts'
 
 /** One located record: the store object plus the identity the result prints. */
 interface LocatedRecord {
@@ -156,7 +156,16 @@ export async function contextRead(
     )
   }
 
-  const found = locateRecord(snapshot, kind, query.ref)
+  const allowed = readableTaskIds(loaded)
+  const readable = allowed === undefined ? snapshot : {
+    ...snapshot,
+    tasks: snapshot.tasks.filter(record => allowed.has(record.taskId)),
+    runs: snapshot.runs.filter(record => allowed.has(record.taskId)),
+    evidence: snapshot.evidence.filter(record => allowed.has(record.taskId)),
+    reviews: snapshot.reviews.filter(record => allowed.has(record.taskId)),
+    diagnoses: snapshot.diagnoses.filter(record => allowed.has(record.taskId)),
+  }
+  const found = locateRecord(readable, kind, query.ref)
   if ('refusal' in found) return refused(found.refusal, found.detail)
   const recordText = await recordTextOf(deps, snapshot, kind, found.record)
   const offset = Math.max(0, Math.trunc(query.offset ?? 0))

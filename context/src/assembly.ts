@@ -97,6 +97,10 @@ export async function assembleSingularityContext(
 
   switch (caller.resolution.kind) {
     case 'worker': {
+      if (caller.resolution.run.executionPhase === 'active') {
+        try { withRuntimeContext(assembly, 'singularity:task-templates', await service.templatesFor(caller)) }
+        catch (error) { throw new AssemblyRefusalError('unreadable', `task-template-catalog-unreadable: ${error instanceof Error ? error.message : String(error)}`) }
+      }
       const contract = await service.contractFor(caller)
       if (!contract.ok) throwRefusal(contract)
       const dynamic = await service.dynamicFor(caller)
@@ -109,6 +113,10 @@ export async function assembleSingularityContext(
       return next()
     }
     case 'root': {
+      if (caller.resolution.run === undefined || caller.resolution.run.executionPhase === 'active') {
+        try { withRuntimeContext(assembly, 'singularity:task-templates', await service.templatesFor(caller)) }
+        catch (error) { throw new AssemblyRefusalError('unreadable', `task-template-catalog-unreadable: ${error instanceof Error ? error.message : String(error)}`) }
+      }
       // Not activated yet: the root prompt and the intake tools are this
       // session's whole context, exactly as before this package existed.
       if (caller.resolution.task === undefined) return next()

@@ -66,7 +66,7 @@ async function oversizedTask(stack: AssemblyStack, storeId: string, parentTaskId
       mandatory: true,
       command: 'true',
     }],
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -92,7 +92,7 @@ async function ordinaryTask(stack: AssemblyStack, storeId: string, taskId: strin
       mandatory: true,
       command: 'true',
     }],
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -111,7 +111,7 @@ describe('the status page a model is handed (Q4)', () => {
     const stack = await boot({ worker: async () => {} })
     const storeId = stack.storeIdOf('s-root')
     await stack.seedLog('s-root', ['ship the release'])
-    const root = await stack.runtime.intakeRootContract(storeId, 's-root', {
+    const root = await stack.runtime.intakeRootContract(storeId, 's-root', { requiredCapabilities: ['execute-task'],
       objective: 'ship the release',
       acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
     })

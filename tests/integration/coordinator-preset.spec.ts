@@ -17,7 +17,7 @@ it('loads the coordinator host, installs only the supervisor policy, and records
   await expect(stack.ctx.agentPresets.resolve('singularity-reviewer')).rejects.toThrow()
   const rootSession = stack.roots[0]!
   await stack.seedLog(rootSession, ['review the recorded source'])
-  const root = await stack.runtime.intakeRootContract(stack.storeIdOf(rootSession), rootSession, {
+  const root = await stack.runtime.intakeRootContract(stack.storeIdOf(rootSession), rootSession, { requiredCapabilities: ['execute-task'],
     objective: 'review the recorded source', acceptanceCriteria: [{ criterionId: 'goal', description: 'the source is reviewed', command: 'true' }],
   })
   const handle = await stack.agentRuntime.spawn(stack.agent(stack.roots[0]!)!, {

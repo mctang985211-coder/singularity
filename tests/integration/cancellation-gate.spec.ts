@@ -70,7 +70,7 @@ const LATE_WRITE = 'write after the completion landed'
 
 /** The root contract this store runs under (A0 §1.2): one goal, one criterion a command settles. */
 const CONTRACT: RootContractSpec = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
 

@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../support/skill-roots.ts'
 import { describe, expect, test } from 'vitest'
 import type { TaskEvent } from '../../../task/src/index.ts'
 import { ROOT_PROPOSAL_TASK_ID } from '../../../task/src/index.ts'
@@ -151,7 +152,7 @@ describe('TaskRuntime review policy (§5)', () => {
     // The configuration schema types the member, but a deployment that builds the
     // runtime directly bypasses it: an unknown mode refuses to start rather than
     // admitting unreviewed batches.
-    expect(() => new TaskRuntime(h.ctx as never, { generatedTaskReview: 'risk' } as unknown as Config)).toThrow(
+    expect(() => new TaskRuntime(h.ctx as never, { generatedTaskReview: 'risk' as Config['generatedTaskReview'], capabilities: TASK_GUIDANCE })).toThrow(
       /generatedTaskReview is "risk"; the review policy is "off" or "all"/,
     )
 

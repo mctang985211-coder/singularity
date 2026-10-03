@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../support/skill-roots.ts'
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -210,7 +211,7 @@ function harness(
   // The deployment's supervision policy travels as its own service (A7), exactly
   // as a fixture names it; the config path is what a mounted plugin would read.
   if (options.supervision !== undefined) ctx.singularitySupervision = { ...options.supervision }
-  const runtime = new TaskRuntime(ctx as never, options.config as Config | undefined)
+  const runtime = new TaskRuntime(ctx as never, { ...options.config, capabilities: { ...TASK_GUIDANCE, ...options.config?.capabilities } })
   return { ctx, task, runtime, sessions, disposers, spawns, resumed, notices }
 }
 
@@ -269,7 +270,7 @@ function rootTask(overrides: Partial<TaskInstance> = {}): TaskInstance {
     objective: 'ship the release',
     depth: 0,
     acceptanceCriteria,
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'decomposable',
     status: 'created',
     runIds: [],
@@ -280,7 +281,7 @@ function rootTask(overrides: Partial<TaskInstance> = {}): TaskInstance {
       acceptanceCriteria: acceptanceCriteria as never,
       assumptions: [],
       constraints: [],
-      requiredCapabilities: [],
+      requiredCapabilities: ['execute-task'],
     },
     ...overrides,
   }
@@ -316,7 +317,7 @@ function passedSibling(
     objective: childId,
     depth: 1,
     acceptanceCriteria: [{ ...criterion(criterionId), verificationMode: 'deterministic' } as never],
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -470,8 +471,8 @@ async function storeWithFailedRoot(
       ? withReference
       : {
           ...withReference,
-          requestedCapabilities: [options.capability],
-          contract: { ...withReference.contract!, requiredCapabilities: [options.capability] },
+          requestedCapabilities: [options.capability, 'execute-task'],
+          contract: { ...withReference.contract!, requiredCapabilities: [options.capability, 'execute-task'] },
         }
   await h.task.createStore(STORE)
   await h.task.createTaskIn(STORE, root, 'test')

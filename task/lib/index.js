@@ -399,6 +399,24 @@ function buildBudgetExtension(snapshot, taskId, sessionId, claim, timestamp) {
 }
 
 //#endregion
+//#region src/template.ts
+function parseCatalogPath(raw) {
+	if (!Array.isArray(raw) || raw.length === 0 || raw.length > 8 || raw.some((segment) => typeof segment !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(segment))) throw new Error("task-template: catalogPath requires 1–8 category names of at most 64 characters");
+	return [...raw];
+}
+function catalogPathWithin(path, prefix) {
+	return prefix.length <= path.length && prefix.every((segment, index) => segment === path[index]);
+}
+function parseTemplateScope(raw) {
+	if (!Array.isArray(raw) || raw.length > 20) throw new Error("task-template: templateScope must be an array of at most 20 catalog paths");
+	const paths = raw.map(parseCatalogPath);
+	return paths.filter((path, index) => !paths.some((prefix, other) => other !== index && catalogPathWithin(path, prefix) && (prefix.length < path.length || other < index)));
+}
+function taskTemplateDigest(template) {
+	return sha256Hex(canonicalize(template));
+}
+
+//#endregion
 //#region src/service/checks/contract.ts
 /** A task's contract is either absent — a task created before the contract existed — or the single source its projection fields are generated from. */
 function assertContract(taskId, contract, task) {
@@ -411,6 +429,7 @@ function assertContract(taskId, contract, task) {
 }
 /** The contract fields one normalized contract must carry, checked the same way wherever a contract is stored — on a task (T1) and on each child of a proposal's batch (T2). */
 function assertContractFields(where, contract) {
+	if (contract.templateScope !== void 0) parseTemplateScope(contract.templateScope);
 	if (contract.contractVersion !== TASK_CONTRACT_VERSION) throw new Error(`task: ${where} declares contract version ${String(contract.contractVersion)}; this build stores version ${TASK_CONTRACT_VERSION}`);
 	const lists = [
 		["assumptions", contract.assumptions],
@@ -842,7 +861,9 @@ const DECOMPOSITION_IDENTITY_FIELDS = [
 	"parentRunId",
 	"callerSessionId",
 	"reason",
-	"children"
+	"children",
+	"templateRef",
+	"templateParameters"
 ];
 /** The closed field set of a root contract identity ({@link RootProposalIdentity}). */
 const ROOT_IDENTITY_FIELDS = [
@@ -992,6 +1013,19 @@ function assertProposalIdentity(snapshot, id, identity) {
 	for (const [name, value] of names) if (!nonEmpty(value)) throw new Error(`task: proposal "${id}" identity ${name} must be a non-empty string`);
 	if (!nonEmpty(identity.parentTaskId)) throw new Error(`task: proposal "${id}" identity parent task id must be a non-empty string`);
 	if (typeof identity.reason !== "string") throw new Error(`task: proposal "${id}" identity reason must be a string`);
+	if (identity.templateRef !== void 0) {
+		const ref = identity.templateRef;
+		if (!isRecord(ref) || typeof ref.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(ref.id) || !Number.isSafeInteger(ref.version) || ref.version < 1 || !isDigest(ref.digest) || Object.keys(ref).some((key) => ![
+			"id",
+			"version",
+			"digest"
+		].includes(key))) throw new Error(`task: proposal "${id}" identity templateRef requires an exact id, version and digest`);
+	} else if (identity.templateParameters !== void 0) throw new Error(`task: proposal "${id}" identity templateParameters requires templateRef`);
+	if (identity.templateParameters !== void 0 && (!isRecord(identity.templateParameters) || Object.values(identity.templateParameters).some((value) => ![
+		"string",
+		"boolean",
+		"number"
+	].includes(typeof value) || typeof value === "number" && !Number.isFinite(value)))) throw new Error(`task: proposal "${id}" identity templateParameters requires finite primitive values`);
 	if (!Array.isArray(identity.children) || identity.children.length === 0) throw new Error(`task: proposal "${id}" identity requires at least one child`);
 	identity.children.forEach((child, index) => {
 		if (!isRecord(child)) throw new Error(`task: proposal "${id}" child ${index} must be an object`);
@@ -1871,12 +1905,6 @@ var EventStoreSet = class {
 };
 
 //#endregion
-//#region src/template.ts
-function taskTemplateDigest(template) {
-	return sha256Hex(canonicalize(template));
-}
-
-//#endregion
 //#region src/index.ts
 function now() {
 	return (/* @__PURE__ */ new Date()).toISOString();
@@ -2367,4 +2395,4 @@ var TaskService = class extends Service {
 var src_default = TaskService;
 
 //#endregion
-export { BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, EventStoreSet, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskService, TaskState, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, definedKeys, describeBudgetExtension, describeBudgetReading, isTerminalRunStatus, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest };
+export { BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, EventStoreSet, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskService, TaskState, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, decompositionDigest, src_default as default, definedKeys, describeBudgetExtension, describeBudgetReading, isTerminalRunStatus, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest };

@@ -66,12 +66,12 @@ async function failedTask(stack: AssemblyStack): Promise<{ storeId: string; task
   const storeId = stack.storeIdOf(ROOT_SESSION)
   await stack.seedLog(ROOT_SESSION, ['ship the release'])
   const root = await stack.runtime.intakeRootContract(storeId, ROOT_SESSION, {
-    objective: 'ship the release',
+    objective: 'ship the release', requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is delivered', command: 'true' }],
   })
   const batch = await stack.runtime.decomposeAndRun(storeId, root.taskId, root.runId, ROOT_SESSION, {
     reason: 'split the work',
-    children: [{ objective: 'child that fails', acceptanceCriteria: [criterion('false')] }],
+    children: [{ objective: 'child that fails', requiredCapabilities: ['execute-task'], acceptanceCriteria: [criterion('false')] }],
   } as never)
   const outcomes = await stack.runtime.awaitBatch(storeId, batch.batchId)
   expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])

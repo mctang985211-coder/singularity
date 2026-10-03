@@ -1,28 +1,12 @@
 import * as _dangosys_dsh_singularity_task0 from "@dangosys/dsh-singularity-task";
-import { AcceptanceCriterion, AdmissionContext, BudgetExtensionProposal, CapabilityManifest, CriterionSpec, DecompositionAdmission, DecompositionIdentity, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionRecord, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunProviderBinding, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractInput, TaskContractVersion, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalPolicy, TaskProposalRoot, TaskProposalStatus, TaskRun, TaskService, TaskSnapshot, TaskTemplate, TaskTemplateRef } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, AdmissionContext, BudgetExtensionProposal, CapabilityManifest, CatalogPath, CriterionSpec, DecompositionAdmission, DecompositionIdentity, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionRecord, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunProviderBinding, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractInput, TaskContractVersion, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalPolicy, TaskProposalRoot, TaskProposalStatus, TaskRun, TaskService, TaskSnapshot, TaskTemplate, TaskTemplateRef, TemplateParameters, TemplateScope } from "@dangosys/dsh-singularity-task";
 import { Context, Service } from "@deepseek-ai/cordis";
+import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
 import { AgentMessageIntent, AgentOptions, McpServerSpec, MessageDeliveryReport, MessageDeliveryStatus, SessionOwnLog, ToolCallBody, ToolCallRef, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
-import { SessionId } from "@deepseek-ai/dsh-session";
 import { ContextFormed } from "@deepseek-ai/dsh-llm";
 import { Agent, AgentHandle } from "@deepseek-ai/dsh-agent";
 
-//#region src/task-template.d.ts
-/** The sole default for production and Evolution: the runtime resolves this once at construction. */
-declare function defaultTaskTemplatesRoot(): string;
-interface TaskTemplateMatch {
-  templateRef: TaskTemplateRef;
-  template: TaskTemplate;
-}
-/** Reject unsupported schema vocabulary rather than claiming to validate it. */
-declare function parseTaskTemplate(raw: unknown): TaskTemplate;
-/** Append one immutable version. An identical repeat returns the same reference. */
-declare function registerTaskTemplate(root: string, input: TaskTemplate): Promise<TaskTemplateRef>;
-/** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery. */
-declare function findTaskTemplates(root: string | undefined, query?: string): Promise<TaskTemplateMatch[]>;
-/** Expand into the same authoring fields as a free contract; no template-specific execution path follows. */
-declare function bindTaskTemplate<T extends TaskContractInput>(root: string | undefined, spec: T): Promise<T & TaskContractInput>;
-//#endregion
 //#region src/mcp-servers.d.ts
 /**
  * The env binding one spawn resolves server templates against. Produced by
@@ -108,131 +92,6 @@ declare function resolveCapabilities(required: readonly string[], registry: Read
 interface PermissionSpec {
   sandbox: string;
   approval: string;
-}
-//#endregion
-//#region src/gate.d.ts
-/** A tool call that was let through and has not reported its result yet. */
-interface InFlightCall {
-  readonly callId: string;
-  readonly name: string;
-}
-/**
- * The jobs service as the drain uses it, structurally. Written as a soft
- * interface so the runtime can hand in `ctx.jobs` without this module importing
- */
-interface JobsViewEntry {
-  readonly id: string;
-  readonly status: string;
-  readonly detail?: string;
-}
-interface JobsView {
-  list(agent?: unknown): readonly JobsViewEntry[];
-  kill(id: string, agent?: unknown, reason?: string): unknown;
-  wait(id: string, timeoutMs: number, agent?: unknown): Promise<{
-    status: string;
-    detail?: string;
-  }>;
-}
-/** What the gate decided about one call. `allow: true` means `next()`; a refusal names the phase and why the tool is not in it. */
-type GateDecision = {
-  allow: true;
-} | {
-  allow: false;
-  reason: string;
-};
-interface DrainOptions {
-  /** How long the whole drain may take, in milliseconds; the caller's policy, never a default here. */
-  timeoutMs: number;
-  /**
-   * The call that is asking for the drain. It is in flight by definition (it is
-   * the submission or admission call itself), so counting it would wait for the
-   */
-  excludeCallId?: string;
-  /** The jobs service; absent (with `agent`) means this deployment has no managed jobs to reconcile. */
-  jobs?: JobsView;
-  /** The owner agent a jobs call is authorized as. */
-  agent?: unknown;
-}
-type DrainResult = {
-  confirmed: true;
-} | {
-  confirmed: false;
-  pending: string[];
-};
-/**
- * The phase each session is in, what it has in flight, and whether it is waiting
- * on an answer. One instance per runtime; nothing here touches the store or a
- */
-declare class ExecutionGate {
-  private readonly phases;
-  /** Registering by call id (not by session) because `tools/result` carries only the call id. */
-  private readonly calls;
-  /**
-   * How many times this process wrote one session's phase by its own authority
-   * ({@link setPhase}, {@link setTerminal}): the applicability token a
-   */
-  private readonly decisions;
-  /**
-   * The sessions whose runs are waiting on an unresolved blocking question
-   * (A4 §F.1). A set rather than a map of booleans: "no entry" and "not blocked"
-   */
-  private readonly questionBlocked;
-  /**
-   * Move a session's phase: the runtime calls this when **it** is the authority
-   * for the transition — a committed admission or submission, a settled run, an
-   */
-  setPhase(sessionId: string, phase: ExecutionPhase): void;
-  /**
-   * Mark a session's run terminal: only the allow-list runs from here, and its
-   * reason says the call is late. A decision, like {@link setPhase} — it moves
-   */
-  setTerminal(sessionId: string): void;
-  /**
-   * How many times this process has written this session's phase by its own
-   * authority; `0` for a session it has never written one for. This is the
-   */
-  decisionToken(sessionId: string): number;
-  /**
-   * Apply a phase the store implies — never one this process decided — and only
-   * when it is newer than everything decided here: `token` is the
-   */
-  applyStorePhase(sessionId: string, phase: ExecutionPhase | 'terminal', token: number): boolean;
-  /**
-   * Record that a session's run is — or is no longer — waiting on an unresolved
-   * blocking question (A4 §F.1). A decision of this process about a fact this
-   */
-  setQuestionsBlocked(sessionId: string, blocked: boolean): void;
-  /**
-   * Apply a blocking state the store implies — never one this process decided —
-   * under the same token rule as {@link applyStorePhase}: `token` is the
-   */
-  applyStoreQuestionsBlocked(sessionId: string, blocked: boolean, token: number): boolean;
-  /** Whether the run bound to this session is waiting on an unresolved blocking question (A4 §7.2's derived wait). */
-  questionsBlocked(sessionId: string): boolean;
-  /** The phase a session is under, or `undefined` when no run is bound to it (nothing is gated). */
-  phaseOf(sessionId: string): ExecutionPhase | 'terminal' | undefined;
-  /**
-   * Register a call that was let through. Called for every allowed call whatever
-   * its phase, because the phase can change while it runs — that in-flight write
-   */
-  trackAllowed(sessionId: string, callId: string, toolName: string): void;
-  /** The result event for a call arrived: it is no longer in flight. Unknown ids are the denied calls, and are ignored. */
-  settled(callId: string): void;
-  /**
-   * The session's in-flight calls that count as writes: everything whose name is
-   * not in {@link COORDINATION_ALLOWED}. The definition is the allow-list, not a
-   */
-  inFlightWrites(sessionId: string): InFlightCall[];
-  /**
-   * Decide one call. A session with no phase is not bound to a run and is not
-   * gated; an `active` run with no blocking question is still deciding its own
-   */
-  decide(sessionId: string, toolName: string): GateDecision;
-  /**
-   * Wait — bounded — until this session has no in-flight write and no live
-   * managed job, and say exactly what is left when the window closes. Never
-   */
-  drainSession(sessionId: string, opts: DrainOptions): Promise<DrainResult>;
 }
 //#endregion
 //#region src/skill-contract.d.ts
@@ -429,6 +288,8 @@ interface LoadedSkillSidecar {
    * and the purpose a reader sees. Absent exactly when the file could not be
    */
   readonly frontmatter?: LoadedSkillFrontmatter;
+  /** Instruction body parsed from the same bytes whose digest was checked. */
+  readonly instructions?: string;
   /** Direct entries the supported vocabulary does not cover (a directory reads as `name/`), sorted. */
   readonly uncovered: readonly string[];
   /** Every reason the directory or its sidecar is not acceptable; empty means a clean load. */
@@ -691,113 +552,7 @@ declare function precheckReplacedCapabilityRow(request: {
  * Every refused provider of one pre-check, one line each, naming the capability
  * that declares it, the skill, the directory when one was found, and every
  */
-declare function providerRefusals(precheck: ProviderPrecheck): string[];
-//#endregion
-//#region src/run-binding.d.ts
-/** Everything one run needs to bind its content: the verdicts, the rows, and where the snapshot goes. */
-interface RunBindingRequest {
-  /** The store the run belongs to; scopes the snapshot directory. */
-  storeId: string;
-  /** The run the snapshot is scoped to. */
-  runId: RunId;
-  /** The run's resolved manifest: its rows are the run's capability rows and its granted servers. */
-  manifest: CapabilityManifest;
-  /**
-   * The admission-time pre-check this run's verdicts come from. Absent when the
-   * caller assembled the plan itself (a hand-built cascade): then no binding is
-   */
-  providers?: ProviderPrecheck;
-  /** The capability table the run resolved against; its revision is recorded when no pre-check carries one. */
-  table?: Readonly<Record<string, CapabilityConfig>>;
-  /** Where the run snapshot is materialized; absent means this deployment cannot materialize content, which fails a run that selected any. */
-  root?: string;
-  /** The MCP template registry the granted server names resolve against (tests pass their own). */
-  mcpRegistry?: Readonly<Record<string, McpServerTemplate>>;
-}
-/** The granted MCP servers' identity: the registry key and the template it resolved to, or `null` when the registry holds no such key. */
-declare function mcpServerBindings(manifest: CapabilityManifest, registry: Readonly<Record<string, McpServerTemplate>>): RunMcpServerBinding[];
-/**
- * Bind one run's content: identify the providers its admission judged,
- * materialize their admitted bytes, and verify the snapshot against the record
- */
-declare function bindRunProviders(request: RunBindingRequest): Promise<RunProviderBinding | undefined>;
-/** One skill's re-read result: whether the snapshot still holds the bytes the record names, and why not. */
-interface RunBindingSkillRead {
-  /** The skill name the record names. */
-  readonly name: string;
-  /** The role the run was bound to it as. */
-  readonly role: RunSkillBinding['role'];
-  /** True when the snapshot directory holds exactly the recorded content and declaration. */
-  readonly readable: boolean;
-  /** Every reason this skill's content is not readable as recorded, each naming its code. */
-  readonly defects: readonly string[];
-}
-/** What re-reading one run's binding found. */
-interface RunBindingRead {
-  /** The snapshot root the record names. */
-  readonly snapshotRoot: string;
-  /** One entry per skill in record order. */
-  readonly skills: readonly RunBindingSkillRead[];
-  /** Every reason any skill's content is not readable as recorded; empty means the whole snapshot verified. */
-  readonly defects: readonly string[];
-}
-//#endregion
-//#region src/normalize.d.ts
-/** Where one batch came from: the store, the parent, its run, and the caller that submitted it. */
-interface DecompositionIdentityContext {
-  storeId: string;
-  parentTaskId: string;
-  parentRunId: string;
-  callerSessionId: string;
-}
-interface NormalizationContext extends DecompositionIdentityContext {
-  /** The limits in force, resolved by the caller from its configuration and recorded verbatim with the batch. */
-  admissionContext: AdmissionContext;
-}
-/** One normalized child: its contract plus the batch facts the identity covers. */
-interface NormalizedChild {
-  contract: TaskContract;
-  dependsOn: number[];
-  decomposable: boolean;
-  requiresIndependentAcceptance: boolean;
-}
-interface NormalizedBatch {
-  contractVersion: TaskContractVersion;
-  /** The caller's reason, verbatim — part of {@link decompositionIdentity}, so a writer that records the batch's identity records this text. */
-  reason: string;
-  children: NormalizedChild[];
-  /** The batch identity and the limits it was admitted under, ready to be recorded with the decomposition. */
-  admission: DecompositionAdmission;
-}
-/**
- * The identity one batch is digested over (§4): where it came from, which
- * contract language it is written in, the caller's reason, and the complete
- */
-declare function decompositionIdentity(context: DecompositionIdentityContext, reason: string, children: readonly NormalizedChild[]): DecompositionIdentity;
-type NormalizationResult = {
-  ok: true;
-  batch: NormalizedBatch;
-} | {
-  ok: false;
-  reasons: string[];
-};
-/**
- * Normalize one decomposition proposal.
- * Returns every defect it found, never the first: a caller revising a proposal
- */
-declare function normalizeDecomposition(spec: unknown, context: NormalizationContext): NormalizationResult;
-type RootNormalizationResult = {
-  ok: true;
-  contract: TaskContract;
-} | {
-  ok: false;
-  reasons: string[];
-};
-/**
- * Normalize one root contract (A0 §2–§3): the caller's single contract —
- * objective, criteria, assumptions, constraints, declared capabilities — in,
- */
-declare function normalizeRootContract(spec: unknown): RootNormalizationResult;
+declare function providerRefusals(precheck: ProviderPrecheck, taskCapabilities?: readonly string[]): string[];
 //#endregion
 //#region src/root-budget.d.ts
 /**
@@ -859,6 +614,267 @@ declare function resolveRootBudget(snapshot: TaskSnapshot, config: RootBudgetCon
  * Whether the persisted run count leaves room for another run.
  */
 declare function checkRunStart(snapshot: TaskSnapshot, budget: ResolvedRootBudget): BudgetVerdict;
+//#endregion
+//#region src/normalize.d.ts
+/** Where one batch came from: the store, the parent, its run, and the caller that submitted it. */
+interface DecompositionIdentityContext {
+  storeId: string;
+  parentTaskId: string;
+  parentRunId: string;
+  callerSessionId: string;
+}
+interface NormalizationContext extends DecompositionIdentityContext {
+  /** The limits in force, resolved by the caller from its configuration and recorded verbatim with the batch. */
+  admissionContext: AdmissionContext;
+}
+/** One normalized child: its contract plus the batch facts the identity covers. */
+interface NormalizedChild {
+  contract: TaskContract;
+  dependsOn: number[];
+  decomposable: boolean;
+  requiresIndependentAcceptance: boolean;
+}
+interface NormalizedBatch {
+  contractVersion: TaskContractVersion;
+  templateRef?: TaskTemplateRef;
+  templateParameters?: TemplateParameters;
+  /** The caller's reason, verbatim — part of {@link decompositionIdentity}, so a writer that records the batch's identity records this text. */
+  reason: string;
+  children: NormalizedChild[];
+  /** The batch identity and the limits it was admitted under, ready to be recorded with the decomposition. */
+  admission: DecompositionAdmission;
+}
+/**
+ * The identity one batch is digested over (§4): where it came from, which
+ * contract language it is written in, the caller's reason, and the complete
+ */
+declare function decompositionIdentity(context: DecompositionIdentityContext, reason: string, children: readonly NormalizedChild[], binding?: Pick<NormalizedBatch, 'templateRef' | 'templateParameters'>): DecompositionIdentity;
+type NormalizationResult = {
+  ok: true;
+  batch: NormalizedBatch;
+} | {
+  ok: false;
+  reasons: string[];
+};
+/**
+ * Normalize one decomposition proposal.
+ * Returns every defect it found, never the first: a caller revising a proposal
+ */
+declare function normalizeDecomposition(spec: unknown, context: NormalizationContext): NormalizationResult;
+type RootNormalizationResult = {
+  ok: true;
+  contract: TaskContract;
+} | {
+  ok: false;
+  reasons: string[];
+};
+/**
+ * Normalize one root contract (A0 §2–§3): the caller's single contract —
+ * objective, criteria, assumptions, constraints, declared capabilities — in,
+ */
+declare function normalizeRootContract(spec: unknown): RootNormalizationResult;
+//#endregion
+//#region src/recovery.d.ts
+/**
+ * One already verified sibling the new attempt reads at one of its leading
+ * positions (plan §F.4, "已通过兄弟证据复用"): a citation of the task, the run
+ */
+interface RootRecoveryReuse {
+  /** The absolute position in the attempt's member sequence this citation claims; unique within one request. */
+  childIndex: number;
+  /** The verified sibling task, a child of the source root task. */
+  taskId: TaskId;
+  /** The sibling's own verified run — the one whose evidence is cited. */
+  sourceRunId: RunId;
+  /** The evidence bundle under that run. */
+  evidenceId: string;
+  /** The criterion the citation narrows to, when the original acceptance map names one for this position. */
+  criterionId?: string;
+  /** Artifacts the citation names (artifact id or kind), all present in the cited bundle. */
+  artifactRefs?: readonly string[];
+  /** Input references the citation names, from the sibling's own declared input vocabulary. */
+  inputRefs?: readonly string[];
+}
+/** Which round a request asks for: `recovery` (the default) re-runs a failed source, `improve` re-runs a verified one. */
+type RecoveryMode = 'recovery' | 'improve';
+/** The stored kind one mode writes into {@link RunRecovery.kind}. */
+declare function recoveryKindOf(mode: RecoveryMode | undefined): 'recovery' | 'improvement';
+/** The mode one stored kind was asked under; a record written before the field existed reads as a recovery. */
+declare function recoveryModeOf(kind: 'recovery' | 'improvement' | undefined): RecoveryMode;
+/**
+ * One recovery request, as the host composition layer hands it to the runtime
+ * (plan §F.4: the tool and evolution's coordinator call this entry, and each
+ */
+interface RootRecoveryRequest {
+  sourceTaskId: TaskId;
+  /** The source run of the attempt, or `null` when the source had none; a failed run for `recovery`, a verified one for `improve`. */
+  sourceRunId: RunId | null;
+  /** The diagnosis this recovery is asked for; it must be a record of this store naming this task. */
+  sourceDiagnosisId: string;
+  /** The caller's request key: one key names one attempt of one diagnosis. */
+  requestKey: string;
+  /**
+   * Which round this is. Absent or `recovery` is the failed-source path; `improve` asks for an improvement round of a
+   * verified source, judged by the same original criteria. The two spend separate per-source caps.
+   */
+  mode?: RecoveryMode;
+  /** Applied evolution proposals consumed by this new attempt, verified by recovery coordination. */
+  proposalIds?: readonly string[];
+  /** The verified siblings the new attempt reads at its leading positions, in position order. */
+  reuses?: readonly RootRecoveryReuse[];
+}
+/** The attempt one request key names on a source task, or `undefined`. */
+declare function recoveryAttemptWithKey(snapshot: TaskSnapshot, sourceTaskId: TaskId, requestKey: string): TaskRun | undefined;
+/**
+ * The attempt one diagnosis already has whose run has not settled, or
+ * `undefined` — the mutual exclusion one diagnosis's recovery has (plan §F.4:
+ */
+declare function inFlightRecoveryAttempt(snapshot: TaskSnapshot, sourceTaskId: TaskId, sourceDiagnosisId: string): TaskRun | undefined;
+/**
+ * The source run one attempt reads, or `undefined` when the failure had none: a
+ * `recovery` names a run that settled `failed`, an `improve` a verified one — and
+ * an `improve` that names none reads the task's newest verified run.
+ */
+declare function recoverySourceRun(source: TaskInstance, request: RootRecoveryRequest, snapshot: TaskSnapshot, kind: 'recovery' | 'improvement'): TaskRun | undefined;
+/** The rounds one source task has spent, counted from the runs its own `runIds` hold: the two kinds spend separate caps. */
+interface RecoveryRounds {
+  /** Runs of the task that are recovery attempts of a failed source. */
+  readonly recovery: number;
+  /** Runs of the task that are improvement attempts of a verified one. */
+  readonly improvement: number;
+}
+/** Count one source task's attempt runs by kind; a row written before `kind` existed is a recovery. */
+declare function recoveryRoundsOf(snapshot: TaskSnapshot, sourceTaskId: TaskId): RecoveryRounds;
+/** The coded refusal one exhausted per-source cap answers with (A7 §3): the caller's next move is to stop, not to retry. */
+declare class IterationCapRefusal extends Error {
+  readonly code = "iteration-cap";
+  constructor(message: string);
+}
+//#endregion
+//#region src/gate.d.ts
+/** A tool call that was let through and has not reported its result yet. */
+interface InFlightCall {
+  readonly callId: string;
+  readonly name: string;
+}
+/**
+ * The jobs service as the drain uses it, structurally. Written as a soft
+ * interface so the runtime can hand in `ctx.jobs` without this module importing
+ */
+interface JobsViewEntry {
+  readonly id: string;
+  readonly status: string;
+  readonly detail?: string;
+}
+interface JobsView {
+  list(agent?: unknown): readonly JobsViewEntry[];
+  kill(id: string, agent?: unknown, reason?: string): unknown;
+  wait(id: string, timeoutMs: number, agent?: unknown): Promise<{
+    status: string;
+    detail?: string;
+  }>;
+}
+/** What the gate decided about one call. `allow: true` means `next()`; a refusal names the phase and why the tool is not in it. */
+type GateDecision = {
+  allow: true;
+} | {
+  allow: false;
+  reason: string;
+};
+interface DrainOptions {
+  /** How long the whole drain may take, in milliseconds; the caller's policy, never a default here. */
+  timeoutMs: number;
+  /**
+   * The call that is asking for the drain. It is in flight by definition (it is
+   * the submission or admission call itself), so counting it would wait for the
+   */
+  excludeCallId?: string;
+  /** The jobs service; absent (with `agent`) means this deployment has no managed jobs to reconcile. */
+  jobs?: JobsView;
+  /** The owner agent a jobs call is authorized as. */
+  agent?: unknown;
+}
+type DrainResult = {
+  confirmed: true;
+} | {
+  confirmed: false;
+  pending: string[];
+};
+/**
+ * The phase each session is in, what it has in flight, and whether it is waiting
+ * on an answer. One instance per runtime; nothing here touches the store or a
+ */
+declare class ExecutionGate {
+  private readonly phases;
+  /** Registering by call id (not by session) because `tools/result` carries only the call id. */
+  private readonly calls;
+  /**
+   * How many times this process wrote one session's phase by its own authority
+   * ({@link setPhase}, {@link setTerminal}): the applicability token a
+   */
+  private readonly decisions;
+  /**
+   * The sessions whose runs are waiting on an unresolved blocking question
+   * (A4 §F.1). A set rather than a map of booleans: "no entry" and "not blocked"
+   */
+  private readonly questionBlocked;
+  /**
+   * Move a session's phase: the runtime calls this when **it** is the authority
+   * for the transition — a committed admission or submission, a settled run, an
+   */
+  setPhase(sessionId: string, phase: ExecutionPhase): void;
+  /**
+   * Mark a session's run terminal: only the allow-list runs from here, and its
+   * reason says the call is late. A decision, like {@link setPhase} — it moves
+   */
+  setTerminal(sessionId: string): void;
+  /**
+   * How many times this process has written this session's phase by its own
+   * authority; `0` for a session it has never written one for. This is the
+   */
+  decisionToken(sessionId: string): number;
+  /**
+   * Apply a phase the store implies — never one this process decided — and only
+   * when it is newer than everything decided here: `token` is the
+   */
+  applyStorePhase(sessionId: string, phase: ExecutionPhase | 'terminal', token: number): boolean;
+  /**
+   * Record that a session's run is — or is no longer — waiting on an unresolved
+   * blocking question (A4 §F.1). A decision of this process about a fact this
+   */
+  setQuestionsBlocked(sessionId: string, blocked: boolean): void;
+  /**
+   * Apply a blocking state the store implies — never one this process decided —
+   * under the same token rule as {@link applyStorePhase}: `token` is the
+   */
+  applyStoreQuestionsBlocked(sessionId: string, blocked: boolean, token: number): boolean;
+  /** Whether the run bound to this session is waiting on an unresolved blocking question (A4 §7.2's derived wait). */
+  questionsBlocked(sessionId: string): boolean;
+  /** The phase a session is under, or `undefined` when no run is bound to it (nothing is gated). */
+  phaseOf(sessionId: string): ExecutionPhase | 'terminal' | undefined;
+  /**
+   * Register a call that was let through. Called for every allowed call whatever
+   * its phase, because the phase can change while it runs — that in-flight write
+   */
+  trackAllowed(sessionId: string, callId: string, toolName: string): void;
+  /** The result event for a call arrived: it is no longer in flight. Unknown ids are the denied calls, and are ignored. */
+  settled(callId: string): void;
+  /**
+   * The session's in-flight calls that count as writes: everything whose name is
+   * not in {@link COORDINATION_ALLOWED}. The definition is the allow-list, not a
+   */
+  inFlightWrites(sessionId: string): InFlightCall[];
+  /**
+   * Decide one call. A session with no phase is not bound to a run and is not
+   * gated; an `active` run with no blocking question is still deciding its own
+   */
+  decide(sessionId: string, toolName: string): GateDecision;
+  /**
+   * Wait — bounded — until this session has no in-flight write and no live
+   * managed job, and say exactly what is left when the window closes. Never
+   */
+  drainSession(sessionId: string, opts: DrainOptions): Promise<DrainResult>;
+}
 //#endregion
 //#region src/workspace.d.ts
 /**
@@ -1397,83 +1413,6 @@ interface QuestionCoordinationDeps {
   readonly gate: ExecutionGate;
 }
 //#endregion
-//#region src/recovery.d.ts
-/**
- * One already verified sibling the new attempt reads at one of its leading
- * positions (plan §F.4, "已通过兄弟证据复用"): a citation of the task, the run
- */
-interface RootRecoveryReuse {
-  /** The absolute position in the attempt's member sequence this citation claims; unique within one request. */
-  childIndex: number;
-  /** The verified sibling task, a child of the source root task. */
-  taskId: TaskId;
-  /** The sibling's own verified run — the one whose evidence is cited. */
-  sourceRunId: RunId;
-  /** The evidence bundle under that run. */
-  evidenceId: string;
-  /** The criterion the citation narrows to, when the original acceptance map names one for this position. */
-  criterionId?: string;
-  /** Artifacts the citation names (artifact id or kind), all present in the cited bundle. */
-  artifactRefs?: readonly string[];
-  /** Input references the citation names, from the sibling's own declared input vocabulary. */
-  inputRefs?: readonly string[];
-}
-/** Which round a request asks for: `recovery` (the default) re-runs a failed source, `improve` re-runs a verified one. */
-type RecoveryMode = 'recovery' | 'improve';
-/** The stored kind one mode writes into {@link RunRecovery.kind}. */
-declare function recoveryKindOf(mode: RecoveryMode | undefined): 'recovery' | 'improvement';
-/** The mode one stored kind was asked under; a record written before the field existed reads as a recovery. */
-declare function recoveryModeOf(kind: 'recovery' | 'improvement' | undefined): RecoveryMode;
-/**
- * One recovery request, as the host composition layer hands it to the runtime
- * (plan §F.4: the tool and evolution's coordinator call this entry, and each
- */
-interface RootRecoveryRequest {
-  sourceTaskId: TaskId;
-  /** The source run of the attempt, or `null` when the source had none; a failed run for `recovery`, a verified one for `improve`. */
-  sourceRunId: RunId | null;
-  /** The diagnosis this recovery is asked for; it must be a record of this store naming this task. */
-  sourceDiagnosisId: string;
-  /** The caller's request key: one key names one attempt of one diagnosis. */
-  requestKey: string;
-  /**
-   * Which round this is. Absent or `recovery` is the failed-source path; `improve` asks for an improvement round of a
-   * verified source, judged by the same original criteria. The two spend separate per-source caps.
-   */
-  mode?: RecoveryMode;
-  /** Applied evolution proposals consumed by this new attempt, verified by recovery coordination. */
-  proposalIds?: readonly string[];
-  /** The verified siblings the new attempt reads at its leading positions, in position order. */
-  reuses?: readonly RootRecoveryReuse[];
-}
-/** The attempt one request key names on a source task, or `undefined`. */
-declare function recoveryAttemptWithKey(snapshot: TaskSnapshot, sourceTaskId: TaskId, requestKey: string): TaskRun | undefined;
-/**
- * The attempt one diagnosis already has whose run has not settled, or
- * `undefined` — the mutual exclusion one diagnosis's recovery has (plan §F.4:
- */
-declare function inFlightRecoveryAttempt(snapshot: TaskSnapshot, sourceTaskId: TaskId, sourceDiagnosisId: string): TaskRun | undefined;
-/**
- * The source run one attempt reads, or `undefined` when the failure had none: a
- * `recovery` names a run that settled `failed`, an `improve` a verified one — and
- * an `improve` that names none reads the task's newest verified run.
- */
-declare function recoverySourceRun(source: TaskInstance, request: RootRecoveryRequest, snapshot: TaskSnapshot, kind: 'recovery' | 'improvement'): TaskRun | undefined;
-/** The rounds one source task has spent, counted from the runs its own `runIds` hold: the two kinds spend separate caps. */
-interface RecoveryRounds {
-  /** Runs of the task that are recovery attempts of a failed source. */
-  readonly recovery: number;
-  /** Runs of the task that are improvement attempts of a verified one. */
-  readonly improvement: number;
-}
-/** Count one source task's attempt runs by kind; a row written before `kind` existed is a recovery. */
-declare function recoveryRoundsOf(snapshot: TaskSnapshot, sourceTaskId: TaskId): RecoveryRounds;
-/** The coded refusal one exhausted per-source cap answers with (A7 §3): the caller's next move is to stop, not to retry. */
-declare class IterationCapRefusal extends Error {
-  readonly code = "iteration-cap";
-  constructor(message: string);
-}
-//#endregion
 //#region src/types.d.ts
 interface DecomposeChildSpec extends TaskContractInput {
   dependsOn?: readonly number[];
@@ -1481,8 +1420,11 @@ interface DecomposeChildSpec extends TaskContractInput {
   requiresIndependentAcceptance?: boolean;
 }
 interface DecomposeSpec {
-  children: readonly DecomposeChildSpec[];
-  reason: string;
+  templateRef?: TaskContractInput['templateRef'];
+  templateParameters?: TaskContractInput['templateParameters'];
+  /** Omitted only for a template recipe; normal admission requires the expanded direct children and reason. */
+  children?: readonly DecomposeChildSpec[];
+  reason?: string;
   /**
    * The contract language this batch is written in (T1). Omitted is the legacy
    * adapter — the runtime writes its current version, which is what an entry
@@ -1852,6 +1794,108 @@ interface RootRecoveryOutcome {
   readonly detail: string;
 }
 //#endregion
+//#region src/task-template.d.ts
+/** The sole default for production and Evolution: the runtime resolves this once at construction. */
+declare function defaultTaskTemplatesRoot(): string;
+interface TaskTemplateMatch {
+  templateRef: TaskTemplateRef;
+  template: TaskTemplate;
+}
+/** Reject unsupported schema vocabulary rather than claiming to validate it. */
+declare function parseTaskTemplate(raw: unknown): TaskTemplate;
+/** Append one immutable version. An identical repeat returns the same reference. */
+declare function registerTaskTemplate(root: string, input: TaskTemplate): Promise<TaskTemplateRef>;
+/** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery. */
+declare function findTaskTemplates(root: string | undefined, query?: string, scope?: TemplateScope): Promise<TaskTemplateMatch[]>;
+/** Expand into the same authoring fields as a free contract; no template-specific execution path follows. */
+declare function bindTaskTemplate<T extends TaskContractInput>(root: string | undefined, spec: T, scope?: TemplateScope): Promise<T & TaskContractInput>;
+declare function bindTaskDecomposition(root: string | undefined, spec: DecomposeSpec, scope?: TemplateScope): Promise<DecomposeSpec>;
+interface TaskTemplateQuery {
+  query?: string;
+  catalogPath?: CatalogPath;
+  templateRef?: TaskTemplateRef;
+  offset?: number;
+  limit?: number;
+}
+interface TaskTemplateCatalogPage {
+  templateScope: TemplateScope | null;
+  entries: ({
+    kind: 'catalog';
+    catalogPath: CatalogPath;
+    templates: number;
+  } | {
+    kind: 'template';
+    templateRef: TaskTemplateRef;
+    catalogPath: CatalogPath;
+    appliesTo: string[];
+    objective: string;
+    parameters: string[];
+    decomposition: boolean;
+  })[];
+  total: number;
+  offset: number;
+  nextOffset: number | null;
+  message?: string;
+}
+declare function taskTemplatePage(root: string | undefined, request: TaskTemplateQuery & {
+  templateRef: TaskTemplateRef;
+}, scope?: TemplateScope): Promise<TaskTemplateMatch>;
+declare function taskTemplatePage(root: string | undefined, request?: Omit<TaskTemplateQuery, 'templateRef'> & {
+  templateRef?: undefined;
+}, scope?: TemplateScope): Promise<TaskTemplateCatalogPage>;
+declare function taskTemplatePage(root: string | undefined, request: TaskTemplateQuery, scope?: TemplateScope): Promise<TaskTemplateMatch | TaskTemplateCatalogPage>;
+//#endregion
+//#region src/run-binding.d.ts
+/** Everything one run needs to bind its content: the verdicts, the rows, and where the snapshot goes. */
+interface RunBindingRequest {
+  /** The store the run belongs to; scopes the snapshot directory. */
+  storeId: string;
+  /** The run the snapshot is scoped to. */
+  runId: RunId;
+  /** The run's resolved manifest: its rows are the run's capability rows and its granted servers. */
+  manifest: CapabilityManifest;
+  /**
+   * The admission-time pre-check this run's verdicts come from. Absent when the
+   * caller must supply a fresh pre-check before this run can execute.
+   */
+  providers?: ProviderPrecheck;
+  /** The capability table the run resolved against; its revision is recorded when no pre-check carries one. */
+  table?: Readonly<Record<string, CapabilityConfig>>;
+  /** Where the run snapshot is materialized; absent means this deployment cannot materialize content, which fails a run that selected any. */
+  root?: string;
+  /** The MCP template registry the granted server names resolve against (tests pass their own). */
+  mcpRegistry?: Readonly<Record<string, McpServerTemplate>>;
+}
+/** The granted MCP servers' identity: the registry key and the template it resolved to, or `null` when the registry holds no such key. */
+declare function mcpServerBindings(manifest: CapabilityManifest, registry: Readonly<Record<string, McpServerTemplate>>): RunMcpServerBinding[];
+/**
+ * Bind one run's content: identify the providers its admission judged,
+ * materialize their admitted bytes, and verify the snapshot against the record
+ */
+declare function bindRunProviders(request: RunBindingRequest): Promise<RunProviderBinding>;
+/** One skill's re-read result: whether the snapshot still holds the bytes the record names, and why not. */
+interface RunBindingSkillRead {
+  /** The skill name the record names. */
+  readonly name: string;
+  /** The role the run was bound to it as. */
+  readonly role: RunSkillBinding['role'];
+  /** True when the snapshot directory holds exactly the recorded content and declaration. */
+  readonly readable: boolean;
+  /** Every reason this skill's content is not readable as recorded, each naming its code. */
+  readonly defects: readonly string[];
+  /** Present only when the bound instruction bytes read back without defects. */
+  readonly instructions?: string;
+}
+/** What re-reading one run's binding found. */
+interface RunBindingRead {
+  /** The snapshot root the record names. */
+  readonly snapshotRoot: string;
+  /** One entry per skill in record order. */
+  readonly skills: readonly RunBindingSkillRead[];
+  /** Every reason any skill's content is not readable as recorded; empty means the whole snapshot verified. */
+  readonly defects: readonly string[];
+}
+//#endregion
 //#region src/config.d.ts
 /**
  * The review/supervision policy of this deployment, as `singularity-agent` declares it: the two round caps here are what
@@ -2033,9 +2077,15 @@ declare class TaskRuntime extends Service {
   readonly parentChains: Map<string, Promise<void>>;
   rootBudgetApproval?: RootBudgetApproval;
   readonly terminalReviewListeners: Set<(fact: TerminalReviewFact) => void | Promise<void>>;
-  constructor(ctx: Context, config?: Config);
+  constructor(ctx: Context, config?: Partial<Config>);
   taskTemplatesRootFor(sessionId?: string): string | undefined;
   findTaskTemplates(query?: string, callerSessionId?: string): Promise<TaskTemplateMatch[]>;
+  /** Pure store reads: catalog queries never adopt a Run or alter its gate. */
+  templateCaller(sessionId: string): Promise<{
+    root: string | undefined;
+    scope?: TemplateScope;
+  }>;
+  listTaskTemplates(request: TaskTemplateQuery, callerSessionId: string): Promise<TaskTemplateMatch | TaskTemplateCatalogPage>;
   registerTaskTemplate(template: TaskTemplate): Promise<_dangosys_dsh_singularity_task0.TaskTemplateRef>;
   unload(): Promise<void>;
   [Service.init](): Promise<void>;
@@ -2369,4 +2419,4 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 //#endregion
-export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, type McpServerTemplate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskRuntime, TaskRuntime as default, TaskTemplateMatch, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, type McpServerTemplate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskRuntime, TaskRuntime as default, TaskTemplateCatalogPage, TaskTemplateMatch, TaskTemplateQuery, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

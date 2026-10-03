@@ -398,7 +398,7 @@ async function startChildRound(
        * gone — so the pre-check is re-run from this run's own viewpoint and a
        */
       const fresh = await env.precheck(Object.keys(manifest.capabilities), env.workspacePath)
-      const refusals = providerRefusals(fresh)
+      const refusals = providerRefusals(fresh, Object.keys(manifest.capabilities))
       if (refusals.length > 0) {
         throw new Error(`the provider pre-check refused this run on resume:\n- ${refusals.join('\n- ')}`)
       }

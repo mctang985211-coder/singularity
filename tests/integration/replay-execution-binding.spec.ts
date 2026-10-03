@@ -47,7 +47,7 @@ const DEPLOYMENT_DEFAULT = { provider: 'mock', model: 'mock' } as const
 
 /** The root contract every case runs under: one goal, one criterion a command settles. */
 const ROOT_CONTRACT: RootContractSpec = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
 
@@ -74,7 +74,7 @@ async function writeChampion(h: ScriptedLoop, storeId: string, criterion: Accept
     objective: 'champion work',
     depth: 0,
     acceptanceCriteria: [criterion],
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -170,7 +170,7 @@ describe('S4-E: the execution binding of a replayed run (real loop)', () => {
               tool: 'task_decompose',
               args: {
                 reason: 'the replayed work turned out not to be atomic',
-                children: [{ objective: 'the child of the replayed work', acceptanceCriteria: [{ description: 'the child holds', command: 'true' }] }],
+                children: [{ objective: 'the child of the replayed work', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'the child holds', command: 'true' }] }],
               },
             },
             { text: 'worker: the batch is the runtime\u2019s now' },

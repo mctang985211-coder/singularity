@@ -85,7 +85,7 @@ export function resolveGrant(agentCtx: Context, agent: Agent, grant: WorkerGrant
 }
 
 /** Register every skill one grant's extra roots carry into the worker's own layer (the replay overlay), first. */
-async function applySkillRoots(agentCtx: Context, grant: WorkerGrant): Promise<Set<string>> {
+export async function applySkillRoots(agentCtx: Context, grant: WorkerGrant): Promise<Set<string>> {
   const roots = grant.skillRoots ?? []
   const overlaid = new Set<string>()
   if (roots.length === 0) return overlaid

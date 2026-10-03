@@ -79,7 +79,7 @@ const FIX_SAMPLE = 't-chain-fix'
 const HOLDOUT_SAMPLE = 't-chain-holdout'
 
 const ROOT_CONTRACT = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [
     { criterionId: 'root-goal', description: 'the release is shipped', command: 'true' },
     {
@@ -98,7 +98,7 @@ const ROOT_CONTRACT = {
  * (the member that passes and must not be re-run).
  */
 const REUSE_CONTRACT = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [
     { criterionId: 'root-goal', description: 'the release is shipped', command: 'true' },
     {
@@ -424,7 +424,7 @@ function script(context: ScriptContext): (sessionId: string, index: number) => r
             args: {
               reason: 're-run the position that failed',
               children: [{
-                objective: 'the member, again',
+                objective: 'the member, again', requiredCapabilities: ['execute-task'],
                 acceptanceCriteria: [{ criterionId: 'member-0', description: 'it holds', command: 'true' }],
               }],
             },
@@ -482,11 +482,11 @@ function script(context: ScriptContext): (sessionId: string, index: number) => r
                 // really does start it after the failure — a failed member is
                 // terminal and leaves the round's pending list.
                 {
-                  objective: 'the member that fails',
+                  objective: 'the member that fails', requiredCapabilities: ['execute-task'],
                   acceptanceCriteria: [{ criterionId: 'member-0', description: 'it holds', command: 'false' }],
                 },
                 {
-                  objective: 'the member that passes',
+                  objective: 'the member that passes', requiredCapabilities: ['execute-task'],
                   acceptanceCriteria: [{ criterionId: 'member-1', description: 'it holds', command: 'true' }],
                 },
               ],
@@ -506,7 +506,7 @@ function script(context: ScriptContext): (sessionId: string, index: number) => r
           args: {
             reason: 'split the work',
             children: [{
-              objective: 'the member that needs the capability',
+              objective: 'the member that needs the capability', requiredCapabilities: ['execute-task'],
               acceptanceCriteria: [{ criterionId: 'member-0', description: 'it holds', command: context.memberFails ? 'false' : 'true' }],
             }],
           },

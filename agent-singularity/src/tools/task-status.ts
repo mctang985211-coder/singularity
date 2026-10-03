@@ -8,7 +8,7 @@ export function defineTaskStatusTool(ctx: Context) {
     name: 'task_status',
     description:
       'The caller\'s project status, paged. Scope `related` (the default) covers the caller\'s own task, its direct children and the tasks directly ' +
-      'adjacent to it through a dependency edge; scope `graph` is the whole domain overview, sorted by task id. Each line carries the task status, ' +
+      'adjacent to it through a dependency edge; scope `graph` lists the caller\'s readable domain, sorted by task id. Workers and delegated reviewers remain within their task branch, ancestor context and dependency neighbours; roots and supervisors retain their domain view. Each line carries the task status, ' +
       'its latest run with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, the terminal review outcome and ' +
       'the diagnosis count. Entries are sorted by task id and paged with `offset` (from 0) and `limit` (default 20, at most 100); the answer states ' +
       'whether more entries follow and the offset to continue with. Pages are observations, not a consistent snapshot across calls. Before any root ' +
@@ -17,7 +17,7 @@ export function defineTaskStatusTool(ctx: Context) {
       scope: {
         type: 'string',
         enum: ['related', 'graph'],
-        description: 'related (default): the caller\'s own task, its direct children and its direct dependency neighbours; graph: every task in the domain',
+        description: 'related (default): own task, direct children and dependency neighbours; graph: readable branch for workers/reviewers, whole domain for roots/supervisors',
       },
       offset: { type: 'number', description: 'Entry offset to start the page at, from 0; default 0' },
       limit: { type: 'number', description: 'Entries per page; default 20, clamped into 1–100 (a clamp is stated in the answer)' },

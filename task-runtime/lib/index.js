@@ -1,11 +1,11 @@
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
-import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TERMINAL_RUN_STATUSES, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest } from "@dangosys/dsh-singularity-task";
+import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TERMINAL_RUN_STATUSES, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest } from "@dangosys/dsh-singularity-task";
 import { Context, Service } from "@deepseek-ai/cordis";
+import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
 import { answerMessageText, findSkillFileIn, parseSkillFile, questionMessageText, skillRootsFor, toolCallRefIn } from "@dangosys/dsh-singularity-agent-runtime";
-import { SessionId } from "@deepseek-ai/dsh-session";
 import { randomUUID } from "node:crypto";
 import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
 
@@ -507,7 +507,7 @@ function checkDecomposition(parent, children, existingEdges) {
 * The identity one batch is digested over (§4): where it came from, which
 * contract language it is written in, the caller's reason, and the complete
 */
-function decompositionIdentity(context, reason, children) {
+function decompositionIdentity(context, reason, children, binding) {
 	return {
 		contractVersion: TASK_CONTRACT_VERSION,
 		storeId: context.storeId,
@@ -515,6 +515,10 @@ function decompositionIdentity(context, reason, children) {
 		parentRunId: context.parentRunId,
 		callerSessionId: context.callerSessionId,
 		reason,
+		...binding?.templateRef === void 0 ? {} : {
+			templateRef: structuredClone(binding.templateRef),
+			templateParameters: structuredClone(binding.templateParameters ?? {})
+		},
 		children: children.map((child) => ({
 			contractDigest: contractDigest(child.contract),
 			dependsOn: child.dependsOn,
@@ -527,13 +531,16 @@ function decompositionIdentity(context, reason, children) {
 const BATCH_FIELDS = new Set([
 	"contractVersion",
 	"reason",
-	"children"
+	"children",
+	"templateRef",
+	"templateParameters"
 ]);
 /** The child fields, and nothing else. */
 const CHILD_FIELDS = new Set([
 	"objective",
 	"templateRef",
 	"templateParameters",
+	"templateScope",
 	"acceptanceCriteria",
 	"requiredCapabilities",
 	"dependsOn",
@@ -692,6 +699,12 @@ function normalizeChild(raw, index, reasons) {
 	else criteria = normalizeCriteria(rawCriteria, label, (criterionIndex) => `ac${index + 1}-${criterionIndex + 1}`, reasons);
 	const requiredCapabilities = raw.requiredCapabilities === void 0 ? [] : stringList(raw.requiredCapabilities, `${label} requiredCapabilities`, reasons);
 	const assumptions = raw.assumptions === void 0 ? [] : stringList(raw.assumptions, `${label} assumptions`, reasons);
+	let templateScope;
+	try {
+		if (raw.templateScope !== void 0) templateScope = parseTemplateScope(raw.templateScope);
+	} catch (error) {
+		reasons.push(`${label}: ${message(error)}`);
+	}
 	const constraints = raw.constraints === void 0 ? [] : stringList(raw.constraints, `${label} constraints`, reasons);
 	const dependsOn = raw.dependsOn === void 0 ? [] : integerList(raw.dependsOn, `${label} dependsOn`, reasons);
 	const decomposable = booleanField(raw.decomposable, false, `${label} decomposable`, reasons);
@@ -705,6 +718,7 @@ function normalizeChild(raw, index, reasons) {
 			assumptions,
 			constraints,
 			requiredCapabilities,
+			...templateScope === void 0 ? {} : { templateScope },
 			...raw.templateRef === void 0 ? {} : {
 				templateRef: carried(raw.templateRef),
 				templateParameters: carried(raw.templateParameters ?? {})
@@ -726,6 +740,19 @@ function normalizeDecomposition(spec, context) {
 		reasons: ["decomposition must be an object with a reason and a children array"]
 	};
 	unknownFields$1(spec, BATCH_FIELDS, "decomposition", reasons);
+	if (spec.templateRef !== void 0) {
+		const ref = spec.templateRef;
+		if (!isPlainObject(ref) || typeof ref.id !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(ref.id) || !Number.isSafeInteger(ref.version) || ref.version < 1 || typeof ref.digest !== "string" || !/^[a-f0-9]{64}$/.test(ref.digest) || Object.keys(ref).some((key) => ![
+			"id",
+			"version",
+			"digest"
+		].includes(key))) reasons.push("decomposition templateRef requires an exact id, version and digest");
+	} else if (spec.templateParameters !== void 0) reasons.push("decomposition templateParameters requires templateRef");
+	if (spec.templateParameters !== void 0 && (!isPlainObject(spec.templateParameters) || Object.values(spec.templateParameters).some((value) => ![
+		"string",
+		"number",
+		"boolean"
+	].includes(typeof value) || typeof value === "number" && !Number.isFinite(value)))) reasons.push("decomposition templateParameters requires finite primitive values");
 	/**
 	* The version gate: absent is the legacy adapter (this build's version is the
 	* one the runtime writes), declared must be a version whose field semantics
@@ -753,10 +780,14 @@ function normalizeDecomposition(spec, context) {
 			ok: true,
 			batch: {
 				contractVersion,
+				...spec.templateRef === void 0 ? {} : {
+					templateRef: carried(spec.templateRef),
+					templateParameters: carried(spec.templateParameters ?? {})
+				},
 				reason,
 				children,
 				admission: {
-					proposalDigest: decompositionDigest(decompositionIdentity(context, reason, children)),
+					proposalDigest: decompositionDigest(decompositionIdentity(context, reason, children, spec)),
 					context: copyValue(context.admissionContext)
 				}
 			}
@@ -778,6 +809,7 @@ const ROOT_CONTRACT_FIELDS = new Set([
 	"objective",
 	"templateRef",
 	"templateParameters",
+	"templateScope",
 	"acceptanceCriteria",
 	"assumptions",
 	"constraints",
@@ -812,6 +844,12 @@ function normalizeRootContract(spec) {
 	const assumptions = spec.assumptions === void 0 ? [] : stringList(spec.assumptions, `${label} assumptions`, reasons);
 	const constraints = spec.constraints === void 0 ? [] : stringList(spec.constraints, `${label} constraints`, reasons);
 	const requiredCapabilities = spec.requiredCapabilities === void 0 ? [] : stringList(spec.requiredCapabilities, `${label} requiredCapabilities`, reasons);
+	let templateScope;
+	try {
+		if (spec.templateScope !== void 0) templateScope = parseTemplateScope(spec.templateScope);
+	} catch (error) {
+		reasons.push(`${label}: ${message(error)}`);
+	}
 	if (reasons.length > 0) return {
 		ok: false,
 		reasons
@@ -825,6 +863,7 @@ function normalizeRootContract(spec) {
 			assumptions,
 			constraints,
 			requiredCapabilities,
+			...templateScope === void 0 ? {} : { templateScope },
 			...spec.templateRef === void 0 ? {} : {
 				templateRef: carried(spec.templateRef),
 				templateParameters: carried(spec.templateParameters ?? {})
@@ -840,7 +879,7 @@ function defaultTaskTemplatesRoot() {
 	return join(process.env.DSH_HOME || join(homedir(), ".dsh"), "singularity", "task-templates");
 }
 function validId(id) {
-	return typeof id === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(id);
+	return typeof id === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(id);
 }
 /** Reject unsupported schema vocabulary rather than claiming to validate it. */
 function parseTaskTemplate(raw) {
@@ -848,10 +887,14 @@ function parseTaskTemplate(raw) {
 	if (Object.keys(raw).some((key) => ![
 		"id",
 		"version",
+		"catalogPath",
 		"appliesTo",
 		"parametersSchema",
-		"contract"
+		"contract",
+		"decomposition"
 	].includes(key))) throw new Error("task-template: template declares an unknown field");
+	parseCatalogPath(raw.catalogPath);
+	if (raw.catalogPath[0] === "general" && raw.catalogPath.length !== 1) throw new Error("task-template: general templates use catalogPath [\"general\"]");
 	if (!validId(raw.id) || !Number.isSafeInteger(raw.version) || raw.version < 1) throw new Error("task-template: id must be a filename-safe name and version a positive integer");
 	if (!Array.isArray(raw.appliesTo) || raw.appliesTo.length === 0 || raw.appliesTo.some((item) => !nonBlank(item))) throw new Error(`task-template: ${raw.id} requires non-empty appliesTo conditions`);
 	const schema = raw.parametersSchema;
@@ -862,7 +905,7 @@ function parseTaskTemplate(raw) {
 		"additionalProperties"
 	].includes(key))) throw new Error(`task-template: ${raw.id} parametersSchema requires object properties and additionalProperties:false`);
 	if (schema.required !== void 0 && (!Array.isArray(schema.required) || schema.required.some((name) => typeof name !== "string" || !Object.hasOwn(schema.properties, name)))) throw new Error(`task-template: ${raw.id} required parameters must name declared properties`);
-	for (const [name, property] of Object.entries(schema.properties)) if (!/^[a-zA-Z0-9_]+$/.test(name) || !isPlainObject(property) || ![
+	for (const [name, property] of Object.entries(schema.properties)) if (!/^[a-zA-Z0-9_]{1,64}$/.test(name) || !isPlainObject(property) || ![
 		"string",
 		"number",
 		"integer",
@@ -883,7 +926,45 @@ function parseTaskTemplate(raw) {
 	if (!normalized.ok) throw new Error(`task-template: ${raw.id} contract: ${normalized.reasons.join("; ")}`);
 	const defects = contractDefects(normalized.contract.acceptanceCriteria.map(({ protectedInputs: _paths,...criterion }) => criterion), `template ${raw.id}`);
 	if (defects.length > 0) throw new Error(`task-template: ${defects.join("; ")}`);
-	for (const match of canonicalize(raw.contract).matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)) if (!Object.hasOwn(schema.properties, match[1])) throw new Error(`task-template: ${raw.id} references undeclared parameter ${match[1]}`);
+	if (raw.decomposition !== void 0) {
+		if (!isPlainObject(raw.decomposition) || !Array.isArray(raw.decomposition.children)) throw new Error(`task-template: ${raw.id} decomposition requires a direct-child proposal`);
+		const children = raw.decomposition.children.map((child) => {
+			if (!isPlainObject(child) || child.templateRef === void 0) return child;
+			const allowed = [
+				"templateRef",
+				"templateParameters",
+				"templateScope",
+				"dependsOn",
+				"decomposable",
+				"requiresIndependentAcceptance"
+			];
+			if (Object.keys(child).some((key) => !allowed.includes(key))) throw new Error("task-template: a decomposition child cannot override its template contract");
+			return {
+				...child,
+				objective: "bound child contract",
+				acceptanceCriteria: [{
+					description: "bound child acceptance",
+					command: "true"
+				}]
+			};
+		});
+		const normalized$1 = normalizeDecomposition({
+			...raw.decomposition,
+			children
+		}, {
+			storeId: "template",
+			parentTaskId: "template",
+			parentRunId: "template",
+			callerSessionId: "template",
+			admissionContext: {
+				maxDepth: 0,
+				maxChildren: children.length,
+				auditOnly: {}
+			}
+		});
+		if (!normalized$1.ok) throw new Error(`task-template: ${raw.id} decomposition: ${normalized$1.reasons.join("; ")}`);
+	}
+	for (const match of canonicalize([raw.contract, raw.decomposition]).matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)) if (!Object.hasOwn(schema.properties, match[1])) throw new Error(`task-template: ${raw.id} references undeclared parameter ${match[1]}`);
 	return structuredClone(raw);
 }
 function parameterTypeMatches(value, type) {
@@ -910,7 +991,7 @@ async function registerTaskTemplate(root, input) {
 	return ref;
 }
 /** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery. */
-async function findTaskTemplates(root, query) {
+async function findTaskTemplates(root, query, scope) {
 	if (root === void 0) return [];
 	let files;
 	try {
@@ -935,24 +1016,37 @@ async function findTaskTemplates(root, query) {
 	}
 	const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
 	return [...newest.values()].filter(({ template }) => {
+		if (!templateVisible(template.catalogPath, scope)) return false;
 		const searchable = `${template.id}\n${template.appliesTo.join("\n")}\n${template.contract.objective}`.toLowerCase();
 		return words.length === 0 || words.some((word) => searchable.includes(word));
 	}).sort((left, right) => left.template.id.localeCompare(right.template.id));
 }
 /** Expand into the same authoring fields as a free contract; no template-specific execution path follows. */
-async function bindTaskTemplate(root, spec) {
+async function bindTaskTemplate(root, spec, scope) {
 	if (!isPlainObject(spec)) return spec;
+	const selected = spec.templateScope === void 0 ? scope : parseTemplateScope(spec.templateScope);
+	if (scope !== void 0 && selected?.some((path) => !templateVisible(path, scope))) throw new Error("task-template: child templateScope cannot widen its parent scope");
 	if (spec.templateRef === void 0) {
 		if (spec.templateParameters !== void 0) throw new Error("task-template: templateParameters requires templateRef");
-		return spec;
+		return selected === void 0 ? spec : {
+			...spec,
+			templateScope: structuredClone(selected)
+		};
 	}
+	const { template, parameters, ref, bind } = await readBinding(root, spec, selected);
+	const templateScope = selected ?? (template.catalogPath[0] === "general" ? void 0 : [template.catalogPath]);
+	return {
+		...spec,
+		...bind(template.contract),
+		...templateScope === void 0 ? {} : { templateScope: structuredClone(templateScope) },
+		templateRef: structuredClone(ref),
+		templateParameters: structuredClone(parameters)
+	};
+}
+/** The same exact reference, parameter and visibility checks bind contracts and direct-child proposals. */
+async function readBinding(root, spec, scope) {
 	const ref = spec.templateRef;
-	if (root === void 0) throw new Error("task-template: taskTemplatesRoot is not configured");
-	if (!isPlainObject(ref) || !validId(ref.id) || !Number.isSafeInteger(ref.version) || ref.version < 1 || typeof ref.digest !== "string" || !/^[a-f0-9]{64}$/.test(ref.digest) || Object.keys(ref).some((key) => ![
-		"id",
-		"version",
-		"digest"
-	].includes(key))) throw new Error("task-template: templateRef requires id, positive version and SHA-256 digest");
+	const template = await readReferencedTemplate(root, ref, scope);
 	for (const field of [
 		"objective",
 		"acceptanceCriteria",
@@ -960,8 +1054,6 @@ async function bindTaskTemplate(root, spec) {
 		"constraints",
 		"requiredCapabilities"
 	]) if (Object.hasOwn(spec, field)) throw new Error(`task-template: ${field} cannot override a template contract`);
-	const template = parseTaskTemplate(JSON.parse(await readFile(join(root, `${ref.id}@${ref.version}.json`), "utf8")));
-	if (template.id !== ref.id || template.version !== ref.version || taskTemplateDigest(template) !== ref.digest) throw new Error(`task-template: ${ref.id}@${ref.version} content does not match its pinned reference`);
 	const parameters = spec.templateParameters ?? {};
 	if (!isPlainObject(parameters)) throw new Error("task-template: templateParameters must be an object");
 	for (const name of template.parametersSchema.required ?? []) if (!Object.hasOwn(parameters, name)) throw new Error(`task-template: missing required parameter ${name}`);
@@ -969,21 +1061,117 @@ async function bindTaskTemplate(root, spec) {
 		const property = template.parametersSchema.properties[name];
 		if (!Object.hasOwn(template.parametersSchema.properties, name) || property === void 0 || !parameterTypeMatches(value, property.type) || property.enum !== void 0 && !property.enum.includes(value)) throw new Error(`task-template: parameter ${name} does not satisfy parametersSchema`);
 	}
-	const bind = (value) => {
-		if (typeof value === "string") return value.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, name) => {
-			if (!Object.hasOwn(parameters, name)) throw new Error(`task-template: unbound parameter ${name}`);
-			return String(parameters[name]);
-		});
-		if (Array.isArray(value)) return value.map(bind);
-		if (isPlainObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, bind(item)]));
+	const bind = (value, typedParameter = false) => {
+		if (typeof value === "string") {
+			const exact = typedParameter ? /^\{\{([a-zA-Z0-9_]+)\}\}$/.exec(value) : null;
+			if (exact !== null) {
+				if (!Object.hasOwn(parameters, exact[1])) throw new Error(`task-template: unbound parameter ${exact[1]}`);
+				return parameters[exact[1]];
+			}
+			return value.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_match, name) => {
+				if (!Object.hasOwn(parameters, name)) throw new Error(`task-template: unbound parameter ${name}`);
+				return String(parameters[name]);
+			});
+		}
+		if (Array.isArray(value)) return value.map((item) => bind(item, typedParameter));
+		if (isPlainObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, bind(item, typedParameter || key === "templateParameters")]));
 		return value;
 	};
 	return {
+		template,
+		parameters,
+		ref,
+		bind
+	};
+}
+/** Exact lookup and binding share reference, content and caller-authority checks. */
+async function readReferencedTemplate(root, ref, scope) {
+	if (root === void 0) throw new Error("task-template: taskTemplatesRoot is not configured");
+	if (!isPlainObject(ref) || !validId(ref.id) || !Number.isSafeInteger(ref.version) || ref.version < 1 || typeof ref.digest !== "string" || !/^[a-f0-9]{64}$/.test(ref.digest) || Object.keys(ref).some((key) => ![
+		"id",
+		"version",
+		"digest"
+	].includes(key))) throw new Error("task-template: templateRef requires id, positive version and SHA-256 digest");
+	const template = parseTaskTemplate(JSON.parse(await readFile(join(root, `${ref.id}@${ref.version}.json`), "utf8")));
+	if (!templateVisible(template.catalogPath, scope)) throw new Error("task-template: templateRef is outside the caller templateScope");
+	if (template.id !== ref.id || template.version !== ref.version || taskTemplateDigest(template) !== ref.digest) throw new Error(`task-template: ${ref.id}@${ref.version} content does not match its pinned reference`);
+	return template;
+}
+async function bindTaskDecomposition(root, spec, scope) {
+	if (!isPlainObject(spec) || spec.templateRef === void 0) return spec;
+	if (Object.hasOwn(spec, "reason") || Object.hasOwn(spec, "children")) throw new Error("task-template: reason and children cannot override a template decomposition");
+	const { template, parameters, ref, bind } = await readBinding(root, spec, scope);
+	if (template.decomposition === void 0) throw new Error("task-template: selected template has no decomposition");
+	return {
 		...spec,
-		...bind(template.contract),
+		...bind(template.decomposition),
 		templateRef: structuredClone(ref),
 		templateParameters: structuredClone(parameters)
 	};
+}
+function templateVisible(path, scope) {
+	return path[0] === "general" || scope === void 0 || scope.some((prefix) => catalogPathWithin(path, prefix));
+}
+/** Bounded catalog and summary pages; exact references are the sole full-template read. No catalog files or index are written. */
+async function taskTemplatePage(root, request = {}, scope) {
+	const path = request.catalogPath === void 0 ? void 0 : parseCatalogPath(request.catalogPath);
+	if (path !== void 0 && !templateVisible(path, scope)) throw new Error("task-template: catalogPath is outside the caller templateScope");
+	if (request.templateRef !== void 0) {
+		const ref = request.templateRef;
+		const template = await readReferencedTemplate(root, ref, scope);
+		if (path !== void 0 && !catalogPathWithin(template.catalogPath, path)) throw new Error("task-template: templateRef is outside the caller templateScope");
+		return {
+			templateRef: ref,
+			template
+		};
+	}
+	const offset = request.offset ?? 0;
+	const limit = request.limit ?? 10;
+	if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new Error("task-template: offset must be non-negative and limit between 1 and 20");
+	const matches = await findTaskTemplates(root, request.query, scope);
+	const filtered = path === void 0 ? matches : matches.filter((item) => catalogPathWithin(item.template.catalogPath, path));
+	const categories = /* @__PURE__ */ new Map();
+	for (const { template } of filtered) {
+		const prefix = scope?.find((prefix$1) => catalogPathWithin(template.catalogPath, prefix$1));
+		const category = template.catalogPath.slice(0, path === void 0 ? prefix?.length ?? 1 : path.length + 1);
+		const key = category.join("/");
+		const entry = categories.get(key) ?? {
+			catalogPath: category,
+			templates: 0
+		};
+		entry.templates += 1;
+		categories.set(key, entry);
+	}
+	const catalog = [...categories.values()].sort((a, b) => a.catalogPath.join("/").localeCompare(b.catalogPath.join("/")));
+	const summaries = scope === void 0 && path === void 0 ? [] : filtered.map(({ templateRef, template }) => ({
+		templateRef,
+		catalogPath: template.catalogPath,
+		appliesTo: template.appliesTo.slice(0, 3).map((text$1) => text$1.slice(0, 300)),
+		objective: template.contract.objective.slice(0, 500),
+		parameters: Object.keys(template.parametersSchema.properties).slice(0, 12),
+		decomposition: template.decomposition !== void 0
+	}));
+	const entries = [...catalog.map((item) => ({
+		kind: "catalog",
+		...item
+	})), ...summaries.map((item) => ({
+		kind: "template",
+		...item
+	}))];
+	const page = {
+		templateScope: scope ?? null,
+		entries: entries.slice(offset, offset + limit),
+		total: entries.length,
+		offset,
+		nextOffset: null,
+		message: filtered.length === 0 ? "No matching Task template. A complete standard contract is allowed." : void 0
+	};
+	for (;;) {
+		page.nextOffset = offset + page.entries.length < entries.length ? offset + page.entries.length : null;
+		if (Buffer.byteLength(JSON.stringify(page), "utf8") <= 4e4 || page.entries.length <= 1) break;
+		page.entries.pop();
+	}
+	return page;
 }
 
 //#endregion
@@ -1938,6 +2126,9 @@ async function scanSkillDirectory(directory) {
 						name: parsed.name,
 						description: parsed.description
 					};
+					scanned.instructions = parsed.content;
+					if (parsed.content.trim().length === 0) scanned.defects.push(defect$1("skill-file-invalid", "SKILL.md has no instruction body; a task needs actual guidance"));
+					if (!parsed.invocation.modelInvocable) scanned.defects.push(defect$1("skill-file-invalid", "SKILL.md disables model invocation; a task must be able to load its guidance"));
 				} catch (error) {
 					scanned.defects.push(defect$1("skill-file-invalid", message(error)));
 				}
@@ -2083,6 +2274,7 @@ async function loadSkillSidecar(directory) {
 		...sidecar === void 0 ? {} : { sidecar },
 		...content === void 0 ? {} : { content },
 		...scanned.frontmatter === void 0 ? {} : { frontmatter: scanned.frontmatter },
+		...scanned.instructions === void 0 ? {} : { instructions: scanned.instructions },
 		uncovered: scanned.uncovered,
 		defects
 	};
@@ -2389,15 +2581,14 @@ async function materializeProvider(provider, snapshotRoot, runId) {
 */
 async function bindRunProviders(request) {
 	const rows = Object.keys(request.manifest.capabilities);
-	if (request.providers === void 0 && rows.length > 0) return void 0;
 	const selected = selectedProviders(request.providers, rows, (row) => request.manifest.capabilities[row]?.skills ?? []);
+	if (selected.length === 0) throw new Error(`run "${request.runId}" has no admitted guidance Skill; every task must select readable instructions through requiredCapabilities`);
 	const base = {
 		registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, [], request.mcpRegistry),
 		capabilities: [...rows].sort(),
 		skills: selected.map(skillBinding),
 		mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? {})
 	};
-	if (selected.length === 0) return base;
 	const root = request.root;
 	if (root === void 0) throw new Error(`run "${request.runId}" selects skills [${selected.map((provider) => provider.verdict.name).join(", ")}] but this deployment configures no run binding root (\`Config.runBindingRoot\`); without one the run cannot load content it was admitted against`);
 	const runDirectory = join(root, request.storeId, request.runId);
@@ -2478,7 +2669,8 @@ async function readRunBinding(binding) {
 			name: skill.name,
 			role: skill.role,
 			readable: defects.length === 0,
-			defects
+			defects,
+			...defects.length > 0 || loaded.instructions === void 0 ? {} : { instructions: loaded.instructions }
 		});
 	}
 	return {
@@ -3525,8 +3717,14 @@ function precheckRefusals(precheck) {
 * Every refused provider of one pre-check, one line each, naming the capability
 * that declares it, the skill, the directory when one was found, and every
 */
-function providerRefusals(precheck) {
-	return precheckRefusals(precheck).map((entry) => `${entry.head}: ${entry.defects.map((item) => `${item.code}: ${item.detail}`).join("; ")}`);
+function providerRefusals(precheck, taskCapabilities) {
+	const selected = taskCapabilities === void 0 ? precheck : {
+		...precheck,
+		capabilities: precheck.capabilities.filter((row) => taskCapabilities.includes(row.capability))
+	};
+	const refusals = precheckRefusals(selected).map((entry) => `${entry.head}: ${entry.defects.map((item) => `${item.code}: ${item.detail}`).join("; ")}`);
+	if (taskCapabilities !== void 0 && !selected.capabilities.some((row) => row.skills.some((skill) => skill.valid))) refusals.push(`task capabilities [${taskCapabilities.join(", ")}] provide no readable guidance Skill; select at least one relevant Skill through requiredCapabilities before executing this task`);
+	return refusals;
 }
 /**
 * The same refusals, one line per defect: the shape a loud report wants, since
@@ -4306,7 +4504,7 @@ async function checkRootContract(self, request) {
 	const manifests = rootManifests(self, contract);
 	const manifest = manifests[0];
 	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), { ...request.envPath === void 0 ? {} : { cwd: request.envPath } });
-	const refusals = providerRefusals(precheck);
+	const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities));
 	if (refusals.length > 0) return {
 		ok: false,
 		refusal: {
@@ -4409,7 +4607,8 @@ async function continueRootProposalIn(self, storeId, proposal) {
 		rootSessionId,
 		proposal,
 		contract,
-		manifests
+		manifests,
+		providers
 	});
 }
 async function activateRootContract(self, request) {
@@ -4435,6 +4634,7 @@ async function activateRootContract(self, request) {
 			storeId,
 			runId,
 			manifest,
+			providers: request.providers,
 			table: self.config.capabilities,
 			root: self.config.runBindingRoot
 		});
@@ -4768,7 +4968,7 @@ async function submitProposalOnce(self, storeId, parentTaskId, parentRunId, call
 		providers: providerContentIdentities(providers.capabilities)
 	});
 	const policy = self.config.generatedTaskReview;
-	const proposalIdentity = decompositionIdentity(identity, batch.reason, batch.children);
+	const proposalIdentity = decompositionIdentity(identity, batch.reason, batch.children, batch);
 	const proposal = {
 		proposalId: taskProposalId(proposalIdentity),
 		requestKey,
@@ -5350,10 +5550,12 @@ async function deriveBatch(self, identity, spec) {
 	const envPath = await self.envPathForSession(identity.callerSessionId);
 	let bound;
 	try {
-		bound = Array.isArray(spec?.children) ? {
-			...spec,
-			children: await Promise.all(spec.children.map((child) => bindTaskTemplate(self.taskTemplatesRootFor(identity.callerSessionId), child)))
-		} : spec;
+		const { root, scope } = await self.templateCaller(identity.callerSessionId);
+		const expanded = await bindTaskDecomposition(root, spec, scope);
+		bound = Array.isArray(expanded?.children) ? {
+			...expanded,
+			children: await Promise.all(expanded.children.map((child) => bindTaskTemplate(root, child, scope)))
+		} : expanded;
 	} catch (error) {
 		const failure = error instanceof Error ? error : new Error(String(error));
 		return {
@@ -5407,6 +5609,10 @@ function storedBatchOf(proposal) {
 	return {
 		contractVersion: proposal.identity.contractVersion,
 		reason: proposal.identity.reason,
+		...proposal.identity.templateRef === void 0 ? {} : {
+			templateRef: structuredClone(proposal.identity.templateRef),
+			templateParameters: structuredClone(proposal.identity.templateParameters ?? {})
+		},
 		children: proposal.batch.map((child) => ({
 			contract: structuredClone(child.contract),
 			dependsOn: [...child.dependsOn],
@@ -5511,7 +5717,7 @@ async function checkDerivedBatch(self, request) {
 		...self.config.mcpServers,
 		...overlay?.mcpServers
 	});
-	const refusals = providerRefusals(precheck);
+	const refusals = manifests.flatMap((manifest, childIndex) => providerRefusals(precheck, Object.keys(manifest.capabilities)).map((reason) => `child ${childIndex}: ${reason}`));
 	if (refusals.length > 0) return {
 		ok: false,
 		refusal: {
@@ -6604,7 +6810,7 @@ async function recoverRootTaskOnce(self, storeId, request, caller) {
 	const rootSessionId = sourceRun?.sessionId ?? self.recoverySessionFor(snapshot, storeId);
 	const envPath = await self.envPathForSession(rootSessionId);
 	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), { ...envPath === void 0 ? {} : { cwd: envPath } });
-	const refusals = providerRefusals(precheck);
+	const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities));
 	if (refusals.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused by the provider pre-check:\n- ${refusals.join("\n- ")}`);
 	const budget$1 = resolveRootBudget(snapshot, self.config.rootBudget ?? {});
 	if (!budget$1.ok) {
@@ -7729,7 +7935,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 			* gone — so the pre-check is re-run from this run's own viewpoint and a
 			*/
 			const fresh = await env.precheck(Object.keys(manifest.capabilities), env.workspacePath);
-			const refusals = providerRefusals(fresh);
+			const refusals = providerRefusals(fresh, Object.keys(manifest.capabilities));
 			if (refusals.length > 0) throw new Error(`the provider pre-check refused this run on resume:\n- ${refusals.join("\n- ")}`);
 			providers = fresh;
 		}
@@ -8254,6 +8460,8 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 	const champion = await self.context.task.taskIn(storeId, championTaskId);
 	if (champion.status !== "verified" && champion.status !== "failed") throw new Error(`task-runtime: champion task "${championTaskId}" is ${champion.status}; only a terminal (verified or failed) task can be replayed`);
 	const championRunId = champion.runIds[champion.runIds.length - 1];
+	const championRun = await self.context.task.runIn(storeId, championRunId);
+	const taskTemplatesRoot = options.overlay?.taskTemplatesRoot ?? championRun.taskTemplatesRoot ?? self.taskTemplatesRootFor(callerSessionId);
 	const effective = options.contract ?? {
 		objective: champion.objective,
 		acceptanceCriteria: champion.acceptanceCriteria,
@@ -8283,7 +8491,7 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 		...envPath === void 0 ? {} : { cwd: envPath },
 		...options.overlay?.extraSkillRoots === void 0 ? {} : { extraRoots: [...options.overlay.extraSkillRoots] }
 	}, table, mcpRegistry);
-	const refusals = providerRefusals(precheck);
+	const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities));
 	if (refusals.length > 0) throw new Error(`task-runtime: provider pre-check rejected replay of "${championTaskId}":\n- ${refusals.join("\n- ")}`);
 	/**
 	* The replay path shares the ordinary decomposition's rules: the contract's
@@ -8315,7 +8523,8 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 		acceptanceCriteria: structuredClone([...fixed.criteria]),
 		assumptions: [...champion.contract?.assumptions ?? []],
 		constraints: [...champion.contract?.constraints ?? []],
-		requiredCapabilities: [...effective.requiredCapabilities]
+		requiredCapabilities: [...effective.requiredCapabilities],
+		...champion.contract?.templateScope === void 0 ? {} : { templateScope: structuredClone(champion.contract.templateScope) }
 	};
 	const task = {
 		taskId: `t-${randomUUID()}`,
@@ -8350,7 +8559,10 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 	const controller = new AbortController();
 	const run = async () => {
 		try {
-			const outcome = await runReplayTask(await self.orchestrateEnv(callerSessionId, callerSessionId, named, options.overlay ?? {}), storeId, {
+			const outcome = await runReplayTask(await self.orchestrateEnv(callerSessionId, callerSessionId, named, {
+				...options.overlay,
+				...taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot }
+			}), storeId, {
 				task,
 				manifest,
 				providers: precheck,
@@ -8358,7 +8570,7 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 				agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, self.config.defaultPreset),
 				...options.overlay?.extraSkillRoots === void 0 ? {} : { skillRoots: [...options.overlay.extraSkillRoots] },
 				...options.agentOptions === void 0 ? {} : { agentOptions: { ...options.agentOptions } },
-				...options.overlay?.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: options.overlay.taskTemplatesRoot },
+				...taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot },
 				spawn,
 				championRunId
 			}, {
@@ -9392,6 +9604,7 @@ async function observeSession(self, sessionId) {
 	const humanCallIds = [];
 	const approvalCallIds = /* @__PURE__ */ new Set();
 	const skillCalls = [];
+	const requestedSkills = /* @__PURE__ */ new Map();
 	let failures = 0;
 	let approvals = 0;
 	let compactions = 0;
@@ -9402,10 +9615,14 @@ async function observeSession(self, sessionId) {
 		if (HUMAN_TOOLS.has(name)) humanCallIds.push(String(event.data.callId));
 		if (name === "skill") {
 			const skill = skillNameFrom(event.data.arguments);
-			if (skill !== void 0) skillCalls.push(skill);
+			if (skill !== void 0) requestedSkills.set(String(event.data.callId), skill);
 		}
 	} else if (event.type === "tool/result") {
 		if (toolResultFailed(event.data)) failures += 1;
+		else if (event.data.message !== void 0) {
+			const skill = requestedSkills.get(String(event.data.message.source.callId));
+			if (skill !== void 0) skillCalls.push(skill);
+		}
 	} else if (event.type === "approval/asked") {
 		approvals += 1;
 		if (typeof event.data.callId === "string") approvalCallIds.add(event.data.callId);
@@ -9577,7 +9794,34 @@ var TaskRuntime = class extends Service {
 		return (sessionId === void 0 ? void 0 : this.sessionExecutionBindings.get(sessionId)?.taskTemplatesRoot) ?? this.config.taskTemplatesRoot;
 	}
 	async findTaskTemplates(query, callerSessionId) {
-		return findTaskTemplates(this.taskTemplatesRootFor(callerSessionId), query);
+		const caller = callerSessionId === void 0 ? void 0 : await this.templateCaller(callerSessionId);
+		return findTaskTemplates(caller?.root ?? this.config.taskTemplatesRoot, query, caller?.scope);
+	}
+	/** Pure store reads: catalog queries never adopt a Run or alter its gate. */
+	async templateCaller(sessionId) {
+		const binding = this.sessions.get(sessionId);
+		const graph = binding === void 0 ? await this.context.graphs.graphForSession(SessionId(sessionId)) : void 0;
+		const storeId = binding?.storeId ?? rootTaskStoreId(graph.rootSessionId);
+		const snapshot = await this.context.task.openStore(storeId).catch((error) => {
+			if (graph?.rootSessionId === sessionId && error instanceof Error && /does not exist/.test(error.message)) return void 0;
+			throw error;
+		});
+		let run = snapshot?.runs.filter((item) => item.sessionId === sessionId).at(-1);
+		let task = run === void 0 ? void 0 : snapshot?.tasks.find((item) => item.taskId === run?.taskId);
+		if (task === void 0 && graph?.rootSessionId !== sessionId) {
+			const delegated = await this.softService("singularityContext")?.resolveCaller(sessionId);
+			if (delegated?.kind !== "reviewer" || delegated.storeId !== storeId || delegated.task === void 0) throw new Error("task-template: caller has no bound Task, valid delegation or root intake authority");
+			task = delegated.task;
+			run = snapshot?.runs.filter((item) => item.taskId === task.taskId).at(-1);
+		}
+		return {
+			root: run?.taskTemplatesRoot ?? this.taskTemplatesRootFor(sessionId),
+			...task === void 0 ? {} : { scope: task.contract?.templateScope ?? [] }
+		};
+	}
+	async listTaskTemplates(request, callerSessionId) {
+		const caller = await this.templateCaller(callerSessionId);
+		return taskTemplatePage(caller.root, request, caller.scope);
 	}
 	async registerTaskTemplate(template) {
 		if (this.config.taskTemplatesRoot === void 0) throw new Error("task-runtime: taskTemplatesRoot is not configured");
@@ -10013,4 +10257,4 @@ function checkObligationCoverage(templates, snapshot) {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

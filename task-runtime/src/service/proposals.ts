@@ -334,7 +334,7 @@ export async function submitProposalOnce(
     providers: providerContentIdentities(providers.capabilities),
   })
   const policy = self.config.generatedTaskReview
-  const proposalIdentity = decompositionIdentity(identity, batch.reason, batch.children)
+  const proposalIdentity = decompositionIdentity(identity, batch.reason, batch.children, batch)
   const proposal: TaskProposal = {
     proposalId: taskProposalId(proposalIdentity),
     requestKey,

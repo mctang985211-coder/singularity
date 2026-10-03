@@ -275,7 +275,6 @@ async function fixture(options: {
   // The skill plane a run's binding registers its snapshot into (the same
   // registry every deployment mounts): without it a spawn that was bound to
   // content refuses, and the runs would never reach a request.
-  await h.ctx.plugin(SkillRegistry, {})
   // The judge the samples pin: the deployment's own `command` verifier unless a
   // case names a test double of its own (only then is one registered).
   const judge = options.judge ?? { id: 'command', version: '1' }
@@ -304,7 +303,7 @@ async function fixture(options: {
   await evolution.prepare(PROPOSAL, ROOT)
 
   const root = await h.begin({
-    objective: 'evaluate the candidate skill',
+    objective: 'evaluate the candidate skill', requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the evaluation is delivered', command: 'true' }],
   })
   const snapshotDir = join(h.checkout, 'frozen-input')

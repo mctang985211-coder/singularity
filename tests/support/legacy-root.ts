@@ -42,6 +42,8 @@ import type { TaskInstance, TaskRun } from '../../task/src/types.ts'
 import type { TaskService } from '../../task/src/index.ts'
 import type { CapabilityConfig, TaskRuntime } from '../../task-runtime/src/index.ts'
 import { bindRunProviders, resolveCapabilities } from '../../task-runtime/src/index.ts'
+import { capabilitySnapshot } from '../../task-runtime/src/capability.ts'
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 
 /**
  * The task-template definition shape (§5.1), kept only for the fixtures below:
@@ -71,7 +73,7 @@ export const RootTaskSpec: Pick<TaskDefinition, 'taskType' | 'version' | 'accept
       mandatory: true,
     },
   ],
-  requiredCapabilities: [],
+  requiredCapabilities: ['execute-task'],
   decompositionPolicy: { allowed: true },
 }
 
@@ -118,7 +120,7 @@ export async function seedLegacyRoot(seed: LegacyRootSeed): Promise<{ taskId: st
   }
   const taskId = `t-${randomUUID()}`
   const runId = `r-${randomUUID()}`
-  const table = seed.capabilities ?? runtime.listCapabilities()
+  const table = { ...TASK_GUIDANCE, ...(seed.capabilities ?? runtime.listCapabilities()) }
   const manifest = resolveCapabilities(RootTaskSpec.requiredCapabilities, table)
   const contract = {
     contractVersion: 1 as const,
@@ -148,13 +150,14 @@ export async function seedLegacyRoot(seed: LegacyRootSeed): Promise<{ taskId: st
     runId,
     manifest,
     table,
-    ...(seed.runBindingRoot === undefined ? {} : { root: seed.runBindingRoot }),
+    providers: await runtime.capabilityProviderReport(rootSessionId, contract.requiredCapabilities),
+    root: seed.runBindingRoot ?? runtime.config.runBindingRoot,
   })
   const run: TaskRun = {
     runId,
     taskId,
     sessionId: rootSessionId,
-    capabilitySnapshot: [],
+    capabilitySnapshot: capabilitySnapshot(manifest),
     ...(providerBinding === undefined ? {} : { providerBinding }),
     executionPhase: 'active',
     artifacts: [],

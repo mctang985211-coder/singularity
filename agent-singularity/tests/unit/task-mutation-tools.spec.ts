@@ -196,6 +196,9 @@ describe('task_decompose', () => {
     expect(
       Object.keys(ctx.taskRuntime.submitDecompositionProposal.mock.calls[0]![4] as Record<string, unknown>).sort(),
     ).toEqual(['children', 'reason'])
+    const schema = tool.parameters as { properties: Record<string, { items?: { properties: Record<string, unknown> } }> }
+    expect(schema.properties).not.toHaveProperty('templateScope')
+    expect(schema.properties.children!.items!.properties).toHaveProperty('templateScope')
   })
 
   it('lifts a declared requestKey and supersedes out of the batch into the submission options', async () => {
@@ -677,6 +680,7 @@ describe('task_intake', () => {
       'supersedes',
       'templateParameters',
       'templateRef',
+      'templateScope',
     ])
     expect(parameters.required).toBeUndefined()
     // The review is the only thing that moves a contract, so no parameter, and

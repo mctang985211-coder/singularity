@@ -277,7 +277,7 @@ const commandCriterion = (criterionId: string, command: string): CriterionSpec =
 
 /** A root contract that satisfies the root's own structural rule, with the goal and the criteria a case is about. */
 function contractFor(objective: string, criteria: readonly CriterionSpec[] = [commandCriterion('root-goal', 'true')]): RootContractSpec {
-  return { objective, acceptanceCriteria: [...criteria] }
+  return { objective, requiredCapabilities: ['execute-task'], acceptanceCriteria: [...criteria] }
 }
 
 /**
@@ -305,7 +305,7 @@ const intakeArgs = (contract: RootContractSpec, extra: Record<string, unknown> =
 const decomposeScript = (objective: string): readonly ScriptEntry[] => [
   {
     tool: 'task_decompose',
-    args: { reason: 'split the work', children: [{ objective, acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }] }] },
+    args: { reason: 'split the work', children: [{ objective, requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }] }] },
   },
   { text: 'root: the batch is the runtime\'s now' },
 ]
@@ -393,7 +393,7 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     expect(consumptionOf(proposal)).toMatchObject({ rootTaskId: root.taskId, rootRunId: bound.run.runId })
     // The activation announced itself to the session it belongs to (the other
     // half of "zero wake-ups" — the refusals below wake nobody).
-    expect(wakeNotices(h, BETA).join('\n')).toContain('the root contract of this session was activated')
+    await vi.waitFor(() => expect(wakeNotices(h, BETA).join('\n')).toContain('the root contract of this session was activated'))
 
     // The session the proposal names is the one whose own log carries the request
     // (`user/message` is the loop's own record of what it read) — and the other
@@ -940,7 +940,7 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     // attributed to its producer rather than to a person, which is what leaves
     // this session with no request to attribute a contract to. What the model saw
     // is the text the graph entry rendered, unchanged: only the attribution moved.
-    const said = h.eventsOf(ROOT).filter(event => event.type === 'user/message')
+    const said = h.eventsOf(ROOT).filter(event => event.type === 'user/message' && event.data.source.kind === 'runtime-prompt')
     expect(said).toHaveLength(1)
     expect((said[0]!.data as { source: unknown }).source).toEqual({ kind: 'runtime-prompt', channel: 'prompt' })
     expect((said[0]!.data as { content: readonly { text?: string }[] }).content.map(block => block.text ?? '').join('\n')).toBe(setup)

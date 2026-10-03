@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 /**
  * A whole deployment whose model is scripted: the real DSH loop, the real
  * singularity tool surface, and one script per session instead of a provider.
@@ -45,7 +46,7 @@
  * @module tests/support/scripted-loop
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, vi } from 'vitest'
@@ -95,6 +96,7 @@ import { defineTaskIntakeTool } from '../../agent-singularity/src/tools/task-int
 import { defineTaskProposalCancelTool } from '../../agent-singularity/src/tools/task-proposal-cancel.ts'
 import { defineTaskProposalContinueTool } from '../../agent-singularity/src/tools/task-proposal-continue.ts'
 import { defineTaskProposalReadTool } from '../../agent-singularity/src/tools/task-proposal-read.ts'
+import { defineTaskVerifyTool } from '../../agent-singularity/src/tools/task-verify.ts'
 import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.ts'
 import { defineTaskStatusTool } from '../../agent-singularity/src/tools/task-status.ts'
 import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/task-submit-result.ts'
@@ -141,7 +143,7 @@ export const OTHER_TOOLS = [
 ]
 
 /** The tools this fixture registers for real; every other name is a stand-in. */
-const REAL_TOOLS = [
+export const REAL_TOOLS = [
   'task_read', 'task_status', 'context_read', 'capability_list', 'task_template_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel',
   // The recovery adapter (A6): its subject is what the tool, the evolution entry
   // and the runtime decide together, so a spec that mounts the evolution plane
@@ -256,6 +258,8 @@ export interface ScriptedSpawn {
 
 export interface ScriptedLoopOptions {
   readonly capabilities?: Readonly<Record<string, CapabilityConfig>>
+  /** Real tools replacing ordinary fixture stand-ins for filesystem or live-model validation. */
+  readonly tools?: readonly ToolDefinition[]
   /** Root sessions of this deployment, in order; the first is the primary. Defaults to `['s-root']`. */
   readonly roots?: readonly string[]
   readonly verifyTimeoutMs?: number
@@ -764,6 +768,8 @@ class ScriptedLoopImpl implements ScriptedLoop {
     this.primary = this.roots[0]!
     this.storeId = rootTaskStoreId(this.primary)
     this.ctx = new Context()
+    mkdirSync(join(this.home, 'skills', 'task-execution'), { recursive: true })
+    copyFileSync(new URL('../../agent-runtime/skills/task-execution/SKILL.md', import.meta.url), join(this.home, 'skills', 'task-execution', 'SKILL.md'))
     this.previousHome = process.env.DSH_HOME
     vi.stubEnv('DSH_HOME', this.home)
     vi.stubEnv('HOME', this.home)
@@ -792,7 +798,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
     // under a candidate overlay, the shape A6's experiment mounts — is refused by
     // name without it. Only the chain's own arm mounts it, so a spec that mounts
     // the skill plane itself keeps doing so.
-    if (this.options.evolution !== undefined) await ctx.plugin(SkillRegistry, {})
+    await ctx.plugin(SkillRegistry, {})
     ctx.effect(() => ctx.llm.registerAdapter([...(this.options.providers ?? ['mock'])], this.adapter))
     for (const header of this.roots) {
       this.log.set(header, {
@@ -932,6 +938,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
     for (const name of [...ROOT_TOOLS, ...OTHER_TOOLS]) {
       if (REAL_TOOLS.includes(name) && (shippedQuestionTools || !QUESTION_TOOLS.includes(name))) continue
       if (this.options.evolution !== undefined && evolutionTools.has(name)) continue
+      if (this.options.tools?.some(tool => tool.name === name) || (this.options.tools !== undefined && name === 'task_verify')) continue
       register(name)
     }
     ctx.tools.register(defineTaskReadTool(ctx))
@@ -1018,6 +1025,9 @@ class ScriptedLoopImpl implements ScriptedLoop {
       this.log.get(String(session.id))?.events.push(event)
     })
 
+    for (const tool of this.options.tools ?? []) ctx.tools.register(tool)
+    if (this.options.tools !== undefined) ctx.tools.register(defineTaskVerifyTool(ctx))
+
     this.agentRuntime = new RecordingAgentRuntime(ctx, request => this.spawnRecords.push({
       sessionId: String(request.sessionId),
       name: request.name,
@@ -1034,14 +1044,14 @@ class ScriptedLoopImpl implements ScriptedLoop {
     await ctx.plugin(VerifierRegistry, { evidenceRoot: join(this.workspace, 'evidence') })
     this.verifier = ctx.get('verifier') as VerifierRegistry
     await ctx.plugin(TaskRuntime, {
-      capabilities: { ...(this.options.capabilities ?? {}) },
+      capabilities: { ...TASK_GUIDANCE, ...(this.options.capabilities ?? {}) },
       ...(this.options.verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs: this.options.verifyTimeoutMs }),
       ...(this.options.writeDrainTimeoutMs === undefined ? {} : { writeDrainTimeoutMs: this.options.writeDrainTimeoutMs }),
       ...(this.options.budget === undefined ? {} : { budget: { ...this.options.budget } }),
       ...(this.options.rootBudget === undefined ? {} : { rootBudget: { ...this.options.rootBudget } }),
       ...(this.options.generatedTaskReview === undefined ? {} : { generatedTaskReview: this.options.generatedTaskReview }),
       runBindingRoot: join(this.home, 'singularity', 'run-bindings'),
-    } as Config)
+    })
     this.runtime = ctx.get('taskRuntime') as TaskRuntime
     // The one approval a budget extension is granted through (K4), installed the
     // way the deployment's assembly installs it: the runtime asks this callback

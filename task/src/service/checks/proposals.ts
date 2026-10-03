@@ -55,6 +55,8 @@ const DECOMPOSITION_IDENTITY_FIELDS: readonly string[] = [
   'callerSessionId',
   'reason',
   'children',
+  'templateRef',
+  'templateParameters',
 ]
 
 /** The closed field set of a root contract identity ({@link RootProposalIdentity}). */
@@ -297,6 +299,20 @@ export function assertProposalIdentity(snapshot: TaskSnapshot, id: string, ident
     throw new Error(`task: proposal "${id}" identity parent task id must be a non-empty string`)
   }
   if (typeof identity.reason !== 'string') throw new Error(`task: proposal "${id}" identity reason must be a string`)
+  if (identity.templateRef !== undefined) {
+    const ref = identity.templateRef
+    if (!isRecord(ref) || typeof ref.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(ref.id) ||
+        !Number.isSafeInteger(ref.version) || ref.version < 1 || !isDigest(ref.digest) ||
+        Object.keys(ref).some(key => !['id', 'version', 'digest'].includes(key)))
+      throw new Error(`task: proposal "${id}" identity templateRef requires an exact id, version and digest`)
+  } else if (identity.templateParameters !== undefined) {
+    throw new Error(`task: proposal "${id}" identity templateParameters requires templateRef`)
+  }
+  if (identity.templateParameters !== undefined && (!isRecord(identity.templateParameters) ||
+      Object.values(identity.templateParameters).some(value =>
+        !['string', 'boolean', 'number'].includes(typeof value) ||
+        (typeof value === 'number' && !Number.isFinite(value)))))
+    throw new Error(`task: proposal "${id}" identity templateParameters requires finite primitive values`)
   if (!Array.isArray(identity.children) || identity.children.length === 0) {
     throw new Error(`task: proposal "${id}" identity requires at least one child`)
   }

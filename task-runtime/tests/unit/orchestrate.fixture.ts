@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../support/skill-roots.ts'
 import { afterEach, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, VerificationResult } from '../../../task/src/index.ts'
@@ -342,7 +343,10 @@ export function harness(
   taskService = new TaskService(ctx as never)
   ctx.task = taskService
   if (options.verifier !== 'absent') ctx.verifier = verifier
-  const runtime = new TaskRuntime(ctx as never, { mcpServers: DEPLOYMENT_MCP_SERVERS, ...options.config })
+  const runtime = new TaskRuntime(ctx as never, {
+    mcpServers: DEPLOYMENT_MCP_SERVERS, ...options.config,
+    capabilities: { ...TASK_GUIDANCE, ...options.config?.capabilities },
+  })
   /**
    * The shipped worker behaviour under A3: a worker hands its result in through
    * the explicit submission entry and *then* goes idle. An idle session is not a
@@ -375,10 +379,10 @@ export type Harness = ReturnType<typeof harness>
 
 export function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
     ...overrides,
-  } as DecomposeSpec['children'][number]
+  } as NonNullable<DecomposeSpec['children']>[number]
 }
 
 /**
@@ -391,7 +395,7 @@ export function childSpec(objective: string, overrides: Record<string, unknown> 
  */
 export function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
 }
@@ -516,7 +520,7 @@ export async function seedProducer(
           command: 'true',
         },
       ],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'leaf',
       status: 'created',
       runIds: [],
@@ -602,7 +606,7 @@ export async function createAcceptanceParent(
       objective: 'prove the combination, not only the parts',
       depth: 0,
       acceptanceCriteria,
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'decomposable',
       status: 'created',
       runIds: [],

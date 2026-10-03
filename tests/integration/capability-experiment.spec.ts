@@ -152,7 +152,7 @@ async function writeSample(h: RunStack, storeId: string, input: {
     objective: input.objective,
     depth: 0,
     acceptanceCriteria: [input.acceptance],
-    requestedCapabilities: [ROW],
+    requestedCapabilities: ['execute-task', ROW],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -165,7 +165,7 @@ async function writeSample(h: RunStack, storeId: string, input: {
       acceptanceCriteria: [input.acceptance],
       assumptions: [],
       constraints: [],
-      requiredCapabilities: [ROW],
+      requiredCapabilities: ['execute-task', ROW],
     },
   }, 'tester')
   await h.task.admitTaskIn(storeId, input.taskId, 'tester', { decompositionStatus: 'leaf' })
@@ -337,7 +337,7 @@ async function fixture(options: {
   await evolution.prepare(PROPOSAL, ROOT)
 
   const first = await h.root(ROOT, {
-    objective: 'evaluate the capability candidate',
+    objective: 'evaluate the capability candidate', requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: 'delivered', command: 'true' }],
   })
   const snapshotDir = join(h.workspace, 'snapshot')
@@ -431,7 +431,7 @@ describe('A6: the two-sided capability experiment on the real deployment', () =>
       source: 'capability-gap',
       proposalId: PROPOSAL,
       sourceRefs: ['diagnosis:d-cap'],
-      required: [ROW],
+      required: [ROW, 'execute-task'],
       missing: [ROW],
     })
     // The refusal is the runtime's own, produced when the side was really
@@ -721,10 +721,10 @@ describe('A6 EVO-2/EVO-3: a row-only capability candidate — one row, no new sk
     expect(result.report.verdict).toBe('fixed')
     const fix = result.report.samples.find(sample => sample.taskId === 't-cap-fix')!
     expect(fix.baseline.outcome).toBe('not-admitted')
-    expect(fix.baseline.admission).toMatchObject({ source: 'capability-gap', required: [ROW], missing: [ROW] })
+    expect(fix.baseline.admission).toMatchObject({ source: 'capability-gap', required: [ROW, 'execute-task'], missing: [ROW] })
     expect(fix.candidate.outcome).toBe('verified')
     const candidateRun = (await f.h.snapshot(f.storeId)).runs.find(run => run.runId === fix.candidate.runId)!
-    expect(candidateRun.providerBinding?.skills.map(skill => skill.name)).toEqual(['capability-row-only-skill'])
+    expect(candidateRun.providerBinding?.skills.map(skill => skill.name)).toEqual(['capability-row-only-skill', 'task-execution'])
     expect(existsSync(join(String(fix.candidate.workspace), ANSWER))).toBe(true)
 
     // The promotion: the report, the gate, the person's decision, the apply — one row.
@@ -1077,7 +1077,7 @@ describe('capability candidates carrying new external MCP definitions', () => {
     const snapshot = await f.h.snapshot(f.storeId)
     const oldBindings = snapshot.runs.map(run => ({ runId: run.runId, binding: run.providerBinding }))
     const candidateRun = snapshot.runs.find(run => run.runId === result.report.samples[0]!.candidate.runId)!
-    expect(candidateRun.providerBinding!.skills).toEqual([])
+    expect(candidateRun.providerBinding!.skills.map(skill => skill.name)).toEqual(['task-execution'])
     expect(candidateRun.providerBinding!.mcpServers).toEqual(result.report.frozen.samples[0]!.candidateProvider!.mcpBindings)
     await f.evolution.gate(PROPOSAL, gateAnswers([result.reportPath]), ROOT)
     await f.evolution.decide(PROPOSAL, 'PROMOTE', ROOT, 'approval:mcp-decide')

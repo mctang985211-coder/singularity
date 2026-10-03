@@ -126,12 +126,42 @@ export function resolveProjectionTarget(loaded: LoadedCaller, spec: ProjectionTa
   }
 }
 
+/** Task ownership bounds worker/reviewer reads; dependencies and ancestor context remain reachable. */
+export function readableTaskIds(loaded: LoadedCaller): ReadonlySet<string> | undefined {
+  const { resolution, snapshot } = loaded
+  if (resolution.kind !== 'worker' && resolution.kind !== 'reviewer') return undefined
+  const own = resolution.task
+  if (own === undefined || snapshot === undefined) return new Set()
+  const branch = new Set<string>()
+  const pending = [own.taskId]
+  while (pending.length > 0) {
+    const id = pending.pop()!
+    if (branch.has(id)) continue
+    branch.add(id)
+    pending.push(...snapshot.tasks.filter(task => task.parentTaskId === id).map(task => task.taskId))
+  }
+  const visible = new Set(branch)
+  for (const edge of snapshot.edges) {
+    if (branch.has(edge.to)) visible.add(edge.from)
+    if (branch.has(edge.from)) visible.add(edge.to)
+  }
+  let parent = own.parentTaskId
+  const ancestors = new Set<string>()
+  while (parent !== undefined && !ancestors.has(parent)) {
+    ancestors.add(parent)
+    visible.add(parent)
+    parent = snapshot.tasks.find(task => task.taskId === parent)?.parentTaskId
+  }
+  return visible
+}
+
 /** The membership gate both session reads pass before DSH is asked anything. */
 export async function sessionMembershipRefusal(
   deps: ReadDeps,
-  resolution: Exclude<CallerResolution, { kind: 'unbound' }>,
+  loaded: LoadedCaller,
   sessionId: string,
 ): Promise<ProjectedRead | undefined> {
+  const resolution = loaded.resolution as Exclude<CallerResolution, { kind: 'unbound' }>
   let member: boolean
   try {
     member = await isGraphMember(deps.graphs, resolution.graph.id, sessionId)
@@ -142,7 +172,14 @@ export async function sessionMembershipRefusal(
         "A session reference is checked against the graph's published members before its log is read.",
     )
   }
-  if (member) return undefined
+  if (member) {
+    const allowed = readableTaskIds(loaded)
+    if (allowed !== undefined && sessionId !== resolution.sessionId &&
+        !loaded.snapshot?.runs.some(run => run.sessionId === sessionId && allowed.has(run.taskId))) {
+      return refused('not-found', `session "${sessionId}" is outside the caller's task branch and dependency context; nothing was read`)
+    }
+    return undefined
+  }
   return refused(
     'cross-graph',
     `session "${sessionId}" is not a published member of graph "${resolution.graph.id}"; a session reference reads the ` +

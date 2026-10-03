@@ -3,7 +3,7 @@
  * guide §4): raw caller input in, the canonical contract of every child with
  */
 
-import { TASK_CONTRACT_VERSION, contractDigest, decompositionDigest } from '@dangosys/dsh-singularity-task'
+import { TASK_CONTRACT_VERSION, contractDigest, decompositionDigest, parseTemplateScope } from '@dangosys/dsh-singularity-task'
 import type {
   AcceptanceCriterion,
   AdmissionContext,
@@ -13,6 +13,8 @@ import type {
   ProtectedInputRef,
   TaskContract,
   TaskContractVersion,
+  TaskTemplateRef,
+  TemplateParameters,
   VerificationMode,
 } from '@dangosys/dsh-singularity-task'
 import { isPlainObject, message, nonBlank, unknownFieldKeys } from './helpers.ts'
@@ -40,6 +42,8 @@ interface NormalizedChild {
 
 export interface NormalizedBatch {
   contractVersion: TaskContractVersion
+  templateRef?: TaskTemplateRef
+  templateParameters?: TemplateParameters
   /** The caller's reason, verbatim — part of {@link decompositionIdentity}, so a writer that records the batch's identity records this text. */
   reason: string
   children: NormalizedChild[]
@@ -55,6 +59,7 @@ export function decompositionIdentity(
   context: DecompositionIdentityContext,
   reason: string,
   children: readonly NormalizedChild[],
+  binding?: Pick<NormalizedBatch, 'templateRef' | 'templateParameters'>,
 ): DecompositionIdentity {
   return {
     contractVersion: TASK_CONTRACT_VERSION,
@@ -63,6 +68,10 @@ export function decompositionIdentity(
     parentRunId: context.parentRunId,
     callerSessionId: context.callerSessionId,
     reason,
+    ...(binding?.templateRef === undefined ? {} : {
+      templateRef: structuredClone(binding.templateRef),
+      templateParameters: structuredClone(binding.templateParameters ?? {}),
+    }),
     children: children.map(child => ({
       contractDigest: contractDigest(child.contract),
       dependsOn: child.dependsOn,
@@ -75,13 +84,14 @@ export function decompositionIdentity(
 export type NormalizationResult = { ok: true; batch: NormalizedBatch } | { ok: false; reasons: string[] }
 
 /** The batch fields, and nothing else: a key outside this set is refused. */
-const BATCH_FIELDS: ReadonlySet<string> = new Set(['contractVersion', 'reason', 'children'])
+const BATCH_FIELDS: ReadonlySet<string> = new Set(['contractVersion', 'reason', 'children', 'templateRef', 'templateParameters'])
 
 /** The child fields, and nothing else. */
 const CHILD_FIELDS: ReadonlySet<string> = new Set([
   'objective',
   'templateRef',
   'templateParameters',
+  'templateScope',
   'acceptanceCriteria',
   'requiredCapabilities',
   'dependsOn',
@@ -291,6 +301,9 @@ function normalizeChild(raw: unknown, index: number, reasons: string[]): Normali
       ? []
       : stringList(raw.requiredCapabilities, `${label} requiredCapabilities`, reasons)
   const assumptions = raw.assumptions === undefined ? [] : stringList(raw.assumptions, `${label} assumptions`, reasons)
+  let templateScope: TaskContract['templateScope']
+  try { if (raw.templateScope !== undefined) templateScope = parseTemplateScope(raw.templateScope) }
+  catch (error) { reasons.push(`${label}: ${message(error)}`) }
   const constraints = raw.constraints === undefined ? [] : stringList(raw.constraints, `${label} constraints`, reasons)
   const dependsOn = raw.dependsOn === undefined ? [] : integerList(raw.dependsOn, `${label} dependsOn`, reasons)
   const decomposable = booleanField(raw.decomposable, false, `${label} decomposable`, reasons)
@@ -310,6 +323,7 @@ function normalizeChild(raw: unknown, index: number, reasons: string[]): Normali
       assumptions,
       constraints,
       requiredCapabilities,
+      ...(templateScope === undefined ? {} : { templateScope }),
       ...(raw.templateRef === undefined ? {} : {
         templateRef: carried<TaskContract['templateRef']>(raw.templateRef),
         templateParameters: carried<NonNullable<TaskContract['templateParameters']>>(raw.templateParameters ?? {}),
@@ -331,6 +345,20 @@ export function normalizeDecomposition(spec: unknown, context: NormalizationCont
     return { ok: false, reasons: ['decomposition must be an object with a reason and a children array'] }
   }
   unknownFields(spec, BATCH_FIELDS, 'decomposition', reasons)
+  if (spec.templateRef !== undefined) {
+    const ref = spec.templateRef
+    if (!isPlainObject(ref) || typeof ref.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(ref.id) ||
+        !Number.isSafeInteger(ref.version) || (ref.version as number) < 1 ||
+        typeof ref.digest !== 'string' || !/^[a-f0-9]{64}$/.test(ref.digest) ||
+        Object.keys(ref).some(key => !['id', 'version', 'digest'].includes(key)))
+      reasons.push('decomposition templateRef requires an exact id, version and digest')
+  } else if (spec.templateParameters !== undefined) {
+    reasons.push('decomposition templateParameters requires templateRef')
+  }
+  if (spec.templateParameters !== undefined && (!isPlainObject(spec.templateParameters) ||
+      Object.values(spec.templateParameters).some(value => !['string', 'number', 'boolean'].includes(typeof value) ||
+        (typeof value === 'number' && !Number.isFinite(value)))))
+    reasons.push('decomposition templateParameters requires finite primitive values')
 
   /**
    * The version gate: absent is the legacy adapter (this build's version is the
@@ -368,10 +396,14 @@ export function normalizeDecomposition(spec: unknown, context: NormalizationCont
       ok: true,
       batch: {
         contractVersion,
+        ...(spec.templateRef === undefined ? {} : {
+          templateRef: carried<TaskTemplateRef>(spec.templateRef),
+          templateParameters: carried<TemplateParameters>(spec.templateParameters ?? {}),
+        }),
         reason,
         children,
         admission: {
-          proposalDigest: decompositionDigest(decompositionIdentity(context, reason, children)),
+          proposalDigest: decompositionDigest(decompositionIdentity(context, reason, children, spec as unknown as NormalizedBatch)),
           context: copyValue(context.admissionContext),
         },
       },
@@ -391,6 +423,7 @@ const ROOT_CONTRACT_FIELDS: ReadonlySet<string> = new Set([
   'objective',
   'templateRef',
   'templateParameters',
+  'templateScope',
   'acceptanceCriteria',
   'assumptions',
   'constraints',
@@ -442,6 +475,10 @@ export function normalizeRootContract(spec: unknown): RootNormalizationResult {
       ? []
       : stringList(spec.requiredCapabilities, `${label} requiredCapabilities`, reasons)
 
+  let templateScope: TaskContract['templateScope']
+  try { if (spec.templateScope !== undefined) templateScope = parseTemplateScope(spec.templateScope) }
+  catch (error) { reasons.push(`${label}: ${message(error)}`) }
+
   if (reasons.length > 0) return { ok: false, reasons }
   return {
     ok: true,
@@ -452,6 +489,7 @@ export function normalizeRootContract(spec: unknown): RootNormalizationResult {
       assumptions,
       constraints,
       requiredCapabilities,
+      ...(templateScope === undefined ? {} : { templateScope }),
       ...(spec.templateRef === undefined ? {} : {
         templateRef: carried<TaskContract['templateRef']>(spec.templateRef),
         templateParameters: carried<NonNullable<TaskContract['templateParameters']>>(spec.templateParameters ?? {}),

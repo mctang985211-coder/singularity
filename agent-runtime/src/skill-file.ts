@@ -3,6 +3,7 @@
 
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 /** How far up from a worker's cwd project skill roots are looked for. */
@@ -129,7 +130,7 @@ export async function skillRootsFor(cwd: string | undefined): Promise<string[]> 
   }
   const dshHome = process.env.DSH_HOME
   if (dshHome !== undefined && dshHome.length > 0) roots.push(join(dshHome, 'skills'))
-  roots.push(join(homedir(), '.agents', 'skills'))
+  roots.push(join(homedir(), '.agents', 'skills'), fileURLToPath(new URL('../skills/', import.meta.url)))
   return roots
 }
 

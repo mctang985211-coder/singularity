@@ -54,7 +54,7 @@ function summaryStart(capability: string, skill: string, role: string): string {
  */
 function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
 }

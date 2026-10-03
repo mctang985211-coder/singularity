@@ -117,6 +117,8 @@ interface LoadedSkillSidecar {
    * and the purpose a reader sees. Absent exactly when the file could not be
    */
   readonly frontmatter?: LoadedSkillFrontmatter
+  /** Instruction body parsed from the same bytes whose digest was checked. */
+  readonly instructions?: string
   /** Direct entries the supported vocabulary does not cover (a directory reads as `name/`), sorted. */
   readonly uncovered: readonly string[]
   /** Every reason the directory or its sidecar is not acceptable; empty means a clean load. */
@@ -236,6 +238,7 @@ interface ScannedDirectory {
   skillMdPresent: boolean
   skillMdSha256?: string
   frontmatter?: LoadedSkillFrontmatter
+  instructions?: string
   resources: SkillResourceIdentity[]
   uncovered: string[]
   /**
@@ -340,6 +343,13 @@ async function scanSkillDirectory(directory: string): Promise<ScannedDirectory> 
         try {
           const parsed = parseSkillFile(bytes.toString('utf8'), join(directory, 'SKILL.md'))
           scanned.frontmatter = { name: parsed.name, description: parsed.description }
+          scanned.instructions = parsed.content
+          if (parsed.content.trim().length === 0) {
+            scanned.defects.push(defect('skill-file-invalid', 'SKILL.md has no instruction body; a task needs actual guidance'))
+          }
+          if (!parsed.invocation.modelInvocable) {
+            scanned.defects.push(defect('skill-file-invalid', 'SKILL.md disables model invocation; a task must be able to load its guidance'))
+          }
         } catch (error) {
           scanned.defects.push(defect('skill-file-invalid', message(error)))
         }
@@ -516,6 +526,7 @@ export async function loadSkillSidecar(directory: string): Promise<LoadedSkillSi
     ...(sidecar === undefined ? {} : { sidecar }),
     ...(content === undefined ? {} : { content }),
     ...(scanned.frontmatter === undefined ? {} : { frontmatter: scanned.frontmatter }),
+    ...(scanned.instructions === undefined ? {} : { instructions: scanned.instructions }),
     uncovered: scanned.uncovered,
     defects,
   }

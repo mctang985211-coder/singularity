@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../support/skill-roots.ts'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { join } from 'node:path'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
@@ -95,7 +96,7 @@ function harness() {
   const runtime = new TaskRuntime(
     ctx as never,
     {
-      capabilities: { 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } },
+      capabilities: { ...TASK_GUIDANCE, ...({ 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } }) },
     } as unknown as Config,
   )
   return { ctx, task, runtime, sessions }
@@ -108,7 +109,7 @@ function harness() {
  * rather than assumed.
  */
 const ROOT_CONTRACT: RootContractSpec = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-ship', description: 'the release is shipped', command: 'true' }],
 }
 
@@ -128,7 +129,7 @@ describe('the pre-check a batch passed travels with its batch (S1-C)', () => {
           acceptanceCriteria: [{ description: 'works', command: 'true' }],
           requiredCapabilities: ['design-ball'],
         },
-        { objective: 'and then some', acceptanceCriteria: [{ description: 'works', command: 'true' }] },
+        { objective: 'and then some', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'works', command: 'true' }] },
       ],
     })
 
@@ -142,7 +143,7 @@ describe('the pre-check a batch passed travels with its batch (S1-C)', () => {
     expect(childTaskIds).toHaveLength(2)
     const providers = batch.providers
     expect(providers).toBeDefined()
-    expect(providers!.capabilities.map(row => row.capability)).toEqual(['design-ball'])
+    expect(providers!.capabilities.map(row => row.capability)).toEqual(['design-ball', 'execute-task'])
     expect(providers!.capabilities[0]!.skills.map(skill => (skill.valid ? skill.role : 'invalid'))).toEqual([
       'guidance',
     ])
@@ -153,10 +154,9 @@ describe('the pre-check a batch passed travels with its batch (S1-C)', () => {
 
     // The children the store holds are the ones those rows were resolved for:
     // the manifest each run binds is the one admission judged, not a second
-    // resolution — the row for the child that asked for it, and an empty
-    // manifest for the sibling that asked for nothing.
+    // resolution — each child keeps the exact method it selected.
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.capabilities[childTaskIds[0]!]!.capabilities).toHaveProperty('design-ball')
-    expect(Object.keys(snapshot.capabilities[childTaskIds[1]!]!.capabilities)).toEqual([])
+    expect(Object.keys(snapshot.capabilities[childTaskIds[1]!]!.capabilities)).toEqual(['execute-task'])
   })
 })

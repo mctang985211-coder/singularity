@@ -106,7 +106,7 @@ async function createSecondParent(h: Harness): Promise<{ taskId: string; runId: 
     ],
     assumptions: [],
     constraints: [],
-    requiredCapabilities: [],
+    requiredCapabilities: ['execute-task'],
   }
   await h.task.createTaskIn(
     STORE,
@@ -116,7 +116,7 @@ async function createSecondParent(h: Harness): Promise<{ taskId: string; runId: 
       objective: contract.objective,
       depth: 0,
       acceptanceCriteria: contract.acceptanceCriteria,
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'decomposable',
       status: 'created',
       runIds: [],
@@ -173,14 +173,14 @@ describe('TaskRuntime post-approval re-check (§6)', () => {
 
   test('a capability resolution that moved marks the approval stale, naming what moved', async () => {
     const h = harness({ config: { generatedTaskReview: 'all' } })
-    await h.runtime.applyCapabilityRow('build-thing', { tools: ['bash'] })
+    await h.runtime.applyCapabilityRow('build-thing', { skills: ['task-execution'], tools: ['bash'] })
     const { taskId, runId } = await createRoot(h)
     const spec = batchSpec([childSpec('task a', { requiredCapabilities: ['build-thing'] })])
 
     const pending = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, spec)
     if (pending.status !== 'pending_review') throw new Error('unreachable')
     await approveInStore(h, pending.proposalId)
-    await h.runtime.applyCapabilityRow('build-thing', { tools: ['filesystem'] })
+    await h.runtime.applyCapabilityRow('build-thing', { skills: ['task-execution'], tools: ['filesystem'] })
 
     const continued = await h.runtime.continueProposal(STORE, pending.proposalId, ROOT_SESSION, { spec })
     expect(continued.status).toBe('stale')
@@ -639,7 +639,7 @@ describe('TaskRuntime recovery (§6 restart and idempotency)', () => {
           command: 'true',
         },
       ],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'leaf' as const,
       status: 'created' as const,
       runIds: [],
@@ -654,8 +654,8 @@ describe('TaskRuntime recovery (§6 restart and idempotency)', () => {
       [],
       undefined,
       [
-        { capabilities: {}, missing: [], closure: 'closed' },
-        { capabilities: {}, missing: [], closure: 'closed' },
+        { capabilities: { 'execute-task': { tools: [], skills: ['task-execution'] } }, missing: [], closure: 'closed' },
+        { capabilities: { 'execute-task': { tools: [], skills: ['task-execution'] } }, missing: [], closure: 'closed' },
       ],
       {
         proposalId: pending.proposalId,

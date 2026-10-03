@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -95,7 +96,7 @@ async function harness(): Promise<Harness> {
   // harness builds the registry by hand, so the built-ins — and the vocabulary
   // `verifierIds()` reports — have to be readied explicitly.
   await verifier.ready()
-  const runtime = new TaskRuntime(ctx)
+  const runtime = new TaskRuntime(ctx, { capabilities: { ...TASK_GUIDANCE } })
   return { task, runtime, verifier, log, spawned }
 }
 
@@ -132,7 +133,7 @@ async function createParent(h: Harness, acceptanceCriteria: AcceptanceCriterion[
     objective: 'prove the combination, not only the parts',
     depth: 0,
     acceptanceCriteria,
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'decomposable',
     status: 'created',
     runIds: [],
@@ -176,7 +177,7 @@ async function seedProducer(h: Harness, outcome: 'verified' | 'failed', kind: st
       mandatory: true,
       command: 'true',
     }],
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -228,7 +229,7 @@ async function createVerifiedChampion(h: Harness): Promise<string> {
       mandatory: true,
       command: 'true',
     }],
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -261,7 +262,7 @@ async function createVerifiedChampion(h: Harness): Promise<string> {
  */
 function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [
       { criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' },
       { criterionId: 'root-children-verified', description: 'all mandatory children verified', mode: 'composite', mandatory: true },
@@ -298,7 +299,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
     }])
     const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'check evidence classification',
-      children: [{ objective: 'child', acceptanceCriteria: [
+      children: [{ objective: 'child', requiredCapabilities: ['execute-task'], acceptanceCriteria: [
         { description: 'mechanical check', command: 'true' },
         { description: 'optional judgement', command: 'true', mandatory: false, heuristic },
       ] }],
@@ -341,7 +342,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
     }])
     const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'custom verifier',
-      children: [{ objective: 'child', acceptanceCriteria: [{ description: 'works', command: 'true' }] }],
+      children: [{ objective: 'child', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'works', command: 'true' }] }],
     })
     await h.runtime.awaitBatch(STORE, batchId)
     await handInParentResult(h, runId)
@@ -360,7 +361,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
         const replay = h.runtime.replayTask(STORE, championId, {
           lineage: 'evolution-replay:p4-regression', spawn,
           contract: {
-            objective: 'consume reference', requiredCapabilities: [],
+            objective: 'consume reference', requiredCapabilities: ['execute-task'],
             acceptanceCriteria: [{
               criterionId: 'consume', description: 'consume reference', verificationMode: 'deterministic',
               mandatory: true, requiredEvidence: [], command: 'true', [field]: ['reference'],
@@ -406,8 +407,8 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
     const batch = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
-        { objective: 'port the ALU', acceptanceCriteria: [{ description: 'the port compiles', command: 'true' }] },
-        { objective: 'run the model', acceptanceCriteria: [{ description: 'the model runs', command: 'true' }] },
+        { objective: 'port the ALU', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'the port compiles', command: 'true' }] },
+        { objective: 'run the model', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'the model runs', command: 'true' }] },
       ],
     })
     const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
@@ -451,8 +452,8 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
     const batch = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
-        { objective: 'port the ALU', acceptanceCriteria: [{ description: 'the port compiles', command: 'true' }] },
-        { objective: 'run the model', acceptanceCriteria: [{ description: 'the model runs', command: 'true' }] },
+        { objective: 'port the ALU', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'the port compiles', command: 'true' }] },
+        { objective: 'run the model', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'the model runs', command: 'true' }] },
       ],
     })
     const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
@@ -481,8 +482,8 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
     const batch = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
-        { objective: 'port the ALU', acceptanceCriteria: [{ description: 'the port compiles', command: 'true' }] },
-        { objective: 'run the model', acceptanceCriteria: [{ description: 'the model runs', command: 'true' }] },
+        { objective: 'port the ALU', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'the port compiles', command: 'true' }] },
+        { objective: 'run the model', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'the model runs', command: 'true' }] },
       ],
     })
     const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
@@ -503,7 +504,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
     const batch = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [{
-        objective: 'rtl implementation',
+        objective: 'rtl implementation', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [{ description: 'cycle-equivalent to the reference', command: 'true', requiresArtifact: ['bemu_trace'] }],
       }],
     })
@@ -529,7 +530,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
     const batch = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [{
-        objective: 'rtl implementation',
+        objective: 'rtl implementation', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [{ description: 'cycle-equivalent to the reference', command: 'true', requiresArtifact: ['bemu_trace'] }],
       }],
     })
@@ -558,7 +559,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
           mandatory: true,
           childEvidence: [{ childIndex: -1 }],
         }],
-        requiredCapabilities: [],
+        requiredCapabilities: ['execute-task'],
       },
     }, ROOT_SESSION)).rejects.toThrow(/childEvidence/)
 
@@ -585,7 +586,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
           mandatory: true,
           childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }],
         }],
-        requiredCapabilities: [],
+        requiredCapabilities: ['execute-task'],
       },
     }, ROOT_SESSION)
 

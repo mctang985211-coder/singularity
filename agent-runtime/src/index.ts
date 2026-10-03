@@ -16,7 +16,8 @@ import type {} from '@deepseek-ai/dsh-tools'
 import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { DEFAULT_ROOT, type GraphEvent } from '@dangosys/dsh-singularity-graph'
-import { applyWorkerGrant } from './grants.ts'
+import { applySkillRoots, applyWorkerGrant } from './grants.ts'
+import { fileURLToPath } from 'node:url'
 import { ensureAgentMessageDelivered, readToolCallBody, reconcileAgentMessageDeliveries } from './messages.ts'
 import type {
   AgentMessageIntent,
@@ -502,6 +503,10 @@ function rootSetup(ctx: Context, agentPreset: string): AgentSetup {
     const evolution = evolutionEnabled(ctx)
     agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
     agentCtx.tools.restrict({ allow: rootToolsFor(evolution) })
+    await applySkillRoots(agentCtx, {
+      capabilities: [], baseline: [], keepPresetTools: false,
+      skillRoots: [fileURLToPath(new URL('../skills/', import.meta.url))],
+    })
     sealRawSessionReads(agentCtx)
     sealRootTools(agentCtx, evolution)
   }

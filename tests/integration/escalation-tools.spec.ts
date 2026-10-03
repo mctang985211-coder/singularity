@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -92,7 +93,7 @@ async function mount(approvalOutcome: string = 'allowed-once') {
   ctx.provide('approval', approval as never)
 
   const task = new TaskService(ctx)
-  const runtime = new TaskRuntime(ctx)
+  const runtime = new TaskRuntime(ctx, { capabilities: { ...TASK_GUIDANCE } } as never)
   // The read core the plugin's tools read through (A2), mounted where the
   // deployment's bundle mounts it.
   await mountContextReadCore(ctx)
@@ -180,7 +181,7 @@ it('refuses an incomplete card without asking the human', async () => {
 it('carries a capability gap from the orchestrator feedback to the ledger through escalate', async () => {
   const { tools, task, runtime, home } = await mount()
   try {
-    const activated = await runtime.intakeRootContract(STORE, ROOT_SESSION, {
+    const activated = await runtime.intakeRootContract(STORE, ROOT_SESSION, { requiredCapabilities: ['execute-task'],
       objective: 'ship the release',
       acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is delivered', command: 'true' }],
     })

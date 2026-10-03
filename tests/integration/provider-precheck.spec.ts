@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 import { DEPLOYMENT_MCP_SERVERS } from '../support/mcp-servers.ts'
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
@@ -206,7 +207,7 @@ async function harness(options: { capabilities?: Record<string, CapabilityConfig
   // and the pre-check would refuse every execution provider on a deployment
   // whose registry is merely still loading.
   await verifier.ready()
-  const config: Partial<Config> = { capabilities: { ...DEFAULT_ROWS, ...(options.capabilities ?? {}) } }
+  const config: Partial<Config> = { capabilities: { ...TASK_GUIDANCE, ...DEFAULT_ROWS, ...(options.capabilities ?? {}) } }
   const runtime = new TaskRuntime(ctx, { mcpServers: DEPLOYMENT_MCP_SERVERS, ...config } as Config)
   if (options.mountAgent === true) {
     // The read core and its assembly, mounted where the deployment's bundle mounts
@@ -230,7 +231,7 @@ function taskEvents(h: Harness): TaskEvent[] {
  * mandatory criterion judged by something other than the composite conjunction.
  */
 function rootContract(objective: string): RootContractSpec {
-  return {
+  return { requiredCapabilities: ['execute-task'],
     objective,
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
@@ -522,7 +523,7 @@ describe('replay provider pre-check (S1-C)', () => {
     const root = await createRoot(h)
     const { batchId } = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
       reason: 'the champion ran its own child',
-      children: [child('champion work', [])],
+      children: [child('champion work', ['execute-task'])],
     })
     await h.runtime.awaitBatch(root.storeId, batchId)
     // The batch end judged nobody (K1 §2): the champion is terminal because its

@@ -42,6 +42,8 @@ export async function replayTask(
   // A verified/failed task always has at least one run; the latest is the
   // champion run the replay's own run descends from (execution lineage).
   const championRunId = champion.runIds[champion.runIds.length - 1]!
+  const championRun = await self.context.task.runIn(storeId, championRunId)
+  const taskTemplatesRoot = options.overlay?.taskTemplatesRoot ?? championRun.taskTemplatesRoot ?? self.taskTemplatesRootFor(callerSessionId)
   const effective = options.contract ?? {
     objective: champion.objective,
     acceptanceCriteria: champion.acceptanceCriteria,
@@ -74,7 +76,7 @@ export async function replayTask(
     table,
     mcpRegistry,
   )
-  const refusals = providerRefusals(precheck)
+  const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities))
   if (refusals.length > 0) {
     throw new Error(
       `task-runtime: provider pre-check rejected replay of "${championTaskId}":\n- ${refusals.join('\n- ')}`,
@@ -113,6 +115,7 @@ export async function replayTask(
     assumptions: [...(champion.contract?.assumptions ?? [])],
     constraints: [...(champion.contract?.constraints ?? [])],
     requiredCapabilities: [...effective.requiredCapabilities],
+    ...(champion.contract?.templateScope === undefined ? {} : { templateScope: structuredClone(champion.contract.templateScope) }),
   }
   const task: TaskInstance = {
     taskId: `t-${randomUUID()}`,
@@ -157,7 +160,9 @@ export async function replayTask(
   const run = async (): Promise<ReplayRunOutcome> => {
     try {
       const outcome = await runReplayTask(
-        await self.orchestrateEnv(callerSessionId, callerSessionId, named, options.overlay ?? {}),
+        await self.orchestrateEnv(callerSessionId, callerSessionId, named, {
+          ...options.overlay, ...(taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot }),
+        }),
         storeId,
         {
           task,
@@ -175,7 +180,7 @@ export async function replayTask(
            * frozen selection, forwarded verbatim — the orchestration carries it to
            */
           ...(options.agentOptions === undefined ? {} : { agentOptions: { ...options.agentOptions } }),
-          ...(options.overlay?.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: options.overlay.taskTemplatesRoot }),
+          ...(taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot }),
           spawn,
           championRunId,
         },

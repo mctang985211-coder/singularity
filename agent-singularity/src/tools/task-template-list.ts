@@ -5,6 +5,11 @@ import { message, sessionId, text } from '../shared.ts'
 
 /** The same creation input is accepted by root intake and each direct child. */
 export const templateBindingParameters = {
+  templateScope: {
+    type: 'array' as const,
+    items: { type: 'array' as const, items: { type: 'string' as const } },
+    description: 'Catalog prefixes for this task. The root selects relevant branches from the user goal; a child may inherit by omitting this field or narrow its parent scope. [] permits only explicit general templates. This grants no tools or capabilities.',
+  },
   templateRef: {
     type: 'object' as const,
     additionalProperties: false,
@@ -25,17 +30,18 @@ export const templateBindingParameters = {
 export function defineTaskTemplateListTool(ctx: Context) {
   return defineTool({
     name: 'task_template_list',
-    description: 'Find reusable Task contracts before intake or decomposition. Returns each matching id\'s latest immutable version, exact digest, applicability conditions, parameter schema and complete contract. Read appliesTo to decide whether it fits; bind a suitable template in task_intake/task_decompose. With no suitable template, write a full standard contract.',
+    description: 'Browse the caller-visible Task catalog and finite summary pages. Select catalogPath from the user goal before root intake; child queries stay within inherited branches plus general. Read an exact templateRef for the complete contract, parameter schema and optional direct-child decomposition. Choose a fitting reference and parameters or write a complete standard contract.',
     parameters: {
-      query: { type: 'string', description: 'Optional whitespace-separated discovery keywords; omit to inspect the full current library. Applicability is decided from appliesTo, not keyword matches.' },
+      query: { type: 'string', description: 'Optional discovery keywords within the visible scope; appliesTo decides applicability.' },
+      catalogPath: { type: 'array', items: { type: 'string' }, description: 'Catalog branch to browse; cannot widen an admitted task scope.' },
+      templateRef: templateBindingParameters.templateRef,
+      offset: { type: 'integer', description: 'Page offset; use nextOffset from the previous response.' },
+      limit: { type: 'integer', description: 'Page size from 1 to 20; default 10.' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => text(value) },
     execute: async (args, exec) => {
       try {
-        const matches = await ctx.taskRuntime.findTaskTemplates(args.query, sessionId(exec, 'task_template_list'))
-        return matches.length === 0
-          ? 'No matching Task template. You may still submit a complete standard contract, preserving the requested objective and acceptance.'
-          : JSON.stringify(matches, null, 2)
+        return JSON.stringify(await ctx.taskRuntime.listTaskTemplates(args, sessionId(exec, 'task_template_list')), null, 2)
       } catch (error) {
         return `task_template_list failed: ${message(error)}`
       }

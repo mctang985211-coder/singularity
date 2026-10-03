@@ -98,7 +98,7 @@ async function isReplayedWorker(h: RunStack, sessionId: SessionId): Promise<bool
  */
 function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
 }
@@ -117,7 +117,7 @@ async function writeChampion(h: RunStack, storeId: string, criterion: Acceptance
     objective: 'champion work',
     depth: 0,
     acceptanceCriteria: [criterion],
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -128,7 +128,7 @@ async function writeChampion(h: RunStack, storeId: string, criterion: Acceptance
     runId,
     taskId,
     sessionId: 's-champion',
-    capabilitySnapshot: [],
+    capabilitySnapshot: ['execute-task'],
     artifacts: [],
     verifierResults: [],
     status: 'running',
@@ -204,7 +204,7 @@ describe('S4-E: a replay in a caller-named workspace', () => {
           // identity against the workspace it runs in.
           protectedInputs: ['input.txt'],
         } as unknown as AcceptanceCriterion],
-        requiredCapabilities: [],
+        requiredCapabilities: ['execute-task'],
       },
       workspace: { path: workspace.directory },
     }, ROOT)
@@ -450,7 +450,7 @@ describe('S4-E: a replay in a caller-named workspace', () => {
         decomposed = await h.call(agent, 'task_decompose', {
           reason: 'the replayed work is not atomic',
           children: [{
-            objective: 'the child of the replayed work',
+            objective: 'the child of the replayed work', requiredCapabilities: ['execute-task'],
             acceptanceCriteria: [{ description: 'the child holds', command: 'test -f parent-worker.txt && pwd > child-verifier-cwd.txt && true' }],
           }],
         })

@@ -176,13 +176,16 @@ describe('bindRunProviders', () => {
       rows: { 'design-ball': ['ball-align'] },
     })) as RunProviderBinding
 
-    expect((await readRunBinding(binding))?.defects).toEqual([])
+    const clean = await readRunBinding(binding)
+    expect(clean?.defects).toEqual([])
+    expect(clean?.skills[0]?.instructions).toContain('Gold is the **ctest semantics**')
 
     // One byte of the body, one byte of a resource, one byte of the declaration:
     // each is a separate identity, and each is reported by name.
     await writeFile(join(binding.snapshotRoot!, 'ball-align', 'SKILL.md'), 'rewritten\n')
     const body = await readRunBinding(binding)
     expect(body!.skills[0]!.readable).toBe(false)
+    expect(body!.skills[0]!.instructions).toBeUndefined()
     expect(body!.defects.join('\n')).toContain('content-mismatch')
     expect(body!.defects.join('\n')).toContain('bound ' + binding.skills[0]!.contentDigest)
 
@@ -300,33 +303,28 @@ describe('bindRunProviders', () => {
     ).rejects.toThrow(/no accepted provider for skill "ball-align"/)
   })
 
-  test('binds nothing for a caller that assembled its own plan, and nothing for a run with no rows', async () => {
+  test('refuses a caller without admission verdicts and a run with no guidance rows', async () => {
     await install('ball-align')
-    // No pre-check but rows in play: no judged identity, so no binding at all.
-    expect(
-      await bindRunProviders({
+    // No pre-check means no admitted Skill; an execution cannot skip guidance.
+    await expect(
+      bindRunProviders({
         storeId: 'sg-t-root',
         runId: 'r-1',
         manifest: manifest({ 'design-ball': ['ball-align'] }),
         table: TABLE,
         root,
       }),
-    ).toBeUndefined()
+    ).rejects.toThrow('has no admitted guidance Skill')
 
-    // No rows: the root case — a record with the table's revision and nothing else.
-    const empty = await bindRunProviders({
+    // A root without guidance is rejected before a Run snapshot exists.
+    await expect(bindRunProviders({
       storeId: 'sg-t-root',
       runId: 'r-root',
       manifest: manifest({}),
       table: TABLE,
       root,
       mcpRegistry: DEPLOYMENT_MCP_SERVERS,
-    })
-    expect(empty!.skills).toEqual([])
-    expect(empty!.capabilities).toEqual([])
-    expect(empty!.mcpServers).toEqual([])
-    expect(empty!.snapshotRoot).toBeUndefined()
-    expect(empty!.registryRevision).toMatch(/^[0-9a-f]{64}$/)
+    })).rejects.toThrow('has no admitted guidance Skill')
     // Nothing was materialized for it.
     await expect(readFile(join(root, 'sg-t-root', 'r-root'))).rejects.toThrow()
   })

@@ -100,7 +100,7 @@ const HANDOFF_BOUNDARY = 'handoff-started' as const
 
 /** One child spec: a goal and one named criterion the real command verifier settles. */
 const children = (objective: string, command: string, criterionId: string): DecomposeSpec['children'] => [{
-  objective,
+  objective, requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId, description: `${objective} works`, command }],
 }]
 
@@ -183,7 +183,7 @@ function chainOn(stack: AssemblyStack): void {
 async function failedRoot(stack: AssemblyStack): Promise<{ taskId: string; runId: string; memberTaskId: string }> {
   await stack.seedLog(ROOT, ['ship the release'])
   const root = await stack.runtime.intakeRootContract(STORE, ROOT, {
-    objective: 'ship the release',
+    objective: 'ship the release', requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [
       { criterionId: 'root-goal', description: 'the release is delivered', command: 'true' },
       {
@@ -239,7 +239,7 @@ function attemptWorker(stack: () => AssemblyStack): (sessionId: string) => Promi
     if (bound.run.recovery === undefined || bound.run.batchId !== undefined) return
     await stack().runtime.decomposeAndRun(STORE, bound.task.taskId, bound.run.runId, sessionId, {
       reason: 're-run the failed position',
-      children: [{ objective: 'the member, again', acceptanceCriteria: [{ criterionId: 'member-0', description: 'it holds', command: 'true' }] }],
+      children: [{ objective: 'the member, again', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ criterionId: 'member-0', description: 'it holds', command: 'true' }] }],
     } as never)
   }
 }

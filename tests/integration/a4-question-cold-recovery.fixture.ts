@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 /**
  * A4 cold recovery, closed loop (plan §F.1): a deployment whose stores and
  * sessions live in the real JSONL log is booted, driven until a worker is
@@ -47,7 +48,7 @@
  * than the store's own root.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, vi } from 'vitest'
@@ -66,6 +67,7 @@ import { AgentRegistry } from '../../../../thirdparty/deepseek-harness/packages/
 import SystemPrompt from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
 import ToolRuntime from '../../../../thirdparty/deepseek-harness/packages/core/tools/lib/index.js'
 import SessionStore from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
+import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
 import SessionProjectionRegistry from '../../../../thirdparty/deepseek-harness/packages/session/session-projection/lib/index.js'
 import AgentLoop from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/lib/index.js'
 import LlmRuntime, {
@@ -109,26 +111,25 @@ export const SCOPE = { graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root' }
 
 /** The root contract every case runs under: one goal, one criterion a command settles. */
 export const ROOT_CONTRACT: RootContractSpec = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
 
 /** One child spec: a goal and a criterion a command can settle. */
 export const children = (objective: string): DecomposeSpec['children'] => [
   {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
   },
 ]
 
 /**
- * The capability manifest a decomposed child is admitted under: no capabilities
- * at all. It is a manifest like any other — a run's store record always carries
+ * The guidance capability a champion declares for replay. A run's store record carries
  * one, and the recovery's worker resume rebuilds the grant from exactly this
  * record — so a fixture that admitted children without one would be testing a
  * store no real batch writes.
  */
-export const NO_CAPABILITIES: CapabilityManifest = { capabilities: {}, missing: [], closure: 'closed' }
+export const EXECUTION_CAPABILITIES: CapabilityManifest = { capabilities: TASK_GUIDANCE, missing: [], closure: 'closed' }
 
 /** The tools registered as the deployment's own definitions; every other name in the plane is a stand-in. */
 export const SHIPPED_TOOLS = ['task_intake', 'task_decompose', 'task_submit_result', 'task_ask_parent', 'task_answer']
@@ -327,9 +328,15 @@ export class Boot {
     },
   ): Promise<Boot> {
     mkdirSync(join(dir, 'env'), { recursive: true })
+    const home = join(dir, 'home')
+    mkdirSync(join(home, 'skills', 'task-execution'), { recursive: true })
+    copyFileSync(new URL('../../agent-runtime/skills/task-execution/SKILL.md', import.meta.url), join(home, 'skills', 'task-execution', 'SKILL.md'))
+    vi.stubEnv('DSH_HOME', home)
+    vi.stubEnv('HOME', home)
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SkillRegistry, {})
     await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
@@ -535,12 +542,12 @@ export class Boot {
     const task = new TaskService(ctx)
     await ctx.plugin(VerifierRegistry, { evidenceRoot: join(dir, 'evidence') })
     await ctx.plugin(TaskRuntime, {
-      capabilities: {},
+      capabilities: TASK_GUIDANCE,
       runBindingRoot: join(dir, 'run-bindings'),
       ...(options.budget === undefined ? {} : { budget: { ...options.budget } }),
       ...(options.rootBudget === undefined ? {} : { rootBudget: { ...options.rootBudget } }),
       ...(options.generatedTaskReview === undefined ? {} : { generatedTaskReview: options.generatedTaskReview }),
-    } as Config)
+    })
     const runtime = ctx.get('taskRuntime') as TaskRuntime
     ctx.tools.register(defineTaskIntakeTool(ctx))
     ctx.tools.register(defineTaskDecomposeTool(ctx))
@@ -649,7 +656,7 @@ export class Boot {
             command: 'true',
           },
         ],
-        requestedCapabilities: [],
+        requestedCapabilities: ['execute-task'],
         decompositionStatus: 'leaf',
         status: 'created',
         runIds: [],
@@ -657,14 +664,14 @@ export class Boot {
       },
       ROOT,
     )
-    await this.task.admitTaskIn(STORE, taskId, ROOT, { decompositionStatus: 'leaf', manifest: NO_CAPABILITIES })
+    await this.task.admitTaskIn(STORE, taskId, ROOT, { decompositionStatus: 'leaf', manifest: EXECUTION_CAPABILITIES })
     await this.task.startRunIn(
       STORE,
       {
         runId,
         taskId,
         sessionId: 's-champion',
-        capabilitySnapshot: [],
+        capabilitySnapshot: ['execute-task'],
         artifacts: [],
         verifierResults: [],
         status: 'running',
@@ -776,7 +783,7 @@ export class Boot {
     const gate = Promise.withResolvers<void>()
     const claim = Promise.withResolvers<void>()
     this.ctx.on('system-prompt/assemble', async (assembly, context, next) => {
-      await gate.promise
+      if (String(context.agent?.id) === sessionId) await gate.promise
       return next()
     })
     this.ctx.on('agent/inbox/claimed', ({ agent, message }) => {

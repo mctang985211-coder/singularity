@@ -67,7 +67,7 @@ const RAW_SESSION_READS = ['session_search', 'session_event_read', 'session_even
  */
 function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
 }

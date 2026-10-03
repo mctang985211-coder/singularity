@@ -153,7 +153,7 @@ async function independentDigest(directory: string): Promise<string> {
 /** The root contract the fixture's tree runs under; the intake is real, so it is stated. */
 function rootContract(objective: string) {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
 }

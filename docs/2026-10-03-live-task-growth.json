@@ -1,0 +1,149 @@
+{
+  "date": "2026-10-03",
+  "test": "tests/integration/live-task-growth.spec.ts",
+  "command": "SINGULARITY_LIVE_TASK_GROWTH=1 pnpm exec vitest run --project integration packages/singularity/tests/integration/live-task-growth.spec.ts",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "result": "passed",
+  "method": "Real model chooses Task templates and recursive direct-child decomposition; production TaskRuntime, AgentRuntime, scoped context and command verifier execute it. read/write are real filesystem tool bodies. Root contracts and available templates are test inputs; no scripted decomposition is sent to the model.",
+  "assertions": {
+    "depthAtLeastTwo": true,
+    "dependencyEdgesPresent": true,
+    "atLeastTwoTemplateInstances": true,
+    "allInstancesCarryContracts": true,
+    "allRunsBindGuidance": true,
+    "thirtyUnrelatedTemplatesAbsentFromAllRequests": true,
+    "rootOriginalProtectedCheckerPassed": true
+  },
+  "cases": [
+    {
+      "numbers": [
+        3,
+        7,
+        -2
+      ],
+      "summary": {
+        "count": 3,
+        "sumSquares": 62,
+        "sumAbsolute": 12
+      },
+      "requestCount": 38,
+      "tasks": [
+        {
+          "taskId": "t-d90a6e0d-44c3-478f-bbcf-2930b892a42c",
+          "depth": 0,
+          "objective": "Deliver a transformation subsystem producing squares.json and absolute.json from numbers.json, and a summary.json consuming those verified results with count, sumSquares and sumAbsolute. Coordinate the subsystem as an owned responsibility; its worker decides the independently checkable transformation children. Use available Task templates where applicable.",
+          "status": "verified"
+        },
+        {
+          "taskId": "t-5065c451-6826-4c2c-bcda-ee6650cd92b4",
+          "parentTaskId": "t-d90a6e0d-44c3-478f-bbcf-2930b892a42c",
+          "depth": 1,
+          "objective": "Own the transformation subsystem: deliver and independently verify both squares.json and absolute.json.",
+          "templateRef": {
+            "digest": "8c22e898be81ae25633a38e3802d18e50d5f37844a84b7ffbc72a15a8d548513",
+            "id": "transform-numbers",
+            "version": 1
+          },
+          "status": "verified"
+        },
+        {
+          "taskId": "t-89f94895-6277-48e0-8df4-0fb3b08cf9e2",
+          "parentTaskId": "t-d90a6e0d-44c3-478f-bbcf-2930b892a42c",
+          "depth": 1,
+          "objective": "Consume verified squares.json and absolute.json; deliver summary.json with count, sumSquares and sumAbsolute.",
+          "templateRef": {
+            "digest": "a3adb90d8f34614955391f3e29bfab6f73983589b5e06126c3e7cfadebedbe05",
+            "id": "summarize-transforms",
+            "version": 1
+          },
+          "status": "verified"
+        },
+        {
+          "taskId": "t-ab097066-15d8-4479-8fd5-b804d2175608",
+          "parentTaskId": "t-5065c451-6826-4c2c-bcda-ee6650cd92b4",
+          "depth": 2,
+          "objective": "Read numbers.json and deliver squares.json with the elementwise squares in input order.",
+          "status": "verified"
+        },
+        {
+          "taskId": "t-8e7ee292-0608-4d5e-99c8-3f28402608cd",
+          "parentTaskId": "t-5065c451-6826-4c2c-bcda-ee6650cd92b4",
+          "depth": 2,
+          "objective": "Read numbers.json and deliver absolute.json with the elementwise absolute values in input order.",
+          "status": "verified"
+        }
+      ],
+      "edges": [
+        {
+          "from": "t-5065c451-6826-4c2c-bcda-ee6650cd92b4",
+          "to": "t-89f94895-6277-48e0-8df4-0fb3b08cf9e2"
+        }
+      ]
+    },
+    {
+      "numbers": [
+        2,
+        -5
+      ],
+      "summary": {
+        "count": 2,
+        "sumSquares": 29,
+        "sumAbsolute": 7
+      },
+      "requestCount": 36,
+      "tasks": [
+        {
+          "taskId": "t-b281ea4d-fc1a-4b19-81ea-8006e14ed050",
+          "depth": 0,
+          "objective": "Deliver a transformation subsystem producing squares.json and absolute.json from numbers.json, and a summary.json consuming those verified results with count, sumSquares and sumAbsolute. Coordinate the subsystem as an owned responsibility; its worker decides the independently checkable transformation children. Use available Task templates where applicable.",
+          "status": "verified"
+        },
+        {
+          "taskId": "t-5eec9f4f-a9ff-47fa-8bc3-1e9a7a57ba3b",
+          "parentTaskId": "t-b281ea4d-fc1a-4b19-81ea-8006e14ed050",
+          "depth": 1,
+          "objective": "Own the transformation subsystem: deliver and independently verify both squares.json and absolute.json.",
+          "templateRef": {
+            "digest": "8c22e898be81ae25633a38e3802d18e50d5f37844a84b7ffbc72a15a8d548513",
+            "id": "transform-numbers",
+            "version": 1
+          },
+          "status": "verified"
+        },
+        {
+          "taskId": "t-ae124a68-54a4-48f1-955f-4b85e375bcbd",
+          "parentTaskId": "t-b281ea4d-fc1a-4b19-81ea-8006e14ed050",
+          "depth": 1,
+          "objective": "Consume verified squares.json and absolute.json; deliver summary.json with count, sumSquares and sumAbsolute.",
+          "templateRef": {
+            "digest": "a3adb90d8f34614955391f3e29bfab6f73983589b5e06126c3e7cfadebedbe05",
+            "id": "summarize-transforms",
+            "version": 1
+          },
+          "status": "verified"
+        },
+        {
+          "taskId": "t-34bf98fe-72be-4cdc-a839-3d072d63fdbd",
+          "parentTaskId": "t-5eec9f4f-a9ff-47fa-8bc3-1e9a7a57ba3b",
+          "depth": 2,
+          "objective": "Read numbers.json and deliver squares.json with the elementwise squares in input order.",
+          "status": "verified"
+        },
+        {
+          "taskId": "t-78f4cfc4-68f1-4187-9ff1-c53109f85d9b",
+          "parentTaskId": "t-5eec9f4f-a9ff-47fa-8bc3-1e9a7a57ba3b",
+          "depth": 2,
+          "objective": "Read numbers.json and deliver absolute.json with the elementwise absolute values in input order.",
+          "status": "verified"
+        }
+      ],
+      "edges": [
+        {
+          "from": "t-5eec9f4f-a9ff-47fa-8bc3-1e9a7a57ba3b",
+          "to": "t-ae124a68-54a4-48f1-955f-4b85e375bcbd"
+        }
+      ]
+    }
+  ],
+  "limits": "Two small numeric inputs demonstrate recursive Task execution and reuse. They do not measure long-term autonomous Supervisor improvement quality."
+}

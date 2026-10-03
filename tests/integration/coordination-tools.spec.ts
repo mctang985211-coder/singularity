@@ -35,7 +35,7 @@ afterEach(async () => {
 })
 
 const children = (objective: string): DecomposeSpec['children'] => [{
-  objective,
+  objective, requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
 }]
 
@@ -57,7 +57,7 @@ async function batchIdOf(h: RunStack, storeId: string, runId: string): Promise<s
  */
 function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
 }

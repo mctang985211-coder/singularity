@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
+import { readFile } from 'node:fs/promises'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import {
@@ -179,7 +180,8 @@ async function assemble(options: unknown): Promise<Assembly> {
   const guard = vi.fn()
   const session = { append: vi.fn() }
   const presentAs = vi.fn()
-  const agentCtx = { tools: { restrict, guard, presentAs }, systemPrompt: { section } }
+  const skills = { register: vi.fn(() => () => {}) }
+  const agentCtx = { tools: { restrict, guard, presentAs }, systemPrompt: { section }, get: (name: string) => name === 'skills' ? skills : undefined }
   await (options as { setup: (ctx: unknown, agent: unknown) => Promise<void> }).setup(agentCtx, { session })
   return { agentCtx, session, restrict, section, guard, presentAs }
 }
@@ -605,35 +607,15 @@ describe('AgentRuntime root lifecycle', () => {
     expect(prompt).not.toContain('evolution')
     expect(prompt).not.toContain('stay manual')
     expect(prompt).not.toContain('Buckyball')
-    // The assumption boundary rides in every root prompt: an assumption records
-    // what the contract takes as given and may never settle a condition the
-    // user did not confirm (R1 S3 evidence: the quarter was fixed that way).
-    expect(prompt).toContain('An assumption is not an answer')
-    expect(prompt).toContain('must never settle a condition you could not confirm')
-    // …and the question goes to the user, not to the environment (R1 S3
-    // evidence: the second attempt normalized a checkout-only source and a
-    // quarter rule it never asked about, and delivered nothing).
-    expect(prompt).toContain('put the question to the user before accepting the contract')
-    expect(prompt).toContain('the environment cannot answer for the user')
-    // …the contract is bounded by what the user supported and by what the
-    // deployment's verifiers can settle (R1 S3 evidence: the third attempt kept
-    // a full-summary goal the answer never supported and left two mandatory
-    // criteria to a review that returned inconclusive).
-    expect(prompt).toContain("Include only requirements supported by the user's words and answers")
-    expect(prompt).toContain('do not make a mandatory criterion depend on a review that may never happen')
-    expect(prompt).toContain(
-      'Reuse an authoritative checker where it covers the result, keep only criteria for distinct requirements',
-    )
-    expect(prompt).toContain('use known artifact paths')
-    // The budget raise (K4) rides every root prompt — `task_budget_extend` is on
-    // every root's allow-list — and it states the facts the model has to act on:
-    // a tree that ran out is still reviewable on the reviewer's own allowance,
-    // and the ceiling moves only because a person moved it.
-    expect(prompt).toContain('call task_budget_extend for a higher whole-total ceiling')
-    expect(prompt).toContain("A stopped tree is still reviewable on the reviewer's own allowance")
-    expect(prompt).toContain(
-      'It re-opens no task, starts nothing by itself, and the runs already counted go on counting',
-    )
+    // The method lives in one real Skill; the bootstrap only names its loader.
+    expect(prompt).toContain('load task-coordination with skill')
+    expect(prompt).toContain('through requiredCapabilities')
+    expect(prompt).not.toContain('An assumption is not an answer')
+    const method = await readFile(new URL('../../skills/task-coordination/SKILL.md', import.meta.url), 'utf8')
+    expect(method).toContain('An assumption is not an answer')
+    expect(method).toContain('At least one mandatory root criterion')
+    expect(method).toContain('One unfinished batch')
+    expect(method).toContain('task_budget_extend')
     // A6 recovery belongs only to the separately granted supervisor hand-off;
     // an ordinary root neither receives the tool nor gets prompted to call it.
     expect(prompt).not.toContain('task_recover')
@@ -647,14 +629,10 @@ describe('AgentRuntime root lifecycle', () => {
     const { restrict, section } = await assemble(state.resumeOptions[0])
     expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
     const prompt = promptTextOf(section)
-    for (const name of ['evolution_propose', 'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list']) {
-      expect(prompt).toContain(name)
-    }
-    expect(prompt).toContain('Task template, Skill or capability')
-    expect(prompt).toContain('MCP server launch definitions')
-    expect(prompt).toContain('original independent acceptance')
-    expect(prompt).toContain('human approval')
-    expect(prompt).not.toMatch(/single-file|single file|candidate.vs.champion|v1 replay/i)
+    expect(prompt).toContain('Evolution tools are available')
+    expect(prompt).toContain('Task and Skill improvements')
+    expect(prompt).toContain('capability/MCP changes when execution means are missing')
+    expect(prompt).toContain('recorded human decisions')
     // The domain reference map is a deployed skill, not part of the general root prompt.
     expect(prompt).not.toContain('Buckyball')
   })
@@ -676,7 +654,7 @@ describe('AgentRuntime root lifecycle', () => {
     expect(promptTextOf(section)).not.toContain('evolution')
   })
 
-  test('carries the intake paragraph in every composition, with the chain still absent when it is off', async () => {
+  test('loads the one coordination method through the Skill bootstrap in every root composition', async () => {
     const closed = context([id('root')])
     const closedRuntime = new AgentRuntime(closed.ctx as never)
     await closedRuntime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
@@ -684,16 +662,9 @@ describe('AgentRuntime root lifecycle', () => {
     const closedPrompt = promptTextOf(closedAssembly.section)
     const closedAllow = (closedAssembly.restrict.mock.calls[0]?.[0] as { allow: readonly string[] }).allow
 
-    // Accepting the user's own goal is the root's core path, not a deployment
-    // option: the tool is on the allow-list and the paragraph is there whatever
-    // the evolution switch says — and neither names a tool the closed
-    // composition does not carry.
     expect(closedAllow).toContain('task_intake')
-    expect(closedPrompt).toContain('call task_intake')
-    expect(closedPrompt).toContain('there is no root task')
-    expect(closedPrompt).toContain('not activated')
-    expect(closedPrompt).toContain('Normalize clear requests yourself')
-    expect(closedPrompt).toContain('Nothing you can call approves a contract')
+    expect(closedPrompt).toContain('Before intake, load task-coordination with skill')
+    expect(closedPrompt).not.toContain('Normalize clear requests')
     expect(closedPrompt).not.toContain('evolution')
 
     const open = context([id('root')], 'idle', { evolution: { enabled: true } })
@@ -703,8 +674,8 @@ describe('AgentRuntime root lifecycle', () => {
     const openAllow = (openAssembly.restrict.mock.calls[0]?.[0] as { allow: readonly string[] }).allow
 
     expect(openAllow).toContain('task_intake')
-    expect(promptTextOf(openAssembly.section)).toContain('call task_intake')
-    expect(promptTextOf(openAssembly.section)).toContain('evolution_candidate')
+    expect(promptTextOf(openAssembly.section)).toContain('load task-coordination with skill')
+    expect(promptTextOf(openAssembly.section)).toContain('Evolution tools are available')
   })
 
   test('ensureRoot returns an interrupted running root to idle before resuming it', async () => {
@@ -758,9 +729,8 @@ describe('AgentRuntime root lifecycle', () => {
     const { restrict, section } = await assemble(state.createOptions[0])
     expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
     const prompt = promptTextOf(section)
-    expect(prompt).toContain('evolution_candidate')
-    expect(prompt).toContain('evolution_propose')
-    expect(prompt).toContain('evolution_list')
+    expect(prompt).toContain('Evolution tools are available')
+    expect(prompt).toContain('Task and Skill improvements')
     expect(prompt).not.toContain('Buckyball')
   })
 })

@@ -56,8 +56,7 @@ describe('renderRunBinding', () => {
     expect(summary).toContain('not covered by this binding: notes.md')
     expect(summary).toContain('- MCP servers mounted for this run: `bbdev` (template eeeeeeeeeeee)')
     expect(summary).toContain(`- bound content snapshot: /dsh/singularity/run-bindings/sg-t-root/r-1/skills`)
-    expect(summary).toContain('the revision, digests and snapshot path above are what this run is bound to')
-    expect(summary).toContain('read with the `skill` tool')
+    expect(summary).toContain('the contract context loads the full Skill instructions from this frozen snapshot before task execution')
   })
 
   test('names a capability that carries no provider skill instead of leaving it out', () => {
@@ -99,7 +98,7 @@ describe('renderRunBinding', () => {
     expect(summary).not.toContain('bound content snapshot:')
     expect(summary).not.toContain('snapshot path above')
     expect(summary).toContain(
-      'this run bound no content snapshot, so the revision and digests above are what it resolved against',
+      'this run bound no content snapshot; it cannot supply guidance to a model request',
     )
   })
 })

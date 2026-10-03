@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -87,7 +88,7 @@ const never = (): Promise<void> => new Promise(() => {})
 
 /** One child spec: a goal and a criterion a command settles. */
 const children = (objective: string): DecomposeSpec['children'] => [{
-  objective,
+  objective, requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
 }]
 
@@ -106,7 +107,7 @@ async function writeChampion(boot: Boot): Promise<string> {
     objective: 'champion work',
     depth: 0,
     acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -600,10 +601,10 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
 /** Mount the runtime the way the deployment's loader does, so `[Service.init]` wires the gate. */
 async function mountRuntime(ctx: Context, options: BootOptions): Promise<TaskRuntime> {
   await ctx.plugin(TaskRuntime, {
-    capabilities: { ...(options.capabilities ?? {}) },
+    capabilities: { ...TASK_GUIDANCE, ...({ ...(options.capabilities ?? {}) }) },
     ...(options.rootBudget === undefined ? {} : { rootBudget: { ...options.rootBudget } }),
     runBindingRoot: join(process.env.DSH_HOME ?? '.', 'run-bindings'),
-  } as Config)
+  })
   return ctx.get('taskRuntime') as TaskRuntime
 }
 
@@ -1105,7 +1106,7 @@ describe('A3 recovery from the real session log', () => {
       objective: 'the old batch child',
       depth: 1,
       acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'leaf',
       status: 'created',
       runIds: [],
@@ -1180,7 +1181,7 @@ describe('A3 recovery from the real session log', () => {
       objective: 'an old root record',
       depth: 0,
       acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'composite', requiredEvidence: [], mandatory: true }],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'decomposable',
       status: 'created',
       runIds: [],
@@ -1204,7 +1205,7 @@ describe('A3 recovery from the real session log', () => {
       objective: 'an old child record',
       depth: 1,
       acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'leaf',
       status: 'created',
       runIds: [],

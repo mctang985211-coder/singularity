@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
@@ -167,7 +168,7 @@ async function harness(): Promise<Harness> {
   // has to be readied explicitly, and `ready()` is what the built-ins register
   // through — including the gate the plugin judges below are held to.
   await verifier.ready()
-  const runtime = new TaskRuntime(ctx)
+  const runtime = new TaskRuntime(ctx, { capabilities: { ...TASK_GUIDANCE } } as never)
   return {
     task,
     runtime,
@@ -263,7 +264,7 @@ function pinnedCriterion(criterionId: string, verifierRef: string): CriterionSpe
  * root contract stated below rather than defaulted.
  */
 function rootContract(objective: string): RootContractSpec {
-  return {
+  return { requiredCapabilities: ['execute-task'],
     objective,
     acceptanceCriteria: [
       // The goal's own independent check (A0 §1.2's structural rule needs one) …
@@ -286,7 +287,7 @@ async function decomposeToChild(h: Harness, criteria: readonly CriterionSpec[]):
   const root = await createRoot(h)
   const { batchId } = await h.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT_SESSION, {
     reason: 'split the work',
-    children: [{ objective: 'produce the product the acceptance check reads', acceptanceCriteria: [...criteria] }],
+    children: [{ requiredCapabilities: ['execute-task'], objective: 'produce the product the acceptance check reads', acceptanceCriteria: [...criteria] }],
   })
   await h.runtime.awaitBatch(STORE, batchId)
   // The batch end handed the root back its own execution and judged nothing
@@ -481,7 +482,7 @@ describe('V2-4: a protected acceptance input is fixed at admission and re-read b
 
     await expect(h.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [{ objective: 'the child whose acceptance input is missing', acceptanceCriteria: [productCriterion()] }],
+      children: [{ requiredCapabilities: ['execute-task'], objective: 'the child whose acceptance input is missing', acceptanceCriteria: [productCriterion()] }],
     } as DecomposeSpec)).rejects.toThrow(
       /contract rejected decomposition of ".+":\n- child 0 criterion "product-check" protectedInputs path "acceptance\.sh" cannot be read/,
     )
@@ -514,7 +515,7 @@ describe('V2-1/V2-2: the executable selftest gate at the real registry', () => {
     const eventsBefore = taskEvents(h).length
     await expect(h.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT_SESSION, {
       reason: 'split the work',
-      children: [{
+      children: [{ requiredCapabilities: ['execute-task'],
         objective: 'the child whose judge was refused',
         acceptanceCriteria: [pinnedCriterion('product-check', 'always-pass')],
       }],

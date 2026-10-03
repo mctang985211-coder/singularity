@@ -12,6 +12,7 @@ import {
   byString,
   RECOVERY_NOTE,
   recoveryMarker,
+  readableTaskIds,
   resolveProjectionTarget,
   STATUS_LIMIT_DEFAULT,
   STATUS_LIMIT_MAX,
@@ -73,12 +74,14 @@ export async function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: St
         'scope for it; ask for scope:"graph" to read the whole domain.',
     )
   }
-  const entries =
+  const allowed = readableTaskIds(loaded)
+  const entries = (
     scope === 'graph'
       ? [...snapshot.tasks]
           .sort((left, right) => byString(left.taskId, right.taskId))
           .map(task => ({ task, roles: [] as string[] }))
       : relatedEntries(snapshot, self as TaskInstance)
+  ).filter(entry => allowed === undefined || allowed.has(entry.task.taskId))
   const page = entries.slice(offset, offset + limit)
   const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES)
   const marker = recoveryMarker(resolution.recovery)
@@ -89,13 +92,14 @@ export async function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: St
       (clamped
         ? ` (requested offset ${requestedOffset}, limit ${requestedLimit}: both are clamped into their ranges)`
         : ''),
+    ...(allowed === undefined ? [] : ['read boundary: own branch, ancestor context and dependency neighbours']),
     `entries in scope: ${entries.length}`,
     ...(marker === undefined ? [] : [marker, RECOVERY_NOTE]),
   ]
   if (budget.addAll(header) > 0)
     return tooLarge('the status header', 'Ask for a smaller page (a lower `limit`) or the `related` scope.')
 
-  const obligations = await obligationLines(deps.envBuilder, resolution.graph.envId, snapshot)
+  const obligations = allowed === undefined ? await obligationLines(deps.envBuilder, resolution.graph.envId, snapshot) : []
   const obligationsReserve = obligations.reduce((total, line) => total + utf8Bytes(line) + 1, 0)
   const shown = budgetList(budget, {
     units: page,

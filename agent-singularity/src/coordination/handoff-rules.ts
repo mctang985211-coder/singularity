@@ -18,6 +18,7 @@ export const SUPERVISOR_BASELINE: readonly string[] = [
   'task_status',
   'context_read',
   'capability_list',
+  'task_template_list',
   'evolution_propose',
   'evolution_candidate',
   'evolution_prepare',

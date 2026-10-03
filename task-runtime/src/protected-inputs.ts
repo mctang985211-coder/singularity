@@ -129,7 +129,7 @@ export async function fixSpecProtectedInputs(
     const touched = outcome.criteria.some((criterion, position) => criterion !== child.acceptanceCriteria[position])
     children.push(touched ? { ...child, acceptanceCriteria: outcome.criteria } : child)
   }
-  const touched = children.some((child, index) => child !== spec.children[index])
+  const touched = children.some((child, index) => child !== spec.children![index])
   return { spec: touched ? { ...spec, children } : spec, reasons }
 }
 

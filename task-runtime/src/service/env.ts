@@ -331,6 +331,7 @@ export async function observeSession(self: TaskRuntime, sessionId: string): Prom
   const humanCallIds: string[] = []
   const approvalCallIds = new Set<string>()
   const skillCalls: string[] = []
+  const requestedSkills = new Map<string, string>()
   let failures = 0
   let approvals = 0
   let compactions = 0
@@ -342,10 +343,14 @@ export async function observeSession(self: TaskRuntime, sessionId: string): Prom
       if (HUMAN_TOOLS.has(name)) humanCallIds.push(String(event.data.callId))
       if (name === 'skill') {
         const skill = skillNameFrom(event.data.arguments)
-        if (skill !== undefined) skillCalls.push(skill)
+        if (skill !== undefined) requestedSkills.set(String(event.data.callId), skill)
       }
     } else if (event.type === 'tool/result') {
       if (toolResultFailed(event.data)) failures += 1
+      else if (event.data.message !== undefined) {
+        const skill = requestedSkills.get(String(event.data.message.source.callId))
+        if (skill !== undefined) skillCalls.push(skill)
+      }
     } else if (event.type === 'approval/asked') {
       approvals += 1
       if (typeof event.data.callId === 'string') approvalCallIds.add(event.data.callId)

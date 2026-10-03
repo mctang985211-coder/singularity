@@ -56,7 +56,7 @@ afterEach(async () => {
 
 /** One child spec: a goal and a criterion a command can settle. */
 const children = (objective: string): DecomposeSpec['children'] => [{
-  objective,
+  objective, requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
 }]
 
@@ -93,7 +93,7 @@ function childSession(h: ScriptedLoop, index = 0): string {
  * something other than the composite conjunction.
  */
 const ROOT_CONTRACT: RootContractSpec = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
 
@@ -170,13 +170,14 @@ describe('the coordination protocol on the real loop (A3)', () => {
     // turns would make this assertion depend on it.
     const endMessageId = `m-batchend-${batchId}`
     await vi.waitFor(() => expect(h.eventsOf(ROOT).some(event => event.type === 'user/message' && event.data.id === endMessageId)).toBe(true))
-    const notice = h.requestsOf(ROOT).find(request => request.texts.join('\n').includes(`[task-batch-end ${batchId}]`))!
+    await vi.waitFor(() => expect(h.requestsOf(ROOT).some(request => request.options.messages.some(message => message.id === endMessageId))).toBe(true))
+    const notice = h.requestsOf(ROOT).find(request => request.options.messages.some(message => message.id === endMessageId))!
     expect(notice.texts.join('\n')).toContain('nothing was submitted on your behalf')
     expect(notice.texts.join('\n')).toContain('1 verified')
     // The wake is a relayed message in the runtime's own name, not a person's.
-    const last = notice.options.messages[notice.options.messages.length - 1]!
-    expect(last.id).toBe(endMessageId)
-    expect(last.source).toMatchObject({ kind: 'agent-message', form: 'relay', senderSessionId: String(ROOT) })
+    const delivered = notice.options.messages.find(message => message.id === endMessageId)!
+    expect(delivered).toBeDefined()
+    expect(delivered.source).toMatchObject({ kind: 'agent-message', form: 'relay', senderSessionId: String(ROOT) })
 
     // …and only the root's own submission starts its acceptance (K1 §2).
     const settled = await h.runtime.submitResult(ROOT, { summary: 'the root hands in the result its batch produced' })
@@ -293,6 +294,7 @@ describe('the coordination protocol on the real loop (A3)', () => {
     const allowed = h.calls.find(call => call.name === 'read' && call.sessionId === child)!
     expect(allowed.result?.isError).toBe(false)
     expect(allowed.result?.text).toContain('read: fixture answer')
+    await vi.waitFor(() => expect(h.calls.find(call => call.name === 'task_read' && call.sessionId === child)?.result).toBeDefined())
     const workerRead = h.calls.find(call => call.name === 'task_read' && call.sessionId === child)!
     expect(workerRead.result?.isError).toBe(false)
     // A denied call is not an in-flight write: nothing is left to drain for that
@@ -430,7 +432,7 @@ describe('the coordination protocol on the real loop (A3)', () => {
             args: {
               reason: 'split the work',
               children: [{
-                objective: 'slow child',
+                objective: 'slow child', requiredCapabilities: ['execute-task'],
                 acceptanceCriteria: [{ description: 'the slow child works', command: 'sleep 1' }],
               }],
             },

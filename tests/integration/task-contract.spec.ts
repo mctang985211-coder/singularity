@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -194,7 +195,7 @@ async function generation(
   // Cordis readies the service when it loads the plugin; a hand-built registry
   // has to be readied explicitly, or `verifierIds()` reports no vocabulary at all.
   await verifier.ready()
-  const runtime = new TaskRuntime(ctx, options.config as Config | undefined)
+  const runtime = new TaskRuntime(ctx, { ...(options.config), capabilities: { ...TASK_GUIDANCE, ...(options.config)?.capabilities } } as Config | undefined)
   if (options.mountAgent === true) {
     // The read core and the prompt assembly, mounted where the deployment's bundle
     // mounts them: the plugin's tool adapters read through this service (A2).
@@ -250,7 +251,7 @@ function verifierIdsFor(snapshot: TaskSnapshot, taskId: string): string[] {
  */
 function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [
       { criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' },
       { criterionId: 'root-children-verified', description: 'all mandatory children verified', mode: 'composite', mandatory: true },
@@ -355,7 +356,7 @@ describe('T1-A: a task is created without any template', () => {
     const feedback = (await h.tools.get('task_decompose')!.execute({
       reason: 'delegate through the tool',
       children: [{
-        objective: toolObjective,
+        objective: toolObjective, requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [{ criterionId: 'tool-1', description: 'the tool child holds', command: 'true' }],
       }],
     }, exec(viaTool.session))) as string
@@ -372,7 +373,7 @@ describe('T1-A: a task is created without any template', () => {
     const batch = await h.runtime.decomposeAndRun(viaRuntime.storeId, viaRuntime.taskId, viaRuntime.runId, viaRuntime.session, {
       reason: 'delegate through the runtime',
       children: [{
-        objective: runtimeObjective,
+        objective: runtimeObjective, requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [{ criterionId: 'runtime-1', description: 'the runtime child holds', command: 'true' }],
       }],
     })
@@ -404,7 +405,7 @@ interface RejectionCase {
 }
 
 const validChild = () => ({
-  objective: 'a child a verifier can judge',
+  objective: 'a child a verifier can judge', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'valid-1', description: 'the child holds', command: 'true' }],
 })
 
@@ -416,7 +417,7 @@ const REJECTION_CASES: RejectionCase[] = [
   },
   {
     name: 'an empty criteria list',
-    spec: () => ({ reason: 'split the work', children: [{ objective: 'a child nothing is required of', acceptanceCriteria: [] }] }),
+    spec: () => ({ reason: 'split the work', children: [{ objective: 'a child nothing is required of', requiredCapabilities: ['execute-task'], acceptanceCriteria: [] }] }),
     defect: 'requires at least one acceptance criterion',
   },
   {
@@ -424,7 +425,7 @@ const REJECTION_CASES: RejectionCase[] = [
     spec: () => ({
       reason: 'split the work',
       children: [{
-        objective: 'a child whose every criterion is optional',
+        objective: 'a child whose every criterion is optional', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [{ criterionId: 'optional-1', description: 'a nice-to-have', command: 'true', mandatory: false }],
       }],
     }),
@@ -435,7 +436,7 @@ const REJECTION_CASES: RejectionCase[] = [
     spec: () => ({
       reason: 'split the work',
       children: [{
-        objective: 'a child with two criteria sharing one declared id',
+        objective: 'a child with two criteria sharing one declared id', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [
           { criterionId: 'dup-1', description: 'the first claim', command: 'true' },
           { criterionId: 'dup-1', description: 'the second claim', command: 'true' },
@@ -449,7 +450,7 @@ const REJECTION_CASES: RejectionCase[] = [
     spec: () => ({
       reason: 'split the work',
       children: [{
-        objective: 'a child judged by no verifier',
+        objective: 'a child judged by no verifier', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [{ criterionId: 'bad-mode', description: 'judged by nothing', mode: 'banana' }],
       }],
     }),
@@ -517,13 +518,13 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
       reason: 'split the work under declared conditions',
       children: [
         {
-          objective: 'the first contracted child',
+          objective: 'the first contracted child', requiredCapabilities: ['execute-task'],
           acceptanceCriteria: [{ criterionId: 'first-1', description: 'the first claim holds', command: 'true' }],
           assumptions: ['assumption A', 'assumption B'],
           constraints: ['constraint X'],
         },
         {
-          objective: 'the second contracted child',
+          objective: 'the second contracted child', requiredCapabilities: ['execute-task'],
           dependsOn: [0],
           acceptanceCriteria: [{ criterionId: 'second-1', description: 'the second claim holds', command: 'true' }],
           assumptions: ['assumption C'],
@@ -540,6 +541,7 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
 
     expect(first.contract).toEqual({
       contractVersion: 1,
+      templateScope: [],
       objective: 'the first contracted child',
       acceptanceCriteria: [{
         criterionId: 'first-1',
@@ -551,10 +553,11 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
       }],
       assumptions: ['assumption A', 'assumption B'],
       constraints: ['constraint X'],
-      requiredCapabilities: [],
+      requiredCapabilities: ['execute-task'],
     })
     expect(second.contract).toEqual({
       contractVersion: 1,
+      templateScope: [],
       objective: 'the second contracted child',
       acceptanceCriteria: [{
         criterionId: 'second-1',
@@ -566,7 +569,7 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
       }],
       assumptions: ['assumption C'],
       constraints: ['constraint Y'],
-      requiredCapabilities: [],
+      requiredCapabilities: ['execute-task'],
     })
     // The projections the store validates against the contract agree with it.
     expect(first.objective).toBe(first.contract!.objective)
@@ -598,7 +601,7 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
     const spec = {
       reason: 'split the work',
       children: [{
-        objective: 'the child whose contract is read back twice',
+        objective: 'the child whose contract is read back twice', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [{ criterionId: 'readback-1', description: 'the claim holds', command: 'true' }],
         assumptions: ['declared assumption'],
         constraints: ['declared constraint'],
@@ -610,6 +613,7 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
     const before = taskWithObjective(await h.task.snapshotIn(root.storeId), 'the child whose contract is read back twice').contract!
     expect(before).toEqual({
       contractVersion: 1,
+      templateScope: [],
       objective: 'the child whose contract is read back twice',
       acceptanceCriteria: [{
         criterionId: 'readback-1',
@@ -621,7 +625,7 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
       }],
       assumptions: ['declared assumption'],
       constraints: ['declared constraint'],
-      requiredCapabilities: [],
+      requiredCapabilities: ['execute-task'],
     })
 
     // The caller still holds its own object after the call: mutating it — arrays
@@ -686,7 +690,7 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
     const batch = await h.runtime.decomposeAndRun(STORE, legacyTaskId, legacyRunId, ROOT_SESSION, {
       reason: 'the legacy parent splits',
       children: [{
-        objective: 'the child of a task that carries no contract',
+        objective: 'the child of a task that carries no contract', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [{ criterionId: 'legacy-child-1', description: 'the child holds', command: 'true' }],
       }],
     })
@@ -729,11 +733,11 @@ describe('T1-E: a declared field cannot widen the admission context or touch the
       reason: 'split under the narrowed limits',
       children: [
         {
-          objective: objectives[0]!,
+          objective: objectives[0]!, requiredCapabilities: ['execute-task'],
           acceptanceCriteria: [{ criterionId: 'narrowed-1', description: 'the first child holds', command: 'true' }],
         },
         {
-          objective: objectives[1]!,
+          objective: objectives[1]!, requiredCapabilities: ['execute-task'],
           acceptanceCriteria: [{ criterionId: 'narrowed-2', description: 'the second child holds', command: 'true' }],
         },
       ],

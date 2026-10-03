@@ -46,7 +46,7 @@ afterEach(async () => {
 })
 
 const children = (objective: string): DecomposeSpec['children'] => [{
-  objective,
+  objective, requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
 }]
 
@@ -81,7 +81,7 @@ async function writeChampion(h: RunStack, storeId: string): Promise<{ taskId: st
     objective: 'champion work',
     depth: 0,
     acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -92,7 +92,7 @@ async function writeChampion(h: RunStack, storeId: string): Promise<{ taskId: st
     runId,
     taskId,
     sessionId: 's-champion',
-    capabilitySnapshot: [],
+    capabilitySnapshot: ['execute-task'],
     artifacts: [],
     verifierResults: [],
     status: 'running',
@@ -123,7 +123,7 @@ async function writeChampion(h: RunStack, storeId: string): Promise<{ taskId: st
  */
 function rootContract(objective: string): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }
 }
@@ -329,7 +329,7 @@ describe('workspace ownership across entries (A3)', () => {
       objective: 'the second tree',
       depth: 0,
       acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'composite', requiredEvidence: [], mandatory: true }],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'decomposable',
       status: 'created',
       runIds: [],
@@ -340,7 +340,7 @@ describe('workspace ownership across entries (A3)', () => {
       runId: secondRunId,
       taskId: secondTaskId,
       sessionId: ROOT2,
-      capabilitySnapshot: [],
+      capabilitySnapshot: ['execute-task'],
       artifacts: [],
       verifierResults: [],
       status: 'running',

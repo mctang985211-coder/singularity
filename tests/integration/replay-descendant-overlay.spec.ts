@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 /** Replay descendants consume the side's candidate through real admission, tool loading and MCP dispatch. */
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -26,7 +27,7 @@ async function fixture(kind: 'mcp' | 'skill') {
     const { task } = await h.runtime.runForSession(sessionId)
     if (task.parentTaskId === undefined) {
       const result = await h.call(agent, 'task_decompose', { reason: 'delegate the provider result', children: [{
-        objective: 'provider child', requiredCapabilities: [ROW],
+        objective: 'provider child', requiredCapabilities: ['execute-task', ROW],
         acceptanceCriteria: [{ criterionId: 'child-result', description: 'provider writes the candidate result', command }],
       }] })
       // A baseline with no new row is a real admission refusal, then its unchanged
@@ -48,7 +49,7 @@ async function fixture(kind: 'mcp' | 'skill') {
     ? { capabilityOverrides: { [ROW]: { mcpServers: ['echo'] } }, mcpServers: { echo: SERVER } }
     : { extraSkillRoots: [skillRoot] }
   await writeFile(join(h.checkout, ANSWER), 'candidate')
-  const source = await h.root(ROOT, { objective: 'delegate and deliver the answer',
+  const source = await h.root(ROOT, { objective: 'delegate and deliver the answer', requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'parent-result', description: 'the independently checked answer', command }] })
   await h.runtime.submitResult(ROOT, { summary: 'historical result' })
   expect((await h.task.runIn(source.storeId, source.runId)).status).toBe('verified')
@@ -82,7 +83,7 @@ describe('candidate replay configuration in descendants', () => {
       expect(await readFile(join(child.providerBinding!.snapshotRoot!, SKILL, 'SKILL.md'), 'utf8')).toContain('candidate')
       expect(await readFile(join(f.h.home, 'skills', SKILL, 'SKILL.md'), 'utf8')).toContain('baseline')
     }
-    expect(f.h.runtime.listCapabilities()).toEqual(f.rows)
+    expect(f.h.runtime.listCapabilities()).toEqual({ ...TASK_GUIDANCE, ...f.rows })
     expect(f.h.runtime.listMcpServers()).toEqual({})
     // The existing experiment re-entry creates a new side under the frozen
     // overlay; no old session binding may be required to reconstruct it.
@@ -91,7 +92,7 @@ describe('candidate replay configuration in descendants', () => {
     expect(reopened.status).toBe('verified')
     const finalBaseline = await replay('final-baseline')
     expect(finalBaseline.status).toBe('failed')
-    expect(f.h.runtime.listCapabilities()).toEqual(f.rows)
+    expect(f.h.runtime.listCapabilities()).toEqual({ ...TASK_GUIDANCE, ...f.rows })
     expect(f.h.runtime.listMcpServers()).toEqual({})
   }, 20_000)
 })

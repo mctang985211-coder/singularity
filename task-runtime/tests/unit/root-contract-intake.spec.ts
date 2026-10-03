@@ -292,11 +292,11 @@ describe('TaskRuntime root contract intake (A0 §1–§2)', () => {
     // one-root gate is a fact about what it *holds*, so proposing beside a waiting
     // proposal is allowed and only activation settles the competition.
     const winner = await h.runtime.submitRootContractProposal(STORE, ROOT_SESSION, {
-      objective: 'a different goal entirely',
+      objective: 'a different goal entirely', requiredCapabilities: ['execute-task'],
       acceptanceCriteria: [{ criterionId: 'other', description: 'the other goal holds', command: 'true' }],
     })
     const loser = await h.runtime.submitRootContractProposal(STORE, ROOT_SESSION, {
-      objective: 'a third goal',
+      objective: 'a third goal', requiredCapabilities: ['execute-task'],
       acceptanceCriteria: [{ criterionId: 'third', description: 'the third goal holds', command: 'true' }],
     })
 
@@ -498,7 +498,7 @@ describe('TaskRuntime root contract intake (A0 §1–§2)', () => {
     // it broke.
     await expect(
       h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
-        objective: 'all children verified',
+        objective: 'all children verified', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [
           {
             criterionId: 'root-children-verified',
@@ -514,13 +514,13 @@ describe('TaskRuntime root contract intake (A0 §1–§2)', () => {
     // proposal, no task, no obligation, no review request.
     await expect(
       h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
-        objective: '   ',
+        objective: '   ', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [{ description: 'it holds', command: 'true' }],
       }),
     ).rejects.toThrow(/objective must be a non-empty string/)
     await expect(
       h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
-        objective: 'an unregistered judge',
+        objective: 'an unregistered judge', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [
           {
             criterionId: 'x',
@@ -535,7 +535,7 @@ describe('TaskRuntime root contract intake (A0 §1–§2)', () => {
     ).rejects.toThrow(/no-such-verifier/)
     await expect(
       h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
-        objective: 'a field nobody reads',
+        objective: 'a field nobody reads', requiredCapabilities: ['execute-task'],
         acceptanceCriteria: [{ description: 'it holds', command: 'true' }],
         budget: 1000,
       } as unknown as RootContractSpec),

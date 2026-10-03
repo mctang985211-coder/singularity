@@ -24,7 +24,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { questionIdOf, rootTaskStoreId, sha256Hex } from '../../task/src/index.ts'
-import type { RootContractSpec } from '../../task-runtime/src/index.ts'
+import { bindRunProviders, resolveCapabilities, type RootContractSpec } from '../../task-runtime/src/index.ts'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
 
 /** Every stack a case booted, so a failing case cannot leak a workspace. */
@@ -46,7 +46,7 @@ afterEach(async () => {
 })
 
 /** The root contract every case runs under (A0 §1.2). */
-const ROOT_CONTRACT: RootContractSpec = {
+const ROOT_CONTRACT: RootContractSpec = { requiredCapabilities: ['execute-task'],
   objective: 'ship the release',
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
@@ -78,18 +78,26 @@ async function seedWorker(
     objective: spec.objective,
     depth: spec.depth,
     acceptanceCriteria: criteria,
-    requestedCapabilities: [],
+    requestedCapabilities: ['execute-task'],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
     childTaskIds: [],
   }, spec.sessionId)
   await stack.task.admitTaskIn(storeId, spec.taskId, spec.sessionId, { decompositionStatus: 'leaf' })
+  const providerBinding = await bindRunProviders({
+    storeId,
+    runId: spec.runId,
+    manifest: resolveCapabilities(['execute-task'], stack.runtime.listCapabilities()),
+    providers: await stack.runtime.capabilityProviderReport(spec.sessionId, ['execute-task']),
+    root: stack.runtime.config.runBindingRoot,
+  })
   await stack.task.startRunIn(storeId, {
     runId: spec.runId,
     taskId: spec.taskId,
     sessionId: spec.sessionId,
-    capabilitySnapshot: [],
+    capabilitySnapshot: ['task-execution'],
+    providerBinding,
     artifacts: [],
     verifierResults: [],
     status: 'running',
@@ -184,7 +192,7 @@ describe('the questions a parent owes an answer to reach its request (A4 §F.1)'
     // Nothing to say before anything is asked: a root whose graph holds no
     // contract yet assembles no question plane at all — no header, no empty
     // context, nothing for the loop to deduplicate.
-    expect(await contextNames(stack, 's-root')).toEqual([])
+    expect(await contextNames(stack, 's-root')).not.toContain('singularity:questions')
 
     const tree = await questionTree(stack)
 
@@ -209,9 +217,9 @@ describe('the questions a parent owes an answer to reach its request (A4 §F.1)'
     expect(childSnapshot).toContain('gate phase:')
     expect(childSnapshot).toContain('your run: run r-child [running] — phase waiting_answer')
     expect(rootSnapshot).not.toContain('waiting_answer')
-    expect(await contextNames(stack, 's-child')).toEqual(['singularity:state', 'singularity:questions'])
+    expect(await contextNames(stack, 's-child')).toEqual(['singularity:task-templates', 'singularity:state', 'singularity:questions'])
     // The grandchild has no question of its own and nothing addressed to it.
-    expect(await contextNames(stack, 's-gchild')).toEqual(['singularity:state'])
+    expect(await contextNames(stack, 's-gchild')).toEqual(['singularity:task-templates', 'singularity:state'])
   })
 })
 
@@ -260,7 +268,7 @@ describe('an unread answer reaches the asking request and leaves only on proof (
     expect(await stack.contextSnapshot('s-gchild')).toContain('the answer to question ' + tree.grandchildQuestionId)
     await stack.appendMessage('s-gchild', 'm-answer-gchild-1', 'the deck is aluminium')
     expect(await stack.contextSnapshot('s-gchild')).not.toContain(tree.grandchildQuestionId)
-    expect(await contextNames(stack, 's-gchild')).toEqual(['singularity:state'])
+    expect(await contextNames(stack, 's-gchild')).toEqual(['singularity:task-templates', 'singularity:state'])
   })
 })
 

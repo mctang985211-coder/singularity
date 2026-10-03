@@ -14,6 +14,7 @@ export function defineContextReadTool(ctx: Context) {
     name: 'context_read',
     description:
       'Read one record of the caller\'s own graph domain by its reference. Kinds and their references: ' +
+      'Workers and delegated reviewers can read their task branch, ancestor context and dependency neighbours; roots and supervisors retain their domain view. ' +
       '`task` (a task id), `run` (a run id), `evidence` (an evidence id), `diagnosis` (a diagnosis id), ' +
       '`review` (`{taskId, runId}` — a review has no id of its own; use runId null for a task that blocked before any run), ' +
       'and `session`, which has two forms. `session` with a session id pages that session\'s log by DSH event seq: `offset` is an ' +

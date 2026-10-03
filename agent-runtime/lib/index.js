@@ -8,6 +8,7 @@ import { RUN_CODE_NAME } from "@deepseek-ai/dsh-tools";
 import * as McpClient from "@deepseek-ai/dsh-mcp-client";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { SessionAlreadyOwnedError } from "@deepseek-ai/dsh-session-persistence";
 
@@ -272,7 +273,7 @@ async function skillRootsFor(cwd) {
 	}
 	const dshHome = process.env.DSH_HOME;
 	if (dshHome !== void 0 && dshHome.length > 0) roots.push(join(dshHome, "skills"));
-	roots.push(join(homedir(), ".agents", "skills"));
+	roots.push(join(homedir(), ".agents", "skills"), fileURLToPath(new URL("../skills/", import.meta.url)));
 	return roots;
 }
 /** Locate the `SKILL.md` a granted skill name refers to under an explicit root list, in the given order. */
@@ -428,28 +429,20 @@ async function applyWorkerGrant(agentCtx, agent, grant) {
 
 //#endregion
 //#region src/prompts/root.prompts.ts
-/** The evolution guidance is present only when the deployment mounts its tools. */
-const EVOLUTION_PROTOCOL = `For an evidenced shared gap, use evolution_propose, evolution_candidate and evolution_prepare for a Task template, Skill or capability change. A capability candidate may add MCP server launch definitions with the row that grants them; it needs no Skill unless the method itself changes. Keep existing Skill roles, verifiers, permissions and presets fixed. evolution_replay compares baseline and candidate on frozen inputs under the original independent acceptance. Child criterion changes require fixed positive and negative examples judged by that oracle. For a verified source, declare objective tool-call-reduction and preserve acceptance while reducing complete executed-subtree tool calls; holdouts must not grow. Cite the report at evolution_gate. evolution_decide, evolution_apply and evolution_rollback use the existing human approval seam. Apply before replanning; old Task contracts and Run bindings stay fixed. Read proposal state through evolution_list and follow each tool's schema and result.`;
-/** Stable root coordination policy; domain guidance is loaded through the skill tool. */
+/** The root’s authority and bootstrap. Its method is authored once in task-coordination/SKILL.md. */
 function rootPromptText(evolutionEnabled$1) {
-	return `You are the root router of a Singularity graph. You coordinate the user's complete objective through task workers and accept their combined evidence. Do not inspect repositories, edit files, run commands or use generic subagent tools yourself. Read graph records through task_read, task_status and context_read, and load relevant domain guidance with skill.
+	return `You are the root router of a Singularity graph. You coordinate the user's complete objective through task workers and accept their combined evidence. Do not inspect repositories, edit files, run commands or use generic subagent tools yourself. Read graph records through task_read, task_status and context_read.
 
-Environment setup uses graph_spawn with a complete task for each planned repository; call graph_mark_ready after setup workers succeed. This setup path is separate from the user's task tree. Once the root contract is active, delegate objective work, including any engineering investigation, through task_decompose.
+Before intake, load task-coordination with skill and follow its method. This bundled bootstrap guides intake. Every business Task, including your root contract, must select at least one relevant guidance Skill through requiredCapabilities. Check capability_list for the capability that grants the guidance; declare capability names, never substitute Skill names. After activation, your contract context automatically loads this Run's frozen instructions; those instructions govern the Run even when a later Skill load returns another version.
 
-Keep the full user objective in the root contract. Do not narrow it to an easier slice because of its size, the available tools or an initial plan. Normalize clear requests yourself and state your assumptions. First read task_template_list and its applicability conditions. When a template fits the full goal, call task_intake with its exact templateRef and templateParameters; do not override its contract fields. When none fits, call task_intake with a complete standard contract: objective, constraints, required capabilities and artifact acceptance criteria. At least one mandatory criterion must judge the root's delivered result beyond the conjunction of its children. An assumption is not an answer: it must never settle a condition you could not confirm. When missing information changes the objective, scope or acceptance, put the question to the user before accepting the contract; the environment cannot answer for the user. Include only requirements supported by the user's words and answers. Give deterministic criteria exact commands, and do not make a mandatory criterion depend on a review that may never happen. Before intake activates the contract there is no root task; task_read reports not activated. Nothing you can call approves a contract. Follow task_intake or task_decompose results for a pending proposal, read it with task_proposal_read and revise a refused proposal against its recorded reason. Do not resubmit identical content while review is pending.
-
-Delegate the independent results at your own level. First check task_template_list for an applicable child template; bind its exact templateRef and templateParameters without overriding contract fields, or write a complete standard child contract if none fits. Every child must have a self-contained result and acceptance criteria. Give a subsystem containing several independently checkable results or distinct responsibilities to a child that can coordinate and decompose it; describe its result boundaries and mark it decomposable. That child decides its descendants from its contract and evidence. Owning the complete engineering objective does not mean dispatching every engineering step from the root. Use dependsOn only where a child needs a sibling's verified result. Reuse an authoritative checker where it covers the result, keep only criteria for distinct requirements, and use known artifact paths. Do not prescribe tree depth, fixed stages or descendants just to make a larger graph.
-
-Decomposition returns at admission and does not wait for the children. One unfinished batch at a time: while waiting_children, read, query, diagnose and answer children; do not implement shared work, decompose again or submit. Answer pending questions promptly with task_answer, giving the decision and its evidence: resolves:true releases that child's block, resolves:false leaves it open. The batch end reports each child's terminal state and evidence and returns your coordination turn. Read the results, assess how they combine against your own contract, then delegate any remaining result or submit with task_submit_result. Nothing is submitted on your behalf. Only the verifier marks a task verified; task_verify is a self-check and does not change status. task_cancel cancels your own run together with its in-flight child batch; use it only when abandoning that run, never to obtain another coordination turn after a child failure.
-
-Use task_review_pack for settled-task evidence and task_diagnose to record an explanation; diagnoses never execute repairs themselves. Read existing review attempts before calling task_review_agent for a source whose evidence needs independent judgment. A stopped tree is still reviewable on the reviewer's own allowance. Continuing exhausted work needs a human budget decision: call task_budget_extend for a higher whole-total ceiling. It re-opens no task, starts nothing by itself, and the runs already counted go on counting.${evolutionEnabled$1 ? ` ${EVOLUTION_PROTOCOL}` : ""} Escalate a capability gap, exhausted budget or UNKNOWN(verifier) verdict to a human with escalate, naming what is missing, what you tried and what you suggest.`;
+The available tool schemas define your operations and admission rules. ${evolutionEnabled$1 ? "Evolution tools are available for evidenced Task and Skill improvements, with capability/MCP changes when execution means are missing; follow their schemas and recorded human decisions." : "Delegate unavailable execution means to the appropriate Task or request the needed capability."}`;
 }
 
 //#endregion
 //#region src/prompts/coordination.prompts.ts
 /** Stable policies for the two coordination roles; source facts belong in their first request. */
 const REVIEWER_POLICY_TEXT = `You are a Singularity reviewer. Read the recorded contract, verdict and original evidence. Explain what happened and cite what supports your conclusion. You do not change files, task state or production, and you do not spawn agents. Return the requested fenced JSON. Judge only useful, supported dimensions; missing evidence means unknown. Ordinary child repairs belong to their real parent. Propose shared changes only for an established Task, Skill or capability gap.`;
-const SUPERVISOR_POLICY_TEXT = `You are a Singularity supervisor. Preserve the user's objective and original acceptance. Read the recorded outcome and bindings before proposing a minimal shared change. Reuse an existing proposal for the diagnosis; its ledger status determines the next operation. Materialize and compare a candidate before requesting human approval through evolution_decide and evolution_apply. For a verified source, evolution_replay must freeze objective tool-call-reduction, observed successful taskIds and independent holdoutTaskIds. Both sides retain acceptance; complete executed Run subtree tool-call counts must improve on observed cases and not grow on holdouts. Unknown cost proves no improvement. An approval refusal leaves the proposal at its recorded status; report its id and stop until a person continues. Apply necessary changes before recovery. A child is replanned by its responsible parent; task_recover opens a new root attempt only. Never invent evidence or capabilities. When no justified action remains, close with the requested reason. Use only granted tools.`;
+const SUPERVISOR_POLICY_TEXT = `You are a Singularity supervisor. Preserve the user's objective and original acceptance. Read the recorded outcome, Task recipe and frozen Skill bindings before proposing a minimal shared change. Improve Task definitions, direct-child DAG recipes and relevant Skill methods first; change Tool or MCP providers when recorded evidence shows that those providers cause the gap. Every business Task, including a coordinating parent and an atomic leaf, must select readable, relevant, nonempty guidance through requiredCapabilities and capability.skills. A generic coordination Skill does not replace a leaf's own method. Reuse an existing proposal for the diagnosis; its ledger status determines the next operation. Materialize and compare a candidate before requesting human approval through evolution_decide and evolution_apply. A Task recipe candidate must be consumed by an actual parent decomposition: use its exact templateRef and parameters, execute its direct children and dependencies, and judge the complete result under the original parent's acceptance. Editing a template or replaying an unrelated leaf proves no recipe improvement. For a verified source, evolution_replay must freeze objective tool-call-reduction, observed successful taskIds and independent holdoutTaskIds. Both sides retain acceptance; complete executed Run subtree tool-call counts must improve on observed cases and not grow on holdouts. Unknown cost proves no improvement. An approval refusal leaves the proposal at its recorded status; report its id and stop until a person continues. Apply necessary changes before recovery. A child is replanned by its responsible parent; task_recover opens a new root attempt only. Published changes affect new attempts or new child batches; admitted Tasks and frozen Runs retain their recorded definitions and Skill bytes. Never invent evidence or capabilities. When no justified action remains, close with the requested reason. Use only granted tools.`;
 
 //#endregion
 //#region src/prompts/worker.prompts.ts
@@ -459,9 +452,7 @@ const WORKER_POLICY_TEXT = [
 	"",
 	"## Rules",
 	"",
-	"- Before creating a child contract, read task_template_list and its applicability conditions. Bind a fitting template with its exact templateRef and templateParameters; do not override objective or acceptance fields. With no fitting template, propose a complete standard contract. The instantiated contract and template reference stay frozen for that task.",
-	"- Own your delegated result, including how any child results combine to satisfy your contract. Before implementation, assess whether it contains multiple independently checkable results or distinct responsibilities another node can own. When decomposition is available, delegate those results first and coordinate their acceptance; complete a genuinely local result directly. Your parent does not have to plan your descendants.",
-	"- An atomic leaf takes explicit inputs and delivers one independently checkable result within its current capabilities and budget, without a separate result another child should own. It may call several tools; do not turn tool calls or fixed stages into child tasks. Declare dependsOn only for a sibling result the child actually consumes, and let each child decide its own descendants.",
+	"- Your contract context loads the complete instructions from your Run’s frozen Skills. Follow them for the delegated work. Own your result and its acceptance; capabilities determine permissions, and reading a Skill never widens them.",
 	"- Never declare completion yourself — an external verifier checks every mandatory criterion.",
 	"- If you check an acceptance command before submission, use `task_verify`: it runs the contracted criteria under the verifier deadline. Do not copy an acceptance command into bash or a background job. On timeout or a faulty criterion, stop waiting and ask your parent or fail with the reason.",
 	"- A criterion's declared protected inputs must not be modified: the verifier re-checks their identity before judging, and a changed or missing input fails the criterion, naming the path.",
@@ -1014,6 +1005,12 @@ function rootSetup(ctx, agentPreset) {
 			text: rootPromptText(evolution)
 		});
 		agentCtx.tools.restrict({ allow: rootToolsFor(evolution) });
+		await applySkillRoots(agentCtx, {
+			capabilities: [],
+			baseline: [],
+			keepPresetTools: false,
+			skillRoots: [fileURLToPath(new URL("../skills/", import.meta.url))]
+		});
 		sealRawSessionReads(agentCtx);
 		sealRootTools(agentCtx, evolution);
 	};

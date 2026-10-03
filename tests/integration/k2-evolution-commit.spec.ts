@@ -421,7 +421,7 @@ async function walkToDecided(
  */
 function rootContract(objective: string, capabilities: readonly string[] = []): RootContractSpec {
   return {
-    objective,
+    objective, requiredCapabilities: ['execute-task'],
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
     ...(capabilities.length === 0 ? {} : { requiredCapabilities: [...capabilities] }),
   }

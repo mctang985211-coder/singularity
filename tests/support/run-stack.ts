@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 /**
  * One deployment-shaped stack for the S1-C integration specs that need the real
  * agent plane, not only the store: the real `TaskService` store and reducer, the
@@ -34,7 +35,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { cp, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -350,6 +351,8 @@ class RunStackImpl implements RunStack {
     this.primary = this.roots[0]!
     this.ctx = new Context()
     for (const root of this.roots) this.sessionRoot.set(root, root)
+    mkdirSync(join(this.home, 'skills', 'task-execution'), { recursive: true })
+    copyFileSync(new URL('../../agent-runtime/skills/task-execution/SKILL.md', import.meta.url), join(this.home, 'skills', 'task-execution', 'SKILL.md'))
     this.previousHome = process.env.DSH_HOME
     vi.stubEnv('DSH_HOME', this.home)
     vi.stubEnv('HOME', this.home)
@@ -361,12 +364,12 @@ class RunStackImpl implements RunStack {
     this.verifier = new VerifierRegistry(this.ctx, { evidenceRoot: join(this.workspace, 'evidence') })
     this.agentRuntime = new RecordingAgentRuntime(this.ctx, this.sessionRoot, () => this.primary, request => this.recordSpawnRequest(request))
     this.runtime = new TaskRuntime(this.ctx, {
-      capabilities: { ...(this.options.capabilities ?? {}) },
+      capabilities: { ...TASK_GUIDANCE, ...(this.options.capabilities ?? {}) },
       mcpServers: { ...this.options.mcpServers },
       ...(this.options.maxDepth === undefined ? {} : { maxDepth: this.options.maxDepth }),
       ...(this.options.rootBudget === undefined ? {} : { rootBudget: { ...this.options.rootBudget } }),
       runBindingRoot: this.options.runBindingRoot ?? join(this.home, 'singularity', 'run-bindings'),
-    } as Config)
+    })
   }
 
   async start(): Promise<this> {

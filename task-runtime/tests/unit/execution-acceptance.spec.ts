@@ -583,7 +583,7 @@ describe('TaskRuntime criterion verifierRef (KISS §4.1, VRTC plan 1.4)', () => 
                 verifierRef: 'ghost',
               },
             ],
-            requiredCapabilities: [],
+            requiredCapabilities: ['execute-task'],
           },
         },
         ROOT_SESSION,

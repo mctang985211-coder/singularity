@@ -735,8 +735,34 @@ describe('provider pre-check against the explicit MCP registry', () => {
     const admitted = await precheck({ ...request, mcpRegistry: { echo } })
     expect(admitted.capabilities[0]!.skills).toEqual([])
     expect(providerRefusals(admitted)).toEqual([])
+    expect(providerRefusals(admitted, ['external'])).toEqual([
+      expect.stringContaining('provide no readable guidance Skill'),
+    ])
     const refused = await precheck({ ...request, mcpRegistry: {} })
     expect(providerRefusals(refused).join(' ')).toContain('unknown MCP server "echo"')
+  })
+
+  test('requires guidance per Task while tool and MCP capabilities keep independent grants', async () => {
+    await install('ball-align', { sidecar: false })
+    const checked = await precheck({
+      capabilities: ['external', 'local-tools', 'method'],
+      table: { external: { mcpServers: ['echo'] }, 'local-tools': { tools: ['filesystem'] }, method: { skills: ['ball-align'] } },
+      mcpRegistry: { echo },
+    })
+    expect(providerRefusals(checked, [])).toEqual([expect.stringContaining('provide no readable guidance Skill')])
+    expect(providerRefusals(checked, ['local-tools'])).toEqual([expect.stringContaining('provide no readable guidance Skill')])
+    expect(providerRefusals(checked, ['external', 'method'])).toEqual([])
+    expect(providerRefusals(checked, ['local-tools', 'method'])).toEqual([])
+    expect(checked.capabilities.find(row => row.capability === 'method')?.skills[0]).toMatchObject({ valid: true, role: 'guidance' })
+  })
+
+  test.each([
+    { body: '   \n', frontmatter: '', defect: 'no instruction body' },
+    { body: 'Read the contracted inputs before producing evidence.', frontmatter: 'disable-model-invocation: true\n', defect: 'disables model invocation' },
+  ])('refuses unusable instruction content: $defect', async ({ body, frontmatter, defect }) => {
+    const directory = await install('ball-align', { sidecar: false })
+    await writeFile(join(directory, 'SKILL.md'), `---\nname: ball-align\ndescription: align a Ball\n${frontmatter}---\n${body}`)
+    expect(providerRefusals(await precheck())).toEqual([expect.stringContaining(defect)])
   })
 
   test('uses the actual server namespace in execution provider tool coverage', async () => {

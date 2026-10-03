@@ -83,7 +83,7 @@ const ROUNDS = RECOVERY_ROUNDS + IMPROVEMENT_ROUNDS
  * 1/3 → 2/3 → 3/3 as the rounds go on.
  */
 const ROOT_CONTRACT = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [
     { criterionId: 'mark-1', description: 'deliverable 1 is in place', command: 'test -f marker-1' },
     { criterionId: 'mark-2', description: 'deliverable 2 is in place', command: 'test -f marker-2' },
@@ -277,7 +277,7 @@ function script(h: () => ScriptedLoop, cells: Cells): (sessionId: string, index:
           tool: 'task_decompose',
           args: {
             reason: `re-run the goal for attempt ${round}`,
-            children: [{ objective: memberObjective(round), acceptanceCriteria: deliverableCriterion(round) }],
+            children: [{ objective: memberObjective(round), requiredCapabilities: ['execute-task'], acceptanceCriteria: deliverableCriterion(round) }],
           },
         },
         { text: `attempt ${round}: the replacement is running` },
@@ -292,7 +292,7 @@ function script(h: () => ScriptedLoop, cells: Cells): (sessionId: string, index:
           tool: 'task_decompose',
           args: {
             reason: 'split the work',
-            children: [{ objective: memberObjective(1), acceptanceCriteria: deliverableCriterion(1) }],
+            children: [{ objective: memberObjective(1), requiredCapabilities: ['execute-task'], acceptanceCriteria: deliverableCriterion(1) }],
           },
         },
         { text: 'root: the batch is running' },
@@ -550,7 +550,7 @@ describe('A7: the multi-round supervisor-iteration loop', () => {
     })
     installReviewAgentAutoTrigger(h.ctx)
     const root = await h.begin({
-      objective: 'ship the release',
+      objective: 'ship the release', requiredCapabilities: ['execute-task'],
       acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'false' }],
     })
 

@@ -1,3 +1,4 @@
+import { TASK_GUIDANCE } from '../../task-runtime/tests/support/skill-roots.ts'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -261,7 +262,7 @@ async function harness(options: { capabilities?: Readonly<Record<string, Capabil
   // execution provider would be refused for the wrong reason.
   await verifier.ready()
   const runtime = new TaskRuntime(ctx, {
-    capabilities: { ...(options.capabilities ?? TABLE) },
+    capabilities: { ...TASK_GUIDANCE, ...(options.capabilities ?? TABLE) },
     runBindingRoot: join(workspace, 'run-bindings'),
   } as Config)
   const evolution = new EvolutionService(ctx, {
@@ -306,7 +307,7 @@ async function harness(options: { capabilities?: Readonly<Record<string, Capabil
  * rather than defaulted.
  */
 function rootContract(objective: string): RootContractSpec {
-  return {
+  return { requiredCapabilities: ['execute-task'],
     objective,
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
   }

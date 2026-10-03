@@ -52,8 +52,11 @@ export interface DecomposeChildSpec extends TaskContractInput {
 }
 
 export interface DecomposeSpec {
-  children: readonly DecomposeChildSpec[]
-  reason: string
+  templateRef?: TaskContractInput['templateRef']
+  templateParameters?: TaskContractInput['templateParameters']
+  /** Omitted only for a template recipe; normal admission requires the expanded direct children and reason. */
+  children?: readonly DecomposeChildSpec[]
+  reason?: string
   /**
    * The contract language this batch is written in (T1). Omitted is the legacy
    * adapter — the runtime writes its current version, which is what an entry
@@ -440,6 +443,7 @@ export interface ActivateRootContractRequest {
   readonly proposal: TaskProposalRoot
   readonly contract: TaskContract
   readonly manifests: readonly CapabilityManifest[]
+  readonly providers: ProviderPrecheck
 }
 
 /** The batch a runtime start hands to the driver it spawns. */

@@ -66,7 +66,7 @@ afterEach(async () => {
 
 /** One child spec: a goal and a criterion a command settles. */
 const children = (objective: string, extra: Partial<DecomposeChildSpec> = {}): DecomposeSpec['children'] => [{
-  objective,
+  objective, requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
   ...extra,
 }]
@@ -212,7 +212,7 @@ async function handInRoot(h: ScriptedLoop, root: { storeId: string; taskId: stri
  * something other than the composite conjunction.
  */
 const ROOT_CONTRACT: RootContractSpec = {
-  objective: 'ship the release',
+  objective: 'ship the release', requiredCapabilities: ['execute-task'],
   acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
 }
 
@@ -334,7 +334,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
           tool: 'task_decompose',
           args: {
             reason: 'split the work',
-            children: [{ objective: 'nothing is required', acceptanceCriteria: [{ description: 'nothing is required here', command: 'true', mandatory: false }] }],
+            children: [{ objective: 'nothing is required', requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'nothing is required here', command: 'true', mandatory: false }] }],
           },
         },
         { tool: 'task_decompose', args: { ...batch('a batch cannot carry a policy'), generatedTaskReview: 'off' } },
@@ -591,7 +591,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
   it('marks an approved batch stale when its capability resolution moved, and never transfers the approval', async () => {
     const h = await startScriptedLoop({
       generatedTaskReview: 'all',
-      capabilities: { 'align-capability': { tools: ['bash'] } },
+      capabilities: { 'align-capability': { skills: ['task-execution'], tools: ['bash'] } },
       script: () => decomposeThenFinish('align the ball with the granted tools', { requiredCapabilities: ['align-capability'] }),
     })
     const root = await h.begin(ROOT_CONTRACT)
@@ -602,7 +602,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
 
     // The row this batch resolved against changes while the person decides: the
     // resolution the review covered is not the one an admission would run under.
-    await h.runtime.applyCapabilityRow('align-capability', { tools: ['filesystem'] })
+    await h.runtime.applyCapabilityRow('align-capability', { skills: ['task-execution'], tools: ['filesystem'] })
     h.review.answerBatch(0, 'allowed-once')
 
     const stale = await statusOf(h, root.storeId, proposalId, 'stale')
@@ -764,7 +764,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
       objective: 'champion work',
       depth: 0,
       acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
-      requestedCapabilities: [],
+      requestedCapabilities: ['execute-task'],
       decompositionStatus: 'leaf',
       status: 'created',
       runIds: [],

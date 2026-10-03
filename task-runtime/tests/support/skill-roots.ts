@@ -26,6 +26,9 @@ const FIXTURE_SKILLS = fileURLToPath(new URL('../fixtures/skills/', import.meta.
 
 const homes: string[] = []
 
+/** Explicit Task method selected by ordinary execution fixtures. Negative guidance cases omit it. */
+export const TASK_GUIDANCE = { 'execute-task': { skills: ['task-execution'] } }
+
 /**
  * Point `$DSH_HOME` and `$HOME` at a fresh tmp directory holding one guidance
  * skill per name: a fixture copy when one exists, a minimal `SKILL.md`
