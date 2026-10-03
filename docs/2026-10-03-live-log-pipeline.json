@@ -1,0 +1,476 @@
+{
+  "date": "2026-10-03",
+  "test": "tests/integration/live-log-pipeline.spec.ts",
+  "command": "SINGULARITY_LIVE_LOG_PIPELINE=1 pnpm exec vitest run --project integration packages/singularity/tests/integration/live-log-pipeline.spec.ts",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "result": "passed",
+  "method": "A real model decomposes the root contract through production TaskRuntime/TaskTemplate retrieval and recursive direct-child decomposition. Four Task templates are available in the logs catalog: three leaf stage templates (parse-log-events, aggregate-event-stats, render-stats-report) and one coordinating template (log-analytics-pipeline) carrying a decomposition recipe that composes the three leaves with dependsOn edges; no CLI template exists, so the model authors that contract in a free batch child. An independent test-authored checker (checks/verify.mjs) recomputes every expectation from events.log with its own parsing logic and regrades each stage; the cli stage runs node cli.mjs events.log <fresh-tmp-out>/ and validates the regenerated artifacts. read/write/bash are real tool bodies bounded to the checkout; the llm/stream hook forwards each model request to the real gateway. Case 2 runs the same specification against a new 8-line input and against the post-repair library the scripted failure-repair spec (tests/integration/log-pipeline-evolution.spec.ts) grows: the defective aggregate-event-stats v1 and the corrected v2 are both present, and the runtime resolves the current version (v2) into the new run. Root contracts, templates and the checker are test inputs; no decomposition is scripted to the model.",
+  "assertions": {
+    "rootVerified": true,
+    "depthAtLeastTwo": true,
+    "dependencyEdgesPresent": 3,
+    "atLeastTwoTemplateBoundInstances": 4,
+    "atLeastOneModelAuthoredContract": 2,
+    "allInstancesCarryContracts": true,
+    "allRunsBindSkills": true,
+    "thirtyUnrelatedTemplatesAbsentFromAllRequests": true,
+    "protectedOriginalCheckerPassed": true,
+    "statsExactlyRecomputed": true,
+    "reportRequiredLinesPresent": true,
+    "repairedTemplateVersionConsumed": 2,
+    "newInputRetestPassed": true
+  },
+  "cases": [
+    {
+      "name": "case-1",
+      "input": {
+        "logFile": "events.log",
+        "lines": 12,
+        "perLevel": {
+          "INFO": 6,
+          "WARN": 3,
+          "ERROR": 3
+        },
+        "errorRate": 0.25
+      },
+      "requestCount": 52,
+      "tasks": [
+        {
+          "taskId": "t-b269d1a2-dc4b-4f1f-8c65-c2bf3d0c41b1",
+          "depth": 0,
+          "objective": "Deliver a log-analytics CLI: cli.mjs must run the whole pipeline end to end for the log file and output directory it is given, and the pipeline itself must produce out/events.json (parse.mjs), out/stats.json (aggregate.mjs) and out/report.md (report.mjs) from events.log. Own the analytics pipeline as an owned responsibility; its worker decides the independently checkable stage children. Author the CLI contract yourself when no template applies; a child that reads or writes files must require the local-files capability. Use available Task templates where applicable.",
+          "status": "verified"
+        },
+        {
+          "taskId": "t-7b5afd84-e093-4fac-befd-7694df2f01a5",
+          "parentTaskId": "t-b269d1a2-dc4b-4f1f-8c65-c2bf3d0c41b1",
+          "depth": 1,
+          "objective": "Own the log-analytics pipeline: parse.mjs, aggregate.mjs and report.mjs must exist in the checkout root and running them in order (`node parse.mjs events.log`, `node aggregate.mjs`, `node report.mjs`) must produce out/events.json, out/stats.json and out/report.md accepted by the independent checker. Coordinate the three stages as independently verified children, respect their data dependency order, and reuse the available stage templates where applicable.",
+          "templateRef": {
+            "id": "log-analytics-pipeline",
+            "version": 1,
+            "digest": "5c0e2b6f9cf1e1ced0b83aaa5bbc48d00fff831b855ebe593c0f56b32e359f0c"
+          },
+          "status": "verified"
+        },
+        {
+          "taskId": "t-d9719ca4-30f7-4bbf-b51b-27c378ccf825",
+          "parentTaskId": "t-b269d1a2-dc4b-4f1f-8c65-c2bf3d0c41b1",
+          "depth": 1,
+          "objective": "Author cli.mjs in the checkout root so that running `node cli.mjs` for the log file path and output directory it is given runs the whole log-analytics pipeline end to end and produces that output directory's events.json (parse stage), stats.json (aggregate stage) and report.md (report stage) from the given log file. Determine the exact expected invocation and argument/output conventions by reading checks/verify.mjs (read-only; never modify it) — do not guess: the CLI must satisfy `node checks/verify.mjs cli`, which is the authoritative judge of this result. The CLI must drive the real stage scripts (parse.mjs, aggregate.mjs, report.mjs) rather than reimplementing the pipeline. If the stage scripts do not yet accept the given log path and output directory, extend them with backward-compatible optional arguments so that the default invocations `node parse.mjs events.log`, `node aggregate.mjs`, `node report.mjs` still produce out/events.json, out/stats.json and out/report.md exactly as before, and re-run `node checks/verify.mjs pipeline` and `node checks/verify.mjs all` after any such change to prove no regression. Keep events.log and checks/verify.mjs unchanged, and read/write only inside the checkout.",
+          "status": "verified"
+        },
+        {
+          "taskId": "t-0ca04d46-74ab-4431-bf74-df58d91aa124",
+          "parentTaskId": "t-7b5afd84-e093-4fac-befd-7694df2f01a5",
+          "depth": 2,
+          "objective": "Author parse.mjs in the checkout root so that `node parse.mjs events.log` reads events.log (one event per line, format \"<ISO8601-ts> <LEVEL> <message>\") and writes out/events.json: a JSON array of {ts, level, message} objects, one per input line, in input order with each message copied verbatim. Run the script so out/events.json exists.",
+          "templateRef": {
+            "digest": "be1e459fe7f355b9a1e46e8b771194419469c35255c5b27ac3862c5ca33cb69a",
+            "id": "parse-log-events",
+            "version": 1
+          },
+          "status": "verified"
+        },
+        {
+          "taskId": "t-6d685d80-2e63-4d84-9db1-04e38c6eed4d",
+          "parentTaskId": "t-7b5afd84-e093-4fac-befd-7694df2f01a5",
+          "depth": 2,
+          "objective": "Author aggregate.mjs in the checkout root so that `node aggregate.mjs` reads out/events.json and writes out/stats.json with exactly the shape {total, perLevel: {INFO, WARN, ERROR}, errorRate}: total is the number of events, perLevel counts each level, and errorRate is ERROR/total rounded to exactly 3 decimals. Run the script so out/stats.json exists.",
+          "templateRef": {
+            "digest": "9fdc93130cbdd723b43e69848735ba831a33a06a947c83a72ffa5c2f728c63d9",
+            "id": "aggregate-event-stats",
+            "version": 1
+          },
+          "status": "verified"
+        },
+        {
+          "taskId": "t-58007914-137a-4a5c-b39c-91cca5095939",
+          "parentTaskId": "t-7b5afd84-e093-4fac-befd-7694df2f01a5",
+          "depth": 2,
+          "objective": "Author report.mjs in the checkout root so that `node report.mjs` reads out/stats.json and writes out/report.md. The file must contain exactly these lines (extra lines are allowed): \"# Log Report\", \"Total: <total>\", \"INFO: <info>\", \"WARN: <warn>\", \"ERROR: <error>\", \"Error rate: <errorRate>\". Run the script so out/report.md exists.",
+          "templateRef": {
+            "digest": "61039d312f3717d85e0c051a26d231bc0daab6630faf370b87fbf4776a80eef0",
+            "id": "render-stats-report",
+            "version": 1
+          },
+          "status": "verified"
+        }
+      ],
+      "edges": [
+        {
+          "from": "t-7b5afd84-e093-4fac-befd-7694df2f01a5",
+          "to": "t-d9719ca4-30f7-4bbf-b51b-27c378ccf825"
+        },
+        {
+          "from": "t-0ca04d46-74ab-4431-bf74-df58d91aa124",
+          "to": "t-6d685d80-2e63-4d84-9db1-04e38c6eed4d"
+        },
+        {
+          "from": "t-6d685d80-2e63-4d84-9db1-04e38c6eed4d",
+          "to": "t-58007914-137a-4a5c-b39c-91cca5095939"
+        }
+      ],
+      "runs": [
+        {
+          "taskId": "t-b269d1a2-dc4b-4f1f-8c65-c2bf3d0c41b1",
+          "skills": [
+            {
+              "name": "task-coordination",
+              "role": "guidance",
+              "capabilities": [
+                "coordinate-tasks"
+              ],
+              "description": "Coordinate a complete Task objective through independent child results, evidence, acceptance, and parent questions. Use when a root or intermediate Task owns a result that requires coordinating other Tasks.",
+              "contractDigest": null,
+              "contentDigest": "337eec6d9c502a20b9ef22d7db40ae387c36fdc7bf306b6e1a9013c87283253d",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "coordinate-tasks"
+          ]
+        },
+        {
+          "taskId": "t-7b5afd84-e093-4fac-befd-7694df2f01a5",
+          "skills": [
+            {
+              "name": "task-coordination",
+              "role": "guidance",
+              "capabilities": [
+                "coordinate-tasks"
+              ],
+              "description": "Coordinate a complete Task objective through independent child results, evidence, acceptance, and parent questions. Use when a root or intermediate Task owns a result that requires coordinating other Tasks.",
+              "contractDigest": null,
+              "contentDigest": "337eec6d9c502a20b9ef22d7db40ae387c36fdc7bf306b6e1a9013c87283253d",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "coordinate-tasks"
+          ]
+        },
+        {
+          "taskId": "t-0ca04d46-74ab-4431-bf74-df58d91aa124",
+          "skills": [
+            {
+              "name": "task-execution",
+              "role": "guidance",
+              "capabilities": [
+                "local-files"
+              ],
+              "description": "Execute a Singularity Task that owns a concrete result and verifier-backed acceptance.",
+              "contractDigest": null,
+              "contentDigest": "45d5e483a6777004ef2966fcbd57ba707d2ac93a497d0540e690379daa2e3c2b",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "local-files"
+          ]
+        },
+        {
+          "taskId": "t-6d685d80-2e63-4d84-9db1-04e38c6eed4d",
+          "skills": [
+            {
+              "name": "task-execution",
+              "role": "guidance",
+              "capabilities": [
+                "local-files"
+              ],
+              "description": "Execute a Singularity Task that owns a concrete result and verifier-backed acceptance.",
+              "contractDigest": null,
+              "contentDigest": "45d5e483a6777004ef2966fcbd57ba707d2ac93a497d0540e690379daa2e3c2b",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "local-files"
+          ]
+        },
+        {
+          "taskId": "t-58007914-137a-4a5c-b39c-91cca5095939",
+          "skills": [
+            {
+              "name": "task-execution",
+              "role": "guidance",
+              "capabilities": [
+                "local-files"
+              ],
+              "description": "Execute a Singularity Task that owns a concrete result and verifier-backed acceptance.",
+              "contractDigest": null,
+              "contentDigest": "45d5e483a6777004ef2966fcbd57ba707d2ac93a497d0540e690379daa2e3c2b",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "local-files"
+          ]
+        },
+        {
+          "taskId": "t-d9719ca4-30f7-4bbf-b51b-27c378ccf825",
+          "skills": [
+            {
+              "name": "task-execution",
+              "role": "guidance",
+              "capabilities": [
+                "local-files"
+              ],
+              "description": "Execute a Singularity Task that owns a concrete result and verifier-backed acceptance.",
+              "contractDigest": null,
+              "contentDigest": "45d5e483a6777004ef2966fcbd57ba707d2ac93a497d0540e690379daa2e3c2b",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "local-files"
+          ]
+        }
+      ],
+      "stats": {
+        "total": 12,
+        "perLevel": {
+          "INFO": 6,
+          "WARN": 3,
+          "ERROR": 3
+        },
+        "errorRate": 0.25
+      },
+      "report": [
+        "# Log Report",
+        "Total: 12",
+        "INFO: 6",
+        "WARN: 3",
+        "ERROR: 3",
+        "Error rate: 0.25"
+      ]
+    },
+    {
+      "name": "case-2",
+      "input": {
+        "logFile": "events.log",
+        "lines": 8,
+        "perLevel": {
+          "INFO": 4,
+          "WARN": 2,
+          "ERROR": 2
+        },
+        "errorRate": 0.25
+      },
+      "requestCount": 50,
+      "tasks": [
+        {
+          "taskId": "t-41eb3177-728d-4dfb-a8d6-86e593667e49",
+          "depth": 0,
+          "objective": "Deliver a log-analytics CLI: cli.mjs must run the whole pipeline end to end for the log file and output directory it is given, and the pipeline itself must produce out/events.json (parse.mjs), out/stats.json (aggregate.mjs) and out/report.md (report.mjs) from events.log. Own the analytics pipeline as an owned responsibility; its worker decides the independently checkable stage children. Author the CLI contract yourself when no template applies; a child that reads or writes files must require the local-files capability. Use available Task templates where applicable.",
+          "status": "verified"
+        },
+        {
+          "taskId": "t-f4416bbc-4393-4b6b-bb94-5859327a1ab3",
+          "parentTaskId": "t-41eb3177-728d-4dfb-a8d6-86e593667e49",
+          "depth": 1,
+          "objective": "Own the log-analytics pipeline: parse.mjs, aggregate.mjs and report.mjs must exist in the checkout root and running them in order (`node parse.mjs events.log`, `node aggregate.mjs`, `node report.mjs`) must produce out/events.json, out/stats.json and out/report.md accepted by the independent checker. Coordinate the three stages as independently verified children, respect their data dependency order, and reuse the available stage templates where applicable.",
+          "templateRef": {
+            "digest": "4300a91d2f45c87748229328823801475e559b6260f507f7956a73614fbfae63",
+            "id": "log-analytics-pipeline",
+            "version": 1
+          },
+          "status": "verified"
+        },
+        {
+          "taskId": "t-e9170ec6-87d9-49c3-b4f3-5779d2187857",
+          "parentTaskId": "t-41eb3177-728d-4dfb-a8d6-86e593667e49",
+          "depth": 1,
+          "objective": "Deliver cli.mjs in the checkout root so that running `node cli.mjs <logPath> <outDir>` performs the whole log-analytics pipeline end to end for the log file and output directory it is given: it must drive the parse, aggregate and report stages for that log path and output directory and produce <outDir>/events.json, <outDir>/stats.json and <outDir>/report.md (for the default case `node cli.mjs events.log out`, the outputs are out/events.json, out/stats.json and out/report.md). Take the log path and output directory as command-line arguments, invoke the existing parse.mjs, aggregate.mjs and report.mjs stage scripts instead of reimplementing their parsing, aggregation or rendering logic, create the output directory when it does not exist, and exit non-zero with a clear message when an argument is missing or a stage fails.",
+          "status": "verified"
+        },
+        {
+          "taskId": "t-d6984b56-326c-46d4-977d-1ca1caa528e8",
+          "parentTaskId": "t-f4416bbc-4393-4b6b-bb94-5859327a1ab3",
+          "depth": 2,
+          "objective": "Author parse.mjs in the checkout root so that `node parse.mjs events.log` reads events.log (one event per line, format \"<ISO8601-ts> <LEVEL> <message>\") and writes out/events.json: a JSON array of {ts, level, message} objects, one per input line, in input order with each message copied verbatim. Run the script so out/events.json exists.",
+          "templateRef": {
+            "id": "parse-log-events",
+            "version": 1,
+            "digest": "be1e459fe7f355b9a1e46e8b771194419469c35255c5b27ac3862c5ca33cb69a"
+          },
+          "status": "verified"
+        },
+        {
+          "taskId": "t-2ec7b5b4-5288-4d8c-860e-8ba53fd41bb8",
+          "parentTaskId": "t-f4416bbc-4393-4b6b-bb94-5859327a1ab3",
+          "depth": 2,
+          "objective": "Author aggregate.mjs in the checkout root so that `node aggregate.mjs` reads out/events.json and writes out/stats.json with exactly the shape {total, perLevel: {INFO, WARN, ERROR}, errorRate}: total is the number of events, perLevel counts each level, and errorRate is ERROR/total rounded to exactly 3 decimals. Run the script so out/stats.json exists.",
+          "templateRef": {
+            "id": "aggregate-event-stats",
+            "version": 2,
+            "digest": "9ff5020defb4c984adbd0b54b9c5f97fd8d12c6356bf9a7134acdb523156bcd7"
+          },
+          "status": "verified"
+        },
+        {
+          "taskId": "t-07b9b3be-c314-4523-a506-b9b81f9cf931",
+          "parentTaskId": "t-f4416bbc-4393-4b6b-bb94-5859327a1ab3",
+          "depth": 2,
+          "objective": "Author report.mjs in the checkout root so that `node report.mjs` reads out/stats.json and writes out/report.md. The file must contain exactly these lines (extra lines are allowed): \"# Log Report\", \"Total: <total>\", \"INFO: <info>\", \"WARN: <warn>\", \"ERROR: <error>\", \"Error rate: <errorRate>\". Run the script so out/report.md exists.",
+          "templateRef": {
+            "id": "render-stats-report",
+            "version": 1,
+            "digest": "61039d312f3717d85e0c051a26d231bc0daab6630faf370b87fbf4776a80eef0"
+          },
+          "status": "verified"
+        }
+      ],
+      "edges": [
+        {
+          "from": "t-f4416bbc-4393-4b6b-bb94-5859327a1ab3",
+          "to": "t-e9170ec6-87d9-49c3-b4f3-5779d2187857"
+        },
+        {
+          "from": "t-d6984b56-326c-46d4-977d-1ca1caa528e8",
+          "to": "t-2ec7b5b4-5288-4d8c-860e-8ba53fd41bb8"
+        },
+        {
+          "from": "t-2ec7b5b4-5288-4d8c-860e-8ba53fd41bb8",
+          "to": "t-07b9b3be-c314-4523-a506-b9b81f9cf931"
+        }
+      ],
+      "runs": [
+        {
+          "taskId": "t-41eb3177-728d-4dfb-a8d6-86e593667e49",
+          "skills": [
+            {
+              "name": "task-coordination",
+              "role": "guidance",
+              "capabilities": [
+                "coordinate-tasks"
+              ],
+              "description": "Coordinate a complete Task objective through independent child results, evidence, acceptance, and parent questions. Use when a root or intermediate Task owns a result that requires coordinating other Tasks.",
+              "contractDigest": null,
+              "contentDigest": "337eec6d9c502a20b9ef22d7db40ae387c36fdc7bf306b6e1a9013c87283253d",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "coordinate-tasks"
+          ]
+        },
+        {
+          "taskId": "t-f4416bbc-4393-4b6b-bb94-5859327a1ab3",
+          "skills": [
+            {
+              "name": "task-coordination",
+              "role": "guidance",
+              "capabilities": [
+                "coordinate-tasks"
+              ],
+              "description": "Coordinate a complete Task objective through independent child results, evidence, acceptance, and parent questions. Use when a root or intermediate Task owns a result that requires coordinating other Tasks.",
+              "contractDigest": null,
+              "contentDigest": "337eec6d9c502a20b9ef22d7db40ae387c36fdc7bf306b6e1a9013c87283253d",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "coordinate-tasks"
+          ]
+        },
+        {
+          "taskId": "t-d6984b56-326c-46d4-977d-1ca1caa528e8",
+          "skills": [
+            {
+              "name": "task-execution",
+              "role": "guidance",
+              "capabilities": [
+                "local-files"
+              ],
+              "description": "Execute a Singularity Task that owns a concrete result and verifier-backed acceptance.",
+              "contractDigest": null,
+              "contentDigest": "45d5e483a6777004ef2966fcbd57ba707d2ac93a497d0540e690379daa2e3c2b",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "local-files"
+          ]
+        },
+        {
+          "taskId": "t-2ec7b5b4-5288-4d8c-860e-8ba53fd41bb8",
+          "skills": [
+            {
+              "name": "task-execution",
+              "role": "guidance",
+              "capabilities": [
+                "local-files"
+              ],
+              "description": "Execute a Singularity Task that owns a concrete result and verifier-backed acceptance.",
+              "contractDigest": null,
+              "contentDigest": "45d5e483a6777004ef2966fcbd57ba707d2ac93a497d0540e690379daa2e3c2b",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "local-files"
+          ]
+        },
+        {
+          "taskId": "t-07b9b3be-c314-4523-a506-b9b81f9cf931",
+          "skills": [
+            {
+              "name": "task-execution",
+              "role": "guidance",
+              "capabilities": [
+                "local-files"
+              ],
+              "description": "Execute a Singularity Task that owns a concrete result and verifier-backed acceptance.",
+              "contractDigest": null,
+              "contentDigest": "45d5e483a6777004ef2966fcbd57ba707d2ac93a497d0540e690379daa2e3c2b",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "local-files"
+          ]
+        },
+        {
+          "taskId": "t-e9170ec6-87d9-49c3-b4f3-5779d2187857",
+          "skills": [
+            {
+              "name": "task-execution",
+              "role": "guidance",
+              "capabilities": [
+                "execute-task",
+                "local-files"
+              ],
+              "description": "Execute a Singularity Task that owns a concrete result and verifier-backed acceptance.",
+              "contractDigest": null,
+              "contentDigest": "45d5e483a6777004ef2966fcbd57ba707d2ac93a497d0540e690379daa2e3c2b",
+              "uncovered": []
+            }
+          ],
+          "capabilities": [
+            "execute-task",
+            "local-files"
+          ]
+        }
+      ],
+      "stats": {
+        "total": 8,
+        "perLevel": {
+          "INFO": 4,
+          "WARN": 2,
+          "ERROR": 2
+        },
+        "errorRate": 0.25
+      },
+      "report": [
+        "# Log Report",
+        "Total: 8",
+        "INFO: 4",
+        "WARN: 2",
+        "ERROR: 2",
+        "Error rate: 0.25"
+      ]
+    }
+  ],
+  "limits": "Two small log inputs demonstrate a genuine cross-module engineering tree (scripts plus executed artifacts), template composition, an independently executed CLI, and reuse of a template version that a scripted failure-repair chain published. They do not measure long-term autonomous Supervisor improvement quality. Each case needs about 50 real model requests (the two-case run took ~11.7 min) and is sensitive to model latency: the root sometimes reaches the end of its batch and its final submit is preceded by a superseded turn, so an attempt can miss the 480 s terminal wait; the run recorded here passed both cases on its first attempt with no retry."
+}

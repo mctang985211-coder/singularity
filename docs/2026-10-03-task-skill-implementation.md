@@ -54,3 +54,12 @@ Task 规定结果，Skill 提供方法，Tool/MCP 提供动作。父节点优先
 真实模型增长验证：两组独立输入分别完成 5 个 Task、深度 2 的责任树与产物依赖 DAG；根、中间节点、原子叶全部 verified。同一 `transform-numbers` 配方和 `summarize-transforms` 模板被再次消费，每个 Run 绑定指导，30 个无关 web 模板未进入请求。结果 `[3,7,-2] → {count:3,sumSquares:62,sumAbsolute:12}`、`[2,-5] → {count:2,sumSquares:29,sumAbsolute:7}`，实际请求分别 38／36 次。证据见 [live Task growth](2026-10-03-live-task-growth.json)，可按其命令启用复验。
 
 第三轮备份：Singularity 与外层 harness 均使用 `backup/self-develop-20261003-round3`。Supervisor 内容／依赖修复、Skill 更新和 MCP 注册发布由脚本驱动真实工具与审批链验证；真实模型验证了递归 Task 生长和复用，尚未证明长期真实模型自主 Supervisor 的收益。
+
+第四轮（复杂业务测试第一批）由主线程指挥子代理实施：有独立验收器的跨模块工程任务实跑、缺陷失败的修复链、新输入复测。基线为 main 合并 `7d9038a`（图生命周期与模型钉扎）；本轮计数相对第三轮记录的差异（unit +8、integration +11 中的 +9）均来自该合并，隔离本批新文件复跑确认与本批无关。
+
+- 新增 `tests/integration/live-log-pipeline.spec.ts`（opt-in，`SINGULARITY_LIVE_LOG_PIPELINE=1`）：真实模型交付跨模块日志分析 CLI——parse／aggregate／report 三个可执行模块加 cli.mjs 端到端串接；独立 checker 从受保护输入自行重算全部期望值并分阶段裁决，`cli` 阶段实际执行 cli.mjs 重跑全管线。两组输入（12 行 6 INFO/3 WARN/3 ERROR；8 行 4/2/2）均 root verified、深度 2、3 条依赖边、4 个模板实例加 1 个模型自撰 CLI 契约、30 个无关模板未进入任何请求；52／50 次请求。证据见 [live log pipeline](2026-10-03-live-log-pipeline.json)，可按其命令启用复验。
+- 新增 `tests/integration/log-pipeline-evolution.spec.ts`（默认集成套件，脚本化模型）：缺陷模板 v1（目标要求 `byLevel`，判据仍核 `perLevel`）使 aggregate 叶被真实 command verifier 判败；诊断经持久消息送达负责父 Run 而非 root；supervisor 走完 task_definition 全链（propose→candidate→prepare→replay→gate→decide→apply，decide／apply 经真实人审缝），双侧对照 baseline 败、candidate 过、holdout 双过；发布 v2 后父 Run 原地重规划并消费新版本，旧失败 Run 绑定与 v1 内容保持冻结。三次连跑确定通过，约 3.5 s。
+- 新输入复测：live case-2 的模板库处于修复后状态（v1 缺陷与 v2 修复并存，当前版本 v2），快照确认 aggregate 任务消费 version 2 且 root verified——修复定义在新输入上由真实模型复现通过。
+- 共享夹具 `tests/support/log-pipeline.ts` 承载场景、期望值重算与模板库注册；live 侧新增受限 bash 工具（cwd 锁定 checkout、60 秒进程组强杀），因交付物是可执行脚本。断言全部按用例重算，无硬编码期望值。
+- 验证：unit 96 文件 2261 通过；integration 91 文件 644 项、636 通过 7 跳过，`a4-question-cold-exchange` 并行全量下偶发失败、单跑 8 通过（第三轮已知的并行 flake 集，非本轮引入）。build（含 source-size，476 文件）与 verify-persistence 通过。未改动生产代码。
+- 遗留：根最终提交轮在 480 秒等待窗内偶发被取消（本轮 live 共 6 次运行中 2 次，通过等待完成后未再提交），live spec 保留 watchdog 与进度快照；独立包 `tsc --noEmit` 的重复声明与旧测试类型问题仍未收尾；中断恢复未在本轮新增用例（已有 a6-process-restart 等脚本化覆盖）；真实模型自主 Supervisor 改进仍未验证（本轮 supervisor 决策为脚本）。
