@@ -63,3 +63,12 @@ Task 规定结果，Skill 提供方法，Tool/MCP 提供动作。父节点优先
 - 共享夹具 `tests/support/log-pipeline.ts` 承载场景、期望值重算与模板库注册；live 侧新增受限 bash 工具（cwd 锁定 checkout、60 秒进程组强杀），因交付物是可执行脚本。断言全部按用例重算，无硬编码期望值。
 - 验证：unit 96 文件 2261 通过；integration 91 文件 644 项、636 通过 7 跳过，`a4-question-cold-exchange` 并行全量下偶发失败、单跑 8 通过（第三轮已知的并行 flake 集，非本轮引入）。build（含 source-size，476 文件）与 verify-persistence 通过。未改动生产代码。
 - 遗留：根最终提交轮在 480 秒等待窗内偶发被取消（本轮 live 共 6 次运行中 2 次，通过等待完成后未再提交），live spec 保留 watchdog 与进度快照；独立包 `tsc --noEmit` 的重复声明与旧测试类型问题仍未收尾；中断恢复未在本轮新增用例（已有 a6-process-restart 等脚本化覆盖）；真实模型自主 Supervisor 改进仍未验证（本轮 supervisor 决策为脚本）。
+
+第五轮（困难业务实测：xv6 内核锁优化）：完整实跑通过，证据见 [live xv6 locks](2026-10-03-live-xv6-locks.json)。
+
+- 环境（约束 ≤10G，实测 813M）：用户态 qemu-system-riscv64 8.2.2（apt 下载解包 + 缺失共享库补全，全程无 root）加 xpack riscv-none-elf-gcc 13.4.0，加 xv6-labs-2021 `lock` 分支（g.csail.mit.edu，`281b66c`）。工具链经 `/home/roxy/code/testbeds/env.sh` 注入 PATH，不污染系统。
+- 独立验收：checker `checks/verify.sh` 调用实验自带评分器 `grade-lab-lock` 按阶段裁决（kalloc／bcache／regression／modules／all），评分器、测试源码与 Makefile 为受保护输入；`all` 要求满分 70/70 含 time.txt 一分。正负对照先行：pristine 树各阶段必败（基线 49/70：kalloctest test1 与 bcachetest test0 竞争失败），参考解 70/70。
+- 完整实跑（`SINGULARITY_LIVE_XV6_LOCKS=1`，真实模型）：root → 协调模板 `xv6-lock-lab-optimization` → kalloc／bcache／regression 三叶（回归依赖两个修复，2 条依赖边），全部 verified；评分 49/70 → 70/70；87 次请求，76 分钟；空闲 nudge 3 次。spec 在运行时之外复跑 `checks/verify.sh all` 复核满分。
+- 过程中两个工程发现转化为测试侧机制：网关瞬断的请求级退避重试（至多 8 次）；worker 纯文本结束 turn 致 Run 悬挂时，watchdog 经运行时自身 prompt 门径接力并留痕（nudges 写入证据）。nudge 只是测试侧兜底；运行时层是否应有"active Run 久无事件自动提醒"的生产机制，留作后续决策。预算教训：TCG 仿真下该任务 80 分钟不够（kalloc 已 verified、bcache 仍在迭代），本轮终态等待 3 小时；wait 超时也保底落盘证据。
+- 默认套件新增 `tests/integration/xv6-locks-harness.spec.ts`（非 opt-in，仅测试床缺失时跳过）：脚本化驱动加真实评分器对 pristine 树判败的回归用例（约 10 s），并断言 verifyTimeoutMs 管线（本轮实跑配置 1 500 000 ms，默认 600 000 ms）。
+- 验证：unit 96 文件 2261 通过；integration 93 文件 646 项、638 通过 8 跳过 0 失败（含两个新 spec）。build 与 verify-persistence 通过。生产代码零改动；`log-pipeline.ts` 的 `checkoutTools` 增加可选 bashTimeoutMs（默认 60 秒不变），供 xv6 侧用 1 500 秒。

@@ -330,14 +330,22 @@ export async function registerLogLibrary(
  * (the checker's `cli` stage executes them end to end), so `bash` gets a real
  * body bounded to the checkout like the other two.
  */
-export function checkoutTools() {
+/** How a `checkoutTools` bash body is bounded: the wall-clock deadline before its process group is killed. */
+export interface CheckoutToolOptions {
+  /** The `bash` body's wall-clock deadline in milliseconds. Defaults to 60 seconds, the round-4 bound. */
+  readonly bashTimeoutMs?: number
+}
+
+export function checkoutTools(options: CheckoutToolOptions = {}) {
+  const bashTimeoutMs = options.bashTimeoutMs ?? 60_000
+  const bashTimeoutSeconds = Math.round(bashTimeoutMs / 1000)
   return ['read', 'write', 'bash'].map(name => defineTool({
     name,
     description: name === 'read'
       ? 'Read a UTF-8 file in this checkout.'
       : name === 'write'
         ? 'Write a UTF-8 file in this checkout.'
-        : 'Run a bash command with the working directory fixed to this checkout. Commands must terminate: one that runs longer than 60 seconds is killed.',
+        : `Run a bash command with the working directory fixed to this checkout. Commands must terminate: one that runs longer than ${bashTimeoutSeconds} seconds is killed.`,
     parameters: name === 'bash'
       ? { command: { type: 'string', required: true } }
       : { path: { type: 'string', required: true }, ...(name === 'write' ? { content: { type: 'string', required: true } } : {}) },
@@ -364,8 +372,8 @@ export function checkoutTools() {
           }
           const timer = setTimeout(() => {
             try { process.kill(-child.pid!, 'SIGKILL') } catch { child.kill('SIGKILL') }
-            finish(new Error('bash timed out after 60 seconds and was killed'), '')
-          }, 60000)
+            finish(new Error(`bash timed out after ${bashTimeoutSeconds} seconds and was killed`), '')
+          }, bashTimeoutMs)
           child.stdout.on('data', chunk => { out += String(chunk) })
           child.stderr.on('data', chunk => { err += String(chunk) })
           child.on('error', error => finish(error, ''))

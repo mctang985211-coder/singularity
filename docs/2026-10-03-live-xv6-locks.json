@@ -1,0 +1,220 @@
+{
+  "date": "2026-10-03",
+  "test": "tests/integration/live-xv6-locks.spec.ts",
+  "command": "SINGULARITY_LIVE_XV6_LOCKS=1 pnpm exec vitest run --project integration packages/singularity/tests/integration/live-xv6-locks.spec.ts",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "result": "passed",
+  "method": "A real model decomposes the root xv6 locks contract through the production TaskRuntime and TaskTemplate retrieval: four `kernel` templates are available (per-CPU kalloc leaf, fine-grained bcache leaf, full-regression leaf, and a coordinating xv6-lock-lab-optimization template whose recipe composes the three leaves with the regression gated on both fixes), alongside thirty unrelated `web` distractors. An independent test-authored checker (checks/verify.sh) is written into the checkout before admission: it runs the lab's own grader (grade-lab-lock, singular) under an internal 1500s timeout, parses the grader's OK/FAIL lines and final `Score: X/70`, and exits 0 only when the stage passes. read/write/bash are real tool bodies bounded to the checkout, with the bash timeout raised to 1500s for grading; the llm/stream hook forwards each model request to the real gateway. The task-runtime verifier budget is 1_500_000 ms, asserted at start so a plumbing regression fails fast instead of silently reverting to the 600_000 ms default. The spec re-runs `bash checks/verify.sh all` itself after the run, outside the runtime.",
+  "assertions": {
+    "rootVerified": true,
+    "depthAtLeastTwo": true,
+    "dependencyEdgesAtLeastTwo": true,
+    "atLeastThreeTemplateBoundInstances": true,
+    "allRunsBindSkills": true,
+    "noUnrelatedTemplatesInRequests": true,
+    "specRegradeScoreFull": true
+  },
+  "cases": [
+    {
+      "name": "xv6-locks-lab",
+      "baseline": {
+        "score": "49/70",
+        "wallSeconds": 189.31,
+        "note": "kalloctest test1 and bcachetest test0 fail on lock contention; no time.txt"
+      },
+      "final": {
+        "score": "Score: 70/70",
+        "wallSeconds": 4557.336,
+        "regradeExit": 0
+      },
+      "requestCount": 87,
+      "tree": {
+        "tasks": [
+          {
+            "taskId": "t-5eba5ce6-8ad8-4f01-8881-8d3d32961b61",
+            "depth": 0,
+            "objective": "Deliver the completed xv6 locks lab: eliminate the kernel's lock contention so the physical page allocator and the buffer cache no longer serialize on a single global lock, and the lab's own grader prints a full score. `python3 grade-lab-lock` must print `Score: 70/70`, including the `time.txt` point: the file `time.txt` must exist at the repository root and contain a single positive integer (the hours spent on the lab). Own the optimization effort as exactly one coordinating child: call task_decompose once with a reason and `children: [{ \"templateRef\": { \"id\": \"xv6-lock-lab-optimization\", \"version\": 1 }, \"decomposable\": true }]`, and nothing else. That child then expands the template's recipe itself into the allocator, buffer-cache and regression grandchildren, so you must NOT pass templateRef at the top level of your call (that would replace your own decomposition with the recipe leaves at your level), and you must not enumerate the stage leaves yourself.",
+            "status": "verified"
+          },
+          {
+            "taskId": "t-8180ef21-09d9-4234-904b-1041f7c7f666",
+            "parentTaskId": "t-5eba5ce6-8ad8-4f01-8881-8d3d32961b61",
+            "depth": 1,
+            "objective": "Own the xv6 locks lab: eliminate the kernel's lock contention so `python3 grade-lab-lock` prints `Score: 70/70`, including the `time.txt` point. Begin by expanding this contract's own recipe: call task_decompose with this template's exact templateRef at the top level and no reason or children, so the runtime admits the allocator, buffer-cache and regression children with the regression gated behind both fixes. Then coordinate them to completion and hand this task in; do not bind this template to yourself again as a child.",
+            "templateRef": {
+              "id": "xv6-lock-lab-optimization",
+              "version": 1,
+              "digest": "fedc66a16d83e36ed54ea1040ac05f3ebf6d461eb6761bcccd98089f6ae5356a"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-841652e7-629e-449f-b4b3-14f22a08d237",
+            "parentTaskId": "t-8180ef21-09d9-4234-904b-1041f7c7f666",
+            "depth": 2,
+            "objective": "Rework kernel/kalloc.c so the physical page allocator stops contending on one global lock: give each CPU its own free list and its own lock, allocate from the calling CPU's list, free to it, and when that list is empty steal pages from another CPU's list. Keep the allocator correct (no lost, duplicated or leaked pages; `usertests sbrkmuch` still passes) and prove the contention is gone: `bash checks/verify.sh kalloc` must pass, which means `python3 grade-lab-lock kalloctest` reports both `test1: OK` and `test2: OK`. Never modify the grader or the test programs.",
+            "templateRef": {
+              "id": "xv6-kalloc-percpu",
+              "version": 1,
+              "digest": "2eb53c647a42e0aeae95c77693a6c3ab0f66c22450216d19c63a1d86c6b71434"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-3c04983f-6dd4-4547-af59-11aaff82b64e",
+            "parentTaskId": "t-8180ef21-09d9-4234-904b-1041f7c7f666",
+            "depth": 2,
+            "objective": "Rework kernel/bio.c so the buffer cache no longer serializes every lookup on a single `bcache` lock: hash blocks into buckets with a lock per bucket, keep the eviction path safe (a buffer is never handed out twice, and eviction must not race a concurrent lookup or release), and preserve the existing bread/bwrite/brelse/bpin/bunpin contract. Prove it: `bash checks/verify.sh bcache` must pass, which means `python3 grade-lab-lock bcachetest` reports both `test0: OK` and `test1: OK`. Never modify the grader or the test programs.",
+            "templateRef": {
+              "id": "xv6-bcache-finegrained",
+              "version": 1,
+              "digest": "886fd3e79d10933b2f6bd1d3eeb7a63d9f87aa59ebd34672f5de24e00e1d894c"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-e7f257f0-8092-4c2a-97ab-149cda36b0f6",
+            "parentTaskId": "t-8180ef21-09d9-4234-904b-1041f7c7f666",
+            "depth": 2,
+            "objective": "After the allocator and buffer-cache locks are reworked, run the full acceptance: `bash checks/verify.sh regression` (`usertests` must pass) and then `bash checks/verify.sh all`. The lab is complete only when the full grade prints `Score: 70/70`, which also requires `time.txt` at the repository root to contain a single positive integer. If a stage regresses, report it to the parent instead of editing the protected grader or test programs.",
+            "templateRef": {
+              "id": "xv6-full-regression",
+              "version": 1,
+              "digest": "5d6f7adc06ce7c7d165c2b5b2cb1a21c131ea042c665c33608649bae19510a3a"
+            },
+            "status": "verified"
+          }
+        ],
+        "edges": [
+          {
+            "from": "t-841652e7-629e-449f-b4b3-14f22a08d237",
+            "to": "t-e7f257f0-8092-4c2a-97ab-149cda36b0f6"
+          },
+          {
+            "from": "t-3c04983f-6dd4-4547-af59-11aaff82b64e",
+            "to": "t-e7f257f0-8092-4c2a-97ab-149cda36b0f6"
+          }
+        ],
+        "runs": [
+          {
+            "taskId": "t-5eba5ce6-8ad8-4f01-8881-8d3d32961b61",
+            "skills": [
+              "task-coordination"
+            ],
+            "capabilities": [
+              "coordinate-tasks"
+            ]
+          },
+          {
+            "taskId": "t-8180ef21-09d9-4234-904b-1041f7c7f666",
+            "skills": [
+              "task-coordination"
+            ],
+            "capabilities": [
+              "coordinate-tasks"
+            ]
+          },
+          {
+            "taskId": "t-841652e7-629e-449f-b4b3-14f22a08d237",
+            "skills": [
+              "task-execution"
+            ],
+            "capabilities": [
+              "local-files"
+            ]
+          },
+          {
+            "taskId": "t-3c04983f-6dd4-4547-af59-11aaff82b64e",
+            "skills": [
+              "task-execution"
+            ],
+            "capabilities": [
+              "local-files"
+            ]
+          },
+          {
+            "taskId": "t-e7f257f0-8092-4c2a-97ab-149cda36b0f6",
+            "skills": [
+              "task-execution"
+            ],
+            "capabilities": [
+              "local-files"
+            ]
+          }
+        ]
+      },
+      "leafVerdicts": [
+        {
+          "templateId": "xv6-kalloc-percpu",
+          "taskId": "t-841652e7-629e-449f-b4b3-14f22a08d237",
+          "status": "verified",
+          "verdicts": [
+            {
+              "criterionId": "kalloc-result",
+              "status": "pass",
+              "exitCode": 0
+            },
+            {
+              "criterionId": "kalloc-result",
+              "status": "pass",
+              "exitCode": 0
+            }
+          ]
+        },
+        {
+          "templateId": "xv6-bcache-finegrained",
+          "taskId": "t-3c04983f-6dd4-4547-af59-11aaff82b64e",
+          "status": "verified",
+          "verdicts": [
+            {
+              "criterionId": "bcache-result",
+              "status": "pass",
+              "exitCode": 0
+            },
+            {
+              "criterionId": "bcache-result",
+              "status": "pass",
+              "exitCode": 0
+            }
+          ]
+        },
+        {
+          "templateId": "xv6-full-regression",
+          "taskId": "t-e7f257f0-8092-4c2a-97ab-149cda36b0f6",
+          "status": "verified",
+          "verdicts": [
+            {
+              "criterionId": "regression-result",
+              "status": "pass",
+              "exitCode": 0
+            },
+            {
+              "criterionId": "regression-result",
+              "status": "pass",
+              "exitCode": 0
+            }
+          ]
+        }
+      ],
+      "gradeOutput": "fatal: not a git repository (or any of the parent directories): .git\nmake: 'kernel/kernel' is up to date.\n== Test running kalloctest == fatal: not a git repository (or any of the parent directories): .git\n(47.4s) \n== Test   kalloctest: test1 == \n  kalloctest: test1: OK \n== Test   kalloctest: test2 == \n  kalloctest: test2: OK \n== Test kalloctest: sbrkmuch == kalloctest: sbrkmuch: OK (6.4s) \n== Test running bcachetest == (4.1s) \n== Test   bcachetest: test0 == \n  bcachetest: test0: OK \n== Test   bcachetest: test1 == \n  bcachetest: test1: OK \n== Test usertests == usertests: OK (124.7s) \n== Test time == \ntime: OK \nScore: 70/70\n--- xv6 locks verdicts (stage: all) ---\nkalloctest: test1: OK\nkalloctest: test2: OK\nbcachetest: test0: OK\nbcachetest: test1: OK\nusertests: OK\nScore: 70/70\nverify.sh: stage all PASSED\n",
+      "nudges": [
+        {
+          "at": "2026-10-03T13:37:27.543Z",
+          "sessionId": "s-4f78c146-b9eb-416f-8a8e-31e22569ffc8",
+          "taskId": "t-3c04983f-6dd4-4547-af59-11aaff82b64e"
+        },
+        {
+          "at": "2026-10-03T13:43:42.545Z",
+          "sessionId": "s-4f78c146-b9eb-416f-8a8e-31e22569ffc8",
+          "taskId": "t-3c04983f-6dd4-4547-af59-11aaff82b64e"
+        },
+        {
+          "at": "2026-10-03T13:52:27.576Z",
+          "sessionId": "s-4f78c146-b9eb-416f-8a8e-31e22569ffc8",
+          "taskId": "t-3c04983f-6dd4-4547-af59-11aaff82b64e"
+        }
+      ]
+    }
+  ],
+  "limits": "One lab task under a TCG-emulated RISC-V guest: the grade itself takes minutes and is sensitive to host load, so the verifier budget is 1_500_000 ms and the terminal wait is 10_800_000 ms (an 80-minute wait was measured insufficient: the model iterated the buffer-cache locking for the whole budget with kalloc already verified). The run records one model and one machine; it does not measure long-term autonomous improvement quality, and the lock-contention thresholds in kalloctest/bcachetest can be flaky under a heavily loaded host. The harness watchdog nudges a run whose turn ended silently (no tool call, nothing in flight, no progress for 6 minutes) through the runtime’s own prompt door; every nudge is recorded per case and counted in the run log."
+}
