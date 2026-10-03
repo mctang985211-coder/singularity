@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { parseReviewerDiagnosis } from '../../src/coordination/review-run.ts'
 import { resolveGrant } from '../../../agent-runtime/src/grants.ts'
 import {
   admitReviewAgent,
@@ -252,7 +253,7 @@ function fixture(handleValue: unknown, spawnImpl?: () => Promise<unknown>, graph
     },
     agentRuntime: { spawn },
   }
-  return { ctx: ctx as unknown as Context, spawn, recordDiagnosisIn }
+  return { ctx: ctx as unknown as Context, spawn, recordDiagnosisIn, snapshot }
 }
 
 /**
@@ -692,9 +693,94 @@ describe('task_review_agent', () => {
     expect(diagnosis.proposals).toEqual([])
     // Absent, not padded: the reviewer made no judgement, so none is stored.
     expect(diagnosis.judgements).toBeUndefined()
+    expect(diagnosis.scope).toBe('task t1')
+    expect(diagnosis.reviewRefs).toEqual(['t1#r1'])
+    expect(diagnosis.evidenceRefs).toEqual(['ev-1'])
+    expect(diagnosis.relatedTaskIds).toBeUndefined()
     expect(result).toContain('no improvement needed')
     expect(result).toContain('proposals: none')
     expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded' })
+  })
+
+  test('cross-task causal lineage is recorded without sweeping in unrelated store evidence', async () => {
+    const reply = '```json\n' + JSON.stringify({
+      observation: 'both tasks reject empty input', conclusion: 'the shared provider omits empty-input handling',
+      confidence: 'medium', scope: 'shared provider across t1 and t2',
+      reviewRefs: ['t2#r2', 't1#r1', 't2#r2'], evidenceRefs: ['ev-2', 'ev-2'], relatedTaskIds: ['t2', 't2'],
+      judgements: [{ dimension: 'skill_fit', verdict: 'inadequate', evidenceRefs: ['ev-2', 't2#r2', 's-worker'], rationale: 'the second trace confirms the same missing handler' }],
+    }) + '\n```'
+    const { ctx, recordDiagnosisIn, snapshot } = fixtureWithBeforePrompt(handle(reply))
+    snapshot.tasks.push({ ...structuredClone(snapshot.tasks[0]!), taskId: 't2', runIds: ['r2'] })
+    snapshot.runs.push({ runId: 'r2', taskId: 't2', status: 'failed' })
+    snapshot.reviews.push({ ...structuredClone(snapshot.reviews[0]!), taskId: 't2', runId: 'r2', evidenceRefs: ['ev-2'] })
+    for (const evidenceId of ['ev-2', 'ev-unrelated']) snapshot.evidence.push({
+      evidenceId, taskId: 't2', taskRunId: 'r2', artifacts: [], verifierResults: [], claims: [], generatedAt: '',
+    } as never)
+
+    const result = await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)
+    expect(result).toContain('recorded')
+    expect(recordDiagnosisIn).toHaveBeenCalledOnce()
+    expect(recordDiagnosisIn.mock.calls[0]![1]).toMatchObject({
+      taskId: 't1', scope: 'shared provider across t1 and t2',
+      reviewRefs: ['t1#r1', 't2#r2'], evidenceRefs: ['ev-2'], relatedTaskIds: ['t2'],
+    })
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded' })
+  })
+
+  test('an explicit empty evidence list retains the source review without copying its evidence', async () => {
+    const reply = '```json\n' + JSON.stringify({
+      observation: 'the review alone locates the failure', conclusion: 'unknown; the original trace is missing',
+      confidence: 'low', reviewRefs: [], evidenceRefs: [], relatedTaskIds: [],
+    }) + '\n```'
+    const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(reply))
+    await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)
+    expect(recordDiagnosisIn.mock.calls[0]![1]).toMatchObject({ reviewRefs: ['t1#r1'], evidenceRefs: [], relatedTaskIds: [] })
+  })
+
+  test('references created during the investigation are validated against the final store read', async () => {
+    const reply = '```json\n' + JSON.stringify({
+      observation: 'a later review confirms the same failed input', conclusion: 'the recorded evidence confirms this local cause',
+      confidence: 'medium', evidenceRefs: ['ev-later'],
+    }) + '\n```'
+    const reviewer = handle(reply)
+    const { ctx, snapshot, recordDiagnosisIn } = fixtureWithBeforePrompt(reviewer)
+    reviewer.agent.whenIdle.mockImplementation(async () => {
+      snapshot.evidence.push({
+        evidenceId: 'ev-later', taskId: 't1', taskRunId: RUN,
+        artifacts: [], verifierResults: [], claims: [], generatedAt: '',
+      } as never)
+    })
+    await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)
+    expect(recordDiagnosisIn.mock.calls[0]![1]).toMatchObject({ evidenceRefs: ['ev-later'] })
+  })
+
+  test.each([
+    ['reviewRefs', ['t1#another-run']],
+    ['reviewRefs', ['other-task#other-run']],
+    ['evidenceRefs', ['other-store-evidence']],
+    ['relatedTaskIds', ['other-store-task']],
+    ['judgements', [{ dimension: 'tool_fit', verdict: 'unknown', evidenceRefs: ['other-store-session'], rationale: 'cannot locate the original trace' }]],
+  ])('a nonexistent %s reference interrupts the attempt and records no diagnosis', async (field, value) => {
+    const reply = '```json\n' + JSON.stringify({
+      observation: 'the evidence is incomplete', conclusion: 'unknown; the original trace is missing',
+      confidence: 'low', [field]: value,
+    }) + '\n```'
+    const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(reply))
+    const result = await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    expect(result).toContain('outside store sg-t-root-1')
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
+  })
+
+  test.each([
+    ['scope', ' '], ['scope', 3], ['reviewRefs', 't1#r1'], ['evidenceRefs', [null]],
+    ['relatedTaskIds', ['']], ['relatedTaskIds', ['t1', 7]],
+  ])('malformed optional %s is refused instead of silently discarded', (field, value) => {
+    const parsed = parseReviewerDiagnosis('```json\n' + JSON.stringify({
+      observation: 'the run failed', conclusion: 'unknown', confidence: 'low', [field]: value,
+    }) + '\n```')
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.refusal).toContain(field)
   })
 
   test('a proposal the reviewer grounds in evidence is recorded, vocabulary or not', async () => {

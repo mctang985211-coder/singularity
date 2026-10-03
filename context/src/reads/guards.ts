@@ -126,12 +126,15 @@ export function resolveProjectionTarget(loaded: LoadedCaller, spec: ProjectionTa
   }
 }
 
-/** Task ownership bounds worker/reviewer reads; dependencies and ancestor context remain reachable. */
+/** Workers read their branch and context; a valid review delegation reads its whole graph, read-only. */
 export function readableTaskIds(loaded: LoadedCaller): ReadonlySet<string> | undefined {
   const { resolution, snapshot } = loaded
   if (resolution.kind !== 'worker' && resolution.kind !== 'reviewer') return undefined
   const own = resolution.task
   if (own === undefined || snapshot === undefined) return new Set()
+  // Placement and the delegator were checked by loadCaller. A missing delegated
+  // task still grants nothing; a valid delegation needs peers to explain shared causes.
+  if (resolution.kind === 'reviewer') return undefined
   const branch = new Set<string>()
   const pending = [own.taskId]
   while (pending.length > 0) {
@@ -174,8 +177,8 @@ export async function sessionMembershipRefusal(
   }
   if (member) {
     const allowed = readableTaskIds(loaded)
-    if (allowed !== undefined && sessionId !== resolution.sessionId &&
-        !loaded.snapshot?.runs.some(run => run.sessionId === sessionId && allowed.has(run.taskId))) {
+    if (allowed !== undefined && (allowed.size === 0 || (sessionId !== resolution.sessionId &&
+        !loaded.snapshot?.runs.some(run => run.sessionId === sessionId && allowed.has(run.taskId))))) {
       return refused('not-found', `session "${sessionId}" is outside the caller's task branch and dependency context; nothing was read`)
     }
     return undefined

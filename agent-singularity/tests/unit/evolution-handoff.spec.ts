@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Diagnosis } from '@dangosys/dsh-singularity-task'
+import type { Diagnosis, ReviewRecord, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import {
   admitReviewAgent,
   readReviewAgentAttempts,
@@ -55,11 +55,11 @@ function diagnosis(overrides: Partial<Diagnosis> = {}): Diagnosis {
   }
 }
 
-interface StoreSnapshot {
+interface StoreSnapshot extends Omit<TaskSnapshot, 'diagnoses' | 'reviews' | 'runs' | 'tasks'> {
   diagnoses: Diagnosis[]
-  reviews: unknown[]
-  runs: unknown[]
-  tasks: unknown[]
+  reviews: ReviewRecord[]
+  runs: TaskRun[]
+  tasks: TaskInstance[]
 }
 
 /**
@@ -79,12 +79,33 @@ function fixture(options: {
 } = {}) {
   const reply = options.reply === null ? undefined : options.reply ?? CLOSE_REPLY
   const spawns: { sessionId: string; name: string; prompt: string; agentPreset: string; grant: unknown }[] = []
+  const taskRecords = (options.tasks ?? [{ taskId: 't-root' }]) as Partial<TaskInstance>[]
+  const rootRuns = taskRecords.some(task => task.taskId === 't-root')
+    ? [{ runId: 'r-1', taskId: 't-root', sessionId: ROOT, status: 'failed' }] : []
+  const runs = [...rootRuns, ...(options.runs ?? [])].map(value => ({
+    capabilitySnapshot: [], artifacts: [], verifierResults: [],
+    executionPhase: (value as Partial<TaskRun>).status === 'running' ? 'active' : 'submitted',
+    status: 'failed', sessionId: 's-worker', startedAt: '2026-10-01T00:00:00.000Z',
+    ...value as Partial<TaskRun>,
+  } as TaskRun))
+  const tasks = taskRecords.map(task => ({
+    definitionRef: { taskType: 'test', version: 1 }, objective: 'Deliver the feature', depth: task.parentTaskId === undefined ? 0 : 1,
+    acceptanceCriteria: [], requestedCapabilities: [], decompositionStatus: 'leaf', status: 'failed',
+    runIds: runs.filter(run => run.taskId === task.taskId).map(run => run.runId),
+    childTaskIds: taskRecords.filter(child => child.parentTaskId === task.taskId).map(child => child.taskId!),
+    ...task,
+  } as TaskInstance))
+  const reviews = (options.reviews ?? [{ taskId: 't-root', runId: 'r-1', outcome: 'failed' }])
+    .map(value => ({ evidenceRefs: ['ev-1'], anomalies: [], criteria: [], ...value as Partial<ReviewRecord> } as ReviewRecord))
   const snapshots = new Map<string, StoreSnapshot>()
   snapshots.set(STORE, {
+    version: 1, id: STORE, edges: [], handoffs: [], obligations: [], capabilities: {},
+    evidence: reviews.filter(review => review.runId !== undefined).map(review => ({
+      evidenceId: 'ev-1', taskId: review.taskId, taskRunId: review.runId!,
+      artifacts: [], verifierResults: [], claims: [], generatedAt: '2026-10-01T00:00:00.000Z',
+    })),
     diagnoses: [],
-    reviews: [...(options.reviews ?? [])],
-    runs: [...(options.runs ?? [])],
-    tasks: [...(options.tasks ?? [])],
+    reviews, runs, tasks,
   })
   const rootAgent = { id: ROOT }
   const waits: (() => Promise<void>)[] = []
@@ -102,7 +123,11 @@ function fixture(options: {
     evolution: options.proposals === undefined ? undefined : { list: async () => options.proposals },
     graphs: { graphForSession: async () => ({ id: 'g1', rootSessionId: ROOT }) },
     task: {
-      snapshotIn: async (storeId: string) => structuredClone(snapshots.get(storeId) ?? { diagnoses: [], reviews: [], runs: [], tasks: [] }),
+      snapshotIn: async (storeId: string) => {
+        const snapshot = snapshots.get(storeId)
+        if (snapshot === undefined) throw new Error(`unknown test store ${storeId}`)
+        return structuredClone(snapshot)
+      },
     },
     agentRuntime: {
       ensureAgentMessageDelivered: vi.fn(async () => ({ status: 'delivered' })),
@@ -729,12 +754,7 @@ describe('the supervisor role in the coordination ledger', () => {
     // Nothing here mounts a `singularityEvolution` service: no hand-off requires
     // the evolution plane any more.
     expect((f.ctx as unknown as { get(name: string): unknown }).get('singularityEvolution')).toBeUndefined()
-    f.snapshots.set(STORE, {
-      diagnoses: [diagnosis(), diagnosis({ diagnosisId: 'd-2', proposals: [] })],
-      reviews: [{ taskId: 't-root', runId: 'r-1', outcome: 'failed' }],
-      runs: [],
-      tasks: [],
-    })
+    f.snapshots.get(STORE)!.diagnoses.push(diagnosis(), diagnosis({ diagnosisId: 'd-2', proposals: [] }))
     expect(await handoffDelegatorOf(f.ctx, STORE)).toMatchObject({ sessionId: ROOT })
     const report = await consumePendingHandoffs(f.ctx, STORE)
     // Both diagnoses are hand-offs at all: the conclusion without a suggestion
@@ -776,8 +796,11 @@ describe('the consumption as a caller renders it', () => {
 describe('durable candidate continuation and parent routing', () => {
   it('leaves four ordinary child diagnoses to their parents and preserves the root allowance', async () => {
     const children = Array.from({ length: 4 }, (_, index) => diagnosis({ diagnosisId: `d-child-${index}`, taskId: `t-child-${index}`, proposals: [] }))
-    const f = fixture({ tasks: [{ taskId: 't-root' }, ...children.map(item => ({ taskId: item.taskId, parentTaskId: 't-root' }))] })
-    f.snapshots.get(STORE)!.diagnoses.push(...children, diagnosis())
+    const f = fixture({
+      tasks: [{ taskId: 't-root' }, ...children.map(item => ({ taskId: item.taskId, parentTaskId: 't-root' }))],
+      reviews: [{ taskId: 't-root', runId: 'r-1', outcome: 'failed' }],
+    })
+    f.snapshots.get(STORE)!.diagnoses.push(...children, diagnosis({ proposals: [] }))
     const report = await consumePendingHandoffs(f.ctx, STORE)
     expect(report.consumptions).toHaveLength(1)
     expect(f.spawns).toHaveLength(1)
@@ -823,10 +846,11 @@ describe('durable candidate continuation and parent routing', () => {
 
   it('delivers an applied child proposal to its recorded delegating parent run', async () => {
     const child = diagnosis({ taskId: 't-child', reviewRefs: ['t-child#r-child'] })
-    const f = fixture({ reply: null, tasks: [{ taskId: 't-child', parentTaskId: 't-parent' }], runs: [
+    const f = fixture({ reply: null, tasks: [{ taskId: 't-parent' }, { taskId: 't-child', parentTaskId: 't-parent' }], runs: [
       { taskId: 't-child', runId: 'r-child', parentRunId: 'r-parent', sessionId: 's-child' },
       { taskId: 't-parent', runId: 'r-parent', sessionId: 's-parent', status: 'running' },
-    ], proposals: [{ proposalId: 'p-1', status: 'applied', sourceRefs: ['diagnosis:d-1'] }] })
+    ], reviews: [{ taskId: 't-child', runId: 'r-child', outcome: 'failed' }],
+    proposals: [{ proposalId: 'p-1', status: 'applied', sourceRefs: ['diagnosis:d-1'] }] })
     await startSupervisorHandoff(f.ctx, { storeId: STORE, diagnosis: child, delegator: { sessionId: ROOT, agent: f.rootAgent as never }, sourceRef: 't-child#r-child', sourceOutcome: 'failed' })
     expect(f.ctx.agentRuntime.ensureAgentMessageDelivered).toHaveBeenCalledWith(expect.objectContaining({ targetSessionId: 's-parent', messageId: 'm-evolution-p-1-r-parent', text: expect.stringContaining('run r-parent') }))
     expect(f.spawns[0]!.prompt).toContain('task_recover does not accept child diagnoses')

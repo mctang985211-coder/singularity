@@ -944,12 +944,13 @@ function resolveProjectionTarget(loaded, spec) {
 		...loaded.snapshot === void 0 ? {} : { snapshot: loaded.snapshot }
 	};
 }
-/** Task ownership bounds worker/reviewer reads; dependencies and ancestor context remain reachable. */
+/** Workers read their branch and context; a valid review delegation reads its whole graph, read-only. */
 function readableTaskIds(loaded) {
 	const { resolution, snapshot } = loaded;
 	if (resolution.kind !== "worker" && resolution.kind !== "reviewer") return void 0;
 	const own = resolution.task;
 	if (own === void 0 || snapshot === void 0) return /* @__PURE__ */ new Set();
+	if (resolution.kind === "reviewer") return void 0;
 	const branch = /* @__PURE__ */ new Set();
 	const pending = [own.taskId];
 	while (pending.length > 0) {
@@ -983,7 +984,7 @@ async function sessionMembershipRefusal(deps, loaded, sessionId) {
 	}
 	if (member) {
 		const allowed = readableTaskIds(loaded);
-		if (allowed !== void 0 && sessionId !== resolution.sessionId && !loaded.snapshot?.runs.some((run) => run.sessionId === sessionId && allowed.has(run.taskId))) return refused("not-found", `session "${sessionId}" is outside the caller's task branch and dependency context; nothing was read`);
+		if (allowed !== void 0 && (allowed.size === 0 || sessionId !== resolution.sessionId && !loaded.snapshot?.runs.some((run) => run.sessionId === sessionId && allowed.has(run.taskId)))) return refused("not-found", `session "${sessionId}" is outside the caller's task branch and dependency context; nothing was read`);
 		return;
 	}
 	return refused("cross-graph", `session "${sessionId}" is not a published member of graph "${resolution.graph.id}"; a session reference reads the caller's own domain, and a session id is not a key to another graph.`);
@@ -1719,25 +1720,44 @@ async function taskStatus(deps, loaded, query) {
 		"# Task status",
 		`graph: ${resolution.graph.id} "${resolution.graph.name}" — store ${resolution.storeId}`,
 		`scope: ${scope} · offset ${offset} · limit ${limit}` + (clamped ? ` (requested offset ${requestedOffset}, limit ${requestedLimit}: both are clamped into their ranges)` : ""),
-		...allowed === void 0 ? [] : ["read boundary: own branch, ancestor context and dependency neighbours"],
+		...resolution.kind === "reviewer" && allowed === void 0 ? ["read boundary: delegated graph, read-only; task and session references cannot cross graphs"] : allowed === void 0 ? [] : ["read boundary: own branch, ancestor context and dependency neighbours"],
 		`entries in scope: ${entries.length}`,
 		...marker === void 0 ? [] : [marker, RECOVERY_NOTE]
 	];
 	if (budget.addAll(header) > 0) return tooLarge("the status header", "Ask for a smaller page (a lower `limit`) or the `related` scope.");
 	const obligations = allowed === void 0 ? await obligationLines(deps.envBuilder, resolution.graph.envId, snapshot) : [];
+	const obligationsReserve = obligations.reduce((total, line) => total + utf8Bytes(line) + 1, 0);
+	const entryLines = (entry) => {
+		const lines = [taskSummaryLine(snapshot, entry.task, entry.roles)];
+		if (scope !== "graph") return lines;
+		const taskId = entry.task.taskId;
+		const incoming = snapshot.edges.filter((edge) => edge.to === taskId && (allowed === void 0 || allowed.has(edge.from))).map((edge) => edge.from);
+		const outgoing = snapshot.edges.filter((edge) => edge.from === taskId && (allowed === void 0 || allowed.has(edge.to))).map((edge) => edge.to);
+		const runs = snapshot.runs.filter((run) => run.taskId === taskId).map((run) => `${run.runId}=session ${run.sessionId}`);
+		const reviews = snapshot.reviews.filter((review) => review.taskId === taskId).map((review) => `${taskId}#${review.runId ?? "no-run"}`);
+		const diagnoses = snapshot.diagnoses.filter((diagnosis) => diagnosis.taskId === taskId).map((diagnosis) => diagnosis.diagnosisId);
+		lines.push(`  parent ${entry.task.parentTaskId ?? "none"}; dependencies [${incoming.join(", ")}]; blocks [${outgoing.join(", ")}]; runs [${runs.join(", ")}]; reviewRefs [${reviews.join(", ")}]; diagnosisRefs [${diagnoses.join(", ")}]`);
+		return lines;
+	};
 	const shown = budgetList(budget, {
 		units: page,
-		lines: (entry) => [taskSummaryLine(snapshot, entry.task, entry.roles)],
-		reserve: obligations.reduce((total, line) => total + utf8Bytes(line) + 1, 0),
+		lines: entryLines,
+		reserve: obligationsReserve,
 		tail: (count) => {
 			const nextOffset$1 = offset + count;
-			return [`- more: ${nextOffset$1 < entries.length ? `yes — continue with offset ${nextOffset$1}` : "no — this is the end of the scope"}`, `- source: one read of store ${resolution.storeId}; pages are observations, not a consistent snapshot across calls` + (count < page.length ? "; this page stopped at the output bound" : "")];
+			return [
+				`- more: ${nextOffset$1 < entries.length ? `yes — continue with offset ${nextOffset$1}` : "no — this is the end of the scope"}`,
+				...scope === "graph" ? ["- exact records: context_read kind:\"task\"/\"run\"/\"diagnosis\" ref:<id>; kind:\"review\" ref:{taskId,runId}; kind:\"session\" ref:<sessionId> (all page in the same read domain)"] : [],
+				`- source: one read of store ${resolution.storeId}; pages are observations, not a consistent snapshot across calls` + (count < page.length ? "; this page stopped at the output bound" : "")
+			];
 		}
 	});
 	if (page.length > 0 && (shown === void 0 || shown.length === 0)) {
 		const first = page[0];
-		const lineBytes = utf8Bytes(taskSummaryLine(snapshot, first.task, first.roles));
-		return tooLarge(`the summary line of task "${first.task.taskId}" (${lineBytes} UTF-8 bytes)`, `Nothing of that entry is shown, and a page of zero entries at offset ${offset} would report the same offset again, so the listing could never move past it. Read that task whole instead with \`context_read\` kind:"task" ref:"${first.task.taskId}" (its record pages in UTF-8 bytes), or ask for the entries *after* it with offset ${offset + 1} — the rest of the scope stays reachable that way.`);
+		const summaryBytes = utf8Bytes(taskSummaryLine(snapshot, first.task, first.roles));
+		const entryBytes = utf8Bytes(entryLines(first).join("\n"));
+		const summaryTooLarge = summaryBytes > CONTEXT_OUTPUT_LIMIT_BYTES;
+		return tooLarge(`the ${summaryTooLarge ? "summary line" : "status entry"} of task "${first.task.taskId}" (${summaryTooLarge ? summaryBytes : entryBytes} UTF-8 bytes)`, `Nothing of that entry is shown, and a page of zero entries at offset ${offset} would report the same offset again, so the listing could never move past it. Read that task whole instead with \`context_read\` kind:"task" ref:"${first.task.taskId}" (its record pages in UTF-8 bytes), or ask for the entries *after* it with offset ${offset + 1} — the rest of the scope stays reachable that way.`);
 	}
 	if (shown === void 0) return tooLarge("the status page footer", "Ask for a smaller page (a lower `limit`).");
 	const nextOffset = offset + shown.length;
@@ -1848,4 +1868,4 @@ var SingularityContextService = class extends Service {
 var src_default = SingularityContextService;
 
 //#endregion
-export { AssemblyRefusalError, CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, OutputBudget, QUESTIONS_CONTEXT_NAME, QUESTIONS_CONTEXT_ORDER, ReviewerBindingError, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SingularityContextService, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, src_default as default, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, questionProjection, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
+export { AssemblyRefusalError, CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, OutputBudget, QUESTIONS_CONTEXT_NAME, QUESTIONS_CONTEXT_ORDER, ReviewerBindingError, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SingularityContextService, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, budgetList, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, src_default as default, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, questionProjection, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };

@@ -92,7 +92,9 @@ export async function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: St
       (clamped
         ? ` (requested offset ${requestedOffset}, limit ${requestedLimit}: both are clamped into their ranges)`
         : ''),
-    ...(allowed === undefined ? [] : ['read boundary: own branch, ancestor context and dependency neighbours']),
+    ...(resolution.kind === 'reviewer' && allowed === undefined
+      ? ['read boundary: delegated graph, read-only; task and session references cannot cross graphs']
+      : allowed === undefined ? [] : ['read boundary: own branch, ancestor context and dependency neighbours']),
     `entries in scope: ${entries.length}`,
     ...(marker === undefined ? [] : [marker, RECOVERY_NOTE]),
   ]
@@ -101,15 +103,28 @@ export async function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: St
 
   const obligations = allowed === undefined ? await obligationLines(deps.envBuilder, resolution.graph.envId, snapshot) : []
   const obligationsReserve = obligations.reduce((total, line) => total + utf8Bytes(line) + 1, 0)
+  const entryLines = (entry: { readonly task: TaskInstance; readonly roles: readonly string[] }): string[] => {
+    const lines = [taskSummaryLine(snapshot, entry.task, entry.roles)]
+    if (scope !== 'graph') return lines
+    const taskId = entry.task.taskId
+    const incoming = snapshot.edges.filter(edge => edge.to === taskId && (allowed === undefined || allowed.has(edge.from))).map(edge => edge.from)
+    const outgoing = snapshot.edges.filter(edge => edge.from === taskId && (allowed === undefined || allowed.has(edge.to))).map(edge => edge.to)
+    const runs = snapshot.runs.filter(run => run.taskId === taskId).map(run => `${run.runId}=session ${run.sessionId}`)
+    const reviews = snapshot.reviews.filter(review => review.taskId === taskId).map(review => `${taskId}#${review.runId ?? 'no-run'}`)
+    const diagnoses = snapshot.diagnoses.filter(diagnosis => diagnosis.taskId === taskId).map(diagnosis => diagnosis.diagnosisId)
+    lines.push(`  parent ${entry.task.parentTaskId ?? 'none'}; dependencies [${incoming.join(', ')}]; blocks [${outgoing.join(', ')}]; runs [${runs.join(', ')}]; reviewRefs [${reviews.join(', ')}]; diagnosisRefs [${diagnoses.join(', ')}]`)
+    return lines
+  }
   const shown = budgetList(budget, {
     units: page,
-    lines: entry => [taskSummaryLine(snapshot, entry.task, entry.roles)],
+    lines: entryLines,
     reserve: obligationsReserve,
     tail: count => {
       const nextOffset = offset + count
       const hasMore = nextOffset < entries.length
       return [
         `- more: ${hasMore ? `yes — continue with offset ${nextOffset}` : 'no — this is the end of the scope'}`,
+        ...(scope === 'graph' ? ['- exact records: context_read kind:"task"/"run"/"diagnosis" ref:<id>; kind:"review" ref:{taskId,runId}; kind:"session" ref:<sessionId> (all page in the same read domain)'] : []),
         `- source: one read of store ${resolution.storeId}; pages are observations, not a consistent snapshot across calls` +
           (count < page.length ? '; this page stopped at the output bound' : ''),
       ]
@@ -119,9 +134,11 @@ export async function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: St
     // The page's own first entry has no room, and a page of zero entries at this
     // offset would report the same offset again — the same page forever.
     const first = page[0] as { readonly task: TaskInstance; readonly roles: readonly string[] }
-    const lineBytes = utf8Bytes(taskSummaryLine(snapshot, first.task, first.roles))
+    const summaryBytes = utf8Bytes(taskSummaryLine(snapshot, first.task, first.roles))
+    const entryBytes = utf8Bytes(entryLines(first).join('\n'))
+    const summaryTooLarge = summaryBytes > CONTEXT_OUTPUT_LIMIT_BYTES
     return tooLarge(
-      `the summary line of task "${first.task.taskId}" (${lineBytes} UTF-8 bytes)`,
+      `the ${summaryTooLarge ? 'summary line' : 'status entry'} of task "${first.task.taskId}" (${summaryTooLarge ? summaryBytes : entryBytes} UTF-8 bytes)`,
       `Nothing of that entry is shown, and a page of zero entries at offset ${offset} would report the same offset again, so the ` +
         `listing could never move past it. Read that task whole instead with \`context_read\` kind:"task" ` +
         `ref:"${first.task.taskId}" (its record pages in UTF-8 bytes), or ask for the entries *after* it with offset ` +

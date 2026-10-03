@@ -635,7 +635,7 @@ describe('task_review_pack', () => {
     }
   }
 
-  it('assembles the nested pack: own reviews in full, parent and children summaries, dependency edges', async () => {
+  it('assembles the exact source in full and navigates parent, children and dependency reviews by reference', async () => {
     const { ctx } = await fixture()
     ctx.task.openStore.mockResolvedValue(nestedSnapshot())
     const tool = defineTaskReviewPackTool(ctx as never)
@@ -643,12 +643,11 @@ describe('task_review_pack', () => {
     const rootPack = (await tool.execute({ taskId: 't-root', runId: 'r-root' }, exec('root-1'))) as string
     expect(rootPack).toContain('review pack for task t-root [verified] depth 0')
     expect(rootPack).toContain('review t-root#r-root [verified]')
-    expect(rootPack).toContain(
-      '- t-child-1 [failed]: review t-child-1#r-child-1: failed — mandatory criteria not satisfied: ac1-1 fail',
-    )
-    expect(rootPack).toContain(
-      '- t-child-2 [blocked]: review t-child-2#no-run: blocked — dependencies [t-child-1] did not verify',
-    )
+    expect(rootPack).toContain('- task t-child-1 [failed] parent t-root; dependencies []; blocks [t-child-2]')
+    expect(rootPack).toContain('review t-child-1#r-child-1 [failed]')
+    expect(rootPack).toContain('- task t-child-2 [blocked] parent t-root; dependencies [t-child-1]')
+    expect(rootPack).toContain('review t-child-2#no-run [blocked; no-run source]')
+    expect(rootPack).not.toContain('    line a')
     expect(rootPack).toContain('diagnoses (0)')
 
     const childPack = (await tool.execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec('root-1'))) as string
@@ -660,7 +659,8 @@ describe('task_review_pack', () => {
     // A record with neither addition renders neither block: absence is not printed as 0.
     expect(childPack).not.toContain('metrics:')
     expect(childPack).not.toContain('  dim ')
-    expect(childPack).toContain('parent t-root [verified]: review t-root#r-root: verified')
+    expect(childPack).toContain('- task t-root [verified] parent none')
+    expect(childPack).toContain('review t-root#r-root [verified]')
     expect(childPack).toContain('dependencies: must verify first []; blocks [t-child-2]')
 
     const blockedPack = (await tool.execute({ taskId: 't-child-2', runId: null }, exec('root-1'))) as string

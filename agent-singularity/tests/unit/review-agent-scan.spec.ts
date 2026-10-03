@@ -222,6 +222,28 @@ afterEach(async () => {
 })
 
 describe('the scan of a store\'s failed reviews', () => {
+  it('keeps replay roots and their failed descendants inside their experiment', async () => {
+    configureSupervision({ autoReview: 'all', coordinationBudget: 8 })
+    const snapshot = baseSnapshot()
+    const seed = snapshot.tasks[0]!
+    snapshot.tasks.push(
+      { ...seed, taskId: 't-replay', status: 'verified', runIds: ['r-replay'], childTaskIds: ['t-replay-child'] },
+      { ...seed, taskId: 't-replay-child', parentTaskId: 't-replay', runIds: ['r-replay-child'] } as never,
+    )
+    snapshot.runs.push(
+      { runId: 'r-replay', taskId: 't-replay', status: 'verified', parentRunId: 'r3' } as never,
+      { runId: 'r-replay-child', taskId: 't-replay-child', status: 'failed', parentRunId: 'r-replay' } as never,
+    )
+    snapshot.reviews = [
+      { ...snapshot.reviews[1]!, taskId: 't-replay', runId: 'r-replay' },
+      failedReview({ taskId: 't-replay-child', runId: 'r-replay-child' }) as never,
+    ]
+    const { ctx, spawn } = fixture(undefined, snapshot)
+    expect((await scanFailedReviewSources(ctx, STORE)).entries).toEqual([])
+    expect(spawn).not.toHaveBeenCalled()
+    expect(await countReviewAgentRuns(STORE)).toBe(0)
+  })
+
   it('routes a blocked source without a run through the batch that admitted it', async () => {
     const snapshot = baseSnapshot()
     snapshot.tasks[0] = { ...snapshot.tasks[0], parentTaskId: 't-parent', runIds: [] } as never
@@ -321,7 +343,10 @@ describe('the scan of a store\'s failed reviews', () => {
     configureSupervision({ autoReview: 'all', coordinationBudget: 1 })
     const snapshot = baseSnapshot()
     snapshot.reviews = snapshot.reviews.filter(review => review.outcome !== 'failed')
-    const { ctx, spawn } = fixture(undefined, snapshot as never)
+    const { ctx, spawn } = fixture(async args => {
+      await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
+      return handle('```json\n{"observation":"the root passed","conclusion":"no improvement needed","confidence":"high"}\n```')
+    }, snapshot as never)
 
     const report = await scanFailedReviewSources(ctx, STORE)
     expect(spawn).toHaveBeenCalledOnce()

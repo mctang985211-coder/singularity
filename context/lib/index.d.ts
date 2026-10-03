@@ -307,6 +307,19 @@ interface OmissionReport {
 }
 /** One bounded list's omission line: the platform's clause plus this read's recovery sentence. */
 declare function omissionLine(report: OmissionReport): string;
+/** One budgeted list: its units, the lines they occupy, and what is owed around them. */
+interface BudgetedList<T> {
+  readonly units: readonly T[];
+  readonly lines: (unit: T) => readonly string[];
+  /** Lines laid out before the units: a heading, a count, a blank separator. */
+  readonly header?: readonly string[];
+  /** Room kept whole for what the caller renders after this list. */
+  readonly reserve?: number;
+  /** The lines owed after the units, given how many were shown: a clause, guidance, a footer. */
+  readonly tail?: (shown: number) => readonly string[];
+}
+/** Lay out whole units until the budget (minus `reserve`) runs out, then the tail, dropping units until it fits. */
+declare function budgetList<T>(budget: OutputBudget, list: BudgetedList<T>): readonly T[] | undefined;
 //#endregion
 //#region src/reads/contract.d.ts
 /** The immutable half of the context one role is assembled with (A2 §D/§9). */
@@ -432,4 +445,4 @@ declare class SingularityContextService extends Service {
   private envBuilder;
 }
 //#endregion
-export { AssemblyRefusalError, type BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, type CallerBase, type CallerGraph, type CallerResolution, type CallerUnbound, type ContextReadQuery, type EnvPathSource, type GraphRecordFacts, type LoadedCaller, type MembershipEdge, type MembershipNode, NAMED_REFUSALS, type NamedRefusal, type OmissionReport, OutputBudget, type ProjectedRead, type ProjectedReadOk, type ProjectedReadRefused, QUESTIONS_CONTEXT_NAME, QUESTIONS_CONTEXT_ORDER, type ReadContinuation, type ReadDeps, type ReadOnlyGraphs, type ReadOnlyTaskRuntime, type ReadOnlyTaskStore, type RelatedEntry, type ReviewReference, ReviewerBindingError, type ReviewerBindingRecord, type ReviewerBindingSource, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, type SessionEventReference, type SessionQueryReads, SingularityContextService, SingularityContextService as default, type StatusQuery, type StatusScope, type Utf8Slice, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, questionProjection, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
+export { AssemblyRefusalError, type BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, type CallerBase, type CallerGraph, type CallerResolution, type CallerUnbound, type ContextReadQuery, type EnvPathSource, type GraphRecordFacts, type LoadedCaller, type MembershipEdge, type MembershipNode, NAMED_REFUSALS, type NamedRefusal, type OmissionReport, OutputBudget, type ProjectedRead, type ProjectedReadOk, type ProjectedReadRefused, QUESTIONS_CONTEXT_NAME, QUESTIONS_CONTEXT_ORDER, type ReadContinuation, type ReadDeps, type ReadOnlyGraphs, type ReadOnlyTaskRuntime, type ReadOnlyTaskStore, type RelatedEntry, type ReviewReference, ReviewerBindingError, type ReviewerBindingRecord, type ReviewerBindingSource, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, type SessionEventReference, type SessionQueryReads, SingularityContextService, SingularityContextService as default, type StatusQuery, type StatusScope, type Utf8Slice, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, budgetList, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, questionProjection, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };

@@ -5,10 +5,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
-import type { Diagnosis, TaskSnapshot } from '@dangosys/dsh-singularity-task'
+import type { Diagnosis, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { warnLine } from '../log.ts'
+import { buildReviewPack } from '../tools/task-review-pack.ts'
 import {
   admitReviewAgent,
+  readReviewAgentAttempts,
   settleReviewAgentAttempt,
   type ReviewAgentAttemptRequest,
   type ReviewAgentSettlementStatus,
@@ -27,6 +29,7 @@ import {
   roundsForDiagnosis,
   responsibleParentRun,
   needsSupervisor,
+  handoffFactsOf,
   supervisorGrant,
   supervisorHandoffDigest,
   supervisorPrompt,
@@ -87,7 +90,7 @@ export async function proposalsForDiagnosis(ctx: Context, diagnosisId: string): 
   return (await ctx.evolution.list()).filter(proposal => proposal.sourceRefs.includes(`diagnosis:${diagnosisId}`))
 }
 
-/** An applied child change wakes its actual parent through the existing durable message delivery. */
+/** An applied shared change wakes each implicated child's actual delegating Run. */
 async function notifyParentOfApplied(
   ctx: Context,
   snapshot: TaskSnapshot,
@@ -95,18 +98,25 @@ async function notifyParentOfApplied(
   proposals: readonly EvolutionProposal[],
   senderSessionId: string,
 ): Promise<void> {
-  const parent = responsibleParentRun(snapshot, diagnosis)
-  if (parent === undefined) return
-  for (const proposal of proposals.filter(item => item.status === 'applied')) {
-    await ctx.agentRuntime.ensureAgentMessageDelivered({
-      messageId: `m-evolution-${proposal.proposalId}-${parent.runId}`,
-      senderSessionId: SessionId(senderSessionId),
-      targetSessionId: SessionId(parent.sessionId),
-      text:
-        `Evolution proposal ${proposal.proposalId} for child diagnosis ${diagnosis.diagnosisId} is applied. ` +
-        `You are its responsible parent task ${parent.taskId}, run ${parent.runId}. Read task_read/task_status and evolution_list ` +
-        'before replanning affected work after your current batch settles. Existing runs retain their old bindings; the original acceptance remains in force.',
-    })
+  const parents = new Map<string, TaskRun>()
+  for (const taskId of new Set([diagnosis.taskId, ...(diagnosis.relatedTaskIds ?? [])])) {
+    const ref = diagnosis.reviewRefs.find(ref => ref.slice(0, ref.lastIndexOf('#')) === taskId)
+    if (taskId !== diagnosis.taskId && ref === undefined) continue
+    const parent = responsibleParentRun(snapshot, { ...diagnosis, taskId, reviewRefs: ref === undefined ? [] : [ref] })
+    if (parent !== undefined) parents.set(parent.runId, parent)
+  }
+  for (const parent of parents.values()) {
+    for (const proposal of proposals.filter(item => item.status === 'applied')) {
+      await ctx.agentRuntime.ensureAgentMessageDelivered({
+        messageId: `m-evolution-${proposal.proposalId}-${parent.runId}`,
+        senderSessionId: SessionId(senderSessionId),
+        targetSessionId: SessionId(parent.sessionId),
+        text:
+          `Evolution proposal ${proposal.proposalId} for child diagnosis ${diagnosis.diagnosisId} is applied. ` +
+          `You are its responsible parent task ${parent.taskId}, run ${parent.runId}. Read task_read/task_status and evolution_list ` +
+          'before replanning affected work after your current batch settles. Existing runs retain their old bindings; the original acceptance remains in force.',
+      })
+    }
   }
 }
 
@@ -117,11 +127,12 @@ export async function startSupervisorHandoff(
 ): Promise<HandoffConsumption> {
   const { storeId, diagnosis, delegator } = input
   const snapshot: TaskSnapshot = await ctx.task.snapshotIn(storeId)
-  if (!needsSupervisor(snapshot, diagnosis)) {
+  const attempts = await readReviewAgentAttempts(storeId)
+  if (!needsSupervisor(snapshot, diagnosis, attempts)) {
     return {
       diagnosisId: diagnosis.diagnosisId,
       result: 'parent',
-      reason: 'ordinary child diagnosis belongs to its delegating parent',
+      reason: 'diagnosis remains with its existing coordinator; no separate supervisor is needed',
     }
   }
   const rounds = input.rounds ?? roundsForDiagnosis(snapshot, diagnosis)
@@ -195,16 +206,20 @@ export async function startSupervisorHandoff(
       signal: input.signal,
       errorLabel: 'evolution hand-off: the delegation of supervisor session',
       failureLabel: 'the supervisor could not be spawned',
-      prompt: () =>
-        supervisorPrompt({
-          diagnosis,
-          sourceOutcome: input.sourceOutcome,
-          sourceRef: input.sourceRef,
-          childSource,
-          parentRun: responsibleParentRun(snapshot, diagnosis),
-          proposals,
-          ...(reviewFacts === undefined ? {} : { reviewFacts }),
-        }),
+      prompt: async () =>
+        [
+          supervisorPrompt({
+            diagnosis,
+            sourceOutcome: input.sourceOutcome,
+            sourceRef: input.sourceRef,
+            childSource,
+            parentRun: responsibleParentRun(snapshot, diagnosis),
+            proposals,
+            ...(reviewFacts === undefined ? {} : { reviewFacts }),
+          }),
+          '--- Task DAG review pack ---',
+          buildReviewPack({ snapshot, source, attempts, handoff: await handoffFactsOf(storeId, attempts) }),
+        ].join('\n'),
     })
     if (spawned.kind === 'spawn-failed') {
       return { diagnosisId: diagnosis.diagnosisId, result: 'failed', reason: spawned.failure }
@@ -237,15 +252,20 @@ async function watchSupervisorCompletion(input: {
   let waiting = true
   let unloaded = false
   let resolveCompleted!: () => void
-  const completed = new Promise<void>(resolve => { resolveCompleted = resolve })
+  const completed = new Promise<void>(resolve => {
+    resolveCompleted = resolve
+  })
   let disposeWait: (() => void | Promise<void>) | undefined
   try {
-    disposeWait = input.ctx.effect(() => async () => {
-      if (!waiting) return
-      unloaded = true
-      cancel()
-      await completed
-    }, 'singularityAgent: supervisor wait')
+    disposeWait = input.ctx.effect(
+      () => async () => {
+        if (!waiting) return
+        unloaded = true
+        cancel()
+        await completed
+      },
+      'singularityAgent: supervisor wait',
+    )
     if (input.signal?.aborted === true) cancel()
     await input.agent.whenIdle()
     if (unloaded || input.signal?.aborted === true) {
@@ -323,7 +343,8 @@ export async function consumePendingHandoffs(
     log?.(`evolution hand-off: store ${storeId} — ${skipped}`)
     return { storeId, consumptions: [], skipped }
   }
-  const pending = snapshot.diagnoses.filter(diagnosis => needsSupervisor(snapshot, diagnosis))
+  const attempts = await readReviewAgentAttempts(storeId)
+  const pending = snapshot.diagnoses.filter(diagnosis => needsSupervisor(snapshot, diagnosis, attempts))
   if (pending.length === 0) return { storeId, consumptions: [] }
   const delegator = await handoffDelegatorOf(ctx, storeId)
   if (delegator === undefined) {

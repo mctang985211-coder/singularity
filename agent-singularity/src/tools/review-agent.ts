@@ -7,12 +7,7 @@ import type {} from '@dangosys/dsh-singularity-task'
 import type { ReviewRecord, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { ReviewAgentAttempt, ReviewAgentPlan, ReviewAgentSource } from '../coordination/ledger.ts'
-import {
-  recordedDiagnosis,
-  renderJudgements,
-  runReviewAgentAttempt,
-  sourceRef,
-} from '../coordination/review-run.ts'
+import { recordedDiagnosis, renderJudgements, runReviewAgentAttempt, sourceRef } from '../coordination/review-run.ts'
 import type { ReviewAttemptOutcome } from '../coordination/review-run.ts'
 import { reviewForSource } from './task-review-pack.ts'
 import { sessionId, text, undeclaredParameters } from '../shared.ts'
@@ -41,7 +36,8 @@ function attemptLabel(attempt: ReviewAgentAttempt): string {
 function renderExistingAttempt(attempt: ReviewAgentAttempt, snapshot: TaskSnapshot): string {
   const diagnosis = recordedDiagnosis(snapshot, attempt.sessionId)
   const status = attempt.settlement?.status ?? (diagnosis === undefined ? 'started' : 'recorded')
-  const head = `task_review_agent: source ${sourceRef(attempt.source)} already has this attempt ` +
+  const head =
+    `task_review_agent: source ${sourceRef(attempt.source)} already has this attempt ` +
     `(${attemptLabel(attempt)}, session ${attempt.sessionId}, ${status}` +
     `${attempt.settlement?.note === undefined ? '' : `: ${attempt.settlement.note}`}) — returning it; no review agent started`
   if (diagnosis === undefined) {
@@ -53,44 +49,65 @@ function renderExistingAttempt(attempt: ReviewAgentAttempt, snapshot: TaskSnapsh
     head,
     `observation: ${diagnosis.observedFailure}`,
     `conclusion: ${diagnosis.localizedCause}`,
+    `scope: ${diagnosis.scope}; related tasks: ${diagnosis.relatedTaskIds?.join(', ') || 'none'}`,
+    `review refs: ${diagnosis.reviewRefs.join(', ')}; evidence refs: ${diagnosis.evidenceRefs.join(', ') || 'none'}`,
   ]
   if (diagnosis.judgements !== undefined && diagnosis.judgements.length > 0) {
     lines.push(`judgements (agent ${attempt.sessionId}):`, ...renderJudgements(diagnosis.judgements))
   }
   lines.push(`diagnosis ${diagnosis.diagnosisId} recorded [${diagnosis.confidence}]`)
   if (diagnosis.proposals.length === 0) lines.push('proposals: none — the conclusion carries no suggestion')
-  else for (const proposal of diagnosis.proposals) lines.push(`proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`)
+  else
+    for (const proposal of diagnosis.proposals)
+      lines.push(`proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`)
   return lines.join('\n')
 }
 
 /** What one refusal says, by name, before any claim or spawn exists. */
-function renderRefusal(plan: Extract<ReviewAgentPlan, { kind: 'refused' }>, source: ReviewAgentSource, storeId: string): string {
+function renderRefusal(
+  plan: Extract<ReviewAgentPlan, { kind: 'refused' }>,
+  source: ReviewAgentSource,
+  storeId: string,
+): string {
   const label = plan.attempt === undefined ? '' : attemptLabel(plan.attempt)
   if (plan.code === 'request-key-conflict') {
-    const named = plan.attempt!.requestKey === null
-      ? `source ${sourceRef(source)} already has a ${label}`
-      : `${label} already names an attempt for source ${sourceRef(source)}`
-    return `task_review_agent: ${named} with a different reason ` +
+    const named =
+      plan.attempt!.requestKey === null
+        ? `source ${sourceRef(source)} already has a ${label}`
+        : `${label} already names an attempt for source ${sourceRef(source)}`
+    return (
+      `task_review_agent: ${named} with a different reason ` +
       `(${JSON.stringify(plan.attempt?.reason ?? null)}); refusing — a key names one review focus and cannot be changed ` +
       `(session ${plan.attempt?.sessionId}); no review agent started`
+    )
   }
   if (plan.code === 'request-key-required') {
     const held = plan.attempts.map(attempt => `${attemptLabel(attempt)} ${attempt.sessionId}`).join(', ')
-    return `task_review_agent: source ${sourceRef(source)} was already reviewed (${held}) and this request names no key; ` +
+    return (
+      `task_review_agent: source ${sourceRef(source)} was already reviewed (${held}) and this request names no key; ` +
       'a new review for a reviewed source needs an explicit requestKey — no review agent started'
+    )
   }
   return `task_review_agent: budget exhausted (${plan.budget.used}/${plan.budget.max}) for store ${storeId} — no review agent started`
 }
 
 /** What one request that arrived while an attempt was open is answered with. */
 function renderOpenAttempt(attempt: ReviewAgentAttempt): string {
-  return `task_review_agent: source ${sourceRef(attempt.source)} already has an attempt in flight ` +
+  return (
+    `task_review_agent: source ${sourceRef(attempt.source)} already has an attempt in flight ` +
     `(${attemptLabel(attempt)}, session ${attempt.sessionId}, run by this process right now) — the new request was not accepted; ` +
     'attempts of one source never run in parallel; no review agent started'
+  )
 }
 
 /** The answer one attempt ended with, rendered for its caller. */
-function renderOutcome(outcome: ReviewAttemptOutcome, source: ReviewAgentSource, storeId: string, snapshot: TaskSnapshot, review: ReviewRecord): string {
+function renderOutcome(
+  outcome: ReviewAttemptOutcome,
+  source: ReviewAgentSource,
+  storeId: string,
+  snapshot: TaskSnapshot,
+  review: ReviewRecord,
+): string {
   switch (outcome.kind) {
     case 'refused':
       return renderRefusal(outcome.plan, source, storeId)
@@ -99,20 +116,26 @@ function renderOutcome(outcome: ReviewAttemptOutcome, source: ReviewAgentSource,
     case 'in-flight':
       return renderOpenAttempt(outcome.attempt)
     case 'spawn-failed':
-      return `task_review_agent: spawn failed: ${outcome.failure} ` +
+      return (
+        `task_review_agent: spawn failed: ${outcome.failure} ` +
         `(source ${sourceRef(source)}, attempt ${outcome.sessionId} recorded interrupted); no review agent started`
+      )
     case 'unrecorded':
       return `task_review_agent: diagnosis produced but not recorded: ${outcome.failure}`
     case 'no-diagnosis':
-      return `task_review_agent: review agent ${outcome.sessionId} ended without a diagnosis — ${outcome.failure} ` +
+      return (
+        `task_review_agent: review agent ${outcome.sessionId} ended without a diagnosis — ${outcome.failure} ` +
         `(source ${sourceRef(source)}, attempt ${outcome.sessionId} recorded interrupted); no diagnosis was recorded ` +
         'and nothing was invented from its silence'
+      )
     case 'recorded':
       return [
         `task_review_agent: review agent ${outcome.sessionId} judged task ${source.taskId} ` +
           `(source ${sourceRef(source)}; the review it read settled ${review.outcome})`,
         `observation: ${outcome.observation}`,
         `conclusion: ${outcome.conclusion}`,
+        `scope: ${outcome.scope}; related tasks: ${outcome.relatedTaskIds.join(', ') || 'none'}`,
+        `review refs: ${outcome.reviewRefs.join(', ')}; evidence refs: ${outcome.evidenceRefs.join(', ') || 'none'}`,
         ...(outcome.judgements.length === 0
           ? []
           : [`judgements (agent ${outcome.sessionId}):`, ...renderJudgements(outcome.judgements)]),
@@ -120,9 +143,9 @@ function renderOutcome(outcome: ReviewAttemptOutcome, source: ReviewAgentSource,
         ...(outcome.proposals.length === 0
           ? ['proposals: none — the conclusion carries no suggestion']
           : [
-            `proposals (${outcome.proposals.length}, suggestions only — none auto-executes):`,
-            ...outcome.proposals.map(item => `- ${item.targetType} ${item.targetId}: ${item.rationale}`),
-          ]),
+              `proposals (${outcome.proposals.length}, suggestions only — none auto-executes):`,
+              ...outcome.proposals.map(item => `- ${item.targetType} ${item.targetId}: ${item.rationale}`),
+            ]),
       ].join('\n')
   }
 }
@@ -160,7 +183,8 @@ export function defineTaskReviewAgentTool(ctx: Context) {
       reason: { type: 'string', description: 'Optional non-empty free text: what this review should focus on' },
       requestKey: {
         type: 'string',
-        description: 'Optional non-empty key for an explicit further review of the same source; omit for the source\'s default attempt',
+        description:
+          "Optional non-empty key for an explicit further review of the same source; omit for the source's default attempt",
       },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },

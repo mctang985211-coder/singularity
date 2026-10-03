@@ -7,8 +7,8 @@ export function defineTaskStatusTool(ctx: Context) {
   return defineTool({
     name: 'task_status',
     description:
-      'The caller\'s project status, paged. Scope `related` (the default) covers the caller\'s own task, its direct children and the tasks directly ' +
-      'adjacent to it through a dependency edge; scope `graph` lists the caller\'s readable domain, sorted by task id. Workers and delegated reviewers remain within their task branch, ancestor context and dependency neighbours; roots and supervisors retain their domain view. Each line carries the task status, ' +
+      "The caller's project status, paged. Scope `related` (the default) covers the caller's own task, its direct children and the tasks directly " +
+      "adjacent to it through a dependency edge; scope `graph` lists the caller's readable domain, sorted by task id. Workers remain within their task branch, ancestor context and dependency neighbours; valid delegated reviewers and supervisors can investigate their whole graph read-only. Each line carries the task status, " +
       'its latest run with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, the terminal review outcome and ' +
       'the diagnosis count. Entries are sorted by task id and paged with `offset` (from 0) and `limit` (default 20, at most 100); the answer states ' +
       'whether more entries follow and the offset to continue with. Pages are observations, not a consistent snapshot across calls. Before any root ' +
@@ -17,21 +17,29 @@ export function defineTaskStatusTool(ctx: Context) {
       scope: {
         type: 'string',
         enum: ['related', 'graph'],
-        description: 'related (default): own task, direct children and dependency neighbours; graph: readable branch for workers/reviewers, whole domain for roots/supervisors',
+        description:
+          'related (default): own task, direct children and dependency neighbours; graph: readable branch for workers, whole graph for roots and valid delegated coordination agents',
       },
       offset: { type: 'number', description: 'Entry offset to start the page at, from 0; default 0' },
-      limit: { type: 'number', description: 'Entries per page; default 20, clamped into 1–100 (a clamp is stated in the answer)' },
+      limit: {
+        type: 'number',
+        description: 'Entries per page; default 20, clamped into 1–100 (a clamp is stated in the answer)',
+      },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
       const caller = sessionId(exec, 'task_status')
       return adaptRead(
         'task_status',
-        await ctx.singularityContext.taskStatus(caller, {
-          ...(args.scope === undefined ? {} : { scope: args.scope as 'related' | 'graph' }),
-          ...(args.offset === undefined ? {} : { offset: args.offset as number }),
-          ...(args.limit === undefined ? {} : { limit: args.limit as number }),
-        }, exec.signal),
+        await ctx.singularityContext.taskStatus(
+          caller,
+          {
+            ...(args.scope === undefined ? {} : { scope: args.scope as 'related' | 'graph' }),
+            ...(args.offset === undefined ? {} : { offset: args.offset as number }),
+            ...(args.limit === undefined ? {} : { limit: args.limit as number }),
+          },
+          exec.signal,
+        ),
       )
     },
   })

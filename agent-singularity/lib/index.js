@@ -7,10 +7,10 @@ import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EvolutionService, applyTar
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, canonicalize, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
-import { CONTEXT_OUTPUT_LIMIT_BYTES, ReviewerBindingError } from "@dangosys/dsh-singularity-context";
+import { CONTEXT_OUTPUT_LIMIT_BYTES, OutputBudget, ReviewerBindingError, budgetList, utf8Bytes } from "@dangosys/dsh-singularity-context";
 import { SessionId } from "@deepseek-ai/dsh-session";
-import { graphAgentOptions } from "@dangosys/dsh-singularity-graphs";
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import { graphAgentOptions } from "@dangosys/dsh-singularity-graphs";
 
 //#region src/services/hitl.ts
 /** The canvas answerer on the native interaction seams: root tools ask through `ctx.userQuestions` / `ctx.approval` (audit events and fail-closed semantics live there), and this service is the answerer. */
@@ -674,9 +674,9 @@ var ProposalReviewService = class extends Service {
 
 //#endregion
 //#region src/coordination/supervision.ts
-/** The shipped defaults: failed reviews are diagnosed, three recovery rounds, two improvement rounds, eight coordination runs per store. */
+/** Diagnose local failures and completed successful goals; three recovery rounds, two improvement rounds, eight coordination runs per store. */
 const DEFAULT_SUPERVISION = {
-	autoReview: "failed",
+	autoReview: "all",
 	maxRecoveryRounds: 3,
 	maxImprovementRounds: 2,
 	coordinationBudget: 8
@@ -1142,6 +1142,7 @@ const COORDINATION_PRESET = "singularity-coordinator";
 const SUPERVISOR_BASELINE = [
 	"task_recover",
 	"task_review_pack",
+	"task_review_agent",
 	"task_read",
 	"task_status",
 	"context_read",
@@ -1317,7 +1318,10 @@ function responsibleParentRun(snapshot, diagnosis) {
 	return parent?.taskId === task.parentTaskId ? parent : void 0;
 }
 /** Ordinary child diagnoses are handled by their parent without another coordination agent. */
-function needsSupervisor(snapshot, diagnosis) {
+function needsSupervisor(snapshot, diagnosis, attempts = []) {
+	const reviewer = attempts.find((attempt) => attempt.sessionId === diagnosis.producedBy?.sessionId);
+	if (reviewer !== void 0 && attempts.some((attempt) => attempt.role === "supervisor" && attempt.sessionId === reviewer.actor)) return false;
+	if (sourceReviewOf(snapshot, diagnosis)?.outcome === "verified" && diagnosis.proposals.length === 0) return false;
 	return snapshot.tasks.find((item) => item.taskId === diagnosis.taskId)?.parentTaskId === void 0 || diagnosis.proposals.length > 0;
 }
 /** The ref a reader uses for one source (`<taskId>#<runId>`, or `<taskId>#no-run`). */
@@ -1343,6 +1347,8 @@ function supervisorPrompt(input) {
 		`The hand-off is diagnosis ${diagnosis.diagnosisId} about task ${diagnosis.taskId} (source ${input.sourceRef}, whose review settled ${input.sourceOutcome}).`,
 		`Its recorded observation: ${diagnosis.observedFailure}`,
 		`Its recorded conclusion: ${diagnosis.localizedCause}`,
+		`Diagnosis scope: ${diagnosis.scope}; related tasks: ${diagnosis.relatedTaskIds?.join(", ") || "none"}.`,
+		`Review sources: ${diagnosis.reviewRefs.join(", ")}; evidence: ${diagnosis.evidenceRefs.join(", ") || "none"}.`,
 		...diagnosis.proposals.map((proposal) => `Suggested ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`),
 		input.parentRun === void 0 ? input.childSource ? "The source is a child; its responsible parent run could not be read. Do not open a root recovery for it." : "The source is the root goal." : `Responsible parent: task ${input.parentRun.taskId}, run ${input.parentRun.runId}, session ${input.parentRun.sessionId} [${input.parentRun.status}]. The parent replans this child; task_recover does not accept child diagnoses.`,
 		"--- prior round review facts (read-only) ---",
@@ -1351,13 +1357,257 @@ function supervisorPrompt(input) {
 		"Existing proposals for this diagnosis:",
 		...input.proposals?.length ? input.proposals.map((proposal) => `${proposal.proposalId} [${proposal.status}]${proposal.decision === void 0 ? "" : ` ${proposal.decision}`}`) : ["none"],
 		"",
-		"Read task_review_pack, task_read/task_status and the original evidence through context_read. Do not create a duplicate proposal.",
+		"Read task_review_pack, task_status scope:\"graph\", related diagnoses and original evidence through context_read. Start with the whole Task DAG, then inspect the relevant contracts, exact Run reviews, dependency edges and frozen Skill bindings. Do not create a duplicate proposal.",
+		"When a causal question needs deeper independent investigation, call task_review_agent for the relevant exact taskId/runId with a concrete reason and a stable requestKey. Its read-only diagnosis returns to you; it does not open another supervisor. Reuse recorded diagnoses before asking again. Reconcile supporting and conflicting evidence, then make one evidence-based decision; a discussion or vote is not an experiment.",
 		`For an established shared gap, cite diagnosis:${diagnosis.diagnosisId} in evolution_propose.sourceRefs. Use only supported candidate targets and only tools actually granted: evolution_candidate → evolution_prepare → evolution_replay → evolution_gate. Missing artifacts alone do not establish a shared gap.`,
 		...input.sourceOutcome === "verified" ? [`For this successful source, evolution_replay must declare objective: "tool-call-reduction", include task ${diagnosis.taskId} in taskIds, and name independent verified holdoutTaskIds. The experiment requires unchanged acceptance and lower complete Run subtree tool-call counts; unknown counters prove no improvement.`] : [],
 		"A gated proposal continues with evolution_decide to request the human decision. A PROMOTE-decided proposal continues with evolution_apply to request approval for its exact production writes. If approval is denied or unavailable, report proposalId and its current status and stop. A rejected or research-only decision opens no recovery for that change.",
 		input.childSource ? "After a child shared change is applied, finish with the proposal id and evidence. The runtime notifies the responsible parent to read its state and replan. Do not call task_recover for the child." : `Apply any necessary shared changes first. Then, if another round is justified, call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "recovery:${diagnosis.diagnosisId}"${input.sourceOutcome === "verified" ? ", mode: \"improve\"" : ""} }. The original acceptance judges it; repeating the key returns the same attempt. A cap refusal ends iteration.`,
 		"If no justified action remains, explain why and end with one fenced json block {\"outcome\":\"closed\",\"reason\":\"...\"}. Closing changes no task state. Unsupported candidate targets require a concrete explanation rather than invented tool support."
 	].join("\n");
+}
+
+//#endregion
+//#region src/tools/task-review-pack.ts
+/** The judgement line: the six dimensions whose conclusion the fact table does not carry, named so a reader cannot mistake the facts for a verdict. */
+function renderJudgementDimensions() {
+	return `needs judgement (agent): ${JUDGED_DIMENSIONS.join(", ")} (not mechanically observable from the fact table; a review agent may conclude them)`;
+}
+/** The review record of one exact source, or nothing when the store holds none. */
+function reviewForSource(snapshot, source) {
+	return snapshot.reviews.find((review) => review.taskId === source.taskId && (review.runId ?? null) === source.runId);
+}
+/** The ledger state of one source: every **review** attempt the store holds for it, in the order they were claimed — the default attempt (`null` key) and each explicit one — with how each ended. */
+function renderAttempts(attempts, source) {
+	const mine = attempts.filter((attempt) => attempt.role === "reviewer" && attempt.source.taskId === source.taskId && attempt.source.runId === source.runId);
+	if (mine.length === 0) return ["review attempts (0): none — no review agent has been started for this source"];
+	return [`review attempts (${mine.length}):`, ...mine.map((attempt) => {
+		const label = attempt.requestKey === null ? "default attempt" : `requestKey "${attempt.requestKey}"`;
+		const status = attempt.settlement?.status ?? "in-flight";
+		const note = attempt.settlement?.note === void 0 ? "" : ` — ${attempt.settlement.note}`;
+		const reason = attempt.reason === null ? "" : ` reason ${JSON.stringify(attempt.reason)}`;
+		return `- ${label} ${attempt.sessionId} [${status}]${reason}${note}`;
+	})];
+}
+/** The effort line: one clause per counter that exists, and nothing for the ones that do not — an absent field means "not observed" (see `ReviewMetrics`), so printing 0 for it would invent a measurement. */
+function renderMetrics(metrics) {
+	const parts = [];
+	if (metrics.tokens !== void 0) parts.push(`tokens in ${metrics.tokens.uncachedInputTokens}/out ${metrics.tokens.outputTokens}/cache ${metrics.tokens.cacheReadTokens}+${metrics.tokens.cacheWriteTokens} (session-cumulative)`);
+	if (metrics.toolCalls !== void 0) parts.push(`toolCalls ${metrics.toolCalls.calls} (${metrics.toolCalls.failures} failed)`);
+	if (metrics.humanInterventions !== void 0) parts.push(`humanInterventions ${metrics.humanInterventions} (session-scoped)`);
+	if (metrics.retries !== void 0) parts.push(`retries ${metrics.retries} (runs beyond the first; a recovery attempt is one)`);
+	if (metrics.evidenceLogs !== void 0) parts.push(`evidenceLogs ${metrics.evidenceLogs}`);
+	return parts.join(" — ");
+}
+/** One line per dimension that the record actually carries: the observed facts, copied out, never rated and never narrated. */
+function renderDimensions(dimensions) {
+	const lines = [];
+	const outcome = dimensions.outcomeCorrectness;
+	if (outcome !== void 0) lines.push(`  dim outcome correctness: ${outcome.outcome}, criteria ${outcome.criteriaCount}, unmet [${outcome.unmetCriterionIds.join(", ")}]`);
+	const specification = dimensions.taskSpecification;
+	if (specification !== void 0) lines.push(`  dim task specification: objective ${specification.objectivePresent ? "present" : "empty"}, criteria ${specification.criteriaCount}, with command ${specification.criteriaWithCommand}`);
+	const acceptance = dimensions.acceptance;
+	if (acceptance !== void 0) {
+		const criteria = acceptance.criteria.map((item) => `${item.criterionId} ${item.mode}${item.hasCommand ? " +command" : ""}${item.mandatory ? "" : " optional"}`);
+		lines.push(`  dim acceptance: ${criteria.join("; ")}`);
+	}
+	const decomposition = dimensions.decomposition;
+	if (decomposition !== void 0) lines.push(`  dim decomposition: depth ${decomposition.depth}, ${decomposition.decompositionStatus}, children ${decomposition.childCount}, edges in/out ${decomposition.incomingEdges}/${decomposition.outgoingEdges}`);
+	const coverage = dimensions.capabilityCoverage;
+	if (coverage !== void 0) lines.push(`  dim capability coverage: ${coverage.closure}, granted [${coverage.granted.join(", ")}], missing [${coverage.missing.join(", ")}]`);
+	const skill = dimensions.skillFit;
+	if (skill !== void 0) {
+		const loaded = (skill.loaded === void 0 ? "" : `, loaded [${skill.loaded.join(", ")}]`) + (skill.loadedOutsideGrant === void 0 ? "" : `, outside grant [${skill.loadedOutsideGrant.join(", ")}]`);
+		lines.push(`  dim skill fit: granted [${skill.granted.join(", ")}]${loaded}`);
+	}
+	const tools = dimensions.toolFit;
+	if (tools !== void 0) {
+		const called = (tools.called === void 0 ? "" : `, called [${tools.called.map((item) => `${item.name} x${item.count}`).join(", ")}]`) + (tools.calledOutsideGrant === void 0 ? "" : `, outside grant [${tools.calledOutsideGrant.join(", ")}]`);
+		lines.push(`  dim tool fit: granted [${tools.granted.join(", ")}]${called}`);
+	}
+	const context = dimensions.contextEfficiency;
+	if (context !== void 0) {
+		const tokens = context.tokens === void 0 ? "" : ` tokens in/out ${context.tokens.uncachedInputTokens}/${context.tokens.outputTokens}`;
+		const compactions = context.compactions === void 0 ? "" : ` compactions ${context.compactions}`;
+		const cache = context.tokens === void 0 ? "" : ` cache read/write ${context.tokens.cacheReadTokens}/${context.tokens.cacheWriteTokens}`;
+		lines.push(`  dim context efficiency:${tokens}${compactions}${cache}`);
+	}
+	return lines;
+}
+/** One review line, with the session id a reader drills into. Printing it here is what lets a diagnosis point `session_trace` at the session the review came from without a second lookup (§2.7.5). */
+function renderReview(review) {
+	const duration = review.durationMs === void 0 ? "" : ` duration ${review.durationMs}ms`;
+	const session = review.sessionId === void 0 ? "" : ` session ${review.sessionId}`;
+	const lines = [`- review ${reviewRef(review)} [${review.outcome}]${duration} evidence: [${review.evidenceRefs.join(", ")}]${session}`];
+	if (review.relatedTaskIds !== void 0) lines.push(`  relatedTaskIds: [${review.relatedTaskIds.join(", ")}]`);
+	if (review.localizedCause !== void 0) lines.push(`  cause: ${review.localizedCause}`);
+	for (const anomaly of review.anomalies) lines.push(`  anomaly: ${anomaly}`);
+	for (const criterion of review.criteria ?? []) {
+		const judge = criterion.verifierId === void 0 ? "" : criterion.verifierVersion === void 0 ? ` [${criterion.verifierId}]` : ` [${criterion.verifierId}@${criterion.verifierVersion}]`;
+		const command = criterion.command === void 0 ? "" : ` — $ ${criterion.command}`;
+		const exit = criterion.exitCode === void 0 ? "" : ` exit ${criterion.exitCode}`;
+		const log = criterion.logRef === void 0 ? "" : ` log ${criterion.logRef}`;
+		const unknown = criterion.unknownKind === void 0 ? "" : ` unknownKind ${criterion.unknownKind}`;
+		lines.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${judge}${exit}${command}${log}${unknown}`);
+	}
+	for (const blocker of review.blockedBy ?? []) lines.push(`  blockedBy ${blocker.taskId} [${blocker.outcome}]`);
+	if (review.metrics !== void 0) {
+		const metrics = renderMetrics(review.metrics);
+		if (metrics.length > 0) lines.push(`  metrics: ${metrics}`);
+	}
+	if (review.dimensions !== void 0) lines.push(...renderDimensions(review.dimensions));
+	if (review.logTail !== void 0) lines.push("  logTail:", ...review.logTail.split("\n").map((line) => `    ${line}`));
+	return lines;
+}
+/** How far one diagnosis's hand-off has gone (A5 §3, plan F.4): what the ledger, the allowance and the source's rounds answer for it. */
+function handoffMark(diagnosis, handoff, snapshot) {
+	if (!needsSupervisor(snapshot, diagnosis, handoff.attempts)) return "coordinator-owned — delivered to the existing coordinator; no shared improvement requires a supervisor";
+	return handoffStateLine({
+		diagnosis,
+		attempts: handoff.attempts,
+		budget: handoff.budget,
+		rounds: roundsForDiagnosis(snapshot, diagnosis)
+	});
+}
+function renderDiagnosis(diagnosis, handoff, snapshot) {
+	const producer = diagnosis.producedBy === void 0 ? "" : diagnosis.producedBy.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? ` [agent ${diagnosis.producedBy.sessionId}]` : ` [${diagnosis.producedBy.kind}]`;
+	const lines = [`- ${diagnosis.diagnosisId} [${diagnosis.confidence}] ${diagnosis.localizedCause}${producer}`];
+	lines.push(`  observation: ${diagnosis.observedFailure}`, `  scope: ${diagnosis.scope}; task ${diagnosis.taskId}`, `  reviewRefs: [${diagnosis.reviewRefs.join(", ")}]; evidenceRefs: [${diagnosis.evidenceRefs.join(", ")}]; relatedTaskIds: [${(diagnosis.relatedTaskIds ?? []).join(", ")}]`);
+	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) {
+		const header = diagnosis.producedBy?.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? `judgements (agent ${diagnosis.producedBy.sessionId})` : "judgements";
+		lines.push(`  ${header}:`);
+		for (const judgement of diagnosis.judgements) lines.push(`    ${judgement.dimension}: ${judgement.verdict} — ${judgement.rationale} refs [${judgement.evidenceRefs.join(", ")}]`);
+	}
+	for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
+	lines.push(`  handoff: ${handoffMark(diagnosis, handoff, snapshot)}`);
+	return lines;
+}
+/** What the exact source run was bound to and loaded (S1-C item 4). */
+function renderBindings(snapshot, source) {
+	const lines = [];
+	for (const run of snapshot.runs.filter((item) => item.taskId === source.taskId && item.runId === source.runId)) {
+		const binding = run.providerBinding;
+		if (binding === void 0) continue;
+		const skills = binding.skills.length === 0 ? "no provider skill" : binding.skills.map((skill) => `${skill.name} [${skill.role}] content ${skill.contentDigest.slice(0, 12)}${skill.contractDigest === null ? "" : ` contract ${skill.contractDigest.slice(0, 12)}`}`).join("; ");
+		const servers = binding.mcpServers.length === 0 ? "" : `; mcp ${binding.mcpServers.map((server) => server.serverName).join(", ")}`;
+		const snapshotRoot = binding.snapshotRoot === void 0 ? "" : `; snapshot ${binding.snapshotRoot}`;
+		lines.push(`- run ${run.runId} [${run.status}] bound registry ${binding.registryRevision.slice(0, 12)}: ${skills}${servers}${snapshotRoot}`);
+	}
+	return lines;
+}
+/** One exact source in full, with bounded same-graph evidence navigation through the existing read tools. */
+function buildReviewPack(input) {
+	const { snapshot, source, attempts, handoff } = input;
+	const { taskId } = source;
+	const task = snapshot.tasks.find((item) => item.taskId === taskId);
+	if (task === void 0) throw new Error(`task_review_pack: unknown task "${taskId}"`);
+	const review = reviewForSource(snapshot, source);
+	const reviews = snapshot.reviews.filter((item) => item.taskId === task.taskId);
+	const incoming = snapshot.edges.filter((edge) => edge.to === task.taskId).map((edge) => edge.from);
+	const outgoing = snapshot.edges.filter((edge) => edge.from === task.taskId).map((edge) => edge.to);
+	const diagnoses = snapshot.diagnoses.filter((item) => item.taskId === task.taskId || item.reviewRefs.includes(reviewRef(source)) || item.relatedTaskIds?.includes(task.taskId));
+	const sourceRun = source.runId === null ? void 0 : snapshot.runs.find((run) => run.runId === source.runId && run.taskId === taskId);
+	const latestRunId = task.runIds.at(-1);
+	const lines = [
+		`review pack for task ${task.taskId} [${task.status}] depth ${task.depth}`,
+		`source: review ${reviewRef(source)}${review === void 0 ? " (not on the record)" : ` [${review.outcome}]`}`,
+		`source run: ${sourceRun === void 0 ? "none" : `${sourceRun.runId} [${sourceRun.status}] session ${sourceRun.sessionId ?? review?.sessionId ?? "unknown"}; ${sourceRun.runId === latestRunId ? "latest run" : "historical run"}; preset ${sourceRun.agentPreset ?? "unknown"}`}; latest run of task: ${latestRunId ?? "none"}`,
+		`objective: ${task.objective}`,
+		`dependencies: must verify first [${incoming.join(", ")}]; blocks [${outgoing.join(", ")}]`,
+		...renderAttempts(attempts, source),
+		renderJudgementDimensions(),
+		`reviews (${reviews.length}): exact source in full; other versions in graph navigation`,
+		...review === void 0 ? [] : renderReview(review),
+		...renderBindings(snapshot, source)
+	];
+	const navigation = ["Navigation: task_status scope:\"graph\" pages tasks; context_read kind:\"task\"/\"run\"/\"evidence\"/\"diagnosis\" ref:<id> reads exact records; kind:\"review\" ref:{taskId,runId} reads one exact review; kind:\"session\" ref:<sessionId> reads session events in pages.", "Counters are recorded observations, sometimes session-cumulative; missing fields are unobserved. Complete cost: unknown — worker counters alone do not account for reviewer, supervisor and replay spend. No graph total is inferred."];
+	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
+	const footerReserve = 512;
+	const navigationBytes = navigation.reduce((total, line) => total + utf8Bytes(line) + 1, 0);
+	if (utf8Bytes(lines.join("\n")) + navigationBytes + footerReserve > budget.maxBytes) return `task_review_pack: exact source ${reviewRef(source)} exceeds the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound; its full record was not shortened. Read it in pages with context_read kind:"review" ref:${JSON.stringify({
+		taskId,
+		runId: source.runId
+	})}${source.runId === null ? "" : `, and kind:"run" ref:${JSON.stringify(source.runId)}`}; task_status scope:"graph" navigates this graph.`;
+	budget.addAll(lines);
+	budget.addAll(navigation);
+	const tasks = [...snapshot.tasks].sort((left, right) => left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0);
+	if (budgetList(budget, {
+		header: [`graph DAG navigation (${tasks.length} tasks; current task state, exact run history; short digests, full identities through context_read):`],
+		units: tasks.slice(0, 20),
+		reserve: footerReserve,
+		lines: (entry) => {
+			const incoming$1 = snapshot.edges.filter((edge) => edge.to === entry.taskId).map((edge) => edge.from);
+			const outgoing$1 = snapshot.edges.filter((edge) => edge.from === entry.taskId).map((edge) => edge.to);
+			const template = entry.templateRef === void 0 ? "unknown" : `${entry.templateRef.id}@${entry.templateRef.version} digest ${entry.templateRef.digest.slice(0, 12)}`;
+			const definition = entry.definitionRef === void 0 ? "unknown" : `${entry.definitionRef.taskType}@${entry.definitionRef.version}`;
+			const diagnosisRefs = snapshot.diagnoses.filter((item) => item.taskId === entry.taskId || item.relatedTaskIds?.includes(entry.taskId)).map((item) => item.diagnosisId);
+			const lines$1 = [`- task ${entry.taskId} [${entry.status}] parent ${entry.parentTaskId ?? "none"}; dependencies [${incoming$1.join(", ")}]; blocks [${outgoing$1.join(", ")}]; definition ${definition}; template ${template}; diagnoses [${diagnosisRefs.join(", ")}]`];
+			for (const run of snapshot.runs.filter((item) => item.taskId === entry.taskId)) {
+				const review$1 = reviewForSource(snapshot, {
+					taskId: entry.taskId,
+					runId: run.runId
+				});
+				const exact = run.taskId === source.taskId && run.runId === source.runId;
+				const latest = run.runId === entry.runIds.at(-1);
+				const version = `${exact ? "exact source, " : ""}${latest ? "latest run" : "historical run"}`;
+				const binding = run.providerBinding;
+				const skills = binding === void 0 ? "unknown" : binding.skills.map((skill) => `${skill.name}[${skill.role}] content ${skill.contentDigest.slice(0, 12)} contract ${skill.contractDigest?.slice(0, 12) ?? "unknown"}`).join("; ") || "none";
+				const frozen = latest || exact ? `; preset ${run.agentPreset ?? "unknown"}; registry ${binding?.registryRevision.slice(0, 12) ?? "unknown"}; frozen skills [${skills}]` : "";
+				const metrics = review$1?.metrics === void 0 ? "" : renderMetrics(review$1.metrics);
+				lines$1.push(`  run ${run.runId} [${run.status}; ${version}] session ${run.sessionId ?? review$1?.sessionId ?? "unknown"}; review ${review$1 === void 0 ? "none" : `${reviewRef(review$1)} [${review$1.outcome}]`}${frozen}; observed counters ${metrics || "unknown"}`);
+			}
+			for (const review$1 of snapshot.reviews.filter((item) => item.taskId === entry.taskId && item.runId === void 0)) lines$1.push(`  review ${reviewRef(review$1)} [${review$1.outcome}; no-run source]`);
+			return lines$1;
+		},
+		tail: (count) => [`navigation shown: ${count}/${tasks.length} tasks. Continue task_status scope:"graph" offset:${count}, then context_read for exact task, run, review and diagnosis refs; pages are separate observations.`]
+	}) === void 0) budget.add("Graph navigation did not fit; use task_status scope:\"graph\" offset:0 and context_read for exact records.");
+	if (budgetList(budget, {
+		header: [`diagnoses (${diagnoses.length}):`],
+		units: diagnoses,
+		lines: (diagnosis) => renderDiagnosis(diagnosis, handoff, snapshot),
+		tail: (count) => [`diagnoses shown: ${count}/${diagnoses.length}; exact records through context_read kind:"diagnosis" ref:<diagnosisId>, discovered through task_status scope:"graph".`]
+	}) === void 0) budget.add("Diagnoses did not fit; discover diagnosisRefs through task_status scope:\"graph\", then context_read kind:\"diagnosis\".");
+	return budget.text();
+}
+function defineTaskReviewPackTool(ctx) {
+	return defineTool({
+		name: "task_review_pack",
+		description: "Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started). The pack names the task itself, the exact source review in full (criteria, log tail, blockers, session), historical review references, the review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the fact table does not carry, the dependency edges touching it, and its diagnoses with any agent judgements — every diagnosis marked with its hand-off state (the supervisor it was delegated to, the outcome that settled it, or the named reason nothing was opened: no live root session, the source's round cap, or the allowance spent). It reports the facts only: whether a review agent runs is decided elsewhere (a terminal review is accepted on its own under the deployment's autoReview mode; an explicit call names its source). It adds bounded same-graph DAG navigation with exact run/session ids, template and frozen provider digests, and observed counters. Continue with task_status scope:\"graph\" and context_read; no ancestry or sibling log replay. Feed this to task_diagnose, or to task_review_agent when a judgement is needed.",
+		parameters: {
+			taskId: {
+				type: "string",
+				required: true,
+				description: "Task to assemble the pack for"
+			},
+			runId: {
+				oneOf: [{ type: "string" }, { type: "null" }],
+				required: true,
+				description: "The Run whose review the pack is for, exactly as its review record names it; null for a review with no run"
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text(v)
+		},
+		execute: async (args, exec) => {
+			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(sessionId(exec, "task_review_pack"))).rootSessionId);
+			const source = {
+				taskId: args.taskId,
+				runId: args.runId
+			};
+			const snapshot = await ctx.task.openStore(storeId);
+			if (!snapshot.tasks.some((task) => task.taskId === args.taskId)) throw new Error(`task_review_pack: unknown task "${args.taskId}" in store ${storeId}`);
+			if (args.runId !== null && !snapshot.runs.some((run) => run.runId === args.runId && run.taskId === args.taskId)) return `task_review_pack: run "${args.runId}" is not a run of task "${args.taskId}"; nothing to pack`;
+			if (reviewForSource(snapshot, source) === void 0) return `task_review_pack: no review record for source ${reviewRef(source)} in store ${storeId}; nothing to pack`;
+			const attempts = await readReviewAgentAttempts(storeId);
+			return buildReviewPack({
+				snapshot,
+				source,
+				attempts,
+				handoff: await handoffFactsOf(storeId, attempts)
+			});
+		}
+	});
 }
 
 //#endregion
@@ -1438,11 +1688,20 @@ async function proposalsForDiagnosis(ctx, diagnosisId) {
 	if (ctx.evolution === void 0) return [];
 	return (await ctx.evolution.list()).filter((proposal) => proposal.sourceRefs.includes(`diagnosis:${diagnosisId}`));
 }
-/** An applied child change wakes its actual parent through the existing durable message delivery. */
+/** An applied shared change wakes each implicated child's actual delegating Run. */
 async function notifyParentOfApplied(ctx, snapshot, diagnosis, proposals, senderSessionId) {
-	const parent = responsibleParentRun(snapshot, diagnosis);
-	if (parent === void 0) return;
-	for (const proposal of proposals.filter((item) => item.status === "applied")) await ctx.agentRuntime.ensureAgentMessageDelivered({
+	const parents = /* @__PURE__ */ new Map();
+	for (const taskId of new Set([diagnosis.taskId, ...diagnosis.relatedTaskIds ?? []])) {
+		const ref = diagnosis.reviewRefs.find((ref$1) => ref$1.slice(0, ref$1.lastIndexOf("#")) === taskId);
+		if (taskId !== diagnosis.taskId && ref === void 0) continue;
+		const parent = responsibleParentRun(snapshot, {
+			...diagnosis,
+			taskId,
+			reviewRefs: ref === void 0 ? [] : [ref]
+		});
+		if (parent !== void 0) parents.set(parent.runId, parent);
+	}
+	for (const parent of parents.values()) for (const proposal of proposals.filter((item) => item.status === "applied")) await ctx.agentRuntime.ensureAgentMessageDelivered({
 		messageId: `m-evolution-${proposal.proposalId}-${parent.runId}`,
 		senderSessionId: SessionId(senderSessionId),
 		targetSessionId: SessionId(parent.sessionId),
@@ -1453,10 +1712,11 @@ async function notifyParentOfApplied(ctx, snapshot, diagnosis, proposals, sender
 async function startSupervisorHandoff(ctx, input) {
 	const { storeId, diagnosis, delegator } = input;
 	const snapshot = await ctx.task.snapshotIn(storeId);
-	if (!needsSupervisor(snapshot, diagnosis)) return {
+	const attempts = await readReviewAgentAttempts(storeId);
+	if (!needsSupervisor(snapshot, diagnosis, attempts)) return {
 		diagnosisId: diagnosis.diagnosisId,
 		result: "parent",
-		reason: "ordinary child diagnosis belongs to its delegating parent"
+		reason: "diagnosis remains with its existing coordinator; no separate supervisor is needed"
 	};
 	const rounds = input.rounds ?? roundsForDiagnosis(snapshot, diagnosis);
 	const reviewFacts = input.reviewFacts ?? reviewFactsFor(snapshot, diagnosis);
@@ -1524,15 +1784,24 @@ async function startSupervisorHandoff(ctx, input) {
 			signal: input.signal,
 			errorLabel: "evolution hand-off: the delegation of supervisor session",
 			failureLabel: "the supervisor could not be spawned",
-			prompt: () => supervisorPrompt({
-				diagnosis,
-				sourceOutcome: input.sourceOutcome,
-				sourceRef: input.sourceRef,
-				childSource,
-				parentRun: responsibleParentRun(snapshot, diagnosis),
-				proposals,
-				...reviewFacts === void 0 ? {} : { reviewFacts }
-			})
+			prompt: async () => [
+				supervisorPrompt({
+					diagnosis,
+					sourceOutcome: input.sourceOutcome,
+					sourceRef: input.sourceRef,
+					childSource,
+					parentRun: responsibleParentRun(snapshot, diagnosis),
+					proposals,
+					...reviewFacts === void 0 ? {} : { reviewFacts }
+				}),
+				"--- Task DAG review pack ---",
+				buildReviewPack({
+					snapshot,
+					source,
+					attempts,
+					handoff: await handoffFactsOf(storeId, attempts)
+				})
+			].join("\n")
 		});
 		if (spawned.kind === "spawn-failed") return {
 			diagnosisId: diagnosis.diagnosisId,
@@ -1629,7 +1898,8 @@ async function consumePendingHandoffs(ctx, storeId, options = {}) {
 			skipped
 		};
 	}
-	const pending = snapshot.diagnoses.filter((diagnosis) => needsSupervisor(snapshot, diagnosis));
+	const attempts = await readReviewAgentAttempts(storeId);
+	const pending = snapshot.diagnoses.filter((diagnosis) => needsSupervisor(snapshot, diagnosis, attempts));
 	if (pending.length === 0) return {
 		storeId,
 		consumptions: []
@@ -1742,215 +2012,6 @@ function installSupervisorHandoffTrigger(ctx, options = {}) {
 }
 
 //#endregion
-//#region src/tools/task-review-pack.ts
-/** The judgement line: the six dimensions whose conclusion the fact table does not carry, named so a reader cannot mistake the facts for a verdict. */
-function renderJudgementDimensions() {
-	return `needs judgement (agent): ${JUDGED_DIMENSIONS.join(", ")} (not mechanically observable from the fact table; a review agent may conclude them)`;
-}
-/** The review record of one exact source, or nothing when the store holds none. */
-function reviewForSource(snapshot, source) {
-	return snapshot.reviews.find((review) => review.taskId === source.taskId && (review.runId ?? null) === source.runId);
-}
-/** The task's most recent review, or nothing when it never settled one (a summary of a neighbour, never a source). */
-function latestReview$1(snapshot, taskId) {
-	return [...snapshot.reviews].reverse().find((item) => item.taskId === taskId);
-}
-/** The ledger state of one source: every **review** attempt the store holds for it, in the order they were claimed — the default attempt (`null` key) and each explicit one — with how each ended. */
-function renderAttempts(attempts, source) {
-	const mine = attempts.filter((attempt) => attempt.role === "reviewer" && attempt.source.taskId === source.taskId && attempt.source.runId === source.runId);
-	if (mine.length === 0) return ["review attempts (0): none — no review agent has been started for this source"];
-	return [`review attempts (${mine.length}):`, ...mine.map((attempt) => {
-		const label = attempt.requestKey === null ? "default attempt" : `requestKey "${attempt.requestKey}"`;
-		const status = attempt.settlement?.status ?? "in-flight";
-		const note = attempt.settlement?.note === void 0 ? "" : ` — ${attempt.settlement.note}`;
-		const reason = attempt.reason === null ? "" : ` reason ${JSON.stringify(attempt.reason)}`;
-		return `- ${label} ${attempt.sessionId} [${status}]${reason}${note}`;
-	})];
-}
-function reviewSummary(snapshot, taskId) {
-	const review = latestReview$1(snapshot, taskId);
-	if (review === void 0) return "no review";
-	const detail = review.localizedCause ?? review.anomalies[0];
-	return `review ${reviewRef(review)}: ${review.outcome}${detail === void 0 ? "" : ` — ${detail}`}`;
-}
-/** The effort line: one clause per counter that exists, and nothing for the ones that do not — an absent field means "not observed" (see `ReviewMetrics`), so printing 0 for it would invent a measurement. */
-function renderMetrics(metrics) {
-	const parts = [];
-	if (metrics.tokens !== void 0) parts.push(`tokens in ${metrics.tokens.uncachedInputTokens}/out ${metrics.tokens.outputTokens}/cache ${metrics.tokens.cacheReadTokens}+${metrics.tokens.cacheWriteTokens} (session-cumulative)`);
-	if (metrics.toolCalls !== void 0) parts.push(`toolCalls ${metrics.toolCalls.calls} (${metrics.toolCalls.failures} failed)`);
-	if (metrics.humanInterventions !== void 0) parts.push(`humanInterventions ${metrics.humanInterventions} (session-scoped)`);
-	if (metrics.retries !== void 0) parts.push(`retries ${metrics.retries} (runs beyond the first; a recovery attempt is one)`);
-	if (metrics.evidenceLogs !== void 0) parts.push(`evidenceLogs ${metrics.evidenceLogs}`);
-	return parts.join(" — ");
-}
-/** One line per dimension that the record actually carries: the observed facts, copied out, never rated and never narrated. */
-function renderDimensions(dimensions) {
-	const lines = [];
-	const outcome = dimensions.outcomeCorrectness;
-	if (outcome !== void 0) lines.push(`  dim outcome correctness: ${outcome.outcome}, criteria ${outcome.criteriaCount}, unmet [${outcome.unmetCriterionIds.join(", ")}]`);
-	const specification = dimensions.taskSpecification;
-	if (specification !== void 0) lines.push(`  dim task specification: objective ${specification.objectivePresent ? "present" : "empty"}, criteria ${specification.criteriaCount}, with command ${specification.criteriaWithCommand}`);
-	const acceptance = dimensions.acceptance;
-	if (acceptance !== void 0) {
-		const criteria = acceptance.criteria.map((item) => `${item.criterionId} ${item.mode}${item.hasCommand ? " +command" : ""}${item.mandatory ? "" : " optional"}`);
-		lines.push(`  dim acceptance: ${criteria.join("; ")}`);
-	}
-	const decomposition = dimensions.decomposition;
-	if (decomposition !== void 0) lines.push(`  dim decomposition: depth ${decomposition.depth}, ${decomposition.decompositionStatus}, children ${decomposition.childCount}, edges in/out ${decomposition.incomingEdges}/${decomposition.outgoingEdges}`);
-	const coverage = dimensions.capabilityCoverage;
-	if (coverage !== void 0) lines.push(`  dim capability coverage: ${coverage.closure}, granted [${coverage.granted.join(", ")}], missing [${coverage.missing.join(", ")}]`);
-	const skill = dimensions.skillFit;
-	if (skill !== void 0) {
-		const loaded = skill.loaded === void 0 || skill.loadedOutsideGrant === void 0 ? "" : `, loaded [${skill.loaded.join(", ")}], outside grant [${skill.loadedOutsideGrant.join(", ")}]`;
-		lines.push(`  dim skill fit: granted [${skill.granted.join(", ")}]${loaded}`);
-	}
-	const tools = dimensions.toolFit;
-	if (tools !== void 0) {
-		const called = tools.called === void 0 || tools.calledOutsideGrant === void 0 ? "" : `, called [${tools.called.map((item) => `${item.name} x${item.count}`).join(", ")}], outside grant [${tools.calledOutsideGrant.join(", ")}]`;
-		lines.push(`  dim tool fit: granted [${tools.granted.join(", ")}]${called}`);
-	}
-	const context = dimensions.contextEfficiency;
-	if (context !== void 0) {
-		const tokens = context.tokens === void 0 ? "" : ` tokens in/out ${context.tokens.uncachedInputTokens}/${context.tokens.outputTokens}`;
-		const compactions = context.compactions === void 0 ? "" : ` compactions ${context.compactions}`;
-		lines.push(`  dim context efficiency:${tokens}${compactions}`);
-	}
-	return lines;
-}
-/** One review line, with the session id a reader drills into. Printing it here is what lets a diagnosis point `session_trace` at the session the review came from without a second lookup (§2.7.5). */
-function renderReview(review) {
-	const duration = review.durationMs === void 0 ? "" : ` duration ${review.durationMs}ms`;
-	const session = review.sessionId === void 0 ? "" : ` session ${review.sessionId}`;
-	const lines = [`- review ${reviewRef(review)} [${review.outcome}]${duration} evidence: [${review.evidenceRefs.join(", ")}]${session}`];
-	if (review.localizedCause !== void 0) lines.push(`  cause: ${review.localizedCause}`);
-	for (const anomaly of review.anomalies) lines.push(`  anomaly: ${anomaly}`);
-	for (const criterion of review.criteria ?? []) {
-		const judge = criterion.verifierId === void 0 ? "" : criterion.verifierVersion === void 0 ? ` [${criterion.verifierId}]` : ` [${criterion.verifierId}@${criterion.verifierVersion}]`;
-		const command = criterion.command === void 0 ? "" : ` — $ ${criterion.command}`;
-		const exit = criterion.exitCode === void 0 ? "" : ` exit ${criterion.exitCode}`;
-		const log = criterion.logRef === void 0 ? "" : ` log ${criterion.logRef}`;
-		lines.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${judge}${exit}${command}${log}`);
-	}
-	for (const blocker of review.blockedBy ?? []) lines.push(`  blockedBy ${blocker.taskId} [${blocker.outcome}]`);
-	if (review.metrics !== void 0) {
-		const metrics = renderMetrics(review.metrics);
-		if (metrics.length > 0) lines.push(`  metrics: ${metrics}`);
-	}
-	if (review.dimensions !== void 0) lines.push(...renderDimensions(review.dimensions));
-	if (review.logTail !== void 0) lines.push("  logTail:", ...review.logTail.split("\n").map((line) => `    ${line}`));
-	return lines;
-}
-/** How far one diagnosis's hand-off has gone (A5 §3, plan F.4): what the ledger, the allowance and the source's rounds answer for it. */
-function handoffMark(diagnosis, handoff, snapshot) {
-	if (!needsSupervisor(snapshot, diagnosis)) return "parent-owned — ordinary child diagnosis is delivered to its delegating parent; no supervisor is needed";
-	return handoffStateLine({
-		diagnosis,
-		attempts: handoff.attempts,
-		budget: handoff.budget,
-		rounds: roundsForDiagnosis(snapshot, diagnosis)
-	});
-}
-function renderDiagnosis(diagnosis, handoff, snapshot) {
-	const producer = diagnosis.producedBy === void 0 ? "" : diagnosis.producedBy.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? ` [agent ${diagnosis.producedBy.sessionId}]` : ` [${diagnosis.producedBy.kind}]`;
-	const lines = [`- ${diagnosis.diagnosisId} [${diagnosis.confidence}] ${diagnosis.localizedCause}${producer}`];
-	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) {
-		const header = diagnosis.producedBy?.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? `judgements (agent ${diagnosis.producedBy.sessionId})` : "judgements";
-		lines.push(`  ${header}:`);
-		for (const judgement of diagnosis.judgements) lines.push(`    ${judgement.dimension}: ${judgement.verdict} — ${judgement.rationale} refs [${judgement.evidenceRefs.join(", ")}]`);
-	}
-	for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
-	lines.push(`  handoff: ${handoffMark(diagnosis, handoff, snapshot)}`);
-	return lines;
-}
-/** What each of the task's runs was bound to and loaded (S1-C item 4): */
-function renderBindings(snapshot, taskId) {
-	const lines = [];
-	for (const run of snapshot.runs.filter((item) => item.taskId === taskId)) {
-		const binding = run.providerBinding;
-		if (binding === void 0) continue;
-		const skills = binding.skills.length === 0 ? "no provider skill" : binding.skills.map((skill) => `${skill.name} [${skill.role}] content ${skill.contentDigest.slice(0, 12)}${skill.contractDigest === null ? "" : ` contract ${skill.contractDigest.slice(0, 12)}`}`).join("; ");
-		const servers = binding.mcpServers.length === 0 ? "" : `; mcp ${binding.mcpServers.map((server) => server.serverName).join(", ")}`;
-		const snapshotRoot = binding.snapshotRoot === void 0 ? "" : `; snapshot ${binding.snapshotRoot}`;
-		lines.push(`- run ${run.runId} [${run.status}] bound registry ${binding.registryRevision.slice(0, 12)}: ${skills}${servers}${snapshotRoot}`);
-	}
-	return lines;
-}
-/** The pack for one source of one task: the source itself first, then the facts (reviews, dependency edges, parent/child summaries), the ledger state of that source, the judgement dimensions the facts. */
-function buildReviewPack(input) {
-	const { snapshot, source, attempts, handoff } = input;
-	const { taskId } = source;
-	const task = snapshot.tasks.find((item) => item.taskId === taskId);
-	if (task === void 0) throw new Error(`task_review_pack: unknown task "${taskId}"`);
-	const review = reviewForSource(snapshot, source);
-	const reviews = snapshot.reviews.filter((item) => item.taskId === task.taskId);
-	const parent = task.parentTaskId === void 0 ? void 0 : snapshot.tasks.find((item) => item.taskId === task.parentTaskId);
-	const incoming = snapshot.edges.filter((edge) => edge.to === task.taskId).map((edge) => edge.from);
-	const outgoing = snapshot.edges.filter((edge) => edge.from === task.taskId).map((edge) => edge.to);
-	const diagnoses = snapshot.diagnoses.filter((item) => item.taskId === task.taskId);
-	const lines = [
-		`review pack for task ${task.taskId} [${task.status}] depth ${task.depth}`,
-		`source: review ${reviewRef(source)}${review === void 0 ? " (not on the record)" : ` [${review.outcome}]`}`,
-		`objective: ${task.objective}`,
-		`dependencies: must verify first [${incoming.join(", ")}]; blocks [${outgoing.join(", ")}]`,
-		...renderAttempts(attempts, source),
-		renderJudgementDimensions(),
-		`reviews (${reviews.length}):`,
-		...reviews.flatMap(renderReview),
-		...renderBindings(snapshot, task.taskId)
-	];
-	if (parent !== void 0) lines.push(`parent ${parent.taskId} [${parent.status}]: ${reviewSummary(snapshot, parent.taskId)}`);
-	lines.push(`children (${task.childTaskIds.length}):`);
-	for (const childId of task.childTaskIds) {
-		const child = snapshot.tasks.find((item) => item.taskId === childId);
-		if (child === void 0) continue;
-		lines.push(`- ${child.taskId} [${child.status}]: ${reviewSummary(snapshot, child.taskId)}`);
-	}
-	lines.push(`diagnoses (${diagnoses.length}):`);
-	for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis, handoff, snapshot));
-	return lines.join("\n");
-}
-function defineTaskReviewPackTool(ctx) {
-	return defineTool({
-		name: "task_review_pack",
-		description: "Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started). The pack names the task itself, all its review records in full (criteria, log tail, blockers, the session each review came from), the review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the fact table does not carry, one-line review summaries of its children and parent, the dependency edges touching it, and its diagnoses with any agent judgements — every diagnosis marked with its hand-off state (the supervisor it was delegated to, the outcome that settled it, or the named reason nothing was opened: no live root session, the source's round cap, or the allowance spent). It reports the facts only: whether a review agent runs is decided elsewhere (a terminal review is accepted on its own under the deployment's autoReview mode; an explicit call names its source). Local evidence plus parent/children summaries — no ancestry replay (guide §2.7.5). Feed this to task_diagnose, or to task_review_agent when a judgement is needed.",
-		parameters: {
-			taskId: {
-				type: "string",
-				required: true,
-				description: "Task to assemble the pack for"
-			},
-			runId: {
-				oneOf: [{ type: "string" }, { type: "null" }],
-				required: true,
-				description: "The Run whose review the pack is for, exactly as its review record names it; null for a review with no run"
-			}
-		},
-		output: {
-			schema: { type: "string" },
-			render: (_a, v) => text(v)
-		},
-		execute: async (args, exec) => {
-			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(sessionId(exec, "task_review_pack"))).rootSessionId);
-			const source = {
-				taskId: args.taskId,
-				runId: args.runId
-			};
-			const snapshot = await ctx.task.openStore(storeId);
-			if (!snapshot.tasks.some((task) => task.taskId === args.taskId)) throw new Error(`task_review_pack: unknown task "${args.taskId}" in store ${storeId}`);
-			if (args.runId !== null && !snapshot.runs.some((run) => run.runId === args.runId && run.taskId === args.taskId)) return `task_review_pack: run "${args.runId}" is not a run of task "${args.taskId}"; nothing to pack`;
-			if (reviewForSource(snapshot, source) === void 0) return `task_review_pack: no review record for source ${reviewRef(source)} in store ${storeId}; nothing to pack`;
-			const attempts = await readReviewAgentAttempts(storeId);
-			return buildReviewPack({
-				snapshot,
-				source,
-				attempts,
-				handoff: await handoffFactsOf(storeId, attempts)
-			});
-		}
-	});
-}
-
-//#endregion
 //#region src/coordination/review-run.ts
 /** Shared coordinator composition; runtime installs the reviewer policy. */
 const REVIEWER_PRESET = "singularity-coordinator";
@@ -1997,6 +2058,12 @@ function parseReviewerObject(reply) {
 /** A non-empty string out of the reply, or nothing. */
 function textOf(value) {
 	return typeof value === "string" && value.trim().length > 0 ? value : void 0;
+}
+/** Optional lineage is explicit: malformed ids are refused, and repeated ids add no evidence. */
+function refsOf(value, field) {
+	if (value === void 0) return void 0;
+	if (!Array.isArray(value) || value.some((ref) => textOf(ref) === void 0)) throw new Error(`the "${field}" field must be an array of non-empty strings`);
+	return [...new Set(value)];
 }
 /** Validate the judgements the reviewer chose to make. Each one has to name a judged dimension and a verdict from the fixed vocabulary, cite at least one non-empty ref and carry a rationale — this is the. */
 function judgementsOf(value) {
@@ -2064,12 +2131,21 @@ function parseReviewerDiagnosis(reply) {
 		refusal: `the reply's confidence "${String(confidence)}" is not high/medium/low`
 	};
 	try {
+		const scope = textOf(parsed.scope);
+		if (parsed.scope !== void 0 && scope === void 0) throw new Error("the \"scope\" field must be a non-empty string");
+		const reviewRefs = refsOf(parsed.reviewRefs, "reviewRefs");
+		const evidenceRefs = refsOf(parsed.evidenceRefs, "evidenceRefs");
+		const relatedTaskIds = refsOf(parsed.relatedTaskIds, "relatedTaskIds");
 		return {
 			ok: true,
 			diagnosis: {
 				observation,
 				conclusion,
 				confidence,
+				...scope === void 0 ? {} : { scope },
+				...reviewRefs === void 0 ? {} : { reviewRefs },
+				...evidenceRefs === void 0 ? {} : { evidenceRefs },
+				...relatedTaskIds === void 0 ? {} : { relatedTaskIds },
 				judgements: judgementsOf(parsed.judgements),
 				proposals: proposalsOf(parsed.proposals)
 			}
@@ -2077,7 +2153,7 @@ function parseReviewerDiagnosis(reply) {
 	} catch (error) {
 		return {
 			ok: false,
-			refusal: `the reply's judgements or proposals are malformed: ${error instanceof Error ? error.message : String(error)}`
+			refusal: `the reply's diagnosis fields are malformed: ${error instanceof Error ? error.message : String(error)}`
 		};
 	}
 }
@@ -2145,7 +2221,8 @@ async function runReviewAgentAttempt(input) {
 					"You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.",
 					"Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and context_read reach the sibling tasks, their sessions and their evidence. Cite what you rest on.",
 					"Do not score, and do not modify anything.",
-					...review.outcome === "verified" ? ["The run passed its review; look for improvement opportunities — what could be better, and whether an improvement round is worth it."] : [],
+					"Start with this exact source, then inspect the business DAG and read original evidence only where it tests a cause. Explain how upstream contracts, dependencies, shared providers or decomposition could produce the observed result. Similar errors alone do not establish a shared cause.",
+					...review.outcome === "verified" ? ["The run passed its review; look for improvement opportunities in avoidable tool calls, repeated reads, retries and decomposition costs. An improvement needs unchanged acceptance and a two-sided replay with complete Run subtree tool-call counts and independent verified holdouts; observed overhead alone proves no gain."] : [],
 					"Return EXACTLY one fenced json block, no prose around it:",
 					"```json",
 					"{\"observation\":\"...\",\"conclusion\":\"...\",\"confidence\":\"high|medium|low\"}",
@@ -2155,9 +2232,11 @@ async function runReviewAgentAttempt(input) {
 					"- conclusion (required): explain the cause and cite the original failure evidence. For a failed source, name one concrete next action for its business coordinator, such as a smaller independently verifiable child result after the batch settles. Check its task/run state first: task_decompose needs an active run; a terminal run needs a named stop and escalation, not another retry. If the evidence does not settle the cause, say what fact is missing and stop there.",
 					"- confidence (required): high, medium or low.",
 					"- A successful source may conclude \"no improvement needed\"; do not invent a failure or a next action.",
+					"- scope, reviewRefs, evidenceRefs, relatedTaskIds (optional): use the existing diagnosis lineage to name the causal scope, exact task#run review refs, evidence bundle ids and implicated task ids. Include only records you read that support the explanation; existence in the store does not make a record relevant. The triggering review remains the source. Do not copy every DAG neighbour into the diagnosis.",
+					"- For a shared cause, cite the original evidence from each implicated task and the common contract, provider version or dependency that connects them; inspect a passing contrast when available. If the cause or benefit is unresolved, state unknown and the missing fact, use low confidence, and make no unsupported proposal.",
 					`- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}], only when useful and supported. Dimensions: ${JUDGED_DIMENSIONS.join(", ")}; verdict: adequate|inadequate|unknown. Do not fill every dimension.`,
-					"- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. Suggest a skill or capability change only when the evidence establishes that gap; most failures need no evolution proposal. Nothing here executes a proposal.",
-					"- Never tell the business coordinator to call task_recover: only a separately delegated supervisor has it. Recommend evolution tools only to a coordinator whose current tools authorize them, for an established skill/capability gap; they are not general task recovery.",
+					"- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. Suggest a Task template, skill or capability change only when the evidence establishes that gap; most failures need no evolution proposal. Nothing here executes a proposal.",
+					"- Never tell the business coordinator to call task_recover: only a separately delegated supervisor has it. Recommend evolution tools only to a coordinator whose current tools authorize them, for an established Task template/skill/capability gap; they are not general task recovery.",
 					"A reply without an observation, a conclusion or a confidence is not a diagnosis: the attempt is recorded interrupted and nothing is stored.",
 					"",
 					`--- source under review ---`,
@@ -2221,20 +2300,47 @@ async function runReviewAgentAttempt(input) {
 			};
 		}
 		const { observation, conclusion, confidence, judgements, proposals } = parsed.diagnosis;
+		const current$1 = await ctx.task.snapshotIn(storeId);
+		const knownReviews = new Set(current$1.reviews.map(reviewRef));
+		const knownEvidence = new Set(current$1.evidence.map((item) => item.evidenceId));
+		const knownTasks = new Set(current$1.tasks.map((item) => item.taskId));
+		const knownJudgementRefs = new Set([
+			...knownReviews,
+			...knownEvidence,
+			...current$1.reviews.flatMap((item) => item.evidenceRefs),
+			...current$1.runs.map((run) => run.sessionId),
+			...current$1.reviews.map((item) => item.sessionId)
+		]);
+		const invalid = [
+			...[sourceRef(source), ...parsed.diagnosis.reviewRefs ?? []].filter((ref) => !knownReviews.has(ref)).map((ref) => `reviewRef "${ref}"`),
+			...(parsed.diagnosis.evidenceRefs ?? []).filter((ref) => !knownEvidence.has(ref)).map((ref) => `evidenceRef "${ref}"`),
+			...(parsed.diagnosis.relatedTaskIds ?? []).filter((id) => !knownTasks.has(id)).map((id) => `relatedTaskId "${id}"`),
+			...judgements.flatMap((item) => item.evidenceRefs).filter((ref) => !knownJudgementRefs.has(ref)).map((ref) => `judgement ref "${ref}"`)
+		];
+		if (invalid.length > 0) {
+			const failure = `the diagnosis cites ${invalid.join(", ")} outside store ${storeId}`;
+			await settleAttempt("interrupted", failure);
+			return {
+				kind: "no-diagnosis",
+				sessionId: reviewerSessionId,
+				failure
+			};
+		}
 		const diagnosis = {
 			diagnosisId: `review-agent-${reviewerSessionId}`,
 			taskId: source.taskId,
 			observedFailure: observation,
-			scope: `task ${source.taskId}`,
+			scope: parsed.diagnosis.scope ?? `task ${source.taskId}`,
 			localizedCause: conclusion,
-			evidenceRefs: review.evidenceRefs,
-			reviewRefs: [sourceRef(source)],
+			evidenceRefs: parsed.diagnosis.evidenceRefs ?? review.evidenceRefs,
+			reviewRefs: [...new Set([sourceRef(source), ...parsed.diagnosis.reviewRefs ?? []])],
 			confidence,
 			proposals,
 			producedBy: {
 				kind: "agent",
 				sessionId: reviewerSessionId
 			},
+			...parsed.diagnosis.relatedTaskIds === void 0 ? {} : { relatedTaskIds: parsed.diagnosis.relatedTaskIds },
 			...judgements.length === 0 ? {} : { judgements }
 		};
 		try {
@@ -2258,6 +2364,10 @@ async function runReviewAgentAttempt(input) {
 			confidence,
 			observation,
 			conclusion,
+			scope: diagnosis.scope,
+			reviewRefs: diagnosis.reviewRefs,
+			evidenceRefs: diagnosis.evidenceRefs,
+			relatedTaskIds: diagnosis.relatedTaskIds ?? [],
 			judgements,
 			proposals
 		};
@@ -2275,10 +2385,19 @@ async function runReviewAgentAttempt(input) {
 
 //#endregion
 //#region src/coordination/review-scan.ts
-/** Every source of the store whose review this mode accepts, in the order the records were written — `all` takes failed and verified records, `failed` only failures, `off` none. */
+/** Local failures immediately; successful whole goals only after root verification. Explicit reviews can still inspect any node. */
 function acceptedSourcesOf(snapshot, mode) {
 	if (mode === "off") return [];
-	return snapshot.reviews.filter((review) => review.outcome === "failed" || mode === "all" && review.outcome === "verified").map((review) => ({
+	return snapshot.reviews.filter((review) => {
+		let run = snapshot.runs.find((run$1) => run$1.runId === review.runId);
+		while (run !== void 0) {
+			if (run.parentRunId === void 0) break;
+			if (snapshot.tasks.some((task) => task.taskId === run.taskId && task.parentTaskId === void 0)) return false;
+			const parentRunId = run.parentRunId;
+			run = snapshot.runs.find((run$1) => run$1.runId === parentRunId);
+		}
+		return review.outcome === "failed" || mode === "all" && review.outcome === "verified" && snapshot.tasks.some((task) => task.taskId === review.taskId && task.parentTaskId === void 0);
+	}).map((review) => ({
 		taskId: review.taskId,
 		runId: review.runId ?? null
 	}));
@@ -2301,6 +2420,7 @@ async function deliverDiagnosis(ctx, storeId, source, reviewerSessionId, log) {
 			`Review diagnosis ${diagnosis.diagnosisId} for review source ${sourceRef(source)} [${diagnosis.confidence}].`,
 			`Observation: ${diagnosis.observedFailure}`,
 			`Conclusion / next action: ${diagnosis.localizedCause}`,
+			`Scope: ${diagnosis.scope}; related tasks: ${diagnosis.relatedTaskIds?.join(", ") || "none"}.`,
 			`Original review: ${diagnosis.reviewRefs.join(", ")}; evidence: ${diagnosis.evidenceRefs.join(", ") || "none recorded"}.`,
 			"Read your current task/run state before acting. A diagnosis changes no task state or authority. Handle local child repairs in your current run after its batch settles; only established shared changes go to the supervisor."
 		].join("\n");
@@ -5006,7 +5126,9 @@ function renderExistingAttempt(attempt, snapshot) {
 	const lines = [
 		head,
 		`observation: ${diagnosis.observedFailure}`,
-		`conclusion: ${diagnosis.localizedCause}`
+		`conclusion: ${diagnosis.localizedCause}`,
+		`scope: ${diagnosis.scope}; related tasks: ${diagnosis.relatedTaskIds?.join(", ") || "none"}`,
+		`review refs: ${diagnosis.reviewRefs.join(", ")}; evidence refs: ${diagnosis.evidenceRefs.join(", ") || "none"}`
 	];
 	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) lines.push(`judgements (agent ${attempt.sessionId}):`, ...renderJudgements(diagnosis.judgements));
 	lines.push(`diagnosis ${diagnosis.diagnosisId} recorded [${diagnosis.confidence}]`);
@@ -5041,6 +5163,8 @@ function renderOutcome(outcome, source, storeId, snapshot, review) {
 			`task_review_agent: review agent ${outcome.sessionId} judged task ${source.taskId} (source ${sourceRef(source)}; the review it read settled ${review.outcome})`,
 			`observation: ${outcome.observation}`,
 			`conclusion: ${outcome.conclusion}`,
+			`scope: ${outcome.scope}; related tasks: ${outcome.relatedTaskIds.join(", ") || "none"}`,
+			`review refs: ${outcome.reviewRefs.join(", ")}; evidence refs: ${outcome.evidenceRefs.join(", ") || "none"}`,
 			...outcome.judgements.length === 0 ? [] : [`judgements (agent ${outcome.sessionId}):`, ...renderJudgements(outcome.judgements)],
 			`diagnosis ${outcome.diagnosisId} recorded [${outcome.confidence}]`,
 			...outcome.proposals.length === 0 ? ["proposals: none — the conclusion carries no suggestion"] : [`proposals (${outcome.proposals.length}, suggestions only — none auto-executes):`, ...outcome.proposals.map((item) => `- ${item.targetType} ${item.targetId}: ${item.rationale}`)]
@@ -5109,12 +5233,12 @@ function defineTaskReviewAgentTool(ctx) {
 function defineTaskStatusTool(ctx) {
 	return defineTool({
 		name: "task_status",
-		description: "The caller's project status, paged. Scope `related` (the default) covers the caller's own task, its direct children and the tasks directly adjacent to it through a dependency edge; scope `graph` lists the caller's readable domain, sorted by task id. Workers and delegated reviewers remain within their task branch, ancestor context and dependency neighbours; roots and supervisors retain their domain view. Each line carries the task status, its latest run with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, the terminal review outcome and the diagnosis count. Entries are sorted by task id and paged with `offset` (from 0) and `limit` (default 20, at most 100); the answer states whether more entries follow and the offset to continue with. Pages are observations, not a consistent snapshot across calls. Before any root contract has been accepted the answer is the named not-activated state (with whatever proposal is still open).",
+		description: "The caller's project status, paged. Scope `related` (the default) covers the caller's own task, its direct children and the tasks directly adjacent to it through a dependency edge; scope `graph` lists the caller's readable domain, sorted by task id. Workers remain within their task branch, ancestor context and dependency neighbours; valid delegated reviewers and supervisors can investigate their whole graph read-only. Each line carries the task status, its latest run with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, the terminal review outcome and the diagnosis count. Entries are sorted by task id and paged with `offset` (from 0) and `limit` (default 20, at most 100); the answer states whether more entries follow and the offset to continue with. Pages are observations, not a consistent snapshot across calls. Before any root contract has been accepted the answer is the named not-activated state (with whatever proposal is still open).",
 		parameters: {
 			scope: {
 				type: "string",
 				enum: ["related", "graph"],
-				description: "related (default): own task, direct children and dependency neighbours; graph: readable branch for workers/reviewers, whole domain for roots/supervisors"
+				description: "related (default): own task, direct children and dependency neighbours; graph: readable branch for workers, whole graph for roots and valid delegated coordination agents"
 			},
 			offset: {
 				type: "number",

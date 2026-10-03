@@ -78,6 +78,10 @@ interface RawDiagnosisReply {
   observation: string
   conclusion: string
   confidence: DiagnosisConfidence
+  scope?: string
+  reviewRefs?: string[]
+  evidenceRefs?: string[]
+  relatedTaskIds?: string[]
   judgements: ReviewJudgement[]
   proposals: DiagnosisProposal[]
 }
@@ -99,6 +103,15 @@ function parseReviewerObject(reply: string | undefined): Record<string, unknown>
 /** A non-empty string out of the reply, or nothing. */
 function textOf(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined
+}
+
+/** Optional lineage is explicit: malformed ids are refused, and repeated ids add no evidence. */
+function refsOf(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.some(ref => textOf(ref) === undefined)) {
+    throw new Error(`the "${field}" field must be an array of non-empty strings`)
+  }
+  return [...new Set(value as string[])]
 }
 
 /** Validate the judgements the reviewer chose to make. Each one has to name a judged dimension and a verdict from the fixed vocabulary, cite at least one non-empty ref and carry a rationale — this is the. */
@@ -159,18 +172,27 @@ export function parseReviewerDiagnosis(
     return { ok: false, refusal: `the reply's confidence "${String(confidence)}" is not high/medium/low` }
   }
   try {
+    const scope = textOf(parsed.scope)
+    if (parsed.scope !== undefined && scope === undefined) throw new Error('the "scope" field must be a non-empty string')
+    const reviewRefs = refsOf(parsed.reviewRefs, 'reviewRefs')
+    const evidenceRefs = refsOf(parsed.evidenceRefs, 'evidenceRefs')
+    const relatedTaskIds = refsOf(parsed.relatedTaskIds, 'relatedTaskIds')
     return {
       ok: true,
       diagnosis: {
         observation,
         conclusion,
         confidence,
+        ...(scope === undefined ? {} : { scope }),
+        ...(reviewRefs === undefined ? {} : { reviewRefs }),
+        ...(evidenceRefs === undefined ? {} : { evidenceRefs }),
+        ...(relatedTaskIds === undefined ? {} : { relatedTaskIds }),
         judgements: judgementsOf(parsed.judgements),
         proposals: proposalsOf(parsed.proposals),
       },
     }
   } catch (error) {
-    return { ok: false, refusal: `the reply's judgements or proposals are malformed: ${error instanceof Error ? error.message : String(error)}` }
+    return { ok: false, refusal: `the reply's diagnosis fields are malformed: ${error instanceof Error ? error.message : String(error)}` }
   }
 }
 
@@ -229,6 +251,10 @@ export type ReviewAttemptOutcome =
     readonly observation: string
     /** The conclusion in the reviewer's own words (the stored `localizedCause`). */
     readonly conclusion: string
+    readonly scope: string
+    readonly reviewRefs: readonly string[]
+    readonly evidenceRefs: readonly string[]
+    readonly relatedTaskIds: readonly string[]
     readonly judgements: readonly ReviewJudgement[]
     readonly proposals: readonly DiagnosisProposal[]
   }
@@ -282,8 +308,9 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
           'Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and ' +
           'context_read reach the sibling tasks, their sessions and their evidence. Cite what you rest on.',
           'Do not score, and do not modify anything.',
+          'Start with this exact source, then inspect the business DAG and read original evidence only where it tests a cause. Explain how upstream contracts, dependencies, shared providers or decomposition could produce the observed result. Similar errors alone do not establish a shared cause.',
           ...(review.outcome === 'verified'
-            ? ['The run passed its review; look for improvement opportunities — what could be better, and whether an improvement round is worth it.']
+            ? ['The run passed its review; look for improvement opportunities in avoidable tool calls, repeated reads, retries and decomposition costs. An improvement needs unchanged acceptance and a two-sided replay with complete Run subtree tool-call counts and independent verified holdouts; observed overhead alone proves no gain.']
             : []),
           'Return EXACTLY one fenced json block, no prose around it:',
           '```json',
@@ -294,9 +321,11 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
           '- conclusion (required): explain the cause and cite the original failure evidence. For a failed source, name one concrete next action for its business coordinator, such as a smaller independently verifiable child result after the batch settles. Check its task/run state first: task_decompose needs an active run; a terminal run needs a named stop and escalation, not another retry. If the evidence does not settle the cause, say what fact is missing and stop there.',
           '- confidence (required): high, medium or low.',
           '- A successful source may conclude "no improvement needed"; do not invent a failure or a next action.',
+          '- scope, reviewRefs, evidenceRefs, relatedTaskIds (optional): use the existing diagnosis lineage to name the causal scope, exact task#run review refs, evidence bundle ids and implicated task ids. Include only records you read that support the explanation; existence in the store does not make a record relevant. The triggering review remains the source. Do not copy every DAG neighbour into the diagnosis.',
+          '- For a shared cause, cite the original evidence from each implicated task and the common contract, provider version or dependency that connects them; inspect a passing contrast when available. If the cause or benefit is unresolved, state unknown and the missing fact, use low confidence, and make no unsupported proposal.',
           `- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}], only when useful and supported. Dimensions: ${JUDGED_DIMENSIONS.join(', ')}; verdict: adequate|inadequate|unknown. Do not fill every dimension.`,
-          '- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. Suggest a skill or capability change only when the evidence establishes that gap; most failures need no evolution proposal. Nothing here executes a proposal.',
-          '- Never tell the business coordinator to call task_recover: only a separately delegated supervisor has it. Recommend evolution tools only to a coordinator whose current tools authorize them, for an established skill/capability gap; they are not general task recovery.',
+          '- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. Suggest a Task template, skill or capability change only when the evidence establishes that gap; most failures need no evolution proposal. Nothing here executes a proposal.',
+          '- Never tell the business coordinator to call task_recover: only a separately delegated supervisor has it. Recommend evolution tools only to a coordinator whose current tools authorize them, for an established Task template/skill/capability gap; they are not general task recovery.',
           'A reply without an observation, a conclusion or a confidence is not a diagnosis: the attempt is recorded interrupted and nothing is stored.',
           '',
           `--- source under review ---`,
@@ -357,19 +386,42 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
       return { kind: 'no-diagnosis' as const, sessionId: reviewerSessionId, failure: parsed.refusal }
     }
     const { observation, conclusion, confidence, judgements, proposals } = parsed.diagnosis
+    const current: TaskSnapshot = await ctx.task.snapshotIn(storeId)
+    const knownReviews = new Set(current.reviews.map(reviewRef))
+    const knownEvidence = new Set(current.evidence.map(item => item.evidenceId))
+    const knownTasks = new Set(current.tasks.map(item => item.taskId))
+    // Older reviews may retain evidence refs without a bundle in the snapshot;
+    // preserve their original lineage, but additional evidence must resolve.
+    const knownJudgementRefs = new Set([
+      ...knownReviews, ...knownEvidence, ...current.reviews.flatMap(item => item.evidenceRefs),
+      ...current.runs.map(run => run.sessionId), ...current.reviews.map(item => item.sessionId),
+    ])
+    const invalid = [
+      ...[sourceRef(source), ...(parsed.diagnosis.reviewRefs ?? [])]
+        .filter(ref => !knownReviews.has(ref)).map(ref => `reviewRef "${ref}"`),
+      ...(parsed.diagnosis.evidenceRefs ?? []).filter(ref => !knownEvidence.has(ref)).map(ref => `evidenceRef "${ref}"`),
+      ...(parsed.diagnosis.relatedTaskIds ?? []).filter(id => !knownTasks.has(id)).map(id => `relatedTaskId "${id}"`),
+      ...judgements.flatMap(item => item.evidenceRefs).filter(ref => !knownJudgementRefs.has(ref)).map(ref => `judgement ref "${ref}"`),
+    ]
+    if (invalid.length > 0) {
+      const failure = `the diagnosis cites ${invalid.join(', ')} outside store ${storeId}`
+      await settleAttempt('interrupted', failure)
+      return { kind: 'no-diagnosis', sessionId: reviewerSessionId, failure }
+    }
     const diagnosis: Diagnosis = {
       diagnosisId: `review-agent-${reviewerSessionId}`,
       taskId: source.taskId,
       // The persisted `observedFailure` slot read as what it is here: the
       // postmortem observation the reviewer wrote, for a failed source and a
       observedFailure: observation,
-      scope: `task ${source.taskId}`,
+      scope: parsed.diagnosis.scope ?? `task ${source.taskId}`,
       localizedCause: conclusion,
-      evidenceRefs: review.evidenceRefs,
-      reviewRefs: [sourceRef(source)],
+      evidenceRefs: parsed.diagnosis.evidenceRefs ?? review.evidenceRefs,
+      reviewRefs: [...new Set([sourceRef(source), ...(parsed.diagnosis.reviewRefs ?? [])])],
       confidence,
       proposals,
       producedBy: { kind: 'agent', sessionId: reviewerSessionId },
+      ...(parsed.diagnosis.relatedTaskIds === undefined ? {} : { relatedTaskIds: parsed.diagnosis.relatedTaskIds }),
       ...(judgements.length === 0 ? {} : { judgements }),
     }
     try {
@@ -396,6 +448,10 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
       confidence,
       observation,
       conclusion,
+      scope: diagnosis.scope,
+      reviewRefs: diagnosis.reviewRefs,
+      evidenceRefs: diagnosis.evidenceRefs,
+      relatedTaskIds: diagnosis.relatedTaskIds ?? [],
       judgements,
       proposals,
     }

@@ -73,6 +73,7 @@ interface StoppedTree {
   readonly childTaskId: string
   readonly childRunId: string
   readonly childSession: string
+  readonly childTools: readonly string[]
   /** Let the root's parked turn continue: its next model answer is the call this spec is about. */
   resumeRoot(): void
 }
@@ -105,7 +106,7 @@ async function stopSpentTree(
 ): Promise<StoppedTree> {
   const parked = Promise.withResolvers<void>()
   const state = {
-    storeId: '', rootTaskId: '', rootRunId: '', childTaskId: '', childRunId: '', childSession: '',
+    storeId: '', rootTaskId: '', rootRunId: '', childTaskId: '', childRunId: '', childSession: '', childTools: [],
     resumeRoot: () => { parked.resolve() },
   } as Mutable
   const h = await startScriptedLoop({
@@ -134,6 +135,7 @@ async function stopSpentTree(
   await vi.waitFor(() => expect(h.spawns).toHaveLength(1))
   state.childSession = h.spawns[0]!.sessionId
   await vi.waitFor(async () => expect((await h.runForSession(state.childSession)).run.status).toBe('running'))
+  await vi.waitFor(() => { state.childTools = h.visible(h.agent(state.childSession)) })
 
   await h.runtime.cancelGraph(state.storeId, 'explicit stop with the run allowance spent')
   const stopped = await vi.waitFor(async () => {
@@ -323,7 +325,7 @@ describe('a stopped tree with a spent run allowance can still be extended by a p
 
     // The tool is the root's surface, never a worker's.
     expect(h.visible(h.agent(ROOT))).toContain('task_budget_extend')
-    expect(h.visible(h.agent(stop.childSession))).not.toContain('task_budget_extend')
+    expect(stop.childTools).not.toContain('task_budget_extend')
   }, 60_000)
 
   it.each(['rejected', 'cancelled'] as const)(

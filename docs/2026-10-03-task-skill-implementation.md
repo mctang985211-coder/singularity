@@ -6,7 +6,7 @@
 
 Task 规定结果，Skill 提供方法，Tool/MCP 提供动作。父节点优先检索可见模板，绑定参数或生成标准契约；执行和验收仍走唯一 TaskRuntime。普通 child 诊断交真实父 Run；共享模板、Skill 或能力变更才交 supervisor。Supervisor 物化候选、对照实验、请求已有工具的人审，批准后应用；根按原契约开新 Run，child 由持久消息唤醒负责父 Run 重新规划。恢复记录关联实际 proposalIds。
 
-唯一协调宿主为 `singularity-coordinator`，reviewer/supervisor 分别装配稳定政策，删除相冲突的 reviewer preset。审批模式为 ask，proposal ledger 承接等待、决定、应用和重启；不另建审批或调度状态机。默认只复盘失败，成功优化按需启用。自然结算与重复交接交错时重读已有账本终态，避免把已关闭会话误判为失联并重复启动。
+唯一协调宿主为 `singularity-coordinator`，reviewer/supervisor 分别装配稳定政策，删除相冲突的 reviewer preset。审批模式为 ask，proposal ledger 承接等待、决定、应用和重启；不另建审批或调度状态机。最新默认自动复盘失败节点与成功根，成功叶只留事实；Supervisor 可以按需委派只读调查并汇总跨节点证据，见 [跨节点复盘](2026-10-03-systemic-supervision.md)。自然结算与重复交接交错时重读已有账本终态，避免把已关闭会话误判为失联并重复启动。
 
 ## Task 模板与 DAG
 

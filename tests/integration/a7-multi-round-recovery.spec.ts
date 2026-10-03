@@ -497,21 +497,22 @@ describe('A7: the multi-round supervisor-iteration loop', () => {
     }
     expect(await readSupervisorHandoff(STORE, diagnoses[ROUNDS - 1]!.diagnosisId)).toBeUndefined()
 
-    // ── the coordination ledger: every terminal review of the whole tree was
+    // ── the coordination ledger: root reviews and failed child reviews of the whole tree were
     //    accepted — the verified runs included — and every uncapped diagnosis
     //    delegated ────────────────────────────────────────────────────────────
     const attempts = await readReviewAgentAttempts(STORE)
     const reviewerSources = attempts.filter(attempt => attempt.role === 'reviewer').map(attempt => `${attempt.source.taskId}#${attempt.source.runId}`)
-    const treeReviews = snapshot.reviews.filter(review => review.taskId === task.taskId || task.childTaskIds.includes(review.taskId))
+    const treeReviews = snapshot.reviews.filter(review => review.taskId === task.taskId ||
+      (task.childTaskIds.includes(review.taskId) && review.outcome === 'failed'))
     expect(new Set(reviewerSources)).toEqual(new Set(treeReviews.map(review => `${review.taskId}#${review.runId}`)))
     // The four root rounds are all among them, the verified ones included.
     expect(attempts.filter(attempt => attempt.role === 'reviewer' && attempt.source.taskId === task.taskId).map(attempt => attempt.source.runId))
       .toEqual(task.runIds)
     // One reviewer per review, and one supervisor per uncapped diagnosis: the
-    // root's first three rounds and each member's verified run. The fourth root
+    // root's first three rounds; successful child runs consume no coordination allowance. The fourth root
     // round's diagnosis is the cap's own refusal — it never got a supervisor.
-    expect(attempts.filter(attempt => attempt.role === 'supervisor')).toHaveLength(RECOVERY_ROUNDS + 3)
-    expect(await countReviewAgentRuns(STORE)).toBe(treeReviews.length + RECOVERY_ROUNDS + 3)
+    expect(attempts.filter(attempt => attempt.role === 'supervisor')).toHaveLength(RECOVERY_ROUNDS)
+    expect(await countReviewAgentRuns(STORE)).toBe(treeReviews.length + RECOVERY_ROUNDS)
 
     // ── the cap's own gate, asked directly: one more improvement is refused ───
     const supervisorOfLastRound = String(supervisorSpawns[RECOVERY_ROUNDS - 1]!.sessionId)
@@ -521,7 +522,7 @@ describe('A7: the multi-round supervisor-iteration loop', () => {
     ).then(() => '', error => String(error))
     expect(refusal).toContain('iteration-cap')
     expect((await h.snapshot(STORE)).runs.filter(run => run.taskId === task.taskId)).toHaveLength(ROUNDS)
-    expect(await countReviewAgentRuns(STORE)).toBe(treeReviews.length + RECOVERY_ROUNDS + 3)
+    expect(await countReviewAgentRuns(STORE)).toBe(treeReviews.length + RECOVERY_ROUNDS)
   }, 90_000)
 
   it('is stopped by a spent coordination allowance: the failed review\'s reviewer spends the store\'s only attempt', async () => {

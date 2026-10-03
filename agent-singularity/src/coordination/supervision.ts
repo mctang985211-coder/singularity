@@ -2,12 +2,12 @@
 
 import type { TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 
-/** When the automatic trigger accepts a terminal review for diagnosis. */
+/** When the automatic trigger accepts failures or completed successful goals for diagnosis. */
 export type AutoReviewMode = 'all' | 'failed' | 'off'
 
 /** The `supervision` block of agent-singularity's configuration, with every member resolved. */
 export interface SupervisionConfig {
-  /** `all` accepts every terminal review (failed and verified), `failed` only failures, `off` none. */
+  /** `all` accepts failures at every node and successful roots; `failed` only failures, `off` none. */
   readonly autoReview: AutoReviewMode
   /** Recovery attempts one failed source accepts before `iteration-cap`. */
   readonly maxRecoveryRounds: number
@@ -17,9 +17,9 @@ export interface SupervisionConfig {
   readonly coordinationBudget: number
 }
 
-/** The shipped defaults: failed reviews are diagnosed, three recovery rounds, two improvement rounds, eight coordination runs per store. */
+/** Diagnose local failures and completed successful goals; three recovery rounds, two improvement rounds, eight coordination runs per store. */
 export const DEFAULT_SUPERVISION: SupervisionConfig = {
-  autoReview: 'failed',
+  autoReview: 'all',
   maxRecoveryRounds: 3,
   maxImprovementRounds: 2,
   coordinationBudget: 8,
@@ -77,7 +77,9 @@ export function sourceRoundsOf(snapshot: TaskSnapshot, taskId: string, outcome: 
 }
 
 /** The refusal a source that has spent its rounds gets, or nothing while another round is allowed. */
-export function roundCapRefusal(rounds: SupervisionRounds): { readonly code: 'iteration-cap'; readonly reason: string } | undefined {
+export function roundCapRefusal(
+  rounds: SupervisionRounds,
+): { readonly code: 'iteration-cap'; readonly reason: string } | undefined {
   if (rounds.outcome === 'verified') {
     if (rounds.improved < rounds.maxImprovement) return undefined
     return {

@@ -26,9 +26,10 @@ import {
  *
  * The contract these cases are the evidence for:
  *
- * 1. Failed reviews are accepted automatically. Successes require explicit
- *    `autoReview: 'all'` or a review call. Ordinary child diagnoses go to their
- *    recorded delegating parent; only shared changes consume a supervisor.
+ * 1. Failed reviews are accepted automatically. `autoReview: 'all'` accepts a
+ *    successful root after its own acceptance; successful leaves still need an
+ *    explicit review call. Ordinary child diagnoses go to their recorded
+ *    delegating parent; only shared changes consume a supervisor.
  * 2. **The settlement does not wait for the reviewer.** The review record is
  *    written inside the terminal transition; the acceptance happens after it, on
  *    the reviewer's own time — so the batch settles and the store is final while
@@ -63,14 +64,19 @@ function child(objective: string, command: string): Record<string, unknown> {
   return { objective, requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: `${objective} works`, command }] }
 }
 
-/** The reviewer's answer: the observation and conclusion it reached, plus the one dimension it judged. */
-const REVIEW_REPLY = '```json\n'
-  + '{"observation":"the child failed its mandatory criterion",'
-  + '"conclusion":"ev-1: the objective omitted the environment; use task_decompose after the batch settles for one child with a pinned environment",'
-  + '"confidence":"medium",'
-  + '"judgements":[{"dimension":"task_specification","verdict":"inadequate","evidenceRefs":["ev-1"],'
-  + '"rationale":"the objective did not name the environment the work had to run in"}]}'
-  + '\n```'
+/** The scripted reviewer cites the exact real review its deployment prompt names. */
+function reviewReply(h: ScriptedLoop, sessionId: string): string {
+  const prompt = h.spawns.find(spawn => spawn.sessionId === sessionId)?.prompt
+  const ref = prompt?.match(/^review (\S+#\S+) \[(?:failed|verified)\]/m)?.[1]
+  if (ref === undefined) throw new Error(`reviewer ${sessionId} received no exact review source`)
+  return '```json\n' + JSON.stringify({
+    observation: 'the child failed its mandatory criterion',
+    conclusion: `${ref}: the objective omitted the environment; use task_decompose after the batch settles for one child with a pinned environment`,
+    confidence: 'medium',
+    judgements: [{ dimension: 'task_specification', verdict: 'inadequate', evidenceRefs: [ref],
+      rationale: 'the objective did not name the environment the work had to run in' }],
+  }) + '\n```'
+}
 
 /** The facts a case reads back out of the tree it drove. */
 interface Tree {
@@ -192,9 +198,10 @@ async function oneChild(
   } = {},
 ): Promise<{ h: ScriptedLoop; tree: Tree; root: { storeId: string; taskId: string; runId: string } }> {
   const tree: Tree = { childTaskId: '', childRunId: '', batchId: '' }
-  const h = await startScriptedLoop({
+  let h!: ScriptedLoop
+  h = await startScriptedLoop({
     ...(options.supervision === undefined ? {} : { supervision: options.supervision }),
-    script: (_sessionId, index): readonly ScriptEntry[] => index === 0
+    script: (sessionId, index): readonly ScriptEntry[] => index === 0
       ? [
         ...(options.lead ?? []),
         { tool: 'task_decompose', args: { reason: 'split the work', children: [child('child: the work', command)] } },
@@ -205,8 +212,8 @@ async function oneChild(
       : index === 1
         ? [{ tool: 'task_submit_result', args: { summary: 'child: handed in' } }]
         : index === 2
-          ? [...(options.reviewer ?? [{ text: REVIEW_REPLY }])]
-          : [...(options.supervisor ?? options.reviewer ?? [{ text: REVIEW_REPLY }])],
+          ? [...(options.reviewer ?? [{ text: reviewReply(h, sessionId) }])]
+          : [...(options.supervisor ?? options.reviewer ?? [{ text: reviewReply(h, sessionId) }])],
   })
   if (options.trigger !== false) {
     installReviewAgentAutoTrigger(h.ctx, options.log === undefined ? {} : { log: line => options.log!.push(line) })
@@ -305,6 +312,8 @@ describe('a failed review is accepted on its own (A5)', () => {
       const after = await h.snapshot(root.storeId)
       expect(after.diagnoses.some(item => String(item.producedBy.sessionId) === reviewer)).toBe(true)
     }, { timeout: 30_000, interval: 25 })
+    const diagnosis = (await h.snapshot(root.storeId)).diagnoses.find(item => item.producedBy?.sessionId === reviewer)!
+    expect(diagnosis.judgements?.[0]?.evidenceRefs).toEqual([`${tree.childTaskId}#${tree.childRunId}`])
     await vi.waitFor(async () => {
       const settled = (await reviewerAttempts(root.storeId))[0]!
       expect(settled.settlement?.status).toBe('recorded')
@@ -325,13 +334,13 @@ describe('a failed review is accepted on its own (A5)', () => {
 
   it('delivers a nested failure diagnosis to its delegating parent run', async () => {
     const h = await startScriptedLoop({
-      script: (_session, index) => index === 0
+      script: (sessionId, index) => index === 0
         ? [{ tool: 'task_decompose', args: { reason: 'delegate subsystem', children: [child('parent subsystem', 'true')] } }]
         : index === 1
           ? [{ tool: 'task_decompose', args: { reason: 'isolate result', children: [child('leaf result', 'false')] } }]
           : index === 2
             ? [{ tool: 'task_submit_result', args: { summary: 'leaf handed in' } }]
-            : [{ text: REVIEW_REPLY }],
+            : [{ text: reviewReply(h, sessionId) }],
     })
     installReviewAgentAutoTrigger(h.ctx)
     const root = await h.begin(ROOT_CONTRACT)
@@ -350,50 +359,26 @@ describe('a failed review is accepted on its own (A5)', () => {
     expect((await h.snapshot(root.storeId)).diagnoses).toHaveLength(1)
   }, 60_000)
 
-  it('accepts a verified review when autoReview: all is explicitly configured', async () => {
-    // This deployment requests successful postmortems explicitly.
+  it('keeps verified leaves out of the automatic chain under autoReview: all', async () => {
+    // Successful root acceptance is covered by systemic-review.spec.ts. Here
+    // the root has not handed in its result: leaf success spends no allowance.
     const { h, tree, root } = await oneChild('true', { supervision: { autoReview: 'all' } })
-    const snapshot = await vi.waitFor(async () => {
+    await vi.waitFor(async () => {
       const current = await h.snapshot(root.storeId)
       expect(current.reviews.find(review => review.taskId === tree.childTaskId)?.outcome).toBe('verified')
-      return current
     }, { timeout: 30_000, interval: 25 })
     expect((await h.runtime.awaitBatch(root.storeId, tree.batchId)).map(outcome => outcome.status)).toEqual(['verified'])
-
-    await vi.waitFor(() => expect(reviewerSpawns(h)).toHaveLength(1), { timeout: 30_000, interval: 25 })
-    const reviewer = String(reviewerSpawns(h)[0]!.sessionId)
-    expect(reviewerSpawns(h)[0]!.name).toBe(`review ${tree.childTaskId}`)
-    const attempts = await vi.waitFor(async () => {
-      const found = await reviewerAttempts(root.storeId)
-      expect(found[0]?.started).toBe(true)
-      return found
-    }, { timeout: 30_000, interval: 25 })
-    expect(attempts).toHaveLength(1)
-    expect(attempts[0]).toMatchObject({
+    expect((await scanFailedReviewSources(h.ctx, root.storeId)).entries).toEqual([])
+    expect((await scanFailedReviewSources(h.ctx, root.storeId, {
       source: { taskId: tree.childTaskId, runId: tree.childRunId },
-      requestKey: null,
-      actor: String(ROOT),
-      sessionId: reviewer,
-      started: true,
-    })
+    })).entries).toEqual([])
+    expect(reviewerSpawns(h)).toEqual([])
     expect(supervisorSpawns(h)).toEqual([])
-    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
-
-    // The reviewer's own first request carries the real outcome: it is a
-    // postmortem of a success, judged from the same pack shape a failure's is.
-    const input = await vi.waitFor(() => {
-      const requests = h.requestsOf(reviewer)
-      expect(requests).toHaveLength(1)
-      return requests[0]!.texts.join('\n')
-    }, { timeout: 30_000, interval: 25 })
-    expect(input).toContain(`review ${tree.childTaskId}#${tree.childRunId} [verified]`)
-    expect(input).toContain('--- review pack ---')
-    // The judgement landed in the store, attributed to that reviewer.
-    await vi.waitFor(async () => {
-      const after = await h.snapshot(root.storeId)
-      expect(after.diagnoses.some(item => String(item.producedBy.sessionId) === reviewer)).toBe(true)
-    }, { timeout: 30_000, interval: 25 })
-    void snapshot
+    expect(await readReviewAgentAttempts(root.storeId)).toEqual([])
+    expect(await countReviewAgentRuns(root.storeId)).toBe(0)
+    const after = await h.snapshot(root.storeId)
+    expect(after.diagnoses).toEqual([])
+    expect(after.runs.find(run => run.runId === root.runId)?.status).toBe('running')
   }, 60_000)
 
   it('spawns nothing at all for a review that settled verified when the policy names failed only', async () => {
@@ -401,7 +386,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     // 'failed'` keeps a success out of the automatic chain. The whole batch is
     // over by now — the review was recorded before it ended — and nothing was
     // accepted: one worker, no reviewer, no ledger row.
-    const { h, tree, root } = await oneChild('true')
+    const { h, tree, root } = await oneChild('true', { supervision: { autoReview: 'failed' } })
     const snapshot = await vi.waitFor(async () => {
       const current = await h.snapshot(root.storeId)
       expect(current.reviews.find(review => review.taskId === tree.childTaskId)?.outcome).toBe('verified')
@@ -552,7 +537,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     expect(after.reviews).toEqual(before.reviews)
     expect(after.reviews.find(review => review.taskId === tree.childTaskId)?.outcome).toBe('verified')
 
-    // A successful child conclusion remains parent-owned and spends no supervisor.
+    // A successful child conclusion stays with its coordinator and spends no supervisor.
     const pack = await vi.waitFor(() => {
       const call = h.calls.find(item => item.name === 'task_review_pack' && item.result !== undefined)
       expect(call).toBeDefined()
@@ -560,7 +545,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     }, { timeout: 30_000, interval: 25 })
     expect(pack).toContain('no improvement needed')
     expect(pack).toContain('review attempts (1):')
-    expect(pack).toContain('handoff: parent-owned')
+    expect(pack).toContain('handoff: coordinator-owned')
   }, 60_000)
 
   it('settles exactly as before in a deployment that mounts no trigger at all', async () => {

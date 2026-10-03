@@ -2,7 +2,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
-import type { Diagnosis, ReviewDimensions, ReviewMetrics, ReviewRecord, TaskId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
+import { budgetList, CONTEXT_OUTPUT_LIMIT_BYTES, OutputBudget, utf8Bytes } from '@dangosys/dsh-singularity-context'
+import type { Diagnosis, ReviewDimensions, ReviewMetrics, ReviewRecord, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { JUDGED_DIMENSIONS, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import { readReviewAgentAttempts } from '../coordination/ledger.ts'
 import type { ReviewAgentAttempt, ReviewAgentSource } from '../coordination/ledger.ts'
@@ -23,11 +24,6 @@ export function reviewForSource(snapshot: TaskSnapshot, source: ReviewAgentSourc
   return snapshot.reviews.find(review => review.taskId === source.taskId && (review.runId ?? null) === source.runId)
 }
 
-/** The task's most recent review, or nothing when it never settled one (a summary of a neighbour, never a source). */
-function latestReview(snapshot: TaskSnapshot, taskId: TaskId): ReviewRecord | undefined {
-  return [...snapshot.reviews].reverse().find(item => item.taskId === taskId)
-}
-
 /** The ledger state of one source: every **review** attempt the store holds for it, in the order they were claimed — the default attempt (`null` key) and each explicit one — with how each ended. */
 function renderAttempts(attempts: readonly ReviewAgentAttempt[], source: ReviewAgentSource): string[] {
   const mine = attempts.filter(attempt => attempt.role === 'reviewer' && attempt.source.taskId === source.taskId && attempt.source.runId === source.runId)
@@ -41,13 +37,6 @@ function renderAttempts(attempts: readonly ReviewAgentAttempt[], source: ReviewA
     const reason = attempt.reason === null ? '' : ` reason ${JSON.stringify(attempt.reason)}`
     return `- ${label} ${attempt.sessionId} [${status}]${reason}${note}`
   })]
-}
-
-function reviewSummary(snapshot: TaskSnapshot, taskId: TaskId): string {
-  const review = latestReview(snapshot, taskId)
-  if (review === undefined) return 'no review'
-  const detail = review.localizedCause ?? review.anomalies[0]
-  return `review ${reviewRef(review)}: ${review.outcome}${detail === undefined ? '' : ` — ${detail}`}`
 }
 
 /** The effort line: one clause per counter that exists, and nothing for the ones that do not — an absent field means "not observed" (see `ReviewMetrics`), so printing 0 for it would invent a measurement. */
@@ -90,16 +79,14 @@ function renderDimensions(dimensions: ReviewDimensions): string[] {
   }
   const skill = dimensions.skillFit
   if (skill !== undefined) {
-    const loaded = skill.loaded === undefined || skill.loadedOutsideGrant === undefined
-      ? ''
-      : `, loaded [${skill.loaded.join(', ')}], outside grant [${skill.loadedOutsideGrant.join(', ')}]`
+    const loaded = (skill.loaded === undefined ? '' : `, loaded [${skill.loaded.join(', ')}]`) +
+      (skill.loadedOutsideGrant === undefined ? '' : `, outside grant [${skill.loadedOutsideGrant.join(', ')}]`)
     lines.push(`  dim skill fit: granted [${skill.granted.join(', ')}]${loaded}`)
   }
   const tools = dimensions.toolFit
   if (tools !== undefined) {
-    const called = tools.called === undefined || tools.calledOutsideGrant === undefined
-      ? ''
-      : `, called [${tools.called.map(item => `${item.name} x${item.count}`).join(', ')}], outside grant [${tools.calledOutsideGrant.join(', ')}]`
+    const called = (tools.called === undefined ? '' : `, called [${tools.called.map(item => `${item.name} x${item.count}`).join(', ')}]`) +
+      (tools.calledOutsideGrant === undefined ? '' : `, outside grant [${tools.calledOutsideGrant.join(', ')}]`)
     lines.push(`  dim tool fit: granted [${tools.granted.join(', ')}]${called}`)
   }
   const context = dimensions.contextEfficiency
@@ -108,7 +95,8 @@ function renderDimensions(dimensions: ReviewDimensions): string[] {
       ? ''
       : ` tokens in/out ${context.tokens.uncachedInputTokens}/${context.tokens.outputTokens}`
     const compactions = context.compactions === undefined ? '' : ` compactions ${context.compactions}`
-    lines.push(`  dim context efficiency:${tokens}${compactions}`)
+    const cache = context.tokens === undefined ? '' : ` cache read/write ${context.tokens.cacheReadTokens}/${context.tokens.cacheWriteTokens}`
+    lines.push(`  dim context efficiency:${tokens}${compactions}${cache}`)
   }
   return lines
 }
@@ -118,6 +106,7 @@ function renderReview(review: ReviewRecord): string[] {
   const duration = review.durationMs === undefined ? '' : ` duration ${review.durationMs}ms`
   const session = review.sessionId === undefined ? '' : ` session ${review.sessionId}`
   const lines = [`- review ${reviewRef(review)} [${review.outcome}]${duration} evidence: [${review.evidenceRefs.join(', ')}]${session}`]
+  if (review.relatedTaskIds !== undefined) lines.push(`  relatedTaskIds: [${review.relatedTaskIds.join(', ')}]`)
   if (review.localizedCause !== undefined) lines.push(`  cause: ${review.localizedCause}`)
   for (const anomaly of review.anomalies) lines.push(`  anomaly: ${anomaly}`)
   for (const criterion of review.criteria ?? []) {
@@ -131,7 +120,8 @@ function renderReview(review: ReviewRecord): string[] {
     const command = criterion.command === undefined ? '' : ` — $ ${criterion.command}`
     const exit = criterion.exitCode === undefined ? '' : ` exit ${criterion.exitCode}`
     const log = criterion.logRef === undefined ? '' : ` log ${criterion.logRef}`
-    lines.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${judge}${exit}${command}${log}`)
+    const unknown = criterion.unknownKind === undefined ? '' : ` unknownKind ${criterion.unknownKind}`
+    lines.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${judge}${exit}${command}${log}${unknown}`)
   }
   for (const blocker of review.blockedBy ?? []) lines.push(`  blockedBy ${blocker.taskId} [${blocker.outcome}]`)
   if (review.metrics !== undefined) {
@@ -145,7 +135,7 @@ function renderReview(review: ReviewRecord): string[] {
 
 /** How far one diagnosis's hand-off has gone (A5 §3, plan F.4): what the ledger, the allowance and the source's rounds answer for it. */
 function handoffMark(diagnosis: Diagnosis, handoff: HandoffFacts, snapshot: TaskSnapshot): string {
-  if (!needsSupervisor(snapshot, diagnosis)) return 'parent-owned — ordinary child diagnosis is delivered to its delegating parent; no supervisor is needed'
+  if (!needsSupervisor(snapshot, diagnosis, handoff.attempts)) return 'coordinator-owned — delivered to the existing coordinator; no shared improvement requires a supervisor'
   return handoffStateLine({
     diagnosis,
     attempts: handoff.attempts,
@@ -161,6 +151,11 @@ function renderDiagnosis(diagnosis: Diagnosis, handoff: HandoffFacts, snapshot: 
       ? ` [agent ${diagnosis.producedBy.sessionId}]`
       : ` [${diagnosis.producedBy.kind}]`
   const lines = [`- ${diagnosis.diagnosisId} [${diagnosis.confidence}] ${diagnosis.localizedCause}${producer}`]
+  lines.push(
+    `  observation: ${diagnosis.observedFailure}`,
+    `  scope: ${diagnosis.scope}; task ${diagnosis.taskId}`,
+    `  reviewRefs: [${diagnosis.reviewRefs.join(', ')}]; evidenceRefs: [${diagnosis.evidenceRefs.join(', ')}]; relatedTaskIds: [${(diagnosis.relatedTaskIds ?? []).join(', ')}]`,
+  )
   if (diagnosis.judgements !== undefined && diagnosis.judgements.length > 0) {
     const header = diagnosis.producedBy?.kind === 'agent' && diagnosis.producedBy.sessionId !== undefined
       ? `judgements (agent ${diagnosis.producedBy.sessionId})`
@@ -175,10 +170,10 @@ function renderDiagnosis(diagnosis: Diagnosis, handoff: HandoffFacts, snapshot: 
   return lines
 }
 
-/** What each of the task's runs was bound to and loaded (S1-C item 4): */
-function renderBindings(snapshot: TaskSnapshot, taskId: TaskId): string[] {
+/** What the exact source run was bound to and loaded (S1-C item 4). */
+function renderBindings(snapshot: TaskSnapshot, source: ReviewAgentSource): string[] {
   const lines: string[] = []
-  for (const run of snapshot.runs.filter(item => item.taskId === taskId)) {
+  for (const run of snapshot.runs.filter(item => item.taskId === source.taskId && item.runId === source.runId)) {
     const binding = run.providerBinding
     if (binding === undefined) continue
     const skills = binding.skills.length === 0
@@ -206,7 +201,7 @@ export interface ReviewPackInput {
   readonly handoff: HandoffFacts
 }
 
-/** The pack for one source of one task: the source itself first, then the facts (reviews, dependency edges, parent/child summaries), the ledger state of that source, the judgement dimensions the facts. */
+/** One exact source in full, with bounded same-graph evidence navigation through the existing read tools. */
 export function buildReviewPack(input: ReviewPackInput): string {
   const { snapshot, source, attempts, handoff } = input
   const { taskId } = source
@@ -214,33 +209,77 @@ export function buildReviewPack(input: ReviewPackInput): string {
   if (task === undefined) throw new Error(`task_review_pack: unknown task "${taskId}"`)
   const review = reviewForSource(snapshot, source)
   const reviews = snapshot.reviews.filter(item => item.taskId === task.taskId)
-  const parent = task.parentTaskId === undefined
-    ? undefined
-    : snapshot.tasks.find(item => item.taskId === task.parentTaskId)
   const incoming = snapshot.edges.filter(edge => edge.to === task.taskId).map(edge => edge.from)
   const outgoing = snapshot.edges.filter(edge => edge.from === task.taskId).map(edge => edge.to)
-  const diagnoses = snapshot.diagnoses.filter(item => item.taskId === task.taskId)
+  const diagnoses = snapshot.diagnoses.filter(item => item.taskId === task.taskId ||
+    item.reviewRefs.includes(reviewRef(source)) || item.relatedTaskIds?.includes(task.taskId))
+  const sourceRun = source.runId === null ? undefined : snapshot.runs.find(run => run.runId === source.runId && run.taskId === taskId)
+  const latestRunId = task.runIds.at(-1)
   const lines = [
     `review pack for task ${task.taskId} [${task.status}] depth ${task.depth}`,
     `source: review ${reviewRef(source)}${review === undefined ? ' (not on the record)' : ` [${review.outcome}]`}`,
+    `source run: ${sourceRun === undefined ? 'none' : `${sourceRun.runId} [${sourceRun.status}] session ${sourceRun.sessionId ?? review?.sessionId ?? 'unknown'}; ${sourceRun.runId === latestRunId ? 'latest run' : 'historical run'}; preset ${sourceRun.agentPreset ?? 'unknown'}`}; latest run of task: ${latestRunId ?? 'none'}`,
     `objective: ${task.objective}`,
     `dependencies: must verify first [${incoming.join(', ')}]; blocks [${outgoing.join(', ')}]`,
     ...renderAttempts(attempts, source),
     renderJudgementDimensions(),
-    `reviews (${reviews.length}):`,
-    ...reviews.flatMap(renderReview),
-    ...renderBindings(snapshot, task.taskId),
+    `reviews (${reviews.length}): exact source in full; other versions in graph navigation`,
+    ...(review === undefined ? [] : renderReview(review)),
+    ...renderBindings(snapshot, source),
   ]
-  if (parent !== undefined) lines.push(`parent ${parent.taskId} [${parent.status}]: ${reviewSummary(snapshot, parent.taskId)}`)
-  lines.push(`children (${task.childTaskIds.length}):`)
-  for (const childId of task.childTaskIds) {
-    const child = snapshot.tasks.find(item => item.taskId === childId)
-    if (child === undefined) continue
-    lines.push(`- ${child.taskId} [${child.status}]: ${reviewSummary(snapshot, child.taskId)}`)
+  const navigation = [
+    'Navigation: task_status scope:"graph" pages tasks; context_read kind:"task"/"run"/"evidence"/"diagnosis" ref:<id> reads exact records; kind:"review" ref:{taskId,runId} reads one exact review; kind:"session" ref:<sessionId> reads session events in pages.',
+    'Counters are recorded observations, sometimes session-cumulative; missing fields are unobserved. Complete cost: unknown — worker counters alone do not account for reviewer, supervisor and replay spend. No graph total is inferred.',
+  ]
+  const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES)
+  const footerReserve = 512
+  const navigationBytes = navigation.reduce((total, line) => total + utf8Bytes(line) + 1, 0)
+  if (utf8Bytes(lines.join('\n')) + navigationBytes + footerReserve > budget.maxBytes) {
+    return `task_review_pack: exact source ${reviewRef(source)} exceeds the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound; its full record was not shortened. Read it in pages with context_read kind:"review" ref:${JSON.stringify({ taskId, runId: source.runId })}${source.runId === null ? '' : `, and kind:"run" ref:${JSON.stringify(source.runId)}`}; task_status scope:"graph" navigates this graph.`
   }
-  lines.push(`diagnoses (${diagnoses.length}):`)
-  for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis, handoff, snapshot))
-  return lines.join('\n')
+  budget.addAll(lines)
+  budget.addAll(navigation)
+  const tasks = [...snapshot.tasks].sort((left, right) => left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0)
+  const shownTasks = budgetList(budget, {
+    header: [`graph DAG navigation (${tasks.length} tasks; current task state, exact run history; short digests, full identities through context_read):`],
+    units: tasks.slice(0, 20),
+    reserve: footerReserve,
+    lines: entry => {
+      const incoming = snapshot.edges.filter(edge => edge.to === entry.taskId).map(edge => edge.from)
+      const outgoing = snapshot.edges.filter(edge => edge.from === entry.taskId).map(edge => edge.to)
+      const template = entry.templateRef === undefined ? 'unknown'
+        : `${entry.templateRef.id}@${entry.templateRef.version} digest ${entry.templateRef.digest.slice(0, 12)}`
+      const definition = entry.definitionRef === undefined ? 'unknown' : `${entry.definitionRef.taskType}@${entry.definitionRef.version}`
+      const diagnosisRefs = snapshot.diagnoses.filter(item => item.taskId === entry.taskId || item.relatedTaskIds?.includes(entry.taskId)).map(item => item.diagnosisId)
+      const lines = [`- task ${entry.taskId} [${entry.status}] parent ${entry.parentTaskId ?? 'none'}; dependencies [${incoming.join(', ')}]; blocks [${outgoing.join(', ')}]; definition ${definition}; template ${template}; diagnoses [${diagnosisRefs.join(', ')}]`]
+      for (const run of snapshot.runs.filter(item => item.taskId === entry.taskId)) {
+        const review = reviewForSource(snapshot, { taskId: entry.taskId, runId: run.runId })
+        const exact = run.taskId === source.taskId && run.runId === source.runId
+        const latest = run.runId === entry.runIds.at(-1)
+        const version = `${exact ? 'exact source, ' : ''}${latest ? 'latest run' : 'historical run'}`
+        const binding = run.providerBinding
+        const skills = binding === undefined ? 'unknown' : binding.skills.map(skill =>
+          `${skill.name}[${skill.role}] content ${skill.contentDigest.slice(0, 12)} contract ${skill.contractDigest?.slice(0, 12) ?? 'unknown'}`).join('; ') || 'none'
+        const frozen = latest || exact ? `; preset ${run.agentPreset ?? 'unknown'}; registry ${binding?.registryRevision.slice(0, 12) ?? 'unknown'}; frozen skills [${skills}]` : ''
+        const metrics = review?.metrics === undefined ? '' : renderMetrics(review.metrics)
+        lines.push(`  run ${run.runId} [${run.status}; ${version}] session ${run.sessionId ?? review?.sessionId ?? 'unknown'}; review ${review === undefined ? 'none' : `${reviewRef(review)} [${review.outcome}]`}${frozen}; observed counters ${metrics || 'unknown'}`)
+      }
+      for (const review of snapshot.reviews.filter(item => item.taskId === entry.taskId && item.runId === undefined)) {
+        lines.push(`  review ${reviewRef(review)} [${review.outcome}; no-run source]`)
+      }
+      return lines
+    },
+    tail: count => [`navigation shown: ${count}/${tasks.length} tasks. Continue task_status scope:"graph" offset:${count}, then context_read for exact task, run, review and diagnosis refs; pages are separate observations.`],
+  })
+  if (shownTasks === undefined) budget.add('Graph navigation did not fit; use task_status scope:"graph" offset:0 and context_read for exact records.')
+  const shownDiagnoses = budgetList(budget, {
+    header: [`diagnoses (${diagnoses.length}):`],
+    units: diagnoses,
+    lines: diagnosis => renderDiagnosis(diagnosis, handoff, snapshot),
+    tail: count => [`diagnoses shown: ${count}/${diagnoses.length}; exact records through context_read kind:"diagnosis" ref:<diagnosisId>, discovered through task_status scope:"graph".`],
+  })
+  if (shownDiagnoses === undefined) budget.add('Diagnoses did not fit; discover diagnosisRefs through task_status scope:"graph", then context_read kind:"diagnosis".')
+  return budget.text()
 }
 
 export function defineTaskReviewPackTool(ctx: Context) {
@@ -249,14 +288,14 @@ export function defineTaskReviewPackTool(ctx: Context) {
     description:
       'Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, ' +
       'or runId null for a review that carries no run (a task blocked before it started). The pack names the task ' +
-      'itself, all its review records in full (criteria, log tail, blockers, the session each review came from), the ' +
+      'itself, the exact source review in full (criteria, log tail, blockers, session), historical review references, the ' +
       'review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the ' +
-      'fact table does not carry, one-line review summaries of its children and parent, the dependency edges touching ' +
+      'fact table does not carry, the dependency edges touching ' +
       'it, and its diagnoses with any agent judgements — every diagnosis marked with its ' +
       'hand-off state (the supervisor it was delegated to, the outcome that settled it, or the named reason nothing ' +
       'was opened: no live root session, the source\'s round cap, or the allowance spent). It reports the facts only: whether a review agent runs is ' +
       'decided elsewhere (a terminal review is accepted on its own under the deployment\'s autoReview mode; an explicit call names its source). ' +
-      'Local evidence plus parent/children summaries — no ancestry replay (guide §2.7.5). Feed this to task_diagnose, or ' +
+      'It adds bounded same-graph DAG navigation with exact run/session ids, template and frozen provider digests, and observed counters. Continue with task_status scope:"graph" and context_read; no ancestry or sibling log replay. Feed this to task_diagnose, or ' +
       'to task_review_agent when a judgement is needed.',
     parameters: {
       taskId: { type: 'string', required: true, description: 'Task to assemble the pack for' },

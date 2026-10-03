@@ -103,6 +103,73 @@ afterEach(() => {
 })
 
 describe('task_review_pack as a fact sheet, without a trigger decision', () => {
+  it('keeps a historical source exact while other runs and shared evidence remain compact references', async () => {
+    const full = failingSnapshot()
+    full.tasks[1]!.runIds.push('r-child-2')
+    Object.assign(full.tasks[1]!, { templateRef: { id: 'parser', version: 2, digest: 'e'.repeat(64) } })
+    Object.assign(full.runs[0]!, {
+      sessionId: 's-old', agentPreset: 'parser-v1',
+      providerBinding: { registryRevision: 'a'.repeat(64), capabilities: ['parse'], mcpServers: [], skills: [{
+        name: 'parser-skill', role: 'knowledge', capabilities: ['parse'], description: 'parse',
+        contentDigest: 'c'.repeat(64), contractDigest: 'b'.repeat(64), uncovered: [],
+      }] },
+    })
+    full.runs.push({ runId: 'r-child-2', taskId: 't-child-1', status: 'verified' as never })
+    Object.assign(full.runs[1]!, { sessionId: 's-new', agentPreset: 'parser-v2' })
+    full.reviews.push({ ...full.reviews[0]!, runId: 'r-child-2', sessionId: 's-new', outcome: 'verified' as never,
+      localizedCause: 'recovered', logTail: 'OTHER-RUN-LOG'.repeat(10_000) })
+    Object.assign(full.reviews[0]!, { metrics: { toolCalls: { calls: 3, failures: 1 } },
+      criteria: [{ criterionId: 'parse', verdict: 'inconclusive', unknownKind: 'verifier', logRef: 'old.log' }] })
+    full.diagnoses = [{
+      diagnosisId: 'd-shared', taskId: 't-root', observedFailure: 'both tasks repeated the same assumption',
+      scope: 'shared parser contract', localizedCause: 'missing empty-input contract', confidence: 'medium',
+      reviewRefs: ['t-child-1#r-child-1', 't-root#r-root'], evidenceRefs: ['ev-1', 'ev-root'],
+      relatedTaskIds: ['t-child-1', 't-root'], proposals: [],
+    }] as never
+    const pack = (await defineTaskReviewPackTool(fixture(full) as never)
+      .execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
+    const exact = pack.split('Navigation:')[0]!
+    expect(exact).toContain('source: review t-child-1#r-child-1 [failed]')
+    expect(exact).toContain('source run: r-child-1 [failed] session s-old; historical run; preset parser-v1')
+    expect(exact).toContain('    line a')
+    expect(exact).toContain('unknownKind verifier')
+    expect(exact).toContain('toolCalls 3 (1 failed)')
+    expect(exact).not.toContain('review t-child-1#r-child-2')
+    expect(pack).not.toContain('OTHER-RUN-LOG')
+    expect(pack).toContain('run r-child-2 [verified; latest run] session s-new; review t-child-1#r-child-2 [verified]')
+    expect(pack).toContain(`template parser@2 digest ${'e'.repeat(12)}`)
+    expect(pack).toContain(`frozen skills [parser-skill[knowledge] content ${'c'.repeat(12)} contract ${'b'.repeat(12)}]`)
+    expect(pack).toContain('scope: shared parser contract; task t-root')
+    expect(pack).toContain('reviewRefs: [t-child-1#r-child-1, t-root#r-root]; evidenceRefs: [ev-1, ev-root]; relatedTaskIds: [t-child-1, t-root]')
+    expect(pack).toContain('Complete cost: unknown')
+    expect(Buffer.byteLength(pack)).toBeLessThanOrEqual(50_000)
+  })
+
+  it('limits sorted DAG navigation to 20 tasks and resumes through the existing graph status cursor', async () => {
+    const full = failingSnapshot()
+    for (let index = 0; index < 30; index += 1) {
+      full.tasks.push({ ...childTask, taskId: `t-z${String(index).padStart(2, '0')}`, runIds: [] })
+    }
+    const pack = (await defineTaskReviewPackTool(fixture(full) as never)
+      .execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
+    expect(pack.match(/^- task /gm)).toHaveLength(20)
+    expect(pack).toContain('- task t-z17')
+    expect(pack).not.toContain('- task t-z18')
+    expect(pack).toContain('navigation shown: 20/32 tasks')
+    expect(pack).toContain('task_status scope:"graph" offset:20')
+  })
+
+  it('does not truncate an oversized exact source and gives its existing record paging reference', async () => {
+    const full = failingSnapshot()
+    full.reviews[0]!.logTail = '证据'.repeat(10_000)
+    const pack = (await defineTaskReviewPackTool(fixture(full) as never)
+      .execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
+    expect(pack).toContain('exact source t-child-1#r-child-1 exceeds the 50000-byte output bound')
+    expect(pack).toContain('context_read kind:"review" ref:{"taskId":"t-child-1","runId":"r-child-1"}')
+    expect(pack).not.toContain('证据')
+    expect(Buffer.byteLength(pack)).toBeLessThanOrEqual(50_000)
+  })
+
   it('prints the session each review came from, the judged dimensions, and no escalation decision', async () => {
     const tool = defineTaskReviewPackTool(fixture(failingSnapshot()) as never)
     const pack = (await tool.execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
@@ -134,7 +201,7 @@ describe('task_review_pack as a fact sheet, without a trigger decision', () => {
    * it is **pending** — recorded, addressed to nobody yet. An interrupted
    * attempt has no Diagnosis at all, so it cannot be shown as pending either.
    */
-  it('marks ordinary child diagnoses parent-owned and shared suggestions pending', async () => {
+  it('marks ordinary child diagnoses coordinator-owned and shared suggestions pending', async () => {
     const full = failingSnapshot()
     full.diagnoses = [
       {
@@ -159,7 +226,7 @@ describe('task_review_pack as a fact sheet, without a trigger decision', () => {
     // Ordinary child repairs are delivered to the parent without starting a supervisor.
     expect(pack.match(/handoff: pending/g)).toHaveLength(1)
     expect(pack).toContain('- d-no-suggestion [high] no improvement needed [agent s-rev-2]')
-    expect(pack.slice(pack.indexOf('- d-no-suggestion'))).toContain('handoff: parent-owned')
+    expect(pack.slice(pack.indexOf('- d-no-suggestion'))).toContain('handoff: coordinator-owned')
   })
 
   it('shows an interrupted attempt as interrupted, with no pending handoff invented for it', async () => {

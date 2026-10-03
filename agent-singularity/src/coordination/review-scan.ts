@@ -8,7 +8,12 @@ import type { TerminalReviewFact } from '@dangosys/dsh-singularity-task-runtime'
 import { warnLine } from '../log.ts'
 import { responsibleParentRun } from './handoff-rules.ts'
 import { liveRootAgentOf, ownerSessionOfStore, sameSource } from './identity.ts'
-import { readReviewAgentAttempts, type ReviewAgentAttempt, type ReviewAgentRefusalCode, type ReviewAgentSource } from './ledger.ts'
+import {
+  readReviewAgentAttempts,
+  type ReviewAgentAttempt,
+  type ReviewAgentRefusalCode,
+  type ReviewAgentSource,
+} from './ledger.ts'
 import { recordedDiagnosis, runReviewAgentAttempt, sourceRef } from './review-run.ts'
 import { supervisionSettings, type AutoReviewMode } from './supervision.ts'
 import { backgroundScan, installGraphSelectedScan } from './trigger.ts'
@@ -34,17 +39,30 @@ export interface ReviewScanReport {
 export interface ReviewScanOptions {
   /** Scan only this source (the terminal-review trigger names one); absent scans every accepted source of the store. */
   readonly source?: ReviewAgentSource
-  /** Which terminal reviews this scan accepts; absent reads the deployment's `supervision.autoReview` (`all` by default). */
+  /** Failures at any node; `all` also accepts successful roots, once their complete result is verified. */
   readonly autoReview?: AutoReviewMode
   /** Where the scan's lines go — named skips included; absent says nothing. */
   readonly log?: (line: string) => void
 }
 
-/** Every source of the store whose review this mode accepts, in the order the records were written — `all` takes failed and verified records, `failed` only failures, `off` none. */
+/** Local failures immediately; successful whole goals only after root verification. Explicit reviews can still inspect any node. */
 function acceptedSourcesOf(snapshot: TaskSnapshot, mode: AutoReviewMode): ReviewAgentSource[] {
   if (mode === 'off') return []
   return snapshot.reviews
-    .filter((review: ReviewRecord) => review.outcome === 'failed' || (mode === 'all' && review.outcome === 'verified'))
+    .filter((review: ReviewRecord) => {
+      let run = snapshot.runs.find(run => run.runId === review.runId)
+      // A replay root has a champion parent Run but no parent Task. Its entire
+      // execution subtree belongs to the experiment, not another automatic loop.
+      while (run !== undefined) {
+        if (run.parentRunId === undefined) break
+        if (snapshot.tasks.some(task => task.taskId === run!.taskId && task.parentTaskId === undefined)) return false
+        const parentRunId = run.parentRunId
+        run = snapshot.runs.find(run => run.runId === parentRunId)
+      }
+      return review.outcome === 'failed' ||
+        (mode === 'all' && review.outcome === 'verified' &&
+          snapshot.tasks.some(task => task.taskId === review.taskId && task.parentTaskId === undefined))
+    })
     .map(review => ({ taskId: review.taskId, runId: review.runId ?? null }))
 }
 
@@ -75,6 +93,7 @@ async function deliverDiagnosis(
       `Review diagnosis ${diagnosis.diagnosisId} for review source ${sourceRef(source)} [${diagnosis.confidence}].`,
       `Observation: ${diagnosis.observedFailure}`,
       `Conclusion / next action: ${diagnosis.localizedCause}`,
+      `Scope: ${diagnosis.scope}; related tasks: ${diagnosis.relatedTaskIds?.join(', ') || 'none'}.`,
       `Original review: ${diagnosis.reviewRefs.join(', ')}; evidence: ${diagnosis.evidenceRefs.join(', ') || 'none recorded'}.`,
       'Read your current task/run state before acting. A diagnosis changes no task state or authority. Handle local child repairs in your current run after its batch settles; only established shared changes go to the supervisor.',
     ].join('\n')
@@ -84,7 +103,9 @@ async function deliverDiagnosis(
       targetSessionId: SessionId(targetSessionId),
       text,
     })
-    log?.(`review agent: diagnosis ${diagnosis.diagnosisId} to coordinator session ${targetSessionId}: ${delivery.status}`)
+    log?.(
+      `review agent: diagnosis ${diagnosis.diagnosisId} to coordinator session ${targetSessionId}: ${delivery.status}`,
+    )
     if (delivery.status === 'unavailable') {
       return `diagnosis ${diagnosis.diagnosisId} recorded but coordinator session ${targetSessionId} is unavailable; the next activation retries delivery`
     }
@@ -110,11 +131,14 @@ export async function scanFailedReviewSources(
   try {
     snapshot = await ctx.task.snapshotIn(storeId)
   } catch (error) {
-    log?.(`review agent: store ${storeId} could not be read (${error instanceof Error ? error.message : String(error)}); nothing was scanned`)
+    log?.(
+      `review agent: store ${storeId} could not be read (${error instanceof Error ? error.message : String(error)}); nothing was scanned`,
+    )
     return report()
   }
   const accepted = acceptedSourcesOf(snapshot, mode)
-  const targets = options.source === undefined ? accepted : accepted.filter(source => sameSource(source, options.source!))
+  const targets =
+    options.source === undefined ? accepted : accepted.filter(source => sameSource(source, options.source!))
   if (targets.length === 0) return report()
 
   const root = liveRootAgentOf(ctx, storeId)
@@ -129,8 +153,15 @@ export async function scanFailedReviewSources(
     // nothing. An *open* attempt is not skipped here — whether it is dead (its
     if (existing !== undefined && open === undefined) {
       const reason = await deliverDiagnosis(ctx, storeId, source, existing.sessionId, log)
-      entries.push({ source, result: 'existing', sessionId: existing.sessionId, ...(reason === undefined ? {} : { reason }) })
-      log?.(`review agent: source ${sourceRef(source)} already has an attempt (session ${existing.sessionId}, ${existing.settlement!.status}) — read, nothing started`)
+      entries.push({
+        source,
+        result: 'existing',
+        sessionId: existing.sessionId,
+        ...(reason === undefined ? {} : { reason }),
+      })
+      log?.(
+        `review agent: source ${sourceRef(source)} already has an attempt (session ${existing.sessionId}, ${existing.settlement!.status}) — read, nothing started`,
+      )
       continue
     }
     if (root === undefined) {
@@ -169,7 +200,12 @@ export async function scanFailedReviewSources(
     switch (outcome.kind) {
       case 'recorded': {
         const reason = await deliverDiagnosis(ctx, storeId, source, outcome.sessionId, log)
-        entries.push({ source, result: 'started', sessionId: outcome.sessionId, ...(reason === undefined ? {} : { reason }) })
+        entries.push({
+          source,
+          result: 'started',
+          sessionId: outcome.sessionId,
+          ...(reason === undefined ? {} : { reason }),
+        })
         log?.(`review agent: source ${sourceRef(source)} accepted — reviewer session ${outcome.sessionId} started`)
         break
       }
@@ -177,10 +213,12 @@ export async function scanFailedReviewSources(
       case 'in-flight': {
         // Another admission owns this source's attempt: the ledgers' decision is
         // what stands, and nothing was spawned here. What it decided is named —
-        const deliveryReason = outcome.kind === 'reuse'
-          ? await deliverDiagnosis(ctx, storeId, source, outcome.attempt.sessionId, log)
-          : undefined
-        const reason = [recoveryReason(outcome.recovered), deliveryReason].filter(part => part !== undefined).join('; ') || undefined
+        const deliveryReason =
+          outcome.kind === 'reuse'
+            ? await deliverDiagnosis(ctx, storeId, source, outcome.attempt.sessionId, log)
+            : undefined
+        const reason =
+          [recoveryReason(outcome.recovered), deliveryReason].filter(part => part !== undefined).join('; ') || undefined
         entries.push({
           source,
           result: 'existing',
@@ -197,10 +235,14 @@ export async function scanFailedReviewSources(
       case 'refused': {
         const reason = refusalReason(outcome.plan.code, outcome.plan.budget)
         const recovered = recoveryReason(outcome.recovered)
-        entries.push({ source, result: 'skipped', reason: recovered === undefined ? reason : `${reason} — ${recovered}` })
+        entries.push({
+          source,
+          result: 'skipped',
+          reason: recovered === undefined ? reason : `${reason} — ${recovered}`,
+        })
         log?.(
           `review agent: source ${sourceRef(source)} skipped — ${reason}; no claim, no reviewer` +
-          `${recovered === undefined ? '' : ` (${recovered})`}`,
+            `${recovered === undefined ? '' : ` (${recovered})`}`,
         )
         break
       }
@@ -210,7 +252,9 @@ export async function scanFailedReviewSources(
         // A reviewer that produced no diagnosis is reported as a failed
         // attempt with the reason named — never as a source that was reviewed.
         entries.push({ source, result: 'failed', sessionId: outcome.sessionId, reason: outcome.failure })
-        log?.(`review agent: source ${sourceRef(source)} accepted, but the reviewer did not finish — ${outcome.failure} (session ${outcome.sessionId})`)
+        log?.(
+          `review agent: source ${sourceRef(source)} accepted, but the reviewer did not finish — ${outcome.failure} (session ${outcome.sessionId})`,
+        )
         break
     }
   }
@@ -219,7 +263,8 @@ export async function scanFailedReviewSources(
 
 /** How one refusal reads in the scan's line, named the way the ledger refused. */
 function refusalReason(code: ReviewAgentRefusalCode, budget: { used: number; max: number }): string {
-  if (code === 'budget-exhausted') return `budget exhausted: the store's review allowance is spent (${budget.used}/${budget.max})`
+  if (code === 'budget-exhausted')
+    return `budget exhausted: the store's review allowance is spent (${budget.used}/${budget.max})`
   if (code === 'request-key-required') return 'the source was already reviewed and this scan names no key'
   if (code === 'iteration-cap') return "the source's rounds are spent; the cap ends the iteration"
   return 'the source already has an attempt with a different focus'
@@ -235,20 +280,26 @@ function recoveryReason(recovered: readonly ReviewAgentAttempt[]): string | unde
 }
 
 /** Install the two triggers of the automatic scan on this deployment's context: one terminal review at a time, and one whole graph activation — each honouring the deployment's `supervision.autoReview`. */
-export function installReviewAgentAutoTrigger(ctx: Context, options: { log?: (line: string) => void } = {}): () => void {
+export function installReviewAgentAutoTrigger(
+  ctx: Context,
+  options: { log?: (line: string) => void } = {},
+): () => void {
   const log = options.log ?? warnLine(ctx)
   const disposers: (() => void)[] = [
     ctx.taskRuntime.registerTerminalReviewListener((fact: TerminalReviewFact) => {
       const mode = supervisionSettings().autoReview
       const accepted = mode !== 'off' && (fact.outcome === 'failed' || (mode === 'all' && fact.outcome === 'verified'))
       if (!accepted) return
-      backgroundScan(log, 'review agent', () => scanFailedReviewSources(ctx, fact.storeId, {
-        source: { taskId: fact.taskId, runId: fact.runId },
-        log,
-      }))
+      backgroundScan(log, 'review agent', () =>
+        scanFailedReviewSources(ctx, fact.storeId, {
+          source: { taskId: fact.taskId, runId: fact.runId },
+          log,
+        }),
+      )
     }),
     installGraphSelectedScan(ctx, { log, label: 'review agent' }, graph =>
-      scanFailedReviewSources(ctx, rootTaskStoreId(graph.rootSessionId), { log })),
+      scanFailedReviewSources(ctx, rootTaskStoreId(graph.rootSessionId), { log }),
+    ),
   ]
   return () => {
     for (const dispose of disposers) dispose()

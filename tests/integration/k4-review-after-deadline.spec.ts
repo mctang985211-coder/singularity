@@ -100,7 +100,13 @@ async function stopTreeWithFailedChild(
     storeId: '', rootTaskId: '', rootRunId: '', childTaskId: '', childRunId: '', childSession: '',
     resumeRoot: () => { parked.resolve() },
   } as Mutable
-  const h = await startScriptedLoop({
+  let h!: ScriptedLoop
+  const reviewSourceReply = () => {
+    const prompt = h.spawns.find(spawn => spawn.name.startsWith('review '))!.prompt
+    const source = /source: review ([^ \n]+)/.exec(prompt)![1]!
+    return REVIEW_REPLY.replace('"e-1"', JSON.stringify(source))
+  }
+  h = await startScriptedLoop({
     rootBudget: { maxRuns: TREE_RUNS },
     ...(options.probes === undefined ? {} : { probes: [...options.probes] }),
     script: (_sessionId, index): readonly ScriptEntry[] => index === 0
@@ -115,7 +121,10 @@ async function stopTreeWithFailedChild(
       ]
       : index === 1
         ? [{ tool: 'task_submit_result', args: { summary: 'the requested result failed its required check' } }, { text: 'child: check failed' }]
-        : [...(options.reviewer ?? [{ text: REVIEW_REPLY }])],
+        : [
+          ...(options.reviewer ?? [{ text: REVIEW_REPLY }]).map(entry =>
+            'text' in entry && entry.text === REVIEW_REPLY ? { text: reviewSourceReply() } : entry),
+        ],
   })
   options.arm?.(h)
   const root = await h.begin(ROOT_CONTRACT)

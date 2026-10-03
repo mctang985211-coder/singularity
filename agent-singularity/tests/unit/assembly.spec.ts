@@ -159,12 +159,12 @@ describe('SingularityAgent assembly', () => {
 
   it('resolves the supervision block over its shipped defaults, and refuses an unknown member of it by name', async () => {
     // The shipped default composes the shipped supervision policy: every
-    // failed terminal review is diagnosed on its own, three recovery rounds, two
+    // failed terminal review and completed successful root is diagnosed, three recovery rounds, two
     // improvement rounds, eight coordination runs per store.
     await mount()
     expect(supervisionSettings()).toEqual(DEFAULT_SUPERVISION)
     expect(DEFAULT_SUPERVISION).toEqual({
-      autoReview: 'failed',
+      autoReview: 'all',
       maxRecoveryRounds: 3,
       maxImprovementRounds: 2,
       coordinationBudget: 8,

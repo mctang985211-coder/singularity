@@ -709,6 +709,6 @@ describe('task_review_pack on one exact source', () => {
     const other = (await defineTaskReviewPackTool(ctx).execute({ taskId: 't2', runId: null }, exec as never)) as string
     expect(other).toContain('source: review t2#no-run [blocked]')
     expect(other).toContain('review attempts (0): none')
-    expect(other).not.toContain(session)
+    expect(other.split('Navigation:')[0]).not.toContain(session)
   })
 })

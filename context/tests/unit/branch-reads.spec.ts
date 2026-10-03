@@ -1,4 +1,4 @@
-/** Worker and reviewer reads follow responsibility branches and direct dependencies. */
+/** Workers retain their branch; trusted review delegations inspect the same graph, read-only. */
 import { describe, expect, test, vi } from 'vitest'
 import type { ContextReadQuery } from '../../src/types.ts'
 import { FixtureStack, expectOk, expectRefused, seedChain } from '../support/stack.ts'
@@ -57,13 +57,41 @@ describe('branch read boundaries', () => {
     }
   })
 
-  test('a reviewer follows its delegated branch and that branch’s dependencies', async () => {
+  test('a valid reviewer reads peers and history throughout its delegated graph without changing the store', async () => {
     const { stack } = await fixture()
     stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', taskId: 't-c1', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
+    const before = await stack.snapshot('sg-t-s-root')
     const text = expectOk(await stack.service.taskStatus('s-review', { scope: 'graph' })).text
-    for (const id of ['t-root', 't-c1', 't-g1', 't-c2']) expect(text).toContain(id)
-    expect(text).not.toContain('t-replay')
+    for (const id of ['t-root', 't-c1', 't-g1', 't-c2', 't-replay']) expect(text).toContain(id)
+    expect(text).toContain('delegated graph, read-only')
+    expect(text).toContain('r-replay=session s-replay')
+    expect(text).toContain('reviewRefs [t-replay#r-replay]')
+    expect(text).toContain('diagnosisRefs [d-replay]')
     for (const query of dependency) expectOk(await stack.service.contextRead('s-review', query))
-    for (const query of unrelated) expectRefused(await stack.service.contextRead('s-review', query), 'not-found')
+    for (const query of unrelated) expectOk(await stack.service.contextRead('s-review', query))
+    expect(await stack.snapshot('sg-t-s-root')).toEqual(before)
+  })
+
+  test('a missing delegated task opens no task or session references', async () => {
+    const { stack } = await fixture()
+    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', taskId: 't-missing', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
+    const text = expectOk(await stack.service.taskStatus('s-review', { scope: 'graph' })).text
+    expect(text).toContain('entries in scope: 0')
+    for (const query of [...dependency, ...unrelated]) expectRefused(await stack.service.contextRead('s-review', query), 'not-found')
+    expectRefused(await stack.service.contextRead('s-review', { kind: 'session', ref: 's-review' }), 'not-found')
+  })
+
+  test('full graph visibility keeps the cross-graph session check before either log API', async () => {
+    const { stack } = await fixture()
+    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', taskId: 't-c1', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
+    stack.graph({ id: 'g-other', rootSessionId: 's-other' })
+    stack.sessionLog('s-other', ['another graph'])
+    const query = (stack.ctx as unknown as { sessionQuery: { readSession: (...args: unknown[]) => unknown; readEvent: (...args: unknown[]) => unknown } }).sessionQuery
+    const session = vi.spyOn(query, 'readSession')
+    const event = vi.spyOn(query, 'readEvent')
+    expectRefused(await stack.service.contextRead('s-review', { kind: 'session', ref: 's-other' }), 'cross-graph')
+    expectRefused(await stack.service.contextRead('s-review', { kind: 'session', ref: { sessionId: 's-other', seq: 0 } }), 'cross-graph')
+    expect(session).not.toHaveBeenCalled()
+    expect(event).not.toHaveBeenCalled()
   })
 })

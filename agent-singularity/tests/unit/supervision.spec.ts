@@ -4,11 +4,7 @@
  * counting, and the ledger's cap-aware supervisor planning.
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import {
-  REVIEW_AGENT_BUDGET_DEFAULT,
-  planSupervisorAttempt,
-  reviewAgentBudget,
-} from '../../src/coordination/ledger.ts'
+import { REVIEW_AGENT_BUDGET_DEFAULT, planSupervisorAttempt, reviewAgentBudget } from '../../src/coordination/ledger.ts'
 import {
   DEFAULT_SUPERVISION,
   configureSupervision,
@@ -30,7 +26,7 @@ afterEach(() => {
 describe('the supervision settings', () => {
   test('ship the contract defaults', () => {
     expect(DEFAULT_SUPERVISION).toEqual({
-      autoReview: 'failed',
+      autoReview: 'all',
       maxRecoveryRounds: 3,
       maxImprovementRounds: 2,
       coordinationBudget: 8,
@@ -74,12 +70,12 @@ describe('the per-source round caps', () => {
     ],
   }
 
-  test('count a task\'s recovery and improvement runs, reading a missing kind as a recovery', () => {
+  test("count a task's recovery and improvement runs, reading a missing kind as a recovery", () => {
     const rounds = sourceRoundsOf(snapshot as never, 't1', 'failed')
     expect(rounds).toMatchObject({ outcome: 'failed', recovered: 1, improved: 1, maxRecovery: 3, maxImprovement: 2 })
   })
 
-  test('refuse only at the cap of the source\'s own kind', () => {
+  test("refuse only at the cap of the source's own kind", () => {
     const under: SupervisionRounds = { outcome: 'failed', recovered: 2, improved: 0, maxRecovery: 3, maxImprovement: 2 }
     expect(roundCapRefusal(under)).toBeUndefined()
     const atRecoveryCap: SupervisionRounds = { ...under, recovered: 3 }
@@ -132,8 +128,13 @@ describe('the cap-aware supervisor planning', () => {
   })
 
   test('an interrupted attempt does not block a fresh start; a concluded one is reused', () => {
-    const dead = attempt({ sessionId: 's-dead', settlement: { status: 'interrupted', note: 'gone', at: '2026-10-01T00:01:00.000Z' } })
-    expect(planSupervisorAttempt({ attempts: [dead] as never, request, budget: { used: 1, max: 8 } })).toMatchObject({ kind: 'start' })
+    const dead = attempt({
+      sessionId: 's-dead',
+      settlement: { status: 'interrupted', note: 'gone', at: '2026-10-01T00:01:00.000Z' },
+    })
+    expect(planSupervisorAttempt({ attempts: [dead] as never, request, budget: { used: 1, max: 8 } })).toMatchObject({
+      kind: 'start',
+    })
     const concluded = attempt({ settlement: { status: 'closed', note: 'done', at: '2026-10-01T00:02:00.000Z' } })
     const plan = planSupervisorAttempt({ attempts: [concluded] as never, request, budget: { used: 8, max: 8 } })
     expect(plan).toMatchObject({ kind: 'reuse' })

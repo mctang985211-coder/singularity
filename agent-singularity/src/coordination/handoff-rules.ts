@@ -14,6 +14,7 @@ export const COORDINATION_PRESET = 'singularity-coordinator'
 export const SUPERVISOR_BASELINE: readonly string[] = [
   'task_recover',
   'task_review_pack',
+  'task_review_agent',
   'task_read',
   'task_status',
   'context_read',
@@ -273,7 +274,19 @@ export function responsibleParentRun(snapshot: TaskSnapshot, diagnosis: Diagnosi
 }
 
 /** Ordinary child diagnoses are handled by their parent without another coordination agent. */
-export function needsSupervisor(snapshot: TaskSnapshot, diagnosis: Diagnosis): boolean {
+export function needsSupervisor(
+  snapshot: TaskSnapshot,
+  diagnosis: Diagnosis,
+  attempts: readonly ReviewAgentAttempt[] = [],
+): boolean {
+  const reviewer = attempts.find(attempt => attempt.sessionId === diagnosis.producedBy?.sessionId)
+  // A focused reviewer reports to its existing supervisor, including after restart.
+  if (
+    reviewer !== undefined &&
+    attempts.some(attempt => attempt.role === 'supervisor' && attempt.sessionId === reviewer.actor)
+  )
+    return false
+  if (sourceReviewOf(snapshot, diagnosis)?.outcome === 'verified' && diagnosis.proposals.length === 0) return false
   const task = snapshot.tasks.find(item => item.taskId === diagnosis.taskId)
   return task?.parentTaskId === undefined || diagnosis.proposals.length > 0
 }
@@ -313,6 +326,8 @@ export function supervisorPrompt(input: {
     `The hand-off is diagnosis ${diagnosis.diagnosisId} about task ${diagnosis.taskId} (source ${input.sourceRef}, whose review settled ${input.sourceOutcome}).`,
     `Its recorded observation: ${diagnosis.observedFailure}`,
     `Its recorded conclusion: ${diagnosis.localizedCause}`,
+    `Diagnosis scope: ${diagnosis.scope}; related tasks: ${diagnosis.relatedTaskIds?.join(', ') || 'none'}.`,
+    `Review sources: ${diagnosis.reviewRefs.join(', ')}; evidence: ${diagnosis.evidenceRefs.join(', ') || 'none'}.`,
     ...diagnosis.proposals.map(
       proposal => `Suggested ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`,
     ),
@@ -332,10 +347,13 @@ export function supervisorPrompt(input: {
         )
       : ['none']),
     '',
-    'Read task_review_pack, task_read/task_status and the original evidence through context_read. Do not create a duplicate proposal.',
+    'Read task_review_pack, task_status scope:"graph", related diagnoses and original evidence through context_read. Start with the whole Task DAG, then inspect the relevant contracts, exact Run reviews, dependency edges and frozen Skill bindings. Do not create a duplicate proposal.',
+    'When a causal question needs deeper independent investigation, call task_review_agent for the relevant exact taskId/runId with a concrete reason and a stable requestKey. Its read-only diagnosis returns to you; it does not open another supervisor. Reuse recorded diagnoses before asking again. Reconcile supporting and conflicting evidence, then make one evidence-based decision; a discussion or vote is not an experiment.',
     `For an established shared gap, cite diagnosis:${diagnosis.diagnosisId} in evolution_propose.sourceRefs. Use only supported candidate targets and only tools actually granted: evolution_candidate → evolution_prepare → evolution_replay → evolution_gate. Missing artifacts alone do not establish a shared gap.`,
     ...(input.sourceOutcome === 'verified'
-      ? [`For this successful source, evolution_replay must declare objective: "tool-call-reduction", include task ${diagnosis.taskId} in taskIds, and name independent verified holdoutTaskIds. The experiment requires unchanged acceptance and lower complete Run subtree tool-call counts; unknown counters prove no improvement.`]
+      ? [
+          `For this successful source, evolution_replay must declare objective: "tool-call-reduction", include task ${diagnosis.taskId} in taskIds, and name independent verified holdoutTaskIds. The experiment requires unchanged acceptance and lower complete Run subtree tool-call counts; unknown counters prove no improvement.`,
+        ]
       : []),
     'A gated proposal continues with evolution_decide to request the human decision. A PROMOTE-decided proposal continues with evolution_apply to request approval for its exact production writes. If approval is denied or unavailable, report proposalId and its current status and stop. A rejected or research-only decision opens no recovery for that change.',
     input.childSource

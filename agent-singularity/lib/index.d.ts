@@ -5,11 +5,11 @@ import { ModelSelection } from "@dangosys/dsh-singularity-evolution";
 import "@dangosys/dsh-singularity-task";
 
 //#region src/coordination/supervision.d.ts
-/** When the automatic trigger accepts a terminal review for diagnosis. */
+/** When the automatic trigger accepts failures or completed successful goals for diagnosis. */
 type AutoReviewMode = 'all' | 'failed' | 'off';
 /** The `supervision` block of agent-singularity's configuration, with every member resolved. */
 interface SupervisionConfig {
-  /** `all` accepts every terminal review (failed and verified), `failed` only failures, `off` none. */
+  /** `all` accepts failures at every node and successful roots; `failed` only failures, `off` none. */
   readonly autoReview: AutoReviewMode;
   /** Recovery attempts one failed source accepts before `iteration-cap`. */
   readonly maxRecoveryRounds: number;
@@ -18,7 +18,7 @@ interface SupervisionConfig {
   /** Review-agent runs (reviewers and supervisors together) one root store may start. */
   readonly coordinationBudget: number;
 }
-/** The shipped defaults: failed reviews are diagnosed, three recovery rounds, two improvement rounds, eight coordination runs per store. */
+/** Diagnose local failures and completed successful goals; three recovery rounds, two improvement rounds, eight coordination runs per store. */
 declare const DEFAULT_SUPERVISION: SupervisionConfig;
 //#endregion
 //#region src/services/hitl.d.ts

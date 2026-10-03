@@ -47,7 +47,7 @@ export type {
   ReviewerBindingRecord,
   ReviewerBindingSource,
 } from './bindings/types.ts'
-export { CONTEXT_OUTPUT_LIMIT_BYTES, omissionLine, OutputBudget, sliceUtf8, utf8Bytes } from './limits.ts'
+export { budgetList, CONTEXT_OUTPUT_LIMIT_BYTES, omissionLine, OutputBudget, sliceUtf8, utf8Bytes } from './limits.ts'
 export type { OmissionReport, Utf8Slice } from './limits.ts'
 export { contractProjection } from './reads/contract.ts'
 export { dynamicProjection, relatedEntries } from './reads/dynamic.ts'
