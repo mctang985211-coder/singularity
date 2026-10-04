@@ -1,0 +1,646 @@
+{
+  "date": "2026-10-04",
+  "test": "tests/integration/live-xv6-supervisor-repair.spec.ts",
+  "command": "NODE_USE_ENV_PROXY=1 SINGULARITY_LIVE_XV6_SUPERVISOR_REPAIR=1 SINGULARITY_LIVE_XV6_EVIDENCE=2026-10-04-live-xv6-supervisor-repair-run2.json pnpm exec vitest run --project integration packages/singularity/tests/integration/live-xv6-supervisor-repair.spec.ts",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "result": "passed",
+  "method": "A all-real run over the xv6 locks world: the defective xv6-lock-lab-optimization v1 recipe lists the completion child at index 0 with no dependsOn, so it starts before the fix child at index 1; the honest completion leaf finds out/locks-fix.applied missing and fails the real checker without fabricating it, and the coordinator fails with it (its own criterion needs the completion artifact and the full grade). The spec re-runs `bash checks/verify.sh all` itself to record the score the defective order really earned. The review scan spawns the reviewer, whose recorded diagnosis carries a task_definition proposal and is consumed into a supervisor hand-off; the supervisor is the real model and calls the real evolution chain (propose, candidate, prepare, replay, gate, decide, apply); the two-sided experiment replays the failed coordinator (observed failure) and the verified fix leaf (holdout) through the real runtime under per-side frozen template libraries, with the lab grader as the original acceptance; the human gates are answered through the deployment approval seam; the publish appends xv6-lock-lab-optimization@2.json, whose shape this spec does NOT prescribe — it accepts whatever version 2 the model publishes as long as it composes exactly the two leaves, cannot start the completion child before the fix child verifies under serial index+dependency scheduling (ordered after it, or gated on it), and keeps the criteria byte-identical — and leaves @1 defective; a second root run on a fresh checkout verifies with its coordinating child bound to version 2 and consumes exactly the published recipe (indices and edges), before the spec re-runs the full grade to 70/70. The repair is pure template CONTENT (order and/or a dependency edge; the criteria stay byte-identical), so evolution_prepare never takes the criterion-repair branch. In hybrid mode only the reviewer's request is scripted; in all-real mode it uses the real model too. autoReview is pinned to \"failed\". The assemble filter keeps the evolution chain and task_review_agent only on the supervisor session. An idle session is nudged per session id (its own active run or the supervisor session, no pending call, no in-flight request, globally stagnant progress for 180 seconds, capped at 12 nudges per session).",
+  "assertions": {
+    "regressionLeafFailedOnRealChecker": true,
+    "run1RegressionLeafGapVerdict": true,
+    "coordinatorFailedOnRealChecker": true,
+    "diagnosisProposesLockLabTemplate": true,
+    "supervisorSessionStarted": true,
+    "supervisorReadProductionTemplate": true,
+    "supervisorRanEvolutionChain": true,
+    "proposalApplied": true,
+    "exactlyOneProposalApplied": true,
+    "ledgerWalkedProposedToApplied": true,
+    "experimentVerdictFixed": true,
+    "experimentBaselineFailedCandidateVerified": true,
+    "experimentHoldoutVerifiedBothSides": true,
+    "publishedEqualsFrozenCandidate": true,
+    "libraryGainedV2AndKeptV1": true,
+    "publishedRecipeGatesCompletion": true,
+    "publishedRecipeEdgesRecorded": true,
+    "failedRunBindingFrozen": true,
+    "root1Terminal": true,
+    "templateBoundTasksAtLeastThree": true,
+    "everyRunBindsASkill": true,
+    "noUnrelatedTemplatesInAnyRequest": true,
+    "run1GraderNotFull": true,
+    "run2GraderFull": true,
+    "graderScoreImproved": true,
+    "run2Verified": true,
+    "run2CoordinatorBindsVersion2": true,
+    "run2ConsumesVersion2Recipe": true,
+    "run2ConsumesPublishedEdgesExactly": true,
+    "run2GradeFull": true,
+    "tokenUsageRecorded": true
+  },
+  "cases": [
+    {
+      "name": "xv6-locks-shared-recipe-repair",
+      "reviewPath": "all-real",
+      "failure": {
+        "regressionLeaf": {
+          "taskId": "t-f518b5e9-2d07-4f7f-b35f-a5a3d58f6739",
+          "templateId": "xv6-lock-completion-regression",
+          "verdict": "fail",
+          "exitCode": 1,
+          "logRef": "sg-t-s-root/r-342b7df4-cbe5-4275-854c-bbf246b623b0/locks-completion-result.log",
+          "logExcerpt": "missing out/locks-fix.applied\n"
+        },
+        "coordinator": {
+          "taskId": "t-0940c23b-bc3f-449b-b5b7-2a8572a2903d",
+          "templateId": "xv6-lock-lab-optimization",
+          "templateVersion": 1,
+          "verdict": "fail",
+          "exitCode": 1,
+          "logRef": "sg-t-s-root/r-3701f6be-12a5-44f1-9e82-22ec51117bcd/locks-lab-result.log"
+        },
+        "run1Grade": {
+          "score": "Score: 69/70",
+          "exit": 1
+        }
+      },
+      "diagnosis": {
+        "diagnosisId": "review-agent-faa728f5-2ca5-4e36-ba67-3a353f8eec98",
+        "observedFailure": "Source task t-0940c23b-bc3f-449b-b5b7-2a8572a2903d (run r-3701f6be-12a5-44f1-9e82-22ec51117bcd, session s-56bab29a-f404-4346-be02-403af3904284) did exactly as contracted: one `task_decompose` with the recipe's exact templateRef admitted two children, t-f518b5e9-...6739 (completion, listed first) and t-8b4cc588-...b91e (fix). The completion child ran FIRST: its mandated first action `test -f out/locks-fix.applied` found no `out/` dir (session s-d94b67b6-...-5790af556e56 seq 14), it submitted a one-line gap report per its contract and settled failed at 14:18:49.87 with locks-completion-result exit 1. The fix child then created out/locks-fix.applied at 14:19:03 and verified (locks-fix-result pass). The coordinator's own criterion locks-lab-result (`test -f out/locks-complete.json && bash checks/verify.sh all`) exited 1; `verify.sh all` showed everything green (kalloctest test1/test2 OK, bcachetest test0/test1 OK, usertests OK) with only `time: FAIL / Cannot read time.txt` → Score 69/70. The coordinator then correctly submitted a gap report naming the failed child and authored no stage artifact; the root t-52e1b508 likewise submitted a gap report after its all-result criterion failed.",
+        "localizedCause": "Root cause is the published recipe `xv6-lock-lab-optimization@1` (digest 5754a46e062b), not the run: its `decomposition.children` lists the completion child before the fix child and carries NO dependency edge (both grandchild tasks show `dependencies []`; the pack's decomposition dim records edges in/out 0/0), while the batch starts children serially in dependency/listing order (completion run 14:18:43.731Z–14:18:49.87Z, fix run only from 14:18:49.882Z). So the completion stage was dispatched before its own input existed, even though the template's own constraint demands that edge ('the completion child is only meaningful once the fix child has produced its marker'). The failures of t-0940c23b (locks-lab-result exit 1, evidence-r-3701f6be-...-040bf5f0) and of parent t-52e1b508 (all-result exit 1) are consequences; the only independent defect is the ordering/edge gap in the recipe. Deliverable state is one artifact short: fix verified (evidence-r-526995b8-...-7bec811e) and Score 69/70, missing only time.txt / out/locks-complete.json. Next action for the business coordinator: both runs are terminal (t-0940c23 and t-52e1b5 runs submitted/failed), so do NOT re-dispatch a failed child — escalate to the owner of the template with the concrete edit: reorder `decomposition.children` so the fix child (xv6-lock-fix-applied@1) is admitted first, or declare the dependency edge on the completion child if the schema supports it, then dispatch a fresh task against that corrected recipe; with the verified marker present the completion stage can legitimately write time.txt and out/locks-complete.json and reach 70/70. Missing fact (uncertainty): the recipe body exposes only `templateRef` per child and no edge field, so whether the runtime can express a dependsOn edge at all is unproven — reordering is the variant testable under unchanged acceptance.",
+        "scope": "task t-0940c23b-bc3f-449b-b5b7-2a8572a2903d",
+        "reviewerProposal": {
+          "targetType": "task_definition",
+          "targetId": "xv6-lock-lab-optimization",
+          "rationale": "Recipe v1's `decomposition.children` admits the completion stage before the fix stage with no dependency edge, so every dispatch self-defeats (seed run: Score 69/70, completion child failed on `test -f out/locks-fix.applied`). Publish a corrected recipe ordering the fix child (xv6-lock-fix-applied@1) first, or carrying the required edge if the schema allows it, and verify with an independent holdout dispatch."
+        },
+        "proposals": [
+          [
+            "task_definition",
+            "xv6-lock-lab-optimization"
+          ]
+        ]
+      },
+      "appliedProposalId": "prop-xv6-locks-recipe-order-1",
+      "firstProposalId": "prop-xv6-locks-recipe-order-1",
+      "proposals": [
+        {
+          "proposalId": "prop-xv6-locks-recipe-order-1",
+          "status": "applied",
+          "targetType": "task_definition",
+          "targetId": "xv6-lock-lab-optimization"
+        }
+      ],
+      "ledgerKinds": [
+        "proposed",
+        "candidate",
+        "prepared",
+        "experiment_started",
+        "experiment_sample",
+        "experiment_sample",
+        "experiment_sample",
+        "experiment_sample",
+        "gated",
+        "decided",
+        "commit_intent",
+        "applied"
+      ],
+      "experiment": {
+        "verdict": "fixed",
+        "sampleCount": 2,
+        "totalSides": 4,
+        "gatePassedSides": 4,
+        "samples": [
+          {
+            "taskId": "t-0940c23b-bc3f-449b-b5b7-2a8572a2903d",
+            "role": "observed-failure",
+            "baseline": "failed",
+            "candidate": "verified"
+          },
+          {
+            "taskId": "t-8b4cc588-2522-4308-a64a-a1a62e00b91e",
+            "role": "holdout",
+            "baseline": "verified",
+            "candidate": "verified"
+          }
+        ]
+      },
+      "gate": {
+        "proposalId": "prop-xv6-locks-recipe-order-1",
+        "answered": 6,
+        "questions": 6,
+        "answers": {
+          "targetFailureFixed": "yes — the frozen two-sided experiment report sandbox/prop-xv6-locks-recipe-order-1/exp-c1e9163573703dc4/experiment-report.json records verdict \"fixed\": sample t-0940c23b-bc3f-449b-b5b7-2a8572a2903d (observed-failure) baseline failed → candidate verified (locks-lab-result fail→pass). Candidate xv6-lock-lab-optimization@2 lists the producer child xv6-lock-fix-applied@1 before the consumer child xv6-lock-completion-regression@1, so the completion stage no longer starts before out/locks-fix.applied exists.",
+          "originalAcceptanceMaintained": "yes — the parent oracle is unchanged: criterion locks-lab-result keeps exact command `bash -c 'test -f out/locks-complete.json && bash checks/verify.sh all'`, verifierRef command, mandatory/deterministic mode and the identical protectedInputs list; the report shows that criterion passing on the candidate side under the fixed original parent oracle.",
+          "existingRegressionMaintained": "yes — the experiment's holdout t-8b4cc588-2522-4308-a64a-a1a62e00b91e (fix stage, verified) is \"baseline verified → candidate verified (no criterion diff)\". Both child templates are carried byte-identical (xv6-lock-fix-applied@1 sha256 263fa9bed949…, xv6-lock-completion-regression@1 sha256 e4753de49021…) and the protected inputs are untouched; recorded evidence evidence-r-526995b8-1fcf-4da9-b3fd-3a45d6e21df8-7bec811e-5311-48a8-b427-61187a54a94c shows the fix stage passing under the unchanged acceptance.",
+          "noUnacceptableSideEffects": "yes — the candidate changes only the order of decomposition.children and the wording of the two order-related clauses in contract constraint/objective; no capability, skill, provider, tool, verifier or task-contract field of either child changes, so no new permission or provider surface is introduced and no leaf criterion is touched.",
+          "holdoutPerformanceAcceptable": "yes — the one holdout (t-8b4cc588) passes on both sides with no criterion diff, so the corrected ordering does not regress an unrelated existing template use; the recipe still admits exactly the same two children.",
+          "resourceCostAcceptable": "yes — the experiment ran two sides over 2 samples (1 recorded failure + 1 holdout), one dispatch per side, with no maxTokens ceiling declared; the candidate recipe admits the same two fixed children as v1 and adds no tool calls or context, so per-run cost is unchanged while the run no longer burns a dispatch on an input-starved completion stage.",
+          "regressionEvidenceRefs": [
+            "sandbox/prop-xv6-locks-recipe-order-1/exp-c1e9163573703dc4/experiment-report.json",
+            "evidence-r-526995b8-1fcf-4da9-b3fd-3a45d6e21df8-7bec811e-5311-48a8-b427-61187a54a94c",
+            "evidence-r-342b7df4-cbe5-4275-854c-bbf246b623b0-11ea103f-34ba-4de3-97e2-937b8674f4e1",
+            "evidence-r-3701f6be-12a5-44f1-9e82-22ec51117bcd-040bf5f0-234a-4071-8339-182ebb1e4658"
+          ]
+        },
+        "regressionEvidenceRefs": [
+          "sandbox/prop-xv6-locks-recipe-order-1/exp-c1e9163573703dc4/experiment-report.json",
+          "evidence-r-526995b8-1fcf-4da9-b3fd-3a45d6e21df8-7bec811e-5311-48a8-b427-61187a54a94c",
+          "evidence-r-342b7df4-cbe5-4275-854c-bbf246b623b0-11ea103f-34ba-4de3-97e2-937b8674f4e1",
+          "evidence-r-3701f6be-12a5-44f1-9e82-22ec51117bcd-040bf5f0-234a-4071-8339-182ebb1e4658"
+        ],
+        "sampleCount": 2,
+        "totalSides": 4,
+        "gatePassedSides": 4,
+        "sides": [
+          {
+            "taskId": "t-0940c23b-bc3f-449b-b5b7-2a8572a2903d",
+            "role": "observed-failure",
+            "side": "baseline",
+            "outcome": "failed"
+          },
+          {
+            "taskId": "t-0940c23b-bc3f-449b-b5b7-2a8572a2903d",
+            "role": "observed-failure",
+            "side": "candidate",
+            "outcome": "verified"
+          },
+          {
+            "taskId": "t-8b4cc588-2522-4308-a64a-a1a62e00b91e",
+            "role": "holdout",
+            "side": "baseline",
+            "outcome": "verified"
+          },
+          {
+            "taskId": "t-8b4cc588-2522-4308-a64a-a1a62e00b91e",
+            "role": "holdout",
+            "side": "candidate",
+            "outcome": "verified"
+          }
+        ]
+      },
+      "tokenUsage": {
+        "source": "deriveTurnTokenUsage(@deepseek-ai/dsh-token-meter) over every completed turn/start..turn/end slice of every session that made a model request",
+        "buckets": "inputTokens is uncached prompt input (uncachedInputTokens); cacheReadTokens/cacheWriteTokens are null unless every measured turn reported them — a bucket no route reported is never rendered as zero",
+        "attribution": "a turn is attributed to the phase of its first request; turns the meter could not prove are counted, not imputed; a phase that completed no turn renders null buckets (its unreportedBuckets names them) and is listed in phasesWithoutCompletedTurns",
+        "phases": {
+          "run1": {
+            "inputTokens": 204753,
+            "outputTokens": 35348,
+            "cacheReadTokens": 666112,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 7,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "supervisor": {
+            "inputTokens": 138921,
+            "outputTokens": 35430,
+            "cacheReadTokens": 1061248,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 3,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "experiment": {
+            "inputTokens": 435206,
+            "outputTokens": 73588,
+            "cacheReadTokens": 1934336,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 11,
+            "turnsWithoutUsage": 1,
+            "unreportedBuckets": []
+          },
+          "run2": {
+            "inputTokens": 207890,
+            "outputTokens": 22406,
+            "cacheReadTokens": 1219072,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 8,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          }
+        },
+        "phasesWithoutCompletedTurns": [],
+        "total": {
+          "inputTokens": 986770,
+          "outputTokens": 166772,
+          "cacheReadTokens": 4880768,
+          "cacheWriteTokens": 0,
+          "measuredTurns": 29,
+          "turnsWithoutUsage": 0,
+          "unreportedBuckets": []
+        },
+        "sessions": {
+          "s-root": {
+            "label": "root:s-root",
+            "firstPhase": "run1",
+            "inputTokens": 111555,
+            "outputTokens": 30162,
+            "cacheReadTokens": 850688,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 5,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-56bab29a-f404-4346-be02-403af3904284": {
+            "label": "Own the xv6 locks lab optimization: own ",
+            "firstPhase": "run1",
+            "inputTokens": 74824,
+            "outputTokens": 13107,
+            "cacheReadTokens": 228608,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 2,
+            "turnsWithoutUsage": 1,
+            "unreportedBuckets": []
+          },
+          "s-d94b67b6-dbf4-44d5-b069-5790af556e56": {
+            "label": "Prove the xv6 locks lab is complete: FIR",
+            "firstPhase": "run1",
+            "inputTokens": 25417,
+            "outputTokens": 959,
+            "cacheReadTokens": 10624,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-b2a59b11-e457-4ec5-bf86-682be249af45": {
+            "label": "Confirm the xv6 locks reference fix: the",
+            "firstPhase": "run1",
+            "inputTokens": 35437,
+            "outputTokens": 2049,
+            "cacheReadTokens": 77184,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "faa728f5-2ca5-4e36-ba67-3a353f8eec98": {
+            "label": "review t-0940c23b-bc3f-449b-b5b7-2a8572a2903d",
+            "firstPhase": "supervisor",
+            "inputTokens": 76796,
+            "outputTokens": 12451,
+            "cacheReadTokens": 325248,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "b642188f-ec25-43f4-905f-348a559d4cd1": {
+            "label": "supervisor for review-agent-faa728f5-2ca5-4e36-ba67-3a353f8eec98",
+            "firstPhase": "supervisor",
+            "inputTokens": 113424,
+            "outputTokens": 31434,
+            "cacheReadTokens": 1392128,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 3,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-f9266303-269e-46ed-95a3-7cb2b7e7a688": {
+            "label": "[evolution-experiment:c1e9163573703dc4:t",
+            "firstPhase": "experiment",
+            "inputTokens": 58721,
+            "outputTokens": 4008,
+            "cacheReadTokens": 78976,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 2,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-c9703e50-edae-42fe-8477-ec2af2663615": {
+            "label": "Prove the xv6 locks lab is complete: FIR",
+            "firstPhase": "experiment",
+            "inputTokens": 24398,
+            "outputTokens": 819,
+            "cacheReadTokens": 10752,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-8b6a1074-b9b9-41ce-a14c-8d82b9cf0cc8": {
+            "label": "Confirm the xv6 locks reference fix: the",
+            "firstPhase": "experiment",
+            "inputTokens": 44505,
+            "outputTokens": 2901,
+            "cacheReadTokens": 114048,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-ecb2697c-d08b-47a3-8f47-3c17873eaec9": {
+            "label": "[evolution-experiment:c1e9163573703dc4:t",
+            "firstPhase": "experiment",
+            "inputTokens": 58293,
+            "outputTokens": 2777,
+            "cacheReadTokens": 61696,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 2,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-73385f13-4fe8-49fa-8ded-cc1dfbdccb2a": {
+            "label": "Confirm the xv6 locks reference fix: the",
+            "firstPhase": "experiment",
+            "inputTokens": 44599,
+            "outputTokens": 4375,
+            "cacheReadTokens": 180096,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-6977dbde-c62f-4124-a419-65d470068b56": {
+            "label": "Prove the xv6 locks lab is complete: FIR",
+            "firstPhase": "experiment",
+            "inputTokens": 58885,
+            "outputTokens": 41367,
+            "cacheReadTokens": 611200,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-31e63310-4aea-4a7d-95ad-ca5e529e40fd": {
+            "label": "[evolution-experiment:c1e9163573703dc4:t",
+            "firstPhase": "experiment",
+            "inputTokens": 48054,
+            "outputTokens": 3942,
+            "cacheReadTokens": 191744,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-96bee73e-a8a8-4dde-9f7d-61518290f2d8": {
+            "label": "[evolution-experiment:c1e9163573703dc4:t",
+            "firstPhase": "experiment",
+            "inputTokens": 63716,
+            "outputTokens": 6039,
+            "cacheReadTokens": 321408,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-root2": {
+            "label": "root:s-root2",
+            "firstPhase": "run2",
+            "inputTokens": 8333,
+            "outputTokens": 766,
+            "cacheReadTokens": 41728,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 2,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-83ac1d7e-050b-48b7-b1d6-0cef64998447": {
+            "label": "Own the xv6 locks lab optimization: own ",
+            "firstPhase": "run2",
+            "inputTokens": 59811,
+            "outputTokens": 2536,
+            "cacheReadTokens": 77312,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 2,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-1db83837-7a49-4ede-abc0-8240a9eb61f5": {
+            "label": "Confirm the xv6 locks reference fix: the",
+            "firstPhase": "run2",
+            "inputTokens": 44646,
+            "outputTokens": 2951,
+            "cacheReadTokens": 142976,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-b86d52f3-ba82-44ff-adf1-3a02c1006a00": {
+            "label": "Prove the xv6 locks lab is complete: FIR",
+            "firstPhase": "run2",
+            "inputTokens": 35356,
+            "outputTokens": 4129,
+            "cacheReadTokens": 164352,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          }
+        }
+      },
+      "library": {
+        "files": [
+          "xv6-lock-lab-optimization@1.json",
+          "xv6-lock-lab-optimization@2.json"
+        ],
+        "publishedEqualsFrozenCandidate": true,
+        "nonEmptyDependsOnPublishedLive": false
+      },
+      "publishedRecipe": {
+        "reason": "The fix and the completion check are one run, and a batch starts its children one at a time in listed order with no dependency edge between them: the producer stage xv6-lock-fix-applied is listed first so its out/locks-fix.applied marker exists before the completion stage xv6-lock-completion-regression checks it.",
+        "children": [
+          {
+            "templateRef": {
+              "id": "xv6-lock-fix-applied",
+              "version": 1,
+              "digest": "263fa9bed949458c7308631fdbba0d74137580b102629036e3de03e8aa869d94"
+            }
+          },
+          {
+            "templateRef": {
+              "id": "xv6-lock-completion-regression",
+              "version": 1,
+              "digest": "e4753de49021e2d490664a453b3c6f1839d331a2aa200a20593471d2086615c2"
+            }
+          }
+        ]
+      },
+      "publishedRecipeEdges": [
+        [],
+        []
+      ],
+      "publishedRecipeLeafIds": [
+        "xv6-lock-fix-applied",
+        "xv6-lock-completion-regression"
+      ],
+      "publishedEdges": [],
+      "publishedRecipeGatesCompletion": true,
+      "run2": {
+        "storeId": "sg-t-s-root2",
+        "taskId": "t-009d4f01-37d4-4dce-88ab-de3d3b4d65f0",
+        "coordinatorTaskId": "t-fd565a73-3cd6-4169-9768-64043908b68d",
+        "coordinatorVersion": 2,
+        "admittedEdges": [
+          [],
+          []
+        ],
+        "edges": [],
+        "grade": {
+          "score": "Score: 70/70",
+          "exit": 0
+        }
+      },
+      "requestCounts": {
+        "run1": 41,
+        "supervisor": 22,
+        "experiment": 113,
+        "run2": 72
+      },
+      "requestTotal": 248,
+      "nudgeCount": 3,
+      "nudgeSessions": {
+        "b642188f-ec25-43f4-905f-348a559d4cd1": 3
+      },
+      "wallSeconds": 6712.517,
+      "tree": {
+        "tasks": [
+          {
+            "taskId": "t-52e1b508-c38c-458b-9d5b-535a4715bf73",
+            "depth": 0,
+            "status": "failed"
+          },
+          {
+            "taskId": "t-0940c23b-bc3f-449b-b5b7-2a8572a2903d",
+            "parentTaskId": "t-52e1b508-c38c-458b-9d5b-535a4715bf73",
+            "depth": 1,
+            "templateRef": {
+              "id": "xv6-lock-lab-optimization",
+              "version": 1,
+              "digest": "5754a46e062b4e994aff9ddfb973a603ee93b567e4be9c9eb1afe0ff6f7cb7ba"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-f518b5e9-2d07-4f7f-b35f-a5a3d58f6739",
+            "parentTaskId": "t-0940c23b-bc3f-449b-b5b7-2a8572a2903d",
+            "depth": 2,
+            "templateRef": {
+              "id": "xv6-lock-completion-regression",
+              "version": 1,
+              "digest": "e4753de49021e2d490664a453b3c6f1839d331a2aa200a20593471d2086615c2"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-8b4cc588-2522-4308-a64a-a1a62e00b91e",
+            "parentTaskId": "t-0940c23b-bc3f-449b-b5b7-2a8572a2903d",
+            "depth": 2,
+            "templateRef": {
+              "id": "xv6-lock-fix-applied",
+              "version": 1,
+              "digest": "263fa9bed949458c7308631fdbba0d74137580b102629036e3de03e8aa869d94"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-ec36e3c3-549b-4feb-8b57-fc3a8c26c48a",
+            "depth": 0,
+            "status": "failed"
+          },
+          {
+            "taskId": "t-2d5af82d-65f4-4561-9c99-11d7d60666fb",
+            "parentTaskId": "t-ec36e3c3-549b-4feb-8b57-fc3a8c26c48a",
+            "depth": 1,
+            "templateRef": {
+              "id": "xv6-lock-completion-regression",
+              "version": 1,
+              "digest": "e4753de49021e2d490664a453b3c6f1839d331a2aa200a20593471d2086615c2"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-f79a4390-852f-4ad5-b0ea-5a6850a98c4e",
+            "parentTaskId": "t-ec36e3c3-549b-4feb-8b57-fc3a8c26c48a",
+            "depth": 1,
+            "templateRef": {
+              "id": "xv6-lock-fix-applied",
+              "version": 1,
+              "digest": "263fa9bed949458c7308631fdbba0d74137580b102629036e3de03e8aa869d94"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-78fa1910-9869-4b62-97be-72f56a1eac84",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-3b81ed3a-6e4f-4f9c-987c-c030a8043282",
+            "parentTaskId": "t-78fa1910-9869-4b62-97be-72f56a1eac84",
+            "depth": 1,
+            "templateRef": {
+              "id": "xv6-lock-fix-applied",
+              "version": 1,
+              "digest": "263fa9bed949458c7308631fdbba0d74137580b102629036e3de03e8aa869d94"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-c9e3470b-5956-415c-b89f-88e6fb0aef43",
+            "parentTaskId": "t-78fa1910-9869-4b62-97be-72f56a1eac84",
+            "depth": 1,
+            "templateRef": {
+              "id": "xv6-lock-completion-regression",
+              "version": 1,
+              "digest": "e4753de49021e2d490664a453b3c6f1839d331a2aa200a20593471d2086615c2"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-8eab0b45-9417-4305-8c2c-42fddfa2d464",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-131ae456-8412-4f94-9868-66dc3a1de8db",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-009d4f01-37d4-4dce-88ab-de3d3b4d65f0",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-fd565a73-3cd6-4169-9768-64043908b68d",
+            "parentTaskId": "t-009d4f01-37d4-4dce-88ab-de3d3b4d65f0",
+            "depth": 1,
+            "templateRef": {
+              "id": "xv6-lock-lab-optimization",
+              "version": 2,
+              "digest": "a716927792f2f2bf96ac2100cda09ac12d2edca8f089b578c26971575e77d48e"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-3ae6d9ed-8760-4ae3-bf2c-196d563707aa",
+            "parentTaskId": "t-fd565a73-3cd6-4169-9768-64043908b68d",
+            "depth": 2,
+            "templateRef": {
+              "id": "xv6-lock-fix-applied",
+              "version": 1,
+              "digest": "263fa9bed949458c7308631fdbba0d74137580b102629036e3de03e8aa869d94"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-272f7f32-dd9c-4b02-b4d9-e2d64a26e758",
+            "parentTaskId": "t-fd565a73-3cd6-4169-9768-64043908b68d",
+            "depth": 2,
+            "templateRef": {
+              "id": "xv6-lock-completion-regression",
+              "version": 1,
+              "digest": "e4753de49021e2d490664a453b3c6f1839d331a2aa200a20593471d2086615c2"
+            },
+            "status": "verified"
+          }
+        ]
+      }
+    }
+  ],
+  "limits": "One run on one machine: run 1, the experiment replays (a failed coordinator and a verified fix leaf, baseline and candidate) and run 2 each build and grade real RISC-V guests under TCG, so the wall time is dominated by grader and model latency. The repair SHAPE is the model's choice (round 6's precedent: a spec must not prescribe a dependency form): the test only rejects a version 2 that fails the semantics (two leaves, completion unable to precede fix under serial index+dependency scheduling, criteria unchanged), the publish/consume consistency, or the grades. The defect is a missing dependency (or mis-order) whose determinism rests on the completion leaf staying honest: a model that fabricates the completion artifacts would mask it, so the completion template says its only input is this run's fix marker and forbids fabricating it. The lock-contention thresholds in kalloctest/bcachetest can be flaky under a heavily loaded host. The spec re-runs `bash checks/verify.sh all` itself for run 1 and run 2, outside the runtime. The reviewer scripted only in hybrid mode; use SINGULARITY_LIVE_REVIEWER_MODE=hybrid for the cheap diagnosis. SINGULARITY_LIVE_XV6_EVIDENCE overrides the evidence output path."
+}

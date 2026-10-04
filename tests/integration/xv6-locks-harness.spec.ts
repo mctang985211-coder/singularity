@@ -82,8 +82,11 @@ it.skipIf(!available)(
     )
     // The pristine lab fails bcachetest test0 on lock contention, so the real
     // command verifier must record a `fail` — the harness is not a pass-through.
+    // The window covers the checker's machine-wide grader lock: a sibling spec
+    // (also qemu-heavy) may hold it for one full `verify.sh all` grade before this
+    // short `bcache` grade runs.
     await vi.waitFor(async () => expect((await h.task.taskIn(root.storeId, childTask.taskId)).status).toBe('failed'), {
-      timeout: 240_000,
+      timeout: 480_000,
       interval: 250,
     })
     const snapshot = await h.snapshot(root.storeId)
@@ -99,5 +102,7 @@ it.skipIf(!available)(
     expect(log).toContain('test0: FAIL')
     expect(log).toContain('tot=')
   },
-  300_000,
+  // The bound covers a wait on the checker's machine-wide grader lock (see the
+  // `bcache` verdict window above) on top of the grade itself.
+  600_000,
 )

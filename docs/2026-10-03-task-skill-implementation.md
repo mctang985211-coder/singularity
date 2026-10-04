@@ -84,3 +84,15 @@ Task 规定结果，Skill 提供方法，Tool/MCP 提供动作。父节点优先
 - 边界：本轮 v2 仅调整顺序、零 dependsOn，非空依赖边的发布保留未在 live 实测（由 DAG 集成回归覆盖）；token 为会话累计口径，未汇总执行子树总成本；两轮通过不证明 Reviewer 与 run2 形态的长期稳定性。
 
 第六轮备份：Singularity 与外层 harness 均使用 `backup/self-develop-20261004-round6`。
+
+第七轮（xv6 困难任务集实测 supervisor 提升效果）：缺陷模板 `xv6-lock-lab-optimization@1` 子任务顺序 [regression, fix] 且无依赖边，regression 诚实叶在 `out/locks-fix.applied` 缺失时立即报缺口、不伪造产物；修复的最小形态是加依赖边。预置参考内核修复冻结重放快照（重放机制实证：每样本每侧都是真实 worker 运行，coordinator 重放必跑整棵子树，冻结已修复快照把实验相位成本压到分阶段 grader）。设计决策：测的是模板协调修复增益而非锁优化能力本身（round5 已证后者）。
+
+- 阶段 0（脚本化全链＋真实 grader，零 live 请求）：新增 `xv6-lock-repair-evolution.spec.ts` 进默认集成套件（测试床缺失时跳过），单次约 11 分钟。硬断言：非空依赖边 `[[1],[]]` 的发布与 run2 admit batch 逐条消费（含 run2.edges 一致）、发布==冻结候选、库 v1/v2 并存、ledger 全序列、诚实缺口判败。共享夹具 `tests/support/xv6-locks.ts` 新增缺陷/修复模板、`seedReferenceLockFix`/`resetLockLab`（清标记防重放残留假成功）等导出。
+- 阶段 1 live 第一轮（all-real）：真实 Reviewer 定位缺陷、Supervisor 全链至 applied、gate 6/6、实验 fixed，且模型发布了非空依赖边（completion.dependsOn=[0]）——但同时重排了子任务，撞上 spec 预设的"保序最小修法"形态断言而判败。按 round6 先例（测试不指定修法，只验语义正确性＋发布/消费一致）修正为 `completionNotBeforeFix` 语义断言（两叶集合、completion 不可先于 fix、criteria 逐字节不变），离线核验四种形态（v1 拒、三种有效修法收）。失败件保留；round6 的失败路径增强经实战检验（失败时 tokenUsage/gate 如实落地，未开始的 run2 相位落 null 而非零）。
+- 阶段 1 复跑（all-real）通过：31 断言全 true，证据 [live xv6 supervisor repair run2](2026-10-04-live-xv6-supervisor-repair-run2.json)（首轮失败件同名无前缀保留）。run1 grader 69/70（诚实失败）→ 修复 → run2 70/70；本轮模型选"纯重排"形态（`nonEmptyDependsOnPublishedLive=false` 如实记录；两种形态均被语义断言接受，非空边硬保证由阶段 0 承担）。248 请求、6 712.5 s、nudge 3 次；token 四相位落盘：run1 204 753/35 348、supervisor 138 921/35 430、experiment 435 206/73 588、run2 207 890/22 406（input/output），cache-read 全程 4 880 768，29 turns 零缺失。
+- 提升结算（首次可量化）：修复投入 = supervisor＋experiment 相位 135 请求、约 57.4 万 input tokens，一次性；修复后模板复用的边际成本 = 一次正常执行（72 请求）且 70/70 通过；缺陷模板不修复则每次使用必败（run1 实证＋实验 baseline 侧重放双证）。单 trial、植入缺陷、预置内核——不构成统计结论，只证明该缺陷类上自主修复可回本。
+- 并行负载修复（测试基建）：xv6 lab Makefile 的 GDB 端口由 uid 推导恒定 26000，两个 qemu spec 并行必撞（`GDB stub found`/`Address already in use`）；`XV6_CHECKER` 内加机器级 advisory flock 只包 grader 本身（flock 缺失时退化为旧行为），xv6-locks-harness 仅放宽等待/超时。修复后三连全量两个 xv6 spec 全绿、碰撞计数 0。
+- 验证：unit 2290 通过；integration 全量除已知负载 flake（a4-question-cold-exchange、a6-evolution-chain、k1-graph-boundary、cancellation-gate、k4-budget-extend，均单跑全过、与本轮无关）外全绿。
+- 遗留：vitest 进程在证据落盘后 afterEach 清理挂起超 600 s 预算（疑 run2 第二 store/env 释放阻塞），已手动清理，不影响证据有效性；`tree.run2` 失败落盘块仍未遇到"run2 开始后才失败"的真实场景；live 侧模型若绕开 `checks/verify.sh` 直调 grader 不受 flock 保护（opt-in 单文件运行，风险低）。
+
+第七轮备份：Singularity 与外层 harness 均使用 `backup/self-develop-20261005-round7`。
