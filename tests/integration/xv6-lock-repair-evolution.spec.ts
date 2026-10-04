@@ -86,9 +86,15 @@ interface World {
 }
 
 const dirs: string[] = []
+let releaseSupervisor: (() => void) | undefined
 afterEach(async () => {
-  await disposeScriptedLoops()
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  releaseSupervisor?.()
+  releaseSupervisor = undefined
+  try {
+    await disposeScriptedLoops()
+  } finally {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  }
 }, 600_000)
 
 function scratch(): string {
@@ -424,6 +430,9 @@ function ledgerKinds(ledgerRoot: string): string[] {
 async function run(): Promise<void> {
   const ledgerRoot = join(scratch(), 'evolution')
   const applied = cell<void>()
+  // Release the test-owned latch on failure as well as success. The adapter's
+  // raceAbort also follows the turn signal; this avoids leaving its latch open.
+  releaseSupervisor = applied.resolve
   const cells: Cells = { applied: applied.promise, resolveApplied: applied.resolve }
   const world: World = { repaired: undefined as unknown as TaskTemplate }
   let h!: ScriptedLoop
@@ -640,7 +649,6 @@ async function run(): Promise<void> {
   expect(final.tasks.find(task => task.taskId === root.taskId)).toBeDefined()
   expect(final.tasks.find(task => task.taskId === FIX_SAMPLE)?.status).toBe('failed')
   expect(final.tasks.find(task => task.taskId === FIX_SAMPLE)?.templateRef).toBeUndefined()
-  await h.dispose()
 }
 
 it.skipIf(!available)(

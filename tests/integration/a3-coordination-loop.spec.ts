@@ -385,6 +385,7 @@ describe('the coordination protocol on the real loop (A3)', () => {
     await vi.waitFor(async () => {
       expect((await h.runForSession(child)).run.executionPhase).toBe('waiting_children')
     })
+    await vi.waitFor(() => expect(h.requestsOf(grandchild).length).toBeGreaterThan(0))
     childWaiting.resolve()
 
     // The tool call itself is the bound: a cancellation the driver never observes
@@ -411,6 +412,7 @@ describe('the coordination protocol on the real loop (A3)', () => {
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('cancelled')
 
     // The abort reached the hung grandchild's own loop and nothing else started.
+    await h.agent(grandchild).whenIdle()
     const turnEnds = h.eventsOf(grandchild).filter(event => event.type === 'turn/end')
     expect(turnEnds.length).toBeGreaterThan(0)
     expect(turnEnds[turnEnds.length - 1]!.data).toMatchObject({ reason: { kind: 'aborted', reason: { kind: 'parent' } } })

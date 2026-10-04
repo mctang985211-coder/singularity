@@ -46,22 +46,33 @@ export interface ReviewScanOptions {
 }
 
 /** Local failures immediately; successful whole goals only after root verification. Explicit reviews can still inspect any node. */
-function acceptedSourcesOf(snapshot: TaskSnapshot, mode: AutoReviewMode): ReviewAgentSource[] {
+function acceptedSourcesOf(snapshot: TaskSnapshot, mode: AutoReviewMode, source?: ReviewAgentSource): ReviewAgentSource[] {
   if (mode === 'off') return []
-  return snapshot.reviews
+  const exact = source === undefined ? undefined : reviewForSource(snapshot, source)
+  const reviews = source === undefined ? snapshot.reviews : exact === undefined ? [] : [exact]
+  const tasks = new Map(snapshot.tasks.map(task => [task.taskId, task]))
+  // Successful children retain their mechanical review but need no
+  // investigation; reject them before tracing any replay ancestry.
+  const eligible = reviews.filter((review: ReviewRecord) => {
+    const task = tasks.get(review.taskId)
+    return review.outcome === 'failed' || (mode === 'all' && review.outcome === 'verified' &&
+      task !== undefined && task.parentTaskId === undefined)
+  })
+  if (eligible.length === 0) return []
+  const runs = new Map(snapshot.runs.map(run => [run.runId, run]))
+  return eligible
     .filter((review: ReviewRecord) => {
-      let run = snapshot.runs.find(run => run.runId === review.runId)
+      let run = review.runId === undefined ? undefined : runs.get(review.runId)
       // A replay root has a champion parent Run but no parent Task. Its entire
       // execution subtree belongs to the experiment, not another automatic loop.
       while (run !== undefined) {
         if (run.parentRunId === undefined) break
-        if (snapshot.tasks.some(task => task.taskId === run!.taskId && task.parentTaskId === undefined)) return false
+        const task = tasks.get(run.taskId)
+        if (task !== undefined && task.parentTaskId === undefined) return false
         const parentRunId = run.parentRunId
-        run = snapshot.runs.find(run => run.runId === parentRunId)
+        run = runs.get(parentRunId)
       }
-      return review.outcome === 'failed' ||
-        (mode === 'all' && review.outcome === 'verified' &&
-          snapshot.tasks.some(task => task.taskId === review.taskId && task.parentTaskId === undefined))
+      return true
     })
     .map(review => ({ taskId: review.taskId, runId: review.runId ?? null }))
 }
@@ -136,9 +147,7 @@ export async function scanFailedReviewSources(
     )
     return report()
   }
-  const accepted = acceptedSourcesOf(snapshot, mode)
-  const targets =
-    options.source === undefined ? accepted : accepted.filter(source => sameSource(source, options.source!))
+  const targets = acceptedSourcesOf(snapshot, mode, options.source)
   if (targets.length === 0) return report()
 
   const root = liveRootAgentOf(ctx, storeId)

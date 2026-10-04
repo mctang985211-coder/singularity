@@ -204,7 +204,7 @@ export async function replayTask(
    * A replay is a driver like a batch is: the runtime owns its progress, so a
    * cancellation or an unload stops it. Its own promise never rejects — the
    */
-  const driverKey = `replay/${storeId}/${championTaskId}`
+  const driverKey = `replay/${storeId}/${task.taskId}`
   self.registerDriver(
     driverKey,
     storeId,
@@ -214,11 +214,7 @@ export async function replayTask(
       () => [],
     ),
   )
-  try {
-    return await promise
-  } finally {
-    self.drivers.delete(driverKey)
-  }
+  return await promise
 }
 
 export async function claimReplayWorkspace(

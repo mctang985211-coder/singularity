@@ -611,13 +611,17 @@ export class EvolutionService extends EvolutionServiceCore {
           'context has no task service — the evidence cannot be checked, so nothing is promoted',
       )
     }
+    const sessions = new Map<string, ReturnType<typeof sessionLog>>()
     return {
       root: this.root,
       experiments: proposalId => this.experiments(proposalId),
       task,
       verifierVocabulary: () => verifierVocabularyOf(this.ctx),
       modelSelection: () => this.modelSelection(),
-      sessionLog: sessionId => sessionLog(this.ctx, sessionId),
+      sessionLog: sessionId => {
+        if (!sessions.has(sessionId)) sessions.set(sessionId, sessionLog(this.ctx, sessionId))
+        return sessions.get(sessionId)!
+      },
     }
   }
 

@@ -4,7 +4,6 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import {
-  countReviewAgentRuns,
   readReviewAgentAttempts,
   reviewAgentLedgerFile,
 } from '../../agent-singularity/src/coordination/ledger.ts'
@@ -282,7 +281,7 @@ describe('a failed review is accepted on its own (A5)', () => {
       started: true,
     })
     expect(supervisorSpawns(h)).toEqual([])
-    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(root.storeId)).filter(attempt => attempt.started).length).toBe(1)
 
     // The reviewer's own first request: the source, its real outcome, and the
     // pack the judgement rests on — read off the adapter, not off the prompt the
@@ -375,7 +374,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     expect(reviewerSpawns(h)).toEqual([])
     expect(supervisorSpawns(h)).toEqual([])
     expect(await readReviewAgentAttempts(root.storeId)).toEqual([])
-    expect(await countReviewAgentRuns(root.storeId)).toBe(0)
+    expect((await readReviewAgentAttempts(root.storeId)).filter(attempt => attempt.started).length).toBe(0)
     const after = await h.snapshot(root.storeId)
     expect(after.diagnoses).toEqual([])
     expect(after.runs.find(run => run.runId === root.runId)?.status).toBe('running')
@@ -397,7 +396,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     expect(h.spawns).toHaveLength(1)
     expect(reviewerSpawns(h)).toEqual([])
     expect(await readReviewAgentAttempts(root.storeId)).toEqual([])
-    expect(await countReviewAgentRuns(root.storeId)).toBe(0)
+    expect((await readReviewAgentAttempts(root.storeId)).filter(attempt => attempt.started).length).toBe(0)
     void snapshot
   }, 60_000)
 
@@ -650,7 +649,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     expect(attempts[0]!.sessionId).toBe(String(reviewerSpawns(h)[0]!.sessionId))
     expect(reviewerSpawns(h)).toHaveLength(1)
     expect(supervisorSpawns(h)).toEqual([])
-    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(root.storeId)).filter(attempt => attempt.started).length).toBe(1)
   }, 60_000)
 
   it('retries a source the automatic trigger had to skip on a graph activation, and only reads what it started', async () => {
@@ -689,7 +688,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     h.ctx.emit('graphs/selected', graph as never)
     await vi.waitFor(() => expect(lines.filter(line => line.includes(tree.childTaskId))).not.toEqual([]))
     expect(reviewerSpawns(h)).toHaveLength(1)
-    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(root.storeId)).filter(attempt => attempt.started).length).toBe(1)
     expect(await reviewerAttempts(root.storeId)).toHaveLength(1)
     expect(lines.some(line => line.includes('already has an attempt'))).toBe(true)
   }, 60_000)
@@ -823,7 +822,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     expect(ledgerRows().filter(row => row.kind === 'claim')).toHaveLength(1)
     expect(ledgerRows().filter(row => row.kind === 'started')).toHaveLength(1)
     expect(reviewerSpawns(h)).toHaveLength(1)
-    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(root.storeId)).filter(attempt => attempt.started).length).toBe(1)
   }, 60_000)
 
   it('repairs a lost terminal write for a recorded diagnosis without a second side effect (REV-3)', async () => {
@@ -843,7 +842,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     await vi.waitFor(async () => expect((await reviewerAttempts(root.storeId))[0]?.settlement?.status).toBe('recorded'))
     expect((await h.snapshot(root.storeId)).diagnoses).toHaveLength(1)
     expect(supervisorSpawns(h)).toEqual([])
-    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(root.storeId)).filter(attempt => attempt.started).length).toBe(1)
 
     // …and then the process died in the window between the two writes: the store
     // holds the diagnosis, the ledger holds no terminal row for the attempt. The
@@ -876,7 +875,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     expect(ledgerRows().filter(row => row.kind === 'started')).toHaveLength(1)
     expect(reviewerSpawns(h)).toHaveLength(1)
     expect((await h.snapshot(root.storeId)).diagnoses).toHaveLength(1)
-    expect(await countReviewAgentRuns(root.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(root.storeId)).filter(attempt => attempt.started).length).toBe(1)
   }, 60_000)
 })
 
@@ -938,7 +937,7 @@ describe('the two triggers are the deployment\'s own composition (A5)', () => {
     // This deployment has no model loop, so the reviewer records no diagnosis
     // here: the acceptance is the reviewer's attempt, and the store spends one
     // coordination run on it.
-    expect(await countReviewAgentRuns(failed.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(failed.storeId)).filter(attempt => attempt.started).length).toBe(1)
     expect(reviewAgentLedgerFile()).toBe(join(dir, 'agents.jsonl'))
     rmSync(dir, { recursive: true, force: true })
   }, 60_000)
@@ -981,7 +980,7 @@ describe('the two triggers are the deployment\'s own composition (A5)', () => {
     })
     expect(reviewers(stack)).toHaveLength(1)
     expect((await readReviewAgentAttempts(failed.storeId)).filter(attempt => attempt.role === 'reviewer')).toHaveLength(1)
-    expect(await countReviewAgentRuns(failed.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(failed.storeId)).filter(attempt => attempt.started).length).toBe(1)
     rmSync(dir, { recursive: true, force: true })
   }, 60_000)
 

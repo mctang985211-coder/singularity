@@ -55,7 +55,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import {
-  countReviewAgentRuns,
+  readReviewAgentAttempts,
   readSupervisorDelegation,
   reviewAgentLedgerFile,
 } from '../../agent-singularity/src/coordination/ledger.ts'
@@ -616,7 +616,7 @@ describe.skipIf(BOUNDARY !== undefined)('A6 EVO-4 (real death): a killed recover
     })
     // The store's coordination allowance, read from the ledger the dead image wrote
     // (the boot above is what points `$DSH_HOME` at this case's own directory).
-    const spent = await countReviewAgentRuns(STORE)
+    const spent = (await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length
     expect(spent).toBeGreaterThan(0)
     chainOn(stack)
     expect(stack.spawns).toEqual([])
@@ -646,7 +646,7 @@ describe.skipIf(BOUNDARY !== undefined)('A6 EVO-4 (real death): a killed recover
     // A started row carries the session, not the role: the two supervisors' rows
     // are read by their sessions.
     expect(ledgerRows().filter(row => row.kind === 'started' && [supervisor, replacement].includes(String(row.sessionId)))).toHaveLength(2)
-    expect(await countReviewAgentRuns(STORE)).toBe(spent + 1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(spent + 1)
     expect(await readSupervisorDelegation(replacement, 'd-restart')).toMatchObject({
       rootStoreId: STORE,
       taskId: marker.sourceRunId === undefined ? undefined : (await stack.snapshot(STORE)).tasks.find(task => task.parentTaskId === undefined)!.taskId,

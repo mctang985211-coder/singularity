@@ -369,12 +369,6 @@ export function planSupervisorAttempt(input: {
   return { kind: 'start', budget }
 }
 
-/** How many review agents this root store has already started, as the file reads right now. A missing file reads as zero; a corrupt line throws rather than silently undercounting. */
-export async function countReviewAgentRuns(rootStoreId: string): Promise<number> {
-  const rows = await readLedgerRows()
-  return startedRowsOf(rows ?? [], rootStoreId).length
-}
-
 /** Every attempt this root store's ledger holds, for a reader that renders the state rather than deciding on it (`task_review_pack`). A display query: the decision is always made inside the admission's serial region. */
 export async function readReviewAgentAttempts(rootStoreId: string): Promise<ReviewAgentAttempt[]> {
   const rows = await readLedgerRows()

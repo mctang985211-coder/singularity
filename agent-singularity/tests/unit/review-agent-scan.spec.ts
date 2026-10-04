@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   admitReviewAgent,
-  countReviewAgentRuns,
   readReviewAgentAttempts,
   reviewAgentLedgerFile,
 } from '../../src/coordination/ledger.ts'
@@ -222,6 +221,23 @@ afterEach(async () => {
 })
 
 describe('the scan of a store\'s failed reviews', () => {
+  it('leaves a successful child source alone even when the graph also holds failed reviews', async () => {
+    configureSupervision({ autoReview: 'all', coordinationBudget: 8 })
+    const snapshot = baseSnapshot()
+    snapshot.tasks[1] = { ...snapshot.tasks[1], parentTaskId: 't1' } as never
+    const { ctx, spawn } = fixture(undefined, snapshot)
+    const ancestry = vi.fn(() => undefined)
+    Object.defineProperty(snapshot.runs[0]!, 'parentRunId', { get: ancestry })
+    ctx.task.snapshotIn = async () => snapshot as never
+
+    const report = await scanFailedReviewSources(ctx, STORE, { source: { taskId: 't3', runId: 'r3' } })
+
+    expect(report.entries).toEqual([])
+    expect(ancestry).not.toHaveBeenCalled()
+    expect(spawn).not.toHaveBeenCalled()
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(0)
+  })
+
   it('keeps replay roots and their failed descendants inside their experiment', async () => {
     configureSupervision({ autoReview: 'all', coordinationBudget: 8 })
     const snapshot = baseSnapshot()
@@ -241,7 +257,7 @@ describe('the scan of a store\'s failed reviews', () => {
     const { ctx, spawn } = fixture(undefined, snapshot)
     expect((await scanFailedReviewSources(ctx, STORE)).entries).toEqual([])
     expect(spawn).not.toHaveBeenCalled()
-    expect(await countReviewAgentRuns(STORE)).toBe(0)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(0)
   })
 
   it('routes a blocked source without a run through the batch that admitted it', async () => {
@@ -321,7 +337,7 @@ describe('the scan of a store\'s failed reviews', () => {
       requestKey: null, reason: null, actor: ROOT,
     })
     expect(rowsOfKind('started')).toHaveLength(1)
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1)
     expect(report.entries).toEqual([
       expect.objectContaining({ result: 'started', source: { taskId: 't1', runId: 'r1' } }),
     ])
@@ -335,7 +351,7 @@ describe('the scan of a store\'s failed reviews', () => {
     const report = await scanFailedReviewSources(ctx, STORE)
     expect(spawn).not.toHaveBeenCalled()
     expect(ledgerRows()).toEqual([])
-    expect(await countReviewAgentRuns(STORE)).toBe(0)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(0)
     expect(report.entries).toEqual([])
   })
 
@@ -463,7 +479,7 @@ describe('the scan of a store\'s failed reviews', () => {
     const settled = rowsOfKind('settled')
     expect(settled).toHaveLength(1)
     expect(settled[0]).toMatchObject({ status: 'interrupted', sessionId: 's-orphaned' })
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1)
     expect(report.entries).toEqual([
       expect.objectContaining({
         result: 'existing',
@@ -509,7 +525,7 @@ describe('the scan of a store\'s failed reviews', () => {
     expect(rowsOfKind('claim')).toHaveLength(1)
     expect(rowsOfKind('started')).toHaveLength(1)
     expect(rowsOfKind('settled')).toHaveLength(0)
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1)
     // Named as the attempt it read, never as a source refused for a different
     // focus — nothing was refused here and nothing was written.
     expect(lines.join('\n')).toContain('s-focus')
@@ -589,7 +605,7 @@ describe('the scan of a store\'s failed reviews', () => {
     expect(settled.filter(row => row.sessionId === 's-k1')).toEqual([
       expect.objectContaining({ status: 'interrupted' }),
     ])
-    expect(await countReviewAgentRuns(STORE)).toBe(2)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(2)
     expect(report.entries).toEqual([
       {
         source: { taskId: 't1', runId: 'r1' },
@@ -693,7 +709,7 @@ describe('the automatic trigger as the assembly installs it', () => {
     expect(events.map(item => item.event)).toEqual(['graphs/selected'])
 
     listeners[0]!({ storeId: STORE, taskId: 't1', runId: 'r1', outcome: 'failed' })
-    await vi.waitFor(async () => expect(await countReviewAgentRuns(STORE)).toBe(1))
+    await vi.waitFor(async () => expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1))
     await vi.waitFor(() => expect(lines.some(line => line.includes('t1#r1 accepted — reviewer session'))).toBe(true))
     const claim = rowsOfKind('claim')
     expect(claim).toHaveLength(1)
@@ -728,10 +744,10 @@ describe('the automatic trigger as the assembly installs it', () => {
     const lines: string[] = []
     const dispose = installReviewAgentAutoTrigger(all.ctx, { log: line => lines.push(line) })
     all.listeners[0]!({ storeId: STORE, taskId: 't1', runId: 'r1', outcome: 'failed' })
-    await vi.waitFor(async () => expect(await countReviewAgentRuns(STORE)).toBe(1))
+    await vi.waitFor(async () => expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1))
     await vi.waitFor(() => expect(lines.some(line => line.includes('t1#r1 accepted, but the reviewer did not finish'))).toBe(true))
     all.listeners[0]!({ storeId: STORE, taskId: 't3', runId: 'r3', outcome: 'verified' })
-    await vi.waitFor(async () => expect(await countReviewAgentRuns(STORE)).toBe(2))
+    await vi.waitFor(async () => expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(2))
     await vi.waitFor(() => expect(lines.some(line => line.includes('t3#r3 accepted, but the reviewer did not finish'))).toBe(true))
     expect(rowsOfKind('claim').map(row => `${String(row.taskId)}#${String(row.runId)}`)).toEqual(['t1#r1', 't3#r3'])
     dispose()

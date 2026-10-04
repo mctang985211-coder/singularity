@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { REVIEWER_BASELINE } from '../../agent-singularity/src/tools/review-agent.ts'
 import {
-  countReviewAgentRuns,
   admitReviewAgent,
   readReviewAgentAttempts,
   readReviewerDelegation,
@@ -289,7 +288,7 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
     expect(attempts).toHaveLength(1)
     expect(attempts[0]!.settlement?.status).toBe('interrupted')
     expect(String(attempts[0]!.settlement?.note)).toContain('no parseable json object')
-    expect(await countReviewAgentRuns(stop.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(stop.storeId)).filter(attempt => attempt.started).length).toBe(1)
     expect(stop.h.agent(reviewerId).status).toBe('idle')
   }, 60_000)
 
@@ -327,7 +326,7 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
       started: true,
     })
     expect(h.spawns.filter(spawn => String(spawn.name ?? '').startsWith('supervisor for '))).toEqual([])
-    expect(await countReviewAgentRuns(storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(storeId)).filter(attempt => attempt.started).length).toBe(1)
     // The delegation the assembly would read is durable before the reviewer's
     // first request, exactly as an explicit call's is.
     expect(await readReviewerDelegation(reviewer)).toMatchObject({ rootStoreId: storeId, taskId: stop.childTaskId })

@@ -53,7 +53,6 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import {
-  countReviewAgentRuns,
   readReviewAgentAttempts,
   readSupervisorHandoff,
   REVIEW_AGENT_BUDGET_DEFAULT,
@@ -512,7 +511,7 @@ describe('A7: the multi-round supervisor-iteration loop', () => {
     // root's first three rounds; successful child runs consume no coordination allowance. The fourth root
     // round's diagnosis is the cap's own refusal — it never got a supervisor.
     expect(attempts.filter(attempt => attempt.role === 'supervisor')).toHaveLength(RECOVERY_ROUNDS)
-    expect(await countReviewAgentRuns(STORE)).toBe(treeReviews.length + RECOVERY_ROUNDS)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(treeReviews.length + RECOVERY_ROUNDS)
 
     // ── the cap's own gate, asked directly: one more improvement is refused ───
     const supervisorOfLastRound = String(supervisorSpawns[RECOVERY_ROUNDS - 1]!.sessionId)
@@ -522,7 +521,7 @@ describe('A7: the multi-round supervisor-iteration loop', () => {
     ).then(() => '', error => String(error))
     expect(refusal).toContain('iteration-cap')
     expect((await h.snapshot(STORE)).runs.filter(run => run.taskId === task.taskId)).toHaveLength(ROUNDS)
-    expect(await countReviewAgentRuns(STORE)).toBe(treeReviews.length + RECOVERY_ROUNDS)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(treeReviews.length + RECOVERY_ROUNDS)
   }, 90_000)
 
   it('is stopped by a spent coordination allowance: the failed review\'s reviewer spends the store\'s only attempt', async () => {
@@ -562,7 +561,7 @@ describe('A7: the multi-round supervisor-iteration loop', () => {
       expect(found).toBeDefined()
       return found!
     }, { timeout: 60_000, interval: 25 })
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1)
     expect(h.spawns.filter(spawn => spawn.name.startsWith('supervisor for'))).toEqual([])
 
     // The hand-off is refused by name at the consumption entry — the same entry
@@ -576,6 +575,6 @@ describe('A7: the multi-round supervisor-iteration loop', () => {
     expect(h.spawns.filter(spawn => spawn.name.startsWith('review '))).toHaveLength(1)
     const snapshot = await h.snapshot(STORE)
     expect(runsOf(snapshot, root.taskId).map(run => run.status)).toEqual(['failed'])
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1)
   }, 90_000)
 })

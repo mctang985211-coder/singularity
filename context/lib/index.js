@@ -366,11 +366,12 @@ async function loadCaller(deps, sessionId, signal) {
 		if (spawned.kind === "failed") return failed(sessionId, "unreadable", spawned.detail, facts);
 		if (spawned.kind === "spawned") return failed(sessionId, "unreadable", `graph "${graph.id}" spawned session "${sessionId}" into itself, but its store "${storeId}" does not exist; the run this session is bound by was recorded in that store, so its absence means the store cannot be read, not that the session has nothing to read. No contract can be assembled for it.`, facts);
 	}
+	const recovery = await deps.taskRuntime.recoveryStatus(storeId);
 	const base = {
 		sessionId,
 		graph: facts,
 		storeId,
-		recovery: await deps.taskRuntime.recoveryStatus(storeId)
+		recovery
 	};
 	const own = snapshot === void 0 ? void 0 : runOfSessionIn(snapshot, sessionId);
 	const task = snapshot === void 0 ? void 0 : taskOfRun(snapshot, own);
@@ -399,7 +400,10 @@ async function loadCaller(deps, sessionId, signal) {
 	};
 	const delegation = ledger ?? await readDelegation(deps, sessionId);
 	if (delegation.kind === "refused") return failed(sessionId, delegation.refusal, delegation.detail, facts);
-	if (delegation.kind === "record") return await reviewerOf(deps, sessionId, graph, delegation.record, signal);
+	if (delegation.kind === "record") return await reviewerOf(deps, sessionId, graph, delegation.record, signal, {
+		...opened,
+		recovery
+	});
 	return {
 		resolution: {
 			...base,
@@ -409,16 +413,16 @@ async function loadCaller(deps, sessionId, signal) {
 	};
 }
 /** A reviewer's resolved domain: the delegation, its graph and its delegator, all checked (Q2). */
-async function reviewerOf(deps, sessionId, graph, record, signal) {
+async function reviewerOf(deps, sessionId, graph, record, signal, domain) {
 	signal?.throwIfAborted();
 	const facts = callerGraph(graph);
 	const storeId = rootTaskStoreId(graph.rootSessionId);
 	if (storeId !== record.rootStoreId) return failed(sessionId, "cross-graph", `session "${sessionId}" is a member of graph "${graph.id}" (store "${storeId}") but its recorded delegation names store "${record.rootStoreId}"; a delegation never moves a session into another graph's domain.`, facts);
 	const standing = await delegatorStanding(deps, sessionId, graph, record.actor);
 	if (standing.kind === "refused") return failed(sessionId, standing.refusal, standing.detail, facts);
-	const opened = await openDomain(deps.task, storeId);
+	const opened = domain ?? await openDomain(deps.task, storeId);
 	if (opened.failure !== void 0) return failed(sessionId, "unreadable", `the delegated store "${storeId}" cannot be read: ${opened.failure}`, facts);
-	const recovery = await deps.taskRuntime.recoveryStatus(storeId);
+	const recovery = domain?.recovery ?? await deps.taskRuntime.recoveryStatus(storeId);
 	const task = opened.snapshot?.tasks.find((item) => item.taskId === record.taskId);
 	return {
 		resolution: {

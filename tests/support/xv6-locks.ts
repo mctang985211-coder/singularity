@@ -132,25 +132,33 @@ trap 'rm -f "$log"' EXIT
 # second refuses to start ("GDB stub found on port ...") and can disturb the
 # first. The default integration suite runs this checker from more than one spec
 # in parallel, so every grader invocation here is serialized on one machine-wide
-# advisory lock, held only around the grader itself. Where flock is unavailable
-# the lock is skipped and the checker behaves exactly as before.
-if command -v flock >/dev/null 2>&1; then
-  exec 9>"\${TMPDIR:-/tmp}/xv6-lock-grader.lock"
-  if ! flock -w 1500 9; then
-    echo "verify.sh: could not acquire the machine-wide xv6 grader lock within 1500s" >&2
-    echo "verify.sh: stage $stage was NOT run" >&2
-    exit 2
-  fi
+# advisory lock, held only around the grader itself. Every invocation uses the
+# same path even when callers carry different TMPDIR values. Refuse to grade
+# without flock rather than let shared-port collisions produce false evidence.
+if ! command -v flock >/dev/null 2>&1; then
+  echo "verify.sh: flock is required to protect the shared xv6 grader port" >&2
+  exit 2
+fi
+exec 9>"/tmp/xv6-lock-grader.lock"
+if ! flock -w 1500 9; then
+  echo "verify.sh: could not acquire the machine-wide xv6 grader lock within 1500s" >&2
+  echo "verify.sh: stage $stage was NOT run" >&2
+  exit 2
 fi
 
 if [ "$stage" = modules ]; then
-  { timeout 1500 python3 grade-lab-lock kalloctest; timeout 1500 python3 grade-lab-lock bcachetest; } > "$log" 2>&1
+  timeout 1500 python3 grade-lab-lock kalloctest > "$log" 2>&1
+  grade_status=$?
+  timeout 1500 python3 grade-lab-lock bcachetest >> "$log" 2>&1
+  bcache_status=$?
+  if [ "$grade_status" = 0 ]; then grade_status=$bcache_status; fi
 elif [ -n "$filter" ]; then
   timeout 1500 python3 grade-lab-lock "$filter" > "$log" 2>&1
+  grade_status=$?
 else
   timeout 1500 python3 grade-lab-lock > "$log" 2>&1
+  grade_status=$?
 fi
-grade_status=$?
 cat "$log"
 
 has() { grep -Eq "$1" "$log"; }
@@ -197,6 +205,10 @@ echo "$score"
 if [ "$grade_status" = 124 ]; then
   echo "verify.sh: the grader exceeded the internal 1500s timeout" >&2
 fi
+if [ "$grade_status" != 0 ]; then
+  echo "verify.sh: the grader exited $grade_status; its partial output cannot pass this stage" >&2
+  required=FAIL
+fi
 
 if [ "$required" = OK ]; then
   echo "verify.sh: stage $stage PASSED"
@@ -222,7 +234,8 @@ export const XV6_CONSTRAINTS = [
     'user/kalloctest.c, user/bcachetest.c and user/usertests.c. Read them; never rewrite them.',
   'Work only inside the checkout. Keep the tree buildable: plain `make` must succeed — the RISC-V cross toolchain ' +
     'and qemu wrapper are already on PATH, so do not chase toolchain setup.',
-  "Grade with the lab's own grader: `python3 grade-lab-lock [filter]`. The script name is singular (grade-lab-lock). " +
+  "Grade through `bash checks/verify.sh <stage>`, which invokes the lab's own `python3 grade-lab-lock [filter]` " +
+    'while holding the shared-port lock. Do not invoke the grader directly. The script name is singular (grade-lab-lock). ' +
     'The lab is complete only when the full run prints `Score: 70/70`, which also requires a file `time.txt` at the ' +
     'repository root containing a single positive integer (the hours spent on the lab).',
 ]

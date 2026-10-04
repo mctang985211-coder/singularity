@@ -283,10 +283,13 @@ describe('S4-E: a replay in a caller-named workspace', () => {
       const secondSide = await h.runtime.replayTask(first.storeId, champion.taskId, { lineage: `${LINEAGE}:b`, workspace: { path: b.directory } }, ROOT)
       expect(secondSide.status).toBe('verified')
       expect(secondSide.workspace).toBe(b.path)
+      // Settling the second replay must retain the first replay's cancellation owner.
+      expect([...h.runtime.drivers.values()].filter(entry => entry.storeId === first.storeId)).toHaveLength(1)
+      await h.runtime.cancelGraph(first.storeId, 'cancel the remaining replay')
     } finally {
       parked.resolve()
     }
-    expect((await firstSide).status).toBe('verified')
+    expect((await firstSide).status).toBe('cancelled')
 
     // Neither side's bytes reached the other directory, and no hold escaped.
     expect(readFileSync(join(a.directory, 'ws-a-worker.txt'), 'utf8')).toBe('x')

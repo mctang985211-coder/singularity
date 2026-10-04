@@ -228,7 +228,7 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
     return failed(sessionId, delegation.refusal, delegation.detail, facts)
   }
   if (delegation.kind === 'record') {
-    return await reviewerOf(deps, sessionId, graph, delegation.record, signal)
+    return await reviewerOf(deps, sessionId, graph, delegation.record, signal, { ...opened, recovery })
   }
   return {
     resolution: { ...base, kind: 'member' },
@@ -243,6 +243,7 @@ async function reviewerOf(
   graph: GraphRecordFacts,
   record: ReviewerBindingRecord,
   signal?: AbortSignal,
+  domain?: Awaited<ReturnType<typeof openDomain>> & { readonly recovery: CallerBase['recovery'] },
 ): Promise<LoadedCaller> {
   signal?.throwIfAborted()
   const facts = callerGraph(graph)
@@ -258,11 +259,11 @@ async function reviewerOf(
   }
   const standing = await delegatorStanding(deps, sessionId, graph, record.actor)
   if (standing.kind === 'refused') return failed(sessionId, standing.refusal, standing.detail, facts)
-  const opened = await openDomain(deps.task, storeId)
+  const opened = domain ?? await openDomain(deps.task, storeId)
   if (opened.failure !== undefined) {
     return failed(sessionId, 'unreadable', `the delegated store "${storeId}" cannot be read: ${opened.failure}`, facts)
   }
-  const recovery = await deps.taskRuntime.recoveryStatus(storeId)
+  const recovery = domain?.recovery ?? await deps.taskRuntime.recoveryStatus(storeId)
   const task = opened.snapshot?.tasks.find(item => item.taskId === record.taskId)
   return {
     resolution: {

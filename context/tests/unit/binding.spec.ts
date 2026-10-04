@@ -4,7 +4,7 @@
  * ledger's delegation, and every named way a binding can fail.
  */
 
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { rootTaskStoreId } from '../../../task/src/index.ts'
 import { ReviewerBindingError } from '../../src/index.ts'
 import { FixtureStack, seedChain, type Chain } from '../support/stack.ts'
@@ -155,6 +155,21 @@ describe('cross-graph reads', () => {
 })
 
 describe('reviewer delegation', () => {
+  test.each(['s-review', 's-unpublished-reviewer'])('resolves %s from one domain snapshot and one recovery observation', async sessionId => {
+    const { stack, chain } = await chainStack()
+    stack.bindingSource(stack.ledger(DEPARTMENT))
+    stack.recoveryStatus(chain.storeId, { status: 'ready' })
+    const open = vi.spyOn(stack.task, 'openStore')
+    stack.observed.recoveryStatus.mockClear()
+
+    const loaded = await stack.service.load(sessionId)
+
+    expect(loaded.resolution).toMatchObject({ kind: 'reviewer', task: { taskId: 't-c1' }, recovery: { status: 'ready' } })
+    expect(loaded.snapshot?.id).toBe(chain.storeId)
+    expect(open).toHaveBeenCalledExactlyOnceWith(chain.storeId)
+    expect(stack.observed.recoveryStatus).toHaveBeenCalledExactlyOnceWith(chain.storeId)
+  })
+
   test('a ledger row binds the reviewer to the delegated graph, review-only', async () => {
     const { stack } = await chainStack()
     stack.bindingSource(stack.ledger(DEPARTMENT))

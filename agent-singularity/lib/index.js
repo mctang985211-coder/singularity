@@ -909,10 +909,6 @@ function planSupervisorAttempt(input) {
 		budget
 	};
 }
-/** How many review agents this root store has already started, as the file reads right now. A missing file reads as zero; a corrupt line throws rather than silently undercounting. */
-async function countReviewAgentRuns(rootStoreId) {
-	return startedRowsOf(await readLedgerRows() ?? [], rootStoreId).length;
-}
 /** Every attempt this root store's ledger holds, for a reader that renders the state rather than deciding on it (`task_review_pack`). A display query: the decision is always made inside the admission's serial region. */
 async function readReviewAgentAttempts(rootStoreId) {
 	return attemptsOf(await readLedgerRows() ?? [], rootStoreId);
@@ -1170,11 +1166,11 @@ function supervisorGrant() {
 	};
 }
 /** The hand-off facts a pack or a reviewer prompt reads: the attempts and the allowance in force. */
-async function handoffFactsOf(storeId, attempts) {
+function handoffFactsOf(attempts) {
 	return {
 		attempts,
 		budget: {
-			used: await countReviewAgentRuns(storeId),
+			used: attempts.filter((attempt) => attempt.started).length,
 			max: reviewAgentBudget()
 		}
 	};
@@ -1605,7 +1601,7 @@ function defineTaskReviewPackTool(ctx) {
 				snapshot,
 				source,
 				attempts,
-				handoff: await handoffFactsOf(storeId, attempts)
+				handoff: handoffFactsOf(attempts)
 			});
 		}
 	});
@@ -1800,7 +1796,7 @@ async function startSupervisorHandoff(ctx, input) {
 					snapshot,
 					source,
 					attempts,
-					handoff: await handoffFactsOf(storeId, attempts)
+					handoff: handoffFactsOf(attempts)
 				})
 			].join("\n")
 		});
@@ -2217,7 +2213,7 @@ async function runReviewAgentAttempt(input) {
 					snapshot: current$1,
 					source,
 					attempts,
-					handoff: await handoffFactsOf(storeId, attempts)
+					handoff: handoffFactsOf(attempts)
 				});
 				return [
 					"You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.",
@@ -2393,17 +2389,27 @@ async function runReviewAgentAttempt(input) {
 //#endregion
 //#region src/coordination/review-scan.ts
 /** Local failures immediately; successful whole goals only after root verification. Explicit reviews can still inspect any node. */
-function acceptedSourcesOf(snapshot, mode) {
+function acceptedSourcesOf(snapshot, mode, source) {
 	if (mode === "off") return [];
-	return snapshot.reviews.filter((review) => {
-		let run = snapshot.runs.find((run$1) => run$1.runId === review.runId);
+	const exact = source === void 0 ? void 0 : reviewForSource(snapshot, source);
+	const reviews = source === void 0 ? snapshot.reviews : exact === void 0 ? [] : [exact];
+	const tasks = new Map(snapshot.tasks.map((task) => [task.taskId, task]));
+	const eligible = reviews.filter((review) => {
+		const task = tasks.get(review.taskId);
+		return review.outcome === "failed" || mode === "all" && review.outcome === "verified" && task !== void 0 && task.parentTaskId === void 0;
+	});
+	if (eligible.length === 0) return [];
+	const runs = new Map(snapshot.runs.map((run) => [run.runId, run]));
+	return eligible.filter((review) => {
+		let run = review.runId === void 0 ? void 0 : runs.get(review.runId);
 		while (run !== void 0) {
 			if (run.parentRunId === void 0) break;
-			if (snapshot.tasks.some((task) => task.taskId === run.taskId && task.parentTaskId === void 0)) return false;
+			const task = tasks.get(run.taskId);
+			if (task !== void 0 && task.parentTaskId === void 0) return false;
 			const parentRunId = run.parentRunId;
-			run = snapshot.runs.find((run$1) => run$1.runId === parentRunId);
+			run = runs.get(parentRunId);
 		}
-		return review.outcome === "failed" || mode === "all" && review.outcome === "verified" && snapshot.tasks.some((task) => task.taskId === review.taskId && task.parentTaskId === void 0);
+		return true;
 	}).map((review) => ({
 		taskId: review.taskId,
 		runId: review.runId ?? null
@@ -2462,8 +2468,7 @@ async function scanFailedReviewSources(ctx, storeId, options = {}) {
 		log?.(`review agent: store ${storeId} could not be read (${error instanceof Error ? error.message : String(error)}); nothing was scanned`);
 		return report();
 	}
-	const accepted = acceptedSourcesOf(snapshot, mode);
-	const targets = options.source === void 0 ? accepted : accepted.filter((source) => sameSource(source, options.source));
+	const targets = acceptedSourcesOf(snapshot, mode, options.source);
 	if (targets.length === 0) return report();
 	const root = liveRootAgentOf(ctx, storeId);
 	const attempts = await readReviewAgentAttempts(storeId);

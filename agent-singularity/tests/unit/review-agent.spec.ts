@@ -9,7 +9,6 @@ import { parseReviewerDiagnosis } from '../../src/coordination/review-run.ts'
 import { resolveGrant } from '../../../agent-runtime/src/grants.ts'
 import {
   admitReviewAgent,
-  countReviewAgentRuns,
   readReviewerDelegation,
   reviewAgentLedgerFile,
 } from '../../src/coordination/ledger.ts'
@@ -419,7 +418,7 @@ describe('the review-agent admission (K4-1)', () => {
     const rows = ledgerRows()
     expect(rows).toHaveLength(1)
     expect(['s-a', 's-b']).toContain(rows[0]!.sessionId)
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(1)
   })
 
   test('with the cap at two and one row on the file, exactly one more admission lands', async () => {
@@ -431,18 +430,18 @@ describe('the review-agent admission (K4-1)', () => {
     expect(results.filter(result => result === 'refused')).toHaveLength(1)
     // Two rows for two runs — the third admission wrote nothing.
     expect(ledgerRows()).toHaveLength(2)
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(2)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(2)
     expect(await attempt(2, 's-z')).toBe('refused')
     expect(ledgerRows()).toHaveLength(2)
   })
 
   test("another store's rows are not this store's count", async () => {
     await admitReviewAgent('sg-t-other', admission => admission.start(row('s-other-store')))
-    expect(await countReviewAgentRuns('sg-t-other')).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === 'sg-t-other').length).toBe(1)
     // This store's own allowance is untouched — and its own region is its own.
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(0)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(0)
     expect(await attempt(1, 's-this-store')).toBe('admitted')
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(1)
     expect(ledgerRows()).toHaveLength(2)
   })
 
@@ -463,11 +462,12 @@ describe('the review-agent admission (K4-1)', () => {
     }
     expect(ledgerText()).toContain('"s-first"')
 
-    // A display count inside that window reports the one row the file holds.
+    // A delegation read inside that window sees the durable started row.
     const read = ledgerFs.nextLedgerRead()
-    const counting = countReviewAgentRuns(ROOT_STORE)
+    const delegation = readReviewerDelegation('s-first')
     await read
-    expect(await counting).toBe(1)
+    expect(await delegation).toMatchObject({ rootStoreId: ROOT_STORE })
+    expect(ledgerRows()).toHaveLength(1)
 
     // A second admission queues behind the open region: it cannot read the
     // file (and so cannot count the row) until the first region has ended, so
@@ -486,7 +486,7 @@ describe('the review-agent admission (K4-1)', () => {
 
     // One row is one spent run: the room a cap of two leaves is still there.
     expect(ledgerRows()).toHaveLength(1)
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(1)
     const room = await admitReviewAgent(ROOT_STORE, async admission => {
       const started = admission.started
       if (started >= 2) return { started, admitted: false }
@@ -506,7 +506,7 @@ describe('the review-agent admission (K4-1)', () => {
 
     // Nothing was written, so nothing was spent and nothing has to be undone.
     expect(ledgerText()).toBe('')
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(0)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(0)
 
     // The failed region did not wedge the store's key: the next admission runs
     // and counts from the file it finds.
@@ -516,7 +516,7 @@ describe('the review-agent admission (K4-1)', () => {
     })
     expect(started).toBe(0)
     expect(ledgerRows()).toHaveLength(1)
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(1)
   })
 
   test('a fresh import derives the count from the file alone, with no in-process carry-over', async () => {
@@ -525,7 +525,7 @@ describe('the review-agent admission (K4-1)', () => {
     vi.resetModules()
     const restarted = await import('../../src/coordination/ledger.ts')
 
-    expect(await restarted.countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    expect(await restarted.admitReviewAgent(ROOT_STORE, async admission => admission.started)).toBe(1)
     // The row written before the restart is spent for the fresh module too: it
     // reads the count where the admission reads it, and the store is out of room.
     const seen = await restarted.admitReviewAgent(ROOT_STORE, async admission => {
@@ -575,7 +575,7 @@ describe('the review-agent admission (K4-1)', () => {
     })
     expect(again).toBe(1)
     expect(ledgerRows()).toHaveLength(1)
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(1)
 
     // A different attempt is a different spend: the door is idle for one
     // session, not for the store.
@@ -584,7 +584,7 @@ describe('the review-agent admission (K4-1)', () => {
       return admission.started
     })
     expect(other).toBe(1)
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(2)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(2)
   })
 })
 
@@ -887,7 +887,7 @@ describe('task_review_agent', () => {
     expect(rowsOfKind('started')).toHaveLength(0)
     expect(rowsOfKind('settled')).toHaveLength(1)
     expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(0)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === 'sg-t-root-1').length).toBe(0)
   })
 
   /**
@@ -911,7 +911,7 @@ describe('task_review_agent', () => {
     expect(reviewer.agent.cancel).not.toHaveBeenCalled()
     expect(recordDiagnosisIn).not.toHaveBeenCalled()
     expect(rowsOfKind('settled')).toEqual([])
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(1)
     vi.useRealTimers()
 
     const repeated = await tool.execute({ taskId: 't1', runId: RUN }, exec as never) as string
@@ -922,7 +922,7 @@ describe('task_review_agent', () => {
     expect(recordDiagnosisIn).toHaveBeenCalledOnce()
     expect(rowsOfKind('settled')).toHaveLength(1)
     expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded' })
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(1)
   })
 
   test('an explicit cancellation ends a silent reviewer with no diagnosis and removes its listener', async () => {
@@ -963,7 +963,7 @@ describe('task_review_agent', () => {
     expect(recordDiagnosisIn).not.toHaveBeenCalled()
     expect(rowsOfKind('settled')).toHaveLength(1)
     expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(1)
   })
 
   test('a failed reviewer ends its attempt without accepting output from the failed turn', async () => {
@@ -1085,7 +1085,7 @@ describe('task_review_agent', () => {
     expect(recordDiagnosisIn).not.toHaveBeenCalled()
     // The row is durable, so the run is spent — and nothing refunds it.
     expect(rowsOfKind('started')).toHaveLength(1)
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === 'sg-t-root-1').length).toBe(1)
 
     // The source is not re-spawned, and the spent run is not re-charged either:
     // the repeat is answered from the attempt the ledger already holds.
@@ -1096,7 +1096,7 @@ describe('task_review_agent', () => {
     expect(spawn).toHaveBeenCalledOnce()
     expect(rowsOfKind('claim')).toHaveLength(1)
     expect(rowsOfKind('started')).toHaveLength(1)
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === 'sg-t-root-1').length).toBe(1)
   })
 
   test('a cancelled reviewer spends one run, and nothing refunds or restarts it', async () => {
@@ -1115,7 +1115,7 @@ describe('task_review_agent', () => {
     const second = await tool.execute({ taskId: 't1', runId: RUN }, exec as never) as string
     expect(second).toContain('already has this attempt')
     expect(spawn).toHaveBeenCalledOnce()
-    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === ROOT_STORE).length).toBe(1)
   })
 
   /**
@@ -1165,7 +1165,7 @@ describe('task_review_agent', () => {
     expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded', sessionId: owner })
     expect(rowsOfKind('claim')).toHaveLength(1)
     expect(rowsOfKind('started')).toHaveLength(1)
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === 'sg-t-root-1').length).toBe(1)
 
     // Once the fact is on the file the attempt is over, and the new key is what
     // starts next — the attempt is not re-run and not re-charged.
@@ -1177,7 +1177,7 @@ describe('task_review_agent', () => {
     expect(spawn).toHaveBeenCalledTimes(2)
     expect(rowsOfKind('claim')).toHaveLength(2)
     expect(rowsOfKind('started')).toHaveLength(2)
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(2)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === 'sg-t-root-1').length).toBe(2)
   })
 
   test('a terminal row that cannot be written still ends the attempt for this process', async () => {
@@ -1219,6 +1219,6 @@ describe('task_review_agent', () => {
     const settled = rowsOfKind('settled')
     expect(settled).toHaveLength(1)
     expect(settled[0]).toMatchObject({ status: 'recorded', sessionId: rowsOfKind('claim')[0]!.sessionId })
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+    expect(ledgerRows().filter(row => row.kind === 'started' && row.rootStoreId === 'sg-t-root-1').length).toBe(1)
   })
 })

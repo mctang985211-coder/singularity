@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { countReviewAgentRuns, readReviewerDelegation, readSupervisorHandoff } from '../../agent-singularity/src/coordination/ledger.ts'
+import { readReviewAgentAttempts, readReviewerDelegation, readSupervisorHandoff } from '../../agent-singularity/src/coordination/ledger.ts'
 import { consumePendingHandoffs } from '../../agent-singularity/src/coordination/evolution-handoff.ts'
 import { supervisorHandoffDigest } from '../../agent-singularity/src/coordination/handoff-rules.ts'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
@@ -91,7 +91,7 @@ describe('the review allowance survives a restart (K4)', () => {
     // The row the allowance is counted from, read back off the file the
     // deployment keeps it in — the reviewer's delegation, written before its
     // first request.
-    expect(await countReviewAgentRuns(failed.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(failed.storeId)).filter(attempt => attempt.started).length).toBe(1)
     expect(await readReviewerDelegation(reviewer)).toMatchObject({ rootStoreId: failed.storeId, taskId: failed.taskId })
 
     // A restart: this process's descriptors go back, its workspace and home stay.
@@ -108,7 +108,7 @@ describe('the review allowance survives a restart (K4)', () => {
     expect(again.text).toContain(reviewer)
     expect(again.text).toContain('no review agent started')
     expect(second.spawns).toEqual([])
-    expect(await countReviewAgentRuns(failed.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(failed.storeId)).filter(attempt => attempt.started).length).toBe(1)
 
     // A further review of the same source is a *new* attempt, and the store's
     // allowance — read from the ledger the previous process wrote — has no room
@@ -122,7 +122,7 @@ describe('the review allowance survives a restart (K4)', () => {
     expect(other.text).toContain(failed.storeId)
     expect(other.text).toContain('no review agent started')
     expect(second.spawns).toEqual([])
-    expect(await countReviewAgentRuns(failed.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(failed.storeId)).filter(attempt => attempt.started).length).toBe(1)
   }, 60_000)
 
   it('recovers a started attempt the previous process left, and accepts a new key within the allowance', async () => {
@@ -144,7 +144,7 @@ describe('the review allowance survives a restart (K4)', () => {
       }),
       '',
     ].join('\n'), 'utf8')
-    expect(await countReviewAgentRuns(failed.storeId)).toBe(1)
+    expect((await readReviewAgentAttempts(failed.storeId)).filter(attempt => attempt.started).length).toBe(1)
 
     await first.crash()
     await first.dispose({ remove: false })
@@ -175,7 +175,7 @@ describe('the review allowance survives a restart (K4)', () => {
     expect(claims).toHaveLength(2)
     expect(claims[1]).toMatchObject({ requestKey: 'k1', reason: 'a fresh look after the crash', taskId: failed.taskId, runId: failed.runId })
     expect(rows.filter(row => row.kind === 'started')).toHaveLength(2)
-    expect(await countReviewAgentRuns(failed.storeId)).toBe(2)
+    expect((await readReviewAgentAttempts(failed.storeId)).filter(attempt => attempt.started).length).toBe(2)
 
     // The source's default attempt reads back as the interrupted attempt it is —
     // not as something in flight, and not as a second reviewer either.
@@ -186,7 +186,7 @@ describe('the review allowance survives a restart (K4)', () => {
     expect(readback.text).not.toContain('in flight')
     expect(readback.text).toContain('no review agent started')
     expect(second.spawns.filter(spawn => String(spawn.name ?? '').startsWith('review '))).toHaveLength(1)
-    expect(await countReviewAgentRuns(failed.storeId)).toBe(2)
+    expect((await readReviewAgentAttempts(failed.storeId)).filter(attempt => attempt.started).length).toBe(2)
   }, 60_000)
 })
 
@@ -249,6 +249,6 @@ describe('the hand-off survives a restart (A6 + K4)', () => {
     expect(rows.filter(row => row.kind === 'claim' && row.role === 'supervisor')).toHaveLength(2)
     expect(await readSupervisorHandoff(failed.storeId, 'd-dead')).toMatchObject({ sessionId: replacement })
     // The dead attempt's spent run is not refunded: two supervisor runs.
-    expect(await countReviewAgentRuns(failed.storeId)).toBe(2)
+    expect((await readReviewAgentAttempts(failed.storeId)).filter(attempt => attempt.started).length).toBe(2)
   }, 60_000)
 })

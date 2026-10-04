@@ -644,11 +644,12 @@ export async function failBatch(self: TaskRuntime, storeId: string, batchId: str
   const found = await batchRecordIn(self, storeId, batchId)
   if (found === undefined) return
   const entry = self.drivers.get(`${storeId}/${batchId}`)
-  entry?.controller.abort()
   const env = await self.orchestrateEnv(await self.sessionForStore(storeId), `fail-batch:${storeId}`)
+  // Persist failure before waking the driver's cancellation branch.
+  try {
+    await settleRunFromRuntime(env, storeId, found.run, 'failed', reason)
+  } finally {
+    entry?.controller.abort()
+  }
   await blockUnstartedChildren(env, storeId, found.memberTaskIds, reason)
-  const snapshot = await self.context.task.snapshotIn(storeId)
-  const parentRun = snapshot.runs.find(run => run.runId === found.run.runId)
-  if (parentRun === undefined || parentRun.status !== 'running') return
-  await settleRunFromRuntime(env, storeId, parentRun, 'failed', reason)
 }

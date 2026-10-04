@@ -157,9 +157,12 @@ const SUPERVISOR_ALLOWED = new Set<string>([
 
 const dirs: string[] = []
 afterEach(async () => {
-  await disposeScriptedLoops()
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
-})
+  try {
+    await disposeScriptedLoops()
+  } finally {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  }
+}, 600_000)
 
 function scratch(): string {
   const dir = mkdtempSync(join(tmpdir(), 'live-xv6-supervisor-repair-'))
@@ -462,9 +465,6 @@ async function reviewerReply(
   return '```json\n' + JSON.stringify(diagnosis) + '\n```'
 }
 
-// The dispose hook tears down the whole stack and can outlive the 120 s default on a failure path.
-afterEach(disposeScriptedLoops, 600_000)
-
 const available = xv6TestbedPresent() && xv6ReferencePresent()
 // The spec's own grader re-runs (and every tool body) spawn children that inherit
 // `process.env`, so the user-space RISC-V toolchain must be on PATH before the run.
@@ -660,7 +660,9 @@ it.skipIf(!enabled || !available)(
       }
       expect(result.usage?.prompt_tokens, 'gateway must report actual prompt usage').toBeTypeOf('number')
       expect(result.usage?.completion_tokens, 'gateway must report actual completion usage').toBeTypeOf('number')
-      const cacheReadTokens = result.usage.prompt_cache_hit_tokens ?? result.usage.prompt_tokens_details?.cached_tokens ?? 0
+      const cacheReadTokens = result.usage.prompt_cache_hit_tokens ?? result.usage.prompt_tokens_details?.cached_tokens
+      const inputTokens = result.usage.prompt_cache_miss_tokens
+        ?? (typeof cacheReadTokens === 'number' ? result.usage.prompt_tokens - cacheReadTokens : undefined)
       // Carry through only buckets the gateway itself reported: `total_tokens`
       // is the provider's own exact total (the meter needs it to prove usage
       // when the route reports no cache-write bucket), and a cache-write counter
@@ -669,12 +671,17 @@ it.skipIf(!enabled || !available)(
         ?? result.usage.prompt_cache_creation_tokens
         ?? result.usage.prompt_tokens_details?.cache_write_tokens
         ?? result.usage.prompt_tokens_details?.cache_creation_tokens
-      yield {
-        type: 'usage',
-        usage: { inputTokens: result.usage.prompt_tokens - cacheReadTokens,
-          outputTokens: result.usage.completion_tokens, cacheReadTokens,
-          ...typeof result.usage.total_tokens === 'number' ? { totalTokens: result.usage.total_tokens } : {},
-          ...typeof cacheWriteTokens === 'number' ? { cacheWriteTokens } : {} },
+      // An aggregate prompt total alone cannot identify the uncached bucket.
+      // Leave usage unavailable instead of pretending that unreported cache is zero.
+      if (typeof inputTokens === 'number') {
+        yield {
+          type: 'usage',
+          usage: { inputTokens,
+            outputTokens: result.usage.completion_tokens,
+            ...typeof cacheReadTokens === 'number' ? { cacheReadTokens } : {},
+            ...typeof result.usage.total_tokens === 'number' ? { totalTokens: result.usage.total_tokens } : {},
+            ...typeof cacheWriteTokens === 'number' ? { cacheWriteTokens } : {} },
+        }
       }
       yield { type: 'finish', reason: { kind: calls.length ? 'tool-calls' : 'stop' } }
     })
@@ -768,6 +775,7 @@ it.skipIf(!enabled || !available)(
           phaseCursor += turn.requests
           if (turn.usage === undefined) {
             unmeasured += 1
+            allUnmeasured += 1
             if (phaseUnmeasured[turnPhase] !== undefined) phaseUnmeasured[turnPhase] += 1
             continue
           }
@@ -796,7 +804,8 @@ it.skipIf(!enabled || !available)(
           'reported them — a bucket no route reported is never rendered as zero',
         attribution:
           'a turn is attributed to the phase of its first request; turns the meter could not prove are counted, not imputed; a phase that ' +
-          'completed no turn renders null buckets (its unreportedBuckets names them) and is listed in phasesWithoutCompletedTurns',
+          'completed no turn renders null buckets (its unreportedBuckets names them) and is listed in phasesWithoutCompletedTurns; ' +
+          'numeric buckets sum the measured turns only, so turnsWithoutUsage greater than zero makes the full cost unknown',
         phases: tokenPhases,
         phasesWithoutCompletedTurns,
         total: tallyTokens(allUsages, allUnmeasured),
@@ -1299,7 +1308,6 @@ it.skipIf(!enabled || !available)(
       })()
       const run2Grade = regrade(checkout2)
       process.stderr.write(`[live] run2 regrade: ${run2Grade.score}\n`)
-      clearInterval(watchdog)
 
       // ── the assertions the evidence records ─────────────────────────────────
       const final = await h.snapshot(STORE)
@@ -1334,7 +1342,7 @@ it.skipIf(!enabled || !available)(
       const gate = buildGate(applied.proposalId, appliedView.gate, report.samples)
 
       const run1ScoreFull = run1Grade.score === 'Score: 70/70'
-      const run2ScoreFull = run2Grade.score === 'Score: 70/70'
+      const run2ScoreFull = run2Grade.status === 0 && run2Grade.score === 'Score: 70/70'
       const assertions = {
         regressionLeafFailedOnRealChecker: regressionFailure.verdict?.status === 'fail',
         run1RegressionLeafGapVerdict:
@@ -1533,10 +1541,11 @@ it.skipIf(!enabled || !available)(
       await writeFile('/tmp/singularity-live-xv6-supervisor-repair.json', JSON.stringify(evidence, null, 2) + '\n')
       evidenceWritten = true
       expect(Object.values(assertions).every(Boolean), JSON.stringify(assertions)).toBe(true)
-      await h.dispose()
     } catch (error) {
       if (!evidenceWritten) await writeFailureEvidence(error)
       throw error
+    } finally {
+      clearInterval(watchdog)
     }
   },
   14_400_000,

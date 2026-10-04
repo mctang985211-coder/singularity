@@ -218,7 +218,7 @@ export async function startSupervisorHandoff(
             ...(reviewFacts === undefined ? {} : { reviewFacts }),
           }),
           '--- Task DAG review pack ---',
-          buildReviewPack({ snapshot, source, attempts, handoff: await handoffFactsOf(storeId, attempts) }),
+          buildReviewPack({ snapshot, source, attempts, handoff: handoffFactsOf(attempts) }),
         ].join('\n'),
     })
     if (spawned.kind === 'spawn-failed') {

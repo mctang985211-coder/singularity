@@ -469,8 +469,9 @@ export function checkoutTools(options: CheckoutToolOptions = {}) {
       if (name === 'bash') {
         const escaped = escapingPathIn(String(args.command), checkout)
         if (escaped !== undefined) throw new Error(`bash refused: the command names ${escaped}. Use checkout-relative paths.`)
+        exec.signal.throwIfAborted()
         return await new Promise<string>((settle, fail) => {
-          // `detached` puts the command in its own process group so a timeout
+          // `detached` puts the command in its own process group so a stop
           // kills anything it spawned, not just the shell: a backgrounded child
           // holding the stdout pipe is what would otherwise hang the tool body.
           const child = spawn('bash', ['-c', String(args.command)], {
@@ -479,24 +480,35 @@ export function checkoutTools(options: CheckoutToolOptions = {}) {
           let out = ''
           let err = ''
           let done = false
+          let stopped: Error | undefined
           const finish = (error: Error | undefined, text: string): void => {
             if (done) return
             done = true
             clearTimeout(timer)
+            exec.signal.removeEventListener('abort', onAbort)
             if (error === undefined) settle(text || '(no output)')
             else fail(error)
           }
-          const timer = setTimeout(() => {
+          const stop = (error: Error): void => {
+            if (done || stopped !== undefined) return
+            stopped = error
             try { process.kill(-child.pid!, 'SIGKILL') } catch { child.kill('SIGKILL') }
-            finish(new Error(`bash timed out after ${bashTimeoutSeconds} seconds and was killed`), '')
-          }, bashTimeoutMs)
+          }
+          const onAbort = (): void => { stop(new Error('bash cancelled and its process group was killed')) }
+          const timer = setTimeout(
+            () => stop(new Error(`bash timed out after ${bashTimeoutSeconds} seconds and was killed`)),
+            bashTimeoutMs,
+          )
           child.stdout.on('data', chunk => { out += String(chunk) })
           child.stderr.on('data', chunk => { err += String(chunk) })
           child.on('error', error => finish(error, ''))
           child.on('close', code => {
-            if (code === 0) finish(undefined, out)
+            if (stopped !== undefined) finish(stopped, '')
+            else if (code === 0) finish(undefined, out)
             else finish(new Error(`bash exited ${code}: ${err || out || 'no output'}`), '')
           })
+          exec.signal.addEventListener('abort', onAbort, { once: true })
+          if (exec.signal.aborted) onAbort()
         })
       }
       const target = resolve(checkout, args.path)

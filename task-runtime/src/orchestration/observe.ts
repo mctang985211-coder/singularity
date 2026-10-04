@@ -54,20 +54,26 @@ async function awaitWorker(handle: AgentHandle, signal: AbortSignal | undefined)
  */
 export function batchItems(memberTaskIds: readonly TaskId[], edges: readonly DependencyEdge[]): BatchItem[] {
   const position = new Map(memberTaskIds.map((taskId, index) => [taskId, index] as const))
+  const dependencies = memberTaskIds.map((): number[] => [])
+  for (const edge of edges) {
+    const to = position.get(edge.to)
+    const from = position.get(edge.from)
+    if (to !== undefined && from !== undefined) dependencies[to]!.push(from)
+  }
   return memberTaskIds.map((taskId, index) => ({
     index,
     taskId,
-    dependsOn: edges
-      .filter(edge => edge.to === taskId)
-      .map(edge => position.get(edge.from))
-      .filter((from): from is number => from !== undefined)
-      .sort((left, right) => left - right),
+    dependsOn: dependencies[index]!.sort((left, right) => left - right),
   }))
 }
 
 /** The latest run the store records for a task, or `undefined` when it has none (never started). */
 export function latestRun(snapshot: TaskSnapshot, taskId: TaskId): TaskRun | undefined {
-  return [...snapshot.runs].reverse().find(run => run.taskId === taskId)
+  for (let index = snapshot.runs.length - 1; index >= 0; index--) {
+    const run = snapshot.runs[index]!
+    if (run.taskId === taskId) return run
+  }
+  return undefined
 }
 
 export function taskOf(snapshot: TaskSnapshot, taskId: TaskId): TaskInstance | undefined {
@@ -92,7 +98,8 @@ export async function waitRunTerminal(env: OrchestrateEnv, storeId: string, runI
   return await new Promise<RunStatus>(resolve => {
     let settled = false
     const unsubscribe = env.watchRun as NonNullable<OrchestrateEnv['watchRun']>
-    const off = unsubscribe(storeId, runId, status => {
+    let off: (() => void) | undefined
+    off = unsubscribe(storeId, runId, status => {
       if (settled || !isTerminalRun(status)) return
       settled = true
       off?.()

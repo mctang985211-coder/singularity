@@ -5488,13 +5488,17 @@ var EvolutionService = class extends EvolutionServiceCore {
 	promotionSources() {
 		const task = optionalService(this.ctx, "task");
 		if (task === void 0) throw new Error("evolution: the promotion gate re-reads the experiment's runs, reviews and evidence from the task store, and this context has no task service — the evidence cannot be checked, so nothing is promoted");
+		const sessions = /* @__PURE__ */ new Map();
 		return {
 			root: this.root,
 			experiments: (proposalId) => this.experiments(proposalId),
 			task,
 			verifierVocabulary: () => verifierVocabularyOf(this.ctx),
 			modelSelection: () => this.modelSelection(),
-			sessionLog: (sessionId) => sessionLog(this.ctx, sessionId)
+			sessionLog: (sessionId) => {
+				if (!sessions.has(sessionId)) sessions.set(sessionId, sessionLog(this.ctx, sessionId));
+				return sessions.get(sessionId);
+			}
 		};
 	}
 	/** The candidate object's provider verdict, taken from the directory the run would load it from. */

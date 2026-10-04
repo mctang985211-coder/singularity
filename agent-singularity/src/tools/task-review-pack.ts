@@ -325,7 +325,7 @@ export function defineTaskReviewPackTool(ctx: Context) {
         snapshot,
         source,
         attempts,
-        handoff: await handoffFactsOf(storeId, attempts),
+        handoff: handoffFactsOf(attempts),
       })
     },
   })

@@ -53,14 +53,18 @@ export async function deriveChildOutcomes(
   memberTaskIds: readonly TaskId[],
 ): Promise<ChildOutcome[]> {
   const snapshot = await task.snapshotIn(storeId)
-  const parent = taskOf(snapshot, parentTaskId)
-  if (parent === undefined) return []
+  const tasks = new Map(snapshot.tasks.map(instance => [instance.taskId, instance]))
+  if (!tasks.has(parentTaskId)) return []
+  const runs = new Map(snapshot.runs.map(run => [run.taskId, run]))
+  const evidence = new Map<RunId, string>()
+  for (const bundle of snapshot.evidence) {
+    if (!evidence.has(bundle.taskRunId)) evidence.set(bundle.taskRunId, bundle.evidenceId)
+  }
   return memberTaskIds.map(taskId => {
-    const instance = taskOf(snapshot, taskId)
-    const run = latestRun(snapshot, taskId)
+    const instance = tasks.get(taskId)
+    const run = runs.get(taskId)
     const status = instance?.status
-    const evidenceId =
-      run === undefined ? undefined : snapshot.evidence.find(item => item.taskRunId === run.runId)?.evidenceId
+    const evidenceId = run === undefined ? undefined : evidence.get(run.runId)
     const outcome: ChildOutcome['status'] =
       status === 'verified' || status === 'failed' || status === 'blocked' || status === 'cancelled' ? status : 'failed'
     return {
@@ -513,8 +517,11 @@ async function startChildRound(
 export async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<ChildOutcome[]> {
   for (;;) {
     const snapshot = await env.task.snapshotIn(batch.storeId)
-    const parentTask = await env.task.taskIn(batch.storeId, batch.parentTaskId)
-    const parentRun = await env.task.runIn(batch.storeId, batch.parentRunId)
+    const tasks = new Map(snapshot.tasks.map(task => [task.taskId, task]))
+    const parentTask = tasks.get(batch.parentTaskId)
+    if (parentTask === undefined) throw new Error(`task: unknown task "${batch.parentTaskId}"`)
+    const parentRun = snapshot.runs.find(run => run.runId === batch.parentRunId)
+    if (parentRun === undefined) throw new Error(`task: unknown run "${batch.parentRunId}"`)
     /**
      * The batch's own members, read from the run's accumulation on every round: the
      * parent task's children are every batch it ever admitted, so a second batch
@@ -534,7 +541,7 @@ export async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Pro
     }
     const items = batchItems(members, snapshot.edges)
     const pending = items.filter(item => {
-      const task = taskOf(snapshot, item.taskId)
+      const task = tasks.get(item.taskId)
       return task !== undefined && !TERMINAL_TASK_STATUSES.has(task.status)
     })
     if (pending.length === 0) return await finishBatch(env, batch)
@@ -548,25 +555,22 @@ export async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Pro
     }
 
     const verified = new Set(
-      items.filter(item => taskOf(snapshot, item.taskId)?.status === 'verified').map(item => item.index),
+      items.filter(item => tasks.get(item.taskId)?.status === 'verified').map(item => item.index),
     )
-    const ready = pending
-      .filter(item => item.dependsOn.every(dependency => verified.has(dependency)))
-      .sort((left, right) => left.index - right.index)
-    if (ready.length === 0) {
+    const item = pending.find(item => item.dependsOn.every(dependency => verified.has(dependency)))
+    if (item === undefined) {
       await blockUnstarted(env, batch.storeId, snapshot, items, item => ({
         reason: `dependencies [${item.dependsOn.map(dependency => (items[dependency] as BatchItem).taskId).join(', ')}] did not verify`,
         blockers: item.dependsOn
           .filter(dependency => !verified.has(dependency))
           .map(dependency => {
             const taskId = (items[dependency] as BatchItem).taskId
-            return { taskId, outcome: taskOf(snapshot, taskId)?.status ?? 'blocked' }
+            return { taskId, outcome: tasks.get(taskId)?.status ?? 'blocked' }
           }),
       }))
       return await finishBatch(env, batch)
     }
 
-    const item = ready[0] as BatchItem
     const started = latestRun(snapshot, item.taskId)
     if (started !== undefined) {
       if (started.executionPhase === 'active') {

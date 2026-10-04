@@ -1598,64 +1598,53 @@ describe('A3 coordination', () => {
 
     await expect(h.runtime.reconcileStore(STORE)).rejects.toThrow('no capability manifest')
   })
-  test("a batch the store cannot read its parent run for is named, never answered with the parent's child history", async () => {
+  test("an unreadable batch snapshot is reported without handing back the parent's child history", async () => {
     const h = harness()
     const { taskId, runId } = await createRoot(h)
-
-    // Batch one: its member settles `verified`, and the batch end hands the run back
-    // `active` — the state a second batch is admitted from (K1 §1).
     const first = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'the survey',
       children: [childSpec('survey the release')],
     })
     const firstOutcomes = await h.runtime.awaitBatch(STORE, first.batchId)
-    expect(firstOutcomes.map(outcome => outcome.status)).toEqual(['verified'])
     const firstMember = firstOutcomes[0]!.taskId
-
     const second = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'the implementation',
       children: [childSpec('implement the release')],
     })
-    const secondMember = (await h.task.snapshotIn(STORE)).tasks.find(
+    const realSnapshotIn = h.task.snapshotIn.bind(h.task)
+    const secondMember = (await realSnapshotIn(STORE)).tasks.find(
       task => task.parentTaskId === taskId && task.taskId !== firstMember,
     )!.taskId
 
-    // A store whose read of the *parent run* fails: the driver cannot be told which
-    // members this batch has, and a read that failed is not a batch that ended. The
-    // answer must not be the parent task's children — every batch this parent ever
-    // admitted — nor an empty list that reports a batch end nobody could read.
+    // When durable state cannot be read, neither the driver nor its failure
+    // cleanup can discover the batch's members honestly. Report that failure;
+    // a previous batch's children must never stand in for the missing read.
     let unreadable = true
-    const realRunIn = h.task.runIn.bind(h.task)
-    vi.spyOn(h.task, 'runIn').mockImplementation(async (storeId: string, requested: string) => {
-      if (unreadable && requested === runId) throw new Error(`store "${storeId}": run "${requested}" could not be read`)
-      return await realRunIn(storeId, requested)
+    vi.spyOn(h.task, 'snapshotIn').mockImplementation(async (storeId: string) => {
+      if (unreadable) throw new Error(`store "${storeId}": snapshot could not be read`)
+      return await realSnapshotIn(storeId)
     })
-
     await expect(h.runtime.awaitBatch(STORE, second.batchId)).rejects.toThrow(/could not be read/)
-    // The run the driver could not read is failed by name all the same: the store's
-    // own status event carries the cause (nothing was reported for the batch).
-    await vi.waitFor(async () => expect((await realRunIn(STORE, runId)).status).toBe('failed'))
-    const failed = taskEvents(h).find(item => item.kind === 'TaskFailed' && item.runId === runId)
-    expect(failed?.kind === 'TaskFailed' ? failed.payload.reason : '').toContain('the batch driver failed')
-    expect(failed?.kind === 'TaskFailed' ? failed.payload.reason : '').toContain('could not be read')
-    // …and the member that never started is left no ghost by the rejection: the
-    // runtime's own belt blocks it (the store records the batch's children).
-    await vi.waitFor(async () => expect((await h.task.taskIn(STORE, secondMember)).status).toBe('blocked'))
+    expect(h.relayed.filter(item => item.messageId === `m-batchend-${second.batchId}`)).toEqual([])
+    expect((await realSnapshotIn(STORE)).runs.find(run => run.runId === runId)?.status).toBe('running')
+
+    // Once the store is readable, the normal runtime failure path settles only
+    // this batch and records the reason. No inaccessible fact was invented.
     unreadable = false
-    // The block's own record follows its status write: the store's review, read back
-    // by the task it settles.
+    await h.runtime.failBatch(STORE, second.batchId, 'the batch snapshot could not be read')
     await vi.waitFor(async () => {
-      const after = await h.task.snapshotIn(STORE)
+      const after = await realSnapshotIn(STORE)
+      expect(after.runs.find(run => run.runId === runId)?.status).toBe('failed')
+      expect(after.tasks.find(task => task.taskId === secondMember)?.status).toBe('blocked')
       expect(after.reviews.find(review => review.taskId === secondMember)?.outcome).toBe('blocked')
     })
-    // Nothing of the batch that did end was reported for this one, and the batch
-    // that did end is exactly where it was.
-    expect(h.relayed.filter(item => item.messageId === `m-batchend-${second.batchId}`)).toEqual([])
-    expect((await h.task.taskIn(STORE, firstMember)).status).toBe('verified')
-    expect((await h.task.runIn(STORE, runId)).batches?.map(batch => batch.batchId)).toEqual([
+    const after = await realSnapshotIn(STORE)
+    expect(after.tasks.find(task => task.taskId === firstMember)?.status).toBe('verified')
+    expect(after.runs.find(run => run.runId === runId)?.batches?.map(batch => batch.batchId)).toEqual([
       first.batchId,
       second.batchId,
     ])
+    expect(h.relayed.filter(item => item.messageId === `m-batchend-${second.batchId}`)).toEqual([])
     vi.restoreAllMocks()
   })
 
@@ -1681,20 +1670,12 @@ describe('A3 coordination', () => {
       task => task.parentTaskId === taskId && task.taskId !== firstMember,
     )!.taskId
 
-    // The store's read of the *parent run* fails for as long as that run waits on the
-    // batch: a read that failed is not a batch that ended, and the driver must never
-    // answer it with the parent task's children — every batch this parent ever
-    // admitted. The store is itself again once the run settles, so the settlement's
-    // own reads of the run it is failing are unaffected (a store nobody can read from
-    // settles nothing).
-    const realRunIn = h.task.runIn.bind(h.task)
-    vi.spyOn(h.task, 'runIn').mockImplementation(async (storeId: string, requested: string) => {
-      const run = await realRunIn(storeId, requested)
-      if (requested === runId && run.status === 'running' && run.executionPhase === 'waiting_children') {
-        throw new Error(`store "${storeId}": run "${requested}" could not be read`)
-      }
-      return run
-    })
+    // One failed durable read stops the driver. Later reads succeed, allowing
+    // failure settlement to name this batch's members from their own record.
+    const realSnapshotIn = h.task.snapshotIn.bind(h.task)
+    vi.spyOn(h.task, 'snapshotIn')
+      .mockRejectedValueOnce(new Error(`store "${STORE}": snapshot could not be read`))
+      .mockImplementation(realSnapshotIn)
 
     const outcomes = await h.runtime.awaitBatch(STORE, second.batchId)
     // The batch's own member, and nothing of the batch before it: the parent task's

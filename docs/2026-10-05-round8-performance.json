@@ -1,0 +1,95 @@
+{
+  "baselineCommit": "890521c239fc4946ba8d4571dea4c1a76c0384e7",
+  "measurement": {
+    "scope": "production scheduler CPU; no persistence, clones, provider I/O or model calls",
+    "tasks": 4096,
+    "runs": 4096,
+    "edges": 4095,
+    "batchMembers": 512,
+    "samples": 11,
+    "repetitions": 8
+  },
+  "baselineMedianMs": {
+    "batchItems": 7.39346012499999,
+    "deriveChildOutcomes": 22.432073749999972,
+    "latestRuns": 3.204569249999963
+  },
+  "currentMedianMs": {
+    "batchItems": 0.125229499999989,
+    "deriveChildOutcomes": 0.6755563749999851,
+    "latestRuns": 0.4913316249999866
+  },
+  "speedup": {
+    "batchItems": 59.03928487297833,
+    "deriveChildOutcomes": 33.205332049454,
+    "latestRuns": 6.52221246698714
+  },
+  "outerBaselineCommit": "a2a0cea922d328a032b8b9a36c26a93b7b2178b6",
+  "method": "Byte-identical benchmark; baseline and candidate run sequentially; warmup 8 repetitions, median of 11 samples of 8 repetitions.",
+  "limits": [
+    "CPU microbenchmark only; no end-to-end speedup claim.",
+    "Same-checkout writers remain sequential.",
+    "Experiment sides remain sequential to preserve run and token admission budgets."
+  ],
+  "benchmarkFile": "task-runtime/tests/unit/scheduler-performance.spec.ts",
+  "benchmarkFileSha256": "10bcdd8bd4443a4d00487a388715398cdc88c15c297ae70bc0cd9bbca440f75f",
+  "productionChange": {
+    "existingFiles": 12,
+    "netLines": 13,
+    "newSourceFiles": 0,
+    "newPersistenceSchemas": 0
+  },
+  "validation": {
+    "build": {
+      "command": "pnpm run build",
+      "exitCode": 0
+    },
+    "unit": {
+      "passed": 2320,
+      "failed": 0,
+      "skipped": 1,
+      "singularityPassed": 2305,
+      "envBuilderPassed": 15,
+      "benchmarkDefaultSkipped": true
+    },
+    "integration": {
+      "passed": 651,
+      "failed": 0,
+      "skipped": 10,
+      "method": "Final non-grader regression plus the two real-grader cases from this round; grouped validation accepted by user.",
+      "finalNonGraderPassed": 649,
+      "realGraderPassed": 2,
+      "fullInitialExitCode": 0,
+      "fullInitialPassed": 649,
+      "fullInitialSkipped": 10
+    },
+    "realGraderCases": [
+      {
+        "file": "xv6-lock-repair-evolution.spec.ts",
+        "status": "passed",
+        "durationSeconds": 677.165
+      },
+      {
+        "file": "xv6-locks-harness.spec.ts",
+        "status": "passed",
+        "durationSeconds": 10.311
+      }
+    ],
+    "persistence": {
+      "eventRoots": 4,
+      "status": "passed"
+    },
+    "sourceSize": {
+      "files": 490,
+      "maxLines": 2000,
+      "status": "passed"
+    },
+    "liveModelRerun": false,
+    "resolvedDuringValidation": [
+      "Fake grader unit used the real shared QEMU lock; isolated its fixture lock.",
+      "Missing-verifier failure lost a race to driver cancellation; failure now persists before abort.",
+      "Nested cancel assertion raced with turn start and end; waits on the actual request and idle state.",
+      "Lifecycle regression captured a registry before Context disposal, rather than accessing an unregistered service."
+    ]
+  }
+}

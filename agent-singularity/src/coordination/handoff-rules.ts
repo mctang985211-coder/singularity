@@ -4,7 +4,7 @@ import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
 import type { Diagnosis, ReviewRecord, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { canonicalize, sha256Hex } from '@dangosys/dsh-singularity-task'
 import { reviewRef } from './identity.ts'
-import { countReviewAgentRuns, reviewAgentBudget, type ReviewAgentAttempt, type ReviewAgentBudget } from './ledger.ts'
+import { reviewAgentBudget, type ReviewAgentAttempt, type ReviewAgentBudget } from './ledger.ts'
 import { roundCapRefusal, sourceRoundsOf, type SupervisionRounds } from './supervision.ts'
 
 /** Shared host preset; runtime installs the actual coordination role. */
@@ -57,11 +57,8 @@ export interface HandoffFacts {
 }
 
 /** The hand-off facts a pack or a reviewer prompt reads: the attempts and the allowance in force. */
-export async function handoffFactsOf(storeId: string, attempts: readonly ReviewAgentAttempt[]): Promise<HandoffFacts> {
-  return {
-    attempts,
-    budget: { used: await countReviewAgentRuns(storeId), max: reviewAgentBudget() },
-  }
+export function handoffFactsOf(attempts: readonly ReviewAgentAttempt[]): HandoffFacts {
+  return { attempts, budget: { used: attempts.filter(attempt => attempt.started).length, max: reviewAgentBudget() } }
 }
 
 /** What one diagnosis's hand-off state is, as the ledger answers it. */

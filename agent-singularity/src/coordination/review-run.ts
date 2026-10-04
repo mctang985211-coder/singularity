@@ -302,7 +302,7 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
           snapshot: current,
           source,
           attempts,
-          handoff: await handoffFactsOf(storeId, attempts),
+          handoff: handoffFactsOf(attempts),
         })
         return [
           'You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.',

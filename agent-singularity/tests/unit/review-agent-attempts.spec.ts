@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import {
-  countReviewAgentRuns,
+  readReviewAgentAttempts,
   readReviewerDelegation,
   reviewAgentLedgerFile,
 } from '../../src/coordination/ledger.ts'
@@ -214,7 +214,7 @@ describe('the exact source one call names', () => {
     expect(claim).toHaveLength(1)
     expect(claim[0]).toMatchObject({ formatVersion: 2, kind: 'claim', rootStoreId: STORE, taskId: 't2', runId: null, requestKey: null, reason: null, actor: 'root-1' })
     expect(rowsOfKind('started')).toHaveLength(1)
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1)
   })
 
   test('the source is the run the caller names, never the latest review', async () => {
@@ -284,7 +284,7 @@ describe('the source attempt: claim, started, settled', () => {
     expect(rowsOfKind('settled')).toHaveLength(1)
     expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded', sessionId: session })
     expect(state.snapshot.diagnoses).toHaveLength(1)
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1)
   })
 
   test('a restart answers the repeat from the ledger: same attempt, same session, no new side effect', async () => {
@@ -304,7 +304,7 @@ describe('the source attempt: claim, started, settled', () => {
     expect(again).toContain(session)
     expect(again).toContain('already has this attempt')
     expect(ledgerRows()).toHaveLength(rowsBefore)
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1)
   })
 
   test('a repeat that changes the focus is a named conflict: no claim, no spawn, nothing overwritten', async () => {
@@ -344,7 +344,7 @@ describe('the source attempt: claim, started, settled', () => {
     expect(claims[1]).toMatchObject({ requestKey: 'k1', reason: 'a second look after the fix', runId: 'r1', taskId: 't1' })
     expect(claims[1]!.sessionId).not.toBe(defaultSession)
     expect(rowsOfKind('started')).toHaveLength(2)
-    expect(await countReviewAgentRuns(STORE)).toBe(2)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(2)
 
     const retry = (await tool.execute(
       { taskId: 't1', runId: 'r1', requestKey: 'k1', reason: 'a second look after the fix' },
@@ -465,7 +465,7 @@ describe('the source attempt: claim, started, settled', () => {
     expect(rowsOfKind('settled')).toHaveLength(1)
     expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted', sessionId: session })
     // The failed spawn spent nothing: no started row counts against the store.
-    expect(await countReviewAgentRuns(STORE)).toBe(0)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(0)
 
     const again = (await tool.execute({ taskId: 't1', runId: 'r1' }, exec as never)) as string
     expect(again).toContain('interrupted')
@@ -503,7 +503,7 @@ describe('what a crash leaves behind', () => {
     expect(settled).toHaveLength(1)
     expect(settled[0]).toMatchObject({ status: 'interrupted', sessionId: 's-crashed' })
     expect(state.snapshot.diagnoses).toEqual([])
-    expect(await countReviewAgentRuns(STORE)).toBe(0)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(0)
 
     // The same call again changes nothing: the identity is the source's attempt,
     // and its interruption is not written twice.
@@ -537,7 +537,7 @@ describe('what a crash leaves behind', () => {
     expect(String(settled[0]!.note)).toContain('is gone')
     expect(rowsOfKind('claim')).toHaveLength(1)
     expect(rowsOfKind('started')).toHaveLength(1)
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1)
 
     // A repeat is the same read: the recovery is not written twice.
     const again = (await tool.execute({ taskId: 't1', runId: 'r1' }, exec as never)) as string
@@ -575,7 +575,7 @@ describe('what a crash leaves behind', () => {
     expect(settled[1]).toMatchObject({ status: 'recorded', sessionId: claims[1]!.sessionId })
     // The recovered attempt's run is spent and is not refunded: two spent runs,
     // one of them the dead attempt's own.
-    expect(await countReviewAgentRuns(STORE)).toBe(2)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(2)
   })
 
   test('a recorded attempt whose terminal write was lost is read back as recorded, not as interrupted', async () => {
@@ -611,7 +611,7 @@ describe('what a crash leaves behind', () => {
     const settled = rowsOfKind('settled')
     expect(settled).toHaveLength(1)
     expect(settled[0]).toMatchObject({ status: 'recorded', sessionId })
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1)
   })
 
   test('a new key against a claim whose process never reached model input is accepted, after the dead attempt is recorded', async () => {
@@ -638,7 +638,7 @@ describe('what a crash leaves behind', () => {
     const settled = rowsOfKind('settled')
     expect(settled[0]).toMatchObject({ status: 'interrupted', sessionId: 's-dead' })
     expect(settled[1]).toMatchObject({ status: 'recorded', sessionId: rowsOfKind('claim')[1]!.sessionId })
-    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(1)
 
     // The source's default attempt reads back as the interrupted attempt it is.
     const readback = (await tool.execute({ taskId: 't1', runId: 'r1' }, exec as never)) as string
@@ -662,7 +662,7 @@ describe('the ledger as the reviewer binding source, with attempt rows in it', (
     })}\n`)
     expect(await readReviewerDelegation('s-claimed')).toBeUndefined()
     // …and it is not a spent run either.
-    expect(await countReviewAgentRuns(STORE)).toBe(0)
+    expect((await readReviewAgentAttempts(STORE)).filter(attempt => attempt.started).length).toBe(0)
   })
 
   test('the three states of the read hold for attempt rows too', async () => {
@@ -676,7 +676,7 @@ describe('the ledger as the reviewer binding source, with attempt rows in it', (
     expect(await readReviewerDelegation('s-none')).toBeUndefined()
     await expect(readReviewerDelegation('s-two')).rejects.toMatchObject({ kind: 'binding-conflict' })
     // Two started rows in this store (the third row belongs to another one).
-    expect(await countReviewAgentRuns(STORE)).toBe(2)
+    expect(rowsOfKind('started').filter(row => row.rootStoreId === STORE)).toHaveLength(2)
   })
 })
 

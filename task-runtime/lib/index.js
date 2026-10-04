@@ -7137,15 +7137,24 @@ async function awaitWorker(handle, signal) {
 */
 function batchItems(memberTaskIds, edges) {
 	const position = new Map(memberTaskIds.map((taskId, index) => [taskId, index]));
+	const dependencies = memberTaskIds.map(() => []);
+	for (const edge of edges) {
+		const to = position.get(edge.to);
+		const from = position.get(edge.from);
+		if (to !== void 0 && from !== void 0) dependencies[to].push(from);
+	}
 	return memberTaskIds.map((taskId, index) => ({
 		index,
 		taskId,
-		dependsOn: edges.filter((edge) => edge.to === taskId).map((edge) => position.get(edge.from)).filter((from) => from !== void 0).sort((left, right) => left - right)
+		dependsOn: dependencies[index].sort((left, right) => left - right)
 	}));
 }
 /** The latest run the store records for a task, or `undefined` when it has none (never started). */
 function latestRun(snapshot, taskId) {
-	return [...snapshot.runs].reverse().find((run) => run.taskId === taskId);
+	for (let index = snapshot.runs.length - 1; index >= 0; index--) {
+		const run = snapshot.runs[index];
+		if (run.taskId === taskId) return run;
+	}
 }
 function taskOf(snapshot, taskId) {
 	return snapshot.tasks.find((task) => task.taskId === taskId);
@@ -7161,7 +7170,8 @@ async function waitRunTerminal(env, storeId, runId) {
 	return await new Promise((resolve$1) => {
 		let settled = false;
 		const unsubscribe = env.watchRun;
-		const off = unsubscribe(storeId, runId, (status) => {
+		let off;
+		off = unsubscribe(storeId, runId, (status) => {
 			if (settled || !isTerminalRun(status)) return;
 			settled = true;
 			off?.();
@@ -7681,12 +7691,16 @@ const CANCELLED_BEFORE_START = "cancelled by the caller before this child starte
 */
 async function deriveChildOutcomes(task, storeId, parentTaskId, memberTaskIds) {
 	const snapshot = await task.snapshotIn(storeId);
-	if (taskOf(snapshot, parentTaskId) === void 0) return [];
+	const tasks = new Map(snapshot.tasks.map((instance) => [instance.taskId, instance]));
+	if (!tasks.has(parentTaskId)) return [];
+	const runs = new Map(snapshot.runs.map((run) => [run.taskId, run]));
+	const evidence = /* @__PURE__ */ new Map();
+	for (const bundle of snapshot.evidence) if (!evidence.has(bundle.taskRunId)) evidence.set(bundle.taskRunId, bundle.evidenceId);
 	return memberTaskIds.map((taskId) => {
-		const instance = taskOf(snapshot, taskId);
-		const run = latestRun(snapshot, taskId);
+		const instance = tasks.get(taskId);
+		const run = runs.get(taskId);
 		const status = instance?.status;
-		const evidenceId = run === void 0 ? void 0 : snapshot.evidence.find((item) => item.taskRunId === run.runId)?.evidenceId;
+		const evidenceId = run === void 0 ? void 0 : evidence.get(run.runId);
 		const outcome = status === "verified" || status === "failed" || status === "blocked" || status === "cancelled" ? status : "failed";
 		return {
 			taskId,
@@ -8055,8 +8069,11 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 async function driveRounds(env, batch) {
 	for (;;) {
 		const snapshot = await env.task.snapshotIn(batch.storeId);
-		const parentTask = await env.task.taskIn(batch.storeId, batch.parentTaskId);
-		const parentRun = await env.task.runIn(batch.storeId, batch.parentRunId);
+		const tasks = new Map(snapshot.tasks.map((task) => [task.taskId, task]));
+		const parentTask = tasks.get(batch.parentTaskId);
+		if (parentTask === void 0) throw new Error(`task: unknown task "${batch.parentTaskId}"`);
+		const parentRun = snapshot.runs.find((run) => run.runId === batch.parentRunId);
+		if (parentRun === void 0) throw new Error(`task: unknown run "${batch.parentRunId}"`);
 		/**
 		* The batch's own members, read from the run's accumulation on every round: the
 		* parent task's children are every batch it ever admitted, so a second batch
@@ -8076,7 +8093,7 @@ async function driveRounds(env, batch) {
 		}
 		const items = batchItems(members, snapshot.edges);
 		const pending = items.filter((item$1) => {
-			const task = taskOf(snapshot, item$1.taskId);
+			const task = tasks.get(item$1.taskId);
 			return task !== void 0 && !TERMINAL_TASK_STATUSES.has(task.status);
 		});
 		if (pending.length === 0) return await finishBatch(env, batch);
@@ -8087,22 +8104,21 @@ async function driveRounds(env, batch) {
 			}));
 			return await finishBatch(env, batch);
 		}
-		const verified = new Set(items.filter((item$1) => taskOf(snapshot, item$1.taskId)?.status === "verified").map((item$1) => item$1.index));
-		const ready = pending.filter((item$1) => item$1.dependsOn.every((dependency) => verified.has(dependency))).sort((left, right) => left.index - right.index);
-		if (ready.length === 0) {
+		const verified = new Set(items.filter((item$1) => tasks.get(item$1.taskId)?.status === "verified").map((item$1) => item$1.index));
+		const item = pending.find((item$1) => item$1.dependsOn.every((dependency) => verified.has(dependency)));
+		if (item === void 0) {
 			await blockUnstarted(env, batch.storeId, snapshot, items, (item$1) => ({
 				reason: `dependencies [${item$1.dependsOn.map((dependency) => items[dependency].taskId).join(", ")}] did not verify`,
 				blockers: item$1.dependsOn.filter((dependency) => !verified.has(dependency)).map((dependency) => {
 					const taskId = items[dependency].taskId;
 					return {
 						taskId,
-						outcome: taskOf(snapshot, taskId)?.status ?? "blocked"
+						outcome: tasks.get(taskId)?.status ?? "blocked"
 					};
 				})
 			}));
 			return await finishBatch(env, batch);
 		}
-		const item = ready[0];
 		const started = latestRun(snapshot, item.taskId);
 		if (started !== void 0) {
 			if (started.executionPhase === "active") {
@@ -8597,13 +8613,9 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 	* A replay is a driver like a batch is: the runtime owns its progress, so a
 	* cancellation or an unload stops it. Its own promise never rejects — the
 	*/
-	const driverKey = `replay/${storeId}/${championTaskId}`;
+	const driverKey = `replay/${storeId}/${task.taskId}`;
 	self.registerDriver(driverKey, storeId, controller, promise.then(() => [], () => []));
-	try {
-		return await promise;
-	} finally {
-		self.drivers.delete(driverKey);
-	}
+	return await promise;
 }
 async function claimReplayWorkspace(self, workspace, storeId, callerSessionId, championTaskId, replayTaskId) {
 	const registry = self.workspaces;
@@ -9046,12 +9058,14 @@ async function reconcileStore(self, storeId) {
 async function failBatch(self, storeId, batchId, reason) {
 	const found = await batchRecordIn(self, storeId, batchId);
 	if (found === void 0) return;
-	self.drivers.get(`${storeId}/${batchId}`)?.controller.abort();
+	const entry = self.drivers.get(`${storeId}/${batchId}`);
 	const env = await self.orchestrateEnv(await self.sessionForStore(storeId), `fail-batch:${storeId}`);
+	try {
+		await settleRunFromRuntime(env, storeId, found.run, "failed", reason);
+	} finally {
+		entry?.controller.abort();
+	}
 	await blockUnstartedChildren(env, storeId, found.memberTaskIds, reason);
-	const parentRun = (await self.context.task.snapshotIn(storeId)).runs.find((run) => run.runId === found.run.runId);
-	if (parentRun === void 0 || parentRun.status !== "running") return;
-	await settleRunFromRuntime(env, storeId, parentRun, "failed", reason);
 }
 
 //#endregion
