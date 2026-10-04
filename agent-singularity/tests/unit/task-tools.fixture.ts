@@ -254,6 +254,7 @@ export async function fixture(options: { storeError?: Error; sessions?: Map<stri
         task: sessionId === 'root-1' ? rootTask : sessionId === 's-child' ? childTask : workerTask,
         run: sessionId === 'root-1' ? rootRun : sessionId === 's-child' ? childRun : workerRun,
       })),
+      envPathForSession: vi.fn(async (_sessionId: string): Promise<string | undefined> => undefined),
       intakeRootContract: vi.fn(),
       submitDecompositionProposal: vi.fn(),
       continueProposal: vi.fn(),

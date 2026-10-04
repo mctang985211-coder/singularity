@@ -22,8 +22,8 @@ export function defineEvolutionProposeTool(ctx: Context) {
   return defineTool({
     name: 'evolution_propose',
     description:
-      'Record an evidenced shared change as a proposal. Executable targets are Task templates, existing Skills and one whole ' +
-      'capability row with optional new MCP definitions and an optional new execution Skill. Use evolution_candidate, ' +
+      'Record an evidenced shared change as a proposal. Executable targetType names are task_definition (a TaskTemplate), skill ' +
+      '(an existing Skill), and capability (one whole row with optional new MCP definitions and an optional new execution Skill). Use evolution_candidate, ' +
       'evolution_prepare, evolution_replay and evolution_gate before the human decisions through evolution_decide and ' +
       'evolution_apply. Other target types remain suggestions. Existing Task contracts and Run bindings stay fixed.',
     parameters: {
@@ -35,10 +35,10 @@ export function defineEvolutionProposeTool(ctx: Context) {
         description: 'Evolution level (L1 execution adaptation / L2 capability / L3 workflow / L4 harness); every level goes through human review, with no exemption',
       },
       baseVersion: { type: 'string', required: true, description: 'Current target version; a first Task template uses absent with candidate version 1' },
-      targetType: { type: 'string', enum: PROPOSAL_TARGET_TYPES, description: 'The mutation surface the proposal points at (required unless fromDiagnosis)' },
+      targetType: { type: 'string', enum: PROPOSAL_TARGET_TYPES, description: 'Executable: task_definition for a TaskTemplate, skill or capability. Other types remain suggestions. Required unless fromDiagnosis.' },
       targetId: { type: 'string', description: 'Name of the concrete target (required unless fromDiagnosis)' },
       rationale: { type: 'string', description: 'Why this change would address the diagnosed cause (required unless fromDiagnosis)' },
-      sourceRefs: { type: 'array', items: { type: 'string' }, description: 'Sources this proposal rests on (diagnosisId / reviewRef / evidenceId)' },
+      sourceRefs: { type: 'array', items: { type: 'string' }, description: 'Sources this proposal rests on: diagnosis:<diagnosisId>, exact taskId#runId review refs, or evidence ids. Known bare diagnosis ids are stored as diagnosis:<id>.' },
       fromDiagnosis: {
         type: 'object',
         additionalProperties: false,

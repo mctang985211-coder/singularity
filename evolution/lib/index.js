@@ -2771,7 +2771,7 @@ async function assertRecipeConsumption(input) {
 		}
 		consumed = true;
 	}
-	if (!consumed) throw new Error(`evolution: ${where} consumed no frozen decomposition recipe`);
+	return consumed;
 }
 async function assertTaskDefinitionPromotion(sources, proposal) {
 	const { view, report } = await experimentEvidence(sources, proposal);
@@ -2788,6 +2788,12 @@ async function assertTaskDefinitionPromotion(sources, proposal) {
 	let candidateBound = false;
 	for (const comparison of report.samples) {
 		const sample = frozen.samples.find((item) => item.taskId === comparison.taskId);
+		const historicalBranch = new Set(subtreeOf(snapshot, sample.taskId).map((task) => task.taskId));
+		const historicallyConsumed = snapshot.proposals.all.some((item) => item.kind !== "root" && historicalBranch.has(item.identity.parentTaskId) && item.identity.templateRef?.id === definition.candidate.template.id && item.status === "admitted" && item.consumption !== void 0 && item.consumption.kind !== "root");
+		const recipeConsumed = {
+			baseline: false,
+			candidate: false
+		};
 		for (const side of ["baseline", "candidate"]) {
 			const detail = comparison[side];
 			const where = `template sample ${comparison.taskId} ${side}`;
@@ -2822,7 +2828,7 @@ async function assertTaskDefinitionPromotion(sources, proposal) {
 			if (task !== void 0) {
 				const expected = side === "candidate" ? definition.candidate : definition.baseline;
 				if (expected?.template.decomposition !== void 0) {
-					await assertRecipeConsumption({
+					recipeConsumed[side] = await assertRecipeConsumption({
 						sources,
 						snapshot,
 						task,
@@ -2831,7 +2837,7 @@ async function assertTaskDefinitionPromotion(sources, proposal) {
 						workspace: detail.workspace,
 						where
 					});
-					if (side === "candidate") candidateBound = true;
+					if (side === "candidate" && recipeConsumed[side]) candidateBound = true;
 				}
 				for (const descendant of subtreeOf(snapshot, task.taskId).filter((item) => item.taskId !== task.taskId)) {
 					if (expected === null) {
@@ -2840,9 +2846,12 @@ async function assertTaskDefinitionPromotion(sources, proposal) {
 					}
 					if (descendant.templateRef?.id !== expected.template.id) continue;
 					if (descendant.templateRef.digest !== expected.digest || descendant.templateRef.version !== expected.template.version) throw new Error("evolution: new child used another template version");
-					if (side === "candidate") candidateBound = true;
+					if (side === "candidate" && expected.template.decomposition === void 0) candidateBound = true;
 				}
 			}
+		}
+		if (historicallyConsumed || recipeConsumed.baseline || recipeConsumed.candidate) {
+			for (const side of ["baseline", "candidate"]) if ((side === "candidate" ? definition.candidate : definition.baseline)?.template.decomposition !== void 0 && !recipeConsumed[side]) throw new Error(`evolution: template sample ${comparison.taskId} ${side} consumed no frozen decomposition recipe`);
 		}
 		await assertSampleInputsIntact({
 			sample,
@@ -2850,7 +2859,7 @@ async function assertTaskDefinitionPromotion(sources, proposal) {
 			productionWorkspace: frozen.snapshot.sourceDir
 		});
 	}
-	if (!candidateBound) throw new Error("evolution: candidate parent replay created no child bound to the new TaskTemplate");
+	if (!candidateBound) throw new Error(definition.candidate.template.decomposition === void 0 ? "evolution: candidate parent replay created no child bound to the new TaskTemplate" : "evolution: candidate parent replay consumed no frozen decomposition recipe");
 	const repair = validateTaskDefinitionMutation(proposal.mutation).criterionRepair;
 	if (repair === void 0 !== (definition.criterionRepair === void 0)) throw new Error("evolution: criterion repair examples were not frozen");
 	if (repair !== void 0 && definition.criterionRepair !== void 0) for (const label of ["positive", "negative"]) {
@@ -5122,8 +5131,14 @@ var EvolutionService = class extends EvolutionServiceCore {
 			at: (/* @__PURE__ */ new Date()).toISOString()
 		};
 		if (!EVOLUTION_LEVELS.includes(record.level)) throw new Error(`evolution: unknown level "${String(input.level)}"`);
-		if (!Array.isArray(input.sourceRefs) || input.sourceRefs.length === 0) throw new Error("evolution: sourceRefs must name at least one source (diagnosisId / reviewRef / evidenceId)");
+		if (!Array.isArray(input.sourceRefs) || input.sourceRefs.length === 0) throw new Error("evolution: sourceRefs must name at least one source (diagnosis:<id> / reviewRef / evidenceId)");
 		input.sourceRefs.forEach((ref, index) => nonEmpty$1(ref, `sourceRefs[${index}]`));
+		const task = optionalService(this.ctx, "task");
+		if (task !== void 0 && optionalService(this.ctx, "graphs") !== void 0 && input.sourceRefs.some((ref) => !ref.startsWith("diagnosis:"))) {
+			const snapshot = await task.openStore(await this.storeOfSession(actor));
+			const diagnosisIds = new Set((snapshot.diagnoses ?? []).map((item) => item.diagnosisId));
+			record.sourceRefs = [...new Set(input.sourceRefs.map((ref) => diagnosisIds.has(ref) ? `diagnosis:${ref}` : ref))];
+		}
 		await this.append(record);
 		return this.get(record.proposalId);
 	}

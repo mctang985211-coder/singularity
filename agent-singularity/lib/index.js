@@ -1358,6 +1358,7 @@ function supervisorPrompt(input) {
 		...input.proposals?.length ? input.proposals.map((proposal) => `${proposal.proposalId} [${proposal.status}]${proposal.decision === void 0 ? "" : ` ${proposal.decision}`}`) : ["none"],
 		"",
 		"Read task_review_pack, task_status scope:\"graph\", related diagnoses and original evidence through context_read. Start with the whole Task DAG, then inspect the relevant contracts, exact Run reviews, dependency edges and frozen Skill bindings. Do not create a duplicate proposal.",
+		"Read relevant reusable contracts through task_template_list, then its exact templateRef. Executable Evolution targetType names are task_definition (a TaskTemplate; targetId is the template id), skill and capability. Other target types remain suggestions.",
 		"When a causal question needs deeper independent investigation, call task_review_agent for the relevant exact taskId/runId with a concrete reason and a stable requestKey. Its read-only diagnosis returns to you; it does not open another supervisor. Reuse recorded diagnoses before asking again. Reconcile supporting and conflicting evidence, then make one evidence-based decision; a discussion or vote is not an experiment.",
 		`For an established shared gap, cite diagnosis:${diagnosis.diagnosisId} in evolution_propose.sourceRefs. Use only supported candidate targets and only tools actually granted: evolution_candidate → evolution_prepare → evolution_replay → evolution_gate. Missing artifacts alone do not establish a shared gap.`,
 		...input.sourceOutcome === "verified" ? [`For this successful source, evolution_replay must declare objective: "tool-call-reduction", include task ${diagnosis.taskId} in taskIds, and name independent verified holdoutTaskIds. The experiment requires unchanged acceptance and lower complete Run subtree tool-call counts; unknown counters prove no improvement.`] : [],
@@ -2022,6 +2023,7 @@ const REVIEWER_BASELINE = [
 	"task_status",
 	"context_read",
 	"capability_list",
+	"task_template_list",
 	"read",
 	"glob",
 	"grep",
@@ -2042,7 +2044,7 @@ function sourceRef(source) {
 		runId: source.runId
 	});
 }
-/** The parsed reply object out of the reviewer's answer: the last fenced block wins, then the last balanced object. A reply with neither parses as nothing. */
+/** The last fenced JSON object is the reviewer's answer. */
 function parseReviewerObject(reply) {
 	if (reply === void 0) return void 0;
 	const fenced = [...reply.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((match) => match[1]);
@@ -2219,23 +2221,28 @@ async function runReviewAgentAttempt(input) {
 				});
 				return [
 					"You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.",
-					"Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and context_read reach the sibling tasks, their sessions and their evidence. Cite what you rest on.",
+					"Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and context_read reach the sibling tasks, their sessions and their evidence; task_template_list reads the delegated task's template catalog and exact templateRef contracts. Cite what you rest on.",
 					"Do not score, and do not modify anything.",
 					"Start with this exact source, then inspect the business DAG and read original evidence only where it tests a cause. Explain how upstream contracts, dependencies, shared providers or decomposition could produce the observed result. Similar errors alone do not establish a shared cause.",
 					...review.outcome === "verified" ? ["The run passed its review; look for improvement opportunities in avoidable tool calls, repeated reads, retries and decomposition costs. An improvement needs unchanged acceptance and a two-sided replay with complete Run subtree tool-call counts and independent verified holdouts; observed overhead alone proves no gain."] : [],
 					"Return EXACTLY one fenced json block, no prose around it:",
 					"```json",
-					"{\"observation\":\"...\",\"conclusion\":\"...\",\"confidence\":\"high|medium|low\"}",
+					JSON.stringify({
+						observation: "...",
+						conclusion: "...",
+						confidence: "low",
+						reviewRefs: [sourceRef(source)]
+					}),
 					"```",
 					"- observation (required): the postmortem observation (复盘观察) — what was actually observed in the source, whether it failed or succeeded.",
 					"- Keep observation and conclusion concise; cite the failure command, log or session ref rather than restating the whole pack.",
 					"- conclusion (required): explain the cause and cite the original failure evidence. For a failed source, name one concrete next action for its business coordinator, such as a smaller independently verifiable child result after the batch settles. Check its task/run state first: task_decompose needs an active run; a terminal run needs a named stop and escalation, not another retry. If the evidence does not settle the cause, say what fact is missing and stop there.",
 					"- confidence (required): high, medium or low.",
 					"- A successful source may conclude \"no improvement needed\"; do not invent a failure or a next action.",
-					"- scope, reviewRefs, evidenceRefs, relatedTaskIds (optional): use the existing diagnosis lineage to name the causal scope, exact task#run review refs, evidence bundle ids and implicated task ids. Include only records you read that support the explanation; existence in the store does not make a record relevant. The triggering review remains the source. Do not copy every DAG neighbour into the diagnosis.",
+					"- scope, reviewRefs, evidenceRefs, relatedTaskIds (optional): name the causal scope and include only records you read that support the explanation. reviewRefs must be exact taskId#runId (or taskId#no-run) refs from task_review_pack or context_read kind:\"review\". Top-level evidenceRefs must be evidence bundle ids read through context_read kind:\"evidence\"; use reviewRefs for a review and cite commands, log paths, criterion ids or template ids in prose, not in these arrays. relatedTaskIds must be actual task ids in this graph. The triggering review is retained automatically. Omit optional arrays when no additional lineage is needed; do not copy every DAG neighbour.",
 					"- For a shared cause, cite the original evidence from each implicated task and the common contract, provider version or dependency that connects them; inspect a passing contrast when available. If the cause or benefit is unresolved, state unknown and the missing fact, use low confidence, and make no unsupported proposal.",
-					`- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}], only when useful and supported. Dimensions: ${JUDGED_DIMENSIONS.join(", ")}; verdict: adequate|inadequate|unknown. Do not fill every dimension.`,
-					"- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. Suggest a Task template, skill or capability change only when the evidence establishes that gap; most failures need no evolution proposal. Nothing here executes a proposal.",
+					`- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}], only when useful and supported. Dimensions: ${JUDGED_DIMENSIONS.join(", ")}; verdict: adequate|inadequate|unknown. Each evidenceRefs array must cite at least one exact review ref, evidence ref printed by a review, evidence bundle id, or Run/review session id from this graph. Do not use commands, log paths, criterion ids, task ids or template ids as judgement refs. Do not fill every dimension.`,
+					"- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. For an established reusable gap, executable targetType names are task_definition (a TaskTemplate; targetId is its template id), skill or capability. Other targetType names remain recorded suggestions. Most failures need no evolution proposal. Nothing here executes a proposal.",
 					"- Never tell the business coordinator to call task_recover: only a separately delegated supervisor has it. Recommend evolution tools only to a coordinator whose current tools authorize them, for an established Task template/skill/capability gap; they are not general task recovery.",
 					"A reply without an observation, a conclusion or a confidence is not a diagnosis: the attempt is recorded interrupted and nothing is stored.",
 					"",
@@ -3178,7 +3185,7 @@ function defineEvolutionApplyTool(ctx) {
 function defineEvolutionCandidateTool(ctx) {
 	return defineTool({
 		name: "evolution_candidate",
-		description: "Record one candidate as mutationJson (a JSON string). Task: {template:<complete canonical TaskTemplate>,criterionRepair?:{positive:{taskId,sourceDir,parameters},negative:{taskId,sourceDir,parameters}}}; changed child criteria need both fixed examples under the original independent parent oracle. Skill: {name,content:<whole SKILL.md>}. Capability: {rows:{<name>:<whole row>},mcpServers?:{<id>:{serverName,description,command,args?,env?,cwd?,toolCallTimeoutMs?}},skill?:{name,content,sidecar:{precondition,inputs,outputs,requiredTools,verifier:{ref}}}}. A row may grant skills, native tool labels or MCP ids and need not contain a Skill. New definitions must be granted by that row; use their serverName in mcp__<serverName>__<tool> names. Native tools must already be authorized; existing permission and preset stay fixed. New Skill sidecar contractVersion, type, capabilities, content hashes and resources are derived by this tool. No production changes. Next: evolution_prepare, evolution_replay, evolution_gate.",
+		description: "Record one candidate as mutationJson (a JSON string). task_definition: {template:<complete canonical TaskTemplate>,criterionRepair?:{positive:{taskId,sourceDir,parameters},negative:{taskId,sourceDir,parameters}}}; changed child criteria need both fixed examples under the original independent parent oracle. Skill: {name,content:<whole SKILL.md>}. Capability: {rows:{<name>:<whole row>},mcpServers?:{<id>:{serverName,description,command,args?,env?,cwd?,toolCallTimeoutMs?}},skill?:{name,content,sidecar:{precondition,inputs,outputs,requiredTools,verifier:{ref}}}}. A row may grant skills, native tool labels or MCP ids and need not contain a Skill. New definitions must be granted by that row; use their serverName in mcp__<serverName>__<tool> names. Native tools must already be authorized; existing permission and preset stay fixed. New Skill sidecar contractVersion, type, capabilities, content hashes and resources are derived by this tool. No production changes. Next: evolution_prepare, evolution_replay, evolution_gate.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -3577,7 +3584,7 @@ function isProposalTargetType(value) {
 function defineEvolutionProposeTool(ctx) {
 	return defineTool({
 		name: "evolution_propose",
-		description: "Record an evidenced shared change as a proposal. Executable targets are Task templates, existing Skills and one whole capability row with optional new MCP definitions and an optional new execution Skill. Use evolution_candidate, evolution_prepare, evolution_replay and evolution_gate before the human decisions through evolution_decide and evolution_apply. Other target types remain suggestions. Existing Task contracts and Run bindings stay fixed.",
+		description: "Record an evidenced shared change as a proposal. Executable targetType names are task_definition (a TaskTemplate), skill (an existing Skill), and capability (one whole row with optional new MCP definitions and an optional new execution Skill). Use evolution_candidate, evolution_prepare, evolution_replay and evolution_gate before the human decisions through evolution_decide and evolution_apply. Other target types remain suggestions. Existing Task contracts and Run bindings stay fixed.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -3603,7 +3610,7 @@ function defineEvolutionProposeTool(ctx) {
 			targetType: {
 				type: "string",
 				enum: PROPOSAL_TARGET_TYPES,
-				description: "The mutation surface the proposal points at (required unless fromDiagnosis)"
+				description: "Executable: task_definition for a TaskTemplate, skill or capability. Other types remain suggestions. Required unless fromDiagnosis."
 			},
 			targetId: {
 				type: "string",
@@ -3616,7 +3623,7 @@ function defineEvolutionProposeTool(ctx) {
 			sourceRefs: {
 				type: "array",
 				items: { type: "string" },
-				description: "Sources this proposal rests on (diagnosisId / reviewRef / evidenceId)"
+				description: "Sources this proposal rests on: diagnosis:<diagnosisId>, exact taskId#runId review refs, or evidence ids. Known bare diagnosis ids are stored as diagnosis:<id>."
 			},
 			fromDiagnosis: {
 				type: "object",
@@ -4243,7 +4250,7 @@ const templateBindingParameters = {
 function defineTaskTemplateListTool(ctx) {
 	return defineTool({
 		name: "task_template_list",
-		description: "Browse the caller-visible Task catalog and finite summary pages. Select catalogPath from the user goal before root intake; child queries stay within inherited branches plus general. Read an exact templateRef for the complete contract, parameter schema and optional direct-child decomposition. Choose a fitting reference and parameters or write a complete standard contract.",
+		description: "Browse the caller-visible Task catalog and finite summary pages. Select catalogPath from the user goal before root intake; worker queries stay within their task branches plus general. Delegated reviewers and supervisors use their associated task scope without needing a business Run. Read an exact templateRef for the complete contract, parameter schema and optional direct-child decomposition. Choose a fitting reference and parameters or write a complete standard contract.",
 		parameters: {
 			query: {
 				type: "string",
@@ -4252,7 +4259,7 @@ function defineTaskTemplateListTool(ctx) {
 			catalogPath: {
 				type: "array",
 				items: { type: "string" },
-				description: "Catalog branch to browse; cannot widen an admitted task scope."
+				description: "Catalog branch to browse; cannot widen the caller-visible scope."
 			},
 			templateRef: templateBindingParameters.templateRef,
 			offset: {
@@ -5320,13 +5327,7 @@ function defineTaskVerifyTool(ctx) {
 			if (verifier === void 0 || typeof verifier.verifyRun !== "function") throw new Error("task_verify: verifier service is not loaded");
 			const { storeId, task, run } = await ctx.taskRuntime.runForSession(caller);
 			if (run.status !== "running") return `task_verify: run ${run.runId} of task ${task.taskId} is ${run.status}; evidence can only be recorded while the run is running`;
-			let cwd;
-			try {
-				const graph = await ctx.graphs.graphForSession(caller);
-				cwd = ctx.get("envBuilder")?.store.get(graph.envId).path;
-			} catch {
-				cwd = void 0;
-			}
+			const cwd = await ctx.taskRuntime.envPathForSession(caller);
 			const timeoutMs = ctx.taskRuntime.verifyTimeoutMs;
 			if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error(`task_verify: task runtime exposes no positive verifyTimeoutMs (got ${String(timeoutMs)}); refusing to run the verifier without a deadline`);
 			const bundle = await verifier.verifyRun(storeId, run.runId, {

@@ -30,10 +30,10 @@ export const templateBindingParameters = {
 export function defineTaskTemplateListTool(ctx: Context) {
   return defineTool({
     name: 'task_template_list',
-    description: 'Browse the caller-visible Task catalog and finite summary pages. Select catalogPath from the user goal before root intake; child queries stay within inherited branches plus general. Read an exact templateRef for the complete contract, parameter schema and optional direct-child decomposition. Choose a fitting reference and parameters or write a complete standard contract.',
+    description: 'Browse the caller-visible Task catalog and finite summary pages. Select catalogPath from the user goal before root intake; worker queries stay within their task branches plus general. Delegated reviewers and supervisors use their associated task scope without needing a business Run. Read an exact templateRef for the complete contract, parameter schema and optional direct-child decomposition. Choose a fitting reference and parameters or write a complete standard contract.',
     parameters: {
       query: { type: 'string', description: 'Optional discovery keywords within the visible scope; appliesTo decides applicability.' },
-      catalogPath: { type: 'array', items: { type: 'string' }, description: 'Catalog branch to browse; cannot widen an admitted task scope.' },
+      catalogPath: { type: 'array', items: { type: 'string' }, description: 'Catalog branch to browse; cannot widen the caller-visible scope.' },
       templateRef: templateBindingParameters.templateRef,
       offset: { type: 'integer', description: 'Page offset; use nextOffset from the previous response.' },
       limit: { type: 'integer', description: 'Page size from 1 to 20; default 10.' },

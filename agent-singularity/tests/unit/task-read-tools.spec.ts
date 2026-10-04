@@ -521,16 +521,18 @@ describe('task_verify', () => {
     generatedAt: '2026-09-16T00:02:00.000Z',
   }
 
-  it('re-runs the verifier with the graph env cwd and records no status', async () => {
+  it('re-runs the verifier in the runtime-resolved workspace and records no status', async () => {
     const { ctx, services } = await fixture()
     const verifyRun = vi.fn(async () => bundle)
     services['verifier'] = { verifyRun }
     services['envBuilder'] = { store: { get: (envId: string) => ({ path: `/envs/${envId}` }) } }
+    ctx.taskRuntime.envPathForSession.mockResolvedValue('/replays/candidate')
     const tool = defineTaskVerifyTool(ctx as never)
     const result = (await tool.execute({}, exec('s-worker'))) as string
     expect(ctx.taskRuntime.runForSession).toHaveBeenCalledExactlyOnceWith('s-worker')
+    expect(ctx.taskRuntime.envPathForSession).toHaveBeenCalledExactlyOnceWith('s-worker')
     expect(verifyRun).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', 'r-worker', {
-      cwd: '/envs/project1',
+      cwd: '/replays/candidate',
       timeoutMs: 1234,
     })
     expect(ctx.task.markRunStatusIn).not.toHaveBeenCalled()

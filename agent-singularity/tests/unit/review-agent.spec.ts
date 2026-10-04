@@ -665,6 +665,10 @@ describe('task_review_agent', () => {
     expect(prompt).not.toContain('nothing else')
     expect(prompt).not.toContain('from the review pack')
     expect(prompt).toContain('context_read')
+    expect(prompt).toContain('task_template_list')
+    expect(prompt).toContain('"confidence":"low","reviewRefs":["t1#r1"]')
+    expect(prompt).toContain('Top-level evidenceRefs must be evidence bundle ids')
+    expect(prompt).toContain('task_definition (a TaskTemplate; targetId is its template id)')
     // The forced six-dimension judgement is gone: judgements are optional and
     // only the ones the reviewer can settle belong in the reply.
     expect(prompt).not.toContain('Include all six dimensions')
@@ -758,8 +762,12 @@ describe('task_review_agent', () => {
     ['reviewRefs', ['t1#another-run']],
     ['reviewRefs', ['other-task#other-run']],
     ['evidenceRefs', ['other-store-evidence']],
+    ['evidenceRefs', ['t1#r1']],
+    ['evidenceRefs', ['s-worker']],
+    ['evidenceRefs', ['verifier.log']],
     ['relatedTaskIds', ['other-store-task']],
     ['judgements', [{ dimension: 'tool_fit', verdict: 'unknown', evidenceRefs: ['other-store-session'], rationale: 'cannot locate the original trace' }]],
+    ['judgements', [{ dimension: 'task_specification', verdict: 'inadequate', evidenceRefs: ['task-template@1'], rationale: 'a template id does not identify original evidence' }]],
   ])('a nonexistent %s reference interrupts the attempt and records no diagnosis', async (field, value) => {
     const reply = '```json\n' + JSON.stringify({
       observation: 'the evidence is incomplete', conclusion: 'unknown; the original trace is missing',

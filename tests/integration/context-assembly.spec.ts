@@ -469,6 +469,7 @@ describe('a reviewer with no business run (A2-2)', () => {
     const reviewerAgent = stack.agent(String(reviewer.sessionId))!
     const names = stack.ctx.tools.schemas(reviewerAgent).map(schema => schema.name)
     expect(names).toContain('context_read')
+    expect(names).toContain('task_template_list')
     for (const sealed of ['session_event_read', 'session_event_trace', 'session_trace', 'session_search']) {
       expect(names).not.toContain(sealed)
     }

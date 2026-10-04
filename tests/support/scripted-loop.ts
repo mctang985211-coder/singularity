@@ -1028,14 +1028,17 @@ class ScriptedLoopImpl implements ScriptedLoop {
     for (const tool of this.options.tools ?? []) ctx.tools.register(tool)
     if (this.options.tools !== undefined) ctx.tools.register(defineTaskVerifyTool(ctx))
 
-    this.agentRuntime = new RecordingAgentRuntime(ctx, request => this.spawnRecords.push({
-      sessionId: String(request.sessionId),
-      name: request.name,
-      ...(request.prompt === undefined
-        ? {}
-        : { prompt: request.prompt.map(block => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n') }),
-      ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
-    }))
+    this.agentRuntime = new RecordingAgentRuntime(ctx, (request, parent) => {
+      this.sessionRoot.set(request.sessionId, this.sessionRoot.get(parent.id) ?? this.primary)
+      this.spawnRecords.push({
+        sessionId: String(request.sessionId),
+        name: request.name,
+        ...(request.prompt === undefined
+          ? {}
+          : { prompt: request.prompt.map(block => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n') }),
+        ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
+      })
+    })
     await ctx.plugin(AgentLoop, { agents: [] })
     // The verifier and the runtime are mounted the way the deployment's loader
     // mounts them, not constructed beside it: `[Service.init]` is what registers
@@ -1286,13 +1289,13 @@ class ScriptedLoopImpl implements ScriptedLoop {
 class RecordingAgentRuntime extends AgentRuntime {
   constructor(
     ctx: Context,
-    private readonly onSpawn: (request: SpawnRequest) => void,
+    private readonly onSpawn: (request: SpawnRequest, parent: Agent) => void,
   ) {
     super(ctx)
   }
 
   override async spawn(parent: Agent, request: SpawnRequest) {
-    this.onSpawn(request)
+    this.onSpawn(request, parent)
     return await super.spawn(parent, request)
   }
 }

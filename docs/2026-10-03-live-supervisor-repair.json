@@ -1,0 +1,187 @@
+{
+  "date": "2026-10-04",
+  "test": "tests/integration/live-supervisor-repair.spec.ts",
+  "command": "NODE_USE_ENV_PROXY=1 SINGULARITY_LIVE_SUPERVISOR_REPAIR=1 pnpm exec vitest run --project integration packages/singularity/tests/integration/live-supervisor-repair.spec.ts",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "result": "failed",
+  "error": "expected false to be true // Object.is equality",
+  "method": "A hybrid run that threw before its terminal assertions; this document is the live state at failure.",
+  "assertions": {
+    "reportLeafFailedOnRealChecker": true,
+    "pipelineCoordinatorFailedOnRealChecker": true,
+    "diagnosisCarriesAProposal": true,
+    "supervisorSessionStarted": true,
+    "supervisorRanTheNineToolChain": false,
+    "run2Verified": false,
+    "noUnrelatedTemplatesInAnyRequest": true
+  },
+  "cases": [
+    {
+      "name": "log-pipeline-shared-template-repair",
+      "reviewPath": "hybrid",
+      "tree": {
+        "tasks": [
+          {
+            "taskId": "t-9385cb82-ba37-45df-b7de-e82247c5ebfd",
+            "depth": 0,
+            "status": "failed"
+          },
+          {
+            "taskId": "t-61966a4f-468e-4745-a315-b6e049c96619",
+            "parentTaskId": "t-9385cb82-ba37-45df-b7de-e82247c5ebfd",
+            "depth": 1,
+            "templateRef": {
+              "id": "log-analytics-pipeline",
+              "version": 1,
+              "digest": "f5af010854f8faf4c3c88bf90097e75798d8ace2c8d6d450191dd51648405e8f"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-3bae3158-41fd-45bb-b7cf-717984dfb234",
+            "parentTaskId": "t-61966a4f-468e-4745-a315-b6e049c96619",
+            "depth": 2,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-aa599b4d-81cf-4833-9989-c497e6810a09",
+            "parentTaskId": "t-61966a4f-468e-4745-a315-b6e049c96619",
+            "depth": 2,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-3d20494a-901f-4ca3-9e61-d1e3d4dea818",
+            "parentTaskId": "t-61966a4f-468e-4745-a315-b6e049c96619",
+            "depth": 2,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-d53abfa2-1383-4805-8f87-ce98280c9110",
+            "depth": 0,
+            "status": "failed"
+          },
+          {
+            "taskId": "t-e460c3f9-c3e5-4965-bed8-31421169609d",
+            "parentTaskId": "t-d53abfa2-1383-4805-8f87-ce98280c9110",
+            "depth": 1,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-5b415fdc-8010-4874-a288-b4843e07fcb2",
+            "parentTaskId": "t-d53abfa2-1383-4805-8f87-ce98280c9110",
+            "depth": 1,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-2a97b4fc-c6a1-4f52-bd76-cad245fc6eea",
+            "parentTaskId": "t-d53abfa2-1383-4805-8f87-ce98280c9110",
+            "depth": 1,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-741575ad-9ca9-4237-8818-20573259d0d2",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-ebb36715-fa2c-46de-ab55-9170fb13fd4d",
+            "parentTaskId": "t-741575ad-9ca9-4237-8818-20573259d0d2",
+            "depth": 1,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-26bcf45c-308a-49e4-954d-400e186e5ccb",
+            "parentTaskId": "t-741575ad-9ca9-4237-8818-20573259d0d2",
+            "depth": 1,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-63be0ab2-a704-4bea-b8ea-219feb9f0001",
+            "parentTaskId": "t-741575ad-9ca9-4237-8818-20573259d0d2",
+            "depth": 1,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-0f846210-78e1-43e3-b323-79cea892b5da",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-e4d3c7c0-9422-494b-977a-47517dd728e7",
+            "depth": 0,
+            "status": "verified"
+          }
+        ],
+        "diagnoses": [
+          {
+            "diagnosisId": "review-agent-7b4a16a5-df1f-4cdc-a171-27e9c82aa421",
+            "proposals": [
+              [
+                "task_definition",
+                "log-analytics-pipeline"
+              ]
+            ]
+          }
+        ]
+      },
+      "requestCounts": {
+        "run1": 36,
+        "supervisor": 7,
+        "experiment": 131,
+        "run2": 0
+      },
+      "requestTotal": 174,
+      "nudgeCount": 7,
+      "nudgeSessions": {
+        "cabd42b0-2dce-41ce-befe-46785fe4a35e": 7
+      },
+      "wallSeconds": 2786.153
+    }
+  ],
+  "limits": "The run threw before its terminal assertions; the document records the live store state and the assertions that could be resolved from it."
+}

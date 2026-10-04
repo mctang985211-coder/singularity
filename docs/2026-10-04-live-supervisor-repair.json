@@ -1,0 +1,376 @@
+{
+  "date": "2026-10-04",
+  "test": "tests/integration/live-supervisor-repair.spec.ts",
+  "command": "NODE_USE_ENV_PROXY=1 SINGULARITY_LIVE_SUPERVISOR_REPAIR=1 SINGULARITY_LIVE_REVIEWER_MODE=all-real pnpm exec vitest run --project integration packages/singularity/tests/integration/live-supervisor-repair.spec.ts",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "result": "passed",
+  "method": "A all-real run over the log-pipeline world: the mis-ordered log-analytics-pipeline v1 recipe ([parse, report, aggregate] with no dependsOn) runs the report stage before the aggregation stage produced out/stats.json, and the honest report leaf refuses to fabricate the input, failing the real checker; the coordinator then fails too because a mandatory child is unmet. The review scan spawns the reviewer, whose recorded diagnosis carries a task_definition proposal and is consumed into a supervisor hand-off; the supervisor is the real model and calls the real evolution chain (propose, candidate, prepare, replay, gate, decide, apply) with argument guidance only from the diagnosis text; the two-sided experiment replays a failed coordinator sample and a verified holdout through the real runtime under per-side frozen template libraries, with the real checker as the original acceptance; the human gates are answered through the deployment approval seam; the publish appends log-analytics-pipeline@2.json and leaves @1 mis-ordered; and a second root run on CASE_2 verifies with the pipeline child bound to version 2. The repair is pure template CONTENT (recipe order and/or dependsOn; the criteria are byte-identical), so evolution_prepare never takes the criterion-repair branch. In all-real mode the Reviewer also uses the real model; in hybrid mode only its request is scripted. autoReview is pinned to \"failed\" for the failed-source path. The fixture mounts the production Reviewer delegation source and the Supervisor reads templates through task_template_list, with no separate template reader. The assemble filter keeps the evolution chain and task_review_agent only on the supervisor session. An idle session is nudged per session id — its own active run or the supervisor session, no pending call, no in-flight request, and globally stagnant progress for 180 seconds, capped at 12 nudges per session — with a neutral continuation that does not tutor the chain; a session with a pending tool call is never prompted. Two more fixture checks: the bash body detects unquoted paths outside the checkout and `..`/`~`/`$HOME` traversals (heredoc bodies and quoted spans are removed first, and only path-like absolute tokens count), and the honest report leaf checks first that out/stats.json is newer than out/events.json and makes the gap path a single task_submit_result so a replay worker reports the missing or stale input instead of exploring.",
+  "assertions": {
+    "reportLeafFailedOnRealChecker": true,
+    "pipelineCoordinatorFailedOnRealChecker": true,
+    "diagnosisProposesPipelineTemplate": true,
+    "supervisorSessionStarted": true,
+    "supervisorReadProductionTemplate": true,
+    "supervisorRanEvolutionChain": true,
+    "proposalApplied": true,
+    "exactlyOneProposalApplied": true,
+    "ledgerWalkedProposedToApplied": true,
+    "experimentVerdictFixed": true,
+    "experimentBaselineFailedCandidateVerified": true,
+    "libraryGainedV2AndKeptV1": true,
+    "failedRunBindingFrozen": true,
+    "root1Terminal": true,
+    "templateBoundTasksAtLeastThree": true,
+    "everyRunBindsASkill": true,
+    "noUnrelatedTemplatesInAnyRequest": true,
+    "run2Verified": true,
+    "run2PipelineBindsVersion2": true,
+    "run2ConsumesVersion2Recipe": true,
+    "run2StatsRecomputed": true
+  },
+  "cases": [
+    {
+      "name": "log-pipeline-shared-template-repair",
+      "reviewPath": "all-real",
+      "failure": {
+        "report": {
+          "taskId": "t-e5a67c84-8997-4d7e-8e37-891af9db1f1b",
+          "templateId": "render-stats-report",
+          "verdict": "fail",
+          "exitCode": 1,
+          "logRef": "sg-t-s-root/r-37556a06-79b3-470a-b90f-5145ffa70e21/report-result.log",
+          "logExcerpt": "    at file:///tmp/singularity-scripted-loop-qvPOUm/env/checks/verify.mjs:69:30\n    at ModuleJob.run (node:internal/modules/esm/module_job:343:25)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:681:26)\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)\n\nNode.js v22.23.3\n"
+        },
+        "coordinator": {
+          "taskId": "t-29679a3f-f48f-4fe9-b2c3-658053172177",
+          "templateId": "log-analytics-pipeline",
+          "templateVersion": 1,
+          "verdict": "fail",
+          "exitCode": 1,
+          "logRef": "sg-t-s-root/r-50239530-6ac6-4408-ab55-f33f4ad441c6/pipeline-result.log"
+        }
+      },
+      "diagnosis": {
+        "diagnosisId": "review-agent-f82bef37-7edc-41f4-ad00-4d25d0254fac",
+        "observedFailure": "The reviewed source is the pipeline-owner task t-29679a3f-f48f-4fe9-b2c3-658053172177 and its only run r-50239530-6ac6-4408-ab55-f33f4ad441c6 [failed, phase submitted]. Its contract was followed literally: it called task_decompose with the template's exact templateRef (id log-analytics-pipeline, v1, digest f5af010854f8f) and nothing else (s-9f505db6 seq 19-21), producing three template-bound children in recipe order — parse t-46ad37aa (verified), report t-e5a67c84 (failed), aggregate t-50b35751 (verified). Its own mandatory criterion failed: `node checks/verify.mjs pipeline` exit 1, log sg-t-s-root/r-50239530-6ac6-4408-ab55-f33f4ad441c6/pipeline-result.log ending in 'missing deliverable report.mjs in the checkout root' at checkReport (evidence-r-50239530-...-eee0e9d1..., evidence-r-50239530-...-80660d31...). The run then submitted an honest gap report naming the failed stage instead of re-dispatching or repairing (s-9f505db6 seq 67-74); no protected input was touched. The failed child t-e5a67c84 did exactly what its contract requires: at 06:58:54 its mandated freshness check `test -f out/stats.json && test out/stats.json -nt out/events.json` returned exit=1 because out/stats.json did not yet exist (s-ca2a9dcd seq 10-17; only out/events.json present), so it authored no report.mjs, made no substitution, and submitted a gap report; its run then failed report-result by command (review t-e5a67c84#r-37556a06-79b3-470a-b90f-5145ffa70e21).",
+        "localizedCause": "Cause, not consequence: the reusable pipeline recipe log-analytics-pipeline@1 (digest f5af010854f8f) lists its decomposition children in the order [parse-log-events, render-stats-report, aggregate-event-stats] and declares no dependency edges — the template's own objective even restates that order ('binds the parse, report and aggregate children in recipe order', t-29679a3f contract) — while its report stage's contract (render-stats-report@1, digest a21192fdcee5) consumes the aggregate stage's out/stats.json and mandates stopping if that input is missing or not newer than out/events.json. The batch therefore admitted the consumer before its producer: report started 06:58:51.743 and its guard fired at 06:58:54, whereas aggregate started 06:59:00.177 and wrote out/stats.json at 06:59:16.885 (verified child t-50b35751, s-4b6b0ca4 seq 10-34; timestamps confirmed in s-9f505db6 seq 57). The contrast is decisive: the two stages with no upstream freshness guard verified, and `node checks/verify.mjs aggregate`/`parse` exit 0, so events.json and stats.json content is correct and the pipeline would have passed had report been ordered after aggregate; no checker, provider or capability defect is in evidence. The coordinator is not the cause: it bound children only via templateRef, respected the failure rule, and did not author or repair a stage contract, exactly as its constraints demanded. Its failed run is terminal (phase submitted), so no retry of t-29679a3f, no re-dispatch of the failed report stage and no inline recipe patching from the pipeline owner is admissible. Concrete next action for the business coordinator (root t-a2a7008e, run r-0afe6129-caf9-4420-9663-e174bd64ca9a, still running): hand in its own honest failed result and raise the recipe defect to the template owner — reorder log-analytics-pipeline@1's children to parse → aggregate → report (or declare the report→aggregate dependency if the recipe schema supports one), then let one fresh template-bound pipeline child run end-to-end under the unchanged acceptance `node checks/verify.mjs pipeline`. Testable holdouts for that repair: the reordered pipeline must produce report.mjs and out/report.md and pass checkPipeline, and the report stage's freshness guard must still refuse when out/stats.json is genuinely absent or older than out/events.json. Secondary, independent friction observed upstream (not this failure's cause): the root contract t-a2a7008e instructs `task_decompose` with a templateRef of id+version 'and nothing else', but the tool rejected exactly that payload for a missing templateRef.digest (INVALID_ARGS, s-root seq 20), costing one failed call before the root added the digest — the root contract's prescribed payload should carry the digest.",
+        "scope": "task t-29679a3f-f48f-4fe9-b2c3-658053172177",
+        "reviewerProposal": {
+          "targetType": "task_definition",
+          "targetId": "log-analytics-pipeline",
+          "rationale": "Recipe defect evidenced across two tasks: log-analytics-pipeline@1 (digest f5af010854f8f) lists children [parse-log-events, render-stats-report, aggregate-event-stats] with no dependency edges, while render-stats-report@1 (digest a21192fdcee5) requires the aggregate stage's out/stats.json, so every pipeline instance admits the report consumer before its producer and fails report-result with 'missing deliverable report.mjs' (evidence-r-37556a06-...-67228e79..., evidence-r-50239530-...-eee0e9d1...). Fix: reorder the template's children to parse → aggregate → report, or declare the report→aggregate dependency if the recipe schema supports one, keeping the freshness guard intact."
+        },
+        "proposals": [
+          [
+            "task_definition",
+            "log-analytics-pipeline"
+          ]
+        ]
+      },
+      "appliedProposalId": "p-log-analytics-recipe-order-1",
+      "firstProposalId": "p-log-analytics-recipe-order-1",
+      "proposals": [
+        {
+          "proposalId": "p-log-analytics-recipe-order-1",
+          "status": "applied",
+          "targetType": "task_definition",
+          "targetId": "log-analytics-pipeline"
+        }
+      ],
+      "ledgerKinds": [
+        "proposed",
+        "candidate",
+        "prepared",
+        "experiment_started",
+        "experiment_sample",
+        "experiment_sample",
+        "experiment_sample",
+        "experiment_sample",
+        "experiment_sample",
+        "experiment_sample",
+        "gated",
+        "decided",
+        "commit_intent",
+        "applied"
+      ],
+      "experiment": {
+        "verdict": "fixed",
+        "samples": [
+          {
+            "taskId": "t-29679a3f-f48f-4fe9-b2c3-658053172177",
+            "role": "observed-failure",
+            "baseline": "failed",
+            "candidate": "verified"
+          },
+          {
+            "taskId": "t-46ad37aa-a0ac-4cd8-a3f3-61254f4060da",
+            "role": "holdout",
+            "baseline": "verified",
+            "candidate": "verified"
+          },
+          {
+            "taskId": "t-50b35751-f806-4ab3-9d0b-37dd54aafd96",
+            "role": "holdout",
+            "baseline": "verified",
+            "candidate": "verified"
+          }
+        ]
+      },
+      "library": [
+        "log-analytics-pipeline@1.json",
+        "log-analytics-pipeline@2.json"
+      ],
+      "publishedRecipe": {
+        "reason": "The three stages produce independently checkable artifacts; the recipe order follows their data dependency (parse -> aggregate -> report), so the report stage starts only after the aggregate stage has written out/stats.json, which its mandatory freshness guard requires.",
+        "children": [
+          {
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            }
+          },
+          {
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            }
+          },
+          {
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            }
+          }
+        ]
+      },
+      "run2": {
+        "storeId": "sg-t-s-root2",
+        "taskId": "t-3d4e343e-af1a-416d-bcd0-daae212c1fbf",
+        "pipelineTaskId": "t-aedceb80-0e57-403b-bbe3-6b8315a3bf4a",
+        "pipelineVersion": 2,
+        "recipeEdges": [],
+        "stats": {
+          "total": 8,
+          "perLevel": {
+            "INFO": 4,
+            "WARN": 2,
+            "ERROR": 2
+          },
+          "errorRate": 0.25
+        }
+      },
+      "requestCounts": {
+        "run1": 38,
+        "supervisor": 25,
+        "experiment": 90,
+        "run2": 49
+      },
+      "requestTotal": 202,
+      "nudgeCount": 0,
+      "nudgeSessions": {},
+      "wallSeconds": 774.138,
+      "tree": {
+        "tasks": [
+          {
+            "taskId": "t-a2a7008e-5f58-475b-874e-7316d27864c7",
+            "depth": 0,
+            "status": "failed"
+          },
+          {
+            "taskId": "t-29679a3f-f48f-4fe9-b2c3-658053172177",
+            "parentTaskId": "t-a2a7008e-5f58-475b-874e-7316d27864c7",
+            "depth": 1,
+            "templateRef": {
+              "id": "log-analytics-pipeline",
+              "version": 1,
+              "digest": "f5af010854f8faf4c3c88bf90097e75798d8ace2c8d6d450191dd51648405e8f"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-46ad37aa-a0ac-4cd8-a3f3-61254f4060da",
+            "parentTaskId": "t-29679a3f-f48f-4fe9-b2c3-658053172177",
+            "depth": 2,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-e5a67c84-8997-4d7e-8e37-891af9db1f1b",
+            "parentTaskId": "t-29679a3f-f48f-4fe9-b2c3-658053172177",
+            "depth": 2,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-50b35751-f806-4ab3-9d0b-37dd54aafd96",
+            "parentTaskId": "t-29679a3f-f48f-4fe9-b2c3-658053172177",
+            "depth": 2,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-b0db8329-2839-435a-b239-7567c0cbdae0",
+            "depth": 0,
+            "status": "failed"
+          },
+          {
+            "taskId": "t-b4d6465c-a9e4-4cec-a0a8-e2c82b35b061",
+            "parentTaskId": "t-b0db8329-2839-435a-b239-7567c0cbdae0",
+            "depth": 1,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-3f5e32e4-794b-4d3c-a747-30a76fb30883",
+            "parentTaskId": "t-b0db8329-2839-435a-b239-7567c0cbdae0",
+            "depth": 1,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-13bb23dc-b858-4ce7-953f-40fccfa949e1",
+            "parentTaskId": "t-b0db8329-2839-435a-b239-7567c0cbdae0",
+            "depth": 1,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-2f854e6b-e24e-490c-8ea0-eb33b554d6ac",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-4159eeb9-1da8-4f70-8408-32ca39db76eb",
+            "parentTaskId": "t-2f854e6b-e24e-490c-8ea0-eb33b554d6ac",
+            "depth": 1,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-bf5c38dd-c323-4be1-99e0-c06b4b91525a",
+            "parentTaskId": "t-2f854e6b-e24e-490c-8ea0-eb33b554d6ac",
+            "depth": 1,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-a17cf3df-fb52-4c1c-97d8-22fb1bbf3256",
+            "parentTaskId": "t-2f854e6b-e24e-490c-8ea0-eb33b554d6ac",
+            "depth": 1,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-7663df30-15a8-4dbf-9b9f-9ff7812994cd",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-8f5d0fd6-6122-4cbc-bbec-5bed4bad57d2",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-c1187793-0bd7-40f1-a4e8-369874226f99",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-b2eef516-8afa-4cf0-baeb-7fec83319653",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-3d4e343e-af1a-416d-bcd0-daae212c1fbf",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-aedceb80-0e57-403b-bbe3-6b8315a3bf4a",
+            "parentTaskId": "t-3d4e343e-af1a-416d-bcd0-daae212c1fbf",
+            "depth": 1,
+            "templateRef": {
+              "digest": "1d0e51e9a7a5daca71f522e6d63826d51e243592f55bbd3f2ed87f8d0c841031",
+              "id": "log-analytics-pipeline",
+              "version": 2
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-e5afc6d1-9d6d-4ec5-92b9-1c1311260115",
+            "parentTaskId": "t-aedceb80-0e57-403b-bbe3-6b8315a3bf4a",
+            "depth": 2,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-2aa38370-e77a-4c7e-bb3d-c33860af12d6",
+            "parentTaskId": "t-aedceb80-0e57-403b-bbe3-6b8315a3bf4a",
+            "depth": 2,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-2373de80-4876-4ea9-86d4-928c646c51ff",
+            "parentTaskId": "t-aedceb80-0e57-403b-bbe3-6b8315a3bf4a",
+            "depth": 2,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "verified"
+          }
+        ]
+      }
+    }
+  ],
+  "limits": "One run on one machine: the experiment replays four real runs (a failed coordinator sample and a verified holdout, baseline and candidate), each of which authors its own artifacts, so the wall time is dominated by real-model latency and the run is sensitive to the supervisor naming the right sample ids and reconstructing the candidate mutation. The defect is a recipe mis-order (the \"forgotten edge\") whose determinism rests on the report leaf staying honest: a model that regenerates out/stats.json would mask the failure on either side, so the report template says its only input is the verified upstream artifact and forbids fabricating it. The Supervisor uses the real task_template_list entry through its recorded delegation; file tools stay checkout-only. The bash path check is an advisory fixture guard, not an OS sandbox. An idle supervision session is nudged by session id with a neutral continuation. autoReview is pinned to \"failed\"; the default \"all\" additionally reviews successful roots and excludes experiment replays. Use SINGULARITY_LIVE_REVIEWER_MODE=all-real for a real Reviewer."
+}

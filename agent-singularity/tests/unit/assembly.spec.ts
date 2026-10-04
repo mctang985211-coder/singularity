@@ -304,7 +304,7 @@ describe('SingularityAgent assembly', () => {
     expect(candidate.parameters.required).toContain('versionSet')
     const mutation = candidate.parameters.properties.mutationJson!
     expect(mutation.type).toBe('string')
-    expect(candidate.description).toContain('Task:')
+    expect(candidate.description).toContain('task_definition: {template:<complete canonical TaskTemplate>')
     expect(candidate.description).toContain('Skill:')
     expect(candidate.description).toContain('Capability:')
     expect(candidate.description).toContain('mcpServers?')

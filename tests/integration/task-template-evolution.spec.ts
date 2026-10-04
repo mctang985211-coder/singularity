@@ -21,6 +21,7 @@ const STORE = rootTaskStoreId(ROOT)
 const ID = 'answer-child'
 const PROPOSAL = 'p-template'
 const GOAL = 'test "$(cat answer.txt)" = 42'
+const MISSING_STAGE = `node -e 'const stage = process.argv[1]; if (stage !== "answer") throw new Error("unknown stage " + stage)' missing`
 const criteria = [{ criterionId: 'goal', description: 'answer is exactly 42', command: GOAL, verifierRef: 'command' }]
 let ledger: string
 beforeEach(() => {
@@ -115,7 +116,12 @@ async function historicalExample(h: ScriptedLoop, id: string, sourceDir: string,
   )
 }
 
-async function fixture(command = GOAL, initial = false) {
+async function fixture(
+  command = GOAL,
+  initial = false,
+  baselineCommand = 'test "$(cat answer.txt)" = 41',
+  parentCommand = GOAL,
+) {
   let h!: ScriptedLoop
   let recovery = false
   let allowRollback!: () => void
@@ -182,7 +188,7 @@ async function fixture(command = GOAL, initial = false) {
               const { task } = await h.runForSession(sessionId)
               writeFileSync(
                 join(String(h.agent(sessionId).session.header.cwd), 'answer.txt'),
-                task.acceptanceCriteria[0]?.command?.endsWith('= 41') ? '41' : '42',
+                task.acceptanceCriteria[0]?.command === baselineCommand ? '41' : '42',
               )
             },
           },
@@ -193,8 +199,12 @@ async function fixture(command = GOAL, initial = false) {
       return [{ text: 'idle' }]
     },
   })
-  if (!initial) await h.runtime.registerTaskTemplate(template('test "$(cat answer.txt)" = 41'))
-  const source = await h.begin({ objective: 'deliver the answer', acceptanceCriteria: criteria, requiredCapabilities: ['execute-task'] })
+  if (!initial) await h.runtime.registerTaskTemplate(template(baselineCommand))
+  const source = await h.begin({
+    objective: 'deliver the answer',
+    acceptanceCriteria: criteria.map(criterion => ({ ...criterion, command: parentCommand })),
+    requiredCapabilities: ['execute-task'],
+  })
   await h.agent(ROOT).whenIdle()
   await vi.waitFor(
     async () =>
@@ -299,6 +309,66 @@ function reopenEvolution(h: ScriptedLoop, interrupt?: CommitStage) {
 }
 
 describe('Task template Evolution', () => {
+  it('repairs a child criterion naming an absent stage while preserving the independent parent oracle', async () => {
+    const f = await fixture(GOAL, false, MISSING_STAGE)
+    const before = await f.h.snapshot(STORE)
+    const broken = before.tasks.find(task => task.templateRef?.id === ID && task.templateRef.version === 1)!
+    const bundle = before.evidence.find(item => item.taskRunId === broken.runIds.at(-1))!
+    expect(broken.status).toBe('failed')
+    expect(bundle.verifierResults[0]?.status).toBe('fail')
+    expect(await f.h.verifier.logTail(bundle.verifierResults[0]!.logRef!)).toContain('unknown stage missing')
+    const oldJudge = await f.h.runtime.replayTask(STORE, 't-positive', {
+      lineage: 'broken-stage-positive',
+      spawn: false,
+      workspace: { path: join(f.h.workspace, 'positive') },
+      contract: {
+        objective: broken.objective,
+        acceptanceCriteria: broken.acceptanceCriteria,
+        requiredCapabilities: broken.requestedCapabilities,
+      },
+    }, ROOT)
+    expect(oldJudge.status).toBe('failed')
+
+    const result = await f.h.ctx.evolution.runExperiment(f.spec, ROOT as SessionId, ROOT)
+    expect(result.report.verdict).toBe('fixed')
+    await f.h.ctx.evolution.checkPromotion(PROPOSAL)
+    const snapshot = await f.h.snapshot(STORE)
+    for (const label of ['positive', 'negative'] as const) {
+      const guard = snapshot.tasks.find(task => task.objective.includes(`:criterion-${label}-oracle:candidate]`))!
+      expect(guard.acceptanceCriteria[0]?.command).toBe(GOAL)
+      expect(guard.status).toBe(label === 'positive' ? 'verified' : 'failed')
+    }
+    expect(snapshot.tasks.find(task => task.taskId === broken.taskId)).toEqual(broken)
+    expect(snapshot.runs.find(run => run.runId === f.source.runId)).toEqual(f.old)
+  }, 40_000)
+
+  it('refuses to replace a broken independent parent oracle with differently judged examples', async () => {
+    const f = await fixture(GOAL, false, undefined, MISSING_STAGE)
+    const before = await f.h.snapshot(STORE)
+    const source = before.tasks.find(task => task.taskId === f.source.taskId)!
+    const bundle = before.evidence.find(item => item.taskRunId === f.source.runId)!
+    expect(await f.h.verifier.logTail(bundle.verifierResults[0]!.logRef!)).toContain('unknown stage missing')
+    await expect(f.h.ctx.evolution.runExperiment(f.spec, ROOT as SessionId, ROOT)).rejects.toThrow(
+      /criterion examples must be judged by the fixed independent parent oracle/,
+    )
+    await expect(f.h.ctx.evolution.checkPromotion(PROPOSAL)).rejects.toThrow()
+    const after = await f.h.snapshot(STORE)
+    expect(after.tasks.find(task => task.taskId === source.taskId)).toEqual(source)
+    expect(after.runs.find(run => run.runId === f.source.runId)).toEqual(f.old)
+  }, 40_000)
+
+  it('refuses a historical positive whose frozen input fails the independent parent oracle', async () => {
+    const f = await fixture()
+    writeFileSync(join(f.h.workspace, 'positive', 'answer.txt'), '41')
+    await expect(f.h.ctx.evolution.runExperiment(f.spec, ROOT as SessionId, ROOT)).rejects.toThrow(
+      /positive criterion promotion guard failed under independent parent oracle/,
+    )
+    const snapshot = await f.h.snapshot(STORE)
+    expect(snapshot.tasks.find(task => task.taskId === 't-positive')?.status).toBe('verified')
+    expect(snapshot.tasks.some(task => task.objective.includes(':criterion-positive:candidate]'))).toBe(false)
+    await expect(f.h.ctx.evolution.checkPromotion(PROPOSAL)).rejects.toThrow()
+  }, 40_000)
+
   it('replays the parent, promotes with actual approval, appends versions and lets the responsible parent replan', async () => {
     const f = await fixture()
     const result = await f.h.ctx.evolution.runExperiment(f.spec, ROOT as SessionId, ROOT)

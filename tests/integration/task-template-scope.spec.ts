@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { assembleContextFor } from '../../../../thirdparty/deepseek-harness/packages/core/agent/lib/index.js'
-import type { TaskTemplate } from '../../task/src/index.ts'
+import { rootTaskStoreId, type TaskTemplate } from '../../task/src/index.ts'
 import { registerTaskTemplate } from '../../task-runtime/src/task-template.ts'
 import { reviewerBindingSource, readReviewerDelegation } from '../../agent-singularity/src/coordination/ledger.ts'
 import { startSupervisorHandoff } from '../../agent-singularity/src/coordination/evolution-handoff.ts'
@@ -31,6 +31,44 @@ function texts(h: ScriptedLoop, sessionId: string, index = 0): string {
 }
 
 describe('Task template catalog in the model request', () => {
+  it('keeps children of a second root in that root store and template scope', async () => {
+    const second = 's-root-second'
+    let h!: ScriptedLoop
+    let reference!: Awaited<ReturnType<typeof registerTaskTemplate>>
+    h = await startScriptedLoop({ roots: [ROOT, second], script: sessionId => sessionId === second ? [
+      { tool: 'task_decompose', args: () => ({ reason: 'execute this root contract', children: [{ templateRef: reference }] }) },
+      { waitFor: async () => {
+        await vi.waitFor(async () => expect((await h.runForSession(second)).run.executionPhase).toBe('active'), { timeout: 10_000 })
+      } },
+      { tool: 'task_submit_result', args: { summary: 'second root passed' } }, { text: 'done' },
+    ] : sessionId === ROOT ? [
+      { tool: 'task_submit_result', args: { summary: 'first root passed' } }, { text: 'done' },
+    ] : [
+      { tool: 'task_read', args: {} },
+      { tool: 'task_template_list', args: {} },
+      { tool: 'task_submit_result', args: { summary: 'second root child passed' } }, { text: 'done' },
+    ] })
+    await h.runtime.registerTaskTemplate(template('first-domain', ['hardware'], 'FIRST_DOMAIN_MARKER'))
+    reference = await h.runtime.registerTaskTemplate(template('second-domain', ['software']))
+    await h.begin({ objective: 'first root', templateScope: [['hardware']], requiredCapabilities: ['execute-task'],
+      acceptanceCriteria: [{ description: 'first check', command: 'true' }] })
+    await vi.waitFor(async () => expect((await h.runForSession(ROOT)).run.status).toBe('verified'), { timeout: 10_000 })
+    h.recordRequest('execute the second root', second)
+    const store = rootTaskStoreId(second)
+    const intake = await h.runtime.intakeRootContract(store, second, { objective: 'second root',
+      templateScope: [['software']], requiredCapabilities: ['execute-task'],
+      acceptanceCriteria: [{ description: 'second check', command: 'true' }] })
+    h.userSays('begin', second)
+    await vi.waitFor(async () => expect((await h.snapshot(store)).tasks.find(task => task.taskId === intake.taskId)?.status)
+      .toBe('verified'), { timeout: 15_000 })
+    const child = h.spawns.find(spawn => spawn.name === 'second-domain')!
+    expect((await h.ctx.graphs.graphForSession(child.sessionId as never)).rootSessionId).toBe(second)
+    expect(h.calls.find(call => call.sessionId === child.sessionId && call.name === 'task_read')?.result?.text).toContain(store)
+    expect(texts(h, child.sessionId)).toContain('second-domain')
+    expect(texts(h, child.sessionId)).not.toContain('FIRST_DOMAIN_MARKER')
+    expect((await h.snapshot(rootTaskStoreId(ROOT))).tasks).toHaveLength(1)
+  })
+
   it('gives the pre-intake root category summaries derived from the library, without dumping complete templates', async () => {
     const h = await startScriptedLoop({ script: () => [{ text: 'ready to select a category' }] })
     await h.runtime.registerTaskTemplate(template('accelerator-check', ['hardware', 'buckyball'], 'hardware-private-body'))
@@ -142,6 +180,61 @@ describe('Task template catalog in the model request', () => {
     expect(secondRun.taskTemplatesRoot).toBe(frozen)
     expect(texts(h, secondRun.sessionId)).toContain('frozen-library-marker')
     expect(texts(h, secondRun.sessionId)).not.toContain('production-after-freeze')
+  })
+
+  it('lets a delegated reviewer without a business Run read its task templates while preserving worker scope', async () => {
+    let h!: ScriptedLoop
+    let reference!: Awaited<ReturnType<typeof registerTaskTemplate>>
+    let childSource!: { taskId: string; run: { runId: string } }
+    h = await startScriptedLoop({
+      supervision: { autoReview: 'off' },
+      script: sessionId => sessionId === ROOT ? [
+        { tool: 'task_decompose', args: () => ({ reason: 'verify the accelerator', children: [{
+          templateRef: reference, templateParameters: {}, templateScope: [['hardware', 'buckyball']],
+        }] }) },
+        { waitFor: async () => {
+          await vi.waitFor(async () => expect((await h.runForSession(ROOT)).run.executionPhase).toBe('active'), { timeout: 10_000 })
+          const child = h.spawns.find(spawn => spawn.name === 'accelerator-check')!
+          const source = await h.runForSession(child.sessionId)
+          childSource = { taskId: source.task.taskId, run: source.run }
+        } },
+        { tool: 'task_review_agent', args: () => ({ taskId: childSource.taskId, runId: childSource.run.runId }) },
+        { tool: 'task_submit_result', args: { summary: 'project check passes' } }, { text: 'done' },
+      ] : h.spawns.find(spawn => spawn.sessionId === sessionId)?.name.startsWith('review ') ? [
+        { tool: 'task_template_list' },
+        { tool: 'task_template_list', args: () => ({ templateRef: reference }) },
+        { text: '```json\n{"observation":"the child passed its authoritative check","conclusion":"no improvement needed","confidence":"high"}\n```' },
+      ] : [
+        { tool: 'task_template_list' },
+        { tool: 'task_submit_result', args: { summary: 'child check passes' } }, { text: 'done' },
+      ],
+    })
+    h.ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource())
+    reference = await h.runtime.registerTaskTemplate(template('accelerator-check', ['hardware', 'buckyball']))
+    const foreign = await h.runtime.registerTaskTemplate(template('typescript-check', ['software', 'typescript']))
+    await h.runtime.registerTaskTemplate(template('general-check', ['general']))
+    const root = await h.begin({ objective: 'verify an accelerator', templateScope: [['hardware']], requiredCapabilities: ['execute-task'], acceptanceCriteria: [{ description: 'project check passes', command: 'true' }] })
+    await h.agent(ROOT).whenIdle()
+    const reviewer = h.spawns.find(spawn => spawn.name.startsWith('review '))!
+    expect(reviewer, JSON.stringify(h.calls)).toBeDefined()
+    expect(h.visible(h.agent(reviewer.sessionId))).toContain('task_template_list')
+    expect((await h.snapshot(root.storeId)).runs.some(run => run.sessionId === reviewer.sessionId)).toBe(false)
+    expect(await readReviewerDelegation(reviewer.sessionId)).toMatchObject({ rootStoreId: root.storeId, taskId: childSource.taskId })
+    const lookup = h.calls.filter(call => call.sessionId === reviewer.sessionId && call.name === 'task_template_list')
+    expect(lookup).toHaveLength(2)
+    expect(JSON.parse(lookup[0]!.result!.text).templateScope).toEqual([['hardware', 'buckyball']])
+    expect(lookup[0]!.result!.text).toContain('accelerator-check')
+    expect(lookup[0]!.result!.text).toContain('general-check')
+    expect(lookup[0]!.result!.text).not.toContain('typescript-check')
+    expect(JSON.parse(lookup[1]!.result!.text).templateRef).toEqual(reference)
+    const worker = h.spawns.find(spawn => spawn.name === 'accelerator-check')!
+    for (const sessionId of [worker.sessionId, reviewer.sessionId]) {
+      await expect(h.runtime.listTaskTemplates({ templateRef: foreign }, sessionId)).rejects.toThrow(/outside/)
+      await expect(h.runtime.listTaskTemplates({ catalogPath: ['software'] }, sessionId)).rejects.toThrow(/outside/)
+    }
+    expect((await h.snapshot(root.storeId)).diagnoses).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: childSource.taskId, producedBy: { kind: 'agent', sessionId: reviewer.sessionId } }),
+    ]))
   })
 
   it('lets a delegated supervisor without a business Run read scoped summaries and the exact template to prepare a Task improvement', async () => {

@@ -95,9 +95,17 @@ export class EvolutionService extends EvolutionServiceCore {
     }
     if (!EVOLUTION_LEVELS.includes(record.level)) throw new Error(`evolution: unknown level "${String(input.level)}"`)
     if (!Array.isArray(input.sourceRefs) || input.sourceRefs.length === 0) {
-      throw new Error('evolution: sourceRefs must name at least one source (diagnosisId / reviewRef / evidenceId)')
+      throw new Error('evolution: sourceRefs must name at least one source (diagnosis:<id> / reviewRef / evidenceId)')
     }
     input.sourceRefs.forEach((ref, index) => nonEmpty(ref, `sourceRefs[${index}]`))
+    const task = optionalService<{ openStore(storeId: string): Promise<TaskSnapshot> }>(this.ctx, 'task')
+    if (task !== undefined && optionalService(this.ctx, 'graphs') !== undefined &&
+        input.sourceRefs.some(ref => !ref.startsWith('diagnosis:'))) {
+      const snapshot = await task.openStore(await this.storeOfSession(actor))
+      const diagnosisIds = new Set((snapshot.diagnoses ?? []).map(item => item.diagnosisId))
+      // Normalize known diagnoses once at the producer; other historical source refs stay opaque.
+      record.sourceRefs = [...new Set(input.sourceRefs.map(ref => diagnosisIds.has(ref) ? `diagnosis:${ref}` : ref))]
+    }
     await this.append(record)
     return this.get(record.proposalId)
   }

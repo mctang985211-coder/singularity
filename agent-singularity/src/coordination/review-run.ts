@@ -42,6 +42,7 @@ export const REVIEWER_BASELINE: readonly string[] = [
   'task_status',
   'context_read',
   'capability_list',
+  'task_template_list',
   'read',
   'glob',
   'grep',
@@ -86,7 +87,7 @@ interface RawDiagnosisReply {
   proposals: DiagnosisProposal[]
 }
 
-/** The parsed reply object out of the reviewer's answer: the last fenced block wins, then the last balanced object. A reply with neither parses as nothing. */
+/** The last fenced JSON object is the reviewer's answer. */
 function parseReviewerObject(reply: string | undefined): Record<string, unknown> | undefined {
   if (reply === undefined) return undefined
   const fenced = [...reply.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map(match => match[1])
@@ -306,7 +307,7 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
         return [
           'You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.',
           'Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and ' +
-          'context_read reach the sibling tasks, their sessions and their evidence. Cite what you rest on.',
+          'context_read reach the sibling tasks, their sessions and their evidence; task_template_list reads the delegated task\'s template catalog and exact templateRef contracts. Cite what you rest on.',
           'Do not score, and do not modify anything.',
           'Start with this exact source, then inspect the business DAG and read original evidence only where it tests a cause. Explain how upstream contracts, dependencies, shared providers or decomposition could produce the observed result. Similar errors alone do not establish a shared cause.',
           ...(review.outcome === 'verified'
@@ -314,17 +315,17 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
             : []),
           'Return EXACTLY one fenced json block, no prose around it:',
           '```json',
-          '{"observation":"...","conclusion":"...","confidence":"high|medium|low"}',
+          JSON.stringify({ observation: '...', conclusion: '...', confidence: 'low', reviewRefs: [sourceRef(source)] }),
           '```',
           '- observation (required): the postmortem observation (复盘观察) — what was actually observed in the source, whether it failed or succeeded.',
           '- Keep observation and conclusion concise; cite the failure command, log or session ref rather than restating the whole pack.',
           '- conclusion (required): explain the cause and cite the original failure evidence. For a failed source, name one concrete next action for its business coordinator, such as a smaller independently verifiable child result after the batch settles. Check its task/run state first: task_decompose needs an active run; a terminal run needs a named stop and escalation, not another retry. If the evidence does not settle the cause, say what fact is missing and stop there.',
           '- confidence (required): high, medium or low.',
           '- A successful source may conclude "no improvement needed"; do not invent a failure or a next action.',
-          '- scope, reviewRefs, evidenceRefs, relatedTaskIds (optional): use the existing diagnosis lineage to name the causal scope, exact task#run review refs, evidence bundle ids and implicated task ids. Include only records you read that support the explanation; existence in the store does not make a record relevant. The triggering review remains the source. Do not copy every DAG neighbour into the diagnosis.',
+          '- scope, reviewRefs, evidenceRefs, relatedTaskIds (optional): name the causal scope and include only records you read that support the explanation. reviewRefs must be exact taskId#runId (or taskId#no-run) refs from task_review_pack or context_read kind:"review". Top-level evidenceRefs must be evidence bundle ids read through context_read kind:"evidence"; use reviewRefs for a review and cite commands, log paths, criterion ids or template ids in prose, not in these arrays. relatedTaskIds must be actual task ids in this graph. The triggering review is retained automatically. Omit optional arrays when no additional lineage is needed; do not copy every DAG neighbour.',
           '- For a shared cause, cite the original evidence from each implicated task and the common contract, provider version or dependency that connects them; inspect a passing contrast when available. If the cause or benefit is unresolved, state unknown and the missing fact, use low confidence, and make no unsupported proposal.',
-          `- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}], only when useful and supported. Dimensions: ${JUDGED_DIMENSIONS.join(', ')}; verdict: adequate|inadequate|unknown. Do not fill every dimension.`,
-          '- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. Suggest a Task template, skill or capability change only when the evidence establishes that gap; most failures need no evolution proposal. Nothing here executes a proposal.',
+          `- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}], only when useful and supported. Dimensions: ${JUDGED_DIMENSIONS.join(', ')}; verdict: adequate|inadequate|unknown. Each evidenceRefs array must cite at least one exact review ref, evidence ref printed by a review, evidence bundle id, or Run/review session id from this graph. Do not use commands, log paths, criterion ids, task ids or template ids as judgement refs. Do not fill every dimension.`,
+          '- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. For an established reusable gap, executable targetType names are task_definition (a TaskTemplate; targetId is its template id), skill or capability. Other targetType names remain recorded suggestions. Most failures need no evolution proposal. Nothing here executes a proposal.',
           '- Never tell the business coordinator to call task_recover: only a separately delegated supervisor has it. Recommend evolution tools only to a coordinator whose current tools authorize them, for an established Task template/skill/capability gap; they are not general task recovery.',
           'A reply without an observation, a conclusion or a confidence is not a diagnosis: the attempt is recorded interrupted and nothing is stored.',
           '',

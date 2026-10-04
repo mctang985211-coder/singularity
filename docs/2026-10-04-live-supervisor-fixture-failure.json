@@ -1,0 +1,622 @@
+{
+  "date": "2026-10-04",
+  "test": "tests/integration/live-supervisor-repair.spec.ts",
+  "command": "NODE_USE_ENV_PROXY=1 SINGULARITY_LIVE_SUPERVISOR_REPAIR=1 SINGULARITY_LIVE_REVIEWER_MODE=all-real pnpm exec vitest run --project integration packages/singularity/tests/integration/live-supervisor-repair.spec.ts",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "result": "failed",
+  "error": "expected undefined to deeply equal [ +0 ]",
+  "method": "A all-real run that threw before its terminal assertions; this document is the live state at failure.",
+  "assertions": {
+    "reportLeafFailedOnRealChecker": true,
+    "pipelineCoordinatorFailedOnRealChecker": true,
+    "diagnosisCarriesAProposal": true,
+    "supervisorSessionStarted": true,
+    "supervisorRanEvolutionChain": true,
+    "run2Verified": false,
+    "noUnrelatedTemplatesInAnyRequest": true
+  },
+  "cases": [
+    {
+      "name": "log-pipeline-shared-template-repair",
+      "reviewPath": "all-real",
+      "tree": {
+        "tasks": [
+          {
+            "taskId": "t-3fca6620-eb59-4b9b-af3a-a16f5dd6f201",
+            "depth": 0,
+            "status": "failed"
+          },
+          {
+            "taskId": "t-6d4d7f94-bdd9-4891-b62c-d3263e7d1261",
+            "parentTaskId": "t-3fca6620-eb59-4b9b-af3a-a16f5dd6f201",
+            "depth": 1,
+            "templateRef": {
+              "id": "log-analytics-pipeline",
+              "version": 1,
+              "digest": "f5af010854f8faf4c3c88bf90097e75798d8ace2c8d6d450191dd51648405e8f"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-830e50d4-5b96-4423-a4f5-6b2fdadedc8b",
+            "parentTaskId": "t-6d4d7f94-bdd9-4891-b62c-d3263e7d1261",
+            "depth": 2,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-8dd08db7-8707-4fd2-8536-efa2f23faeda",
+            "parentTaskId": "t-6d4d7f94-bdd9-4891-b62c-d3263e7d1261",
+            "depth": 2,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-be201508-7727-4733-a77a-6d3c4ea18d3d",
+            "parentTaskId": "t-6d4d7f94-bdd9-4891-b62c-d3263e7d1261",
+            "depth": 2,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-0e51afb7-428e-4004-b93a-2b237e1b514e",
+            "depth": 0,
+            "status": "failed"
+          },
+          {
+            "taskId": "t-3780324b-3818-43b6-bfd4-4410d3087bf7",
+            "parentTaskId": "t-0e51afb7-428e-4004-b93a-2b237e1b514e",
+            "depth": 1,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-13641c13-16fe-45bb-9d54-df9ceacb69c0",
+            "parentTaskId": "t-0e51afb7-428e-4004-b93a-2b237e1b514e",
+            "depth": 1,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-d3792650-a2dd-4e19-92c5-cb1f9c916118",
+            "parentTaskId": "t-0e51afb7-428e-4004-b93a-2b237e1b514e",
+            "depth": 1,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-fadb6a03-d016-45a5-8a03-d25925af8c34",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-e5cae206-64d3-44b0-af4d-60ce2d86acb4",
+            "parentTaskId": "t-fadb6a03-d016-45a5-8a03-d25925af8c34",
+            "depth": 1,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-010c3a5a-5d50-4da7-98c9-e59fbe9bdff3",
+            "parentTaskId": "t-fadb6a03-d016-45a5-8a03-d25925af8c34",
+            "depth": 1,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-6a14beee-f0c2-44d2-8906-4cc737be1c35",
+            "parentTaskId": "t-fadb6a03-d016-45a5-8a03-d25925af8c34",
+            "depth": 1,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-021d8ab3-2e2a-49f7-94e3-fd81776a4722",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-75ae0d90-e85b-46b0-8abd-c38f3650e15b",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-384b7cc2-6c01-4a32-9fff-5e06927e0cf7",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-6f98223b-15a7-4021-b69d-549555cfdab7",
+            "depth": 0,
+            "status": "verified"
+          }
+        ],
+        "diagnoses": [
+          {
+            "diagnosisId": "review-agent-35f434c7-ffd0-46fc-9c5d-a6af8c3b60a1",
+            "proposals": [
+              [
+                "task_definition",
+                "log-analytics-pipeline"
+              ]
+            ]
+          }
+        ]
+      },
+      "proposals": [
+        {
+          "proposalId": "prop-log-analytics-pipeline-recipe-order-v2",
+          "targetType": "task_definition",
+          "targetId": "log-analytics-pipeline",
+          "baseVersion": "1",
+          "level": "L3",
+          "rationale": "The published template log-analytics-pipeline@1 declares decomposition.children = [parse-log-events, render-stats-report, aggregate-event-stats] with no dependency edges, and the runtime admits the batch's children one at a time in exactly that declared recipe order (decompose result: \"starts the children one at a time in dependency order\"; observed schedule parse -> report -> aggregate). render-stats-report's own contract hard-gates on out/stats.json existing and being newer than out/events.json, which can only hold after aggregate-event-stats has run, so on every fresh checkout the report stage is admitted before its producer and must fail. The template objective compounds this by ordering the children \"parse, report and aggregate\" in one sentence while demanding \"respect their data dependency order\" in the same paragraph. The repair is internal to the template: declare the children in their only valid data order (parse-log-events -> aggregate-event-stats -> render-stats-report) and make the objective name that same order, leaving contract criteria, caps and child template digests untouched.",
+          "sourceRefs": [
+            "diagnosis:review-agent-35f434c7-ffd0-46fc-9c5d-a6af8c3b60a1",
+            "t-8dd08db7-8707-4fd2-8536-efa2f23faeda#r-56c9265f-8330-4e89-a3ef-1e8c5cbbbdff",
+            "t-be201508-7727-4733-a77a-6d3c4ea18d3d#r-2daaec9a-618a-41b0-9ab6-2753ece2d96d",
+            "evidence-r-56c9265f-8330-4e89-a3ef-1e8c5cbbbdff-d217d266-15ad-4507-b39e-7a6f056a30f0",
+            "evidence-r-2daaec9a-618a-41b0-9ab6-2753ece2d96d-3f931884-31ff-4aa6-ae6d-bb4b1b31fb20"
+          ],
+          "status": "applied",
+          "history": [
+            {
+              "status": "proposed",
+              "actor": "c069b9a2-9241-4bc7-a190-8e081405bb91",
+              "at": "2026-10-04T06:36:08.575Z"
+            },
+            {
+              "status": "candidate",
+              "actor": "c069b9a2-9241-4bc7-a190-8e081405bb91",
+              "at": "2026-10-04T06:36:22.573Z"
+            },
+            {
+              "status": "prepared",
+              "actor": "c069b9a2-9241-4bc7-a190-8e081405bb91",
+              "at": "2026-10-04T06:36:26.731Z"
+            },
+            {
+              "status": "gated",
+              "actor": "c069b9a2-9241-4bc7-a190-8e081405bb91",
+              "at": "2026-10-04T06:41:12.562Z"
+            },
+            {
+              "status": "decided",
+              "actor": "c069b9a2-9241-4bc7-a190-8e081405bb91",
+              "at": "2026-10-04T06:41:16.335Z"
+            },
+            {
+              "status": "applied",
+              "actor": "c069b9a2-9241-4bc7-a190-8e081405bb91",
+              "at": "2026-10-04T06:41:20.254Z"
+            }
+          ],
+          "mutation": {
+            "template": {
+              "id": "log-analytics-pipeline",
+              "version": 2,
+              "catalogPath": [
+                "logs"
+              ],
+              "appliesTo": [
+                "Own and independently verify the parse, aggregate and report stages of the log-analytics pipeline."
+              ],
+              "parametersSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              },
+              "contract": {
+                "objective": "Own the log-analytics pipeline: parse.mjs, aggregate.mjs and report.mjs must exist in the checkout root and running them in order (`node parse.mjs events.log`, `node aggregate.mjs`, `node report.mjs`) must produce out/events.json, out/stats.json and out/report.md accepted by the independent checker. Coordinate the three stages as independently verified children in their data dependency order — parse, then aggregate, then report — and reuse the available stage templates where applicable. Begin by expanding this contract's own recipe: call task_decompose with this template's exact templateRef at the top level and no reason or children, so the runtime binds the parse, aggregate and report children in the recipe's data order. Never author a stage contract inline, copy a stage objective by hand, or repair a stage template from here.",
+                "acceptanceCriteria": [
+                  {
+                    "criterionId": "pipeline-result",
+                    "description": "pipeline agrees with the original protected input",
+                    "command": "node checks/verify.mjs pipeline",
+                    "verifierRef": "command",
+                    "protectedInputs": [
+                      "checks/verify.mjs",
+                      "events.log"
+                    ]
+                  }
+                ],
+                "requiredCapabilities": [
+                  "coordinate-tasks"
+                ],
+                "constraints": [
+                  "Keep events.log and checks/verify.mjs unchanged. Read and write only inside the checkout.",
+                  "Expand this template's recipe with a top-level templateRef (omit `reason` and `children`); bind every stage child to its provided template and never author, copy or repair a stage contract inline.",
+                  "A stage child that fails ends this pipeline: do NOT admit another batch, do NOT re-dispatch a failed stage, and do not work around the recipe yourself. Submit this task with a gap report naming the failed stage so the defect stays visible for its owner to repair."
+                ]
+              },
+              "decomposition": {
+                "reason": "The three stages produce independently checkable artifacts and each consumes the previous stage's artifact, so the recipe lists them in data order: parse-log-events -> aggregate-event-stats -> render-stats-report. render-stats-report's freshness gate requires out/stats.json to exist and be newer than out/events.json, so aggregate-event-stats must be admitted before it.",
+                "children": [
+                  {
+                    "templateRef": {
+                      "id": "parse-log-events",
+                      "version": 1,
+                      "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+                    }
+                  },
+                  {
+                    "templateRef": {
+                      "id": "aggregate-event-stats",
+                      "version": 1,
+                      "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+                    }
+                  },
+                  {
+                    "templateRef": {
+                      "id": "render-stats-report",
+                      "version": 1,
+                      "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "versionSet": {
+            "log-analytics-pipeline": "2"
+          },
+          "prepared": {
+            "sandbox": "sandbox/prop-log-analytics-pipeline-recipe-order-v2",
+            "mechanical": true,
+            "champion": "captured",
+            "templateCandidate": {
+              "template": {
+                "id": "log-analytics-pipeline",
+                "version": 2,
+                "catalogPath": [
+                  "logs"
+                ],
+                "appliesTo": [
+                  "Own and independently verify the parse, aggregate and report stages of the log-analytics pipeline."
+                ],
+                "parametersSchema": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                },
+                "contract": {
+                  "objective": "Own the log-analytics pipeline: parse.mjs, aggregate.mjs and report.mjs must exist in the checkout root and running them in order (`node parse.mjs events.log`, `node aggregate.mjs`, `node report.mjs`) must produce out/events.json, out/stats.json and out/report.md accepted by the independent checker. Coordinate the three stages as independently verified children in their data dependency order — parse, then aggregate, then report — and reuse the available stage templates where applicable. Begin by expanding this contract's own recipe: call task_decompose with this template's exact templateRef at the top level and no reason or children, so the runtime binds the parse, aggregate and report children in the recipe's data order. Never author a stage contract inline, copy a stage objective by hand, or repair a stage template from here.",
+                  "acceptanceCriteria": [
+                    {
+                      "criterionId": "pipeline-result",
+                      "description": "pipeline agrees with the original protected input",
+                      "command": "node checks/verify.mjs pipeline",
+                      "verifierRef": "command",
+                      "protectedInputs": [
+                        "checks/verify.mjs",
+                        "events.log"
+                      ]
+                    }
+                  ],
+                  "requiredCapabilities": [
+                    "coordinate-tasks"
+                  ],
+                  "constraints": [
+                    "Keep events.log and checks/verify.mjs unchanged. Read and write only inside the checkout.",
+                    "Expand this template's recipe with a top-level templateRef (omit `reason` and `children`); bind every stage child to its provided template and never author, copy or repair a stage contract inline.",
+                    "A stage child that fails ends this pipeline: do NOT admit another batch, do NOT re-dispatch a failed stage, and do not work around the recipe yourself. Submit this task with a gap report naming the failed stage so the defect stays visible for its owner to repair."
+                  ]
+                },
+                "decomposition": {
+                  "reason": "The three stages produce independently checkable artifacts and each consumes the previous stage's artifact, so the recipe lists them in data order: parse-log-events -> aggregate-event-stats -> render-stats-report. render-stats-report's freshness gate requires out/stats.json to exist and be newer than out/events.json, so aggregate-event-stats must be admitted before it.",
+                  "children": [
+                    {
+                      "templateRef": {
+                        "id": "parse-log-events",
+                        "version": 1,
+                        "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+                      }
+                    },
+                    {
+                      "templateRef": {
+                        "id": "aggregate-event-stats",
+                        "version": 1,
+                        "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+                      }
+                    },
+                    {
+                      "templateRef": {
+                        "id": "render-stats-report",
+                        "version": 1,
+                        "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+                      }
+                    }
+                  ]
+                }
+              },
+              "digest": "11fb33c9f172cffe2b49296ed4e86302f2666c546cc2ddc5f0db80076d245bfc",
+              "sha256": "1d2d4f99cf4b8ccf5969039281eea073896dff5e4c9cb233cf480dfd2967ae3d"
+            },
+            "templateBaseline": {
+              "template": {
+                "id": "log-analytics-pipeline",
+                "version": 1,
+                "catalogPath": [
+                  "logs"
+                ],
+                "appliesTo": [
+                  "Own and independently verify the parse, aggregate and report stages of the log-analytics pipeline."
+                ],
+                "parametersSchema": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": false
+                },
+                "contract": {
+                  "objective": "Own the log-analytics pipeline: parse.mjs, aggregate.mjs and report.mjs must exist in the checkout root and running them in order (`node parse.mjs events.log`, `node aggregate.mjs`, `node report.mjs`) must produce out/events.json, out/stats.json and out/report.md accepted by the independent checker. Coordinate the three stages as independently verified children, respect their data dependency order, and reuse the available stage templates where applicable. Begin by expanding this contract's own recipe: call task_decompose with this template's exact templateRef at the top level and no reason or children, so the runtime binds the parse, report and aggregate children in recipe order. Never author a stage contract inline, copy a stage objective by hand, or repair a stage template from here.",
+                  "acceptanceCriteria": [
+                    {
+                      "criterionId": "pipeline-result",
+                      "description": "pipeline agrees with the original protected input",
+                      "command": "node checks/verify.mjs pipeline",
+                      "verifierRef": "command",
+                      "protectedInputs": [
+                        "checks/verify.mjs",
+                        "events.log"
+                      ]
+                    }
+                  ],
+                  "requiredCapabilities": [
+                    "coordinate-tasks"
+                  ],
+                  "constraints": [
+                    "Keep events.log and checks/verify.mjs unchanged. Read and write only inside the checkout.",
+                    "Expand this template's recipe with a top-level templateRef (omit `reason` and `children`); bind every stage child to its provided template and never author, copy or repair a stage contract inline.",
+                    "A stage child that fails ends this pipeline: do NOT admit another batch, do NOT re-dispatch a failed stage, and do not work around the recipe yourself. Submit this task with a gap report naming the failed stage so the defect stays visible for its owner to repair."
+                  ]
+                },
+                "decomposition": {
+                  "reason": "The three stages produce independently checkable artifacts.",
+                  "children": [
+                    {
+                      "templateRef": {
+                        "id": "parse-log-events",
+                        "version": 1,
+                        "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+                      }
+                    },
+                    {
+                      "templateRef": {
+                        "id": "render-stats-report",
+                        "version": 1,
+                        "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+                      }
+                    },
+                    {
+                      "templateRef": {
+                        "id": "aggregate-event-stats",
+                        "version": 1,
+                        "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+                      }
+                    }
+                  ]
+                }
+              },
+              "digest": "f5af010854f8faf4c3c88bf90097e75798d8ace2c8d6d450191dd51648405e8f",
+              "sha256": "92aa327d3fbdc59ea43b9336671301b411426a432de6317726389cd8c620029e"
+            },
+            "templateLibraries": {
+              "baseline": "49ce82a7901f4338848b63dcafc47ba8aa3a69bcc0c6f940ea69ef4f8e0a01c9",
+              "candidate": "190a163c81a8f5e397d7c9c5780b1fc6c258ab9aeae0c43d21698225e65690cf"
+            },
+            "files": [
+              "task-templates/baseline/aggregate-event-stats@1.json",
+              "task-templates/baseline/log-analytics-pipeline@1.json",
+              "task-templates/baseline/parse-log-events@1.json",
+              "task-templates/baseline/render-stats-report@1.json",
+              "task-templates/baseline/unrelated-0@1.json",
+              "task-templates/baseline/unrelated-10@1.json",
+              "task-templates/baseline/unrelated-11@1.json",
+              "task-templates/baseline/unrelated-12@1.json",
+              "task-templates/baseline/unrelated-13@1.json",
+              "task-templates/baseline/unrelated-14@1.json",
+              "task-templates/baseline/unrelated-15@1.json",
+              "task-templates/baseline/unrelated-16@1.json",
+              "task-templates/baseline/unrelated-17@1.json",
+              "task-templates/baseline/unrelated-18@1.json",
+              "task-templates/baseline/unrelated-19@1.json",
+              "task-templates/baseline/unrelated-1@1.json",
+              "task-templates/baseline/unrelated-20@1.json",
+              "task-templates/baseline/unrelated-21@1.json",
+              "task-templates/baseline/unrelated-22@1.json",
+              "task-templates/baseline/unrelated-23@1.json",
+              "task-templates/baseline/unrelated-24@1.json",
+              "task-templates/baseline/unrelated-25@1.json",
+              "task-templates/baseline/unrelated-26@1.json",
+              "task-templates/baseline/unrelated-27@1.json",
+              "task-templates/baseline/unrelated-28@1.json",
+              "task-templates/baseline/unrelated-29@1.json",
+              "task-templates/baseline/unrelated-2@1.json",
+              "task-templates/baseline/unrelated-3@1.json",
+              "task-templates/baseline/unrelated-4@1.json",
+              "task-templates/baseline/unrelated-5@1.json",
+              "task-templates/baseline/unrelated-6@1.json",
+              "task-templates/baseline/unrelated-7@1.json",
+              "task-templates/baseline/unrelated-8@1.json",
+              "task-templates/baseline/unrelated-9@1.json",
+              "task-templates/candidate/aggregate-event-stats@1.json",
+              "task-templates/candidate/log-analytics-pipeline@1.json",
+              "task-templates/candidate/parse-log-events@1.json",
+              "task-templates/candidate/render-stats-report@1.json",
+              "task-templates/candidate/unrelated-0@1.json",
+              "task-templates/candidate/unrelated-10@1.json",
+              "task-templates/candidate/unrelated-11@1.json",
+              "task-templates/candidate/unrelated-12@1.json",
+              "task-templates/candidate/unrelated-13@1.json",
+              "task-templates/candidate/unrelated-14@1.json",
+              "task-templates/candidate/unrelated-15@1.json",
+              "task-templates/candidate/unrelated-16@1.json",
+              "task-templates/candidate/unrelated-17@1.json",
+              "task-templates/candidate/unrelated-18@1.json",
+              "task-templates/candidate/unrelated-19@1.json",
+              "task-templates/candidate/unrelated-1@1.json",
+              "task-templates/candidate/unrelated-20@1.json",
+              "task-templates/candidate/unrelated-21@1.json",
+              "task-templates/candidate/unrelated-22@1.json",
+              "task-templates/candidate/unrelated-23@1.json",
+              "task-templates/candidate/unrelated-24@1.json",
+              "task-templates/candidate/unrelated-25@1.json",
+              "task-templates/candidate/unrelated-26@1.json",
+              "task-templates/candidate/unrelated-27@1.json",
+              "task-templates/candidate/unrelated-28@1.json",
+              "task-templates/candidate/unrelated-29@1.json",
+              "task-templates/candidate/unrelated-2@1.json",
+              "task-templates/candidate/unrelated-3@1.json",
+              "task-templates/candidate/unrelated-4@1.json",
+              "task-templates/candidate/unrelated-5@1.json",
+              "task-templates/candidate/unrelated-6@1.json",
+              "task-templates/candidate/unrelated-7@1.json",
+              "task-templates/candidate/unrelated-8@1.json",
+              "task-templates/candidate/unrelated-9@1.json",
+              "task-templates/candidate/log-analytics-pipeline@2.json",
+              "task-templates/rollback/log-analytics-pipeline@3.json"
+            ]
+          },
+          "gate": {
+            "targetFailureFixed": "Yes. The frozen two-sided experiment (exp-334c9b47c48ef99c, repetition 0, candidate log-analytics-pipeline@2 sha256:11fb33c9f172cffe2b49296ed4e86302f2666c546cc2ddc5f0db80076d245bfc) reports verdict \"fixed\": on the observed failure t-6d4d7f94-bdd9-4891-b62c-d3263e7d1261 the freshly started baseline side failed pipeline-result while the candidate side passed (fail→pass). Mechanism matches the diagnosis: the recipe now lists parse-log-events → aggregate-event-stats → render-stats-report, so render-stats-report is admitted only after aggregate-event-stats wrote out/stats.json, and the objective no longer orders the children \"parse, report, aggregate\".",
+            "originalAcceptanceMaintained": "Yes. The candidate template's contract is byte-identical in acceptance to log-analytics-pipeline@1: the single deterministic mandatory criterion pipeline-result `node checks/verify.mjs pipeline` with protected inputs checks/verify.mjs and events.log (sha256 34b122631fa3ff208b33bb3833303719bde66ee1853ec7614f9b4214961c6612 and be0ecc6e412583229d9976bbc8f6c81e644b8b88b3290cea37517aaa0ad8d958), plus the unchanged constraints. The candidate side passed that original independent oracle in the experiment.",
+            "existingRegressionMaintained": "Yes. Both frozen holdouts were verified on both sides with no criterion diff in the experiment: t-830e50d4-5b96-4423-a4f5-6b2fdadedc8b (parse-log-events, evidence-r-6ce4b036-9719-4dd3-84b8-a9f313d99278-a3fef138-2af2-4c65-b2b3-e8c04fb2bfa9) and t-be201508-7727-4733-a77a-6d3c4ea18d3d (aggregate-event-stats, evidence-r-2daaec9a-618a-41b0-9ab6-2753ece2d96d-3f931884-31ff-4aa6-ae6d-bb4b1b31fb20). The three child stage templates and their digests are unchanged, so per-stage checks verify.mjs parse|aggregate|report are unaffected.",
+            "noUnacceptableSideEffects": "Yes. Only decomposition.children order, decomposition.reason and the objective sentence that named the child order changed; the only published template mutated is log-analytics-pipeline (child templates parse-log-events@1, aggregate-event-stats@1, render-stats-report@1 are carried at their existing digests and untouched). No capability, tool, provider or protected input is changed, and events.log and checks/verify.mjs stay untouched (unchanged constraint). Existing admitted Tasks and frozen Runs keep their recorded definitions.",
+            "holdoutPerformanceAcceptable": "Yes. Nonempty holdout set: the two verified sibling stages t-830e50d4 and t-be201508, each still verified under the candidate with no criterion diff, and the candidate side passed the pipeline acceptance that the baseline side failed.",
+            "resourceCostAcceptable": "Yes. The experiment ran one baseline and one candidate side for the failed parent plus a baseline/candidate pair per holdout under the deployment's own runtime limits with no maxTokens ceiling declared; the candidate removes a guaranteed-to-fail report stage admission and its wasted run rather than adding work, so cost per attempt does not grow.",
+            "regressionEvidenceRefs": [
+              "sandbox/prop-log-analytics-pipeline-recipe-order-v2/exp-334c9b47c48ef99c/experiment-report.json",
+              "evidence-r-56c9265f-8330-4e89-a3ef-1e8c5cbbbdff-d217d266-15ad-4507-b39e-7a6f056a30f0",
+              "evidence-r-2daaec9a-618a-41b0-9ab6-2753ece2d96d-3f931884-31ff-4aa6-ae6d-bb4b1b31fb20"
+            ]
+          },
+          "decision": "PROMOTE",
+          "decisionNote": "Promote the gated TaskTemplate candidate log-analytics-pipeline@2 (sha256:11fb33c9f172cffe2b49296ed4e86302f2666c546cc2ddc5f0db80076d245bfc). The recipe now lists the children in their only valid data order parse-log-events → aggregate-event-stats → render-stats-report and the objective names that same order, while acceptance, protected inputs, capabilities and the three child template digests are unchanged. Frozen experiment exp-334c9b47c48ef99c: observed failure pipeline-result fail→pass, both holdouts maintained with no criterion diff.",
+          "decisionApprovalRef": "approval:call_00_9ajqxxqlfb76wxrmo15vd9iw",
+          "applied": {
+            "targets": [
+              "/tmp/singularity-scripted-loop-FVCYut/dsh-home/singularity/task-templates/log-analytics-pipeline@2.json"
+            ],
+            "approvalRef": "approval:call_00_r0inojjurmtmp1jaw1sdqm2b"
+          }
+        }
+      ],
+      "experiments": [
+        {
+          "proposalId": "prop-log-analytics-pipeline-recipe-order-v2",
+          "experimentId": "334c9b47c48ef99c",
+          "verdict": "fixed",
+          "samples": [
+            {
+              "taskId": "t-6d4d7f94-bdd9-4891-b62c-d3263e7d1261",
+              "role": "observed-failure",
+              "baseline": "failed",
+              "candidate": "verified"
+            },
+            {
+              "taskId": "t-830e50d4-5b96-4423-a4f5-6b2fdadedc8b",
+              "role": "holdout",
+              "baseline": "verified",
+              "candidate": "verified"
+            },
+            {
+              "taskId": "t-be201508-7727-4733-a77a-6d3c4ea18d3d",
+              "role": "holdout",
+              "baseline": "verified",
+              "candidate": "verified"
+            }
+          ]
+        }
+      ],
+      "evolutionCalls": [
+        {
+          "tool": "evolution_list",
+          "isError": false,
+          "result": "evolution ledger: no proposals match"
+        },
+        {
+          "tool": "evolution_propose",
+          "isError": false,
+          "result": "proposal prop-log-analytics-pipeline-recipe-order-v2 registered [proposed] L3 task_definition log-analytics-pipeline (base 1)\nrationale: The published template log-analytics-pipeline@1 declares decomposition.children = [parse-log-events, render-stats-report, aggregate-event-stats] with no dependency edges, and the runtime admits the batch's children one at a time in exactly that declared recipe order (decompose result: \"starts the children one at a time in dependency order\"; observed schedule parse -> report -> aggregate). render-stats-report's own contract hard-gates on out/stats.json existing and being newer than out/events.json, which can only hold after aggregate-event-stats has run, so on every fresh checkout the report stage is admitted before its producer and must fail. The template objective compounds this by ordering the children \"parse, report and aggregate\" in one sentence while demanding \"respect their data dependency order\" in the same paragraph. The repair is internal to the template: declare the children in their only valid data order (parse-log-events -> aggregate-event-stats -> render-stats-report) and make the objective name that same order, leaving contract criteria, caps and child template digests untouched.\nsourceRefs: [diagnosis:review-agent-35f434c7-ffd0-46fc-9c5d-a6af8c3b60a1, t-8dd08db7-8707-4fd2-8536-efa2f23faeda#r-56c9265f-8330-4e89-a3ef-1e8c5cbbbdff, t-be201508-7727-4733-a77a-6d3c4ea18d3d#r-2daaec9a-618a-41b0-9ab6-2753ece2d96d, evidence-r-56c9265f-"
+        },
+        {
+          "tool": "evolution_candidate",
+          "isError": false,
+          "result": "proposal prop-log-analytics-pipeline-recipe-order-v2 [candidate] version set: log-analytics-pipeline=2\nledger entry only — no branch created, nothing executed; mutation recorded — next: evolution_prepare (sandbox materialization), then evolution_replay (the two-sided experiment), then evolution_gate"
+        },
+        {
+          "tool": "evolution_prepare",
+          "isError": false,
+          "result": "proposal prop-log-analytics-pipeline-recipe-order-v2 [prepared] sandbox: /tmp/live-supervisor-repair-kucCJv/evolution/sandbox/prop-log-analytics-pipeline-recipe-order-v2\n  wrote task-templates/baseline/aggregate-event-stats@1.json\n  wrote task-templates/baseline/log-analytics-pipeline@1.json\n  wrote task-templates/baseline/parse-log-events@1.json\n  wrote task-templates/baseline/render-stats-report@1.json\n  wrote task-templates/baseline/unrelated-0@1.json\n  wrote task-templates/baseline/unrelated-10@1.json\n  wrote task-templates/baseline/unrelated-11@1.json\n  wrote task-templates/baseline/unrelated-12@1.json\n  wrote task-templates/baseline/unrelated-13@1.json\n  wrote task-templates/baseline/unrelated-14@1.json\n  wrote task-templates/baseline/unrelated-15@1.json\n  wrote task-templates/baseline/unrelated-16@1.json\n  wrote task-templates/baseline/unrelated-17@1.json\n  wrote task-templates/baseline/unrelated-18@1.json\n  wrote task-templates/baseline/unrelated-19@1.json\n  wrote task-templates/baseline/unrelated-1@1.json\n  wrote task-templates/baseline/unrelated-20@1.json\n  wrote task-templates/baseline/unrelated-21@1.json\n  wrote task-templates/baseline/unrelated-22@1.json\n  wrote task-templates/baseline/unrelated-23@1.json\n  wrote task-templates/baseline/unrelated-24@1.json\n  wrote task-templates/baseline/unrelated-25@1.json\n  wrote task-templates/baseline/unrelated-26@1.json\n  wrote task-templates/baseline/unrelated-27@1.json\n  wrote task-templates/baseline/unrelated-28@1.json\n  "
+        },
+        {
+          "tool": "evolution_replay",
+          "isError": false,
+          "result": "proposal prop-log-analytics-pipeline-recipe-order-v2 [experiment] task_definition log-analytics-pipeline — verdict: fixed\nsamples (3):\n  t-6d4d7f94-bdd9-4891-b62c-d3263e7d1261 [observed-failure] baseline failed → candidate verified (pipeline-result fail→pass) — fixed\n  t-830e50d4-5b96-4423-a4f5-6b2fdadedc8b [holdout] baseline verified → candidate verified (no criterion diff) — maintained\n  t-be201508-7727-4733-a77a-6d3c4ea18d3d [holdout] baseline verified → candidate verified (no criterion diff) — maintained\nevery side above is a new run this experiment started — the baseline under the production configuration (the production object, or the production table for a capability sample, whose frozen identity is read again at every promotion gate), the candidate on the prepared object's bytes (the prepared `SKILL.md`, the sidecar derived from production for an execution skill, and, for a capability candidate, the frozen row the candidate overlay mounts); the sample's historical record only locates the case\nreport: sandbox/prop-log-analytics-pipeline-recipe-order-v2/exp-334c9b47c48ef99c/experiment-report.json\nexperiment 334c9b47c48ef99c (repetition 0, frozen f047fa51ad8b2bedadbb7f1a024a723ed57ec783a38009240b3ecd185c9c35a4); candidate TaskTemplate log-analytics-pipeline@2 sha256:11fb33c9f172cffe2b49296ed4e86302f2666c546cc2ddc5f0db80076d245bfc; template baseline log-analytics-pipeline@1 sha256:f5af010854f8faf4c3c88bf90097e75798d8ace2c8d6d450191dd51648405e8f; fixed original parent orac"
+        },
+        {
+          "tool": "evolution_gate",
+          "isError": false,
+          "result": "proposal prop-log-analytics-pipeline-recipe-order-v2 [gated] gate answered 6/6, regression evidence: [sandbox/prop-log-analytics-pipeline-recipe-order-v2/exp-334c9b47c48ef99c/experiment-report.json, evidence-r-56c9265f-8330-4e89-a3ef-1e8c5cbbbdff-d217d266-15ad-4507-b39e-7a6f056a30f0, evidence-r-2daaec9a-618a-41b0-9ab6-2753ece2d96d-3f931884-31ff-4aa6-ae6d-bb4b1b31fb20]\nledger entry only — nothing executed or promoted; next: evolution_decide (human approval required)"
+        },
+        {
+          "tool": "evolution_decide",
+          "isError": false,
+          "result": "proposal prop-log-analytics-pipeline-recipe-order-v2 [decided] PROMOTE — Promote the gated TaskTemplate candidate log-analytics-pipeline@2 (sha256:11fb33c9f172cffe2b49296ed4e86302f2666c546cc2ddc5f0db80076d245bfc). The recipe now lists the children in their only valid data order parse-log-events → aggregate-event-stats → render-stats-report and the objective names that same order, while acceptance, protected inputs, capabilities and the three child template digests are unchanged. Frozen experiment exp-334c9b47c48ef99c: observed failure pipeline-result fail→pass, both holdouts maintained with no criterion diff.\ndiagnosis review-agent-35f434c7-ffd0-46fc-9c5d-a6af8c3b60a1 — already delegated to supervisor session c069b9a2-9241-4bc7-a190-8e081405bb91; nothing started\nrecorded after human approval — nothing applied yet; evolution_apply (second human gate) takes it to production"
+        },
+        {
+          "tool": "evolution_apply",
+          "isError": false,
+          "result": "proposal prop-log-analytics-pipeline-recipe-order-v2 [applied] L3 task_definition log-analytics-pipeline — PROMOTE in effect\nwrote production targets:\n  - /tmp/singularity-scripted-loop-FVCYut/dsh-home/singularity/task-templates/log-analytics-pipeline@2.json\neffective for new task instances — the library serves the published template; existing task contracts and Run bindings stay fixed\ndiagnosis review-agent-35f434c7-ffd0-46fc-9c5d-a6af8c3b60a1 — already delegated to supervisor session c069b9a2-9241-4bc7-a190-8e081405bb91; nothing started\nhuman approval: approval:call_00_r0inojjurmtmp1jaw1sdqm2b — rollback with evolution_rollback"
+        }
+      ],
+      "requestCounts": {
+        "run1": 33,
+        "supervisor": 27,
+        "experiment": 92,
+        "run2": 0
+      },
+      "requestTotal": 152,
+      "nudgeCount": 0,
+      "nudgeSessions": {},
+      "wallSeconds": 631.77
+    }
+  ],
+  "limits": "The run threw before its terminal assertions; the document records the live store state and the assertions that could be resolved from it."
+}

@@ -37,7 +37,7 @@ async function assertRecipeConsumption(input: {
   workspace: string
   expected: { template: TaskTemplate; digest: string }
   where: string
-}): Promise<void> {
+}): Promise<boolean> {
   const { sources, snapshot, task, library, workspace, expected, where } = input
   const branch = new Set(subtreeOf(snapshot, task.taskId).map(item => item.taskId))
   const proposals = snapshot.proposals.all.filter(proposal => proposal.kind !== 'root' &&
@@ -108,7 +108,7 @@ async function assertRecipeConsumption(input: {
     }
     consumed = true
   }
-  if (!consumed) throw new Error(`evolution: ${where} consumed no frozen decomposition recipe`)
+  return consumed
 }
 
 export async function assertTaskDefinitionPromotion(
@@ -143,6 +143,11 @@ export async function assertTaskDefinitionPromotion(
   let candidateBound = false
   for (const comparison of report.samples) {
     const sample = frozen.samples.find(item => item.taskId === comparison.taskId)!
+    const historicalBranch = new Set(subtreeOf(snapshot, sample.taskId).map(task => task.taskId))
+    const historicallyConsumed = snapshot.proposals.all.some(item => item.kind !== 'root' &&
+      historicalBranch.has(item.identity.parentTaskId) && item.identity.templateRef?.id === definition.candidate.template.id &&
+      item.status === 'admitted' && item.consumption !== undefined && item.consumption.kind !== 'root')
+    const recipeConsumed = { baseline: false, candidate: false }
     for (const side of ['baseline', 'candidate'] as const) {
       const detail = comparison[side]
       const where = `template sample ${comparison.taskId} ${side}`
@@ -166,9 +171,9 @@ export async function assertTaskDefinitionPromotion(
       if (task !== undefined) {
         const expected = side === 'candidate' ? definition.candidate : definition.baseline
         if (expected?.template.decomposition !== undefined) {
-          await assertRecipeConsumption({ sources, snapshot, task, expected,
+          recipeConsumed[side] = await assertRecipeConsumption({ sources, snapshot, task, expected,
             library: resolve(sources.root, sandbox, 'task-templates', side), workspace: detail.workspace, where })
-          if (side === 'candidate') candidateBound = true
+          if (side === 'candidate' && recipeConsumed[side]) candidateBound = true
         }
         for (const descendant of subtreeOf(snapshot, task.taskId).filter(item => item.taskId !== task.taskId)) {
           if (expected === null) {
@@ -182,14 +187,24 @@ export async function assertTaskDefinitionPromotion(
             descendant.templateRef.version !== expected.template.version
           )
             throw new Error('evolution: new child used another template version')
-          if (side === 'candidate') candidateBound = true
+          if (side === 'candidate' && expected.template.decomposition === undefined) candidateBound = true
         }
+      }
+    }
+    // Unaffected leaf samples remain regression guards; affected samples must exercise both available recipes.
+    if (historicallyConsumed || recipeConsumed.baseline || recipeConsumed.candidate) {
+      for (const side of ['baseline', 'candidate'] as const) {
+        const expected = side === 'candidate' ? definition.candidate : definition.baseline
+        if (expected?.template.decomposition !== undefined && !recipeConsumed[side])
+          throw new Error(`evolution: template sample ${comparison.taskId} ${side} consumed no frozen decomposition recipe`)
       }
     }
     await assertSampleInputsIntact({ sample, snapshot, productionWorkspace: frozen.snapshot.sourceDir })
   }
   if (!candidateBound)
-    throw new Error('evolution: candidate parent replay created no child bound to the new TaskTemplate')
+    throw new Error(definition.candidate.template.decomposition === undefined
+      ? 'evolution: candidate parent replay created no child bound to the new TaskTemplate'
+      : 'evolution: candidate parent replay consumed no frozen decomposition recipe')
   const repair = validateTaskDefinitionMutation(proposal.mutation).criterionRepair
   if ((repair === undefined) !== (definition.criterionRepair === undefined))
     throw new Error('evolution: criterion repair examples were not frozen')

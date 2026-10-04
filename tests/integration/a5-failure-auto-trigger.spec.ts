@@ -329,7 +329,7 @@ describe('a failed review is accepted on its own (A5)', () => {
     expect(insertions()).toHaveLength(1)
     expect(h.visible(h.agent(ROOT))).not.toContain('task_recover')
     expect(input).toContain('Never tell the business coordinator to call task_recover')
-    expect(input).toContain('most failures need no evolution proposal')
+    expect(input).toContain('Most failures need no evolution proposal')
   }, 60_000)
 
   it('delivers a nested failure diagnosis to its delegating parent run', async () => {

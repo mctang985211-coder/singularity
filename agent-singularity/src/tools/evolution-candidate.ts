@@ -7,7 +7,7 @@ export function defineEvolutionCandidateTool(ctx: Context) {
   return defineTool({
     name: 'evolution_candidate',
     description:
-      'Record one candidate as mutationJson (a JSON string). Task: {template:<complete canonical TaskTemplate>,criterionRepair?:' +
+      'Record one candidate as mutationJson (a JSON string). task_definition: {template:<complete canonical TaskTemplate>,criterionRepair?:' +
       '{positive:{taskId,sourceDir,parameters},negative:{taskId,sourceDir,parameters}}}; changed child criteria need both fixed ' +
       'examples under the original independent parent oracle. Skill: {name,content:<whole SKILL.md>}. Capability: ' +
       '{rows:{<name>:<whole row>},mcpServers?:{<id>:{serverName,description,command,args?,env?,cwd?,toolCallTimeoutMs?}},skill?:' +

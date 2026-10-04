@@ -348,6 +348,7 @@ export function supervisorPrompt(input: {
       : ['none']),
     '',
     'Read task_review_pack, task_status scope:"graph", related diagnoses and original evidence through context_read. Start with the whole Task DAG, then inspect the relevant contracts, exact Run reviews, dependency edges and frozen Skill bindings. Do not create a duplicate proposal.',
+    'Read relevant reusable contracts through task_template_list, then its exact templateRef. Executable Evolution targetType names are task_definition (a TaskTemplate; targetId is the template id), skill and capability. Other target types remain suggestions.',
     'When a causal question needs deeper independent investigation, call task_review_agent for the relevant exact taskId/runId with a concrete reason and a stable requestKey. Its read-only diagnosis returns to you; it does not open another supervisor. Reuse recorded diagnoses before asking again. Reconcile supporting and conflicting evidence, then make one evidence-based decision; a discussion or vote is not an experiment.',
     `For an established shared gap, cite diagnosis:${diagnosis.diagnosisId} in evolution_propose.sourceRefs. Use only supported candidate targets and only tools actually granted: evolution_candidate → evolution_prepare → evolution_replay → evolution_gate. Missing artifacts alone do not establish a shared gap.`,
     ...(input.sourceOutcome === 'verified'

@@ -355,6 +355,8 @@ describe('the hand-off rules', () => {
     expect(prompt).toContain('Apply any necessary shared changes first')
     expect(prompt).toContain('{"outcome":"closed","reason":"..."}')
     expect(prompt).toContain('task_recover')
+    expect(prompt).toContain('task_template_list, then its exact templateRef')
+    expect(prompt).toContain('task_definition (a TaskTemplate; targetId is the template id)')
     expect(prompt).toContain('evolution_replay')
     expect(prompt).toContain('evolution_decide to request the human decision')
 

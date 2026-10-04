@@ -1,6 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { EvidenceBundle, RunId } from '@dangosys/dsh-singularity-task'
 import { sessionId, text } from '../shared.ts'
@@ -8,11 +7,6 @@ import { sessionId, text } from '../shared.ts'
 /** Local view of the verifier service; resolved softly so this package never imports the verifier plugin. */
 interface RunVerifier {
   verifyRun(storeId: string, runId: RunId, options?: { cwd?: string; timeoutMs?: number }): Promise<EvidenceBundle>
-}
-
-/** Local view of the env-builder service; resolved softly like the verifier. */
-interface EnvSource {
-  store: { get(id: string): { path: string } }
 }
 
 export function defineTaskVerifyTool(ctx: Context) {
@@ -33,13 +27,7 @@ export function defineTaskVerifyTool(ctx: Context) {
       if (run.status !== 'running') {
         return `task_verify: run ${run.runId} of task ${task.taskId} is ${run.status}; evidence can only be recorded while the run is running`
       }
-      let cwd: string | undefined
-      try {
-        const graph = await ctx.graphs.graphForSession(caller)
-        cwd = (ctx.get('envBuilder') as EnvSource | undefined)?.store.get(graph.envId).path
-      } catch {
-        cwd = undefined
-      }
+      const cwd = await ctx.taskRuntime.envPathForSession(caller)
       // The verifier sets no timer when `timeoutMs` is undefined
       // (`verifier/src/command-verifier.ts:47`), so a criterion with a long
       const timeoutMs = ctx.taskRuntime.verifyTimeoutMs
