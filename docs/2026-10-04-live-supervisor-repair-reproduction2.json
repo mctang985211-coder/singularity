@@ -1,0 +1,769 @@
+{
+  "date": "2026-10-04",
+  "test": "tests/integration/live-supervisor-repair.spec.ts",
+  "command": "NODE_USE_ENV_PROXY=1 SINGULARITY_LIVE_SUPERVISOR_REPAIR=1 SINGULARITY_LIVE_REVIEWER_MODE=all-real SINGULARITY_LIVE_SUPERVISOR_EVIDENCE=2026-10-04-live-supervisor-repair-reproduction2.json pnpm exec vitest run --project integration packages/singularity/tests/integration/live-supervisor-repair.spec.ts",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "result": "passed",
+  "method": "A all-real run over the log-pipeline world: the mis-ordered log-analytics-pipeline v1 recipe ([parse, report, aggregate] with no dependsOn) runs the report stage before the aggregation stage produced out/stats.json, and the honest report leaf refuses to fabricate the input, failing the real checker; the coordinator then fails too because a mandatory child is unmet. The review scan spawns the reviewer, whose recorded diagnosis carries a task_definition proposal and is consumed into a supervisor hand-off; the supervisor is the real model and calls the real evolution chain (propose, candidate, prepare, replay, gate, decide, apply) with argument guidance only from the diagnosis text; the two-sided experiment replays a failed coordinator sample and a verified holdout through the real runtime under per-side frozen template libraries, with the real checker as the original acceptance; the human gates are answered through the deployment approval seam; the publish appends log-analytics-pipeline@2.json and leaves @1 mis-ordered; and a second root run on CASE_2 verifies with the pipeline child bound to version 2. The repair is pure template CONTENT (recipe order and/or dependsOn; the criteria are byte-identical), so evolution_prepare never takes the criterion-repair branch. In all-real mode the Reviewer also uses the real model; in hybrid mode only its request is scripted. autoReview is pinned to \"failed\" for the failed-source path. The fixture mounts the production Reviewer delegation source and the Supervisor reads templates through task_template_list, with no separate template reader. The assemble filter keeps the evolution chain and task_review_agent only on the supervisor session. An idle session is nudged per session id — its own active run or the supervisor session, no pending call, no in-flight request, and globally stagnant progress for 180 seconds, capped at 12 nudges per session — with a neutral continuation that does not tutor the chain; a session with a pending tool call is never prompted. Two more fixture checks: the bash body detects unquoted paths outside the checkout and `..`/`~`/`$HOME` traversals (heredoc bodies and quoted spans are removed first, and only path-like absolute tokens count), and the honest report leaf checks first that out/stats.json is newer than out/events.json and makes the gap path a single task_submit_result so a replay worker reports the missing or stale input instead of exploring.",
+  "assertions": {
+    "reportLeafFailedOnRealChecker": true,
+    "pipelineCoordinatorFailedOnRealChecker": true,
+    "diagnosisProposesPipelineTemplate": true,
+    "supervisorSessionStarted": true,
+    "supervisorReadProductionTemplate": true,
+    "supervisorRanEvolutionChain": true,
+    "proposalApplied": true,
+    "exactlyOneProposalApplied": true,
+    "ledgerWalkedProposedToApplied": true,
+    "experimentVerdictFixed": true,
+    "experimentBaselineFailedCandidateVerified": true,
+    "publishedEqualsFrozenCandidate": true,
+    "libraryGainedV2AndKeptV1": true,
+    "failedRunBindingFrozen": true,
+    "root1Terminal": true,
+    "templateBoundTasksAtLeastThree": true,
+    "everyRunBindsASkill": true,
+    "noUnrelatedTemplatesInAnyRequest": true,
+    "run2Verified": true,
+    "run2PipelineBindsVersion2": true,
+    "run2ConsumesVersion2Recipe": true,
+    "run2StatsRecomputed": true,
+    "tokenUsageRecorded": true
+  },
+  "cases": [
+    {
+      "name": "log-pipeline-shared-template-repair",
+      "reviewPath": "all-real",
+      "failure": {
+        "report": {
+          "taskId": "t-bdc5a1bf-5b6c-47b6-877b-6bdf6d0cd23a",
+          "templateId": "render-stats-report",
+          "verdict": "fail",
+          "exitCode": 1,
+          "logRef": "sg-t-s-root/r-ff89f56d-c2e9-4d8a-8ece-8c7f54410e08/report-result.log",
+          "logExcerpt": "    at file:///tmp/singularity-scripted-loop-YkTA97/env/checks/verify.mjs:69:30\n    at ModuleJob.run (node:internal/modules/esm/module_job:343:25)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:681:26)\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)\n\nNode.js v22.23.3\n"
+        },
+        "coordinator": {
+          "taskId": "t-0079c934-7b41-45f2-8268-b52bfb82427d",
+          "templateId": "log-analytics-pipeline",
+          "templateVersion": 1,
+          "verdict": "fail",
+          "exitCode": 1,
+          "logRef": "sg-t-s-root/r-493b0c95-5fc5-43c8-819e-c7c6ff0ad199/pipeline-result.log"
+        }
+      },
+      "diagnosis": {
+        "diagnosisId": "review-agent-d85c7344-cefc-4051-a271-07be27d1504a",
+        "observedFailure": "The reviewed source t-0079c934#r-493b0c95-5fc5-43c8-819e-c7c6ff0ad199 [failed] failed its only mandatory criterion: `node checks/verify.mjs pipeline` exit 1, log sg-t-s-root/r-493b0c95-5fc5-43c8-819e-c7c6ff0ad199/pipeline-result.log, \"missing deliverable report.mjs in the checkout root\" (evidence-r-493b0c95-5fc5-43c8-819e-c7c6ff0ad199-317b4ac2-4ded-49e6-b1af-04892bf6997f). Its single batch b-r-493b0c95-…-3eb2aef3 expanded log-analytics-pipeline@1 into three children that the scheduler ran one at a time in the declared order parse → report → aggregate (sessions s-032c0a68 08:53:22, s-9afef68d 08:53:37, s-78216c27 08:53:45). The report child (review t-bdc5a1bf-5b6c-47b6-877b-6bdf6d0cd23a#r-ff89f56d-c2e9-4d8a-8ece-8c7f54410e08) ran while out/ held only events.json — its mandated freshness test exited 1 (session s-9afef68d seq 10–12), `ls out/` showed \"stats missing\" (seq 17) — so per its template it authored no report.mjs and submitted the gap; its criterion report-result failed (evidence-r-ff89f56d-c2e9-4d8a-8ece-8c7f54410e08-1083069e-dacb-4ab6-ab89-4838d76d3b28). Parse (t-94e38553, r-45a3e804) and aggregate (t-838b7805, r-296b0219) verified, and the aggregate child only then wrote out/stats.json (total 12, INFO 6/WARN 3/ERROR 3, errorRate 0.25); its identical freshness test passed (\"fresh\", s-78216c27 seq 41–43), and the parent's post-batch `ls` (s-308dc221 seq 47) shows parse.mjs, aggregate.mjs, out/events.json, out/stats.json but no report.mjs/out/report.md. The parent submitted the contract-mandated gap report; protected input hashes unchanged.",
+        "localizedCause": "Cause is one TaskTemplate defect, not a worker, skill or tool failure: log-analytics-pipeline@1 (catalog logs, digest f5af010854f8faf4c3c88bf90097e75798d8ace2c8d6d450191dd51648405e8f) declares its decomposition.children as [parse-log-events, render-stats-report, aggregate-event-stats], and its contract text even says the runtime \"binds the parse, report and aggregate children in recipe order\". render-stats-report requires out/stats.json to exist and be newer than out/events.json, which only the aggregate stage writes, so report-before-aggregate is unsatisfiable by construction and the report stage is guaranteed to gap out (session s-9afef68d seq 10–17 → report-result exit 1). The parent's diagnosis in s-308dc221 seq 61 (\"the precondition is unsatisfiable in an isolated child run\") mis-attributes this to run isolation; the counterexample is the aggregate child itself, whose identical mtime check passed because it ran after parse (s-78216c27 seq 41–45) — stats.json's mtime only needs to exceed events.json's, so the order parse → aggregate → report satisfies it. Worker behaviour was contract-conformant (3 tool calls, 0 failures, 0 retries, edit/read/write granted, no writes outside the checkout) and no shared provider or diamond dependency exists (all children edges 0/0). Next action for the business coordinator: the pipeline task's run r-493b0c95-5fc5-43c8-819e-c7c6ff0ad199 is terminal (phase submitted), so nothing may be re-dispatched there; the root coordinator t-83d21ed2-7a13-4d47-92be-5b9b9273b4d3 (run r-1a2a77a0-cf8a-43c0-b360-02f486db89c2 still active) must NOT re-admit the same recipe, which would deterministically reproduce the failure — escalate the template's child order to its owner and re-run only against a corrected version (children ordered parse-log-events → aggregate-event-stats → render-stats-report, or explicit dependency edges), keeping pipeline-result as the unchanged acceptance test. Confidence high: the failing run, the failing stage's log and the passing contrast are all read end-to-end.",
+        "scope": "task t-0079c934-7b41-45f2-8268-b52bfb82427d",
+        "reviewerProposal": {
+          "targetType": "task_definition",
+          "targetId": "log-analytics-pipeline",
+          "rationale": "Published template v1 (digest f5af010854f8) has an incorrect child order: it binds render-stats-report before aggregate-event-stats, yet render-stats-report requires out/stats.json newer than out/events.json, which only aggregate-event-stats writes. Publish a corrected version with children ordered parse-log-events, aggregate-event-stats, render-stats-report (or with explicit dependency edges), which is testable under the unchanged pipeline-result command and the existing per-stage commands; the aggregate child's passing freshness check (s-78216c27 seq 41–43) is the holdout contrast that the corrected order reproduces for report."
+        },
+        "proposals": [
+          [
+            "task_definition",
+            "log-analytics-pipeline"
+          ]
+        ]
+      },
+      "appliedProposalId": "log-analytics-pipeline-child-order-1",
+      "firstProposalId": "log-analytics-pipeline-child-order-1",
+      "proposals": [
+        {
+          "proposalId": "log-analytics-pipeline-child-order-1",
+          "status": "applied",
+          "targetType": "task_definition",
+          "targetId": "log-analytics-pipeline"
+        }
+      ],
+      "ledgerKinds": [
+        "proposed",
+        "candidate",
+        "prepared",
+        "experiment_started",
+        "experiment_sample",
+        "experiment_sample",
+        "experiment_sample",
+        "experiment_sample",
+        "experiment_sample",
+        "experiment_sample",
+        "gated",
+        "decided",
+        "commit_intent",
+        "applied"
+      ],
+      "experiment": {
+        "verdict": "fixed",
+        "sampleCount": 3,
+        "totalSides": 6,
+        "gatePassedSides": 6,
+        "samples": [
+          {
+            "taskId": "t-0079c934-7b41-45f2-8268-b52bfb82427d",
+            "role": "observed-failure",
+            "baseline": "failed",
+            "candidate": "verified"
+          },
+          {
+            "taskId": "t-838b7805-55a6-4bc7-91ed-349dc5ab03c0",
+            "role": "observed-regression",
+            "baseline": "verified",
+            "candidate": "verified"
+          },
+          {
+            "taskId": "t-94e38553-4226-40b3-9c21-d33cf1694dc0",
+            "role": "holdout",
+            "baseline": "verified",
+            "candidate": "verified"
+          }
+        ]
+      },
+      "gate": {
+        "proposalId": "log-analytics-pipeline-child-order-1",
+        "answered": 6,
+        "questions": 6,
+        "answers": {
+          "targetFailureFixed": "Yes. The frozen experiment (sandbox/log-analytics-pipeline-child-order-1/exp-43552c41776f33cb/experiment-report.json) reports verdict \"fixed\": observed-failure sample t-0079c934-7b41-45f2-8268-b52bfb82427d went pipeline-result fail → pass under the candidate template log-analytics-pipeline@2 (sha256 eb6c3dd9…) while the production baseline f5af010854f8 still fails; the mechanism matches the diagnosis exactly (children now bound parse-log-events → aggregate-event-stats → render-stats-report, so the report stage's mandated freshness gate runs after aggregate wrote out/stats.json).",
+          "originalAcceptanceMaintained": "Yes. The candidate keeps the identical mandatory criterion pipeline-result — same criterionId, same deterministic command `node checks/verify.mjs pipeline`, same protected inputs checks/verify.mjs and events.log — and the contract's constraints on protected inputs and on not authoring stage contracts inline are preserved verbatim; only the recipe order and the sentence naming it are corrected.",
+          "existingRegressionMaintained": "Yes. Observed-regression sample t-838b7805-55a6-4bc7-91ed-349dc5ab03c0 (criterion aggregate-result, `node checks/verify.mjs aggregate`) verified on both sides with no criterion diff in the frozen experiment, and holdout t-94e38553-4226-40b3-9c21-d33cf1694dc0 (criterion parse-result, `node checks/verify.mjs parse`) also verified on both sides with no criterion diff. The three stage templates (parse-log-events@1 915cef3d374a, aggregate-event-stats@1 cfe58dff2dad, render-stats-report@1 a21192fdcee5) are carried into the candidate library byte-identical by digest, and the original pipeline-result acceptance command is unchanged.",
+          "noUnacceptableSideEffects": "No. The mutation touches only this template's own decomposition.children order, its decomposition.reason and one contract sentence plus one added order-stability constraint; no stage template, capability row, skill, provider or tool grant changes, acceptanceCriteria and protectedInputs are unchanged, and the candidate never rewrites a sibling or depends on hidden run state. It removes a deterministic unsatisfiable precondition rather than relaxing any check.",
+          "holdoutPerformanceAcceptable": "Yes. Holdout t-94e38553-4226-40b3-9c21-d33cf1694dc0 was verified on the candidate side (no criterion diff against its baseline run r-45a3e804), so the corrected recipe order does not perturb a stage it is not meant to change.",
+          "resourceCostAcceptable": "Yes. Repairing the order does not add work: the same three stage runs happen, now in a satisfiable order, and the failed configuration's wasted report-stage run is eliminated. No token ceiling was declared, so cost is judged only by the sample verdicts; no criterion diff and no extra sides appeared on the regression and holdout samples.",
+          "regressionEvidenceRefs": [
+            "sandbox/log-analytics-pipeline-child-order-1/exp-43552c41776f33cb/experiment-report.json",
+            "evidence-r-ff89f56d-c2e9-4d8a-8ece-8c7f54410e08-1083069e-dacb-4ab6-ab89-4838d76d3b28",
+            "evidence-r-493b0c95-5fc5-43c8-819e-c7c6ff0ad199-317b4ac2-4ded-49e6-b1af-04892bf6997f",
+            "evidence-r-296b0219-631b-4d1b-8963-4dffef7d02ce-de062f0b-d121-4550-8f56-e1819cf829a4"
+          ]
+        },
+        "regressionEvidenceRefs": [
+          "sandbox/log-analytics-pipeline-child-order-1/exp-43552c41776f33cb/experiment-report.json",
+          "evidence-r-ff89f56d-c2e9-4d8a-8ece-8c7f54410e08-1083069e-dacb-4ab6-ab89-4838d76d3b28",
+          "evidence-r-493b0c95-5fc5-43c8-819e-c7c6ff0ad199-317b4ac2-4ded-49e6-b1af-04892bf6997f",
+          "evidence-r-296b0219-631b-4d1b-8963-4dffef7d02ce-de062f0b-d121-4550-8f56-e1819cf829a4"
+        ],
+        "sampleCount": 3,
+        "totalSides": 6,
+        "gatePassedSides": 6,
+        "sides": [
+          {
+            "taskId": "t-0079c934-7b41-45f2-8268-b52bfb82427d",
+            "role": "observed-failure",
+            "side": "baseline",
+            "outcome": "failed"
+          },
+          {
+            "taskId": "t-0079c934-7b41-45f2-8268-b52bfb82427d",
+            "role": "observed-failure",
+            "side": "candidate",
+            "outcome": "verified"
+          },
+          {
+            "taskId": "t-838b7805-55a6-4bc7-91ed-349dc5ab03c0",
+            "role": "observed-regression",
+            "side": "baseline",
+            "outcome": "verified"
+          },
+          {
+            "taskId": "t-838b7805-55a6-4bc7-91ed-349dc5ab03c0",
+            "role": "observed-regression",
+            "side": "candidate",
+            "outcome": "verified"
+          },
+          {
+            "taskId": "t-94e38553-4226-40b3-9c21-d33cf1694dc0",
+            "role": "holdout",
+            "side": "baseline",
+            "outcome": "verified"
+          },
+          {
+            "taskId": "t-94e38553-4226-40b3-9c21-d33cf1694dc0",
+            "role": "holdout",
+            "side": "candidate",
+            "outcome": "verified"
+          }
+        ]
+      },
+      "tokenUsage": {
+        "source": "deriveTurnTokenUsage(@deepseek-ai/dsh-token-meter) over every completed turn/start..turn/end slice of every session that made a model request",
+        "buckets": "inputTokens is uncached prompt input (uncachedInputTokens); cacheReadTokens/cacheWriteTokens are null unless every measured turn reported them — a bucket no route reported is never rendered as zero",
+        "attribution": "a turn is attributed to the phase of its first request; turns the meter could not prove are counted, not imputed; a phase that completed no turn renders null buckets (its unreportedBuckets names them) and is listed in phasesWithoutCompletedTurns",
+        "phases": {
+          "run1": {
+            "inputTokens": 195239,
+            "outputTokens": 18267,
+            "cacheReadTokens": 472320,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 8,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "supervisor": {
+            "inputTokens": 139943,
+            "outputTokens": 46343,
+            "cacheReadTokens": 1005568,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 3,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "experiment": {
+            "inputTokens": 496862,
+            "outputTokens": 35665,
+            "cacheReadTokens": 1147136,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 16,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "run2": {
+            "inputTokens": 161255,
+            "outputTokens": 9079,
+            "cacheReadTokens": 295936,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 7,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          }
+        },
+        "phasesWithoutCompletedTurns": [],
+        "total": {
+          "inputTokens": 993299,
+          "outputTokens": 109354,
+          "cacheReadTokens": 2920960,
+          "cacheWriteTokens": 0,
+          "measuredTurns": 34,
+          "turnsWithoutUsage": 0,
+          "unreportedBuckets": []
+        },
+        "sessions": {
+          "s-root": {
+            "label": "root:s-root",
+            "firstPhase": "run1",
+            "inputTokens": 81700,
+            "outputTokens": 18501,
+            "cacheReadTokens": 544768,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 5,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-308dc221-523f-4335-827d-362239165df8": {
+            "label": "Own the log-analytics pipeline: parse.mj",
+            "firstPhase": "run1",
+            "inputTokens": 104883,
+            "outputTokens": 8648,
+            "cacheReadTokens": 273280,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 3,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-032c0a68-fa08-48e2-85a0-4968ce2799ec": {
+            "label": "Author parse.mjs in the checkout root so",
+            "firstPhase": "run1",
+            "inputTokens": 29007,
+            "outputTokens": 1019,
+            "cacheReadTokens": 45696,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-9afef68d-aec3-4fb6-a83a-4d2aaef85512": {
+            "label": "FIRST, before anything else, check that ",
+            "firstPhase": "run1",
+            "inputTokens": 22001,
+            "outputTokens": 876,
+            "cacheReadTokens": 20480,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-78216c27-a34c-4410-8953-0bc27f2c884d": {
+            "label": "Author aggregate.mjs in the checkout roo",
+            "firstPhase": "run1",
+            "inputTokens": 29875,
+            "outputTokens": 1564,
+            "cacheReadTokens": 82816,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "d85c7344-cefc-4051-a271-07be27d1504a": {
+            "label": "review t-0079c934-7b41-45f2-8268-b52bfb82427d",
+            "firstPhase": "supervisor",
+            "inputTokens": 70248,
+            "outputTokens": 12980,
+            "cacheReadTokens": 174080,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "54e3dff9-5e58-480f-a765-e2e7630cdc32": {
+            "label": "supervisor for review-agent-d85c7344-cefc-4051-a271-07be27d1504a",
+            "firstPhase": "supervisor",
+            "inputTokens": 61299,
+            "outputTokens": 31431,
+            "cacheReadTokens": 760832,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-f7bee9ed-65de-49a9-a610-436fafb1c38b": {
+            "label": "[evolution-experiment:43552c41776f33cb:t",
+            "firstPhase": "experiment",
+            "inputTokens": 67644,
+            "outputTokens": 7142,
+            "cacheReadTokens": 127232,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 2,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-556f6fd8-1abf-4ab4-88dc-2e6961943d5f": {
+            "label": "Author parse.mjs in the checkout root so",
+            "firstPhase": "experiment",
+            "inputTokens": 30123,
+            "outputTokens": 1358,
+            "cacheReadTokens": 46208,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-99fe1fed-7a6b-48b0-98fa-686b8b7240b1": {
+            "label": "FIRST, before anything else, check that ",
+            "firstPhase": "experiment",
+            "inputTokens": 22104,
+            "outputTokens": 1466,
+            "cacheReadTokens": 32256,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-1a44f111-6df6-42fb-b12d-e3387f537113": {
+            "label": "Author aggregate.mjs in the checkout roo",
+            "firstPhase": "experiment",
+            "inputTokens": 31155,
+            "outputTokens": 1722,
+            "cacheReadTokens": 47872,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-d2d1ebd1-62b2-47b7-ae8f-845a7a0c7d86": {
+            "label": "[evolution-experiment:43552c41776f33cb:t",
+            "firstPhase": "experiment",
+            "inputTokens": 70114,
+            "outputTokens": 3577,
+            "cacheReadTokens": 110208,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 2,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-e46f7ef8-63aa-4258-918c-b1fe81b9e7a4": {
+            "label": "Author parse.mjs in the checkout root so",
+            "firstPhase": "experiment",
+            "inputTokens": 31125,
+            "outputTokens": 1372,
+            "cacheReadTokens": 47104,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-29f7307f-0480-43f6-9469-1292e73830e4": {
+            "label": "Author aggregate.mjs in the checkout roo",
+            "firstPhase": "experiment",
+            "inputTokens": 31852,
+            "outputTokens": 1408,
+            "cacheReadTokens": 47872,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-a1908734-a4a6-4fbf-bcc6-556a5bb0bf67": {
+            "label": "FIRST, before anything else, check that ",
+            "firstPhase": "experiment",
+            "inputTokens": 28279,
+            "outputTokens": 1312,
+            "cacheReadTokens": 68352,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-9380e2f2-d207-409b-8fce-ee034fa43cc8": {
+            "label": "[evolution-experiment:43552c41776f33cb:t",
+            "firstPhase": "experiment",
+            "inputTokens": 31725,
+            "outputTokens": 2325,
+            "cacheReadTokens": 60160,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-e7f2c03d-7fcf-49e5-a54a-019f34bafee1": {
+            "label": "[evolution-experiment:43552c41776f33cb:t",
+            "firstPhase": "experiment",
+            "inputTokens": 28718,
+            "outputTokens": 1303,
+            "cacheReadTokens": 46336,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-c202ea79-8658-4ebc-b178-c547511cbdce": {
+            "label": "[evolution-experiment:43552c41776f33cb:t",
+            "firstPhase": "experiment",
+            "inputTokens": 30106,
+            "outputTokens": 1092,
+            "cacheReadTokens": 44800,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-9c35d89f-6b70-48f3-a7f2-96aa5241f913": {
+            "label": "[evolution-experiment:43552c41776f33cb:t",
+            "firstPhase": "experiment",
+            "inputTokens": 30086,
+            "outputTokens": 1179,
+            "cacheReadTokens": 44672,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-root2": {
+            "label": "root:s-root2",
+            "firstPhase": "run2",
+            "inputTokens": 12189,
+            "outputTokens": 2930,
+            "cacheReadTokens": 55936,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 2,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-d212d945-843f-4efd-875c-ff98c1dcc0e5": {
+            "label": "Own the log-analytics pipeline: parse.mj",
+            "firstPhase": "run2",
+            "inputTokens": 63435,
+            "outputTokens": 2478,
+            "cacheReadTokens": 81408,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 2,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-e2554554-5fab-4e18-a75c-ffe462481d06": {
+            "label": "Author parse.mjs in the checkout root so",
+            "firstPhase": "run2",
+            "inputTokens": 27853,
+            "outputTokens": 1121,
+            "cacheReadTokens": 45056,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-36998b6f-73b6-40bb-9ce3-995fe3158575": {
+            "label": "Author aggregate.mjs in the checkout roo",
+            "firstPhase": "run2",
+            "inputTokens": 29636,
+            "outputTokens": 1245,
+            "cacheReadTokens": 46592,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          },
+          "s-bc8bb70e-da2b-4e4d-a3ad-f1f25e8ea8c2": {
+            "label": "FIRST, before anything else, check that ",
+            "firstPhase": "run2",
+            "inputTokens": 28142,
+            "outputTokens": 1305,
+            "cacheReadTokens": 66944,
+            "cacheWriteTokens": 0,
+            "measuredTurns": 1,
+            "turnsWithoutUsage": 0,
+            "unreportedBuckets": []
+          }
+        }
+      },
+      "library": {
+        "files": [
+          "log-analytics-pipeline@1.json",
+          "log-analytics-pipeline@2.json"
+        ],
+        "publishedEqualsFrozenCandidate": true
+      },
+      "publishedRecipe": {
+        "reason": "The three stages produce independently checkable artifacts and must run in data dependency order: parse produces out/events.json, aggregate produces out/stats.json from it, and report renders out/report.md from out/stats.json, so the report stage can only run after the aggregate stage has written its verified input.",
+        "children": [
+          {
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            }
+          },
+          {
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            }
+          },
+          {
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            }
+          }
+        ]
+      },
+      "run2": {
+        "storeId": "sg-t-s-root2",
+        "taskId": "t-66745b9f-7c60-4d76-b8dc-8f6917c74e1e",
+        "pipelineTaskId": "t-00c07da4-7954-445d-9681-ef7810117a6d",
+        "pipelineVersion": 2,
+        "recipeEdges": [],
+        "stats": {
+          "total": 8,
+          "perLevel": {
+            "INFO": 4,
+            "WARN": 2,
+            "ERROR": 2
+          },
+          "errorRate": 0.25
+        }
+      },
+      "requestCounts": {
+        "run1": 33,
+        "supervisor": 28,
+        "experiment": 90,
+        "run2": 46
+      },
+      "requestTotal": 197,
+      "nudgeCount": 0,
+      "nudgeSessions": {},
+      "wallSeconds": 805.894,
+      "tree": {
+        "tasks": [
+          {
+            "taskId": "t-83d21ed2-7a13-4d47-92be-5b9b9273b4d3",
+            "depth": 0,
+            "status": "failed"
+          },
+          {
+            "taskId": "t-0079c934-7b41-45f2-8268-b52bfb82427d",
+            "parentTaskId": "t-83d21ed2-7a13-4d47-92be-5b9b9273b4d3",
+            "depth": 1,
+            "templateRef": {
+              "id": "log-analytics-pipeline",
+              "version": 1,
+              "digest": "f5af010854f8faf4c3c88bf90097e75798d8ace2c8d6d450191dd51648405e8f"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-94e38553-4226-40b3-9c21-d33cf1694dc0",
+            "parentTaskId": "t-0079c934-7b41-45f2-8268-b52bfb82427d",
+            "depth": 2,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-bdc5a1bf-5b6c-47b6-877b-6bdf6d0cd23a",
+            "parentTaskId": "t-0079c934-7b41-45f2-8268-b52bfb82427d",
+            "depth": 2,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-838b7805-55a6-4bc7-91ed-349dc5ab03c0",
+            "parentTaskId": "t-0079c934-7b41-45f2-8268-b52bfb82427d",
+            "depth": 2,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-24b01b1d-5b0c-47e3-bd05-12b8f0296647",
+            "depth": 0,
+            "status": "failed"
+          },
+          {
+            "taskId": "t-e7c1123f-b9e9-41d0-ac7f-7d55d8605a75",
+            "parentTaskId": "t-24b01b1d-5b0c-47e3-bd05-12b8f0296647",
+            "depth": 1,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-7b83b801-397d-4d48-b734-a1dcaa96b615",
+            "parentTaskId": "t-24b01b1d-5b0c-47e3-bd05-12b8f0296647",
+            "depth": 1,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "failed"
+          },
+          {
+            "taskId": "t-9a5a4ef9-1d63-4f98-ac56-4696af746651",
+            "parentTaskId": "t-24b01b1d-5b0c-47e3-bd05-12b8f0296647",
+            "depth": 1,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-dc599dd2-09c4-4ddf-9bf0-3de2bbc404f4",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-3d9a6a10-9db3-41d6-8b75-0cf50240e4eb",
+            "parentTaskId": "t-dc599dd2-09c4-4ddf-9bf0-3de2bbc404f4",
+            "depth": 1,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-751f0efb-2cfb-43fb-adb9-5b26e974430a",
+            "parentTaskId": "t-dc599dd2-09c4-4ddf-9bf0-3de2bbc404f4",
+            "depth": 1,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-bd718934-ee08-45e2-a03e-55dab81ca8ed",
+            "parentTaskId": "t-dc599dd2-09c4-4ddf-9bf0-3de2bbc404f4",
+            "depth": 1,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-302a1349-bcb6-4268-a194-be7b1b1e693a",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-fafb7b36-efc2-454f-b6db-3cabad22ba99",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-cbda1de8-d768-4dbb-b506-865185c3e0e5",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-7a3eea0e-0a85-4ea1-aaa9-d29c95391c20",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-66745b9f-7c60-4d76-b8dc-8f6917c74e1e",
+            "depth": 0,
+            "status": "verified"
+          },
+          {
+            "taskId": "t-00c07da4-7954-445d-9681-ef7810117a6d",
+            "parentTaskId": "t-66745b9f-7c60-4d76-b8dc-8f6917c74e1e",
+            "depth": 1,
+            "templateRef": {
+              "id": "log-analytics-pipeline",
+              "version": 2,
+              "digest": "eb6c3dd95b425713ac8a45a0333bd151467fedeeaaf7ffd96b2ed3982cfc755e"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-152b979a-0047-470c-a8d1-07cacd4147a6",
+            "parentTaskId": "t-00c07da4-7954-445d-9681-ef7810117a6d",
+            "depth": 2,
+            "templateRef": {
+              "id": "parse-log-events",
+              "version": 1,
+              "digest": "915cef3d374a935b986385a050d14675120f752821eede85c0581b6e46ef9152"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-5721b02f-20a9-483d-b21a-75b506a3198e",
+            "parentTaskId": "t-00c07da4-7954-445d-9681-ef7810117a6d",
+            "depth": 2,
+            "templateRef": {
+              "id": "aggregate-event-stats",
+              "version": 1,
+              "digest": "cfe58dff2dad7fcb0dfe6c9a188957135683858d893ccf47dcc125f7d82c5db8"
+            },
+            "status": "verified"
+          },
+          {
+            "taskId": "t-7e92b7b9-f762-45c2-947f-651453f00460",
+            "parentTaskId": "t-00c07da4-7954-445d-9681-ef7810117a6d",
+            "depth": 2,
+            "templateRef": {
+              "id": "render-stats-report",
+              "version": 1,
+              "digest": "a21192fdcee5fd67f13f6c4ab0c8b8f54f4dab9a5bb892c4ca081245b7aa1805"
+            },
+            "status": "verified"
+          }
+        ]
+      }
+    }
+  ],
+  "limits": "One run on one machine: the experiment replays four real runs (a failed coordinator sample and a verified holdout, baseline and candidate), each of which authors its own artifacts, so the wall time is dominated by real-model latency and the run is sensitive to the supervisor naming the right sample ids and reconstructing the candidate mutation. The defect is a recipe mis-order (the \"forgotten edge\") whose determinism rests on the report leaf staying honest: a model that regenerates out/stats.json would mask the failure on either side, so the report template says its only input is the verified upstream artifact and forbids fabricating it. The Supervisor uses the real task_template_list entry through its recorded delegation; file tools stay checkout-only. The bash path check is an advisory fixture guard, not an OS sandbox. An idle supervision session is nudged by session id with a neutral continuation. autoReview is pinned to \"failed\"; the default \"all\" additionally reviews successful roots and excludes experiment replays. Use SINGULARITY_LIVE_REVIEWER_MODE=all-real for a real Reviewer."
+}

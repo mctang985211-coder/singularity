@@ -72,3 +72,15 @@ Task 规定结果，Skill 提供方法，Tool/MCP 提供动作。父节点优先
 - 过程中两个工程发现转化为测试侧机制：网关瞬断的请求级退避重试（至多 8 次）；worker 纯文本结束 turn 致 Run 悬挂时，watchdog 经运行时自身 prompt 门径接力并留痕（nudges 写入证据）。nudge 只是测试侧兜底；运行时层是否应有"active Run 久无事件自动提醒"的生产机制，留作后续决策。预算教训：TCG 仿真下该任务 80 分钟不够（kalloc 已 verified、bcache 仍在迭代），本轮终态等待 3 小时；wait 超时也保底落盘证据。
 - 默认套件新增 `tests/integration/xv6-locks-harness.spec.ts`（非 opt-in，仅测试床缺失时跳过）：脚本化驱动加真实评分器对 pristine 树判败的回归用例（约 10 s），并断言 verifyTimeoutMs 管线（本轮实跑配置 1 500 000 ms，默认 600 000 ms）。
 - 验证：unit 96 文件 2261 通过；integration 93 文件 646 项、638 通过 8 跳过 0 失败（含两个新 spec）。build 与 verify-persistence 通过。生产代码零改动；`log-pipeline.ts` 的 `checkoutTools` 增加可选 bashTimeoutMs（默认 60 秒不变），供 xv6 侧用 1 500 秒。
+
+第六轮（真实 Supervisor 自主改进全链验证）：主线上报的三处生产机制缺口由修复轮落在 Singularity `446d200`、外层 `d9c690e`——recipe 晋升对不受影响叶子 holdout 回归化、受影响样本双侧真实消费；Reviewer 获只读 `task_template_list` 并沿用委派 scope；裸 diagnosisId 只在写入时规范化；`task_verify` 复用会话工作目录；spawn 继承父 root；criterionRepair 维持"候选不得替换自身最终 oracle"契约，损坏父验收走 Task intake 新合同。修复者工作区已完成首轮 all-real 闭环（21 断言全 true、202 请求、774 s、零 nudge，证据 [live supervisor repair](2026-10-04-live-supervisor-repair.json) 与[审计](2026-10-04-supervisor-repair-audit.md)）；本轮在主工作区独立核验并两次复现。
+
+- 独立核验：审计七条结论逐条对码成立（晋升守卫未放宽、无第二套模板索引、消费者无第二种诊断解析）；21 断言与 `/tmp` 运行期原始调用记录一致；基线 unit 2290 通过、integration 647 通过 9 跳过复现；flake 清单增补 `a6-evolution-chain`（并行负载）与 `a3-coordination-loop`（串行取消），单跑均全绿；build、source-size（484 文件）、verify-persistence、diff 检查通过。
+- 证据增强（`tests/integration/live-supervisor-repair.spec.ts`，不动生产语义）：token 计量复用 dsh 自带 `deriveTurnTokenUsage`（未自写计量逻辑），四相位＋全程＋每会话的 input/output/cache-read/cache-write 落盘，网关未回报的桶如实落 null 不冒充零；gate 明细（样本×双侧 outcome、六问原文）与"发布内容==冻结候选"布尔落盘；`supervisorReadProductionTemplate` 强化为与库 `@1.json` 的 id/version/decomposition 深比较；两处硬编码 true 改为计算布尔；断言 21→23 项并强制全 true；失败路径补落 tokenUsage、gate 与 run2 树快照；证据文件名可由 `SINGULARITY_LIVE_SUPERVISOR_EVIDENCE` 覆盖。
+- tsc 收尾：修复 `446d200` 新引入的唯一类型错误（`evolution/src/promotion/task-definition.ts:147` 可选链，语义零变化），evolution 包 `tsc --noEmit` 由 9 条回到与 c436d9d 完全一致的 8 条先存错误，lib 同轮重建。
+- 独立复现（all-real，`SINGULARITY_LIVE_REVIEWER_MODE=all-real`）两次：第一次 failed——演化链完整（proposal applied、experiment fixed、gate 6/6），但 run2 根任务两次 `task_decompose` 携带契约覆盖字段被 runtime 正确拒绝后退回"根处就地展开"形态，协调子任务断言诚实判败（证据 [reproduction](2026-10-04-live-supervisor-repair-reproduction.json)）；第二次 passed——23 断言全 true，run2 首次 decompose 即建成绑定 `log-analytics-pipeline@2` 的协调子任务并消费 v2 配方，token 全程 input 993 299／output 109 354／cache-read 2 920 960、34 turns 零缺失，197 请求、806 s、零 nudge（证据 [reproduction2](2026-10-04-live-supervisor-repair-reproduction2.json)）。run2 形态稳定性三轮累计 2/3，首次失败为模型行为抖动而非系统缺陷。
+- 新发现上报（生产侧，未修）：`task_decompose` 对 `assumptions`/`requiredCapabilities` 等契约覆盖字段的拒绝文案未引导"去掉覆盖字段重新声明子任务"，是 run2 形态抖动的主要诱因；是否改善该错误引导留待决策。
+- 验证：unit 2290 通过；integration 全量 647 通过 9 跳过（其间一次 19 失败为并行重建 lib 的自扰竞态，复跑消失）。失败路径证据增强未经真实失败实战检验（第二次运行通过，未触发）。
+- 边界：本轮 v2 仅调整顺序、零 dependsOn，非空依赖边的发布保留未在 live 实测（由 DAG 集成回归覆盖）；token 为会话累计口径，未汇总执行子树总成本；两轮通过不证明 Reviewer 与 run2 形态的长期稳定性。
+
+第六轮备份：Singularity 与外层 harness 均使用 `backup/self-develop-20261004-round6`。

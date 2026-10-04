@@ -38,14 +38,20 @@ import {
 import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import {
   textResponse,
   toolCallResponse,
 } from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/tests/mock-adapter.ts'
 import { resolveApiConfig } from '../../../../tools/scripts/api-config.mjs'
 import TokenMeter from '../../../../thirdparty/deepseek-harness/packages/llm/token-meter/lib/index.js'
+import {
+  deriveTurnTokenUsage,
+  type TurnTokenUsage,
+} from '../../../../thirdparty/deepseek-harness/packages/llm/token-meter/lib/types/turn-usage.js'
 import { buildExperimentReport } from '../../evolution/src/index.ts'
 import { reviewerBindingSource } from '../../agent-singularity/src/coordination/ledger.ts'
 import { scanFailedReviewSources } from '../../agent-singularity/src/coordination/review-scan.ts'
@@ -125,12 +131,20 @@ async function registerDefectiveLibrary(runtime: TemplateRegistry, distractors: 
 
 const enabled = process.env.SINGULARITY_LIVE_SUPERVISOR_REPAIR === '1'
 const PROGRESS_PATH = '/tmp/singularity-live-supervisor-repair-progress.json'
-const EVIDENCE_PATH = new URL('../../docs/2026-10-04-live-supervisor-repair.json', import.meta.url)
+const EVIDENCE_OVERRIDE = process.env.SINGULARITY_LIVE_SUPERVISOR_EVIDENCE
+/** Evidence output directory, or the file `SINGULARITY_LIVE_SUPERVISOR_EVIDENCE` names (relative to it, or absolute). */
+const EVIDENCE_DIR = new URL('../../docs/', import.meta.url)
+const EVIDENCE_PATH = EVIDENCE_OVERRIDE === undefined || EVIDENCE_OVERRIDE === ''
+  ? new URL('2026-10-04-live-supervisor-repair.json', EVIDENCE_DIR)
+  : new URL(EVIDENCE_OVERRIDE, EVIDENCE_DIR)
 const REQUEST_ALLOWANCE = 300
 /** `hybrid` scripts only the reviewer's diagnosis; `all-real` forwards the reviewer to the gateway too. */
 const REVIEWER_MODE = process.env.SINGULARITY_LIVE_REVIEWER_MODE === 'all-real' ? 'all-real' : 'hybrid'
 const LIVE_COMMAND = 'NODE_USE_ENV_PROXY=1 SINGULARITY_LIVE_SUPERVISOR_REPAIR=1' +
   (REVIEWER_MODE === 'all-real' ? ' SINGULARITY_LIVE_REVIEWER_MODE=all-real' : '') +
+  (EVIDENCE_OVERRIDE === undefined || EVIDENCE_OVERRIDE === ''
+    ? ''
+    : ` SINGULARITY_LIVE_SUPERVISOR_EVIDENCE=${EVIDENCE_OVERRIDE}`) +
   ' pnpm exec vitest run --project integration packages/singularity/tests/integration/live-supervisor-repair.spec.ts'
 
 // This host reaches the model gateway only through the configured HTTPS proxy, and Node 22's fetch ignores the proxy
@@ -213,6 +227,76 @@ interface ProposalLike {
   readonly decision?: string
 }
 
+/** The gate's six verbatim answers plus the evidence they cite, as the applied proposal folds them. */
+interface GateAnswersLike {
+  readonly targetFailureFixed: string
+  readonly originalAcceptanceMaintained: string
+  readonly existingRegressionMaintained: string
+  readonly noUnacceptableSideEffects: string
+  readonly holdoutPerformanceAcceptable: string
+  readonly resourceCostAcceptable: string
+  readonly regressionEvidenceRefs: readonly string[]
+}
+
+/** The experiment sides the gate was judged over, in the evidence's own shape. */
+interface GateSampleLike {
+  readonly taskId: string
+  readonly role: string
+  readonly baseline: { readonly outcome: string }
+  readonly candidate: { readonly outcome: string }
+}
+
+interface GateRecord {
+  readonly proposalId: string
+  readonly answered: number
+  readonly questions: number
+  readonly answers: GateAnswersLike | null
+  readonly regressionEvidenceRefs: readonly string[]
+  readonly sampleCount: number
+  readonly totalSides: number
+  readonly gatePassedSides: number
+  readonly sides: readonly { taskId: string; role: string; side: 'baseline' | 'candidate'; outcome: string }[]
+}
+
+/** The gate's six answers and the sides it passed, built from the applied proposal and its experiment. */
+function buildGate(
+  proposalId: string,
+  gateAnswers: GateAnswersLike | undefined,
+  samples: readonly GateSampleLike[],
+): GateRecord {
+  const answered = gateAnswers === undefined
+    ? 0
+    : [
+        gateAnswers.targetFailureFixed,
+        gateAnswers.originalAcceptanceMaintained,
+        gateAnswers.existingRegressionMaintained,
+        gateAnswers.noUnacceptableSideEffects,
+        gateAnswers.holdoutPerformanceAcceptable,
+        gateAnswers.resourceCostAcceptable,
+      ].filter(answer => typeof answer === 'string' && answer.trim() !== '').length
+  const sides = samples.flatMap(sample =>
+    ([['baseline', sample.baseline.outcome], ['candidate', sample.candidate.outcome]] as const).map(
+      ([side, outcome]) => ({ taskId: sample.taskId, role: sample.role, side, outcome }),
+    ))
+  const gatePassedSides = sides.filter(side => {
+    const expected = side.role === 'observed-failure'
+      ? side.side === 'baseline' ? 'failed' : 'verified'
+      : 'verified'
+    return side.outcome === expected
+  }).length
+  return {
+    proposalId,
+    answered,
+    questions: 6,
+    answers: gateAnswers ?? null,
+    regressionEvidenceRefs: gateAnswers?.regressionEvidenceRefs ?? [],
+    sampleCount: samples.length,
+    totalSides: sides.length,
+    gatePassedSides,
+    sides,
+  }
+}
+
 interface EvolutionApi {
   list(): Promise<readonly ProposalLike[]>
   get(proposalId: string): Promise<ProposalLike>
@@ -268,6 +352,109 @@ function chainOf(calls: readonly CallRecord[], sessionId: string, proposalId?: s
     }
   }
   return ordered
+}
+
+/**
+ * One thrown value as a bounded diagnostic line. Some fetch failures stringify as
+ * `[object Object]`, so read the fields the gateway/undici actually populate
+ * (name, message, code, status, cause) instead of trusting `String(error)`.
+ */
+function describeThrown(value: unknown, depth = 0): string {
+  if (value === null || value === undefined) return String(value)
+  if (typeof value !== 'object') return String(value)
+  const record = value as {
+    name?: unknown
+    message?: unknown
+    code?: unknown
+    status?: unknown
+    cause?: unknown
+  }
+  const parts: string[] = []
+  const label = typeof record.name === 'string' && record.name !== '' ? record.name : undefined
+  const message = typeof record.message === 'string' ? record.message : undefined
+  if (label !== undefined && message !== undefined && message !== '') parts.push(`${label}: ${message}`)
+  else if (label !== undefined) parts.push(label)
+  else if (message !== undefined) parts.push(`message=${message}`)
+  if (record.code !== undefined) parts.push(`code=${String(record.code)}`)
+  if (record.status !== undefined) parts.push(`status=${String(record.status)}`)
+  if (record.cause !== undefined && depth < 3) parts.push(`cause=${describeThrown(record.cause, depth + 1)}`)
+  if (parts.length > 0) return parts.join(' ')
+  try {
+    return JSON.stringify(value) ?? String(value)
+  } catch {
+    return Object.prototype.toString.call(value)
+  }
+}
+
+/**
+ * The four disjoint provider buckets this evidence reports. A bucket a provider
+ * never reported is `null`, never zero: only `deriveTurnTokenUsage`'s own
+ * per-turn proof of "every attempt reported it" turns one into a number.
+ */
+interface TokenTally {
+  readonly inputTokens: number | null
+  readonly outputTokens: number | null
+  readonly cacheReadTokens: number | null
+  readonly cacheWriteTokens: number | null
+  /** Completed turns whose provider usage the meter could prove. */
+  readonly measuredTurns: number
+  /** Completed turns it could not prove (scripted reviewer, aborted stream, partial attempt usage). */
+  readonly turnsWithoutUsage: number
+  /** Buckets rendered `null` because at least one measured turn — or every turn — never reported them. */
+  readonly unreportedBuckets: readonly string[]
+}
+
+/** Sum the proofs of a set of turns; a bucket is null unless every one of them carried it. */
+function tallyTokens(usages: readonly TurnTokenUsage[], turnsWithoutUsage: number): TokenTally {
+  const bucket = (pick: (usage: TurnTokenUsage) => number | undefined): number | null =>
+    usages.length > 0 && usages.every(usage => pick(usage) !== undefined)
+      ? usages.reduce((sum, usage) => sum + pick(usage)!, 0)
+      : null
+  const inputTokens = usages.length > 0 ? usages.reduce((sum, usage) => sum + usage.uncachedInputTokens, 0) : null
+  const outputTokens = usages.length > 0 ? usages.reduce((sum, usage) => sum + usage.outputTokens, 0) : null
+  const cacheReadTokens = bucket(usage => usage.cacheReadTokens)
+  const cacheWriteTokens = bucket(usage => usage.cacheWriteTokens)
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    measuredTurns: usages.length,
+    turnsWithoutUsage,
+    unreportedBuckets: [
+      ...inputTokens === null ? ['inputTokens'] : [],
+      ...outputTokens === null ? ['outputTokens'] : [],
+      ...cacheReadTokens === null ? ['cacheReadTokens'] : [],
+      ...cacheWriteTokens === null ? ['cacheWriteTokens'] : [],
+    ],
+  }
+}
+
+/**
+ * Fold every COMPLETE turn of one durable session log through the meter's own
+ * `deriveTurnTokenUsage`, with the number of model requests the turn really
+ * spent. One stream call always settles exactly one `assistant/attempt` (error)
+ * or `assistant/message` (success) event, so that count also maps each turn back
+ * to its entry in the spec's per-request phase trace.
+ */
+function sessionTurns(events: readonly SessionEvent[]): { usage: TurnTokenUsage | undefined; requests: number }[] {
+  const turns: { usage: TurnTokenUsage | undefined; requests: number }[] = []
+  let slice: SessionEvent[] = []
+  for (const event of events) {
+    if (event.type === 'turn/start') {
+      slice = [event]
+      continue
+    }
+    if (slice.length === 0) continue
+    slice.push(event)
+    if (event.type !== 'turn/end') continue
+    turns.push({
+      usage: deriveTurnTokenUsage(slice),
+      requests: slice.filter(item => item.type === 'assistant/attempt' || item.type === 'assistant/message').length,
+    })
+    slice = []
+  }
+  return turns
 }
 
 /**
@@ -416,6 +603,10 @@ it.skipIf(!enabled)(
     const requests: Requests[] = []
     const phaseOf = { current: 'run1' as string }
     const requestCounts: Record<string, number> = { run1: 0, supervisor: 0, experiment: 0, run2: 0 }
+    // The phase of every request a session makes, in order — the same
+    // `phaseOf` partition `requestCounts` uses, kept per session so each
+    // completed turn can be attributed to the window it opened in.
+    const sessionRequestPhases = new Map<string, string[]>()
     const phase = (next: string): void => {
       phaseOf.current = next
       if (requestCounts[next] === undefined) requestCounts[next] = 0
@@ -425,6 +616,9 @@ it.skipIf(!enabled)(
       if (requests.length >= REQUEST_ALLOWANCE) throw new Error('live validation exceeded its request allowance')
       const spawnName = h.spawns.find(spawn => String(spawn.sessionId) === String(options.sessionId))?.name ?? ''
       const sid = String(options.sessionId)
+      const sessionPhases = sessionRequestPhases.get(sid) ?? []
+      sessionPhases.push(phaseOf.current)
+      sessionRequestPhases.set(sid, sessionPhases)
       inFlight.set(sid, (inFlight.get(sid) ?? 0) + 1)
       requests.push({
         sessionId: String(options.sessionId),
@@ -466,7 +660,9 @@ it.skipIf(!enabled)(
       const requestStartedAt = Date.now()
       let response: Awaited<ReturnType<typeof fetch>> | undefined
       let lastError: unknown
+      let attempts = 0
       for (let attempt = 1; attempt <= 8 && response === undefined; attempt += 1) {
+        attempts = attempt
         try {
           const signal = AbortSignal.any([options.signal ?? new AbortController().signal, AbortSignal.timeout(240000)])
           response = await fetch(`${api.upstream}/v1/chat/completions`, {
@@ -494,7 +690,9 @@ it.skipIf(!enabled)(
       // The gateway fetch is over: the session is no longer "in flight" even while it processes the answer.
       inFlight.set(sid, Math.max(0, (inFlight.get(sid) ?? 1) - 1))
       if (response === undefined) {
-        process.stderr.write(`[live] request #${requests.length} gave up after 8 attempts: ${String(lastError)}\n`)
+        process.stderr.write(
+          `[live] request #${requests.length} gave up after ${attempts} attempts: ${describeThrown(lastError)}\n`,
+        )
         throw lastError
       }
       if (!response.ok) throw new Error(`live model returned HTTP ${response.status}`)
@@ -525,10 +723,20 @@ it.skipIf(!enabled)(
       expect(result.usage?.prompt_tokens, 'gateway must report actual prompt usage').toBeTypeOf('number')
       expect(result.usage?.completion_tokens, 'gateway must report actual completion usage').toBeTypeOf('number')
       const cacheReadTokens = result.usage.prompt_cache_hit_tokens ?? result.usage.prompt_tokens_details?.cached_tokens ?? 0
+      // Carry through only buckets the gateway itself reported: `total_tokens`
+      // is the provider's own exact total (the meter needs it to prove usage
+      // when the route reports no cache-write bucket), and a cache-write counter
+      // is included only when the route returns one — never invented as zero.
+      const cacheWriteTokens = result.usage.prompt_cache_write_tokens
+        ?? result.usage.prompt_cache_creation_tokens
+        ?? result.usage.prompt_tokens_details?.cache_write_tokens
+        ?? result.usage.prompt_tokens_details?.cache_creation_tokens
       yield {
         type: 'usage',
         usage: { inputTokens: result.usage.prompt_tokens - cacheReadTokens,
-          outputTokens: result.usage.completion_tokens, cacheReadTokens },
+          outputTokens: result.usage.completion_tokens, cacheReadTokens,
+          ...typeof result.usage.total_tokens === 'number' ? { totalTokens: result.usage.total_tokens } : {},
+          ...typeof cacheWriteTokens === 'number' ? { cacheWriteTokens } : {} },
       }
       yield { type: 'finish', reason: { kind: calls.length ? 'tool-calls' : 'stop' } }
     })
@@ -598,6 +806,68 @@ it.skipIf(!enabled)(
     }, 15000)
     watchdog.unref?.()
 
+    // ── provider token usage, folded by the meter's own deriveTurnTokenUsage ──
+    // Shared by the success and failure evidence: a run that throws mid-way still
+    // reports the phases that produced turns, and a phase with no completed turn
+    // renders null buckets (named in unreportedBuckets) rather than a fabricated zero.
+    const computeTokenUsage = () => {
+      const phaseUsages: Record<string, TurnTokenUsage[]> = {}
+      const phaseUnmeasured: Record<string, number> = {}
+      for (const name of Object.keys(requestCounts)) {
+        phaseUsages[name] = []
+        phaseUnmeasured[name] = 0
+      }
+      const allUsages: TurnTokenUsage[] = []
+      let allUnmeasured = 0
+      const tokenSessions: Record<string, TokenTally & { label: string; firstPhase: string }> = {}
+      for (const [sessionId, sessionPhases] of sessionRequestPhases) {
+        const turns = sessionTurns(h.eventsOf(sessionId))
+        const sessionUsages: TurnTokenUsage[] = []
+        let unmeasured = 0
+        let phaseCursor = 0
+        for (const turn of turns) {
+          // A turn's model requests are contiguous in the session's own request
+          // order, so the phase of its first request is the window it opened in.
+          const turnPhase = sessionPhases[phaseCursor] ?? sessionPhases.at(-1) ?? 'unknown'
+          phaseCursor += turn.requests
+          if (turn.usage === undefined) {
+            unmeasured += 1
+            if (phaseUnmeasured[turnPhase] !== undefined) phaseUnmeasured[turnPhase] += 1
+            continue
+          }
+          sessionUsages.push(turn.usage)
+          allUsages.push(turn.usage)
+          if (phaseUsages[turnPhase] !== undefined) phaseUsages[turnPhase]!.push(turn.usage)
+        }
+        tokenSessions[sessionId] = {
+          label: h.spawns.find(spawn => String(spawn.sessionId) === sessionId)?.name ?? `root:${sessionId}`,
+          firstPhase: sessionPhases[0] ?? 'unknown',
+          ...tallyTokens(sessionUsages, unmeasured),
+        }
+      }
+      const tokenPhases: Record<string, TokenTally> = {}
+      const phasesWithoutCompletedTurns: string[] = []
+      for (const name of Object.keys(requestCounts)) {
+        const tally = tallyTokens(phaseUsages[name]!, phaseUnmeasured[name]!)
+        tokenPhases[name] = tally
+        if (tally.measuredTurns === 0 && tally.turnsWithoutUsage === 0) phasesWithoutCompletedTurns.push(name)
+      }
+      return {
+        source:
+          'deriveTurnTokenUsage(@deepseek-ai/dsh-token-meter) over every completed turn/start..turn/end slice of every session that made a model request',
+        buckets:
+          'inputTokens is uncached prompt input (uncachedInputTokens); cacheReadTokens/cacheWriteTokens are null unless every measured turn ' +
+          'reported them — a bucket no route reported is never rendered as zero',
+        attribution:
+          'a turn is attributed to the phase of its first request; turns the meter could not prove are counted, not imputed; a phase that ' +
+          'completed no turn renders null buckets (its unreportedBuckets names them) and is listed in phasesWithoutCompletedTurns',
+        phases: tokenPhases,
+        phasesWithoutCompletedTurns,
+        total: tallyTokens(allUsages, allUnmeasured),
+        sessions: tokenSessions,
+      }
+    }
+
     // Evidence preservation: if any terminal wait below throws, the run still leaves an honest document (never a stale
     // smoke artifact). The success path writes the full document and sets the flag; the catch writes the live state.
     let evidenceWritten = false
@@ -608,13 +878,16 @@ it.skipIf(!enabled)(
       const supervisor = h.spawns.find(spawn => spawn.name.startsWith('supervisor for '))
       const chain = supervisor === undefined ? [] : chainOf(calls, String(supervisor.sessionId))
       const tasks = snapshot?.tasks ?? []
+      const run2Tasks = snapshot2?.tasks ?? []
       const proposals = await evolution.list()
       const experiments = []
+      const experimentReports: { proposalId: string; report: ReturnType<typeof buildExperimentReport> }[] = []
       for (const proposal of proposals) {
         for (const view of await evolution.experiments(proposal.proposalId)) {
           const experiment = view as Parameters<typeof buildExperimentReport>[0]
           try {
             const report = buildExperimentReport(experiment)
+            experimentReports.push({ proposalId: proposal.proposalId, report })
             experiments.push({ proposalId: proposal.proposalId, experimentId: report.experimentId,
               verdict: report.verdict, samples: report.samples.map(sample => ({ taskId: sample.taskId, role: sample.role,
                 baseline: sample.baseline.outcome, candidate: sample.candidate.outcome })) })
@@ -624,6 +897,20 @@ it.skipIf(!enabled)(
           }
         }
       }
+      // Gate evidence is real as soon as any proposal reached the gate; the most
+      // advanced one wins, and a run that threw before any gate answer leaves null
+      // rather than a fabricated record.
+      const advancement = (status: string): number =>
+        status === 'applied' ? 0 : status === 'decided' ? 1 : status === 'gated' ? 2 : 3
+      let gate: ReturnType<typeof buildGate> | null = null
+      for (const proposal of [...proposals].sort((left, right) => advancement(left.status) - advancement(right.status))) {
+        const view = (await evolution.get(proposal.proposalId)) as ProposalLike & { gate?: GateAnswersLike }
+        if (view.gate === undefined) continue
+        const judged = experimentReports.filter(item => item.proposalId === proposal.proposalId).at(-1)?.report
+        gate = buildGate(proposal.proposalId, view.gate, judged?.samples ?? [])
+        break
+      }
+      const tokenUsage = computeTokenUsage()
       const assertions = {
         reportLeafFailedOnRealChecker: tasks.find(task => task.templateRef?.id === REPORT)?.status === 'failed',
         pipelineCoordinatorFailedOnRealChecker:
@@ -663,9 +950,30 @@ it.skipIf(!enabled)(
                 diagnosisId: diagnosis.diagnosisId,
                 proposals: diagnosis.proposals.map(item => [item.targetType, item.targetId]),
               })),
+              // The second root's store is torn down after the test, so snapshot it
+              // here when run2 already has tasks; a store that never started adds nothing.
+              ...(snapshot2 !== undefined && run2Tasks.length > 0
+                ? {
+                    run2: {
+                      storeId: STORE2,
+                      tasks: run2Tasks.map(task => ({
+                        taskId: task.taskId,
+                        parentTaskId: task.parentTaskId,
+                        depth: task.depth,
+                        templateRef: task.templateRef,
+                        decompositionStatus: task.decompositionStatus,
+                        childTaskIds: task.childTaskIds,
+                        status: task.status,
+                      })),
+                      edges: snapshot2.edges,
+                    },
+                  }
+                : {}),
             },
             proposals,
             experiments,
+            gate,
+            tokenUsage,
             evolutionCalls: calls.filter(call => call.name.startsWith('evolution_')).map(call => ({
               tool: call.name, isError: call.result?.isError, result: call.result?.text.slice(0, 1500),
             })),
@@ -677,7 +985,9 @@ it.skipIf(!enabled)(
           },
         ],
         limits:
-          'The run threw before its terminal assertions; the document records the live store state and the assertions that could be resolved from it.',
+          'The run threw before its terminal assertions; the document records the live store state and the assertions that could be resolved from it. ' +
+          'tokenUsage covers every phase that completed a turn (phasesWithoutCompletedTurns names the ones that did not, with null buckets, never zero); ' +
+          'gate is null when no proposal had recorded a gate before the throw.',
       }
       writeFileSync(EVIDENCE_PATH, JSON.stringify(document, null, 2) + '\n')
       await writeFile('/tmp/singularity-live-supervisor-repair.json', JSON.stringify(document, null, 2) + '\n')
@@ -859,10 +1169,16 @@ it.skipIf(!enabled)(
       const pipelineV2 = JSON.parse(readFileSync(join(library, `${PIPELINE}@2.json`), 'utf8'))
       const childIds = (template: { decomposition: { children: { templateRef: { id: string } }[] } }) =>
         template.decomposition.children.map(child => child.templateRef.id)
+      const v1ChildIds = childIds(pipelineV1)
+      const v2ChildIds = childIds(pipelineV2)
       // Publish the evaluated recipe exactly; the model may repair order, edges, or both.
       expect(childIds(pipelineV1)).toEqual(['parse-log-events', 'render-stats-report', 'aggregate-event-stats'])
       expect(childIds(pipelineV2)).toEqual(['parse-log-events', 'aggregate-event-stats', 'render-stats-report'])
       expect(pipelineV2).toEqual(JSON.parse(readFileSync(
+        join(ledgerRoot, 'sandbox', applied.proposalId, 'task-templates', 'candidate', `${PIPELINE}@2.json`), 'utf8')))
+      // The same comparison as a boolean for the evidence: the published library
+      // file and the frozen candidate the experiment evaluated are the same content.
+      const publishedEqualsFrozenCandidate = isDeepStrictEqual(pipelineV2, JSON.parse(readFileSync(
         join(ledgerRoot, 'sandbox', applied.proposalId, 'task-templates', 'candidate', `${PIPELINE}@2.json`), 'utf8')))
       expect(pipelineV1.contract.acceptanceCriteria).toEqual(pipelineV2.contract.acceptanceCriteria)
       const afterRepair = await h.snapshot(STORE)
@@ -946,23 +1262,45 @@ it.skipIf(!enabled)(
         call.name === 'task_template_list' &&
         (call.args as { templateRef?: { id?: string } }).templateRef?.id === PIPELINE)
       const readTemplate = JSON.parse(templateRead?.result?.text ?? '{}')
+      // The supervisor's read must return the production template itself — the same
+      // id, version and whole decomposition as `log-analytics-pipeline@1.json`.
+      const productionTemplateV1 = JSON.parse(readFileSync(join(library, `${PIPELINE}@1.json`), 'utf8'))
+      const readProductionTemplate = readTemplate.template as
+        | { id?: string; version?: number; decomposition?: unknown }
+        | undefined
+      const supervisorReadMatchesLibrary =
+        readProductionTemplate?.id === productionTemplateV1.id &&
+        readProductionTemplate?.version === productionTemplateV1.version &&
+        isDeepStrictEqual(readProductionTemplate?.decomposition, productionTemplateV1.decomposition)
       const templateBound = final.tasks.filter(task => task.templateRef !== undefined).length
+
+      // ── provider token usage, folded by the meter's own deriveTurnTokenUsage (shared with the failure path) ──
+      const tokenUsage = computeTokenUsage()
+
+      // ── the gate's detail, read back from the applied proposal and the report ──
+      const appliedView = (await evolution.get(applied.proposalId)) as ProposalLike & { gate?: GateAnswersLike }
+      const gate = buildGate(applied.proposalId, appliedView.gate, report.samples)
+
       const assertions = {
         reportLeafFailedOnRealChecker: reportFailure.verdict?.status === 'fail',
         pipelineCoordinatorFailedOnRealChecker: failure.verdict.status === 'fail',
         diagnosisProposesPipelineTemplate: diagnosis.proposals.some(proposal => proposal.targetId.includes(PIPELINE)),
         supervisorSessionStarted: String(supervisorSpawn.sessionId).length > 0,
-        supervisorReadProductionTemplate: readTemplate.template?.id === PIPELINE,
+        supervisorReadProductionTemplate: supervisorReadMatchesLibrary,
         supervisorRanEvolutionChain:
           chain.join('>') ===
           'evolution_propose>evolution_candidate>evolution_prepare>evolution_replay>evolution_gate>evolution_decide>evolution_apply',
-        proposalApplied: (await evolution.get(applied.proposalId)).status === 'applied',
+        proposalApplied: appliedView.status === 'applied',
         exactlyOneProposalApplied: diagnosisProposals.filter(item => item.status === 'applied').length === 1,
         ledgerWalkedProposedToApplied: cursor === expectedSequence.length,
         experimentVerdictFixed: report.verdict === 'fixed',
         experimentBaselineFailedCandidateVerified:
           observedFailure?.baseline.outcome === 'failed' && observedFailure?.candidate.outcome === 'verified',
-        libraryGainedV2AndKeptV1: true,
+        publishedEqualsFrozenCandidate,
+        libraryGainedV2AndKeptV1:
+          pipelineV1.version === 1 && pipelineV2.version === 2 &&
+          v1ChildIds.join('>') === 'parse-log-events>render-stats-report>aggregate-event-stats' &&
+          v2ChildIds.join('>') === 'parse-log-events>aggregate-event-stats>render-stats-report',
         failedRunBindingFrozen:
           afterRepair.tasks.find(task => task.taskId === pipelineTask.taskId)?.templateRef?.version === 1,
         root1Terminal: ['failed', 'verified', 'cancelled'].includes((await h.task.taskIn(STORE, root1.taskId)).status),
@@ -972,7 +1310,13 @@ it.skipIf(!enabled)(
         run2Verified: run2.tasks.find(task => task.taskId === intake.taskId)?.status === 'verified',
         run2PipelineBindsVersion2: run2Pipeline.templateRef?.version === 2,
         run2ConsumesVersion2Recipe: run2Recipe.identity.templateRef?.version === 2 && run2ChildIds.length === 3,
-        run2StatsRecomputed: true,
+        run2StatsRecomputed:
+          stats.total === expectation.stats.total && expectation.stats.total !== expectedLog(CASE_1).stats.total,
+        tokenUsageRecorded:
+          Object.values(tokenUsage.phases).every(phase => phase.measuredTurns > 0) &&
+          tokenUsage.total.measuredTurns > 0 &&
+          tokenUsage.total.inputTokens !== null &&
+          tokenUsage.total.outputTokens !== null,
       }
       const wallSeconds = (Date.now() - startedAt) / 1000
       const evidence = {
@@ -1047,6 +1391,9 @@ it.skipIf(!enabled)(
             ledgerKinds: kinds,
             experiment: {
               verdict: report.verdict,
+              sampleCount: report.samples.length,
+              totalSides: gate.totalSides,
+              gatePassedSides: gate.gatePassedSides,
               samples: report.samples.map(sample => ({
                 taskId: sample.taskId,
                 role: sample.role,
@@ -1054,7 +1401,12 @@ it.skipIf(!enabled)(
                 candidate: sample.candidate.outcome,
               })),
             },
-            library: [`${PIPELINE}@1.json`, `${PIPELINE}@2.json`],
+            gate,
+            tokenUsage,
+            library: {
+              files: [`${PIPELINE}@1.json`, `${PIPELINE}@2.json`],
+              publishedEqualsFrozenCandidate,
+            },
             publishedRecipe: pipelineV2.decomposition,
             run2: {
               storeId: STORE2,

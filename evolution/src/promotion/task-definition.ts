@@ -144,9 +144,9 @@ export async function assertTaskDefinitionPromotion(
   for (const comparison of report.samples) {
     const sample = frozen.samples.find(item => item.taskId === comparison.taskId)!
     const historicalBranch = new Set(subtreeOf(snapshot, sample.taskId).map(task => task.taskId))
-    const historicallyConsumed = snapshot.proposals.all.some(item => item.kind !== 'root' &&
+    const historicallyConsumed = snapshot.proposals?.all.some(item => item.kind !== 'root' &&
       historicalBranch.has(item.identity.parentTaskId) && item.identity.templateRef?.id === definition.candidate.template.id &&
-      item.status === 'admitted' && item.consumption !== undefined && item.consumption.kind !== 'root')
+      item.status === 'admitted' && item.consumption !== undefined && item.consumption.kind !== 'root') ?? false
     const recipeConsumed = { baseline: false, candidate: false }
     for (const side of ['baseline', 'candidate'] as const) {
       const detail = comparison[side]
