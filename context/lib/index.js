@@ -105,14 +105,15 @@ function withContractSection(assembly, text) {
 }
 /** Append one plane to the runtime-context plane; an unchanged name is replaced, never duplicated. */
 function withRuntimeContext(assembly, name, text) {
-	const existing = assembly.contexts.find((context) => context.name === name);
+	assembly.contexts = assembly.contexts.filter((context) => context.name !== name);
+	const existing = assembly.sections.find((section) => section.name === name);
 	if (existing !== void 0) {
 		existing.text = text;
-		return;
-	}
-	assembly.contexts.push({
+		existing.interpolate = false;
+	} else assembly.sections.push({
 		name,
-		text
+		text,
+		interpolate: false
 	});
 }
 /** The question plane, when it has anything to say: an empty projection adds no context at all. */
@@ -154,7 +155,10 @@ async function assembleSingularityContext(service, assembly, context, next) {
 			if (!contract.ok) throwRefusal(contract);
 			const questions = await service.questionsFor(caller);
 			if (!questions.ok) throwRefusal(questions);
+			const dynamic = await service.dynamicFor(caller);
+			if (!dynamic.ok) throwRefusal(dynamic);
 			withContractSection(assembly, contract.text);
+			withRuntimeContext(assembly, STATE_CONTEXT_NAME, dynamic.text);
 			withQuestionContext(assembly, questions.text);
 			return next();
 		}
@@ -1181,6 +1185,16 @@ async function dynamicProjection(deps, loaded) {
 		const label = `delegated task state (review-only, no business Run): ${run === void 0 ? "no run was ever started" : ownRunLine(run, snapshot)}`;
 		if (!budget.add(label)) return tooLarge("the delegated task state", taskPageHint(task.taskId));
 	} else if (!budget.add(`your run: ${target.run === void 0 ? "none" : ownRunLine(target.run, snapshot)}`)) return tooLarge("the run line", taskPageHint(task.taskId));
+	if (target.run !== void 0 && deps.taskRuntime.decompositionState !== void 0 && resolution.kind !== "reviewer") {
+		const state = await deps.taskRuntime.decompositionState(resolution.sessionId);
+		const lines = [
+			`canDecompose: ${state.canDecompose}; depth: ${state.depth}/${state.maxDepth}; phase: ${state.phase}`,
+			...state.remainingRuns === void 0 ? [] : [`remaining root run budget: ${state.remainingRuns}`],
+			...state.reasons.length === 0 ? [] : [`decomposition refused because: ${state.reasons.join("; ")}`],
+			...target.run.placement === void 0 ? [] : [`execution workspace: ${target.run.placement.workspacePath}`]
+		];
+		if (budget.addAll(lines) > 0) return tooLarge("decomposition availability", taskPageHint(task.taskId));
+	}
 	if (snapshot !== void 0) {
 		const lines = relatedEntries(snapshot, task).map((entry) => taskSummaryLine(snapshot, entry.task, entry.roles));
 		const clause = (omitted) => omissionLine({

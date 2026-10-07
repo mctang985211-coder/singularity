@@ -24,15 +24,15 @@ export function defineEvolutionProposeTool(ctx: Context) {
     description:
       'Record an evidenced shared change as a proposal. Executable targetType names are task_definition (a TaskTemplate), skill ' +
       '(an existing Skill), and capability (one whole row with optional new MCP definitions and an optional new execution Skill). Use evolution_candidate, ' +
-      'evolution_prepare, evolution_replay and evolution_gate before the human decisions through evolution_decide and ' +
-      'evolution_apply. Other target types remain suggestions. Existing Task contracts and Run bindings stay fixed.',
+      'evolution_prepare, evolution_replay and evolution_gate before recording the model decision through evolution_decide. ' +
+      'evolution_apply publishes under the deployment publication approval policy. Other target types remain suggestions. Existing Task contracts and Run bindings stay fixed.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Unique id for this proposal; a duplicate id is rejected' },
       level: {
         type: 'string',
         required: true,
         enum: ['L1', 'L2', 'L3', 'L4'],
-        description: 'Evolution level (L1 execution adaptation / L2 capability / L3 workflow / L4 harness); every level goes through human review, with no exemption',
+        description: 'Evolution level (L1 execution adaptation / L2 capability / L3 workflow / L4 harness); publication follows the deployment approval policy',
       },
       baseVersion: { type: 'string', required: true, description: 'Current target version; a first Task template uses absent with candidate version 1' },
       targetType: { type: 'string', enum: PROPOSAL_TARGET_TYPES, description: 'Executable: task_definition for a TaskTemplate, skill or capability. Other types remain suggestions. Required unless fromDiagnosis.' },

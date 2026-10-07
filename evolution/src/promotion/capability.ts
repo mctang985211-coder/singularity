@@ -388,7 +388,7 @@ export async function assertCapabilityPromotionEvidence(
           'frozen acceptance, never an admission that merely went through; the promotion is refused',
       )
     }
-    const required = frozen.objective === 'tool-call-reduction'
+    const required = frozen.objective !== undefined
       ? snapshot.tasks.find(task => task.taskId === sample.taskId)!.acceptanceCriteria.filter(criterion => criterion.mandatory)
       : frozenSample.criteria
     const failed = required.filter(criterion => sample.candidate.criteria.find(item => item.criterionId === criterion.criterionId)?.verdict !== 'pass')
@@ -526,10 +526,10 @@ export async function assertCapabilityPromotionEvidence(
     )
   }
   const degraded = report.samples.filter(sample => sample.verdict === 'regressed')
-  if (report.verdict !== (frozen.objective === 'tool-call-reduction' ? 'improved' : 'fixed')) {
+  if (report.verdict !== (frozen.objective !== undefined ? 'improved' : 'fixed')) {
     throw capabilityRefusal(
       'capability-not-fixed',
-      `the two-sided capability experiment "${view.experimentId}" did not show a clean ${frozen.objective === 'tool-call-reduction' ? 'improvement' : 'fix'} — ` +
+      `the two-sided capability experiment "${view.experimentId}" did not show a clean ${frozen.objective !== undefined ? 'improvement' : 'fix'} — ` +
         `${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples)
           .map(line => `- ${line}`)
           .join('\n')}` +

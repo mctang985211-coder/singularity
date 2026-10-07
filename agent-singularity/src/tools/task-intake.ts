@@ -45,10 +45,9 @@ export function defineTaskIntakeTool(ctx: Context) {
           criterionId:
             'Stable id for this criterion; omitted, the runtime generates one from its position (`ac-1`, `ac-2`, …). Declared ids ' +
             'must be unique inside the contract',
-          command: 'Shell command the verifier runs; exit code 0 proves the criterion (deterministic modes)',
+          command: 'Shell command, executed from this Run\'s workspace root; exit code 0 proves the criterion. Prefer an existing authoritative checker with explicit artifact or manifest paths. Propagate its failure; do not end with an unconditional success command.',
           mode:
-            'Verifier kind; defaults to deterministic with a command. Mandatory review/formal requires an explicit registered settling verifier. `composite` is the conjunction of ' +
-            'the children this goal later decomposes into: it may be one of the mandatory criteria, never the only one',
+            'Verifier kind; defaults to deterministic with a command. Mandatory review/formal requires an explicit registered settling verifier.',
           requiresArtifact: 'Artifact/evidence kinds or ids that must already exist in the task store as a verified reference product for this criterion to be judgeable; a missing one blocks the run and registers an obligation',
           acceptsArtifact: 'Artifact/evidence kinds or ids this criterion consumes as a raw input: existence in the task store is the whole requirement, any run state',
           verifierRef: 'Registered verifier id that judges this criterion; must exist in the verifier registry — an unknown id rejects the whole contract at intake and the error lists the registered ids. Omit to dispatch by mode.',
@@ -156,4 +155,3 @@ function activatedText(rootSessionId: string, result: Extract<RootIntakeResult, 
     '  and when the goal is delivered hand the root task in yourself with `task_submit_result` — only that submission starts its acceptance.',
   ].join('\n')
 }
-

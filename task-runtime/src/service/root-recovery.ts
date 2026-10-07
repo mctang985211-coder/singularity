@@ -569,6 +569,7 @@ export async function recoveryStatus(self: TaskRuntime, storeId: string): Promis
     if (self.startedSessions.has(run.sessionId)) continue
     if (self.agentOrUndefined(run.sessionId) !== undefined) continue
     if (run.batchId !== undefined && self.drivers.has(`${storeId}/${run.batchId}`)) continue
+    if (self.drivers.has(`replay/${storeId}/${run.taskId}`)) continue
     if (rootTaskStoreId(run.sessionId) === storeId) continue
     if (run.executionPhase === undefined) {
       return {

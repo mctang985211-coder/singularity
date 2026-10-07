@@ -19,7 +19,7 @@
  *    `evolution_replay` (the two-sided experiment: the baseline refused at
  *    admission, the candidate really executed and judged) → `evolution_gate`;
  * 4. **a person** decides and applies, through the deployment's real
- *    `evolution_decide`/`evolution_apply` tools and the real approval seam (two
+ *    `evolution_decide`/`evolution_apply` tools and the real approval seam (one
  *    held asks, both answered here) — the supervisor's own grant carries neither,
  *    which is why the operator session is the one that calls them;
  * 5. the supervisor calls `task_recover`, the runtime opens the failed goal's new
@@ -60,7 +60,7 @@ import { writeCapabilityConfig } from '../support/capability-config.ts'
 import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type ScriptedLoop, type SupervisionOptions } from '../support/scripted-loop.ts'
 
 const ROOT = 's-root' as SessionId
-/** The deployment's operator session: a live root whose model puts the person's two questions. */
+/** The deployment's operator session: a live root whose model puts the model decision and publication approval. */
 const OPERATOR = 's-operator' as SessionId
 const STORE = rootTaskStoreId(String(ROOT))
 const PROPOSAL = 'p-chain'
@@ -317,7 +317,7 @@ interface ScriptContext {
  * The model every session in this chain is: the root that fails and asks for the
  * postmortem, the member, the reviewer, the supervisor that prepares the whole
  * candidate through its own tools and then asks for the recovery, the operator
- * that puts the person's two decisions, the experiment's worker (which does what
+ * that puts the model decision and publication approval, the experiment's worker (which does what
  * the skill it loaded says), and the recovered attempt, which re-runs the failed
  * position against the capability that was just applied.
  */
@@ -328,7 +328,7 @@ function script(context: ScriptContext): (sessionId: string, index: number) => r
     const spawn = loop.spawns.find(item => String(item.sessionId) === sessionId)
     const name = spawn?.name ?? ''
     if (String(sessionId) === String(OPERATOR)) {
-      // The person's two gates, through the deployment's own tools: each asks the
+      // The model decision and publication approval, through the deployment tools: only apply asks the
       // human (the spec answers the ask) and records the approval reference the
       // runtime and this plane read.
       return [
@@ -678,15 +678,8 @@ describe('A6 EVO-3: the capability chain, from the failing source to the recover
     expect(notApplied).toContain('is opened only after a person approves it and apply commits it')
     expect((await h.snapshot(STORE)).runs).toHaveLength(runsBeforeApply)
 
-    // ── a person decides and applies, through the deployment's own tools ─────
+    // ── the model decides and a person approves publication ─────
     h.userSays('the candidate is ready: decide it and apply it', OPERATOR)
-    await vi.waitFor(() => expect(h.review.asks.some(ask => ask.toolName === 'evolution_decide')).toBe(true), { timeout: 60_000, interval: 25 })
-    // The decide ask is a held question until a person answers it — two gates,
-    // the decision and the apply, and the ask names the promotion.
-    const decideAsk = h.review.asks.findIndex(ask => ask.toolName === 'evolution_decide')
-    expect(h.review.asks[decideAsk]!.reason).toContain(`proposal ${PROPOSAL}`)
-    expect(h.review.asks[decideAsk]!.reason).toContain(ROW)
-    h.review.answer(decideAsk, 'allowed-once')
     await vi.waitFor(() => expect(h.review.asks.some(ask => ask.toolName === 'evolution_apply')).toBe(true), { timeout: 60_000, interval: 25 })
     h.review.answer(h.review.asks.findIndex(ask => ask.toolName === 'evolution_apply'), 'allowed-once')
     await vi.waitFor(async () => expect((await h.ctx.evolution.get(PROPOSAL)).status).toBe('applied'), { timeout: 60_000, interval: 25 })

@@ -74,5 +74,7 @@ export function applyTargets(proposal: EvolutionProposal, roots: { skillRoot: st
   if (proposal.prepared?.skillContent?.contract !== undefined) {
     files.push(join(roots.skillRoot, name, SKILL_SIDECAR_FILE))
   }
+  const resources = [...(proposal.prepared?.skillContent?.resources ?? []), ...(proposal.prepared?.skillBaseline?.resources ?? [])]
+  for (const path of [...new Set(resources.map(resource => resource.path))]) files.push(join(roots.skillRoot, name, path))
   return files
 }

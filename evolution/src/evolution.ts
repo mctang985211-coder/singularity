@@ -4,8 +4,8 @@ import { assertTaskDefinitionPromotion } from './promotion/task-definition.ts'
 /** The evolution plane service: the proposal lifecycle, its two-sided experiment, the promotion gate and the durable apply/rollback commit.
  * @module dsh-singularity-evolution/evolution */
 
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
-import { existsSync, type Dirent } from 'node:fs'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { TaskSnapshot } from '@dangosys/dsh-singularity-task'
@@ -43,9 +43,10 @@ import { capabilityTableIdentity } from './capability-config.ts'
 
 import type { ExperimentSources } from './experiment/freeze.ts'
 import type { ExperimentResult } from './experiment/record.ts'
-import type { ExperimentSpec } from './experiment/spec.ts'
+import type { ExperimentSpec, OutcomeModelCall } from './experiment/spec.ts'
 import { buildExperimentReport } from './experiment/record.ts'
 import { resumeExperiment, runExperiment } from './experiment/runner.ts'
+import { assertOutcomeEvidence } from './experiment/outcome.ts'
 import { assertCapabilityPromotionEvidence } from './promotion/capability.ts'
 import { noEvaluatorRefusal } from './promotion/shared.ts'
 import { assertSkillPromotionEvidence } from './promotion/skill.ts'
@@ -55,7 +56,7 @@ import { EvolutionServiceCore } from './service/core.ts'
 import { capabilityBytes, readVerifiedSkillCandidate } from './service/skill-files.ts'
 import { materialize } from './service/sandbox.ts'
 import { sessionLog, verifierVocabularyOf } from './service/sources.ts'
-import { validateGateAnswers, validateMutation, validateVersionSet } from './ledger/records.ts'
+import { validateGateAnswers, validateLoadableMutation, validateMutation, validateVersionSet } from './ledger/records.ts'
 import {
   candidateSidecar,
   contractIdentityOf,
@@ -63,6 +64,8 @@ import {
   productionSidecarRelative,
   productionSkillRelative,
   readProductionSkill,
+  assertSkillObjectIdentity,
+  skillObjectIdentity,
 } from './service/skill-files.ts'
 import { assertSegment, nonEmpty, refExistsOnDisk, resolveWithin } from './shared.ts'
 import type {
@@ -128,6 +131,9 @@ export class EvolutionService extends EvolutionServiceCore {
     }
     validateVersionSet(versionSet)
     validateMutation(current.targetType, mutation)
+    validateLoadableMutation(current.targetType, mutation)
+    if (current.targetType === 'skill' && mutation.name !== current.targetId)
+      throw new Error('evolution: Skill mutation.name must equal the proposal targetId')
     await this.append({
       formatVersion: 4,
       kind: 'candidate',
@@ -146,6 +152,7 @@ export class EvolutionService extends EvolutionServiceCore {
     // Every candidate the fold admits carries a validated mutation: `candidate`
     const mutation = current.mutation
     validateMutation(current.targetType, mutation)
+    validateLoadableMutation(current.targetType, mutation)
     assertSegment(proposalId, 'proposalId')
     // The two candidate lifecycles materialize different objects and share
     if (current.targetType === 'task_definition') {
@@ -180,22 +187,8 @@ export class EvolutionService extends EvolutionServiceCore {
           '(SKILL.md plus SKILL.contract.json with no resources), so nothing was written',
       )
     }
-    if (loaded.sidecar !== undefined && loaded.sidecar.content.resources.length > 0) {
-      throw new Error(
-        `evolution: the production skill "${directory}" declares ${loaded.sidecar.content.resources.length} resource(s) ` +
-          `(${loaded.sidecar.content.resources.map(resource => JSON.stringify(resource.path)).join(', ')}), and this build promotes an ` +
-          'object whose content identity covers SKILL.md alone — resources need an executor that writes them, so nothing was written',
-      )
-    }
-    // The other direction of the same rule, and the one place it can be missed: the side that already landed.
-    const undeclaredFiles = [...loaded.content.resources.map(resource => resource.path), ...loaded.uncovered]
-    if (undeclaredFiles.length > 0) {
-      throw new Error(
-        `evolution: the production skill "${directory}" holds ${undeclaredFiles.length} file(s) beyond the object this build freezes ` +
-          `(${undeclaredFiles.map(path => JSON.stringify(path)).join(', ')}), and the object is fixed — guidance is SKILL.md alone, and ` +
-          'an execution provider is SKILL.md plus the SKILL.contract.json beside it with no resources — so a directory carrying more is ' +
-          'not the object a candidate reproduces: nothing was written',
-      )
+    if (loaded.uncovered.length > 0) {
+      throw new Error(`evolution: production Skill carries unsupported files: ${loaded.uncovered.join(', ')}`)
     }
     // The bytes the object is frozen from: read once, through the same verified read the candidate goes through.
     const productionSkillMd = await readVerifiedFile(this.skillRoot, productionSkillRelative(name))
@@ -217,24 +210,20 @@ export class EvolutionService extends EvolutionServiceCore {
           'prepared (its declaration is no longer the one the loader had just validated) — nothing was written',
       )
     }
+    const resources: Record<string, Buffer> = {}
+    for (const resource of loaded.content.resources) {
+      const bytes = await readVerifiedFile(this.skillRoot, `${name}/${resource.path}`)
+      if (sha256Hex(bytes) !== resource.sha256) throw new Error(`evolution: production resource "${resource.path}" changed during prepare`)
+      resources[resource.path] = bytes
+    }
     const dir = join(this.root, 'sandbox', proposalId)
     const written = await materialize(dir, mutation, {
       skillMd: productionSkillMd,
+      resources,
       ...(productionSidecar === undefined ? {} : { sidecar: productionSidecar }),
     })
     const sandbox = `sandbox/${proposalId}`
-    const candidateSkillMd = await readVerifiedFile(this.root, `${sandbox}/skills/${name}/SKILL.md`)
-    const skillContent: SkillContentIdentity = {
-      name,
-      sha256: sha256Hex(candidateSkillMd),
-      ...(loaded.sidecar === undefined
-        ? {}
-        : {
-            contract: contractIdentityOf(
-              await readVerifiedFile(this.root, `${sandbox}/skills/${name}/${SKILL_SIDECAR_FILE}`),
-            ),
-          }),
-    }
+    const skillContent = await skillObjectIdentity(join(dir, 'skills', name), name)
     await this.append({
       formatVersion: 4,
       kind: 'prepared',
@@ -435,7 +424,11 @@ export class EvolutionService extends EvolutionServiceCore {
         )
       }
       try {
-        buildExperimentReport(experiment)
+        const report = buildExperimentReport(experiment)
+        if (report.frozen.objective === 'llm-outcome') {
+          if (report.verdict !== 'improved') throw new Error(`llm-outcome gate requires an improved report, got ${report.verdict}`)
+          await assertOutcomeEvidence(this.root, report)
+        }
       } catch (error) {
         throw new Error(
           `${error instanceof Error ? error.message : String(error)} — a ${current.targetType} candidate gates on a completed ` +
@@ -473,7 +466,7 @@ export class EvolutionService extends EvolutionServiceCore {
     return this.get(proposalId)
   }
 
-  /** Move gated → decided. Callers (the evolution_decide tool) must have a human grant to pass as approval evidence. */
+  /** Move gated → decided and retain the caller decision reference. Publication authorization belongs to apply. */
   async decide(
     proposalId: string,
     decision: EvolutionDecision,
@@ -531,7 +524,11 @@ export class EvolutionService extends EvolutionServiceCore {
           ? await capabilityBytes(this.root, proposal, 'apply')
           : await (async () => {
               const candidate = await readVerifiedSkillCandidate(this.root, this.skillRoot, proposal)
-              return [candidate.skillMd, ...(candidate.sidecar === undefined ? [] : [candidate.sidecar])]
+              return request.files.map(file => {
+                if (file.source === undefined) return undefined
+                const path = relative(join(this.skillRoot, (proposal.mutation as SkillMutation).name), file.target)
+                return path === 'SKILL.md' ? candidate.skillMd : path === SKILL_SIDECAR_FILE ? candidate.sidecar : candidate.resources[path]
+              })
             })()
       await commitIntent(this.commitHost(), request, bytes)
       return {
@@ -637,29 +634,7 @@ export class EvolutionService extends EvolutionServiceCore {
       )
     }
     const directory = resolveWithin(this.root, `${sandbox}/skills/${name}`)
-    const expectedFiles = identity.contract === undefined ? ['SKILL.md'] : ['SKILL.md', SKILL_SIDECAR_FILE]
-    let entries: Dirent[]
-    try {
-      entries = await readdir(directory, { withFileTypes: true })
-    } catch {
-      // A directory that cannot be listed is the validator's to refuse, with
-      // the defect its absence deserves (`skill-missing`), not this boundary's.
-      entries = []
-    }
-    const present = entries.map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name)).sort()
-    const unexpected = present.filter(entry => !expectedFiles.includes(entry))
-    const missing = expectedFiles.filter(file => !present.includes(file))
-    if (unexpected.length > 0 || missing.length > 0) {
-      const parts = [
-        unexpected.length === 0 ? undefined : `carries ${unexpected.map(entry => JSON.stringify(entry)).join(', ')}`,
-        missing.length === 0 ? undefined : `is missing ${missing.map(entry => JSON.stringify(entry)).join(', ')}`,
-      ].filter((part): part is string => part !== undefined)
-      throw new Error(
-        `evolution: skill candidate "${name}" at ${directory} ${parts.join(' and ')} — one skill object is a fixed file set ` +
-          `(${expectedFiles.map(file => JSON.stringify(file)).join(', ')}, the shape prepare froze), so a candidate whose files moved ` +
-          'is refused rather than promoted as an object the frozen evidence never described',
-      )
-    }
+    await assertSkillObjectIdentity(directory, identity)
     const verdict = await this.providerVerdict({ name, directory })
     const defects = verdict.valid ? '' : verdict.defects.map(item => `${item.code}: ${item.detail}`).join('; ')
     if (!verdict.valid) {
@@ -702,13 +677,13 @@ export class EvolutionService extends EvolutionServiceCore {
           `(sha256 ${sha256Hex(candidate)} != ${identity.sha256}) — propose a new candidate and re-evaluate it; recorded identities are never re-digested`,
       )
     }
-    const expectedSidecar = candidateSidecar(loadedSidecar(championSidecar), identity.sha256)
+    const expectedSidecar = candidateSidecar(loadedSidecar(championSidecar), identity.sha256, identity.resources ?? [])
     const sandboxSidecar = await readVerifiedFile(this.root, `${sandbox}/skills/${name}/${SKILL_SIDECAR_FILE}`)
     const sandboxText = sandboxSidecar.toString('utf8')
     if (sandboxText !== expectedSidecar || sha256Hex(sandboxSidecar) !== contract.sha256) {
       throw new Error(
         `evolution: the candidate sidecar of skill "${name}" is not the declaration derived from production — the production object ` +
-          '(the champion snapshot) with only content.skillMdSha256 rewritten to the candidate SKILL.md digest; a content update may not ' +
+          '(the champion snapshot) with its content identity rewritten to candidate files; a content update may not ' +
           'move capabilities, required tools, verifier or any other declaration field, so the promotion is refused',
       )
     }
@@ -722,7 +697,7 @@ export class EvolutionService extends EvolutionServiceCore {
   }
 
   /** Read a prepared skill candidate's materialized object and verify it against the identity recorded at prepare. */
-  async readSkillCandidate(proposalId: string): Promise<{ skillMd: Buffer; sidecar?: Buffer }> {
+  async readSkillCandidate(proposalId: string): Promise<{ skillMd: Buffer; sidecar?: Buffer; resources: Record<string, Buffer> }> {
     return readVerifiedSkillCandidate(this.root, this.skillRoot, await this.get(proposalId))
   }
 
@@ -803,6 +778,7 @@ export class EvolutionService extends EvolutionServiceCore {
         `evolution: skill proposal "${proposal.proposalId}" records no production baseline identity — ${guidance}`,
       )
     }
+    await assertSkillObjectIdentity(join(this.skillRoot, name), identity)
     let current: { bytes: Buffer; sha256: string } | null
     try {
       current = await readProductionSkill(this.skillRoot, productionSkillRelative(name))
@@ -886,35 +862,17 @@ export class EvolutionService extends EvolutionServiceCore {
         return { targets: request.files.map(file => file.target), proposal: await this.get(proposalId) }
       }
       const prepared = proposal.prepared!
-      const applied = prepared.skillContent!
-      const name = (proposal.mutation as SkillMutation).name
-      // Both files the proposal applied must still be exactly what it applied,
-      for (const [index, file] of request.files.entries()) {
-        const relative = index === 0 ? productionSkillRelative(name) : productionSidecarRelative(name)
-        const expected = index === 0 ? applied.sha256 : applied.contract!.sha256
-        const current = await readProductionSkill(this.skillRoot, relative)
-        if (current === null || current.sha256 !== expected) {
-          throw new Error(
-            `evolution: the production file "${file.target}" does not hold the content proposal "${proposalId}" applied ` +
-              `(sha256 ${current?.sha256 ?? 'missing'} != ${expected}) — a rollback restores the baseline of the object this proposal ` +
-              'applied, and a file another writer (or a later proposal) changed is left exactly as it is: nothing was written and no ' +
-              'commit intent was recorded',
-          )
-        }
-      }
-      const championFiles: Buffer[] = []
-      for (const [index, file] of request.files.entries()) {
-        const expected = index === 0 ? prepared.skillBaseline!.sha256 : prepared.skillBaseline!.contract!.sha256
-        const snapshot = await readVerifiedFile(this.root, file.source!)
-        const digest = sha256Hex(snapshot)
-        if (digest !== expected) {
-          throw new Error(
-            `evolution: the champion snapshot "${file.source}" of proposal "${proposalId}" no longer hashes to the production ` +
-              `baseline recorded at prepare (sha256 ${digest} != ${expected}) — the snapshot cannot restore the bytes it captured: ` +
-              'nothing was written and no commit intent was recorded',
-          )
-        }
-        championFiles.push(snapshot)
+      await assertSkillObjectIdentity(join(this.skillRoot, prepared.skillContent!.name), prepared.skillContent!)
+      await assertSkillObjectIdentity(join(this.root, prepared.sandbox!, 'champion', 'skills', prepared.skillBaseline!.name), prepared.skillBaseline!)
+      const championFiles: (Buffer | undefined)[] = []
+      for (const file of request.files) {
+        const current = await readProductionSkill(this.skillRoot, relative(this.skillRoot, file.target))
+        if ((current?.sha256 ?? null) !== file.baselineSha256)
+          throw new Error(`evolution: production file "${file.target}" differs from the applied object`)
+        const bytes = file.source === undefined ? undefined : await readVerifiedFile(this.root, file.source)
+        if (bytes !== undefined && sha256Hex(bytes) !== file.contentSha256)
+          throw new Error(`evolution: champion snapshot "${file.source}" differs from its frozen identity`)
+        championFiles.push(bytes)
       }
       await commitIntent(this.commitHost(), request, championFiles)
       return { targets: request.files.map(file => file.target), proposal: await this.get(proposalId) }
@@ -962,13 +920,15 @@ export class EvolutionService extends EvolutionServiceCore {
     spec: ExperimentSpec,
     caller: SessionId,
     actor: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; judge?: OutcomeModelCall; maxParallel?: number } = {},
   ): Promise<ExperimentResult> {
     await this.assertSupportedSource(await this.get(spec.proposalId), await this.storeOfSession(String(caller)), spec)
     return runExperiment(this.experimentSources(), {
       spec,
       caller,
       actor,
+      judge: options.judge,
+      ...(options.maxParallel === undefined ? {} : { maxParallel: options.maxParallel }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })
   }
@@ -978,7 +938,7 @@ export class EvolutionService extends EvolutionServiceCore {
     experimentId: string,
     caller: SessionId,
     actor: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; judge?: OutcomeModelCall; maxParallel?: number } = {},
   ): Promise<ExperimentResult> {
     const experiment = await this.experiment(experimentId)
     await this.assertSupportedSource(
@@ -990,6 +950,8 @@ export class EvolutionService extends EvolutionServiceCore {
       experimentId,
       caller,
       actor,
+      judge: options.judge,
+      ...(options.maxParallel === undefined ? {} : { maxParallel: options.maxParallel }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })
   }
@@ -1030,11 +992,11 @@ export class EvolutionService extends EvolutionServiceCore {
         )
       })
       if ((source.status === 'verified' || successfulRun) &&
-          (spec?.objective !== 'tool-call-reduction' ||
+          (spec?.objective === undefined ||
            !spec.samples.some(sample => sample.taskId === source.taskId && sample.role === 'observed-success'))) {
         throw new Error(
           `evolution: diagnosis "${diagnosisId}" names a successful source task/run; its frozen experiment must declare ` +
-            'objective tool-call-reduction and include that source as an observed-success sample',
+            'objective tool-call-reduction or llm-outcome and include that source as an observed-success sample',
         )
       }
     }
@@ -1056,6 +1018,7 @@ export class EvolutionService extends EvolutionServiceCore {
       graphs,
       task,
       taskRuntime: {
+        config: (taskRuntime as unknown as { config: { maxActiveWorkers: number } }).config,
         replayTask: (storeId: string, championTaskId: string, options: ReplayTaskOptions, callerSessionId: string) =>
           taskRuntime.replayTask(storeId, championTaskId, options, callerSessionId),
         capabilityProviderReport: (sessionId: string, capabilities?: readonly string[]) =>

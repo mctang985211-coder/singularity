@@ -97,6 +97,14 @@ export function assertSubmissionShape(runId: RunId, submission: SubmissionRecord
 
 /** A run's birth phase is written by the runtime, and the reducer judges its shape only — the transition semantics belong to `changeRunPhase`. */
 export function assertBirthPhase(run: TaskRun): void {
+  if (run.placement !== undefined) {
+    const placement = run.placement
+    if (!nonEmpty(placement.workspacePath) || !nonEmpty(placement.inputSnapshotPath) ||
+      !isDigest(placement.inputSnapshotDigest) || !Array.isArray(placement.dependencyEvidenceRefs) ||
+      placement.dependencyEvidenceRefs.some(ref => !nonEmpty(ref))) {
+      throw new Error(`task: run "${run.runId}" requires a valid isolated workspace placement`)
+    }
+  }
   const phase = run.executionPhase
   if (phase === undefined) return
   if (phase !== 'active' && phase !== 'submitted') {

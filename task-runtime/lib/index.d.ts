@@ -1,9 +1,9 @@
 import * as _dangosys_dsh_singularity_task0 from "@dangosys/dsh-singularity-task";
-import { AcceptanceCriterion, AdmissionContext, BudgetExtensionProposal, CapabilityManifest, CatalogPath, CriterionSpec, DecompositionAdmission, DecompositionIdentity, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionRecord, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunProviderBinding, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractInput, TaskContractVersion, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalPolicy, TaskProposalRoot, TaskProposalStatus, TaskRun, TaskService, TaskSnapshot, TaskTemplate, TaskTemplateRef, TemplateParameters, TemplateScope } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, AdmissionContext, BudgetExtensionProposal, CapabilityManifest, CatalogPath, CriterionSpec, DecompositionAdmission, DecompositionIdentity, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionRecord, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunPlacement, RunProviderBinding, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractInput, TaskContractVersion, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalPolicy, TaskProposalRoot, TaskProposalStatus, TaskRun, TaskService, TaskSnapshot, TaskTemplate, TaskTemplateRef, TemplateParameters, TemplateScope } from "@dangosys/dsh-singularity-task";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { AgentMessageIntent, AgentOptions, McpServerSpec, MessageDeliveryReport, MessageDeliveryStatus, SessionOwnLog, ToolCallBody, ToolCallRef, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
+import { AgentMessageIntent, AgentOptions, McpServerSpec, MessageDeliveryReport, MessageDeliveryStatus, SessionOwnLog, ToolCallBody, ToolCallRef, WorkerGrant, parseSkillFile } from "@dangosys/dsh-singularity-agent-runtime";
 import { ContextFormed } from "@deepseek-ai/dsh-llm";
 import { Agent, AgentHandle } from "@deepseek-ai/dsh-agent";
 
@@ -115,7 +115,7 @@ type SkillContractVersion = typeof SKILL_CONTRACT_VERSION;
  * The directories a skill may hold supporting files in. The supported shape is
  * deliberately one level deep — `<dir>/<file>` — because a deeper tree cannot
  */
-
+declare const SUPPORTED_SKILL_RESOURCE_DIRS: readonly string[];
 /**
  * One supporting file's identity: where it is inside the skill directory and the
  * SHA-256 of its exact bytes.
@@ -1089,6 +1089,13 @@ interface OrchestrateEnv {
    * worker has to be told the door is open before it can walk through it, and a
    */
   allowRuntimeDecomposition: boolean;
+  isolatedChildren?: boolean;
+  maxActiveWorkers?: number;
+  childEnv?(run: TaskRun): Promise<OrchestrateEnv>;
+  prepareChildPlacement?(batch: BatchContext, runId: RunId, dependencyEvidenceRefs: string[]): Promise<RunPlacement>;
+  withChildAdmission?<T>(start: () => Promise<T>): Promise<T | undefined>;
+  waitForCapacity?(signal: AbortSignal): Promise<void>;
+  activateParent?(sessionId: string, signal: AbortSignal, activate: () => Promise<void>): Promise<void>;
   spawn(request: SpawnChildRequest): Promise<AgentHandle>;
   verifyRun(storeId: string, runId: RunId, options?: VerifyRunOptions): Promise<EvidenceBundle>;
   /** Optional tail reader for verifier logs (logRef relative to the verifier's evidence root); absent keeps logTail off failed records. */
@@ -1934,6 +1941,10 @@ interface Config {
   maxDepth: number;
   /** Most children one `task_decompose` batch may create. */
   maxChildren: number;
+  /** Optionally copy ordinary children into independent local workspaces. */
+  isolatedChildren: boolean;
+  /** Maximum active child workers across this runtime; waiting parents release capacity. */
+  maxActiveWorkers: number;
   /** Per-run resource budget; see {@link BudgetConfig} for which member is enforced, checked post-hoc, or declared only. */
   budget: BudgetConfig;
   /**
@@ -2063,6 +2074,10 @@ declare class TaskRuntime extends Service {
   readonly startedSessions: Set<string>;
   readonly drivers: Map<string, DriverEntry>;
   readonly replayLineage: Map<string, string>;
+  readonly activeWorkerSessions: Set<string>;
+  childAdmissionTail: Promise<void>;
+  readonly capacityWaiters: Set<() => void>;
+  readonly workspaceReleases: Set<Promise<void>>;
   readonly sessionWorkspaces: Map<string, string>;
   readonly sessionExecutionBindings: Map<string, {
     agentOptions?: AgentOptions;
@@ -2144,6 +2159,14 @@ declare class TaskRuntime extends Service {
   }>;
   manifestsOf(batch: NormalizedBatch, callerSessionId?: string): CapabilityManifest[];
   storedBatchOf(proposal: TaskProposal): NormalizedBatch;
+  decompositionState(sessionId: string): Promise<{
+    reasons: string[];
+    remainingRuns?: number | undefined;
+    canDecompose: boolean;
+    depth: number;
+    maxDepth: number;
+    phase: string;
+  }>;
   assertDecomposableRun(storeId: string, parentTask: TaskInstance, parentRun: TaskRun, callerSessionId: string, signal?: AbortSignal): Promise<void>;
   inFlightProposalsOf(storeId: string, parentRunId: RunId): Promise<TaskProposalDecomposition[]>;
   checkDerivedBatch(request: CheckDerivedBatchRequest): Promise<DecompositionPrecheck>;
@@ -2419,4 +2442,4 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 //#endregion
-export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, type McpServerTemplate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskRuntime, TaskRuntime as default, TaskTemplateCatalogPage, TaskTemplateMatch, TaskTemplateQuery, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, type McpServerTemplate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskRuntime, TaskRuntime as default, TaskTemplateCatalogPage, TaskTemplateMatch, TaskTemplateQuery, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

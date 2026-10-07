@@ -22,6 +22,8 @@ export async function resumeAdoptedWorkerSession(
   request: AdoptedWorkerResumeRequest,
 ): Promise<AdoptedWorkerResume> {
   const sessionId = request.run.sessionId
+  if (request.run.placement !== undefined) self.sessionWorkspaces.set(sessionId, request.run.placement.workspacePath)
+  self.activeWorkerSessions.add(sessionId)
   if (request.run.taskTemplatesRoot !== undefined) {
     self.sessionExecutionBindings.set(sessionId, {
       ...self.sessionExecutionBindings.get(sessionId),
@@ -125,55 +127,63 @@ export async function rebuildWorkspaceOwnership(self: TaskRuntime, storeId: stri
     await releaseStoreWorkspace(self, storeId)
     return
   }
-  const workspace = await workspacePathForSession(self, rootRun.sessionId)
-  if (workspace === undefined) return
-  const held = self.workspaces.ownerOf(workspace)
-  if (held !== undefined) {
-    if (held.storeId !== storeId)
-      throw new Error(`task-runtime: workspace ${workspace} is held by ${describeOwner(held)}`)
-    return
+  const placed = snapshot.runs.filter(run => run.status === 'running' && run.placement !== undefined)
+  for (const run of placed) {
+    await normalizeWorkspacePath(run.placement!.workspacePath)
+    self.sessionWorkspaces.set(run.sessionId, run.placement!.workspacePath)
+    self.activeWorkerSessions.add(run.sessionId)
   }
-  const adoption = await self.workspaces.reconcileAdopt(workspace)
-  if (!adoption.adopted) throw new Error(`task-runtime: cannot take over workspace ${workspace}: ${adoption.reason}`)
-  let owner: WorkspaceOwner = { kind: 'run', storeId, taskId: rootRun.taskId, runId: rootRun.runId, since: now() }
-  await self.workspaces.claim(workspace, owner)
-  let run = rootRun
-  while (run.executionPhase === 'waiting_children') {
-    const batch = run.batches?.find(batch => batch.batchId === run.batchId)
-    if (batch === undefined)
-      throw new Error(`task-runtime: Run "${run.runId}" has no identifiable persisted child batch`)
-    const next: WorkspaceOwner = { kind: 'batch', storeId, taskId: run.taskId, batchId: batch.batchId, since: now() }
-    await self.workspaces.push(workspace, owner, next)
-    owner = next
-    const children = snapshot.runs.filter(
-      child => child.status === 'running' && batch.memberTaskIds.includes(child.taskId),
-    )
-    if (children.length > 1)
-      throw new Error(`task-runtime: batch "${batch.batchId}" holds multiple running workspace writers`)
-    if (children.length === 0) break
-    run = children[0]!
-    const childOwner: WorkspaceOwner = { kind: 'run', storeId, taskId: run.taskId, runId: run.runId, since: now() }
-    await self.workspaces.push(workspace, owner, childOwner)
-    owner = childOwner
+  for (const initial of [rootRun, ...placed]) {
+    const workspace = await workspacePathForSession(self, initial.sessionId)
+    if (workspace === undefined) continue
+    const held = self.workspaces.ownerOf(workspace)
+    if (held !== undefined) {
+      if (held.storeId !== storeId)
+        throw new Error(`task-runtime: workspace ${workspace} is held by ${describeOwner(held)}`)
+      continue
+    }
+    const adoption = await self.workspaces.reconcileAdopt(workspace)
+    if (!adoption.adopted) throw new Error(`task-runtime: cannot take over workspace ${workspace}: ${adoption.reason}`)
+    let owner: WorkspaceOwner = { kind: 'run', storeId, taskId: initial.taskId, runId: initial.runId, since: now() }
+    await self.workspaces.claim(workspace, owner)
+    if (!self.config.isolatedChildren && self.config.maxActiveWorkers > 1) continue
+    let run = initial
+    while (run.executionPhase === 'waiting_children') {
+      const batch = run.batches?.find(batch => batch.batchId === run.batchId)
+      if (batch === undefined)
+        throw new Error(`task-runtime: Run "${run.runId}" has no identifiable persisted child batch`)
+      const next: WorkspaceOwner = { kind: 'batch', storeId, taskId: run.taskId, batchId: batch.batchId, since: now() }
+      await self.workspaces.push(workspace, owner, next)
+      owner = next
+      const children = snapshot.runs.filter(
+        child => child.status === 'running' && child.placement === undefined && batch.memberTaskIds.includes(child.taskId),
+      )
+      if (children.length > 1)
+        throw new Error(`task-runtime: batch "${batch.batchId}" holds multiple running workspace writers`)
+      if (children.length === 0) break
+      run = children[0]!
+      const childOwner: WorkspaceOwner = { kind: 'run', storeId, taskId: run.taskId, runId: run.runId, since: now() }
+      await self.workspaces.push(workspace, owner, childOwner)
+      owner = childOwner
+    }
   }
 }
 
 export async function releaseStoreWorkspace(self: TaskRuntime, storeId: string): Promise<void> {
   if (self.workspaces === undefined) return
-  const sessionId = recoverySessionFor(self, undefined, storeId)
-  const workspace = await workspacePathForSession(self, sessionId)
-  if (workspace === undefined) return
-  for (;;) {
-    const top = self.workspaces.ownerOf(workspace)
-    if (top === undefined) return
-    if (top.storeId !== storeId) {
-      self.warn(
-        `workspace ${workspace} holds a layer of store ${top.storeId} (${top.kind}) while store ${storeId} is being cancelled; ` +
-          "only this process's own layers are released here",
-      )
-      return
+  await Promise.all(self.workspaceReleases)
+  const snapshot = await self.context.task.snapshotIn(storeId)
+  const sessionId = recoverySessionFor(self, snapshot, storeId)
+  const rootWorkspace = await workspacePathForSession(self, sessionId)
+  const paths = new Set(snapshot.runs.flatMap(run => run.placement === undefined ? [] : [run.placement.workspacePath]))
+  if (rootWorkspace !== undefined) paths.add(rootWorkspace)
+  for (const workspace of paths) {
+    for (;;) {
+      const top = self.workspaces.ownerOf(workspace)
+      if (top === undefined) break
+      if (top.storeId !== storeId) throw new Error(`task-runtime: workspace ${workspace} is held by another store`)
+      await self.workspaces.release(workspace, top)
     }
-    await self.workspaces.release(workspace, top)
   }
 }
 
@@ -269,6 +279,11 @@ export async function resolveBinding(
 
 export function reindex(self: TaskRuntime, storeId: string, snapshot: TaskSnapshot): void {
   for (const run of snapshot.runs) {
+    if (run.sharedWorkspace && run.status === 'running') self.activeWorkerSessions.add(run.sessionId)
+    if (run.placement !== undefined && run.status === 'running') {
+      self.sessionWorkspaces.set(run.sessionId, run.placement.workspacePath)
+      self.activeWorkerSessions.add(run.sessionId)
+    }
     self.sessions.set(run.sessionId, { storeId, taskId: run.taskId, runId: run.runId })
   }
 }

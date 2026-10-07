@@ -11,7 +11,7 @@ import type { ModelSelection } from './replay.ts'
 import type { CommitFile, CommitStage } from './commit.ts'
 import type { CapabilityTableIdentity } from './capability-config.ts'
 
-import type { ExperimentSampleRecord, ExperimentStartedRecord } from './experiment/spec.ts'
+import type { ExperimentJudgedRecord, ExperimentSampleRecord, ExperimentStartedRecord } from './experiment/spec.ts'
 import type { SupervisorDelegation } from './ledger/records.ts'
 
 export type EvolutionLevel = 'L1' | 'L2' | 'L3' | 'L4'
@@ -31,6 +31,8 @@ export const APPLYABLE_TARGET_TYPES: readonly ProposalTargetType[] = ['skill', '
 export interface SkillMutation {
   name: string
   content: string
+  /** Complete text resource set. Omission preserves the production resources. */
+  resources?: Record<string, string>
 }
 
 /** The champion state of one prepared proposal: `captured` for a same-name update, `absent` when production held no object to snapshot. */
@@ -140,7 +142,7 @@ export type EvolutionRecord =
       proposalId: string
       decision: EvolutionDecision
       note?: string
-      /** Human-review evidence: the approval call id of the evolution_decide call that granted this decision. */
+      /** The evolution_decide call that recorded the model decision. */
       approvalRef?: string
       actor: string
       at: string
@@ -176,6 +178,7 @@ export type EvolutionRecord =
   /** The experiment family (S4-E §F.2): the two-sided skill evaluation's frozen start line and its sample records. */
   | ExperimentStartedRecord
   | ExperimentSampleRecord
+  | ExperimentJudgedRecord
 
 /** Which way one commit moves a production target. */
 export type CommitDirection = 'apply' | 'rollback'

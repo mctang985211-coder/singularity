@@ -49,6 +49,7 @@ import { readSupervisorHandoff } from '../../agent-singularity/src/coordination/
 import { startSupervisorHandoff } from '../../agent-singularity/src/coordination/evolution-handoff.ts'
 import { defineTaskRecoverTool } from '../../agent-singularity/src/tools/task-recover.ts'
 import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
+import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
 import { readFile as readConfig } from 'node:fs/promises'
 import { writeCapabilityConfig } from '../support/capability-config.ts'
 import { disposeRunStacks, ScriptedBudgetApproval, startRunStack, type RunStack } from '../support/run-stack.ts'
@@ -1024,19 +1025,23 @@ describe('A6 EVO-5: both recovery entries at the states a deployment refuses in'
     await f.evolution.gate(PROPOSAL, gateAnswers([result.reportPath]), ROOT)
     const before = await budgetFacts(f)
 
-    // The person refuses, through the deployment's own tool and its approval seam:
-    // no decision is recorded and the proposal stays gated.
+    // The model records PROMOTE; the person refuses its publication.
     const approval = f.h.ctx.get('approval') as unknown as { request: (...args: never[]) => Promise<string> }
     const answered = approval.request
-    approval.request = async () => 'rejected'
     const decision = (await defineEvolutionDecideTool(f.h.ctx).execute(
       { proposalId: PROPOSAL, decision: 'PROMOTE' },
       { agent: { id: String(ROOT) }, callId: 'call-refuse', signal: new AbortController().signal } as never,
     )) as string
+    expect(decision).toContain('[decided] PROMOTE')
+    approval.request = async () => 'rejected'
+    const publication = (await defineEvolutionApplyTool(f.h.ctx).execute(
+      { proposalId: PROPOSAL },
+      { agent: { id: String(ROOT) }, callId: 'call-refuse-publication', signal: new AbortController().signal } as never,
+    )) as string
     approval.request = answered
-    expect(decision).toContain('no decision recorded')
-    expect(decision).toContain('stays gated')
-    expect((await f.evolution.get(PROPOSAL)).status).toBe('gated')
+    expect(publication).toContain('nothing written')
+    expect(publication).toContain('stays decided')
+    expect((await f.evolution.get(PROPOSAL)).status).toBe('decided')
     expect(f.h.runtime.listCapabilities()[ROW]).toBeUndefined()
 
     // Both recovery entries refuse the hand-off: its capability is not in force, and
@@ -1044,11 +1049,11 @@ describe('A6 EVO-5: both recovery entries at the states a deployment refuses in'
     await f.h.task.recordDiagnosisIn(f.storeId, recoveryDiagnosis(), 'tester')
     const supervisor = await supervisorFor(f, recoveryDiagnosis() as unknown as Record<string, unknown>)
     const viaEntry = await recoverViaEntry(f, supervisor, 'k-refused')
-    expect(String(viaEntry)).toContain('is gated')
+    expect(String(viaEntry)).toContain('PROMOTE-decided but not applied')
     expect(String(viaEntry)).toContain('nothing was started')
     const viaTool = await recoverViaTool(f, supervisor, 'k-refused')
     expect(viaTool).toContain('task_recover rejected')
-    expect(viaTool).toContain('is gated')
+    expect(viaTool).toContain('PROMOTE-decided but not applied')
     expect((await f.h.snapshot(f.storeId)).runs.filter(run => run.recovery !== undefined)).toHaveLength(0)
     expect(await budgetFacts(f)).toEqual(before)
     ledgerKeepsNoRunAccount(await ledgerLines(f))

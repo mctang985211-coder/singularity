@@ -1,12 +1,13 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { mkdir, realpath, writeFile } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AcceptanceCriterion } from '../../task/src/index.ts'
 import type { ReplayRunOutcome, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { WorkspaceBusyError, WorkspaceRegistry } from '../../task-runtime/src/index.ts'
+import { captureWorkspacePatch } from '../../task-runtime/src/workspace.ts'
 import { disposeRunStacks, sha256Of, startRunStack, type RunStack, type ToolCallResult } from '../support/run-stack.ts'
 
 /**
@@ -535,5 +536,131 @@ describe('S4-E: the named workspace and the caller\u2019s graph env', () => {
     expect(existsSync(join(h.checkout, 'worker-marker.txt'))).toBe(true)
     expect(markers(h)).toHaveLength(before.length)
     expect(markerFor(h, checkoutPath)?.owner).toMatchObject({ taskId: first.taskId, runId: first.runId })
+  })
+})
+
+
+describe('ordinary isolated children', () => {
+  it('overlaps two siblings, then materializes both verified patches into their dependent', async () => {
+    const entered = deferred()
+    const release = deferred()
+    let h!: RunStack
+    const active: string[] = []
+    h = await startRunStack({
+      roots: [ROOT], isolatedChildren: true, maxActiveWorkers: 2,
+      worker: async (sessionId, agent) => {
+        const { task } = await h.runtime.runForSession(sessionId)
+        const cwd = agent.session.header.cwd
+        if (task.objective === 'join') {
+          expect(await readFile(join(cwd, 'left.txt'), 'utf8')).toBe('left')
+          expect(await readFile(join(cwd, 'right.txt'), 'utf8')).toBe('right')
+          await writeFile(join(cwd, 'joined.txt'), 'both')
+          return
+        }
+        active.push(cwd)
+        if (active.length === 2) entered.resolve()
+        await release.promise
+        await writeFile(join(cwd, `${task.objective}.txt`), task.objective)
+      },
+    })
+    const root = await h.root(ROOT, rootContract('parallel goal'))
+    const admission = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT, {
+      reason: 'independent local outputs, then join',
+      children: ['left', 'right', 'join'].map((objective, index) => ({
+        objective, requiredCapabilities: ['execute-task'], dependsOn: index === 2 ? [0, 1] : [],
+        acceptanceCriteria: [{ description: 'local output exists', command: `test -f ${objective === 'join' ? 'joined' : objective}.txt` }],
+      })),
+    })
+    await entered.promise
+    expect(new Set(active).size).toBe(2)
+    const during = await h.snapshot(root.storeId)
+    expect(during.runs.filter(run => run.placement !== undefined && run.status === 'running')).toHaveLength(2)
+    expect(during.tasks.find(task => task.objective === 'join')?.status).toBe('admitted')
+    // Reconstruct both writers from durable placements, preserving Run/Session identity.
+    await h.runtime.workspaces.close()
+    h.runtime.sessionWorkspaces.clear()
+    await h.runtime.rebuildWorkspaceOwnership(root.storeId)
+    for (const run of during.runs.filter(run => run.placement !== undefined)) {
+      expect(h.runtime.workspaces.ownerOf(run.placement!.workspacePath)).toMatchObject({ runId: run.runId })
+      expect(h.runtime.sessionWorkspaces.get(run.sessionId)).toBe(run.placement!.workspacePath)
+    }
+    const state = await h.runtime.decompositionState(ROOT)
+    expect(state.canDecompose).toBe(false)
+    expect(state.reasons.join(' ')).toContain('waiting_children')
+    release.resolve()
+    const outcomes = await h.runtime.awaitBatch(root.storeId, admission.batchId)
+    expect(outcomes.map(outcome => outcome.status), JSON.stringify((await h.snapshot(root.storeId)).reviews)).toEqual(['verified', 'verified', 'verified'])
+    const snapshot = await h.snapshot(root.storeId)
+    const patches = snapshot.evidence.flatMap(evidence => evidence.artifacts.filter(artifact => artifact.kind === 'workspace-patch'))
+    expect(patches).toHaveLength(3)
+    const savedRun = snapshot.runs.find(run => run.placement !== undefined)!
+    const savedPatch = patches.find(artifact => artifact.artifactId === `workspace-patch:${savedRun.runId}`)!
+    expect(await captureWorkspacePatch(savedRun.placement!, savedRun.runId)).toEqual(savedPatch)
+    const joined = patches.find(artifact => JSON.parse(readFileSync(artifact.uri, 'utf8')).files.some((file: { path: string }) => file.path === 'joined.txt'))!
+    expect(readFileSync(join(dirname(joined.uri), 'files', 'joined.txt'), 'utf8')).toBe('both')
+    expect(existsSync(join(h.checkout, 'left.txt'))).toBe(false)
+    expect(existsSync(join(h.checkout, 'joined.txt'))).toBe(false)
+    expect(await h.runtime.decompositionState(ROOT)).toMatchObject({ canDecompose: true, depth: 0, maxDepth: 4 })
+    await h.runtime.cancelGraph(root.storeId, 'test cleanup')
+    expect(markers(h)).toHaveLength(0)
+  })
+
+  it('cancels both in-flight siblings and releases every isolated workspace', async () => {
+    const entered = deferred()
+    let h!: RunStack
+    let count = 0
+    h = await startRunStack({ roots: [ROOT], isolatedChildren: true, maxActiveWorkers: 2,
+      submit: false,
+      worker: () => { count += 1; if (count === 2) entered.resolve() },
+    })
+    const root = await h.root(ROOT, rootContract('cancel parallel goal'))
+    const admission = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT, {
+      reason: 'two independent local waits',
+      children: ['one', 'two'].map(objective => ({ objective, requiredCapabilities: ['execute-task'],
+        acceptanceCriteria: [{ description: 'criterion', command: 'true' }],
+      })),
+    })
+    await entered.promise
+    await h.runtime.cancelGraph(root.storeId, 'stop both')
+    const outcomes = await h.runtime.awaitBatch(root.storeId, admission.batchId)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled', 'cancelled'])
+    expect(markers(h), JSON.stringify(markers(h))).toHaveLength(0)
+    expect(h.runtime.activeWorkerSessions.size).toBe(0)
+  })
+})
+
+
+describe('ordinary shared-workspace children', () => {
+  it('overlaps independent Sessions in one cwd and hands their real outputs back to the root', async () => {
+    const entered = deferred()
+    const release = deferred()
+    let h!: RunStack
+    const running: string[] = []
+    h = await startRunStack({ roots: [ROOT], maxActiveWorkers: 2,
+      worker: async (sessionId, agent) => {
+        const { task } = await h.runtime.runForSession(sessionId)
+        running.push(sessionId)
+        expect(agent.session.header.cwd).toBe(h.checkout)
+        if (running.length === 2) entered.resolve()
+        await release.promise
+        await writeFile(join(agent.session.header.cwd, `${task.objective}.txt`), task.objective)
+      },
+    })
+    const root = await h.root(ROOT, {
+      objective: 'two local outputs delivered together', requiredCapabilities: ['execute-task'],
+      acceptanceCriteria: [{ description: 'both real files exist in the root cwd', command: 'test -f left.txt && test -f right.txt' }],
+    })
+    const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT, {
+      reason: 'independent file responsibilities', children: ['left', 'right'].map(objective => ({
+        objective, requiredCapabilities: ['execute-task'],
+        acceptanceCriteria: [{ description: 'its own output exists', command: `test -f ${objective}.txt` }],
+      })),
+    })
+    await entered.promise
+    expect(new Set(running).size).toBe(2)
+    expect((await h.snapshot(root.storeId)).runs.filter(run => run.sharedWorkspace && run.status === 'running')).toHaveLength(2)
+    release.resolve()
+    expect((await h.runtime.awaitBatch(root.storeId, batch.batchId)).map(outcome => outcome.status)).toEqual(['verified', 'verified'])
+    expect(await h.runtime.submitResult(ROOT, { summary: 'both files delivered' })).toMatchObject({ status: 'verified' })
   })
 })

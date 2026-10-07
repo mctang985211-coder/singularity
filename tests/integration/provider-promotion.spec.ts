@@ -618,11 +618,11 @@ describe('one illegal provider, one defect code, every entry that still judges i
     const toolCtx = { evolution: h.evolution, approval: h.approval, taskRuntime: h.runtime } as never
     const decided = (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 's2', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
     expect(decided).toContain('[decided] PROMOTE')
-    const decideReason = (h.approval.request.mock.calls.at(-1)![0] as { reason: string }).reason
-    expect(decideReason).toContain('provider: skill `verify` → guidance (no sidecar; loadable guidance, not an execution provider)')
 
     const appliedViaTool = (await defineEvolutionApplyTool(toolCtx).execute({ proposalId: 's2' }, exec(ROOT_SESSION))) as string
     expect(appliedViaTool).toContain('provider: skill `verify` → guidance')
+    const applyReason = (h.approval.request.mock.calls.at(-1)![0] as { reason: string }).reason
+    expect(applyReason).toContain('provider: skill `verify` → guidance (no sidecar; loadable guidance, not an execution provider)')
     expect(await readFile(join(h.skillRoot, 'verify', 'SKILL.md'))).toEqual(Buffer.from(candidate, 'utf8'))
 
     // The same candidate with a declaration added to its sandbox is refused at

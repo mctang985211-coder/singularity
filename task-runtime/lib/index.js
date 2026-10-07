@@ -1,11 +1,11 @@
-import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { copyFile, cp, lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TERMINAL_RUN_STATUSES, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest } from "@dangosys/dsh-singularity-task";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { answerMessageText, findSkillFileIn, parseSkillFile, questionMessageText, skillRootsFor, toolCallRefIn } from "@dangosys/dsh-singularity-agent-runtime";
+import { answerMessageText, findSkillFileIn, parseSkillFile, parseSkillFile as parseSkillFile$1, questionMessageText, skillRootsFor, toolCallRefIn } from "@dangosys/dsh-singularity-agent-runtime";
 import { randomUUID } from "node:crypto";
 import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
 
@@ -461,6 +461,7 @@ function checkDecomposition(parent, children, existingEdges) {
 		reasons.push(...contractDefects(child.acceptanceCriteria, label));
 		reasons.push(...independentAcceptanceDefects(child.acceptanceCriteria, child.requiresIndependentAcceptance, label));
 		for (const criterion of child.acceptanceCriteria) {
+			if (child.decomposable !== true && (criterion.verificationMode === "composite" || criterion.childEvidence !== void 0)) reasons.push(`${label} criterion "${criterion.criterionId}" uses composite/childEvidence but this Task is not declared decomposable: true; these criteria refer to this Task's own children, and childIndex is not its position among siblings in this batch. For a leaf file delivery, use a deterministic command that checks the delivered files.`);
 			/**
 			* `requiresArtifact` gets a shape check here and nothing more: whether the
 			* named artifact exists is a spawn-time question (it needs the store
@@ -660,16 +661,22 @@ function normalizeCriteria(raw, label, idOf, reasons) {
 		const mandatory = booleanField(value.mandatory, true, `${criterionLabel$1} mandatory`, reasons);
 		const requiredEvidence = value.requiredEvidence === void 0 ? [] : stringList(value.requiredEvidence, `${criterionLabel$1} requiredEvidence`, reasons);
 		const command = value.command;
+		const mode = carried(value.mode === void 0 ? command !== void 0 ? "deterministic" : "review" : value.mode);
+		const verifierRef = value.verifierRef === void 0 ? [
+			"deterministic",
+			"simulation",
+			"measurement"
+		].includes(mode) ? "command" : mode === "composite" ? "composite" : void 0 : carried(value.verifierRef);
 		const criterion = {
 			criterionId,
 			description,
-			verificationMode: carried(value.mode === void 0 ? command !== void 0 ? "deterministic" : "review" : value.mode),
+			verificationMode: mode,
 			requiredEvidence,
 			mandatory,
 			...command === void 0 ? {} : { command: carried(command) },
 			...value.requiresArtifact === void 0 ? {} : { requiresArtifact: carried(value.requiresArtifact) },
 			...value.acceptsArtifact === void 0 ? {} : { acceptsArtifact: carried(value.acceptsArtifact) },
-			...value.verifierRef === void 0 ? {} : { verifierRef: carried(value.verifierRef) },
+			...verifierRef === void 0 ? {} : { verifierRef },
 			...value.childEvidence === void 0 ? {} : { childEvidence: carried(value.childEvidence) },
 			...value.heuristic === void 0 ? {} : { heuristic: carried(value.heuristic) },
 			...value.protectedInputs === void 0 ? {} : { protectedInputs: carried(value.protectedInputs) }
@@ -1721,7 +1728,11 @@ const SKILL_CONTRACT_VERSION = 1;
 * The directories a skill may hold supporting files in. The supported shape is
 * deliberately one level deep — `<dir>/<file>` — because a deeper tree cannot
 */
-const SUPPORTED_SKILL_RESOURCE_DIRS = ["references", "scripts"];
+const SUPPORTED_SKILL_RESOURCE_DIRS = [
+	"references",
+	"scripts",
+	"resources"
+];
 /**
 * Whether one declared resource path is a path this contract can identify:
 * exactly `<dir>/<file>` with `<dir>` in {@link SUPPORTED_SKILL_RESOURCE_DIRS},
@@ -2121,7 +2132,7 @@ async function scanSkillDirectory(directory) {
 				* uses (`readSkillFile`): a file declaring another name, or whose
 				*/
 				try {
-					const parsed = parseSkillFile(bytes.toString("utf8"), join(directory, "SKILL.md"));
+					const parsed = parseSkillFile$1(bytes.toString("utf8"), join(directory, "SKILL.md"));
 					scanned.frontmatter = {
 						name: parsed.name,
 						description: parsed.description
@@ -2583,6 +2594,9 @@ async function bindRunProviders(request) {
 	const rows = Object.keys(request.manifest.capabilities);
 	const selected = selectedProviders(request.providers, rows, (row) => request.manifest.capabilities[row]?.skills ?? []);
 	if (selected.length === 0) throw new Error(`run "${request.runId}" has no admitted guidance Skill; every task must select readable instructions through requiredCapabilities`);
+	let instructionBytes = 0;
+	for (const provider of selected) instructionBytes += (await readVerifiedFile(provider.verdict.directory, "SKILL.md")).byteLength;
+	if (instructionBytes > 4e4) throw new Error(`run "${request.runId}" selects ${instructionBytes} bytes of Skill instructions, above the 40000-byte inline guidance budget; select concise relevant guidance, move supporting material into Skill resources, or delegate distinct responsibilities before starting this Run`);
 	const base = {
 		registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, [], request.mcpRegistry),
 		capabilities: [...rows].sort(),
@@ -3352,6 +3366,129 @@ var WorkspaceRegistry = class {
 		await rm(this.markerPath(workspace), { force: true });
 	}
 };
+/** Content identity of a local workspace snapshot. */
+async function workspaceFiles(root) {
+	const files = [];
+	async function walk(directory) {
+		for (const name of (await readdir(directory)).sort()) {
+			if (name === ".git" || name === ".singularity-results") continue;
+			const path = join(directory, name);
+			const stat$1 = await lstat(path);
+			if (stat$1.isDirectory()) await walk(path);
+			else if (stat$1.isSymbolicLink()) files.push({
+				path: relative(root, path),
+				sha256: sha256Hex(`symlink:${await readlink(path)}`)
+			});
+			else if (stat$1.isFile()) files.push({
+				path: relative(root, path),
+				sha256: sha256Hex(await readFile(path))
+			});
+			else throw new Error(`task-runtime: isolated workspace contains unsupported file ${path}`);
+		}
+	}
+	await walk(root);
+	return files;
+}
+async function prepareChildWorkspace(root, source, storeId, batchId, runId, dependencyArtifacts, dependencyEvidenceRefs) {
+	const batchRoot = join(root, "child-workspaces", sha256Hex(storeId), sha256Hex(batchId));
+	const inputSnapshotPath = join(batchRoot, "input");
+	const manifestPath = join(batchRoot, "input.json");
+	let input;
+	try {
+		input = JSON.parse(await readFile(manifestPath, "utf8"));
+	} catch (error) {
+		if (error.code !== "ENOENT") throw error;
+		await mkdir(batchRoot, { recursive: true });
+		const bindingRoot = resolve(root);
+		await cp(source, inputSnapshotPath, {
+			recursive: true,
+			errorOnExist: true,
+			force: false,
+			filter: async (path) => {
+				if (basename(path) === ".git" || basename(path) === ".singularity-results") return false;
+				const absolute = resolve(path);
+				if (absolute !== resolve(source) && (absolute === bindingRoot || bindingRoot.startsWith(absolute + sep))) return false;
+				return true;
+			}
+		});
+		input = await workspaceFiles(inputSnapshotPath);
+		await writeFile(manifestPath, JSON.stringify(input));
+	}
+	const actual = await workspaceFiles(inputSnapshotPath);
+	if (JSON.stringify(actual) !== JSON.stringify(input)) throw new Error("task-runtime: isolated input snapshot changed");
+	const workspacePath = join(batchRoot, runId, "workspace");
+	await cp(inputSnapshotPath, workspacePath, {
+		recursive: true,
+		errorOnExist: true,
+		force: false
+	});
+	const applied = /* @__PURE__ */ new Map();
+	for (const artifact of dependencyArtifacts) {
+		const raw = await readFile(artifact.uri);
+		if (artifact.digest !== sha256Hex(raw)) throw new Error(`task-runtime: dependency patch ${artifact.artifactId} changed`);
+		const patch = JSON.parse(raw.toString("utf8"));
+		for (const file of patch.files) {
+			if (isAbsolute(file.path) || file.path.split(sep).includes("..")) throw new Error(`task-runtime: invalid dependency patch path ${file.path}`);
+			if (applied.has(file.path) && applied.get(file.path) !== file.sha256) throw new Error(`task-runtime: dependency patches conflict at ${file.path}; an integration task must resolve them`);
+			applied.set(file.path, file.sha256);
+			const target = join(workspacePath, file.path);
+			if (file.sha256 === null) await rm(target, { force: true });
+			else {
+				const payload = join(dirname(artifact.uri), "files", file.path);
+				if (sha256Hex(await readFile(payload)) !== file.sha256) throw new Error(`task-runtime: dependency patch file ${file.path} changed`);
+				await mkdir(dirname(target), { recursive: true });
+				await copyFile(payload, target);
+			}
+		}
+	}
+	return {
+		workspacePath,
+		inputSnapshotPath,
+		inputSnapshotDigest: sha256Hex(JSON.stringify(input)),
+		dependencyEvidenceRefs
+	};
+}
+/** A verified child's output is handed off as an immutable, digest-bound patch; it never overwrites the parent. */
+async function captureWorkspacePatch(placement, runId) {
+	const input = await workspaceFiles(placement.inputSnapshotPath);
+	if (sha256Hex(JSON.stringify(input)) !== placement.inputSnapshotDigest) throw new Error("task-runtime: isolated input snapshot changed");
+	const output = await workspaceFiles(placement.workspacePath);
+	const before = new Map(input.map((file) => [file.path, file.sha256]));
+	const after = new Map(output.map((file) => [file.path, file.sha256]));
+	const patch = { files: [...new Set([...before.keys(), ...after.keys()])].sort().filter((path) => before.get(path) !== after.get(path)).map((path) => ({
+		path,
+		sha256: after.get(path) ?? null
+	})) };
+	const resultRoot = join(dirname(placement.workspacePath), "result");
+	const uri = join(resultRoot, "patch.json");
+	const bytes = JSON.stringify(patch);
+	const artifact = {
+		artifactId: `workspace-patch:${runId}`,
+		kind: "workspace-patch",
+		uri,
+		digest: sha256Hex(bytes)
+	};
+	let prior;
+	try {
+		prior = await readFile(uri, "utf8");
+	} catch (error) {
+		if (error.code !== "ENOENT") throw error;
+	}
+	if (prior !== void 0) {
+		if (prior !== bytes) throw new Error(`task-runtime: resumed output patch for ${runId} differs from its recorded bytes`);
+		for (const file of patch.files) if (file.sha256 !== null && sha256Hex(await readFile(join(resultRoot, "files", file.path))) !== file.sha256) throw new Error(`task-runtime: recorded output file ${file.path} changed`);
+		return artifact;
+	}
+	await mkdir(resultRoot, { recursive: true });
+	for (const file of patch.files) {
+		if (file.sha256 === null) continue;
+		const target = join(resultRoot, "files", file.path);
+		await mkdir(dirname(target), { recursive: true });
+		await copyFile(join(placement.workspacePath, file.path), target);
+	}
+	await writeFile(uri, bytes, { flag: "wx" });
+	return artifact;
+}
 
 //#endregion
 //#region src/config.ts
@@ -3401,6 +3538,8 @@ const ConfigSchema = z.object({
 	verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),
 	maxDepth: z.number().default(DEFAULT_MAX_DEPTH),
 	maxChildren: z.number().default(DEFAULT_MAX_CHILDREN),
+	isolatedChildren: z.boolean().default(false),
+	maxActiveWorkers: z.number().default(2),
 	budget: z.object({
 		maxToolCalls: z.number(),
 		tokens: z.number(),
@@ -5625,6 +5764,28 @@ function storedBatchOf(proposal) {
 		}
 	};
 }
+function decompositionAvailability(self, task, run, snapshot) {
+	const reasons = [];
+	if (run.status !== "running") reasons.push(`run is ${run.status}`);
+	if (run.executionPhase !== "active") reasons.push(`only an active run may decompose; phase is ${run.executionPhase ?? "legacy/untracked"}`);
+	if (task.decompositionStatus === "leaf" && !self.config.allowRuntimeDecomposition) reasons.push("task is leaf and runtime decomposition is disabled");
+	if (task.depth >= self.config.maxDepth) reasons.push(`depth ${task.depth} reaches maxDepth ${self.config.maxDepth}`);
+	const questions = blockingQuestionsOf(snapshot, run.runId);
+	if (questions.length > 0) reasons.push(`unresolved blocking questions: ${questions.map((question) => question.questionId).join(", ")}`);
+	if (snapshot.proposals?.all.some((proposal) => proposal.kind !== "root" && proposal.identity.parentRunId === run.runId && isOpenProposal(proposal))) reasons.push("an open decomposition proposal must be continued or cancelled");
+	const budget$1 = resolveRootBudget(snapshot, self.config.rootBudget ?? {});
+	const remainingRuns = budget$1.ok && budget$1.maxRuns !== void 0 ? Math.max(0, budget$1.maxRuns - snapshot.runs.length) : void 0;
+	if (!budget$1.ok && hasRootLimits(self.config.rootBudget)) reasons.push(`root budget cannot be resolved: ${budget$1.reason}`);
+	if (remainingRuns === 0) reasons.push("root run budget is exhausted");
+	return {
+		canDecompose: reasons.length === 0,
+		depth: task.depth,
+		maxDepth: self.config.maxDepth,
+		phase: run.executionPhase ?? "legacy/untracked",
+		...remainingRuns === void 0 ? {} : { remainingRuns },
+		reasons
+	};
+}
 async function assertDecomposableRun(self, storeId, parentTask, parentRun, callerSessionId, signal) {
 	const parentTaskId = parentTask.taskId;
 	if (parentRun.taskId !== parentTaskId) throw new Error(`task-runtime: run "${parentRun.runId}" belongs to task "${parentRun.taskId}", not "${parentTaskId}"`);
@@ -5633,6 +5794,8 @@ async function assertDecomposableRun(self, storeId, parentTask, parentRun, calle
 	if (parentRun.executionPhase !== "active") throw new Error(`task-runtime: run "${parentRun.runId}" is in phase "${parentRun.executionPhase}"; only an active run may decompose (a run with an unfinished batch is handed back \`active\` when the batch ends; only then may it decompose again)`);
 	const openQuestions = blockingQuestionsOf(await self.context.task.snapshotIn(storeId), parentRun.runId);
 	if (openQuestions.length > 0) throw new Error(`task-runtime: run "${parentRun.runId}" is waiting on ${openQuestions.length === 1 ? "an unresolved blocking question" : `${openQuestions.length} unresolved blocking questions`} (${openQuestions.map((question) => question.questionId).join(", ")}); an answer releases the wait, and only then may the run delegate`);
+	const availability = decompositionAvailability(self, parentTask, parentRun, await self.context.task.snapshotIn(storeId));
+	if (!availability.canDecompose) throw new Error(`task-runtime: decomposition refused: ${availability.reasons.join("; ")}`);
 	if (signal?.aborted === true) throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`);
 }
 async function inFlightProposalsOf(self, storeId, parentRunId) {
@@ -5665,6 +5828,7 @@ async function checkDerivedBatch(self, request) {
 		objective: child.contract.objective,
 		acceptanceCriteria: child.contract.acceptanceCriteria,
 		dependsOn: child.dependsOn,
+		decomposable: child.decomposable,
 		requiresIndependentAcceptance: child.requiresIndependentAcceptance
 	})), snapshot.edges);
 	if (!verdict.ok) return {
@@ -5815,7 +5979,7 @@ async function admitPrecheckedBatch(self, request) {
 	const { batchId } = consumption;
 	await self.context.task.admitBatchIn(storeId, parentTaskId, parentRun.runId, children, actor, edges, batch.admission, manifests, consumption);
 	self.executionGate.setPhase(callerSessionId, "waiting_children");
-	if (workspacePath !== void 0 && self.workspaces !== void 0) {
+	if (workspacePath !== void 0 && self.workspaces !== void 0 && (self.config.isolatedChildren || self.config.maxActiveWorkers === 1)) {
 		const held = self.workspaces.ownerOf(workspacePath);
 		if (held !== void 0) await self.workspaces.push(workspacePath, held, {
 			kind: "batch",
@@ -7069,6 +7233,7 @@ async function recoveryStatus(self, storeId) {
 		if (self.startedSessions.has(run.sessionId)) continue;
 		if (self.agentOrUndefined(run.sessionId) !== void 0) continue;
 		if (run.batchId !== void 0 && self.drivers.has(`${storeId}/${run.batchId}`)) continue;
+		if (self.drivers.has(`replay/${storeId}/${run.taskId}`)) continue;
 		if (rootTaskStoreId(run.sessionId) === storeId) continue;
 		if (run.executionPhase === void 0) return {
 			status: "needs-recovery",
@@ -7494,17 +7659,22 @@ async function finishBatch(env, batch) {
 	* The store's half of the handback (§1.3): one phase event says the run waits on
 	* nothing and closes the batch it names, so a reader of the store sees the same
 	*/
-	await env.task.changeRunPhaseIn(batch.storeId, batch.parentTaskId, batch.parentRunId, env.actor, {
-		phase: "active",
-		batchId: batch.batchId
-	});
-	env.gate.setPhase(parentRun.sessionId, "active");
-	env.gate.setQuestionsBlocked(parentRun.sessionId, blocked);
+	const activate = async () => {
+		await env.task.changeRunPhaseIn(batch.storeId, batch.parentTaskId, batch.parentRunId, env.actor, {
+			phase: "active",
+			batchId: batch.batchId
+		});
+		env.gate.setPhase(parentRun.sessionId, "active");
+		env.gate.setQuestionsBlocked(parentRun.sessionId, blocked);
+	};
+	if (env.activateParent === void 0) await activate();
+	else await env.activateParent(parentRun.sessionId, batch.signal, activate);
 	/**
 	* …and the parent is told: the batch's own outcomes, under the identity the
 	* batch derives, delivered to the Session that waited. A re-delivery states
 	*/
-	const message$1 = batchEndMessageText(batch.batchId, outcomes);
+	const patches = snapshot.evidence.filter((evidence) => members.includes(evidence.taskId) && outcomes.some((outcome) => outcome.taskId === evidence.taskId && outcome.status === "verified")).flatMap((evidence) => evidence.artifacts.filter((artifact) => artifact.kind === "workspace-patch").map((artifact) => `- ${evidence.taskId} verified output patch: ${artifact.uri} (sha256 ${artifact.digest}); files are beside it under files/. Integrate explicitly; the parent workspace was not modified.`));
+	const message$1 = [batchEndMessageText(batch.batchId, outcomes), ...patches].join("\n");
 	const delivery = await deliverBatchResult$1(env, {
 		storeId: batch.storeId,
 		runId: batch.parentRunId,
@@ -7926,6 +8096,18 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 	if (!snapshot.handoffs.some((existing) => existing.handoffId === handoff.handoffId)) await env.task.recordHandoffIn(batch.storeId, handoff, env.actor);
 	const agentPreset = resolvePreset(manifest, env.defaultPreset);
 	const name = task.objective.trim().replace(/\s+/g, " ").slice(0, 40) || `child-${item.index + 1}`;
+	let placement;
+	if (env.isolatedChildren) try {
+		placement = await env.prepareChildPlacement(batch, runId, dependencyEvidence);
+	} catch (error) {
+		return {
+			kind: "adopted",
+			outcome: await blockChild(env, batch.storeId, item, {
+				reason: `isolated workspace preparation failed: ${message(error)}`,
+				blockers: []
+			}, dependencyTaskIds)
+		};
+	}
 	const run = {
 		runId,
 		taskId: item.taskId,
@@ -7933,6 +8115,8 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 		parentRunId: parentRun.runId,
 		...env.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: env.taskTemplatesRoot },
 		capabilitySnapshot: capabilitySnapshot(manifest),
+		...placement === void 0 ? {} : { placement },
+		...!env.isolatedChildren && (env.maxActiveWorkers ?? 1) > 1 ? { sharedWorkspace: true } : {},
 		...agentPreset === void 0 ? {} : { agentPreset },
 		executionPhase: "active",
 		artifacts: [],
@@ -7940,6 +8124,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 		status: "running",
 		startedAt: (/* @__PURE__ */ new Date()).toISOString()
 	};
+	if (placement !== void 0) env = await env.childEnv(run);
 	let binding;
 	try {
 		let providers = batch.providers;
@@ -8004,7 +8189,10 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 	* One writer at a time (§3.4): the batch's hold is handed to this child for
 	* as long as it works. A workspace this process does not hold as expected is
 	*/
-	const handover = await handOverWorkspace(env, runOwner(batch.storeId, item.taskId, run.runId), (top) => top !== void 0 && top.batchId === batch.batchId, sessionId, `batch ${batch.batchId}`);
+	const handover = run.sharedWorkspace ? { ok: true } : placement === void 0 ? await handOverWorkspace(env, runOwner(batch.storeId, item.taskId, run.runId), (top) => top !== void 0 && top.batchId === batch.batchId, sessionId, `batch ${batch.batchId}`) : await (async () => {
+		await env.workspaces.claim(placement.workspacePath, runOwner(batch.storeId, item.taskId, run.runId));
+		return { ok: true };
+	})();
 	if (!handover.ok) return {
 		kind: "adopted",
 		outcome: await settleChildRun(env, batch.storeId, {
@@ -8067,6 +8255,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 }
 /** What the driver does between rounds: everything the store says, and nothing it holds in memory. */
 async function driveRounds(env, batch) {
+	if (env.isolatedChildren || (env.maxActiveWorkers ?? 1) > 1) return await driveConcurrentRounds(env, batch);
 	for (;;) {
 		const snapshot = await env.task.snapshotIn(batch.storeId);
 		const tasks = new Map(snapshot.tasks.map((task) => [task.taskId, task]));
@@ -8133,6 +8322,93 @@ async function driveRounds(env, batch) {
 		const attempt = await startChildRound(env, batch, parentTask, parentRun, items, item, snapshot);
 		if (attempt.kind === "adopted") continue;
 		await driveChildRound(env, batch, attempt.child);
+	}
+}
+/** Start ready siblings in a serial admission transaction, then observe all independent work in flight. */
+async function driveConcurrentRounds(env, original) {
+	const controller = new AbortController();
+	const abort = () => controller.abort();
+	original.signal.addEventListener("abort", abort, { once: true });
+	if (original.signal.aborted) abort();
+	const batch = {
+		...original,
+		signal: controller.signal
+	};
+	const inFlight = /* @__PURE__ */ new Map();
+	let failure;
+	const watch = (item, work) => {
+		const promise = work.then(() => {}, (error) => {
+			failure = error;
+			controller.abort();
+		}).finally(() => {
+			inFlight.delete(item.taskId);
+		});
+		inFlight.set(item.taskId, promise);
+	};
+	try {
+		for (;;) {
+			if (failure !== void 0) throw failure;
+			const snapshot = await env.task.snapshotIn(batch.storeId);
+			const tasks = new Map(snapshot.tasks.map((task) => [task.taskId, task]));
+			const parentTask = tasks.get(batch.parentTaskId);
+			const parentRun = snapshot.runs.find((run) => run.runId === batch.parentRunId);
+			const items = batchItems(batchMembers(parentRun, batch.batchId), snapshot.edges);
+			const pending = items.filter((item) => !TERMINAL_TASK_STATUSES.has(tasks.get(item.taskId).status));
+			if (batch.signal.aborted || parentRun.status !== "running") {
+				controller.abort();
+				await Promise.all(inFlight.values());
+				await blockUnstarted(env, batch.storeId, await env.task.snapshotIn(batch.storeId), items, () => ({
+					reason: CANCELLED_BEFORE_START,
+					blockers: []
+				}));
+				return await finishBatch(env, original);
+			}
+			if (pending.length === 0) {
+				await Promise.all(inFlight.values());
+				return await finishBatch(env, original);
+			}
+			let progressed = false;
+			let capacityBlocked = false;
+			for (const item of pending) {
+				if (inFlight.has(item.taskId)) continue;
+				const dependencyTaskIds = item.dependsOn.map((index) => items[index].taskId);
+				const started = latestRun(snapshot, item.taskId);
+				if (started !== void 0) {
+					watch(item, awaitAdoptedWorkerWait(await env.childEnv(started), batch, item, started, dependencyTaskIds));
+					progressed = true;
+					continue;
+				}
+				const blockers = dependencyTaskIds.filter((id) => TERMINAL_TASK_STATUSES.has(tasks.get(id).status) && tasks.get(id).status !== "verified");
+				if (blockers.length > 0) {
+					await blockChild(env, batch.storeId, item, {
+						reason: `dependencies [${blockers.join(", ")}] did not verify`,
+						blockers: blockers.map((taskId) => ({
+							taskId,
+							outcome: tasks.get(taskId).status
+						}))
+					}, dependencyTaskIds);
+					progressed = true;
+					continue;
+				}
+				if (!dependencyTaskIds.every((id) => tasks.get(id).status === "verified")) continue;
+				const attempt = await env.withChildAdmission(() => startChildRound(env, batch, parentTask, parentRun, items, item, snapshot));
+				if (attempt === void 0) {
+					capacityBlocked = true;
+					continue;
+				}
+				progressed = true;
+				if (attempt.kind === "started") watch(item, driveChildRound(await env.childEnv(attempt.child.run), batch, attempt.child));
+			}
+			if (progressed) continue;
+			const waits = [...inFlight.values()];
+			if (capacityBlocked) waits.push(env.waitForCapacity(batch.signal));
+			if (waits.length === 0) throw new Error(`task-runtime: batch ${batch.batchId} has pending children but no runnable dependency path`);
+			await Promise.race(waits);
+		}
+	} finally {
+		controller.abort();
+		await Promise.all(inFlight.values());
+		original.signal.removeEventListener("abort", abort);
 	}
 }
 
@@ -8716,16 +8992,21 @@ function settlementParts(self, actor) {
 	};
 }
 function runSettledFromRuntime(self, storeId, taskId, runId, status) {
+	const activeSession = self.sessionBoundInProcess(storeId, runId);
+	if (activeSession !== void 0) self.activeWorkerSessions.delete(activeSession);
+	for (const notify$1 of self.capacityWaiters) notify$1();
 	recomputeAskingSessions(self, storeId, runId);
 	const sessionId = self.sessionBoundInProcess(storeId, runId);
 	if (sessionId === void 0) return;
 	self.executionGate.setTerminal(sessionId);
-	self.releaseRunWorkspaceLayer(storeId, runId, sessionId).catch((error) => {
+	const release = self.releaseRunWorkspaceLayer(storeId, runId, sessionId).catch((error) => {
 		self.warn(`run ${runId}: the workspace layer it held could not be released (${message(error)})`);
 	}).finally(() => {
 		if (self.sessionWorkspaces.size > 0) self.sessionWorkspaces.delete(sessionId);
 		if (self.sessionExecutionBindings.size > 0) self.sessionExecutionBindings.delete(sessionId);
+		self.workspaceReleases.delete(release);
 	});
+	self.workspaceReleases.add(release);
 }
 async function recomputeAskingSessions(self, storeId, runId) {
 	try {
@@ -8970,7 +9251,7 @@ async function reconcileStore(self, storeId) {
 			if (read !== void 0 && read.defects.length > 0) throw new Error(`task-runtime: run "${run.runId}" content binding changed:\n- ${read.defects.join("\n- ")}`);
 		}
 		if (rootTaskStoreId(run.sessionId) !== storeId && !self.startedSessions.has(run.sessionId) && run.submission?.origin !== "runtime") {
-			const attempt = await resumeAdoptedWorker(env, storeId, run);
+			const attempt = await resumeAdoptedWorker(run.placement === void 0 ? env : await self.orchestrateEnv(run.sessionId, `recovery:${storeId}`, run.placement.workspacePath), storeId, run);
 			if (attempt.status !== "live") throw new Error(`task-runtime: cannot continue run "${run.runId}" in Session "${run.sessionId}": ${attempt.reason}`);
 			questionResumes.push({
 				subject: `run "${run.runId}" (session "${run.sessionId}")`,
@@ -8987,7 +9268,7 @@ async function reconcileStore(self, storeId) {
 	}
 	for (const run of submitted) {
 		const lineage = self.replayLineage.get(run.taskId);
-		await settleSubmittedRun(env, storeId, run.taskId, run.runId, lineage === void 0 ? {} : { anomalies: [lineage] });
+		await settleSubmittedRun(run.placement === void 0 ? env : await self.orchestrateEnv(run.sessionId, `recovery:${storeId}`, run.placement.workspacePath), storeId, run.taskId, run.runId, lineage === void 0 ? {} : { anomalies: [lineage] });
 	}
 	for (const run of waiting) startBatchDriver(self, {
 		storeId,
@@ -9122,6 +9403,8 @@ async function wakeUnclaimedQuestionMessages(self, storeId, deliveries) {
 //#region src/service/sessions.ts
 async function resumeAdoptedWorkerSession(self, request) {
 	const sessionId = request.run.sessionId;
+	if (request.run.placement !== void 0) self.sessionWorkspaces.set(sessionId, request.run.placement.workspacePath);
+	self.activeWorkerSessions.add(sessionId);
 	if (request.run.taskTemplatesRoot !== void 0) self.sessionExecutionBindings.set(sessionId, {
 		...self.sessionExecutionBindings.get(sessionId),
 		taskTemplatesRoot: request.run.taskTemplatesRoot
@@ -9205,67 +9488,76 @@ async function stopAdoptedSession(self, sessionId) {
 async function rebuildWorkspaceOwnership(self, storeId) {
 	const snapshot = await self.context.task.snapshotIn(storeId);
 	const rootTaskId = snapshot.tasks.find((task) => task.parentTaskId === void 0)?.taskId;
-	const rootRun = snapshot.runs.find((run$1) => run$1.status === "running" && rootTaskStoreId(run$1.sessionId) === storeId) ?? snapshot.runs.find((run$1) => run$1.status === "running" && run$1.taskId === rootTaskId && run$1.recovery !== void 0);
+	const rootRun = snapshot.runs.find((run) => run.status === "running" && rootTaskStoreId(run.sessionId) === storeId) ?? snapshot.runs.find((run) => run.status === "running" && run.taskId === rootTaskId && run.recovery !== void 0);
 	if (rootRun === void 0) {
 		await releaseStoreWorkspace(self, storeId);
 		return;
 	}
-	const workspace = await workspacePathForSession(self, rootRun.sessionId);
-	if (workspace === void 0) return;
-	const held = self.workspaces.ownerOf(workspace);
-	if (held !== void 0) {
-		if (held.storeId !== storeId) throw new Error(`task-runtime: workspace ${workspace} is held by ${describeOwner(held)}`);
-		return;
+	const placed = snapshot.runs.filter((run) => run.status === "running" && run.placement !== void 0);
+	for (const run of placed) {
+		await normalizeWorkspacePath(run.placement.workspacePath);
+		self.sessionWorkspaces.set(run.sessionId, run.placement.workspacePath);
+		self.activeWorkerSessions.add(run.sessionId);
 	}
-	const adoption = await self.workspaces.reconcileAdopt(workspace);
-	if (!adoption.adopted) throw new Error(`task-runtime: cannot take over workspace ${workspace}: ${adoption.reason}`);
-	let owner = {
-		kind: "run",
-		storeId,
-		taskId: rootRun.taskId,
-		runId: rootRun.runId,
-		since: now()
-	};
-	await self.workspaces.claim(workspace, owner);
-	let run = rootRun;
-	while (run.executionPhase === "waiting_children") {
-		const batch = run.batches?.find((batch$1) => batch$1.batchId === run.batchId);
-		if (batch === void 0) throw new Error(`task-runtime: Run "${run.runId}" has no identifiable persisted child batch`);
-		const next = {
-			kind: "batch",
-			storeId,
-			taskId: run.taskId,
-			batchId: batch.batchId,
-			since: now()
-		};
-		await self.workspaces.push(workspace, owner, next);
-		owner = next;
-		const children = snapshot.runs.filter((child) => child.status === "running" && batch.memberTaskIds.includes(child.taskId));
-		if (children.length > 1) throw new Error(`task-runtime: batch "${batch.batchId}" holds multiple running workspace writers`);
-		if (children.length === 0) break;
-		run = children[0];
-		const childOwner = {
+	for (const initial of [rootRun, ...placed]) {
+		const workspace = await workspacePathForSession(self, initial.sessionId);
+		if (workspace === void 0) continue;
+		const held = self.workspaces.ownerOf(workspace);
+		if (held !== void 0) {
+			if (held.storeId !== storeId) throw new Error(`task-runtime: workspace ${workspace} is held by ${describeOwner(held)}`);
+			continue;
+		}
+		const adoption = await self.workspaces.reconcileAdopt(workspace);
+		if (!adoption.adopted) throw new Error(`task-runtime: cannot take over workspace ${workspace}: ${adoption.reason}`);
+		let owner = {
 			kind: "run",
 			storeId,
-			taskId: run.taskId,
-			runId: run.runId,
+			taskId: initial.taskId,
+			runId: initial.runId,
 			since: now()
 		};
-		await self.workspaces.push(workspace, owner, childOwner);
-		owner = childOwner;
+		await self.workspaces.claim(workspace, owner);
+		if (!self.config.isolatedChildren && self.config.maxActiveWorkers > 1) continue;
+		let run = initial;
+		while (run.executionPhase === "waiting_children") {
+			const batch = run.batches?.find((batch$1) => batch$1.batchId === run.batchId);
+			if (batch === void 0) throw new Error(`task-runtime: Run "${run.runId}" has no identifiable persisted child batch`);
+			const next = {
+				kind: "batch",
+				storeId,
+				taskId: run.taskId,
+				batchId: batch.batchId,
+				since: now()
+			};
+			await self.workspaces.push(workspace, owner, next);
+			owner = next;
+			const children = snapshot.runs.filter((child) => child.status === "running" && child.placement === void 0 && batch.memberTaskIds.includes(child.taskId));
+			if (children.length > 1) throw new Error(`task-runtime: batch "${batch.batchId}" holds multiple running workspace writers`);
+			if (children.length === 0) break;
+			run = children[0];
+			const childOwner = {
+				kind: "run",
+				storeId,
+				taskId: run.taskId,
+				runId: run.runId,
+				since: now()
+			};
+			await self.workspaces.push(workspace, owner, childOwner);
+			owner = childOwner;
+		}
 	}
 }
 async function releaseStoreWorkspace(self, storeId) {
 	if (self.workspaces === void 0) return;
-	const workspace = await workspacePathForSession(self, recoverySessionFor(self, void 0, storeId));
-	if (workspace === void 0) return;
-	for (;;) {
+	await Promise.all(self.workspaceReleases);
+	const snapshot = await self.context.task.snapshotIn(storeId);
+	const rootWorkspace = await workspacePathForSession(self, recoverySessionFor(self, snapshot, storeId));
+	const paths = new Set(snapshot.runs.flatMap((run) => run.placement === void 0 ? [] : [run.placement.workspacePath]));
+	if (rootWorkspace !== void 0) paths.add(rootWorkspace);
+	for (const workspace of paths) for (;;) {
 		const top = self.workspaces.ownerOf(workspace);
-		if (top === void 0) return;
-		if (top.storeId !== storeId) {
-			self.warn(`workspace ${workspace} holds a layer of store ${top.storeId} (${top.kind}) while store ${storeId} is being cancelled; only this process's own layers are released here`);
-			return;
-		}
+		if (top === void 0) break;
+		if (top.storeId !== storeId) throw new Error(`task-runtime: workspace ${workspace} is held by another store`);
 		await self.workspaces.release(workspace, top);
 	}
 }
@@ -9334,11 +9626,18 @@ async function resolveBinding(self, binding) {
 	}
 }
 function reindex(self, storeId, snapshot) {
-	for (const run of snapshot.runs) self.sessions.set(run.sessionId, {
-		storeId,
-		taskId: run.taskId,
-		runId: run.runId
-	});
+	for (const run of snapshot.runs) {
+		if (run.sharedWorkspace && run.status === "running") self.activeWorkerSessions.add(run.sessionId);
+		if (run.placement !== void 0 && run.status === "running") {
+			self.sessionWorkspaces.set(run.sessionId, run.placement.workspacePath);
+			self.activeWorkerSessions.add(run.sessionId);
+		}
+		self.sessions.set(run.sessionId, {
+			storeId,
+			taskId: run.taskId,
+			runId: run.runId
+		});
+	}
 }
 async function workspacePathForSession(self, sessionId) {
 	const path = await self.envPathForSession(sessionId);
@@ -9460,6 +9759,39 @@ async function envPathForSession(self, sessionId) {
 function contractRefusal(parentTaskId, reasons) {
 	return /* @__PURE__ */ new Error(`task-runtime: contract rejected decomposition of "${parentTaskId}":\n- ${reasons.join("\n- ")}`);
 }
+function activeWorkerCount(self) {
+	return [...self.activeWorkerSessions].filter((sessionId) => !["waiting_children", "terminal"].includes(self.executionGate.phaseOf(sessionId) ?? "")).length;
+}
+async function withChildAdmission(self, start) {
+	const before = self.childAdmissionTail;
+	let release;
+	self.childAdmissionTail = new Promise((resolve$1) => {
+		release = resolve$1;
+	});
+	await before;
+	try {
+		if (activeWorkerCount(self) >= self.config.maxActiveWorkers) return void 0;
+		return await start();
+	} finally {
+		release();
+	}
+}
+async function waitForCapacity(self, signal) {
+	if (signal.aborted || activeWorkerCount(self) < self.config.maxActiveWorkers) return;
+	await new Promise((resolve$1) => {
+		const check = () => {
+			if (!signal.aborted && activeWorkerCount(self) >= self.config.maxActiveWorkers) return;
+			self.capacityWaiters.delete(check);
+			signal.removeEventListener("abort", check);
+			off();
+			resolve$1();
+		};
+		const off = self.context.on("task/change", check);
+		self.capacityWaiters.add(check);
+		signal.addEventListener("abort", check, { once: true });
+		check();
+	});
+}
 async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOverlay) {
 	/**
 	* A session this process already spawned into a named workspace keeps
@@ -9481,6 +9813,8 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 		...self.config.mcpServers,
 		...overlay?.mcpServers
 	};
+	const callerBinding = self.sessions.get(callerSessionId);
+	const callerRun = callerBinding === void 0 ? void 0 : await self.context.task.runIn(callerBinding.storeId, callerBinding.runId);
 	return {
 		task: self.context.task,
 		actor,
@@ -9489,8 +9823,37 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 		verifyTimeoutMs: self.config.verifyTimeoutMs,
 		budget: { ...self.config.budget },
 		allowRuntimeDecomposition: self.config.allowRuntimeDecomposition,
+		isolatedChildren: self.config.isolatedChildren,
+		maxActiveWorkers: self.config.maxActiveWorkers,
+		withChildAdmission: (start) => withChildAdmission(self, start),
+		waitForCapacity: (signal) => waitForCapacity(self, signal),
+		activateParent: async (sessionId, signal, activate) => {
+			if (!self.activeWorkerSessions.has(sessionId)) return await activate();
+			while (!signal.aborted) {
+				if (await withChildAdmission(self, async () => {
+					await activate();
+					return true;
+				})) return;
+				await waitForCapacity(self, signal);
+			}
+		},
+		childEnv: async (run) => {
+			const child = await orchestrateEnv(self, callerSessionId, actor, run.placement?.workspacePath, overlay);
+			if (run.sharedWorkspace) delete child.workspaces;
+			return child;
+		},
+		prepareChildPlacement: async (batch, runId, dependencyEvidenceRefs) => {
+			if (workspacePath === void 0 || self.config.runBindingRoot === void 0) throw new Error("task-runtime: isolatedChildren requires a workspace and runBindingRoot");
+			const snapshot = await self.context.task.snapshotIn(batch.storeId);
+			const artifacts = dependencyEvidenceRefs.flatMap((ref) => {
+				const evidence = snapshot.evidence.find((item) => item.evidenceId === ref);
+				if (evidence === void 0) throw new Error(`task-runtime: missing dependency evidence ${ref}`);
+				return evidence.artifacts.filter((artifact) => artifact.kind === "workspace-patch");
+			});
+			return prepareChildWorkspace(self.config.runBindingRoot, workspacePath, batch.storeId, batch.batchId, runId, artifacts, dependencyEvidenceRefs);
+		},
 		gate: self.executionGate,
-		workspaces: self.workspaces,
+		...callerRun?.sharedWorkspace === true ? {} : { workspaces: self.workspaces },
 		...workspacePath === void 0 ? {} : { workspacePath },
 		...named === void 0 ? {} : { workerCwd: named },
 		...binding?.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: binding.taskTemplatesRoot },
@@ -9563,27 +9926,52 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 				...overlay === void 0 ? {} : { overlay: structuredClone(overlay) }
 			});
 			const agentOptions = frozenAgentOptions ?? graphAgentOptions(await self.context.graphs.graphForSession(SessionId(callerSessionId)));
-			return self.context.agentRuntime.spawn(parent, {
-				sessionId: SessionId(request.sessionId),
-				name: request.name,
-				...request.taskWorker === void 0 ? {} : { taskWorker: request.taskWorker },
-				...request.agentPreset !== void 0 ? { agentPreset: request.agentPreset } : {},
-				...request.permissionPreset !== void 0 ? { permissionPreset: request.permissionPreset } : {},
-				...request.cwd !== void 0 ? { cwd: request.cwd } : {},
-				...agentOptions !== void 0 ? { agentOptions } : {},
-				...request.grant !== void 0 ? { grant: request.grant } : {},
-				...request.signal !== void 0 ? { signal: request.signal } : {}
-			});
+			self.activeWorkerSessions.add(request.sessionId);
+			try {
+				return await self.context.agentRuntime.spawn(parent, {
+					sessionId: SessionId(request.sessionId),
+					name: request.name,
+					...request.taskWorker === void 0 ? {} : { taskWorker: request.taskWorker },
+					...request.agentPreset !== void 0 ? { agentPreset: request.agentPreset } : {},
+					...request.permissionPreset !== void 0 ? { permissionPreset: request.permissionPreset } : {},
+					...request.cwd !== void 0 ? { cwd: request.cwd } : {},
+					...agentOptions !== void 0 ? { agentOptions } : {},
+					...request.grant !== void 0 ? { grant: request.grant } : {},
+					...request.signal !== void 0 ? { signal: request.signal } : {}
+				});
+			} catch (error) {
+				self.activeWorkerSessions.delete(request.sessionId);
+				for (const notify$1 of self.capacityWaiters) notify$1();
+				throw error;
+			}
 		},
 		resumeWorkerSession: (request) => self.resumeAdoptedWorkerSession(request),
 		verifyRun: async (storeId, runId, options = {}) => {
 			const verifier = runVerifier(self);
 			if (verifier === void 0 || typeof verifier.verifyRun !== "function") throw new VerifierUnavailableError(`task-runtime: verifier service is not loaded; cannot verify run "${runId}" (expected plugin id "verifier", ticket C2)`);
 			const cwd = named ?? await envPathForSession(self, callerSessionId);
-			return verifier.verifyRun(storeId, runId, {
+			const evidence = await verifier.verifyRun(storeId, runId, {
 				...cwd === void 0 ? {} : { cwd },
 				...options
 			});
+			const run = await self.context.task.runIn(storeId, runId);
+			if (run.placement !== void 0) {
+				const patch = await captureWorkspacePatch(run.placement, runId);
+				const outputId = `workspace-output-${runId}`;
+				const prior = (await self.context.task.snapshotIn(storeId)).evidence.find((item) => item.evidenceId === outputId);
+				if (prior === void 0) await self.context.task.recordEvidenceIn(storeId, {
+					evidenceId: outputId,
+					taskRunId: runId,
+					taskId: run.taskId,
+					artifacts: [patch],
+					verifierResults: evidence.verifierResults,
+					claims: [],
+					generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+				}, actor);
+				else if (prior.artifacts[0]?.digest !== patch.digest) throw new Error(`task-runtime: persisted output patch for ${runId} changed`);
+				evidence.artifacts.push(patch);
+			}
+			return evidence;
 		},
 		readLogTail: async (logRef) => runVerifier(self)?.logTail?.(logRef),
 		observeSession: async (sessionId) => observeSession(self, sessionId),
@@ -9765,6 +10153,10 @@ var TaskRuntime = class extends Service {
 	startedSessions = /* @__PURE__ */ new Set();
 	drivers = /* @__PURE__ */ new Map();
 	replayLineage = /* @__PURE__ */ new Map();
+	activeWorkerSessions = /* @__PURE__ */ new Set();
+	childAdmissionTail = Promise.resolve();
+	capacityWaiters = /* @__PURE__ */ new Set();
+	workspaceReleases = /* @__PURE__ */ new Set();
 	sessionWorkspaces = /* @__PURE__ */ new Map();
 	sessionExecutionBindings = /* @__PURE__ */ new Map();
 	executionGate;
@@ -9794,6 +10186,8 @@ var TaskRuntime = class extends Service {
 		assertRootBudgetConfig(rootBudget ?? {});
 		assertGeneratedTaskReview(config?.generatedTaskReview);
 		assertSupervisionConfig(config?.supervision);
+		const maxActiveWorkers = config?.maxActiveWorkers ?? 2;
+		if (!Number.isInteger(maxActiveWorkers) || maxActiveWorkers < 1) throw new Error("task-runtime: maxActiveWorkers must be a positive integer");
 		this.config = {
 			capabilities: structuredClone(config?.capabilities ?? {}),
 			taskTemplatesRoot: config?.taskTemplatesRoot ?? defaultTaskTemplatesRoot(),
@@ -9802,6 +10196,8 @@ var TaskRuntime = class extends Service {
 			verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
 			maxDepth: config?.maxDepth ?? DEFAULT_MAX_DEPTH,
 			maxChildren: config?.maxChildren ?? DEFAULT_MAX_CHILDREN,
+			isolatedChildren: config?.isolatedChildren ?? false,
+			maxActiveWorkers,
 			budget: {
 				...DEFAULT_BUDGET,
 				...config?.budget ?? {}
@@ -9953,6 +10349,10 @@ var TaskRuntime = class extends Service {
 	}
 	storedBatchOf(proposal) {
 		return storedBatchOf(proposal);
+	}
+	async decompositionState(sessionId) {
+		const found = await this.runForSession(sessionId);
+		return decompositionAvailability(this, found.task, found.run, await this.context.task.snapshotIn(found.storeId));
 	}
 	async assertDecomposableRun(storeId, parentTask, parentRun, callerSessionId, signal) {
 		return assertDecomposableRun(this, storeId, parentTask, parentRun, callerSessionId, signal);
@@ -10288,4 +10688,4 @@ function checkObligationCoverage(templates, snapshot) {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

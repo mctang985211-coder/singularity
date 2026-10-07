@@ -10,7 +10,7 @@ import { roundCapRefusal, sourceRoundsOf, type SupervisionRounds } from './super
 /** Shared host preset; runtime installs the actual coordination role. */
 export const COORDINATION_PRESET = 'singularity-coordinator'
 
-/** Candidate comparison, existing human approval gates, root recovery and evidence reads. */
+/** Candidate comparison, publication, root recovery and evidence reads. */
 export const SUPERVISOR_BASELINE: readonly string[] = [
   'task_recover',
   'task_review_pack',
@@ -153,19 +153,19 @@ export function handoffStateLine(input: {
   }
 }
 
-/** The explicit close a supervisor's reply may carry — the structured outcome that ends a hand-off without further iteration. */
-export function closeOutcomeOf(reply: string | undefined): { readonly reason: string } | undefined {
+/** A supervisor explicitly closes the work or names the obstruction that stopped it. */
+export function supervisorOutcomeOf(reply: string | undefined): { readonly outcome: 'closed' | 'blocked'; readonly reason: string } | undefined {
   if (reply === undefined) return undefined
   const blocks = [...reply.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map(match => match[1]!)
   for (const block of blocks.reverse()) {
     try {
       const parsed: unknown = JSON.parse(block)
       if (parsed === null || typeof parsed !== 'object') continue
-      if ((parsed as { outcome?: unknown }).outcome !== 'closed') continue
+      const outcome = (parsed as { outcome?: unknown }).outcome
+      if (outcome !== 'closed' && outcome !== 'blocked') continue
       const reason = (parsed as { reason?: unknown }).reason
-      return {
-        reason: typeof reason === 'string' && reason.trim().length > 0 ? reason : 'the supervisor closed the hand-off',
-      }
+      if (typeof reason !== 'string' || reason.trim().length === 0) continue
+      return { outcome, reason }
     } catch {
       continue
     }
@@ -344,19 +344,20 @@ export function supervisorPrompt(input: {
         )
       : ['none']),
     '',
-    'Read task_review_pack, task_status scope:"graph", related diagnoses and original evidence through context_read. Start with the whole Task DAG, then inspect the relevant contracts, exact Run reviews, dependency edges and frozen Skill bindings. Do not create a duplicate proposal.',
-    'Read relevant reusable contracts through task_template_list, then its exact templateRef. Executable Evolution targetType names are task_definition (a TaskTemplate; targetId is the template id), skill and capability. Other target types remain suggestions.',
+    'Read task_review_pack, task_status scope:"graph", related diagnoses and original evidence through context_read. Start with the whole Task DAG, then inspect the relevant contracts, exact Run reviews, dependency edges and frozen Skill bindings. Treat the recorded conclusion and suggestions as hypotheses: synthesize exploration, decomposition, method and provider evidence before choosing the causal asset to improve. Do not create a duplicate proposal.',
+    'Read the exact target before constructing a candidate: skill loads its instructions and resource base; read obtains the complete SKILL.md including YAML frontmatter and each relevant Tool/resource file. glob/grep locate files; do not search session pages for asset bytes. Read reusable contracts through task_template_list, then its exact templateRef. Executable Evolution targetType names are task_definition (a TaskTemplate; targetId is the template id), skill and capability. Other target types remain suggestions.',
     'When a causal question needs deeper independent investigation, call task_review_agent for the relevant exact taskId/runId with a concrete reason and a stable requestKey. Its read-only diagnosis returns to you; it does not open another supervisor. Reuse recorded diagnoses before asking again. Reconcile supporting and conflicting evidence, then make one evidence-based decision; a discussion or vote is not an experiment.',
-    `For an established shared gap, cite diagnosis:${diagnosis.diagnosisId} in evolution_propose.sourceRefs. Use only supported candidate targets and only tools actually granted: evolution_candidate → evolution_prepare → evolution_replay → evolution_gate. Missing artifacts alone do not establish a shared gap.`,
+    `For an evidenced shared gap, cite diagnosis:${diagnosis.diagnosisId} in evolution_propose.sourceRefs. Explain the mechanism, candidate change, expected benefit and falsifying comparison in its rationale. Use only supported candidate targets and only tools actually granted: evolution_candidate → evolution_prepare → evolution_replay → evolution_gate. Missing artifacts alone do not establish a shared gap.`,
     ...(input.sourceOutcome === 'verified'
       ? [
-          `For this successful source, evolution_replay must declare objective: "tool-call-reduction", include task ${diagnosis.taskId} in taskIds, and name independent verified holdoutTaskIds. The experiment requires unchanged acceptance and lower complete Run subtree tool-call counts; unknown counters prove no improvement.`,
+          `For this successful source, evolution_replay must include task ${diagnosis.taskId} in taskIds and name independent verified holdoutTaskIds. Choose objective:"llm-outcome" with evaluation.goal for task result quality or domain performance; supply known rubric and real measurement commands, or let the independent model generate the missing frozen plan. Choose objective:"tool-call-reduction" for execution overhead. Both retain original acceptance; the outcome judge consumes actual two-sided measurements, while the cost comparison requires lower complete Run subtree tool-call counts. Unknown measurements or counters prove no gain.`,
         ]
       : []),
-    'A gated proposal continues with evolution_decide to request the human decision. A PROMOTE-decided proposal continues with evolution_apply to request approval for its exact production writes. If approval is denied or unavailable, report proposalId and its current status and stop. A rejected or research-only decision opens no recovery for that change.',
+    'Use clean original inputs for evolution_replay. Portable contracts and measurement commands address files relative to each replay cwd; a contract containing the old workspace absolute paths cannot safely evaluate isolated copies. Use the replay snapshot sourceDir explicitly when the current workspace already contains solved artifacts; do not rewrite arbitrary strings or weaken the original verifier/golden checks.',
+    'A proposed ledger entry is unfinished work. Continue through candidate, prepare, replay, gate and decision in this Supervisor session. evolution_decide records your model decision without human approval. A PROMOTE-decided proposal continues with evolution_apply, which requests one exact-write approval or records the deployment publicationApproval auto preauthorization. If approval, tools, inputs or budget are unavailable, report proposalId, its current status and a concrete obstruction with one fenced json block {"outcome":"blocked","reason":"..."}. A rejected or research-only decision opens no recovery for that change.',
     input.childSource
       ? 'After a child shared change is applied, finish with the proposal id and evidence. The runtime notifies the responsible parent to read its state and replan. Do not call task_recover for the child.'
-      : `Apply any necessary shared changes first. Then, if another round is justified, call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "recovery:${diagnosis.diagnosisId}"${input.sourceOutcome === 'verified' ? ', mode: "improve"' : ''} }. The original acceptance judges it; repeating the key returns the same attempt. A cap refusal ends iteration.`,
+      : `Apply any necessary shared changes first. Then, if another round is justified, call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "recovery:${diagnosis.diagnosisId}"${input.sourceOutcome === 'verified' ? ', mode: "improve"' : ''} }. A completed root remains terminal; you own this continuation independently and must not ask it to write a proposal. The original acceptance judges the new Run; repeating the key returns the same attempt. A cap refusal ends iteration.`,
     'If no justified action remains, explain why and end with one fenced json block {"outcome":"closed","reason":"..."}. Closing changes no task state. Unsupported candidate targets require a concrete explanation rather than invented tool support.',
   ].join('\n')
 }

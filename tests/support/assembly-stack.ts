@@ -35,6 +35,8 @@ import { AgentRegistry, assembleContextFor } from '../../../../thirdparty/deepse
 import SessionStore, { SessionId, SESSION_FORMAT_VERSION } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { SessionEvent } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
+import LocalFileSystem from '../../../../thirdparty/deepseek-harness/packages/fs/fs-local/lib/index.js'
+import LocalSubprocessRuntime from '../../../../thirdparty/deepseek-harness/packages/subprocess/subprocess-local/lib/index.js'
 import Loader from '../../../../thirdparty/deepseek-harness/vendor/loader/lib/index.js'
 import SessionProjectionRegistry from '../../../../thirdparty/deepseek-harness/packages/session/session-projection/lib/index.js'
 import AgentPresetRegistry from '../../../../thirdparty/deepseek-harness/packages/preset/agent-preset-registry/lib/index.js'
@@ -230,11 +232,21 @@ export class AssemblyStack {
     }
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) })
     if (this.options.coordinatorPreset) {
+      await ctx.plugin(LocalFileSystem, { cwd: this.checkout })
+      await ctx.plugin(LocalSubprocessRuntime)
       await ctx.plugin(Loader)
       await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(AgentPresetRegistry, { default: 'singularity-coordinator' })
       const { load } = createRequire(new URL('../../../../thirdparty/deepseek-harness/packages/preset/agent-preset-registry/package.json', import.meta.url))('js-yaml')
       const patch = load(readFileSync(new URL('../../bundle/presets/singularity-coordinator.patch.yml', import.meta.url), 'utf8'))
+      const pluginPaths: Record<string, string> = {
+        '@deepseek-ai/dsh-tool-fs': 'fs/tool-fs',
+        '@deepseek-ai/dsh-tool-fs-search': 'fs/tool-fs-search',
+        '@deepseek-ai/dsh-tool-skill': 'skill/tool-skill',
+      }
+      for (const plugin of patch[0].insert[0].config.plugins) {
+        plugin.name = new URL(`../../../../thirdparty/deepseek-harness/packages/${pluginPaths[plugin.name]}/lib/index.js`, import.meta.url).href
+      }
       await ctx.plugin(AgentPreset, patch[0].insert[0].config)
     } else {
       ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })

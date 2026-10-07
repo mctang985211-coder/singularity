@@ -73,6 +73,7 @@ describe('normalizeDecomposition', () => {
           requiredEvidence: [],
           mandatory: true,
           command: 'true',
+          verifierRef: 'command',
         },
       ],
       assumptions: ['a reference model exists'],
@@ -657,7 +658,7 @@ describe('normalizeDecomposition', () => {
     const contractDigest = sha256(
       [
         '{"acceptanceCriteria":[{"command":"true","criterionId":"ac1-1","description":"child a works",',
-        '"mandatory":true,"requiredEvidence":[],"verificationMode":"deterministic"}],',
+        '"mandatory":true,"requiredEvidence":[],"verificationMode":"deterministic","verifierRef":"command"}],',
         '"assumptions":[],"constraints":[],"contractVersion":1,"objective":"child a","requiredCapabilities":[]}',
       ].join(''),
     )

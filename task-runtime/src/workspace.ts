@@ -3,10 +3,10 @@
  * two runs that would otherwise write into the same checkout.
  */
 
-import { mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve as resolvePath } from 'node:path'
+import { cp, copyFile, lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path'
 import { sha256Hex } from '@dangosys/dsh-singularity-task'
-import type { RunId, TaskId } from '@dangosys/dsh-singularity-task'
+import type { ArtifactRef, RunId, RunPlacement, TaskId } from '@dangosys/dsh-singularity-task'
 import { enqueueByKey, message } from './helpers.ts'
 
 /** The directory under a deployment's run-binding root that holds ownership markers (§3.4). */
@@ -447,4 +447,113 @@ export class WorkspaceRegistry {
   private async removeMarker(workspace: string): Promise<void> {
     await rm(this.markerPath(workspace), { force: true })
   }
+}
+
+
+interface WorkspaceFile { path: string; sha256: string }
+interface WorkspacePatch { files: { path: string; sha256: string | null }[] }
+
+/** Content identity of a local workspace snapshot. */
+async function workspaceFiles(root: string): Promise<WorkspaceFile[]> {
+  const files: WorkspaceFile[] = []
+  async function walk(directory: string): Promise<void> {
+    for (const name of (await readdir(directory)).sort()) {
+      if (name === '.git' || name === '.singularity-results') continue
+      const path = join(directory, name)
+      const stat = await lstat(path)
+      if (stat.isDirectory()) await walk(path)
+      else if (stat.isSymbolicLink()) files.push({ path: relative(root, path), sha256: sha256Hex(`symlink:${await readlink(path)}`) })
+      else if (stat.isFile()) files.push({ path: relative(root, path), sha256: sha256Hex(await readFile(path)) })
+      else throw new Error(`task-runtime: isolated workspace contains unsupported file ${path}`)
+    }
+  }
+  await walk(root)
+  return files
+}
+
+export async function prepareChildWorkspace(
+  root: string, source: string, storeId: string, batchId: string, runId: string,
+  dependencyArtifacts: readonly ArtifactRef[], dependencyEvidenceRefs: string[],
+): Promise<RunPlacement> {
+  const batchRoot = join(root, 'child-workspaces', sha256Hex(storeId), sha256Hex(batchId))
+  const inputSnapshotPath = join(batchRoot, 'input')
+  const manifestPath = join(batchRoot, 'input.json')
+  let input: WorkspaceFile[]
+  try { input = JSON.parse(await readFile(manifestPath, 'utf8')) as WorkspaceFile[] }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    await mkdir(batchRoot, { recursive: true })
+    const bindingRoot = resolvePath(root)
+    await cp(source, inputSnapshotPath, {
+      recursive: true, errorOnExist: true, force: false,
+      filter: async path => {
+        if (basename(path) === '.git' || basename(path) === '.singularity-results') return false
+        // Runtime state is outside the input contract, even when DSH_HOME sits under the checkout.
+        const absolute = resolvePath(path)
+        if (absolute !== resolvePath(source) && (absolute === bindingRoot || bindingRoot.startsWith(absolute + sep))) return false
+        return true
+      },
+    })
+    input = await workspaceFiles(inputSnapshotPath)
+    await writeFile(manifestPath, JSON.stringify(input))
+  }
+  const actual = await workspaceFiles(inputSnapshotPath)
+  if (JSON.stringify(actual) !== JSON.stringify(input)) throw new Error('task-runtime: isolated input snapshot changed')
+  const workspacePath = join(batchRoot, runId, 'workspace')
+  await cp(inputSnapshotPath, workspacePath, { recursive: true, errorOnExist: true, force: false })
+  const applied = new Map<string, string | null>()
+  for (const artifact of dependencyArtifacts) {
+    const raw = await readFile(artifact.uri)
+    if (artifact.digest !== sha256Hex(raw)) throw new Error(`task-runtime: dependency patch ${artifact.artifactId} changed`)
+    const patch = JSON.parse(raw.toString('utf8')) as WorkspacePatch
+    for (const file of patch.files) {
+      if (isAbsolute(file.path) || file.path.split(sep).includes('..')) throw new Error(`task-runtime: invalid dependency patch path ${file.path}`)
+      if (applied.has(file.path) && applied.get(file.path) !== file.sha256) throw new Error(`task-runtime: dependency patches conflict at ${file.path}; an integration task must resolve them`)
+      applied.set(file.path, file.sha256)
+      const target = join(workspacePath, file.path)
+      if (file.sha256 === null) await rm(target, { force: true })
+      else {
+        const payload = join(dirname(artifact.uri), 'files', file.path)
+        if (sha256Hex(await readFile(payload)) !== file.sha256) throw new Error(`task-runtime: dependency patch file ${file.path} changed`)
+        await mkdir(dirname(target), { recursive: true })
+        await copyFile(payload, target)
+      }
+    }
+  }
+  return { workspacePath, inputSnapshotPath, inputSnapshotDigest: sha256Hex(JSON.stringify(input)), dependencyEvidenceRefs }
+}
+
+/** A verified child's output is handed off as an immutable, digest-bound patch; it never overwrites the parent. */
+export async function captureWorkspacePatch(placement: RunPlacement, runId: RunId): Promise<ArtifactRef> {
+  const input = await workspaceFiles(placement.inputSnapshotPath)
+  if (sha256Hex(JSON.stringify(input)) !== placement.inputSnapshotDigest) throw new Error('task-runtime: isolated input snapshot changed')
+  const output = await workspaceFiles(placement.workspacePath)
+  const before = new Map(input.map(file => [file.path, file.sha256]))
+  const after = new Map(output.map(file => [file.path, file.sha256]))
+  const patch: WorkspacePatch = { files: [...new Set([...before.keys(), ...after.keys()])].sort()
+    .filter(path => before.get(path) !== after.get(path)).map(path => ({ path, sha256: after.get(path) ?? null })) }
+  const resultRoot = join(dirname(placement.workspacePath), 'result')
+  const uri = join(resultRoot, 'patch.json')
+  const bytes = JSON.stringify(patch)
+  const artifact = { artifactId: `workspace-patch:${runId}`, kind: 'workspace-patch', uri, digest: sha256Hex(bytes) }
+  let prior: string | undefined
+  try { prior = await readFile(uri, 'utf8') }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  if (prior !== undefined) {
+    if (prior !== bytes) throw new Error(`task-runtime: resumed output patch for ${runId} differs from its recorded bytes`)
+    for (const file of patch.files) {
+      if (file.sha256 !== null && sha256Hex(await readFile(join(resultRoot, 'files', file.path))) !== file.sha256)
+        throw new Error(`task-runtime: recorded output file ${file.path} changed`)
+    }
+    return artifact
+  }
+  await mkdir(resultRoot, { recursive: true })
+  for (const file of patch.files) {
+    if (file.sha256 === null) continue
+    const target = join(resultRoot, 'files', file.path)
+    await mkdir(dirname(target), { recursive: true })
+    await copyFile(join(placement.workspacePath, file.path), target)
+  }
+  await writeFile(uri, bytes, { flag: 'wx' })
+  return artifact
 }

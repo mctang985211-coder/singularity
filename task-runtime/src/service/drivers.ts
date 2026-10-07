@@ -119,11 +119,14 @@ export function runSettledFromRuntime(
 ): void {
   void taskId
   void status
+  const activeSession = self.sessionBoundInProcess(storeId, runId)
+  if (activeSession !== undefined) self.activeWorkerSessions.delete(activeSession)
+  for (const notify of self.capacityWaiters) notify()
   void recomputeAskingSessions(self, storeId, runId)
   const sessionId = self.sessionBoundInProcess(storeId, runId)
   if (sessionId === undefined) return
   self.executionGate.setTerminal(sessionId)
-  void self
+  const release = self
     .releaseRunWorkspaceLayer(storeId, runId, sessionId)
     .catch(error => {
       self.warn(`run ${runId}: the workspace layer it held could not be released (${message(error)})`)
@@ -137,7 +140,9 @@ export function runSettledFromRuntime(
       // What the session ran under (S4-E §Q3) is forgotten with it: a terminal
       // run cannot decompose, so the binding has nothing left to propagate to.
       if (self.sessionExecutionBindings.size > 0) self.sessionExecutionBindings.delete(sessionId)
+      self.workspaceReleases.delete(release)
     })
+  self.workspaceReleases.add(release)
 }
 
 export async function recomputeAskingSessions(self: TaskRuntime, storeId: string, runId: RunId): Promise<void> {
@@ -537,7 +542,8 @@ export async function reconcileStore(self: TaskRuntime, storeId: string): Promis
       !self.startedSessions.has(run.sessionId) &&
       run.submission?.origin !== 'runtime'
     ) {
-      const attempt = await resumeAdoptedWorker(env, storeId, run)
+      const runEnv = run.placement === undefined ? env : await self.orchestrateEnv(run.sessionId, `recovery:${storeId}`, run.placement.workspacePath)
+      const attempt = await resumeAdoptedWorker(runEnv, storeId, run)
       if (attempt.status !== 'live') {
         throw new Error(
           `task-runtime: cannot continue run "${run.runId}" in Session "${run.sessionId}": ${attempt.reason}`,
@@ -558,7 +564,8 @@ export async function reconcileStore(self: TaskRuntime, storeId: string): Promis
   // All identities and gates exist before verification or a driver can execute.
   for (const run of submitted) {
     const lineage = self.replayLineage.get(run.taskId)
-    await settleSubmittedRun(env, storeId, run.taskId, run.runId, lineage === undefined ? {} : { anomalies: [lineage] })
+    const runEnv = run.placement === undefined ? env : await self.orchestrateEnv(run.sessionId, `recovery:${storeId}`, run.placement.workspacePath)
+    await settleSubmittedRun(runEnv, storeId, run.taskId, run.runId, lineage === undefined ? {} : { anomalies: [lineage] })
   }
   for (const run of waiting) {
     startBatchDriver(self, {

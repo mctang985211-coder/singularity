@@ -1,9 +1,11 @@
 import { assertMcpServerIdentity, assertCapabilityRow, capabilityRowDigest } from '../capability-candidate.ts'
 import { assertTemplateIdentity } from '../task-definition.ts'
+import { resourceIdentities } from '../ledger/records.ts'
 /** The experiment comparer and the schema validators the report read path runs.
  * @module dsh-singularity-evolution/replay/comparer */
 
 import { isHex64, isRecord } from '../shared.ts'
+import { assertOutcomeEvaluation, assertOutcomeMeasurements, assertOutcomePlan } from './outcome.ts'
 import type {
   ExperimentAdmissionRefusal,
   ExperimentAdmissionSource,
@@ -41,6 +43,7 @@ import {
   EXPERIMENT_SIDES,
   EXPERIMENT_VERDICTS,
   frozenDigestOf,
+  canonicalJson,
   OUTCOME_RANK,
 } from './contract.ts'
 
@@ -67,11 +70,17 @@ export function compareExperimentSides(
   baseline: ExperimentSideComparison,
   candidate: ExperimentSideComparison,
   objective?: ExperimentObjective,
+  outcomeVerdict?: 'improved' | 'not-improved' | 'regressed' | 'inconclusive',
 ): ExperimentSampleVerdict {
-  if (objective === 'tool-call-reduction') {
+  if (objective !== undefined) {
     const relation = compareReplaySides(asReplaySide(baseline), asReplaySide(candidate)).relation
     if (baseline.outcome !== 'verified' || relation === 'inconclusive') return 'inconclusive'
     if (candidate.outcome !== 'verified' || relation === 'worse') return 'regressed'
+    if (objective === 'llm-outcome') {
+      if (outcomeVerdict === undefined) return 'inconclusive'
+      return role === 'observed-success' || outcomeVerdict === 'regressed' || outcomeVerdict === 'inconclusive'
+        ? outcomeVerdict : 'maintained'
+    }
     const before = baseline.cost?.status === 'reported' ? baseline.cost.metrics.toolCalls?.calls : undefined
     const after = candidate.cost?.status === 'reported' ? candidate.cost.metrics.toolCalls?.calls : undefined
     if (!Number.isSafeInteger(before) || !Number.isSafeInteger(after) || before! < 0 || after! < 0) return 'inconclusive'
@@ -104,7 +113,7 @@ export function overallExperimentVerdict(
   objective?: ExperimentObjective,
 ): ExperimentVerdict {
   if (samples.some(sample => sample.verdict === 'inconclusive')) return 'inconclusive'
-  if (objective === 'tool-call-reduction') {
+  if (objective !== undefined) {
     if (samples.some(sample => sample.verdict === 'regressed')) return 'regressed'
     const successes = samples.filter(sample => sample.role === 'observed-success')
     return successes.length > 0 && successes.every(sample => sample.verdict === 'improved') ? 'improved' : 'not-improved'
@@ -125,6 +134,7 @@ function assertIdentity(value: unknown, field: string): asserts value is SkillCo
   if (!isRecord(value) || typeof value.name !== 'string' || value.name.length === 0 || !isHex64(value.sha256)) {
     throw new Error(`evolution: experiment report ${field} must be a content identity { name, sha256, contract? }`)
   }
+  if (value.resources !== undefined) resourceIdentities(value.resources)
   if (value.contract !== undefined) {
     const contract = value.contract
     if (!isRecord(contract) || !isHex64(contract.sha256) || !isHex64(contract.contractDigest)) {
@@ -142,9 +152,14 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
   if (typeof value.proposalId !== 'string' || value.proposalId.length === 0) {
     throw new Error('evolution: experiment report frozen.proposalId must be a non-empty string')
   }
-  if (value.objective !== undefined && value.objective !== 'tool-call-reduction') {
-    throw new Error('evolution: experiment report frozen.objective must be tool-call-reduction when declared')
+  if (value.objective !== undefined && value.objective !== 'tool-call-reduction' && value.objective !== 'llm-outcome') {
+    throw new Error('evolution: experiment report frozen.objective must be tool-call-reduction or llm-outcome')
   }
+  if (value.objective === 'llm-outcome') {
+    assertOutcomePlan(value.evaluation)
+    assertModelSelection(value.evaluation.judge.model, 'frozen.evaluation.judge.model')
+  }
+  else if (value.evaluation !== undefined) throw new Error('evolution: evaluation is only valid for llm-outcome')
   if (!Number.isInteger(value.repetition) || (value.repetition as number) < 0) {
     throw new Error('evolution: experiment report frozen.repetition must be a non-negative integer')
   }
@@ -208,8 +223,8 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
     assertFrozenSample(sample, `frozen.samples[${index}]`, taskIds, value.capability !== undefined || value.taskDefinition !== undefined),
   )
   const roles = value.samples.map(sample => (sample as FrozenSample).role)
-  const requiredRole = value.objective === 'tool-call-reduction' ? 'observed-success' : 'observed-failure'
-  const incompatibleRole = value.objective === 'tool-call-reduction' ? 'observed-failure' : 'observed-success'
+  const requiredRole = value.objective !== undefined ? 'observed-success' : 'observed-failure'
+  const incompatibleRole = value.objective !== undefined ? 'observed-failure' : 'observed-success'
   if (!roles.includes(requiredRole) || roles.includes(incompatibleRole)) {
     throw new Error(
       `evolution: an experiment frozen block needs at least one ${requiredRole} sample and no ${incompatibleRole} samples for its objective`,
@@ -287,7 +302,7 @@ function assertFrozenCapabilitySide(value: unknown, field: string): asserts valu
         '(capabilities, registryRevision, mcpServers, preset, skills)',
     )
   }
-  assertFrozenMcpBindings(value, field)
+  assertFrozenMcpBindings({ mcpServers: value.mcpServers, mcpBindings: value.mcpBindings }, field)
   const names = new Set<string>()
   for (const skill of value.skills) {
     assertFrozenProviderSkill(skill, `${field}.skills[${(skill as { name?: unknown }).name as string}]`)
@@ -431,7 +446,7 @@ function assertFrozenProviderIdentity(value: unknown, field: string): asserts va
     )
   }
   if (!Array.isArray(value.skills)) throw new Error(`evolution: experiment report ${field}.skills must be an array`)
-  assertFrozenMcpBindings(value, field)
+  assertFrozenMcpBindings({ mcpServers: value.mcpServers, mcpBindings: value.mcpBindings }, field)
   const names = new Set<string>()
   for (const skill of value.skills) {
     assertFrozenProviderSkill(skill, `${field}.skills[${(skill as { name?: unknown }).name as string}]`)
@@ -740,6 +755,16 @@ export function assertExperimentReport(report: unknown): asserts report is Exper
   }
   assertFrozenExperiment(report.frozen)
   const frozen = report.frozen as FrozenExperiment
+  if (report.evaluation !== undefined) {
+    if (frozen.objective !== 'llm-outcome') throw new Error('evolution: unexpected outcome evaluation')
+    assertOutcomeEvaluation(report.evaluation)
+    const input = JSON.parse(report.evaluation.input) as Record<string, unknown>
+    const samples = (report.samples as ExperimentSampleComparison[]).map(({ verdict: _verdict, ...sample }) => sample)
+    if (input.frozenDigest !== report.frozenDigest || canonicalJson(input.plan) !== canonicalJson(frozen.evaluation) ||
+        canonicalJson(input.samples) !== canonicalJson(samples))
+      throw new Error('evolution: saved judge input differs from this experiment’s frozen plan or side facts')
+    assertOutcomeMeasurements(input.measurements, samples, frozen.evaluation!)
+  }
   if (frozen.proposalId !== report.proposalId) {
     throw new Error(
       `evolution: experiment report frozen.proposalId "${frozen.proposalId}" does not match "${report.proposalId}"`,
@@ -789,7 +814,8 @@ export function assertExperimentReport(report: unknown): asserts report is Exper
         `evolution: experiment report ${field} sides share one workspace "${baseline.workspace}" — two sides need two workspaces`,
       )
     }
-    const computed = compareExperimentSides(frozenSample.role, baseline, candidate, frozen.objective)
+    const outcomeVerdict = (report.evaluation as ExperimentReport['evaluation'])?.judgement.samples.find(item => item.taskId === taskId)?.verdict
+    const computed = compareExperimentSides(frozenSample.role, baseline, candidate, frozen.objective, outcomeVerdict)
     if (entry.verdict !== computed) {
       throw new Error(
         `evolution: experiment report ${field}.verdict "${String(entry.verdict)}" does not match its own evidence ("${computed}")`,

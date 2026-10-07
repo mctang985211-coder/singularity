@@ -110,6 +110,10 @@ export interface Config {
   maxDepth: number
   /** Most children one `task_decompose` batch may create. */
   maxChildren: number
+  /** Optionally copy ordinary children into independent local workspaces. */
+  isolatedChildren: boolean
+  /** Maximum active child workers across this runtime; waiting parents release capacity. */
+  maxActiveWorkers: number
   /** Per-run resource budget; see {@link BudgetConfig} for which member is enforced, checked post-hoc, or declared only. */
   budget: BudgetConfig
   /**
@@ -204,6 +208,8 @@ export const ConfigSchema: z<Config> = z.object({
   verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),
   maxDepth: z.number().default(DEFAULT_MAX_DEPTH),
   maxChildren: z.number().default(DEFAULT_MAX_CHILDREN),
+  isolatedChildren: z.boolean().default(false),
+  maxActiveWorkers: z.number().default(2),
   budget: (
     z.object({
       maxToolCalls: z.number(),

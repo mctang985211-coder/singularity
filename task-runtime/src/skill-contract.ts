@@ -25,7 +25,7 @@ type SkillContractVersion = typeof SKILL_CONTRACT_VERSION
  * The directories a skill may hold supporting files in. The supported shape is
  * deliberately one level deep — `<dir>/<file>` — because a deeper tree cannot
  */
-export const SUPPORTED_SKILL_RESOURCE_DIRS: readonly string[] = ['references', 'scripts']
+export const SUPPORTED_SKILL_RESOURCE_DIRS: readonly string[] = ['references', 'scripts', 'resources']
 
 /**
  * Whether one declared resource path is a path this contract can identify:

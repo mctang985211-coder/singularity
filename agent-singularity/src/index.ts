@@ -66,6 +66,8 @@ export type { AutoReviewMode, SupervisionConfig } from './coordination/supervisi
 export interface Config {
   /** Whether this composition registers the nine `evolution_*` tools on the global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} — registers none of them: no model surface (root, granted worker, or the */
   evolution: 'off' | 'on'
+  /** `auto` records deployment preauthorization for method publication; `ask` requests one exact-write approval. */
+  publicationApproval?: 'ask' | 'auto'
   /** The review/supervision policy: which terminal reviews are diagnosed on their own, the per-source round caps, and the coordination allowance (see {@link SupervisionConfig}). */
   supervision?: SupervisionConfig
 }
@@ -82,6 +84,7 @@ const Supervision: z<SupervisionConfig> = z.object({
 
 const ConfigSchema: z<Config> = z.object({
   evolution: z.union([z.const('off'), z.const('on')]).default(DEFAULT_EVOLUTION),
+  publicationApproval: z.union([z.const('ask'), z.const('auto')]).default('ask'),
   supervision: Supervision.default({ ...DEFAULT_SUPERVISION }),
 })
 
@@ -89,10 +92,12 @@ const ConfigSchema: z<Config> = z.object({
 class EvolutionExposure extends Service {
   /** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
   readonly enabled: boolean
+  readonly publicationApproval: 'ask' | 'auto'
 
-  constructor(ctx: Context, enabled: boolean) {
+  constructor(ctx: Context, enabled: boolean, publicationApproval: 'ask' | 'auto') {
     super(ctx, 'singularityEvolution')
     this.enabled = enabled
+    this.publicationApproval = publicationApproval
   }
 }
 
@@ -167,7 +172,7 @@ export class SingularityAgent extends Service {
     new ProposalReviewService(ctx)
     // What this assembly did, said where a sibling can read it (the root agent's
     // tool allow-list is the consumer) — see {@link EvolutionExposure}.
-    new EvolutionExposure(ctx, evolution === 'on')
+    new EvolutionExposure(ctx, evolution === 'on', config?.publicationApproval ?? 'ask')
     // The supervision policy, said where the task runtime reads it: the round
     // caps and the coordination allowance are one policy, declared once here.
     new SupervisionExposure(ctx, supervision)
@@ -267,7 +272,7 @@ export class SingularityAgent extends Service {
   /** Refuse a configuration member this plugin does not read. The schema keeps unknown keys on the object it validates, so this is where a caller's typo is caught: */
   private assertClosedConfig(config: Config | undefined): void {
     if (config === undefined) return
-    const known = new Set(['evolution', 'supervision'])
+    const known = new Set(['evolution', 'publicationApproval', 'supervision'])
     const unknown = Object.keys(config).filter(key => !known.has(key))
     if (unknown.length > 0) {
       throw new Error(

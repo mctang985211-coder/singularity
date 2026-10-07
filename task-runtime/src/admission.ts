@@ -45,6 +45,8 @@ export interface AdmissionChild {
   objective: string
   acceptanceCriteria: readonly AcceptanceCriterion[]
   dependsOn?: readonly number[]
+  /** The new child explicitly intends to delegate to its own children. */
+  decomposable?: boolean
   /** Contract-level marker (P4): this child demands independent parent acceptance, so at least one of its criteria must carry a `childEvidence` map. */
   requiresIndependentAcceptance?: boolean
 }
@@ -281,6 +283,11 @@ export function checkDecomposition(
     reasons.push(...contractDefects(child.acceptanceCriteria, label))
     reasons.push(...independentAcceptanceDefects(child.acceptanceCriteria, child.requiresIndependentAcceptance, label))
     for (const criterion of child.acceptanceCriteria) {
+      if (child.decomposable !== true && (criterion.verificationMode === 'composite' || criterion.childEvidence !== undefined)) {
+        reasons.push(`${label} criterion "${criterion.criterionId}" uses composite/childEvidence but this Task is not declared decomposable: true; ` +
+          'these criteria refer to this Task\'s own children, and childIndex is not its position among siblings in this batch. ' +
+          'For a leaf file delivery, use a deterministic command that checks the delivered files.')
+      }
       /**
        * `requiresArtifact` gets a shape check here and nothing more: whether the
        * named artifact exists is a spawn-time question (it needs the store

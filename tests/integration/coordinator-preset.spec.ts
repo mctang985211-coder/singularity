@@ -1,5 +1,7 @@
 /** The shipped coordinator patch is mounted by the actual preset registry; the spawn role owns its policy. */
 import { afterEach, expect, it, vi } from 'vitest'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
 import { supervisorGrant } from '../../agent-singularity/src/coordination/handoff-rules.ts'
@@ -30,4 +32,21 @@ it('loads the coordinator host, installs only the supervisor policy, and records
   expect(prompt).not.toContain('You are a Singularity reviewer.')
   expect(prompt).not.toContain('Return the requested fenced JSON.')
   expect(handle.agent.session.append).toHaveBeenCalledWith('approval/policy', { policy: 'ask' })
+  const skillFile = join(stack.checkout, 'SKILL.md')
+  const toolFile = join(stack.checkout, 'resources', 'feedback.py')
+  const skillText = '---\nname: target-method\ndescription: exact production method\n---\n\nRead resources/feedback.py.\n'
+  const toolText = 'def score(cycles, cells):\n    return 1 / (cycles * cells)\n'
+  mkdirSync(join(stack.checkout, 'resources'))
+  writeFileSync(skillFile, skillText)
+  writeFileSync(toolFile, toolText)
+  const schemas = stack.ctx.tools.schemas(handle.agent).map(tool => tool.name)
+  expect(schemas).toEqual(expect.arrayContaining(['read', 'glob', 'grep', 'skill']))
+  for (const forbidden of ['write', 'edit', 'bash']) expect(schemas).not.toContain(forbidden)
+  const skillRead = await stack.call('s-supervisor', 'read', { file_path: skillFile })
+  const toolRead = await stack.call('s-supervisor', 'read', { file_path: toolFile })
+  expect(skillRead.isError, skillRead.text).toBe(false)
+  expect(skillRead.text).toContain('name: target-method')
+  expect(skillRead.text).toContain('Read resources/feedback.py.')
+  expect(toolRead.isError, toolRead.text).toBe(false)
+  expect(toolRead.text).toContain('return 1 / (cycles * cells)')
 })

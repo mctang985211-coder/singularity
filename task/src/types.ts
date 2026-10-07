@@ -261,6 +261,13 @@ export interface RunMemberReuseRefusal {
   reasons: string[]
 }
 
+export interface RunPlacement {
+  workspacePath: string
+  inputSnapshotPath: string
+  inputSnapshotDigest: string
+  dependencyEvidenceRefs: string[]
+}
+
 export interface TaskRun {
   // (§5.3)
   runId: RunId
@@ -268,6 +275,9 @@ export interface TaskRun {
   sessionId: string
   parentRunId?: RunId
   capabilitySnapshot: string[]
+  placement?: RunPlacement
+  /** Ordinary siblings share their parent checkout while owning independent Sessions. */
+  sharedWorkspace?: boolean
   agentPreset?: string
   /** What this run was bound to and loaded (S1-C item 4). Absent on every run created before the field existed, and on a run whose caller assembled its plan without an admission-time pre-check: neither loaded content this build can vouch for … */
   providerBinding?: RunProviderBinding

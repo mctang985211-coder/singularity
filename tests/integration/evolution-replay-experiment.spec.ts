@@ -636,7 +636,7 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
 
 /**
  * S4-E §F.2 end to end through the production tools: the experiment is the
- * evidence, the gate cites its report, and only after the two human gates does
+ * evidence, the gate cites its report, and only after the publication approval does
  * the candidate replace the production `SKILL.md` — from which `evolution_rollback`
  * restores the champion bytes. This is the chain EVAL-2's positive case asks for,
  * with the real ledger, store, runtime, spawn, verifier and both approvals
@@ -683,14 +683,14 @@ describe('S4-E: the promotion gate promotes a fixed skill candidate end to end',
     expect(gated.isError, gated.text).toBe(false)
     expect(gated.text).toContain('[gated] gate answered 6/6')
 
-    // 3. The first human gate: PROMOTE is recorded, and nothing is written yet.
+    // 3. The model decision: PROMOTE is recorded, and nothing is written yet.
     const decided = await f.call('evolution_decide', { proposalId: PROPOSAL, decision: 'PROMOTE', note: 'the fix holds' })
     expect(decided.isError, decided.text).toBe(false)
     expect(decided.text).toContain('proposal p1 [decided] PROMOTE — the fix holds')
-    expect(decided.text).toContain('nothing applied yet; evolution_apply (second human gate) takes it to production')
+    expect(decided.text).toContain('nothing applied yet; continue with evolution_apply')
     expect(readFileSync(production, 'utf8')).toBe(PRODUCTION_BODY)
 
-    // 4. The second human gate: the apply writes exactly the candidate bytes.
+    // 4. The publication approval: the apply writes exactly the candidate bytes.
     const applied = await f.call('evolution_apply', { proposalId: PROPOSAL })
     expect(applied.isError, applied.text).toBe(false)
     expect(applied.text).toContain('proposal p1 [applied] L2 skill')
@@ -715,7 +715,7 @@ describe('S4-E: the promotion gate promotes a fixed skill candidate end to end',
       'gated', 'decided', 'commit_intent', 'applied', 'commit_intent', 'rolledback',
     ])
     const lines = await ledgerLines(f)
-    expect(lines.filter(line => line.kind === 'decided')[0]).toMatchObject({ decision: 'PROMOTE', approvalRef: expect.stringMatching(/^approval:/) })
+    expect(lines.filter(line => line.kind === 'decided')[0]).toMatchObject({ decision: 'PROMOTE', approvalRef: expect.stringMatching(/^decision:/) })
     expect(lines.filter(line => line.kind === 'applied')[0]).toMatchObject({
       targets: [production],
       approvalRef: expect.stringMatching(/^approval:/),

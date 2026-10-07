@@ -489,7 +489,7 @@ it.skipIf(!enabled || !available)(
       evolution: { ledgerRoot },
       // Select the failed-source path; the successful-root optimization path is covered separately.
       supervision: { autoReview: 'failed', maxRecoveryRounds: 3, maxImprovementRounds: 2, coordinationBudget: 12 },
-      // The human gates are answered through the deployment's own approval seam, not by a model.
+      // The publication approval is answered through the deployment's own approval seam, not by a model.
       approvalAnswer: () => 'allowed-once',
       verifyTimeoutMs: XV6_VERIFY_TIMEOUT_MS,
       // The grader itself takes minutes under TCG; the shell bodies only write markers.
@@ -1152,11 +1152,7 @@ it.skipIf(!enabled || !available)(
       const holdout = report.samples.find(sample => sample.role === 'holdout')
       expect(holdout).toBeDefined()
 
-      // ── the human gates, answered through the deployment's approval seam ─────
-      await vi.waitFor(() => expect(h.review.asks.some(ask => ask.toolName === 'evolution_decide')).toBe(true), {
-        timeout: 1_800_000,
-        interval: 1000,
-      })
+      // ── the publication approval, answered through the deployment's approval seam ─────
       await vi.waitFor(() => expect(h.review.asks.some(ask => ask.toolName === 'evolution_apply')).toBe(true), {
         timeout: 1_800_000,
         interval: 1000,

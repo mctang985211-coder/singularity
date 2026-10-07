@@ -67,7 +67,7 @@ async function fixture(candidateReads = 0, candidateFails = false, decomposed = 
   h = await startScriptedLoop({
     capabilities: rows, evolution: { ledgerRoot: ledger, ...(capabilityConfig === undefined ? {} : { capabilityConfig }) },
     supervision: { autoReview: 'off' },
-    approvalAnswer: ask => ['evolution_decide', 'evolution_apply'].includes(ask.toolName) ? undefined : 'allowed-once',
+    approvalAnswer: ask => ask.toolName === 'evolution_apply' ? undefined : 'allowed-once',
     script: (sessionId, index): readonly ScriptEntry[] => {
       const name = h.spawns.find(spawn => spawn.sessionId === sessionId)?.name ?? ''
       if (name.startsWith('review ')) return [{ text: '```json\n' + JSON.stringify({
@@ -143,14 +143,14 @@ async function fixture(candidateReads = 0, candidateFails = false, decomposed = 
   unlinkSync(join(h.checkout, ANSWER))
   h.userSays('review the successful result for redundant calls')
   await vi.waitFor(async () => expect((await h.ctx.evolution.get(PROPOSAL)).status,
-    h.calls.filter(call => call.name.startsWith('evolution_')).map(call => call.result?.text).join('\n')).toBe('gated'), { timeout: 20_000, interval: 25 })
+    h.calls.filter(call => call.name.startsWith('evolution_')).map(call => call.result?.text).join('\n')).toBe(cleanImprovement ? 'decided' : 'gated'), { timeout: 20_000, interval: 25 })
   return { h, taskId, runId, diagnosisId }
 }
 
 describe('verified-source measured cost optimization', () => {
   it('finishes durable supervisor settlement before unloading an unanswered human gate', async () => {
     const f = await fixture()
-    await vi.waitFor(() => expect(f.h.review.asks.some(ask => ask.toolName === 'evolution_decide')).toBe(true))
+    await vi.waitFor(() => expect(f.h.review.asks.some(ask => ask.toolName === 'evolution_apply')).toBe(true))
     await f.h.dispose()
     const attempt = (await readReviewAgentAttempts(STORE)).find(item => item.role === 'supervisor')!
     expect(attempt.started).toBe(true)
@@ -198,9 +198,7 @@ describe('verified-source measured cost optimization', () => {
       expect(sample.baseline.cost).toMatchObject({ status: 'reported', metrics: { toolCalls: { calls: 3 } } })
       expect(sample.candidate.cost).toMatchObject({ status: 'reported', metrics: { toolCalls: { calls: 1 } } })
     }
-    await vi.waitFor(() => expect(f.h.review.asks.some(ask => ask.toolName === 'evolution_decide')).toBe(true), { timeout: 10_000 })
     expect((await f.h.snapshot(STORE)).runs.some(run => run.recovery !== undefined)).toBe(false)
-    f.h.review.answer(f.h.review.asks.findIndex(ask => ask.toolName === 'evolution_decide'), 'allowed-once')
     await vi.waitFor(() => expect(f.h.review.asks.some(ask => ask.toolName === 'evolution_apply')).toBe(true), { timeout: 10_000 })
     f.h.review.answer(f.h.review.asks.findIndex(ask => ask.toolName === 'evolution_apply'), 'allowed-once')
     const recoveryCall = await vi.waitFor(() => {

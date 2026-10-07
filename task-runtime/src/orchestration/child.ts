@@ -8,6 +8,7 @@ import type {
   ReviewCriterion,
   RunId,
   RunProviderBinding,
+  RunPlacement,
   RunStatus,
   TaskId,
   TaskInstance,
@@ -377,6 +378,14 @@ async function startChildRound(
 
   const agentPreset = resolvePreset(manifest, env.defaultPreset)
   const name = task.objective.trim().replace(/\s+/g, ' ').slice(0, 40) || `child-${item.index + 1}`
+  let placement: RunPlacement | undefined
+  if (env.isolatedChildren) {
+    try { placement = await env.prepareChildPlacement!(batch, runId, dependencyEvidence) }
+    catch (error) {
+      return { kind: 'adopted', outcome: await blockChild(env, batch.storeId, item,
+        { reason: `isolated workspace preparation failed: ${message(error)}`, blockers: [] }, dependencyTaskIds) }
+    }
+  }
   const run: TaskRun = {
     runId,
     taskId: item.taskId,
@@ -384,6 +393,8 @@ async function startChildRound(
     parentRunId: parentRun.runId,
     ...(env.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: env.taskTemplatesRoot }),
     capabilitySnapshot: capabilitySnapshot(manifest),
+    ...(placement === undefined ? {} : { placement }),
+    ...(!env.isolatedChildren && (env.maxActiveWorkers ?? 1) > 1 ? { sharedWorkspace: true } : {}),
     ...(agentPreset === undefined ? {} : { agentPreset }),
     // Born active (§1.1): this run decides its own work until it submits or
     // decomposes, and the phase is what admits both.
@@ -393,6 +404,7 @@ async function startChildRound(
     status: 'running',
     startedAt: new Date().toISOString(),
   }
+  if (placement !== undefined) env = await env.childEnv!(run)
   let binding: RunProviderBinding | undefined
   try {
     let providers = batch.providers
@@ -454,13 +466,15 @@ async function startChildRound(
    * One writer at a time (§3.4): the batch's hold is handed to this child for
    * as long as it works. A workspace this process does not hold as expected is
    */
-  const handover = await handOverWorkspace(
-    env,
-    runOwner(batch.storeId, item.taskId, run.runId),
-    top => top !== undefined && top.batchId === batch.batchId,
-    sessionId,
-    `batch ${batch.batchId}`,
-  )
+  const handover = run.sharedWorkspace ? { ok: true as const } : placement === undefined
+    ? await handOverWorkspace(
+      env, runOwner(batch.storeId, item.taskId, run.runId),
+      top => top !== undefined && top.batchId === batch.batchId, sessionId, `batch ${batch.batchId}`,
+    )
+    : await (async () => {
+      await env.workspaces!.claim(placement.workspacePath, runOwner(batch.storeId, item.taskId, run.runId))
+      return { ok: true as const }
+    })()
   if (!handover.ok) {
     return {
       kind: 'adopted',
@@ -515,6 +529,7 @@ async function startChildRound(
 
 /** What the driver does between rounds: everything the store says, and nothing it holds in memory. */
 export async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<ChildOutcome[]> {
+  if (env.isolatedChildren || (env.maxActiveWorkers ?? 1) > 1) return await driveConcurrentRounds(env, batch)
   for (;;) {
     const snapshot = await env.task.snapshotIn(batch.storeId)
     const tasks = new Map(snapshot.tasks.map(task => [task.taskId, task]))
@@ -587,5 +602,82 @@ export async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Pro
     const attempt = await startChildRound(env, batch, parentTask, parentRun, items, item, snapshot)
     if (attempt.kind === 'adopted') continue
     await driveChildRound(env, batch, attempt.child)
+  }
+}
+
+
+/** Start ready siblings in a serial admission transaction, then observe all independent work in flight. */
+async function driveConcurrentRounds(env: OrchestrateEnv, original: BatchContext): Promise<ChildOutcome[]> {
+  const controller = new AbortController()
+  const abort = (): void => controller.abort()
+  original.signal.addEventListener('abort', abort, { once: true })
+  if (original.signal.aborted) abort()
+  const batch = { ...original, signal: controller.signal }
+  const inFlight = new Map<TaskId, Promise<void>>()
+  let failure: unknown
+  const watch = (item: BatchItem, work: Promise<unknown>): void => {
+    const promise = work.then(() => {}, error => { failure = error; controller.abort() })
+      .finally(() => { inFlight.delete(item.taskId) })
+    inFlight.set(item.taskId, promise)
+  }
+  try {
+    for (;;) {
+      if (failure !== undefined) throw failure
+      const snapshot = await env.task.snapshotIn(batch.storeId)
+      const tasks = new Map(snapshot.tasks.map(task => [task.taskId, task]))
+      const parentTask = tasks.get(batch.parentTaskId)!
+      const parentRun = snapshot.runs.find(run => run.runId === batch.parentRunId)!
+      const items = batchItems(batchMembers(parentRun, batch.batchId), snapshot.edges)
+      const pending = items.filter(item => !TERMINAL_TASK_STATUSES.has(tasks.get(item.taskId)!.status))
+      if (batch.signal.aborted || parentRun.status !== 'running') {
+        controller.abort()
+        await Promise.all(inFlight.values())
+        await blockUnstarted(env, batch.storeId, await env.task.snapshotIn(batch.storeId), items, () => ({ reason: CANCELLED_BEFORE_START, blockers: [] }))
+        return await finishBatch(env, original)
+      }
+      if (pending.length === 0) {
+        await Promise.all(inFlight.values())
+        return await finishBatch(env, original)
+      }
+      let progressed = false
+      let capacityBlocked = false
+      for (const item of pending) {
+        if (inFlight.has(item.taskId)) continue
+        const dependencyTaskIds = item.dependsOn.map(index => items[index]!.taskId)
+        const started = latestRun(snapshot, item.taskId)
+        if (started !== undefined) {
+          const childEnv = await env.childEnv!(started)
+          watch(item, awaitAdoptedWorkerWait(childEnv, batch, item, started, dependencyTaskIds))
+          progressed = true
+          continue
+        }
+        const blockers = dependencyTaskIds.filter(id => TERMINAL_TASK_STATUSES.has(tasks.get(id)!.status) && tasks.get(id)!.status !== 'verified')
+        if (blockers.length > 0) {
+          await blockChild(env, batch.storeId, item, {
+            reason: `dependencies [${blockers.join(', ')}] did not verify`,
+            blockers: blockers.map(taskId => ({ taskId, outcome: tasks.get(taskId)!.status })),
+          }, dependencyTaskIds)
+          progressed = true
+          continue
+        }
+        if (!dependencyTaskIds.every(id => tasks.get(id)!.status === 'verified')) continue
+        const attempt = await env.withChildAdmission!(() => startChildRound(env, batch, parentTask, parentRun, items, item, snapshot))
+        if (attempt === undefined) { capacityBlocked = true; continue }
+        progressed = true
+        if (attempt.kind === 'started') {
+          const childEnv = await env.childEnv!(attempt.child.run)
+          watch(item, driveChildRound(childEnv, batch, attempt.child))
+        }
+      }
+      if (progressed) continue
+      const waits = [...inFlight.values()]
+      if (capacityBlocked) waits.push(env.waitForCapacity!(batch.signal))
+      if (waits.length === 0) throw new Error(`task-runtime: batch ${batch.batchId} has pending children but no runnable dependency path`)
+      await Promise.race(waits)
+    }
+  } finally {
+    controller.abort()
+    await Promise.all(inFlight.values())
+    original.signal.removeEventListener('abort', abort)
   }
 }

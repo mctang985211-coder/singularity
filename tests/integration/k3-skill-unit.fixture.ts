@@ -23,7 +23,7 @@
  *
  * - K3-1 — the main chain: an existing execution skill whose old body fails a
  *   frozen acceptance criterion and whose new body fixes it, evaluated by the
- *   real two-sided experiment, promoted by two real human gates, applied as one
+ *   real two-sided experiment, promoted with one real publication approval, applied as one
  *   two-file commit. The assertions are read off the run bindings' own snapshots
  *   (both files, byte for byte), the production files, and the derived sidecar
  *   compared field by field with the one production held.
@@ -767,7 +767,7 @@ export async function walkToGated(
   return { reportPath: experiment.report, experimentId: experiment.experimentId, report }
 }
 
-/** Close the human decision through the real tool: one real `approval.request`, then the `decided` line. */
+/** Record the model decision through the real tool and its `decided` line. */
 export async function decideThroughTool(s: UnitStack, proposalId: string, actor: SessionId = ROOT_A): Promise<string> {
   const answer = await s.call('evolution_decide', { proposalId, decision: 'PROMOTE', note: 'the fix holds' }, actor)
   expect(answer.isError, answer.text).toBe(false)
@@ -776,7 +776,7 @@ export async function decideThroughTool(s: UnitStack, proposalId: string, actor:
   return answer.text
 }
 
-/** Apply through the real tool: the second human gate, the two-file commit, and the applied record. */
+/** Apply through the real tool: the publication approval, the two-file commit, and the applied record. */
 export async function applyThroughTool(s: UnitStack, proposalId: string, actor: SessionId = ROOT_A): Promise<string> {
   const answer = await s.call('evolution_apply', { proposalId }, actor)
   expect(answer.isError, answer.text).toBe(false)

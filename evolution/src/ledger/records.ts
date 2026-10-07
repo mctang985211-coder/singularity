@@ -2,9 +2,9 @@ import { validateTaskDefinitionMutation } from '../task-definition.ts'
 /** Record payload validation for the ledger's own lines, shared by the write doors and the fold.
  * @module dsh-singularity-evolution/ledger/records */
 
-import { basename, dirname, resolve } from 'node:path'
+import { basename, dirname, relative, resolve } from 'node:path'
 import type { ProposalTargetType, TaskSnapshot } from '@dangosys/dsh-singularity-task'
-import { SKILL_SIDECAR_FILE } from '@dangosys/dsh-singularity-task-runtime'
+import { parseSkillFile, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS } from '@dangosys/dsh-singularity-task-runtime'
 import type { RootRecoveryOutcome } from '@dangosys/dsh-singularity-task-runtime'
 import type { CapabilityRowIdentity } from '../capability-candidate.ts'
 import { assertMcpServerIdentity, assertCapabilityRow, capabilityRowDigest, validateCapabilityMutation } from '../capability-candidate.ts'
@@ -34,9 +34,47 @@ export function validateMutation(
         'existing skill object and one whole capability row with an optional new execution skill, and every other target type is a recorded proposal',
     )
   }
-  assertOnlyKeys(mutation, ['name', 'content'], 'skill mutation')
+  assertOnlyKeys(mutation, ['name', 'content', 'resources'], 'skill mutation')
   assertSegment(mutation.name, 'mutation.name')
   nonEmpty(mutation.content, 'mutation.content')
+  if (mutation.resources !== undefined) {
+    if (!isRecord(mutation.resources)) throw new Error('evolution: mutation.resources must map resource paths to complete UTF-8 text')
+    for (const [path, content] of Object.entries(mutation.resources)) {
+      assertResourcePath(path)
+      if (typeof content !== 'string' || content.includes('\0')) throw new Error(`evolution: resource "${path}" must be UTF-8 text`)
+    }
+  }
+}
+
+/** Validate bytes entering a new candidate or prepare; historical records retain their original content. */
+export function validateLoadableMutation(targetType: ProposalTargetType, mutation: Record<string, unknown>): void {
+  const skill = targetType === 'skill' ? mutation as { name: string; content: string }
+    : targetType === 'capability' ? validateCapabilityMutation(mutation).skill : undefined
+  if (skill === undefined) return
+  const parsed = parseSkillFile(skill.content, `${skill.name}/SKILL.md`)
+  if (parsed.name !== skill.name) throw new Error('evolution: Skill frontmatter name must equal mutation.name')
+  if (!parsed.content.trim() || !parsed.invocation.modelInvocable)
+    throw new Error('evolution: candidate Skill must have instructions and permit model invocation')
+}
+
+export function assertResourcePath(path: string): void {
+  const parts = path.split('/')
+  if (parts.length !== 2 || !SUPPORTED_SKILL_RESOURCE_DIRS.includes(parts[0]!) ||
+      !parts[1] || parts[1] === '.' || parts[1] === '..' || path.includes('\\'))
+    throw new Error(`evolution: resource "${path}" must be a file under ${SUPPORTED_SKILL_RESOURCE_DIRS.join('/, ')}/`)
+}
+
+export function resourceIdentities(value: unknown): { path: string; sha256: string }[] {
+  if (!Array.isArray(value)) throw new Error('evolution: resources identity must be an array')
+  const paths = new Set<string>()
+  return value.map(resource => {
+    if (!isRecord(resource) || typeof resource.path !== 'string' || typeof resource.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(resource.sha256)) throw new Error('evolution: each resource identity must carry path and sha256')
+    assertResourcePath(resource.path)
+    if (paths.has(resource.path)) throw new Error(`evolution: duplicate resource "${resource.path}"`)
+    paths.add(resource.path)
+    return { path: resource.path, sha256: resource.sha256 }
+  })
 }
 
 /** Candidate versionSet payload validation, shared by the write path (`candidate`) and the fold. */
@@ -104,7 +142,7 @@ export function validateCommitIntent(record: CommitIntentRecord): void {
     )
   }
   const files = record.files
-  if (!Array.isArray(files) || files.length > 2 || (files.length === 0 && record.capability === undefined)) {
+  if (!Array.isArray(files) || (files.length === 0 && record.capability === undefined)) {
     throw new Error(
       `evolution: commit_intent record for proposal "${record.proposalId}" names ${Array.isArray(files) ? `${files.length} file(s)` : 'no file list'} ` +
         `and ${record.capability === undefined ? 'no capability row' : `capability row "${record.capability.name}"`} — a commit carries a fixed file ` +
@@ -152,17 +190,19 @@ export function validateCommitIntent(record: CommitIntentRecord): void {
         `evolution: ${at} names target "${file.target}" — an intent names the absolute production paths it commits`,
       )
     }
-    if (!(files.length === 1 && (file.baselineSha256 === null || file.contentSha256 === null) && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*@[1-9][0-9]*\.json$/.test(basename(file.target))) && basename(file.target) !== (index === 0 ? 'SKILL.md' : SKILL_SIDECAR_FILE)) {
+    const template = files.length === 1 && (file.baselineSha256 === null || file.contentSha256 === null) && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*@[1-9][0-9]*\.json$/.test(basename(file.target))
+    const skillDirectory = dirname(files[0]!.target)
+    if (!template && index === 0 && basename(file.target) !== 'SKILL.md') {
       throw new Error(
         `evolution: ${at} names target "${file.target}" — the file set of one skill object is ordered and fixed: SKILL.md first, ` +
           `and, when the object carries an execution sidecar, ${SKILL_SIDECAR_FILE} second`,
       )
     }
-    if (index > 0 && dirname(file.target) !== dirname(files[0]!.target)) {
-      throw new Error(
-        `evolution: ${at} names target "${file.target}" beside "${files[0]!.target}" — the files of one skill object live in one ` +
-          'directory, the one a loader reads whole',
-      )
+    if (index > 0) {
+      const path = relative(skillDirectory, file.target)
+      if (index !== 1 || path !== SKILL_SIDECAR_FILE) assertResourcePath(path)
+      if (files.slice(0, index).some(previous => previous.target === file.target))
+        throw new Error(`evolution: ${at} repeats target "${file.target}"`)
     }
   })
   const capability = record.capability
@@ -293,7 +333,8 @@ export function preparedIdentity(value: unknown, field: string, proposalId: stri
     )
   }
   const contract = value.contract
-  if (contract === undefined) return { name: value.name, sha256: value.sha256 }
+  const resources = value.resources === undefined ? {} : { resources: resourceIdentities(value.resources) }
+  if (contract === undefined) return { name: value.name, sha256: value.sha256, ...resources }
   if (
     !isRecord(contract) ||
     typeof contract.sha256 !== 'string' ||
@@ -309,6 +350,7 @@ export function preparedIdentity(value: unknown, field: string, proposalId: stri
   return {
     name: value.name,
     sha256: value.sha256,
+    ...resources,
     contract: { sha256: contract.sha256, contractDigest: contract.contractDigest },
   }
 }

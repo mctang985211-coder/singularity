@@ -209,6 +209,7 @@ describe('checkDecomposition', () => {
         child({ acceptanceCriteria: [criterion({ verificationMode: 'review', command: undefined, verifierRef: 'registered-review' })] }),
         child({
           taskId: 'c2',
+          decomposable: true,
           acceptanceCriteria: [criterion({ criterionId: 'ac2-1', verificationMode: 'composite', command: undefined })],
         }),
       ],
@@ -282,18 +283,32 @@ describe('checkDecomposition', () => {
 })
 
 describe('checkDecomposition parent acceptance declarations (P4, KISS §6 C2)', () => {
+  test.each([undefined, false])('rejects leaf composite acceptance when decomposable is %s', decomposable => {
+    const verdict = checkDecomposition(parent(), [child({ decomposable, acceptanceCriteria: [criterion({
+      verificationMode: 'composite', command: undefined, childEvidence: [{ childIndex: 0, evidenceRef: 'valid/id' }],
+    })] })], [])
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) {
+      expect(verdict.reasons).toHaveLength(1)
+      expect(verdict.reasons[0]).toContain('decomposable: true')
+      expect(verdict.reasons[0]).toContain('own children')
+      expect(verdict.reasons[0]).toContain('not its position among siblings')
+    }
+  })
+
   test('accepts a well-formed childEvidence map and acceptsArtifact, shape only', () => {
     const verdict = checkDecomposition(
       parent(),
       [
         child({
+          decomposable: true,
           acceptanceCriteria: [
             criterion({
               verificationMode: 'composite',
               command: undefined,
               childEvidence: [
                 { childIndex: 0, criterionId: 'ac1-1' },
-                { childIndex: 1, evidenceRef: 'bemu_trace' },
+                { childIndex: 1, evidenceRef: 'valid/evidence_id' },
               ],
             }),
           ],
@@ -390,6 +405,7 @@ describe('checkDecomposition parent acceptance declarations (P4, KISS §6 C2)', 
       [
         child({
           requiresIndependentAcceptance: true,
+          decomposable: true,
           acceptanceCriteria: [
             criterion({ verificationMode: 'composite', command: undefined, childEvidence: [{ childIndex: 0 }] }),
           ],
@@ -634,6 +650,7 @@ describe('rootIndependenceDefects', () => {
         parent(),
         [
           child({
+            decomposable: true,
             acceptanceCriteria: [criterion({ verificationMode: 'composite', command: undefined })],
           }),
         ],

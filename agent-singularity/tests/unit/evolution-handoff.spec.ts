@@ -21,7 +21,7 @@ import {
 import {
   COORDINATION_PRESET,
   SUPERVISOR_BASELINE,
-  closeOutcomeOf,
+  supervisorOutcomeOf,
   handoffDecision,
   handoffSourceOf,
   handoffStateLine,
@@ -76,6 +76,7 @@ function fixture(options: {
   proposals?: readonly unknown[]
   idle?: Promise<void>
   cancel?: () => void
+  onPrompt?: (text: string) => string | undefined | Promise<string | undefined>
 } = {}) {
   const reply = options.reply === null ? undefined : options.reply ?? CLOSE_REPLY
   const spawns: { sessionId: string; name: string; prompt: string; agentPreset: string; grant: unknown }[] = []
@@ -131,6 +132,12 @@ function fixture(options: {
     },
     agentRuntime: {
       ensureAgentMessageDelivered: vi.fn(async () => ({ status: 'delivered' })),
+      prompt: vi.fn(async (agent: { session: { snapshotEvents(): unknown[] } }, content: { text: string }[]) => {
+        const reply = await options.onPrompt?.(content[0]!.text)
+        if (reply !== undefined) agent.session.snapshotEvents().push({
+          type: 'assistant/message', data: { message: { content: [{ type: 'text', text: reply }] } },
+        })
+      }),
       spawn: vi.fn(async (_parent: unknown, request: Record<string, unknown>) => {
         const name = String(request.name)
         spawns.push({
@@ -292,11 +299,13 @@ describe('the hand-off rules', () => {
   })
 
   it('reads the close a supervisor declared, or nothing', () => {
-    expect(closeOutcomeOf(CLOSE_REPLY)).toEqual({ reason: 'no further round is justified' })
-    expect(closeOutcomeOf('```json\n{"outcome":"closed"}\n```')).toEqual({ reason: 'the supervisor closed the hand-off' })
-    expect(closeOutcomeOf('prose with no block')).toBeUndefined()
-    expect(closeOutcomeOf('```json\n{"outcome":"recovered"}\n```')).toBeUndefined()
-    expect(closeOutcomeOf(undefined)).toBeUndefined()
+    expect(supervisorOutcomeOf(CLOSE_REPLY)).toEqual({ outcome: 'closed', reason: 'no further round is justified' })
+    expect(supervisorOutcomeOf('```json\n{"outcome":"blocked","reason":"source bytes unavailable"}\n```'))
+      .toEqual({ outcome: 'blocked', reason: 'source bytes unavailable' })
+    expect(supervisorOutcomeOf('```json\n{"outcome":"closed"}\n```')).toBeUndefined()
+    expect(supervisorOutcomeOf('prose with no block')).toBeUndefined()
+    expect(supervisorOutcomeOf('```json\n{"outcome":"recovered"}\n```')).toBeUndefined()
+    expect(supervisorOutcomeOf(undefined)).toBeUndefined()
   })
 
   it('reads the source a diagnosis names, and its identity changes with its suggestions', () => {
@@ -358,7 +367,9 @@ describe('the hand-off rules', () => {
     expect(prompt).toContain('task_template_list, then its exact templateRef')
     expect(prompt).toContain('task_definition (a TaskTemplate; targetId is the template id)')
     expect(prompt).toContain('evolution_replay')
-    expect(prompt).toContain('evolution_decide to request the human decision')
+    expect(prompt).toContain('evolution_decide records your model decision without human approval')
+    expect(prompt).toContain('read obtains the complete SKILL.md including YAML frontmatter')
+    expect(prompt).toContain('relative to each replay cwd')
 
     const bare = supervisorPrompt({ diagnosis: diagnosis({ proposals: [] }), sourceRef: 't-root#r-1', sourceOutcome: 'verified' })
     expect(bare).toContain('Existing proposals for this diagnosis:')
@@ -809,19 +820,54 @@ describe('durable candidate continuation and parent routing', () => {
     expect((await readReviewAgentAttempts(STORE)).map(attempt => attempt.source.taskId)).toEqual(['t-root'])
   })
 
-  it('records a gated candidate and picks up the same proposal after activation', async () => {
+  it('continues a gated candidate once, reports no progress as blocked and picks it up after activation', async () => {
     const proposals = [{ proposalId: 'p-1', status: 'gated', sourceRefs: ['diagnosis:d-1'] }]
     const f = fixture({ reply: null, proposals })
     const request = { storeId: STORE, diagnosis: diagnosis(), delegator: { sessionId: ROOT, agent: f.rootAgent as never }, sourceRef: 't-root#r-1', sourceOutcome: 'failed' }
     await startSupervisorHandoff(f.ctx, request)
     await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(1))
-    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded', note: 'proposal p-1 [gated]' })
+    expect(f.ctx.agentRuntime.prompt).toHaveBeenCalledOnce()
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted', note: 'blocked: the Supervisor ended without advancing its unfinished proposal; proposal p-1 [gated]' })
     const restarted = fixture({ reply: null, proposals })
     await startSupervisorHandoff(restarted.ctx, { ...request, delegator: { sessionId: ROOT, agent: restarted.rootAgent as never } })
     expect(restarted.spawns).toHaveLength(1)
     expect(restarted.spawns[0]!.prompt).toContain('p-1 [gated]')
     await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(2))
-    expect(rowsOfKind('settled').every(row => row.status === 'recorded')).toBe(true)
+    expect(rowsOfKind('settled').every(row => row.status === 'interrupted')).toBe(true)
+  })
+
+  it('continues the same Supervisor from a proposed entry through publication to a new root Run', async () => {
+    const proposals = [{ proposalId: 'p-1', status: 'proposed', sourceRefs: ['diagnosis:d-1'] }]
+    const f = fixture({ reply: null, proposals, onPrompt: text => {
+      if (proposals[0]!.status === 'proposed') {
+        expect(text).toContain('p-1 [proposed]')
+        proposals[0]!.status = 'gated'
+      } else if (proposals[0]!.status === 'gated') {
+        proposals[0]!.status = 'applied'
+      } else {
+        expect(text).toContain('mode:"improve"')
+        f.snapshots.get(STORE)!.runs.push({
+          runId: 'r-next', taskId: 't-root', sessionId: 's-next', recovery: { sourceDiagnosisId: 'd-1' },
+        } as TaskRun)
+      }
+      return undefined
+    } })
+    await startSupervisorHandoff(f.ctx, { storeId: STORE, diagnosis: diagnosis(), delegator: { sessionId: ROOT, agent: f.rootAgent as never }, sourceRef: 't-root#r-1', sourceOutcome: 'verified' })
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(1))
+    expect(f.spawns).toHaveLength(1)
+    expect(f.ctx.agentRuntime.prompt).toHaveBeenCalledTimes(3)
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded', note: 'task_recover issued: run r-next' })
+  })
+
+  it('preserves the concrete obstruction without prompting a blocked Supervisor again', async () => {
+    const f = fixture({
+      reply: '```json\n{"outcome":"blocked","reason":"publication approval denied"}\n```',
+      proposals: [{ proposalId: 'p-1', status: 'decided', decision: 'PROMOTE', sourceRefs: ['diagnosis:d-1'] }],
+    })
+    await startSupervisorHandoff(f.ctx, { storeId: STORE, diagnosis: diagnosis(), delegator: { sessionId: ROOT, agent: f.rootAgent as never }, sourceRef: 't-root#r-1', sourceOutcome: 'failed' })
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(1))
+    expect(f.ctx.agentRuntime.prompt).not.toHaveBeenCalled()
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted', note: 'blocked: publication approval denied; proposal p-1 [decided] PROMOTE' })
   })
 
   it('reads a crashed supervisor candidate from the proposal ledger before admitting a successor', async () => {

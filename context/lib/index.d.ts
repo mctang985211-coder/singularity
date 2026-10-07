@@ -106,6 +106,14 @@ interface ReadOnlyTaskRuntime {
   };
   /** Whether this deployment admits a run's own `task_decompose`. */
   allowsRuntimeDecomposition(): boolean;
+  decompositionState?(sessionId: string): Promise<{
+    canDecompose: boolean;
+    depth: number;
+    maxDepth: number;
+    phase: string;
+    remainingRuns?: number;
+    reasons: string[];
+  }>;
 }
 /** Everything the binding resolver reads. */
 interface BindingDeps {

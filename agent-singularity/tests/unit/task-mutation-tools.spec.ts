@@ -708,13 +708,8 @@ describe('task_intake', () => {
       'formal',
       'measurement',
       'review',
-      'composite',
     ])
-    // The one field of a decomposition criterion this tool does not declare: a
-    // childEvidence map names positions in a batch, and a root contract is
-    // submitted before any batch exists. The runtime would accept the key; the
-    // schema refuses it instead of letting a model declare a map nothing can
-    // ever judge.
+    // Author ordinary contracts with commands; advanced child mappings live in pinned templates.
     expect(Object.keys(criteria.properties!)).not.toContain('childEvidence')
   })
 

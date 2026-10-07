@@ -16,7 +16,7 @@ export function defineTaskDecomposeTool(ctx: Context) {
       'A template carrying decomposition can supply this batch: pass its exact templateRef and templateParameters at the top level, omitting reason and children. The runtime expands its direct children and dependsOn through the same admission path. ' +
       'Each caller owns its full result and may coordinate children that decompose again; define only this level and let each child decide its descendants. ' +
       'The batch is admitted atomically and the runtime then runs them ' +
-      'one at a time in dependency order; this call returns at admission and does not wait. Each child is verified ' +
+      'concurrently up to the configured worker limit, respecting real dependsOn edges; this call returns at admission and does not wait. Each child is verified ' +
       'against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead ' +
       'come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.',
     parameters: {
@@ -39,21 +39,17 @@ export function defineTaskDecomposeTool(ctx: Context) {
             objective: { type: 'string', description: 'Complete, self-contained goal of the child task' },
             acceptanceCriteria: {
               type: 'array',
-              description: 'Required for a free contract; omit when using templateRef. How a verifier decides the child is done',
+              description: 'Required for a free contract; omit when using templateRef. Prefer a few commands that check this Task\'s actual result through its explicit case directory or delivery manifest.',
               items: criterionSchema({
                 description: 'What must hold true',
                 criterionId:
-                  'Stable id for this criterion: fixed at admission, and the only id a parent-level childEvidence.criterionId can rely on. ' +
-                  'Omitted, the runtime generates one from the batch position; declared ids must be unique inside a child. ' +
-                  'A parent-level childEvidence.criterionId must name an id the child it points to actually declared, ' +
-                  'which only holds when that child declares the id explicitly here',
-                command: 'Shell command; exit code 0 proves the criterion (deterministic modes). Reuse an authoritative checker that already covers this result; do not duplicate its assertions',
+                  'Stable id for this criterion, unique inside the child. Omitted, the runtime generates one.',
+                command: 'Shell command, executed from this Run\'s workspace root. Exit code 0 proves the criterion. Use explicit paths to this Task\'s case or delivery manifest and an existing authoritative checker. Do not glob sibling outputs or print success after a failed checker.',
                 mode: 'Verifier kind; defaults to deterministic with a command. Mandatory review/formal criteria require an explicit registered verifier that can settle them; the built-in review placeholder is refused.',
                 requiresArtifact: 'Artifact/evidence kinds or ids that must already exist in the task store as a verified reference product (a verified run carrying a passing verdict) for this criterion to be judgeable; a missing one blocks the child before spawn and registers an obligation',
                 acceptsArtifact: 'Artifact/evidence kinds or ids this criterion consumes as a raw input: existence in the task store is the whole requirement, any run state. Missing blocks the child before spawn and registers an obligation',
                 verifierRef: 'Registered verifier id that judges this criterion; must exist in the verifier registry — an unknown id rejects the whole batch at admission and the error lists the registered ids. Omit to dispatch by mode.',
-                childEvidence: 'Parent-level evidence map (composite mode only): which member of this run — by 0-based position in the run\'s accumulated members, every batch it admits in admission order — this criterion rests on, optionally narrowed to a child criterion and an evidence reference. Judged at parent-acceptance time; an incomplete mapping fails the parent naming the missing items',
-                heuristic: 'Label this criterion a heuristic judgement: the verdict is marked as such and never counted as a deterministic pass. Mutually exclusive with childEvidence',
+                heuristic: 'Label this criterion a heuristic judgement: the verdict is marked as such and never counted as a deterministic pass.',
                 protectedInputs:
                   'Paths of acceptance inputs this criterion depends on that must not be modified by the executing side: acceptance scripts, threshold files, fixtures. ' +
                   'Declare them as paths relative to the task\'s checkout (an absolute path stays absolute). Admission resolves each one against the session\'s checkout and fixes the SHA-256 of its bytes ' +
@@ -83,10 +79,6 @@ export function defineTaskDecomposeTool(ctx: Context) {
             decomposable: {
               type: 'boolean',
               description: 'Mark true when the child owns multiple independently checkable results or distinct responsibilities. Its worker coordinates those results and decides its own decomposition before implementation; do not prewrite descendants or reduce its full acceptance. A genuinely local result can be completed directly. A capability gap also uses this marker for admission, but it grants no missing capability.',
-            },
-            requiresIndependentAcceptance: {
-              type: 'boolean',
-              description: 'Contract-level marker: this child demands independent parent acceptance — at least one of its acceptance criteria must carry a childEvidence map, or admission refuses the batch. Deleting the map never silently degrades acceptance back to the all-children-verified conjunction',
             },
           },
         },

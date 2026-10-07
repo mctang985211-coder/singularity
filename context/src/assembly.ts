@@ -68,12 +68,13 @@ function withContractSection(assembly: PromptAssembly, text: string): void {
 
 /** Append one plane to the runtime-context plane; an unchanged name is replaced, never duplicated. */
 function withRuntimeContext(assembly: PromptAssembly, name: string, text: string): void {
-  const existing = assembly.contexts.find(context => context.name === name)
+  // Harness runtime contexts are always interpolated. Task facts instead use literal sections.
+  assembly.contexts = assembly.contexts.filter(context => context.name !== name)
+  const existing = assembly.sections.find(section => section.name === name)
   if (existing !== undefined) {
     existing.text = text
-    return
-  }
-  assembly.contexts.push({ name, text })
+    existing.interpolate = false
+  } else assembly.sections.push({ name, text, interpolate: false })
 }
 
 /** The question plane, when it has anything to say: an empty projection adds no context at all. */
@@ -126,7 +127,10 @@ export async function assembleSingularityContext(
       // read here, and it has no parent of its own to have asked.
       const questions = await service.questionsFor(caller)
       if (!questions.ok) throwRefusal(questions)
+      const dynamic = await service.dynamicFor(caller)
+      if (!dynamic.ok) throwRefusal(dynamic)
       withContractSection(assembly, contract.text)
+      withRuntimeContext(assembly, STATE_CONTEXT_NAME, dynamic.text)
       withQuestionContext(assembly, questions.text)
       return next()
     }

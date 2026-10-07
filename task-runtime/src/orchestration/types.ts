@@ -14,6 +14,7 @@ import type {
   ReviewTokenUsage,
   ReviewToolCall,
   RunId,
+  RunPlacement,
   RunProviderBinding,
   RunStatus,
   TaskId,
@@ -161,6 +162,13 @@ export interface OrchestrateEnv {
    * worker has to be told the door is open before it can walk through it, and a
    */
   allowRuntimeDecomposition: boolean
+  isolatedChildren?: boolean
+  maxActiveWorkers?: number
+  childEnv?(run: TaskRun): Promise<OrchestrateEnv>
+  prepareChildPlacement?(batch: BatchContext, runId: RunId, dependencyEvidenceRefs: string[]): Promise<RunPlacement>
+  withChildAdmission?<T>(start: () => Promise<T>): Promise<T | undefined>
+  waitForCapacity?(signal: AbortSignal): Promise<void>
+  activateParent?(sessionId: string, signal: AbortSignal, activate: () => Promise<void>): Promise<void>
   spawn(request: SpawnChildRequest): Promise<AgentHandle>
   verifyRun(storeId: string, runId: RunId, options?: VerifyRunOptions): Promise<EvidenceBundle>
   /** Optional tail reader for verifier logs (logRef relative to the verifier's evidence root); absent keeps logTail off failed records. */

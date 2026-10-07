@@ -13,6 +13,8 @@ import type {
   ExperimentSideDetail,
   FrozenExperiment,
   ModelSelection,
+  OutcomeEvaluationPlan,
+  OutcomeEvaluation,
 } from '../replay.ts'
 import { EXPERIMENT_SAMPLE_ROLES } from '../replay.ts'
 import { assertSegment as sharedSegment, nonEmpty as sharedNonEmpty } from '../shared.ts'
@@ -27,6 +29,7 @@ export interface ExperimentSampleSpec {
 export interface ExperimentSpec {
   proposalId: string
   objective?: ExperimentObjective
+  evaluation?: OutcomeEvaluationPlan
   samples: ExperimentSampleSpec[]
   /** The directory whose recursive content is the frozen input both workspaces are built from. */
   snapshot: { sourceDir: string }
@@ -44,6 +47,21 @@ export interface ExperimentRequest {
   readonly caller: SessionId
   readonly actor: string
   readonly signal?: AbortSignal
+  /** Scheduling limit; defaults to the runtime worker limit. */
+  readonly maxParallel?: number
+  readonly judge?: OutcomeModelCall
+}
+
+export type OutcomeModelCall = (model: ModelSelection, prompt: string, input: string, signal?: AbortSignal) => Promise<string>
+
+export interface ExperimentJudgedRecord {
+  formatVersion: 4
+  kind: 'experiment_judged'
+  proposalId: string
+  experimentId: string
+  evaluation: OutcomeEvaluation
+  actor: string
+  at: string
 }
 
 /** The idempotency key of one sample side (§F.2). All five members together name one record. */
@@ -111,7 +129,7 @@ export interface ExperimentSampleRecord {
   at: string
 }
 
-export type ExperimentRecord = ExperimentStartedRecord | ExperimentSampleRecord
+export type ExperimentRecord = ExperimentStartedRecord | ExperimentSampleRecord | ExperimentJudgedRecord
 
 export function nonEmpty(value: unknown, field: string): string {
   return sharedNonEmpty(value, field, detail => new Error(`experiment: ${detail}`))
@@ -125,8 +143,8 @@ export function safeSegment(value: unknown, field: string): string {
 /** The specification's own shape, before anything is read or frozen. */
 export function validateSpec(spec: ExperimentSpec): void {
   nonEmpty(spec.proposalId, 'proposalId')
-  if (spec.objective !== undefined && spec.objective !== 'tool-call-reduction') {
-    throw new Error('experiment: objective must be tool-call-reduction when declared')
+  if (spec.objective !== undefined && spec.objective !== 'tool-call-reduction' && spec.objective !== 'llm-outcome') {
+    throw new Error('experiment: objective must be tool-call-reduction or llm-outcome when declared')
   }
   if (
     spec.model === null ||

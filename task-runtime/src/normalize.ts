@@ -242,6 +242,14 @@ function normalizeCriteria(
         : stringList(value.requiredEvidence, `${criterionLabel} requiredEvidence`, reasons)
 
     const command = value.command
+    const mode = carried<VerificationMode>(
+      value.mode === undefined ? (command !== undefined ? 'deterministic' : 'review') : value.mode,
+    )
+    const verifierRef = value.verifierRef === undefined
+      ? ['deterministic', 'simulation', 'measurement'].includes(mode)
+        ? 'command'
+        : mode === 'composite' ? 'composite' : undefined
+      : carried<string>(value.verifierRef)
     const criterion: AcceptanceCriterion = {
       criterionId,
       description,
@@ -249,15 +257,13 @@ function normalizeCriteria(
        * A declared mode is carried verbatim, whatever it is; whether it names
        * one of the six judges is `contractDefects`' rule. Only an absent mode
        */
-      verificationMode: carried<VerificationMode>(
-        value.mode === undefined ? (command !== undefined ? 'deterministic' : 'review') : value.mode,
-      ),
+      verificationMode: mode,
       requiredEvidence,
       mandatory,
       ...(command === undefined ? {} : { command: carried<string>(command) }),
       ...(value.requiresArtifact === undefined ? {} : { requiresArtifact: carried<string[]>(value.requiresArtifact) }),
       ...(value.acceptsArtifact === undefined ? {} : { acceptsArtifact: carried<string[]>(value.acceptsArtifact) }),
-      ...(value.verifierRef === undefined ? {} : { verifierRef: carried<string>(value.verifierRef) }),
+      ...(verifierRef === undefined ? {} : { verifierRef }),
       ...(value.childEvidence === undefined ? {} : { childEvidence: carried<ChildEvidenceRef[]>(value.childEvidence) }),
       ...(value.heuristic === undefined ? {} : { heuristic: carried<boolean>(value.heuristic) }),
       /**

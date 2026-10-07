@@ -77,6 +77,17 @@ export async function dynamicProjection(deps: ReadDeps, loaded: LoadedCaller): P
     }
   }
 
+  if (target.run !== undefined && deps.taskRuntime.decompositionState !== undefined && resolution.kind !== 'reviewer') {
+    const state = await deps.taskRuntime.decompositionState(resolution.sessionId)
+    const lines = [
+      `canDecompose: ${state.canDecompose}; depth: ${state.depth}/${state.maxDepth}; phase: ${state.phase}`,
+      ...(state.remainingRuns === undefined ? [] : [`remaining root run budget: ${state.remainingRuns}`]),
+      ...(state.reasons.length === 0 ? [] : [`decomposition refused because: ${state.reasons.join('; ')}`]),
+      ...(target.run.placement === undefined ? [] : [`execution workspace: ${target.run.placement.workspacePath}`]),
+    ]
+    if (budget.addAll(lines) > 0) return tooLarge('decomposition availability', taskPageHint(task.taskId))
+  }
+
   if (snapshot !== undefined) {
     const entries = relatedEntries(snapshot, task)
     const lines = entries.map(entry => taskSummaryLine(snapshot, entry.task, entry.roles))

@@ -217,7 +217,7 @@ describe('Task decomposition recipe Evolution', () => {
       noUnacceptableSideEffects: 'isolated frozen libraries and workspaces', holdoutPerformanceAcceptable: 'verified', resourceCostAcceptable: 'traffic measured', regressionEvidenceRefs: [result.reportPath],
     }, ROOT)
     f.h.userSays('publish the evaluated content and dependency repair', 's-control')
-    await approve(f.h, 'evolution_decide'); await approve(f.h, 'evolution_apply')
+    await approve(f.h, 'evolution_apply')
     await vi.waitFor(async () => expect((await f.h.ctx.evolution.get(PROPOSAL)).status).toBe('applied'), { timeout: 10_000 })
     const recovered = await f.h.runtime.recoverRootTask(STORE, {
       sourceTaskId: f.source.taskId, sourceRunId: f.source.runId, sourceDiagnosisId: 'd-plan', requestKey: 'recipe-replan', proposalIds: [PROPOSAL],

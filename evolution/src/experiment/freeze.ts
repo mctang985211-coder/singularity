@@ -32,6 +32,7 @@ import type {
   ExperimentSampleSpec,
   ExperimentSpec,
   ExperimentStartedRecord,
+  ExperimentJudgedRecord,
 } from './spec.ts'
 
 /** The idempotency key's content member (K3, A6): the digest of the candidate's complete identity. */
@@ -57,7 +58,7 @@ export function preparedContentDigestOf(frozen: {
 
 /** True for a record of the experiment family — the lines the proposal fold must leave alone. */
 export function isExperimentRecord(record: { kind: string }): record is ExperimentRecord {
-  return record.kind === 'experiment_started' || record.kind === 'experiment_sample'
+  return record.kind === 'experiment_started' || record.kind === 'experiment_sample' || record.kind === 'experiment_judged'
 }
 
 /** One experiment's folded view: its started record plus every sample record written under it. */
@@ -74,6 +75,7 @@ export interface ExperimentView {
   at: string
   /** Sample records in ledger order. */
   samples: ExperimentSampleRecord[]
+  judged?: ExperimentJudgedRecord
 }
 
 /** The ledger as this module uses it: the proposal it evaluates, the candidate's files, the experiment views and the ledger root. */
@@ -94,6 +96,7 @@ export interface ExperimentLedger {
   recordExperimentStart(record: ExperimentStartedRecord): Promise<void>
   /** Record one sample side. A key that is already recorded refuses a different content by name. */
   recordExperimentSample(record: ExperimentSampleRecord): Promise<void>
+  recordExperimentJudged?(record: ExperimentJudgedRecord): Promise<void>
 }
 
 /** One accepted provider verdict, as a freeze reads it off the runtime's own pre-check (the members it records, and no more). */
@@ -118,6 +121,7 @@ export interface ExperimentSources {
   readonly graphs: { graphForSession(sessionId: SessionId): Promise<{ readonly rootSessionId: SessionId }> }
   readonly task: { openStore(storeId: string): Promise<TaskSnapshot> }
   readonly taskRuntime: {
+    readonly config?: { readonly maxActiveWorkers: number }
     replayTask(
       storeId: string,
       championTaskId: string,
@@ -648,6 +652,7 @@ export function freezeExperiment(input: {
   const frozen: FrozenExperiment = {
     proposalId: input.proposalId,
     ...(input.spec.objective === undefined ? {} : { objective: input.spec.objective }),
+    ...(input.spec.evaluation === undefined ? {} : { evaluation: structuredClone(input.spec.evaluation) }),
     repetition: input.spec.repetition,
     ...(candidate === undefined ? {} : { candidate: frozenIdentityOf(candidate) }),
     ...(input.productionBaseline === undefined
@@ -693,8 +698,8 @@ export function freezeExperiment(input: {
           ? `extraSkillRoots: [${input.sandbox}/skills] — the complete candidate object: ` +
             `${
               candidate!.contract === undefined
-                ? `the guidance object "${candidate!.name}" (SKILL.md alone, no sidecar)`
-                : `the execution object "${candidate!.name}" (SKILL.md plus the derived SKILL.contract.json)`
+                ? `the guidance object "${candidate!.name}" (SKILL.md and frozen resources, no sidecar)`
+                : `the execution object "${candidate!.name}" (SKILL.md, frozen resources and the derived SKILL.contract.json)`
             }, ` +
             "loaded whole through the runtime's own discovery"
           : `capabilityOverrides: { "${capability.row.name}": the prepared row }` +

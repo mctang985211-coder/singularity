@@ -27,7 +27,8 @@ import type { ExperimentRecord, ExperimentSampleRecord } from '../../src/experim
 import { directoryDigest, experimentLineage } from '../../src/experiment/record.ts'
 import { resumeExperiment, runExperiment } from '../../src/experiment/runner.ts'
 import type { ExperimentBudget, FrozenExperiment, SkillContentIdentity } from '../../src/replay.ts'
-import { digestOf, foldExperiments, frozenDigestOf, modelSelectionOf } from '../../src/index.ts'
+import { assertExperimentReport, compareExperimentSides, digestOf, foldExperiments, frozenDigestOf, modelSelectionOf, OUTCOME_JUDGE_PROMPT } from '../../src/index.ts'
+import { assertOutcomeEvidence } from '../../src/experiment/outcome.ts'
 
 const PROPOSAL = 'p1'
 const SKILL = 'fixture-skill'
@@ -223,6 +224,7 @@ async function world(
     readCapabilityCandidate: async () => {
       throw new Error('the fixture evaluates a skill candidate; no capability prepare exists in this ledger')
     },
+    readTaskDefinitionCandidate: async () => { throw new Error('the fixture evaluates a skill candidate') },
     experiment: async (experimentId: string) => {
       const view = folded().get(experimentId)
       if (view === undefined) throw new Error(`evolution: unknown experiment "${experimentId}"`)
@@ -238,6 +240,10 @@ async function world(
       foldExperiments([...records, record], proposals)
       records.push(record)
     },
+    recordExperimentJudged: async record => {
+      foldExperiments([...records, record], proposals)
+      records.push(record)
+    },
   }
 
   const sources: ExperimentSources = {
@@ -249,6 +255,7 @@ async function world(
         ? undefined
         : (options.vocabulary ?? { ids: ['command'], versions: { command: '1' } }),
     taskRuntime: {
+      config: { maxActiveWorkers: 1 },
       capabilityProviderReport: async () => ({
         capabilities: unlisted ? [] : [{ capability, skills: [skillVerdict] }],
         revision: registryRevision(table, providerIdentities),
@@ -363,6 +370,83 @@ async function world(
   }
 }
 
+it('runs four isolated sides concurrently and shares a concurrent repeat call without starting duplicate runs', async () => {
+  const w = await world()
+  Object.assign(w.sources.taskRuntime.config!, { maxActiveWorkers: 4 })
+  const replay = w.sources.taskRuntime.replayTask
+  let active = 0
+  let peak = 0
+  let release!: () => void
+  const allStarted = new Promise<void>(resolve => { release = resolve })
+  w.sources.taskRuntime.replayTask = async (...args) => {
+    active += 1
+    peak = Math.max(peak, active)
+    if (active === 4) release()
+    await allStarted
+    try { return await replay(...args) }
+    finally { active -= 1 }
+  }
+  try {
+    const request = { spec: w.spec(), caller: CALLER, actor: 'root-1' }
+    const [first, repeated] = await Promise.all([runExperiment(w.sources, request), runExperiment(w.sources, request)])
+    expect(peak).toBe(4)
+    expect(first.experimentId).toBe(repeated.experimentId)
+    expect(w.calls).toHaveLength(4)
+    expect(new Set(w.calls.map(call => call.workspace)).size).toBe(4)
+    expect(w.records.filter(record => record.kind === 'experiment_started')).toHaveLength(1)
+    expect(w.records.filter(record => record.kind === 'experiment_sample')).toHaveLength(4)
+    await resumeExperiment(w.sources, { experimentId: first.experimentId, caller: CALLER, actor: 'root-1' })
+    expect(w.calls).toHaveLength(4)
+  } finally { await rm(w.root, { recursive: true, force: true }) }
+})
+
+it('judges real command output for successful observed and holdout cases once, preserves acceptance and rechecks saved artifacts', async () => {
+  const w = await world()
+  try {
+    w.tasks[0]!.status = 'verified'
+    w.reviews[0]!.outcome = 'verified'
+    await writeFile(join(w.snapshotDir, 'metric.txt'), '42\n')
+    const model = modelSelectionOf({ provider: 'scripted', model: 'judge' })!
+    const evaluation = {
+      goal: 'improve the measured output', rubric: 'observed improvement and no holdout regression',
+      measurements: [{ id: 'metric', command: 'cat metric.txt' }],
+      judge: { model, prompt: OUTCOME_JUDGE_PROMPT, digest: digestOf({ model, prompt: OUTCOME_JUDGE_PROMPT }) },
+    }
+    let judged = 0
+    const judge = async (_model: unknown, _prompt: unknown, input: string) => {
+      judged++
+      const facts = JSON.parse(input)
+      expect(facts.measurements).toHaveLength(4)
+      expect(facts.measurements.every((item: { stdout: string; exitCode: number }) => item.stdout === '42\n' && item.exitCode === 0)).toBe(true)
+      return JSON.stringify({ samples: facts.samples.map((sample: { taskId: string; role: string }) => ({
+        taskId: sample.taskId,
+        verdict: sample.role === 'observed-success' ? 'improved' : 'not-improved',
+        findings: [{ claim: 'synthetic model decision grounded in actual shell output', evidenceRefs: [`${sample.taskId}/baseline/metric`, `${sample.taskId}/candidate/metric`] }],
+        uncertainties: ['scripted model judgement verifies control flow, not domain improvement'],
+      })) })
+    }
+    const spec = { ...w.spec(), objective: 'llm-outcome' as const, evaluation,
+      samples: [{ taskId: 't-fix', role: 'observed-success' as const }, { taskId: 't-holdout', role: 'holdout' as const }] }
+    const result = await runExperiment(w.sources, { spec, caller: CALLER, actor: 'root', judge })
+    expect(result.report.verdict).toBe('improved')
+    expect(result.report.samples[1]!.verdict).toBe('maintained')
+    expect(result.report.evaluation!.judgement.samples[0]!.uncertainties).toHaveLength(1)
+    await assertOutcomeEvidence(w.ledgerRoot, result.report)
+    const repeated = await runExperiment(w.sources, { spec, caller: CALLER, actor: 'root', judge })
+    expect(repeated.report).toEqual(result.report)
+    expect(judged).toBe(1)
+    expect(w.calls).toHaveLength(4)
+    expect(() => assertExperimentReport({ ...result.report,
+      frozen: { ...result.report.frozen, evaluation: { ...evaluation, rubric: 'a changed scoring rule' } },
+    })).toThrow()
+    const verified = { outcome: 'verified' as const, criteria: [{ criterionId: 'original', verdict: 'pass' as const }] }
+    expect(compareExperimentSides('observed-success', verified,
+      { outcome: 'failed', criteria: [{ criterionId: 'original', verdict: 'fail' }] }, 'llm-outcome', 'improved')).toBe('regressed')
+    await writeFile(join(result.report.samples[0]!.candidate.workspace, 'metric.txt'), '999\n')
+    await expect(assertOutcomeEvidence(w.ledgerRoot, result.report)).rejects.toThrow(/artifacts changed/)
+  } finally { await rm(w.root, { recursive: true, force: true }) }
+})
+
 function digestOfBytes(text: string): string {
   return createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex')
 }
@@ -411,7 +495,7 @@ describe('the two-sided orchestrator', () => {
     w.runs.find(run => run.runId === 'r-fix-history')!.status = 'verified'
     const review = w.reviews.find(review => review.runId === 'r-fix-history')!
     review.outcome = 'verified'
-    review.criteria[0]!.verdict = 'pass'
+    review.criteria![0]!.verdict = 'pass'
     const spec = { ...w.spec(), objective: 'tool-call-reduction' as const, samples: [
       { taskId: 't-fix', role: 'observed-success' as const }, { taskId: 't-holdout', role: 'holdout' as const },
     ] }

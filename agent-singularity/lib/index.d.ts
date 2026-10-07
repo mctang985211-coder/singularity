@@ -163,6 +163,8 @@ declare class ProposalReviewService extends Service implements ProposalReviewCha
 interface Config {
   /** Whether this composition registers the nine `evolution_*` tools on the global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} — registers none of them: no model surface (root, granted worker, or the */
   evolution: 'off' | 'on';
+  /** `auto` records deployment preauthorization for method publication; `ask` requests one exact-write approval. */
+  publicationApproval?: 'ask' | 'auto';
   /** The review/supervision policy: which terminal reviews are diagnosed on their own, the per-source round caps, and the coordination allowance (see {@link SupervisionConfig}). */
   supervision?: SupervisionConfig;
 }
@@ -172,7 +174,8 @@ declare const DEFAULT_EVOLUTION: 'off';
 declare class EvolutionExposure extends Service {
   /** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
   readonly enabled: boolean;
-  constructor(ctx: Context, enabled: boolean);
+  readonly publicationApproval: 'ask' | 'auto';
+  constructor(ctx: Context, enabled: boolean, publicationApproval: 'ask' | 'auto');
 }
 /** The supervision policy this composition resolved, provided on the agent's own fiber as `ctx.singularitySupervision` — what the task runtime's per-source round caps read. */
 declare class SupervisionExposure extends Service {

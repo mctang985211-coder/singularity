@@ -7,7 +7,7 @@ import { dirname, resolve } from 'node:path'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
 import type { ExperimentReport, FrozenSample } from '../replay.ts'
-import { agentOptionsOf, EXPERIMENT_SIDES, frozenDigestOf } from '../replay.ts'
+import { agentOptionsOf, canonicalJson, EXPERIMENT_SIDES, frozenDigestOf } from '../replay.ts'
 import type { ExperimentRequest, ExperimentSampleRecord, ExperimentSpec } from './spec.ts'
 import { assertSampleRole, validateSpec } from './spec.ts'
 import type { ExperimentResult } from './record.ts'
@@ -32,7 +32,7 @@ import {
   sampleRecord,
   tokensOfRecord,
 } from './record.ts'
-import type { ExperimentSources, SampleProviders } from './freeze.ts'
+import type { ExperimentLedger, ExperimentSources, SampleProviders } from './freeze.ts'
 import {
   freezeCriterionRepair,
   experimentCandidate,
@@ -42,11 +42,33 @@ import {
   frozenSampleOf,
 } from './freeze.ts'
 import { buildWorkspace } from './workspace.ts'
+import { judgeExperiment } from './outcome.ts'
+
+const runningExperiments = new WeakMap<ExperimentLedger, Map<string, Promise<ExperimentResult>>>()
+
+export function runExperiment(sources: ExperimentSources, request: ExperimentRequest): Promise<ExperimentResult> {
+  const key = canonicalJson({ ...request.spec,
+    snapshot: { sourceDir: resolve(request.spec.snapshot.sourceDir) },
+    model: { ...request.spec.model, label: `${request.spec.model.provider}/${request.spec.model.model}` },
+  })
+  let running = runningExperiments.get(sources.evolution)
+  if (running === undefined) {
+    running = new Map()
+    runningExperiments.set(sources.evolution, running)
+  }
+  const existing = running.get(key)
+  if (existing !== undefined) return existing
+  const result = executeExperiment(sources, request).finally(() => running!.delete(key))
+  running.set(key, result)
+  return result
+}
 
 /** Run — or continue — the frozen two-sided experiment, and return the report the ledger records recompute to. */
-export async function runExperiment(sources: ExperimentSources, request: ExperimentRequest): Promise<ExperimentResult> {
+async function executeExperiment(sources: ExperimentSources, request: ExperimentRequest): Promise<ExperimentResult> {
   const { spec, caller, actor } = request
   validateSpec(spec)
+  if (request.maxParallel !== undefined && (!Number.isInteger(request.maxParallel) || request.maxParallel < 1))
+    throw new Error('experiment: maxParallel must be a positive integer')
   const { sandbox, candidate, capability, taskDefinition, overlay, proposal } = await experimentCandidate(sources, spec.proposalId)
   const { storeId, snapshot } = await experimentStore(sources, caller)
   // The judge vocabulary the criteria are frozen against, read before anything
@@ -138,10 +160,20 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
   let spentTokens = reportedTokensSpent(view.samples)
   let settledSides = view.samples.length
 
+  const runtimeLimit = sources.taskRuntime.config?.maxActiveWorkers ?? 2
+  const maxParallel = request.maxParallel === undefined ? runtimeLimit : Math.min(request.maxParallel, runtimeLimit)
+  if (!Number.isInteger(maxParallel) || maxParallel < 1) throw new Error('experiment: maxParallel must be a positive integer')
+  const pending = view.frozen.samples.flatMap(sample => EXPERIMENT_SIDES.map(side => ({ sample, side })))
+  let next = 0
+  let stopped = false
+  let failure: unknown
   let started = 0
   try {
-    sampleLoop: for (const sample of view.frozen.samples) {
-      for (const side of EXPERIMENT_SIDES) {
+    if (view.frozen.taskDefinition?.criterionRepair !== undefined)
+      await runCriterionGuards(sources, view, caller, actor, agentOptions, request.signal)
+    const worker = async () => {
+      while (!stopped && !request.signal?.aborted && next < pending.length) {
+        const { sample, side } = pending[next++]!
         const key = experimentSampleKeyOf(view, sample.taskId, side)
         const lineage = experimentLineage(view.experimentId, sample.taskId, side)
         const workspace = resolve(sources.evolution.root, sandboxRel, sample.taskId, side)
@@ -150,7 +182,7 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
           assertRecordedRunOrigin(snapshot, lineage, key, prior)
           continue
         }
-        if (request.signal?.aborted) break sampleLoop
+        if (request.signal?.aborted) return
         const inFlight = snapshot.tasks.find(item => item.objective.startsWith(`[${lineage}] `))
         if (inFlight !== undefined) {
           const recovered = recoveredSampleRecord({ view, sample, side, task: inFlight, snapshot, workspace, actor })
@@ -208,9 +240,9 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
           settledSides += 1
           continue
         }
-        if (side === 'candidate' && view.frozen.taskDefinition?.criterionRepair !== undefined) {
-          await runCriterionGuards(sources, view, caller, actor, agentOptions, request.signal)
-        }
+        if (stopped || request.signal?.aborted) return
+        assertBudgetAllowsStart({ experimentId: view.experimentId, budget, spentTokens, settledSides,
+          where: `sample "${sample.taskId}" ${side} side` })
         const outcome = await sources.taskRuntime.replayTask(
           storeId,
           sample.taskId,
@@ -264,9 +296,14 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
         started += 1
         // A run that settled cancelled is a stop somebody asked for: no further
         // side is started under it, and the settled ones stay recorded.
-        if (facts.outcome === 'cancelled') break sampleLoop
+        if (facts.outcome === 'cancelled') stopped = true
       }
     }
+    await Promise.all(Array.from({ length: Math.min(maxParallel, pending.length) }, async () => {
+      try { await worker() }
+      catch (error) { stopped = true; failure ??= error }
+    }))
+    if (failure !== undefined) throw failure
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (started === 0) throw error instanceof Error ? error : new Error(message)
@@ -276,6 +313,8 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
     )
   }
 
+  await judgeExperiment({ ledger: sources.evolution, view: await sources.evolution.experiment(experimentId),
+    snapshot: await sources.task.openStore(storeId), actor, judge: request.judge, signal: request.signal })
   const finalView = await sources.evolution.experiment(experimentId)
   let report: ExperimentReport
   try {
@@ -294,7 +333,7 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
 /** Resume a frozen experiment by id: its specification *is* the frozen block, so the id alone is unambiguous. */
 export async function resumeExperiment(
   sources: ExperimentSources,
-  request: { experimentId: string; caller: SessionId; actor: string; signal?: AbortSignal },
+  request: { experimentId: string; caller: SessionId; actor: string; signal?: AbortSignal; judge?: ExperimentRequest['judge']; maxParallel?: number },
 ): Promise<ExperimentResult> {
   const view = await sources.evolution.experiment(request.experimentId)
   const spec: ExperimentSpec = {
@@ -303,6 +342,7 @@ export async function resumeExperiment(
     snapshot: { sourceDir: view.frozen.snapshot.sourceDir },
     model: view.frozen.model,
     ...(view.frozen.objective === undefined ? {} : { objective: view.frozen.objective }),
+    ...(view.frozen.evaluation === undefined ? {} : { evaluation: view.frozen.evaluation }),
     budget: view.frozen.budget,
     repetition: view.frozen.repetition,
   }
@@ -310,6 +350,8 @@ export async function resumeExperiment(
     spec,
     caller: request.caller,
     actor: request.actor,
+    judge: request.judge,
+    ...(request.maxParallel === undefined ? {} : { maxParallel: request.maxParallel }),
     ...(request.signal === undefined ? {} : { signal: request.signal }),
   })
 }

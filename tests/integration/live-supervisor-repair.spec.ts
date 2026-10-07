@@ -544,7 +544,7 @@ it.skipIf(!enabled)(
       evolution: { ledgerRoot },
       // Select the failed-source path; the successful-root optimization path is covered separately.
       supervision: { autoReview: 'failed', maxRecoveryRounds: 3, maxImprovementRounds: 2, coordinationBudget: 12 },
-      // The human gates are answered through the deployment's own approval seam, not by a model.
+      // The publication approval is answered through the deployment's own approval seam, not by a model.
       approvalAnswer: () => 'allowed-once',
       verifyTimeoutMs: 1_500_000,
       // The pipeline's own commands are seconds; a 25-minute bound only lets a model's stray `find /` stall the run.
@@ -1148,11 +1148,7 @@ it.skipIf(!enabled)(
       expect(observedFailure!.baseline.outcome).toBe('failed')
       expect(observedFailure!.candidate.outcome).toBe('verified')
 
-      // ── the human gates, answered through the deployment's approval seam ──
-      await vi.waitFor(() => expect(h.review.asks.some(ask => ask.toolName === 'evolution_decide')).toBe(true), {
-        timeout: 1_800_000,
-        interval: 1000,
-      })
+      // ── the publication approval, answered through the deployment's approval seam ──
       await vi.waitFor(() => expect(h.review.asks.some(ask => ask.toolName === 'evolution_apply')).toBe(true), {
         timeout: 1_800_000,
         interval: 1000,
@@ -1334,7 +1330,7 @@ it.skipIf(!enabled)(
           'the real model and calls the real evolution chain (propose, candidate, prepare, replay, gate, decide, apply) with argument ' +
           'guidance only from the diagnosis text; the two-sided experiment replays a failed coordinator sample and a verified holdout ' +
           'through the real runtime under per-side frozen template libraries, with the real checker as the original acceptance; the ' +
-          'human gates are answered through the deployment approval seam; the publish appends log-analytics-pipeline@2.json and leaves ' +
+          'publication approval is answered through the deployment approval seam; the publish appends log-analytics-pipeline@2.json and leaves ' +
           '@1 mis-ordered; and a second root run on CASE_2 verifies with the pipeline child bound to version 2. The repair is pure ' +
           'template CONTENT (recipe order and/or dependsOn; the criteria are byte-identical), so evolution_prepare never takes the ' +
           'criterion-repair branch. In all-real mode the Reviewer also uses the real model; in hybrid mode only its request is ' +

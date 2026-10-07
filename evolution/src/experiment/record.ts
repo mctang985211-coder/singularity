@@ -36,7 +36,7 @@ import {
   overallExperimentVerdict,
 } from '../replay.ts'
 import { isHex64 } from '../shared.ts'
-import type { ExperimentKey, ExperimentSampleRecord, ExperimentStartedRecord } from './spec.ts'
+import type { ExperimentKey, ExperimentRecord, ExperimentSampleRecord, ExperimentStartedRecord } from './spec.ts'
 import { nonEmpty } from './spec.ts'
 import type { ExperimentSources, ExperimentView } from './freeze.ts'
 import { isExperimentRecord, preparedContentDigestOf, refusedProviderLines } from './freeze.ts'
@@ -384,10 +384,11 @@ export function buildExperimentReport(view: ExperimentView): ExperimentReport {
       role: sample.role,
       baseline,
       candidate,
-      verdict: compareExperimentSides(sample.role, baseline, candidate, view.frozen.objective),
+      verdict: compareExperimentSides(sample.role, baseline, candidate, view.frozen.objective,
+        view.judged?.evaluation.judgement.samples.find(item => item.taskId === sample.taskId)?.verdict),
     }
   })
-  const at = [view.at, ...view.samples.map(record => record.at)].reduce((left, right) => (left > right ? left : right))
+  const at = [view.at, ...view.samples.map(record => record.at), ...(view.judged === undefined ? [] : [view.judged.at])].reduce((left, right) => (left > right ? left : right))
   const report: ExperimentReport = {
     formatVersion: 3,
     proposalId: view.proposalId,
@@ -395,6 +396,7 @@ export function buildExperimentReport(view: ExperimentView): ExperimentReport {
     at,
     frozen: view.frozen,
     frozenDigest: view.frozenDigest,
+    ...(view.judged === undefined ? {} : { evaluation: view.judged.evaluation }),
     samples,
     verdict: overallExperimentVerdict(samples, view.frozen.objective),
   }
@@ -724,7 +726,7 @@ export function foldExperiments(
   const keys = new Set<string>()
   for (const raw of records) {
     if (!isExperimentRecord(raw)) continue
-    const record = raw as ExperimentStartedRecord | ExperimentSampleRecord
+    const record = raw as ExperimentRecord
     if (record.kind === 'experiment_started') {
       if (views.has(record.experimentId)) {
         throw new Error(`evolution: experiment "${record.experimentId}" is recorded twice`)
@@ -744,6 +746,13 @@ export function foldExperiments(
       continue
     }
     const view = views.get(record.experimentId)
+    if (record.kind === 'experiment_judged') {
+      if (view === undefined || view.proposalId !== record.proposalId || view.frozen.objective !== 'llm-outcome' || view.judged !== undefined)
+        throw new Error('evolution: outcome judgement must belong to one frozen llm-outcome experiment and may only be recorded once')
+      view.judged = record
+      buildExperimentReport(view)
+      continue
+    }
     const key: ExperimentKey = {
       proposalId: record.proposalId,
       preparedContentDigest: record.preparedContentDigest,

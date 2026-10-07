@@ -138,6 +138,8 @@ export interface RunStackOptions {
   readonly runBindingRoot?: string
   /** Depth ceiling for a cascade; defaults to the runtime's own. */
   readonly maxDepth?: number
+  readonly isolatedChildren?: boolean
+  readonly maxActiveWorkers?: number
   /**
    * The tree-wide root budget (`Config.rootBudget`): the run count
    * a store's whole tree — replays included, since a replay's parentless task
@@ -367,6 +369,8 @@ class RunStackImpl implements RunStack {
       capabilities: { ...TASK_GUIDANCE, ...(this.options.capabilities ?? {}) },
       mcpServers: { ...this.options.mcpServers },
       ...(this.options.maxDepth === undefined ? {} : { maxDepth: this.options.maxDepth }),
+      isolatedChildren: this.options.isolatedChildren ?? false,
+      maxActiveWorkers: this.options.maxActiveWorkers ?? 1,
       ...(this.options.rootBudget === undefined ? {} : { rootBudget: { ...this.options.rootBudget } }),
       runBindingRoot: this.options.runBindingRoot ?? join(this.home, 'singularity', 'run-bindings'),
     })

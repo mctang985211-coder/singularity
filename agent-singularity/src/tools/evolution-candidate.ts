@@ -9,7 +9,9 @@ export function defineEvolutionCandidateTool(ctx: Context) {
     description:
       'Record one candidate as mutationJson (a JSON string). task_definition: {template:<complete canonical TaskTemplate>,criterionRepair?:' +
       '{positive:{taskId,sourceDir,parameters},negative:{taskId,sourceDir,parameters}}}; changed child criteria need both fixed ' +
-      'examples under the original independent parent oracle. Skill: {name,content:<whole SKILL.md>}. Capability: ' +
+      'examples under the original independent parent oracle. Skill: {name,content:<whole SKILL.md>,resources?:{<relative path>:<whole UTF-8 text>}}. ' +
+      'SKILL.md must have valid YAML frontmatter with the same name. Resources support resources/<file>, scripts/<file> and references/<file>, ' +
+      'including executable Tool source; supply the complete resource collection to replace it, or omit resources to preserve production resources. Capability: ' +
       '{rows:{<name>:<whole row>},mcpServers?:{<id>:{serverName,description,command,args?,env?,cwd?,toolCallTimeoutMs?}},skill?:' +
       '{name,content,sidecar:{precondition,inputs,outputs,requiredTools,verifier:{ref}}}}. A row may grant skills, native tool ' +
       'labels or MCP ids and need not contain a Skill. New definitions must be granted by that row; use their serverName in ' +

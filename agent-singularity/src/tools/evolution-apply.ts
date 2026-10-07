@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { APPLYABLE_TARGET_TYPES, applyTargets, renderProviderRoles } from '@dangosys/dsh-singularity-evolution'
 import type { EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
+import { optionalService } from '@dangosys/dsh-singularity-task-runtime'
 import { continueProposalHandoff } from '../coordination/evolution-handoff.ts'
 import { denialReason, message, renderOpenIntentRecovery, sessionId, text } from '../shared.ts'
 
@@ -37,7 +38,8 @@ export function defineEvolutionApplyTool(ctx: Context) {
     name: 'evolution_apply',
     description:
       'Apply a PROMOTE-decided Task template, Skill or capability candidate at L1–L3. Recheck the frozen candidate, experiment ' +
-      'and production baseline before and after human approval. Review shows the exact mutation, definitions and targets. ' +
+      'and production baseline. The deployment publicationApproval policy requests one exact-write approval by default, ' +
+      'or records its explicit auto preauthorization. Review shows the exact mutation, definitions and targets. ' +
       'One existing durable commit writes production; retry settles its open intent without asking again. New admissions ' +
       'consume the published version; existing Task contracts and Run bindings stay fixed. evolution_rollback restores the baseline.',
     parameters: {
@@ -92,11 +94,15 @@ export function defineEvolutionApplyTool(ctx: Context) {
         return `evolution_apply rejected: ${message(error)}`
       }
       const targets = applyTargets(proposal, ctx.evolution)
+      const publicationApproval = optionalService<{ publicationApproval: 'ask' | 'auto' }>(ctx, 'singularityEvolution')?.publicationApproval ?? 'ask'
       const reason = [
         `Evolution apply for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
         `rationale: ${proposal.rationale}`,
         'recorded decision: PROMOTE',
+        `version set: ${JSON.stringify(proposal.versionSet)}`,
         `evaluated mutation: ${JSON.stringify(proposal.mutation)}`,
+        `evaluation gate: ${JSON.stringify(proposal.gate)}`,
+        `experiment/regression evidence: ${proposal.gate!.regressionEvidenceRefs.join(', ')}`,
         ...(proposal.prepared?.mcpServers === undefined ? [] : [`MCP definitions sha256:${proposal.prepared.mcpServers.digest}`]),
         ...(proposal.prepared?.capabilityTable === undefined ? [] : [`deployment config baseline sha256:${proposal.prepared.capabilityTable.baselineSha256}; apply sha256:${proposal.prepared.capabilityTable.applySha256}; rollback sha256:${proposal.prepared.capabilityTable.rollbackSha256}`]),
         'this writes production targets:',
@@ -110,19 +116,24 @@ export function defineEvolutionApplyTool(ctx: Context) {
             ? 'rollback: append the previous template content as a new version, or remove a first publication; existing contracts stay fixed'
             : 'rollback: evolution_rollback restores the champion snapshot from the sandbox',
       ].join('\n')
-      const outcome = await ctx.approval.request({
-        agent,
-        toolName: 'evolution_apply',
-        callId: exec.callId,
-        reason,
-        signal: exec.signal,
-      })
-      if (outcome !== 'allowed-once') {
-        const why = denialReason(outcome)
-        return `evolution_apply: nothing written — ${why}; proposal ${proposal.proposalId} stays decided`
+      if (publicationApproval === 'ask') {
+        const outcome = await ctx.approval.request({
+          agent,
+          toolName: 'evolution_apply',
+          callId: exec.callId,
+          reason,
+          signal: exec.signal,
+        })
+        if (outcome !== 'allowed-once') {
+          const why = denialReason(outcome)
+          return `evolution_apply: nothing written — ${why}; proposal ${proposal.proposalId} stays decided`
+        }
       }
+      const approvalRef = publicationApproval === 'auto'
+        ? `preauthorized:singularity-agent.publicationApproval=auto:${exec.callId}`
+        : `approval:${exec.callId}`
       try {
-        const applied = await ctx.evolution.apply(args.proposalId, caller, `approval:${exec.callId}`)
+        const applied = await ctx.evolution.apply(args.proposalId, caller, approvalRef)
         return [
           `proposal ${applied.proposal.proposalId} [applied] ${applied.proposal.level} ${applied.proposal.targetType} ${applied.proposal.targetId} — PROMOTE in effect`,
           'wrote production targets:',
@@ -131,7 +142,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
           ...renderProviderRoles(applied.providers ?? []),
           effectNote(applied.proposal),
           ...(await continueProposalHandoff(ctx, applied.proposal, caller)),
-          `human approval: approval:${exec.callId} — rollback with evolution_rollback`,
+          `publication authorization: ${approvalRef} — rollback with evolution_rollback`,
         ].join('\n')
       } catch (error) {
         return `evolution_apply rejected: ${message(error)}`

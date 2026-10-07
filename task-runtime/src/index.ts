@@ -45,6 +45,7 @@ export {
 export type { SkillSidecar } from './skill-contract.ts'
 export {
   SKILL_SIDECAR_FILE,
+  SUPPORTED_SKILL_RESOURCE_DIRS,
   serializeSkillSidecar,
   sidecarWithSkillMd,
   skillContractDefects,
@@ -143,3 +144,4 @@ export { TaskRuntime }
 export default TaskRuntime
 
 export * from './task-template.ts'
+export { parseSkillFile } from '@dangosys/dsh-singularity-agent-runtime'

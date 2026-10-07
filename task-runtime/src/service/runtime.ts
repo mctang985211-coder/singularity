@@ -128,6 +128,14 @@ export class TaskRuntime extends Service {
 
   readonly replayLineage = new Map<TaskId, string>()
 
+  readonly activeWorkerSessions = new Set<string>()
+
+  childAdmissionTail: Promise<void> = Promise.resolve()
+
+  readonly capacityWaiters = new Set<() => void>()
+
+  readonly workspaceReleases = new Set<Promise<void>>()
+
   readonly sessionWorkspaces = new Map<string, string>()
 
   readonly sessionExecutionBindings = new Map<string, { agentOptions?: AgentOptions; taskTemplatesRoot?: string; overlay?: ReplayOverlay }>()
@@ -163,6 +171,10 @@ export class TaskRuntime extends Service {
     assertRootBudgetConfig(rootBudget ?? {})
     svcLifecycle.assertGeneratedTaskReview(config?.generatedTaskReview)
     svcLifecycle.assertSupervisionConfig(config?.supervision)
+    const maxActiveWorkers = config?.maxActiveWorkers ?? 2
+    if (!Number.isInteger(maxActiveWorkers) || maxActiveWorkers < 1) throw new Error(
+      'task-runtime: maxActiveWorkers must be a positive integer',
+    )
     this.config = {
       capabilities: structuredClone(config?.capabilities ?? {}),
       taskTemplatesRoot: config?.taskTemplatesRoot ?? defaultTaskTemplatesRoot(),
@@ -171,6 +183,8 @@ export class TaskRuntime extends Service {
       verifyTimeoutMs: config?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
       maxDepth: config?.maxDepth ?? DEFAULT_MAX_DEPTH,
       maxChildren: config?.maxChildren ?? DEFAULT_MAX_CHILDREN,
+      isolatedChildren: config?.isolatedChildren ?? false,
+      maxActiveWorkers,
       budget: { ...DEFAULT_BUDGET, ...(config?.budget ?? {}) },
       allowRuntimeDecomposition: config?.allowRuntimeDecomposition ?? DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
       generatedTaskReview: config?.generatedTaskReview ?? DEFAULT_GENERATED_TASK_REVIEW,
@@ -419,6 +433,11 @@ export class TaskRuntime extends Service {
 
   storedBatchOf(proposal: TaskProposal): NormalizedBatch {
     return svcAdmission.storedBatchOf(proposal)
+  }
+
+  async decompositionState(sessionId: string) {
+    const found = await this.runForSession(sessionId)
+    return svcAdmission.decompositionAvailability(this, found.task, found.run, await this.context.task.snapshotIn(found.storeId))
   }
 
   async assertDecomposableRun(

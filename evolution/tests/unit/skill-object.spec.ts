@@ -227,7 +227,7 @@ describe('K3: prepare freezes the whole skill object', () => {
     expect(await ledgerKinds(root)).not.toContain('prepared')
   })
 
-  it('refuses an execution sidecar that declares resources, naming them, writing nothing', async () => {
+  it('freezes an execution sidecar and its declared resources', async () => {
     const { svc, root, skillRoot } = await serviceWithProduction()
     const content = skillText('# production skill with a reference')
     const directory = join(skillRoot, 'verify')
@@ -258,9 +258,10 @@ describe('K3: prepare freezes the whole skill object', () => {
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('# candidate') })
 
-    await expect(svc.prepare('s1', 'root-1')).rejects.toThrow(/declares 1 resource\(s\) \("references\/notes.md"\)/)
-    expect((await svc.get('s1')).status).toBe('candidate')
-    expect(existsSync(join(root, 'sandbox'))).toBe(false)
+    const prepared = await svc.prepare('s1', 'root-1')
+    expect(prepared.prepared!.skillContent!.resources).toEqual([{ path: 'references/notes.md', sha256: sha256Of('the declared resource\n') }])
+    expect(await readFile(join(SKILL_DIR(root), 'references', 'notes.md'), 'utf8')).toBe('the declared resource\n')
+    expect(await readFile(join(CHAMPION_DIR(root), 'references', 'notes.md'), 'utf8')).toBe('the declared resource\n')
   })
 
   it('refuses a production directory the loader refuses: an undeclared file, or bytes a declaration does not cover', async () => {
@@ -304,7 +305,7 @@ describe('K3: prepare freezes the whole skill object', () => {
     expect(existsSync(join(root, 'sandbox'))).toBe(false)
   })
 
-  it('refuses a guidance production directory holding a file beyond SKILL.md, where no declaration exists to reject it', async () => {
+  it('freezes guidance resources without requiring a sidecar', async () => {
     const { svc, root, skillRoot } = await serviceWithProduction()
     const directory = join(skillRoot, 'verify')
     await mkdir(join(directory, 'references'), { recursive: true })
@@ -313,14 +314,10 @@ describe('K3: prepare freezes the whole skill object', () => {
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('# candidate') })
 
-    // No sidecar, so the loader has nothing to hold the directory to: the file
-    // is reported as a resource the identity does not cover, and prepare must
-    // refuse it rather than freeze the SKILL.md alone and call it the object.
-    const refusal = await refusalOf(svc.prepare('s1', 'root-1'))
-    expect(refusal).toContain('references/notes.md')
-    expect(refusal).toContain('nothing was written')
-    expect((await svc.get('s1')).status).toBe('candidate')
-    expect(existsSync(join(root, 'sandbox'))).toBe(false)
+    const prepared = await svc.prepare('s1', 'root-1')
+    expect(prepared.prepared!.skillContent!.resources).toEqual([{ path: 'references/notes.md', sha256: sha256Of('a reference nobody declared\n') }])
+    expect(await readFile(join(SKILL_DIR(root), 'references', 'notes.md'), 'utf8')).toBe('a reference nobody declared\n')
+
   })
 })
 

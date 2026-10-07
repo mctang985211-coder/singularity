@@ -230,11 +230,10 @@ describe('the assembled request of a three-layer chain (A2-1)', () => {
     // One copy, and the section is the contract's own: the projection's header
     // appears exactly once however often the request is assembled.
     expect(prompt.split('# Immutable context (contract)')).toHaveLength(2)
-    // The dynamic half rides the runtime-context plane, not the sections: the run
-    // state is the snapshot's business, and the contract is not duplicated there.
+    // Dynamic facts use literal sections because Harness interpolates its runtime-context plane.
+    expect(prompt).toContain('role: worker')
+    expect(prompt).toContain('gate phase:')
     const snapshot = await stack.contextSnapshot(chain.grandchildSession)
-    expect(snapshot).toContain('role: worker')
-    expect(snapshot).toContain('gate phase:')
     expect(snapshot).not.toContain('## Handoff')
 
     // The dependency's records are readable by reference inside the same domain —
@@ -504,7 +503,7 @@ describe('reads and repeated assemblies are not side effects (A2-4/A2-3)', () =>
     const stack = await boot({ worker: async () => {} })
     const storeId = stack.storeIdOf('s-root')
     await stack.seedLog('s-root', ['ship the release'])
-    const root = await stack.runtime.intakeRootContract(storeId, 's-root', rootContract('ship the release'))
+    const root = await stack.runtime.intakeRootContract(storeId, 's-root', rootContract('ship the release {{ rtl_signal }}'))
     const before = (await stack.events(storeId)).length
     const phaseBefore = stack.runtime.gate.phaseOf('s-root')
     const spawnsBefore = stack.spawns.length
@@ -531,7 +530,8 @@ describe('reads and repeated assemblies are not side effects (A2-4/A2-3)', () =>
     // The root's own request carries its contract, and only one copy of it: for a
     // root the projection's heading is the graph root's, not a worker's briefing.
     expect(first).toContain('## Your contract (graph root)')
-    expect(first).toContain('objective: ship the release')
+    expect(first).toContain('objective: ship the release {{ rtl_signal }}')
+    expect(first).toContain('canDecompose: true')
     expect(first.split('# Immutable context (contract)')).toHaveLength(2)
     expect((await stack.events(storeId)).length).toBe(before)
     expect(stack.spawns.length).toBe(spawnsBefore)

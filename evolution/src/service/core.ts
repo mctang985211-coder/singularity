@@ -38,7 +38,7 @@ import { committedRow, reconcileIntent, syncDirectory } from '../commit.ts'
 import { capabilityTableDrift, writeCapabilityRowToConfig } from '../capability-config.ts'
 
 import type { ExperimentView } from '../experiment/freeze.ts'
-import type { ExperimentSampleRecord, ExperimentStartedRecord } from '../experiment/spec.ts'
+import type { ExperimentJudgedRecord, ExperimentSampleRecord, ExperimentStartedRecord } from '../experiment/spec.ts'
 import { assertExperimentStartRecord, foldExperiments } from '../experiment/record.ts'
 import { fold } from '../ledger/fold.ts'
 import { objectWriteRefusal } from './writes.ts'
@@ -495,7 +495,7 @@ export class EvolutionServiceCore extends Service {
     const skillMd = intent.files[0]!
     const directory = dirname(skillMd.target)
     const name = basename(directory)
-    const twoFiles = intent.files.length === 2
+    const sidecarFile = intent.files.find(file => file.target === join(directory, SKILL_SIDECAR_FILE))
     const verdict = await this.providerVerdict({ name, directory })
     const defects = verdict.valid ? '' : verdict.defects.map(item => `${item.code}: ${item.detail}`).join('; ')
     if (!verdict.valid) {
@@ -505,7 +505,7 @@ export class EvolutionServiceCore extends Service {
           'neither the state before the commit nor a loadable object',
       )
     }
-    const expectedRole = twoFiles ? 'execution-provider' : 'guidance'
+    const expectedRole = sidecarFile === undefined ? 'guidance' : 'execution-provider'
     if (verdict.role !== expectedRole) {
       throw new Error(
         `evolution: the production skill object "${directory}" loads as ${verdict.role} after the ${intent.direction} of proposal ` +
@@ -520,9 +520,11 @@ export class EvolutionServiceCore extends Service {
           'stays open and no completion is recorded',
       )
     }
-    if (!twoFiles) return
+    const promised = intent.direction === 'apply' ? proposalForFiles.prepared?.skillContent : proposalForFiles.prepared?.skillBaseline
+    if (JSON.stringify(verdict.content.resources) !== JSON.stringify(promised?.resources ?? []))
+      throw new Error('evolution: committed Skill resources differ from their prepared content identity')
+    if (sidecarFile === undefined) return
     if (verdict.role !== 'execution-provider') return
-    const sidecarFile = intent.files[1]!
     const sidecar = await readVerifiedFile(this.skillRoot, productionSidecarRelative(name))
     const sidecarDigest = sha256Hex(sidecar)
     if (sidecarDigest !== sidecarFile.contentSha256) {
@@ -533,7 +535,6 @@ export class EvolutionServiceCore extends Service {
       )
     }
     const proposal = await this.get(intent.proposalId)
-    const promised = intent.direction === 'apply' ? proposal.prepared?.skillContent : proposal.prepared?.skillBaseline
     if (promised?.contract === undefined || verdict.contractDigest !== promised.contract.contractDigest) {
       throw new Error(
         `evolution: the production skill "${name}" loads to declaration digest ${verdict.contractDigest} after the ${intent.direction} ` +
@@ -1067,39 +1068,21 @@ export class EvolutionServiceCore extends Service {
           '— a commit moves one object between two versions of the same shape',
       )
     }
-    const targets = applyTargets(proposal, this)
-    const skillMd: CommitFile =
-      direction === 'apply'
-        ? {
-            target: targets[0]!,
-            baselineSha256: baseline.sha256,
-            contentSha256: content.sha256,
-            source: `${prepared.sandbox}/skills/${name}/SKILL.md`,
-          }
-        : {
-            target: targets[0]!,
-            baselineSha256: content.sha256,
-            contentSha256: baseline.sha256,
-            source: `${prepared.sandbox}/champion/skills/${name}/SKILL.md`,
-          }
-    const files: CommitFile[] = [skillMd]
-    if (contentContract !== undefined && baselineContract !== undefined) {
-      files.push(
-        direction === 'apply'
-          ? {
-              target: targets[1]!,
-              baselineSha256: baselineContract.sha256,
-              contentSha256: contentContract.sha256,
-              source: `${prepared.sandbox}/skills/${name}/${SKILL_SIDECAR_FILE}`,
-            }
-          : {
-              target: targets[1]!,
-              baselineSha256: contentContract.sha256,
-              contentSha256: baselineContract.sha256,
-              source: `${prepared.sandbox}/champion/skills/${name}/${SKILL_SIDECAR_FILE}`,
-            },
-      )
-    }
+    const candidateFiles = new Map<string, string>([['SKILL.md', content.sha256]])
+    const baselineFiles = new Map<string, string>([['SKILL.md', baseline.sha256]])
+    if (contentContract !== undefined) candidateFiles.set(SKILL_SIDECAR_FILE, contentContract.sha256)
+    if (baselineContract !== undefined) baselineFiles.set(SKILL_SIDECAR_FILE, baselineContract.sha256)
+    for (const resource of content.resources ?? []) candidateFiles.set(resource.path, resource.sha256)
+    for (const resource of baseline.resources ?? []) baselineFiles.set(resource.path, resource.sha256)
+    const paths = [...candidateFiles.keys(), ...baselineFiles.keys()].filter((path, index, all) => all.indexOf(path) === index)
+    const before = direction === 'apply' ? baselineFiles : candidateFiles
+    const after = direction === 'apply' ? candidateFiles : baselineFiles
+    const files: CommitFile[] = paths.map(path => ({
+      target: join(this.skillRoot, name, path),
+      baselineSha256: before.get(path) ?? null,
+      contentSha256: after.get(path) ?? null,
+      ...(after.has(path) ? { source: `${prepared.sandbox}/${direction === 'apply' ? '' : 'champion/'}skills/${name}/${path}` } : {}),
+    }))
     return { proposalId: proposal.proposalId, direction, approvalRef, files, actor }
   }
 
@@ -1245,6 +1228,10 @@ export class EvolutionServiceCore extends Service {
 
   /** Record one sample side, once. The key carries the run: a second record for the same key is refused. */
   async recordExperimentSample(record: ExperimentSampleRecord): Promise<void> {
+    await this.append(record)
+  }
+
+  async recordExperimentJudged(record: ExperimentJudgedRecord): Promise<void> {
     await this.append(record)
   }
 }

@@ -26,7 +26,7 @@ import { readRunBinding } from '../run-binding.ts'
 import type { RunBindingRead } from '../run-binding.ts'
 import { VerifierUnavailableError, type OrchestrateEnv, type ReplayOverlay, type SessionObservation } from '../orchestration/types.ts'
 import { message } from '../helpers.ts'
-import { releaseLayer } from '../workspace.ts'
+import { captureWorkspacePatch, prepareChildWorkspace, releaseLayer } from '../workspace.ts'
 import type {
   RunVerifier,
   EnvPathSource,
@@ -111,6 +111,38 @@ export function contractRefusal(parentTaskId: TaskId, reasons: readonly string[]
   return new Error(`task-runtime: contract rejected decomposition of "${parentTaskId}":\n- ${reasons.join('\n- ')}`)
 }
 
+function activeWorkerCount(self: TaskRuntime): number {
+  return [...self.activeWorkerSessions].filter(sessionId => !['waiting_children', 'terminal'].includes(self.executionGate.phaseOf(sessionId) ?? '')).length
+}
+
+async function withChildAdmission<T>(self: TaskRuntime, start: () => Promise<T>): Promise<T | undefined> {
+  const before = self.childAdmissionTail
+  let release!: () => void
+  self.childAdmissionTail = new Promise<void>(resolve => { release = resolve })
+  await before
+  try {
+    if (activeWorkerCount(self) >= self.config.maxActiveWorkers) return undefined
+    return await start()
+  } finally { release() }
+}
+
+async function waitForCapacity(self: TaskRuntime, signal: AbortSignal): Promise<void> {
+  if (signal.aborted || activeWorkerCount(self) < self.config.maxActiveWorkers) return
+  await new Promise<void>(resolve => {
+    const check = (): void => {
+      if (!signal.aborted && activeWorkerCount(self) >= self.config.maxActiveWorkers) return
+      self.capacityWaiters.delete(check)
+      signal.removeEventListener('abort', check)
+      off()
+      resolve()
+    }
+    const off = self.context.on('task/change', check)
+    self.capacityWaiters.add(check)
+    signal.addEventListener('abort', check, { once: true })
+    check()
+  })
+}
+
 export async function orchestrateEnv(
   self: TaskRuntime,
   callerSessionId: string,
@@ -132,6 +164,8 @@ export async function orchestrateEnv(
   const overlay = replayOverlay ?? binding?.overlay
   const table = { ...self.config.capabilities, ...overlay?.capabilityOverrides }
   const mcpRegistry = { ...self.config.mcpServers, ...overlay?.mcpServers }
+  const callerBinding = self.sessions.get(callerSessionId)
+  const callerRun = callerBinding === undefined ? undefined : await self.context.task.runIn(callerBinding.storeId, callerBinding.runId)
   return {
     task: self.context.task,
     actor,
@@ -140,8 +174,35 @@ export async function orchestrateEnv(
     verifyTimeoutMs: self.config.verifyTimeoutMs,
     budget: { ...self.config.budget },
     allowRuntimeDecomposition: self.config.allowRuntimeDecomposition,
+    isolatedChildren: self.config.isolatedChildren,
+    maxActiveWorkers: self.config.maxActiveWorkers,
+    withChildAdmission: start => withChildAdmission(self, start),
+    waitForCapacity: signal => waitForCapacity(self, signal),
+    activateParent: async (sessionId, signal, activate) => {
+      if (!self.activeWorkerSessions.has(sessionId)) return await activate()
+      while (!signal.aborted) {
+        const activated = await withChildAdmission(self, async () => { await activate(); return true })
+        if (activated) return
+        await waitForCapacity(self, signal)
+      }
+    },
+    childEnv: async run => {
+      const child = await orchestrateEnv(self, callerSessionId, actor, run.placement?.workspacePath, overlay)
+      if (run.sharedWorkspace) delete child.workspaces
+      return child
+    },
+    prepareChildPlacement: async (batch, runId, dependencyEvidenceRefs) => {
+      if (workspacePath === undefined || self.config.runBindingRoot === undefined) throw new Error('task-runtime: isolatedChildren requires a workspace and runBindingRoot')
+      const snapshot = await self.context.task.snapshotIn(batch.storeId)
+      const artifacts = dependencyEvidenceRefs.flatMap(ref => {
+        const evidence = snapshot.evidence.find(item => item.evidenceId === ref)
+        if (evidence === undefined) throw new Error(`task-runtime: missing dependency evidence ${ref}`)
+        return evidence.artifacts.filter(artifact => artifact.kind === 'workspace-patch')
+      })
+      return prepareChildWorkspace(self.config.runBindingRoot, workspacePath, batch.storeId, batch.batchId, runId, artifacts, dependencyEvidenceRefs)
+    },
     gate: self.executionGate,
-    workspaces: self.workspaces,
+    ...(callerRun?.sharedWorkspace === true ? {} : { workspaces: self.workspaces }),
     ...(workspacePath === undefined ? {} : { workspacePath }),
     ...(named === undefined ? {} : { workerCwd: named }),
     ...(binding?.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: binding.taskTemplatesRoot }),
@@ -230,7 +291,8 @@ export async function orchestrateEnv(
       // otherwise the model the caller's graph pins applies.
       const agentOptions = frozenAgentOptions
         ?? graphAgentOptions(await self.context.graphs.graphForSession(SessionId(callerSessionId)))
-      return self.context.agentRuntime.spawn(parent, {
+      self.activeWorkerSessions.add(request.sessionId)
+      try { return await self.context.agentRuntime.spawn(parent, {
         sessionId: SessionId(request.sessionId),
         name: request.name,
         ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
@@ -244,7 +306,11 @@ export async function orchestrateEnv(
         ...(agentOptions !== undefined ? { agentOptions } : {}),
         ...(request.grant !== undefined ? { grant: request.grant } : {}),
         ...(request.signal !== undefined ? { signal: request.signal } : {}),
-      })
+      }) } catch (error) {
+        self.activeWorkerSessions.delete(request.sessionId)
+        for (const notify of self.capacityWaiters) notify()
+        throw error
+      }
     },
     /**
      * The recovery pass's own door into a worker's Session (A4 §F.1): one
@@ -259,7 +325,20 @@ export async function orchestrateEnv(
         )
       }
       const cwd = named ?? (await envPathForSession(self, callerSessionId))
-      return verifier.verifyRun(storeId, runId, { ...(cwd === undefined ? {} : { cwd }), ...options })
+      const evidence = await verifier.verifyRun(storeId, runId, { ...(cwd === undefined ? {} : { cwd }), ...options })
+      const run = await self.context.task.runIn(storeId, runId)
+      if (run.placement !== undefined) {
+        const patch = await captureWorkspacePatch(run.placement, runId)
+        const outputId = `workspace-output-${runId}`
+        const prior = (await self.context.task.snapshotIn(storeId)).evidence.find(item => item.evidenceId === outputId)
+        if (prior === undefined) await self.context.task.recordEvidenceIn(storeId, {
+          evidenceId: outputId, taskRunId: runId, taskId: run.taskId,
+          artifacts: [patch], verifierResults: evidence.verifierResults, claims: [], generatedAt: new Date().toISOString(),
+        }, actor)
+        else if (prior.artifacts[0]?.digest !== patch.digest) throw new Error(`task-runtime: persisted output patch for ${runId} changed`)
+        evidence.artifacts.push(patch)
+      }
+      return evidence
     },
     readLogTail: async logRef => runVerifier(self)?.logTail?.(logRef),
     observeSession: async sessionId => observeSession(self, sessionId),

@@ -513,10 +513,8 @@ async function run(): Promise<void> {
   const holdout = report.samples.find(sample => sample.taskId === HOLDOUT_SAMPLE)!
   expect([holdout.baseline.outcome, holdout.candidate.outcome]).toEqual(['verified', 'verified'])
 
-  // ── a person decides and applies through the real seam ───────────────────
+  // ── the model decides and a person approves publication ───────────────────
   h.userSays('decide and apply the repair', OPERATOR)
-  await vi.waitFor(() => expect(h.review.asks.some(ask => ask.toolName === 'evolution_decide')).toBe(true), { timeout: 60_000, interval: 25 })
-  h.review.answer(h.review.asks.findIndex(ask => ask.toolName === 'evolution_decide'), 'allowed-once')
   await vi.waitFor(() => expect(h.review.asks.some(ask => ask.toolName === 'evolution_apply')).toBe(true), { timeout: 60_000, interval: 25 })
   h.review.answer(h.review.asks.findIndex(ask => ask.toolName === 'evolution_apply'), 'allowed-once')
   await vi.waitFor(async () => expect((await h.ctx.evolution.get(PROPOSAL)).status).toBe('applied'), { timeout: 60_000, interval: 25 })

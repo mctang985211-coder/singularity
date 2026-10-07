@@ -7,7 +7,7 @@ export function defineEvolutionPrepareTool(ctx: Context) {
     name: 'evolution_prepare',
     description:
       'Freeze the candidate and its production baseline in the proposal sandbox. A Task candidate freezes both template libraries; ' +
-      'a Skill freezes SKILL.md and its existing execution declaration; a capability freezes its whole row, optional MCP launch ' +
+      'a Skill freezes SKILL.md, its complete text resource collection and existing execution declaration; a capability freezes its whole row, optional MCP launch ' +
       'definitions and optional new execution Skill. No production changes. Next: evolution_replay, then evolution_gate.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Task template, Skill or capability candidate to freeze' },
@@ -53,9 +53,10 @@ export function defineEvolutionPrepareTool(ctx: Context) {
           `proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
           ...view.files.map(file => `  wrote ${file}`),
           view.skillContent!.contract === undefined
-            ? 'candidate object: guidance (one file, SKILL.md)'
+            ? 'candidate object: guidance (SKILL.md and its frozen text resources)'
             : 'candidate object: execution provider (SKILL.md + SKILL.contract.json) — the sidecar is derived from production ' +
-              'with only content.skillMdSha256 rewritten, so this candidate cannot move a capability, a required tool or a verifier',
+              'with the candidate content identity, so this candidate cannot move a capability, a required tool or a verifier',
+          `frozen resources: ${(view.skillContent!.resources ?? []).map(resource => `${resource.path} sha256:${resource.sha256}`).join(', ') || 'none'}`,
           'champion snapshot: captured under champion/',
           `production baseline: ${baseline.name} sha256:${baseline.sha256.slice(0, 12)}… (an apply refuses if the production ` +
             'object changed since this read)',

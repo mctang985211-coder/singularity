@@ -511,6 +511,10 @@ function assertSubmissionShape(runId, submission) {
 }
 /** A run's birth phase is written by the runtime, and the reducer judges its shape only — the transition semantics belong to `changeRunPhase`. */
 function assertBirthPhase(run) {
+	if (run.placement !== void 0) {
+		const placement = run.placement;
+		if (!nonEmpty(placement.workspacePath) || !nonEmpty(placement.inputSnapshotPath) || !isDigest(placement.inputSnapshotDigest) || !Array.isArray(placement.dependencyEvidenceRefs) || placement.dependencyEvidenceRefs.some((ref) => !nonEmpty(ref))) throw new Error(`task: run "${run.runId}" requires a valid isolated workspace placement`);
+	}
 	const phase = run.executionPhase;
 	if (phase === void 0) return;
 	if (phase !== "active" && phase !== "submitted") throw new Error(`task: run "${run.runId}" execution phase must be "active" or "submitted" at start`);

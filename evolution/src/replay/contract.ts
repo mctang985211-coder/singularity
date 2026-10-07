@@ -35,6 +35,8 @@ export interface SkillContentIdentity {
   sha256: string
   /** Present exactly when the object carries an execution sidecar; see {@link SkillContractIdentity}. */
   contract?: SkillContractIdentity
+  /** All resource files loaded with this Skill, in relative-path order. */
+  resources?: { path: string; sha256: string }[]
 }
 
 /** One side of one task's comparison: an outcome and the criterion verdicts the run reported. */
@@ -182,7 +184,48 @@ export interface ExperimentBudget {
 export type ExperimentCost = { status: 'reported'; metrics: ReviewMetrics } | { status: 'unknown'; reason: string }
 
 /** Omission retains failure repair. Tool-call reduction compares complete executed Run subtrees. */
-export type ExperimentObjective = 'tool-call-reduction'
+export type ExperimentObjective = 'tool-call-reduction' | 'llm-outcome'
+
+export interface OutcomeEvaluationPlan {
+  goal: string
+  rubric: string
+  measurements: { id: string; command: string }[]
+  judge: { model: ModelSelection; prompt: string; digest: string }
+  /** The complete response when an LLM generated the rubric and commands. */
+  generatedResponse?: string
+}
+
+export interface OutcomeMeasurement {
+  ref: string
+  sampleTaskId: string
+  side: ExperimentSide
+  id: string
+  command: string
+  stdout: string
+  stderr: string
+  exitCode: number
+  workspace: string
+  workspaceDigest: string
+}
+
+export interface OutcomeJudgement {
+  samples: {
+    taskId: string
+    verdict: 'improved' | 'not-improved' | 'regressed' | 'inconclusive'
+    findings: { claim: string; evidenceRefs: string[] }[]
+    uncertainties: string[]
+  }[]
+}
+
+export interface OutcomeEvaluation {
+  input: string
+  inputDigest: string
+  evidencePath: string
+  evidenceDigest: string
+  response: string
+  responseDigest: string
+  judgement: OutcomeJudgement
+}
 
 /** One criterion's verdict on one side, with the verifier that decided it (v1's report dropped the verifier identity; every generation since keeps it). */
 export interface ExperimentCriterionDetail {
@@ -399,6 +442,7 @@ export interface FrozenSample {
 export interface FrozenExperiment {
   proposalId: string
   objective?: ExperimentObjective
+  evaluation?: OutcomeEvaluationPlan
   /** The repetition index this experiment froze. A higher index is a *different* experiment. */
   repetition: number
   /** The candidate object's content identity the candidate side runs against (the candidate half of the report's identity). */
@@ -429,6 +473,7 @@ export interface ExperimentReport {
   at: string
   frozen: FrozenExperiment
   frozenDigest: string
+  evaluation?: OutcomeEvaluation
   samples: ExperimentSampleComparison[]
   verdict: ExperimentVerdict
 }

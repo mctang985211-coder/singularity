@@ -156,18 +156,24 @@ export async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Pro
    * The store's half of the handback (§1.3): one phase event says the run waits on
    * nothing and closes the batch it names, so a reader of the store sees the same
    */
-  await env.task.changeRunPhaseIn(batch.storeId, batch.parentTaskId, batch.parentRunId, env.actor, {
-    phase: 'active',
-    batchId: batch.batchId,
-  })
-  env.gate.setPhase(parentRun.sessionId, 'active')
-  env.gate.setQuestionsBlocked(parentRun.sessionId, blocked)
+  const activate = async (): Promise<void> => {
+    await env.task.changeRunPhaseIn(batch.storeId, batch.parentTaskId, batch.parentRunId, env.actor, {
+      phase: 'active', batchId: batch.batchId,
+    })
+    env.gate.setPhase(parentRun.sessionId, 'active')
+    env.gate.setQuestionsBlocked(parentRun.sessionId, blocked)
+  }
+  if (env.activateParent === undefined) await activate()
+  else await env.activateParent(parentRun.sessionId, batch.signal, activate)
 
   /**
    * …and the parent is told: the batch's own outcomes, under the identity the
    * batch derives, delivered to the Session that waited. A re-delivery states
    */
-  const message = batchEndMessageText(batch.batchId, outcomes)
+  const patches = snapshot.evidence.filter(evidence => members.includes(evidence.taskId) && outcomes.some(outcome => outcome.taskId === evidence.taskId && outcome.status === 'verified'))
+    .flatMap(evidence => evidence.artifacts.filter(artifact => artifact.kind === 'workspace-patch')
+      .map(artifact => `- ${evidence.taskId} verified output patch: ${artifact.uri} (sha256 ${artifact.digest}); files are beside it under files/. Integrate explicitly; the parent workspace was not modified.`))
+  const message = [batchEndMessageText(batch.batchId, outcomes), ...patches].join('\n')
   const delivery = await deliverBatchResult(env, {
     storeId: batch.storeId,
     runId: batch.parentRunId,

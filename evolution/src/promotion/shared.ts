@@ -16,6 +16,7 @@ import type {
 /** Whether two object identities are the same identity, member by member (K3): name, SKILL.md digest and sidecar identity. */
 export function sameIdentity(left: SkillContentIdentity, right: SkillContentIdentity): boolean {
   if (left.name !== right.name || left.sha256 !== right.sha256) return false
+  if (JSON.stringify(left.resources ?? []) !== JSON.stringify(right.resources ?? [])) return false
   if ((left.contract === undefined) !== (right.contract === undefined)) return false
   if (left.contract === undefined || right.contract === undefined) return true
   return (

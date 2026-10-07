@@ -14,6 +14,7 @@ import type {
   TaskProposalBatchConsumption,
   TaskProposalDecomposition,
   TaskRun,
+  TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
 import { batchIdFor, blockingQuestionsOf, taskContractIdentity } from '@dangosys/dsh-singularity-task'
 import { checkDecomposition } from '../admission.ts'
@@ -106,6 +107,23 @@ export function storedBatchOf(proposal: TaskProposal): NormalizedBatch {
   }
 }
 
+export function decompositionAvailability(self: TaskRuntime, task: TaskInstance, run: TaskRun, snapshot: TaskSnapshot) {
+  const reasons: string[] = []
+  if (run.status !== 'running') reasons.push(`run is ${run.status}`)
+  if (run.executionPhase !== 'active') reasons.push(`only an active run may decompose; phase is ${run.executionPhase ?? 'legacy/untracked'}`)
+  if (task.decompositionStatus === 'leaf' && !self.config.allowRuntimeDecomposition) reasons.push('task is leaf and runtime decomposition is disabled')
+  if (task.depth >= self.config.maxDepth) reasons.push(`depth ${task.depth} reaches maxDepth ${self.config.maxDepth}`)
+  const questions = blockingQuestionsOf(snapshot, run.runId)
+  if (questions.length > 0) reasons.push(`unresolved blocking questions: ${questions.map(question => question.questionId).join(', ')}`)
+  if (snapshot.proposals?.all.some(proposal => proposal.kind !== 'root' && proposal.identity.parentRunId === run.runId && isOpenProposal(proposal))) reasons.push('an open decomposition proposal must be continued or cancelled')
+  const budget = resolveRootBudget(snapshot, self.config.rootBudget ?? {})
+  const remainingRuns = budget.ok && budget.maxRuns !== undefined ? Math.max(0, budget.maxRuns - snapshot.runs.length) : undefined
+  if (!budget.ok && hasRootLimits(self.config.rootBudget)) reasons.push(`root budget cannot be resolved: ${budget.reason}`)
+  if (remainingRuns === 0) reasons.push('root run budget is exhausted')
+  return { canDecompose: reasons.length === 0, depth: task.depth, maxDepth: self.config.maxDepth,
+    phase: run.executionPhase ?? 'legacy/untracked', ...(remainingRuns === undefined ? {} : { remainingRuns }), reasons }
+}
+
 export async function assertDecomposableRun(
   self: TaskRuntime,
   storeId: string,
@@ -144,6 +162,8 @@ export async function assertDecomposableRun(
         `(${openQuestions.map(question => question.questionId).join(', ')}); an answer releases the wait, and only then may the run delegate`,
     )
   }
+  const availability = decompositionAvailability(self, parentTask, parentRun, await self.context.task.snapshotIn(storeId))
+  if (!availability.canDecompose) throw new Error(`task-runtime: decomposition refused: ${availability.reasons.join('; ')}`)
   if (signal?.aborted === true) {
     throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`)
   }
@@ -192,6 +212,7 @@ export async function checkDerivedBatch(
       objective: child.contract.objective,
       acceptanceCriteria: child.contract.acceptanceCriteria,
       dependsOn: child.dependsOn,
+      decomposable: child.decomposable,
       requiresIndependentAcceptance: child.requiresIndependentAcceptance,
     })),
     snapshot.edges,
@@ -384,7 +405,7 @@ export async function admitPrecheckedBatch(
   // The phase is committed, so the gate closes for this session now: from here
   // the parent may read, diagnose, ask or cancel, and nothing else (§3.3).
   self.executionGate.setPhase(callerSessionId, 'waiting_children')
-  if (workspacePath !== undefined && self.workspaces !== undefined) {
+  if (workspacePath !== undefined && self.workspaces !== undefined && (self.config.isolatedChildren || self.config.maxActiveWorkers === 1)) {
     const held = self.workspaces.ownerOf(workspacePath)
     if (held !== undefined) {
       await self.workspaces.push(workspacePath, held, {

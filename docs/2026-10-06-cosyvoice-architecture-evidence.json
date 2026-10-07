@@ -1,0 +1,2597 @@
+{
+  "observedAt": "2026-10-06T13:17:42+08:00",
+  "timezone": "Asia/Shanghai",
+  "singularityCommit": "fa7c5999bbf9467731cabea87bb9ed2e60b23355",
+  "harnessCommit": "c525f427bfea015c018b1d83782f4cfb3965085d",
+  "graphId": "graph4",
+  "storeId": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9",
+  "rootTaskId": "t-c07d1494-7083-4e71-8224-def2de2ab98a",
+  "counts": {
+    "tasks": 31,
+    "runs": 26,
+    "reviews": 23,
+    "diagnoses": 0,
+    "evidence": 55,
+    "edges": 32,
+    "obligations": 0
+  },
+  "taskStatuses": {
+    "running": 3,
+    "verified": 23,
+    "admitted": 5
+  },
+  "depths": {
+    "0": 1,
+    "1": 7,
+    "2": 23
+  },
+  "verdicts": {
+    "pass": 34,
+    "inconclusive": 18
+  },
+  "criterionCount": 68,
+  "criteriaWithoutVerifierRef": 67,
+  "tasksWithMissingVerifierRef": 31,
+  "globalEvolution": {
+    "proposalCount": 5,
+    "experimentCount": 0,
+    "proposals": [
+      {
+        "proposalId": "prop-capability-probe-task-edges",
+        "status": "proposed",
+        "targetType": "decomposition_policy",
+        "sourceRefs": [
+          "diagnosis:root-contract-scope-defect-chip-delivery",
+          "t-3d4ba909-ef7e-4157-9ccd-8a7776f91a4a#no-run",
+          "t-afe3bc31-8b3c-4448-81f2-4b7fba1c6735#r-57ef244c-d0f0-4189-9d48-f21ee915b7a6"
+        ]
+      },
+      {
+        "proposalId": "prop-admission-pins-verifier-refs",
+        "status": "proposed",
+        "targetType": "runtime_policy",
+        "sourceRefs": [
+          "diagnosis:root-contract-scope-defect-chip-delivery",
+          "t-afe3bc31-8b3c-4448-81f2-4b7fba1c6735#r-57ef244c-d0f0-4189-9d48-f21ee915b7a6",
+          "t-6fd38b7f-7270-4e22-a59b-5e29bf833d55#r-81b8ca94-a00e-4e3c-b7af-2fb4e27b406f"
+        ]
+      },
+      {
+        "proposalId": "prop-chip-delivery-freshness-criterion-v3",
+        "status": "prepared",
+        "targetType": "task_definition",
+        "sourceRefs": [
+          "diagnosis:root-contract-scope-defect-chip-delivery",
+          "t-afe3bc31-8b3c-4448-81f2-4b7fba1c6735#r-57ef244c-d0f0-4189-9d48-f21ee915b7a6",
+          "t-2a7fec27-a676-4089-9f5a-a4eea991c315#r-582b65cb-624e-4046-a84e-2b61465a541a"
+        ]
+      },
+      {
+        "proposalId": "prop-chip-delivery-freshness-criterion-v2",
+        "status": "prepared",
+        "targetType": "task_definition",
+        "sourceRefs": [
+          "diagnosis:root-contract-scope-defect-chip-delivery",
+          "t-afe3bc31-8b3c-4448-81f2-4b7fba1c6735#r-57ef244c-d0f0-4189-9d48-f21ee915b7a6",
+          "t-2a7fec27-a676-4089-9f5a-a4eea991c315#r-582b65cb-624e-4046-a84e-2b61465a541a"
+        ]
+      },
+      {
+        "proposalId": "prop-chip-delivery-freshness-criterion",
+        "status": "prepared",
+        "targetType": "task_definition",
+        "sourceRefs": [
+          "diagnosis:root-contract-scope-defect-chip-delivery",
+          "t-afe3bc31-8b3c-4448-81f2-4b7fba1c6735#r-57ef244c-d0f0-4189-9d48-f21ee915b7a6",
+          "t-2a7fec27-a676-4089-9f5a-a4eea991c315#r-582b65cb-624e-4046-a84e-2b61465a541a"
+        ]
+      }
+    ]
+  },
+  "terminalReviewCosts": {
+    "note": "Sum of whole-session metrics of 23 completed runs, excluding unfinished runs and external orchestration; cache reads are cumulative traffic, not unique tokens or dollar cost.",
+    "toolCalls": 2807,
+    "tokens": {
+      "uncachedInputTokens": 5949840,
+      "outputTokens": 2288506,
+      "cacheReadTokens": 429071232,
+      "cacheWriteTokens": 0
+    }
+  },
+  "tasks": [
+    {
+      "taskId": "t-c07d1494-7083-4e71-8224-def2de2ab98a",
+      "parentTaskId": null,
+      "depth": 0,
+      "objective": "为 CosyVoice 语音模型在 BuckyBall 架构上设计并交付一个加速芯片（accelerator chip），并把整条链路真实跑通、真实验证到 PPA 综合：workload 构建与运行、Ball 编写/集成与注册、BEMU 与 Verilator RTL 的完整输出对照官方参考、compiler 构建与 MLIR 测试、UVM（vcs 缺席则如",
+      "status": "running",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-1",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/cv_full_accept.py all",
+          "protectedInputs": [
+            {
+              "path": "checks/cv_full_accept.py",
+              "sha256": "b0e6fa28a29c05c89e07709a1412fdd2154e11f7586f1e64b88856c03f36f960"
+            },
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            },
+            {
+              "path": "fixture/tolerance.json",
+              "sha256": "0463aaeb59bab995e6a864eacdb7148e5fc4f0ccfb2f36367ca64687cce1ed72"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            },
+            {
+              "path": "fixture/reference/lm_tokens.bin",
+              "sha256": "bf9b45f2008fecca3b0e0c29e668329c7dcf4e627979e42682d60fb54715c2ca"
+            },
+            {
+              "path": "fixture/reference/prelookahead_out.bin",
+              "sha256": "aa14bc8b34fd9734a30be11a4f4969d0868d4a5c7a21f5bf47cec84c246ff257"
+            },
+            {
+              "path": "fixture/reference/flow_encoder_out.bin",
+              "sha256": "560b375b8e2ddd94c24da2e2668cf345307fdb4c78496b2c3de42ed4b3132062"
+            },
+            {
+              "path": "fixture/reference/flow_mel.bin",
+              "sha256": "4f5411415f5f907522f10c0133b8f897310047ab20bd6b61d67b5b5b113402ff"
+            },
+            {
+              "path": "fixture/reference/hift_wav.bin",
+              "sha256": "b8bebf689752614165627acb664b7a04bb2de821855d51884c858f8e0a80b5a8"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-2",
+          "verificationMode": "review",
+          "mandatory": false,
+          "verifierRef": "review",
+          "heuristic": true
+        }
+      ]
+    },
+    {
+      "taskId": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "parentTaskId": "t-c07d1494-7083-4e71-8224-def2de2ab98a",
+      "depth": 1,
+      "objective": "【任务】把 CosyVoice2-0.5B 的 prelookahead 边界（prelookahead_out = conv1 k=4 → leaky_relu → conv2 k=3 → 残差，float32 [1,25,512]）的 workload 要求适配到新 chip hibiki。按 bb 模板树 bb-chip-integration 分支继",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-chip-composite",
+          "verificationMode": "composite",
+          "mandatory": true
+        },
+        {
+          "criterionId": "AC-chip-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        }
+      ]
+    },
+    {
+      "taskId": "t-f6dbcd39-5e5d-447a-94ec-517eadf595a7",
+      "parentTaskId": "t-c07d1494-7083-4e71-8224-def2de2ab98a",
+      "depth": 1,
+      "objective": "【任务】让 chip hibiki 上承载 prelookahead 计算的 Ball 算子满足同一算子合同，按 bb 模板树 bb-ball-semantics 分支继续分解（对应已发布模板 bb-ball-semantics v1，其二级条目为 bb-operator-contract / bb-contract-layer-map / bb-layer",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-ball-composite",
+          "verificationMode": "composite",
+          "mandatory": true
+        },
+        {
+          "criterionId": "AC-ball-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-ball-rtl",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d",
+      "parentTaskId": "t-c07d1494-7083-4e71-8224-def2de2ab98a",
+      "depth": 1,
+      "objective": "【任务】把官方 CosyVoice2-0.5B 的 prelookahead_out 边界接入 chip hibiki 的 workload，并按 bb 模板树 bb-model-integration 分支继续分解（对应已发布模板 bb-model-integration v1，其二级条目为 bb-model-boundary / bb-subgraph-",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-model-composite",
+          "verificationMode": "composite",
+          "mandatory": true
+        },
+        {
+          "criterionId": "AC-model-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        }
+      ]
+    },
+    {
+      "taskId": "t-f0f77a5c-4c39-4288-96a1-029a628d56b5",
+      "parentTaskId": "t-c07d1494-7083-4e71-8224-def2de2ab98a",
+      "depth": 1,
+      "objective": "【任务】确认 chip hibiki（core / balldomain）的注册一致性，按 bb 模板树 bb-ball-registration 分支分解（对应已发布模板 bb-ball-registration v1，其二级条目为 bb-registration-validate / bb-registration-fix）；叶任务只交付一个可独立验证的",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-reg-composite",
+          "verificationMode": "composite",
+          "mandatory": true
+        },
+        {
+          "criterionId": "AC-reg-authoritative",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        }
+      ]
+    },
+    {
+      "taskId": "t-bcd34961-c383-4586-ba2f-72ae65a4d059",
+      "parentTaskId": "t-c07d1494-7083-4e71-8224-def2de2ab98a",
+      "depth": 1,
+      "objective": "【任务】为 chip hibiki 的结果取得构建、仿真与测量事实（全部本轮新产生、真实），按 bb 模板树 bb-engineering-verification 分支继续分解（对应已发布模板 bb-engineering-verification v1，其二级条目为 bb-artifact-identity / bb-target-build / bb-",
+      "status": "running",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-verify-composite",
+          "verificationMode": "composite",
+          "mandatory": true
+        },
+        {
+          "criterionId": "AC-verify-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-verify-verilator",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-7d7a576d-a2c3-412c-932f-e32f0b6bfca4",
+      "parentTaskId": "t-c07d1494-7083-4e71-8224-def2de2ab98a",
+      "depth": 1,
+      "objective": "【任务】用 waveform MCP 从本轮真实运行产生的 FST（log/<stamp>-hibiki-<config>-*/waveform/waveform.fst）回答一个与本轮 chip hibiki 的 Ball 执行相关的具体时序问题，按 bb 模板树 bb-waveform-analysis 分支选择相应子模板分解（bb-handshake-",
+      "status": "admitted",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-wave-composite",
+          "verificationMode": "composite",
+          "mandatory": true
+        },
+        {
+          "criterionId": "AC-wave-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-wave-conclusion",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-57216946-1209-4783-9dc8-94300a82e59a",
+      "parentTaskId": "t-c07d1494-7083-4e71-8224-def2de2ab98a",
+      "depth": 1,
+      "objective": "【任务】把本轮全部交付打包成冻结验收夹具判得过的完整交付，并使 python3 checks/cv_full_accept.py all 在环境根以退出码 0 通过——这是你的强制判据，必须真跑、真过，不得修改夹具或减弱判据。你是协调节点：只能编排，执行在自己的叶任务（声明 build-*/run-*/measure-* 等执行能力）。\n【交付】(a) en",
+      "status": "admitted",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-pkg-accept",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/cv_full_accept.py all",
+          "protectedInputs": [
+            {
+              "path": "checks/cv_full_accept.py",
+              "sha256": "b0e6fa28a29c05c89e07709a1412fdd2154e11f7586f1e64b88856c03f36f960"
+            },
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            },
+            {
+              "path": "fixture/tolerance.json",
+              "sha256": "0463aaeb59bab995e6a864eacdb7148e5fc4f0ccfb2f36367ca64687cce1ed72"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            },
+            {
+              "path": "fixture/reference/lm_tokens.bin",
+              "sha256": "bf9b45f2008fecca3b0e0c29e668329c7dcf4e627979e42682d60fb54715c2ca"
+            },
+            {
+              "path": "fixture/reference/prelookahead_out.bin",
+              "sha256": "aa14bc8b34fd9734a30be11a4f4969d0868d4a5c7a21f5bf47cec84c246ff257"
+            },
+            {
+              "path": "fixture/reference/flow_encoder_out.bin",
+              "sha256": "560b375b8e2ddd94c24da2e2668cf345307fdb4c78496b2c3de42ed4b3132062"
+            },
+            {
+              "path": "fixture/reference/flow_mel.bin",
+              "sha256": "4f5411415f5f907522f10c0133b8f897310047ab20bd6b61d67b5b5b113402ff"
+            },
+            {
+              "path": "fixture/reference/hift_wav.bin",
+              "sha256": "b8bebf689752614165627acb664b7a04bb2de821855d51884c858f8e0a80b5a8"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-pkg-composite",
+          "verificationMode": "composite",
+          "mandatory": true
+        }
+      ]
+    },
+    {
+      "taskId": "t-be988716-c0ad-4760-a167-9d0e8f0a11ca",
+      "parentTaskId": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "depth": 2,
+      "objective": "判断现有 BuckyBall chip <chip> 是否满足当前模型所需容量/IO/拓扑，给出可核对的适配结论；现有 chip 足够时直接复用。",
+      "status": "verified",
+      "templateRef": {
+        "digest": "61f533223cfdbf7d1b46d97bc3b3b85773f4250f903b84fbea5250df1966d8ea",
+        "id": "bb-existing-chip-fit",
+        "version": 1
+      },
+      "criteria": [
+        {
+          "criterionId": "AC-fit-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-fit-truth",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-6bc93693-0918-45e7-a328-c704a1ad1804",
+      "parentTaskId": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "depth": 2,
+      "objective": "根据已知容量、延迟与 IO 为 <chip> 确定拓扑边界（tile/core 组成与副本数量），每项数量都有证据来源。",
+      "status": "verified",
+      "templateRef": {
+        "digest": "5f11c7f015fc0bff255746e45786c9ecd8e189270a110eecfc53a53eacb1ac7f",
+        "id": "bb-topology-boundary",
+        "version": 1
+      },
+      "criteria": [
+        {
+          "criterionId": "AC-topology-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-topology-truth",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-94f3e8e7-7a5d-45d4-a1b3-355fbcf81e24",
+      "parentTaskId": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "depth": 2,
+      "objective": "把已有切分映射到 <chip> 的 core：实际名称、shape/dtype、SharedMem 区域与连接匹配。",
+      "status": "verified",
+      "templateRef": {
+        "digest": "39c07bb7bf01ef57392a380bf016152c5e51fee7397f6a18f825a39cc2219e06",
+        "id": "bb-subgraph-mapping",
+        "version": 1
+      },
+      "criteria": [
+        {
+          "criterionId": "AC-map-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-map-truth",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-32a178a5-e99f-47e2-b386-6ea452f4d715",
+      "parentTaskId": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "depth": 2,
+      "objective": "集成 <chip> 的配置边界：chip.toml→designs→tiles→cores 骨架完整，配置生成入口实际运行过且生成物齐备。",
+      "status": "verified",
+      "templateRef": {
+        "digest": "f62b31587d24410c3e9b88feba2c10846e233a383ba3dae740e2c858ee50e2f2",
+        "id": "bb-config-boundary",
+        "version": 1
+      },
+      "criteria": [
+        {
+          "criterionId": "AC-config-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-config-identity",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-9893fd7f-e470-48fc-bccf-9d7422728640",
+      "parentTaskId": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "depth": 2,
+      "objective": "把目标 <target> 注册进 <chip> 的构建/回归入口，使该目标被真实识别与使用，并保持已有权威 trace 与产物身份。",
+      "status": "verified",
+      "templateRef": {
+        "digest": "d971e87dad7d4278a503ae584ff86967368042a291efed6df39e0ce231b40271",
+        "id": "bb-workload-target-wiring",
+        "version": 1
+      },
+      "criteria": [
+        {
+          "criterionId": "AC-wiring-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-wiring-used",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-dee5134a-f79e-48ce-97bf-913ecbca4160",
+      "parentTaskId": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "depth": 2,
+      "objective": "为 chip hibiki 写 core 级设计文档与 core 间合同，使每个 core 的使命/合同/验收/非目标，以及 core 间合同（SharedMem 区域、shape/dtype/layout、所有权、非法输入显式失败）逐字段可判定；权威产物写入 examples/chips/hibiki/docs/ 并字节一致复制到 env 根 log/hi",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-docs-contract",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 - <<'PY'\nimport json, os, sys, tomllib\nenv = os.getcwd()\nchip = \"hibiki\"\nrepo = os.path.join(env, \"DangoSys\", \"buckyball\")\nchip_dir = os.path.join(repo, \"examples\", \"chips\", chip)\ndocs = os.path.join(env, \"log\", \"hibiki-docs\")\nchip_docs = os.path.join(chip_dir, \"docs\")\nfails = []\ndef load(p):\n    with open(p, encoding=\"utf-8\") as fh:\n        return json.load(fh)\ncfg_path = os.path.join(chip_dir, \"configs\", \"generated\", \"config\", \"config.json\")\nif not os.path.isfile(cfg_path):\n    print(\"FAIL: missing\", cfg_path, \"(run bbdev config --install first)\")\n    sys.exit(1)\ncfg = load(cfg_path)\ncores, balldomain = [], {}\nfor tile in cfg[\"designs\"][\"tiles\"]:\n    for core in tile[\"cores\"]:\n        name = core[\"name\"]\n        if name not in cores:\n            cores.append(name)\n        balldomain[name] = core[\"balldomain\"][\"_file\"]\nbriefs_path = os.path.join(docs, \"core-briefs.json\")\nicc_path = os.path.join(docs, \"inter-core-contract.json\")\nfor p in (briefs_path, icc_path):\n    if not os.path.isfile(p):\n        print(\"FAIL: missing\", p)\n        sys.exit(1)\nbriefs = load(briefs_path).get(\"cores\") or {}\nfor c in cores:\n    b = briefs.get(c)\n    if not isinstance(b, dict):\n        fails.append(\"core-briefs.json: no brief for core \" + c)\n        continue\n    for key in (\"mission\", \"contract\", \"acceptance\", \"non_goals\"):\n        v = b.get(key)\n        if not v or (isinstance(v, list) and not any(str(x).strip() for x in v)):\n            fails.append(\"core-briefs.json[\" + c + \"].\" + key + \" empty\")\n    md = os.path.join(chip_docs, \"cores\", c + \".md\")\n    if not (os.path.isfile(md) and os.path.getsize(md) > 0):\n        fails.append(\"missing prose brief \" + md)\n    else:\n        text = open(md, encoding=\"utf-8\").read()\n        for h in (\"Mission\", \"Contract\", \"Acceptance\", \"Non-goals\"):\n            if h not in text:\n                fails.append(md + \": missing section \" + h)\nicc = load(icc_path)\nregions = icc.get(\"shared_regions\") or []\nplacements = icc.get(\"ball_placements\") or []\nif not regions:\n    fails.append(\"inter-core-contract.json: no shared_regions\")\nfor r in regions:\n    for k in (\"name\", \"core\", \"shape\", \"dtype\", \"layout\", \"owner\", \"readers\", \"writers\", \"illegal_input\"):\n        if not r.get(k):\n            fails.append(\"region \" + str(r.get(\"name\")) + \" missing \" + k)\n    if r.get(\"core\") not in cores:\n        fails.append(\"region \" + str(r.get(\"name\")) + \" names unknown core \" + str(r.get(\"core\")))\nif not placements:\n    fails.append(\"inter-core-contract.json: no ball_placements\")\nfor p in placements:\n    if p.get(\"core\") not in cores:\n        fails.append(\"placement \" + str(p.get(\"op\")) + \" names unknown core \" + str(p.get(\"core\")))\n        continue\n    bd_file = balldomain[p[\"core\"]]\n    bd_path = bd_file if os.path.isabs(bd_file) else os.path.join(repo, bd_file)\n    try:\n        data = tomllib.load(open(bd_path, \"rb\"))\n    except Exception as exc:\n        fails.append(\"cannot read balldomain \" + bd_path + \": \" + repr(exc))\n        continue\n    isa = {int(i[\"bid\"]): i for i in (data.get(\"ballISA\") or []) if \"bid\" in i and \"funct7\" in i}\n    mapping = {int(m[\"ballId\"]): m for m in (data.get(\"ballIdMappings\") or [])}\n    try:\n        bid = int(p[\"bid\"])\n        f7 = int(p[\"funct7\"])\n    except Exception:\n        fails.append(\"placement \" + str(p.get(\"op\")) + \": bid/funct7 not integers\")\n        continue\n    e = isa.get(bid)\n    if e is None or int(e[\"funct7\"]) != f7:\n        fails.append(\"placement \" + str(p.get(\"op\")) + \": bid/funct7 not registered in \" + bd_path)\n    elif mapping.get(bid, {}).get(\"ballClass\") != p.get(\"ball_class\"):\n        fails.append(\"placement \" + str(p.get(\"op\")) + \": ballClass mismatch vs \" + bd_path)\nif placements:\n    f7s = set()\n    for p in placements:\n        try:\n            f7s.add(int(p[\"funct7\"]))\n        except Exception:\n            pass\n    if len(f7s) < 2:\n        fails.append(\"fewer than 2 distinct funct7 across ball_placements: \" + str(sorted(f7s)))\nboundary = icc.get(\"boundary\") or {}\nif boundary.get(\"name\") != \"prelookahead_out\":\n    fails.append(\"boundary.name must be prelookahead_out\")\ntensors = boundary.get(\"tensors\") or []\ngot = {}\nfor t in tensors:\n    got[t.get(\"name\")] = t.get(\"shape\")\n    if t.get(\"dtype\") != \"float32\":\n        fails.append(\"boundary tensor \" + str(t.get(\"name\")) + \" dtype \" + str(t.get(\"dtype\")) + \" != float32\")\nfor name, shape in ((\"x\", [1, 25, 512]), (\"prelookahead_out\", [1, 25, 512])):\n    if got.get(name) != shape:\n        fails.append(\"boundary tensor \" + name + \" shape \" + str(got.get(name)) + \" != \" + str(shape))\nfor p in (os.path.join(docs, \"inter-core-contract.md\"), os.path.join(docs, \"README.md\")):\n    if not (os.path.isfile(p) and os.path.getsize(p) > 0):\n        fails.append(\"missing prose doc \" + p)\nprint(\"cores:\", cores)\nprint(\"regions:\", len(regions), \"placements:\", len(placements))\nfor f in fails:\n    print(\"FAIL:\", f)\nprint(\"RESULT:\", \"PASS\" if not fails else \"FAIL\")\nsys.exit(1 if fails else 0)\nPY",
+          "protectedInputs": [
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-docs-truth",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-55384d79-222e-432a-ab48-8d39c93dc345",
+      "parentTaskId": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "depth": 2,
+      "objective": "把 chip hibiki 本分支的全部交付组装成 env 根的交付清单 task-artifact.json（kind=chip-integration），并同时把权威文件的字节一致副本刷新到 env 根 log/hibiki-delivery/，使 python3 checks/leaf_accept.py 与 AC-chip-artifact 的机械要",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-chip-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-chip-manifest-paths",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 - <<'PY'\nimport json, os, sys\nenv = os.path.realpath(os.getcwd())\nm_path = os.path.join(env, \"task-artifact.json\")\nfails = []\nif not os.path.isfile(m_path):\n    print(\"FAIL: no task-artifact.json at\", env)\n    sys.exit(1)\nm = json.load(open(m_path, encoding=\"utf-8\"))\nextra = sorted(set(m) - {\"version\", \"kind\", \"paths\", \"result\"})\nif extra:\n    fails.append(\"extra top-level fields: \" + str(extra))\nif m.get(\"version\") != 1:\n    fails.append(\"version != 1\")\nif m.get(\"kind\") != \"chip-integration\":\n    fails.append(\"kind != chip-integration\")\npaths = m.get(\"paths\")\nbase = {}\nif not isinstance(paths, list) or not paths:\n    fails.append(\"paths is not a non-empty list\")\n    paths = []\nfor p in paths:\n    if not isinstance(p, str) or os.path.isabs(p):\n        fails.append(\"bad path entry \" + repr(p))\n        continue\n    rp = os.path.realpath(os.path.join(env, p))\n    if not (rp == env or rp.startswith(env + os.sep)):\n        fails.append(\"path escapes env root: \" + p)\n        continue\n    ok = (os.path.isfile(rp) and os.path.getsize(rp) > 0) or (os.path.isdir(rp) and any(os.scandir(rp)))\n    if not ok:\n        fails.append(\"missing or empty: \" + p)\n    base.setdefault(os.path.basename(p), p)\nneed = [\"config.json\", \"chip.pb\", \"cmake.defs\", \"Cargo.toml\", \"workloads-elf.bemu.toml\", \"workloads-elf.verilator.toml\", \"inter-core-contract.json\", \"chip.toml\"]\nmissing = [n for n in need if n not in base]\nif missing:\n    fails.append(\"paths missing required entries: \" + str(missing))\nif not any(\"docs\" in p or \"cores\" in p for p in paths):\n    fails.append(\"no docs path in paths\")\nresult = m.get(\"result\") or {}\nif result.get(\"marker\") != \"PASSED\":\n    fails.append(\"result.marker != PASSED\")\nvals = result.get(\"values\") or {}\nfor k in (\"chip\", \"model\", \"config_dir\"):\n    if k not in vals:\n        fails.append(\"result.values missing \" + k)\nif vals.get(\"chip\") != \"hibiki\":\n    fails.append(\"values.chip != hibiki\")\nif \"CosyVoice2\" not in str(vals.get(\"model\")):\n    fails.append(\"values.model does not name CosyVoice2\")\ncd = vals.get(\"config_dir\")\nif not isinstance(cd, str) or cd not in paths:\n    fails.append(\"values.config_dir must be one of paths\")\nelif not os.path.isdir(os.path.join(env, cd)):\n    fails.append(\"values.config_dir is not a directory: \" + cd)\nprint(\"manifest paths:\", len(paths), \"values:\", vals)\nfor f in fails:\n    print(\"FAIL:\", f)\nprint(\"RESULT:\", \"PASS\" if not fails else \"FAIL\")\nsys.exit(1 if fails else 0)\nPY"
+        }
+      ]
+    },
+    {
+      "taskId": "t-abf15bbf-f092-4787-b677-91197ccf4c27",
+      "parentTaskId": "t-f6dbcd39-5e5d-447a-94ec-517eadf595a7",
+      "depth": 2,
+      "objective": "明确 <ball> 的算子合同：ISA（mnemonic/funct7/bid）、shared 布局、内存足迹与非法输入表；未确认条件保持 unknown。",
+      "status": "verified",
+      "templateRef": {
+        "id": "bb-operator-contract",
+        "version": 1,
+        "digest": "b43b2ee9d32b11acb7920990659ce3b40a8cd89864c1c84648e1b892b4eead3f"
+      },
+      "criteria": [
+        {
+          "criterionId": "AC-contract-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-contract-source",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-742fc023-77df-493d-a082-94105f9fc9c1",
+      "parentTaskId": "t-f6dbcd39-5e5d-447a-94ec-517eadf595a7",
+      "depth": 2,
+      "objective": "确认 <ball> 合同到真实工程入口的层映射：ctest、BEMU(emu/src)、compiler dialect、RTL(scala)、UVM(verify/) 的位置与缺口。",
+      "status": "verified",
+      "templateRef": {
+        "id": "bb-contract-layer-map",
+        "version": 1,
+        "digest": "8a1df0801b7fd57e8cb0c82c9430eaf55f8e051f5bed24d3bebee02dc167dd0e"
+      },
+      "criteria": [
+        {
+          "criterionId": "AC-maplayer-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-maplayer-truth",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-c03eca26-2f6c-416a-9a7e-7055c4adc2de",
+      "parentTaskId": "t-f6dbcd39-5e5d-447a-94ec-517eadf595a7",
+      "depth": 2,
+      "objective": "按合同修正 <ball> 指定层的局部行为，并用合法/非法输入的反例验证；跨多个独立实现时由节点再细分。",
+      "status": "verified",
+      "templateRef": {
+        "id": "bb-layer-local-behavior",
+        "version": 1,
+        "digest": "0394da81e37c1b6dcf724c5601a2718fdc85dbf76addb16b4cf52799f6378518"
+      },
+      "criteria": [
+        {
+          "criterionId": "AC-local-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-local-illegal",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-ac38c62e-0afa-4d1f-844d-85faa3cf1952",
+      "parentTaskId": "t-f6dbcd39-5e5d-447a-94ec-517eadf595a7",
+      "depth": 2,
+      "objective": "为 <ball> 在 <chip> 的真实 RTL 上取得指定行为的原始证据：RTL elaboration 产物存在，行为判据由 RTL/UVM 运行裁决。",
+      "status": "verified",
+      "templateRef": {
+        "id": "bb-rtl-behavior",
+        "version": 1,
+        "digest": "05f152ce67208cc7de0bca95579714b8ca90df5805c447b137cfb8d5ba0aa6fd"
+      },
+      "criteria": [
+        {
+          "criterionId": "AC-rtl-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py"
+        },
+        {
+          "criterionId": "AC-rtl-behavior",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-25abebee-f75a-41ba-8a96-85d97e2b92ce",
+      "parentTaskId": "t-f0f77a5c-4c39-4288-96a1-029a628d56b5",
+      "depth": 2,
+      "objective": "【任务】对 chip hibiki（core tokgen = tile 0 的 core_id 0；balldomain = examples/cores/tokgen/configs/balldomains/default.toml，MCP 参数 balldomain=\"default\"）取得仓库自身权威 validate_toml 的原始结果，并复核该",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-reg-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-reg-scope",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-fe6f35d7-9814-460d-b056-1abef794ae98",
+      "parentTaskId": "t-f0f77a5c-4c39-4288-96a1-029a628d56b5",
+      "depth": 2,
+      "objective": "【任务】消费本批第 1 个任务（bb-registration-validate）落盘的原始结果与缺陷清单，在授权范围内处理 chip hibiki（core tokgen / balldomain examples/cores/tokgen/configs/balldomains/default.toml）的注册缺陷，并以同一对象重验通过，如实交付。步骤：",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-fix-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-fix-scope",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-838c0513-0bfb-4d7e-9ecb-5cdd32d938fc",
+      "parentTaskId": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d",
+      "depth": 2,
+      "objective": "【模型边界身份】为 chip hibiki 的 CosyVoice2-0.5B prelookahead_out 边界取证并固定来源与 IO 身份，交付一个可独立验证的结果：边界规格文件（对应已发布模板 bb-model-boundary v1 的判据）。\n【必须写进 log/hibiki-model-boundary/boundary.json 的内容】(",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-boundary-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            },
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            },
+            {
+              "path": "fixture/tolerance.json",
+              "sha256": "0463aaeb59bab995e6a864eacdb7148e5fc4f0ccfb2f36367ca64687cce1ed72"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            },
+            {
+              "path": "fixture/reference/prelookahead_out.bin",
+              "sha256": "aa14bc8b34fd9734a30be11a4f4969d0868d4a5c7a21f5bf47cec84c246ff257"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-boundary-mechanical",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-model-boundary/check-boundary.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            },
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-boundary-fidelity",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-d1aeddc9-9f67-4555-9cf5-f096d1e4481f",
+      "parentTaskId": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d",
+      "depth": 2,
+      "objective": "【子图实现与构建】把 prelookahead_out 边界实现成 chip hibiki 可编译的 chip-local C workload，并本轮真构建出 ELF；交付一个可独立验证的结果：源文件 + 本轮构建的 ELF（对应已发布模板 bb-subgraph-import v1 的判据）。\n【实现】(a) 新源文件 examples/chips/hi",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-import-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            },
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            },
+            {
+              "path": "fixture/tolerance.json",
+              "sha256": "0463aaeb59bab995e6a864eacdb7148e5fc4f0ccfb2f36367ca64687cce1ed72"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            },
+            {
+              "path": "fixture/reference/prelookahead_out.bin",
+              "sha256": "aa14bc8b34fd9734a30be11a4f4969d0868d4a5c7a21f5bf47cec84c246ff257"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-import-mechanical",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-model-import/check-import.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            },
+            {
+              "path": "fixture/inputs/prelookahead_in.bin",
+              "sha256": "26fc0932eee4bd686cc2e99600fc39030c8832d6b474163681ec6c7239d36b82"
+            },
+            {
+              "path": "fixture/inputs/prelookahead_conv1_weight.bin",
+              "sha256": "506a1dd9266c4707f860d2b0963dd701b04b55bfd5144f4af366b400b455a3ae"
+            },
+            {
+              "path": "fixture/inputs/prelookahead_conv2_weight.bin",
+              "sha256": "2d5b8f60d126d23fef861ca888e0f2f7094543210339a4b9ffa22d2b881ff1c7"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-import-numeric",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-b1112436-9332-4518-a0b6-5bb8c6db5fb5",
+      "parentTaskId": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d",
+      "depth": 2,
+      "objective": "【目标注册 + 该 chip 的 BEMU 批量回归】把上一步真构建出来的 ELF 登记进 chip hibiki 的回归入口，并本轮真跑通该 chip 的 BEMU 批量回归；交付一个可独立验证的结果：注册生效且批量回归消费它的原始 JUnit（对应已发布模板 bb-workload-target-wiring v1 的判据）。\n【做法】(a) 从 log",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-wiring-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            },
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            },
+            {
+              "path": "fixture/tolerance.json",
+              "sha256": "0463aaeb59bab995e6a864eacdb7148e5fc4f0ccfb2f36367ca64687cce1ed72"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            },
+            {
+              "path": "fixture/reference/prelookahead_out.bin",
+              "sha256": "aa14bc8b34fd9734a30be11a4f4969d0868d4a5c7a21f5bf47cec84c246ff257"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-wiring-mechanical",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-model-wiring/check-wiring.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-wiring-used",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-976a10d9-4e9c-4c88-aada-07c632db0970",
+      "parentTaskId": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d",
+      "depth": 2,
+      "objective": "【独立参考】为 prelookahead_out 边界固定并核对独立参考：以冻结 fixture 参考为准，核对摘要与元素数，并用本轮自己的独立复算交叉验证；交付一个可独立验证的结果：参考记录文件（对应已发布模板 bb-independent-reference v1 的判据）。\n【做法】(a) 机械核对冻结参考身份：fixture/SHA256SUMS 里",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-ref-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            },
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            },
+            {
+              "path": "fixture/tolerance.json",
+              "sha256": "0463aaeb59bab995e6a864eacdb7148e5fc4f0ccfb2f36367ca64687cce1ed72"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            },
+            {
+              "path": "fixture/reference/prelookahead_out.bin",
+              "sha256": "aa14bc8b34fd9734a30be11a4f4969d0868d4a5c7a21f5bf47cec84c246ff257"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-ref-mechanical",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-model-reference/check-reference.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            },
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            },
+            {
+              "path": "fixture/tolerance.json",
+              "sha256": "0463aaeb59bab995e6a864eacdb7148e5fc4f0ccfb2f36367ca64687cce1ed72"
+            },
+            {
+              "path": "fixture/reference/prelookahead_out.bin",
+              "sha256": "aa14bc8b34fd9734a30be11a4f4969d0868d4a5c7a21f5bf47cec84c246ff257"
+            },
+            {
+              "path": "fixture/inputs/prelookahead_in.bin",
+              "sha256": "26fc0932eee4bd686cc2e99600fc39030c8832d6b474163681ec6c7239d36b82"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-ref-traceable",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-e6d7f88b-1761-4fcd-ba88-524b03bd92e9",
+      "parentTaskId": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d",
+      "depth": 2,
+      "objective": "【BEMU 实跑与冻结格式对照 + Ball 参与取证】把 hibiki 上这个 workload 的 BEMU 原始输出按冻结交换格式落盘、按冻结容差与冻结参考逐元素对照为 PASS，并把 Ball 参与的事实取证清楚；交付一个可独立验证的结果：该 backend 的原始输出与对照记录（对应已发布模板 bb-run-output-compare v1 的判",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-compare-artifact",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 checks/leaf_accept.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            },
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            },
+            {
+              "path": "fixture/tolerance.json",
+              "sha256": "0463aaeb59bab995e6a864eacdb7148e5fc4f0ccfb2f36367ca64687cce1ed72"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            },
+            {
+              "path": "fixture/reference/prelookahead_out.bin",
+              "sha256": "aa14bc8b34fd9734a30be11a4f4969d0868d4a5c7a21f5bf47cec84c246ff257"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-compare-mechanical",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-model-compare/check-compare.py",
+          "protectedInputs": [
+            {
+              "path": "checks/leaf_accept.py",
+              "sha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291"
+            },
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            },
+            {
+              "path": "fixture/tolerance.json",
+              "sha256": "0463aaeb59bab995e6a864eacdb7148e5fc4f0ccfb2f36367ca64687cce1ed72"
+            },
+            {
+              "path": "fixture/SHA256SUMS",
+              "sha256": "ccac8469e803cf17b63a8ad85b24eda8cac3ccc118385335d17efb7ff2ad695d"
+            },
+            {
+              "path": "fixture/reference/prelookahead_out.bin",
+              "sha256": "aa14bc8b34fd9734a30be11a4f4969d0868d4a5c7a21f5bf47cec84c246ff257"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-compare-semantics",
+          "verificationMode": "review",
+          "mandatory": false
+        }
+      ]
+    },
+    {
+      "taskId": "t-887d4f38-38de-4689-ace3-805ad9a224d5",
+      "parentTaskId": "t-bcd34961-c383-4586-ba2f-72ae65a4d059",
+      "depth": 2,
+      "objective": "【bb-engineering-verification 分支的 bb-backend-run 组合边界叶】你只交付一个结果：chip hibiki 的 RTL(Verilator) 上 prelookahead_out 边界的真实端到端输出，与冻结参考逐元素一致。\n\n【冻结实例】env 根=/home/ROXY/code/bb_work/harness/e",
+      "status": "verified",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-verilator-compare",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-ev/verilator/check-verilator.py",
+          "protectedInputs": [
+            {
+              "path": "fixture/reference/prelookahead_out.bin",
+              "sha256": "aa14bc8b34fd9734a30be11a4f4969d0868d4a5c7a21f5bf47cec84c246ff257"
+            },
+            {
+              "path": "fixture/tolerance.json",
+              "sha256": "0463aaeb59bab995e6a864eacdb7148e5fc4f0ccfb2f36367ca64687cce1ed72"
+            },
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-verilator-run-integrity",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-ev/verilator/check-verilator-run.py"
+        }
+      ]
+    },
+    {
+      "taskId": "t-f554fc89-5bef-42ae-a135-e78768553a9f",
+      "parentTaskId": "t-bcd34961-c383-4586-ba2f-72ae65a4d059",
+      "depth": 2,
+      "objective": "【bb-engineering-verification 分支的 bb-target-build 叶】你只交付一个结果：chip hibiki 本轮构建出来的 compiler 工具链，并用它真实跑通一个 MLIR 测试。\n\n【冻结实例】env 根=/home/ROXY/code/bb_work/harness/environment/project4（cw",
+      "status": "running",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-compiler-artifacts",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-ev/compiler/check-compiler.py",
+          "protectedInputs": [
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-compiler-mlir-run",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-ev/compiler/check-mlir-run.py",
+          "protectedInputs": [
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "taskId": "t-23353199-cbca-4cb4-a8c3-93c4cfd806f7",
+      "parentTaskId": "t-bcd34961-c383-4586-ba2f-72ae65a4d059",
+      "depth": 2,
+      "objective": "【bb-engineering-verification 分支的回归叶（对应交付 (f)）】你只交付一个结果：chip hibiki 的批量回归事实——bemu 与 verilator 两条入口真实跑过、各自的 nextest JUnit 本轮产生且全绿。\n\n【冻结实例】env 根=/home/ROXY/code/bb_work/harness/enviro",
+      "status": "admitted",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-regression-batches",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-ev/regression/check-regression.py",
+          "protectedInputs": [
+            {
+              "path": "fixture/manifest.json",
+              "sha256": "4a2e7b31958742c49629f4b1b559f76295bfb0b092c14a9f148efac9ada87b18"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "taskId": "t-9e70f8db-ff9d-4f38-b5a3-8d351b7abe2f",
+      "parentTaskId": "t-bcd34961-c383-4586-ba2f-72ae65a4d059",
+      "depth": 2,
+      "objective": "【bb-engineering-verification 分支的 bb-metric-measure 叶（对应交付 (c)(d)）】你只交付一个结果：chip hibiki 真实 RTL 的面积/时序/功耗测量证据，以及 dc_shell 缺席的现场证明。\n\n【冻结实例】env 根=/home/ROXY/code/bb_work/harness/enviro",
+      "status": "admitted",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-ppa-reports",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-ev/ppa/check-ppa.py",
+          "protectedInputs": [
+            {
+              "path": "checks/cv_full_accept.py",
+              "sha256": "b0e6fa28a29c05c89e07709a1412fdd2154e11f7586f1e64b88856c03f36f960"
+            }
+          ]
+        },
+        {
+          "criterionId": "AC-dc-absence",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-ev/ppa/check-dc-absence.py"
+        }
+      ]
+    },
+    {
+      "taskId": "t-1d3eca54-c05b-41b4-94e6-bca2a9e61315",
+      "parentTaskId": "t-bcd34961-c383-4586-ba2f-72ae65a4d059",
+      "depth": 2,
+      "objective": "【bb-engineering-verification 分支的 UVM 叶（对应交付 (e)）】你只交付一个结果：chip hibiki 的 UVM 资产就位 + 本轮真实 UVM 尝试 + vcs 缺席的现场证明，且如实报告（绝不假装通过）。\n\n【冻结实例】env 根=/home/ROXY/code/bb_work/harness/environment",
+      "status": "admitted",
+      "templateRef": null,
+      "criteria": [
+        {
+          "criterionId": "AC-uvm-assets-absence",
+          "verificationMode": "deterministic",
+          "mandatory": true,
+          "command": "python3 log/hibiki-ev/uvm/check-uvm.py"
+        }
+      ]
+    }
+  ],
+  "reviews": [
+    {
+      "taskId": "t-be988716-c0ad-4760-a167-9d0e8f0a11ca",
+      "runId": "r-31f3e1f1-6c71-4eec-87dd-270efd2041e2",
+      "sessionId": "s-ca2e98c1-be81-4737-850e-bb71387fce97",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 1296023,
+      "criteria": [
+        {
+          "criterionId": "AC-fit-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-31f3e1f1-6c71-4eec-87dd-270efd2041e2/AC-fit-artifact.log"
+        },
+        {
+          "criterionId": "AC-fit-truth",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 221854,
+          "outputTokens": 94799,
+          "cacheReadTokens": 10856576,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 120,
+          "failures": 0
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-6bc93693-0918-45e7-a328-c704a1ad1804",
+      "runId": "r-1c6178d7-be78-4a41-abfe-3ff6d582b8bc",
+      "sessionId": "s-0ea83efe-b380-4350-adf1-01bfdc204b2d",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 1397872,
+      "criteria": [
+        {
+          "criterionId": "AC-topology-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-1c6178d7-be78-4a41-abfe-3ff6d582b8bc/AC-topology-artifact.log"
+        },
+        {
+          "criterionId": "AC-topology-truth",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 209002,
+          "outputTokens": 98228,
+          "cacheReadTokens": 11972096,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 110,
+          "failures": 2
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-94f3e8e7-7a5d-45d4-a1b3-355fbcf81e24",
+      "runId": "r-6333aaaa-ac5a-4b22-aa05-0173fcbce733",
+      "sessionId": "s-97d027d2-d71e-4673-96b0-3a469947bf22",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 1554276,
+      "criteria": [
+        {
+          "criterionId": "AC-map-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-6333aaaa-ac5a-4b22-aa05-0173fcbce733/AC-map-artifact.log"
+        },
+        {
+          "criterionId": "AC-map-truth",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 251067,
+          "outputTokens": 113768,
+          "cacheReadTokens": 18093184,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 148,
+          "failures": 2
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-32a178a5-e99f-47e2-b386-6ea452f4d715",
+      "runId": "r-04409862-3ff2-4469-b1e5-56ee0d29beb4",
+      "sessionId": "s-f44086d4-e066-41ea-b2a1-3bc13e902f6b",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 547880,
+      "criteria": [
+        {
+          "criterionId": "AC-config-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-04409862-3ff2-4469-b1e5-56ee0d29beb4/AC-config-artifact.log"
+        },
+        {
+          "criterionId": "AC-config-identity",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 122491,
+          "outputTokens": 47827,
+          "cacheReadTokens": 3957248,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 65,
+          "failures": 0
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-9893fd7f-e470-48fc-bccf-9d7422728640",
+      "runId": "r-44b51381-7b73-4f11-bb93-e5b90548a378",
+      "sessionId": "s-ee5a228f-bbba-4074-97cf-808906ad26cc",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 1730784,
+      "criteria": [
+        {
+          "criterionId": "AC-wiring-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-44b51381-7b73-4f11-bb93-e5b90548a378/AC-wiring-artifact.log"
+        },
+        {
+          "criterionId": "AC-wiring-used",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 242273,
+          "outputTokens": 118798,
+          "cacheReadTokens": 15351424,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 136,
+          "failures": 4
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-dee5134a-f79e-48ce-97bf-913ecbca4160",
+      "runId": "r-ccd3d886-c386-4f44-b391-833999bc5243",
+      "sessionId": "s-2b333f3b-c4c2-4d4c-878e-c995ad865726",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 794015,
+      "criteria": [
+        {
+          "criterionId": "AC-docs-contract",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 - <<'PY'\nimport json, os, sys, tomllib\nenv = os.getcwd()\nchip = \"hibiki\"\nrepo = os.path.join(env, \"DangoSys\", \"buckyball\")\nchip_dir = os.path.join(repo, \"examples\", \"chips\", chip)\ndocs = os.path.join(env, \"log\", \"hibiki-docs\")\nchip_docs = os.path.join(chip_dir, \"docs\")\nfails = []\ndef load(p):\n    with open(p, encoding=\"utf-8\") as fh:\n        return json.load(fh)\ncfg_path = os.path.join(chip_dir, \"configs\", \"generated\", \"config\", \"config.json\")\nif not os.path.isfile(cfg_path):\n    print(\"FAIL: missing\", cfg_path, \"(run bbdev config --install first)\")\n    sys.exit(1)\ncfg = load(cfg_path)\ncores, balldomain = [], {}\nfor tile in cfg[\"designs\"][\"tiles\"]:\n    for core in tile[\"cores\"]:\n        name = core[\"name\"]\n        if name not in cores:\n            cores.append(name)\n        balldomain[name] = core[\"balldomain\"][\"_file\"]\nbriefs_path = os.path.join(docs, \"core-briefs.json\")\nicc_path = os.path.join(docs, \"inter-core-contract.json\")\nfor p in (briefs_path, icc_path):\n    if not os.path.isfile(p):\n        print(\"FAIL: missing\", p)\n        sys.exit(1)\nbriefs = load(briefs_path).get(\"cores\") or {}\nfor c in cores:\n    b = briefs.get(c)\n    if not isinstance(b, dict):\n        fails.append(\"core-briefs.json: no brief for core \" + c)\n        continue\n    for key in (\"mission\", \"contract\", \"acceptance\", \"non_goals\"):\n        v = b.get(key)\n        if not v or (isinstance(v, list) and not any(str(x).strip() for x in v)):\n            fails.append(\"core-briefs.json[\" + c + \"].\" + key + \" empty\")\n    md = os.path.join(chip_docs, \"cores\", c + \".md\")\n    if not (os.path.isfile(md) and os.path.getsize(md) > 0):\n        fails.append(\"missing prose brief \" + md)\n    else:\n        text = open(md, encoding=\"utf-8\").read()\n        for h in (\"Mission\", \"Contract\", \"Acceptance\", \"Non-goals\"):\n            if h not in text:\n                fails.append(md + \": missing section \" + h)\nicc = load(icc_path)\nregions = icc.get(\"shared_regions\") or []\nplacements = icc.get(\"ball_placements\") or []\nif not regions:\n    fails.append(\"inter-core-contract.json: no shared_regions\")\nfor r in regions:\n    for k in (\"name\", \"core\", \"shape\", \"dtype\", \"layout\", \"owner\", \"readers\", \"writers\", \"illegal_input\"):\n        if not r.get(k):\n            fails.append(\"region \" + str(r.get(\"name\")) + \" missing \" + k)\n    if r.get(\"core\") not in cores:\n        fails.append(\"region \" + str(r.get(\"name\")) + \" names unknown core \" + str(r.get(\"core\")))\nif not placements:\n    fails.append(\"inter-core-contract.json: no ball_placements\")\nfor p in placements:\n    if p.get(\"core\") not in cores:\n        fails.append(\"placement \" + str(p.get(\"op\")) + \" names unknown core \" + str(p.get(\"core\")))\n        continue\n    bd_file = balldomain[p[\"core\"]]\n    bd_path = bd_file if os.path.isabs(bd_file) else os.path.join(repo, bd_file)\n    try:\n        data = tomllib.load(open(bd_path, \"rb\"))\n    except Exception as exc:\n        fails.append(\"cannot read balldomain \" + bd_path + \": \" + repr(exc))\n        continue\n    isa = {int(i[\"bid\"]): i for i in (data.get(\"ballISA\") or []) if \"bid\" in i and \"funct7\" in i}\n    mapping = {int(m[\"ballId\"]): m for m in (data.get(\"ballIdMappings\") or [])}\n    try:\n        bid = int(p[\"bid\"])\n        f7 = int(p[\"funct7\"])\n    except Exception:\n        fails.append(\"placement \" + str(p.get(\"op\")) + \": bid/funct7 not integers\")\n        continue\n    e = isa.get(bid)\n    if e is None or int(e[\"funct7\"]) != f7:\n        fails.append(\"placement \" + str(p.get(\"op\")) + \": bid/funct7 not registered in \" + bd_path)\n    elif mapping.get(bid, {}).get(\"ballClass\") != p.get(\"ball_class\"):\n        fails.append(\"placement \" + str(p.get(\"op\")) + \": ballClass mismatch vs \" + bd_path)\nif placements:\n    f7s = set()\n    for p in placements:\n        try:\n            f7s.add(int(p[\"funct7\"]))\n        except Exception:\n            pass\n    if len(f7s) < 2:\n        fails.append(\"fewer than 2 distinct funct7 across ball_placements: \" + str(sorted(f7s)))\nboundary = icc.get(\"boundary\") or {}\nif boundary.get(\"name\") != \"prelookahead_out\":\n    fails.append(\"boundary.name must be prelookahead_out\")\ntensors = boundary.get(\"tensors\") or []\ngot = {}\nfor t in tensors:\n    got[t.get(\"name\")] = t.get(\"shape\")\n    if t.get(\"dtype\") != \"float32\":\n        fails.append(\"boundary tensor \" + str(t.get(\"name\")) + \" dtype \" + str(t.get(\"dtype\")) + \" != float32\")\nfor name, shape in ((\"x\", [1, 25, 512]), (\"prelookahead_out\", [1, 25, 512])):\n    if got.get(name) != shape:\n        fails.append(\"boundary tensor \" + name + \" shape \" + str(got.get(name)) + \" != \" + str(shape))\nfor p in (os.path.join(docs, \"inter-core-contract.md\"), os.path.join(docs, \"README.md\")):\n    if not (os.path.isfile(p) and os.path.getsize(p) > 0):\n        fails.append(\"missing prose doc \" + p)\nprint(\"cores:\", cores)\nprint(\"regions:\", len(regions), \"placements:\", len(placements))\nfor f in fails:\n    print(\"FAIL:\", f)\nprint(\"RESULT:\", \"PASS\" if not fails else \"FAIL\")\nsys.exit(1 if fails else 0)\nPY",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-ccd3d886-c386-4f44-b391-833999bc5243/AC-docs-contract.log"
+        },
+        {
+          "criterionId": "AC-docs-truth",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 165209,
+          "outputTokens": 72831,
+          "cacheReadTokens": 5726720,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 64,
+          "failures": 0
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-55384d79-222e-432a-ab48-8d39c93dc345",
+      "runId": "r-837c5e53-937f-4e1a-abc4-4677746210bb",
+      "sessionId": "s-224e8f52-e1f2-41ea-bf2c-5c7b878fb7d5",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 395224,
+      "criteria": [
+        {
+          "criterionId": "AC-chip-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-837c5e53-937f-4e1a-abc4-4677746210bb/AC-chip-artifact.log"
+        },
+        {
+          "criterionId": "AC-chip-manifest-paths",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 - <<'PY'\nimport json, os, sys\nenv = os.path.realpath(os.getcwd())\nm_path = os.path.join(env, \"task-artifact.json\")\nfails = []\nif not os.path.isfile(m_path):\n    print(\"FAIL: no task-artifact.json at\", env)\n    sys.exit(1)\nm = json.load(open(m_path, encoding=\"utf-8\"))\nextra = sorted(set(m) - {\"version\", \"kind\", \"paths\", \"result\"})\nif extra:\n    fails.append(\"extra top-level fields: \" + str(extra))\nif m.get(\"version\") != 1:\n    fails.append(\"version != 1\")\nif m.get(\"kind\") != \"chip-integration\":\n    fails.append(\"kind != chip-integration\")\npaths = m.get(\"paths\")\nbase = {}\nif not isinstance(paths, list) or not paths:\n    fails.append(\"paths is not a non-empty list\")\n    paths = []\nfor p in paths:\n    if not isinstance(p, str) or os.path.isabs(p):\n        fails.append(\"bad path entry \" + repr(p))\n        continue\n    rp = os.path.realpath(os.path.join(env, p))\n    if not (rp == env or rp.startswith(env + os.sep)):\n        fails.append(\"path escapes env root: \" + p)\n        continue\n    ok = (os.path.isfile(rp) and os.path.getsize(rp) > 0) or (os.path.isdir(rp) and any(os.scandir(rp)))\n    if not ok:\n        fails.append(\"missing or empty: \" + p)\n    base.setdefault(os.path.basename(p), p)\nneed = [\"config.json\", \"chip.pb\", \"cmake.defs\", \"Cargo.toml\", \"workloads-elf.bemu.toml\", \"workloads-elf.verilator.toml\", \"inter-core-contract.json\", \"chip.toml\"]\nmissing = [n for n in need if n not in base]\nif missing:\n    fails.append(\"paths missing required entries: \" + str(missing))\nif not any(\"docs\" in p or \"cores\" in p for p in paths):\n    fails.append(\"no docs path in paths\")\nresult = m.get(\"result\") or {}\nif result.get(\"marker\") != \"PASSED\":\n    fails.append(\"result.marker != PASSED\")\nvals = result.get(\"values\") or {}\nfor k in (\"chip\", \"model\", \"config_dir\"):\n    if k not in vals:\n        fails.append(\"result.values missing \" + k)\nif vals.get(\"chip\") != \"hibiki\":\n    fails.append(\"values.chip != hibiki\")\nif \"CosyVoice2\" not in str(vals.get(\"model\")):\n    fails.append(\"values.model does not name CosyVoice2\")\ncd = vals.get(\"config_dir\")\nif not isinstance(cd, str) or cd not in paths:\n    fails.append(\"values.config_dir must be one of paths\")\nelif not os.path.isdir(os.path.join(env, cd)):\n    fails.append(\"values.config_dir is not a directory: \" + cd)\nprint(\"manifest paths:\", len(paths), \"values:\", vals)\nfor f in fails:\n    print(\"FAIL:\", f)\nprint(\"RESULT:\", \"PASS\" if not fails else \"FAIL\")\nsys.exit(1 if fails else 0)\nPY",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-837c5e53-937f-4e1a-abc4-4677746210bb/AC-chip-manifest-paths.log"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 109395,
+          "outputTokens": 36724,
+          "cacheReadTokens": 2699264,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 47,
+          "failures": 1
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 2
+      }
+    },
+    {
+      "taskId": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "runId": "r-b8f6dbf3-1507-446f-a100-90c7cdcf587d",
+      "sessionId": "s-edb4489a-93c8-49f4-8ca5-95401bd25315",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 8896237,
+      "criteria": [
+        {
+          "criterionId": "AC-chip-composite",
+          "verdict": "pass",
+          "verifierId": "composite",
+          "verifierVersion": "1"
+        },
+        {
+          "criterionId": "AC-chip-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-b8f6dbf3-1507-446f-a100-90c7cdcf587d/AC-chip-artifact.log"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 596351,
+          "outputTokens": 110490,
+          "cacheReadTokens": 5896576,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 74,
+          "failures": 0
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-abf15bbf-f092-4787-b677-91197ccf4c27",
+      "runId": "r-7ed3b8c3-94db-4f0b-8277-12340f6f3fe0",
+      "sessionId": "s-d6e51eac-d773-4ba1-a25c-f6997489403f",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 1393660,
+      "criteria": [
+        {
+          "criterionId": "AC-contract-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-7ed3b8c3-94db-4f0b-8277-12340f6f3fe0/AC-contract-artifact.log"
+        },
+        {
+          "criterionId": "AC-contract-source",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 210729,
+          "outputTokens": 84092,
+          "cacheReadTokens": 8607872,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 94,
+          "failures": 2
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-742fc023-77df-493d-a082-94105f9fc9c1",
+      "runId": "r-25aa6d19-af8e-4e08-9169-75e93a62f274",
+      "sessionId": "s-b0c78376-c4f9-4549-a44c-264ab2dfc385",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 1203180,
+      "criteria": [
+        {
+          "criterionId": "AC-maplayer-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-25aa6d19-af8e-4e08-9169-75e93a62f274/AC-maplayer-artifact.log"
+        },
+        {
+          "criterionId": "AC-maplayer-truth",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 227524,
+          "outputTokens": 82490,
+          "cacheReadTokens": 13574528,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 131,
+          "failures": 0
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-c03eca26-2f6c-416a-9a7e-7055c4adc2de",
+      "runId": "r-036c7707-804a-4bbd-b0d5-2f936b3e8cfc",
+      "sessionId": "s-07acac86-0e13-42b8-a54f-36329af13510",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 1560775,
+      "criteria": [
+        {
+          "criterionId": "AC-local-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-036c7707-804a-4bbd-b0d5-2f936b3e8cfc/AC-local-artifact.log"
+        },
+        {
+          "criterionId": "AC-local-illegal",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 229574,
+          "outputTokens": 105647,
+          "cacheReadTokens": 18502400,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 171,
+          "failures": 1
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-ac38c62e-0afa-4d1f-844d-85faa3cf1952",
+      "runId": "r-43d92629-b85d-479a-8b6d-a26718e9b0d6",
+      "sessionId": "s-1ac5612c-bf64-4579-b1eb-9d0344c81a55",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 3618510,
+      "criteria": [
+        {
+          "criterionId": "AC-rtl-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-43d92629-b85d-479a-8b6d-a26718e9b0d6/AC-rtl-artifact.log"
+        },
+        {
+          "criterionId": "AC-rtl-behavior",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 352510,
+          "outputTokens": 152751,
+          "cacheReadTokens": 37052800,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 224,
+          "failures": 1
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-f6dbcd39-5e5d-447a-94ec-517eadf595a7",
+      "runId": "r-1d4dbd2a-09cf-46da-8d6a-580097ef0c30",
+      "sessionId": "s-a9061820-acbe-4498-9f5f-ea0d37833bc2",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 8908828,
+      "criteria": [
+        {
+          "criterionId": "AC-ball-composite",
+          "verdict": "pass",
+          "verifierId": "composite",
+          "verifierVersion": "1"
+        },
+        {
+          "criterionId": "AC-ball-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-1d4dbd2a-09cf-46da-8d6a-580097ef0c30/AC-ball-artifact.log"
+        },
+        {
+          "criterionId": "AC-ball-rtl",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 391080,
+          "outputTokens": 102558,
+          "cacheReadTokens": 7441152,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 68,
+          "failures": 1
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-25abebee-f75a-41ba-8a96-85d97e2b92ce",
+      "runId": "r-68409e18-533f-43f5-b2a8-4ef3457001d9",
+      "sessionId": "s-ed5a478c-07c4-451c-89ec-394a5612c2b1",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 803777,
+      "criteria": [
+        {
+          "criterionId": "AC-reg-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-68409e18-533f-43f5-b2a8-4ef3457001d9/AC-reg-artifact.log"
+        },
+        {
+          "criterionId": "AC-reg-scope",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 143962,
+          "outputTokens": 51383,
+          "cacheReadTokens": 6252928,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 87,
+          "failures": 2
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-fe6f35d7-9814-460d-b056-1abef794ae98",
+      "runId": "r-1b9db5d5-efd5-41aa-b168-4c72058da313",
+      "sessionId": "s-e1d4d5d5-3aa5-4d05-a8b5-1e0bf5f5a198",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 575622,
+      "criteria": [
+        {
+          "criterionId": "AC-fix-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-1b9db5d5-efd5-41aa-b168-4c72058da313/AC-fix-artifact.log"
+        },
+        {
+          "criterionId": "AC-fix-scope",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 126719,
+          "outputTokens": 46292,
+          "cacheReadTokens": 3254016,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 48,
+          "failures": 0
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-f0f77a5c-4c39-4288-96a1-029a628d56b5",
+      "runId": "r-6acdc4b9-b0dd-497a-9a4c-181dcfcc10f8",
+      "sessionId": "s-6420f369-c14d-4162-9e45-27d90b9fecd9",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 2098409,
+      "criteria": [
+        {
+          "criterionId": "AC-reg-composite",
+          "verdict": "pass",
+          "verifierId": "composite",
+          "verifierVersion": "1"
+        },
+        {
+          "criterionId": "AC-reg-authoritative",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-6acdc4b9-b0dd-497a-9a4c-181dcfcc10f8/AC-reg-authoritative.log"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 251253,
+          "outputTokens": 57414,
+          "cacheReadTokens": 3713920,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 62,
+          "failures": 1
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-838c0513-0bfb-4d7e-9ecb-5cdd32d938fc",
+      "runId": "r-8dc5f967-c681-4256-ae30-7fdd7203ec6e",
+      "sessionId": "s-70a8201f-d713-40fa-af74-638ae3052d0f",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 866486,
+      "criteria": [
+        {
+          "criterionId": "AC-boundary-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-8dc5f967-c681-4256-ae30-7fdd7203ec6e/AC-boundary-artifact.log"
+        },
+        {
+          "criterionId": "AC-boundary-mechanical",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 log/hibiki-model-boundary/check-boundary.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-8dc5f967-c681-4256-ae30-7fdd7203ec6e/AC-boundary-mechanical.log"
+        },
+        {
+          "criterionId": "AC-boundary-fidelity",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 156533,
+          "outputTokens": 70659,
+          "cacheReadTokens": 4514304,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 64,
+          "failures": 0
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 2
+      }
+    },
+    {
+      "taskId": "t-d1aeddc9-9f67-4555-9cf5-f096d1e4481f",
+      "runId": "r-776cdbeb-94fb-49cf-a7ba-2c307ee114c5",
+      "sessionId": "s-f3265137-79c1-4b38-81ad-6a1e1f2378ed",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 1791303,
+      "criteria": [
+        {
+          "criterionId": "AC-import-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-776cdbeb-94fb-49cf-a7ba-2c307ee114c5/AC-import-artifact.log"
+        },
+        {
+          "criterionId": "AC-import-mechanical",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 log/hibiki-model-import/check-import.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-776cdbeb-94fb-49cf-a7ba-2c307ee114c5/AC-import-mechanical.log"
+        },
+        {
+          "criterionId": "AC-import-numeric",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 228730,
+          "outputTokens": 102871,
+          "cacheReadTokens": 13360384,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 119,
+          "failures": 0
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 2
+      }
+    },
+    {
+      "taskId": "t-b1112436-9332-4518-a0b6-5bb8c6db5fb5",
+      "runId": "r-bb019c87-caa1-499c-814c-a64ce04017e8",
+      "sessionId": "s-757621d9-0787-421e-a564-8dbef830157b",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 662858,
+      "criteria": [
+        {
+          "criterionId": "AC-wiring-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-bb019c87-caa1-499c-814c-a64ce04017e8/AC-wiring-artifact.log"
+        },
+        {
+          "criterionId": "AC-wiring-mechanical",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 log/hibiki-model-wiring/check-wiring.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-bb019c87-caa1-499c-814c-a64ce04017e8/AC-wiring-mechanical.log"
+        },
+        {
+          "criterionId": "AC-wiring-used",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 147093,
+          "outputTokens": 45951,
+          "cacheReadTokens": 5077888,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 74,
+          "failures": 0
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 2
+      }
+    },
+    {
+      "taskId": "t-976a10d9-4e9c-4c88-aada-07c632db0970",
+      "runId": "r-fe646892-06fb-4ec4-bddc-8851f758b4dd",
+      "sessionId": "s-8e3da3d8-7602-43ce-bc23-fd7d14b2c659",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 368946,
+      "criteria": [
+        {
+          "criterionId": "AC-ref-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-fe646892-06fb-4ec4-bddc-8851f758b4dd/AC-ref-artifact.log"
+        },
+        {
+          "criterionId": "AC-ref-mechanical",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 log/hibiki-model-reference/check-reference.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-fe646892-06fb-4ec4-bddc-8851f758b4dd/AC-ref-mechanical.log"
+        },
+        {
+          "criterionId": "AC-ref-traceable",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 94806,
+          "outputTokens": 34098,
+          "cacheReadTokens": 1667200,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 35,
+          "failures": 0
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 2
+      }
+    },
+    {
+      "taskId": "t-e6d7f88b-1761-4fcd-ba88-524b03bd92e9",
+      "runId": "r-8672b02f-c0f5-4fe5-b289-6d2b2cf417b6",
+      "sessionId": "s-8361bd40-648c-44d2-b43e-a00e8c829aae",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 1030121,
+      "criteria": [
+        {
+          "criterionId": "AC-compare-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-8672b02f-c0f5-4fe5-b289-6d2b2cf417b6/AC-compare-artifact.log"
+        },
+        {
+          "criterionId": "AC-compare-mechanical",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 log/hibiki-model-compare/check-compare.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-8672b02f-c0f5-4fe5-b289-6d2b2cf417b6/AC-compare-mechanical.log"
+        },
+        {
+          "criterionId": "AC-compare-semantics",
+          "verdict": "inconclusive",
+          "verifierId": "review",
+          "verifierVersion": "1"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 191360,
+          "outputTokens": 74578,
+          "cacheReadTokens": 8785408,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 97,
+          "failures": 2
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 2
+      }
+    },
+    {
+      "taskId": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d",
+      "runId": "r-325fd93b-95c5-47eb-82d5-dce6596dc7f9",
+      "sessionId": "s-889e6676-e91c-4162-a495-33636a6505d4",
+      "outcome": "verified",
+      "anomalies": [],
+      "durationMs": 5637732,
+      "criteria": [
+        {
+          "criterionId": "AC-model-composite",
+          "verdict": "pass",
+          "verifierId": "composite",
+          "verifierVersion": "1"
+        },
+        {
+          "criterionId": "AC-model-artifact",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 checks/leaf_accept.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-325fd93b-95c5-47eb-82d5-dce6596dc7f9/AC-model-artifact.log"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 389715,
+          "outputTokens": 85972,
+          "cacheReadTokens": 5365888,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 78,
+          "failures": 0
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 1
+      }
+    },
+    {
+      "taskId": "t-887d4f38-38de-4689-ace3-805ad9a224d5",
+      "runId": "r-f7fd1903-f7b2-4343-a853-9013f269ad3b",
+      "sessionId": "s-5dbade90-1900-4e86-b7d0-1fb03095817e",
+      "outcome": "verified",
+      "anomalies": [
+        "budget exceeded: maxToolCalls (observed 691 tool calls over the limit 600; post-hoc check at terminal time — the run was not stopped in flight) — L4 exit (KISS §7): report this to a human with the escalate tool — what: the run already spent more tool calls than its budget allows; tried: the run finished before the breach was observable; suggested: raise the budget, split the task, or accept the overspend"
+      ],
+      "durationMs": 46082890,
+      "criteria": [
+        {
+          "criterionId": "AC-verilator-compare",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 log/hibiki-ev/verilator/check-verilator.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-f7fd1903-f7b2-4343-a853-9013f269ad3b/AC-verilator-compare.log"
+        },
+        {
+          "criterionId": "AC-verilator-run-integrity",
+          "verdict": "pass",
+          "verifierId": "command",
+          "verifierVersion": "1",
+          "command": "python3 log/hibiki-ev/verilator/check-verilator-run.py",
+          "exitCode": 0,
+          "logRef": "sg-t-0663b378-ecc5-46f0-a395-177624bc06f9/r-f7fd1903-f7b2-4343-a853-9013f269ad3b/AC-verilator-run-integrity.log"
+        }
+      ],
+      "metrics": {
+        "tokens": {
+          "uncachedInputTokens": 890610,
+          "outputTokens": 498285,
+          "cacheReadTokens": 217347456,
+          "cacheWriteTokens": 0
+        },
+        "toolCalls": {
+          "calls": 691,
+          "failures": 8
+        },
+        "humanInterventions": 0,
+        "retries": 0,
+        "evidenceLogs": 2
+      }
+    }
+  ],
+  "questions": [
+    {
+      "childRunId": "r-43d92629-b85d-479a-8b6d-a26718e9b0d6",
+      "requestKey": "rtl-fix-authority",
+      "questionDigest": "6603a9fb5439620cd81b0836c60e258bb9e5edf2d12577b56d48204439903ced",
+      "questionRef": {
+        "sessionId": "s-1ac5612c-bf64-4579-b1eb-9d0344c81a55",
+        "seq": 145
+      },
+      "messageId": "m-q-0011ce8c7e904fb1cf251355c99c9d14a2570c544bc2c66bd679cb52cf31b3c8",
+      "blocking": false,
+      "questionId": "q-0011ce8c7e904fb1cf251355c99c9d14a2570c544bc2c66bd679cb52cf31b3c8",
+      "parentRunId": "r-1d4dbd2a-09cf-46da-8d6a-580097ef0c30",
+      "askedAt": "2026-10-05T11:08:21.814Z",
+      "answers": [
+        {
+          "questionId": "q-0011ce8c7e904fb1cf251355c99c9d14a2570c544bc2c66bd679cb52cf31b3c8",
+          "parentRunId": "r-1d4dbd2a-09cf-46da-8d6a-580097ef0c30",
+          "requestKey": "rtl-behavior-scope-b",
+          "answerDigest": "a88236a12c66ca5c457aa1568090f4a4b0ee81e5a25fad2c35ac43e4f562e627",
+          "resolves": true,
+          "answerRef": {
+            "sessionId": "s-a9061820-acbe-4498-9f5f-ea0d37833bc2",
+            "seq": 258
+          },
+          "messageId": "m-a-238dd763f39292a83d83951514a1408e5f99642bfcd21c147cfea41ed7c75e97",
+          "answerId": "a-238dd763f39292a83d83951514a1408e5f99642bfcd21c147cfea41ed7c75e97",
+          "answeredAt": "2026-10-05T11:09:18.273Z"
+        }
+      ]
+    },
+    {
+      "childRunId": "r-f7fd1903-f7b2-4343-a853-9013f269ad3b",
+      "requestKey": "rtl-prelookahead-full-run-infeasible",
+      "questionDigest": "2cc24c1319c3a8a655c2500511db9cc4b9468d636be336d80a7a4cc293db7eee",
+      "questionRef": {
+        "sessionId": "s-5dbade90-1900-4e86-b7d0-1fb03095817e",
+        "seq": 521
+      },
+      "messageId": "m-q-d6a033119fffc30ec996960a2bee1f6a20399fe2adf8d539ee3f47d6befa1e43",
+      "blocking": true,
+      "questionId": "q-d6a033119fffc30ec996960a2bee1f6a20399fe2adf8d539ee3f47d6befa1e43",
+      "parentRunId": "r-84df5298-ae95-4850-8ca9-95a274561641",
+      "askedAt": "2026-10-05T15:05:07.312Z",
+      "answers": [
+        {
+          "questionId": "q-d6a033119fffc30ec996960a2bee1f6a20399fe2adf8d539ee3f47d6befa1e43",
+          "parentRunId": "r-84df5298-ae95-4850-8ca9-95a274561641",
+          "requestKey": "verilator-full-run-feasibility-r1",
+          "answerDigest": "5b6b0afafcebda2142d6edc7ab398005aec23e0cae5db16fb14042e0ab3177af",
+          "resolves": true,
+          "answerRef": {
+            "sessionId": "s-3639be17-008c-4bc1-8f9e-9258385b8fbc",
+            "seq": 327
+          },
+          "messageId": "m-a-e663835e0ad42b2cf895aaa0019e30e7846393260fb6c700b420e572ef3b7ef4",
+          "answerId": "a-e663835e0ad42b2cf895aaa0019e30e7846393260fb6c700b420e572ef3b7ef4",
+          "answeredAt": "2026-10-05T15:07:14.122Z"
+        }
+      ]
+    },
+    {
+      "childRunId": "r-f7fd1903-f7b2-4343-a853-9013f269ad3b",
+      "requestKey": "rtl-prelookahead-config-gate-report",
+      "questionDigest": "48a149216401b4ff0d1fae859c3ae0001efaf98d3518f9746fb108d4d2171609",
+      "questionRef": {
+        "sessionId": "s-5dbade90-1900-4e86-b7d0-1fb03095817e",
+        "seq": 875
+      },
+      "messageId": "m-q-7cb84e83cf09a2f5d02a36355a8f6285ca9d11c526b7c2b03d714a07562a9e1e",
+      "blocking": true,
+      "questionId": "q-7cb84e83cf09a2f5d02a36355a8f6285ca9d11c526b7c2b03d714a07562a9e1e",
+      "parentRunId": "r-84df5298-ae95-4850-8ca9-95a274561641",
+      "askedAt": "2026-10-05T16:55:27.781Z",
+      "answers": [
+        {
+          "questionId": "q-7cb84e83cf09a2f5d02a36355a8f6285ca9d11c526b7c2b03d714a07562a9e1e",
+          "parentRunId": "r-84df5298-ae95-4850-8ca9-95a274561641",
+          "requestKey": "verilator-full-run-feasibility-r2",
+          "answerDigest": "885baea39199659faec047a3bca766f3cc2356302e12730c22fdb2f0c1aa6d8a",
+          "resolves": true,
+          "answerRef": {
+            "sessionId": "s-3639be17-008c-4bc1-8f9e-9258385b8fbc",
+            "seq": 344
+          },
+          "messageId": "m-a-5aebde4dd9c6fa2ec5d614335db0fcb973dd841e75a9dd9cbb883a267ddcf2b0",
+          "answerId": "a-5aebde4dd9c6fa2ec5d614335db0fcb973dd841e75a9dd9cbb883a267ddcf2b0",
+          "answeredAt": "2026-10-05T16:59:08.415Z"
+        }
+      ]
+    },
+    {
+      "childRunId": "r-84df5298-ae95-4850-8ca9-95a274561641",
+      "requestKey": "verilator-partition-scope-ruling",
+      "questionDigest": "30ef3a824f23b888efcf87bc752926379e23a4134736912962afdb73b6a06bcf",
+      "questionRef": {
+        "sessionId": "s-3639be17-008c-4bc1-8f9e-9258385b8fbc",
+        "seq": 350
+      },
+      "messageId": "m-q-896e21d3cf4531fa9d9c2e4cb58480285b94f82ee502394258380910befb9e3d",
+      "blocking": false,
+      "questionId": "q-896e21d3cf4531fa9d9c2e4cb58480285b94f82ee502394258380910befb9e3d",
+      "parentRunId": "r-cd0d2b0b-77ea-4946-aed1-f69cd33b8b97",
+      "askedAt": "2026-10-05T16:59:26.600Z",
+      "answers": [
+        {
+          "questionId": "q-896e21d3cf4531fa9d9c2e4cb58480285b94f82ee502394258380910befb9e3d",
+          "parentRunId": "r-cd0d2b0b-77ea-4946-aed1-f69cd33b8b97",
+          "requestKey": "verilator-partition-ruling-v1",
+          "answerDigest": "1c0428ee1d6b58d6cc5750d08149032e4dae258496fc7051e28b54ceefd81572",
+          "resolves": true,
+          "answerRef": {
+            "sessionId": "0663b378-ecc5-46f0-a395-177624bc06f9",
+            "seq": 155
+          },
+          "messageId": "m-a-bea4ae228fcc2676bbaaae8159db2f43e1b2b283423117f6a194c9b86577c174",
+          "answerId": "a-bea4ae228fcc2676bbaaae8159db2f43e1b2b283423117f6a194c9b86577c174",
+          "answeredAt": "2026-10-05T17:00:20.847Z"
+        }
+      ]
+    },
+    {
+      "childRunId": "r-f7fd1903-f7b2-4343-a853-9013f269ad3b",
+      "requestKey": "partition-concurrency-cap-report",
+      "questionDigest": "ffab853a889dc85689bea8c2acc9e791c71f3efe240bd18f19b4bbf206adfa3e",
+      "questionRef": {
+        "sessionId": "s-5dbade90-1900-4e86-b7d0-1fb03095817e",
+        "seq": 1450
+      },
+      "messageId": "m-q-2bbae1a24f17e1e9fedd14f7cdb050d1df016610933c1a5ce26d01fc6d2d4b77",
+      "blocking": false,
+      "questionId": "q-2bbae1a24f17e1e9fedd14f7cdb050d1df016610933c1a5ce26d01fc6d2d4b77",
+      "parentRunId": "r-84df5298-ae95-4850-8ca9-95a274561641",
+      "askedAt": "2026-10-05T17:15:58.212Z",
+      "answers": [
+        {
+          "questionId": "q-2bbae1a24f17e1e9fedd14f7cdb050d1df016610933c1a5ce26d01fc6d2d4b77",
+          "parentRunId": "r-84df5298-ae95-4850-8ca9-95a274561641",
+          "requestKey": "verilator-p2-proceed-r3",
+          "answerDigest": "d76b5f8b7d0cf3d3b668f3f6df3083f0cc24f2e9620a5aa016340487ffbfd692",
+          "resolves": true,
+          "answerRef": {
+            "sessionId": "s-3639be17-008c-4bc1-8f9e-9258385b8fbc",
+            "seq": 373
+          },
+          "messageId": "m-a-667cf2200eefa158ed7d31353f46622995543741d397f03d8ffd09ecda643232",
+          "answerId": "a-667cf2200eefa158ed7d31353f46622995543741d397f03d8ffd09ecda643232",
+          "answeredAt": "2026-10-05T17:16:52.048Z"
+        }
+      ]
+    },
+    {
+      "childRunId": "r-84df5298-ae95-4850-8ca9-95a274561641",
+      "requestKey": "verilator-two-stage-amendment",
+      "questionDigest": "eb1bbbb37c53c63544990dada2411f9c174320dbd5c238eb7983053c0eebd8da",
+      "questionRef": {
+        "sessionId": "s-3639be17-008c-4bc1-8f9e-9258385b8fbc",
+        "seq": 375
+      },
+      "messageId": "m-q-12dc09ad3a64a20ce33db9292cb94ebdb775f96f243537103d892026bcf4964b",
+      "blocking": false,
+      "questionId": "q-12dc09ad3a64a20ce33db9292cb94ebdb775f96f243537103d892026bcf4964b",
+      "parentRunId": "r-cd0d2b0b-77ea-4946-aed1-f69cd33b8b97",
+      "askedAt": "2026-10-05T17:16:52.622Z",
+      "answers": [
+        {
+          "questionId": "q-12dc09ad3a64a20ce33db9292cb94ebdb775f96f243537103d892026bcf4964b",
+          "parentRunId": "r-cd0d2b0b-77ea-4946-aed1-f69cd33b8b97",
+          "requestKey": "verilator-two-stage-ruling-v1",
+          "answerDigest": "25eed6ab63a5103e88fc54ac58014fcc6c2a619c67d78905913ed78182c62f7e",
+          "resolves": true,
+          "answerRef": {
+            "sessionId": "0663b378-ecc5-46f0-a395-177624bc06f9",
+            "seq": 170
+          },
+          "messageId": "m-a-cd4672198d1f3411e9e42da4aa11d069888df4801564f615a57333a0599d3afb",
+          "answerId": "a-cd4672198d1f3411e9e42da4aa11d069888df4801564f615a57333a0599d3afb",
+          "answeredAt": "2026-10-05T17:17:23.371Z"
+        }
+      ]
+    },
+    {
+      "childRunId": "r-f7fd1903-f7b2-4343-a853-9013f269ad3b",
+      "requestKey": "campaign-eta-slip-report",
+      "questionDigest": "2f344224c02f7314c7be3a3d80d64d1c879134e8091d90ad21e1581a90e72e44",
+      "questionRef": {
+        "sessionId": "s-5dbade90-1900-4e86-b7d0-1fb03095817e",
+        "seq": 2012
+      },
+      "messageId": "m-q-fea9b4e9267af10aecf3732e0c8d292f730f8ba267d024d0729953b170f6cd97",
+      "blocking": false,
+      "questionId": "q-fea9b4e9267af10aecf3732e0c8d292f730f8ba267d024d0729953b170f6cd97",
+      "parentRunId": "r-84df5298-ae95-4850-8ca9-95a274561641",
+      "askedAt": "2026-10-05T19:21:17.175Z",
+      "answers": [
+        {
+          "questionId": "q-fea9b4e9267af10aecf3732e0c8d292f730f8ba267d024d0729953b170f6cd97",
+          "parentRunId": "r-84df5298-ae95-4850-8ca9-95a274561641",
+          "requestKey": "verilator-p2-finish-r4",
+          "answerDigest": "965d56950ee400a1e67980b02263f943172812be014238107c3244f06a7c313c",
+          "resolves": true,
+          "answerRef": {
+            "sessionId": "s-3639be17-008c-4bc1-8f9e-9258385b8fbc",
+            "seq": 397
+          },
+          "messageId": "m-a-fc0d1aa1229331c5e65a199e13ad271f88a33e0a9a01a341eb1df1b67159593f",
+          "answerId": "a-fc0d1aa1229331c5e65a199e13ad271f88a33e0a9a01a341eb1df1b67159593f",
+          "answeredAt": "2026-10-05T19:21:33.607Z"
+        }
+      ]
+    }
+  ],
+  "taskEdges": [
+    {
+      "from": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "to": "t-f6dbcd39-5e5d-447a-94ec-517eadf595a7"
+    },
+    {
+      "from": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "to": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d"
+    },
+    {
+      "from": "t-f6dbcd39-5e5d-447a-94ec-517eadf595a7",
+      "to": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d"
+    },
+    {
+      "from": "t-f0f77a5c-4c39-4288-96a1-029a628d56b5",
+      "to": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d"
+    },
+    {
+      "from": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "to": "t-f0f77a5c-4c39-4288-96a1-029a628d56b5"
+    },
+    {
+      "from": "t-f6dbcd39-5e5d-447a-94ec-517eadf595a7",
+      "to": "t-f0f77a5c-4c39-4288-96a1-029a628d56b5"
+    },
+    {
+      "from": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "to": "t-bcd34961-c383-4586-ba2f-72ae65a4d059"
+    },
+    {
+      "from": "t-f6dbcd39-5e5d-447a-94ec-517eadf595a7",
+      "to": "t-bcd34961-c383-4586-ba2f-72ae65a4d059"
+    },
+    {
+      "from": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d",
+      "to": "t-bcd34961-c383-4586-ba2f-72ae65a4d059"
+    },
+    {
+      "from": "t-f0f77a5c-4c39-4288-96a1-029a628d56b5",
+      "to": "t-bcd34961-c383-4586-ba2f-72ae65a4d059"
+    },
+    {
+      "from": "t-bcd34961-c383-4586-ba2f-72ae65a4d059",
+      "to": "t-7d7a576d-a2c3-412c-932f-e32f0b6bfca4"
+    },
+    {
+      "from": "t-5859a46b-7000-4200-aa4e-d9bde3f0add5",
+      "to": "t-57216946-1209-4783-9dc8-94300a82e59a"
+    },
+    {
+      "from": "t-f6dbcd39-5e5d-447a-94ec-517eadf595a7",
+      "to": "t-57216946-1209-4783-9dc8-94300a82e59a"
+    },
+    {
+      "from": "t-819efd6d-ebe0-4ae1-bd24-7127ffd6949d",
+      "to": "t-57216946-1209-4783-9dc8-94300a82e59a"
+    },
+    {
+      "from": "t-f0f77a5c-4c39-4288-96a1-029a628d56b5",
+      "to": "t-57216946-1209-4783-9dc8-94300a82e59a"
+    },
+    {
+      "from": "t-bcd34961-c383-4586-ba2f-72ae65a4d059",
+      "to": "t-57216946-1209-4783-9dc8-94300a82e59a"
+    },
+    {
+      "from": "t-7d7a576d-a2c3-412c-932f-e32f0b6bfca4",
+      "to": "t-57216946-1209-4783-9dc8-94300a82e59a"
+    },
+    {
+      "from": "t-be988716-c0ad-4760-a167-9d0e8f0a11ca",
+      "to": "t-6bc93693-0918-45e7-a328-c704a1ad1804"
+    },
+    {
+      "from": "t-6bc93693-0918-45e7-a328-c704a1ad1804",
+      "to": "t-94f3e8e7-7a5d-45d4-a1b3-355fbcf81e24"
+    },
+    {
+      "from": "t-94f3e8e7-7a5d-45d4-a1b3-355fbcf81e24",
+      "to": "t-32a178a5-e99f-47e2-b386-6ea452f4d715"
+    },
+    {
+      "from": "t-32a178a5-e99f-47e2-b386-6ea452f4d715",
+      "to": "t-9893fd7f-e470-48fc-bccf-9d7422728640"
+    },
+    {
+      "from": "t-32a178a5-e99f-47e2-b386-6ea452f4d715",
+      "to": "t-dee5134a-f79e-48ce-97bf-913ecbca4160"
+    },
+    {
+      "from": "t-32a178a5-e99f-47e2-b386-6ea452f4d715",
+      "to": "t-55384d79-222e-432a-ab48-8d39c93dc345"
+    },
+    {
+      "from": "t-9893fd7f-e470-48fc-bccf-9d7422728640",
+      "to": "t-55384d79-222e-432a-ab48-8d39c93dc345"
+    },
+    {
+      "from": "t-dee5134a-f79e-48ce-97bf-913ecbca4160",
+      "to": "t-55384d79-222e-432a-ab48-8d39c93dc345"
+    },
+    {
+      "from": "t-abf15bbf-f092-4787-b677-91197ccf4c27",
+      "to": "t-742fc023-77df-493d-a082-94105f9fc9c1"
+    },
+    {
+      "from": "t-abf15bbf-f092-4787-b677-91197ccf4c27",
+      "to": "t-c03eca26-2f6c-416a-9a7e-7055c4adc2de"
+    },
+    {
+      "from": "t-742fc023-77df-493d-a082-94105f9fc9c1",
+      "to": "t-c03eca26-2f6c-416a-9a7e-7055c4adc2de"
+    },
+    {
+      "from": "t-abf15bbf-f092-4787-b677-91197ccf4c27",
+      "to": "t-ac38c62e-0afa-4d1f-844d-85faa3cf1952"
+    },
+    {
+      "from": "t-c03eca26-2f6c-416a-9a7e-7055c4adc2de",
+      "to": "t-ac38c62e-0afa-4d1f-844d-85faa3cf1952"
+    },
+    {
+      "from": "t-25abebee-f75a-41ba-8a96-85d97e2b92ce",
+      "to": "t-fe6f35d7-9814-460d-b056-1abef794ae98"
+    },
+    {
+      "from": "t-887d4f38-38de-4689-ace3-805ad9a224d5",
+      "to": "t-23353199-cbca-4cb4-a8c3-93c4cfd806f7"
+    }
+  ],
+  "recovery": {
+    "recovery": {
+      "status": "ready",
+      "wokenSessions": [],
+      "pendingNotices": [],
+      "pendingBatchResults": []
+    },
+    "reconcile": null
+  },
+  "counterexamples": [
+    {
+      "name": "plausible_strings",
+      "checker": "/home/ROXY/code/bb_work/harness/environment/project4/checks/leaf_accept.py",
+      "checkerSha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291",
+      "isolatedDirectory": "/tmp/sg-leaf-accept-audit-xql97v8k",
+      "manifest": {
+        "version": 1,
+        "kind": "topology-boundary",
+        "paths": [
+          "unrelated.txt"
+        ],
+        "result": {
+          "marker": "PASSED",
+          "values": {
+            "tile": "any",
+            "core": "any",
+            "replica": "any",
+            "latency": "any"
+          }
+        }
+      },
+      "fileContents": "no capacity calculation, no chip artifact, no topology validation\n",
+      "exitCode": 0,
+      "stdout": "PASS  task-artifact.json parses as JSON\nPASS  manifest keeps only version/kind/paths/result  []\nPASS  manifest version is 1  1\nPASS  kind names a known schema: 'topology-boundary'\nPASS  paths is a non-empty list  1 entries\nPASS  path stays under the env root: 'unrelated.txt'\nPASS  path exists and is non-empty: unrelated.txt\nPASS  result.marker is PASSED  PASSED\nPASS  result.values.tile is a real value  any\nPASS  result.values.core is a real value  any\nPASS  result.values.replica is a real value  any\nPASS  result.values.latency is a real value  any\n\ntask-artifact.json: kind=topology-boundary\nALL CHECKS PASS\n"
+    },
+    {
+      "name": "wrong_kind_for_topology",
+      "checker": "/home/ROXY/code/bb_work/harness/environment/project4/checks/leaf_accept.py",
+      "checkerSha256": "b0a309422e28798d8520092a61d42ad80be222065074a69a2c8da5507ae5e291",
+      "isolatedDirectory": "/tmp/sg-leaf-accept-audit-xql97v8k",
+      "manifest": {
+        "version": 1,
+        "kind": "artifact-identity",
+        "paths": [
+          "unrelated.txt"
+        ],
+        "result": {
+          "marker": "PASSED",
+          "values": {
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "artifact": "unrelated.txt"
+          }
+        }
+      },
+      "fileContents": "no capacity calculation, no chip artifact, no topology validation\n",
+      "exitCode": 0,
+      "stdout": "PASS  task-artifact.json parses as JSON\nPASS  manifest keeps only version/kind/paths/result  []\nPASS  manifest version is 1  1\nPASS  kind names a known schema: 'artifact-identity'\nPASS  paths is a non-empty list  1 entries\nPASS  path stays under the env root: 'unrelated.txt'\nPASS  path exists and is non-empty: unrelated.txt\nPASS  result.marker is PASSED  PASSED\nPASS  result.values.sha256 is a real value  0000000000000000000000000000000000000000000000000000000000000000\nPASS  result.values.sha256 is 64 hex digits  0000000000000000000000000000000000000000000000000000000000000000\nPASS  result.values.artifact is a real value  unrelated.txt\n\ntask-artifact.json: kind=artifact-identity\nALL CHECKS PASS\n"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "/home/ROXY/code/bb_work/harness/environment/project4/log/hibiki-model-compare/prelookahead_out.bemu.cv2.txt",
+      "bytes": 123269,
+      "sha256": "1b3232012de12fd8b0e82577843c011e333fe35080f7f7e4d67d72dbf5fd0b91"
+    },
+    {
+      "path": "/home/ROXY/code/bb_work/harness/environment/project4/log/hibiki-ev/verilator/prelookahead_out.verilator.cv2.txt",
+      "bytes": 123269,
+      "sha256": "1b3232012de12fd8b0e82577843c011e333fe35080f7f7e4d67d72dbf5fd0b91"
+    },
+    {
+      "path": "/home/ROXY/code/bb_work/harness/environment/project4/log/hibiki-ev/verilator/raw/p2-bitproof.json",
+      "bytes": 1720,
+      "sha256": "71e1bff57583d5b3dc12d7e83e6c8d028acb2dd68d738342aa1430f68c80af3f"
+    }
+  ],
+  "checks": {
+    "unit": {
+      "files": 5,
+      "passed": 109,
+      "skipped": 1
+    },
+    "sourceSize": {
+      "filesChecked": 490,
+      "limitLines": 2000,
+      "passed": true
+    },
+    "persistence": {
+      "eventRoots": 4,
+      "passed": true
+    }
+  },
+  "contextInterpolationProbe": {
+    "input": {
+      "name": "singularity:task-templates",
+      "text": "objective: verify {{artifact}}"
+    },
+    "productionFunction": "renderContextSections",
+    "result": "unknown prompt variable \"{{artifact}}\" in context \"singularity:task-templates\"; registered variables: provider, model, cwd",
+    "note": "Controlled input to actual bundled upstream function; live templates not modified."
+  }
+}

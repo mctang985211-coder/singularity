@@ -20,7 +20,7 @@ import { spawnUnderClaim, type ClaimedSpawn } from './spawn-under-claim.ts'
 import { installGraphSelectedScan } from './trigger.ts'
 import {
   COORDINATION_PRESET,
-  closeOutcomeOf,
+  supervisorOutcomeOf,
   handoffSourceOf,
   handoffSourceRef,
   lastAssistantText,
@@ -267,10 +267,13 @@ async function watchSupervisorCompletion(input: {
       'singularityAgent: supervisor wait',
     )
     if (input.signal?.aborted === true) cancel()
-    await input.agent.whenIdle()
-    if (unloaded || input.signal?.aborted === true) {
-      note = unloaded ? 'the plugin was unloaded before the supervisor completed' : 'the supervisor was cancelled'
-    } else {
+    let continuedState: string | undefined
+    while (true) {
+      await input.agent.whenIdle()
+      if (unloaded || input.signal?.aborted === true) {
+        note = unloaded ? 'the plugin was unloaded before the supervisor completed' : 'the supervisor was cancelled'
+        break
+      }
       const snapshot: TaskSnapshot = await input.ctx.task.snapshotIn(input.storeId)
       const recovery = [...snapshot.runs]
         .reverse()
@@ -278,15 +281,17 @@ async function watchSupervisorCompletion(input: {
       if (recovery !== undefined) {
         status = 'recorded'
         note = `task_recover issued: run ${recovery.runId}`
+        break
       } else {
         const proposals = await proposalsForDiagnosis(input.ctx, input.diagnosis.diagnosisId)
+        const outcome = supervisorOutcomeOf(lastAssistantText(input.agent.session.snapshotEvents()))
         if (proposals.length > 0) {
-          status = proposals.every(
+          const childSource = snapshot.tasks.find(task => task.taskId === input.diagnosis.taskId)?.parentTaskId !== undefined
+          const finished = proposals.every(
             proposal =>
-              proposal.status === 'rolledback' || (proposal.status === 'decided' && proposal.decision !== 'PROMOTE'),
+              proposal.status === 'rolledback' || (proposal.status === 'decided' && proposal.decision !== 'PROMOTE') ||
+              (childSource && proposal.status === 'applied'),
           )
-            ? 'closed'
-            : 'recorded'
           note = proposals
             .map(
               proposal =>
@@ -294,13 +299,38 @@ async function watchSupervisorCompletion(input: {
             )
             .join('; ')
           await notifyParentOfApplied(input.ctx, snapshot, input.diagnosis, proposals, input.sessionId)
-        } else {
-          const close = closeOutcomeOf(lastAssistantText(input.agent.session.snapshotEvents()))
-          if (close !== undefined) {
-            status = 'closed'
-            note = close.reason
+          if (finished) {
+            status = childSource && proposals.some(proposal => proposal.status === 'applied') ? 'recorded' : 'closed'
+            break
           }
+          if (outcome !== undefined) {
+            status = outcome.outcome === 'closed' ? 'closed' : 'interrupted'
+            note = `${outcome.outcome}: ${outcome.reason}; ${note}`
+            break
+          }
+          const state = JSON.stringify(proposals.map(proposal => [proposal.proposalId, proposal.status, proposal.decision]))
+          if (state === continuedState) {
+            note = `blocked: the Supervisor ended without advancing its unfinished proposal; ${note}`
+            break
+          }
+          continuedState = state
+          await input.ctx.agentRuntime.prompt(input.agent, [{
+            type: 'text',
+            text: `Diagnosis ${input.diagnosis.diagnosisId} remains yours. Durable proposal state: ${note}. ` +
+              'A ledger entry does not finish the hand-off. Continue the next candidate/prepare/replay/gate/decide/apply step using the existing proposal. ' +
+              (childSource
+                ? 'After publication the responsible parent replans the child.'
+                : 'After publication decide whether another root Run is justified and call task_recover with the same diagnosis (mode:"improve" for a verified source).') +
+              ' If a concrete obstruction prevents progress, end with {"outcome":"blocked","reason":"..."} in a fenced json block; ' +
+              'if no justified action remains, explicitly close with {"outcome":"closed","reason":"..."}.',
+          }])
+          continue
         }
+        if (outcome !== undefined) {
+          status = outcome.outcome === 'closed' ? 'closed' : 'interrupted'
+          note = outcome.outcome === 'closed' ? outcome.reason : `blocked: ${outcome.reason}`
+        }
+        break
       }
     }
   } catch (error) {

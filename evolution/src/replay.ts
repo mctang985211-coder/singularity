@@ -3,3 +3,4 @@
 
 export * from './replay/contract.ts'
 export * from './replay/comparer.ts'
+export * from './replay/outcome.ts'

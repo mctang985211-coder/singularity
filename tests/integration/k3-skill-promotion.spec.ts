@@ -160,7 +160,7 @@ function sandboxSidecar(h: RunStack, proposalId: string, name: string = SKILL): 
  * ------------------------------------------------------------------------- */
 
 describe('K3-1: a registered execution skill is improved and applied as one whole object', () => {
-  it('fails on the old body and passes on the new one, and the derived two-file object lands through two real human gates', async () => {
+  it('fails on the old body and passes on the new one, and the derived two-file object lands through one real publication approval', async () => {
     const s = await boot()
     const h = s.h
     const production = await writeSkillObject(join(h.home, 'skills'), {
@@ -244,15 +244,15 @@ describe('K3-1: a registered execution skill is improved and applied as one whol
       ])
     }
 
-    // --- the first human gate: the decision changes the ledger and nothing else ---
+    // --- the model decision: the decision changes the ledger and nothing else ---
     const beforeDecision = await productionObject(h)
     await decideThroughTool(s, P1)
     expect(await productionObject(h)).toEqual(beforeDecision)
-    expect(approvalCalls(h).map(call => call.toolName)).toEqual(['evolution_decide'])
+    expect(approvalCalls(h).map(call => call.toolName)).toEqual([])
 
-    // --- the second human gate: the write ---
+    // --- the publication approval: the write ---
     await applyThroughTool(s, P1)
-    expect(approvalCalls(h).map(call => call.toolName)).toEqual(['evolution_decide', 'evolution_apply'])
+    expect(approvalCalls(h).map(call => call.toolName)).toEqual(['evolution_apply'])
     expect(await productionObject(h)).toEqual({ skillMd: candidateBody, sidecar: derivedBytes })
 
     // --- one commit, two files: the intent named both, the completion closed both ---

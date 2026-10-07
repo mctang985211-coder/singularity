@@ -76,12 +76,13 @@ describe('skill sidecar vocabulary', () => {
   test('the sidecar file name, contract version and supported resource positions are fixed', () => {
     expect(SKILL_SIDECAR_FILE).toBe('SKILL.contract.json')
     expect(SKILL_CONTRACT_VERSION).toBe(1)
-    expect(SUPPORTED_SKILL_RESOURCE_DIRS).toEqual(['references', 'scripts'])
+    expect(SUPPORTED_SKILL_RESOURCE_DIRS).toEqual(['references', 'scripts', 'resources'])
   })
 
   test('supported resource paths are one `<dir>/<file>` level under a known directory', () => {
     expect(isSupportedSkillResourcePath('references/a.md')).toBe(true)
     expect(isSupportedSkillResourcePath('scripts/run_bemu.sh')).toBe(true)
+    expect(isSupportedSkillResourcePath('resources/feedback.py')).toBe(true)
     expect(isSupportedSkillResourcePath('references/nested/a.md')).toBe(false)
     expect(isSupportedSkillResourcePath('docs/a.md')).toBe(false)
     expect(isSupportedSkillResourcePath('references')).toBe(false)

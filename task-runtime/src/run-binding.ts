@@ -223,6 +223,17 @@ export async function bindRunProviders(request: RunBindingRequest): Promise<RunP
   if (selected.length === 0) {
     throw new Error(`run "${request.runId}" has no admitted guidance Skill; every task must select readable instructions through requiredCapabilities`)
   }
+  let instructionBytes = 0
+  for (const provider of selected) {
+    instructionBytes += (await readVerifiedFile(provider.verdict.directory, 'SKILL.md')).byteLength
+  }
+  // Reserve room for the contract and execution facts in the 50 KB context read.
+  if (instructionBytes > 40_000) {
+    throw new Error(
+      `run "${request.runId}" selects ${instructionBytes} bytes of Skill instructions, above the 40000-byte inline guidance budget; ` +
+      'select concise relevant guidance, move supporting material into Skill resources, or delegate distinct responsibilities before starting this Run',
+    )
+  }
   const base: RunProviderBinding = {
     registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, [], request.mcpRegistry),
     capabilities: [...rows].sort(),

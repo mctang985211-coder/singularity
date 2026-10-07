@@ -40,7 +40,7 @@ async function assertRecipeConsumption(input: {
 }): Promise<boolean> {
   const { sources, snapshot, task, library, workspace, expected, where } = input
   const branch = new Set(subtreeOf(snapshot, task.taskId).map(item => item.taskId))
-  const proposals = snapshot.proposals.all.filter(proposal => proposal.kind !== 'root' &&
+  const proposals = snapshot.proposals!.all.filter(proposal => proposal.kind !== 'root' &&
     branch.has(proposal.identity.parentTaskId) && proposal.identity.templateRef?.id === expected.template.id)
   let consumed = false
   for (const proposal of proposals) {
@@ -77,7 +77,7 @@ async function assertRecipeConsumption(input: {
     const expanded = await bindTaskDecomposition(library, {
       templateRef: wanted, templateParameters: proposal.identity.templateParameters ?? {},
     } as DecomposeSpec, scope)
-    const children = await Promise.all(expanded.children.map(child => bindTaskTemplate(library, child, scope)))
+    const children = await Promise.all(expanded.children!.map(child => bindTaskTemplate(library, child, scope)))
     const fixed = await fixSpecProtectedInputs({ ...expanded, children }, workspace)
     const normalized = normalizeDecomposition(fixed.spec, {
       storeId: proposal.identity.storeId, parentTaskId: parent.taskId, parentRunId: run.runId,

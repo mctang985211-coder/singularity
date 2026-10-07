@@ -40,8 +40,8 @@ const BASELINE = skillText('# the production version\n')
 const THIRD_PARTY = skillText('# a version no commit of this proposal wrote\n')
 
 /** A loadable `SKILL.md`: the frontmatter the validator and the skill loader both require. */
-function skillText(body: string): string {
-  return `---\nname: ${SKILL}\ndescription: a fixture skill for the commit tools\n---\n\n${body}`
+function skillText(body: string, name = SKILL): string {
+  return `---\nname: ${name}\ndescription: a fixture skill for the commit tools\n---\n\n${body}`
 }
 
 function sha256Of(text: string): string {
@@ -424,6 +424,7 @@ describe('the tools without an open commit intent', () => {
 
 describe('evolution_list', () => {
   function capabilityLines(withSkill: boolean): Record<string, unknown>[] {
+    const candidate = skillText('# the candidate version\n', 'research-new')
     const row = { skills: [withSkill ? 'research-new' : SKILL] }
     const capability = capabilityRowIdentity({ name: 'research', entry: row })
     const common = { formatVersion: 4, proposalId: 'c1', actor: 'root-1' }
@@ -435,11 +436,11 @@ describe('evolution_list', () => {
       {
         ...common, kind: 'candidate', versionSet: { capabilityTable: 'v2' },
         mutation: { rows: { research: row }, ...(withSkill ? { skill: {
-          name: 'research-new', content: CANDIDATE,
+          name: 'research-new', content: candidate,
           sidecar: {
             contractVersion: 1, type: 'execution', capabilities: ['research'], precondition: 'input exists',
             inputs: [], outputs: [], requiredTools: [], verifier: { ref: 'command' },
-            content: { skillMdSha256: sha256Of(CANDIDATE), resources: [] },
+            content: { skillMdSha256: sha256Of(candidate), resources: [] },
           },
         } } : {}) },
         at: AT(1),
@@ -449,7 +450,7 @@ describe('evolution_list', () => {
         capabilityRow: capability, capabilityBaseline: null,
         ...(withSkill ? {
           skillContent: {
-            name: 'research-new', sha256: sha256Of(CANDIDATE),
+            name: 'research-new', sha256: sha256Of(candidate),
             contract: { sha256: SIDECAR_SHA256, contractDigest: SIDECAR_CONTRACT_DIGEST },
           },
           skillBaseline: null,
@@ -479,7 +480,7 @@ describe('evolution_list', () => {
     expect(listed).toContain('c1 [prepared] L2 capability research (base v1)')
     expect(listed).toContain('candidate row: research sha256:e4cef40c66dc')
     expect(listed).toContain('production row baseline: absent')
-    expect(listed).toContain(`new execution skill: research-new sha256:${sha256Of(CANDIDATE).slice(0, 12)}`)
+    expect(listed).toContain(`new execution skill: research-new sha256:${sha256Of(skillText('# the candidate version\n', 'research-new')).slice(0, 12)}`)
     expect(listed).toContain('production skill baseline: absent')
   })
 

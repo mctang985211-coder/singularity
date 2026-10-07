@@ -32,6 +32,7 @@ import { assertExperimentReport, canonicalJson, digestOf, protectedInputsDigest 
 import { sha256Hex } from '@dangosys/dsh-singularity-task'
 import type { SkillPromotionSources, VerifierVocabulary } from './shared.ts'
 import { identityLabel, noExperimentRefusal, reportBytes } from './shared.ts'
+import { assertOutcomeEvidence } from '../experiment/outcome.ts'
 
 /** Whether one report side's evidence exists in the store as the side says it does. */
 export function assertSideEvidence(input: {
@@ -555,7 +556,7 @@ export async function assertSideProviderBinding(input: {
     }
     const expectedContract = sideObject.contract?.contractDigest ?? null
     // The object's own bytes as the run's binding records them: this build's
-    const expectedContentDigest = skillContentDigest({ skillMdSha256: sideObject.sha256, resources: [] })
+    const expectedContentDigest = skillContentDigest({ skillMdSha256: sideObject.sha256, resources: sideObject.resources ?? [] })
     if ((bound.contractDigest ?? null) !== expectedContract) {
       throw new Error(
         `evolution: run "${run.runId}" of the ${where} bound skill "${name}" declaration ` +
@@ -784,5 +785,6 @@ export async function experimentEvidence(
         'own records, never from an edited file',
     )
   }
+  await assertOutcomeEvidence(sources.root, report)
   return { view: experiment, report }
 }

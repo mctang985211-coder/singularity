@@ -198,12 +198,20 @@ describe('SingularityAgent assembly', () => {
 
     const off = await mount()
     expect(read(off.ctx)).toBe(false)
+    expect(off.ctx.singularityEvolution.publicationApproval).toBe('ask')
     await off.ctx.fiber.dispose()
     expect(off.ctx.get('singularityEvolution')).toBeUndefined()
 
     const on = await mount({ evolution: 'on' })
     expect(read(on.ctx)).toBe(true)
     await on.ctx.fiber.dispose()
+  })
+
+  it('exposes explicit publication preauthorization and rejects a misspelled policy', async () => {
+    const { ctx } = await mount({ evolution: 'on', publicationApproval: 'auto' })
+    expect(ctx.singularityEvolution.publicationApproval).toBe('auto')
+    await ctx.fiber.dispose()
+    await expect(mount({ evolution: 'on', publicationApproval: 'never' } as unknown as Config)).rejects.toThrow(/publicationApproval/)
   })
 
   it('installs the root-budget approval on the runtime at construction, and uninstalls it with the plugin', async () => {
