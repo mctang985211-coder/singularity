@@ -11,8 +11,8 @@ Dependencies: workspace `task`, `task-runtime`; peers `cordis` + `dsh-session`.
 config.yaml: optional `root` (default `$DSH_HOME/evolution`), `skillRoot`
 (default `$DSH_HOME/skills`), `capabilityConfig` (the deployment `config.yml`
 whose `task-runtime` `capabilities:` row a capability commit writes); injected
-by the assembly: `repoRoot`, `modelSelection`, `supervisorDelegation`,
-`commitProbe` / `capabilityConfigProbe` (typed test seams).
+by the assembly: `repoRoot`, `modelSelection`, `commitProbe` /
+`capabilityConfigProbe` (typed test seams).
 
 ### Tools
 
@@ -26,7 +26,7 @@ none
 
 1. ctx.evolution: propose / candidate / prepare / gate / decide / apply /
    rollback / reconcile / openIntentTargets / openIntentCapabilities /
-   experiment(s) / runExperiment / resumeExperiment / coordinateRecovery /
+   experiment(s) / runExperiment / resumeExperiment /
    readSkillCandidate / readCapabilityCandidate / checkPromotion /
    checkProductionBaseline
 

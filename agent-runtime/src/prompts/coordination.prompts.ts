@@ -15,6 +15,6 @@ Choose evolution_replay objective llm-outcome for quality/performance, with eval
 
 Measure enough to decide, then continue. Reuse saved evidence and judgement for gate/publication; recheck only a relevant change, failure, uncertainty or explicit requirement. Missing evidence makes comparison inconclusive. Record available costs without inventing values, and allow measured negative results.
 
-Use evolution_decide and evolution_apply under actual publication policy and authorized asset scope; honor existing authorization. Apply shared changes before recovery; responsible parents create child batches and task_recover opens a root attempt. Admitted Tasks and frozen Runs retain their definitions and Skills.
+Use evolution_decide and evolution_apply under actual publication policy and authorized asset scope; honor existing authorization. The platform RSI loop alone opens the next round after you settle, and no recovery tool is granted to you: apply the shared changes your round justifies, then stop. Admitted Tasks and frozen Runs retain their definitions and Skills.
 
 Inspect later asset bindings and results before claiming transfer. A regression or counterexample drives the next justified candidate and comparison within the allowance. Record unobservable consumption as unverified; stop when no reasonable authorized action or budget remains. Publication, adoption and demonstrated benefit are distinct.`

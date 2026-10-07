@@ -17,7 +17,7 @@ import type {
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
 import { batchIdFor, blockingQuestionsOf, taskContractIdentity } from '@dangosys/dsh-singularity-task'
-import { checkDecomposition } from '../admission.ts'
+import { checkDecomposition, commandSyntaxDefects } from '../admission.ts'
 import { providerRefusals } from '../provider-precheck.ts'
 import { resolveCapabilities } from '../capability.ts'
 import { checkBatchAdmission, hasRootLimits, resolveRootBudget } from '../root-budget.ts'
@@ -225,6 +225,28 @@ export async function checkDerivedBatch(
           `task-runtime: admission rejected decomposition of "${parentTaskId}":\n- ${verdict.reasons.join('\n- ')}`,
         ),
         reasons: verdict.reasons,
+        gaps: [],
+      },
+    }
+  }
+  /**
+   * The one rule the structural verdict cannot make: a criterion's command is
+   * parsed by a shell here, in the same pass that refuses the batch, so a batch
+   * whose criterion the shell cannot parse never mints children. The label is
+   * the one `checkDecomposition` gives a child at this stage, before ids exist.
+   */
+  const syntaxReasons: string[] = []
+  for (const [index, child] of batch.children.entries()) {
+    syntaxReasons.push(...(await commandSyntaxDefects(child.contract.acceptanceCriteria, `child ${index}`)))
+  }
+  if (syntaxReasons.length > 0) {
+    return {
+      ok: false,
+      refusal: {
+        error: new Error(
+          `task-runtime: admission rejected decomposition of "${parentTaskId}":\n- ${syntaxReasons.join('\n- ')}`,
+        ),
+        reasons: syntaxReasons,
         gaps: [],
       },
     }

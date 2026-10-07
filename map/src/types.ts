@@ -73,6 +73,21 @@ export interface ModelsResponse {
   readonly default: ModelRef
 }
 
+/** A graph-level RSI run: the round objective, how many rounds to iterate, and whether a human gates each round. */
+export interface RsiConfig {
+  readonly task: string
+  readonly iterationRounds: number
+  readonly humanReview: boolean
+}
+
+/** How far a running RSI loop has got; absent until the driver reports its first round. */
+export interface RsiProgress {
+  /** 1-based round in flight, or the last completed one when the phase is `done`/`failed`. */
+  readonly round: number
+  readonly phase: 'running' | 'publishing' | 'debugging' | 'done' | 'failed'
+  readonly note?: string
+}
+
 export interface GraphEntry {
   readonly id: string
   readonly name: string
@@ -84,6 +99,8 @@ export interface GraphEntry {
   readonly createdAt?: number
   readonly repos?: readonly string[]
   readonly model?: ModelRef
+  readonly rsi?: RsiConfig
+  readonly rsiProgress?: RsiProgress
 }
 
 export interface GraphsResponse {
@@ -107,6 +124,7 @@ export interface CreateGraphBody {
   readonly createEnv?: true
   readonly repos?: readonly string[]
   readonly model?: ModelRef
+  readonly rsi?: RsiConfig
 }
 
 export type RunStatus = 'running' | 'blocked' | 'failed' | 'verified' | 'cancelled'

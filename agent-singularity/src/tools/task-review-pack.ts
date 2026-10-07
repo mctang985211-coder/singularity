@@ -7,8 +7,7 @@ import type { Diagnosis, ReviewDimensions, ReviewMetrics, ReviewRecord, TaskSnap
 import { JUDGED_DIMENSIONS, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import { readReviewAgentAttempts } from '../coordination/ledger.ts'
 import type { ReviewAgentAttempt, ReviewAgentSource } from '../coordination/ledger.ts'
-import { handoffFactsOf, handoffStateLine, needsSupervisor, roundsForDiagnosis } from '../coordination/handoff-rules.ts'
-import type { HandoffFacts } from '../coordination/handoff-rules.ts'
+import { supervisorAttemptsLine } from '../coordination/handoff-rules.ts'
 import { reviewRef } from '../coordination/identity.ts'
 import { sessionId, text } from '../shared.ts'
 
@@ -133,18 +132,12 @@ function renderReview(review: ReviewRecord): string[] {
   return lines
 }
 
-/** How far one diagnosis's hand-off has gone (A5 §3, plan F.4): what the ledger, the allowance and the source's rounds answer for it. */
-function handoffMark(diagnosis: Diagnosis, handoff: HandoffFacts, snapshot: TaskSnapshot): string {
-  if (!needsSupervisor(snapshot, diagnosis, handoff.attempts)) return 'coordinator-owned — delivered to the existing coordinator; no shared improvement requires a supervisor'
-  return handoffStateLine({
-    diagnosis,
-    attempts: handoff.attempts,
-    budget: handoff.budget,
-    rounds: roundsForDiagnosis(snapshot, diagnosis),
-  })
+/** How far one diagnosis's supervision has gone: the supervisor attempts the LEDGER holds for it. */
+function supervisionMark(diagnosis: Diagnosis, attempts: readonly ReviewAgentAttempt[]): string {
+  return supervisorAttemptsLine(diagnosis.diagnosisId, attempts)
 }
 
-function renderDiagnosis(diagnosis: Diagnosis, handoff: HandoffFacts, snapshot: TaskSnapshot): string[] {
+function renderDiagnosis(diagnosis: Diagnosis, attempts: readonly ReviewAgentAttempt[]): string[] {
   const producer = diagnosis.producedBy === undefined
     ? ''
     : diagnosis.producedBy.kind === 'agent' && diagnosis.producedBy.sessionId !== undefined
@@ -166,7 +159,7 @@ function renderDiagnosis(diagnosis: Diagnosis, handoff: HandoffFacts, snapshot: 
     }
   }
   for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`)
-  lines.push(`  handoff: ${handoffMark(diagnosis, handoff, snapshot)}`)
+  lines.push(`  supervision: ${supervisionMark(diagnosis, attempts)}`)
   return lines
 }
 
@@ -197,13 +190,11 @@ export interface ReviewPackInput {
   readonly source: ReviewAgentSource
   /** The store's coordination attempts, as the ledger holds them (`readReviewAgentAttempts`). */
   readonly attempts: readonly ReviewAgentAttempt[]
-  /** What this deployment would do with each diagnosis's hand-off (A6). */
-  readonly handoff: HandoffFacts
 }
 
 /** One exact source in full, with bounded same-graph evidence navigation through the existing read tools. */
 export function buildReviewPack(input: ReviewPackInput): string {
-  const { snapshot, source, attempts, handoff } = input
+  const { snapshot, source, attempts } = input
   const { taskId } = source
   const task = snapshot.tasks.find(item => item.taskId === taskId)
   if (task === undefined) throw new Error(`task_review_pack: unknown task "${taskId}"`)
@@ -275,7 +266,7 @@ export function buildReviewPack(input: ReviewPackInput): string {
   const shownDiagnoses = budgetList(budget, {
     header: [`diagnoses (${diagnoses.length}):`],
     units: diagnoses,
-    lines: diagnosis => renderDiagnosis(diagnosis, handoff, snapshot),
+    lines: diagnosis => renderDiagnosis(diagnosis, attempts),
     tail: count => [`diagnoses shown: ${count}/${diagnoses.length}; exact records through context_read kind:"diagnosis" ref:<diagnosisId>, discovered through task_status scope:"graph".`],
   })
   if (shownDiagnoses === undefined) budget.add('Diagnoses did not fit; discover diagnosisRefs through task_status scope:"graph", then context_read kind:"diagnosis".')
@@ -291,10 +282,10 @@ export function defineTaskReviewPackTool(ctx: Context) {
       'itself, the exact source review in full (criteria, log tail, blockers, session), historical review references, the ' +
       'review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the ' +
       'fact table does not carry, the dependency edges touching ' +
-      'it, and its diagnoses with any agent judgements — every diagnosis marked with its ' +
-      'hand-off state (the supervisor it was delegated to, the outcome that settled it, or the named reason nothing ' +
-      'was opened: no live root session, the source\'s round cap, or the allowance spent). It reports the facts only: whether a review agent runs is ' +
-      'decided elsewhere (a terminal review is accepted on its own under the deployment\'s autoReview mode; an explicit call names its source). ' +
+      'it, and its diagnoses with any agent judgements — every diagnosis marked with the ' +
+      'supervisor attempts the coordination ledger holds for it (which session ran it and how it ended), which only a ' +
+      'graph that runs an RSI loop has. It reports the facts only: whether a review agent runs is ' +
+      'decided elsewhere (an explicit call names its source; a graph\'s RSI loop spawns its supervisor itself). ' +
       'It adds bounded same-graph DAG navigation with exact run/session ids, template and frozen provider digests, and observed counters. Continue with task_status scope:"graph" and context_read; no ancestry or sibling log replay. Feed this to task_diagnose, or ' +
       'to task_review_agent when a judgement is needed.',
     parameters: {
@@ -321,12 +312,7 @@ export function defineTaskReviewPackTool(ctx: Context) {
         return `task_review_pack: no review record for source ${reviewRef(source)} in store ${storeId}; nothing to pack`
       }
       const attempts = await readReviewAgentAttempts(storeId)
-      return buildReviewPack({
-        snapshot,
-        source,
-        attempts,
-        handoff: handoffFactsOf(attempts),
-      })
+      return buildReviewPack({ snapshot, source, attempts })
     },
   })
 }

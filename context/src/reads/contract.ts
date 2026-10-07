@@ -57,9 +57,9 @@ export async function contractProjection(deps: ReadDeps, loaded: LoadedCaller): 
   }
   const task = target.task as TaskInstance
   const run = target.run
-  const role: 'worker' | 'root' | 'reviewer' | 'replay' =
+  const role: 'worker' | 'root' | 'reviewer' | 'supervisor' | 'replay' =
     resolution.kind === 'reviewer'
-      ? 'reviewer'
+      ? resolution.delegation.role ?? 'reviewer'
       : resolution.kind === 'root'
         ? 'root'
         : task.parentTaskId === undefined && run?.parentRunId !== undefined
@@ -116,15 +116,17 @@ export async function contractProjection(deps: ReadDeps, loaded: LoadedCaller): 
       '',
       `- this session has no business Run: the contract above belongs to the task it was delegated to review ` +
         `(delegated by session ${resolution.delegation.actor}, recorded ${resolution.delegation.at}), and reading it is not executing it.`,
+      ...(role === 'supervisor' ? ['- responsibility: investigate and compare reusable method candidates through Evolution; the platform owns round scheduling.'] : []),
+      ...(resolution.delegation.sourceRunId == null ? [] : [`- exact source Run: ${resolution.delegation.sourceRunId}`]),
     ]
     if (budget.addAll(label) > 0) return tooLarge('the review-only label', taskPageHint(task.taskId))
   }
 
   // Blocks owed after the bounded lists are measured before them: the lists hand
   // their room forward, so a long reference list is cut and named instead.
-  const summaryLines: string[] = role === 'reviewer' && run?.providerBinding !== undefined
+  const summaryLines: string[] = resolution.kind === 'reviewer' && run?.providerBinding !== undefined
     ? await bindingLines(deps.taskRuntime, run.providerBinding) : []
-  if (role !== 'reviewer') {
+  if (resolution.kind !== 'reviewer') {
     if (run?.providerBinding === undefined || run.providerBinding.skills.length === 0) {
       return refused('unreadable', `task "${task.taskId}" has no bound guidance Skill; its model request cannot execute unguided work.`)
     }

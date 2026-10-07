@@ -77,6 +77,26 @@ export class GraphsState {
         this.value = { ...this.value, graphs }
         return
       }
+      case 'graph/rsi': {
+        const idx = this.value.graphs.findIndex(g => g.id === event.id)
+        if (idx < 0) throw new Error(`graphs: unknown graph "${event.id}"`)
+        // Clear driver bookkeeping, not the frozen root task or its historical rounds.
+        const { rsi: _previous, rsiProgress: _progress, ...bare } = this.value.graphs[idx]
+        const next = event.rsi === null ? bare : { ...bare, rsi: event.rsi }
+        const graphs = [...this.value.graphs]
+        graphs[idx] = next
+        this.value = { ...this.value, graphs }
+        return
+      }
+      case 'graph/rsi-progress': {
+        const idx = this.value.graphs.findIndex(g => g.id === event.id)
+        if (idx < 0) throw new Error(`graphs: unknown graph "${event.id}"`)
+        const next = { ...this.value.graphs[idx], rsiProgress: event.progress }
+        const graphs = [...this.value.graphs]
+        graphs[idx] = next
+        this.value = { ...this.value, graphs }
+        return
+      }
       case 'graph/remove': {
         if (!this.value.graphs.some(g => g.id === event.id)) {
           throw new Error(`graphs: unknown graph "${event.id}"`)

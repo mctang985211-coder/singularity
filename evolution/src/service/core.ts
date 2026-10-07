@@ -8,7 +8,6 @@ import type { FileHandle } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId, sha256Hex } from '@dangosys/dsh-singularity-task'
 import {
   capabilityToolQuery,
@@ -22,13 +21,9 @@ import {
 } from '@dangosys/dsh-singularity-task-runtime'
 import type {
   CapabilityToolQuery,
-  RootRecoveryCaller,
-  RootRecoveryOutcome,
-  RootRecoveryRequest,
   SkillProviderCandidate,
   SkillProviderVerdict,
 } from '@dangosys/dsh-singularity-task-runtime'
-import { inFlightRecoveryAttempt, recoveryAttemptWithKey } from '@dangosys/dsh-singularity-task-runtime'
 import type { McpServerTemplate, CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import { assertMcpServerIdentity, capabilityRowDigest, validateCapabilityMutation } from '../capability-candidate.ts'
 import { canonicalJson, modelSelectionOf } from '../replay.ts'
@@ -43,18 +38,7 @@ import { assertExperimentStartRecord, foldExperiments } from '../experiment/reco
 import { fold } from '../ledger/fold.ts'
 import { objectWriteRefusal } from './writes.ts'
 import { effectiveCapabilitiesOf, effectiveMcpServersOf } from './sources.ts'
-import type {
-  RecoveryCoordinationCaller,
-  RecoveryCoordinationOutcome,
-  RecoveryCoordinationRequest,
-  SupervisorDelegation,
-} from '../ledger/records.ts'
-import {
-  assertLedgerFormatVersion,
-  capabilityTableStates,
-  recoveryCoordinationDefects,
-  recoverySourceRunId,
-} from '../ledger/records.ts'
+import { assertLedgerFormatVersion, capabilityTableStates } from '../ledger/records.ts'
 import { applyTargets, assertTransition } from '../ledger/state-machine.ts'
 import { productionSidecarRelative, productionSkillRelative, readProductionSkill } from './skill-files.ts'
 import { ledgerDirectories, ProductionReadError, resolveWithin } from '../shared.ts'
@@ -82,11 +66,6 @@ export class EvolutionServiceCore extends Service {
   protected readonly resolveModelSelection?: () => ModelSelection | undefined
   /** The commit path's typed test seam, if this instance was built with one (see {@link Config.commitProbe}). */
   protected readonly commitProbe?: (stage: CommitStage, target?: string) => void
-  /** The injected supervisor-delegation source, if the assembly wired one (see {@link Config.supervisorDelegation}). */
-  protected readonly resolveSupervisorDelegation?: (
-    sessionId: string,
-    diagnosisId: string,
-  ) => Promise<SupervisorDelegation | undefined>
   /** The deployment's capability table file, when it named one (see {@link Config.capabilityConfig}). */
   protected readonly capabilityConfigPath?: string
   /** The capability-config write's typed test seam, when this instance was built with one (see {@link Config.capabilityConfigProbe}). */
@@ -102,7 +81,6 @@ export class EvolutionServiceCore extends Service {
     this.repoRoot = config.repoRoot ?? process.cwd()
     this.resolveModelSelection = config.modelSelection
     this.commitProbe = config.commitProbe
-    this.resolveSupervisorDelegation = config.supervisorDelegation
     this.capabilityConfigPath = config.capabilityConfig === undefined ? undefined : resolve(config.capabilityConfig)
     this.capabilityConfigProbe = config.capabilityConfigProbe
     const dshHome = process.env.DSH_HOME ?? join(this.repoRoot, '.dsh')
@@ -764,260 +742,6 @@ export class EvolutionServiceCore extends Service {
           'store a recovery would open cannot be established; nothing was started',
       )
     }
-  }
-
-  /** The one runtime call this entry makes, with the answer every path carries: the runtime's own recovery outcome. */
-  protected async recoverThroughRuntime(
-    storeId: string,
-    recovery: RootRecoveryRequest,
-    caller: RecoveryCoordinationCaller,
-    delegation: SupervisorDelegation,
-    coordination: readonly string[],
-  ): Promise<RecoveryCoordinationOutcome> {
-    const runtime = optionalService<{
-      recoverRootTask(
-        storeId: string,
-        request: RootRecoveryRequest,
-        caller: RootRecoveryCaller,
-      ): Promise<RootRecoveryOutcome>
-    }>(this.ctx, 'taskRuntime')
-    if (runtime?.recoverRootTask === undefined) {
-      throw new Error(
-        'evolution: this deployment offers no execution-recovery entry (taskRuntime.recoverRootTask), so the new attempt cannot be opened; ' +
-          'nothing was started',
-      )
-    }
-    const outcome = await runtime.recoverRootTask(storeId, recovery, {
-      sessionId: caller.sessionId,
-      ...(caller.signal === undefined ? {} : { signal: caller.signal }),
-    })
-    return {
-      ...outcome,
-      handoff: { sessionId: delegation.sessionId, actor: delegation.actor, diagnosisId: delegation.diagnosisId },
-      coordination,
-    }
-  }
-
-  /** Whether this deployment declares the evolution chain on. Read softly, and read as on when the
-   * switch is absent: only a deployment that says `enabled: false` relaxes the ledger's own gates. */
-  protected evolutionChainOn(): boolean {
-    const exposure = optionalService<{ readonly enabled?: boolean }>(this.ctx, 'singularityEvolution')
-    return exposure === undefined || exposure.enabled !== false
-  }
-
-  /** The **recovery coordination** entry (A6, plan §F.4): take one recorded delegation and open the runtime's own recovery. */
-  async coordinateRecovery(
-    request: RecoveryCoordinationRequest,
-    caller: RecoveryCoordinationCaller,
-  ): Promise<RecoveryCoordinationOutcome> {
-    const defects = recoveryCoordinationDefects(request)
-    if (defects.length > 0) {
-      throw new Error(`evolution: the recovery request was refused:\n- ${defects.join('\n- ')}`)
-    }
-    if (typeof caller?.sessionId !== 'string' || caller.sessionId.trim().length === 0) {
-      throw new Error(
-        'evolution: a recovery is asked for by the session that coordinates the hand-off: pass a non-empty caller session id',
-      )
-    }
-    if (this.resolveSupervisorDelegation === undefined) {
-      throw new Error(
-        'evolution: this deployment wires no supervisor-delegation source, so "this session coordinates the hand-off" cannot be ' +
-          'established; a recovery needs the ledger row that delegated the hand-off, and nothing was started',
-      )
-    }
-    const delegation = await this.resolveSupervisorDelegation(caller.sessionId, request.sourceDiagnosisId)
-    if (delegation === undefined) {
-      throw new Error(
-        `evolution: session "${caller.sessionId}" is not the supervisor of diagnosis "${request.sourceDiagnosisId}" — this deployment's ` +
-          'ledger records no started hand-off for that pair, and a recovery entry is open to the coordinator that hand-off was delegated ' +
-          'to and to no one else; nothing was started',
-      )
-    }
-    if (delegation.sessionId !== caller.sessionId || delegation.diagnosisId !== request.sourceDiagnosisId) {
-      throw new Error(
-        `evolution: the delegation read back for session "${caller.sessionId}" names session "${delegation.sessionId}" and diagnosis ` +
-          `"${delegation.diagnosisId}"; a delegation that does not answer the question it was asked is not an authorization, and nothing was started`,
-      )
-    }
-    const storeId = await this.storeOfSession(caller.sessionId)
-    if (storeId !== delegation.rootStoreId) {
-      throw new Error(
-        `evolution: session "${caller.sessionId}" belongs to store "${storeId}", while the hand-off it claims was delegated into ` +
-          `"${delegation.rootStoreId}" — a delegation never moves a session into another graph's store, and nothing was started`,
-      )
-    }
-    const task = optionalService<{ openStore(storeId: string): Promise<TaskSnapshot> }>(this.ctx, 'task')
-    if (task === undefined) {
-      throw new Error(
-        'evolution: this deployment offers no task store, so the diagnosis a recovery names cannot be read; nothing was started',
-      )
-    }
-    let snapshot: TaskSnapshot
-    try {
-      snapshot = await task.openStore(storeId)
-    } catch (error) {
-      throw new Error(
-        `evolution: the store "${storeId}" of the hand-off could not be read (${error instanceof Error ? error.message : String(error)}); ` +
-          'nothing was started',
-      )
-    }
-    const diagnosis = (snapshot.diagnoses ?? []).find(item => item.diagnosisId === request.sourceDiagnosisId)
-    if (diagnosis === undefined) {
-      throw new Error(
-        `evolution: store "${storeId}" holds no diagnosis "${request.sourceDiagnosisId}"; a recovery is asked for by a diagnosis of this ` +
-          'store, so this hand-off names no fact here and nothing was started',
-      )
-    }
-    const source = snapshot.tasks.find(item => item.taskId === diagnosis.taskId)
-    if (source === undefined) {
-      throw new Error(
-        `evolution: diagnosis "${diagnosis.diagnosisId}" names task "${diagnosis.taskId}", which store "${storeId}" does not hold; ` +
-          'nothing was started',
-      )
-    }
-    if (source.parentTaskId !== undefined) {
-      throw new Error(
-        `evolution: task "${source.taskId}" is a child of "${source.parentTaskId}"; a recovery attempt is opened for the store's own root task, ` +
-          'and a child is re-run by a batch of its parent — nothing was started',
-      )
-    }
-    const coordination: string[] = [
-      `the hand-off was delegated by session "${delegation.actor}" into store "${delegation.rootStoreId}"`,
-      `the diagnosis names root task "${source.taskId}" [${source.status}]`,
-    ]
-    // A verified source is an improvement round: this plane forwards it and the
-    // runtime, which owns the per-source cap, judges it by the original criteria.
-    if (source.status === 'verified') {
-      coordination.push(
-        `root task "${source.taskId}" is verified, so the attempt is an improvement round — the runtime decides whether its cap admits it`,
-      )
-    }
-    const sourceRunId = recoverySourceRunId(diagnosis, source, snapshot)
-    // A key that already names an attempt is *answered*, not re-decided: the run's
-    const answered = recoveryAttemptWithKey(snapshot, source.taskId, request.requestKey)
-    if (answered !== undefined) {
-      coordination.push(
-        `request key "${request.requestKey}" already names attempt "${answered.runId}" [${answered.status}]; it is answered from that record`,
-      )
-      return await this.recoverThroughRuntime(
-        storeId,
-        {
-          sourceTaskId: source.taskId,
-          sourceRunId,
-          sourceDiagnosisId: request.sourceDiagnosisId,
-          requestKey: request.requestKey,
-          ...(request.mode !== undefined ? { mode: request.mode } : {}),
-          proposalIds: answered.recovery?.proposalIds,
-        },
-        caller,
-        delegation,
-        coordination,
-      )
-    }
-    if (source.status === 'running' || source.status === 'verifying') {
-      throw new Error(
-        `evolution: root task "${source.taskId}" is ${source.status}; a recovery opens a new attempt after the old one settled and never ` +
-          'hot-swaps a live run — nothing was started',
-      )
-    }
-    const chainOn = this.evolutionChainOn()
-    const associated = (await this.list()).filter(proposal =>
-      proposal.sourceRefs.includes(`diagnosis:${diagnosis.diagnosisId}`),
-    )
-    // The chain's capability gate (A6): a change this hand-off stands on must be
-    // applied; chain off, a proposal can authorize nothing, so none blocks the attempt.
-    if (chainOn) {
-      for (const proposal of associated) {
-        if (
-          proposal.status === 'applied' &&
-          proposal.applied !== undefined &&
-          proposal.rolledback === undefined
-        ) {
-          continue
-        }
-        const state =
-          proposal.status === 'decided' && proposal.decision === 'PROMOTE'
-            ? 'PROMOTE-decided but not applied'
-            : proposal.status === 'rolledback'
-              ? 'rolled back'
-              : proposal.status
-        throw new Error(
-          `evolution: the shared change this hand-off depends on (proposal "${proposal.proposalId}" ${proposal.targetType} "${proposal.targetId}") is ` +
-            `${state}; a recovery that depends on this change is opened only after a person approves it and apply commits it into ` +
-            'production — nothing was started, and no run was opened',
-        )
-      }
-      if (associated.length > 0) {
-        coordination.push(
-          `this ledger holds ${associated.length} proposal(s) for the diagnosis, ` +
-            'all applied and in force',
-        )
-      }
-    } else if (associated.length > 0) {
-      coordination.push(
-        `the evolution chain is off in this deployment, so the ${associated.length} proposal(s) this ledger holds for the diagnosis are not consulted`,
-      )
-    }
-    if (associated.length === 0) {
-      // A pure artifact gap: no candidate in this ledger, so the only capability
-      const requested = source.requestedCapabilities ?? []
-      if (requested.length === 0) {
-        coordination.push(
-          'this ledger holds no proposal for the diagnosis; the source requires no capability row of its own',
-        )
-      } else {
-        const query = optionalService<{ listCapabilities?(): Readonly<Record<string, CapabilityConfig>> }>(
-          this.ctx,
-          'taskRuntime',
-        )
-        const table = (() => {
-          try {
-            return query?.listCapabilities?.()
-          } catch {
-            return undefined
-          }
-        })()
-        if (table === undefined) {
-          throw new Error(
-            `evolution: the recovery of "${source.taskId}" carries no candidate in this ledger, so it is a pure artifact gap — and the ` +
-              "capability table that gap's production needs cannot be read in this context; nothing was started rather than assuming the rows resolve",
-          )
-        }
-        const unresolved = requested.filter(name => !capabilityToolQuery(table, this.effectiveMcpServers())(name).known)
-        if (unresolved.length > 0) {
-          throw new Error(
-            `evolution: the recovery of "${source.taskId}" carries no candidate in this ledger and the capability the production needs is still ` +
-              `missing ([${unresolved.join(', ')}] resolve to no row in this deployment's table); a pure artifact gap is recoverable, a capability gap ` +
-              'is not — nothing was started',
-          )
-        }
-        coordination.push(
-          `this ledger holds no proposal for the diagnosis; the row(s) the source uses ([${requested.join(', ')}]) resolve in the current table`,
-        )
-      }
-    }
-    const inFlight = inFlightRecoveryAttempt(snapshot, source.taskId, request.sourceDiagnosisId)
-    if (inFlight !== undefined && inFlight.recovery?.requestKey !== request.requestKey) {
-      throw new Error(
-        `evolution: diagnosis "${request.sourceDiagnosisId}" already has a recovery attempt in flight (run "${inFlight.runId}", key ` +
-          `"${inFlight.recovery?.requestKey ?? 'unknown'}"); key "${request.requestKey}" starts nothing — an attempt ends when its run settles, and ` +
-          'a new key may be asked for after that',
-      )
-    }
-    return await this.recoverThroughRuntime(
-      storeId,
-      {
-        sourceTaskId: source.taskId,
-        sourceRunId,
-        sourceDiagnosisId: request.sourceDiagnosisId,
-        requestKey: request.requestKey,
-        ...(chainOn && associated.length ? { proposalIds: associated.map(proposal => proposal.proposalId) } : {}),
-        ...(request.mode !== undefined ? { mode: request.mode } : {}),
-      },
-      caller,
-      delegation,
-      coordination,
-    )
   }
 
   /** The commit request one apply/rollback binds, read off the prepared record. */

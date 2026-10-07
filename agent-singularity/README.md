@@ -8,14 +8,16 @@ Package: `@dangosys/dsh-singularity-agent`
 
 Dependencies: graphs, agent-runtime, context, task, task-runtime, evolution
 
-config.yaml: `evolution` (`off` | `on`, default `off`) — whether this composition registers the nine `evolution_*` tools on the global layer. Off registers the other 24 tools and no chain tool on any surface; on registers all 33. A value this build cannot execute, or a configuration member it does not read, refuses to start and names what it refused.
+config.yaml: `evolution` (`off` | `on`, default `off`) — whether this composition registers the nine `evolution_*` tools on the global layer. Off registers the other 23 tools and no chain tool on any surface; on registers all 32. A value this build cannot execute, or a configuration member it does not read, refuses to start and names what it refused.
+
+See the [current RSI protocol](../docs/2026-10-07-rsi-optimization.md) for role boundaries, template construction, round settlement and migration.
 
 ### Tools
 
-24 tools are registered in every composition; the nine `evolution_*` ones only when `evolution` is `on`. The root agent's allow-list (`ROOT_TOOLS` in agent-runtime) names those 24 minus `task_ask_parent` (a root has no parent) and minus `task_recover` (the delegated supervisor's own entry), plus the preset's `skill` loader.
+23 tools are registered in every composition; the nine `evolution_*` ones only when `evolution` is `on`. The root agent's allow-list names those 23 minus `task_ask_parent` (a root has no parent), plus the preset's `skill` loader.
 
-1. graph_spawn — create a setup-phase worker and wait for its final response; objective work goes through task_decompose.
-2. graph_mark_ready — mark the caller's graph ready after environment setup.
+1. graph_spawn — root-only, create a setup-phase worker with a restricted setup grant and wait for its final response; objective work goes through task_decompose.
+2. graph_mark_ready — root-only, mark the caller's graph ready after environment setup.
 3. hitl_ask — ask a human a text question and wait for the answer.
 4. hitl_approve — ask a human to approve/reject and wait; only `allowed-once` grants, everything else fails closed.
 5. task_read — read the caller's contract, task and run (root sees child statuses; before acceptance, the named not-activated state).
@@ -32,21 +34,20 @@ config.yaml: `evolution` (`off` | `on`, default `off`) — whether this composit
 16. task_proposal_cancel — withdraw a proposal this session submitted before its batch is admitted.
 17. task_status — paged project status: the caller's task, its direct children and dependency neighbours, or the whole graph.
 18. task_verify — worker self-check: re-run the verifier and record evidence; no task status changes.
-19. task_review_pack — read-only evidence pack for one exact review source, including the A6 hand-off state of every diagnosis with suggestions.
+19. task_review_pack — read-only evidence pack for one exact review source, including durable coordination attempts for its diagnoses.
 20. task_review_agent — start one read-only review attempt for one source; the reviewer records its own Diagnosis (observation, conclusion, confidence, optional judgements and proposals).
 21. task_diagnose — persist a Diagnosis (postmortem observation, scope, localized cause, confidence, optional proposals); suggestions never execute.
 22. task_budget_extend — ask a human to raise a configured root run ceiling; records one budget-extension fact and answers a same-key retry from the record.
-23. task_recover — the delegated supervisor's entry: open one failed root goal's new attempt for one recorded Diagnosis; never on a root's surface.
-24. evolution_propose — register an evolution proposal (optionally transcribed from a Diagnosis).
-25. evolution_candidate — record the candidate's version set and its one structured mutation.
-26. evolution_prepare — materialize a mutation into the proposal sandbox plus the champion snapshot.
-27. evolution_replay — run the two-sided experiment (baseline vs candidate) and write the comparison report.
-28. evolution_gate — record the six gate answers; regression evidence refs must exist.
-29. evolution_decide — record PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH after a native human approval.
-30. evolution_apply — promote a decided PROMOTE (same-name skill object, or one capability row with its optional new skill) into production; second human approval, every production path named.
-31. evolution_rollback — restore the champion snapshot (or remove the apply product) after a human approval.
-32. evolution_list — read the evolution ledger with status filters and history.
-33. escalate — raise an L4 card (capability gap, exhausted budget, UNKNOWN(verifier)); shown through the approval seam and recorded in the escalation ledger only after an explicit approve.
+23. evolution_propose — register an evolution proposal (optionally transcribed from a Diagnosis).
+24. evolution_candidate — record the candidate's version set and its one structured mutation.
+25. evolution_prepare — materialize a mutation into the proposal sandbox plus the champion snapshot.
+26. evolution_replay — run the two-sided experiment (baseline vs candidate) and write the comparison report.
+27. evolution_gate — record the six gate answers; regression evidence refs must exist.
+28. evolution_decide — record PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH after a native human approval.
+29. evolution_apply — promote a decided PROMOTE (same-name skill object, or one capability row with its optional new skill) into production; second human approval, every production path named.
+30. evolution_rollback — restore the champion snapshot (or remove the apply product) after a human approval.
+31. evolution_list — read the evolution ledger with status filters and history.
+32. escalate — raise an L4 card (capability gap, exhausted budget, UNKNOWN(verifier)); shown through the approval seam and recorded in the escalation ledger only after an explicit approve.
 
 ### Web APIs
 
@@ -54,7 +55,7 @@ none — the HITL cards are served by graph-web (`GET/POST /singularity/hitl`), 
 
 ### Service state
 
-1. ctx.singularityAgent: tool registration host (24 always; 33 with `evolution: on`); the root allow-list is ROOT_TOOLS in agent-runtime.
+1. ctx.singularityAgent: tool registration host (23 always; 32 with `evolution: on`); the root allow-list is ROOT_TOOLS in agent-runtime.
 2. ctx.hitl: the canvas answerer on `ctx.userQuestions` / `ctx.approval`; pending cards are listed and answered through graph-web.
 3. ctx.proposalReviewChannel: the T2/T3 review channel — renders the saved subject, asks the store owner's session through the approval seam, records the decision as `approval:<owner session>`.
 4. ctx.escalation: append-only escalation ledger at `$DSH_HOME/escalations.jsonl` (`<repoRoot>/.dsh` when `DSH_HOME` is unset); config override `root`.
@@ -64,10 +65,9 @@ none — the HITL cards are served by graph-web (`GET/POST /singularity/hitl`), 
 
 ## Design notes
 
-- Layout: `src/index.ts` is the assembly. `src/services/` owns the mounted services (hitl, escalation, proposal-review + its rendering); `src/coordination/` owns the review ledger, one review attempt, the automatic scan, the A6 hand-off rules and identity helpers; `src/tools/` owns the 33 `define*Tool` entries; `src/shared.ts` owns the helpers they share. The pre-refactor top-level module paths are gone — every consumer imports the owning module directly.
+- Layout: `src/index.ts` is the assembly. `src/services/` owns the mounted services (hitl, escalation, proposal-review + its rendering); `src/coordination/` owns the coordination ledger, read-only reviewer attempts, the graph RSI driver and identity helpers; `src/tools/` owns the 32 `define*Tool` entries; `src/shared.ts` owns the helpers they share. The pre-refactor top-level module paths are gone — every consumer imports the owning module directly.
 - `src/shared.ts` owns the helpers the tool surface used to copy: `text()`, `sessionId(exec, tool)`, `message()`, `undeclaredParameters()`, `denialReason()` / `approvalAnswer()`, `adaptRead()`, `proposalStoreFor()` and `questionCall()` — `message()` is also what the coordination and service modules use. One implementation per helper, per package.
 - The approval gates read the native outcome vocabulary, never an argument: only `allowed-once` lets a decision, an apply or an escalation be recorded; `rejected` / `cancelled` / `unavailable` are reported by name and write nothing.
-- The review ledger is the only durable record of coordination attempts. `admitReviewAgent` runs each decision inside one serial region per (ledger file, root store), writes the claim before the reviewer exists and counts the `started` row as the spent run; an open row no live process owns is recovered as `interrupted` (or `recorded` when the store already holds its diagnosis). A started supervisor row is the hand-off's terminal fact and is never recovered.
-- Hand-off decisions are pure functions of the deployment's switch, the diagnosis, the ledger attempts and the allowance (`handoff-rules.ts`): named stops (`no-suggestions`, `evolution-off`, `unsupported-target`, `requires-new-authority`, `budget-exhausted`, `handoff-conflict`) leave the diagnosis readable and pending. The supervisor never decides or applies a promotion — a person does.
+- The review ledger is the only durable record of coordination attempts. `admitReviewAgent` runs each decision inside one serial region per (ledger file, root store), writes the claim before the reviewer exists and counts the `started` row as the spent run; an open row no live process owns is recovered as `interrupted` (or `recorded` when the store already holds its diagnosis). Supervisor attempts use the same durable claim/start/settlement facts, read back when the platform reconciles a round.
 - Refusals are values, not silent drops: undeclared tool parameters, unknown store ids, unknown records and conflicting ledger rows are refused by name with the reason, so a model or an operator can act on the exact fact.
 - Long-form design rationale for the pre-refactor layout lives in `packages/singularity/docs/` (singularity-harness-guide.md, exploration-evolution-architecture.md, agent-prompt-contracts.md).

@@ -77,8 +77,6 @@ export interface SessionLogReader {
  * the recovery entry enforces per source task, counted separately for failed and verified sources.
  */
 export interface SupervisionConfig {
-  /** `all` accepts every terminal review, `failed` only failures, `off` none — read by the review trigger, not here. */
-  autoReview: 'all' | 'failed' | 'off'
   /** Recovery attempts one failed source accepts; the next request is refused with the coded `iteration-cap`. */
   maxRecoveryRounds: number
   /** Improvement attempts one verified source accepts; the next request is refused with the coded `iteration-cap`. */
@@ -172,9 +170,8 @@ export const DEFAULT_MAX_CHILDREN = 8
 
 export const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true
 
-/** The shipped supervision policy (A7 §1): failed terminal reviews diagnosed, three recovery rounds, two improvement rounds, eight coordination runs. */
+/** The shipped supervision backstop: three recovery rounds, two improvement rounds, eight coordination runs. A graph that runs an RSI loop declares its own round count over these (`maxImprovementRoundsFor`). */
 export const DEFAULT_SUPERVISION: Readonly<SupervisionConfig> = {
-  autoReview: 'failed',
   maxRecoveryRounds: 3,
   maxImprovementRounds: 2,
   coordinationBudget: 8,
@@ -194,7 +191,6 @@ const RootBudget: z<RootBudgetConfig> = z.object({
 })
 
 const Supervision: z<SupervisionConfig> = z.object({
-  autoReview: z.union([z.const('all'), z.const('failed'), z.const('off')]).default(DEFAULT_SUPERVISION.autoReview),
   maxRecoveryRounds: z.number().default(DEFAULT_SUPERVISION.maxRecoveryRounds),
   maxImprovementRounds: z.number().default(DEFAULT_SUPERVISION.maxImprovementRounds),
   coordinationBudget: z.number().default(DEFAULT_SUPERVISION.coordinationBudget),

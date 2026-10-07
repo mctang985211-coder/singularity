@@ -196,12 +196,12 @@ describe('task_review_pack as a fact sheet, without a trigger decision', () => {
   })
 
   /**
-   * The handoff mark (A5 §3, F.3): every recorded Diagnosis is A6's handoff, a
-   * conclusion without proposals included, and with no supervisor delegated yet
-   * it is **pending** — recorded, addressed to nobody yet. An interrupted
-   * attempt has no Diagnosis at all, so it cannot be shown as pending either.
+   * The supervision mark (F): a diagnosis is shown with the supervisor attempts
+   * the coordination ledger holds for it — the session each round's supervisor
+   * ran under and how it ended. A store whose graph runs no RSI loop has no such
+   * attempt, and the pack says so rather than inventing a delegation.
    */
-  it('marks ordinary child diagnoses coordinator-owned and shared suggestions pending', async () => {
+  it('marks each diagnosis with the supervisor attempts the ledger holds for it', async () => {
     const full = failingSnapshot()
     full.diagnoses = [
       {
@@ -218,18 +218,34 @@ describe('task_review_pack as a fact sheet, without a trigger decision', () => {
         proposals: [], producedBy: { kind: 'agent' as never, sessionId: 's-rev-2' },
       },
     ] as never
+    // A round's supervisor ran for the first diagnosis and recorded its outcome.
+    writeFileSync(join(ledgerDir, 'agents.jsonl'), [
+      JSON.stringify({
+        formatVersion: 2, kind: 'claim', role: 'supervisor', rootStoreId: 'sg-t-root-1', taskId: 't-child-1',
+        runId: 'r-child-1', requestKey: 'rsi-supervise-g1-round-1', reason: null, diagnosisId: 'd-with-suggestion',
+        handoffDigest: 'digest-1', sessionId: 's-supervisor', actor: 'root-1', at: '2026-09-27T00:00:00.000Z',
+      }),
+      JSON.stringify({
+        formatVersion: 2, kind: 'started', rootStoreId: 'sg-t-root-1', taskId: 't-child-1',
+        sessionId: 's-supervisor', actor: 'root-1', at: '2026-09-27T00:00:01.000Z',
+      }),
+      JSON.stringify({
+        formatVersion: 2, kind: 'settled', rootStoreId: 'sg-t-root-1', taskId: 't-child-1', sessionId: 's-supervisor',
+        status: 'recorded', note: 'proposal p-1 [applied]', at: '2026-09-27T00:00:02.000Z',
+      }),
+      '',
+    ].join('\n'))
     const pack = (await defineTaskReviewPackTool(fixture(full) as never)
       .execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
 
     expect(pack).toContain('proposal prompt_template reviewer: name the empty-input case')
-    expect(pack).toContain('handoff: pending')
-    // Ordinary child repairs are delivered to the parent without starting a supervisor.
-    expect(pack.match(/handoff: pending/g)).toHaveLength(1)
+    expect(pack).toContain('supervision: supervisor attempt s-supervisor [recorded] — proposal p-1 [applied]')
+    expect(pack.match(/supervisor attempt s-supervisor/g)).toHaveLength(1)
     expect(pack).toContain('- d-no-suggestion [high] no improvement needed [agent s-rev-2]')
-    expect(pack.slice(pack.indexOf('- d-no-suggestion'))).toContain('handoff: coordinator-owned')
+    expect(pack.slice(pack.indexOf('- d-no-suggestion'))).toContain('supervision: no supervisor attempt')
   })
 
-  it('shows an interrupted attempt as interrupted, with no pending handoff invented for it', async () => {
+  it('shows an interrupted attempt as interrupted, with no supervision invented for it', async () => {
     const full = failingSnapshot()
     // The reviewer ran and produced nothing: the ledger holds the claim and the
     // interrupted fact, and the store holds no diagnosis for it.
@@ -255,7 +271,7 @@ describe('task_review_pack as a fact sheet, without a trigger decision', () => {
     expect(pack).toContain('review attempts (1):')
     expect(pack).toContain('default attempt s-reviewer [interrupted] — the reviewer timed out after 5ms with no diagnosis')
     expect(pack).toContain('diagnoses (0):')
-    expect(pack).not.toContain('handoff: pending')
+    expect(pack).not.toContain('supervisor attempt')
   })
 
   it('renders agent judgements apart from the mechanical fact lines', async () => {

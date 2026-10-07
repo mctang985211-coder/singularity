@@ -74,8 +74,6 @@ import { SingularityContextService } from '../../context/src/index.ts'
 import { EvolutionService, modelSelectionOf } from '../../evolution/src/index.ts'
 import { ProposalReviewService } from '../../agent-singularity/src/services/proposal-review.ts'
 import { configureSupervision } from '../../agent-singularity/src/coordination/supervision.ts'
-import { supervisorDelegationSource } from '../../agent-singularity/src/coordination/ledger.ts'
-import { defineTaskRecoverTool } from '../../agent-singularity/src/tools/task-recover.ts'
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
 import { defineEvolutionCandidateTool } from '../../agent-singularity/src/tools/evolution-candidate.ts'
 import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
@@ -102,6 +100,7 @@ import { defineTaskStatusTool } from '../../agent-singularity/src/tools/task-sta
 import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/task-submit-result.ts'
 import type { CapabilityConfig, Config, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
+import type { RsiConfig } from '../../graphs/src/index.ts'
 import { defineRootBudgetApproval, defineTaskBudgetExtendTool } from '../../agent-singularity/src/tools/budget-extend.ts'
 import { defineTaskReviewAgentTool } from '../../agent-singularity/src/tools/review-agent.ts'
 import { defineTaskReviewPackTool } from '../../agent-singularity/src/tools/task-review-pack.ts'
@@ -136,19 +135,11 @@ export const OTHER_TOOLS = [
   'bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'job_output', 'job_list', 'job_kill', 'ask_user_question',
   'web_fetch', 'subagent_fetchless', 'session_search', 'session_event_read', 'session_event_trace', 'session_trace',
   'task_ask_parent',
-  // The recovery adapter (A6): registered on the global plane like the rest of
-  // the task surface, and deliberately absent from every root's allow-list — a
-  // root prompt may not name it.
-  'task_recover',
 ]
 
 /** The tools this fixture registers for real; every other name is a stand-in. */
 export const REAL_TOOLS = [
   'task_read', 'task_status', 'context_read', 'capability_list', 'task_template_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel',
-  // The recovery adapter (A6): its subject is what the tool, the evolution entry
-  // and the runtime decide together, so a spec that mounts the evolution plane
-  // gets the deployment's own definition (see `options.evolution`).
-  'task_recover',
   'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
   'task_ask_parent', 'task_answer',
   // The review pair (K4): a spec that has to show the review chain really running
@@ -173,8 +164,6 @@ const QUESTION_TOOLS: readonly string[] = ['task_ask_parent', 'task_answer']
  * `Config.supervision` is what a mounted deployment reads.
  */
 export interface SupervisionOptions {
-  /** Which terminal reviews the automatic scan accepts: `all` (the default), `failed`, or `off`. */
-  readonly autoReview?: 'all' | 'failed' | 'off'
   /** How many recovery rounds a failed source accepts before the coded `iteration-cap` refusal (default 3). */
   readonly maxRecoveryRounds?: number
   /** How many improvement rounds a verified source accepts before the coded `iteration-cap` refusal (default 2). */
@@ -312,17 +301,20 @@ export interface ScriptedLoopOptions {
   /**
    * Mount the **evolution plane** on this deployment (A6), as the assembly does:
    * the real `EvolutionService` over `ledgerRoot`, its `ctx.evolution` service,
-   * the `singularityEvolution` exposure the hand-off consumption reads its switch
-   * from, and the real `task_recover` tool. Off by default: a deployment that
-   * never turned the chain on has no candidate surface and consumes no hand-off.
+   * and the `singularityEvolution` exposure. Off by default: a deployment that
+   * never turned the chain on has no candidate surface.
    */
   readonly evolution?: { readonly ledgerRoot: string; readonly capabilityConfig?: string }
   /**
-   * The deployment's supervision policy (A5/A6/A7): which terminal reviews the
-   * automatic trigger accepts, how far an iteration may run, and the store's
-   * coordination allowance. Absent leaves the deployment's shipped defaults in
-   * force, so a case about the defaults names nothing; a case that needs the old
-   * selective behavior (`autoReview: 'failed'`) or a small cap states it here.
+   * The graph's autonomous-improvement settings (F). A case that names them can
+   * drive the platform RSI loop over this deployment (`RsiLoopDriver.ensure`);
+   * absent leaves the graph with no loop, exactly as a real graph without `rsi`.
+   */
+  readonly rsi?: RsiConfig
+  /**
+   * The deployment's supervision policy (A7): how far an iteration may run and
+   * the store's coordination allowance. Absent leaves the deployment's shipped
+   * defaults in force, so a case about the defaults names nothing.
    */
   readonly supervision?: SupervisionOptions
   /**
@@ -510,6 +502,8 @@ export interface ScriptedLoop {
   recordRequest(text: string, sessionId?: SessionId | string): void
   /** The run a session is bound to, with the store and task it belongs to. */
   runForSession(sessionId: SessionId | string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun }>
+  /** The loop position the graph registry last stored, as the RSI loop driver writes it (F). */
+  rsiProgressOf(): unknown
   dispose(): Promise<void>
 }
 
@@ -754,6 +748,8 @@ class ScriptedLoopImpl implements ScriptedLoop {
   private readonly callRecords: ToolCallRecord[] = []
   private readonly executedNames: string[] = []
   private readonly graphEvents: GraphCommit[] = []
+  /** The loop position the graph registry last stored, as the RSI loop driver writes it (F). */
+  private rsiProgress: unknown
   private readonly primary: SessionId
   private previousHome: string | undefined
   private callOrder = 0
@@ -851,10 +847,10 @@ class ScriptedLoopImpl implements ScriptedLoop {
     }
     ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
     ctx.provide('layout', { setIn: async () => {} })
-    // The supervision policy a spec asked for (A5/A6/A7), two ways: the plugin's
-    // global settings (what the trigger and the ledger read — a mounted
-    // deployment configures them through `SingularityAgent`, and this fixture
-    // sets them here because no plugin is mounted), and the deployment's own
+    // The supervision policy a spec asked for (A7), two ways: the plugin's
+    // global settings (what the coordination ledger reads — a mounted deployment
+    // configures them through `SingularityAgent`, and this fixture sets them here
+    // because no plugin is mounted), and the deployment's own
     // `singularitySupervision` service (what the task runtime's round caps read,
     // exactly as the evolution switch above). A spec that names nothing gets the
     // shipped defaults on both planes.
@@ -883,39 +879,53 @@ class ScriptedLoopImpl implements ScriptedLoop {
         graphState.agents.push(agent as never)
       },
     } as never)
-    ctx.provide('graphs', graphRegistry({
-      graphForSession: async (sessionId: SessionId) => ({
-        id: 'g1',
-        name: 'graph',
-        envId: 'env1',
-        rootSessionId: this.options.graphRootFor?.(String(sessionId)) ?? this.sessionRoot.get(sessionId) ?? this.primary,
-        graphStoreId: 'sg-g-root',
-        layoutStoreId: 'sg-l-root',
-      }),
-      list: async () => [{
+    ctx.provide('graphs', (() => {
+      const record = (): Record<string, unknown> => ({
         id: 'g1',
         name: 'graph',
         envId: 'env1',
         rootSessionId: this.primary,
         graphStoreId: 'sg-g-root',
         layoutStoreId: 'sg-l-root',
-      }],
-      // Membership is the graph store's own record — the node a root or a spawn
-      // published — so a session reference is checked against it before any log
-      // is read.
-      members: () => [
-        ...this.roots.map(String),
-        ...graphState.agents.map(agent => String(agent.id)),
-        ...this.sessionRoot.keys(),
-      ],
-      // The graph store's own edges, the record a spawned session leaves behind.
-      edges: () => graphState.edges.flatMap(edge => {
-        const candidate = edge as { kind?: string; from?: string; to?: string }
-        return typeof candidate.kind === 'string' && typeof candidate.from === 'string' && typeof candidate.to === 'string'
-          ? [{ kind: candidate.kind, from: candidate.from, to: candidate.to }]
-          : []
-      }),
-    }) as never)
+        ...(this.options.rsi === undefined ? {} : { rsi: { ...this.options.rsi } }),
+        ...(this.rsiProgress === undefined ? {} : { rsiProgress: this.rsiProgress }),
+      })
+      return {
+        ...graphRegistry({
+          graphForSession: async (sessionId: SessionId) => ({
+            ...record(),
+            rootSessionId: this.options.graphRootFor?.(String(sessionId)) ?? this.sessionRoot.get(sessionId) ?? this.primary,
+          }),
+          list: async () => [record()],
+          // Membership is the graph store's own record — the node a root or a spawn
+          // published — so a session reference is checked against it before any log
+          // is read.
+          members: () => [
+            ...this.roots.map(String),
+            ...graphState.agents.map(agent => String(agent.id)),
+            ...this.sessionRoot.keys(),
+          ],
+          // The graph store's own edges, the record a spawned session leaves behind.
+          edges: () => graphState.edges.flatMap(edge => {
+            const candidate = edge as { kind?: string; from?: string; to?: string }
+            return typeof candidate.kind === 'string' && typeof candidate.from === 'string' && typeof candidate.to === 'string'
+              ? [{ kind: candidate.kind, from: candidate.from, to: candidate.to }]
+              : []
+          }),
+        }),
+        // What an RSI loop driver (F) reads: one graph record, and the position it
+        // writes back. A fixture whose spec declared no `rsi` settings is never
+        // scheduled, exactly as a real graph without them is not.
+        get: async (id: string) => {
+          if (id !== 'g1') throw new Error(`graphs: no graph "${id}" in this fixture`)
+          return structuredClone(record())
+        },
+        markRsiProgress: async (id: string, progress: unknown) => {
+          if (id !== 'g1') throw new Error(`graphs: no graph "${id}" in this fixture`)
+          this.rsiProgress = progress as never
+        },
+      }
+    })() as never)
     // The session plane's read-only half (A2): exact reads over this fixture's own
     // log, the same records `eventsOf` returns.
     ctx.provide('sessionQuery', sessionQueryReads(sessionId => this.log.get(String(sessionId))?.events) as never)
@@ -973,23 +983,20 @@ class ScriptedLoopImpl implements ScriptedLoop {
     // the store's own event, which only the real definition can produce.
     ctx.tools.register(defineTaskBudgetExtendTool(ctx))
     // The recovery adapter and the evolution plane (A6), mounted together and
-    // only when the deployment says so: the tool's whole subject is what the
-    // evolution entry and the runtime decide about a hand-off, so a deployment
-    // without the chain has no such tool at all.
+    // only when the deployment says so: a deployment without the chain has no
+    // candidate surface at all.
     if (this.options.evolution !== undefined) {
       const service = new EvolutionService(ctx, {
         root: this.options.evolution.ledgerRoot,
         skillRoot: join(this.home, 'skills'),
         repoRoot: this.workspace,
         modelSelection: () => modelSelectionOf(this.options.defaultSelection?.() ?? { provider: 'mock', model: 'mock' }),
-        supervisorDelegation: supervisorDelegationSource().read,
         ...(this.options.evolution.capabilityConfig === undefined ? {} : { capabilityConfig: this.options.evolution.capabilityConfig }),
       })
       // The service registers itself (`ctx.evolution`) in its own constructor;
       // the switch is what a sibling reads, and it is on for this deployment.
       void service
       ctx.provide('singularityEvolution', { enabled: true })
-      ctx.tools.register(defineTaskRecoverTool(ctx))
       // The plane's own tools, registered for real for the same reason: a spec
       // whose subject is the *chain a coordinator walks* has to reach the
       // deployment's definitions — a stand-in that answers "fixture answer" would
@@ -1165,6 +1172,10 @@ class ScriptedLoopImpl implements ScriptedLoop {
 
   async runForSession(sessionId: SessionId | string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun }> {
     return await this.runtime.runForSession(String(sessionId))
+  }
+
+  rsiProgressOf(): unknown {
+    return this.rsiProgress
   }
 
   async begin(contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }> {

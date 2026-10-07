@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from 'node:child_process'
 import { reaches } from '@dangosys/dsh-singularity-task'
 import type {
   AcceptanceCriterion,
@@ -9,6 +10,9 @@ import { protectedInputDefects } from './protected-inputs.ts'
 
 /** Modes whose criterion is executed by the command verifier and therefore needs `command`. */
 const EXECUTABLE_MODES: readonly VerificationMode[] = ['deterministic', 'simulation', 'measurement']
+
+/** How long one syntax check may take before it is read as tooling trouble and skipped. */
+const SYNTAX_CHECK_TIMEOUT_MS = 5_000
 
 /** Every mode a criterion may declare, in declaration order (`VerificationMode`); the list the mode rule names. */
 const VERIFICATION_MODES: readonly VerificationMode[] = [
@@ -208,6 +212,80 @@ export function contractDefects(criteria: readonly AcceptanceCriterion[], label:
   // mean nothing was required, and failing it would close nothing.
   if (!criteria.some(criterion => criterion.mandatory === true)) {
     reasons.push(`${label} requires at least one mandatory acceptance criterion`)
+  }
+  return reasons
+}
+
+/** The first non-blank line of a diagnostic, or `undefined` when the text held none. */
+function firstLine(text: string): string | undefined {
+  return text
+    .split('\n')
+    .map(line => line.trim())
+    .find(line => line.length > 0)
+}
+
+/**
+ * Whether `bash` can parse one command, checked by `bash -n` with the command on
+ * its stdin: the command is tokenized and never executed, so no side effect of
+ * the criterion can happen here. `undefined` means the check has no answer — the
+ * shell could not be started, or did not answer in time — and an unanswered
+ * check never blocks admission.
+ */
+function commandSyntaxDefect(command: string, where: string): Promise<string | undefined> {
+  return new Promise(resolveDefect => {
+    let child: ChildProcess
+    try {
+      child = spawn('bash', ['-n'], { stdio: ['pipe', 'ignore', 'pipe'] })
+    } catch {
+      resolveDefect(undefined)
+      return
+    }
+    let settled = false
+    let diagnostic = ''
+    const finish = (defect: string | undefined): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolveDefect(defect)
+    }
+    // `bash` that exits before reading its stdin is not the command's fault, and
+    // the pipe erroring is not the admission's either: both answers are dropped.
+    child.stdin?.on('error', () => undefined)
+    child.stderr?.on('data', (chunk: Buffer) => {
+      diagnostic += chunk.toString('utf8')
+    })
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      finish(undefined)
+    }, SYNTAX_CHECK_TIMEOUT_MS)
+    child.on('error', () => finish(undefined))
+    child.on('close', code => {
+      if (code === 0 || code === null) return finish(undefined)
+      const reason = firstLine(diagnostic) ?? `bash -n exited ${code} without a diagnostic`
+      finish(`${where} command has a shell syntax error: ${reason}`)
+    })
+    child.stdin?.end(command)
+  })
+}
+
+/**
+ * The syntax of every executable criterion's command, checked before a contract
+ * is admitted. A command the shell cannot parse can never settle its criterion,
+ * so refusing it here spares the round the run that would have failed at verify
+ * time; a check with no answer (no `bash` on PATH) is skipped rather than read
+ * as a defect.
+ */
+export async function commandSyntaxDefects(
+  criteria: readonly AcceptanceCriterion[],
+  label: string,
+): Promise<string[]> {
+  const reasons: string[] = []
+  for (const criterion of criteria) {
+    const command = criterion.command
+    if (!EXECUTABLE_MODES.includes(criterion.verificationMode)) continue
+    if (typeof command !== 'string' || command.trim().length === 0) continue
+    const defect = await commandSyntaxDefect(command, `${label} criterion "${criterion.criterionId}"`)
+    if (defect !== undefined) reasons.push(defect)
   }
   return reasons
 }

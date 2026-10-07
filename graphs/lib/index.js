@@ -83,6 +83,37 @@ var GraphsState = class GraphsState {
 				};
 				return;
 			}
+			case "graph/rsi": {
+				const idx = this.value.graphs.findIndex((g) => g.id === event.id);
+				if (idx < 0) throw new Error(`graphs: unknown graph "${event.id}"`);
+				const { rsi: _previous, rsiProgress: _progress,...bare } = this.value.graphs[idx];
+				const next = event.rsi === null ? bare : {
+					...bare,
+					rsi: event.rsi
+				};
+				const graphs = [...this.value.graphs];
+				graphs[idx] = next;
+				this.value = {
+					...this.value,
+					graphs
+				};
+				return;
+			}
+			case "graph/rsi-progress": {
+				const idx = this.value.graphs.findIndex((g) => g.id === event.id);
+				if (idx < 0) throw new Error(`graphs: unknown graph "${event.id}"`);
+				const next = {
+					...this.value.graphs[idx],
+					rsiProgress: event.progress
+				};
+				const graphs = [...this.value.graphs];
+				graphs[idx] = next;
+				this.value = {
+					...this.value,
+					graphs
+				};
+				return;
+			}
 			case "graph/remove": {
 				if (!this.value.graphs.some((g) => g.id === event.id)) throw new Error(`graphs: unknown graph "${event.id}"`);
 				const graphs = this.value.graphs.filter((g) => g.id !== event.id);
@@ -150,6 +181,22 @@ function nextGraphId(existing) {
 	let n = 1;
 	while (existing.includes(`graph${n}`)) n += 1;
 	return `graph${n}`;
+}
+/** The fields an RSI config carries: anything else is refused by name rather than ignored. */
+const RSI_FIELDS = [
+	"task",
+	"iterationRounds",
+	"humanReview"
+];
+/** Validates one RSI config, refusing a malformed one with the offending field named. */
+function assertRsiConfig(rsi) {
+	if (typeof rsi !== "object" || rsi === null || Array.isArray(rsi)) throw new Error(`graphs: rsi must be an object carrying ${RSI_FIELDS.join(", ")}`);
+	const fields = rsi;
+	for (const key of Object.keys(fields)) if (!RSI_FIELDS.includes(key)) throw new Error(`graphs: rsi carries "${key}", which is not part of an RSI config; it carries ${RSI_FIELDS.join(", ")} and nothing else`);
+	if (typeof fields.task !== "string" || fields.task.trim().length === 0) throw new Error("graphs: rsi.task must be a non-empty string");
+	const rounds = fields.iterationRounds;
+	if (typeof rounds !== "number" || !Number.isInteger(rounds) || rounds < 1) throw new Error("graphs: rsi.iterationRounds must be an integer >= 1");
+	if (typeof fields.humanReview !== "boolean") throw new Error("graphs: rsi.humanReview must be a boolean");
 }
 /** The registry's own answer when no graph publishes a session; distinguishable by code from a failed read. */
 const SESSION_NOT_IN_GRAPH = "graph-session-not-found";
@@ -236,6 +283,7 @@ var GraphsService = class extends Service {
 		return this.transition(async () => {
 			await this.ready;
 			if (request.model !== void 0) await this.assertModel(request.model);
+			if (request.rsi !== void 0) assertRsiConfig(request.rsi);
 			const modelOptions = request.model === void 0 ? void 0 : graphAgentOptions({ model: request.model });
 			let createdEnvId;
 			let attached;
@@ -287,7 +335,8 @@ var GraphsService = class extends Service {
 					layoutStoreId,
 					createdAt: Date.now(),
 					ready: false,
-					...request.model === void 0 ? {} : { model: request.model }
+					...request.model === void 0 ? {} : { model: request.model },
+					...request.rsi === void 0 ? {} : { rsi: request.rsi }
 				};
 				await this.commit([{
 					kind: "graph/add",
@@ -379,17 +428,47 @@ var GraphsService = class extends Service {
 	}
 	/** Pin, replace, or clear (null) one graph's model. Only later spawns read it; existing sessions keep theirs. */
 	async setModel(id, model) {
+		return this.setPins(id, { model });
+	}
+	/**
+	* Set, replace, or clear (null) one graph's RSI config, dropping its stored driver progress.
+	* A configured driver reconciles the same frozen root task; a new objective requires a new graph.
+	*/
+	async setRsi(id, rsi) {
+		return this.setPins(id, { rsi });
+	}
+	/** Validate all supplied settings before committing one event batch in the graph transition queue. */
+	async setPins(id, update) {
 		return this.transition(async () => {
 			await this.ready;
 			await this.get(id);
-			if (model !== null) await this.assertModel(model);
-			await this.commit([{
+			const { model, rsi } = update;
+			if (model === void 0 && rsi === void 0) throw new Error("graphs: model or rsi is required (pass null to clear either)");
+			if (rsi !== void 0 && rsi !== null) assertRsiConfig(rsi);
+			if (model !== void 0 && model !== null) await this.assertModel(model);
+			const events = [];
+			if (model !== void 0) events.push({
 				kind: "graph/model",
 				id,
 				model
-			}]);
+			});
+			if (rsi !== void 0) events.push({
+				kind: "graph/rsi",
+				id,
+				rsi
+			});
+			await this.commit(events);
 			return (await this.state()).get(id);
 		});
+	}
+	/** Record the loop driver's live position on one graph; the registry stores it verbatim. */
+	async markRsiProgress(id, progress) {
+		await this.get(id);
+		await this.commit([{
+			kind: "graph/rsi-progress",
+			id,
+			progress
+		}]);
 	}
 	/** Refuse a pin the current provider registry cannot serve; the message names the offending field. */
 	async assertModel(model) {

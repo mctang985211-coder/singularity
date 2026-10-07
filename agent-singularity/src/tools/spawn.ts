@@ -5,6 +5,12 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { graphAgentOptions } from '@dangosys/dsh-singularity-graphs'
 import { sessionId, text } from '../shared.ts'
 
+/** Setup is a root-owned environment operation, with no business delegation or publication tools. */
+const SETUP_TOOLS = [
+  'read', 'write', 'edit', 'glob', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'skill',
+  'env_list', 'env_ensure_component', 'env_register_component', 'env_set_component_status', 'env_mark_clean',
+]
+
 export function defineSpawnTool(ctx: Context) {
   return defineTool({
     name: 'graph_spawn',
@@ -22,13 +28,16 @@ export function defineSpawnTool(ctx: Context) {
     execute: async (args, exec) => {
       const caller = sessionId(exec, 'graph_spawn')
       const graph = await ctx.graphs.graphForSession(caller)
+      if (String(graph.rootSessionId) !== String(caller))
+        throw new Error(`graph_spawn: only graph ${graph.id}'s root may delegate setup`)
       if (graph.ready)
         throw new Error(`graph_spawn: graph ${graph.id} is ready; delegate objective work with task_decompose`)
       const pinned = graphAgentOptions(graph)
       const handle = await ctx.agentRuntime.spawn(exec.agent!, {
         sessionId: SessionId(randomUUID()),
         name: args.name,
-        prompt: [{ type: 'text', text: args.task }],
+        prompt: [{ type: 'text', text: 'Prepare the environment only. Do not delegate agents, accept business tasks, or publish methods. ' + args.task }],
+        grant: { capabilities: [], baseline: SETUP_TOOLS, keepPresetTools: false },
         signal: exec.signal,
         ...(pinned === undefined ? {} : { agentOptions: pinned }),
       })

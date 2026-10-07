@@ -12,8 +12,7 @@ it.each([
   { original: 'accepted', replay: 'wrong', status: 'failed', verdict: 'fail' },
 ] as const)('checks the replay when original=$original and replay=$replay', async ({ original, replay, status, verdict }) => {
   const h = await startScriptedLoop({
-    tools: [], supervision: { autoReview: 'off' },
-    script: sessionId => sessionId === ROOT ? [
+    tools: [], script: sessionId => sessionId === ROOT ? [
       { tool: 'task_submit_result', args: { summary: 'original answer' } }, { text: 'done' },
     ] : [
       { tool: 'task_verify' },

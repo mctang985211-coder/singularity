@@ -116,7 +116,12 @@ export function resolveProjectionTarget(loaded: LoadedCaller, spec: ProjectionTa
     }
   }
   const task = 'task' in resolution ? resolution.task : undefined
-  const run = resolution.kind === 'worker' || resolution.kind === 'root' ? resolution.run : undefined
+  const run = resolution.kind === 'worker' || resolution.kind === 'root' ? resolution.run
+    : resolution.kind === 'reviewer' && resolution.delegation.sourceRunId != null
+      ? loaded.snapshot?.runs.find(item => item.taskId === task?.taskId && item.runId === resolution.delegation.sourceRunId)
+      : undefined
+  if (resolution.kind === 'reviewer' && resolution.delegation.sourceRunId != null && run === undefined)
+    return { kind: 'refused', read: refused('not-found', `the coordination delegation names source Run "${resolution.delegation.sourceRunId}" of task "${resolution.delegation.taskId}", which this store does not hold.`) }
   return {
     kind: 'bound',
     resolution,

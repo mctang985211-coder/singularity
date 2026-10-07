@@ -220,7 +220,9 @@ describe('VerifierRegistry evidence bundles', () => {
     const logRef = bundle.verifierResults[0]!.logRef!
     expect(isAbsolute(logRef)).toBe(false)
     expect(logRef).toBe(`${STORE}/r1/c1.log`)
-    expect(await readFile(join(evidenceRoot, logRef), 'utf8')).toBe('')
+    // The criterion wrote nothing, so the log carries the one outcome line the
+    // verifier writes: an empty file would make the verdict undiagnosable.
+    expect(await readFile(join(evidenceRoot, logRef), 'utf8')).toBe('(no output) exit code 0\n')
   })
 
   test('an absolute logRef inside evidenceRoot is normalized to a relative one', async () => {

@@ -730,6 +730,7 @@ function taskSummaryLine(snapshot, task, roles = []) {
 function contractHeading(role) {
 	switch (role) {
 		case "reviewer": return "## Delegated contract (review-only)";
+		case "supervisor": return "## Source contract (method supervision, no business Run)";
 		case "root": return "## Your contract (graph root)";
 		default: return "## Your contract";
 	}
@@ -943,7 +944,11 @@ function resolveProjectionTarget(loaded, spec) {
 		read: refused("not-found", `the delegation of session "${resolution.sessionId}" names task "${resolution.delegation.taskId}", which store "${resolution.storeId}" does not hold; ${spec.delegation}`)
 	};
 	const task = "task" in resolution ? resolution.task : void 0;
-	const run = resolution.kind === "worker" || resolution.kind === "root" ? resolution.run : void 0;
+	const run = resolution.kind === "worker" || resolution.kind === "root" ? resolution.run : resolution.kind === "reviewer" && resolution.delegation.sourceRunId != null ? loaded.snapshot?.runs.find((item) => item.taskId === task?.taskId && item.runId === resolution.delegation.sourceRunId) : void 0;
+	if (resolution.kind === "reviewer" && resolution.delegation.sourceRunId != null && run === void 0) return {
+		kind: "refused",
+		read: refused("not-found", `the coordination delegation names source Run "${resolution.delegation.sourceRunId}" of task "${resolution.delegation.taskId}", which this store does not hold.`)
+	};
 	return {
 		kind: "bound",
 		resolution,
@@ -1051,7 +1056,7 @@ async function contractProjection(deps, loaded) {
 	if (snapshot === void 0) return refused("unreadable", `store "${resolution.storeId}" of graph "${resolution.graph.id}" could not be read, so the contract it holds cannot be projected.`);
 	const task = target.task;
 	const run = target.run;
-	const role = resolution.kind === "reviewer" ? "reviewer" : resolution.kind === "root" ? "root" : task.parentTaskId === void 0 && run?.parentRunId !== void 0 ? "replay" : "worker";
+	const role = resolution.kind === "reviewer" ? resolution.delegation.role ?? "reviewer" : resolution.kind === "root" ? "root" : task.parentTaskId === void 0 && run?.parentRunId !== void 0 ? "replay" : "worker";
 	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
 	const header = [
 		"# Immutable context (contract)",
@@ -1088,11 +1093,16 @@ async function contractProjection(deps, loaded) {
 		...contractBody(task)
 	]) > 0) return tooLarge("your contract", taskPageHint(task.taskId));
 	if (resolution.kind === "reviewer") {
-		const label = ["", `- this session has no business Run: the contract above belongs to the task it was delegated to review (delegated by session ${resolution.delegation.actor}, recorded ${resolution.delegation.at}), and reading it is not executing it.`];
+		const label = [
+			"",
+			`- this session has no business Run: the contract above belongs to the task it was delegated to review (delegated by session ${resolution.delegation.actor}, recorded ${resolution.delegation.at}), and reading it is not executing it.`,
+			...role === "supervisor" ? ["- responsibility: investigate and compare reusable method candidates through Evolution; the platform owns round scheduling."] : [],
+			...resolution.delegation.sourceRunId == null ? [] : [`- exact source Run: ${resolution.delegation.sourceRunId}`]
+		];
 		if (budget.addAll(label) > 0) return tooLarge("the review-only label", taskPageHint(task.taskId));
 	}
-	const summaryLines = role === "reviewer" && run?.providerBinding !== void 0 ? await bindingLines(deps.taskRuntime, run.providerBinding) : [];
-	if (role !== "reviewer") {
+	const summaryLines = resolution.kind === "reviewer" && run?.providerBinding !== void 0 ? await bindingLines(deps.taskRuntime, run.providerBinding) : [];
+	if (resolution.kind !== "reviewer") {
 		if (run?.providerBinding === void 0 || run.providerBinding.skills.length === 0) return refused("unreadable", `task "${task.taskId}" has no bound guidance Skill; its model request cannot execute unguided work.`);
 		let bound;
 		try {
@@ -1174,15 +1184,15 @@ async function dynamicProjection(deps, loaded) {
 	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
 	const header = [
 		"# Dynamic context (state)",
-		`role: ${resolution.kind}`,
+		`role: ${resolution.kind === "reviewer" ? resolution.delegation.role ?? "reviewer" : resolution.kind}`,
 		`graph: ${resolution.graph.id} "${resolution.graph.name}" — store ${resolution.storeId}`,
 		...marker === void 0 ? [] : [marker, RECOVERY_NOTE],
 		`gate phase: ${gate ?? "not tracked for this session"}`
 	];
 	if (budget.addAll(header) > 0) return tooLarge("the dynamic projection header", taskPageHint(task.taskId));
 	if (resolution.kind === "reviewer") {
-		const run = snapshot === void 0 ? void 0 : latestRun(snapshot, task);
-		const label = `delegated task state (review-only, no business Run): ${run === void 0 ? "no run was ever started" : ownRunLine(run, snapshot)}`;
+		const run = resolution.delegation.sourceRunId === void 0 ? snapshot === void 0 ? void 0 : latestRun(snapshot, task) : target.run;
+		const label = `delegated task state (${resolution.delegation.role === "supervisor" ? "method supervision" : "review-only"}, no business Run): ${run === void 0 ? "no source run was recorded" : ownRunLine(run, snapshot)}`;
 		if (!budget.add(label)) return tooLarge("the delegated task state", taskPageHint(task.taskId));
 	} else if (!budget.add(`your run: ${target.run === void 0 ? "none" : ownRunLine(target.run, snapshot)}`)) return tooLarge("the run line", taskPageHint(task.taskId));
 	if (target.run !== void 0 && deps.taskRuntime.decompositionState !== void 0 && resolution.kind !== "reviewer") {
@@ -1656,7 +1666,8 @@ async function taskRead(deps, loaded) {
 	if (resolution.kind === "reviewer") {
 		const lines$1 = [
 			"",
-			"delegated task (review-only): this session has no business Run. The contract below is the task it was delegated to review.",
+			resolution.delegation.role === "supervisor" ? "source task (method supervision): this session has no business Run. Preserve this contract while comparing reusable method candidates; the platform schedules rounds." : "delegated task (review-only): this session has no business Run. The contract below is the task it was delegated to review.",
+			...resolution.delegation.sourceRunId == null ? [] : [`exact source Run: ${resolution.delegation.sourceRunId}`],
 			...contractBody(task)
 		];
 		if (budget.addAll(lines$1) > 0) return tooLarge("the delegated contract", taskPageHint(task.taskId));

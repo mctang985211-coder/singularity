@@ -886,6 +886,70 @@ body,
   font: 12px var(--font-sans);
 }
 
+.sg-create-card textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 54px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: var(--color-wash);
+  color: var(--color-ink);
+  font: 12px var(--font-sans);
+  resize: vertical;
+}
+
+/* The RSI settings block: a toggle whose fields appear only while it is on. */
+.sg-rsi {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--color-line);
+  padding-top: 8px;
+}
+
+.sg-create-card label.sg-rsi-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.sg-create-card label.sg-rsi-toggle input[type='checkbox'] {
+  flex: none;
+  width: auto;
+  height: auto;
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+.sg-rsi-task {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sg-rsi-clear {
+  margin-right: auto;
+}
+
+.sg-rsi-chip {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font: 700 10px var(--font-sans);
+  background: color-mix(in srgb, var(--color-accent) 14%, var(--color-card));
+  color: var(--color-accent-strong);
+  white-space: nowrap;
+}
+
+.sg-rsi-chip[data-phase='done'] {
+  background: color-mix(in srgb, #059669 14%, var(--color-card));
+  color: #059669;
+}
+
+.sg-rsi-chip[data-phase='failed'] {
+  background: color-mix(in srgb, var(--color-watch) 14%, var(--color-card));
+  color: var(--color-watch);
+}
+
 .sg-create-actions {
   display: flex;
   justify-content: flex-end;

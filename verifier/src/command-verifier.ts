@@ -23,6 +23,13 @@ function killTree(child: ChildProcess): void {
   }
 }
 
+/** The one line a log carries when the command itself wrote nothing — an empty log makes a failure undiagnosable. */
+function outcomeLine(outcome: CommandOutcome): string {
+  if (outcome.error !== undefined) return outcome.error.message
+  if (outcome.timedOut === true) return '(no output) timed out'
+  return `(no output) exit code ${outcome.exitCode ?? 'unknown'}`
+}
+
 function runCommand(
   command: string,
   cwd: string,
@@ -32,8 +39,13 @@ function runCommand(
   return new Promise(resolveOutcome => {
     const child = spawn(command, { cwd, shell: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
     const log = createWriteStream(logPath)
-    child.stdout.pipe(log, { end: false })
-    child.stderr.pipe(log, { end: false })
+    let outputBytes = 0
+    for (const stream of [child.stdout, child.stderr]) {
+      stream.on('data', (chunk: Buffer) => {
+        outputBytes += chunk.length
+      })
+      stream.pipe(log, { end: false })
+    }
     let timedOut = false
     let settled = false
     const timer =
@@ -47,6 +59,10 @@ function runCommand(
       if (settled) return
       settled = true
       if (timer !== undefined) clearTimeout(timer)
+      // The log holds exactly what the command wrote; only a command that wrote
+      // nothing leaves room for the outcome line, so a silent failure is still
+      // readable and nothing the command said is ever changed.
+      if (outputBytes === 0) log.write(`${outcomeLine(outcome)}\n`)
       log.end(() => resolveOutcome(outcome))
     }
     child.on('error', error => finish({ error }))

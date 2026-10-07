@@ -65,8 +65,7 @@ async function seedHoldout(h: ScriptedLoop, sourceDir: string) {
 async function fixture(holdoutCandidate = '42') {
   let h!: ScriptedLoop
   h = await startScriptedLoop({
-    roots: [ROOT, 's-control'], evolution: { ledgerRoot: ledger }, supervision: { autoReview: 'off' },
-    approvalService: 'native', approvalAnswer: ask => ask.toolName.startsWith('evolution_') ? undefined : 'allowed-once',
+    roots: [ROOT, 's-control'], evolution: { ledgerRoot: ledger }, approvalService: 'native', approvalAnswer: ask => ask.toolName.startsWith('evolution_') ? undefined : 'allowed-once',
     script: (sessionId, index): readonly ScriptEntry[] => {
       if (sessionId === 's-control') return [
         { tool: 'evolution_decide', args: { proposalId: PROPOSAL, decision: 'PROMOTE' } },
@@ -217,6 +216,7 @@ describe('Task decomposition recipe Evolution', () => {
       noUnacceptableSideEffects: 'isolated frozen libraries and workspaces', holdoutPerformanceAcceptable: 'verified', resourceCostAcceptable: 'traffic measured', regressionEvidenceRefs: [result.reportPath],
     }, ROOT)
     f.h.userSays('publish the evaluated content and dependency repair', 's-control')
+    await approve(f.h, 'evolution_decide')
     await approve(f.h, 'evolution_apply')
     await vi.waitFor(async () => expect((await f.h.ctx.evolution.get(PROPOSAL)).status).toBe('applied'), { timeout: 10_000 })
     const recovered = await f.h.runtime.recoverRootTask(STORE, {

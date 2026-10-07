@@ -183,8 +183,12 @@ export interface RunFacts {
   evidenceRefs: string[]
   terminal: boolean
   detail: string
-  /** Why a terminal side still records `interrupted`: a blocked run is a dead end the experiment has no outcome for. */
-  interruptedReason?: string
+  /**
+   * Why the side reads the way it does: the store's own cause for a terminal
+   * `failed` run, or why a blocked one is recorded `interrupted` — a blocked run
+   * is a dead end the experiment has no outcome for.
+   */
+  reason?: string
 }
 
 /** How a settled run's own status reads in the experiment's outcome vocabulary: a blocked
@@ -219,11 +223,19 @@ export function runFactsOf(
         : `the store holds run ${run.runId} as ${run.status}${run.executionPhase === undefined ? '' : ` (${run.executionPhase})`} with ${
             review === undefined ? 'no terminal review record' : `a terminal review record (${review.outcome})`
           }`
-  const interruptedReason =
+  /**
+   * A failure reason is copied the same way an interruption's is: the side is
+   * reported with the store's own cause instead of an empty criteria list and no
+   * explanation. A run that failed without recording a cause is left with only
+   * the facts above.
+   */
+  const reason =
     status === 'blocked'
       ? `the store holds run ${runId} as blocked, a dead end no transition resumes, and the experiment has no blocked outcome; ` +
         'the side is recorded interrupted'
-      : undefined
+      : status === 'failed'
+        ? review?.localizedCause
+        : undefined
   return {
     outcome: status === undefined ? 'interrupted' : OUTCOME_OF_STATUS[status],
     taskId: task.taskId,
@@ -233,7 +245,7 @@ export function runFactsOf(
     evidenceRefs: evidenceRefsOf(snapshot, runId, review),
     terminal: status !== undefined,
     detail,
-    ...(interruptedReason === undefined ? {} : { interruptedReason }),
+    ...(reason === undefined ? {} : { reason }),
   }
 }
 
@@ -323,7 +335,7 @@ export function recoveredSampleRecord(input: {
     workspace: input.workspace,
     initialDigest: input.view.frozen.snapshot.digest,
     cost: costOf(facts.review, input.view.frozen.objective === 'tool-call-reduction' ? input.snapshot : undefined),
-    ...(facts.interruptedReason === undefined ? {} : { reason: facts.interruptedReason }),
+    ...(facts.reason === undefined ? {} : { reason: facts.reason }),
     actor: input.actor,
   })
 }
@@ -651,7 +663,7 @@ export function assertExperimentSample(
   if (!EXPERIMENT_OUTCOMES.includes(record.outcome)) {
     throw new Error(`evolution: ${field} has an unknown outcome "${String(record.outcome)}"`)
   }
-  for (const member of ['taskId', 'runId', 'reviewRef'] as const) {
+  for (const member of ['taskId', 'runId', 'reviewRef', 'reason'] as const) {
     if (record[member] !== undefined && (typeof record[member] !== 'string' || record[member].length === 0)) {
       throw new Error(`evolution: ${field} has a malformed ${member}`)
     }

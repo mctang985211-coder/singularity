@@ -2,6 +2,7 @@ import { copyFile, cp, lstat, mkdir, readFile, readdir, readlink, realpath, rena
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TERMINAL_RUN_STATUSES, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest } from "@dangosys/dsh-singularity-task";
+import { spawn } from "node:child_process";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
@@ -321,6 +322,8 @@ const EXECUTABLE_MODES = [
 	"simulation",
 	"measurement"
 ];
+/** How long one syntax check may take before it is read as tooling trouble and skipped. */
+const SYNTAX_CHECK_TIMEOUT_MS = 5e3;
 /** Every mode a criterion may declare, in declaration order (`VerificationMode`); the list the mode rule names. */
 const VERIFICATION_MODES = [
 	"deterministic",
@@ -418,6 +421,72 @@ function contractDefects(criteria, label) {
 		reasons.push(...protectedInputDefects([criterion], label));
 	}
 	if (!criteria.some((criterion) => criterion.mandatory === true)) reasons.push(`${label} requires at least one mandatory acceptance criterion`);
+	return reasons;
+}
+/** The first non-blank line of a diagnostic, or `undefined` when the text held none. */
+function firstLine(text$1) {
+	return text$1.split("\n").map((line) => line.trim()).find((line) => line.length > 0);
+}
+/**
+* Whether `bash` can parse one command, checked by `bash -n` with the command on
+* its stdin: the command is tokenized and never executed, so no side effect of
+* the criterion can happen here. `undefined` means the check has no answer — the
+* shell could not be started, or did not answer in time — and an unanswered
+* check never blocks admission.
+*/
+function commandSyntaxDefect(command, where) {
+	return new Promise((resolveDefect) => {
+		let child;
+		try {
+			child = spawn("bash", ["-n"], { stdio: [
+				"pipe",
+				"ignore",
+				"pipe"
+			] });
+		} catch {
+			resolveDefect(void 0);
+			return;
+		}
+		let settled = false;
+		let diagnostic = "";
+		const finish = (defect$2) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolveDefect(defect$2);
+		};
+		child.stdin?.on("error", () => void 0);
+		child.stderr?.on("data", (chunk) => {
+			diagnostic += chunk.toString("utf8");
+		});
+		const timer = setTimeout(() => {
+			child.kill("SIGKILL");
+			finish(void 0);
+		}, SYNTAX_CHECK_TIMEOUT_MS);
+		child.on("error", () => finish(void 0));
+		child.on("close", (code) => {
+			if (code === 0 || code === null) return finish(void 0);
+			finish(`${where} command has a shell syntax error: ${firstLine(diagnostic) ?? `bash -n exited ${code} without a diagnostic`}`);
+		});
+		child.stdin?.end(command);
+	});
+}
+/**
+* The syntax of every executable criterion's command, checked before a contract
+* is admitted. A command the shell cannot parse can never settle its criterion,
+* so refusing it here spares the round the run that would have failed at verify
+* time; a check with no answer (no `bash` on PATH) is skipped rather than read
+* as a defect.
+*/
+async function commandSyntaxDefects(criteria, label) {
+	const reasons = [];
+	for (const criterion of criteria) {
+		const command = criterion.command;
+		if (!EXECUTABLE_MODES.includes(criterion.verificationMode)) continue;
+		if (typeof command !== "string" || command.trim().length === 0) continue;
+		const defect$2 = await commandSyntaxDefect(command, `${label} criterion "${criterion.criterionId}"`);
+		if (defect$2 !== void 0) reasons.push(defect$2);
+	}
 	return reasons;
 }
 /**
@@ -1171,7 +1240,7 @@ async function taskTemplatePage(root, request = {}, scope) {
 		total: entries.length,
 		offset,
 		nextOffset: null,
-		message: filtered.length === 0 ? "No matching Task template. A complete standard contract is allowed." : void 0
+		message: filtered.length === 0 ? "No matching Task template. Author a complete one-off contract and proceed; discovery and admission do not publish a shared template. Reusable findings from execution may later support a supervisor-evaluated task_definition candidate." : void 0
 	};
 	for (;;) {
 		page.nextOffset = offset + page.entries.length < entries.length ? offset + page.entries.length : null;
@@ -1376,7 +1445,6 @@ const COORDINATION_ALLOWED = new Set([
 	"task_review_agent",
 	"task_diagnose",
 	"task_budget_extend",
-	"task_recover",
 	"read",
 	"read_image",
 	"glob",
@@ -3502,9 +3570,8 @@ const DEFAULT_WRITE_DRAIN_TIMEOUT_MS = 3e4;
 const DEFAULT_MAX_DEPTH = 4;
 const DEFAULT_MAX_CHILDREN = 8;
 const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true;
-/** The shipped supervision policy (A7 §1): failed terminal reviews diagnosed, three recovery rounds, two improvement rounds, eight coordination runs. */
+/** The shipped supervision backstop: three recovery rounds, two improvement rounds, eight coordination runs. A graph that runs an RSI loop declares its own round count over these (`maxImprovementRoundsFor`). */
 const DEFAULT_SUPERVISION = {
-	autoReview: "failed",
 	maxRecoveryRounds: 3,
 	maxImprovementRounds: 2,
 	coordinationBudget: 8
@@ -3521,11 +3588,6 @@ const RootBudget = z.object({
 	maxConcurrentWrites: z.number()
 });
 const Supervision = z.object({
-	autoReview: z.union([
-		z.const("all"),
-		z.const("failed"),
-		z.const("off")
-	]).default(DEFAULT_SUPERVISION.autoReview),
 	maxRecoveryRounds: z.number().default(DEFAULT_SUPERVISION.maxRecoveryRounds),
 	maxImprovementRounds: z.number().default(DEFAULT_SUPERVISION.maxImprovementRounds),
 	coordinationBudget: z.number().default(DEFAULT_SUPERVISION.coordinationBudget)
@@ -3889,9 +3951,8 @@ function assertGeneratedTaskReview(policy) {
 /** Refuse a supervision policy this build cannot read: an unread member is a typo, and a cap is a whole count at or above zero. */
 function assertSupervisionConfig(policy) {
 	if (policy === void 0) return;
-	if (policy === null || typeof policy !== "object" || Array.isArray(policy)) throw new Error("task-runtime: supervision must be an object with the review policy's members");
+	if (policy === null || typeof policy !== "object" || Array.isArray(policy)) throw new Error("task-runtime: supervision must be an object with the round-cap and allowance members");
 	const known = new Set([
-		"autoReview",
 		"maxRecoveryRounds",
 		"maxImprovementRounds",
 		"coordinationBudget"
@@ -3899,11 +3960,6 @@ function assertSupervisionConfig(policy) {
 	const unknown = Object.keys(policy).filter((key) => !known.has(key));
 	if (unknown.length > 0) throw new Error(`task-runtime: supervision names [${unknown.join(", ")}], which this policy does not declare; a member nobody reads refuses to start rather than being silently ignored`);
 	const record = policy;
-	if (record.autoReview !== void 0 && ![
-		"all",
-		"failed",
-		"off"
-	].includes(record.autoReview)) throw new Error(`task-runtime: supervision.autoReview is ${JSON.stringify(record.autoReview)}; it is "all", "failed" or "off"`);
 	for (const name of [
 		"maxRecoveryRounds",
 		"maxImprovementRounds",
@@ -3917,18 +3973,49 @@ function assertSupervisionConfig(policy) {
 /**
 * The policy in force: the `singularitySupervision` service a deployment exposes (the way `singularityEvolution` carries
 * the chain switch) over this plugin's own config, per member; a value that is not a usable count reads as its default.
+* These are the backstop a graph that runs no RSI loop runs under — a store whose graph declares its own round count is
+* answered through {@link improvementCapFor}.
 */
 function supervisionSettings(self) {
 	const provided = self.softService("singularitySupervision");
 	const configured = self.config.supervision;
 	const whole = (value, fallback, floor) => typeof value === "number" && Number.isFinite(value) && value >= floor ? Math.floor(value) : fallback;
-	const autoReview = (value) => value === "all" || value === "failed" || value === "off" ? value : void 0;
 	return {
-		autoReview: autoReview(provided?.autoReview) ?? autoReview(configured?.autoReview) ?? DEFAULT_SUPERVISION.autoReview,
 		maxRecoveryRounds: whole(provided?.maxRecoveryRounds, whole(configured?.maxRecoveryRounds, DEFAULT_SUPERVISION.maxRecoveryRounds, 0), 0),
 		maxImprovementRounds: whole(provided?.maxImprovementRounds, whole(configured?.maxImprovementRounds, DEFAULT_SUPERVISION.maxImprovementRounds, 0), 0),
 		coordinationBudget: whole(provided?.coordinationBudget, whole(configured?.coordinationBudget, DEFAULT_SUPERVISION.coordinationBudget, 1), 1)
 	};
+}
+/**
+* The **improvement-round cap in force for one store**. The deployment policy is
+* the default (see {@link supervisionSettings}), but a store whose graph runs an
+* RSI loop declares its own round count through the same exposure
+* (`singularitySupervision.maxImprovementRoundsFor`, answered from the graph's
+* `rsi.iterationRounds`) — so a platform-scheduled loop may open exactly the
+* rounds its graph names, while every store without one keeps the deployment's
+* cap unchanged. An unusable answer reads as no answer: the policy stands.
+*/
+function improvementCapFor(self, storeId) {
+	const specific = roundCapAnswer(self, "maxImprovementRoundsFor", storeId);
+	if (specific !== void 0) return specific;
+	return supervisionSettings(self).maxImprovementRounds;
+}
+/**
+* The **recovery-round cap in force for one store**: the same graph-declared
+* round count as {@link improvementCapFor}. The platform RSI loop is the only
+* caller that opens a recovery any more, and a store whose graph schedules it
+* opens exactly the rounds its graph names; a store no graph declared keeps the
+* runtime's own constant.
+*/
+function recoveryCapFor(self, storeId) {
+	const specific = roundCapAnswer(self, "maxRecoveryRoundsFor", storeId);
+	if (specific !== void 0) return specific;
+	return supervisionSettings(self).maxRecoveryRounds;
+}
+/** One store's answer from the supervision exposure, or `undefined` when nothing usable is exposed. */
+function roundCapAnswer(self, method, storeId) {
+	const specific = self.softService("singularitySupervision")?.[method]?.(storeId);
+	return typeof specific === "number" && Number.isFinite(specific) && specific >= 0 ? Math.floor(specific) : void 0;
 }
 async function unload(self) {
 	/**
@@ -4632,7 +4719,11 @@ async function existingRootTask(self, storeId) {
 async function checkRootContract(self, request) {
 	const { rootSessionId, contract } = request;
 	const label = `root contract of session "${rootSessionId}"`;
-	const defects = [...contractDefects(contract.acceptanceCriteria, label), ...rootIndependenceDefects(contract.acceptanceCriteria, label)];
+	const defects = [
+		...contractDefects(contract.acceptanceCriteria, label),
+		...rootIndependenceDefects(contract.acceptanceCriteria, label),
+		...await commandSyntaxDefects(contract.acceptanceCriteria, label)
+	];
 	if (defects.length > 0) return {
 		ok: false,
 		refusal: {
@@ -5839,6 +5930,22 @@ async function checkDerivedBatch(self, request) {
 			gaps: []
 		}
 	};
+	/**
+	* The one rule the structural verdict cannot make: a criterion's command is
+	* parsed by a shell here, in the same pass that refuses the batch, so a batch
+	* whose criterion the shell cannot parse never mints children. The label is
+	* the one `checkDecomposition` gives a child at this stage, before ids exist.
+	*/
+	const syntaxReasons = [];
+	for (const [index, child] of batch.children.entries()) syntaxReasons.push(...await commandSyntaxDefects(child.contract.acceptanceCriteria, `child ${index}`));
+	if (syntaxReasons.length > 0) return {
+		ok: false,
+		refusal: {
+			error: /* @__PURE__ */ new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}":\n- ${syntaxReasons.join("\n- ")}`),
+			reasons: syntaxReasons,
+			gaps: []
+		}
+	};
 	const manifests = manifestsOf(self, batch, identity.callerSessionId);
 	const rejected = batch.children.map((child, index) => ({
 		child,
@@ -6950,7 +7057,10 @@ async function recoverRootTaskOnce(self, storeId, request, caller) {
 	} else if (source.status === "verified") throw new Error(`task-runtime: root task "${sourceTaskId}" is verified — a successful source is not recovered by the recovery door, and nothing was written; a verified source accepts an improvement round, judged by the same original criteria: ask again with mode "improve"`);
 	else if (source.status === "running" || source.status === "verifying") throw new Error(`task-runtime: root task "${sourceTaskId}" is ${source.status}: an attempt is in flight, and a recovery does not hot-swap a live run`);
 	else if (source.status !== "failed" && source.status !== "blocked") throw new Error(`task-runtime: root task "${sourceTaskId}" is ${source.status}; a recovery attempt is opened for a failed task (a \`failed\` task, or a \`blocked\` one that never ran), and this is not one`);
-	assertRoundCap(supervisionSettings(self), recoveryRoundsOf(snapshot, sourceTaskId), kind, sourceTaskId);
+	assertRoundCap({
+		maxRecoveryRounds: recoveryCapFor(self, storeId),
+		maxImprovementRounds: improvementCapFor(self, storeId)
+	}, recoveryRoundsOf(snapshot, sourceTaskId), kind, sourceTaskId);
 	const sourceRun = recoverySourceRun(source, request, snapshot, kind);
 	assertRecoveryContract(source);
 	/**
@@ -8835,7 +8945,7 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 		contract,
 		...champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}
 	};
-	const spawn = options.spawn !== false;
+	const spawn$1 = options.spawn !== false;
 	/**
 	* A replayed worker reads its context the way every task worker does (A2):
 	* the replay task is parentless by design, so the store records no handoff
@@ -8866,7 +8976,7 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 				...options.overlay?.extraSkillRoots === void 0 ? {} : { skillRoots: [...options.overlay.extraSkillRoots] },
 				...options.agentOptions === void 0 ? {} : { agentOptions: { ...options.agentOptions } },
 				...taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot },
-				spawn,
+				spawn: spawn$1,
 				championRunId
 			}, {
 				...options.signal === void 0 ? {} : { admission: options.signal },

@@ -547,6 +547,29 @@ describe('TaskRuntime root contract intake (A0 §1–§2)', () => {
     expect(h.notifications).toHaveLength(0)
   })
 
+  test('a root contract whose criterion command the shell cannot parse is refused before a proposal exists', async () => {
+    const h = harness()
+    await h.task.createStore(STORE)
+    const before = await h.task.snapshotIn(STORE)
+
+    // A command with an unbalanced quote parses nowhere: the criterion could never
+    // run, so the intake refuses it here instead of at verify time, naming the
+    // criterion and the shell's own diagnostic.
+    await expect(
+      h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
+        objective: 'measure the delivered artifact', requiredCapabilities: ['execute-task'],
+        acceptanceCriteria: [
+          { criterionId: 'root-balanced', description: 'it holds', mode: 'deterministic', command: 'echo "unclosed' },
+        ],
+      }),
+    ).rejects.toThrow(/root contract.*criterion "root-balanced" command has a shell syntax error:/)
+
+    // The refusal is whole, like every other: no proposal, no task, no run.
+    expect(await h.task.snapshotIn(STORE)).toEqual(before)
+    expect(h.reviewCalls).toHaveLength(0)
+    expect(h.spawned).toHaveLength(0)
+  })
+
   test('a store that already holds a root refuses a new intake by name, whatever root it holds', async () => {
     const h = harness()
     await h.task.createStore(STORE)

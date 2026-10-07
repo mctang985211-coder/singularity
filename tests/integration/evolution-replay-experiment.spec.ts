@@ -715,7 +715,7 @@ describe('S4-E: the promotion gate promotes a fixed skill candidate end to end',
       'gated', 'decided', 'commit_intent', 'applied', 'commit_intent', 'rolledback',
     ])
     const lines = await ledgerLines(f)
-    expect(lines.filter(line => line.kind === 'decided')[0]).toMatchObject({ decision: 'PROMOTE', approvalRef: expect.stringMatching(/^decision:/) })
+    expect(lines.filter(line => line.kind === 'decided')[0]).toMatchObject({ decision: 'PROMOTE', approvalRef: expect.stringMatching(/^approval:/) })
     expect(lines.filter(line => line.kind === 'applied')[0]).toMatchObject({
       targets: [production],
       approvalRef: expect.stringMatching(/^approval:/),

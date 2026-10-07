@@ -132,6 +132,18 @@ describe('resolveGrant', () => {
     expect(resolved.allow).toEqual(['bash', 'read'])
   })
 
+  test('keeping research preset tools cannot add a second agent delegation tree', () => {
+    const h = harness({ global: ['task_decompose', 'read'], preset: ['web_search', 'subagent', 'subagent_fork', 'workflow', 'ralph'] })
+    const resolved = resolveGrant(h.ctx, worker(), grant({ baseline: ['task_decompose', 'read'], keepPresetTools: true }))
+    expect(resolved.allow).toEqual(['read', 'task_decompose', 'web_search'])
+  })
+
+  test('an explicit capability cannot bypass Task admission with native delegation', () => {
+    const h = harness({ global: ['subagent'], preset: [] })
+    expect(() => resolveGrant(h.ctx, worker(), grant({ capabilities: [{ capability: 'research', tools: ['subagent'], skills: [] }] })))
+      .toThrow('delegate through task_decompose')
+  })
+
   test('a capability tool the worker cannot see rejects the grant, naming the capability and the surface', () => {
     const h = harness({ global: ['read'], preset: [] })
     expect(() =>

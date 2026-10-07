@@ -1,6 +1,8 @@
 # Singularity Harness 工作指南
 
-当前施工状态（2026-10-03）：Task 模板、Skill、capability 与新增 MCP server 定义已共用候选、对照实验、人审、提交、回滚和恢复路径；默认复盘失败，普通 child 诊断回真实父 Run，共享变更才交 supervisor。实现和验证范围见[施工记录](2026-10-03-task-skill-implementation.md)。以下各日期验收记录保留其历史范围。
+当前协议（2026-10-07）：平台 RSI driver 统一开轮，Task/TaskTemplate/Skill 分工、轮次结案、方法消费、角色权限和图控制见[当前 RSI 协议与优化](2026-10-07-rsi-optimization.md)。无 rsi 设置的图没有旧自动复盘链；以下各日期验收记录保留其历史范围。
+
+历史施工状态（2026-10-03）：Task 模板、Skill、capability 与新增 MCP server 定义共用候选、对照实验、人审、提交、回滚和恢复路径；当时默认复盘失败，普通 child 诊断回真实父 Run，共享变更交 supervisor。实现和验证范围见[施工记录](2026-10-03-task-skill-implementation.md)。
 
 历史状态（2026-10-01）：**K1～K4、A5、A6 均按各自合同验收；前端以外的真实模型全链纵向验收仍为 INCONCLUSIVE。** A6 的 EVO-2～EVO-5 机制经定向反例与独立复核，EVO-1 在授权的两个冻结案例中由真实 Agent 分别组合现有能力（L1）和生成新 execution Skill（L2），双侧独立验收通过，再经受控 DSH 拒绝/允许门只应用到临时部署。最终纵向试验未形成失败源 Review，因此未观察到同一真实模型链上的 Diagnosis → 候选 → 应用 → `task_recover` → 原 AC 通过；见[纵向验收记录](history/2026-09-28-final-backend-vertical-review.md)。A6 证据见 §5.23、[交付记录](history/2026-09-28-a6-delivery-record.md)及[唯一计划](2026-09-20-vrtc-code-change-plan.md)。两例成功不代表任意目标均能自进化，也不代表真人审批或生产部署。
 
@@ -535,7 +537,7 @@ K4 于 2026-09-27 独立审核通过；失败反例、精简重做和同键审�
 
 - **有限候选与同一提交协议（2026-10-03）**：`EvolutionService` 支持 Task 模板首发或追加版本、已有 Skill 同名更新，以及一条 capability 整行变更和可选新 MCP server 定义、execution Skill。Native tools 必须已有授权；新 verifier、权限、preset/runtime policy 与资源包仍无发布执行器。候选绑定模板库、行、MCP 启动定义、部署配置与可选 Skill 的内容身份，复用现有 commit intent、原子文件替换与重开对账；开放 intent 阻断相关准入。部署配置先持久化，再更新 runtime registry。
 - **双侧真实评估与成功源成本优化（2026-10-03）**：失败修复保留原比较规则；capability 基线沿普通准入产生真实 `not-admitted`，候选沿原 driver 和独立 verifier 执行。成功 Diagnosis 必须冻结 `objective: tool-call-reduction` 并把源 Task 纳入 `observed-success`，另有独立 holdout。两侧保留原验收，观察样本工具调用必须减少，holdout 允许持平；成本覆盖每侧实际 Run 的完整后代子树，任一计量缺失即 `inconclusive`，晋升重读 store 核对。`success-cost-evolution.spec.ts` 已用真实脚本模型循环验证完整人审、应用、生产改进 Run 与 proposal 归属，也验证根调用下降但子树总成本增加时拒绝晋升。
-- **恢复调用链只有一条**：`task_recover({sourceDiagnosisId, requestKey, mode?})` 只在 supervisor handoff grant/prompt 中可见；adapter → evolution `coordinateRecovery` → task-runtime `recoverTask`。evolution 核对委派与能力变更的批准/applied 状态；runtime 重读同 store 的失败源、原契约、依赖、provider、累计额度与幂等，再开一个新根 Run/Session。纯产物缺口不强造 EvolutionProposal；跨 graph、错误 diagnosis、未应用能力、额度不足及同源在途换 key 均零新 Run；成功源在迭代 v2 起由 `mode:'improve'` 打开改进轮（§5.27），此前「成功源一律零新 Run」的拒绝随之废止。
+- **恢复调用链只有一条**：没有任何 agent 持有恢复工具——轮次调度只属于平台 RSI loop driver（§5.27 之后的重构，2026-10-07）。driver 每轮终态后 spawn supervisor（读工具 + `evolution_*`，无恢复工具），再由 driver 自己调 task-runtime 的 `recoverRootTask` 开下一轮（verified→`mode:'improve'`，failed→`mode:'recovery'`）。runtime 重读同 store 的失败/通过源、原契约、依赖、provider、累计额度与幂等，再开一个新根 Run/Session；跨 graph、错误 diagnosis、额度不足及同源在途换 key 均零新 Run。driver 若收到 supervisor 以 `{"outcome":"closed"/"blocked"}` 结束，则把 loop 记 `failed` 并停止，不再开轮。
 - **复用、依赖与原 AC**：`deriveReuse` 从失败 Run 的成员、Evidence、输入和产物事实自动绑定原 AC 的 `childEvidence` 位置，允许已通过成员位于失败成员之后；坏引用列出未绑定位置并重做，不移动后续位置。缺产物消费者仍经过原依赖闸，根提交前再次检查产物/Evidence；旧失败、Review、Evidence 不改，最终仍由原 AC 独立验收。
 - **真死亡恢复**：联合提交各持久边界及恢复的 Run 创建后、批次准入前、准入后/spawn 前、新根结算前均由子进程 `SIGKILL` 后新进程重开。结算窗口的旧测试曾把 workspace 尚未接管导致的假 `failed` 当成绿灯；现于 submitted Run 独立验收前安全重建 workspace ownership，重开后同一 Run 由原 AC 得到 `verified`，活跃/第三方 owner 仍具名拒绝，同 key 无重复 Run/批次、累计预算不归零。
 - **真实模型效果范围**：原 L1 三次尝试和 L2 前两次失败轨迹保留；修复 `mutationJson` 公开入口后，原冻结 L2 第三次由真实 Agent 生成新 Skill，双侧 fix/holdout 通过独立 verifier；新获授权并重新冻结的 L1 第一轮由真实 Agent 组合已有授权 Skill，双侧同样通过。两例的受控 operator 均依次拒绝/允许决定与应用；拒绝零应用，允许后只更新临时部署，受保护生产文件摘要不变。L1 新冻结证据见验收记录（历史实验路径：`/home/ROXY/code/bb_work/a6-evo1-l1-recheck-2026-09-28/evidence/L1-assessment.md`）；L2 原始与续验证据见验收记录（历史实验路径：`/home/ROXY/code/bb_work/a6-evo1-2026-09-28/evidence/EVO-1-assessment.md`）。
@@ -607,6 +609,8 @@ K2 独立审核：[验收记录](history/2026-09-27-k2-review.md)。
 验证：`./dsh --profile web --dump-config` 与 `./dsh --profile verify-smoke --dump-config` 均 exit 0 且无跳过/缺失警告；web profile 真实启动后 `agentPresets` roster 为 `[standard, ptc, minimal, cordis, bb-verify, singularity-reviewer]`，两个工作区预设均 `broken=none`（definition 装载与行审查通过）；verify-smoke 的 `minimal` 声明同样经真实 Loader 装配读回 `broken=none`（临时 overlay 禁用已退役的 verify-runner 行）。
 
 ### 5.27 当前协调与改进协议（2026-10-03）
+
+> 2026-10-07 重构：自动复盘 reviewer（`supervision.autoReview`）与 agent 侧 supervisor 交接链已删除；supervisor 只存在于平台 RSI loop（图的 `rsi` 设置）里，由驱动在每轮终态后 spawn，并自己打开下一轮（verified→`improve`，failed→`recovery`）。`task_recover` 工具已不存在。下面 1/2/4/5 条描述的触发与轮数旋钮由该重构取代，其余事实（角色预设、审批、Run recovery 记录、改进比较规则）不变。
 
 1. **默认失败复盘**：`supervision.autoReview` 默认 `failed`；可显式选择 `all` 或 `off`。终态与 graph 激活扫描共用已有受理、去重和持久账本。成功优化按需执行，不要求每个成功 child 启动协调代理。
 2. **普通 child 诊断先回父**：没有共享变更建议时，真实父 Run 消费诊断并调整当前工作；共享 Task 模板、Skill 或 capability 变更才进入 supervisor，且须启用 Evolution。根恢复保持原目标与验收。

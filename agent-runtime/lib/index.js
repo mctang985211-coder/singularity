@@ -192,6 +192,18 @@ function sourceReadRefusal(sessionId, seq, error) {
 }
 
 //#endregion
+//#region src/delegation-guard.ts
+const TASK_DELEGATION_DENIAL = "singularity: delegate through task_decompose; native subagent/workflow delegation has no Task contract or Run";
+/** The native delegation tools in the supported DSH presets, including optional external providers. */
+function isNativeDelegationTool(name) {
+	return name === "subagent" || name.startsWith("subagent_") || name === "workflow" || name === "ralph";
+}
+/** Local tools can escape schema restriction; enforce the same rule at execution on create and resume. */
+function sealNativeDelegation(agentCtx) {
+	agentCtx.tools.guard((execution) => isNativeDelegationTool(execution.name) ? TASK_DELEGATION_DENIAL : void 0);
+}
+
+//#endregion
 //#region src/skill-file.ts
 /** How far up from a worker's cwd project skill roots are looked for. */
 const PROJECT_LOOKUP_DEPTH = 8;
@@ -337,13 +349,17 @@ function assertCapabilityTools(grant, visible) {
 /** Compute the allow-list one grant resolves to; throws when a capability tool is not visible. */
 function resolveGrant(agentCtx, agent, grant) {
 	const visible = visibleToolNames(agentCtx, agent);
+	for (const capability of grant.capabilities) {
+		const bypasses = capability.tools.filter(isNativeDelegationTool);
+		if (bypasses.length > 0) throw new Error(`agent-runtime: capability "${capability.capability}" declares native delegation tools [${bypasses.join(", ")}]; ${TASK_DELEGATION_DENIAL}`);
+	}
 	assertCapabilityTools(grant, visible);
 	const allow = /* @__PURE__ */ new Set();
 	for (const capability of grant.capabilities) for (const tool of capability.tools) allow.add(tool);
-	for (const tool of grant.baseline) if (visible.has(tool)) allow.add(tool);
+	for (const tool of grant.baseline) if (visible.has(tool) && !isNativeDelegationTool(tool)) allow.add(tool);
 	if (grant.keepPresetTools) {
 		const global = visibleToolNames(agentCtx);
-		for (const tool of visible) if (!global.has(tool)) allow.add(tool);
+		for (const tool of visible) if (!global.has(tool) && !isNativeDelegationTool(tool)) allow.add(tool);
 	}
 	return {
 		allow: [...allow].sort(),
@@ -435,9 +451,9 @@ function rootPromptText(evolutionEnabled$1) {
 
 Read task_read, task_status and context_read; repository execution belongs to real Task workers. Decide engineering and coordination within your authority. Ask the user for missing decisions that change their objective, scope or acceptance.
 
-Before intake, load task-coordination with skill. Select relevant guidance through requiredCapabilities, using capability_list for names. Activated Runs load frozen Skill instructions; engineering heuristics remain falsifiable hypotheses with applicability conditions.
+Before intake, load task-coordination with skill and consult capability_list and relevant task_template_list branches. Declare each Task's execution capabilities and relevant guidance through requiredCapabilities, using the catalog's actual capability names. Bind a template only when its appliesTo conditions, full contract and parameters fit the objective; otherwise author a complete one-off contract and proceed without publishing a template. A Task defines the result, inputs, acceptance and required capabilities; a TaskTemplate parameterizes that contract and may offer a direct-child recipe. A Skill teaches the method and its applicability conditions. Activated Runs load frozen Skill instructions; engineering heuristics remain falsifiable hypotheses.
 
-Tool schemas define your operations. ${evolutionEnabled$1 ? "Evolution tools are available for evidenced Task and Skill improvements, with capability/MCP changes when execution means are missing. Repeated contracts or corrected contract defects should yield parameterized candidates for authorized Supervisor comparison and catalog reuse. Work within budget and recorded human decisions; publication alone is not a measured gain." : "Return reusable contract and method gaps with evidence; delegate missing execution means or request the capability."}`;
+Tool schemas define your operations. ${evolutionEnabled$1 ? "Evolution tools are available for evidenced Task and Skill improvements, with capability/MCP changes when execution means are missing. Preserve reusable findings from executed contracts and batches with exact Task/Run and evidence references. The automatic RSI supervisor consolidates these findings from the task tree and diagnoses, selects justified task_definition or Skill candidates, compares and publishes within authority; ordinary business Tasks need no shared-template publication. Manual Evolution work still follows actual authorization. Draft review does not establish Task acceptance or method improvement; independent verification, comparison, publication and later exact catalog or Skill consumption establish separate facts. Work within budget and recorded human decisions." : "Return reusable contract and method gaps with Task/Run and evidence references; delegate execution to Tasks through requiredCapabilities. Report a concrete capability gap when the catalog cannot supply the needed execution means."}`;
 }
 
 //#endregion
@@ -458,7 +474,7 @@ Choose evolution_replay objective llm-outcome for quality/performance, with eval
 
 Measure enough to decide, then continue. Reuse saved evidence and judgement for gate/publication; recheck only a relevant change, failure, uncertainty or explicit requirement. Missing evidence makes comparison inconclusive. Record available costs without inventing values, and allow measured negative results.
 
-Use evolution_decide and evolution_apply under actual publication policy and authorized asset scope; honor existing authorization. Apply shared changes before recovery; responsible parents create child batches and task_recover opens a root attempt. Admitted Tasks and frozen Runs retain their definitions and Skills.
+Use evolution_decide and evolution_apply under actual publication policy and authorized asset scope; honor existing authorization. The platform RSI loop alone opens the next round after you settle, and no recovery tool is granted to you: apply the shared changes your round justifies, then stop. Admitted Tasks and frozen Runs retain their definitions and Skills.
 
 Inspect later asset bindings and results before claiming transfer. A regression or counterexample drives the next justified candidate and comparison within the allowance. Record unobservable consumption as unverified; stop when no reasonable authorized action or budget remains. Publication, adoption and demonstrated benefit are distinct.`;
 
@@ -469,7 +485,7 @@ const WORKER_POLICY_TEXT = `You are a Singularity task worker. Own the complete 
 
 Investigate consequential unknowns with a bounded distinguishing check and revise your method from real evidence. Skill heuristics are hypotheses with applicability conditions; retain failed cases and checks without banning an entire approach.
 
-Implement a local result or task_decompose independently verifiable children with clear ownership, inputs, acceptance and capabilities. Define direct children only; let them choose descendants. Parallelize independent work with real dependsOn edges. Bind a fitting task_template_list reference or author the next contract; one-off contracts need no publication. After a batch, read failures and results, integrate accepted child artifacts and choose the next useful action. Clean starting inputs for independent comparisons do not prohibit ordinary child integration.
+Implement a local result or task_decompose independently verifiable children with clear ownership, inputs, acceptance and capabilities. Define direct children only; let them choose descendants. Parallelize independent work with real dependsOn edges. Consult capability_list and relevant task_template_list branches before drafting children. Inspect the appliesTo conditions and full contract, then bind a fitting exact reference and parameters; when none fits, author a complete one-off contract and proceed without publishing a template. A Task defines the result and acceptance; a TaskTemplate parameterizes the contract and optional direct-child recipe; a Skill teaches the method. After a batch, read failures and results, integrate accepted child artifacts and choose the next useful action. Clean starting inputs for independent comparisons do not prohibit ordinary child integration.
 
 Keep ordinary acceptance simple: a few command criteria using existing authoritative checkers. Commands start from the current Run workspace root and read this Task's explicit case/delivery manifest. Never use bare globs to collect sibling results. Your criteria check your own result; parents aggregate theirs separately. Template mappings refer only to your own children, never siblings. Artifact paths are not Evidence IDs.
 
@@ -477,7 +493,7 @@ Never declare completion yourself: the external verifier judges mandatory criter
 
 Decide facts and engineering choices yourself. Use task_ask_parent for decisions outside your authority and blocking:false when independent work can continue. Answer children promptly with task_answer and resolves:true only when settled; questions change no contract or permissions.
 
-When ready, hand it in with \`task_submit_result\`, referencing artifacts and actual evidence once. Repeated contracts or corrected contract defects produce a parameterized TaskTemplate or Skill candidate with causal evidence for authorized Supervisor comparison, publication and later catalog binding. Store methods, not solved RTL answers. Going idle is not a submission; report an impossible result rather than weaken acceptance.`;
+When ready, hand it in with \`task_submit_result\`, referencing artifacts and actual evidence once. Include justified reusable contract or method findings in your summary or artifacts, with the relevant Task/Run, executed batches, evidence and failure conditions. This gives the supervisor concrete sources for a parameterized TaskTemplate or Skill candidate; it does not require every one-off Task to become a template. The authorized supervisor consolidates findings, compares candidates and publishes for later exact catalog or Skill binding. Draft review does not replace independent acceptance. Store reusable contracts and methods, not solved RTL answers. Going idle is not a submission; report an impossible result rather than weaken acceptance.`;
 /** The first user message a task worker receives when its spawn carried no prompt of its own. */
 const WORKER_KICKOFF_TEXT = "Begin your delegated task. Read the contract with task_read as needed, investigate consequential unknowns, and implement or delegate verifiable results. Integrate their evidence and submit with task_submit_result.";
 
@@ -1054,6 +1070,7 @@ function workerSetup(ctx, role) {
 		});
 		if (role.grant !== void 0) await applyWorkerGrant(agentCtx, agent, role.grant);
 		sealRawSessionReads(agentCtx);
+		sealNativeDelegation(agentCtx);
 	};
 }
 var src_default = AgentRuntime;

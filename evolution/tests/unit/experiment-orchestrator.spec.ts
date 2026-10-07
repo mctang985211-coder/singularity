@@ -51,6 +51,8 @@ interface ScriptedOutcome {
   /** The tokens the run's review reports (default 10: the fixture's own bucket split). */
   tokens?: number
   toolCalls?: number
+  /** The failed run's own cause, as the store's review record carries it. */
+  localizedCause?: string
 }
 
 /** A little world: one prepared skill proposal, one store, one scripted runtime, one ledger. */
@@ -303,6 +305,7 @@ async function world(
           outcome: scriptedOutcome.outcome,
           evidenceRefs: [`e-${runId}`],
           anomalies: [taskOptions.lineage],
+          ...(scriptedOutcome.localizedCause === undefined ? {} : { localizedCause: scriptedOutcome.localizedCause }),
           criteria: scriptedOutcome.criteria ?? [{ criterionId: 'ac', verdict: 'pass', verifierId: 'command' }],
           ...(scriptedOutcome.noMetrics === true
             ? {}
@@ -691,6 +694,51 @@ describe('the two-sided orchestrator', () => {
       metrics: { tokens: { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 } },
     })
     expect(result.report.verdict).toBe('fixed')
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it("carries a failed side's own cause into the record and the report", async () => {
+    const cause = 'the replayed run settled failed: spawn failed: the worker died before its first tool call'
+    const w = await world({
+      outcomes: [
+        // A side that failed fast: no criterion ever ran, and the only account of
+        // why is the review record's own localized cause.
+        { outcome: 'failed', criteria: [], localizedCause: cause },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }] },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }] },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }] },
+      ],
+    })
+    const result = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
+    const failed = result.report.samples[0]!.baseline
+    expect(failed.outcome).toBe('failed')
+    expect(failed.criteria).toEqual([])
+    // Without the cause the report showed an empty criteria list and no reason.
+    expect(failed.reason).toBe(cause)
+    // The verified side carries no reason: the field explains a side that has one.
+    expect(result.report.samples[0]!.candidate.reason).toBeUndefined()
+
+    const record = result.experiment.samples.find(
+      sample => sample.sampleTaskId === 't-fix' && sample.side === 'baseline',
+    )
+    expect(record?.reason).toBe(cause)
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('leaves a failed side without a recorded cause unexplained rather than inventing one', async () => {
+    const w = await world({
+      outcomes: [
+        // A store that holds the failure and nothing about why: the report says
+        // only what the store said.
+        { outcome: 'failed', criteria: [] },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }] },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }] },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }] },
+      ],
+    })
+    const result = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
+    expect(result.report.samples[0]!.baseline.outcome).toBe('failed')
+    expect(result.report.samples[0]!.baseline.reason).toBeUndefined()
     await rm(w.root, { recursive: true, force: true })
   })
 

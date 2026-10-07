@@ -67,7 +67,7 @@ export interface WorkerGrant {
   readonly capabilities: readonly WorkerCapabilityGrant[]
   /** Baseline plane: tools the worker's prompt needs whatever its capabilities are, intersected with the surface. */
   readonly baseline: readonly string[]
-  /** Whether the mounted agent preset's own tool plane stays (a capability named its own preset). */
+  /** Keep the preset's local tools, excluding native delegation: all agent work uses Task/Run contracts. */
   readonly keepPresetTools: boolean
   /** Extra skill roots searched before production discovery, for this worker only (the replay overlay). */
   readonly skillRoots?: readonly string[]

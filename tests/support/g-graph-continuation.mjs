@@ -240,11 +240,10 @@ await ctx.plugin(AgentLoop, { agents: [] })
 const graphs = new GraphsService(ctx)
 const singularityContext = new SingularityContextService(ctx)
 singularityContext[Service.init]()
-// The review chain is deliberately off in this fixture: the spec's subject is
-// the graph's own continuation topology, and an automatically accepted terminal
-// review would publish reviewer/supervisor nodes beside the tree this comparison
-// is about.
-const singularity = new SingularityAgent(ctx, { evolution: 'off', supervision: { autoReview: 'off' } })
+// No coordination supervisor runs in this fixture: the spec's subject is the
+// graph's own continuation topology, and the platform RSI loop only touches a
+// graph that declares `rsi` settings (this one does not).
+const singularity = new SingularityAgent(ctx, { evolution: 'off' })
 await singularity[Service.init]()
 ctx.tools.register({
   name: 'skill',

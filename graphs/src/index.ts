@@ -14,9 +14,12 @@ import type {
   CreateGraphResult,
   GraphArchive,
   GraphModel,
+  GraphPinsUpdate,
   GraphRecord,
   GraphsEvent,
   GraphsSnapshot,
+  RsiConfig,
+  RsiProgress,
 } from './types.ts'
 import { GraphsState, isReusableEnv } from './service/state.ts'
 import { assertModelServiceable, graphAgentOptions, type ModelCatalogReader } from './model.ts'
@@ -48,6 +51,34 @@ function nextGraphId(existing: readonly string[]): string {
   let n = 1
   while (existing.includes(`graph${n}`)) n += 1
   return `graph${n}`
+}
+
+/** The fields an RSI config carries: anything else is refused by name rather than ignored. */
+const RSI_FIELDS: readonly string[] = ['task', 'iterationRounds', 'humanReview']
+
+/** Validates one RSI config, refusing a malformed one with the offending field named. */
+function assertRsiConfig(rsi: unknown): asserts rsi is RsiConfig {
+  if (typeof rsi !== 'object' || rsi === null || Array.isArray(rsi)) {
+    throw new Error(`graphs: rsi must be an object carrying ${RSI_FIELDS.join(', ')}`)
+  }
+  const fields = rsi as Record<string, unknown>
+  for (const key of Object.keys(fields)) {
+    if (!RSI_FIELDS.includes(key)) {
+      throw new Error(
+        `graphs: rsi carries "${key}", which is not part of an RSI config; it carries ${RSI_FIELDS.join(', ')} and nothing else`,
+      )
+    }
+  }
+  if (typeof fields.task !== 'string' || fields.task.trim().length === 0) {
+    throw new Error('graphs: rsi.task must be a non-empty string')
+  }
+  const rounds = fields.iterationRounds
+  if (typeof rounds !== 'number' || !Number.isInteger(rounds) || rounds < 1) {
+    throw new Error('graphs: rsi.iterationRounds must be an integer >= 1')
+  }
+  if (typeof fields.humanReview !== 'boolean') {
+    throw new Error('graphs: rsi.humanReview must be a boolean')
+  }
 }
 
 /** The registry's own answer when no graph publishes a session; distinguishable by code from a failed read. */
@@ -142,6 +173,7 @@ export class GraphsService extends Service {
     return this.transition(async () => {
       await this.ready
       if (request.model !== undefined) await this.assertModel(request.model)
+      if (request.rsi !== undefined) assertRsiConfig(request.rsi)
       const modelOptions = request.model === undefined ? undefined : graphAgentOptions({ model: request.model })
       let createdEnvId: string | undefined
       let attached: { envId: string; sessionId: SessionId } | undefined
@@ -195,6 +227,7 @@ export class GraphsService extends Service {
           createdAt: Date.now(),
           ready: false,
           ...(request.model === undefined ? {} : { model: request.model }),
+          ...(request.rsi === undefined ? {} : { rsi: request.rsi }),
         }
         await this.commit([{ kind: 'graph/add', graph }])
         committed = true
@@ -301,13 +334,40 @@ export class GraphsService extends Service {
 
   /** Pin, replace, or clear (null) one graph's model. Only later spawns read it; existing sessions keep theirs. */
   async setModel(id: string, model: GraphModel | null): Promise<GraphRecord> {
+    return this.setPins(id, { model })
+  }
+
+  /**
+   * Set, replace, or clear (null) one graph's RSI config, dropping its stored driver progress.
+   * A configured driver reconciles the same frozen root task; a new objective requires a new graph.
+   */
+  async setRsi(id: string, rsi: RsiConfig | null): Promise<GraphRecord> {
+    return this.setPins(id, { rsi })
+  }
+
+  /** Validate all supplied settings before committing one event batch in the graph transition queue. */
+  async setPins(id: string, update: GraphPinsUpdate): Promise<GraphRecord> {
     return this.transition(async () => {
       await this.ready
       await this.get(id)
-      if (model !== null) await this.assertModel(model)
-      await this.commit([{ kind: 'graph/model', id, model }])
+      const { model, rsi } = update
+      if (model === undefined && rsi === undefined) {
+        throw new Error('graphs: model or rsi is required (pass null to clear either)')
+      }
+      if (rsi !== undefined && rsi !== null) assertRsiConfig(rsi)
+      if (model !== undefined && model !== null) await this.assertModel(model)
+      const events: GraphsEvent[] = []
+      if (model !== undefined) events.push({ kind: 'graph/model', id, model })
+      if (rsi !== undefined) events.push({ kind: 'graph/rsi', id, rsi })
+      await this.commit(events)
       return (await this.state()).get(id)
     })
+  }
+
+  /** Record the loop driver's live position on one graph; the registry stores it verbatim. */
+  async markRsiProgress(id: string, progress: RsiProgress): Promise<void> {
+    await this.get(id)
+    await this.commit([{ kind: 'graph/rsi-progress', id, progress }])
   }
 
   /** Refuse a pin the current provider registry cannot serve; the message names the offending field. */
@@ -344,7 +404,10 @@ export class GraphsService extends Service {
       const selected = (await this.state()).selected()
       // Successor activation is its own concern: a successor whose sessions cannot resume
       // (e.g. its MCP server cannot start) must neither hold this request nor fail the delete.
-      if (selected !== undefined) void Promise.resolve().then(() => this.activate(selected)).catch(() => {})
+      if (selected !== undefined)
+        void Promise.resolve()
+          .then(() => this.activate(selected))
+          .catch(() => {})
       else {
         this.ctx.graph.clearActive()
         this.ctx.layout.clearActive()

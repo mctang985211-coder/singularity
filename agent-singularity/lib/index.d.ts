@@ -2,23 +2,22 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest } from "@dangosys/dsh-singularity-task-runtime";
 import { ModelSelection } from "@dangosys/dsh-singularity-evolution";
-import "@dangosys/dsh-singularity-task";
 
 //#region src/coordination/supervision.d.ts
-/** When the automatic trigger accepts failures or completed successful goals for diagnosis. */
-type AutoReviewMode = 'all' | 'failed' | 'off';
-/** The `supervision` block of agent-singularity's configuration, with every member resolved. */
+
+/** The supervision policy in force for this deployment — agent-singularity's `supervision` config, resolved once at plugin construction and read by the coordination ledger and the RSI loop driver. @module @dangosys/dsh-singularity-agent/supervision */
+/**
+ * The `supervision` block of agent-singularity's configuration, with every
+ * member resolved. It carries the one knob this deployment still owns: the
+ * coordination allowance. The per-source round caps a *store* runs under belong
+ * to the graph whose RSI loop schedules it (see {@link graphImprovementCap}), and
+ * the runtime's own constants are the backstop for a store without one.
+ */
 interface SupervisionConfig {
-  /** `all` accepts failures at every node and successful roots; `failed` only failures, `off` none. */
-  readonly autoReview: AutoReviewMode;
-  /** Recovery attempts one failed source accepts before `iteration-cap`. */
-  readonly maxRecoveryRounds: number;
-  /** Improvement attempts one verified source accepts before `iteration-cap`. */
-  readonly maxImprovementRounds: number;
-  /** Review-agent runs (reviewers and supervisors together) one root store may start. */
+  /** Review-agent runs (reviewers and the RSI loop's supervisors together) one root store may start. */
   readonly coordinationBudget: number;
 }
-/** Diagnose local failures and completed successful goals; three recovery rounds, two improvement rounds, eight coordination runs per store. */
+/** Eight coordination runs per store. */
 declare const DEFAULT_SUPERVISION: SupervisionConfig;
 //#endregion
 //#region src/services/hitl.d.ts
@@ -54,6 +53,12 @@ declare class HitlService extends Service {
   list(): readonly HitlPending[];
   answer(id: string, answer: HitlAnswer): void;
   private enqueue;
+  /**
+   * Ask only when the graph runs with a human: `rsi.humanReview === false` resolves the card on the spot
+   * (approve → approved, ask → {@link UNMANNED_ASK_ANSWER}) and never queues one, so the pending list cannot grow.
+   */
+  private enqueueForGraph;
+  private queue;
 }
 //#endregion
 //#region src/services/escalation.d.ts
@@ -163,9 +168,7 @@ declare class ProposalReviewService extends Service implements ProposalReviewCha
 interface Config {
   /** Whether this composition registers the nine `evolution_*` tools on the global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} — registers none of them: no model surface (root, granted worker, or the */
   evolution: 'off' | 'on';
-  /** `auto` records deployment preauthorization for method publication; `ask` requests one exact-write approval. */
-  publicationApproval?: 'ask' | 'auto';
-  /** The review/supervision policy: which terminal reviews are diagnosed on their own, the per-source round caps, and the coordination allowance (see {@link SupervisionConfig}). */
+  /** The review/supervision policy: the coordination allowance a store's coordination agents spend (see {@link SupervisionConfig}). */
   supervision?: SupervisionConfig;
 }
 /** The shipped switch position: `off`. */
@@ -174,16 +177,24 @@ declare const DEFAULT_EVOLUTION: 'off';
 declare class EvolutionExposure extends Service {
   /** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
   readonly enabled: boolean;
-  readonly publicationApproval: 'ask' | 'auto';
-  constructor(ctx: Context, enabled: boolean, publicationApproval: 'ask' | 'auto');
+  constructor(ctx: Context, enabled: boolean);
 }
-/** The supervision policy this composition resolved, provided on the agent's own fiber as `ctx.singularitySupervision` — what the task runtime's per-source round caps read. */
+/** The supervision policy this composition resolved, provided on the agent's own fiber as `ctx.singularitySupervision` — the coordination allowance the ledger reads, and the per-store round cap the task runtime's recovery entry reads. */
 declare class SupervisionExposure extends Service {
-  readonly autoReview: SupervisionConfig['autoReview'];
-  readonly maxRecoveryRounds: number;
-  readonly maxImprovementRounds: number;
   readonly coordinationBudget: number;
   constructor(ctx: Context, policy: SupervisionConfig);
+  /**
+   * The round cap in force for one store: the round count its graph's RSI
+   * settings declare when that graph runs a platform loop (the driver registers
+   * it — see `coordination/rsi-loop.ts`), `undefined` otherwise, so the
+   * runtime's own constant stands for every store without one. The runtime's
+   * `iteration-cap` check reads this per store, so a graph-scheduled loop may
+   * open exactly the rounds its graph names — and since the driver is the only
+   * caller that opens a round any more, the same answer governs its recoveries.
+   */
+  maxImprovementRoundsFor(storeId: string): number | undefined;
+  /** The recovery-round cap in force for one store: the graph's own round count for a driver-scheduled store, `undefined` otherwise (the runtime's constant then stands). */
+  maxRecoveryRoundsFor(storeId: string): number | undefined;
 }
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -207,4 +218,4 @@ declare class SingularityAgent extends Service {
   private warn;
 }
 //#endregion
-export { type AutoReviewMode, Config, DEFAULT_EVOLUTION, DEFAULT_SUPERVISION, EscalationService, type HitlAnswer, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, type SupervisionConfig, deploymentModelSelection };
+export { Config, DEFAULT_EVOLUTION, DEFAULT_SUPERVISION, EscalationService, type HitlAnswer, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, type SupervisionConfig, deploymentModelSelection };

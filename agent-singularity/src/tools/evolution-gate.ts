@@ -21,7 +21,7 @@ export function defineEvolutionGateTool(ctx: Context) {
       'cannot become candidates and have no gate to answer. Records the ' +
       'ledger entry only; nothing is promoted or changed, and evolution_decide re-checks the candidate\'s whole content ' +
       'identity and its provider verdict before a PROMOTE can be recorded. ' +
-      'Next step is evolution_decide, which always asks a human.',
+      'Next step is evolution_decide, which requests one approval — auto-resolved when the graph runs without a human.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Candidate to gate' },
       targetFailureFixed: { type: 'string', required: true, description: 'Target failure fixed, or verified source improved under frozen tool-call-reduction or llm-outcome; cite the saved report verdict. LLM judgement input and response identities are mechanically rechecked without resampling.' },
@@ -67,7 +67,7 @@ export function defineEvolutionGateTool(ctx: Context) {
         )
         return [
           `proposal ${proposal.proposalId} [gated] gate answered 6/6, regression evidence: [${proposal.gate!.regressionEvidenceRefs.join(', ')}]`,
-          'ledger entry only — nothing executed or promoted; next: evolution_decide (human approval required)',
+          'ledger entry only — nothing executed or promoted; next: evolution_decide (one approval)',
         ].join('\n')
       } catch (error) {
         return `evolution_gate rejected: ${message(error)}`

@@ -12,7 +12,6 @@ import type { CommitFile, CommitStage } from './commit.ts'
 import type { CapabilityTableIdentity } from './capability-config.ts'
 
 import type { ExperimentJudgedRecord, ExperimentSampleRecord, ExperimentStartedRecord } from './experiment/spec.ts'
-import type { SupervisorDelegation } from './ledger/records.ts'
 
 export type EvolutionLevel = 'L1' | 'L2' | 'L3' | 'L4'
 
@@ -357,8 +356,6 @@ export interface Config {
   modelSelection?: () => ModelSelection | undefined
   /** The typed test seam of the commit path (K2, per-file since K3): it fires at each named stage. */
   commitProbe?: (stage: CommitStage, target?: string) => void
-  /** Where this deployment reads the **supervisor delegation** of one hand-off. */
-  supervisorDelegation?: (sessionId: string, diagnosisId: string) => Promise<SupervisorDelegation | undefined>
   /** The capability table's own file (A6): the deployment's `config.yml`, whose `task-runtime` capabilities row a capability commit writes. */
   capabilityConfig?: string
   /** The typed test seam of the capability-config write (A6), the same shape as the commit probe. */

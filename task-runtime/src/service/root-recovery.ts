@@ -38,7 +38,7 @@ import {
   storedReuse,
 } from '../recovery.ts'
 import type { RecoveryRounds, ReuseContext, RootRecoveryRequest } from '../recovery.ts'
-import { supervisionSettings } from './lifecycle.ts'
+import { improvementCapFor, recoveryCapFor } from './lifecycle.ts'
 import type { WorkspaceOwner } from '../workspace.ts'
 import type {
   StoreRecoveryStatus,
@@ -194,7 +194,12 @@ export async function recoverRootTaskOnce(
         '(a `failed` task, or a `blocked` one that never ran), and this is not one',
     )
   }
-  assertRoundCap(supervisionSettings(self), recoveryRoundsOf(snapshot, sourceTaskId), kind, sourceTaskId)
+  assertRoundCap(
+    { maxRecoveryRounds: recoveryCapFor(self, storeId), maxImprovementRounds: improvementCapFor(self, storeId) },
+    recoveryRoundsOf(snapshot, sourceTaskId),
+    kind,
+    sourceTaskId,
+  )
   const sourceRun = recoverySourceRun(source, request, snapshot, kind)
   assertRecoveryContract(source)
   /**

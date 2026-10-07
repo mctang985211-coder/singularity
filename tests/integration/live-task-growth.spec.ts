@@ -41,8 +41,7 @@ it.skipIf(!enabled)('grows a responsibility tree with dependency edges and reuse
     const h = await startScriptedLoop({
       capabilities: { 'coordinate-tasks': { skills: ['task-coordination'] },
         'local-files': { skills: ['task-execution'], tools: ['filesystem'] } },
-      script: () => [], supervision: { autoReview: 'off' },
-      tools: ['read', 'write'].map(name => defineTool({
+      script: () => [], tools: ['read', 'write'].map(name => defineTool({
         name, description: name === 'read' ? 'Read a UTF-8 file in this checkout.' : 'Write a UTF-8 file in this checkout.',
         parameters: { path: { type: 'string', required: true }, ...(name === 'write' ? { content: { type: 'string', required: true } } : {}) },
         output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },

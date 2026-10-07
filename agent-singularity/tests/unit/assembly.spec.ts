@@ -23,7 +23,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {} from '@dangosys/dsh-singularity-evolution'
 import { DEFAULT_EVOLUTION, SingularityAgent } from '../../src/index.ts'
 import type { Config } from '../../src/index.ts'
-import { DEFAULT_SUPERVISION, configureSupervision, supervisionSettings } from '../../src/coordination/supervision.ts'
+import {
+  configureSupervision,
+  DEFAULT_SUPERVISION,
+  registerGraphImprovementCap,
+  supervisionSettings,
+  unregisterGraphImprovementCap,
+} from '../../src/coordination/supervision.ts'
 
 /** The nine tools the switch gates; nothing else on the surface depends on it. */
 const EVOLUTION_TOOLS = [
@@ -39,10 +45,10 @@ const EVOLUTION_TOOLS = [
 ]
 
 /**
- * The twenty-four tools every composition registers, whatever the switch says
- * (`escalate` included, and `task_recover` — A6's recovery adapter, which is
- * gated by the caller's own live session and the deployment's ledger rather
- * than by the switch, and is deliberately absent from every root's allow-list).
+ * The twenty-three tools every composition registers, whatever the switch says
+ * (`escalate` included). No task-recovery tool exists in this deployment (F):
+ * round scheduling belongs to the platform RSI loop driver, which calls the
+ * runtime's own recovery entry directly.
  */
 const ALWAYS_TOOLS = [
   'graph_mark_ready',
@@ -68,7 +74,6 @@ const ALWAYS_TOOLS = [
   'task_review_agent',
   'task_diagnose',
   'task_budget_extend',
-  'task_recover',
   'escalate',
 ]
 
@@ -87,9 +92,9 @@ function stub(name: string, value: object) {
  * of its own, and the tool registry is the deployment's (here, a map that keeps
  * what the plugin registered). `taskRuntime` is the one dependency this
  * composition registers callbacks on at construction — the root-budget approval
- * (K4) and the terminal-review listener the automatic review trigger rides
- * (A5) — so its default here accepts and forgets one each, and a case that cares
- * about the installation passes its own recorder.
+ * (K4) and the terminal-review listener the RSI loop driver rides (F) — so its
+ * default here accepts and forgets one each, and a case that cares about the
+ * installation passes its own recorder.
  */
 async function mount(
   config?: Config,
@@ -129,7 +134,7 @@ afterEach(() => {
 })
 
 describe('SingularityAgent assembly', () => {
-  it('registers the twenty-four unconditional tools and no evolution tool on the shipped default', async () => {
+  it('registers the twenty-three unconditional tools and no evolution tool on the shipped default', async () => {
     const { tools } = await mount()
     expect(DEFAULT_EVOLUTION).toBe('off')
 
@@ -137,11 +142,11 @@ describe('SingularityAgent assembly', () => {
     for (const name of EVOLUTION_TOOLS) expect(tools.has(name), name).toBe(false)
     expect(tools.size).toBe(ALWAYS_TOOLS.length)
     // The name is the surface: a gate written as an internal permission check
-    // would still leave all thirty-one reachable by an un-granted worker.
+    // would still leave all thirty-two reachable by an un-granted worker.
     expect([...tools.keys()].filter(name => name.startsWith('evolution_'))).toEqual([])
   })
 
-  it('registers all thirty-three tools when the deployment turns evolution on', async () => {
+  it('registers all thirty-two tools when the deployment turns evolution on', async () => {
     const { tools } = await mount({ evolution: 'on' })
     for (const name of [...ALWAYS_TOOLS, ...EVOLUTION_TOOLS]) expect(tools.has(name), name).toBe(true)
     expect(tools.size).toBe(ALWAYS_TOOLS.length + EVOLUTION_TOOLS.length)
@@ -158,35 +163,42 @@ describe('SingularityAgent assembly', () => {
   })
 
   it('resolves the supervision block over its shipped defaults, and refuses an unknown member of it by name', async () => {
-    // The shipped default composes the shipped supervision policy: every
-    // failed terminal review and completed successful root is diagnosed, three recovery rounds, two
-    // improvement rounds, eight coordination runs per store.
+    // The shipped default composes the shipped supervision policy: eight
+    // coordination runs per store, and nothing else — the per-source round caps
+    // belong to the runtime (and, for a store whose graph runs an RSI loop, to
+    // the graph itself).
     await mount()
     expect(supervisionSettings()).toEqual(DEFAULT_SUPERVISION)
-    expect(DEFAULT_SUPERVISION).toEqual({
-      autoReview: 'all',
-      maxRecoveryRounds: 3,
-      maxImprovementRounds: 2,
-      coordinationBudget: 8,
-    })
+    expect(DEFAULT_SUPERVISION).toEqual({ coordinationBudget: 8 })
 
     // A partial block resolves against the defaults rather than blanking them.
-    await mount({ evolution: 'off', supervision: { autoReview: 'failed', coordinationBudget: 3 } } as Config)
-    expect(supervisionSettings()).toEqual({ ...DEFAULT_SUPERVISION, autoReview: 'failed', coordinationBudget: 3 })
+    await mount({ evolution: 'off', supervision: { coordinationBudget: 3 } } as Config)
+    expect(supervisionSettings()).toEqual({ coordinationBudget: 3 })
 
     // A member nobody reads refuses to start, exactly as a top-level typo does.
-    await expect(mount({ evolution: 'off', supervision: { autoReview: 'failed', autoReviews: 'all' } } as unknown as Config))
-      .rejects.toThrow(/autoReviews/)
+    await expect(mount({ evolution: 'off', supervision: { coordinationBudgets: 3 } } as unknown as Config))
+      .rejects.toThrow(/coordinationBudgets/)
+    // The two round caps this deployment no longer declares are refused too: the
+    // RSI loop opens the rounds its graph names, and the runtime's own constant
+    // is the backstop for every other store.
+    await expect(mount({ evolution: 'off', supervision: { maxRecoveryRounds: 1000 } } as unknown as Config))
+      .rejects.toThrow(/maxRecoveryRounds/)
 
-    // The resolved policy is exposed where a sibling reads it: the runtime's
-    // per-source round caps read `singularitySupervision`, member for member.
-    const exposed = await mount({ evolution: 'off', supervision: { autoReview: 'failed', coordinationBudget: 3 } } as Config)
-    expect(exposed.ctx.get('singularitySupervision')).toMatchObject({
-      autoReview: 'failed',
-      maxRecoveryRounds: 3,
-      maxImprovementRounds: 2,
-      coordinationBudget: 3,
-    })
+    // The resolved policy is exposed where a sibling reads it: the coordination
+    // allowance the ledger reads, and the per-store cap the runtime's
+    // `iteration-cap` check reads.
+    const exposed = await mount({ evolution: 'off', supervision: { coordinationBudget: 3 } } as Config)
+    expect(exposed.ctx.get('singularitySupervision')).toMatchObject({ coordinationBudget: 3 })
+    // A store an RSI loop declared reports that graph's own round count; a store
+    // nobody declared reports no answer, so the runtime's constant stands.
+    expect(exposed.ctx.singularitySupervision.maxImprovementRoundsFor('sg-t-elsewhere')).toBeUndefined()
+    expect(exposed.ctx.singularitySupervision.maxRecoveryRoundsFor('sg-t-elsewhere')).toBeUndefined()
+    registerGraphImprovementCap('sg-t-elsewhere', 5)
+    expect(exposed.ctx.singularitySupervision.maxImprovementRoundsFor('sg-t-elsewhere')).toBe(5)
+    // The driver is the only opener of a recovery any more, so the store's own
+    // graph-declared count governs both kinds of round.
+    expect(exposed.ctx.singularitySupervision.maxRecoveryRoundsFor('sg-t-elsewhere')).toBe(5)
+    unregisterGraphImprovementCap('sg-t-elsewhere')
     await exposed.ctx.fiber.dispose()
   })
 
@@ -198,7 +210,6 @@ describe('SingularityAgent assembly', () => {
 
     const off = await mount()
     expect(read(off.ctx)).toBe(false)
-    expect(off.ctx.singularityEvolution.publicationApproval).toBe('ask')
     await off.ctx.fiber.dispose()
     expect(off.ctx.get('singularityEvolution')).toBeUndefined()
 
@@ -207,11 +218,14 @@ describe('SingularityAgent assembly', () => {
     await on.ctx.fiber.dispose()
   })
 
-  it('exposes explicit publication preauthorization and rejects a misspelled policy', async () => {
-    const { ctx } = await mount({ evolution: 'on', publicationApproval: 'auto' })
-    expect(ctx.singularityEvolution.publicationApproval).toBe('auto')
-    await ctx.fiber.dispose()
-    await expect(mount({ evolution: 'on', publicationApproval: 'never' } as unknown as Config)).rejects.toThrow(/publicationApproval/)
+  it('no longer reads a publication-approval policy: every apply asks the native approval seam', async () => {
+    // The switch is gone (F): a graph's `rsi.humanReview` decides whether the
+    // approval card is answered by a person or resolved on the spot, so this
+    // composition declares no policy of its own and a config that still names
+    // one is a member nobody reads.
+    await expect(mount({ evolution: 'on', publicationApproval: 'auto' } as unknown as Config)).rejects.toThrow(
+      /publicationApproval/,
+    )
   })
 
   it('installs the root-budget approval on the runtime at construction, and uninstalls it with the plugin', async () => {
@@ -230,7 +244,7 @@ describe('SingularityAgent assembly', () => {
         return () => { if (installed === approval) installed = undefined }
       },
       // The other door this composition installs on the runtime (A5): the
-      // terminal-review listener the automatic review trigger rides.
+      // terminal-review listener the RSI loop driver rides.
       registerTerminalReviewListener: () => () => {},
     })
 

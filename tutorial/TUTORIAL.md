@@ -60,16 +60,16 @@ curl -b /tmp/dsh.cookies -H 'content-type: application/json' \
 
 发送后根节点会 `task_intake` 收下根任务，再自行决定分解。
 
-## 5. 默认迭代
+## 5. 平台驱动的迭代（RSI loop）
 
-迭代默认触发，失败与通过都继续，不需要开关或手动调用：
+只有带 `rsi` 设置的图才有迭代；驱动在平台侧（`agent-singularity` 的 RSI loop driver），不需要开关或手动调用：
 
-- **每次终态 review 都自动复盘**：失败（failed）与通过（verified）都自动受理 reviewer（`supervision.autoReview` 默认 `all`），不再只在失败时触发。
-- **任何诊断都交给 supervisor**：diagnosis 直接交接给 supervisor 处理，不再先要求 Evolution 提案或进化链已启用。
-- **失败 → recovery 轮**：每个来源最多 3 轮（`supervision.maxRecoveryRounds` 默认 3）。
-- **通过 → improvement 轮**：每个来源最多 2 轮（`supervision.maxImprovementRounds` 默认 2）。来源指一条诊断指向的 task/run。
+- **每一轮 = 根任务的一次终态 run**：verified 或 failed 都算一轮，图上的 `rsi.iterationRounds` 决定跑几轮。
+- **终态即受监督**：驱动为该轮记录一条 diagnosis 并 spawn 一个 supervisor（读工具 + `evolution_*`，没有 `task_recover`），由它分析并发布方法变更。
+- **下一轮由驱动打开**：verified 轮之后用 `mode:'improve'` 打开下一轮，failed 轮之后用 `mode:'recovery'`；`task_recover` 工具已不存在，round 调度只属于驱动。
+- **supervisor 明确说停就停**：supervisor 以 `{"outcome":"closed"/"blocked"}` 结束（合约级缺陷不可重试）时，驱动把该 loop 标为 `failed` 并停止，不再开新一轮。
+- **非 RSI 图没有 supervisor**：没有 `rsi` 的图，失败就是失败，没有自动迭代，也没有自动复盘 reviewer。
 - **每一轮都是根任务下的一次新 run**：Tasks 页签里，带 recovery 记录的 run 行显示 ↻ 徽标——`↻ recovery · round N` 或 `↻ improve · round N`，N 是该 run 在 `task.runIds` 里的 1 基序号。每个 run 有自己的一条 review（逐条判据、退出码、证据），展开 run 行即可核对。
-- **`task_recover` 的 `mode:'improve'`**：来源是 verified 时用 improve 模式打开新一轮；失败来源的重试仍是 recovery。
 - **supervisor 拿到上一轮的 review 事实**：上一轮的判据 verdict、metrics 与派生的 passed/total 随交接提供；supervisor 也可以判定 `closed`，结束这一来源的迭代。
 - **ReviewRecord 没有 score 字段**：轮次得分是派生读数——按 `task.runIds` 顺序取每个 run 的终态 review，数 criterion verdict 的 passed/total。
 
@@ -106,9 +106,8 @@ curl -b /tmp/dsh.cookies -H 'content-type: application/json' \
 6. **盯 Verifier**：按 run 看判据与 logTail；用它读每一轮失败/通过在哪条 criterion、退出码多少。
 7. **（可选）盯 Recovery**：看 store 屏障与 reconcile 状态；轮次本身不在这里。
 8. **旋钮**（在部署配置里给 id 为 `singularity-agent` 的条目加 `config.supervision`；条目按 id 覆盖整段 config，仓库根 `config.yml` 当前还没有这一行）：
-   - `supervision.autoReview`：默认 `all`（failed 与 verified 都复盘）；`failed` 回到旧的失败才复盘，`off` 关闭自动复盘；
-   - `supervision.maxRecoveryRounds`（默认 3）、`supervision.maxImprovementRounds`（默认 2）：每来源轮数硬上限；
-   - `supervision.coordinationBudget`：协调预算次数，默认 8；环境变量 `SINGULARITY_REVIEW_AGENT_BUDGET` 优先于它；想一次看满 3+2 轮可调到 16；
+   - `supervision.coordinationBudget`：协调预算次数，默认 8；环境变量 `SINGULARITY_REVIEW_AGENT_BUDGET` 优先于它；
+   - 每图轮数由图的 `rsi.iterationRounds` 决定（前端 GraphSwitcher 里可设），不再有 `autoReview` / `maxRecoveryRounds` / `maxImprovementRounds` 这些键；
    - `verifyTimeoutMs: 600000`（task-runtime 行）：本教程的验证是秒级测试，10 分钟绰绰有余，不需要调。
    默认值即上述取值，不改也能跑；改完配置重启部署（部署读取的是 `.dsh/profiles/web/cordis.patch.yml`，由仓库根 `config.yml` 拷贝）；未知键会被 schema 拒绝，以部署实际接受为准。
 9. **终止预期**：迭代在 recovery ≤3、improvement ≤2、协调预算用尽、或 supervisor `closed` 中先到者处停止，一定会停。停止后 Tasks 页不再新增 ↻ run；若最后一轮仍是 failed，那是本轮的最终结果，如实记录 review 与 evidence，不要等它"再试一次"。
@@ -146,8 +145,8 @@ pnpm build    # 期望退出码 0
 - **重复部署**：默认再跑会建 `project2`；想复用原有环境就带 `--id project1`（幂等补齐）。
 - **端口**：本部署 web 在 `127.0.0.1:3080`，以启动日志为准；换端口时 API 示例同步改。
 - **超时**：本教程的验证是秒级测试，默认 `verifyTimeoutMs: 600000`（10 分钟）远远够用，不需要为教程调大。
-- **迭代只跑了一两轮就停**：先看协调预算。默认 8 次，每轮通常 reviewer+supervisor 各一次；用尽后不再开新轮，`$DSH_HOME/review-agents/agents.jsonl` 的 settled 行能看到消耗。要跑满轮数上限就调大 `SINGULARITY_REVIEW_AGENT_BUDGET`。
-- **自动复盘没触发**：确认 singularity-agent 配置行的 `supervision.autoReview` 是 `all`（默认），且改动后已重启部署。
+- **迭代只跑了一两轮就停**：先看图上的 `rsi.iterationRounds`（轮数上限）与协调预算。预算默认 8 次，每轮通常 supervisor 一次；用尽后不再开新轮，`$DSH_HOME/review-agents/agents.jsonl` 的 settled 行能看到消耗。要跑更多轮就调大 `SINGULARITY_REVIEW_AGENT_BUDGET`。
+- **迭代没触发**：只有带 `rsi` 设置的图才迭代；在 GraphSwitcher 里确认该图的 RSI 设置已写入，且改动后已重启部署。supervisor 以 `{"outcome":"blocked"}` 结束也会让 loop 停下，`rsiProgress.note` 里有原因。
 - **run 行没有 ↻ 徽标**：徽标来自该 run 的 `recovery` 记录（`TaskRun.recovery`）；没有该记录的普通 run 不显示，历史 run 按原样读取。
 - **轮次得分在哪**：`ReviewRecord` 没有 score 字段；轮次得分是派生值，按 `task.runIds` 顺序统计该轮 review 的 criterion verdict（passed/total）与 outcome、metrics。
 - **别改测试**：测试是规格；删测试、跳过或用 mock 绕过都会让验收失去意义。

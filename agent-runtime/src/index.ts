@@ -31,6 +31,7 @@ import { rootPromptText } from './prompts/root.prompts.ts'
 import { REVIEWER_POLICY_TEXT, SUPERVISOR_POLICY_TEXT } from './prompts/coordination.prompts.ts'
 import { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
 import { sealRawSessionReads } from './raw-session-guard.ts'
+import { sealNativeDelegation } from './delegation-guard.ts'
 import type { GraphScope, RootRequest, RuntimePromptSource, SpawnRequest, WorkerResumeRequest } from './types.ts'
 import { WORKER_DEFAULT_PERMISSION_PRESET, resumeWorkerAgent as resumeWorker } from './worker-resume.ts'
 import type { WorkerResumeDeps, WorkerRole } from './worker-resume.ts'
@@ -539,6 +540,7 @@ function workerSetup(ctx: Context, role: WorkerRole): AgentSetup {
     }
     if (role.grant !== undefined) await applyWorkerGrant(agentCtx, agent, role.grant)
     sealRawSessionReads(agentCtx)
+    sealNativeDelegation(agentCtx)
   }
 }
 

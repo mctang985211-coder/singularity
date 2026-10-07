@@ -132,6 +132,47 @@ describe('CommandVerifier', () => {
     expect(elapsedMs).toBeLessThan(2000)
     expect(liveProcesses(SLEEP_MARKER)).toEqual([])
   })
+
+  test('a non-zero exit with no output still leaves a diagnosable log', async () => {
+    const { evidenceRoot, verifier, request } = await setup()
+    const [result] = await verifier.verify(request([criterion({ command: 'exit 2' })]))
+    expect(result.status).toBe('fail')
+    expect(result.exitCode).toBe(2)
+    // An empty log is what made a failure undiagnosable: the outcome line is
+    // written by the verifier, never by the command.
+    expect(await readFile(join(evidenceRoot, result.logRef!), 'utf8')).toBe('(no output) exit code 2\n')
+  })
+
+  test('a silent success and a silent timeout carry their outcome in the log too', async () => {
+    const { evidenceRoot, verifier, request } = await setup()
+    const [passed] = await verifier.verify(request([criterion({ command: 'true' })]))
+    expect(passed.status).toBe('pass')
+    expect(await readFile(join(evidenceRoot, passed.logRef!), 'utf8')).toBe('(no output) exit code 0\n')
+
+    const [timedOut] = await verifier.verify(
+      request([criterion({ command: `${SLEEP_MARKER} && true` })], 300),
+    )
+    expect(timedOut.status).toBe('inconclusive')
+    expect(await readFile(join(evidenceRoot, timedOut.logRef!), 'utf8')).toBe('(no output) timed out\n')
+  })
+
+  test('a command that never started leaves the spawn error in its log', async () => {
+    const { evidenceRoot, verifier, request } = await setup()
+    const [result] = await verifier.verify({
+      ...request([criterion({ command: 'true' })]),
+      cwd: join(evidenceRoot, 'there-is-no-such-directory'),
+    })
+    expect(result.status).toBe('inconclusive')
+    expect(result.details).toContain('ENOENT')
+    expect(await readFile(join(evidenceRoot, result.logRef!), 'utf8')).toBe(`${result.details}\n`)
+  })
+
+  test('what the command itself wrote is the log, line for line', async () => {
+    const { evidenceRoot, verifier, request } = await setup()
+    const [result] = await verifier.verify(request([criterion({ command: 'printf "only this\\n"; exit 3' })]))
+    expect(result.status).toBe('fail')
+    expect(await readFile(join(evidenceRoot, result.logRef!), 'utf8')).toBe('only this\n')
+  })
 })
 
 /** A duration no other process shares, so the `ps` sweep cannot match a bystander. */

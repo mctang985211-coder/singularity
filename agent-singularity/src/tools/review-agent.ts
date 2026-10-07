@@ -167,7 +167,7 @@ export function defineTaskReviewAgentTool(ctx: Context) {
       'names a target type the diagnosis does not freeze, and nothing here executes it. reason names what the review ' +
       'should focus on. A reviewer that is cancelled or answers without a diagnosis leaves an ' +
       'interrupted attempt with the reason named and records no Diagnosis. One source has one default ' +
-      'attempt: a repeat of the same call (an automatic scan and an explicit call share it) returns that attempt and ' +
+      'attempt: a repeat of the same call returns that attempt and ' +
       'its result instead of starting another, and never spends the budget again. Reviewing the same source again ' +
       'after that attempt ended is an explicit act: pass a new non-empty requestKey, which is persisted with the ' +
       'source and the focus; the same key with a different reason is refused. While an attempt of the source is in ' +

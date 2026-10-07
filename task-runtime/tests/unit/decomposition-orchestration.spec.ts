@@ -798,6 +798,27 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
   })
 
+  test('refuses a child criterion the shell cannot parse, before any child exists', async () => {
+    const h = harness()
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    await expect(
+      decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+        reason: 'split the work',
+        children: [
+          childSpec('task a'),
+          childSpec('task b', {
+            acceptanceCriteria: [{ description: 'the answer is balanced', command: 'echo "unclosed' }],
+          }),
+        ],
+      }),
+    ).rejects.toThrow(/child 1 criterion .*command has a shell syntax error:/)
+
+    // The batch is refused whole: the parent is still the only task and no worker
+    // was ever spawned for a sibling that would have been admitted beside it.
+    expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(1)
+    expect(h.spawned).toHaveLength(0)
+  })
+
   test('refuses children that would exceed the configured maxDepth, naming the limit', async () => {
     const h = harness({ config: { maxDepth: 0 } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)

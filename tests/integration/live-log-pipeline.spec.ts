@@ -34,8 +34,7 @@ it.skipIf(!enabled)('grows a log-analytics CLI tree with an independent checker 
     const h = await startScriptedLoop({
       capabilities: { 'coordinate-tasks': { skills: ['task-coordination'] },
         'local-files': { skills: ['task-execution'], tools: ['filesystem'] } },
-      script: () => [], supervision: { autoReview: 'off' },
-      tools: checkoutTools(),
+      script: () => [], tools: checkoutTools(),
     })
     // The live request presents only executable tools; the fixture keeps other names registered for role validation.
     h.ctx.on('system-prompt/assemble', async (assembly, _context, next) => {

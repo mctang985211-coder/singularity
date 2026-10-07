@@ -47,6 +47,10 @@ interface ReviewerBindingRecord {
   readonly rootStoreId: string;
   /** The task the reviewer was delegated to review. */
   readonly taskId: string;
+  /** Coordination responsibility; old binding sources omit it and mean reviewer. */
+  readonly role?: 'reviewer' | 'supervisor';
+  /** The exact source Run from the claim; null means the task never ran. */
+  readonly sourceRunId?: string | null;
   /** The session that started the reviewer. */
   readonly actor: string;
   /** When the delegation was recorded. */

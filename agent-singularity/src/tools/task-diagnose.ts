@@ -40,7 +40,7 @@ export function defineTaskDiagnoseTool(ctx: Context) {
       'output — evidenceRefs and reviewRefs must name real evidence ids and the review refs the pack prints; at least one ref is ' +
       'required. proposals are structured suggestions only: they are stored as data and never execute automatically, and their ' +
       'targetType is an open name — nothing here executes a suggestion, and the entry that converts one refuses what it cannot run. ' +
-      'Written once per diagnosisId and immutable afterwards.',
+      'Use task_definition for a justified reusable TaskTemplate contract or direct-child recipe, and skill for execution-method advice. Ground candidate suggestions in executed contracts, batches and their outcomes, including relatedTaskIds when the finding spans several tasks. A one-off contract does not require publication; supervisor consolidation and real comparison decide what is reusable. Draft review does not replace independent Task acceptance. Written once per diagnosisId and immutable afterwards.',
     parameters: {
       taskId: { type: 'string', required: true, description: 'Task the diagnosis explains' },
       diagnosisId: { type: 'string', required: true, description: 'Unique id for this diagnosis; a duplicate id is rejected' },
@@ -52,7 +52,7 @@ export function defineTaskDiagnoseTool(ctx: Context) {
       confidence: { type: 'string', required: true, enum: ['high', 'medium', 'low'], description: 'How sure the diagnoser is; coarse on purpose' },
       proposals: {
         type: 'array',
-        description: 'Structured suggestions for later Evolution steps; stored as data, never auto-executed',
+        description: 'Structured suggestions for supervisor consolidation and later Evolution steps; task_definition names a reusable TaskTemplate, skill names method advice. Stored as data, never auto-executed; ordinary one-off contracts need none.',
         items: {
           type: 'object',
           additionalProperties: false,

@@ -38,9 +38,9 @@ export function assertGeneratedTaskReview(policy: unknown): void {
 export function assertSupervisionConfig(policy: unknown): void {
   if (policy === undefined) return
   if (policy === null || typeof policy !== 'object' || Array.isArray(policy)) {
-    throw new Error('task-runtime: supervision must be an object with the review policy\'s members')
+    throw new Error('task-runtime: supervision must be an object with the round-cap and allowance members')
   }
-  const known = new Set(['autoReview', 'maxRecoveryRounds', 'maxImprovementRounds', 'coordinationBudget'])
+  const known = new Set(['maxRecoveryRounds', 'maxImprovementRounds', 'coordinationBudget'])
   const unknown = Object.keys(policy).filter(key => !known.has(key))
   if (unknown.length > 0) {
     throw new Error(
@@ -49,9 +49,6 @@ export function assertSupervisionConfig(policy: unknown): void {
     )
   }
   const record = policy as Record<string, unknown>
-  if (record.autoReview !== undefined && !['all', 'failed', 'off'].includes(record.autoReview as string)) {
-    throw new Error(`task-runtime: supervision.autoReview is ${JSON.stringify(record.autoReview)}; it is "all", "failed" or "off"`)
-  }
   for (const name of ['maxRecoveryRounds', 'maxImprovementRounds', 'coordinationBudget'] as const) {
     const value = record[name]
     if (value === undefined) continue
@@ -66,19 +63,15 @@ export function assertSupervisionConfig(policy: unknown): void {
 /**
  * The policy in force: the `singularitySupervision` service a deployment exposes (the way `singularityEvolution` carries
  * the chain switch) over this plugin's own config, per member; a value that is not a usable count reads as its default.
+ * These are the backstop a graph that runs no RSI loop runs under — a store whose graph declares its own round count is
+ * answered through {@link improvementCapFor}.
  */
 export function supervisionSettings(self: TaskRuntime): SupervisionConfig {
   const provided = self.softService<Partial<SupervisionConfig>>('singularitySupervision')
   const configured = self.config.supervision
   const whole = (value: number | undefined, fallback: number, floor: number): number =>
     typeof value === 'number' && Number.isFinite(value) && value >= floor ? Math.floor(value) : fallback
-  const autoReview = (value: unknown): SupervisionConfig['autoReview'] | undefined =>
-    value === 'all' || value === 'failed' || value === 'off' ? value : undefined
   return {
-    autoReview:
-      autoReview(provided?.autoReview) ??
-      autoReview(configured?.autoReview) ??
-      DEFAULT_SUPERVISION.autoReview,
     maxRecoveryRounds: whole(
       provided?.maxRecoveryRounds,
       whole(configured?.maxRecoveryRounds, DEFAULT_SUPERVISION.maxRecoveryRounds, 0),
@@ -95,6 +88,48 @@ export function supervisionSettings(self: TaskRuntime): SupervisionConfig {
       1,
     ),
   }
+}
+
+/**
+ * The **improvement-round cap in force for one store**. The deployment policy is
+ * the default (see {@link supervisionSettings}), but a store whose graph runs an
+ * RSI loop declares its own round count through the same exposure
+ * (`singularitySupervision.maxImprovementRoundsFor`, answered from the graph's
+ * `rsi.iterationRounds`) — so a platform-scheduled loop may open exactly the
+ * rounds its graph names, while every store without one keeps the deployment's
+ * cap unchanged. An unusable answer reads as no answer: the policy stands.
+ */
+export function improvementCapFor(self: TaskRuntime, storeId: string): number {
+  const specific = roundCapAnswer(self, 'maxImprovementRoundsFor', storeId)
+  if (specific !== undefined) return specific
+  return supervisionSettings(self).maxImprovementRounds
+}
+
+/**
+ * The **recovery-round cap in force for one store**: the same graph-declared
+ * round count as {@link improvementCapFor}. The platform RSI loop is the only
+ * caller that opens a recovery any more, and a store whose graph schedules it
+ * opens exactly the rounds its graph names; a store no graph declared keeps the
+ * runtime's own constant.
+ */
+export function recoveryCapFor(self: TaskRuntime, storeId: string): number {
+  const specific = roundCapAnswer(self, 'maxRecoveryRoundsFor', storeId)
+  if (specific !== undefined) return specific
+  return supervisionSettings(self).maxRecoveryRounds
+}
+
+/** One store's answer from the supervision exposure, or `undefined` when nothing usable is exposed. */
+function roundCapAnswer(
+  self: TaskRuntime,
+  method: 'maxImprovementRoundsFor' | 'maxRecoveryRoundsFor',
+  storeId: string,
+): number | undefined {
+  const provided = self.softService<{
+    maxImprovementRoundsFor?: (storeId: string) => unknown
+    maxRecoveryRoundsFor?: (storeId: string) => unknown
+  }>('singularitySupervision')
+  const specific = provided?.[method]?.(storeId)
+  return typeof specific === 'number' && Number.isFinite(specific) && specific >= 0 ? Math.floor(specific) : undefined
 }
 
 export async function unload(self: TaskRuntime): Promise<void> {

@@ -286,7 +286,7 @@ async function executeExperiment(sources: ExperimentSources, request: Experiment
           workspace: real,
           initialDigest: view.frozen.snapshot.digest,
           cost: costOf(facts.review, view.frozen.objective === 'tool-call-reduction' ? after : undefined),
-          ...(facts.interruptedReason === undefined ? {} : { reason: facts.interruptedReason }),
+          ...(facts.reason === undefined ? {} : { reason: facts.reason }),
           actor,
         })
         await sources.evolution.recordExperimentSample(fresh)

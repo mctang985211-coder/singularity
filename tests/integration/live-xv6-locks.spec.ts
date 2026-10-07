@@ -56,7 +56,6 @@ it.skipIf(!enabled)(
       // runtime's own default is only 600_000 ms, so the harness names the xv6 budget.
       verifyTimeoutMs: XV6_VERIFY_TIMEOUT_MS,
       script: () => [],
-      supervision: { autoReview: 'off' },
       tools: xv6CheckoutTools(),
     })
     // Plumbing first: the runtime the harness just mounted must carry the xv6 budget,

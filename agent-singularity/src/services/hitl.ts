@@ -2,8 +2,24 @@ import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/dsh-user-approval'
+import { logOf } from '../log.ts'
 
 export type HitlKind = 'ask' | 'approve'
+
+/** The one answer an unmanned graph's ask gets: nobody is online, so the agent keeps its goal and records the assumptions it made. */
+const UNMANNED_ASK_ANSWER =
+  '（无人迭代模式）无人工在线审核：请按你的最佳判断继续，保持目标不缩小，并在结果中记录你做出的假设。'
+
+/** The lazily read slice of the graphs registry this seam consults; a deployment without it queues as before. */
+interface GraphResolver {
+  graphForSession?(sessionId: string): Promise<unknown>
+}
+
+/** The slice of a graph record that decides whether a human is asked (`rsi.humanReview`). */
+interface GraphRsiView {
+  readonly id: string
+  readonly rsi?: { readonly humanReview?: boolean }
+}
 
 export interface HitlPending {
   readonly id: string
@@ -88,6 +104,37 @@ export class HitlService extends Service {
     if (typeof sessionId !== 'string' || sessionId.length === 0) {
       throw new Error('hitl: missing session id')
     }
+    // The graph decides who is asked: a session in no graph, an unresolved one, or a load without the registry queues exactly as before.
+    const graphs = this.ctx.get('graphs') as GraphResolver | undefined
+    if (typeof graphs?.graphForSession !== 'function') return this.queue(sessionId, kind, prompt, signal)
+    return this.enqueueForGraph(sessionId, kind, prompt, signal, graphs.graphForSession.bind(graphs))
+  }
+
+  /**
+   * Ask only when the graph runs with a human: `rsi.humanReview === false` resolves the card on the spot
+   * (approve → approved, ask → {@link UNMANNED_ASK_ANSWER}) and never queues one, so the pending list cannot grow.
+   */
+  private async enqueueForGraph(
+    sessionId: string,
+    kind: HitlKind,
+    prompt: string,
+    signal: AbortSignal,
+    resolveGraph: (sessionId: string) => Promise<unknown>,
+  ): Promise<HitlAnswer> {
+    let graph: GraphRsiView | undefined
+    try {
+      graph = await resolveGraph(sessionId) as GraphRsiView
+    } catch {
+      graph = undefined
+    }
+    signal.throwIfAborted()
+    if (graph?.rsi?.humanReview !== false) return this.queue(sessionId, kind, prompt, signal)
+    logOf(this.ctx, 'hitl')?.info(`hitl: ${kind} card auto-resolved for graph ${graph.id} (unmanned mode): ${prompt}`)
+    this.ctx.emit('hitl/change', this.list())
+    return kind === 'approve' ? { kind: 'approve', decision: 'approve' } : { kind: 'ask', text: UNMANNED_ASK_ANSWER }
+  }
+
+  private queue(sessionId: string, kind: HitlKind, prompt: string, signal: AbortSignal): Promise<HitlAnswer> {
     const id = randomUUID()
     const pending: HitlPending = { id, kind, prompt, sessionId, createdAt: Date.now() }
     const abort = () => {

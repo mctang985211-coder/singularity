@@ -131,7 +131,6 @@ async function fixture(
   h = await startScriptedLoop({
     roots: [ROOT, 's-control'],
     evolution: { ledgerRoot: ledger },
-    supervision: { autoReview: 'off' },
     approvalService: 'native',
     approvalAnswer: ask => (ask.toolName.startsWith('evolution_') ? undefined : 'allowed-once'),
     script: (sessionId, index): readonly ScriptEntry[] => {
@@ -462,9 +461,16 @@ describe('Task template Evolution', () => {
   it('grows a first template from the free-contract fallback and rolls it back through the same commit', async () => {
     const f = await fixture(GOAL, true)
     expect(await f.h.runtime.findTaskTemplates()).toEqual([])
+    const original = await f.h.snapshot(STORE)
+    const oneOff = original.tasks.find(task => task.parentTaskId === f.source.taskId)!
+    expect(oneOff.templateRef).toBeUndefined()
+    expect(oneOff.definitionRef.taskType).toBe(`contract:${oneOff.contractDigest}`)
+    expect(original.diagnoses.find(diagnosis => diagnosis.diagnosisId === 'd-template')?.proposals)
+      .toContainEqual({ targetType: 'task_definition', targetId: ID, rationale: 'repair the child judge' })
     expect((await f.h.ctx.evolution.get(PROPOSAL)).prepared?.templateBaseline).toBeNull()
     const result = await f.h.ctx.evolution.runExperiment(f.spec, ROOT as SessionId, ROOT)
     expect(result.report.verdict).toBe('fixed')
+    expect(await f.h.runtime.findTaskTemplates()).toEqual([])
     await f.h.ctx.evolution.gate(
       PROPOSAL,
       {
@@ -485,9 +491,20 @@ describe('Task template Evolution', () => {
       timeout: 10_000,
     })
     expect((await f.h.runtime.findTaskTemplates())[0]?.templateRef.version).toBe(1)
+    const next = await f.h.runtime.recoverRootTask(STORE, {
+      sourceTaskId: f.source.taskId, sourceRunId: f.source.runId, sourceDiagnosisId: 'd-template',
+      requestKey: 'first-template-consumption', proposalIds: [PROPOSAL],
+    }, { sessionId: ROOT })
+    await vi.waitFor(async () => expect((await f.h.snapshot(STORE)).runs.find(run => run.runId === next.runId)?.status)
+      .toBe('verified'), { timeout: 15_000 })
     const before = await f.h.snapshot(STORE)
-    const bound = before.tasks.find(task => task.templateRef?.id === ID && task.templateRef.version === 1)!
+    const bound = before.tasks.find(task => task.parentTaskId === f.source.taskId && task.templateRef?.id === ID)!
+    expect(bound.templateRef?.version).toBe(1)
     expect(bound.contract?.objective).toBe('produce answer.txt containing 42')
+    expect(before.tasks.find(task => task.taskId === oneOff.taskId)).toEqual(oneOff)
+    const nextSession = before.runs.find(run => run.runId === next.runId)!.sessionId
+    expect(f.h.calls.filter(call => call.sessionId === nextSession && call.name === 'task_template_list')
+      .some(call => call.result?.text.includes(`"id": "${ID}"`))).toBe(true)
     f.allowRollback()
     await answerApproval(f.h, 'evolution_rollback')
     await vi.waitFor(

@@ -34,8 +34,7 @@ afterEach(async () => { await disposeScriptedLoops(); await disposeRunStacks() }
 describe('guidance on actual model requests', () => {
   it('loads relevant full instructions for the root, coordinating child and atomic leaf without Skill calls', async () => {
     let h!: ScriptedLoop
-    h = await startScriptedLoop({ capabilities, supervision: { autoReview: 'off' },
-      script: (session, index): readonly ScriptEntry[] => {
+    h = await startScriptedLoop({ capabilities, script: (session, index): readonly ScriptEntry[] => {
         const waitForChildren = { waitFor: async () => {
           await vi.waitFor(async () => expect((await h.runForSession(session)).run.executionPhase).toBe('active'), { timeout: 10_000 })
         } }
@@ -82,8 +81,7 @@ describe('guidance on actual model requests', () => {
   })
 
   it('keeps an existing Run on frozen bytes and gives a new root Run the edited production method', async () => {
-    const h = await startScriptedLoop({ capabilities, roots: [ROOT, 's-new-root'], supervision: { autoReview: 'off' },
-      script: () => [{ text: 'coordinating with the admitted method' }],
+    const h = await startScriptedLoop({ capabilities, roots: [ROOT, 's-new-root'], script: () => [{ text: 'coordinating with the admitted method' }],
     })
     await install(h)
     const production = join(h.home, 'skills', 'task-coordination', 'SKILL.md')
@@ -110,7 +108,7 @@ describe('guidance on actual model requests', () => {
   })
 
   it.each(['tampered', 'deleted'] as const)('refuses the next actual request when its frozen Skill is %s', async damage => {
-    const h = await startScriptedLoop({ capabilities, supervision: { autoReview: 'off' }, script: () => [{ text: 'coordinate the answer' }] })
+    const h = await startScriptedLoop({ capabilities, script: () => [{ text: 'coordinate the answer' }] })
     await install(h)
     await h.begin(contract(`coordinate the ${damage} case`))
     await h.agent(ROOT).whenIdle()

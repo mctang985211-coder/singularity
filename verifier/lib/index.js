@@ -40,6 +40,12 @@ function killTree(child) {
 		child.kill("SIGKILL");
 	}
 }
+/** The one line a log carries when the command itself wrote nothing — an empty log makes a failure undiagnosable. */
+function outcomeLine(outcome) {
+	if (outcome.error !== void 0) return outcome.error.message;
+	if (outcome.timedOut === true) return "(no output) timed out";
+	return `(no output) exit code ${outcome.exitCode ?? "unknown"}`;
+}
 function runCommand(command, cwd, timeoutMs, logPath) {
 	return new Promise((resolveOutcome) => {
 		const child = spawn(command, {
@@ -53,8 +59,13 @@ function runCommand(command, cwd, timeoutMs, logPath) {
 			]
 		});
 		const log = createWriteStream(logPath);
-		child.stdout.pipe(log, { end: false });
-		child.stderr.pipe(log, { end: false });
+		let outputBytes = 0;
+		for (const stream of [child.stdout, child.stderr]) {
+			stream.on("data", (chunk) => {
+				outputBytes += chunk.length;
+			});
+			stream.pipe(log, { end: false });
+		}
 		let timedOut = false;
 		let settled = false;
 		const timer = timeoutMs === void 0 ? void 0 : setTimeout(() => {
@@ -65,6 +76,7 @@ function runCommand(command, cwd, timeoutMs, logPath) {
 			if (settled) return;
 			settled = true;
 			if (timer !== void 0) clearTimeout(timer);
+			if (outputBytes === 0) log.write(`${outcomeLine(outcome)}\n`);
 			log.end(() => resolveOutcome(outcome));
 		};
 		child.on("error", (error) => finish({ error }));

@@ -30,7 +30,6 @@ const CONTRACT_ALLOWED = [
   'task_proposal_cancel',
   'task_proposal_read',
   'task_read',
-  'task_recover',
   'task_review_agent',
   'task_review_pack',
   'task_status',

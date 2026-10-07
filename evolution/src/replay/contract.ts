@@ -258,7 +258,11 @@ export interface ExperimentSideDetail {
   initialDigest?: string
   criteria: ExperimentCriterionDetail[]
   cost: ExperimentCost
-  /** Why this side has no terminal run; required for `interrupted`, absent otherwise. */
+  /**
+   * Why this side reads the way it does: required for `interrupted` (it has no
+   * terminal run), and carried for `failed` when the store recorded the run's own
+   * cause; absent otherwise.
+   */
   reason?: string
   /** The runtime's own admission refusal, for a side that is `not-admitted` (A6). */
   admission?: ExperimentAdmissionRefusal

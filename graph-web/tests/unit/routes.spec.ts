@@ -364,25 +364,33 @@ describe('singularity model catalog and graph model pin', () => {
     })
   })
 
-  it('POST /singularity/graphs forwards the create body, model pin included, to the service', async () => {
-    const create = vi.fn(async (body: { model?: unknown }) => ({
-      graph: { id: 'graph1', model: body.model },
+  it('POST /singularity/graphs forwards the create body and graph settings to the service', async () => {
+    const create = vi.fn(async (body: { model?: unknown; rsi?: unknown }) => ({
+      graph: { id: 'graph1', model: body.model, rsi: body.rsi },
       reused: false,
     }))
     const { ctx, handlers } = mockCtx({ graphs: { create } })
     apply(ctx as never)
-    const body = { createEnv: true, repos: ['acme/widget'], model: { provider: 'p1', model: 'm1' } }
+    const body = {
+      createEnv: true,
+      repos: ['acme/widget'],
+      model: { provider: 'p1', model: 'm1' },
+      rsi: { task: 'Improve widget', iterationRounds: 3, humanReview: true },
+    }
     const res = mockRes()
     await handlers.get('/singularity/graphs')!(mockReq('POST', '/singularity/graphs', body), res as never)
 
     expect(res.statusCode).toBe(200)
     expect(create).toHaveBeenCalledExactlyOnceWith(body)
-    expect(json(res)).toEqual({ id: 'graph1', model: { provider: 'p1', model: 'm1' }, reused: false })
+    expect(json(res)).toEqual({ id: 'graph1', model: body.model, rsi: body.rsi, reused: false })
   })
 
-  it('PATCH /singularity/graphs/:id pins or clears the model, refusing a body without one', async () => {
-    const setModel = vi.fn(async (id: string, model: unknown) => ({ id, model }))
-    const { ctx, handlers } = mockCtx({ graphs: { setModel } })
+  it('PATCH /singularity/graphs/:id forwards model and RSI pins in one service transaction', async () => {
+    const setPins = vi.fn(async (id: string, pins: { model?: unknown; rsi?: unknown }) => {
+      if (pins.model === undefined && pins.rsi === undefined) throw new Error('graphs: model or rsi is required')
+      return { id, ...pins }
+    })
+    const { ctx, handlers } = mockCtx({ graphs: { setPins } })
     apply(ctx as never)
     const serve = handlers.get('/singularity/graphs/*')!
 
@@ -392,15 +400,33 @@ describe('singularity model catalog and graph model pin', () => {
       pinned as never,
     )
     expect(pinned.statusCode).toBe(200)
-    expect(setModel).toHaveBeenLastCalledWith('graph1', { provider: 'p1', model: 'm1' })
+    expect(setPins).toHaveBeenLastCalledWith('graph1', { model: { provider: 'p1', model: 'm1' } })
 
     const cleared = mockRes()
     await serve(mockReq('PATCH', '/singularity/graphs/graph1', { model: null }), cleared as never)
-    expect(setModel).toHaveBeenLastCalledWith('graph1', null)
+    expect(setPins).toHaveBeenLastCalledWith('graph1', { model: null })
+
+    const rsi = { task: 'Improve widget', iterationRounds: 2, humanReview: false }
+    const configured = mockRes()
+    await serve(mockReq('PATCH', '/singularity/graphs/graph1', { rsi }), configured as never)
+    expect(configured.statusCode).toBe(200)
+    expect(setPins).toHaveBeenLastCalledWith('graph1', { rsi })
+
+    const combined = { model: { provider: 'p1', model: 'm1' }, rsi }
+    const updated = mockRes()
+    await serve(mockReq('PATCH', '/singularity/graphs/graph1', combined), updated as never)
+    expect(updated.statusCode).toBe(200)
+    expect(setPins).toHaveBeenLastCalledWith('graph1', combined)
+    expect(json(updated)).toEqual({ id: 'graph1', ...combined })
+
+    const stopped = mockRes()
+    await serve(mockReq('PATCH', '/singularity/graphs/graph1', { rsi: null }), stopped as never)
+    expect(stopped.statusCode).toBe(200)
+    expect(setPins).toHaveBeenLastCalledWith('graph1', { rsi: null })
 
     const missing = mockRes()
     await serve(mockReq('PATCH', '/singularity/graphs/graph1', {}), missing as never)
     expect(missing.statusCode).toBe(400)
-    expect(setModel).toHaveBeenCalledTimes(2)
+    expect(setPins).toHaveBeenCalledTimes(6)
   })
 })

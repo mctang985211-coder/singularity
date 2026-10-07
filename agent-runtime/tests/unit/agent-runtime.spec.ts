@@ -610,14 +610,16 @@ describe('AgentRuntime root lifecycle', () => {
     // The method lives in one real Skill; the bootstrap only names its loader.
     expect(prompt).toContain('load task-coordination with skill')
     expect(prompt).toContain('through requiredCapabilities')
+    expect(prompt).toContain("Declare each Task's execution capabilities and relevant guidance through requiredCapabilities")
+    expect(prompt).toContain('delegate execution to Tasks through requiredCapabilities')
     expect(prompt).not.toContain('An assumption is not an answer')
     const method = await readFile(new URL('../../skills/task-coordination/SKILL.md', import.meta.url), 'utf8')
     expect(method).toContain('An assumption is not an answer')
     expect(method).toContain('At least one mandatory root criterion')
     expect(method).toContain('One unfinished batch')
     expect(method).toContain('task_budget_extend')
-    // A6 recovery belongs only to the separately granted supervisor hand-off;
-    // an ordinary root neither receives the tool nor gets prompted to call it.
+    // No agent holds a task-recovery tool in this deployment (F): the platform
+    // RSI loop opens the next round, so no root surface names one.
     expect(prompt).not.toContain('task_recover')
   })
 
@@ -881,6 +883,16 @@ describe('the spawn request contract (A2)', () => {
     for (const other of ['context_read', 'session_history_export', 'task_read', 'bash']) {
       expect(denialOf(guard, other)).toBeUndefined()
     }
+  })
+
+  test.each([false, true])('a worker cannot use preset-local native delegation (taskWorker=%s)', async taskWorker => {
+    const state = await spawnContext()
+    await state.runtime.spawn(state.root, { sessionId: id('child'), name: 'worker', taskWorker, prompt: [{ type: 'text', text: 'work' }] })
+    const { guard } = await runSetup(state.createCalls[0]!.options)
+    for (const name of ['subagent', 'subagent_fork', 'subagent_codex', 'workflow', 'ralph'])
+      expect(denialOf(guard, name)).toContain('delegate through task_decompose')
+    for (const name of ['task_decompose', 'bash', 'job_output', 'web_search'])
+      expect(denialOf(guard, name)).toBeUndefined()
   })
 
   test.each([false, true])('root-local tools obey the coordination allow-list (evolution=%s)', async enabled => {

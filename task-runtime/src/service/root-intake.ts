@@ -32,7 +32,7 @@ import {
   rootTaskStoreId,
 } from '@dangosys/dsh-singularity-task'
 import { capabilitySnapshot } from '../capability.ts'
-import { contractDefects, rootIndependenceDefects } from '../admission.ts'
+import { commandSyntaxDefects, contractDefects, rootIndependenceDefects } from '../admission.ts'
 import { providerContentIdentities, providerRefusals } from '../provider-precheck.ts'
 import { bindRunProviders, readRunBinding } from '../run-binding.ts'
 import { bindTaskTemplate } from '../task-template.ts'
@@ -672,6 +672,9 @@ export async function checkRootContract(self: TaskRuntime, request: CheckRootCon
   const defects = [
     ...contractDefects(contract.acceptanceCriteria, label),
     ...rootIndependenceDefects(contract.acceptanceCriteria, label),
+    // The structural rules above are synchronous and pure; parsing a command
+    // needs a shell, so the syntax pass is the one awaited step here.
+    ...(await commandSyntaxDefects(contract.acceptanceCriteria, label)),
   ]
   if (defects.length > 0) {
     return { ok: false, refusal: { error: rootRefusal(defects), reasons: defects } }

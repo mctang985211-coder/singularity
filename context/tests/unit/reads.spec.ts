@@ -22,6 +22,29 @@ async function chainStack(): Promise<{ stack: FixtureStack; chain: Chain }> {
   return { stack, chain }
 }
 
+test('supervisor context preserves its coordination responsibility and exact source Run', async () => {
+  const { stack } = await chainStack()
+  stack.bindingSource(stack.ledger({
+    rootStoreId: 'sg-t-s-root', taskId: 't-c1', actor: 's-root', at: '2026-10-07T00:00:00.000Z',
+    role: 'supervisor', sourceRunId: 'r-c1',
+  }))
+  const contract = expectOk(await stack.service.contractProjection('s-review')).text
+  expect(contract).toContain('role: supervisor')
+  expect(contract).toContain('method supervision, no business Run')
+  expect(contract).toContain('exact source Run: r-c1')
+  expect(contract).not.toContain('## Guidance loaded for this run')
+  expect(expectOk(await stack.service.taskRead('s-review')).text).toContain('method supervision')
+})
+
+test('a missing exact coordination source Run is refused instead of falling back to the latest Run', async () => {
+  const { stack } = await chainStack()
+  stack.bindingSource(stack.ledger({
+    rootStoreId: 'sg-t-s-root', taskId: 't-c1', actor: 's-root', at: '2026-10-07T00:00:00.000Z',
+    role: 'supervisor', sourceRunId: 'r-missing',
+  }))
+  expect(expectRefused(await stack.service.contractProjection('s-review'), 'not-found')).toContain('r-missing')
+})
+
 /** The session plane as a seam: only the method a case replaces, typed structurally. */
 interface SessionQuerySeam {
   readEvent(

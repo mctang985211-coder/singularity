@@ -13,6 +13,8 @@ export function defineMarkReadyTool(ctx: Context) {
     execute: async (_args, exec: ToolRunContext) => {
       const caller = sessionId(exec, 'graph_mark_ready')
       const graph = await ctx.graphs.graphForSession(caller)
+      if (String(graph.rootSessionId) !== String(caller))
+        throw new Error(`graph_mark_ready: only graph ${graph.id}'s root may finish setup`)
       await ctx.graphs.markReady(graph.id)
       return `graph ${graph.id} ready`
     },

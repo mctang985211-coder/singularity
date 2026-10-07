@@ -3,8 +3,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { APPLYABLE_TARGET_TYPES, applyTargets, renderProviderRoles } from '@dangosys/dsh-singularity-evolution'
 import type { EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
-import { optionalService } from '@dangosys/dsh-singularity-task-runtime'
-import { continueProposalHandoff } from '../coordination/evolution-handoff.ts'
 import { denialReason, message, renderOpenIntentRecovery, sessionId, text } from '../shared.ts'
 
 /** Why a decided PROMOTE proposal still cannot be applied: L4 harness evolution and target types this build has no executor for. */
@@ -38,8 +36,8 @@ export function defineEvolutionApplyTool(ctx: Context) {
     name: 'evolution_apply',
     description:
       'Apply a PROMOTE-decided Task template, Skill or capability candidate at L1–L3. Recheck the frozen candidate, experiment ' +
-      'and production baseline. The deployment publicationApproval policy requests one exact-write approval by default, ' +
-      'or records its explicit auto preauthorization. Review shows the exact mutation, definitions and targets. ' +
+      'and production baseline. One exact-write approval is always requested through the native seam — a graph whose RSI ' +
+      'settings run without a human resolves it on the spot. Review shows the exact mutation, definitions and targets. ' +
       'One existing durable commit writes production; retry settles its open intent without asking again. New admissions ' +
       'consume the published version; existing Task contracts and Run bindings stay fixed. evolution_rollback restores the baseline.',
     parameters: {
@@ -68,7 +66,6 @@ export function defineEvolutionApplyTool(ctx: Context) {
             ...(recovered.proposal.targetType === 'capability' ? [`  - capability row ${recovered.proposal.targetId} in the production table`] : []),
             ...recovered.targets.map(target => `  - ${target}`),
             effectNote(recovered.proposal),
-            ...(await continueProposalHandoff(ctx, recovered.proposal, caller)),
           ].join('\n')
         } catch (error) {
           return `evolution_apply rejected: ${message(error)}`
@@ -94,7 +91,6 @@ export function defineEvolutionApplyTool(ctx: Context) {
         return `evolution_apply rejected: ${message(error)}`
       }
       const targets = applyTargets(proposal, ctx.evolution)
-      const publicationApproval = optionalService<{ publicationApproval: 'ask' | 'auto' }>(ctx, 'singularityEvolution')?.publicationApproval ?? 'ask'
       const reason = [
         `Evolution apply for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
         `rationale: ${proposal.rationale}`,
@@ -116,22 +112,18 @@ export function defineEvolutionApplyTool(ctx: Context) {
             ? 'rollback: append the previous template content as a new version, or remove a first publication; existing contracts stay fixed'
             : 'rollback: evolution_rollback restores the champion snapshot from the sandbox',
       ].join('\n')
-      if (publicationApproval === 'ask') {
-        const outcome = await ctx.approval.request({
-          agent,
-          toolName: 'evolution_apply',
-          callId: exec.callId,
-          reason,
-          signal: exec.signal,
-        })
-        if (outcome !== 'allowed-once') {
-          const why = denialReason(outcome)
-          return `evolution_apply: nothing written — ${why}; proposal ${proposal.proposalId} stays decided`
-        }
+      const outcome = await ctx.approval.request({
+        agent,
+        toolName: 'evolution_apply',
+        callId: exec.callId,
+        reason,
+        signal: exec.signal,
+      })
+      if (outcome !== 'allowed-once') {
+        const why = denialReason(outcome)
+        return `evolution_apply: nothing written — ${why}; proposal ${proposal.proposalId} stays decided`
       }
-      const approvalRef = publicationApproval === 'auto'
-        ? `preauthorized:singularity-agent.publicationApproval=auto:${exec.callId}`
-        : `approval:${exec.callId}`
+      const approvalRef = `approval:${exec.callId}`
       try {
         const applied = await ctx.evolution.apply(args.proposalId, caller, approvalRef)
         return [
@@ -141,8 +133,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
           ...applied.targets.map(target => `  - ${target}`),
           ...renderProviderRoles(applied.providers ?? []),
           effectNote(applied.proposal),
-          ...(await continueProposalHandoff(ctx, applied.proposal, caller)),
-          `publication authorization: ${approvalRef} — rollback with evolution_rollback`,
+          `human approval: ${approvalRef} — rollback with evolution_rollback`,
         ].join('\n')
       } catch (error) {
         return `evolution_apply rejected: ${message(error)}`

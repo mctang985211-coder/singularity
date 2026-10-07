@@ -6,7 +6,7 @@ import { ReviewerBindingError } from '@dangosys/dsh-singularity-context'
 import type { ReviewerBindingRecord } from '@dangosys/dsh-singularity-context'
 import { appendJsonlRow, readJsonlFile } from '../jsonl-ledger.ts'
 import { sameSource } from './identity.ts'
-import { DEFAULT_SUPERVISION, roundCapRefusal, supervisionSettings, type SupervisionRounds } from './supervision.ts'
+import { DEFAULT_SUPERVISION, supervisionSettings } from './supervision.ts'
 
 /** How many review agents this store has started, as this region's read of the ledger holds them — the shipped default of `supervision.coordinationBudget`. */
 export const REVIEW_AGENT_BUDGET_DEFAULT = DEFAULT_SUPERVISION.coordinationBudget
@@ -106,7 +106,7 @@ export interface ReviewAgentAttemptRequest {
   /** `reviewer` (the default) for a review attempt, `supervisor` for a hand-off's coordinator. */
   readonly role?: ReviewAgentRole
   readonly source: ReviewAgentSource
-  /** `null` is the source's default attempt; an automatic scan never invents a key. */
+  /** `null` is the source's default attempt; a caller that names none gets it. */
   readonly requestKey: string | null
   /** The caller's review focus, or `null` when it named none. */
   readonly reason: string | null
@@ -141,8 +141,7 @@ export interface ReviewAgentAttempt {
 }
 
 /** Why an admission refuses to start an attempt by name. */
-export type ReviewAgentRefusalCode =
-  'request-key-conflict' | 'request-key-required' | 'budget-exhausted' | 'iteration-cap'
+export type ReviewAgentRefusalCode = 'request-key-conflict' | 'request-key-required' | 'budget-exhausted'
 
 /** The store's review-agent allowance as the admission read it. */
 export interface ReviewAgentBudget {
@@ -174,8 +173,8 @@ export interface ReviewAgentPlanHooks {
   readonly recorded?: (attempt: ReviewAgentAttempt) => boolean | Promise<boolean>
   /** Existing proposal facts show an unfinished operation after the previous coordinator stopped. */
   readonly resumeRecorded?: boolean
-  /** The hand-off source's round facts; a capped source plans nothing. */
-  readonly supervisionRounds?: SupervisionRounds
+  /** The operator re-set the graph's RSI config after the attempt closed `blocked`: the obstruction it named is declared cleared, so the closed attempt does not answer the round and a fresh one may start. */
+  readonly retryClosed?: boolean
 }
 
 /** One decision, and the dead attempts it recovered on the way (see {@link ReviewAgentAdmission.plan}). */
@@ -332,13 +331,14 @@ export function planReviewAttempt(input: {
   return { kind: 'start', budget }
 }
 
-/** Decide one hand-off's supervisor request (A6) against one store's attempts: a concluded hand-off is answered with the supervisor it already had; an interrupted one is a failure and does not block a fresh attempt. */
+/** Decide one round's supervisor request against one store's attempts: a concluded supervision is answered with the supervisor it already had; an interrupted one is a failure and does not block a fresh attempt. */
 export function planSupervisorAttempt(input: {
   readonly attempts: readonly ReviewAgentAttempt[]
   readonly request: ReviewAgentAttemptRequest
   readonly budget: ReviewAgentBudget
-  readonly rounds?: SupervisionRounds
   readonly resumeRecorded?: boolean
+  /** An operator reset after a `closed` settlement: the closed attempt stays on the record but does not answer the round. */
+  readonly retryClosed?: boolean
 }): ReviewAgentPlan {
   const { request, budget } = input
   const mine = attemptsOfRole(input.attempts, 'supervisor').filter(
@@ -353,17 +353,16 @@ export function planSupervisorAttempt(input: {
   const open = mine.find(attempt => attempt.settlement === undefined)
   if (open !== undefined) return { kind: 'in-flight', attempt: open }
   // Closed outcomes and completed recovery keep their identity; unfinished durable proposals may continue.
+  // A `closed` settlement is the final answer — unless the caller carries an operator reset (`retryClosed`),
+  // which says the obstruction the closed attempt named was cleared and the round deserves a fresh attempt.
   const concluded = mine
     .filter(
       attempt =>
-        attempt.settlement?.status === 'closed' || (attempt.settlement?.status === 'recorded' && !input.resumeRecorded),
+        (attempt.settlement?.status === 'closed' && input.retryClosed !== true) ||
+        (attempt.settlement?.status === 'recorded' && !input.resumeRecorded),
     )
     .at(-1)
   if (concluded !== undefined) return { kind: 'reuse', attempt: concluded }
-  const cap = input.rounds === undefined ? undefined : roundCapRefusal(input.rounds)
-  if (cap !== undefined) {
-    return { kind: 'refused', code: 'iteration-cap', reason: cap.reason, attempt: undefined, attempts: mine, budget }
-  }
   if (budget.used >= budget.max)
     return { kind: 'refused', code: 'budget-exhausted', attempt: undefined, attempts: mine, budget }
   return { kind: 'start', budget }
@@ -373,18 +372,6 @@ export function planSupervisorAttempt(input: {
 export async function readReviewAgentAttempts(rootStoreId: string): Promise<ReviewAgentAttempt[]> {
   const rows = await readLedgerRows()
   return attemptsOf(rows ?? [], rootStoreId)
-}
-
-/** The supervisor one hand-off is delegated to, as the ledger holds it: the newest started attempt that is still open or ended with an outcome; an interrupted attempt is a failure, not the hand-off's owner. */
-export async function readSupervisorHandoff(
-  rootStoreId: string,
-  diagnosisId: string,
-): Promise<ReviewAgentAttempt | undefined> {
-  const attempts = await readReviewAgentAttempts(rootStoreId)
-  return attempts
-    .filter(attempt => attempt.role === 'supervisor' && attempt.diagnosisId === diagnosisId && attempt.started)
-    .filter(attempt => attempt.settlement === undefined || attempt.settlement.status !== 'interrupted')
-    .at(-1)
 }
 
 /** The budget one admission belongs to: a ledger file and a root store. */
@@ -520,7 +507,7 @@ export async function admitReviewAgent<T>(
                 request,
                 budget: { used, max: reviewAgentBudget() },
                 resumeRecorded: hooks?.resumeRecorded,
-                ...(hooks?.supervisionRounds === undefined ? {} : { rounds: hooks.supervisionRounds }),
+                retryClosed: hooks?.retryClosed,
               })
             : planReviewAttempt({ attempts, request, budget: { used, max: reviewAgentBudget() } })
         return { plan, recovered }
@@ -593,16 +580,21 @@ export async function readReviewerDelegation(sessionId: string): Promise<Reviewe
   const matches = (rows ?? []).filter(isStartedRow).filter(row => row.sessionId === sessionId)
   if (matches.length === 0) return undefined
   const first = matches[0]!
+  const claims = (rows ?? []).filter((row): row is ReviewAgentClaimRecord => row.kind === 'claim' && row.sessionId === sessionId)
+  const claim = claims[0]
   const record: ReviewerBindingRecord = {
     rootStoreId: first.rootStoreId,
     taskId: first.taskId,
     actor: first.actor,
     at: first.at,
+    ...(claim === undefined ? {} : { role: claim.role ?? 'reviewer', sourceRunId: claim.runId }),
   }
   const conflicting = matches.some(
     row => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor,
   )
-  if (conflicting) {
+  const claimConflict = claims.some(row => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId ||
+    row.actor !== record.actor || (row.role ?? 'reviewer') !== record.role || row.runId !== record.sourceRunId)
+  if (conflicting || claimConflict) {
     throw new ReviewerBindingError(
       'binding-conflict',
       `session "${sessionId}" is recorded under more than one reviewer delegation: ` +
@@ -610,63 +602,6 @@ export async function readReviewerDelegation(sessionId: string): Promise<Reviewe
     )
   }
   return record
-}
-
-/** One recorded **supervisor** delegation (A6): the hand-off it was started for, beside the delegation fields every row carries. */
-export interface SupervisorDelegationRecord extends ReviewerBindingRecord {
-  /** The supervisor session the delegation names — the same id the reader asked about, repeated so a caller never re-derives it. */
-  readonly sessionId: string
-  /** The Diagnosis this supervisor was delegated for. */
-  readonly diagnosisId: string
-}
-
-/** The supervisor delegation of one (session, diagnosis) pair, as the ledger holds it, or `undefined` when no started row names both. */
-export async function readSupervisorDelegation(
-  sessionId: string,
-  diagnosisId: string,
-): Promise<SupervisorDelegationRecord | undefined> {
-  let rows: ReviewAgentLedgerRow[] | undefined
-  try {
-    rows = await readLedgerRows()
-  } catch (error) {
-    throw new ReviewerBindingError(
-      'unreadable',
-      `the supervisor ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`,
-    )
-  }
-  const startedSessions = new Set((rows ?? []).filter(isStartedRow).map(row => row.sessionId))
-  const matches = (rows ?? [])
-    .filter((row): row is ReviewAgentClaimRecord => row.formatVersion === 2 && row.kind === 'claim')
-    .filter(row => row.role === 'supervisor' && row.diagnosisId === diagnosisId && row.sessionId === sessionId)
-    .filter(row => startedSessions.has(row.sessionId))
-  const first = matches[0]
-  if (first === undefined) return undefined
-  const record: SupervisorDelegationRecord = {
-    rootStoreId: first.rootStoreId,
-    taskId: first.taskId,
-    actor: first.actor,
-    at: first.at,
-    sessionId: first.sessionId,
-    diagnosisId,
-  }
-  const conflicting = matches.some(
-    row => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor,
-  )
-  if (conflicting) {
-    throw new ReviewerBindingError(
-      'binding-conflict',
-      `session "${sessionId}" is recorded under more than one supervisor delegation for diagnosis "${diagnosisId}": ` +
-        matches.map(row => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join('; '),
-    )
-  }
-  return record
-}
-
-/** The delegation source the assembly injects into the evolution plane (A6): this deployment's ledger, as the narrow read door above. */
-export function supervisorDelegationSource(): {
-  read(sessionId: string, diagnosisId: string): Promise<SupervisorDelegationRecord | undefined>
-} {
-  return { read: readSupervisorDelegation }
 }
 
 /** The binding source the plugin registers into the context service: this deployment's ledger, as the narrow read door above. */

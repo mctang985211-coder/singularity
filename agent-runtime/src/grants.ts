@@ -7,6 +7,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import { messageOf } from './messages.ts'
 import type { WorkerGrant } from './types.ts'
+import { isNativeDelegationTool, TASK_DELEGATION_DENIAL } from './delegation-guard.ts'
 import {
   findSkillFile,
   listSkillFiles,
@@ -68,15 +69,20 @@ export interface ResolvedGrant {
 /** Compute the allow-list one grant resolves to; throws when a capability tool is not visible. */
 export function resolveGrant(agentCtx: Context, agent: Agent, grant: WorkerGrant): ResolvedGrant {
   const visible = visibleToolNames(agentCtx, agent)
+  for (const capability of grant.capabilities) {
+    const bypasses = capability.tools.filter(isNativeDelegationTool)
+    if (bypasses.length > 0)
+      throw new Error(`agent-runtime: capability "${capability.capability}" declares native delegation tools [${bypasses.join(', ')}]; ${TASK_DELEGATION_DENIAL}`)
+  }
   assertCapabilityTools(grant, visible)
   const allow = new Set<string>()
   for (const capability of grant.capabilities) for (const tool of capability.tools) allow.add(tool)
-  for (const tool of grant.baseline) if (visible.has(tool)) allow.add(tool)
+  for (const tool of grant.baseline) if (visible.has(tool) && !isNativeDelegationTool(tool)) allow.add(tool)
   // A preset's own plane is what the composition contributes beyond the global layer; keeping it is how a
   // capability that named its preset keeps that preset's own tools, which no label could enumerate.
   if (grant.keepPresetTools) {
     const global = visibleToolNames(agentCtx)
-    for (const tool of visible) if (!global.has(tool)) allow.add(tool)
+    for (const tool of visible) if (!global.has(tool) && !isNativeDelegationTool(tool)) allow.add(tool)
   }
   return {
     allow: [...allow].sort(),

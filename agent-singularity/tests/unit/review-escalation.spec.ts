@@ -9,10 +9,10 @@ import { renderJudgementDimensions } from '../../src/tools/task-review-pack.ts'
  *
  * `computeEscalation`'s thresholds (E1–E4), its `required`/`suppressed`
  * derivation and the pack's `escalation:` line had no consumer left once the
- * triggers were fixed: a review agent runs for a terminal review the
- * deployment's `supervision.autoReview` accepts (the automatic scan) or for an
- * explicit call under the store's own allowance, and never because a threshold
- * the pack re-derived said so. Two symbols keep a consumer and stay here:
+ * triggers were fixed: a review agent runs for an explicit call under the
+ * store's own allowance, and never because a threshold the pack re-derived said
+ * so. (The automatic scan that once accepted a terminal review on its own is
+ * gone too — see F.) Two symbols keep a consumer and stay here:
  *
  * - `REVIEW_AGENT_BUDGET_DEFAULT`, the shipped per-root-store allowance the
  *   ledger counts against (`review-agent-ledger.ts:reviewAgentBudget`);

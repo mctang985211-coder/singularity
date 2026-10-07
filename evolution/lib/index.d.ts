@@ -1,6 +1,6 @@
 import * as _dangosys_dsh_singularity_task0 from "@dangosys/dsh-singularity-task";
 import { AcceptanceCriterion, ProposalTargetType, ReviewCriterion, ReviewMetrics, ReviewRecord, RunMcpServerBinding, TaskInstance, TaskSnapshot, TaskTemplate, TemplateParameters } from "@dangosys/dsh-singularity-task";
-import { CapabilityConfig, CapabilityToolQuery, McpServerTemplate, ReplayRunOutcome, ReplayTaskOptions, RootRecoveryOutcome, RootRecoveryRequest, SkillProviderCandidate, SkillProviderVerdict, SkillSidecar } from "@dangosys/dsh-singularity-task-runtime";
+import { CapabilityConfig, CapabilityToolQuery, McpServerTemplate, ReplayRunOutcome, ReplayTaskOptions, SkillProviderCandidate, SkillProviderVerdict, SkillSidecar } from "@dangosys/dsh-singularity-task-runtime";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { Context, Service } from "@deepseek-ai/cordis";
 
@@ -282,7 +282,11 @@ interface ExperimentSideDetail {
   initialDigest?: string;
   criteria: ExperimentCriterionDetail[];
   cost: ExperimentCost;
-  /** Why this side has no terminal run; required for `interrupted`, absent otherwise. */
+  /**
+   * Why this side reads the way it does: required for `interrupted` (it has no
+   * terminal run), and carried for `failed` when the store recorded the run's own
+   * cause; absent otherwise.
+   */
   reason?: string;
   /** The runtime's own admission refusal, for a side that is `not-admitted` (A6). */
   admission?: ExperimentAdmissionRefusal;
@@ -710,42 +714,6 @@ declare function validateSpec(spec: ExperimentSpec): void;
 /** The role a sample must have been chosen for, against the historical record it carries. */
 declare function assertSampleRole(sample: ExperimentSampleSpec, task: TaskInstance, review: ReviewRecord): void;
 //#endregion
-//#region src/ledger/records.d.ts
-/** One recorded supervisor delegation, as the ledger that owns it answers this plane's lookup. */
-interface SupervisorDelegation {
-  readonly rootStoreId: string;
-  readonly taskId: string;
-  readonly diagnosisId: string;
-  readonly sessionId: string;
-  readonly actor: string;
-  readonly at: string;
-}
-/** One recovery-coordination request, as the tool adapter hands it over (plan §F.4's `task_recover` payload). */
-interface RecoveryCoordinationRequest {
-  /** The diagnosis the recovery is asked for; it must be a record of the caller's own store. */
-  sourceDiagnosisId: string;
-  /** The caller's key: one key names one attempt of one diagnosis. */
-  requestKey: string;
-  /** Recovery retries a failed source; improve opens an improvement round on a verified one (runtime default: recovery). */
-  mode?: 'recovery' | 'improve';
-}
-/** Who asks for a recovery: the **supervisor** session of that hand-off, as a live session with an abort signal. */
-interface RecoveryCoordinationCaller {
-  readonly sessionId: string;
-  readonly signal?: AbortSignal;
-}
-/** What one coordination answered (A6): the runtime's own recovery outcome, the hand-off it was authorized by and what this plane checked. */
-interface RecoveryCoordinationOutcome extends RootRecoveryOutcome {
-  /** The supervisor delegation this call was authorized by. */
-  readonly handoff: {
-    readonly sessionId: string;
-    readonly actor: string;
-    readonly diagnosisId: string;
-  };
-  /** What this plane checked and found, in the caller's own words. */
-  readonly coordination: readonly string[];
-}
-//#endregion
 //#region src/types.d.ts
 type EvolutionLevel = 'L1' | 'L2' | 'L3' | 'L4';
 type EvolutionStatus = 'proposed' | 'candidate' | 'prepared' | 'gated' | 'decided' | 'applied' | 'rolledback';
@@ -1037,8 +1005,6 @@ interface Config {
   modelSelection?: () => ModelSelection | undefined;
   /** The typed test seam of the commit path (K2, per-file since K3): it fires at each named stage. */
   commitProbe?: (stage: CommitStage, target?: string) => void;
-  /** Where this deployment reads the **supervisor delegation** of one hand-off. */
-  supervisorDelegation?: (sessionId: string, diagnosisId: string) => Promise<SupervisorDelegation | undefined>;
   /** The capability table's own file (A6): the deployment's `config.yml`, whose `task-runtime` capabilities row a capability commit writes. */
   capabilityConfig?: string;
   /** The typed test seam of the capability-config write (A6), the same shape as the commit probe. */
@@ -1332,8 +1298,12 @@ interface RunFacts {
   evidenceRefs: string[];
   terminal: boolean;
   detail: string;
-  /** Why a terminal side still records `interrupted`: a blocked run is a dead end the experiment has no outcome for. */
-  interruptedReason?: string;
+  /**
+   * Why the side reads the way it does: the store's own cause for a terminal
+   * `failed` run, or why a blocked one is recorded `interrupted` — a blocked run
+   * is a dead end the experiment has no outcome for.
+   */
+  reason?: string;
 }
 declare function runFactsOf(snapshot: TaskSnapshot, task: TaskInstance, settled: ReplayRunOutcome | undefined): RunFacts;
 /** The one ledger line a sample side writes, from the facts its run settled to. */
@@ -1425,8 +1395,6 @@ declare class EvolutionServiceCore extends Service {
   protected readonly resolveModelSelection?: () => ModelSelection | undefined;
   /** The commit path's typed test seam, if this instance was built with one (see {@link Config.commitProbe}). */
   protected readonly commitProbe?: (stage: CommitStage, target?: string) => void;
-  /** The injected supervisor-delegation source, if the assembly wired one (see {@link Config.supervisorDelegation}). */
-  protected readonly resolveSupervisorDelegation?: (sessionId: string, diagnosisId: string) => Promise<SupervisorDelegation | undefined>;
   /** The deployment's capability table file, when it named one (see {@link Config.capabilityConfig}). */
   protected readonly capabilityConfigPath?: string;
   /** The capability-config write's typed test seam, when this instance was built with one (see {@link Config.capabilityConfigProbe}). */
@@ -1494,13 +1462,6 @@ declare class EvolutionServiceCore extends Service {
   list(filter?: ListFilter): Promise<EvolutionProposal[]>;
   /** The root task store of one live session, derived from its own graph — never from an id the caller passed. */
   protected storeOfSession(sessionId: string): Promise<string>;
-  /** The one runtime call this entry makes, with the answer every path carries: the runtime's own recovery outcome. */
-  protected recoverThroughRuntime(storeId: string, recovery: RootRecoveryRequest, caller: RecoveryCoordinationCaller, delegation: SupervisorDelegation, coordination: readonly string[]): Promise<RecoveryCoordinationOutcome>;
-  /** Whether this deployment declares the evolution chain on. Read softly, and read as on when the
-   * switch is absent: only a deployment that says `enabled: false` relaxes the ledger's own gates. */
-  protected evolutionChainOn(): boolean;
-  /** The **recovery coordination** entry (A6, plan §F.4): take one recorded delegation and open the runtime's own recovery. */
-  coordinateRecovery(request: RecoveryCoordinationRequest, caller: RecoveryCoordinationCaller): Promise<RecoveryCoordinationOutcome>;
   /** The commit request one apply/rollback binds, read off the prepared record. */
   protected commitRequest(proposal: EvolutionProposal, direction: CommitDirection, actor: string, approvalRef: string): CommitRequest;
   /** The commit one capability candidate binds (A6): the one row it moves and the file set of the new skill when it carries one. */
@@ -1638,4 +1599,4 @@ declare function walkSnapshotInput(root: string, visit: (entry: SnapshotInputEnt
 /** Build one side's workspace from the frozen snapshot, then prove it holds the frozen digest. */
 declare function buildWorkspace(sourceDir: string, target: string, snapshotDigest: string): Promise<string>;
 //#endregion
-export { APPLYABLE_TARGET_TYPES, type ApplyOutcome, CapabilityRow, CapabilityRowIdentity, CapabilitySkill, CapabilityStoreView, type CommitCapability, type CommitDirection, type CommitIntentRecord, type CommitIntentView, type Config, CriterionRepairExample, EVOLUTION_DECISIONS, EXPERIMENT_ADMISSION_SOURCES, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, EvolutionService as default, type EvolutionStatus, ExperimentAdmissionRefusal, ExperimentAdmissionSource, ExperimentBudget, ExperimentCandidate, ExperimentCost, ExperimentCriterionDetail, ExperimentJudgedRecord, ExperimentKey, ExperimentLedger, ExperimentObjective, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCapability, FrozenCapabilityRow, FrozenCapabilitySide, FrozenCriterion, FrozenCriterionExample, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, FrozenSampleAdmission, FrozenTaskDefinition, type GateAnswers, McpServerIdentity, ModelSelection, OUTCOME_JUDGE_PROMPT, OUTCOME_RANK, OutcomeEvaluation, OutcomeEvaluationPlan, OutcomeJudgement, OutcomeMeasurement, OutcomeModelCall, PrecheckSkillVerdict, PreparedCapability, type PreparedView, type PromotionCheck, type ProposeInput, ProviderPrecheckView, type RecoveryCoordinationCaller, type RecoveryCoordinationOutcome, type RecoveryCoordinationRequest, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, RunFacts, SampleProviders, SideRelation, SkillContentIdentity, SkillContractIdentity, type SkillMutation, type SupervisorDelegation, TaskDefinitionIdentity, TaskDefinitionMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertAdmissionRecord, assertBudgetAllowsStart, assertCapabilityCandidateAdmissible, assertCapabilityRow, assertExperimentReport, assertExperimentSample, assertExperimentStartRecord, assertFrozenExperiment, assertMcpServerIdentity, assertOutcomeEvaluation, assertOutcomeMeasurements, assertOutcomePlan, assertRecordedRunOrigin, assertSampleCriteria, assertSampleRole, assertTemplateBaseline, assertTemplateIdentity, buildExperimentReport, buildWorkspace, candidateRegistryRevisionOf, canonicalJson, capabilityOverlay, capabilityRefusal, capabilityRowBytes, capabilityRowDigest, capabilityRowIdentity, capabilityTableWith, compareExperimentSides, compareReplaySides, costOf, criteriaOf, criterionDetail, digestOf, directoryDigest, discoverSkill, evidenceRefsOf, experimentCandidate, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentStore, foldExperiments, freezeCriterionRepair, freezeExperiment, frozenCapabilitySample, frozenCapabilitySideOf, frozenCriterionOf, frozenDigestOf, frozenIdentityOf, frozenProviderIdentity, frozenSampleOf, independentOracleCriteria, isExperimentRecord, latestReview, mcpServerIdentity, modelSelectionOf, nonEmpty, oracleContractDigest, overallExperimentVerdict, parseOutcomeJudgement, prepareTaskDefinition, preparedContentDigestOf, protectedInputsDigest, readPreparedCapability, readTaskDefinition, recoveredSampleRecord, refusedBaselineRun, refusedProviderLines, renderProviderRoles, reportedTokensSpent, resolveLink, resumeExperiment, reviewRefOf, runExperiment, runFactsOf, safeSegment, sameKeyRefusal, sampleRecord, sideDetailOf, templateBytes, templateCommitRequest, templateIdentity, templateLibraryDigest, tokensOfRecord, validateCapabilityMutation, validateSpec, validateTaskDefinitionMutation, walkSnapshotInput };
+export { APPLYABLE_TARGET_TYPES, type ApplyOutcome, CapabilityRow, CapabilityRowIdentity, CapabilitySkill, CapabilityStoreView, type CommitCapability, type CommitDirection, type CommitIntentRecord, type CommitIntentView, type Config, CriterionRepairExample, EVOLUTION_DECISIONS, EXPERIMENT_ADMISSION_SOURCES, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, EvolutionService as default, type EvolutionStatus, ExperimentAdmissionRefusal, ExperimentAdmissionSource, ExperimentBudget, ExperimentCandidate, ExperimentCost, ExperimentCriterionDetail, ExperimentJudgedRecord, ExperimentKey, ExperimentLedger, ExperimentObjective, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCapability, FrozenCapabilityRow, FrozenCapabilitySide, FrozenCriterion, FrozenCriterionExample, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, FrozenSampleAdmission, FrozenTaskDefinition, type GateAnswers, McpServerIdentity, ModelSelection, OUTCOME_JUDGE_PROMPT, OUTCOME_RANK, OutcomeEvaluation, OutcomeEvaluationPlan, OutcomeJudgement, OutcomeMeasurement, OutcomeModelCall, PrecheckSkillVerdict, PreparedCapability, type PreparedView, type PromotionCheck, type ProposeInput, ProviderPrecheckView, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, RunFacts, SampleProviders, SideRelation, SkillContentIdentity, SkillContractIdentity, type SkillMutation, TaskDefinitionIdentity, TaskDefinitionMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertAdmissionRecord, assertBudgetAllowsStart, assertCapabilityCandidateAdmissible, assertCapabilityRow, assertExperimentReport, assertExperimentSample, assertExperimentStartRecord, assertFrozenExperiment, assertMcpServerIdentity, assertOutcomeEvaluation, assertOutcomeMeasurements, assertOutcomePlan, assertRecordedRunOrigin, assertSampleCriteria, assertSampleRole, assertTemplateBaseline, assertTemplateIdentity, buildExperimentReport, buildWorkspace, candidateRegistryRevisionOf, canonicalJson, capabilityOverlay, capabilityRefusal, capabilityRowBytes, capabilityRowDigest, capabilityRowIdentity, capabilityTableWith, compareExperimentSides, compareReplaySides, costOf, criteriaOf, criterionDetail, digestOf, directoryDigest, discoverSkill, evidenceRefsOf, experimentCandidate, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentStore, foldExperiments, freezeCriterionRepair, freezeExperiment, frozenCapabilitySample, frozenCapabilitySideOf, frozenCriterionOf, frozenDigestOf, frozenIdentityOf, frozenProviderIdentity, frozenSampleOf, independentOracleCriteria, isExperimentRecord, latestReview, mcpServerIdentity, modelSelectionOf, nonEmpty, oracleContractDigest, overallExperimentVerdict, parseOutcomeJudgement, prepareTaskDefinition, preparedContentDigestOf, protectedInputsDigest, readPreparedCapability, readTaskDefinition, recoveredSampleRecord, refusedBaselineRun, refusedProviderLines, renderProviderRoles, reportedTokensSpent, resolveLink, resumeExperiment, reviewRefOf, runExperiment, runFactsOf, safeSegment, sameKeyRefusal, sampleRecord, sideDetailOf, templateBytes, templateCommitRequest, templateIdentity, templateLibraryDigest, tokensOfRecord, validateCapabilityMutation, validateSpec, validateTaskDefinitionMutation, walkSnapshotInput };

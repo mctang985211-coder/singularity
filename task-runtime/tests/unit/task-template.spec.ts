@@ -98,8 +98,11 @@ describe('immutable task templates enter the existing contract path', () => {
   })
 
   test('no applicable template permits a complete free contract with its real content source', async () => {
-    const h = harness()
+    const root = await library()
+    const h = harness({ config: { taskTemplatesRoot: root } })
     expect(await h.runtime.findTaskTemplates('a new goal')).toEqual([])
+    const page = await h.runtime.listTaskTemplates({ query: 'a new goal' }, ROOT_SESSION)
+    expect(page).toMatchObject({ entries: [], message: expect.stringContaining('complete one-off contract') })
     const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
       objective: 'a new goal', acceptanceCriteria: [{ description: 'the existing checker passes', command: 'true' }],
       requiredCapabilities: ['template-guidance'],
@@ -109,6 +112,16 @@ describe('immutable task templates enter the existing contract path', () => {
     expect(task.templateRef).toBeUndefined()
     expect(task.contractDigest).toBe(contractDigest(task.contract!))
     expect(task.definitionRef.taskType).toBe(`contract:${task.contractDigest}`)
+    const batch = await h.runtime.decomposeAndRun(STORE, activated.taskId, activated.runId, ROOT_SESSION, {
+      reason: 'a new result without a matching shared template',
+      children: [{ objective: 'deliver the next one-off result',
+        acceptanceCriteria: [{ description: 'the result passes its own existing check', command: 'true' }],
+        requiredCapabilities: ['template-guidance'] }],
+    })
+    const [outcome] = await h.runtime.awaitBatch(STORE, batch.batchId)
+    expect(outcome?.status).toBe('verified')
+    expect((await h.task.taskIn(STORE, batch.childTaskIds[0]!)).templateRef).toBeUndefined()
+    expect(await h.runtime.findTaskTemplates()).toEqual([])
   })
 
   test('rejects invalid parameter bindings and digest/source overrides before recording any proposal', async () => {

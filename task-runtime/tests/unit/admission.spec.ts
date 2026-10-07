@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import type { AcceptanceCriterion, DependencyEdge } from '../../../task/src/types.ts'
 import type { AdmissionChild, AdmissionParent } from '../../src/admission.ts'
-import { checkDecomposition, contractDefects, rootIndependenceDefects } from '../../src/admission.ts'
+import { checkDecomposition, commandSyntaxDefects, contractDefects, rootIndependenceDefects } from '../../src/admission.ts'
 
 function criterion(overrides: Partial<AcceptanceCriterion> = {}): AcceptanceCriterion {
   return {
@@ -674,5 +674,53 @@ describe('mandatory criterion settlement', () => {
     expect(contractDefects([
       criterion(), criterion({ criterionId: 'optional', verificationMode: 'review', mandatory: false, command: undefined }),
     ], 'task')).toEqual([])
+  })
+})
+
+describe('commandSyntaxDefects', () => {
+  test('accepts a command the shell can parse and rejects one it cannot, naming the criterion', async () => {
+    expect(await commandSyntaxDefects([criterion({ command: 'test -f out.txt && echo ok' })], 'child 0')).toEqual([])
+
+    const reasons = await commandSyntaxDefects(
+      [criterion({ criterionId: 'ac-quote', command: 'echo "unclosed' })],
+      'child 0 ("t-1")',
+    )
+    expect(reasons).toHaveLength(1)
+    expect(reasons[0]).toContain('child 0 ("t-1") criterion "ac-quote" command has a shell syntax error:')
+    // The diagnostic the shell printed, not a paraphrase of it.
+    expect(reasons[0]).toMatch(/unexpected EOF|syntax error/)
+  })
+
+  test('checks only the modes whose command is executed, and only a declared command', async () => {
+    // A judged or composite criterion never reaches the shell, and a missing
+    // command is already `contractDefects`' refusal.
+    expect(await commandSyntaxDefects([criterion({ verificationMode: 'review', command: 'echo "unclosed' })], 'child 0')).toEqual([])
+    expect(await commandSyntaxDefects([criterion({ verificationMode: 'composite', command: 'echo "unclosed' })], 'child 0')).toEqual([])
+    expect(await commandSyntaxDefects([criterion({ command: undefined })], 'child 0')).toEqual([])
+    expect(await commandSyntaxDefects([criterion({ command: '   ' })], 'child 0')).toEqual([])
+  })
+
+  test('reports every defective command in one call, in criterion order', async () => {
+    const reasons = await commandSyntaxDefects(
+      [
+        criterion({ criterionId: 'ac-good', command: 'true' }),
+        criterion({ criterionId: 'ac-bad', command: 'echo "unclosed' }),
+        criterion({ criterionId: 'ac-worse', command: 'echo $(unclosed' }),
+      ],
+      'child 0',
+    )
+    expect(reasons).toHaveLength(2)
+    expect(reasons[0]).toContain('criterion "ac-bad"')
+    expect(reasons[1]).toContain('criterion "ac-worse"')
+  })
+
+  test('skips the check when no shell can be started rather than blocking admission', async () => {
+    const path = process.env.PATH
+    process.env.PATH = '/nonexistent-tooling-directory'
+    try {
+      expect(await commandSyntaxDefects([criterion({ command: 'echo "unclosed' })], 'child 0')).toEqual([])
+    } finally {
+      process.env.PATH = path
+    }
   })
 })

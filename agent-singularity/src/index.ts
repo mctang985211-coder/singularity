@@ -15,10 +15,9 @@ import type { ModelSelection } from '@dangosys/dsh-singularity-evolution'
 import { HitlService } from './services/hitl.ts'
 import { EscalationService } from './services/escalation.ts'
 import { ProposalReviewService } from './services/proposal-review.ts'
-import { reviewerBindingSource, supervisorDelegationSource } from './coordination/ledger.ts'
-import { installReviewAgentAutoTrigger } from './coordination/review-scan.ts'
-import { installSupervisorHandoffTrigger } from './coordination/evolution-handoff.ts'
-import { configureSupervision, DEFAULT_SUPERVISION, type SupervisionConfig } from './coordination/supervision.ts'
+import { reviewerBindingSource } from './coordination/ledger.ts'
+import { configureSupervision, graphImprovementCap, DEFAULT_SUPERVISION, type SupervisionConfig } from './coordination/supervision.ts'
+import { installRsiLoopDriver } from './coordination/rsi-loop.ts'
 import { logOf } from './log.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
@@ -48,7 +47,6 @@ import { defineTaskProposalCancelTool } from './tools/task-proposal-cancel.ts'
 import { defineTaskProposalContinueTool } from './tools/task-proposal-continue.ts'
 import { defineTaskProposalReadTool } from './tools/task-proposal-read.ts'
 import { defineTaskReadTool } from './tools/task-read.ts'
-import { defineTaskRecoverTool } from './tools/task-recover.ts'
 import { defineTaskReviewAgentTool } from './tools/review-agent.ts'
 import { defineTaskReviewPackTool } from './tools/task-review-pack.ts'
 import { defineTaskStatusTool } from './tools/task-status.ts'
@@ -60,15 +58,13 @@ export type { HitlAnswer } from './services/hitl.ts'
 export { EscalationService } from './services/escalation.ts'
 export { ProposalReviewService } from './services/proposal-review.ts'
 export { DEFAULT_SUPERVISION } from './coordination/supervision.ts'
-export type { AutoReviewMode, SupervisionConfig } from './coordination/supervision.ts'
+export type { SupervisionConfig } from './coordination/supervision.ts'
 
 /** Plugin configuration — the deployment's composition, not a model's choice. */
 export interface Config {
   /** Whether this composition registers the nine `evolution_*` tools on the global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} — registers none of them: no model surface (root, granted worker, or the */
   evolution: 'off' | 'on'
-  /** `auto` records deployment preauthorization for method publication; `ask` requests one exact-write approval. */
-  publicationApproval?: 'ask' | 'auto'
-  /** The review/supervision policy: which terminal reviews are diagnosed on their own, the per-source round caps, and the coordination allowance (see {@link SupervisionConfig}). */
+  /** The review/supervision policy: the coordination allowance a store's coordination agents spend (see {@link SupervisionConfig}). */
   supervision?: SupervisionConfig
 }
 
@@ -76,15 +72,11 @@ export interface Config {
 export const DEFAULT_EVOLUTION: 'off' = 'off'
 
 const Supervision: z<SupervisionConfig> = z.object({
-  autoReview: z.union([z.const('all'), z.const('failed'), z.const('off')]).default(DEFAULT_SUPERVISION.autoReview),
-  maxRecoveryRounds: z.number().default(DEFAULT_SUPERVISION.maxRecoveryRounds),
-  maxImprovementRounds: z.number().default(DEFAULT_SUPERVISION.maxImprovementRounds),
   coordinationBudget: z.number().default(DEFAULT_SUPERVISION.coordinationBudget),
 })
 
 const ConfigSchema: z<Config> = z.object({
   evolution: z.union([z.const('off'), z.const('on')]).default(DEFAULT_EVOLUTION),
-  publicationApproval: z.union([z.const('ask'), z.const('auto')]).default('ask'),
   supervision: Supervision.default({ ...DEFAULT_SUPERVISION }),
 })
 
@@ -92,28 +84,38 @@ const ConfigSchema: z<Config> = z.object({
 class EvolutionExposure extends Service {
   /** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
   readonly enabled: boolean
-  readonly publicationApproval: 'ask' | 'auto'
 
-  constructor(ctx: Context, enabled: boolean, publicationApproval: 'ask' | 'auto') {
+  constructor(ctx: Context, enabled: boolean) {
     super(ctx, 'singularityEvolution')
     this.enabled = enabled
-    this.publicationApproval = publicationApproval
   }
 }
 
-/** The supervision policy this composition resolved, provided on the agent's own fiber as `ctx.singularitySupervision` — what the task runtime's per-source round caps read. */
+/** The supervision policy this composition resolved, provided on the agent's own fiber as `ctx.singularitySupervision` — the coordination allowance the ledger reads, and the per-store round cap the task runtime's recovery entry reads. */
 class SupervisionExposure extends Service {
-  readonly autoReview: SupervisionConfig['autoReview']
-  readonly maxRecoveryRounds: number
-  readonly maxImprovementRounds: number
   readonly coordinationBudget: number
 
   constructor(ctx: Context, policy: SupervisionConfig) {
     super(ctx, 'singularitySupervision')
-    this.autoReview = policy.autoReview
-    this.maxRecoveryRounds = policy.maxRecoveryRounds
-    this.maxImprovementRounds = policy.maxImprovementRounds
     this.coordinationBudget = policy.coordinationBudget
+  }
+
+  /**
+   * The round cap in force for one store: the round count its graph's RSI
+   * settings declare when that graph runs a platform loop (the driver registers
+   * it — see `coordination/rsi-loop.ts`), `undefined` otherwise, so the
+   * runtime's own constant stands for every store without one. The runtime's
+   * `iteration-cap` check reads this per store, so a graph-scheduled loop may
+   * open exactly the rounds its graph names — and since the driver is the only
+   * caller that opens a round any more, the same answer governs its recoveries.
+   */
+  maxImprovementRoundsFor(storeId: string): number | undefined {
+    return graphImprovementCap(storeId)
+  }
+
+  /** The recovery-round cap in force for one store: the graph's own round count for a driver-scheduled store, `undefined` otherwise (the runtime's constant then stands). */
+  maxRecoveryRoundsFor(storeId: string): number | undefined {
+    return graphImprovementCap(storeId)
   }
 }
 
@@ -155,13 +157,11 @@ export class SingularityAgent extends Service {
     const evolution = config?.evolution ?? DEFAULT_EVOLUTION
     ctx.plugin(HitlService)
     // The evolution tools read `ctx.evolution`, and a service a child fiber
-    // provides is invisible to the parent that mounted it — so the ledger's
+    // provides is invisible to the parent that mounted it — so this assembly
+    // constructs the ledger on its own fiber and hands its service to the tools.
     this.evolution = new EvolutionService(ctx, {
       repoRoot: REPO_ROOT,
       modelSelection: () => deploymentModelSelection(ctx),
-      // The A6 seams, both owned elsewhere: the supervisor delegation is a row of
-      // the coordination ledger this plugin owns (the evolution plane must not
-      supervisorDelegation: supervisorDelegationSource().read,
       capabilityConfig: join(REPO_ROOT, 'config.yml'),
     })
     // Same discipline for the escalation ledger: the `escalate` tool reads
@@ -172,7 +172,7 @@ export class SingularityAgent extends Service {
     new ProposalReviewService(ctx)
     // What this assembly did, said where a sibling can read it (the root agent's
     // tool allow-list is the consumer) — see {@link EvolutionExposure}.
-    new EvolutionExposure(ctx, evolution === 'on', config?.publicationApproval ?? 'ask')
+    new EvolutionExposure(ctx, evolution === 'on')
     // The supervision policy, said where the task runtime reads it: the round
     // caps and the coordination allowance are one policy, declared once here.
     new SupervisionExposure(ctx, supervision)
@@ -182,17 +182,14 @@ export class SingularityAgent extends Service {
       () => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()),
       'singularityAgent: reviewer binding source',
     )
-    // The automatic trigger of the review chain (A5): a review that settled
-    // `failed` is accepted for diagnosis on its own — when the record becomes
+    // The platform-side RSI loop driver (F): a graph that carries `rsi` settings
+    // has its rounds scheduled here, from the platform, rather than by the root
+    // agent's prompt — one terminal root Run per round, one supervisor per round,
+    // one next round opened by this driver. It is the only place a coordination
+    // supervisor exists: no agent-side trigger consumes a diagnosis any more.
     ctx.effect(
-      () => installReviewAgentAutoTrigger(ctx),
-      'singularityAgent: review agent auto trigger',
-    )
-    // The hand-off trigger (A6): a graph that becomes active scans its store for
-    // pending hand-offs — the moment a process that booted over a store with a
-    ctx.effect(
-      () => installSupervisorHandoffTrigger(ctx),
-      'singularityAgent: supervisor hand-off trigger',
+      () => installRsiLoopDriver(ctx),
+      'singularityAgent: rsi loop driver',
     )
     // The one approval a budget extension can be granted through (K4): the
     // runtime asks it alone — for the one request that is not already recorded —
@@ -225,9 +222,6 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineTaskVerifyTool(ctx))
     ctx.tools.register(defineTaskReviewPackTool(ctx))
     ctx.tools.register(defineTaskReviewAgentTool(ctx))
-    // The recovery entry (A6): registered like the rest of the task surface —
-    // who may reach it is decided by the caller's own live session and the
-    ctx.tools.register(defineTaskRecoverTool(ctx))
     // Asking a person to raise this tree's ceilings (K4): registered like the
     // rest of the task surface — who may reach it (a graph's root coordination
     ctx.tools.register(defineTaskBudgetExtendTool(ctx))
@@ -272,7 +266,7 @@ export class SingularityAgent extends Service {
   /** Refuse a configuration member this plugin does not read. The schema keeps unknown keys on the object it validates, so this is where a caller's typo is caught: */
   private assertClosedConfig(config: Config | undefined): void {
     if (config === undefined) return
-    const known = new Set(['evolution', 'publicationApproval', 'supervision'])
+    const known = new Set(['evolution', 'supervision'])
     const unknown = Object.keys(config).filter(key => !known.has(key))
     if (unknown.length > 0) {
       throw new Error(
@@ -282,7 +276,7 @@ export class SingularityAgent extends Service {
     }
     const supervision = config.supervision
     if (supervision === undefined) return
-    const knownSupervision = new Set(['autoReview', 'maxRecoveryRounds', 'maxImprovementRounds', 'coordinationBudget'])
+    const knownSupervision = new Set(['coordinationBudget'])
     const unknownSupervision = Object.keys(supervision).filter(key => !knownSupervision.has(key))
     if (unknownSupervision.length === 0) return
     throw new Error(

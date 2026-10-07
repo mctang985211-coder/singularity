@@ -12,13 +12,13 @@ export function defineTaskDecomposeTool(ctx: Context) {
     name: 'task_decompose',
     description:
       'Delegate the caller\'s current task\'s independently checkable results or distinct responsibilities to child tasks. ' +
-      'Call task_template_list first; use a suitable pinned template and parameters, or write a full standard contract when none applies. ' +
+      'Consult capability_list and task_template_list first; inspect applicability and the full contract, then use a suitable pinned template and parameters, or write a complete one-off contract when none applies. No shared template needs to be created or published for admission. ' +
       'A template carrying decomposition can supply this batch: pass its exact templateRef and templateParameters at the top level, omitting reason and children. The runtime expands its direct children and dependsOn through the same admission path. ' +
       'Each caller owns its full result and may coordinate children that decompose again; define only this level and let each child decide its descendants. ' +
       'The batch is admitted atomically and the runtime then runs them ' +
       'concurrently up to the configured worker limit, respecting real dependsOn edges; this call returns at admission and does not wait. Each child is verified ' +
       'against its own delivered result; this does not require a new checker or duplicate criteria. Only verified children count as done. Where this deployment reviews generated tasks, the batch may instead ' +
-      'come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.',
+      'come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it. Draft review does not replace result verification. Preserve reusable findings from executed contracts and batches in the result for supervisor comparison and later task_definition publication when justified.',
     parameters: {
       templateRef: templateBindingParameters.templateRef,
       templateParameters: templateBindingParameters.templateParameters,

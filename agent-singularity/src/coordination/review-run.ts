@@ -14,10 +14,7 @@ import type {
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS } from '@dangosys/dsh-singularity-task'
-import { logOf } from '../log.ts'
-import { message } from '../shared.ts'
-import { consumeHandoffDiagnosis } from './evolution-handoff.ts'
-import { handoffFactsOf, lastAssistantText } from './handoff-rules.ts'
+import { lastAssistantText } from './handoff-rules.ts'
 import { reviewRef, type ReviewParentAgent } from './identity.ts'
 import {
   admitReviewAgent,
@@ -298,12 +295,7 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
       failureLabel: 'spawn failed',
       prompt: async () => {
         const attempts = await readReviewAgentAttempts(storeId)
-        const pack = buildReviewPack({
-          snapshot: current,
-          source,
-          attempts,
-          handoff: handoffFactsOf(attempts),
-        })
+        const pack = buildReviewPack({ snapshot: current, source, attempts })
         return [
           'You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.',
           'Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and ' +
@@ -326,7 +318,7 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
           '- For a shared cause, cite the original evidence from each implicated task and the common contract, provider version or dependency that connects them; inspect a passing contrast when available. State uncertainty and conflicting evidence. A causally supported candidate may describe an anticipated benefit as a testable hypothesis and say what would refute it; do not present untested benefit as an established gain. If the cause is unresolved, identify the missing fact and use low confidence rather than inventing a proposal.',
           `- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}], only when useful and supported. Dimensions: ${JUDGED_DIMENSIONS.join(', ')}; verdict: adequate|inadequate|unknown. Each evidenceRefs array must cite at least one exact review ref, evidence ref printed by a review, evidence bundle id, or Run/review session id from this graph. Do not use commands, log paths, criterion ids, task ids or template ids as judgement refs. Do not fill every dimension.`,
           '- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. For an evidenced reusable gap, executable targetType names are task_definition (a TaskTemplate; targetId is its template id), skill or capability. Include the causal mechanism, expected benefit and how it could be tested in rationale. Other targetType names remain recorded suggestions. Local artifact defects alone do not justify shared changes. Nothing here executes a proposal.',
-          '- Never tell the business coordinator to call task_recover: only a separately delegated supervisor has it. Recommend evolution tools only to a coordinator whose current tools authorize them, for an established Task template/skill/capability gap; they are not general task recovery.',
+          '- No agent holds a task-recovery tool in this deployment: round scheduling belongs to the platform RSI loop alone. Recommend evolution tools only to a coordinator whose current tools authorize them, for an established Task template/skill/capability gap; they are not a general retry mechanism.',
           'A reply without an observation, a conclusion or a confidence is not a diagnosis: the attempt is recorded interrupted and nothing is stored.',
           '',
           `--- source under review ---`,
@@ -436,12 +428,8 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
       }
     }
     await settleAttempt('recorded')
-    // Consume shared or root work after the diagnosis is durable; ordinary child work stays with its parent.
-    if (!unloaded && input.signal?.aborted !== true) await consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error: unknown) => {
-      logOf(ctx, 'singularity-agent')?.warn(
-        `evolution hand-off: ${diagnosis.diagnosisId} could not be consumed (${message(error)})`,
-      )
-    })
+    // The diagnosis is durable and that is the reviewer's whole output: the
+    // caller that asked for it reads it back from this result and the store.
     return {
       kind: 'recorded' as const,
       sessionId: reviewerSessionId,

@@ -1909,8 +1909,6 @@ interface RunBindingRead {
  * the recovery entry enforces per source task, counted separately for failed and verified sources.
  */
 interface SupervisionConfig {
-  /** `all` accepts every terminal review, `failed` only failures, `off` none — read by the review trigger, not here. */
-  autoReview: 'all' | 'failed' | 'off';
   /** Recovery attempts one failed source accepts; the next request is refused with the coded `iteration-cap`. */
   maxRecoveryRounds: number;
   /** Improvement attempts one verified source accepts; the next request is refused with the coded `iteration-cap`. */
@@ -1989,7 +1987,7 @@ declare const DEFAULT_BUDGET: Readonly<BudgetConfig>;
 declare const DEFAULT_MAX_DEPTH = 4;
 declare const DEFAULT_MAX_CHILDREN = 8;
 declare const DEFAULT_ALLOW_RUNTIME_DECOMPOSITION = true;
-/** The shipped supervision policy (A7 §1): failed terminal reviews diagnosed, three recovery rounds, two improvement rounds, eight coordination runs. */
+/** The shipped supervision backstop: three recovery rounds, two improvement rounds, eight coordination runs. A graph that runs an RSI loop declares its own round count over these (`maxImprovementRoundsFor`). */
 declare const DEFAULT_SUPERVISION: Readonly<SupervisionConfig>;
 interface RunBinding {
   storeId: string;

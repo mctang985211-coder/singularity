@@ -590,6 +590,17 @@ describe('assertExperimentReport', () => {
     interrupted.verdict = 'inconclusive' as never
     expect(() => assertExperimentReport(interrupted)).toThrow(/must carry the reason it has no terminal run/)
 
+    // A failed side may carry the store's own cause, and — like every reason the
+    // report holds — a blank one is refused: a reason that explains nothing is
+    // not evidence of why the side failed.
+    const explained = reportFixture()
+    explained.samples[0]!.baseline.reason = 'the replayed run settled failed: spawn failed'
+    expect(() => assertExperimentReport(explained)).not.toThrow()
+
+    const blankCause = reportFixture()
+    blankCause.samples[0]!.baseline.reason = ''
+    expect(() => assertExperimentReport(blankCause)).toThrow(/\.reason must be a non-empty string when present/)
+
     const noReason = reportFixture()
     noReason.samples[1]!.candidate.cost = { status: 'unknown' } as never
     expect(() => assertExperimentReport(noReason)).toThrow(/must say why the cost is unknown/)
@@ -1109,7 +1120,10 @@ describe('the candidate and prepare refusals (S4-E 收尾)', () => {
         },
         'root-1',
       )
-      await svc.candidate('p1', { skill: '1' }, 'root-1', { name: 'fixture-skill', content: 'candidate' })
+      await svc.candidate('p1', { skill: '1' }, 'root-1', {
+        name: 'fixture-skill',
+        content: '---\nname: fixture-skill\ndescription: Valid candidate for the missing-production refusal.\n---\nCandidate method.\n',
+      })
       const before = await readFile(svc.file, 'utf8')
       const err = await svc.prepare('p1', 'root-1').then(
         () => undefined,

@@ -1083,11 +1083,5 @@ export type {
   SkillMutation,
 } from './types.ts'
 export { applyTargets } from './ledger/state-machine.ts'
-export type {
-  RecoveryCoordinationCaller,
-  RecoveryCoordinationOutcome,
-  RecoveryCoordinationRequest,
-  SupervisorDelegation,
-} from './ledger/records.ts'
 
 export default EvolutionService

@@ -76,6 +76,19 @@ function harness(
     live?: readonly string[]
     /** The supervision policy this deployment exposes on `singularitySupervision`, exactly as a fixture names it. */
     supervision?: Partial<SupervisionConfig>
+    /**
+     * The **per-store** improvement cap the same exposure answers
+     * (`maxImprovementRoundsFor`) — how a graph that runs an RSI loop declares
+     * its own round count (F). Absent leaves every store on the policy above.
+     */
+    supervisionForStore?: (storeId: string) => number | undefined
+    /**
+     * The per-store **recovery** cap the same exposure answers
+     * (`maxRecoveryRoundsFor`) — the same graph-declared round count, which the
+     * driver's recovery rounds are bounded by. Absent leaves every store on the
+     * policy above.
+     */
+    supervisionRecoveryForStore?: (storeId: string) => number | undefined
   } = {},
 ) {
   const sessions = options.sessions ?? new Map<string, StoredSession>()
@@ -210,7 +223,13 @@ function harness(
   }
   // The deployment's supervision policy travels as its own service (A7), exactly
   // as a fixture names it; the config path is what a mounted plugin would read.
-  if (options.supervision !== undefined) ctx.singularitySupervision = { ...options.supervision }
+  if (options.supervision !== undefined || options.supervisionForStore !== undefined || options.supervisionRecoveryForStore !== undefined) {
+    ctx.singularitySupervision = {
+      ...options.supervision,
+      ...(options.supervisionForStore === undefined ? {} : { maxImprovementRoundsFor: options.supervisionForStore }),
+      ...(options.supervisionRecoveryForStore === undefined ? {} : { maxRecoveryRoundsFor: options.supervisionRecoveryForStore }),
+    } as never
+  }
   const runtime = new TaskRuntime(ctx as never, { ...options.config, capabilities: { ...TASK_GUIDANCE, ...options.config?.capabilities } })
   return { ctx, task, runtime, sessions, disposers, spawns, resumed, notices }
 }
@@ -597,6 +616,25 @@ function request(overrides: Partial<RootRecoveryRequest> = {}): RootRecoveryRequ
 /** One call through the entry, with the supervisor whose agent is live. */
 async function recover(h: Harness, overrides: Partial<RootRecoveryRequest> = {}, caller = SUPERVISOR) {
   return await h.runtime.recoverRootTask(STORE, request(overrides), { sessionId: caller })
+}
+
+/** Settle one root run `verified` under the original criterion, so the source accepts another improvement round. */
+async function verifyRoot(h: Harness, runId: string): Promise<void> {
+  await h.task.recordEvidenceIn(
+    STORE,
+    {
+      evidenceId: `e-${runId}`,
+      taskRunId: runId,
+      taskId: 'root',
+      artifacts: [],
+      verifierResults: [{ criterionId: 'root-goal', status: 'pass', verifierId: 'command' }],
+      claims: [],
+      generatedAt: NOW,
+    },
+    'test',
+  )
+  await h.task.markRunStatusIn(STORE, 'root', runId, 'verifying', 'test')
+  await h.task.markRunStatusIn(STORE, 'root', runId, 'verified', 'test')
 }
 
 /** The runs one store holds for a task, in start order. */
@@ -1387,6 +1425,78 @@ describe('A7: improvement rounds and the per-source caps', () => {
     expect(await runsOf(h, 'root')).toHaveLength(2)
   })
 
+  test('a store whose graph declares its own improvement cap accepts exactly those rounds (F)', async () => {
+    // The deployment policy says one improvement round; this store's graph runs
+    // an RSI loop of two, and the per-source cap has to admit the graph's own
+    // count — the runtime resolves it per store (see `improvementCapFor`).
+    const h = harness({
+      supervision: { maxImprovementRounds: 1 },
+      supervisionForStore: storeId => (storeId === STORE ? 2 : undefined),
+    })
+    await storeWithVerifiedGoal(h)
+    const first = await recover(h, { mode: 'improve', requestKey: 'k-1' })
+    expect(first.attempt).toBe('started')
+    await verifyRoot(h, first.runId)
+    const second = await recover(h, { mode: 'improve', requestKey: 'k-2', sourceRunId: first.runId })
+    expect(second.attempt).toBe('started')
+    await verifyRoot(h, second.runId)
+    // The graph's own cap is what the third round meets: 2/2, not the policy's 1.
+    const error = await failure(() => recover(h, { mode: 'improve', requestKey: 'k-3', sourceRunId: second.runId }))
+    expect((error as IterationCapRefusal).code).toBe('iteration-cap')
+    expect(error.message).toContain('(2/2)')
+    expect(await runsOf(h, 'root')).toHaveLength(3)
+  })
+
+  test('a store no graph declares keeps the deployment cap, whatever another store reports', async () => {
+    const h = harness({
+      supervision: { maxImprovementRounds: 1 },
+      supervisionForStore: storeId => (storeId === 'sg-t-another-graph' ? 9 : undefined),
+    })
+    await storeWithVerifiedGoal(h)
+    const first = await recover(h, { mode: 'improve', requestKey: 'k-1' })
+    await verifyRoot(h, first.runId)
+    const error = await failure(() => recover(h, { mode: 'improve', requestKey: 'k-2', sourceRunId: first.runId }))
+    expect((error as IterationCapRefusal).code).toBe('iteration-cap')
+    expect(error.message).toContain('(1/1)')
+  })
+
+  test('a store whose graph declares its own round count accepts that many recovery rounds (F)', async () => {
+    // The deployment policy says one recovery round; this store's graph runs an
+    // RSI loop of three, and its driver-opened recoveries are bounded by the
+    // graph's count — the runtime resolves it per store (see `recoveryCapFor`).
+    const h = harness({
+      supervision: { maxRecoveryRounds: 1 },
+      supervisionRecoveryForStore: storeId => (storeId === STORE ? 3 : undefined),
+    })
+    await storeWithFailedRoot(h)
+    const first = await recover(h, { requestKey: 'k-1' })
+    await h.task.markRunStatusIn(STORE, 'root', first.runId, 'failed', 'test', { reason: 'the attempt failed too' })
+    const second = await recover(h, { requestKey: 'k-2' })
+    expect(second.attempt).toBe('started')
+    await h.task.markRunStatusIn(STORE, 'root', second.runId, 'failed', 'test', { reason: 'and again' })
+    const third = await recover(h, { requestKey: 'k-3' })
+    expect(third.attempt).toBe('started')
+    await h.task.markRunStatusIn(STORE, 'root', third.runId, 'failed', 'test', { reason: 'and again' })
+    // The graph's own cap is what the fourth round meets: 3/3, not the policy's 1.
+    const error = await failure(() => recover(h, { requestKey: 'k-4' }))
+    expect((error as IterationCapRefusal).code).toBe('iteration-cap')
+    expect(error.message).toContain('(3/3)')
+    expect(await runsOf(h, 'root')).toHaveLength(4)
+  })
+
+  test('a store no graph declares keeps the deployment recovery cap', async () => {
+    const h = harness({
+      supervision: { maxRecoveryRounds: 1 },
+      supervisionRecoveryForStore: storeId => (storeId === 'sg-t-another-graph' ? 9 : undefined),
+    })
+    await storeWithFailedRoot(h)
+    const first = await recover(h, { requestKey: 'k-1' })
+    await h.task.markRunStatusIn(STORE, 'root', first.runId, 'failed', 'test', { reason: 'the attempt failed too' })
+    const error = await failure(() => recover(h, { requestKey: 'k-2' }))
+    expect((error as IterationCapRefusal).code).toBe('iteration-cap')
+    expect(error.message).toContain('(1/1)')
+  })
+
   test('a failed improvement round returns the source to the failed path, and later rounds spend the recovery cap', async () => {
     const h = harness({ supervision: { maxRecoveryRounds: 1, maxImprovementRounds: 1 } })
     await storeWithVerifiedGoal(h)
@@ -1415,7 +1525,7 @@ describe('A7: improvement rounds and the per-source caps', () => {
 
   test('reads the caps from its own plugin config when no supervision service is exposed', async () => {
     const h = harness({
-      config: { supervision: { autoReview: 'all', maxRecoveryRounds: 0, maxImprovementRounds: 0, coordinationBudget: 8 } },
+      config: { supervision: { maxRecoveryRounds: 0, maxImprovementRounds: 0, coordinationBudget: 8 } },
     })
     await storeWithFailedRoot(h)
     const error = await failure(() => recover(h))

@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import type { CreateGraphRequest, GraphModel } from '@dangosys/dsh-singularity-graphs'
+import type { CreateGraphRequest, GraphPinsUpdate } from '@dangosys/dsh-singularity-graphs'
 import { GRAPHS_PATH } from '../../constants.ts'
 import { fail, guardMethod, readJson, sendJson, urlOf } from '../libs/http.ts'
 
@@ -47,13 +47,11 @@ export function registerGraphs(ctx: Context): () => void {
         if (id === undefined || id.length === 0) throw new Error('graphs: missing graph id')
 
         if (parts.length === 1) {
-          // The graph's model pin: `null` returns it to the deployment default.
+          // The graph's pins: `null` clears the model (back to the deployment default) or the RSI config.
           if (!guardMethod(req, res, 'PATCH')) return
-          const body = await readJson<{ model?: GraphModel | null }>(req)
-          if (body.model === undefined) {
-            throw new Error('graphs: model is required (pass null to follow the deployment default)')
-          }
-          sendJson(res, 200, await ctx.graphs.setModel(id, body.model))
+          const body = await readJson<GraphPinsUpdate>(req)
+          const graph = await ctx.graphs.setPins(id, body)
+          sendJson(res, 200, graph)
           return
         }
         if (parts.length !== 2) throw new Error(`graphs: unknown path ${url.pathname}`)

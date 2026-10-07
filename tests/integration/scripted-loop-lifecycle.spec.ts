@@ -26,7 +26,6 @@ it.each([false, true])('disposes three real root agents and a second env with su
   const parked = new Promise<void>(() => {})
   const h = await startScriptedLoop({
     roots: ROOTS,
-    supervision: { autoReview: 'off' },
     script: () => suspended ? [{ waitFor: () => parked }] : [{ text: 'idle without submitting' }],
   })
   const checkout2 = join(h.workspace, 'env2')

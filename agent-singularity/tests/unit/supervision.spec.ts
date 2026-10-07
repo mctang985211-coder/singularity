@@ -1,17 +1,17 @@
 /**
  * The supervision policy (agent-singularity's `supervision` config): the shipped
- * defaults, the budget precedence env > config > default, the per-source round
- * counting, and the ledger's cap-aware supervisor planning.
+ * allowance, the budget precedence env > config > default, the graph-declared
+ * round cap a store's RSI loop registers, and the ledger's supervisor planning.
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { REVIEW_AGENT_BUDGET_DEFAULT, planSupervisorAttempt, reviewAgentBudget } from '../../src/coordination/ledger.ts'
 import {
   DEFAULT_SUPERVISION,
   configureSupervision,
-  roundCapRefusal,
-  sourceRoundsOf,
+  graphImprovementCap,
+  registerGraphImprovementCap,
   supervisionSettings,
-  type SupervisionRounds,
+  unregisterGraphImprovementCap,
 } from '../../src/coordination/supervision.ts'
 
 beforeEach(() => {
@@ -20,32 +20,21 @@ beforeEach(() => {
 
 afterEach(() => {
   configureSupervision(undefined)
+  unregisterGraphImprovementCap('sg-t-root')
   vi.unstubAllEnvs()
 })
 
 describe('the supervision settings', () => {
-  test('ship the contract defaults', () => {
-    expect(DEFAULT_SUPERVISION).toEqual({
-      autoReview: 'all',
-      maxRecoveryRounds: 3,
-      maxImprovementRounds: 2,
-      coordinationBudget: 8,
-    })
+  test('ship the contract default allowance', () => {
+    expect(DEFAULT_SUPERVISION).toEqual({ coordinationBudget: 8 })
     expect(supervisionSettings()).toEqual(DEFAULT_SUPERVISION)
     expect(REVIEW_AGENT_BUDGET_DEFAULT).toBe(DEFAULT_SUPERVISION.coordinationBudget)
   })
 
-  test('resolve a partial config over the defaults, flooring the counts and refusing below-floor values', () => {
-    expect(configureSupervision({ autoReview: 'failed', maxRecoveryRounds: 2.7 })).toEqual({
-      autoReview: 'failed',
-      maxRecoveryRounds: 2,
-      maxImprovementRounds: 2,
-      coordinationBudget: 8,
-    })
-    // A coordination budget below one reads as the default; a round count of
-    // zero is a real cap (no round is allowed).
+  test('resolve a partial config over the default, refusing a budget below one', () => {
+    expect(configureSupervision({ coordinationBudget: 3 })).toEqual({ coordinationBudget: 3 })
+    // A coordination budget below one reads as the default.
     expect(configureSupervision({ coordinationBudget: 0 })).toMatchObject({ coordinationBudget: 8 })
-    expect(configureSupervision({ maxImprovementRounds: 0 })).toMatchObject({ maxImprovementRounds: 0 })
   })
 
   test('the env override wins over the config, and the config wins over the default', () => {
@@ -60,37 +49,26 @@ describe('the supervision settings', () => {
   })
 })
 
-describe('the per-source round caps', () => {
-  const snapshot = {
-    runs: [
-      { runId: 'r1', taskId: 't1' },
-      { runId: 'r2', taskId: 't1', recovery: { sourceDiagnosisId: 'd-1', requestKey: 'k1' } },
-      { runId: 'r3', taskId: 't1', recovery: { kind: 'improvement', sourceDiagnosisId: 'd-1', requestKey: 'k2' } },
-      { runId: 'r4', taskId: 't2', recovery: { sourceDiagnosisId: 'd-2', requestKey: 'k3' } },
-    ],
-  }
-
-  test("count a task's recovery and improvement runs, reading a missing kind as a recovery", () => {
-    const rounds = sourceRoundsOf(snapshot as never, 't1', 'failed')
-    expect(rounds).toMatchObject({ outcome: 'failed', recovered: 1, improved: 1, maxRecovery: 3, maxImprovement: 2 })
+describe('the graph-declared round cap', () => {
+  test('answers a registered store and stays silent for every other store', () => {
+    expect(graphImprovementCap('sg-t-root')).toBeUndefined()
+    registerGraphImprovementCap('sg-t-root', 5)
+    expect(graphImprovementCap('sg-t-root')).toBe(5)
+    // A store no graph registered keeps the runtime's own backstop.
+    expect(graphImprovementCap('sg-t-elsewhere')).toBeUndefined()
+    unregisterGraphImprovementCap('sg-t-root')
+    expect(graphImprovementCap('sg-t-root')).toBeUndefined()
   })
 
-  test("refuse only at the cap of the source's own kind", () => {
-    const under: SupervisionRounds = { outcome: 'failed', recovered: 2, improved: 0, maxRecovery: 3, maxImprovement: 2 }
-    expect(roundCapRefusal(under)).toBeUndefined()
-    const atRecoveryCap: SupervisionRounds = { ...under, recovered: 3 }
-    expect(roundCapRefusal(atRecoveryCap)).toMatchObject({ code: 'iteration-cap' })
-    expect(roundCapRefusal(atRecoveryCap)!.reason).toContain('3/3')
-    // A verified source answers to the improvement cap, whatever its recovery
-    // history was.
-    expect(roundCapRefusal({ ...atRecoveryCap, outcome: 'verified', improved: 1 })).toBeUndefined()
-    const atImprovementCap: SupervisionRounds = { ...atRecoveryCap, outcome: 'verified', improved: 2 }
-    expect(roundCapRefusal(atImprovementCap)).toMatchObject({ code: 'iteration-cap' })
-    expect(roundCapRefusal(atImprovementCap)!.reason).toContain('2/2')
+  test('refuses a count that is not a usable round number', () => {
+    registerGraphImprovementCap('sg-t-root', Number.NaN)
+    expect(graphImprovementCap('sg-t-root')).toBeUndefined()
+    registerGraphImprovementCap('sg-t-root', -1)
+    expect(graphImprovementCap('sg-t-root')).toBeUndefined()
   })
 })
 
-describe('the cap-aware supervisor planning', () => {
+describe('the supervisor planning', () => {
   const request = {
     role: 'supervisor' as const,
     source: { taskId: 't1', runId: 'r1' },
@@ -116,17 +94,6 @@ describe('the cap-aware supervisor planning', () => {
     ...overrides,
   })
 
-  test('a capped source plans nothing, before any budget decision', () => {
-    const plan = planSupervisorAttempt({
-      attempts: [],
-      request,
-      budget: { used: 0, max: 8 },
-      rounds: { outcome: 'failed', recovered: 3, improved: 0, maxRecovery: 3, maxImprovement: 2 },
-    })
-    expect(plan).toMatchObject({ kind: 'refused', code: 'iteration-cap' })
-    expect((plan as { reason?: string }).reason).toContain('3/3')
-  })
-
   test('an interrupted attempt does not block a fresh start; a concluded one is reused', () => {
     const dead = attempt({
       sessionId: 's-dead',
@@ -139,5 +106,17 @@ describe('the cap-aware supervisor planning', () => {
     const plan = planSupervisorAttempt({ attempts: [concluded] as never, request, budget: { used: 8, max: 8 } })
     expect(plan).toMatchObject({ kind: 'reuse' })
     expect((plan as { attempt: { sessionId: string } }).attempt.sessionId).toBe('s-old')
+  })
+
+  test('refuses a second hand-off content for one diagnosis, and a spent allowance', () => {
+    const conflicting = attempt({ handoffDigest: 'another-digest' })
+    expect(planSupervisorAttempt({ attempts: [conflicting] as never, request, budget: { used: 0, max: 8 } })).toMatchObject(
+      { kind: 'refused', code: 'request-key-conflict' },
+    )
+    const spent = attempt({ settlement: { status: 'interrupted', note: 'gone', at: '2026-10-01T00:01:00.000Z' } })
+    expect(planSupervisorAttempt({ attempts: [spent] as never, request, budget: { used: 8, max: 8 } })).toMatchObject({
+      kind: 'refused',
+      code: 'budget-exhausted',
+    })
   })
 })

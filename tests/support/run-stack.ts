@@ -127,11 +127,10 @@ export interface RunStackOptions {
   /** Declare the evolution chain on (`ctx.singularityEvolution`), the switch the root reads. Defaults off. */
   readonly evolution?: boolean
   /**
-   * The deployment's supervision policy (A5/A6/A7), provided on the deployment's
-   * own `singularitySupervision` service exactly as named: which terminal reviews
-   * the automatic trigger accepts, how many recovery/improvement rounds a source
-   * accepts, and the store's coordination allowance. Absent leaves the shipped
-   * defaults in force.
+   * The deployment's supervision policy (A7), provided on the deployment's own
+   * `singularitySupervision` service exactly as named: how many
+   * recovery/improvement rounds a source accepts, and the store's coordination
+   * allowance. Absent leaves the shipped defaults in force.
    */
   readonly supervision?: SupervisionOptions
   /** Where run bindings are materialized. Defaults to `<home>/singularity/run-bindings`. */
@@ -401,7 +400,7 @@ class RunStackImpl implements RunStack {
     ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
     // The deployment's evolution switch: read by the root assembly before any root exists.
     if (this.options.evolution === true) ctx.provide('singularityEvolution', { enabled: true })
-    // The supervision policy a spec asked for (A5/A6/A7): this stack mounts no
+    // The supervision policy a spec asked for (A7): this stack mounts no
     // singularity plugin, so the policy travels as the deployment's own service,
     // exactly as the evolution switch does above — and the plugin-global
     // settings (the trigger and the ledger) are reset to the same policy.

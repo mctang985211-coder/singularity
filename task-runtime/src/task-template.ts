@@ -299,7 +299,7 @@ export async function taskTemplatePage(root: string | undefined, request: TaskTe
   const entries = [...catalog.map(item => ({ kind: 'catalog' as const, ...item })), ...summaries.map(item => ({ kind: 'template' as const, ...item }))]
   const page = { templateScope: scope ?? null, entries: entries.slice(offset, offset + limit), total: entries.length, offset,
     nextOffset: null as number | null,
-    message: filtered.length === 0 ? 'No matching Task template. A complete standard contract is allowed.' : undefined }
+    message: filtered.length === 0 ? 'No matching Task template. Author a complete one-off contract and proceed; discovery and admission do not publish a shared template. Reusable findings from execution may later support a supervisor-evaluated task_definition candidate.' : undefined }
   // Whole entries remain pageable when escaping or Unicode makes a count-limited page unusually large.
   for (;;) {
     page.nextOffset = offset + page.entries.length < entries.length ? offset + page.entries.length : null

@@ -3,9 +3,8 @@ import { validateTaskDefinitionMutation } from '../task-definition.ts'
  * @module dsh-singularity-evolution/ledger/records */
 
 import { basename, dirname, relative, resolve } from 'node:path'
-import type { ProposalTargetType, TaskSnapshot } from '@dangosys/dsh-singularity-task'
+import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
 import { parseSkillFile, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS } from '@dangosys/dsh-singularity-task-runtime'
-import type { RootRecoveryOutcome } from '@dangosys/dsh-singularity-task-runtime'
 import type { CapabilityRowIdentity } from '../capability-candidate.ts'
 import { assertMcpServerIdentity, assertCapabilityRow, capabilityRowDigest, validateCapabilityMutation } from '../capability-candidate.ts'
 import type { SkillContentIdentity } from '../replay.ts'
@@ -353,88 +352,4 @@ export function preparedIdentity(value: unknown, field: string, proposalId: stri
     ...resources,
     contract: { sha256: contract.sha256, contractDigest: contract.contractDigest },
   }
-}
-
-/** The required ids of a recovery-coordination request; `mode` is the one optional member. */
-const RECOVERY_COORDINATION_REQUIRED: readonly string[] = ['sourceDiagnosisId', 'requestKey']
-
-/** The fields a recovery-coordination request may carry: anything else is refused by name rather than ignored. */
-export const RECOVERY_COORDINATION_FIELDS: readonly string[] = [...RECOVERY_COORDINATION_REQUIRED, 'mode']
-
-/** Every reason a coordination request cannot be a recovery request at all: an unknown field or an empty value, named. */
-export function recoveryCoordinationDefects(request: unknown): string[] {
-  if (request === null || typeof request !== 'object' || Array.isArray(request)) {
-    return ['the request must be an object carrying sourceDiagnosisId and requestKey']
-  }
-  const defects: string[] = []
-  for (const key of Object.keys(request)) {
-    if (!RECOVERY_COORDINATION_FIELDS.includes(key)) {
-      defects.push(
-        `unknown field "${key}": a recovery request carries ${RECOVERY_COORDINATION_FIELDS.join(', ')} and nothing else — an approval, ` +
-          'a decision or a permission is never part of what a caller passes',
-      )
-    }
-  }
-  const fields = request as Record<string, unknown>
-  for (const name of RECOVERY_COORDINATION_REQUIRED) {
-    const value = fields[name]
-    if (typeof value !== 'string' || value.trim().length === 0) defects.push(`${name} must be a non-empty string`)
-  }
-  if (fields.mode !== undefined && fields.mode !== 'recovery' && fields.mode !== 'improve') {
-    defects.push(`mode must be "recovery" or "improve" when present`)
-  }
-  return defects
-}
-
-/** The failed run one diagnosis is about: the run its own review ref names, else the source task's newest failed run. A verified source names no run — the runtime resolves its newest verified attempt. */
-export function recoverySourceRunId(
-  diagnosis: { readonly reviewRefs: readonly string[]; readonly taskId: string },
-  source: { readonly taskId: string; readonly runIds: readonly string[]; readonly status: string },
-  snapshot: TaskSnapshot,
-): string | null {
-  if (source.status === 'verified') return null
-  for (const ref of diagnosis.reviewRefs) {
-    const separator = ref.lastIndexOf('#')
-    if (separator < 0 || ref.slice(0, separator) !== diagnosis.taskId) continue
-    const runId = ref.slice(separator + 1)
-    if (runId === 'no-run') return null
-    const run = snapshot.runs.find(item => item.runId === runId && item.taskId === diagnosis.taskId)
-    if (run?.status === 'failed') return runId
-  }
-  const failed = [...snapshot.runs].reverse().find(run => run.taskId === source.taskId && run.status === 'failed')
-  return failed?.runId ?? null
-}
-
-/** One recorded supervisor delegation, as the ledger that owns it answers this plane's lookup. */
-export interface SupervisorDelegation {
-  readonly rootStoreId: string
-  readonly taskId: string
-  readonly diagnosisId: string
-  readonly sessionId: string
-  readonly actor: string
-  readonly at: string
-}
-
-/** One recovery-coordination request, as the tool adapter hands it over (plan §F.4's `task_recover` payload). */
-export interface RecoveryCoordinationRequest {
-  /** The diagnosis the recovery is asked for; it must be a record of the caller's own store. */
-  sourceDiagnosisId: string
-  /** The caller's key: one key names one attempt of one diagnosis. */
-  requestKey: string
-  /** Recovery retries a failed source; improve opens an improvement round on a verified one (runtime default: recovery). */
-  mode?: 'recovery' | 'improve'
-}
-
-/** Who asks for a recovery: the **supervisor** session of that hand-off, as a live session with an abort signal. */
-export interface RecoveryCoordinationCaller {
-  readonly sessionId: string
-  readonly signal?: AbortSignal
-}
-
-/** What one coordination answered (A6): the runtime's own recovery outcome, the hand-off it was authorized by and what this plane checked. */
-export interface RecoveryCoordinationOutcome extends RootRecoveryOutcome {
-  /** The supervisor delegation this call was authorized by. */
-  readonly handoff: { readonly sessionId: string; readonly actor: string; readonly diagnosisId: string }
-  /** What this plane checked and found, in the caller's own words. */
-  readonly coordination: readonly string[]
 }

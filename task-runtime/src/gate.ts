@@ -20,7 +20,6 @@ export const COORDINATION_ALLOWED: ReadonlySet<string> = new Set([
   'task_review_agent',
   'task_diagnose',
   'task_budget_extend',
-  'task_recover',
   'read',
   'read_image',
   'glob',

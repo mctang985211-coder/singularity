@@ -187,10 +187,12 @@ export function taskSummaryLine(snapshot: TaskSnapshot, task: TaskInstance, role
 }
 
 /** The heading the contract of each role is printed under. */
-export function contractHeading(role: 'worker' | 'root' | 'reviewer' | 'replay'): string {
+export function contractHeading(role: 'worker' | 'root' | 'reviewer' | 'supervisor' | 'replay'): string {
   switch (role) {
     case 'reviewer':
       return '## Delegated contract (review-only)'
+    case 'supervisor':
+      return '## Source contract (method supervision, no business Run)'
     case 'root':
       return '## Your contract (graph root)'
     default:

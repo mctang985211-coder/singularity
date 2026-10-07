@@ -37,7 +37,10 @@ export async function taskRead(deps: ReadDeps, loaded: LoadedCaller): Promise<Pr
   if (resolution.kind === 'reviewer') {
     const lines = [
       '',
-      'delegated task (review-only): this session has no business Run. The contract below is the task it was delegated to review.',
+      resolution.delegation.role === 'supervisor'
+        ? 'source task (method supervision): this session has no business Run. Preserve this contract while comparing reusable method candidates; the platform schedules rounds.'
+        : 'delegated task (review-only): this session has no business Run. The contract below is the task it was delegated to review.',
+      ...(resolution.delegation.sourceRunId == null ? [] : [`exact source Run: ${resolution.delegation.sourceRunId}`]),
       ...contractBody(task),
     ]
     if (budget.addAll(lines) > 0) return tooLarge('the delegated contract', taskPageHint(task.taskId))

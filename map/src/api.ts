@@ -14,6 +14,7 @@ import type {
   ProposalDecision,
   RecoveryResponse,
   ReviewResponse,
+  RsiConfig,
   TaskInvalidation,
   TaskSnapshotWire,
 } from './types'
@@ -103,11 +104,17 @@ export function fetchModels(): Promise<ModelsResponse> {
   return request<ModelsResponse>('/singularity/models')
 }
 
-export function patchGraphModel(id: string, model: ModelRef | null): Promise<unknown> {
+/** The editable fields of a graph: an absent key keeps the current value, `null` clears that field. */
+export interface GraphPatch {
+  readonly model?: ModelRef | null
+  readonly rsi?: RsiConfig | null
+}
+
+export function patchGraph(id: string, patch: GraphPatch): Promise<unknown> {
   return request<unknown>(`/singularity/graphs/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model }),
+    body: JSON.stringify(patch),
   })
 }
 

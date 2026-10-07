@@ -624,6 +624,11 @@ function assertSideDetail(value: unknown, field: string, sample: FrozenSample): 
       throw new Error(`evolution: experiment report ${field}.${key} must be a non-empty string when present`)
     }
   }
+  // The cause is the store's own words whenever a side carries one: a blank
+  // string would read as a reason that explains nothing.
+  if (value.reason !== undefined && (typeof value.reason !== 'string' || value.reason.length === 0)) {
+    throw new Error(`evolution: experiment report ${field}.reason must be a non-empty string when present`)
+  }
   if (sample.observed.runId !== undefined && value.runId === sample.observed.runId) {
     throw new Error(
       `evolution: experiment report ${field} cites run "${sample.observed.runId}", the sample's own historical run — ` +

@@ -298,8 +298,7 @@ function registerGraphs(ctx) {
 				if (parts.length === 1) {
 					if (!guardMethod(req, res, "PATCH")) return;
 					const body = await readJson(req);
-					if (body.model === void 0) throw new Error("graphs: model is required (pass null to follow the deployment default)");
-					sendJson(res, 200, await ctx.graphs.setModel(id, body.model));
+					sendJson(res, 200, await ctx.graphs.setPins(id, body));
 					return;
 				}
 				if (parts.length !== 2) throw new Error(`graphs: unknown path ${url.pathname}`);

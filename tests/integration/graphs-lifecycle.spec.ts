@@ -1,11 +1,15 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { Readable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { EnvStore } from '../../../env-builder/src/service/store.ts'
 import { GraphsService } from '../../graphs/src/index.ts'
+import type { GraphPinsUpdate, RsiConfig } from '../../graphs/src/types.ts'
+import { registerGraphs } from '../../graph-web/src/web/api/graphs.ts'
 
 let root: string
 
@@ -19,10 +23,10 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true })
 })
 
-function harness(overrides: { sessionPersistence?: unknown } = {}) {
+function harness(overrides: { sessionPersistence?: unknown; events?: SessionEvent[] } = {}) {
   const ctx = new Context()
   const store = new EnvStore(root)
-  const events: SessionEvent[] = []
+  const events: SessionEvent[] = overrides.events ?? []
   const agents: { id: SessionId }[] = []
   const append = vi.fn(async (records: readonly SessionEvent[]) => {
     events.push(...records)
@@ -77,14 +81,45 @@ function harness(overrides: { sessionPersistence?: unknown } = {}) {
     // is being cleaned, so the store's task tree is cancelled first (§3.6).
     cancelGraph: vi.fn(async (_storeId: string, _reason: string) => {}),
   }
-  ctx.provide('sessionPersistence', (overrides.sessionPersistence ?? { list: async () => [], create: async () => handle }) as never)
+  ctx.provide(
+    'sessionPersistence',
+    (overrides.sessionPersistence ?? {
+      list: async () => (events.length === 0 ? [] : [{ header: { id: 'graphs-registry' } }]),
+      create: async () => handle,
+      open: async () => handle,
+    }) as never,
+  )
   ctx.provide('envBuilder', { store } as never)
   ctx.provide('graph', graph as never)
   ctx.provide('layout', layout as never)
   ctx.provide('agentRuntime', runtime as never)
   ctx.provide('taskRuntime', taskRuntime as never)
+  const catalog = {
+    listProviders: () => [{ id: 'p1', name: 'Provider One' }],
+    listModels: vi.fn(async (_provider: string) => [
+      { id: 'm1', name: 'Model One' },
+      { id: 'm2', name: 'Model Two' },
+    ]),
+  }
+  ctx.provide('llm', catalog as never)
   const service = new GraphsService(ctx)
-  return { ctx, service, store, events, agents, append, runtime, graph, layout, detach, deleteEnv, taskRuntime }
+  const reopen = (): GraphsService => harness({ events: structuredClone(events) }).service
+  return {
+    ctx,
+    service,
+    store,
+    events,
+    agents,
+    append,
+    runtime,
+    graph,
+    layout,
+    detach,
+    deleteEnv,
+    taskRuntime,
+    catalog,
+    reopen,
+  }
 }
 
 describe('graphs creation lifecycle', () => {
@@ -177,7 +212,9 @@ describe('graphs creation lifecycle', () => {
     // the graph is registered (A2 §E): the store's log is unreadable, so the
     // barrier fails and the failure is what the caller sees.
     taskRuntime.adoptRoot.mockRejectedValueOnce(new Error('the store log is unreadable'))
-    await expect(service.create({ createEnv: true, repos: ['acme/widget'] })).rejects.toThrow('the store log is unreadable')
+    await expect(service.create({ createEnv: true, repos: ['acme/widget'] })).rejects.toThrow(
+      'the store log is unreadable',
+    )
 
     // The graph stays registered and selected — visible as failed, never
     // rolled back onto the previous selection — and the barrier ran exactly
@@ -185,7 +222,10 @@ describe('graphs creation lifecycle', () => {
     const graphs = await service.list()
     expect(graphs).toHaveLength(1)
     expect((await service.snapshot()).selectedId).toBe(graphs[0]!.id)
-    expect(taskRuntime.adoptRoot).toHaveBeenCalledExactlyOnceWith(`sg-t-${graphs[0]!.rootSessionId}`, graphs[0]!.rootSessionId)
+    expect(taskRuntime.adoptRoot).toHaveBeenCalledExactlyOnceWith(
+      `sg-t-${graphs[0]!.rootSessionId}`,
+      graphs[0]!.rootSessionId,
+    )
     // Zero model input: the setup prompt never went out.
     expect(runtime.prompt).not.toHaveBeenCalled()
     // The committed graph keeps its environment and root binding: the failure
@@ -194,6 +234,215 @@ describe('graphs creation lifecycle', () => {
     expect(runtime.stopAgents).not.toHaveBeenCalled()
     expect(detach).not.toHaveBeenCalled()
     expect(deleteEnv).not.toHaveBeenCalled()
+  })
+})
+
+const rsiConfig: RsiConfig = { task: 'Improve widget', iterationRounds: 3, humanReview: true }
+
+/** Drive the registered HTTP endpoint against the real registry, including its persistence queue. */
+function patchGraph(service: GraphsService, store: EnvStore) {
+  let handler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined
+  registerGraphs({
+    graphs: service,
+    envBuilder: { store },
+    webServer: {
+      register: ({ kind, handler: registered }: { kind: string; handler: typeof handler }) => {
+        if (kind === 'prefix') handler = registered
+        return () => {}
+      },
+    },
+  } as never)
+  return async (id: string, body: unknown) => {
+    const req = Readable.from([JSON.stringify(body)]) as unknown as IncomingMessage
+    req.method = 'PATCH'
+    req.url = `/singularity/graphs/${id}`
+    const res = {
+      statusCode: 0,
+      body: '',
+      writeHead(status: number) {
+        this.statusCode = status
+      },
+      end(body: string) {
+        this.body = body
+      },
+    }
+    await handler!(req, res as unknown as ServerResponse)
+    return res
+  }
+}
+
+describe('graph RSI settings persistence and HTTP updates', () => {
+  it('creates and reopens the configured graph with its recorded driver position', async () => {
+    const { service, reopen, events } = harness()
+    const { graph } = await service.create({ createEnv: true, repos: ['acme/widget'], rsi: rsiConfig })
+    const progress = { round: 2, phase: 'publishing' as const, note: 'Candidate under evaluation' }
+    await service.markRsiProgress(graph.id, progress)
+
+    expect(events[0]).toMatchObject({ data: { kind: 'graph/add', graph: { rsi: rsiConfig } } })
+    expect(await reopen().get(graph.id)).toEqual({ ...graph, rsiProgress: progress })
+  })
+
+  it.each([
+    ['non-object', null, 'rsi must be an object'],
+    ['blank task', { ...rsiConfig, task: '  ' }, 'rsi.task'],
+    ['missing task', { iterationRounds: 3, humanReview: true }, 'rsi.task'],
+    ['zero rounds', { ...rsiConfig, iterationRounds: 0 }, 'rsi.iterationRounds'],
+    ['fractional rounds', { ...rsiConfig, iterationRounds: 1.5 }, 'rsi.iterationRounds'],
+    ['non-boolean review', { ...rsiConfig, humanReview: 'true' }, 'rsi.humanReview'],
+    ['unknown setting', { ...rsiConfig, background: true }, '"background"'],
+  ])('refuses create with %s before allocating an environment or root', async (_label, rsi, error) => {
+    const { service, store, runtime, events } = harness()
+    await expect(service.create({ createEnv: true, repos: ['acme/widget'], rsi: rsi as RsiConfig })).rejects.toThrow(
+      error,
+    )
+    expect(store.list()).toEqual([])
+    expect(await service.list()).toEqual([])
+    expect(runtime.createRoot).not.toHaveBeenCalled()
+    expect(events).toEqual([])
+  })
+
+  it('set, repeated set, and clear drop driver progress while preserving the same graph root', async () => {
+    const { service, reopen, runtime } = harness()
+    const { graph } = await service.create({ createEnv: true, repos: ['acme/widget'], rsi: rsiConfig })
+    const replacement = { ...rsiConfig, iterationRounds: 5, humanReview: false }
+    const progress = { round: 2, phase: 'running' as const }
+
+    await service.markRsiProgress(graph.id, progress)
+    const replaced = await service.setRsi(graph.id, replacement)
+    expect(replaced).toEqual({ ...graph, rsi: replacement })
+    expect(await reopen().get(graph.id)).toEqual(replaced)
+
+    await service.markRsiProgress(graph.id, progress)
+    const repeated = await service.setRsi(graph.id, replacement)
+    expect(repeated.rsiProgress).toBeUndefined()
+    expect(repeated.rootSessionId).toBe(graph.rootSessionId)
+
+    await service.markRsiProgress(graph.id, progress)
+    const cleared = await service.setRsi(graph.id, null)
+    expect('rsi' in cleared).toBe(false)
+    expect('rsiProgress' in cleared).toBe(false)
+    expect(cleared.rootSessionId).toBe(graph.rootSessionId)
+    expect(await reopen().get(graph.id)).toEqual(cleared)
+    expect(runtime.createRoot).toHaveBeenCalledOnce()
+  })
+
+  it('replays an older graph with no RSI settings without adding defaults', async () => {
+    const { service, reopen } = harness()
+    const { graph } = await service.create({ createEnv: true, repos: ['acme/widget'] })
+    const read = await reopen().get(graph.id)
+    expect(read).toEqual(graph)
+    expect('rsi' in read).toBe(false)
+    expect('rsiProgress' in read).toBe(false)
+  })
+
+  it.each([
+    [{ model: { provider: 'p1', model: 'm2' }, rsi: { ...rsiConfig, iterationRounds: 0 } }, 'rsi.iterationRounds'],
+    [{ model: { provider: 'p1', model: 'unknown' }, rsi: { ...rsiConfig, humanReview: false } }, 'model.model'],
+    [{ rsi: { ...rsiConfig, task: '' } }, 'rsi.task'],
+    [{}, 'model or rsi is required'],
+  ])('HTTP refusal leaves the whole graph and event log untouched: %j', async (update, error) => {
+    const { service, store, reopen, events, append } = harness()
+    const { graph } = await service.create({
+      createEnv: true,
+      repos: ['acme/widget'],
+      model: { provider: 'p1', model: 'm1' },
+      rsi: rsiConfig,
+    })
+    await service.markRsiProgress(graph.id, { round: 2, phase: 'running' })
+    const before = await service.get(graph.id)
+    const recorded = structuredClone(events)
+    append.mockClear()
+
+    const response = await patchGraph(service, store)(graph.id, update)
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toContain(error)
+    expect(await service.get(graph.id)).toEqual(before)
+    expect(await reopen().get(graph.id)).toEqual(before)
+    expect(events).toEqual(recorded)
+    expect(append).not.toHaveBeenCalled()
+  })
+
+  it('HTTP combined success persists both pins once and broadcasts only the complete result', async () => {
+    const { ctx, service, store, reopen, append } = harness()
+    const { graph } = await service.create({ createEnv: true, repos: ['acme/widget'], rsi: rsiConfig })
+    await service.markRsiProgress(graph.id, { round: 2, phase: 'running' })
+    const changed = vi.fn()
+    ctx.on('graphs/change', changed)
+    append.mockClear()
+    const update: GraphPinsUpdate = {
+      model: { provider: 'p1', model: 'm2' },
+      rsi: { ...rsiConfig, humanReview: false },
+    }
+
+    const response = await patchGraph(service, store)(graph.id, update)
+    expect(response.statusCode).toBe(200)
+    const result = JSON.parse(response.body)
+    expect(result).toEqual({ ...graph, ...update })
+    expect(append).toHaveBeenCalledOnce()
+    expect(append.mock.calls[0][0].map(record => record.data)).toEqual([
+      { kind: 'graph/model', id: graph.id, model: update.model },
+      { kind: 'graph/rsi', id: graph.id, rsi: update.rsi },
+    ])
+    expect(changed).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ graphs: [result] }))
+    expect(await reopen().get(graph.id)).toEqual(result)
+
+    const cleared = await patchGraph(service, store)(graph.id, { model: null, rsi: null })
+    expect(cleared.statusCode).toBe(200)
+    const afterClear = await service.get(graph.id)
+    expect('model' in afterClear).toBe(false)
+    expect('rsi' in afterClear).toBe(false)
+    expect(await reopen().get(graph.id)).toEqual(afterClear)
+  })
+
+  it('a persistence failure in a combined update keeps both original settings', async () => {
+    const { service, store, reopen, append, events } = harness()
+    const { graph } = await service.create({
+      createEnv: true,
+      repos: ['acme/widget'],
+      model: { provider: 'p1', model: 'm1' },
+      rsi: rsiConfig,
+    })
+    const recorded = structuredClone(events)
+    append.mockRejectedValueOnce(new Error('registry unavailable'))
+
+    const response = await patchGraph(service, store)(graph.id, {
+      model: { provider: 'p1', model: 'm2' },
+      rsi: null,
+    })
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toContain('registry unavailable')
+    expect(await service.get(graph.id)).toEqual(graph)
+    expect(await reopen().get(graph.id)).toEqual(graph)
+    expect(events).toEqual(recorded)
+  })
+
+  it('serializes a combined update with later settings changes while model validation awaits', async () => {
+    const { service, catalog, append } = harness()
+    const { graph } = await service.create({ createEnv: true, repos: ['acme/widget'] })
+    const models = Promise.withResolvers<{ id: string; name: string }[]>()
+    catalog.listModels.mockImplementationOnce(() => models.promise)
+    append.mockClear()
+    const combined = service.setPins(graph.id, { model: { provider: 'p1', model: 'm1' }, rsi: rsiConfig })
+    const cleared = service.setRsi(graph.id, null)
+    await vi.waitFor(() => expect(catalog.listModels).toHaveBeenCalledOnce())
+    expect(append).not.toHaveBeenCalled()
+
+    models.resolve([{ id: 'm1', name: 'Model One' }])
+    await combined
+    await cleared
+    expect(append.mock.calls.map(([records]) => records.map(record => (record.data as { kind: string }).kind))).toEqual(
+      [['graph/model', 'graph/rsi'], ['graph/rsi']],
+    )
+    expect((await service.get(graph.id)).model).toEqual({ provider: 'p1', model: 'm1' })
+    expect((await service.get(graph.id)).rsi).toBeUndefined()
+  })
+
+  it('refuses settings and progress for unknown graphs without appending events', async () => {
+    const { service, events } = harness()
+    await expect(service.setRsi('missing', rsiConfig)).rejects.toThrow('unknown graph')
+    await expect(service.setPins('missing', { model: null, rsi: null })).rejects.toThrow('unknown graph')
+    await expect(service.markRsiProgress('missing', { round: 1, phase: 'running' })).rejects.toThrow('unknown graph')
+    expect(events).toEqual([])
   })
 })
 
@@ -215,9 +464,13 @@ describe('graphs boot recovery', () => {
     }
     const seeded = {
       list: async () => [{ header: { id: 'graphs-registry' } }],
-      create: async () => { throw new Error('unreachable') },
+      create: async () => {
+        throw new Error('unreachable')
+      },
       open: async () => ({
-        read: async () => ({ events: [{ type: 'graphs/event', seq: 0, time: 1, data: { kind: 'graph/add', graph }, ignorable: true }] }),
+        read: async () => ({
+          events: [{ type: 'graphs/event', seq: 0, time: 1, data: { kind: 'graph/add', graph }, ignorable: true }],
+        }),
         append: async () => {},
         flush: async () => {},
         close: async () => {},
@@ -229,7 +482,9 @@ describe('graphs boot recovery', () => {
     // The boot recovers the selected graph by activating it (A2 §E): the
     // barrier is awaited before the environment switch, not chased by an
     // asynchronous selected-listener.
-    await vi.waitFor(() => expect(taskRuntime.adoptRoot).toHaveBeenCalledExactlyOnceWith('sg-t-s-root-1', rootSessionId))
+    await vi.waitFor(() =>
+      expect(taskRuntime.adoptRoot).toHaveBeenCalledExactlyOnceWith('sg-t-s-root-1', rootSessionId),
+    )
     expect((await service.snapshot()).selectedId).toBe('graph1')
     await ctx.fiber.dispose()
   })

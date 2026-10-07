@@ -11,6 +11,7 @@ import type {
   ModelRef,
   ModelsResponse,
   ProposalDecision,
+  RsiConfig,
   TaskSnapshotWire,
 } from './types'
 import {
@@ -26,7 +27,7 @@ import {
   fetchTask,
   INITIAL_GRAPH_ID,
   openEvents,
-  patchGraphModel,
+  patchGraph,
   putLayout,
   selectGraph,
   setStoreOverride,
@@ -117,6 +118,7 @@ interface Store {
   removeGraph: (id: string) => Promise<void>
   loadModels: () => Promise<void>
   updateGraphModel: (id: string, model: ModelRef | null) => Promise<void>
+  updateGraphRsi: (id: string, rsi: RsiConfig | null) => Promise<void>
   taskStoreId: () => string | null
   loadTask: () => Promise<void>
   setSelectedRun: (id: string | null) => void
@@ -420,7 +422,11 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
   async updateGraphModel(id, model) {
-    await patchGraphModel(id, model)
+    await patchGraph(id, { model })
+    await get().loadGraphs()
+  },
+  async updateGraphRsi(id, rsi) {
+    await patchGraph(id, { rsi })
     await get().loadGraphs()
   },
   taskStoreId() {

@@ -69,6 +69,8 @@
 
 ### 2. suggestion 与必须先发布的变更混在一起，会阻断 recovery
 
+> 2026-10-07：`coordinateRecovery` 已随 `task_recover` 工具一起删除（supervisor 只存在于平台 RSI loop，轮次由 driver 直接调 `recoverRootTask` 打开）。下面这条对旧入口的审计结论作为历史记录保留；它描述的 proposal 门槛在今天的链路里不存在。
+
 `coordinateRecovery` 用 `diagnosis:<id>` 找关联的 **全部** Evolution proposals，然后要求每个都是 applied 且未 rolledback；它没有“必要前置变更”字段，也没有排除不能执行的 policy suggestion、REJECT 或 KEEP_FOR_FURTHER_RESEARCH 提案。于是为同一 diagnosis 记录一个没有执行器的 `runtime_policy` 建议，就可能让其 root recovery 永远过不了这条门。这是实质控制流耦合，不是单纯 UI 困惑。[S34][S1]
 
 改进方向是显式声明 recovery 依赖的 proposalIds；其余建议可留研究账本，并保持 provenance。该建议属于审计推论，本次未改源码。

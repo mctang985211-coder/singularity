@@ -60,7 +60,7 @@ export async function dynamicProjection(deps: ReadDeps, loaded: LoadedCaller): P
   const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES)
   const header = [
     '# Dynamic context (state)',
-    `role: ${resolution.kind}`,
+    `role: ${resolution.kind === 'reviewer' ? resolution.delegation.role ?? 'reviewer' : resolution.kind}`,
     `graph: ${resolution.graph.id} "${resolution.graph.name}" — store ${resolution.storeId}`,
     ...(marker === undefined ? [] : [marker, RECOVERY_NOTE]),
     `gate phase: ${gate ?? 'not tracked for this session'}`,
@@ -68,8 +68,9 @@ export async function dynamicProjection(deps: ReadDeps, loaded: LoadedCaller): P
   if (budget.addAll(header) > 0) return tooLarge('the dynamic projection header', taskPageHint(task.taskId))
 
   if (resolution.kind === 'reviewer') {
-    const run = snapshot === undefined ? undefined : latestRun(snapshot, task)
-    const label = `delegated task state (review-only, no business Run): ${run === undefined ? 'no run was ever started' : ownRunLine(run, snapshot)}`
+    const run = resolution.delegation.sourceRunId === undefined
+      ? snapshot === undefined ? undefined : latestRun(snapshot, task) : target.run
+    const label = `delegated task state (${resolution.delegation.role === 'supervisor' ? 'method supervision' : 'review-only'}, no business Run): ${run === undefined ? 'no source run was recorded' : ownRunLine(run, snapshot)}`
     if (!budget.add(label)) return tooLarge('the delegated task state', taskPageHint(task.taskId))
   } else {
     if (!budget.add(`your run: ${target.run === undefined ? 'none' : ownRunLine(target.run, snapshot)}`)) {
