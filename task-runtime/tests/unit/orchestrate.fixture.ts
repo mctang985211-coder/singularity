@@ -242,6 +242,7 @@ export function harness(
     }),
   }
   const graphs = {
+    list: vi.fn(async () => [{ id: 'g1', name: 'graph', envId: 'env1', rootSessionId: ROOT_SESSION, graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root', createdAt: 0, ready: true }]),
     graphForSession: vi.fn(async (_sessionId: string) => ({
       id: 'g1',
       name: 'graph',
@@ -347,6 +348,10 @@ export function harness(
     mcpServers: DEPLOYMENT_MCP_SERVERS, ...options.config,
     capabilities: { ...TASK_GUIDANCE, ...options.config?.capabilities },
   })
+  // Direct API fixtures may deliberately model a previously frozen global catalog.
+  // New graph tests omit this explicit legacy binding and use graph-owned libraries.
+  if (options.config?.taskTemplatesRoot !== undefined)
+    runtime.sessionExecutionBindings.set(ROOT_SESSION, { taskTemplatesRoot: options.config.taskTemplatesRoot })
   /**
    * The shipped worker behaviour under A3: a worker hands its result in through
    * the explicit submission entry and *then* goes idle. An idle session is not a

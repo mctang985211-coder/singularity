@@ -25,7 +25,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { questionIdOf, rootTaskStoreId, sha256Hex } from '../../task/src/index.ts'
 import { bindRunProviders, resolveCapabilities, type RootContractSpec } from '../../task-runtime/src/index.ts'
+import { capabilitySnapshot } from '../../task-runtime/src/capability.ts'
+import { WORKER_CONTRACT_SECTION } from '../../context/src/index.ts'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
+
+/** The prefix every plane the context core contributes carries. */
+const SINGULARITY_SECTION_PREFIX = 'singularity:'
 
 /** Every stack a case booted, so a failing case cannot leak a workspace. */
 const stacks: AssemblyStack[] = []
@@ -85,10 +90,14 @@ async function seedWorker(
     childTaskIds: [],
   }, spec.sessionId)
   await stack.task.admitTaskIn(storeId, spec.taskId, spec.sessionId, { decompositionStatus: 'leaf' })
+  // The run is bound against the table its own session's admission resolves —
+  // its graph library's rows merged over the deployment's configuration — which
+  // is the same table the provider pre-check for that session is asked with.
+  const manifest = resolveCapabilities(['execute-task'], await stack.runtime.capabilitiesForSession(spec.sessionId))
   const providerBinding = await bindRunProviders({
     storeId,
     runId: spec.runId,
-    manifest: resolveCapabilities(['execute-task'], stack.runtime.listCapabilities()),
+    manifest,
     providers: await stack.runtime.capabilityProviderReport(spec.sessionId, ['execute-task']),
     root: stack.runtime.config.runBindingRoot,
   })
@@ -96,7 +105,7 @@ async function seedWorker(
     runId: spec.runId,
     taskId: spec.taskId,
     sessionId: spec.sessionId,
-    capabilitySnapshot: ['task-execution'],
+    capabilitySnapshot: capabilitySnapshot(manifest),
     providerBinding,
     artifacts: [],
     verifierResults: [],
@@ -181,9 +190,27 @@ async function questionTree(stack: AssemblyStack, options: { readonly answer?: b
   return { storeId, rootRunId: root.runId, child, grandchild, childQuestionId, grandchildQuestionId, childAnswerMessageId }
 }
 
-/** The names of the runtime contexts one session's request is assembled with. */
-async function contextNames(stack: AssemblyStack, sessionId: string): Promise<string[]> {
-  return (await stack.assemble(sessionId)).contexts.map(context => context.name)
+/**
+ * The dynamic planes: the singularity sections of an assembled request other than
+ * the immutable contract. They carry task facts — an objective, a question id, a
+ * cited `ref` — so they are literal sections rather than interpolated runtime
+ * contexts, and reading them here is reading the same assembly the loop sends.
+ */
+function isDynamicPlane(name: string): boolean {
+  return name.startsWith(SINGULARITY_SECTION_PREFIX) && name !== WORKER_CONTRACT_SECTION
+}
+
+/** The names of the dynamic planes one session's request is assembled with, in assembly order. */
+async function planeNames(stack: AssemblyStack, sessionId: string): Promise<string[]> {
+  return (await stack.assemble(sessionId)).sections.map(section => section.name).filter(isDynamicPlane)
+}
+
+/** The text of those planes, joined the way the request carries them. */
+async function planeText(stack: AssemblyStack, sessionId: string): Promise<string> {
+  return (await stack.assemble(sessionId)).sections
+    .filter(section => isDynamicPlane(section.name))
+    .map(section => section.text)
+    .join('\n\n')
 }
 
 describe('the questions a parent owes an answer to reach its request (A4 §F.1)', () => {
@@ -192,11 +219,11 @@ describe('the questions a parent owes an answer to reach its request (A4 §F.1)'
     // Nothing to say before anything is asked: a root whose graph holds no
     // contract yet assembles no question plane at all — no header, no empty
     // context, nothing for the loop to deduplicate.
-    expect(await contextNames(stack, 's-root')).not.toContain('singularity:questions')
+    expect(await planeNames(stack, 's-root')).not.toContain('singularity:questions')
 
     const tree = await questionTree(stack)
 
-    const rootSnapshot = await stack.contextSnapshot('s-root')
+    const rootSnapshot = await planeText(stack, 's-root')
     expect(rootSnapshot).toContain('# Pending questions (coordination)')
     expect(rootSnapshot).toContain('role: root')
     expect(rootSnapshot).toContain('## Questions waiting for your answer (1)')
@@ -206,20 +233,22 @@ describe('the questions a parent owes an answer to reach its request (A4 §F.1)'
     // The question the grandchild asked is not the root's business.
     expect(rootSnapshot).not.toContain(tree.grandchildQuestionId)
 
-    const childSnapshot = await stack.contextSnapshot('s-child')
+    const childSnapshot = await planeText(stack, 's-child')
     expect(childSnapshot).toContain('role: worker')
     expect(childSnapshot).toContain('## Questions waiting for your answer (1)')
     expect(childSnapshot).toContain(`- ${tree.grandchildQuestionId} — from child run r-gchild (task t-gchild), blocking: no`)
     expect(childSnapshot).toContain('ref:{"sessionId":"s-gchild","seq":0}')
     // The same assembled request carries the dynamic plane, with the child's own
-    // open blocking question shown as `waiting_answer` — derived, not written;
-    // the root's own request has its stored phase and no derived word.
+    // open blocking question shown as `waiting_answer` — derived, not written.
+    // The root's own run line states the phase its store records, never the
+    // derived word: the child mentioned above is the root's related-task entry,
+    // not the root's own run.
     expect(childSnapshot).toContain('gate phase:')
     expect(childSnapshot).toContain('your run: run r-child [running] — phase waiting_answer')
-    expect(rootSnapshot).not.toContain('waiting_answer')
-    expect(await contextNames(stack, 's-child')).toEqual(['singularity:task-templates', 'singularity:state', 'singularity:questions'])
+    expect(rootSnapshot).toContain(`your run: run ${tree.rootRunId} [running] — phase active`)
+    expect(await planeNames(stack, 's-child')).toEqual(['singularity:task-templates', 'singularity:state', 'singularity:questions'])
     // The grandchild has no question of its own and nothing addressed to it.
-    expect(await contextNames(stack, 's-gchild')).toEqual(['singularity:task-templates', 'singularity:state'])
+    expect(await planeNames(stack, 's-gchild')).toEqual(['singularity:task-templates', 'singularity:state'])
   })
 })
 
@@ -230,11 +259,11 @@ describe('an unread answer reaches the asking request and leaves only on proof (
 
     // The question is gone from the root's request — it answered it — and the
     // answer is in the asking child's request.
-    const rootSnapshot = await stack.contextSnapshot('s-root')
+    const rootSnapshot = await planeText(stack, 's-root')
     expect(rootSnapshot).not.toContain(tree.childQuestionId)
     expect(rootSnapshot).not.toContain('# Pending questions (coordination)')
 
-    const childSnapshot = await stack.contextSnapshot('s-child')
+    const childSnapshot = await planeText(stack, 's-child')
     expect(childSnapshot).toContain('## Answers waiting to be read (1)')
     expect(childSnapshot).toContain(`the answer to question ${tree.childQuestionId}, resolves: yes`)
     expect(childSnapshot).toContain('ref:{"sessionId":"s-root","seq":0}')
@@ -246,7 +275,7 @@ describe('an unread answer reaches the asking request and leaves only on proof (
     // The proof: the answer's own message id as a `user/message` event in the
     // child's Session — what the loop writes when the message reaches a request.
     await stack.appendMessage('s-child', tree.childAnswerMessageId)
-    const afterReading = await stack.contextSnapshot('s-child')
+    const afterReading = await planeText(stack, 's-child')
     expect(afterReading).not.toContain('## Answers waiting to be read')
     expect(afterReading).not.toContain(tree.childQuestionId)
     // The grandchild's question is still the child's own open item: proving one
@@ -265,10 +294,10 @@ describe('an unread answer reaches the asking request and leaves only on proof (
       answerRef: { sessionId: 's-child', seq: 1 },
       messageId: 'm-answer-gchild-1',
     }, 's-child')
-    expect(await stack.contextSnapshot('s-gchild')).toContain('the answer to question ' + tree.grandchildQuestionId)
+    expect(await planeText(stack, 's-gchild')).toContain('the answer to question ' + tree.grandchildQuestionId)
     await stack.appendMessage('s-gchild', 'm-answer-gchild-1', 'the deck is aluminium')
-    expect(await stack.contextSnapshot('s-gchild')).not.toContain(tree.grandchildQuestionId)
-    expect(await contextNames(stack, 's-gchild')).toEqual(['singularity:task-templates', 'singularity:state'])
+    expect(await planeText(stack, 's-gchild')).not.toContain(tree.grandchildQuestionId)
+    expect(await planeNames(stack, 's-gchild')).toEqual(['singularity:task-templates', 'singularity:state'])
   })
 })
 
@@ -278,16 +307,16 @@ describe('assembling the question plane changes nothing', () => {
     const tree = await questionTree(stack)
     const events = (await stack.events(tree.storeId)).length
 
-    const root = await stack.contextSnapshot('s-root')
-    const child = await stack.contextSnapshot('s-child')
+    const root = await planeText(stack, 's-root')
+    const child = await planeText(stack, 's-child')
     expect(root).toContain(tree.childQuestionId)
     expect(child).toContain(tree.grandchildQuestionId)
 
     // Three more assemblies of both requests, plus the prompt itself: the same
     // bytes every time, and the store exactly where it stood.
     for (let index = 0; index < 3; index += 1) {
-      expect(await stack.contextSnapshot('s-root')).toBe(root)
-      expect(await stack.contextSnapshot('s-child')).toBe(child)
+      expect(await planeText(stack, 's-root')).toBe(root)
+      expect(await planeText(stack, 's-child')).toBe(child)
       await stack.prompt('s-root')
       await stack.prompt('s-child')
     }

@@ -765,12 +765,17 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
   it('retries an approval whose admission was refused whole, still in one batch', async () => {
     const dir = workspace()
     // The budget is what keeps the approval from being admitted in the first
-    // process: the root run already holds the only slot, so the post-approval
-    // admission is refused whole — nothing is minted, no run is charged, and the
-    // decision stays on the record.
-    const a = await boot(dir, { generatedTaskReview: 'all', rootBudget: { maxRuns: 1 } })
+    // process: the root run already holds one of the two slots, so a two-child
+    // batch cannot be proposed against it — the post-approval admission is
+    // refused whole, nothing is minted, no run is charged, and the decision
+    // stays on the record.
+    const a = await boot(dir, { generatedTaskReview: 'all', rootBudget: { maxRuns: 2 } })
     const root = await activateRoot(a)
-    const pending = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('first child'))
+    const twoChildren: DecomposeSpec = {
+      reason: 'split the work',
+      children: [...children('first child'), ...children('second child')],
+    }
+    const pending = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, twoChildren)
     expect(pending.status).toBe('pending_review')
     const proposalId = pending.proposalId
 
@@ -778,7 +783,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(approved.outcome).toBe('approved')
     expect(approved.status).toBe('ready')
     expect(approved.detail).toContain('the batch was not admitted')
-    expect(approved.detail).toContain('root budget allows 1 run(s)')
+    expect(approved.detail).toContain('root budget allows 2 run(s)')
     const refused = await proposalOf(a, proposalId)
     expect(refused.status).toBe('ready')
     expect(refused.decision!.outcome).toBe('approved')
@@ -787,20 +792,20 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     await a.crash()
 
     // A deployment that can afford the batch now recovers the approval and
-    // admits the same batch: still one admission, one child, one batch.
+    // admits the same batch: still one admission, two children, one batch.
     const b = await reopen(dir, { generatedTaskReview: 'all', rootBudget: { maxRuns: 10 } })
     const admitted = await statusOf(b, proposalId, 'admitted')
     expect(admitted.decision!.outcome).toBe('approved')
     const consumption = admitted.consumption!
     const outcomes = await b.runtime.awaitBatch(STORE, consumption.batchId)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
     expect(outcomes.map(outcome => outcome.taskId)).toEqual(consumption.childTaskIds)
-    expect((await b.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
+    for (const outcome of outcomes) expect((await b.task.taskIn(STORE, outcome.taskId)).status).toBe('verified')
     await handInRoot(b)
     expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     expect(batchProposalEvents(taskEvents(await b.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
-    expect((await b.snapshot()).tasks).toHaveLength(2)
-    expect(b.spawns).toHaveLength(1)
+    expect((await b.snapshot()).tasks).toHaveLength(3)
+    expect(b.spawns).toHaveLength(2)
     await b.dispose()
   })
 
@@ -889,16 +894,16 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(repeat.proposalId).toBe(first.proposalId)
     expect(((await a.snapshot()).proposals!.all).filter(proposal => proposal.kind !== 'root')).toHaveLength(1)
     expect((await a.snapshot()).tasks).toHaveLength(1)
-    // A different batch under the same calling context is refused by name while
-    // one proposal is on the run (K1 §3): a run holds at most one batch proposal
-    // at a time, and a second one is never built beside the first — nothing is
-    // recorded, so no proposal id comes back to cite.
+    // A different batch under the same calling context is refused while one
+    // proposal is on the run (K1 §3): a run holds at most one batch proposal at
+    // a time, and a second one is never built beside the first — the refusal
+    // names the rule, nothing is recorded, and the held proposal is still the
+    // only one.
     const other = await a.runtime
       .submitDecompositionProposal(STORE, root.taskId, root.runId, ROOT, specOf('a different child'))
       .then(() => undefined, (error: unknown) => error)
     expect(other).toBeInstanceOf(Error)
-    expect((other as Error).message).toContain('already has a proposal in flight')
-    expect((other as Error).message).toContain(first.proposalId)
+    expect((other as Error).message).toContain('an open decomposition proposal must be continued or cancelled')
     expect((await a.snapshot()).proposals!.all.filter(proposal => proposal.kind !== 'root')).toHaveLength(1)
     const continued = await a.runtime.continueProposal(STORE, first.proposalId, ROOT)
     expect(continued.status).toBe('admitted')
@@ -989,14 +994,13 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     if (first.status !== 'pending_review') throw new Error('unreachable')
     // K1 §3: one run holds at most one batch proposal at a time, so the second
     // batch never becomes a competing record — the call that asks for it is
-    // refused by name, naming the proposal that holds the run, and nothing is
-    // written: no second proposal, no second child, and the person is asked once.
+    // refused, nothing is written: no second proposal, no second child, and the
+    // person is asked once.
     const refused = await a.runtime
       .decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('second batch child'))
       .then(() => undefined, (error: unknown) => error)
     expect(refused).toBeInstanceOf(Error)
-    expect((refused as Error).message).toContain('already has a proposal in flight')
-    expect((refused as Error).message).toContain(first.proposalId)
+    expect((refused as Error).message).toContain('an open decomposition proposal must be continued or cancelled')
     expect(a.review.asks).toHaveLength(1)
     const waiting = await a.snapshot()
     expect(waiting.proposals!.all.filter(proposal => proposal.kind !== 'root')).toHaveLength(1)

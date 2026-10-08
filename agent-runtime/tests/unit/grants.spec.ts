@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
 import { applyWorkerGrant, resolveGrant } from '../../src/grants.ts'
 import type { WorkerGrant } from '../../src/types.ts'
 
@@ -62,6 +63,20 @@ function harness(
     get: (name: string) => (name === 'skills' ? skills : undefined),
     // The cordis plugin seam mcp-client mounts through; captured, never run.
     plugin,
+    isolate: () => {
+      let localSkills: unknown
+      return {
+        on: vi.fn(),
+        get: (name: string) => name === 'skills' ? localSkills : undefined,
+        get skills() { return localSkills },
+        plugin: async (module: unknown) => {
+          if (module === SkillRegistry) localSkills = {
+            register: (skill: Registered) => { registered.push(skill); return () => {} },
+          }
+          return {}
+        },
+      }
+    },
   }
   return { ctx: ctx as unknown as Context, restrict, registered, skills, mounted, plugin }
 }
@@ -320,7 +335,7 @@ describe('applyWorkerGrant skill overlay (replay extraSkillRoots)', () => {
     return dir
   }
 
-  test('an overlay skill shadows the same-name granted skill and covers skills no capability grants', async () => {
+  test('an overlay freezes the granted skill without exposing other overlay skills', async () => {
     const dir = overlayRoot()
     const h = harness({ global: [], preset: [] }, { discovered: { verify: 'production verify body' } })
     await applyWorkerGrant(
@@ -333,7 +348,7 @@ describe('applyWorkerGrant skill overlay (replay extraSkillRoots)', () => {
     )
 
     const names = h.registered.map(skill => skill.name)
-    expect(names).toEqual(['overlay-only', 'verify'])
+    expect(names).toEqual(['verify'])
     // the granted name kept the overlay body — production discovery was never consulted for it
     expect(h.registered.find(skill => skill.name === 'verify')!.content).toContain('overlay body')
     expect(h.registered.find(skill => skill.name === 'verify')!.path).toBe(join(dir, 'verify', 'SKILL.md'))
@@ -354,7 +369,7 @@ describe('applyWorkerGrant skill overlay (replay extraSkillRoots)', () => {
     )
 
     const names = h.registered.map(skill => skill.name).sort()
-    expect(names).toEqual(['other', 'overlay-only', 'verify'])
+    expect(names).toEqual(['other'])
     expect(h.registered.find(skill => skill.name === 'other')!.content).toBe('production other body')
     rmSync(dir, { recursive: true, force: true })
   })

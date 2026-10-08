@@ -648,6 +648,7 @@ export function assertSidesAgree(
   baseline: { run: TaskRun; binding: RunProviderBinding },
   candidate: { run: TaskRun; binding: RunProviderBinding },
   where: string,
+  firstSkill = false,
 ): void {
   const comparable = (binding: RunProviderBinding) => ({
     capabilities: [...binding.capabilities].sort(),
@@ -655,6 +656,7 @@ export function assertSidesAgree(
       left.serverName < right.serverName ? -1 : left.serverName > right.serverName ? 1 : 0,
     ),
     skills: [...binding.skills]
+      .filter(skill => !firstSkill || skill.name !== improved.name)
       .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
       .map(skill => ({
         name: skill.name,
@@ -727,6 +729,15 @@ export function assertExperimentCostWithinBudget(report: ExperimentReport): void
   const budget = report.frozen.budget
   if (budget.maxTokens === undefined) return
   let spent = 0
+  const plan = report.frozen.evaluation
+  if (plan?.generatedResponse !== undefined) {
+    if (plan.generatedUsage === undefined) throw new Error('evolution: generated evaluation plan token usage is unknown; it cannot be checked against maxTokens')
+    spent += Object.values(plan.generatedUsage).reduce((sum, value) => sum + value, 0)
+  }
+  if (report.evaluation !== undefined) {
+    if (report.evaluation.judgeUsage === undefined) throw new Error('evolution: independent judge token usage is unknown; it cannot be checked against maxTokens')
+    spent += Object.values(report.evaluation.judgeUsage).reduce((sum, value) => sum + value, 0)
+  }
   let sides = 0
   for (const sample of report.samples) {
     for (const detail of [sample.baseline, sample.candidate]) {
@@ -750,6 +761,9 @@ export async function experimentEvidence(
 ): Promise<{ view: ExperimentView; report: ExperimentReport }> {
   const [experiment] = await sources.experiments(proposal.proposalId)
   if (experiment === undefined) throw noExperimentRefusal(proposal)
+  if (experiment.frozen.libraryId !== sources.libraryId) {
+    throw new Error('evolution: the experiment belongs to a different graph library or publication scope')
+  }
   let report: ExperimentReport
   try {
     report = buildExperimentReport(experiment)

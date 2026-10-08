@@ -6,6 +6,7 @@ import type { EvolutionProposal } from '../evolution.ts'
 import type { ExperimentReport, FrozenSample } from '../replay.ts'
 import type { SkillPromotionEvidence, SkillPromotionSources } from './shared.ts'
 import { VERDICT_REFUSALS, identityLabel, sameIdentity, sampleVerdictLines } from './shared.ts'
+import { assertCapabilitySideBinding } from './capability.ts'
 import {
   assertCostWithinDeclaredBudget,
   assertExperimentCostWithinBudget,
@@ -51,7 +52,8 @@ export async function assertSkillPromotionEvidence(
   }
   const baseline = prepared?.skillBaseline
   const frozenBaseline = frozen.productionBaseline
-  if (baseline == null || frozenBaseline === undefined || !sameIdentity(frozenBaseline, baseline)) {
+  const firstSkill = baseline === null && prepared?.champion === 'absent'
+  if (firstSkill ? frozenBaseline !== undefined : baseline == null || frozenBaseline === undefined || !sameIdentity(frozenBaseline, baseline)) {
     throw new Error(
       `evolution: the experiment's frozen production baseline (${frozenBaseline === undefined ? 'none' : identityLabel(frozenBaseline)}) ` +
         `is not the baseline prepare recorded for proposal "${proposal.proposalId}" ` +
@@ -108,11 +110,16 @@ export async function assertSkillPromotionEvidence(
             'provider binding cannot be re-read, so the promotion is refused',
         )
       }
-      await assertSideProviderBinding({ sample: frozenSample, detail, run, frozen, where: label })
+      if (firstSkill) {
+        if (frozenSample.provider?.skills.some(skill => skill.name === candidate.name) ||
+            !frozenSample.candidateProvider?.skills.some(skill => skill.name === candidate.name))
+          throw new Error('evolution: first Skill evidence must bind the candidate only on the candidate side')
+        await assertCapabilitySideBinding({ sample: frozenSample, detail, run, frozen, where: label })
+      } else await assertSideProviderBinding({ sample: frozenSample, detail, run, frozen, where: label })
       if (run.providerBinding !== undefined) sideRuns[side] = { run, binding: run.providerBinding }
     }
     if (sideRuns.baseline !== undefined && sideRuns.candidate !== undefined) {
-      assertSidesAgree(frozen, candidate, sideRuns.baseline, sideRuns.candidate, `sample "${sample.taskId}"`)
+      assertSidesAgree(frozen, candidate, sideRuns.baseline, sideRuns.candidate, `sample "${sample.taskId}"`, firstSkill)
     }
     await assertSampleInputsIntact({ sample: frozenSample, snapshot, productionWorkspace: frozen.snapshot.sourceDir })
   }

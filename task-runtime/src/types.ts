@@ -127,7 +127,7 @@ export interface ReplayTaskOptions {
    * The workspace this replay runs in, when the caller has prepared one of its
    * own (S4-E) instead of replaying into its own checkout. The directory is
    */
-  workspace?: { path: string }
+  workspace?: { path: string; rebaseFrom?: string }
   /**
    * The model selection this replay runs under (S4-E §Q3), replacing the
    * deployment's default for this run's worker and for every worker its

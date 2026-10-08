@@ -1,7 +1,8 @@
+import { evolutionForSession } from './evolution-scope.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
-import { text } from '../shared.ts'
+import { sessionId, text } from '../shared.ts'
 
 const TARGET_TYPES: readonly ProposalTargetType[] = [
   'skill', 'tool', 'capability', 'task_definition', 'decomposition_policy',
@@ -21,8 +22,9 @@ export function defineEvolutionListTool(ctx: Context) {
       targetId: { type: 'string', description: 'Only proposals pointing at this target' },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
-    execute: async args => {
-      const proposals = await ctx.evolution.list({
+    execute: async (args, exec) => {
+      const evolution = await evolutionForSession(ctx, sessionId(exec, 'evolution_list'))
+      const proposals = await evolution.list({
         ...(args.status === undefined ? {} : { status: args.status }),
         ...(args.targetType === undefined ? {} : { targetType: args.targetType }),
         ...(args.targetId === undefined ? {} : { targetId: args.targetId }),
@@ -43,13 +45,13 @@ export function defineEvolutionListTool(ctx: Context) {
         if (proposal.prepared !== undefined) {
           const view = proposal.prepared
           if (proposal.targetType === 'task_definition') {
-            lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, frozen template libraries)`)
+            lines.push(`  sandbox: ${evolution.root}/${view.sandbox} (${view.files.length} files, frozen template libraries)`)
             lines.push(`  candidate template: ${view.templateCandidate!.template.id}@${view.templateCandidate!.template.version} sha256:${view.templateCandidate!.digest}`)
             lines.push(view.templateBaseline == null ? '  template baseline: absent' : `  template baseline: ${view.templateBaseline.template.id}@${view.templateBaseline.template.version} sha256:${view.templateBaseline.digest}`)
           } else if (proposal.targetType === 'capability') {
             const row = view.capabilityRow!
             const baseline = view.capabilityBaseline
-            lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox!} (${view.files.length} files, capability row${view.skillContent === undefined ? '' : ' + new execution skill'})`)
+            lines.push(`  sandbox: ${evolution.root}/${view.sandbox!} (${view.files.length} files, capability row${view.skillContent === undefined ? '' : ' + new execution skill'})`)
             lines.push(`  candidate row: ${row.name} sha256:${row.digest.slice(0, 12)}…`)
             lines.push(`  production row baseline: ${baseline === null ? 'absent' : `${baseline!.name} sha256:${baseline!.digest.slice(0, 12)}…`}`)
             lines.push(view.skillContent === undefined
@@ -62,9 +64,9 @@ export function defineEvolutionListTool(ctx: Context) {
               ? 'guidance (SKILL.md)'
               : 'execution provider (SKILL.md + SKILL.contract.json)'
             lines.push(
-              `  sandbox: ${ctx.evolution.root}/${view.sandbox!} (${view.files.length} files, ${shape}, champion snapshot captured, ` +
+              `  sandbox: ${evolution.root}/${view.sandbox!} (${view.files.length} files, ${shape}, champion snapshot ${view.champion}, ` +
               `candidate content ${view.skillContent!.name} sha256:${view.skillContent!.sha256.slice(0, 12)}…, ` +
-              `production baseline ${view.skillBaseline!.name} sha256:${view.skillBaseline!.sha256.slice(0, 12)}…)`,
+              (view.skillBaseline == null ? 'production baseline absent)' : `production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…)`),
             )
           }
         }

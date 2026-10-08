@@ -167,21 +167,28 @@ function evolutionOf(ctx) {
 	if (exposure !== void 0 && exposure.enabled === false) return void 0;
 	return optionalService(ctx, "evolution");
 }
+async function scopedEvolution(ctx, req) {
+	const evolution = evolutionOf(ctx);
+	if (evolution === void 0 || evolution.forSession === void 0) return evolution;
+	const graphId = urlOf(req).searchParams.get("graphId");
+	const graph = graphId === null ? await ctx.graphs.current() : await ctx.graphs.get(graphId);
+	return evolution.forSession(graph.rootSessionId);
+}
 function registerEvolution(ctx) {
 	const stopList = ctx.webServer.register({
 		kind: "exact",
 		path: EVOLUTION_PATH,
 		handler: async (req, res) => {
 			if (!guardMethod(req, res, "GET")) return;
-			const evolution = evolutionOf(ctx);
-			if (evolution === void 0) {
-				sendJson(res, 200, {
-					proposals: [],
-					experiments: []
-				});
-				return;
-			}
 			try {
+				const evolution = await scopedEvolution(ctx, req);
+				if (evolution === void 0) {
+					sendJson(res, 200, {
+						proposals: [],
+						experiments: []
+					});
+					return;
+				}
 				sendJson(res, 200, {
 					proposals: await evolution.list(),
 					experiments: await evolution.experiments()
@@ -200,7 +207,7 @@ function registerEvolution(ctx) {
 				const url = urlOf(req);
 				const id = decodeURIComponent(url.pathname.slice(EVOLUTION_PATH.length + 1));
 				if (id.length === 0 || id.includes("/")) throw new Error(`evolution: unknown path ${url.pathname}`);
-				const evolution = evolutionOf(ctx);
+				const evolution = await scopedEvolution(ctx, req);
 				if (evolution === void 0) throw new Error(`evolution: unknown proposal "${id}"`);
 				sendJson(res, 200, { proposal: await evolution.get(id) });
 			} catch (error) {
@@ -302,6 +309,14 @@ function registerGraphs(ctx) {
 					return;
 				}
 				if (parts.length !== 2) throw new Error(`graphs: unknown path ${url.pathname}`);
+				if (action === "library") {
+					if (!guardMethod(req, res, "GET")) return;
+					const graph = await ctx.graphs.get(id);
+					const runtime = optionalService(ctx, "taskRuntime");
+					if (runtime === void 0) throw new Error("graphs: task library service is unavailable");
+					sendJson(res, 200, await runtime.libraryRead(graph.rootSessionId));
+					return;
+				}
 				if (action === "select" || action === "ready" || action === "delete") {
 					if (!guardMethod(req, res, "POST")) return;
 					if (action === "select") sendJson(res, 200, await ctx.graphs.select(id));

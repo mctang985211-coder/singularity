@@ -495,7 +495,7 @@ describe('TaskRuntime request keys (§6)', () => {
       h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, batchSpec([childSpec('task b')]), {
         requestKey: 'caller-key-2',
       }),
-    ).rejects.toThrow(/already has a proposal in flight/)
+    ).rejects.toThrow(/decomposition refused: an open decomposition proposal must be continued or cancelled/)
     expect(await h.runtime.proposalsForParent(STORE, taskId)).toHaveLength(1)
 
     // The derived key of the same caller for *different* content differs, which

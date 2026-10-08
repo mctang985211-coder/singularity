@@ -30,11 +30,9 @@ import { disposeRunStacks, skillText, startRunStack, writeGuidanceSkill, type Ru
  * `provider-promotion.spec.ts` takes); and the model loop, replaced by the agent
  * factory's `setup` the way the other binding specs do.
  *
- * Why the apply is pointed at `<home>/skills`: that directory is one of the roots
- * the worker's own discovery walks (`skillRootsFor`), which is where a deployment
- * keeps its shared skills — so "the new version is in production" and "the next
- * admission discovers it" are the same fact instead of two fixtures agreeing by
- * construction.
+ * Apply and later Run admission use this graph's own Skill root. A second Run
+ * replays the original checked Task in that graph, so the publication never
+ * depends on a host-wide directory or leaks into another graph.
  *
  * Everything asserted is read back from a durable surface: the store's own run
  * object and events, the bytes on disk, or the registration the worker's own skill
@@ -66,14 +64,15 @@ afterEach(async () => {
 })
 
 /** The evolution ledger of one test, pointed at the skill root discovery also reads. */
-function evolutionOf(h: RunStack): EvolutionService {
-  return new EvolutionService(h.ctx, {
+async function evolutionOf(h: RunStack): Promise<EvolutionService> {
+  const service = new EvolutionService(h.ctx, {
     root: join(h.workspace, 'evolution'),
-    skillRoot: join(h.home, 'skills'),
+    skillRoot: (await h.runtime.libraryForSession(ROOT_A)).skillRoot,
     // The same resolver the deployment wires: the model selection the experiment
     // freezes and the promotion gate re-reads from the runs' own requests.
     modelSelection: () => deploymentModelSelection(h.ctx),
   })
+  return service.forSession(ROOT_A)
 }
 
 function child(objective: string, requiredCapabilities: readonly string[]): DecomposeSpec['children'][number] {
@@ -100,11 +99,21 @@ async function runOne(h: RunStack, sessionId: SessionId = ROOT_A, capability = R
   return { storeId: root.storeId, taskId: outcomes[0]!.taskId, runId: outcomes[0]!.runId! }
 }
 
-/** The body the worker's own skill layer holds for one skill, as the registry serves it. */
-async function registeredSkill(h: RunStack, agent: Agent, name: string): Promise<{ content: string; path?: string }> {
-  const skill = await h.ctx.skills.get(name, { scope: agent, cwd: h.checkout })
-  if (skill === undefined) throw new Error(`the worker's skill layer holds no "${name}"`)
-  return skill as { content: string; path?: string }
+/** Start a later comparison Run in the same graph library, under the same frozen Task acceptance. */
+async function replayNextRun(h: RunStack, capability = ROW): Promise<{ storeId: string; taskId: string; runId: string }> {
+  const storeId = rootTaskStoreId(ROOT_A)
+  const snapshot = await h.task.snapshotIn(storeId)
+  const source = snapshot.tasks.find(task => task.parentTaskId !== undefined && task.status === 'verified' && task.requestedCapabilities.includes(capability))!
+  const next = await h.runtime.replayTask(storeId, source.taskId, { lineage: 'next-method-version' }, ROOT_A)
+  expect(next.status).toBe('verified')
+  return { storeId, taskId: next.taskId, runId: next.runId }
+}
+
+/** Read through the model's scoped loader, which resolves its isolated registry. */
+async function registeredSkill(h: RunStack, agent: Agent, name: string): Promise<{ content: string; resourceBase?: { path: string } }> {
+  const loader = h.ctx.tools.get('skill', agent)
+  if (loader === undefined) throw new Error('the worker has no skill loader')
+  return await loader.execute({ name }, exec(agent, 'read-bound-skill')) as { content: string; resourceBase?: { path: string } }
 }
 
 function gateAnswers(refs: string[]) {
@@ -129,7 +138,7 @@ function exec(agent: Agent, callId: string) {
  * mirrors a capability row into the running table.
  */
 async function applySkillVersion(h: RunStack, name: string, content: string, proposalId = 'p-skill-1'): Promise<string> {
-  const svc = evolutionOf(h)
+  const svc = await evolutionOf(h)
   await svc.propose({
     proposalId,
     targetType: 'skill',
@@ -175,7 +184,7 @@ describe('a new version in production and the runs that are already bound (S1-C)
   it('leaves the in-flight run on v1, binds v2 to a new run, and serves the old run from its own snapshot', async () => {
     const config: Record<string, CapabilityConfig> = { [ROW]: { skills: [SKILL], tools: ['filesystem'] } }
     const h = await startRunStack({ capabilities: config, roots: [ROOT_A, ROOT_B], tools: true })
-    await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V1)
+    await writeGuidanceSkill((await h.runtime.libraryForSession(ROOT_A)).skillRoot, SKILL, V1)
 
     const first = await runOne(h, ROOT_A)
     const firstRun = await h.task.runIn(first.storeId, first.runId)
@@ -184,13 +193,13 @@ describe('a new version in production and the runs that are already bound (S1-C)
     expect(firstBinding.skills[0]!.role).toBe('guidance')
     const firstWorker = h.agent(firstRun.sessionId as SessionId)!
     expect((await registeredSkill(h, firstWorker, SKILL)).content).toContain(V1)
-    expect((await registeredSkill(h, firstWorker, SKILL)).path!.startsWith(firstBinding.snapshotRoot!)).toBe(true)
+    expect((await registeredSkill(h, firstWorker, SKILL)).resourceBase!.path.startsWith(firstBinding.snapshotRoot!)).toBe(true)
     expect((await h.runtime.readRunBinding(firstBinding))?.defects).toEqual([])
 
     // The new version goes to production through the real apply, in the one skill
     // root discovery also reads.
     await applySkillVersion(h, SKILL, skillText(V2, SKILL))
-    expect(await readFile(join(h.home, 'skills', SKILL, 'SKILL.md'), 'utf8')).toBe(skillText(V2, SKILL))
+    expect(await readFile(join((await h.runtime.libraryForSession(ROOT_A)).skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(skillText(V2, SKILL))
 
     // The in-flight run keeps what it loaded: the record, the snapshot bytes and
     // the worker's own layer all still say v1.
@@ -202,7 +211,7 @@ describe('a new version in production and the runs that are already bound (S1-C)
 
     // A run admitted afterwards binds the new bytes: a version change is a new run,
     // never a hot swap of the old one.
-    const second = await runOne(h, ROOT_B)
+    const second = await replayNextRun(h)
     const secondBinding = (await h.task.runIn(second.storeId, second.runId)).providerBinding!
     expect(secondBinding.skills[0]!.contentDigest).not.toBe(firstBinding.skills[0]!.contentDigest)
     expect(secondBinding.snapshotRoot).not.toBe(firstBinding.snapshotRoot)
@@ -229,10 +238,10 @@ describe('a new version in production and the runs that are already bound (S1-C)
         // plan's "apply does not hot-swap an in-flight run" is about.
         await applySkillVersion(h, SKILL, skillText(V2, SKILL))
         heldWhileRunning = (await registeredSkill(h, agent, SKILL)).content
-        productionWhileRunning = await readFile(join(h.home, 'skills', SKILL, 'SKILL.md'), 'utf8')
+        productionWhileRunning = await readFile(join((await h.runtime.libraryForSession(ROOT_A)).skillRoot, SKILL, 'SKILL.md'), 'utf8')
       },
     })
-    await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V1)
+    await writeGuidanceSkill((await h.runtime.libraryForSession(ROOT_A)).skillRoot, SKILL, V1)
 
     const first = await runOne(h, ROOT_A)
     const firstRun = await h.task.runIn(first.storeId, first.runId)
@@ -253,7 +262,7 @@ describe('a new version in production and the runs that are already bound (S1-C)
     expect((await registeredSkill(h, worker, SKILL)).content).toContain(V1)
     // …while a run admitted after the apply loads v2, because that is what it was
     // admitted against.
-    const second = await runOne(h, ROOT_B)
+    const second = await replayNextRun(h)
     const secondBinding = (await h.task.runIn(second.storeId, second.runId)).providerBinding!
     expect(secondBinding.skills[0]!.contentDigest).not.toBe(binding.skills[0]!.contentDigest)
     expect((await registeredSkill(h, h.agent((await h.task.runIn(second.storeId, second.runId)).sessionId as SessionId)!, SKILL)).content).toContain(V2)
@@ -262,7 +271,7 @@ describe('a new version in production and the runs that are already bound (S1-C)
   it('refuses an old run whose snapshot was edited or removed by name, and never falls back to production', async () => {
     const config: Record<string, CapabilityConfig> = { [ROW]: { skills: [SKILL], tools: ['filesystem'] } }
     const h = await startRunStack({ capabilities: config, roots: [ROOT_A, ROOT_B], tools: true })
-    await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V1)
+    await writeGuidanceSkill((await h.runtime.libraryForSession(ROOT_A)).skillRoot, SKILL, V1)
 
     const first = await runOne(h, ROOT_A)
     const firstRun = await h.task.runIn(first.storeId, first.runId)
@@ -314,12 +323,12 @@ describe('a new version in production and the runs that are already bound (S1-C)
 
     // A run admitted now binds v2 — the deployment moved on, and that is exactly
     // what the old run must not be served instead of its own bytes.
-    const second = await runOne(h, ROOT_B)
+    const second = await replayNextRun(h)
     const secondBinding = (await h.task.runIn(second.storeId, second.runId)).providerBinding!
     expect(secondBinding.skills[0]!.contentDigest).not.toBe(binding.skills[0]!.contentDigest)
     expect((await h.runtime.readRunBinding(secondBinding))?.defects).toEqual([])
     // The refusal did not touch production either: v2 stands where the apply put it.
-    expect(await readFile(join(h.home, 'skills', SKILL, 'SKILL.md'), 'utf8')).toBe(skillText(V2, SKILL))
+    expect(await readFile(join((await h.runtime.libraryForSession(ROOT_A)).skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(skillText(V2, SKILL))
 
     // A live worker keeps what it loaded, whatever the snapshot's fate.
     expect((await registeredSkill(h, worker, SKILL)).content).toContain(V1)
@@ -328,6 +337,8 @@ describe('a new version in production and the runs that are already bound (S1-C)
   it('leaves the accepted task contract untouched when the capability row that carried it is replaced', async () => {
     const narrow: Record<string, CapabilityConfig> = { [ROW]: { skills: [SKILL], tools: ['filesystem'] } }
     const h = await startRunStack({ capabilities: narrow, roots: [ROOT_A, ROOT_B], tools: true })
+    await writeGuidanceSkill((await h.runtime.libraryForSession(ROOT_A)).skillRoot, SKILL, V1)
+    // This test exercises the legacy deployment-wide capability row API; its provider also lives in the host registry.
     await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V1)
     await writeFile(join(h.workspace, 'config.yml'), CONFIG_FIXTURE, 'utf8')
 
@@ -380,7 +391,7 @@ describe('a new version in production and the runs that are already bound (S1-C)
 
     // A new decomposition resolves against the new row — same skill, wider plane,
     // a different registry revision.
-    const second = await runOne(h, ROOT_B)
+    const second = await replayNextRun(h)
     const secondRun = await h.task.runIn(second.storeId, second.runId)
     const secondManifest = h.events(second.storeId)
       .find((event): event is Extract<TaskEvent, { kind: 'CapabilityResolved' }> => event.kind === 'CapabilityResolved' && event.taskId === second.taskId)!
@@ -393,7 +404,7 @@ describe('a new version in production and the runs that are already bound (S1-C)
   it('refuses to re-enter a run whose bound content is gone rather than adopt the version production holds now', async () => {
     const config: Record<string, CapabilityConfig> = { [ROW]: { skills: [SKILL], tools: ['filesystem'] } }
     const h = await startRunStack({ capabilities: config, roots: [ROOT_A], tools: true })
-    await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V1)
+    await writeGuidanceSkill((await h.runtime.libraryForSession(ROOT_A)).skillRoot, SKILL, V1)
     const storeId = rootTaskStoreId(ROOT_A)
     // The state a restart finds: one admitted root task with a run bound to this
     // session whose snapshot is not on disk any more.
@@ -444,7 +455,7 @@ describe('a new version in production and the runs that are already bound (S1-C)
 
     // Production moves on through the real apply: v2 stands at the skill root.
     await applySkillVersion(h, SKILL, skillText(V2, SKILL), 'p-skill-reentry')
-    expect(await readFile(join(h.home, 'skills', SKILL, 'SKILL.md'), 'utf8')).toBe(skillText(V2, SKILL))
+    expect(await readFile(join((await h.runtime.libraryForSession(ROOT_A)).skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(skillText(V2, SKILL))
 
     // Re-entry refuses, naming the skill and the path the record points at. The
     // entry is `adoptRoot` — the one that opens a store and binds the root it
@@ -458,7 +469,7 @@ describe('a new version in production and the runs that are already bound (S1-C)
     // appended, and production still holds v2 rather than being rewritten back.
     expect((await h.task.runIn(storeId, 'r-gone')).providerBinding).toEqual(recorded)
     expect(h.events(storeId)).toEqual(eventsBefore)
-    expect(await readFile(join(h.home, 'skills', SKILL, 'SKILL.md'), 'utf8')).toBe(skillText(V2, SKILL))
+    expect(await readFile(join((await h.runtime.libraryForSession(ROOT_A)).skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(skillText(V2, SKILL))
     expect(h.spawns).toHaveLength(0)
   })
 })

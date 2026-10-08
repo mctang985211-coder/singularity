@@ -1,3 +1,4 @@
+import { evolutionForSession } from './evolution-scope.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-approval'
@@ -30,11 +31,12 @@ export function defineEvolutionRollbackTool(ctx: Context) {
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
       const caller = sessionId(exec, 'evolution_rollback')
+      const evolution = await evolutionForSession(ctx, caller)
       const agent = exec.agent
       if (agent === undefined) throw new Error('evolution_rollback: missing agent')
       let proposal
       try {
-        proposal = await ctx.evolution.get(args.proposalId)
+        proposal = await evolution.get(args.proposalId)
       } catch (error) {
         return `evolution_rollback rejected: ${message(error)}`
       }
@@ -42,7 +44,7 @@ export function defineEvolutionRollbackTool(ctx: Context) {
       // the recorded intent already binds its grant and the content it was
       if (proposal.openIntent !== undefined) {
         try {
-          const recovered = await ctx.evolution.rollback(args.proposalId, caller, proposal.openIntent.approvalRef)
+          const recovered = await evolution.rollback(args.proposalId, caller, proposal.openIntent.approvalRef)
           return [
             `proposal ${recovered.proposal.proposalId} [rolledback] ${recovered.proposal.level} ${recovered.proposal.targetType} ${recovered.proposal.targetId} — ${recovered.proposal.targetType === 'capability' ? 'production baseline restored' : 'champion restored'}`,
             ...renderOpenIntentRecovery(proposal.openIntent, recovered.recovered),
@@ -58,7 +60,7 @@ export function defineEvolutionRollbackTool(ctx: Context) {
       if (proposal.status !== 'applied') {
         return `evolution_rollback rejected: proposal ${proposal.proposalId} is ${proposal.status}; only an applied proposal can be rolled back`
       }
-      const targets = applyTargets(proposal, ctx.evolution, 'rollback')
+      const targets = applyTargets(proposal, evolution, 'rollback')
       if (targets.length === 0 && proposal.targetType !== 'capability') {
         return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build restores a Task template, Skill or capability candidate, so there is no executor for this target type`
       }
@@ -88,7 +90,7 @@ export function defineEvolutionRollbackTool(ctx: Context) {
         return `evolution_rollback: nothing written — ${why}; proposal ${proposal.proposalId} stays applied`
       }
       try {
-        const rolledback = await ctx.evolution.rollback(args.proposalId, caller, `approval:${exec.callId}`)
+        const rolledback = await evolution.rollback(args.proposalId, caller, `approval:${exec.callId}`)
         return [
           `proposal ${rolledback.proposal.proposalId} [rolledback] ${rolledback.proposal.level} ${rolledback.proposal.targetType} ${rolledback.proposal.targetId} — ${rolledback.proposal.targetType === 'capability' ? 'production baseline restored' : 'champion restored'}`,
           'wrote production targets:',

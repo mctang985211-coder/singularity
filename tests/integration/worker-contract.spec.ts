@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createUserMessage } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
-import { RuntimeContextProjection, SystemPromptProjection } from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/lib/types/runtime-context.js'
-import { joinContextSections, renderContextSections } from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
+import { SystemPromptProjection } from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/lib/types/runtime-context.js'
+import { renderContextSections } from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
 import { bindScopeParent, createScope } from '../../../../thirdparty/deepseek-harness/packages/core/scope/lib/index.js'
 import { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -98,8 +98,8 @@ describe('the assembled request a worker receives', () => {
     // The stable role policy is the agent runtime's section, ahead of the contract,
     // and it is not a second copy of it.
     expect(prompt).toContain('You are a Singularity task worker.')
-    expect(prompt).toContain('Follow them for the delegated work. Own your result and its acceptance')
-    expect(prompt).toContain('### Skill task-execution')
+    expect(prompt).toContain('Own the complete result and acceptance of this execution.')
+    expect(prompt).toContain('### Skill task-coordination')
     expect(prompt).toContain('the complete instructions from this Run’s frozen Skill snapshot')
     expect(prompt.indexOf('You are a Singularity task worker.')).toBeLessThan(prompt.indexOf('# Immutable context (contract)'))
     // The stable policy names no raw cross-session reader (A2): history is read
@@ -118,19 +118,20 @@ describe('the assembled request a worker receives', () => {
     expect(rootPrompt).toContain('## Your contract (graph root)')
     expect(rootPrompt).toContain('objective: ship the release')
     expect(rootPrompt).toContain('coordinate the user\'s complete objective through task workers')
-    expect(rootPrompt).toContain('Before intake, load task-coordination with skill and follow its method')
-    expect(rootPrompt).toContain('Every business Task, including your root contract, must select at least one relevant guidance Skill')
+    expect(rootPrompt).toContain('Before intake, load task-coordination with skill and read task_library, capability_list and relevant task_template_list entries.')
+    expect(rootPrompt).toContain("Declare each Task's execution capabilities and relevant guidance through requiredCapabilities")
     expect(rootPrompt).not.toContain('role: worker')
     expect(rootPrompt).not.toContain('You are a Singularity task worker.')
   })
 
-  it('denies root-local execution tools while workers keep their granted tools', async () => {
+  it('denies root-local delegation tools while workers keep their granted tools', async () => {
     const stack = await boot()
     const root = stack.root()
     const invoked = vi.fn(async () => 'fixture result')
-    for (const name of ['subagent', 'subagent_fork', 'read', 'grep', 'write', 'edit', 'bash']) {
-      // Preset-generated definitions can live on the agent's own plane, where
-      // tools.restrict does not apply. The execution guard must still deny them.
+    // Preset-generated definitions can live on the agent's own plane, where
+    // tools.restrict does not apply. The execution guard decides them by the
+    // root's own allow-list, which names no native delegation tree.
+    for (const name of ['subagent', 'subagent_fork']) {
       root.ctx.tools.register({
         name,
         description: 'agent-owned fixture',
@@ -141,9 +142,23 @@ describe('the assembled request a worker receives', () => {
       expect(stack.ctx.tools.get(name, root), name).toBeDefined()
       const answer = await stack.call(root.id, name)
       expect(answer.isError, name).toBe(true)
-      expect(answer.text, name).toContain('delegate engineering work with task_decompose')
+      expect(answer.text, name).toContain('singularity: use the root execution tools and task_decompose for delegated task work')
     }
     expect(invoked).not.toHaveBeenCalled()
+    // The root's own allow-list does name the local execution tools, so an
+    // own-plane definition of one of those answers: the guard reads the
+    // allow-list, not where the definition was registered.
+    for (const name of ['read', 'grep', 'write', 'edit', 'bash']) {
+      root.ctx.tools.register({
+        name,
+        description: 'agent-owned fixture',
+        parameters: { type: 'object', properties: {} },
+        output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value as string }] },
+        execute: invoked,
+      })
+      expect((await stack.call(root.id, name)).isError, name).toBe(false)
+    }
+    expect(invoked).toHaveBeenCalledTimes(5)
     const { workerSession } = await chain(stack)
     expect((await stack.call(workerSession, 'read')).isError).toBe(false)
     expect((await stack.call(workerSession, 'bash')).isError).toBe(false)
@@ -315,28 +330,35 @@ describe('what the projection does with the assembled contract, step after step'
     expect(projection.project(rendered, NEW_SERIES)).toEqual([])
   })
 
-  it('commits the dynamic context snapshot once, then commits nothing while it is unchanged', async () => {
-    // The dynamic half rides DSH's runtime-context plane (A2 §D): this drives
-    // the loop's own RuntimeContextProjection the way agent.ts does — project
-    // the assembled contexts, commit the candidate, project again — so the
-    // dedup that keeps repeated assemblies from stacking snapshots is the real
-    // one, not a re-assertion of this package's byte-stability.
+  it('carries the dynamic state as one literal section and commits it once, then commits nothing', async () => {
+    // A2 §D, as the deployment now implements it: the dynamic half is a literal
+    // section of the assembled prompt (`context/src/assembly.ts`, which posts task
+    // facts into the sections because Harness interpolates its runtime-context
+    // plane), so nothing of this deployment's rides that plane and no runtime
+    // snapshot can stack a second copy. What keeps repeated assemblies from
+    // duplicating the state is the loop's own SystemPromptProjection on node 0,
+    // driven here the way agent.ts drives it.
     const stack = await boot()
     const { workerSession } = await chain(stack)
     const assembly = await stack.assemble(workerSession)
-    const sections = renderContextSections(assembly)
-    expect(sections.map(section => section.name)).toContain('singularity:state')
-    const current = joinContextSections(sections)
+    const state = assembly.sections.find(section => section.name === 'singularity:state')
+    expect(state?.text).toContain('role: worker')
+    expect(state?.text).toContain('gate phase:')
+    expect(state?.interpolate).toBe(false)
+    // The runtime-context plane holds nothing of this deployment's: there is no
+    // second copy for a runtime-context snapshot to carry.
+    expect(renderContextSections(assembly)).toEqual([])
 
+    const rendered = await stack.prompt(workerSession)
     const session = stack.ctx.sessions.create(SessionId('s-worker'))
-    const projection = new RuntimeContextProjection(stack.ctx, session)
-    const first = projection.project(current, sections)
-    expect(first).toBeDefined()
-    await session.append('user/message', first!, { surfaceOp: 'append' })
-    expect(session.deriveMessages()).toHaveLength(1)
+    const projection = new SystemPromptProjection(session)
+    const first = projection.project(rendered, REPLACING)
+    expect(first).toHaveLength(1)
+    commit(session, first[0])
+    expect(textOf(session, 0)).toContain('gate phase:')
 
-    // Step after step with an unchanged projection: no candidate, no write.
-    expect(projection.project(current, sections)).toBeUndefined()
-    expect(session.deriveMessages()).toHaveLength(1)
+    // Step after step with an unchanged assembly: no candidate, no write.
+    expect(projection.project(rendered, REPLACING)).toEqual([])
+    expect(session.surface.nodes).toHaveLength(1)
   })
 })

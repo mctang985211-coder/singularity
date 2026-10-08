@@ -1176,8 +1176,10 @@ describe('skill promotion gate: apply re-checks the evidence before it writes (E
 
   it('refuses an apply whose production baseline moved after the decision, writing nothing', async () => {
     const f = await decided()
-    await writeFile(join(f.skillRoot, SKILL, 'SKILL.md'), '# production moved\n')
-    expect(await refusal(f.svc.apply(PROPOSAL, 'root-1', 'approval:apply'))).toContain('changed since prepare')
+    await writeFile(join(f.skillRoot, SKILL, 'SKILL.md'), skillText('# production moved'))
+    expect(await refusal(f.svc.apply(PROPOSAL, 'root-1', 'approval:apply'))).toContain(
+      'no longer matches its frozen content identity',
+    )
     expect(await f.ledgerKinds()).not.toContain('applied')
   })
 
@@ -1683,8 +1685,10 @@ describe("skill promotion gate: the improved skill's complete object (K3)", () =
       '{"contractVersion":1,"type":"execution"}\n',
     )
     const message = await refusal(f.svc.checkPromotion(PROPOSAL))
-    expect(message).toContain('no longer matches the content identity recorded at prepare')
-    expect(message).toContain(SKILL_SIDECAR_FILE)
+    // The rewritten sidecar is not a valid declaration, so the whole-object load
+    // refuses the sandbox directory by name.
+    expect(message).toContain('is not loadable')
+    expect(message).toContain('sidecar.')
     expect(await f.ledgerKinds()).not.toContain('decided')
   })
 

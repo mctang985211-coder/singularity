@@ -76,6 +76,7 @@ export interface ModelsResponse {
 /** A graph-level RSI run: the round objective, how many rounds to iterate, and whether a human gates each round. */
 export interface RsiConfig {
   readonly task: string
+  readonly metrics?: readonly string[]
   readonly iterationRounds: number
   readonly humanReview: boolean
 }
@@ -116,12 +117,18 @@ export interface GraphEnv {
   readonly sessionCount?: number
   readonly available: boolean
   readonly bound?: boolean
+  readonly assets?: {
+    readonly skills: { readonly exists: boolean; readonly count: number; readonly error?: string }
+    readonly taskTemplates: { readonly exists: boolean; readonly count: number; readonly error?: string }
+  }
 }
 
 export interface CreateGraphBody {
   readonly name?: string
   readonly envId?: string
   readonly createEnv?: true
+  /** Always allocate a new environment rather than reuse one with matching repositories. */
+  readonly fresh?: boolean
   readonly repos?: readonly string[]
   readonly model?: ModelRef
   readonly rsi?: RsiConfig

@@ -17,6 +17,8 @@ export interface GraphPinsUpdate {
 export interface RsiConfig {
   /** Objective text recorded for launch/UI; changing it never rewrites an existing frozen root task. */
   readonly task: string
+  /** Natural-language outcome and resource measures the agent investigates and makes concrete. */
+  readonly metrics?: readonly string[]
   /** Total improvement iterations the graph should run (integer >= 1). */
   readonly iterationRounds: number
   /** true: HITL approval gates queue for a human; false: the platform auto-resolves them. */
@@ -73,6 +75,9 @@ export type GraphsEvent =
   | { readonly kind: 'graph/rsi-progress'; readonly id: string; readonly progress: RsiProgress }
   | { readonly kind: 'graph/remove'; readonly id: string; readonly archive: GraphArchive }
 
+/** Launch needs only a goal; iteration controls have platform defaults. */
+export type RsiLaunch = Pick<RsiConfig, 'task' | 'metrics'> & Partial<Pick<RsiConfig, 'iterationRounds' | 'humanReview'>>
+
 export interface CreateGraphRequest {
   readonly name?: string
   readonly createEnv?: true
@@ -86,7 +91,7 @@ export interface CreateGraphRequest {
   /** Model pinned for the new graph; absent follows the deployment default selection. */
   readonly model?: GraphModel
   /** RSI settings to stamp on the new graph; absent leaves it without an improvement loop. */
-  readonly rsi?: RsiConfig
+  readonly rsi?: RsiLaunch
 }
 
 export interface CreateGraphResult {

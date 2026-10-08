@@ -143,7 +143,10 @@ describe('the ledger is formatVersion 4 and nothing else', () => {
     const root = await mkdtemp(join(tmpdir(), 'evolution-version-'))
     const svc = new EvolutionService(fixtureCtx(), { root })
     await svc.propose(proposal, 'root-1')
-    await svc.candidate('p1', { skill: 'v2' }, 'root-1', { name: 'verify', content: 'candidate bytes' })
+    await svc.candidate('p1', { skill: 'v2' }, 'root-1', {
+      name: 'verify',
+      content: '---\nname: verify\ndescription: the fixture candidate\n---\n\ncandidate bytes',
+    })
 
     const records = (await readFile(join(root, 'proposals.jsonl'), 'utf8'))
       .trim()

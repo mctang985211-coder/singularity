@@ -80,6 +80,7 @@ export interface ExperimentView {
 
 /** The ledger as this module uses it: the proposal it evaluates, the candidate's files, the experiment views and the ledger root. */
 export interface ExperimentLedger {
+  readonly libraryId?: string
   /** Absolute ledger directory; the sandbox, the workspaces and the report live under it. */
   readonly root: string
   get(proposalId: string): Promise<EvolutionProposal>
@@ -394,6 +395,26 @@ export async function frozenProviderIdentity(input: {
   }
 }
 
+/** A first guidance Skill is measured on the same Task and capability rows:
+ * the candidate side adds the guidance to a row already granted by that Task.
+ * No new tool, preset, verifier or acceptance field is introduced. */
+export function firstSkillOverlay(
+  sources: ExperimentSources,
+  candidate: SkillContentIdentity,
+  sandbox: string,
+  required: readonly string[],
+): { capabilityOverrides: Record<string, CapabilityConfig>; extraSkillRoots: string[] } {
+  const table = sources.taskRuntime.listCapabilities?.()
+  const carrier = [...new Set(required)].sort().find(name => table?.[name] !== undefined)
+  if (carrier === undefined || table === undefined)
+    throw new Error('experiment: a first Skill needs a Task granting a capability such as execute-task so its guidance can enter both-side Run binding')
+  const row = table[carrier]!
+  return {
+    capabilityOverrides: { [carrier]: { ...row, skills: [...new Set([...(row.skills ?? []), candidate.name])] } },
+    extraSkillRoots: [resolve(sources.evolution.root, sandbox, 'skills')],
+  }
+}
+
 /** One frozen side identity built from one pre-check's verdicts, refusing a deployment whose providers are unusable or whose roles are unknown. */
 export function frozenCapabilitySideOf(input: {
   precheck: ProviderPrecheckView
@@ -637,6 +658,7 @@ export function frozenIdentityOf(identity: SkillContentIdentity): SkillContentId
 /** Build the frozen identity block (§F.2), then check it against the schema the report reader uses. */
 export function freezeExperiment(input: {
   proposalId: string
+  libraryId?: string
   spec: ExperimentSpec
   candidate?: SkillContentIdentity
   productionBaseline?: SkillContentIdentity
@@ -651,6 +673,7 @@ export function freezeExperiment(input: {
   const taskDefinition = input.taskDefinition
   const frozen: FrozenExperiment = {
     proposalId: input.proposalId,
+    ...(input.libraryId === undefined ? {} : { libraryId: input.libraryId }),
     ...(input.spec.objective === undefined ? {} : { objective: input.spec.objective }),
     ...(input.spec.evaluation === undefined ? {} : { evaluation: structuredClone(input.spec.evaluation) }),
     repetition: input.spec.repetition,
@@ -689,7 +712,7 @@ export function freezeExperiment(input: {
     },
     budget: { ...input.spec.budget },
     samples: input.samples,
-    snapshot: { sourceDir: resolve(input.spec.snapshot.sourceDir), digest: input.snapshotDigest },
+    snapshot: { ...normalizeSnapshot(input.spec.snapshot), digest: input.snapshotDigest },
     comparerVersion: EXPERIMENT_COMPARER_VERSION,
     overlay: {
       baseline: taskDefinition === undefined ? 'none — the baseline runs under the production configuration' : 'session template library: frozen baseline',
@@ -745,3 +768,4 @@ export async function freezeCriterionRepair(definition: FrozenTaskDefinition, pr
   definition.criterionRepair = examples
   definition.guardVerifierVersions = guardVerifierVersions
 }
+import { normalizeSnapshot } from '../replay/snapshot.ts'

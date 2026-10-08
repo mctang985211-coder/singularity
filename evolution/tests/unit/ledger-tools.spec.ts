@@ -59,11 +59,11 @@ describe('EvolutionService ledger', () => {
     ])
   })
 
-  it('rejects state-machine skips: gate on proposed, decide on candidate, candidate twice', async () => {
+  it('rejects state-machine skips: gate on proposed, promote before gate, candidate twice', async () => {
     const { svc } = await serviceWithRoots()
     await svc.propose(skillProposal, 'root-1')
     await expect(svc.gate('s1', gateAnswers(['/x']), 'root-1')).rejects.toThrow('cannot record "gated"')
-    await expect(svc.decide('s1', 'REJECT', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "decided"')
+    await expect(svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "decided"')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
     await expect(
       svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') }),
@@ -73,6 +73,39 @@ describe('EvolutionService ledger', () => {
     await expect(svc.gate('s1', gateAnswers(['/x']), 'root-1')).rejects.toThrow(
       /cannot record "gated".*evolution_prepare/,
     )
+  })
+
+  it.each(
+    (['REJECT', 'KEEP_FOR_FURTHER_RESEARCH'] as const).flatMap(decision =>
+      (['proposed', 'candidate', 'prepared'] as const).map(stage => ({ decision, stage })),
+    ),
+  )('settles $stage with $decision and a reason without an experiment or production write', async ({ decision, stage }) => {
+    const { svc, skillRoot } = await serviceWithProduction()
+    const skillPath = join(skillRoot, 'verify', 'SKILL.md')
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(skillPath, PRODUCTION_V1)
+    await svc.propose(skillProposal, 'root-1')
+    if (stage !== 'proposed')
+      await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: PRODUCTION_V1 })
+    if (stage === 'prepared') await svc.prepare('s1', 'root-1')
+
+    for (const note of [undefined, ' ', ''])
+      await expect(svc.decide('s1', decision, 'root-1', 'approval:call-1', note)).rejects.toThrow('requires a reason in note')
+    await expect(svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-1', 'same bytes')).rejects.toThrow('cannot record "decided"')
+    await expect(svc.decide('s1', decision, 'root-1', '', 'same bytes')).rejects.toThrow('approvalRef')
+    expect((await svc.get('s1')).status).toBe(stage)
+
+    const note = 'Candidate matches the available Skill; retain the existing experience and explore a new task.'
+    const settled = await svc.decide('s1', decision, 'root-1', 'approval:call-1', note)
+    expect(settled).toMatchObject({ status: 'decided', decision, decisionNote: note, decisionApprovalRef: 'approval:call-1' })
+    expect(settled.gate).toBeUndefined()
+    expect(await svc.experiments('s1')).toEqual([])
+    const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root: svc.root, skillRoot })
+    expect(await reopened.get('s1')).toEqual(settled)
+    await expect(reopened.apply('s1', 'root-1', 'approval:apply')).rejects.toThrow('cannot record "applied"')
+    await expect(reopened.prepare('s1', 'root-1')).rejects.toThrow('cannot record "prepared"')
+    await expect(reopened.decide('s1', 'PROMOTE', 'root-1', 'approval:again')).rejects.toThrow('cannot record "decided"')
+    expect(await readFile(skillPath, 'utf8')).toBe(PRODUCTION_V1)
   })
 
   it('rejects moves on an unknown proposal id', async () => {
@@ -502,16 +535,63 @@ describe('evolution tools', () => {
     },
   )
 
-  it('evolution_decide refuses a proposal that is not gated, without asking the human', async () => {
+  it('evolution_decide refuses an ungated PROMOTE before asking for approval', async () => {
     const svc = await service()
     const { ctx, approval } = toolCtx(svc)
     await defineEvolutionProposeTool(ctx).execute({ ...proposal }, exec('root-1'))
     const result = (await defineEvolutionDecideTool(ctx).execute(
-      { proposalId: 'p1', decision: 'REJECT' },
+      { proposalId: 'p1', decision: 'PROMOTE' },
       exec('root-1'),
     )) as string
     expect(approval.request).not.toHaveBeenCalled()
-    expect(result).toContain('is proposed; only a gated proposal can be decided')
+    expect(result).toContain('is proposed; cannot record "decided"')
+  })
+
+  it.each(['REJECT', 'KEEP_FOR_FURTHER_RESEARCH'] as const)(
+    'evolution_decide settles an open proposal with %s through the native approval seam',
+    async decision => {
+      const svc = await service()
+      await svc.propose(proposal, 'root-1')
+      const { ctx, approval } = toolCtx(svc)
+      const tool = defineEvolutionDecideTool(ctx)
+      const missingReason = await tool.execute({ proposalId: 'p1', decision }, exec('root-1'))
+      expect(missingReason).toContain('requires a reason in note')
+      expect(approval.request).not.toHaveBeenCalled()
+      const note = 'Current evidence supports keeping the existing method and exploring a different candidate.'
+      const result = await tool.execute({ proposalId: 'p1', decision, note }, exec('root-1'))
+      expect(approval.request).toHaveBeenCalledOnce()
+      expect(approval.request.mock.calls[0]![0].reason).toContain(`proposed decision: ${decision} — ${note}`)
+      expect(result).toContain(`[decided] ${decision}`)
+      expect(await svc.get('p1')).toMatchObject({ status: 'decided', decision, decisionApprovalRef: 'approval:call-1' })
+    },
+  )
+
+  it.each(['rejected', 'cancelled', 'unavailable'])(
+    'keeps an open proposal unchanged when early settlement approval is %s',
+    async outcome => {
+      const svc = await service()
+      await svc.propose(proposal, 'root-1')
+      const { ctx, approval } = toolCtx(svc, outcome)
+      const result = await defineEvolutionDecideTool(ctx).execute(
+        { proposalId: 'p1', decision: 'REJECT', note: 'Candidate has no useful delta.' }, exec('root-1'),
+      )
+      expect(approval.request).toHaveBeenCalledOnce()
+      expect(result).toContain('no decision recorded')
+      expect((await svc.get('p1')).status).toBe('proposed')
+      expect((await svc.get('p1')).history).toHaveLength(1)
+    },
+  )
+
+  it('refuses a forged early decline without a reason when reopening the ledger', async () => {
+    const svc = await service()
+    await svc.propose(proposal, 'root-1')
+    const forged = {
+      formatVersion: 4, kind: 'decided', proposalId: 'p1', decision: 'REJECT',
+      actor: 'root-1', at: 'now', approvalRef: 'approval:call-1',
+    }
+    await writeFile(join(svc.root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
+    const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root: svc.root })
+    await expect(reopened.list()).rejects.toThrow('requires a reason in note')
   })
 
   it('evolution_list filters and renders derived history', async () => {

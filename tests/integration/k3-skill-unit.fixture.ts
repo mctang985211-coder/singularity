@@ -62,6 +62,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { AcceptanceCriterion, RunProviderBinding } from '../../task/src/index.ts'
 import { SKILL_SIDECAR_FILE, serializeSkillSidecar, skillContractDigest } from '../../task-runtime/src/index.ts'
 import type { CapabilityConfig, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
+import { graphLibrary } from '../../task-runtime/src/index.ts'
 import { EvolutionService, buildExperimentReport } from '../../evolution/src/index.ts'
 import type { CommitDirection, ExperimentReport, SkillContentIdentity } from '../../evolution/src/index.ts'
 import type { CommitStage } from '../../evolution/src/commit.ts'
@@ -149,6 +150,8 @@ export async function boot(
     /** Keep the scripted worker off (a case that never runs a worker). */
     quiet?: boolean
     commitProbe?: (stage: CommitStage, target?: string) => void
+    /** The graph root the named root sessions belong to (see {@link RunStackOptions.graphRootFor}). */
+    graphRootFor?: (sessionId: string) => string | undefined
   } = {},
 ): Promise<UnitStack> {
   const roots = options.roots ?? [ROOT_A, ROOT_B, ROOT_C]
@@ -156,6 +159,7 @@ export async function boot(
   h = await startRunStack({
     ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
     roots: [...roots],
+    ...(options.graphRootFor === undefined ? {} : { graphRootFor: options.graphRootFor }),
     capabilities: { ...(options.capabilities ?? TABLE) },
     tools: true,
     evolution: true,
@@ -163,14 +167,34 @@ export async function boot(
       ? {}
       : { worker: (sessionId: SessionId, agent: Agent) => unitWorker(h, sessionId, agent) }),
   })
-  const svc = new EvolutionService(h.ctx, {
-    root: ledgerRoot(h),
-    skillRoot: join(h.home, 'skills'),
+  // The deployment's own construction: one process-wide service whose ledger and
+  // skill root are the *graph library's* own, resolved per caller session. Every
+  // entry (the tools included) reaches the same scoped instance, so what a case
+  // reads back is what the entries wrote. The library is named here as well
+  // because the service registers itself on this context (`ctx.evolution`) and the
+  // runtime's recovery barrier reconciles *that* instance before it adopts a store:
+  // a base left on the default `$DSH_HOME/evolution` would make the barrier read an
+  // empty ledger beside the graph's own.
+  const lib = library(h, roots[0]!)
+  const base = new EvolutionService(h.ctx, {
+    root: join(lib.root, 'evolution'),
+    skillRoot: lib.skillRoot,
+    taskTemplatesRoot: lib.taskTemplatesRoot,
+    libraryId: lib.id,
     // The deployment's own selection: the experiment freezes it and the promotion
     // gate re-reads the runs' own requests against it.
     modelSelection: () => deploymentModelSelection(h.ctx),
     ...(options.commitProbe === undefined ? {} : { commitProbe: options.commitProbe }),
   })
+  // The process image's own recovery, before the graph's plane is opened: a boot
+  // settles the graph ledger the way `SingularityAgent[Service.init]` does, so the
+  // instance the runtime's barrier reconciles is never one whose snapshot a later
+  // settlement has already overtaken. A second reconciler over a ledger its own fold
+  // still reads as open records the completion it owed *again*, and the fold refuses
+  // a completion that follows one (`applied` admits only `rolledback`) — the ledger
+  // would stop folding while on disk it looked settled.
+  await base.reconcile()
+  const svc = await base.forSession(roots[0]!)
   if (options.tools !== false) {
     for (const root of roots) {
       const scope = h.rootAgent(root).ctx
@@ -330,13 +354,21 @@ export async function writeSkillObject(
  * file a live worker would have read — not a fixture flag about which side it is.
  * The file is read rather than the layer's body text, because the digest of these
  * bytes is what a run binding's record has to agree with.
+ *
+ * The layer is the worker's own `skill` loader: a worker's granted skills live in
+ * the registry its composition isolated, which only the agent-scoped tool resolves.
  */
 export async function loadedSkillFile(h: RunStack, agent: Agent, name = SKILL): Promise<string> {
-  const skill = await h.ctx.skills.get(name, { scope: agent, cwd: h.checkout })
-  if (skill === undefined) throw new Error(`the worker's skill layer holds no "${name}"`)
-  const path = (skill as { path?: string }).path
-  if (path === undefined) throw new Error(`the worker's skill layer resolved no file for "${name}"`)
-  return readFile(path, 'utf8')
+  const loader = h.ctx.tools.get('skill', agent)
+  if (loader === undefined) throw new Error('the worker has no skill loader')
+  const loaded = (await loader.execute({ name }, {
+    agent,
+    callId: `read-loaded-skill:${name}`,
+    signal: new AbortController().signal,
+  } as never)) as { resourceBase?: { path?: string } }
+  const path = loaded.resourceBase?.path
+  if (path === undefined) throw new Error(`the worker's skill layer resolved no directory for "${name}"`)
+  return readFile(join(path, 'SKILL.md'), 'utf8')
 }
 
 /**
@@ -372,22 +404,32 @@ export async function unitWorker(h: RunStack, sessionId: SessionId, agent: Agent
  * Durable surfaces
  * ------------------------------------------------------------------------- */
 
-/** The evolution ledger's directory inside one workspace (both boots resolve the same path). */
+/** The graph library one root session owns — the derivation the runtime and the evolution plane both resolve. */
+export function library(h: RunStack, root: SessionId = ROOT_A): ReturnType<typeof graphLibrary> {
+  return graphLibrary(root, h.home)
+}
+
+/** The library's own skill root: where this graph's production skills are installed and written. */
+export function skillRoot(h: RunStack, root: SessionId = ROOT_A): string {
+  return library(h, root).skillRoot
+}
+
+/** The evolution ledger's directory inside one root session's library (both boots resolve the same path). */
 export function ledgerRoot(h: RunStack): string {
-  return join(h.workspace, 'evolution')
+  return join(library(h).root, 'evolution')
 }
 
 /** One skill's production `SKILL.md`, and the declaration beside it when the object has one. */
 export function productionSkill(h: RunStack, name: string = SKILL): string {
-  return join(h.home, 'skills', name, 'SKILL.md')
+  return join(skillRoot(h), name, 'SKILL.md')
 }
 
 export function productionSidecar(h: RunStack, name: string = SKILL): string {
-  return join(h.home, 'skills', name, SKILL_SIDECAR_FILE)
+  return join(skillRoot(h), name, SKILL_SIDECAR_FILE)
 }
 
 export function productionDirectory(h: RunStack, name: string = SKILL): string {
-  return join(h.home, 'skills', name)
+  return join(skillRoot(h), name)
 }
 
 /** The ledger's own lines, read from the file — never from a service's memory. */
@@ -957,7 +999,7 @@ export async function decidedWorld(directory: string): Promise<DecidedWorld> {
   const probe = windowProbe()
   const s = await boot({ workspace: directory, commitProbe: probe.probe })
   const h = s.h
-  const production = await writeSkillObject(join(h.home, 'skills'), {
+  const production = await writeSkillObject(skillRoot(h), {
     body: skillBody(SKILL, ['keep.txt', 'holdout.txt']),
     sidecar: 'execution',
   })

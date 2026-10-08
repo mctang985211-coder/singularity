@@ -6,8 +6,9 @@ import { spawn } from "node:child_process";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
+import { fileURLToPath } from "node:url";
+import { createHash, randomUUID } from "node:crypto";
 import { answerMessageText, findSkillFileIn, parseSkillFile, parseSkillFile as parseSkillFile$1, questionMessageText, skillRootsFor, toolCallRefIn } from "@dangosys/dsh-singularity-agent-runtime";
-import { randomUUID } from "node:crypto";
 import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
 
 //#region src/mcp-servers.ts
@@ -1067,7 +1068,7 @@ async function registerTaskTemplate(root, input) {
 	return ref;
 }
 /** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery. */
-async function findTaskTemplates(root, query, scope) {
+async function findTaskTemplates(root, query, scope, includeRetired = false) {
 	if (root === void 0) return [];
 	let files;
 	try {
@@ -1076,10 +1077,18 @@ async function findTaskTemplates(root, query, scope) {
 		if (error.code === "ENOENT") return [];
 		throw error;
 	}
+	const retired = /* @__PURE__ */ new Set();
+	if (!includeRetired) try {
+		const index = JSON.parse(await readFile(join(dirname(root), "index.json"), "utf8"));
+		for (const item of index.tasks ?? []) if (item.status === "retired") retired.add(`${item.templateRef.id}@${item.templateRef.version}`);
+	} catch (error) {
+		if (error.code !== "ENOENT") throw error;
+	}
 	const newest = /* @__PURE__ */ new Map();
 	for (const file of files.filter((file$1) => file$1.endsWith(".json")).sort()) {
 		const template = parseTaskTemplate(JSON.parse(await readFile(join(root, file), "utf8")));
 		if (file !== `${template.id}@${template.version}.json`) throw new Error(`task-template: ${file} must be named ${template.id}@${template.version}.json`);
+		if (retired.has(`${template.id}@${template.version}`)) continue;
 		const previous = newest.get(template.id);
 		if (previous === void 0 || previous.template.version < template.version) newest.set(template.id, {
 			template,
@@ -1122,7 +1131,7 @@ async function bindTaskTemplate(root, spec, scope) {
 /** The same exact reference, parameter and visibility checks bind contracts and direct-child proposals. */
 async function readBinding(root, spec, scope) {
 	const ref = spec.templateRef;
-	const template = await readReferencedTemplate(root, ref, scope);
+	const template = await readReferencedTemplate(root, ref, scope, true);
 	for (const field of [
 		"objective",
 		"acceptanceCriteria",
@@ -1161,13 +1170,18 @@ async function readBinding(root, spec, scope) {
 	};
 }
 /** Exact lookup and binding share reference, content and caller-authority checks. */
-async function readReferencedTemplate(root, ref, scope) {
+async function readReferencedTemplate(root, ref, scope, forBinding = false) {
 	if (root === void 0) throw new Error("task-template: taskTemplatesRoot is not configured");
 	if (!isPlainObject(ref) || !validId(ref.id) || !Number.isSafeInteger(ref.version) || ref.version < 1 || typeof ref.digest !== "string" || !/^[a-f0-9]{64}$/.test(ref.digest) || Object.keys(ref).some((key) => ![
 		"id",
 		"version",
 		"digest"
 	].includes(key))) throw new Error("task-template: templateRef requires id, positive version and SHA-256 digest");
+	if (forBinding) try {
+		if ((JSON.parse(await readFile(join(dirname(root), "index.json"), "utf8")).tasks ?? []).some((item) => item.templateRef.id === ref.id && item.templateRef.version === ref.version && item.status === "retired")) throw new Error("task-template: this version is retired; choose a current reusable template or author the next contract");
+	} catch (error) {
+		if (error.code !== "ENOENT") throw error;
+	}
 	const template = parseTaskTemplate(JSON.parse(await readFile(join(root, `${ref.id}@${ref.version}.json`), "utf8")));
 	if (!templateVisible(template.catalogPath, scope)) throw new Error("task-template: templateRef is outside the caller templateScope");
 	if (template.id !== ref.id || template.version !== ref.version || taskTemplateDigest(template) !== ref.digest) throw new Error(`task-template: ${ref.id}@${ref.version} content does not match its pinned reference`);
@@ -1219,7 +1233,7 @@ async function taskTemplatePage(root, request = {}, scope) {
 		categories.set(key, entry);
 	}
 	const catalog = [...categories.values()].sort((a, b) => a.catalogPath.join("/").localeCompare(b.catalogPath.join("/")));
-	const summaries = scope === void 0 && path === void 0 ? [] : filtered.map(({ templateRef, template }) => ({
+	const summaries = filtered.map(({ templateRef, template }) => ({
 		templateRef,
 		catalogPath: template.catalogPath,
 		appliesTo: template.appliesTo.slice(0, 3).map((text$1) => text$1.slice(0, 300)),
@@ -1248,6 +1262,29 @@ async function taskTemplatePage(root, request = {}, scope) {
 		page.entries.pop();
 	}
 	return page;
+}
+/** Freeze the complete catalog for a replay; immutable older refs in recipes remain available. */
+async function snapshotTaskTemplates(root, target) {
+	await mkdir(target, { recursive: true });
+	if (root === void 0) return;
+	let files;
+	try {
+		files = await readdir(root);
+	} catch (error) {
+		if (error.code === "ENOENT") return;
+		throw error;
+	}
+	for (const file of files.filter((file$1) => file$1.endsWith(".json"))) {
+		const template = parseTaskTemplate(JSON.parse(await readFile(join(root, file), "utf8")));
+		if (file !== `${template.id}@${template.version}.json`) throw new Error(`task-template: invalid file ${file}`);
+		await registerTaskTemplate(target, template);
+	}
+	try {
+		const index = await readFile(join(dirname(root), "index.json"), "utf8");
+		await writeFile(join(dirname(target), "index.json"), index, { flag: "wx" });
+	} catch (error) {
+		if (!["ENOENT", "EEXIST"].includes(error.code ?? "")) throw error;
+	}
 }
 
 //#endregion
@@ -1331,6 +1368,7 @@ const WORKER_BASELINE_TOOLS = [
 	"task_verify",
 	"capability_list",
 	"task_template_list",
+	"task_library",
 	"task_proposal_read",
 	"task_proposal_continue",
 	"task_proposal_cancel",
@@ -1427,6 +1465,208 @@ function resolvePermission(manifest, resolveSpec) {
 		name,
 		rank: rank(name)
 	})).reduce((strictest, item) => item.rank[0] > strictest.rank[0] || item.rank[0] === strictest.rank[0] && item.rank[1] > strictest.rank[1] ? item : strictest).name;
+}
+
+//#endregion
+//#region src/library.ts
+/** Derived from the graph's immutable root identity; no second persistent binding. */
+function graphLibrary(rootSessionId, home = process.env.DSH_HOME || join(homedir(), ".dsh")) {
+	if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,199}$/.test(rootSessionId)) throw new Error("task-library: invalid graph root session id");
+	const root = join(home, "singularity", "environments", rootSessionId);
+	return {
+		id: rootSessionId,
+		root,
+		taskTemplatesRoot: join(root, "task-templates"),
+		skillRoot: join(root, "skills")
+	};
+}
+const tails = /* @__PURE__ */ new Map();
+async function serial(library, work) {
+	const pending = (tails.get(library.root) ?? Promise.resolve()).catch(() => {}).then(work);
+	tails.set(library.root, pending);
+	try {
+		return await pending;
+	} finally {
+		if (tails.get(library.root) === pending) tails.delete(library.root);
+	}
+}
+async function readIndex(library) {
+	try {
+		const index = JSON.parse(await readFile(join(library.root, "index.json"), "utf8"));
+		if (index.version !== 1 || !Array.isArray(index.tasks) || !Array.isArray(index.skills)) throw new Error("task-library: unsupported index");
+		return index;
+	} catch (error) {
+		if (error.code !== "ENOENT") throw error;
+		return {
+			version: 1,
+			tasks: [],
+			skills: []
+		};
+	}
+}
+async function saveIndex(library, index) {
+	const temporary = join(library.root, `.index-${randomUUID()}.json`);
+	await writeFile(temporary, `${JSON.stringify(index, null, 2)}\n`, { flag: "wx" });
+	await rename(temporary, join(library.root, "index.json"));
+}
+const digest = (text$1) => createHash("sha256").update(text$1).digest("hex");
+function skillsOf(template, table = {}) {
+	return [...new Set((template.contract.requiredCapabilities ?? []).flatMap((name) => name.startsWith("method:") ? [name.slice(7)] : name === "execute-task" ? ["task-coordination"] : table[name]?.skills ?? []))];
+}
+/** Generic platform guidance is seeded once; domain libraries are authored by the graph's agents. */
+async function ensureTaskLibrary(library) {
+	return serial(library, async () => {
+		await mkdir(library.taskTemplatesRoot, { recursive: true });
+		await mkdir(library.skillRoot, { recursive: true });
+		const installed = join(library.root, ".initialized");
+		try {
+			await stat(installed);
+			return library;
+		} catch (error) {
+			if (error.code !== "ENOENT") throw error;
+		}
+		const text$1 = await readFile(join(dirname(fileURLToPath(import.meta.resolve("@dangosys/dsh-singularity-agent-runtime/package.json"))), "skills/task-coordination/SKILL.md"), "utf8");
+		const target = join(library.skillRoot, "task-coordination");
+		await mkdir(target, { recursive: true });
+		try {
+			await writeFile(join(target, "SKILL.md"), text$1, { flag: "wx" });
+		} catch (error) {
+			if (error.code !== "EEXIST") throw error;
+		}
+		const index = await scanIndex(library, await readIndex(library));
+		const builtIn = index.skills.find((item) => item.name === "task-coordination");
+		if (builtIn !== void 0 && builtIn.reason === void 0) {
+			builtIn.status = "retained";
+			builtIn.reason = "Generic platform task coordination guidance";
+		}
+		await saveIndex(library, index);
+		await writeFile(installed, "1\n", { flag: "wx" });
+		return library;
+	});
+}
+/** Include methods published through Evolution in the same small table as temporary agent drafts. */
+async function scanIndex(library, index) {
+	for (const { templateRef, template } of await findTaskTemplates(library.taskTemplatesRoot, void 0, void 0, true)) if (!index.tasks.some((item) => item.templateRef.id === templateRef.id && item.templateRef.version === templateRef.version)) index.tasks.push({
+		templateRef,
+		status: "temporary",
+		skills: skillsOf(template)
+	});
+	for (const entry of await readdir(library.skillRoot, { withFileTypes: true })) {
+		if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+		let text$1;
+		try {
+			text$1 = await readFile(join(library.skillRoot, entry.name, "SKILL.md"), "utf8");
+		} catch (error) {
+			if (error.code === "ENOENT") continue;
+			throw error;
+		}
+		const parsed = parseSkillFile$1(text$1, join(library.skillRoot, entry.name, "SKILL.md"));
+		if (parsed.name !== entry.name) throw new Error(`task-library: ${entry.name} declares ${parsed.name}`);
+		const latest = index.skills.filter((item) => item.name === entry.name).at(-1);
+		if (latest?.digest !== digest(text$1)) index.skills.push({
+			name: entry.name,
+			version: (latest?.version ?? 0) + 1,
+			digest: digest(text$1),
+			status: "temporary"
+		});
+	}
+	return index;
+}
+async function readTaskLibrary(library) {
+	await ensureTaskLibrary(library);
+	return serial(library, async () => {
+		const index = await scanIndex(library, await readIndex(library));
+		await saveIndex(library, index);
+		return {
+			...library,
+			...index
+		};
+	});
+}
+async function writeTaskLibrary(library, input, table) {
+	await ensureTaskLibrary(library);
+	return serial(library, async () => {
+		const index = await scanIndex(library, await readIndex(library));
+		if (input.kind === "task") {
+			const templateRef = await registerTaskTemplate(library.taskTemplatesRoot, input.template);
+			let row$1 = index.tasks.find((item) => item.templateRef.id === templateRef.id && item.templateRef.version === templateRef.version);
+			if (row$1 === void 0) {
+				row$1 = {
+					templateRef,
+					status: "temporary",
+					skills: skillsOf(input.template, table)
+				};
+				index.tasks.push(row$1);
+			}
+			await saveIndex(library, index);
+			return row$1;
+		}
+		if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(input.name)) throw new Error("task-library: invalid Skill name");
+		const file = join(library.skillRoot, input.name, "SKILL.md");
+		if (parseSkillFile$1(input.skillMd, file).name !== input.name) throw new Error("task-library: Skill frontmatter name must match");
+		const previous = index.skills.filter((item) => item.name === input.name).at(-1);
+		if (previous?.digest === digest(input.skillMd)) return previous;
+		if (input.expectedVersion !== (previous?.version ?? 0)) throw new Error(`task-library: expectedVersion must be ${previous?.version ?? 0}; read the current version before changing a Skill`);
+		if (previous !== void 0) {
+			const archive = join(library.root, "skill-versions", input.name, String(previous.version));
+			await mkdir(dirname(archive), { recursive: true });
+			await cp(dirname(file), archive, {
+				recursive: true,
+				errorOnExist: true,
+				force: false
+			}).catch((error) => {
+				if (error.code !== "EEXIST") throw error;
+			});
+		}
+		await mkdir(dirname(file), { recursive: true });
+		const temporary = join(dirname(file), `.SKILL-${randomUUID()}.md`);
+		await writeFile(temporary, input.skillMd, { flag: "wx" });
+		await rename(temporary, file);
+		const row = {
+			name: input.name,
+			version: (previous?.version ?? 0) + 1,
+			digest: digest(input.skillMd),
+			status: "temporary"
+		};
+		index.skills.push(row);
+		await saveIndex(library, index);
+		return row;
+	});
+}
+async function reviewTaskLibrary(library, review, reviewedBy) {
+	await ensureTaskLibrary(library);
+	return serial(library, async () => {
+		if (review.kind === "skill" && review.name === "task-coordination" && review.status === "retired") throw new Error("task-coordination supplies execute-task; retain or revise it to keep generic tasks executable");
+		if (!review.reason.trim()) throw new Error("task-library: review requires a reason from execution evidence");
+		const index = await scanIndex(library, await readIndex(library));
+		const row = review.kind === "task" ? index.tasks.find((item) => item.templateRef.id === review.name && item.templateRef.version === review.version) : index.skills.find((item) => item.name === review.name && item.version === review.version);
+		if (row === void 0) throw new Error("task-library: reviewed version is absent");
+		row.status = review.status;
+		row.reason = review.reason;
+		row.reviewedBy = reviewedBy;
+		await saveIndex(library, index);
+		return row;
+	});
+}
+async function libraryCapabilities(library) {
+	const index = await readTaskLibrary(library);
+	const latest = new Map(index.skills.map((item) => [item.name, item]));
+	return {
+		"execute-task": {
+			skills: ["task-coordination"],
+			tools: [
+				"filesystem",
+				"search",
+				"bash",
+				"jobs",
+				"skill"
+			]
+		},
+		...Object.fromEntries([...latest.values()].filter((item) => item.status !== "retired").map((item) => [`method:${item.name}`, {
+			skills: [item.name],
+			tools: ["skill"]
+		}]))
+	};
 }
 
 //#endregion
@@ -2650,8 +2890,8 @@ async function materializeProvider(provider, snapshotRoot, runId) {
 	}
 	const defects = skillContractDefects(declared);
 	if (defects.length > 0) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${verdict.directory} is not a valid sidecar (${defects.map((item) => `${item.code}: ${item.reason}`).join("; ")})`);
-	const digest = skillContractDigest(declared);
-	if (digest !== verdict.contractDigest) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${verdict.directory} is not the one it was judged against (judged ${verdict.contractDigest}, read ${digest})`);
+	const digest$1 = skillContractDigest(declared);
+	if (digest$1 !== verdict.contractDigest) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${verdict.directory} is not the one it was judged against (judged ${verdict.contractDigest}, read ${digest$1})`);
 	await writeFile(join(target, SKILL_SIDECAR_FILE), sidecarBytes);
 }
 /**
@@ -2732,8 +2972,8 @@ async function readRunBinding(binding) {
 		if (loaded.content === void 0) {
 			if (defects.length === 0) defects.push(`skill-missing: ${join(root, skill.name)} holds no readable SKILL.md`);
 		} else {
-			const digest = skillContentDigest(loaded.content);
-			if (digest !== skill.contentDigest) defects.push(`content-mismatch: ${join(root, skill.name, "SKILL.md")} and its resources are not the bound content: bound ${skill.contentDigest}, read ${digest}`);
+			const digest$1 = skillContentDigest(loaded.content);
+			if (digest$1 !== skill.contentDigest) defects.push(`content-mismatch: ${join(root, skill.name, "SKILL.md")} and its resources are not the bound content: bound ${skill.contentDigest}, read ${digest$1}`);
 			if (loaded.frontmatter === void 0 && defects.length === 0) defects.push(`skill-file-invalid: ${join(root, skill.name, "SKILL.md")} declares no frontmatter a worker could load`);
 			else if (loaded.frontmatter !== void 0 && loaded.frontmatter.name !== skill.name) defects.push(`skill-name-mismatch: skill file ${join(root, skill.name, "SKILL.md")} declares name "${loaded.frontmatter.name}" but the record binds "${skill.name}"`);
 			const declared = loaded.sidecar === void 0 ? null : skillContractDigest(loaded.sidecar);
@@ -4048,7 +4288,8 @@ async function serviceInit(self) {
 		const offPre = self.context.on("tools/pre-execute", async (exec, next) => {
 			const sessionId = exec.agent?.id;
 			if (sessionId === void 0) return await next();
-			const decision = self.executionGate.decide(String(sessionId), exec.name);
+			const gatedName = exec.name === "task_library" && typeof exec.arguments === "object" && exec.arguments !== null && exec.arguments.action === "read" ? "task_read" : exec.name;
+			const decision = self.executionGate.decide(String(sessionId), gatedName);
 			if (!decision.allow) return {
 				kind: "deny",
 				reason: decision.reason
@@ -4399,7 +4640,7 @@ async function adoptRootThroughBarrier(self, storeId, rootSessionId) {
 		* No root on the record is not the end of the question: the recovery pass
 		* is what continues an approval that was recorded before the process died
 		*/
-		await self.reconcileStore(storeId);
+		await self.reconcileStore(storeId, rootSessionId);
 		snapshot = await self.context.task.snapshotIn(storeId);
 		root = snapshot.tasks.find((task) => task.parentTaskId === void 0);
 		if (root === void 0) return {
@@ -4425,6 +4666,10 @@ async function adoptRootThroughBarrier(self, storeId, rootSessionId) {
 		runId: run.runId
 	});
 	self.startedSessions.add(rootSessionId);
+	if (run.taskTemplatesRoot !== void 0) self.sessionExecutionBindings.set(rootSessionId, {
+		...self.sessionExecutionBindings.get(rootSessionId),
+		taskTemplatesRoot: run.taskTemplatesRoot
+	});
 	if (!rootWasStarted && (phase === "active" || phase === "waiting_children" && pendingCoordinationOf(snapshot, run.runId).length > 0)) self.notifyWhenReady(rootSessionId, "task-runtime: continue this same Run from the persisted conversation. Check any interrupted tool action without a receipt before repeating it; handle any unresolved Task questions from the conversation, then continue work allowed in your current execution phase and submit when ready.");
 	if (phase === "terminal") self.executionGate.setTerminal(rootSessionId);
 	else if (phase !== void 0) self.executionGate.setPhase(rootSessionId, phase);
@@ -4437,7 +4682,7 @@ async function adoptRootThroughBarrier(self, storeId, rootSessionId) {
 	* Adoption is the recovery entry (§3.6): runs this process is not driving
 	* are settled or restarted, then the workspace layers are rebuilt from the
 	*/
-	await self.reconcileStore(storeId);
+	await self.reconcileStore(storeId, rootSessionId);
 	await self.rebuildWorkspaceOwnership(storeId);
 	return {
 		adopted: true,
@@ -4571,7 +4816,7 @@ async function submitRootProposalOnce(self, storeId, rootSessionId, spec, option
 	* protected acceptance inputs are read against, the provider pre-check
 	*/
 	const envPath = await self.envPathForSession(rootSessionId);
-	const derived = await deriveRootContract(self, spec, envPath);
+	const derived = await deriveRootContract(self, spec, envPath, rootSessionId);
 	if (!derived.ok) throw derived.refusal;
 	const { contract } = derived;
 	const requestKey = rootRequestKey(storeId, rootSessionId, contract, options.requestKey);
@@ -4588,7 +4833,7 @@ async function submitRootProposalOnce(self, storeId, rootSessionId, spec, option
 			proposal: stored,
 			rootSessionId,
 			contract: structuredClone(stored.contract),
-			manifests: rootManifests(self, stored.contract)
+			manifests: await rootManifests(self, stored.contract, rootSessionId)
 		}) : void 0;
 		return {
 			proposalId: stored.proposalId,
@@ -4683,9 +4928,9 @@ async function submitRootProposalOnce(self, storeId, rootSessionId, spec, option
 		review
 	};
 }
-async function deriveRootContract(self, spec, envPath) {
+async function deriveRootContract(self, spec, envPath, callerSessionId) {
 	try {
-		spec = await bindTaskTemplate(self.config.taskTemplatesRoot, spec);
+		spec = await bindTaskTemplate(await self.taskTemplatesRootFor(callerSessionId), spec);
 	} catch (error) {
 		return {
 			ok: false,
@@ -4710,8 +4955,8 @@ async function deriveRootContract(self, spec, envPath) {
 function rootRefusal(reasons) {
 	return /* @__PURE__ */ new Error(`task-runtime: root contract rejected:\n- ${reasons.join("\n- ")}`);
 }
-function rootManifests(self, contract) {
-	return [self.resolveCapabilities(contract.requiredCapabilities)];
+async function rootManifests(self, contract, sessionId) {
+	return [resolveCapabilities(contract.requiredCapabilities, sessionId === void 0 ? self.config.capabilities : await self.capabilitiesForSession(sessionId), self.config.mcpServers)];
 }
 async function existingRootTask(self, storeId) {
 	return (await self.context.task.snapshotIn(storeId)).tasks.find((task) => task.parentTaskId === void 0);
@@ -4731,9 +4976,12 @@ async function checkRootContract(self, request) {
 			reasons: defects
 		}
 	};
-	const manifests = rootManifests(self, contract);
+	const manifests = await rootManifests(self, contract, rootSessionId);
 	const manifest = manifests[0];
-	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), { ...request.envPath === void 0 ? {} : { cwd: request.envPath } });
+	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
+		...request.envPath === void 0 ? {} : { cwd: request.envPath },
+		extraRoots: (await self.skillViewForSession(rootSessionId)).extraRoots
+	}, await self.capabilitiesForSession(rootSessionId), self.config.mcpServers ?? {}, rootSessionId);
 	const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities));
 	if (refusals.length > 0) return {
 		ok: false,
@@ -4865,7 +5113,7 @@ async function activateRootContract(self, request) {
 			runId,
 			manifest,
 			providers: request.providers,
-			table: self.config.capabilities,
+			table: await self.capabilitiesForSession(rootSessionId),
 			root: self.config.runBindingRoot
 		});
 		const task = {
@@ -4886,6 +5134,7 @@ async function activateRootContract(self, request) {
 			taskId,
 			sessionId: rootSessionId,
 			capabilitySnapshot: capabilitySnapshot(manifest),
+			taskTemplatesRoot: await self.taskTemplatesRootFor(rootSessionId),
 			providerBinding,
 			executionPhase: "active",
 			artifacts: [],
@@ -5163,7 +5412,7 @@ async function submitProposalOnce(self, storeId, parentTaskId, parentRunId, call
 			proposal: stored,
 			parentTask,
 			batch: storedBatch,
-			manifests: self.manifestsOf(storedBatch, callerSessionId)
+			manifests: await self.manifestsOf(storedBatch, callerSessionId)
 		}) : void 0;
 		return {
 			proposalId: stored.proposalId,
@@ -5179,11 +5428,6 @@ async function submitProposalOnce(self, storeId, parentTaskId, parentRunId, call
 	*     may propose one, and the batch has to clear every admission rule. Two
 	*/
 	await self.assertDecomposableRun(storeId, parentTask, parentRun, callerSessionId, options.exec?.signal);
-	const inFlight = await self.inFlightProposalsOf(storeId, parentRunId);
-	if (inFlight.length > 0) {
-		const held = inFlight[0];
-		throw new Error(`task-runtime: run "${parentRunId}" already has a proposal in flight — "${held.proposalId}" is ${held.status}; a run has at most one batch proposal at a time, so continue that one (or withdraw it with task_proposal_cancel) rather than proposing a second, and nothing was recorded`);
-	}
 	const checked = await self.checkDerivedBatch({
 		identity,
 		parentTask,
@@ -5817,12 +6061,9 @@ async function deriveBatch(self, identity, spec) {
 		...envPath === void 0 ? {} : { envPath }
 	};
 }
-function manifestsOf(self, batch, callerSessionId) {
+async function manifestsOf(self, batch, callerSessionId) {
 	const overlay = callerSessionId === void 0 ? void 0 : self.sessionExecutionBindings.get(callerSessionId)?.overlay;
-	const table = {
-		...self.config.capabilities,
-		...overlay?.capabilityOverrides
-	};
+	const table = callerSessionId === void 0 ? self.config.capabilities : await self.capabilitiesForSession(callerSessionId);
 	const registry = {
 		...self.config.mcpServers,
 		...overlay?.mcpServers
@@ -5946,7 +6187,7 @@ async function checkDerivedBatch(self, request) {
 			gaps: []
 		}
 	};
-	const manifests = manifestsOf(self, batch, identity.callerSessionId);
+	const manifests = await manifestsOf(self, batch, identity.callerSessionId);
 	const rejected = batch.children.map((child, index) => ({
 		child,
 		index,
@@ -5980,14 +6221,11 @@ async function checkDerivedBatch(self, request) {
 	const overlay = self.sessionExecutionBindings.get(identity.callerSessionId)?.overlay;
 	const precheck = await self.providerPrecheck([...new Set(manifests.flatMap((manifest) => Object.keys(manifest.capabilities)))], {
 		...request.envPath === void 0 ? {} : { cwd: request.envPath },
-		...overlay?.extraSkillRoots === void 0 ? {} : { extraRoots: [...overlay.extraSkillRoots] }
-	}, {
-		...self.config.capabilities,
-		...overlay?.capabilityOverrides
-	}, {
+		extraRoots: (await self.skillViewForSession(identity.callerSessionId)).extraRoots
+	}, await self.capabilitiesForSession(identity.callerSessionId), {
 		...self.config.mcpServers,
 		...overlay?.mcpServers
-	});
+	}, identity.callerSessionId);
 	const refusals = manifests.flatMap((manifest, childIndex) => providerRefusals(precheck, Object.keys(manifest.capabilities)).map((reason) => `child ${childIndex}: ${reason}`));
 	if (refusals.length > 0) return {
 		ok: false,
@@ -7079,11 +7317,14 @@ async function recoverRootTaskOnce(self, storeId, request, caller) {
 	const reuseReasons = reuseDefects(declarations, reuseContext);
 	if (reuseReasons.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused; the declared reuse does not resolve:\n- ${reuseReasons.join("\n- ")}`);
 	const unbound = derived?.unbound ?? [];
-	const manifest = self.resolveCapabilities(source.requestedCapabilities);
-	if (manifest.missing.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused: the capability gap this attempt is for is still open ([${manifest.missing.join(", ")}] resolve to no row in this deployment's table); apply the row that closes it, and the recovery re-reads what the deployment holds then — nothing was written`);
 	const rootSessionId = sourceRun?.sessionId ?? self.recoverySessionFor(snapshot, storeId);
+	const manifest = resolveCapabilities(source.requestedCapabilities, await self.capabilitiesForSession(rootSessionId), self.config.mcpServers);
+	if (manifest.missing.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused: the capability gap this attempt is for is still open ([${manifest.missing.join(", ")}] resolve to no row in this deployment's table); apply the row that closes it, and the recovery re-reads what the deployment holds then — nothing was written`);
 	const envPath = await self.envPathForSession(rootSessionId);
-	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), { ...envPath === void 0 ? {} : { cwd: envPath } });
+	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
+		...envPath === void 0 ? {} : { cwd: envPath },
+		extraRoots: (await self.skillViewForSession(rootSessionId)).extraRoots
+	}, await self.capabilitiesForSession(rootSessionId), self.config.mcpServers ?? {}, rootSessionId);
 	const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities));
 	if (refusals.length > 0) throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused by the provider pre-check:\n- ${refusals.join("\n- ")}`);
 	const budget$1 = resolveRootBudget(snapshot, self.config.rootBudget ?? {});
@@ -7115,9 +7356,9 @@ function recoveryAttemptForRequest(snapshot, request) {
 	* The key is bound to the *request*, not to the binding it produced: a
 	* request that names no reuse has its citations derived from the store (a
 	*/
-	const digest = stored.requestDigest ?? recoveryAttemptDigest(stored);
+	const digest$1 = stored.requestDigest ?? recoveryAttemptDigest(stored);
 	const wanted = requestAttemptDigest(request);
-	if (digest !== wanted) throw new Error(`task-runtime: request key "${request.requestKey}" already names a recovery attempt of "${request.sourceTaskId}" (run "${existing.runId}", session "${existing.sessionId}", request ${digest}); this request's content is ${wanted} — one key names one request, and a different request is a different key`);
+	if (digest$1 !== wanted) throw new Error(`task-runtime: request key "${request.requestKey}" already names a recovery attempt of "${request.sourceTaskId}" (run "${existing.runId}", session "${existing.sessionId}", request ${digest$1}); this request's content is ${wanted} — one key names one request, and a different request is a different key`);
 	return {
 		attempt: "existing",
 		storeId: snapshot.id,
@@ -7227,7 +7468,7 @@ async function startRecoveryAttempt(self, input) {
 			runId,
 			manifest,
 			providers: input.precheck,
-			table: self.config.capabilities,
+			table: await self.capabilitiesForSession(rootSessionId),
 			root: self.config.runBindingRoot
 		});
 		const run = {
@@ -7235,6 +7476,7 @@ async function startRecoveryAttempt(self, input) {
 			taskId: source.taskId,
 			sessionId,
 			capabilitySnapshot: capabilitySnapshot(manifest),
+			taskTemplatesRoot: input.sourceRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(rootSessionId),
 			...preset === void 0 ? {} : { agentPreset: preset },
 			...binding === void 0 ? {} : { providerBinding: binding },
 			executionPhase: "active",
@@ -7394,6 +7636,7 @@ function buildHandoff(init) {
 async function awaitWorker(handle, signal) {
 	const cancel = () => handle.agent.cancel({ kind: "parent" });
 	signal?.addEventListener("abort", cancel, { once: true });
+	if (isAborted(signal)) cancel();
 	try {
 		await handle.agent.whenIdle();
 		return isAborted(signal) ? { kind: "aborted" } : { kind: "idle" };
@@ -8243,7 +8486,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 			* A resumed batch carries no verdicts — the process that judged them is
 			* gone — so the pre-check is re-run from this run's own viewpoint and a
 			*/
-			const fresh = await env.precheck(Object.keys(manifest.capabilities), env.workspacePath);
+			const fresh = await env.precheck(Object.keys(manifest.capabilities), env.workspacePath, manifest);
 			const refusals = providerRefusals(fresh, Object.keys(manifest.capabilities));
 			if (refusals.length > 0) throw new Error(`the provider pre-check refused this run on resume:\n- ${refusals.join("\n- ")}`);
 			providers = fresh;
@@ -8848,6 +9091,24 @@ async function finishReplay(env, storeId, run, status) {
 }
 
 //#endregion
+//#region src/replay-paths.ts
+/** Relocate declared workspace paths, retaining every other contract value. */
+function rebaseWorkspacePaths(value, from, to) {
+	if (!isAbsolute(from) || !isAbsolute(to) || resolve(from) === "/") throw new Error("replay: workspace mapping requires absolute roots and a specific source directory");
+	const source = resolve(from);
+	const target = resolve(to);
+	const escaped = source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const prefix = new RegExp(`(^|[\\s"'\\x60=(:,])${escaped}(?=/|$|[\\s"'\\x60),;])`, "g");
+	const visit = (item) => {
+		if (typeof item === "string") return item.replace(prefix, (_match, before) => before + target);
+		if (Array.isArray(item)) return item.map(visit);
+		if (item !== null && typeof item === "object") return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, visit(child)]));
+		return item;
+	};
+	return visit(value);
+}
+
+//#endregion
 //#region src/service/replay.ts
 async function replayTask(self, storeId, championTaskId, options, callerSessionId) {
 	const known = new Set([
@@ -8866,14 +9127,17 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 	if (champion.status !== "verified" && champion.status !== "failed") throw new Error(`task-runtime: champion task "${championTaskId}" is ${champion.status}; only a terminal (verified or failed) task can be replayed`);
 	const championRunId = champion.runIds[champion.runIds.length - 1];
 	const championRun = await self.context.task.runIn(storeId, championRunId);
-	const taskTemplatesRoot = options.overlay?.taskTemplatesRoot ?? championRun.taskTemplatesRoot ?? self.taskTemplatesRootFor(callerSessionId);
-	const effective = options.contract ?? {
+	let taskTemplatesRoot = options.overlay?.taskTemplatesRoot ?? championRun.taskTemplatesRoot ?? await self.taskTemplatesRootFor(callerSessionId);
+	const original = options.contract ?? {
 		objective: champion.objective,
 		acceptanceCriteria: champion.acceptanceCriteria,
 		requiredCapabilities: champion.requestedCapabilities
 	};
+	const named = options.workspace === void 0 ? void 0 : await normalizeWorkspacePath(options.workspace.path);
+	const effective = options.workspace?.rebaseFrom === void 0 ? original : rebaseWorkspacePaths(original, options.workspace.rebaseFrom, named);
+	const context = options.workspace?.rebaseFrom === void 0 ? champion.contract : rebaseWorkspacePaths(champion.contract, options.workspace.rebaseFrom, named);
 	const table = {
-		...self.config.capabilities,
+		...await self.capabilitiesForSession(callerSessionId),
 		...options.overlay?.capabilityOverrides ?? {}
 	};
 	const mcpRegistry = parseMcpServerRegistry({
@@ -8886,7 +9150,6 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 	* The checkout this replay's everything resolves against: the workspace the
 	* caller named, resolved to its real path first so the claim, the cwd and the
 	*/
-	const named = options.workspace === void 0 ? void 0 : await normalizeWorkspacePath(options.workspace.path);
 	const envPath = named ?? await self.envPathForSession(callerSessionId);
 	/**
 	* The same provider pre-check the ordinary decomposition runs (S1-C item 1),
@@ -8894,8 +9157,8 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 	*/
 	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
 		...envPath === void 0 ? {} : { cwd: envPath },
-		...options.overlay?.extraSkillRoots === void 0 ? {} : { extraRoots: [...options.overlay.extraSkillRoots] }
-	}, table, mcpRegistry);
+		extraRoots: (await self.skillViewForSession(callerSessionId, options.overlay?.extraSkillRoots)).extraRoots
+	}, table, mcpRegistry, callerSessionId);
 	const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities));
 	if (refusals.length > 0) throw new Error(`task-runtime: provider pre-check rejected replay of "${championTaskId}":\n- ${refusals.join("\n- ")}`);
 	/**
@@ -8926,8 +9189,8 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 		contractVersion: TASK_CONTRACT_VERSION,
 		objective: `[${options.lineage}] ${effective.objective}`,
 		acceptanceCriteria: structuredClone([...fixed.criteria]),
-		assumptions: [...champion.contract?.assumptions ?? []],
-		constraints: [...champion.contract?.constraints ?? []],
+		assumptions: [...context?.assumptions ?? []],
+		constraints: [...context?.constraints ?? []],
 		requiredCapabilities: [...effective.requiredCapabilities],
 		...champion.contract?.templateScope === void 0 ? {} : { templateScope: structuredClone(champion.contract.templateScope) }
 	};
@@ -8945,6 +9208,11 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 		contract,
 		...champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}
 	};
+	if (options.overlay?.taskTemplatesRoot === void 0) {
+		const frozenCatalog = join(self.config.runBindingRoot, "replay-libraries", task.taskId, "task-templates");
+		await snapshotTaskTemplates(taskTemplatesRoot, frozenCatalog);
+		taskTemplatesRoot = frozenCatalog;
+	}
 	const spawn$1 = options.spawn !== false;
 	/**
 	* A replayed worker reads its context the way every task worker does (A2):
@@ -9317,7 +9585,7 @@ async function cancelGraph(self, storeId, reason) {
 		for (const entry of entries) entry.controller.abort();
 		await Promise.all(entries.map((entry) => entry.promise.catch(() => [])));
 		const snapshot = await self.context.task.snapshotIn(storeId);
-		const env = await self.orchestrateEnv(self.recoverySessionFor(snapshot, storeId), `cancel-graph:${storeId}`);
+		const env = await self.orchestrateEnv(await self.sessionForStore(storeId), `cancel-graph:${storeId}`);
 		const stillRunning = snapshot.runs.filter((run) => run.status === "running");
 		for (const run of stillRunning) await settleRunFromRuntime(env, storeId, run, "cancelled", `cancelled with the graph: ${reason}`);
 		for (const run of stillRunning) await self.reconcileSessionJobs(run.sessionId);
@@ -9344,12 +9612,12 @@ async function stopUnidentifiedBatch(self, env, storeId, run) {
 	await settleRunFromRuntime(env, storeId, run, "cancelled", reason);
 	await self.reconcileSessionJobs(run.sessionId);
 }
-async function reconcileStore(self, storeId) {
+async function reconcileStore(self, storeId, rootSessionId) {
 	const snapshot = await self.context.task.snapshotIn(storeId);
 	self.reindex(storeId, snapshot);
 	const depthOf = (taskId) => snapshot.tasks.find((task) => task.taskId === taskId)?.depth ?? 0;
 	const ordered = snapshot.runs.filter((run) => run.status === "running").sort((left, right) => depthOf(right.taskId) - depthOf(left.taskId));
-	const env = await self.orchestrateEnv(self.recoverySessionFor(snapshot, storeId), `recovery:${storeId}`);
+	const env = await self.orchestrateEnv(rootSessionId ?? await self.sessionForStore(storeId), `recovery:${storeId}`);
 	const questionResumes = [];
 	const waiting = [];
 	const submitted = [];
@@ -9661,7 +9929,7 @@ async function releaseStoreWorkspace(self, storeId) {
 	if (self.workspaces === void 0) return;
 	await Promise.all(self.workspaceReleases);
 	const snapshot = await self.context.task.snapshotIn(storeId);
-	const rootWorkspace = await workspacePathForSession(self, recoverySessionFor(self, snapshot, storeId));
+	const rootWorkspace = await workspacePathForSession(self, await self.sessionForStore(storeId));
 	const paths = new Set(snapshot.runs.flatMap((run) => run.placement === void 0 ? [] : [run.placement.workspacePath]));
 	if (rootWorkspace !== void 0) paths.add(rootWorkspace);
 	for (const workspace of paths) for (;;) {
@@ -9678,11 +9946,11 @@ function recoverySessionFor(self, snapshot, storeId) {
 	return storeId;
 }
 async function sessionForStore(self, storeId) {
-	try {
-		return recoverySessionFor(self, await self.context.task.snapshotIn(storeId), storeId);
-	} catch {
-		return storeId;
-	}
+	const recorded = recoverySessionFor(self, await self.context.task.snapshotIn(storeId), storeId);
+	if (recorded !== storeId) return recorded;
+	const graph = (await self.context.graphs.list()).find((item) => rootTaskStoreId(item.rootSessionId) === storeId);
+	if (graph === void 0) throw new Error(`task-runtime: store "${storeId}" has no recorded Run or owning graph`);
+	return graph.rootSessionId;
 }
 async function runForSession(self, sessionId) {
 	const found = await lookupRun(self, sessionId);
@@ -9916,7 +10184,7 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 	const binding = self.sessionExecutionBindings.get(callerSessionId);
 	const overlay = replayOverlay ?? binding?.overlay;
 	const table = {
-		...self.config.capabilities,
+		...await self.capabilitiesForSession(callerSessionId),
 		...overlay?.capabilityOverrides
 	};
 	const mcpRegistry = {
@@ -9925,6 +10193,8 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 	};
 	const callerBinding = self.sessions.get(callerSessionId);
 	const callerRun = callerBinding === void 0 ? void 0 : await self.context.task.runIn(callerBinding.storeId, callerBinding.runId);
+	const taskTemplatesRoot = binding?.taskTemplatesRoot ?? callerRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(callerSessionId);
+	const skillView = await self.skillViewForSession(callerSessionId, replayOverlay?.extraSkillRoots);
 	return {
 		task: self.context.task,
 		actor,
@@ -9966,14 +10236,20 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 		...callerRun?.sharedWorkspace === true ? {} : { workspaces: self.workspaces },
 		...workspacePath === void 0 ? {} : { workspacePath },
 		...named === void 0 ? {} : { workerCwd: named },
-		...binding?.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: binding.taskTemplatesRoot },
+		...taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot },
 		...binding?.agentOptions === void 0 ? {} : { agentOptions: binding.agentOptions },
 		writeDrainTimeoutMs: self.config.writeDrainTimeoutMs,
 		...self.config.rootBudget === void 0 ? {} : { rootBudget: { ...self.config.rootBudget } },
-		precheck: (capabilities, cwd) => providerPrecheck(self, capabilities, {
+		precheck: (capabilities, cwd, admittedManifest) => providerPrecheck(self, capabilities, {
 			...cwd === void 0 ? {} : { cwd },
-			...overlay?.extraSkillRoots === void 0 ? {} : { extraRoots: [...overlay.extraSkillRoots] }
-		}, table, mcpRegistry),
+			extraRoots: skillView.extraRoots
+		}, admittedManifest === void 0 ? table : {
+			...table,
+			...Object.fromEntries(Object.entries(admittedManifest.capabilities).map(([name, entry]) => [name, {
+				...table[name],
+				skills: [...entry.skills]
+			}]))
+		}, mcpRegistry, callerSessionId),
 		notify: (sessionId, text$1) => {
 			self.notify(sessionId, text$1);
 		},
@@ -10028,11 +10304,11 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 			* What the session *runs under* is remembered the same way (S4-E §Q3): a
 			* replay's worker carries the experiment's frozen selection, and the
 			*/
-			const taskTemplatesRoot = request.taskTemplatesRoot ?? binding?.taskTemplatesRoot;
+			const childTemplatesRoot = request.taskTemplatesRoot ?? taskTemplatesRoot;
 			const frozenAgentOptions = request.agentOptions ?? binding?.agentOptions;
-			if (frozenAgentOptions !== void 0 || taskTemplatesRoot !== void 0 || overlay !== void 0) self.sessionExecutionBindings.set(request.sessionId, {
+			if (frozenAgentOptions !== void 0 || childTemplatesRoot !== void 0 || overlay !== void 0) self.sessionExecutionBindings.set(request.sessionId, {
 				...frozenAgentOptions === void 0 ? {} : { agentOptions: frozenAgentOptions },
-				...taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot },
+				...childTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: childTemplatesRoot },
 				...overlay === void 0 ? {} : { overlay: structuredClone(overlay) }
 			});
 			const agentOptions = frozenAgentOptions ?? graphAgentOptions(await self.context.graphs.graphForSession(SessionId(callerSessionId)));
@@ -10137,7 +10413,12 @@ async function observeSession(self, sessionId) {
 	let failures = 0;
 	let approvals = 0;
 	let compactions = 0;
-	for (const event of events ?? []) if (event.type === "tool/call") {
+	for (const event of events ?? []) if (event.type === "user/message") {
+		const source = event.data.source;
+		if (source.kind === "task-skills" && Array.isArray(source.names)) {
+			for (const name of source.names) if (typeof name === "string") skillCalls.push(name);
+		}
+	} else if (event.type === "tool/call") {
 		const name = event.data.name;
 		if (typeof name !== "string") continue;
 		calls.set(name, (calls.get(name) ?? 0) + 1);
@@ -10201,9 +10482,10 @@ function runVerifier(self) {
 async function registeredVerifierIdsImpl(self) {
 	return registeredVerifierIds(self.context);
 }
-async function providerPrecheck(self, capabilities, view, table = self.config.capabilities, mcpRegistry = self.config.mcpServers ?? {}) {
+async function providerPrecheck(self, capabilities, view, table = self.config.capabilities, mcpRegistry = self.config.mcpServers ?? {}, callerSessionId) {
 	const verifierRefs = await registeredVerifierIdsImpl(self);
-	const commitLedger = self.softService("evolution");
+	const evolution = self.softService("evolution");
+	const commitLedger = callerSessionId !== void 0 && evolution?.forSession !== void 0 ? await evolution.forSession(callerSessionId) : evolution;
 	return precheckProviders({
 		capabilities,
 		table,
@@ -10215,7 +10497,10 @@ async function providerPrecheck(self, capabilities, view, table = self.config.ca
 }
 async function capabilityProviderReport(self, sessionId, capabilities) {
 	const envPath = await envPathForSession(self, sessionId);
-	return providerPrecheck(self, capabilities ?? Object.keys(self.config.capabilities), { ...envPath === void 0 ? {} : { cwd: envPath } });
+	return providerPrecheck(self, capabilities ?? Object.keys(await self.capabilitiesForSession(sessionId)), {
+		...envPath === void 0 ? {} : { cwd: envPath },
+		extraRoots: (await self.skillViewForSession(sessionId)).extraRoots
+	}, await self.capabilitiesForSession(sessionId), self.config.mcpServers ?? {}, sessionId);
 }
 async function readRunBindingImpl(binding) {
 	return readRunBinding(binding);
@@ -10327,8 +10612,108 @@ var TaskRuntime = class extends Service {
 		*/
 		ctx.effect(() => () => this.unload());
 	}
-	taskTemplatesRootFor(sessionId) {
-		return (sessionId === void 0 ? void 0 : this.sessionExecutionBindings.get(sessionId)?.taskTemplatesRoot) ?? this.config.taskTemplatesRoot;
+	async libraryForRoot(rootSessionId) {
+		return ensureTaskLibrary(graphLibrary(rootSessionId));
+	}
+	async libraryForSession(sessionId) {
+		const graph = await this.context.graphs.graphForSession(SessionId(sessionId));
+		return this.libraryForRoot(graph.rootSessionId);
+	}
+	async comparisonRunForSession(sessionId) {
+		const library = await this.libraryForSession(sessionId);
+		const graph = await this.context.graphs.graphForSession(SessionId(sessionId));
+		const run = (await this.context.task.openStore(rootTaskStoreId(graph.rootSessionId)).catch((error) => {
+			if (error instanceof Error && /does not exist/.test(error.message)) return void 0;
+			throw error;
+		}))?.runs.filter((item) => item.sessionId === sessionId).at(-1);
+		if (run === void 0) return void 0;
+		const within = (root, target) => {
+			const path = relative(root, target);
+			return path === "" || !path.startsWith("..") && !path.startsWith("/");
+		};
+		return this.sessionExecutionBindings.get(sessionId)?.overlay !== void 0 || run.taskTemplatesRoot !== void 0 && (within(join(library.root, "evolution"), run.taskTemplatesRoot) || within(join(this.config.runBindingRoot, "replay-libraries"), run.taskTemplatesRoot)) ? run : void 0;
+	}
+	async libraryRead(sessionId) {
+		const library = await this.libraryForSession(sessionId);
+		const execution = this.sessionExecutionBindings.get(sessionId);
+		const run = await this.comparisonRunForSession(sessionId);
+		if (run !== void 0) {
+			const taskTemplatesRoot = run.taskTemplatesRoot ?? execution?.taskTemplatesRoot;
+			const skillRoot = run.providerBinding?.snapshotRoot ?? execution?.overlay?.extraSkillRoots?.[0] ?? library.skillRoot;
+			return {
+				...library,
+				id: run.runId,
+				graphLibraryId: library.id,
+				root: dirname(taskTemplatesRoot),
+				taskTemplatesRoot,
+				skillRoot,
+				version: 1,
+				readOnly: true,
+				message: "This Run uses a frozen comparison view. Include findings in task_submit_result; the supervisor can add useful experience to the graph library.",
+				tasks: (await findTaskTemplates(taskTemplatesRoot)).map(({ templateRef, template }) => ({
+					templateRef,
+					status: "temporary",
+					skills: [...new Set((template.contract.requiredCapabilities ?? []).flatMap((capability) => capability.startsWith("method:") ? [capability.slice(7)] : (run.providerBinding?.skills ?? []).filter((skill) => skill.capabilities.includes(capability)).map((skill) => skill.name)))]
+				})),
+				skills: (run.providerBinding?.skills ?? []).map((item) => ({
+					name: item.name,
+					version: 0,
+					digest: item.contentDigest,
+					status: "temporary"
+				}))
+			};
+		}
+		return readTaskLibrary(library);
+	}
+	async libraryWrite(sessionId, input) {
+		if (await this.comparisonRunForSession(sessionId) !== void 0) throw new Error("Include findings in task_submit_result; the supervisor can add useful experience to the graph library after comparison");
+		await this.templateCaller(sessionId);
+		const graph = await this.context.graphs.graphForSession(SessionId(sessionId));
+		const caller = await this.softService("singularityContext")?.resolveCaller(sessionId);
+		if (!(caller?.kind === "reviewer" && caller.delegation?.role === "supervisor")) {
+			const binding = this.sessions.get(sessionId);
+			const snapshot = await this.context.task.openStore(binding?.storeId ?? rootTaskStoreId(graph.rootSessionId)).catch((error) => {
+				if (graph.rootSessionId === sessionId && error instanceof Error && /does not exist/.test(error.message)) return void 0;
+				throw error;
+			});
+			const run = binding === void 0 ? snapshot?.runs.filter((item) => item.sessionId === sessionId).at(-1) : snapshot?.runs.find((item) => item.runId === binding.runId);
+			if (run === void 0 ? graph.rootSessionId !== sessionId : run.status !== "running" || run.executionPhase !== void 0 && run.executionPhase !== "active") throw new Error("task-library: temporary writes belong to root planning, an active Task, or delegated method supervision");
+		}
+		return writeTaskLibrary(await this.libraryForSession(sessionId), input, await this.capabilitiesForSession(sessionId));
+	}
+	async libraryReview(sessionId, review) {
+		if (await this.comparisonRunForSession(sessionId) !== void 0) throw new Error("Include comparison findings in task_submit_result for graph method supervision");
+		const graph = await this.context.graphs.graphForSession(SessionId(sessionId));
+		if (graph.rootSessionId !== sessionId || graph.rsi !== void 0) {
+			const caller = await this.softService("singularityContext")?.resolveCaller(sessionId);
+			if (caller?.kind !== "reviewer" || caller.delegation?.role !== "supervisor") throw new Error("task-library: retention decisions belong to the graph root or delegated supervisor");
+		}
+		return reviewTaskLibrary(await this.libraryForSession(sessionId), review, sessionId);
+	}
+	async capabilitiesForSession(sessionId) {
+		const overlay = this.sessionExecutionBindings.get(sessionId)?.overlay;
+		return {
+			...this.config.capabilities,
+			...await libraryCapabilities(await this.libraryForSession(sessionId)),
+			...overlay?.capabilityOverrides
+		};
+	}
+	async skillViewForSession(sessionId, extraRoots = []) {
+		const overlay = this.sessionExecutionBindings.get(sessionId)?.overlay;
+		const library = await this.libraryForSession(sessionId);
+		const cwd = await this.envPathForSession(sessionId);
+		return {
+			...cwd === void 0 ? {} : { cwd },
+			extraRoots: [
+				...extraRoots,
+				...overlay?.extraSkillRoots ?? [],
+				library.skillRoot
+			]
+		};
+	}
+	async taskTemplatesRootFor(sessionId) {
+		if (sessionId === void 0) return this.config.taskTemplatesRoot;
+		return this.sessionExecutionBindings.get(sessionId)?.taskTemplatesRoot ?? (await this.libraryForSession(sessionId)).taskTemplatesRoot;
 	}
 	async findTaskTemplates(query, callerSessionId) {
 		const caller = callerSessionId === void 0 ? void 0 : await this.templateCaller(callerSessionId);
@@ -10349,18 +10734,22 @@ var TaskRuntime = class extends Service {
 			const delegated = await this.softService("singularityContext")?.resolveCaller(sessionId);
 			if (delegated?.kind !== "reviewer" || delegated.storeId !== storeId || delegated.task === void 0) throw new Error("task-template: caller has no bound Task, valid delegation or root intake authority");
 			task = delegated.task;
-			run = snapshot?.runs.filter((item) => item.taskId === task.taskId).at(-1);
+			run = delegated.delegation?.sourceRunId === void 0 ? snapshot?.runs.filter((item) => item.taskId === task.taskId).at(-1) : snapshot?.runs.find((item) => item.runId === delegated.delegation?.sourceRunId && item.taskId === task.taskId);
 		}
 		return {
-			root: run?.taskTemplatesRoot ?? this.taskTemplatesRootFor(sessionId),
-			...task === void 0 ? {} : { scope: task.contract?.templateScope ?? [] }
+			root: run?.taskTemplatesRoot ?? await this.taskTemplatesRootFor(sessionId),
+			...task === void 0 ? {} : { scope: task.contract?.templateScope }
 		};
 	}
 	async listTaskTemplates(request, callerSessionId) {
 		const caller = await this.templateCaller(callerSessionId);
 		return taskTemplatePage(caller.root, request, caller.scope);
 	}
-	async registerTaskTemplate(template) {
+	async registerTaskTemplate(template, callerSessionId) {
+		if (callerSessionId !== void 0) return (await this.libraryWrite(callerSessionId, {
+			kind: "task",
+			template
+		})).templateRef;
 		if (this.config.taskTemplatesRoot === void 0) throw new Error("task-runtime: taskTemplatesRoot is not configured");
 		return registerTaskTemplate(this.config.taskTemplatesRoot, template);
 	}
@@ -10454,7 +10843,7 @@ var TaskRuntime = class extends Service {
 	async deriveBatch(identity, spec) {
 		return deriveBatch(this, identity, spec);
 	}
-	manifestsOf(batch, callerSessionId) {
+	async manifestsOf(batch, callerSessionId) {
 		return manifestsOf(this, batch, callerSessionId);
 	}
 	storedBatchOf(proposal) {
@@ -10554,8 +10943,8 @@ var TaskRuntime = class extends Service {
 	async awaitBatch(storeId, batchId) {
 		return awaitBatch(this, storeId, batchId);
 	}
-	async reconcileStore(storeId) {
-		return reconcileStore(this, storeId);
+	async reconcileStore(storeId, rootSessionId) {
+		return reconcileStore(this, storeId, rootSessionId);
 	}
 	async wakeUnclaimedQuestionMessages(storeId, deliveries) {
 		return wakeUnclaimedQuestionMessages(this, storeId, deliveries);
@@ -10670,8 +11059,8 @@ var TaskRuntime = class extends Service {
 	async registeredVerifierIds() {
 		return registeredVerifierIdsImpl(this);
 	}
-	async providerPrecheck(capabilities, view, table = this.config.capabilities, mcpRegistry = this.config.mcpServers ?? {}) {
-		return providerPrecheck(this, capabilities, view, table, mcpRegistry);
+	async providerPrecheck(capabilities, view, table = this.config.capabilities, mcpRegistry = this.config.mcpServers ?? {}, callerSessionId) {
+		return providerPrecheck(this, capabilities, view, table, mcpRegistry, callerSessionId);
 	}
 	async capabilityProviderReport(sessionId, capabilities) {
 		return capabilityProviderReport(this, sessionId, capabilities);
@@ -10798,4 +11187,4 @@ function checkObligationCoverage(templates, snapshot) {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, ensureTaskLibrary, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, graphLibrary, inFlightRecoveryAttempt, isOpenProposal, libraryCapabilities, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readTaskLibrary, readVerifiedFile, rebaseWorkspacePaths, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, reviewTaskLibrary, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, snapshotTaskTemplates, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline, writeTaskLibrary };

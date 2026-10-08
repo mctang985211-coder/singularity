@@ -66,13 +66,15 @@ export function defineCapabilityListTool(ctx: Context) {
     parameters: {},
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (_args, exec) => {
-      const capabilities = ctx.taskRuntime.listCapabilities()
+      const caller = exec.agent?.id
+      const capabilities = typeof caller === 'string' && caller.length > 0
+        ? await ctx.taskRuntime.capabilitiesForSession(caller)
+        : ctx.taskRuntime.listCapabilities()
       const names = Object.keys(capabilities)
       const servers = Object.entries(ctx.taskRuntime.listMcpServers())
       if (names.length === 0 && servers.length === 0) return 'no capabilities or MCP servers configured'
       // The provider verdicts come from the same pre-check admission runs, from
       // this caller's own discovery viewpoint: a skill that is missing or
-      const caller = exec.agent?.id
       const report = typeof caller === 'string' && caller.length > 0
         ? await ctx.taskRuntime.capabilityProviderReport(caller)
         : undefined

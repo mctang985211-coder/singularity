@@ -110,8 +110,8 @@ export interface GraphPatch {
   readonly rsi?: RsiConfig | null
 }
 
-export function patchGraph(id: string, patch: GraphPatch): Promise<unknown> {
-  return request<unknown>(`/singularity/graphs/${encodeURIComponent(id)}`, {
+export function patchGraph(id: string, patch: GraphPatch): Promise<GraphEntry> {
+  return request<GraphEntry>(`/singularity/graphs/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(patch),
@@ -139,12 +139,12 @@ export function decideProposal(body: {
   return post<ProposalDecisionResult>('/singularity/task/proposals/decide', body)
 }
 
-export function fetchEvolution(): Promise<EvolutionResponse> {
-  return request<EvolutionResponse>('/singularity/evolution')
+export function fetchEvolution(graphId?: string): Promise<EvolutionResponse> {
+  return request<EvolutionResponse>('/singularity/evolution' + (graphId === undefined ? '' : '?graphId=' + encodeURIComponent(graphId)))
 }
 
-export function fetchEvolutionProposal(id: string): Promise<{ proposal: EvolutionProposalWire | null }> {
-  return request<{ proposal: EvolutionProposalWire | null }>('/singularity/evolution/' + encodeURIComponent(id))
+export function fetchEvolutionProposal(id: string, graphId?: string): Promise<{ proposal: EvolutionProposalWire | null }> {
+  return request<{ proposal: EvolutionProposalWire | null }>('/singularity/evolution/' + encodeURIComponent(id) + (graphId === undefined ? '' : '?graphId=' + encodeURIComponent(graphId)))
 }
 
 export function fetchRecovery(storeId: string): Promise<RecoveryResponse> {

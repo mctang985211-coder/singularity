@@ -22,6 +22,7 @@ import { logOf } from './log.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
 import { defineRootBudgetApproval, defineTaskBudgetExtendTool } from './tools/budget-extend.ts'
+import { defineTaskLibraryTool } from './tools/task-library.ts'
 import { defineCapabilityListTool } from './tools/capability-list.ts'
 import { defineContextReadTool } from './tools/context-read.ts'
 import { defineEscalateTool } from './tools/escalate.ts'
@@ -203,6 +204,7 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineApproveTool(ctx))
     ctx.tools.register(defineTaskReadTool(ctx))
     ctx.tools.register(defineCapabilityListTool(ctx))
+    ctx.tools.register(defineTaskLibraryTool(ctx))
     ctx.tools.register(defineTaskTemplateListTool(ctx))
     ctx.tools.register(defineContextReadTool(ctx))
     // The root's own goal is accepted here (A0): it is in ROOT_TOOLS only, and

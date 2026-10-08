@@ -4,6 +4,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { blockingQuestionsOf, questionIdOf, sha256Hex } from '../../task/src/index.ts'
 import type { TaskEvent } from '../../task/src/index.ts'
 import { bindRunProviders, resolveCapabilities, settleRunFromRuntime } from '../../task-runtime/src/index.ts'
+import { capabilitySnapshot } from '../../task-runtime/src/capability.ts'
 import type { DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import {
   disposeScriptedLoops,
@@ -861,10 +862,14 @@ describe('questions inside a replay (A4 §F.1)', () => {
       childTaskIds: [],
     }, 'tester')
     await h.task.admitTaskIn(root.storeId, 't-replay-child', 'tester', { decompositionStatus: 'leaf' })
+    // The run is bound against the table the root session's own admission
+    // resolves — its graph library's rows merged over the configuration — which
+    // is the table the provider pre-check for that session is asked with.
+    const manifest = resolveCapabilities(['execute-task'], await h.runtime.capabilitiesForSession(String(ROOT)))
     const providerBinding = await bindRunProviders({
       storeId: root.storeId,
       runId: 'r-replay-child',
-      manifest: resolveCapabilities(['execute-task'], h.runtime.listCapabilities()),
+      manifest,
       providers: await h.runtime.capabilityProviderReport(String(ROOT), ['execute-task']),
       root: h.runtime.config.runBindingRoot,
     })
@@ -872,7 +877,7 @@ describe('questions inside a replay (A4 §F.1)', () => {
       runId: 'r-replay-child',
       taskId: 't-replay-child',
       sessionId: REPLAY_CHILD,
-      capabilitySnapshot: ['task-execution'],
+      capabilitySnapshot: capabilitySnapshot(manifest),
       providerBinding,
       artifacts: [],
       verifierResults: [],

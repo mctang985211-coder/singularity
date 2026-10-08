@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { CreateGraphRequest, GraphPinsUpdate } from '@dangosys/dsh-singularity-graphs'
+import { optionalService } from '@dangosys/dsh-singularity-task-runtime'
 import { GRAPHS_PATH } from '../../constants.ts'
 import { fail, guardMethod, readJson, sendJson, urlOf } from '../libs/http.ts'
 
@@ -55,6 +56,15 @@ export function registerGraphs(ctx: Context): () => void {
           return
         }
         if (parts.length !== 2) throw new Error(`graphs: unknown path ${url.pathname}`)
+
+        if (action === 'library') {
+          if (!guardMethod(req, res, 'GET')) return
+          const graph = await ctx.graphs.get(id)
+          const runtime = optionalService<Pick<Context['taskRuntime'], 'libraryRead'>>(ctx, 'taskRuntime')
+          if (runtime === undefined) throw new Error('graphs: task library service is unavailable')
+          sendJson(res, 200, await runtime.libraryRead(graph.rootSessionId))
+          return
+        }
 
         if (action === 'select' || action === 'ready' || action === 'delete') {
           if (!guardMethod(req, res, 'POST')) return

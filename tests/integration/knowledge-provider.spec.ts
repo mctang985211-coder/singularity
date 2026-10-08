@@ -63,7 +63,7 @@ function rootContract(objective: string): RootContractSpec {
 describe('a knowledge provider (S1-C)', () => {
   it('is loadable and recorded as knowledge, and never counts as an execution provider', async () => {
     const capabilities: Record<string, CapabilityConfig> = { [ROW]: { skills: [SKILL], tools: ['filesystem'] } }
-    const h = await startRunStack({ capabilities, roots: [ROOT], tools: true })
+    const h = await startRunStack({ capabilities, roots: [ROOT], tools: true, skillTool: true })
     const directory = await writeKnowledgeSkill(join(h.home, 'skills'), SKILL, BODY)
 
     const root = await h.root(ROOT, rootContract('ship the release'))
@@ -99,9 +99,15 @@ describe('a knowledge provider (S1-C)', () => {
     expect(binding.skills[0]!.contractDigest).toBe(verdict.contractDigest)
     expect(binding.skills[0]!.contentDigest).toBe(verdict.contentDigest)
     const worker = h.agent(run.sessionId as SessionId)!
-    const registered = await h.ctx.skills.get(SKILL, { scope: worker, cwd: h.checkout })
+    // The worker's own skill layer is its run's frozen registration, and the
+    // model reaches it through the real `skill` loader mounted on that layer.
+    const loader = h.ctx.tools.get('skill', worker)
+    if (loader === undefined) throw new Error('the worker has no skill loader')
+    const registered = await loader.execute({ name: SKILL }, {
+      agent: worker, callId: 'read-bound-skill', signal: new AbortController().signal,
+    } as never) as { content: string; resourceBase?: { path: string } }
     expect(registered?.content).toContain(BODY)
-    expect(registered!.path!.startsWith(binding.snapshotRoot!)).toBe(true)
+    expect(registered!.resourceBase!.path.startsWith(binding.snapshotRoot!)).toBe(true)
 
     // …and the tool a model reads before dispatching says the same thing.
     const listed = await h.call(worker, 'capability_list', {})

@@ -9,7 +9,7 @@
  * @module @dangosys/dsh-singularity-agent/handoff-rules
  */
 
-import type { ReviewRecord } from '@dangosys/dsh-singularity-task'
+import type { ReviewMetrics, ReviewRecord, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { ReviewAgentAttempt } from './ledger.ts'
 
 /** Shared host preset; runtime installs the actual coordination role. */
@@ -68,6 +68,54 @@ export function renderSupervisorReviewFacts(review: ReviewRecord): string {
   if (metrics !== undefined) lines.push(`metrics: ${metrics}`)
   if (review.logTail !== undefined) lines.push(`logTail: ${review.logTail}`)
   return lines.join('\n')
+}
+
+/** Executed descendants belong to an exact Run, including failed attempts, rather than a task's latest tree. */
+export function runSubtree(snapshot: TaskSnapshot, rootRunId: string): TaskRun[] {
+  const selected = new Set([rootRunId])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const run of snapshot.runs) {
+      if (run.parentRunId !== undefined && selected.has(run.parentRunId) && !selected.has(run.runId)) {
+        selected.add(run.runId)
+        changed = true
+      }
+    }
+  }
+  return snapshot.runs.filter(run => selected.has(run.runId))
+}
+
+/** Sum readable session counters once; coverage keeps a missing reading distinct from zero effort. */
+export function renderRecordedCostFacts(
+  label: string,
+  sessionIds: readonly string[],
+  observations: ReadonlyMap<string, ReviewMetrics>,
+  unit = 'sessions',
+): string {
+  const sessions = [...new Set(sessionIds)]
+  const tokens = { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  const buckets = Object.keys(tokens) as (keyof typeof tokens)[]
+  let tokenSessions = 0
+  let toolSessions = 0
+  let calls = 0
+  let failures = 0
+  for (const sessionId of sessions) {
+    const metrics = observations.get(sessionId)
+    if (metrics?.tokens !== undefined && buckets.every(key => Number.isFinite(metrics.tokens![key]) && metrics.tokens![key] >= 0)) {
+      tokenSessions += 1
+      for (const key of buckets) tokens[key] += metrics.tokens[key]
+    }
+    if (metrics?.toolCalls !== undefined && [metrics.toolCalls.calls, metrics.toolCalls.failures].every(value => Number.isFinite(value) && value >= 0)) {
+      toolSessions += 1
+      calls += metrics.toolCalls.calls
+      failures += metrics.toolCalls.failures
+    }
+  }
+  const usage = tokenSessions === 0 ? 'tokens unknown' :
+    `tokens ${Object.values(tokens).reduce((sum, value) => sum + value, 0)} (input ${tokens.uncachedInputTokens}, output ${tokens.outputTokens}, cache read ${tokens.cacheReadTokens}, cache write ${tokens.cacheWriteTokens})`
+  const tools = toolSessions === 0 ? 'toolCalls unknown' : `toolCalls ${calls} (${failures} failed)`
+  return `${label}: ${sessions.length} ${unit}; ${usage}; ${tools}; coverage tokens ${tokenSessions}/${sessions.length}, tools ${toolSessions}/${sessions.length}; monetary cost unknown (no recorded price).`
 }
 
 /** The effort counters of one review record, one clause per counter that exists — an absent field means "not observed". */

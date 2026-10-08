@@ -38,6 +38,10 @@ type WorkerSettlement = { kind: 'idle' } | { kind: 'aborted' } | { kind: 'failed
 async function awaitWorker(handle: AgentHandle, signal: AbortSignal | undefined): Promise<WorkerSettlement> {
   const cancel = () => handle.agent.cancel({ kind: 'parent' })
   signal?.addEventListener('abort', cancel, { once: true })
+  // An abort that already happened when this wait began is the same cancellation:
+  // the listener above never fires for it, and the worker would otherwise run on
+  // with nothing left to cancel it.
+  if (isAborted(signal)) cancel()
   try {
     await handle.agent.whenIdle()
     return isAborted(signal) ? { kind: 'aborted' } : { kind: 'idle' }

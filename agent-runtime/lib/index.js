@@ -6,6 +6,9 @@ import { snapshotSubagentDescriptor } from "@deepseek-ai/dsh-subagent";
 import { DEFAULT_ROOT } from "@dangosys/dsh-singularity-graph";
 import { RUN_CODE_NAME } from "@deepseek-ai/dsh-tools";
 import * as McpClient from "@deepseek-ai/dsh-mcp-client";
+import SkillRegistry, { renderSkillContent } from "@deepseek-ai/dsh-skill";
+import { FileSystemSkillProvider } from "@deepseek-ai/dsh-skill-filesystem";
+import * as ToolSkill from "@deepseek-ai/dsh-tool-skill";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -328,6 +331,37 @@ async function readSkillFile(file, name) {
 
 //#endregion
 //#region src/grants.ts
+/** Deliver the Run's explicitly bound methods before its first model action. */
+function installBoundSkillInstructions(local, definitions) {
+	const methods = definitions.filter((skill) => skill.invocation?.modelInvocable !== false);
+	if (methods.length === 0) return;
+	local.on("agent/pre-step", async ({ agent, signal }, next) => {
+		const decision = await next();
+		if (decision.kind === "reject" || decision.messages.some((message) => message.source.kind === "task-skills")) return decision;
+		if (agent.session.surface.nodes.some((seq) => {
+			const event = agent.session.eventAt(seq);
+			return event?.type === "user/message" && event.data.source.kind === "task-skills" && event.data.source.names.length === methods.length && methods.every((skill) => event.data.source.kind === "task-skills" && event.data.source.names.includes(skill.name));
+		})) return decision;
+		signal.throwIfAborted();
+		return {
+			...decision,
+			messages: [...decision.messages, createUserMessage({
+				source: {
+					kind: "task-skills",
+					form: "instructions",
+					names: methods.map((skill) => skill.name)
+				},
+				content: [{
+					type: "text",
+					text: methods.map((skill) => renderSkillContent({
+						...skill,
+						provider: "runtime"
+					})).join("\n\n")
+				}]
+			})]
+		};
+	});
+}
 function skillRegistry(agentCtx) {
 	return agentCtx.get("skills");
 }
@@ -366,13 +400,93 @@ function resolveGrant(agentCtx, agent, grant) {
 		baselineUnavailable: [...new Set(grant.baseline.filter((tool) => !visible.has(tool)))].sort()
 	};
 }
-/** Register every skill one grant's extra roots carry into the worker's own layer (the replay overlay), first. */
-async function applySkillRoots(agentCtx, grant) {
+/** A separate registry prevents host providers from merging into the agent's catalog. */
+async function isolatedSkills(agentCtx) {
+	const local = agentCtx.isolate("skills");
+	await local.plugin(SkillRegistry, {});
+	return local;
+}
+/** Keep native catalog middleware outside the host's same-name catalog cleanup. */
+const ScopedSkillTool = {
+	name: "singularity-scoped-skill",
+	inject: ToolSkill.inject,
+	apply(ctx) {
+		const native = ctx.extend({ on(name, listener, options) {
+			return ctx.on(name, listener, {
+				...typeof options === "boolean" ? { prepend: options } : options,
+				...name === "agent/pre-step" ? { prepend: true } : {}
+			});
+		} });
+		ToolSkill.apply(native);
+		ctx.on("agent/pre-step", async ({ agent, signal }, next) => {
+			const decision = await next();
+			if (decision.kind === "reject") return decision;
+			const allowed = new Set((await ctx.skills.list({
+				scope: agent,
+				cwd: agent.session.header.cwd,
+				signal
+			})).filter((skill) => skill.invocation.userInvocable).map((skill) => skill.name));
+			const seen = /* @__PURE__ */ new Set();
+			const messages = decision.messages.slice().reverse().filter((message) => {
+				if (message.source.kind !== "skill-invocation") return true;
+				const name = message.source.name;
+				if (!allowed.has(name) || seen.has(name)) return false;
+				seen.add(name);
+				return true;
+			}).reverse();
+			return {
+				...decision,
+				messages
+			};
+		}, { prepend: true });
+	}
+};
+/** Use the native loader/catalog with only this graph's active method roots. */
+async function installGraphSkillCatalog(agentCtx, options, exposeTool = true) {
+	const local = await isolatedSkills(agentCtx);
+	let invalidate;
+	let files;
+	local.get("skills").registerProvider((control) => {
+		invalidate = control.invalidate;
+		files = new FileSystemSkillProvider(local, control, {
+			providerName: "singularity-graph",
+			includeDefaultRoots: false,
+			customSkillDirs: [...options.skillRoots],
+			watch: false
+		});
+		return {
+			name: files.name,
+			async list(lookup) {
+				const observation = await files.list(lookup);
+				const candidates = Array.isArray(observation) ? observation : observation.candidates;
+				const latest = options.readLibrary === void 0 ? void 0 : new Map((await options.readLibrary()).skills.map((row) => [row.name, row.status]));
+				const visible = candidates.filter((candidate) => latest === void 0 || latest.get(candidate.name) !== "retired");
+				return Array.isArray(observation) ? visible : {
+					...observation,
+					candidates: visible
+				};
+			},
+			get: (candidate, lookup) => files.get(candidate, lookup)
+		};
+	});
+	local.on("agent/pre-step", (_event, next) => {
+		invalidate();
+		return next();
+	});
+	if (exposeTool) await local.plugin(ScopedSkillTool);
+	return local;
+}
+/** Resolve only explicitly granted names before detaching the host registry. */
+async function frozenGrantSkills(agentCtx, agent, grant) {
+	const granted = /* @__PURE__ */ new Map();
+	for (const capability of grant.capabilities) for (const name of capability.skills) if (!granted.has(name)) granted.set(name, capability.capability);
 	const roots = grant.skillRoots ?? [];
-	const overlaid = /* @__PURE__ */ new Set();
-	if (roots.length === 0) return overlaid;
-	const skills = skillRegistry(agentCtx);
-	if (skills === void 0) throw new Error(`agent-runtime: skill overlay roots [${roots.join(", ")}] were requested but the deployment provides no skill registry (ctx.skills)`);
+	const host = skillRegistry(agentCtx);
+	if (host === void 0 && (granted.size > 0 || roots.length > 0)) {
+		const requested = roots.length > 0 ? `skill overlay roots [${roots.join(", ")}] were requested` : `capabilities [${[...new Set(granted.values())].join(", ")}] grant skills [${[...granted.keys()].join(", ")}]`;
+		throw new Error(`agent-runtime: ${requested} but the deployment provides no skill registry (ctx.skills)`);
+	}
+	const definitions = /* @__PURE__ */ new Map();
 	for (const root of roots) {
 		let files;
 		try {
@@ -380,38 +494,24 @@ async function applySkillRoots(agentCtx, grant) {
 		} catch (error) {
 			throw new Error(`agent-runtime: skill overlay root "${root}" is not readable: ${messageOf(error)}`);
 		}
-		for (const { name, file } of files) {
-			if (overlaid.has(name)) continue;
-			skills.register(await readSkillFile(file, name));
-			overlaid.add(name);
-		}
+		for (const { name, file } of files) if (granted.has(name) && !definitions.has(name)) definitions.set(name, await readSkillFile(file, name));
 	}
-	return overlaid;
-}
-/** Grant one worker's capability skills; overlay-registered names are skipped so the overlay body wins. */
-async function grantSkills(agentCtx, agent, grant, overlaid) {
-	const granted = /* @__PURE__ */ new Map();
-	for (const capability of grant.capabilities) for (const skill of capability.skills) if (!granted.has(skill) && !overlaid.has(skill)) granted.set(skill, capability.capability);
-	if (granted.size === 0) return;
-	const skills = skillRegistry(agentCtx);
-	if (skills === void 0) throw new Error(`agent-runtime: capabilities [${[...new Set(granted.values())].join(", ")}] grant skills [${[...granted.keys()].join(", ")}] but the deployment provides no skill registry (ctx.skills)`);
 	const cwd = agent.session.header.cwd;
 	for (const [name, capability] of granted) {
-		const discovered = await skills.get(name, {
+		if (definitions.has(name)) continue;
+		const discovered = await host.get(name, {
 			scope: agent,
 			cwd
 		});
 		if (discovered !== void 0) {
-			skills.register(toRuntimeSkill(discovered));
+			definitions.set(name, toRuntimeSkill(discovered));
 			continue;
 		}
 		const file = await findSkillFile(name, cwd);
-		if (file === void 0) {
-			const roots = await skillRootsFor(cwd);
-			throw new Error(`agent-runtime: capability "${capability}" grants skill "${name}" but no SKILL.md for it is reachable; searched ${roots.join(", ")}`);
-		}
-		skills.register(await readSkillFile(file, name));
+		if (file === void 0) throw new Error(`agent-runtime: capability "${capability}" grants skill "${name}" but no SKILL.md for it is reachable; searched ${(await skillRootsFor(cwd)).join(", ")}`);
+		definitions.set(name, await readSkillFile(file, name));
 	}
+	return [...definitions.values()];
 }
 /** Mount every MCP server one grant declares, one mcp-client instance per spec, fail-closed on startup. */
 async function mountMcpServers(agentCtx, agent, grant) {
@@ -431,7 +531,7 @@ async function mountMcpServers(agentCtx, agent, grant) {
 	}
 }
 /** Apply one worker's grant: restrict tools, register skills, mount MCP servers — all fail-closed. */
-async function applyWorkerGrant(agentCtx, agent, grant) {
+async function applyWorkerGrant(agentCtx, agent, grant, graphCatalog) {
 	const { allow } = resolveGrant(agentCtx, agent, grant);
 	try {
 		agentCtx.tools.restrict({ allow });
@@ -439,63 +539,51 @@ async function applyWorkerGrant(agentCtx, agent, grant) {
 		const capabilities = grant.capabilities.map((capability) => capability.capability);
 		throw new Error(`agent-runtime: could not restrict agent "${agent.id}" to [${allow.join(", ")}] for capabilit${capabilities.length === 1 ? "y" : "ies"} [${capabilities.join(", ")}]: ${messageOf(error)}`);
 	}
-	await grantSkills(agentCtx, agent, grant, await applySkillRoots(agentCtx, grant));
+	if (graphCatalog !== void 0) await installGraphSkillCatalog(agentCtx, graphCatalog, allow.includes("skill"));
+	else {
+		const definitions = await frozenGrantSkills(agentCtx, agent, grant);
+		const local = await isolatedSkills(agentCtx);
+		const skills = local.get("skills");
+		for (const definition of definitions) skills.register(definition);
+		if (allow.includes("skill")) await local.plugin(ScopedSkillTool);
+		installBoundSkillInstructions(local, definitions);
+	}
 	await mountMcpServers(agentCtx, agent, grant);
 }
 
 //#endregion
 //#region src/prompts/root.prompts.ts
-/** The root’s authority and bootstrap. Its method is authored once in task-coordination/SKILL.md. */
+/** The graph root turns a user's objective and metrics into an executable contract. */
 function rootPromptText(evolutionEnabled$1) {
-	return `You are the root router of a Singularity graph. You coordinate the user's complete objective through task workers and own the combined result. Investigate consequential unknowns through focused Tasks, read their evidence and author the next direct-child contracts. Bind a fitting template or write a complete contract; do not preplan the tree. Children own verifiable results and their descendants. Run independent work concurrently with real dependsOn edges, integrate accepted child artifacts and retain your complete acceptance.
+	return `You are the root router of a Singularity graph. You coordinate the user's complete objective through task workers and own the combined result. Start from the user's task and metrics: investigate the available environment, state useful assumptions, and define the result and checks for this execution. Use your tools for local investigation, measurement and implementation, and delegate useful independent results to Tasks. Resolve ordinary engineering choices from evidence; ask the user for consequential decisions about their objective or authority. An exploratory Task can supply facts needed for a later implementation.
 
-Read task_read, task_status and context_read; repository execution belongs to real Task workers. Decide engineering and coordination within your authority. Ask the user for missing decisions that change their objective, scope or acceptance.
+Before intake, load task-coordination with skill and read task_library, capability_list and relevant task_template_list entries. The graph's library holds reusable TaskTemplates and their guidance Skills. Bind a fitting template and its exact parameters, or author the contract the current task needs. Declare each Task's execution capabilities and relevant guidance through requiredCapabilities, using actual catalog names. Define useful direct children with owned results, inputs and checks; they choose their descendants. Integrate their evidence and deliver the complete objective.
 
-Before intake, load task-coordination with skill and consult capability_list and relevant task_template_list branches. Declare each Task's execution capabilities and relevant guidance through requiredCapabilities, using the catalog's actual capability names. Bind a template only when its appliesTo conditions, full contract and parameters fit the objective; otherwise author a complete one-off contract and proceed without publishing a template. A Task defines the result, inputs, acceptance and required capabilities; a TaskTemplate parameterizes that contract and may offer a direct-child recipe. A Skill teaches the method and its applicability conditions. Activated Runs load frozen Skill instructions; engineering heuristics remain falsifiable hypotheses.
-
-Tool schemas define your operations. ${evolutionEnabled$1 ? "Evolution tools are available for evidenced Task and Skill improvements, with capability/MCP changes when execution means are missing. Preserve reusable findings from executed contracts and batches with exact Task/Run and evidence references. The automatic RSI supervisor consolidates these findings from the task tree and diagnoses, selects justified task_definition or Skill candidates, compares and publishes within authority; ordinary business Tasks need no shared-template publication. Manual Evolution work still follows actual authorization. Draft review does not establish Task acceptance or method improvement; independent verification, comparison, publication and later exact catalog or Skill consumption establish separate facts. Work within budget and recorded human decisions." : "Return reusable contract and method gaps with Task/Run and evidence references; delegate execution to Tasks through requiredCapabilities. Report a concrete capability gap when the catalog cannot supply the needed execution means."}`;
+A Task owns this execution's goal and acceptance. A TaskTemplate records reusable goals and decomposition; a Skill records methods, conditions and experience. You may record useful exploratory goals or methods in the graph library as temporary templates or Skills. ${evolutionEnabled$1 ? "Evolution tools are available for Task and Skill improvements and capability/MCP changes when execution means are missing. The RSI supervisor reviews the library and actual results, chooses what to retain or modify, compares candidates, publishes, and inspects later consumption. Weigh task quality and performance together with recorded model tokens, cache traffic, tool work and cost. Work within budget and recorded human decisions." : "Return useful goals, methods and capability gaps with Task/Run and evidence references. Delegate execution to Tasks through requiredCapabilities."}`;
 }
 
 //#endregion
 //#region src/prompts/coordination.prompts.ts
-/** Stable policies for the two coordination roles; source facts belong in their first request. */
-const REVIEWER_POLICY_TEXT = `You are a Singularity reviewer. Explain one exact Task/Run from original evidence and identify a useful next action. Use the compact DAG to locate relevant contracts, results, sessions and frozen Skills. Treat diagnoses as hypotheses; trace responsible causes and seek counterexamples or facts that distinguish explanations. Follow useful leads rather than restating the graph.
+/** Stable role guidance; exact source facts are supplied in the first request. */
+const REVIEWER_POLICY_TEXT = `You are a Singularity reviewer. Investigate the requested Task/Run through its original evidence, task tree, graph library and frozen Skills. Explain causes, useful next actions, applicability conditions and uncertainties. Weigh task quality and performance alongside recorded model usage and tool work. Use your granted reads and return the requested JSON with evidence references. Return ordinary repairs to the responsible parent and reusable method findings to the supervisor.`;
+const SUPERVISOR_POLICY_TEXT = `You are a Singularity supervisor. Read task_library, the actual task tree, results and costs. Review exploratory goals, decomposition templates and Skill experience; record retention or retirement with task_library review, and write useful revisions. A Task's acceptance belongs to that execution. TaskTemplates teach reusable goals and decomposition; Skills teach paths, methods and conditions. Preserve the user's objective and the original checks of each compared task.
 
-Examine result quality, performance, model cost and repeated work where relevant. Check that command criteria use the Run workspace root and explicit own manifests, without sibling globs or parent-acceptance substitution. A failure defines its conditions, not a ban on every implementation. Distinguish observations, causal hypotheses and gains, referencing existing evidence once. Repeated contracts or repaired contract defects should become parameterized TaskTemplate or Skill candidates with causal evidence.
+Choose the responsible TaskTemplate, Skill or capability provider, compare a useful candidate, and publish within authority. Use evolution_replay objective llm-outcome with evaluation.goal for task quality or performance, or tool-call-reduction for overhead. The LLM can supply a measurement plan that is frozen before real comparison. Reuse available tools and artifacts, clean starting inputs and comparable model budgets. Report seen cases as regression evidence and test transfer on fresh tasks when available. Weigh domain results together with model tokens, cache traffic, tool work and reported cost; mark unavailable readings unknown.
 
-You do not change files, task state or production, score acceptance, or spawn agents. Use granted reads and return the requested fenced JSON. A proposal names the responsible asset and an unchanged-acceptance comparison that could refute its benefit. Uncertainty or no justified change is valid. Ordinary repairs return to their responsible parent; a supervisor's investigation returns to that supervisor.`;
-const SUPERVISOR_POLICY_TEXT = `You are a Singularity supervisor. Execute reusable method improvement: investigate, build a candidate, compare, publish within authority and use later consumption results to choose the next action. Preserve the user's objective, authoritative acceptance, resource limits and failure logs. Budget and recorded decisions bound the work; a proposal ledger is not completion.
-
-Read the outcome and compact DAG, then inspect relevant original evidence and exact asset bytes. Treat diagnoses and Skill heuristics as hypotheses; seek counterexamples and applicability conditions rather than banning a direction after one failure. Inspect quality/performance alongside recorded model tokens/cost, elapsed time and tool work. Use task_review_agent only when a focused independent answer can change your decision.
-
-Choose the causal TaskTemplate, Skill or capability/Tool provider. Repeated contracts or corrected contract defects require a parameterized template or method candidate with causal evidence; one-off contracts need no publication. Teach future Tasks how to investigate, decompose and verify, retaining simple command criteria, own manifests and relevant guidance Skills. Never store a solved RTL answer. A recipe comparison must exercise its actual direct-child decomposition and original parent acceptance; children retain their own acceptance. Advance candidates through comparison and publication, then have later Tasks bind exact catalog templateRef/parameters or the published Skill and inspect actual consumption.
-
-Choose evolution_replay objective llm-outcome for quality/performance, with evaluation.goal and any known rubric or measurements. An LLM may supply the plan; freeze it before comparison and obtain results from real Tools in each Run workspace. Use clean starting inputs for independent solves, comparable budgets and holdouts unused in forming the candidate. Deterministic remeasurement of one artifact is not another model solve. Tool-call-reduction measures complete Run subtree overhead; fewer calls alone do not prove better domain results.
-
-Measure enough to decide, then continue. Reuse saved evidence and judgement for gate/publication; recheck only a relevant change, failure, uncertainty or explicit requirement. Missing evidence makes comparison inconclusive. Record available costs without inventing values, and allow measured negative results.
-
-Use evolution_decide and evolution_apply under actual publication policy and authorized asset scope; honor existing authorization. The platform RSI loop alone opens the next round after you settle, and no recovery tool is granted to you: apply the shared changes your round justifies, then stop. Admitted Tasks and frozen Runs retain their definitions and Skills.
-
-Inspect later asset bindings and results before claiming transfer. A regression or counterexample drives the next justified candidate and comparison within the allowance. Record unobservable consumption as unverified; stop when no reasonable authorized action or budget remains. Publication, adoption and demonstrated benefit are distinct.`;
+Reuse enough evidence to decide. A useful negative result or reasoned no_change can complete supervision. Use evolution_decide with REJECT or KEEP_FOR_FURTHER_RESEARCH and a reason to conclude an open proposal when comparison is unnecessary or unavailable. PROMOTE follows completed comparison and gate. Inspect later exact template or Skill bindings and outcomes to establish consumption and benefit. Finish each executable candidate through evolution_decide and evolution_apply as appropriate, then return your outcome; the platform driver opens the next round. Budget and recorded decisions bound your work.`;
 
 //#endregion
 //#region src/prompts/worker.prompts.ts
-/** The worker role's stable policy (A2), registered as the `singularity:worker` section (order 75). */
-const WORKER_POLICY_TEXT = `You are a Singularity task worker. Own the complete result under your original acceptance and root constraints. Context and task_read, task_status and context_read supply the contract, state and frozen Skills. Capabilities and tool admission define your authority.
+/** Stable worker policy; each Task supplies its own result and acceptance. */
+const WORKER_POLICY_TEXT = `You are a Singularity task worker. Own the complete result and acceptance of this execution. Your Task's bound Skills are loaded as frozen instructions before work begins; apply useful methods and record their outcomes. Read task_read, task_status and context_read for the contract and state. Use task_library and task_template_list to find this graph's matching methods and next TaskTemplates; capability_list names the available execution means.
 
-Investigate consequential unknowns with a bounded distinguishing check and revise your method from real evidence. Skill heuristics are hypotheses with applicability conditions; retain failed cases and checks without banning an entire approach.
+Investigate useful unknowns and choose local work or task_decompose. Give direct children clear ownership, inputs, checks and capabilities; let them choose descendants. Run independent work concurrently with real dependsOn edges, read batch outcomes and integrate accepted artifacts. Bind a fitting template or author the current task's contract. Choose a few checks that observe your result, using existing tools or a small task-specific check when useful. Commands run from this Run's workspace with its explicit inputs. Preserve authoritative checks, protected inputs, resource limits and failure evidence.
 
-Implement a local result or task_decompose independently verifiable children with clear ownership, inputs, acceptance and capabilities. Define direct children only; let them choose descendants. Parallelize independent work with real dependsOn edges. Consult capability_list and relevant task_template_list branches before drafting children. Inspect the appliesTo conditions and full contract, then bind a fitting exact reference and parameters; when none fits, author a complete one-off contract and proceed without publishing a template. A Task defines the result and acceptance; a TaskTemplate parameterizes the contract and optional direct-child recipe; a Skill teaches the method. After a batch, read failures and results, integrate accepted child artifacts and choose the next useful action. Clean starting inputs for independent comparisons do not prohibit ordinary child integration.
+Use task_verify for a useful self-check under the verifier deadline; submission performs acceptance. Reuse unchanged evidence. Decide facts and engineering choices from evidence, use task_ask_parent for decisions outside your authority, and answer children promptly with task_answer.
 
-Keep ordinary acceptance simple: a few command criteria using existing authoritative checkers. Commands start from the current Run workspace root and read this Task's explicit case/delivery manifest. Never use bare globs to collect sibling results. Your criteria check your own result; parents aggregate theirs separately. Template mappings refer only to your own children, never siblings. Artifact paths are not Evidence IDs.
-
-Never declare completion yourself: the external verifier judges mandatory criteria. A criterion's protected inputs must not be modified; retain authoritative oracles, resource limits and failure logs. For a useful self-check, use \`task_verify\`: it runs the contracted criteria under the verifier deadline. Do not copy an acceptance command into bash or a background job. \`task_verify\` is only a self-check; submission performs required acceptance. Reuse unchanged evidence rather than repeat equivalent checks or reports.
-
-Decide facts and engineering choices yourself. Use task_ask_parent for decisions outside your authority and blocking:false when independent work can continue. Answer children promptly with task_answer and resolves:true only when settled; questions change no contract or permissions.
-
-When ready, hand it in with \`task_submit_result\`, referencing artifacts and actual evidence once. Include justified reusable contract or method findings in your summary or artifacts, with the relevant Task/Run, executed batches, evidence and failure conditions. This gives the supervisor concrete sources for a parameterized TaskTemplate or Skill candidate; it does not require every one-off Task to become a template. The authorized supervisor consolidates findings, compares candidates and publishes for later exact catalog or Skill binding. Draft review does not replace independent acceptance. Store reusable contracts and methods, not solved RTL answers. Going idle is not a submission; report an impossible result rather than weaken acceptance.`;
-/** The first user message a task worker receives when its spawn carried no prompt of its own. */
-const WORKER_KICKOFF_TEXT = "Begin your delegated task. Read the contract with task_read as needed, investigate consequential unknowns, and implement or delegate verifiable results. Integrate their evidence and submit with task_submit_result.";
+If you identify a useful goal to explore or decompose, record it as a temporary TaskTemplate in the graph library. Record reusable paths, methods, conditions and experience as Skills, linking relevant Task/Run and evidence. The supervisor reviews them during iteration and chooses retention or revision alongside task results and model cost. Finish with task_submit_result, referencing artifacts and evidence once; the external verifier judges this task's criteria.`;
+/** The first request a task worker receives when the spawn carries no request. */
+const WORKER_KICKOFF_TEXT = "Begin your delegated task. Read task_read and the graph library as needed, investigate useful unknowns, implement or delegate results, and submit their evidence with task_submit_result.";
 
 //#endregion
 //#region src/raw-session-guard.ts
@@ -890,15 +978,26 @@ var AgentRuntime = class extends Service {
 		}
 	}
 	async prompt(agent, prompt) {
+		await this.deliverPrompt(agent, prompt, false);
+	}
+	/** Deliver a goal submitted through the host's graph creation API as user input. */
+	async promptUser(agent, prompt, context) {
+		await this.deliverPrompt(agent, prompt, true, context);
+	}
+	async deliverPrompt(agent, prompt, user, context) {
 		if (this.closing) throw new Error("agent-runtime: closing");
 		this.live(agent);
 		const scope = this.scope(agent.id);
 		if (this.stopping.has(scope.graphStoreId)) throw new Error("agent-runtime: graph stopping");
 		if ((await this.ctx.graph.snapshotIn(scope.graphStoreId)).agents.every((item) => item.id !== agent.id)) throw new Error(`agent-runtime: agent "${agent.id}" is not in graph`);
 		this.live(agent);
+		if (context !== void 0) agent.inject(createUserMessage({
+			content: [...context],
+			source: runtimePrompt("prompt")
+		}));
 		agent.followup(createUserMessage({
 			content: [...prompt],
-			source: runtimePrompt("prompt")
+			source: user ? { kind: "user" } : runtimePrompt("prompt")
 		}));
 	}
 	/** Read back the body of a `tool/call` a question or answer cites, flushing the sender first (A4 §F.1). */
@@ -983,6 +1082,16 @@ const EVOLUTION_TOOLS = [
 ];
 /** The tools every root may call whatever the deployment's evolution switch says (README Design notes). */
 const ROOT_CORE_TOOLS = [
+	"read",
+	"glob",
+	"grep",
+	"write",
+	"edit",
+	"bash",
+	"job_list",
+	"job_output",
+	"job_kill",
+	"task_library",
 	"graph_spawn",
 	"graph_mark_ready",
 	"hitl_ask",
@@ -1023,7 +1132,16 @@ function rootToolsFor(enabled) {
 function sealRootTools(agentCtx, enabled) {
 	agentCtx.tools.presentAs("native");
 	const allowed = new Set(rootToolsFor(enabled));
-	agentCtx.tools.guard((execution) => allowed.has(execution.name) ? void 0 : "singularity: the root coordinates through task tools; delegate engineering work with task_decompose");
+	agentCtx.tools.guard((execution) => allowed.has(execution.name) ? void 0 : "singularity: use the root execution tools and task_decompose for delegated task work");
+}
+async function graphCatalogFor(ctx, agent, root) {
+	const libraries = ctx.get("taskRuntime");
+	const ownerSessionId = root ? agent.id : agent.session.header?.parentSession ?? agent.id;
+	const library = libraries === void 0 ? void 0 : root ? await libraries.libraryForRoot(agent.id) : await libraries.libraryForSession?.(ownerSessionId);
+	return {
+		skillRoots: [library?.skillRoot ?? fileURLToPath(new URL("../skills/", import.meta.url))],
+		...libraries?.libraryRead === void 0 || library === void 0 ? {} : { readLibrary: () => libraries.libraryRead(agent.id) }
+	};
 }
 /** Compose one root's scoped world; `createRoot` and `resumeRoot` both hand this to the agent factory. */
 function rootSetup(ctx, agentPreset) {
@@ -1038,12 +1156,7 @@ function rootSetup(ctx, agentPreset) {
 			text: rootPromptText(evolution)
 		});
 		agentCtx.tools.restrict({ allow: rootToolsFor(evolution) });
-		await applySkillRoots(agentCtx, {
-			capabilities: [],
-			baseline: [],
-			keepPresetTools: false,
-			skillRoots: [fileURLToPath(new URL("../skills/", import.meta.url))]
-		});
+		await installGraphSkillCatalog(agentCtx, await graphCatalogFor(ctx, agent, true));
 		sealRawSessionReads(agentCtx);
 		sealRootTools(agentCtx, evolution);
 	};
@@ -1068,7 +1181,8 @@ function workerSetup(ctx, role) {
 			text: WORKER_POLICY_TEXT,
 			interpolate: false
 		});
-		if (role.grant !== void 0) await applyWorkerGrant(agentCtx, agent, role.grant);
+		if (role.grant !== void 0) await applyWorkerGrant(agentCtx, agent, role.grant, role.coordinationRole === "supervisor" ? await graphCatalogFor(ctx, agent, false) : void 0);
+		else if (role.coordinationRole === "supervisor") await installGraphSkillCatalog(agentCtx, await graphCatalogFor(ctx, agent, false));
 		sealRawSessionReads(agentCtx);
 		sealNativeDelegation(agentCtx);
 	};

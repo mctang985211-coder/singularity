@@ -4,9 +4,9 @@ import { SessionId } from "@deepseek-ai/dsh-session";
 import { EventStoreSet, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 
 //#region src/service/state.ts
-/** Whether an existing environment can be bound by a new graph: it has repositories, no graph, and no sessions. */
+/** Whether an existing workspace can be bound by a new graph: no graph and no sessions. */
 function isReusableEnv(env, boundEnvIds) {
-	return env.components.length > 0 && !boundEnvIds.has(env.id) && env.sessionIds.length === 0;
+	return !boundEnvIds.has(env.id) && env.sessionIds.length === 0;
 }
 function copy(value) {
 	return structuredClone(value);
@@ -168,11 +168,11 @@ function setupPromptText(graphId, env) {
 	const pending = env.components.filter((component) => component.status === "installing");
 	const present = env.components.filter((component) => component.status !== "installing");
 	const names = (components) => components.map((component) => `${component.owner}/${component.repo}`).join(", ");
-	const presentLine = present.length === 0 ? "" : `\nAlready present (do not reinstall): ${names(present)}.`;
+	const presentLine = present.length === 0 ? "" : `\nAlready present: ${names(present)}.`;
 	return `Set up Singularity graph ${graphId}. Environment ${env.id} is at ${env.path}.
 Planned repositories: ${names(pending) || "(none)"}.${presentLine}
 
-This setup work is not the graph's goal: the goal is the user's own objective, and when the user states it, accept it with task_intake — before that the graph has no root task, so task_read reports the session as not activated and there is nothing to decompose. For each planned repository, delegate installation and registration to a worker with graph_spawn — never with task_decompose, which only has a task to work on once a root contract has been accepted. The worker must install it with bash according to the repository instructions and then call env_register_component. If a worker needs human input, you may use hitl_ask or hitl_approve. When all setup workers complete successfully, call graph_mark_ready. If there are no planned repositories, call graph_mark_ready immediately.`;
+Install and register planned repositories through graph_spawn, then call graph_mark_ready. An empty workspace is ready immediately. After setup, explore the user's objective and measures, read this graph's task_library, and establish the task_intake contract for this execution. Record useful goals, decomposition paths and experience as TaskTemplates or Skills in the graph library; the supervisor reviews them during iteration.`;
 }
 
 //#endregion
@@ -185,6 +185,7 @@ function nextGraphId(existing) {
 /** The fields an RSI config carries: anything else is refused by name rather than ignored. */
 const RSI_FIELDS = [
 	"task",
+	"metrics",
 	"iterationRounds",
 	"humanReview"
 ];
@@ -194,6 +195,7 @@ function assertRsiConfig(rsi) {
 	const fields = rsi;
 	for (const key of Object.keys(fields)) if (!RSI_FIELDS.includes(key)) throw new Error(`graphs: rsi carries "${key}", which is not part of an RSI config; it carries ${RSI_FIELDS.join(", ")} and nothing else`);
 	if (typeof fields.task !== "string" || fields.task.trim().length === 0) throw new Error("graphs: rsi.task must be a non-empty string");
+	if (fields.metrics !== void 0 && (!Array.isArray(fields.metrics) || fields.metrics.some((metric) => typeof metric !== "string" || metric.trim().length === 0))) throw new Error("graphs: rsi.metrics must be an array of non-empty descriptions");
 	const rounds = fields.iterationRounds;
 	if (typeof rounds !== "number" || !Number.isInteger(rounds) || rounds < 1) throw new Error("graphs: rsi.iterationRounds must be an integer >= 1");
 	if (typeof fields.humanReview !== "boolean") throw new Error("graphs: rsi.humanReview must be a boolean");
@@ -283,7 +285,13 @@ var GraphsService = class extends Service {
 		return this.transition(async () => {
 			await this.ready;
 			if (request.model !== void 0) await this.assertModel(request.model);
-			if (request.rsi !== void 0) assertRsiConfig(request.rsi);
+			if (request.rsi !== void 0 && (typeof request.rsi !== "object" || request.rsi === null || Array.isArray(request.rsi))) assertRsiConfig(request.rsi);
+			const rsi = request.rsi === void 0 ? void 0 : {
+				iterationRounds: 3,
+				humanReview: false,
+				...request.rsi
+			};
+			if (rsi !== void 0) assertRsiConfig(rsi);
 			const modelOptions = request.model === void 0 ? void 0 : graphAgentOptions({ model: request.model });
 			let createdEnvId;
 			let attached;
@@ -299,7 +307,6 @@ var GraphsService = class extends Service {
 					reused = true;
 				} else {
 					const { label, repos } = choice.create;
-					if (repos.length === 0) throw new Error("graphs: new environment requires at least one repository");
 					envId = createdEnvId = (label === void 0 ? store.create() : store.create(label)).id;
 					for (const ref of repos) store.planComponent(envId, ref);
 				}
@@ -336,7 +343,7 @@ var GraphsService = class extends Service {
 					createdAt: Date.now(),
 					ready: false,
 					...request.model === void 0 ? {} : { model: request.model },
-					...request.rsi === void 0 ? {} : { rsi: request.rsi }
+					...rsi === void 0 ? {} : { rsi }
 				};
 				await this.commit([{
 					kind: "graph/add",
@@ -344,11 +351,15 @@ var GraphsService = class extends Service {
 				}]);
 				committed = true;
 				await this.activate(graph);
-				const env = store.get(envId);
-				await this.ctx.agentRuntime.prompt(handle.agent, [{
+				const setup = [{
 					type: "text",
-					text: setupPromptText(id, env)
-				}]);
+					text: setupPromptText(id, store.get(envId))
+				}];
+				if (rsi === void 0) await this.ctx.agentRuntime.prompt(handle.agent, setup);
+				else await this.ctx.agentRuntime.promptUser(handle.agent, [{
+					type: "text",
+					text: [rsi.task, ...rsi.metrics?.length ? ["关注指标：", ...rsi.metrics.map((metric) => `- ${metric}`)] : []].join("\n")
+				}], setup);
 				return {
 					graph,
 					reused
@@ -391,7 +402,6 @@ var GraphsService = class extends Service {
 		}
 		if (request.createEnv === true) {
 			const repos = request.repos ?? [];
-			if (repos.length === 0) throw new Error("graphs: new environment requires at least one repository");
 			if (request.fresh !== true) {
 				const bound = (await this.state()).boundEnvIds();
 				const match = store.findByRepos(repos).find((env) => isReusableEnv(env, bound));
@@ -407,9 +417,7 @@ var GraphsService = class extends Service {
 	async assertReusable(envId) {
 		const occupant = (await this.state()).snapshot().graphs.find((graph) => graph.envId === envId);
 		if (occupant !== void 0) throw new Error(`graphs: environment "${envId}" already bound to graph "${occupant.id}" ("${occupant.name}"); release it with POST /singularity/graphs/${occupant.id}/delete or choose another environment`);
-		const env = this.ctx.envBuilder.store.get(envId);
-		if (env.components.length === 0) throw new Error(`graphs: environment "${envId}" has no repositories`);
-		if (env.sessionIds.length > 0) throw new Error(`graphs: environment "${envId}" still has sessions`);
+		if (this.ctx.envBuilder.store.get(envId).sessionIds.length > 0) throw new Error(`graphs: environment "${envId}" still has sessions`);
 	}
 	async workspaceTaken(label, matches) {
 		const graphs = (await this.state()).snapshot().graphs;

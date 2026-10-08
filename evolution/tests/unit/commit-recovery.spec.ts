@@ -33,6 +33,7 @@ import {
   P3_CANDIDATE_A,
   P3_CANDIDATE_B,
   skillProductionFile,
+  skillText,
   refusalOf,
   INTERRUPTED_STAGES,
 } from './evolution.fixture.ts'
@@ -186,9 +187,9 @@ describe('K2: commit intents in the fold', () => {
     [
       'a sidecar of another directory',
       { files: [intentFile(), { ...intentFile(), target: '/production/skills/other/SKILL.contract.json' }] },
-      /the files of one skill object live in one directory/,
+      /resource "\.\.\/other\/SKILL\.contract\.json" must be a file under/,
     ],
-    ['three files', { files: [intentFile(), intentFile(), intentFile()] }, /a fixed file set of one or two files/],
+    ['three files', { files: [intentFile(), intentFile(), intentFile()] }, /resource "SKILL\.md" must be a file under/],
     ['no file list at all', { files: [] }, /a fixed file set of one or two files/],
   ])('refuses a commit intent with %s', async (_label, over, expected) => {
     const { svc } = await ledgerFixture(decidedLines([intentLine(over)]))
@@ -312,13 +313,15 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     const { svc, root, skillRoot } = await decidedSkillFixture()
     await svc.apply('s1', 'root-1', 'approval:call-1')
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
-    await writeFile(COMMIT_TARGET(skillRoot), '# a later writer moved this target\n')
+    await writeFile(COMMIT_TARGET(skillRoot), skillText('# a later writer moved this target'))
 
+    // Production no longer loads as the candidate object this proposal applied,
+    // so the whole-object identity check refuses the rollback.
     await expect(svc.rollback('s1', 'root-1', 'approval:call-2')).rejects.toThrow(
-      /does not hold the content proposal "s1" applied/,
+      /no longer matches its frozen content identity/,
     )
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
-    expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).toBe('# a later writer moved this target\n')
+    expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).toBe(skillText('# a later writer moved this target'))
     expect(await svc.openIntentTargets()).toEqual([])
   })
 
@@ -326,10 +329,12 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     const { svc, root, skillRoot } = await decidedSkillFixture()
     await svc.apply('s1', 'root-1', 'approval:call-1')
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
-    await writeFile(join(root, CHAMPION_SOURCE), '# the snapshot was damaged\n')
+    await writeFile(join(root, CHAMPION_SOURCE), skillText('# the snapshot was damaged'))
 
+    // The champion snapshot no longer loads as the frozen pair, so the
+    // whole-object identity check refuses the rollback.
     await expect(svc.rollback('s1', 'root-1', 'approval:call-2')).rejects.toThrow(
-      /champion snapshot .* no longer hashes/,
+      /no longer matches its frozen content identity/,
     )
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect(await readFile(COMMIT_TARGET(skillRoot))).toEqual(Buffer.from(SKILL_CANDIDATE, 'utf8'))
@@ -350,7 +355,7 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     // one it is undoing: it stops by name, writes nothing and records no intent.
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     await expect(svc.rollback('s1', 'root-1', 'approval:call-3')).rejects.toThrow(
-      /does not hold the content proposal "s1" applied/,
+      /no longer matches its frozen content identity/,
     )
     expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(P3_CANDIDATE_B)
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
@@ -365,10 +370,12 @@ describe('K2: the commit — intent, atomic write, completion', () => {
 
   it('refuses a drifted production baseline in the commit path, recording no intent', async () => {
     const { svc, root, skillRoot } = await decidedSkillFixture()
-    await writeFile(COMMIT_TARGET(skillRoot), '# moved since prepare\n')
+    await writeFile(COMMIT_TARGET(skillRoot), skillText('# moved since prepare'))
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
 
-    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(/changed since prepare/)
+    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(
+      /no longer matches its frozen content identity/,
+    )
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect(await ledgerKinds(root)).not.toContain('commit_intent')
     expect(await svc.openIntentTargets()).toEqual([])
@@ -417,7 +424,9 @@ describe('K2: the commit — intent, atomic write, completion', () => {
 
     // s2's baseline is the pre-commit bytes: the ordinary check still refuses it.
     const settled = await readFile(join(root, 'proposals.jsonl'), 'utf8')
-    expect(await refusalOf(reopened.apply('s2', 'root-1', 'approval:call-2'))).toContain('changed since prepare')
+    expect(await refusalOf(reopened.apply('s2', 'root-1', 'approval:call-2'))).toContain(
+      'no longer matches its frozen content identity',
+    )
     expect(await readFile(target)).toEqual(Buffer.from(P3_CANDIDATE_A, 'utf8'))
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(settled)
 

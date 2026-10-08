@@ -162,10 +162,12 @@ export async function orchestrateEnv(
    */
   const binding = self.sessionExecutionBindings.get(callerSessionId)
   const overlay = replayOverlay ?? binding?.overlay
-  const table = { ...self.config.capabilities, ...overlay?.capabilityOverrides }
+  const table = { ...await self.capabilitiesForSession(callerSessionId), ...overlay?.capabilityOverrides }
   const mcpRegistry = { ...self.config.mcpServers, ...overlay?.mcpServers }
   const callerBinding = self.sessions.get(callerSessionId)
   const callerRun = callerBinding === undefined ? undefined : await self.context.task.runIn(callerBinding.storeId, callerBinding.runId)
+  const taskTemplatesRoot = binding?.taskTemplatesRoot ?? callerRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(callerSessionId)
+  const skillView = await self.skillViewForSession(callerSessionId, replayOverlay?.extraSkillRoots)
   return {
     task: self.context.task,
     actor,
@@ -205,14 +207,18 @@ export async function orchestrateEnv(
     ...(callerRun?.sharedWorkspace === true ? {} : { workspaces: self.workspaces }),
     ...(workspacePath === undefined ? {} : { workspacePath }),
     ...(named === undefined ? {} : { workerCwd: named }),
-    ...(binding?.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: binding.taskTemplatesRoot }),
+    ...(taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot }),
     ...(binding?.agentOptions === undefined ? {} : { agentOptions: binding.agentOptions }),
     writeDrainTimeoutMs: self.config.writeDrainTimeoutMs,
     ...(self.config.rootBudget === undefined ? {} : { rootBudget: { ...self.config.rootBudget } }),
-    precheck: (capabilities, cwd) => providerPrecheck(self, capabilities, {
+    precheck: (capabilities, cwd, admittedManifest) => providerPrecheck(self, capabilities, {
       ...(cwd === undefined ? {} : { cwd }),
-      ...(overlay?.extraSkillRoots === undefined ? {} : { extraRoots: [...overlay.extraSkillRoots] }),
-    }, table, mcpRegistry),
+      extraRoots: skillView.extraRoots,
+    }, admittedManifest === undefined ? table : {
+      ...table,
+      ...Object.fromEntries(Object.entries(admittedManifest.capabilities).map(([name, entry]) =>
+        [name, { ...table[name], skills: [...entry.skills] }])),
+    }, mcpRegistry, callerSessionId),
     notify: (sessionId, text) => {
       self.notify(sessionId, text)
     },
@@ -278,12 +284,12 @@ export async function orchestrateEnv(
        * What the session *runs under* is remembered the same way (S4-E §Q3): a
        * replay's worker carries the experiment's frozen selection, and the
        */
-      const taskTemplatesRoot = request.taskTemplatesRoot ?? binding?.taskTemplatesRoot
+      const childTemplatesRoot = request.taskTemplatesRoot ?? taskTemplatesRoot
       const frozenAgentOptions = request.agentOptions ?? binding?.agentOptions
-      if (frozenAgentOptions !== undefined || taskTemplatesRoot !== undefined || overlay !== undefined) {
+      if (frozenAgentOptions !== undefined || childTemplatesRoot !== undefined || overlay !== undefined) {
         self.sessionExecutionBindings.set(request.sessionId, {
           ...(frozenAgentOptions === undefined ? {} : { agentOptions: frozenAgentOptions }),
-          ...(taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot }),
+          ...(childTemplatesRoot === undefined ? {} : { taskTemplatesRoot: childTemplatesRoot }),
           ...(overlay === undefined ? {} : { overlay: structuredClone(overlay) }),
         })
       }
@@ -420,7 +426,11 @@ export async function observeSession(self: TaskRuntime, sessionId: string): Prom
   let approvals = 0
   let compactions = 0
   for (const event of events ?? []) {
-    if (event.type === 'tool/call') {
+    if (event.type === 'user/message') {
+      const source = event.data.source as { kind?: string; names?: unknown }
+      if (source.kind === 'task-skills' && Array.isArray(source.names))
+        for (const name of source.names) if (typeof name === 'string') skillCalls.push(name)
+    } else if (event.type === 'tool/call') {
       const name = event.data.name
       if (typeof name !== 'string') continue
       calls.set(name, (calls.get(name) ?? 0) + 1)
@@ -508,9 +518,12 @@ export async function providerPrecheck(
   view: SkillDiscoveryView,
   table: Readonly<Record<string, CapabilityConfig>> = self.config.capabilities,
   mcpRegistry: Readonly<Record<string, McpServerTemplate>> = self.config.mcpServers ?? {},
+  callerSessionId?: string,
 ): Promise<ProviderPrecheck> {
   const verifierRefs = await registeredVerifierIdsImpl(self)
-  const commitLedger = self.softService<EvolutionCommitLedger>('evolution')
+  const evolution = self.softService<EvolutionCommitLedger & { forSession?(sessionId: string): Promise<EvolutionCommitLedger> }>('evolution')
+  const commitLedger = callerSessionId !== undefined && evolution?.forSession !== undefined
+    ? await evolution.forSession(callerSessionId) : evolution
   return precheckProviders({
     capabilities,
     table,
@@ -527,9 +540,10 @@ export async function capabilityProviderReport(
   capabilities?: readonly string[],
 ): Promise<ProviderPrecheck> {
   const envPath = await envPathForSession(self, sessionId)
-  return providerPrecheck(self, capabilities ?? Object.keys(self.config.capabilities), {
+  return providerPrecheck(self, capabilities ?? Object.keys(await self.capabilitiesForSession(sessionId)), {
     ...(envPath === undefined ? {} : { cwd: envPath }),
-  })
+    extraRoots: (await self.skillViewForSession(sessionId)).extraRoots,
+  }, await self.capabilitiesForSession(sessionId), self.config.mcpServers ?? {}, sessionId)
 }
 
 export async function readRunBindingImpl(binding: RunProviderBinding): Promise<RunBindingRead | undefined> {

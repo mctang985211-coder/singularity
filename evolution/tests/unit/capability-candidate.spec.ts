@@ -647,14 +647,18 @@ describe('capability candidate: named refusals, zero writes', () => {
     const { svc, root, registry } = await fixture()
     const content = skillText('a6-some-other-name', CANDIDATE_BODY)
     await svc.propose(capabilityProposal, 'root-1')
-    await svc.candidate(
-      'cap1',
-      VERSION_SET,
-      'root-1',
-      capabilityMutation({ content, skill: { name: NEW_SKILL, content, sidecar: executionSidecar(content) } }),
+    // The frontmatter of the candidate's skill is checked as the candidate is
+    // recorded, so the refusal lands before any prepare.
+    const message = await refusalOf(
+      svc.candidate(
+        'cap1',
+        VERSION_SET,
+        'root-1',
+        capabilityMutation({ content, skill: { name: NEW_SKILL, content, sidecar: executionSidecar(content) } }),
+      ),
     )
-    const message = await refusalOf(svc.prepare('cap1', 'root-1'))
-    expect(message).toContain('skill-name-mismatch')
+    expect(message).toContain('Skill frontmatter name must equal mutation.name')
+    expect((await svc.get('cap1')).status).toBe('proposed')
     expect(registry[NEW_ROW]).toBeUndefined()
     // The sandbox the check needed is removed with the refusal: nothing of this
     // candidate survives it.

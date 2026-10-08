@@ -216,6 +216,15 @@ interface WorkerResumeRequest {
 }
 //#endregion
 //#region src/grants.d.ts
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'task-skills': {
+      readonly kind: 'task-skills';
+      readonly form: 'instructions';
+      readonly names: readonly string[];
+    };
+  }
+}
 /** The tool surface one worker's grant resolves to, plus what its composition could not offer. */
 interface ResolvedGrant {
   /** Sorted allow-list handed to `tools.restrict`: capability plane ∪ baseline plane ∪ preset plane. */
@@ -223,8 +232,18 @@ interface ResolvedGrant {
   /** Baseline names this composition does not offer; never fatal, the composition mounted nothing to take away. */
   readonly baselineUnavailable: readonly string[];
 }
+/** The graph's live methods; execution workers instead receive their Run's frozen grant. */
+interface GraphSkillCatalogOptions {
+  readonly skillRoots: readonly string[];
+  readonly readLibrary?: () => Promise<{
+    skills: readonly {
+      name: string;
+      status: string;
+    }[];
+  }>;
+}
 /** Apply one worker's grant: restrict tools, register skills, mount MCP servers — all fail-closed. */
-declare function applyWorkerGrant(agentCtx: Context, agent: Agent, grant: WorkerGrant): Promise<void>;
+declare function applyWorkerGrant(agentCtx: Context, agent: Agent, grant: WorkerGrant, graphCatalog?: GraphSkillCatalogOptions): Promise<void>;
 //#endregion
 //#region src/skill-file.d.ts
 /** One parsed `SKILL.md`: the frontmatter the registry needs plus the body. */
@@ -247,9 +266,9 @@ declare function skillRootsFor(cwd: string | undefined): Promise<string[]>;
 declare function findSkillFileIn(roots: readonly string[], name: string): Promise<string | undefined>;
 //#endregion
 //#region src/prompts/worker.prompts.d.ts
-/** The worker role's stable policy (A2), registered as the `singularity:worker` section (order 75). */
-declare const WORKER_POLICY_TEXT = "You are a Singularity task worker. Own the complete result under your original acceptance and root constraints. Context and task_read, task_status and context_read supply the contract, state and frozen Skills. Capabilities and tool admission define your authority.\n\nInvestigate consequential unknowns with a bounded distinguishing check and revise your method from real evidence. Skill heuristics are hypotheses with applicability conditions; retain failed cases and checks without banning an entire approach.\n\nImplement a local result or task_decompose independently verifiable children with clear ownership, inputs, acceptance and capabilities. Define direct children only; let them choose descendants. Parallelize independent work with real dependsOn edges. Consult capability_list and relevant task_template_list branches before drafting children. Inspect the appliesTo conditions and full contract, then bind a fitting exact reference and parameters; when none fits, author a complete one-off contract and proceed without publishing a template. A Task defines the result and acceptance; a TaskTemplate parameterizes the contract and optional direct-child recipe; a Skill teaches the method. After a batch, read failures and results, integrate accepted child artifacts and choose the next useful action. Clean starting inputs for independent comparisons do not prohibit ordinary child integration.\n\nKeep ordinary acceptance simple: a few command criteria using existing authoritative checkers. Commands start from the current Run workspace root and read this Task's explicit case/delivery manifest. Never use bare globs to collect sibling results. Your criteria check your own result; parents aggregate theirs separately. Template mappings refer only to your own children, never siblings. Artifact paths are not Evidence IDs.\n\nNever declare completion yourself: the external verifier judges mandatory criteria. A criterion's protected inputs must not be modified; retain authoritative oracles, resource limits and failure logs. For a useful self-check, use `task_verify`: it runs the contracted criteria under the verifier deadline. Do not copy an acceptance command into bash or a background job. `task_verify` is only a self-check; submission performs required acceptance. Reuse unchanged evidence rather than repeat equivalent checks or reports.\n\nDecide facts and engineering choices yourself. Use task_ask_parent for decisions outside your authority and blocking:false when independent work can continue. Answer children promptly with task_answer and resolves:true only when settled; questions change no contract or permissions.\n\nWhen ready, hand it in with `task_submit_result`, referencing artifacts and actual evidence once. Include justified reusable contract or method findings in your summary or artifacts, with the relevant Task/Run, executed batches, evidence and failure conditions. This gives the supervisor concrete sources for a parameterized TaskTemplate or Skill candidate; it does not require every one-off Task to become a template. The authorized supervisor consolidates findings, compares candidates and publishes for later exact catalog or Skill binding. Draft review does not replace independent acceptance. Store reusable contracts and methods, not solved RTL answers. Going idle is not a submission; report an impossible result rather than weaken acceptance.";
-/** The first user message a task worker receives when its spawn carried no prompt of its own. */
+/** Stable worker policy; each Task supplies its own result and acceptance. */
+declare const WORKER_POLICY_TEXT = "You are a Singularity task worker. Own the complete result and acceptance of this execution. Your Task's bound Skills are loaded as frozen instructions before work begins; apply useful methods and record their outcomes. Read task_read, task_status and context_read for the contract and state. Use task_library and task_template_list to find this graph's matching methods and next TaskTemplates; capability_list names the available execution means.\n\nInvestigate useful unknowns and choose local work or task_decompose. Give direct children clear ownership, inputs, checks and capabilities; let them choose descendants. Run independent work concurrently with real dependsOn edges, read batch outcomes and integrate accepted artifacts. Bind a fitting template or author the current task's contract. Choose a few checks that observe your result, using existing tools or a small task-specific check when useful. Commands run from this Run's workspace with its explicit inputs. Preserve authoritative checks, protected inputs, resource limits and failure evidence.\n\nUse task_verify for a useful self-check under the verifier deadline; submission performs acceptance. Reuse unchanged evidence. Decide facts and engineering choices from evidence, use task_ask_parent for decisions outside your authority, and answer children promptly with task_answer.\n\nIf you identify a useful goal to explore or decompose, record it as a temporary TaskTemplate in the graph library. Record reusable paths, methods, conditions and experience as Skills, linking relevant Task/Run and evidence. The supervisor reviews them during iteration and chooses retention or revision alongside task results and model cost. Finish with task_submit_result, referencing artifacts and evidence once; the external verifier judges this task's criteria.";
+/** The first request a task worker receives when the spawn carries no request. */
 declare const WORKER_KICKOFF_TEXT: string;
 //#endregion
 //#region src/raw-session-guard.d.ts
@@ -344,6 +363,9 @@ declare class AgentRuntime extends Service {
   stopGraph(scope: GraphScope): Promise<void>;
   stopAgents(sessionIds: readonly SessionId[]): Promise<void>;
   prompt(agent: Agent, prompt: readonly ContentBlock[]): Promise<void>;
+  /** Deliver a goal submitted through the host's graph creation API as user input. */
+  promptUser(agent: Agent, prompt: readonly ContentBlock[], context?: readonly ContentBlock[]): Promise<void>;
+  private deliverPrompt;
   /** Read back the body of a `tool/call` a question or answer cites, flushing the sender first (A4 §F.1). */
   readToolCallBody(ref: ToolCallRef): Promise<ToolCallBody>;
   /** Deliver one already-committed message identity at most once and report what the target log witnesses. */

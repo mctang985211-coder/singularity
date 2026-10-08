@@ -1500,12 +1500,12 @@ describe('K1-5: the root\'s budget is the store\'s, across batches and across re
     await h.runtime.awaitBatch(root.storeId, secondBatch)
 
     // Two batches, one root run and two member runs: three runs against a ceiling
-    // of three, and the third batch is refused by name with the total it holds.
+    // of three. A third batch cannot start — the store's budget is exhausted, and
+    // the refusal names exactly that fact.
     expect((await h.snapshot(root.storeId)).runs).toHaveLength(3)
     const third = await answered(h, 'task_decompose', 2)
     expect(third.text).toContain('task_decompose rejected')
-    expect(third.text).toContain('root budget allows 3 run(s)')
-    expect(third.text).toContain('are already recorded')
+    expect(third.text).toContain('root run budget is exhausted')
     const refused = await h.snapshot(root.storeId)
     expect(refused.runs).toHaveLength(3)
     expect(refused.tasks).toHaveLength(3)
@@ -1527,22 +1527,25 @@ describe('K1-5: the root\'s budget is the store\'s, across batches and across re
       } as unknown as DecomposeSpec)
       .then(() => undefined, (error: unknown) => error)
     expect(refusedInA).toBeInstanceOf(Error)
-    expect((refusedInA as Error).message).toContain('root budget allows 3 run(s)')
-    expect((refusedInA as Error).message).toContain('are already recorded')
+    expect((refusedInA as Error).message).toContain('root run budget is exhausted')
     expect((await a.snapshot()).runs).toHaveLength(3)
     await a.crash()
 
     // The ceiling is derived from the runs the store records, so the next process
-    // reads the same total. The proposal the refusal left on the record is still
-    // there, still `ready`, and continuing it under the same ceiling is refused
-    // for the same reason: a restart resets no budget.
+    // reads the same total and refuses the same third batch: a restart resets no
+    // budget.
     const b = await reopen(dir, { rootBudget: { maxRuns: 3 } })
     const reopened = await b.snapshot()
     expect(reopened.runs).toHaveLength(3)
-    const pending = reopened.proposals!.all.find(proposal => proposal.kind !== 'root' && proposal.status === 'ready')
-    expect(pending).toBeDefined()
-    await expect(b.runtime.continueProposal(STORE, pending!.proposalId, String(ROOT)))
-      .rejects.toThrow(/root budget allows 3 run\(s\)/)
+    const { taskId, runId } = await rootOf(b)
+    const refusedInB = await b.runtime
+      .decomposeAndRun(STORE, taskId, runId, String(ROOT), {
+        reason: 'a third round the budget cannot afford',
+        children: [child('a third child', [commandCriterion('third-1')])],
+      } as unknown as DecomposeSpec)
+      .then(() => undefined, (error: unknown) => error)
+    expect(refusedInB).toBeInstanceOf(Error)
+    expect((refusedInB as Error).message).toContain('root run budget is exhausted')
     const after = await b.snapshot()
     expect(after.runs).toHaveLength(3)
     expect(after.tasks).toHaveLength(3)

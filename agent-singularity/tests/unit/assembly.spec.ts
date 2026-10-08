@@ -45,7 +45,7 @@ const EVOLUTION_TOOLS = [
 ]
 
 /**
- * The twenty-three tools every composition registers, whatever the switch says
+ * The twenty-five tools every composition registers, whatever the switch says
  * (`escalate` included). No task-recovery tool exists in this deployment (F):
  * round scheduling belongs to the platform RSI loop driver, which calls the
  * runtime's own recovery entry directly.
@@ -57,6 +57,7 @@ const ALWAYS_TOOLS = [
   'hitl_approve',
   'task_read',
   'capability_list',
+  'task_library',
   'task_template_list',
   'context_read',
   'task_intake',
@@ -134,7 +135,7 @@ afterEach(() => {
 })
 
 describe('SingularityAgent assembly', () => {
-  it('registers the twenty-three unconditional tools and no evolution tool on the shipped default', async () => {
+  it('registers the twenty-five unconditional tools and no evolution tool on the shipped default', async () => {
     const { tools } = await mount()
     expect(DEFAULT_EVOLUTION).toBe('off')
 
@@ -142,11 +143,11 @@ describe('SingularityAgent assembly', () => {
     for (const name of EVOLUTION_TOOLS) expect(tools.has(name), name).toBe(false)
     expect(tools.size).toBe(ALWAYS_TOOLS.length)
     // The name is the surface: a gate written as an internal permission check
-    // would still leave all thirty-two reachable by an un-granted worker.
+    // would still leave all thirty-four reachable by an un-granted worker.
     expect([...tools.keys()].filter(name => name.startsWith('evolution_'))).toEqual([])
   })
 
-  it('registers all thirty-two tools when the deployment turns evolution on', async () => {
+  it('registers all thirty-four tools when the deployment turns evolution on', async () => {
     const { tools } = await mount({ evolution: 'on' })
     for (const name of [...ALWAYS_TOOLS, ...EVOLUTION_TOOLS]) expect(tools.has(name), name).toBe(true)
     expect(tools.size).toBe(ALWAYS_TOOLS.length + EVOLUTION_TOOLS.length)

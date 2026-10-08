@@ -17,7 +17,7 @@ import type {
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
 import { canonicalize, rootTaskStoreId, runMemberSlots } from '@dangosys/dsh-singularity-task'
-import { capabilitySnapshot, resolvePreset } from '../capability.ts'
+import { resolveCapabilities, capabilitySnapshot, resolvePreset } from '../capability.ts'
 import { providerRefusals } from '../provider-precheck.ts'
 import { checkRunStart, hasRootLimits, resolveRootBudget } from '../root-budget.ts'
 import { bindRunProviders } from '../run-binding.ts'
@@ -222,7 +222,8 @@ export async function recoverRootTaskOnce(
     )
   }
   const unbound: RunMemberReuseRefusal[] = derived?.unbound ?? []
-  const manifest = self.resolveCapabilities(source.requestedCapabilities)
+  const rootSessionId = sourceRun?.sessionId ?? self.recoverySessionFor(snapshot, storeId)
+  const manifest = resolveCapabilities(source.requestedCapabilities, await self.capabilitiesForSession(rootSessionId), self.config.mcpServers)
   if (manifest.missing.length > 0) {
     throw new Error(
       `task-runtime: the recovery of "${sourceTaskId}" was refused: the capability gap this attempt is for is still open ` +
@@ -230,11 +231,11 @@ export async function recoverRootTaskOnce(
         're-reads what the deployment holds then — nothing was written',
     )
   }
-  const rootSessionId = sourceRun?.sessionId ?? self.recoverySessionFor(snapshot, storeId)
   const envPath = await self.envPathForSession(rootSessionId)
   const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
     ...(envPath === undefined ? {} : { cwd: envPath }),
-  })
+    extraRoots: (await self.skillViewForSession(rootSessionId)).extraRoots,
+  }, await self.capabilitiesForSession(rootSessionId), self.config.mcpServers ?? {}, rootSessionId)
   const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities))
   if (refusals.length > 0) {
     throw new Error(
@@ -441,7 +442,7 @@ export async function startRecoveryAttempt(
       runId,
       manifest,
       providers: input.precheck,
-      table: self.config.capabilities,
+      table: await self.capabilitiesForSession(rootSessionId),
       root: self.config.runBindingRoot,
     })
     const run: TaskRun = {
@@ -449,6 +450,7 @@ export async function startRecoveryAttempt(
       taskId: source.taskId,
       sessionId,
       capabilitySnapshot: capabilitySnapshot(manifest),
+      taskTemplatesRoot: input.sourceRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(rootSessionId),
       ...(preset === undefined ? {} : { agentPreset: preset }),
       ...(binding === undefined ? {} : { providerBinding: binding }),
       // Born active, exactly as a first attempt is (§1.1): the new attempt

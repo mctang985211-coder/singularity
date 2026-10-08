@@ -58,6 +58,7 @@ import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
 import { SingularityContextService } from '../../context/src/index.ts'
 import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
+import { defineTaskLibraryTool } from '../../agent-singularity/src/tools/task-library.ts'
 import { defineTaskTemplateListTool } from '../../agent-singularity/src/tools/task-template-list.ts'
 import { defineContextReadTool } from '../../agent-singularity/src/tools/context-read.ts'
 import { defineTaskCancelTool } from '../../agent-singularity/src/tools/task-cancel.ts'
@@ -80,7 +81,7 @@ const FIXTURE_SKILLS = fileURLToPath(new URL('../../task-runtime/tests/fixtures/
 
 /** Exactly the root agent's allow-list, so the root composition is the deployment's own. */
 export const ROOT_TOOLS = [
-  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'task_template_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
+  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'task_template_list', 'task_library', 'context_read', 'skill', 'task_intake', 'task_decompose',
   'task_submit_result', 'task_answer', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'task_budget_extend', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
@@ -98,7 +99,7 @@ export const GLOBAL_TOOLS = [
 ]
 
 /** The tools a stack can mount for real ({@link RunStackOptions.tools}); the stand-ins skip these names. */
-const REAL_TOOLS = ['task_read', 'task_status', 'context_read', 'capability_list', 'task_template_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel']
+const REAL_TOOLS = ['task_read', 'task_status', 'context_read', 'capability_list', 'task_template_list', 'task_library', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel']
 
 /** What the `standard`-style preset contributes on its own plane. */
 export const PRESET_TOOLS = ['bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'skill', 'job_output', 'job_list', 'job_kill', 'ask_user_question', 'web_fetch', 'subagent_fetchless']
@@ -109,6 +110,15 @@ export interface RunStackOptions {
   readonly mcpServers?: Config['mcpServers']
   /** Root sessions of this deployment, in order; the first is the primary. Defaults to `['s-root']`. */
   readonly roots?: readonly string[]
+  /**
+   * The graph root one session belongs to, where a spec needs a second root
+   * session *inside the same graph*: a graph's library — its Skill root and its
+   * evolution ledger — is derived from its graph root, so two root sessions in
+   * one graph share both while keeping their own stores. Defaults to the
+   * deployment's own mapping: a root session is its own graph's root, and a
+   * spawned session belongs to the tree that spawned it.
+   */
+  readonly graphRootFor?: (sessionId: string) => string | undefined
   /**
    * The directory this stack lives in — its `home` (`<workspace>/dsh-home`), its
    * checkout and its scratch. Defaults to a freshly minted tmp directory. A spec
@@ -439,13 +449,16 @@ class RunStackImpl implements RunStack {
       addAgentIn: async () => {},
     } as never)
     // One graph per root session, so a second admission in the same deployment
-    // (a new version after an apply) has its own store and its own root run.
+    // (a new version after an apply) has its own store and its own root run — a
+    // caller that names {@link RunStackOptions.graphRootFor} puts those roots in
+    // one graph instead, sharing that graph's library.
     ctx.provide('graphs', graphRegistry({
       graphForSession: async (sessionId: SessionId) => ({
         id: 'g1',
         name: 'graph',
         envId: 'env1',
-        rootSessionId: this.sessionRoot.get(sessionId) ?? this.primary,
+        rootSessionId:
+          this.options.graphRootFor?.(String(sessionId)) ?? this.sessionRoot.get(sessionId) ?? this.primary,
         graphStoreId: 'sg-g-root',
         layoutStoreId: 'sg-l-root',
       }),
@@ -500,6 +513,7 @@ class RunStackImpl implements RunStack {
       ctx.tools.register(defineContextReadTool(ctx))
       ctx.tools.register(defineCapabilityListTool(ctx))
       ctx.tools.register(defineTaskTemplateListTool(ctx))
+      ctx.tools.register(defineTaskLibraryTool(ctx))
       ctx.tools.register(defineTaskIntakeTool(ctx))
       ctx.tools.register(defineTaskDecomposeTool(ctx))
       ctx.tools.register(defineTaskSubmitResultTool(ctx))

@@ -38,9 +38,13 @@
  * **The reopen.** A second {@link startRunStack} over the *same* workspace is a
  * second process image: its own `Context`, its own services, its own store, its
  * own in-memory roots — reading the first one's ledger and production bytes off
- * disk and nothing else. The host entry that settles an interrupted commit is the
- * one a restart uses: `TaskRuntime.adoptRoot`'s recovery barrier, which
- * reconciles the evolution ledger before it takes a store over.
+ * disk and nothing else. A deployment settles an interrupted commit when it opens
+ * the graph's evolution plane: the ledger is reconciled before the plane answers
+ * (`EvolutionService.forSession`), so the reopened image is what settles the
+ * commit the previous one left open. `TaskRuntime.adoptRoot`'s recovery barrier
+ * reconciles the assembly's own ledger before it takes a store over, and it
+ * reports — a blocked commit does not fail the takeover — what a graph's plane
+ * has to leave open.
  *
  * Every assertion is read back from a durable surface — the bytes on disk, the
  * ledger's own lines (re-read from the file, never from a service's memory), the
@@ -57,6 +61,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { rootTaskStoreId } from '../../task/src/index.ts'
+import { graphLibrary } from '../../task-runtime/src/index.ts'
 import type { CapabilityConfig, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { EvolutionService, type CommitDirection } from '../../evolution/src/index.ts'
 import type { CommitStage } from '../../evolution/src/commit.ts'
@@ -85,7 +90,6 @@ const SKILL = 'k2-commit-fixture-skill'
 const CLEAN_SKILL = 'k2-clean-fixture-skill'
 const ROOT_A = 's-k2-root-a' as SessionId
 const ROOT_B = 's-k2-root-b' as SessionId
-const ROOT_C = 's-k2-root-c' as SessionId
 const P1 = 'k2-p1'
 const P2 = 'k2-p2'
 const P3 = 'k2-p3'
@@ -156,14 +160,19 @@ async function sharedDirectory(): Promise<string> {
   return directory
 }
 
-/** The evolution ledger's directory inside one workspace (both boots resolve the same path). */
-function ledgerRoot(h: RunStack): string {
-  return join(h.workspace, 'evolution')
+/** The graph library one root session owns — the ledger and skill root this deployment's evolution plane resolves for it. */
+function libraryOf(h: RunStack, root: SessionId = ROOT_A): ReturnType<typeof graphLibrary> {
+  return graphLibrary(String(root), h.home)
 }
 
-/** The one production path a skill commit writes, under the root the deployment's discovery also reads. */
+/** The evolution ledger's directory in that graph's library (both boots resolve the same path). */
+function ledgerRoot(h: RunStack): string {
+  return join(libraryOf(h).root, 'evolution')
+}
+
+/** The one production path a skill commit writes, under the graph's own Skill root — the root discovery also reads. */
 function productionPath(h: RunStack, name: string = SKILL): string {
-  return join(h.home, 'skills', name, 'SKILL.md')
+  return join(libraryOf(h).skillRoot, name, 'SKILL.md')
 }
 
 /**
@@ -172,19 +181,37 @@ function productionPath(h: RunStack, name: string = SKILL): string {
  * a skill's files together, so either file names the directory).
  */
 function productionDirectory(h: RunStack, name: string = SKILL): string {
-  return join(h.home, 'skills', name)
+  return join(libraryOf(h).skillRoot, name)
 }
 
-/** The evolution plane of one boot, over the shared ledger root and the production skill root. */
-function evolutionOf(h: RunStack, commitProbe?: (stage: CommitStage, target?: string) => void): EvolutionService {
-  return new EvolutionService(h.ctx, {
-    root: ledgerRoot(h),
-    skillRoot: join(h.home, 'skills'),
+/**
+ * The evolution plane of one boot, over its graph's own library — the ledger and
+ * skill root the runtime resolves for one session. The instance every entry of
+ * this boot reaches is the graph-scoped one (`forSession`), so what a case reads
+ * back is what the entries wrote; a caller that supplies a `commitProbe` arms the
+ * same seam on that scoped instance.
+ *
+ * Opening the graph's plane reconciles its ledger — that is this deployment's
+ * recovery entry for a commit it left open — so a case that needs the intent to
+ * stay open must read it before a fresh boot's plane is opened.
+ */
+async function evolutionOf(
+  h: RunStack,
+  commitProbe?: (stage: CommitStage, target?: string) => void,
+  root: SessionId = ROOT_A,
+): Promise<EvolutionService> {
+  const library = libraryOf(h, root)
+  const service = new EvolutionService(h.ctx, {
+    root: join(library.root, 'evolution'),
+    skillRoot: library.skillRoot,
+    taskTemplatesRoot: library.taskTemplatesRoot,
+    libraryId: library.id,
     // The deployment's own selection: the experiment freezes it and the promotion
     // gate re-reads the runs' own requests against it.
     modelSelection: () => deploymentModelSelection(h.ctx),
     ...(commitProbe === undefined ? {} : { commitProbe }),
   })
+  return service.forSession(root)
 }
 
 /**
@@ -365,7 +392,7 @@ function intentFile(intent: Record<string, unknown>, index = 0): { target: strin
 
 /** Every staging file left beside one production target (a commit removes its own, always). */
 async function stagingFiles(h: RunStack, name: string = SKILL): Promise<string[]> {
-  return (await readdir(join(h.home, 'skills', name))).filter(entry => entry.includes('.tmp-'))
+  return (await readdir(join(libraryOf(h).skillRoot, name))).filter(entry => entry.includes('.tmp-'))
 }
 
 /** One skill's production `SKILL.md`, read from disk — the bytes every assertion here is about. */
@@ -470,11 +497,19 @@ async function refusalOf(
   throw new Error('the runtime admitted a batch it was supposed to refuse')
 }
 
-/** The body the worker's own skill layer holds for one skill, as the registry serves it. */
-async function registeredSkill(h: RunStack, agent: Agent, name: string): Promise<{ content: string; path?: string }> {
-  const skill = await h.ctx.skills.get(name, { scope: agent, cwd: h.checkout })
-  if (skill === undefined) throw new Error(`the worker's skill layer holds no "${name}"`)
-  return skill as { content: string; path?: string }
+/**
+ * The body the worker's own skill layer holds for one skill. A worker's granted
+ * skills live in the registry its own composition isolated, so the agent-scoped
+ * `skill` loader is the door that resolves them.
+ */
+async function registeredSkill(h: RunStack, agent: Agent, name: string): Promise<{ content: string }> {
+  const loader = h.ctx.tools.get('skill', agent)
+  if (loader === undefined) throw new Error('the worker has no skill loader')
+  const loaded = (await loader.execute({ name }, toolRun(agent, `read-bound-skill:${name}`))) as {
+    content: string
+    resourceBase?: { path?: string }
+  }
+  return { content: loaded.content }
 }
 
 /** The bytes one admitted run's own binding materialized — what that run was admitted against. */
@@ -511,12 +546,12 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
   it.each(CRASH_STAGES)('settles an apply interrupted after %s, and a new run loads the recovered version', async stage => {
     const directory = await sharedDirectory()
     const h1 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h1).skillRoot, SKILL, V0)
     const target = productionPath(h1)
 
     // One proposal, walked to the state a commit starts from, over the real tool-less path.
     const crash = throwingProbe()
-    const first = evolutionOf(h1, crash.probe)
+    const first = await evolutionOf(h1, crash.probe)
     await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
     const walked = kindsOf(await ledgerLines(h1))
     expect(walked.at(-1)).toBe('decided')
@@ -555,21 +590,14 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
     expect(await stagingFiles(h1)).toEqual([])
 
     // The reopen: a second process image over the same directory, reading the ledger
-    // and production off disk. Nothing is settled until the host settles it.
+    // and production off disk. Opening the graph's evolution plane *is* this
+    // deployment's recovery entry — the graph's ledger is reconciled before the
+    // plane answers — so the reopened image is what settles the interrupted commit.
     const h2 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    const reopened = evolutionOf(h2)
-    expect(await reopened.openIntentTargets()).toEqual([target])
-    expect(await productionBytes(h2)).toBe(stage === 'write-renamed' ? skillText(V1, SKILL) : skillText(V0, SKILL))
+    const reopened = await evolutionOf(h2)
+    expect(await reopened.openIntentTargets()).toEqual([])
+    expect(await productionBytes(h2)).toBe(skillText(V1, SKILL))
     expect(h2.spawns).toHaveLength(0)
-
-    // The host entry: the recovery barrier a restart runs before it takes a store over.
-    const adoptedStore = rootTaskStoreId(ROOT_A)
-    await h2.task.createStore(adoptedStore)
-    const warnings = captureWarnings(h2)
-    const adoption = await h2.runtime.adoptRoot(adoptedStore, ROOT_A)
-    expect(adoption.adopted).toBe(false)
-    // The barrier settled the intent: nothing about it is reported as a blocked commit.
-    expect(warnings.filter(line => line.includes('could not be settled'))).toEqual([])
 
     // Production is the committed version, the intent is closed by exactly one
     // completion carrying the intent's own grant, and nothing was left behind.
@@ -607,11 +635,11 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
   it.each(CRASH_STAGES)('settles a rollback interrupted after %s, and a new run loads the restored version', async stage => {
     const directory = await sharedDirectory()
     const h1 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h1).skillRoot, SKILL, V0)
     const target = productionPath(h1)
 
     const crash = throwingProbe()
-    const first = evolutionOf(h1, crash.probe)
+    const first = await evolutionOf(h1, crash.probe)
     await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
     // A complete apply first: the state a rollback starts from, and the state it
     // must still find production in.
@@ -647,15 +675,12 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
       .toContain(sha256Of(await productionBytes(h1)))
     expect(await stagingFiles(h1)).toEqual([])
 
+    // The reopen: the second process image opens the graph's plane, which reconciles
+    // the ledger before it answers — the recovery entry this deployment has for a
+    // commit its predecessor left open.
     const h2 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    const reopened = evolutionOf(h2)
-    expect(await reopened.openIntentTargets()).toEqual([target])
-    expect(await productionBytes(h2)).toBe(stage === 'write-renamed' ? skillText(V0, SKILL) : skillText(V1, SKILL))
-
-    const adoptedStore = rootTaskStoreId(ROOT_A)
-    await h2.task.createStore(adoptedStore)
-    const adoption = await h2.runtime.adoptRoot(adoptedStore, ROOT_A)
-    expect(adoption.adopted).toBe(false)
+    const reopened = await evolutionOf(h2)
+    expect(await reopened.openIntentTargets()).toEqual([])
 
     expect(await productionBytes(h2)).toBe(skillText(V0, SKILL))
     const settled = await ledgerLines(h2)
@@ -695,10 +720,11 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
  * Each case is a whole world. The parent sets it up (production `V0`, one proposal
  * decided, and — for a rollback — a real apply already landed by its own ledger),
  * spawns the nested child that performs the commit and dies inside it, reads what
- * that death left, reopens the same directory, refuses admission, runs the host's
- * recovery entry and checks the settlement. An exception from {@link throwingProbe}
- * cannot stand in for any of it: the two are kept apart by the assertions themselves
- * (the signal and the dead pid below; the "a throw is not an exit" case after them).
+ * that death left, reopens the same directory — whose graph plane reconciles that
+ * ledger as it opens — and checks the settlement. An exception from
+ * {@link throwingProbe} cannot stand in for any of it: the two are kept apart by
+ * the assertions themselves (the signal and the dead pid below; the "a throw is
+ * not an exit" case after them).
  *
  * The describe is skipped whenever the env names a window, i.e. inside the nested run
  * itself: the case that kills a process and the case that spawns one are never the
@@ -708,9 +734,9 @@ describe.skipIf(EXIT_WINDOW !== undefined)('K2-2 (real exit): the process that c
   it.each(CRASH_STAGES)('settles an apply a killed process left interrupted after %s, redoing or completing it', async window => {
     const directory = await sharedDirectory()
     const h1 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h1).skillRoot, SKILL, V0)
     const target = productionPath(h1)
-    const first = evolutionOf(h1)
+    const first = await evolutionOf(h1)
     await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
     const walked = kindsOf(await ledgerLines(h1))
     expect(walked.at(-1)).toBe('decided')
@@ -762,37 +788,27 @@ describe.skipIf(EXIT_WINDOW !== undefined)('K2-2 (real exit): the process that c
     } else expect(staging).toEqual([])
 
     // The reopen: a second process image over the same directory, reading the ledger
-    // and the production bytes off disk and nothing else. The open intent is what it
-    // sees, and the gated capability is refused by name before any recovery ran (the
-    // deep version of that gate is the K2-3 case). The refusal is asked of a *second*
-    // root session, so the store the barrier below takes over is still unopened.
-    const h2 = await startRunStack({ workspace: directory, roots: [ROOT_A, ROOT_B], capabilities: { ...TABLE }, tools: true })
-    const reopened = evolutionOf(h2)
-    expect(await reopened.openIntentTargets()).toEqual([target])
-    await expect(h2.root(ROOT_B, rootContract('ship the killed release', [ROW]))).rejects.toThrow(/commit-intent-open/)
-    expect(await reopened.openIntentTargets()).toEqual([target])
-    expect(await productionBytes(h2)).toBe(window === 'write-renamed' ? skillText(V1, SKILL) : skillText(V0, SKILL))
+    // and the production bytes off disk and nothing else. Opening the graph's
+    // evolution plane reconciles the ledger before the plane answers, so this image
+    // settles the commit the killed one left open — the graph's own recovery entry.
+    const h2 = await startRunStack({ workspace: directory, roots: [ROOT_A, ROOT_B], graphRootFor: () => ROOT_A, capabilities: { ...TABLE }, tools: true })
+    const before = window === 'write-renamed' ? await stat(target) : undefined
+    const reopened = await evolutionOf(h2)
+    expect(await reopened.openIntentTargets()).toEqual([])
     expect(h2.spawns).toHaveLength(0)
 
-    // The host's own recovery entry: the barrier a restart runs before it takes a
-    // store over.
-    const before = window === 'write-renamed' ? await stat(target) : undefined
-    const adoptedStore = rootTaskStoreId(ROOT_A)
-    await h2.task.createStore(adoptedStore)
-    const adoption = await h2.runtime.adoptRoot(adoptedStore, ROOT_A)
-    expect(adoption.adopted).toBe(false)
-
     if (window === 'write-renamed') {
-      // 仅补账: production already carried the committed content, so the host only
-      // recorded the completion — the file the dead process's own rename left is not
-      // touched: same inode, same mtime, same bytes.
+      // 仅补账: production already carried the committed content, so the reopened
+      // plane only recorded the completion — the file the dead process's own rename
+      // left is not touched: same inode, same mtime, same bytes.
       const after = await stat(target)
       expect({ ino: after.ino, mtimeMs: after.mtimeMs, size: after.size })
         .toEqual({ ino: before!.ino, mtimeMs: before!.mtimeMs, size: before!.size })
       expect(await productionBytes(h2)).toBe(skillText(V1, SKILL))
     } else {
-      // 补做: production still held the version before the commit, so the host redid
-      // the write — production now holds the intent's own content identity, whole …
+      // 补做: production still held the version before the commit, so the reopened
+      // plane redid the write — production now holds the intent's own content
+      // identity, whole …
       expect(await productionBytes(h2)).toBe(skillText(V1, SKILL))
       expect(sha256Of(await productionBytes(h2))).toBe(intentFile(intent).contentSha256)
     }
@@ -806,9 +822,9 @@ describe.skipIf(EXIT_WINDOW !== undefined)('K2-2 (real exit): the process that c
   it.each(CRASH_STAGES)('settles a rollback a killed process left interrupted after %s, redoing or completing it', async window => {
     const directory = await sharedDirectory()
     const h1 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h1).skillRoot, SKILL, V0)
     const target = productionPath(h1)
-    const first = evolutionOf(h1)
+    const first = await evolutionOf(h1)
     // The world a rollback starts from: `V1` applied by this ledger, through the real
     // commit path in this very process, nothing interrupted.
     await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
@@ -850,21 +866,13 @@ describe.skipIf(EXIT_WINDOW !== undefined)('K2-2 (real exit): the process that c
       expect(staging[0]!.startsWith(`.SKILL.md.tmp-${child.pid}-`)).toBe(true)
     } else expect(staging).toEqual([])
 
-    // The reopen and the gate, as in the apply case: the open intent is visible and
-    // the target it names is refused to admission before anything settled it — from a
-    // second root session, so the store the barrier takes over is still unopened.
-    const h2 = await startRunStack({ workspace: directory, roots: [ROOT_A, ROOT_B], capabilities: { ...TABLE }, tools: true })
-    const reopened = evolutionOf(h2)
-    expect(await reopened.openIntentTargets()).toEqual([target])
-    await expect(h2.root(ROOT_B, rootContract('ship the killed release', [ROW]))).rejects.toThrow(/commit-intent-open/)
-    expect(await reopened.openIntentTargets()).toEqual([target])
-    expect(await productionBytes(h2)).toBe(window === 'write-renamed' ? skillText(V0, SKILL) : skillText(V1, SKILL))
-
+    // The reopen, as in the apply case: the second process image opens the graph's
+    // evolution plane, which reconciles the ledger before it answers — the commit the
+    // killed image left open is settled here.
+    const h2 = await startRunStack({ workspace: directory, roots: [ROOT_A, ROOT_B], graphRootFor: () => ROOT_A, capabilities: { ...TABLE }, tools: true })
     const before = window === 'write-renamed' ? await stat(target) : undefined
-    const adoptedStore = rootTaskStoreId(ROOT_A)
-    await h2.task.createStore(adoptedStore)
-    const adoption = await h2.runtime.adoptRoot(adoptedStore, ROOT_A)
-    expect(adoption.adopted).toBe(false)
+    const reopened = await evolutionOf(h2)
+    expect(await reopened.openIntentTargets()).toEqual([])
 
     if (window === 'write-renamed') {
       // 仅补账: the rename had landed, so only the completion was missing and the
@@ -887,9 +895,9 @@ describe.skipIf(EXIT_WINDOW !== undefined)('K2-2 (real exit): the process that c
   it('keeps an in-process throw apart from that real exit: its staging file is removed and the same instance settles the intent', async () => {
     const directory = await sharedDirectory()
     const h = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h).skillRoot, SKILL, V0)
     const crash = throwingProbe()
-    const svc = evolutionOf(h, crash.probe)
+    const svc = await evolutionOf(h, crash.probe)
     await walkToDecided(h, svc, P1, SKILL, skillText(V1, SKILL))
 
     // The throw is caught by this very process, and that is the whole difference from
@@ -936,12 +944,14 @@ describe.skipIf(EXIT_WINDOW === undefined)('K2-2 (nested child): the process ima
     // proposal off the ledger, reads the production bytes, and its probe exits the
     // process at the armed window by SIGKILL — no `catch`, no `finally`, no cleanup
     // of the stage it died in, which is exactly what a killed deployment does.
-    const h = await startRunStack({ workspace })
+    // The parent's roots are `[ROOT_A]`, so the child resolves the same graph
+    // library (the ledger and the Skill root the parent's own plane used).
+    const h = await startRunStack({ workspace, roots: [ROOT_A] })
     // The session plane the parent handed over, replayed into this boot's memory
     // before anything re-reads it: `apply` re-checks the promotion against the store
     // and the side runs' own logs (S4-E §Q3).
     await replaySessionLogs(h, await readFile(join(workspace, SESSION_HANDOVER), 'utf8'))
-    const svc = evolutionOf(h, stage => {
+    const svc = await evolutionOf(h, stage => {
       if (stage === window) process.kill(process.pid, 'SIGKILL')
     })
     // Written before that call: this pid is the parent's proof of which process image
@@ -960,29 +970,38 @@ describe('K2-3: an open commit intent blocks the real admission until a reconcil
   it('refuses the gated capability by name with no evolution tool registered, and admits it again after the host reconciled', async () => {
     const directory = await sharedDirectory()
     const h1 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
-    await writeGuidanceSkill(join(h1.home, 'skills'), CLEAN_SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h1).skillRoot, SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h1).skillRoot, CLEAN_SKILL, V0)
     const target = productionPath(h1)
 
     // A commit interrupted after the rename: production already carries the new
     // version and the ledger says its completion was never recorded.
     const crash = throwingProbe()
-    const first = evolutionOf(h1, crash.probe)
+    const first = await evolutionOf(h1, crash.probe)
     await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
     crash.arm('write-renamed')
     await expect(first.apply(P1, ROOT_A, 'approval:k2-apply')).rejects.toThrow(/in-process probe threw after/)
     expect(await productionBytes(h1)).toBe(skillText(V1, SKILL))
+
+    // A third party rewrites production while the intent stands, so the reopened
+    // graph cannot settle it: a commit whose target holds neither the state before
+    // it nor the state it committed stops by name and its intent stays open. Only
+    // such an intent is left for the admission gate below to refuse — what a graph
+    // *can* settle it settles as it opens, which is the case after this one.
+    const thirdParty = skillText(THIRD_PARTY, SKILL)
+    await writeFile(target, thirdParty, 'utf8')
 
     // The reopened deployment: a new process image, the ledger read from disk, and
     // no evolution tool on the root's surface at all — the switch a deployment
     // would have off. The gate below is therefore the service's, not a tool's.
     const h2 = await startRunStack({
       workspace: directory,
-      roots: [ROOT_A, ROOT_B, ROOT_C],
+      roots: [ROOT_A, ROOT_B],
+      graphRootFor: () => ROOT_A,
       capabilities: { ...TABLE },
       tools: true,
     })
-    const reopened = evolutionOf(h2)
+    const reopened = await evolutionOf(h2)
     expect(h2.visible(h2.rootAgent(ROOT_A)).filter(name => name.startsWith('evolution_'))).toEqual([])
     expect(await reopened.openIntentTargets()).toEqual([target])
 
@@ -1016,7 +1035,7 @@ describe('K2-3: an open commit intent blocks the real admission until a reconcil
     //    worker loads it, while the intent is still open.
     const clean = await admitChild(h2, ROOT_B, root, CLEAN_ROW)
     expect((await registeredSkill(h2, h2.agent(clean.workerSessionId)!, CLEAN_SKILL)).content).toContain(V0)
-    expect(await productionBytes(h2)).toBe(skillText(V1, SKILL))
+    expect(await productionBytes(h2)).toBe(thirdParty)
     // The settled tree hands its checkout back, so the next root can take it (K1 §2).
     await h2.runtime.submitResult(ROOT_B, { summary: 'the ungated tree hands in the result its batch produced' })
 
@@ -1030,11 +1049,14 @@ describe('K2-3: an open commit intent blocks the real admission until a reconcil
     expect(await reopened.list()).toHaveLength(1)
     expect(await ledgerBytes(h2)).toBe(queried)
 
-    // 5. The host reconciles — a restarted deployment's barrier, on a store of its
-    //    own — and then the same two admissions pass, against the recovered bytes.
-    const barrierStore = rootTaskStoreId(ROOT_C)
-    await h2.task.createStore(barrierStore)
-    await h2.runtime.adoptRoot(barrierStore, ROOT_C)
+    // 5. The committed bytes are restored — the person settles what the directory
+    //    holds — and the graph's own reconcile entry then closes the intent with the
+    //    completion alone. The same two admissions then pass against the recovered
+    //    bytes.
+    await writeFile(target, skillText(V1, SKILL), 'utf8')
+    const outcomes = await reopened.reconcile()
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]).toMatchObject({ intentId: `${P1}/apply`, proposalId: P1, result: 'completed-written', targets: [target] })
     expect(await reopened.openIntentTargets()).toEqual([])
     const settledKinds = kindsOf(await ledgerLines(h2))
     expect(settledKinds.slice(-2)).toEqual(['commit_intent', 'applied'])
@@ -1052,11 +1074,11 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
   it('stops the reconciliation by name when a third party rewrote the open target, and keeps refusing admission', async () => {
     const directory = await sharedDirectory()
     const h1 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h1).skillRoot, SKILL, V0)
     const target = productionPath(h1)
 
     const crash = throwingProbe()
-    const first = evolutionOf(h1, crash.probe)
+    const first = await evolutionOf(h1, crash.probe)
     await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
     crash.arm('intent-recorded')
     await expect(first.apply(P1, ROOT_A, 'approval:k2-apply')).rejects.toThrow(/in-process probe threw after/)
@@ -1067,8 +1089,8 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
     const thirdParty = skillText(THIRD_PARTY, SKILL)
     await writeFile(target, thirdParty, 'utf8')
 
-    const h2 = await startRunStack({ workspace: directory, roots: [ROOT_A, ROOT_B], capabilities: { ...TABLE }, tools: true })
-    const reopened = evolutionOf(h2)
+    const h2 = await startRunStack({ workspace: directory, roots: [ROOT_A, ROOT_B], graphRootFor: () => ROOT_A, capabilities: { ...TABLE }, tools: true })
+    const reopened = await evolutionOf(h2)
     expect(await reopened.openIntentTargets()).toEqual([target])
 
     // The host barrier completes — a blocked commit does not fail the takeover — and
@@ -1113,9 +1135,9 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
   it('refuses the earlier proposal a rollback over the later one, and rolls the later one back to the earlier content', async () => {
     const directory = await sharedDirectory()
     const h = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h).skillRoot, SKILL, V0)
     const target = productionPath(h)
-    const svc = evolutionOf(h)
+    const svc = await evolutionOf(h)
 
     // s1 replaces v0 with v1 and lands in production.
     await walkToDecided(h, svc, P1, SKILL, skillText(V1, SKILL), 's-k2-fixture-p1')
@@ -1132,11 +1154,11 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
     const landed = await ledgerBytes(h)
 
     // s1's rollback would restore v0 over s2's version: refused by name, with no line
-    // and no write.
+    // and no write. The production object no longer matches the one s1 applied, so
+    // the whole-object identity check is what refuses it.
     const refusal = await svc.rollback(P1, ROOT_A, 'approval:k2-rollback')
       .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
-    expect(refusal).toContain(`does not hold the content proposal "${P1}" applied`)
-    expect(refusal).toContain('nothing was written and no commit intent was recorded')
+    expect(refusal).toContain('no longer matches its frozen content identity')
     expect(await productionBytes(h)).toBe(skillText(V2, SKILL))
     expect(await ledgerBytes(h)).toBe(landed)
     expect((await svc.get(P1)).status).toBe('applied')
@@ -1163,8 +1185,8 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
       tools: true,
       evolution: true,
     })
-    await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V0)
-    await writeGuidanceSkill(join(h.home, 'skills'), CLEAN_SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h).skillRoot, SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h).skillRoot, CLEAN_SKILL, V0)
     const target = productionPath(h)
 
     // The world the failure needs: two proposals prepared against the same
@@ -1173,7 +1195,7 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
     // and the same digest, which is why P2's own baseline check cannot keep its
     // commit off a target P1's unfinished commit also names.
     const crash = throwingProbe()
-    const svc = evolutionOf(h, crash.probe)
+    const svc = await evolutionOf(h, crash.probe)
     await walkToDecided(h, svc, P1, SKILL, skillText(V1, SKILL), 's-k2-fixture-p1')
     await walkToDecided(h, svc, P2, SKILL, skillText(V2, SKILL), 's-k2-fixture-p2')
     expect(await productionBytes(h)).toBe(skillText(V0, SKILL))
@@ -1255,7 +1277,7 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
     const recovered = await ledgerBytes(h)
     const stale = await svc.apply(P2, ROOT_A, 'approval:k2-apply')
       .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
-    expect(stale).toContain('changed since prepare')
+    expect(stale).toContain('no longer matches its frozen content identity')
     expect(await productionBytes(h)).toBe(skillText(V1, SKILL))
     expect(await ledgerBytes(h)).toBe(recovered)
 
@@ -1271,10 +1293,10 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
   it('refuses a rollback the target another proposal left open, and restores it once that intent is settled', async () => {
     const directory = await sharedDirectory()
     const h = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h).skillRoot, SKILL, V0)
     const target = productionPath(h)
     const crash = throwingProbe()
-    const svc = evolutionOf(h, crash.probe)
+    const svc = await evolutionOf(h, crash.probe)
 
     // `V1` lands through the real commit path, and the second proposal is prepared
     // against what that apply left in production.
@@ -1330,8 +1352,7 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
     const recovered = await ledgerBytes(h)
     const late = await svc.rollback(P1, ROOT_A, 'approval:k2-rollback')
       .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
-    expect(late).toContain(`does not hold the content proposal "${P1}" applied`)
-    expect(late).toContain('nothing was written and no commit intent was recorded')
+    expect(late).toContain('no longer matches its frozen content identity')
     expect(await productionBytes(h)).toBe(skillText(V2, SKILL))
     expect(await ledgerBytes(h)).toBe(recovered)
 
@@ -1350,9 +1371,9 @@ describe('K2-5: a reopened instance rolls an applied proposal back through the r
   it('rolls back over a formatVersion 4 ledger the reopened process read from disk', async () => {
     const directory = await sharedDirectory()
     const h1 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
-    await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
+    await writeGuidanceSkill(libraryOf(h1).skillRoot, SKILL, V0)
     const target = productionPath(h1)
-    const first = evolutionOf(h1)
+    const first = await evolutionOf(h1)
     await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
     await first.apply(P1, ROOT_A, 'approval:k2-apply')
     expect(await productionBytes(h1)).toBe(skillText(V1, SKILL))
@@ -1366,7 +1387,7 @@ describe('K2-5: a reopened instance rolls an applied proposal back through the r
       tools: true,
       evolution: true,
     })
-    const reopened = evolutionOf(h2)
+    const reopened = await evolutionOf(h2)
     const lines = await ledgerLines(h2)
     expect(lines.length).toBeGreaterThan(0)
     expect(lines.every(line => line.formatVersion === 4)).toBe(true)

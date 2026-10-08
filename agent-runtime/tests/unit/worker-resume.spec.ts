@@ -173,6 +173,8 @@ function harness(options: HarnessOptions = {}): Harness {
       },
     },
     get: () => undefined,
+    /** The scoped world a grant composes its own skill registry in. */
+    isolate: () => ({ plugin: async () => {}, get: () => undefined, on: () => {} }),
   }
   const ctx = {
     reflect: { provide: () => {} },
@@ -502,12 +504,12 @@ describe('AgentRuntime.resumeWorkerAgent', () => {
     expect(handle).toBe(h.handle)
     // The deployment's own composition ran: the persisted preset mounted, the
     // declared permission applied, the worker policy section installed, the
-    // grant's allow-list restricted, and the raw-session seal registered.
+    // grant's allow-list restricted, and both execution seals registered.
     expect(h.composed.mounted).toEqual(['standard'])
     expect(h.composed.permissions[0]).toEqual([expect.anything(), 'danger-full-access'])
     expect(h.composed.sections[0]).toMatchObject({ name: 'singularity:worker', order: 75 })
     expect(h.composed.restricted[0]).toEqual({ allow: ['read'] })
-    expect(h.composed.guarded).toBe(1)
+    expect(h.composed.guarded).toBe(2)
     // The handle is the runtime's own: the stop path finds and disposes it.
     await expect(h.runtime.stopAgents([WORKER])).resolves.toBeUndefined()
   })

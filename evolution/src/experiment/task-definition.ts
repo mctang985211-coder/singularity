@@ -81,7 +81,7 @@ export async function runCriterionGuards(
         {
           lineage,
           spawn: false,
-          workspace: { path: workspace },
+          workspace: { path: workspace, ...(view.frozen.snapshot.rebaseFrom === undefined ? {} : { rebaseFrom: view.frozen.snapshot.rebaseFrom }) },
           ...(contract === undefined
             ? {}
             : {

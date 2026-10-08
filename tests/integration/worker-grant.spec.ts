@@ -15,6 +15,7 @@ import { SingularityAgent } from '../../agent-singularity/src/index.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { WorkerGrant } from '../../agent-runtime/src/types.ts'
 import { workerBaseline } from '../../task-runtime/src/capability.ts'
+import { graphLibrary } from '../../task-runtime/src/library.ts'
 
 /**
  * The real thing on the tools and skills axes: the deployment's own
@@ -103,7 +104,7 @@ interface Harness {
   visible(agent: Agent): string[]
   reachable(sessionId: SessionId): Agent | undefined
   /** Dispatch one call as one agent through the real registry and gate waterfall. */
-  call(agent: Agent, name: string): Promise<{ isError: boolean; text: string }>
+  call(agent: Agent, name: string, args?: Record<string, unknown>): Promise<{ isError: boolean; text: string }>
   /** Register one more tool on an agent's own scope, standing in for a later preset/MCP mount. */
   regrant(agent: Agent, name: string): void
   spawn(grant: WorkerGrant | undefined, presetTools?: readonly string[]): Promise<Agent>
@@ -169,10 +170,17 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   // is the real registration, and the grant filter runs over it.
   ctx.provide('graphs', { graphForSession: async () => ({ id: 'g1', envId: 'env1', rootSessionId: ROOT_SESSION }) } as never)
   ctx.provide('task', {} as never)
-  // The one call the plugin makes on the runtime at construction — installing
-  // its root-budget approval (K4) — accepted and forgotten: no case here asks
-  // for a budget extension.
-  ctx.provide('taskRuntime', { registerRootBudgetApproval: () => () => {}, registerTerminalReviewListener: () => () => {} } as never)
+  // The calls the plugin makes on the runtime — its root-budget approval (K4) at
+  // construction, and the graph library derivation the root's own skill catalog is
+  // built from (`agent-runtime/src/index.ts:graphCatalogFor`). Accepted and
+  // forgotten: no case here asks for a budget extension, and the catalog is not
+  // one of this spec's subjects, so the library layout is the real derivation and
+  // nothing else.
+  ctx.provide('taskRuntime', {
+    registerRootBudgetApproval: () => () => {},
+    registerTerminalReviewListener: () => () => {},
+    libraryForRoot: async (rootSessionId: string) => graphLibrary(rootSessionId),
+  } as never)
   // The read core the root-agent plugin injects (A2). No tool this spec drives
   // reads context — its subjects are the tool surface and the grant filter, both
   // of which are the deployment's own registration — so this sibling provides the
@@ -256,12 +264,12 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     executed,
     visible: agent => ctx.tools.schemas(agent).map(schema => schema.name).sort(),
     reachable: sessionId => agents.get(sessionId),
-    async call(agent, name) {
+    async call(agent, name, args = {}) {
       callSeq += 1
       const answer = await ctx.tools.execute({
         callId: `wg-${callSeq}`,
         name,
-        arguments: {},
+        arguments: args,
         agent,
         signal: new AbortController().signal,
       })
@@ -431,12 +439,21 @@ describe('worker capability grants', () => {
       capabilities: [{ capability: 'design-ball', tools: ['read', 'write'], skills: ['ball-align'] }],
     }))
 
-    const granted = await h.ctx.skills.get('ball-align', { scope: child, cwd })
-    expect(granted?.content).toContain('# Ball Alignment')
-    expect(granted?.source).toBe('runtime')
-    // The grant is a runtime skill in the worker's own layer: nothing else sees it.
+    // The worker's own loader is where the grant lands (`grants.ts`: an isolated
+    // registry per worker, holding exactly the grant's frozen skills), so the body
+    // it serves for the granted name is the SKILL.md the grant read off disk.
+    const granted = await h.call(child, 'skill', { name: 'ball-align' })
+    expect(granted.isError).toBe(false)
+    expect(granted.text).toContain('# Ball Alignment')
+    // ...and it is that worker's alone: the deployment's shared skill registry
+    // holds neither the name nor anything else, and a sibling worker whose own
+    // capability named no skill loads nothing from the first one's layer.
     expect(await h.ctx.skills.get('ball-align')).toBeUndefined()
-    expect((await h.ctx.skills.list({ scope: child })).map(skill => skill.name)).toEqual(['ball-align'])
+    expect((await h.ctx.skills.list({ scope: child })).map(skill => skill.name)).toEqual([])
+    const sibling = await h.spawn(grantOf({ capabilities: [{ capability: 'design-ball', tools: ['read'], skills: [] }] }))
+    const refused = await h.call(sibling, 'skill', { name: 'ball-align' })
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toContain('ball-align')
   })
 
   it('rejects the spawn when a granted skill resolves to no SKILL.md', async () => {
@@ -474,10 +491,13 @@ describe('worker capability grants', () => {
 
   it('leaves the root the skill loader, and discovery reaches a repo-level .agents/skills skill', async () => {
     const h = await harness({ discovery: true })
-    // The root's allow-list names the preset-plane loader: it stays while the
-    // rest of the preset plane is filtered out.
+    // The root's own allow-list names the preset-plane loader, so it stays while
+    // the rest of the preset plane — the tools no root allow-list names — is
+    // filtered out.
     expect(h.visible(h.root)).toContain('skill')
-    expect(h.visible(h.root)).not.toContain('bash')
+    for (const filtered of ['read_image', 'ask_user_question', 'web_fetch', 'subagent_fetchless']) {
+      expect(h.visible(h.root), filtered).not.toContain(filtered)
+    }
 
     // The same lookup the `skill` tool runs: the cwd walk hits the .git marker,
     // and <projectRoot>/.agents/skills is a zero-config discovery root.

@@ -44,6 +44,7 @@ function harness(overrides: { sessionPersistence?: unknown; events?: SessionEven
       return { agent }
     }),
     ensureRoot: vi.fn(async (sessionId: SessionId) => ({ agent: { id: sessionId } })),
+    promptUser: vi.fn(async (_agent: { id: SessionId }, _prompt: { type: string; text: string }[]) => {}),
     prompt: vi.fn(async (_agent: { id: SessionId }, _prompt: { type: string; text: string }[]) => {}),
     stopAgents: vi.fn(async (_ids: readonly SessionId[]) => {}),
     stopGraph: vi.fn(async (): Promise<void> => {
@@ -123,16 +124,15 @@ function harness(overrides: { sessionPersistence?: unknown; events?: SessionEven
 }
 
 describe('graphs creation lifecycle', () => {
-  it('rejects a graph environment without repositories', async () => {
+  it('creates an empty environment from a goal and metrics, then delivers the user goal', async () => {
     const { service, store, runtime } = harness()
-    await expect(service.create({ createEnv: true })).rejects.toThrow(
-      'new environment requires at least one repository',
-    )
-    expect(store.list()).toEqual([])
-
-    const env = store.create()
-    await expect(service.create({ envId: env.id })).rejects.toThrow(`environment "${env.id}" has no repositories`)
-    expect(runtime.createRoot).not.toHaveBeenCalled()
+    const result = await service.create({ createEnv: true, rsi: { task: 'Improve a word counter', metrics: ['correctness', 'latency'] } })
+    expect(store.get(result.graph.envId).components).toEqual([])
+    expect(result.graph.rsi).toEqual({ task: 'Improve a word counter', metrics: ['correctness', 'latency'], iterationRounds: 3, humanReview: false })
+    expect(runtime.promptUser).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: result.graph.rootSessionId }), [
+      { type: 'text', text: 'Improve a word counter\n关注指标：\n- correctness\n- latency' },
+    ], [{ type: 'text', text: expect.stringContaining('Set up Singularity graph') }])
+    expect(runtime.prompt).not.toHaveBeenCalled()
   })
 
   it('uses the environment cwd and sends setup only after registry persistence completes', async () => {

@@ -334,7 +334,14 @@ describe('K3: P2 and P3 hold the whole object', () => {
       await writeFile(join(SKILL_DIR(root), file), moved)
 
       const refusal = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
-      expect(refusal).toContain('no longer matches the content identity recorded at prepare')
+      // The moved half is refused by name: a rewritten `SKILL.md` by the content
+      // identity prepare recorded, a rewritten sidecar by the whole-object
+      // identity check the loader runs over the sandbox directory.
+      const expected =
+        file === 'SKILL.md'
+          ? 'no longer matches the content identity recorded at prepare'
+          : 'is not the declared content'
+      expect(refusal).toContain(expected)
       expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
       expect(await ledgerKinds(root)).not.toContain('applied')
       expect(await ledgerKinds(root)).not.toContain('commit_intent')
@@ -346,7 +353,9 @@ describe('K3: P2 and P3 hold the whole object', () => {
     // Recorded sidecar deleted: the object is incomplete.
     const execution = await executionDecidedFixture()
     await rm(join(SKILL_DIR(execution.root), SKILL_SIDECAR_FILE))
-    expect(await refusalOf(execution.svc.checkPromotion('s1'))).toContain('cannot be read as a real file')
+    // A missing half of the pair is not the object prepare froze: the whole-object
+    // identity check refuses the directory by name.
+    expect(await refusalOf(execution.svc.checkPromotion('s1'))).toContain('no longer matches its frozen content identity')
 
     // Guidance identity, sidecar added: a different object than the one frozen.
     const { svc, root, skillRoot } = await serviceWithProduction()
@@ -359,7 +368,7 @@ describe('K3: P2 and P3 hold the whole object', () => {
       capabilities: [PROMOTION_ROW],
       requiredTools: ['bash'],
     })
-    expect(await refusalOf(svc.checkPromotion('s1'))).toContain('the content identity recorded at prepare is guidance')
+    expect(await refusalOf(svc.checkPromotion('s1'))).toContain('no longer matches its frozen content identity')
   })
 
   it('refuses a candidate sidecar whose declaration moved: the derivation, not the file, is the contract', async () => {
@@ -377,9 +386,10 @@ describe('K3: P2 and P3 hold the whole object', () => {
     await writeFile(join(SKILL_DIR(root), SKILL_SIDECAR_FILE), escalated)
 
     const refusal = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
-    // The bytes moved, so the P2 identity refuses it first — either way the
-    // promotion stops by name with nothing written and nothing recorded.
-    expect(refusal).toMatch(/no longer matches the content identity recorded at prepare/)
+    // The bytes moved, so the whole-object identity check refuses the sandbox
+    // directory by name: the promotion stops with nothing written and nothing
+    // recorded.
+    expect(refusal).toMatch(/no longer matches its frozen content identity/)
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).toBe(fixture.production)
     expect(await svc.openIntentTargets()).toEqual([])
@@ -399,8 +409,10 @@ describe('K3: P2 and P3 hold the whole object', () => {
     )
 
     const refusal = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
-    expect(refusal).toContain('sidecar')
-    expect(refusal).toContain('changed since prepare')
+    // The production object is no longer the one prepare froze: the whole-object
+    // identity check refuses the directory by name.
+    expect(refusal).toContain('no longer matches its frozen content identity')
+    expect(refusal).toContain(join(skillRoot, 'verify'))
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect(await ledgerKinds(root)).not.toContain('commit_intent')
 
@@ -416,8 +428,10 @@ describe('K3: P2 and P3 hold the whole object', () => {
       capabilities: [PROMOTION_ROW],
       requiredTools: ['bash'],
     })
+    // production now loads as an object the baseline never had: the whole-object
+    // identity check refuses it by name.
     expect(await refusalOf(guidance.svc.apply('s1', 'root-1', 'approval:call-1'))).toContain(
-      'now carries a SKILL.contract.json the baseline prepare recorded did not have',
+      'no longer matches its frozen content identity',
     )
     expect(await readFile(join(guidance.root, 'proposals.jsonl'), 'utf8')).toBe(sidecarBefore)
   })
@@ -447,8 +461,11 @@ describe('K3: P2 and P3 hold the whole object', () => {
     const beforeRollback = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     await writeFile(championSidecar, derivedSidecar(fixture.productionSidecar, skillText('# the snapshot was damaged')))
     const rollbackRefusal = await refusalOf(svc.rollback('s1', 'root-1', 'approval:call-2'))
-    expect(rollbackRefusal).toMatch(/champion snapshot .* no longer hashes/)
-    expect(rollbackRefusal).toContain(SKILL_SIDECAR_FILE)
+    // The champion snapshot no longer loads as the frozen pair, so the
+    // whole-object identity check refuses it by name.
+    expect(rollbackRefusal).toContain('is not loadable')
+    expect(rollbackRefusal).toContain(CHAMPION_DIR(root))
+    expect(rollbackRefusal).toContain('is not the declared content')
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(beforeRollback)
     expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).toBe(fixture.candidate)
     expect(await readFile(SIDECAR_TARGET(skillRoot), 'utf8')).toBe(
@@ -599,8 +616,10 @@ describe('K3: the two-file commit', () => {
     )
 
     const refusal = await refusalOf(svc.rollback('s1', 'root-1', 'approval:call-2'))
-    expect(refusal).toContain('does not hold the content proposal "s1" applied')
-    expect(refusal).toContain(SIDECAR_TARGET(skillRoot))
+    // The production pair no longer loads as the frozen candidate object, so the
+    // whole-object identity check refuses it by name before any intent.
+    expect(refusal).toContain('is not loadable')
+    expect(refusal).toContain(join(skillRoot, 'verify'))
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect(await svc.openIntentTargets()).toEqual([])
     expect(await readFile(COMMIT_TARGET(skillRoot), 'utf8')).not.toBe(production)
@@ -752,7 +771,9 @@ describe('K3: the two-file commit', () => {
     // proposal's own baseline check then refuses it, because production moved.
     expect((await reopened.reconcile()).map(outcome => outcome.result)).toEqual(['completed-redone'])
     expect(await reopened.openIntentTargets()).toEqual([])
-    expect(await refusalOf(reopened.apply('s2', 'root-1', 'approval:call-2'))).toContain('changed since prepare')
+    expect(await refusalOf(reopened.apply('s2', 'root-1', 'approval:call-2'))).toContain(
+      'no longer matches its frozen content identity',
+    )
   })
 
   it('reports the blocked intent, instead of throwing, when the production directory cannot be listed', async () => {
@@ -811,22 +832,18 @@ describe('K3: the two-file commit', () => {
     expect(await reopened.openIntentTargets()).toEqual([skillTarget, sidecarTarget])
 
     // The fresh path over the same obstacle, on a world whose proposal has no
-    // open intent: the commit path turns the same reason into its own named stop
-    // before the intent line, so the refusal is the commit's words and not the
-    // directory read's.
+    // open intent: the production-baseline whole-object check reads the same
+    // directory through the loader, which refuses it outright, so nothing is
+    // recorded and production keeps the baseline.
     const fresh = await executionDecidedFixture()
     const freshDirectory = join(fresh.skillRoot, 'verify')
     const freshBefore = await readFile(join(fresh.root, 'proposals.jsonl'), 'utf8')
     await chmod(freshDirectory, 0o300)
-    let refusal: string
     try {
-      refusal = await refusalOf(fresh.svc.apply('s1', 'root-1', 'approval:call-1'))
+      await expect(fresh.svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(/permission denied|EACCES/i)
     } finally {
       await chmod(freshDirectory, 0o755)
     }
-    expect(refusal).toContain('cannot be read to check what it holds')
-    expect(refusal).toContain(freshDirectory)
-    expect(refusal).toContain('nothing was written')
     expect(await readFile(join(fresh.root, 'proposals.jsonl'), 'utf8')).toBe(freshBefore)
     expect(await ledgerKinds(fresh.root)).not.toContain('commit_intent')
     expect(await readFile(COMMIT_TARGET(fresh.skillRoot), 'utf8')).toBe(fresh.production)

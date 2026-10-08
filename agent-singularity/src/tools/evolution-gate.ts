@@ -1,3 +1,4 @@
+import { evolutionForSession } from './evolution-scope.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@dangosys/dsh-singularity-graphs'
@@ -40,6 +41,7 @@ export function defineEvolutionGateTool(ctx: Context) {
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
       const caller = sessionId(exec, 'evolution_gate')
+      const evolution = await evolutionForSession(ctx, caller)
       // Evidence ids come from the caller's task store; a missing store just
       // means no id resolves, while on-disk path refs still can.
       let evidenceIds = new Set<string>()
@@ -51,7 +53,7 @@ export function defineEvolutionGateTool(ctx: Context) {
         evidenceIds = new Set()
       }
       try {
-        const proposal = await ctx.evolution.gate(
+        const proposal = await evolution.gate(
           args.proposalId,
           {
             targetFailureFixed: args.targetFailureFixed,

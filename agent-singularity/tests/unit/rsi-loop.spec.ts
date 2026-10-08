@@ -30,7 +30,7 @@ import {
   supervisorGrant,
   supervisorRequestKey,
 } from '../../src/coordination/rsi-loop.ts'
-import { supervisorOutcomeOf } from '../../src/coordination/handoff-rules.ts'
+import { renderRecordedCostFacts, runSubtree, supervisorOutcomeOf } from '../../src/coordination/handoff-rules.ts'
 import {
   graphImprovementCap,
   registerGraphImprovementCap,
@@ -373,6 +373,121 @@ afterEach(() => {
 })
 
 describe('the RSI loop driver', () => {
+  it('reads publication and experiment costs from the graph scope agents publish into', async () => {
+    let scopedProposals: EvolutionProposal[] = []
+    const f = fixture({ onSpawn: () => { scopedProposals = [appliedProposal(1, 'scoped-p')] } })
+    const forSession = vi.fn(async (sessionId: string) => {
+      expect(sessionId).toBe(ROOT)
+      return { list: async () => scopedProposals, experiments: async () => [] }
+    })
+    Object.assign(f.ctx.evolution, { forSession, list: vi.fn(async () => { throw new Error('global ledger belongs to another library') }) })
+    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    expect(f.recoveries[0]!.request.proposalIds).toEqual(['scoped-p'])
+    expect(forSession).toHaveBeenCalled()
+  })
+
+  it('includes generated-plan and independent-judge usage once per recorded experiment', async () => {
+    const f = fixture({ supervisorReply: NO_CHANGE_REPLY, proposals: [{ ...appliedProposal(0, 'manual-p'), sourceRefs: [] }] })
+    Object.assign(f.ctx.evolution, { experiments: async () => [{
+      experimentId: 'exp-1',
+      frozen: { evaluation: { generatedResponse: '{}', generatedUsage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 } } },
+      judged: { evaluation: { judgeUsage: { uncachedInputTokens: 5, outputTokens: 6, cacheReadTokens: 7, cacheWriteTokens: 8 } } },
+    }] })
+    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    expect(f.spawns[0]!.prompt).toContain('Auxiliary evaluation plan/judge usage: 2 model calls; tokens 36 (input 6, output 8, cache read 10, cache write 12)')
+    expect(f.recoveries).toHaveLength(1)
+  })
+
+  it('hands natural-language metrics and recorded full-tree effort to method supervision', async () => {
+    const f = fixture({ rsi: { ...RSI, metrics: ['reduce latency', 'model cost'] }, supervisorReply: NO_CHANGE_REPLY })
+    f.store.runs.push({ ...f.store.runs[0]!, runId: 'r-child', taskId: 't-child', sessionId: 's-child', parentRunId: 'r-1' })
+    f.store.runs.push({ ...f.store.runs[0]!, runId: 'r-old', taskId: 't-old', sessionId: 's-old' })
+    f.store.reviews[0]!.metrics = { tokens: { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 300, cacheWriteTokens: 4 }, toolCalls: { calls: 2, failures: 0 } }
+    f.store.reviews.push({ taskId: 't-child', runId: 'r-child', outcome: 'verified', evidenceRefs: [], anomalies: [], metrics: { tokens: { uncachedInputTokens: 50, outputTokens: 10, cacheReadTokens: 100, cacheWriteTokens: 0 }, toolCalls: { calls: 3, failures: 1 } } })
+    f.store.reviews.push({ taskId: 't-old', runId: 'r-old', outcome: 'verified', evidenceRefs: [], anomalies: [], metrics: { toolCalls: { calls: 7, failures: 0 } } })
+    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    const prompt = f.spawns[0]!.prompt
+    expect(prompt).toContain('Metrics to explore and improve: reduce latency; model cost')
+    expect(prompt).toContain('Current round execution tree: 2 sessions; tokens 584 (input 150, output 30, cache read 400, cache write 4); toolCalls 5 (1 failed); coverage tokens 2/2, tools 2/2')
+    expect(prompt).toContain('Graph usage to date (executions, replay experiments and recorded coordination): 3 sessions; tokens unknown; toolCalls unknown; coverage tokens 0/3, tools 0/3')
+    expect(prompt).toContain('monetary cost unknown')
+    expect(prompt).toContain('evaluation.goal is enough for an LLM-generated frozen plan')
+  })
+
+  it('counts complete business and coordination sessions once after submission while the round retains its frozen review', async () => {
+    const f = fixture({ supervisorReply: NO_CHANGE_REPLY })
+    await previousSupervisor(0, 'recorded')
+    const coordination = 's-old-supervisor-0-recorded'
+    f.store.runs.push({ ...f.store.runs[0]!, runId: 'r-same-session', taskId: 't-other' })
+    f.store.reviews[0]!.metrics = { tokens: { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      toolCalls: { calls: 2, failures: 0 } }
+    const logs = new Map([
+      [ROOT, [
+        { type: 'tool/call', data: { name: 'read' } }, { type: 'tool/call', data: { name: 'task_submit_result' } },
+        { type: 'tool/call', data: { name: 'read' } }, { type: 'tool/call', data: { name: 'bash' } },
+        { type: 'tool/result', data: { message: { isError: true } } },
+      ]],
+      [coordination, [
+        { type: 'tool/call', data: { name: 'task_read' } }, { type: 'tool/call', data: { name: 'evolution_replay' } },
+        { type: 'tool/result', data: { message: { isError: true } } },
+      ]],
+    ])
+    Object.assign(f.ctx, {
+      sessions: { get: (id: string) => ({ id }) },
+      sessionProjections: { snapshot: (session: { id: string }) => ({ values: { tokenUsage: session.id === ROOT
+        ? { uncachedInputTokens: 150, outputTokens: 45, cacheReadTokens: 10, cacheWriteTokens: 0 }
+        : { uncachedInputTokens: 9, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 } } }) },
+      sessionQuery: { readSession: async (id: string) => ({ events: logs.get(id) ?? [] }) },
+    })
+    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    const prompt = f.spawns[0]!.prompt
+    expect(prompt).toContain('Current round execution tree: 1 sessions; tokens 120 (input 100, output 20, cache read 0, cache write 0); toolCalls 2 (0 failed)')
+    expect(prompt).toContain('Graph usage to date (executions, replay experiments and recorded coordination): 2 sessions; tokens 217 (input 159, output 48, cache read 10, cache write 0); toolCalls 6 (2 failed); coverage tokens 2/2, tools 2/2')
+    expect(f.store.reviews[0]!.metrics!.tokens!.outputTokens).toBe(20)
+  })
+
+  it('restores complete cold-session token usage with the existing projection reader', async () => {
+    const f = fixture({ supervisorReply: NO_CHANGE_REPLY })
+    f.store.reviews[0]!.metrics = { tokens: { uncachedInputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+    const header = { id: ROOT }
+    const events = [{ type: 'tool/call', data: { name: 'task_submit_result' } }]
+    const restore = vi.fn(() => ({ snapshot: { values: { tokenUsage: {
+      uncachedInputTokens: 20, outputTokens: 6, cacheReadTokens: 4, cacheWriteTokens: 0,
+    } } } }))
+    Object.assign(f.ctx, {
+      sessionProjections: { restore },
+      sessionQuery: { readSession: async () => ({ session: header, inheritedEventCount: 0, events }) },
+    })
+    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    expect(restore).toHaveBeenCalledWith({}, events, 0, header, 0)
+    expect(f.spawns[0]!.prompt).toContain('Graph usage to date (executions, replay experiments and recorded coordination): 1 sessions; tokens 30 (input 20, output 6, cache read 4, cache write 0); toolCalls 1 (0 failed); coverage tokens 1/1, tools 1/1')
+    expect(f.spawns[0]!.prompt).toContain('Current round execution tree: 1 sessions; tokens 12')
+  })
+
+  it('fills missing tool counts from actual session logs and leaves missing tokens unknown', async () => {
+    const f = fixture({ supervisorReply: NO_CHANGE_REPLY })
+    Object.assign(f.ctx, { sessionQuery: { readSession: async () => ({ events: [
+      { type: 'tool/call', data: { name: 'read' } },
+      { type: 'tool/call', data: { name: 'bash' } },
+      { type: 'tool/result', data: { message: { isError: true } } },
+    ] }) } })
+    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    expect(f.spawns[0]!.prompt).toContain('Current round execution tree: 1 sessions; tokens unknown; toolCalls 2 (1 failed); coverage tokens 0/1, tools 1/1')
+  })
+
+  it('deduplicates session costs and keeps reused historical runs out of a current execution tree', () => {
+    const snapshot = { runs: [
+      { runId: 'new', sessionId: 's-new' },
+      { runId: 'child', sessionId: 's-child', parentRunId: 'new' },
+      { runId: 'grandchild', sessionId: 's-grandchild', parentRunId: 'child' },
+      { runId: 'old-child', sessionId: 's-old', parentRunId: 'old' },
+    ] } as TaskSnapshot
+    expect(runSubtree(snapshot, 'new').map(run => run.runId)).toEqual(['new', 'child', 'grandchild'])
+    expect(renderRecordedCostFacts('sample', ['s-child', 's-child', 's-missing'], new Map([
+      ['s-child', { toolCalls: { calls: 4, failures: 1 } }],
+    ]))).toContain('2 sessions; tokens unknown; toolCalls 4 (1 failed); coverage tokens 0/2, tools 1/2')
+  })
+
   it('supervises the verified round and opens the next one under the round key, consuming what was applied', async () => {
     // The supervisor applies one proposal while it runs.
     const f = fixture({ onSpawn: () => f.setProposals([appliedProposal(1, 'p-1')]) })
@@ -399,7 +514,8 @@ describe('the RSI loop driver', () => {
     expect(prompt).toContain(`Cite diagnosis:${roundDiagnosisId(GRAPH, 1)}`)
     expect(prompt).toContain(STORE)
     expect(prompt).toContain('t-root')
-    expect(prompt).toContain('task_recover is deliberately not granted')
+    expect(prompt).toContain('The platform driver opens the next round')
+    expect(prompt).toContain('task_library')
     expect(prompt).toContain("The round settled verified against the store's own acceptance criteria")
   })
 
@@ -432,7 +548,7 @@ describe('the RSI loop driver', () => {
     expect(diagnosis.observedFailure).toBe('mandatory criteria not satisfied: ac-1 fail')
     expect(diagnosis.proposals).toEqual([])
     expect(f.spawns[0]!.prompt).toContain('The round settled failed')
-    expect(f.spawns[0]!.prompt).toContain('debug that failure')
+    expect(f.spawns[0]!.prompt).toContain('Debug that failure')
   })
 
   it('marks the loop failed and opens nothing when the supervisor reports the loop closed', async () => {
@@ -474,12 +590,34 @@ describe('the RSI loop driver', () => {
     expect(diagnosis!.evidenceRefs).toEqual(['ev-1'])
   })
 
-  it('marks the loop done and opens nothing once the configured rounds have settled', async () => {
-    const f = fixture({ rsi: { ...RSI, iterationRounds: 1 } })
+  it('reviews final library experience and finishes without opening another execution', async () => {
+    const f = fixture({ rsi: { ...RSI, iterationRounds: 1 }, supervisorReply: NO_CHANGE_REPLY })
     await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
     expect(f.recoveries).toEqual([])
-    expect(f.spawns).toEqual([])
-    expect(f.progressWrites).toEqual([{ round: 1, phase: 'done', note: '1/1 rounds settled; final round verified; the loop is finished' }])
+    expect(f.spawns).toHaveLength(1)
+    expect(f.spawns[0]!.prompt).toContain('Final library review')
+    expect(f.progressWrites.at(-1)).toEqual({ round: 1, phase: 'done', note: '1/1 rounds settled; final round verified; final library review settled; the loop is finished' })
+    expect((await readReviewAgentAttempts(STORE)).at(-1)?.settlement).toMatchObject({ status: 'recorded' })
+  })
+
+  it('waits for the final library review and reuses its durable settlement after restart', async () => {
+    let release!: () => void
+    const idle = new Promise<void>(resolve => { release = resolve })
+    const f = fixture({ rsi: { ...RSI, iterationRounds: 1 }, supervisorReply: NO_CHANGE_REPLY, onSupervisorIdle: () => idle })
+    const driver = new RsiLoopDriver(f.ctx, { log: () => {} })
+    const pending = driver.ensure(GRAPH)
+    await vi.waitFor(() => expect(f.spawns).toHaveLength(1))
+    expect(f.progressWrites.at(-1)).toMatchObject({ round: 1, phase: 'publishing' })
+    expect(f.recoveries).toEqual([])
+    release()
+    await pending
+    expect(f.progressWrites.at(-1)).toMatchObject({ phase: 'done' })
+    driver.stop()
+    const restarted = new RsiLoopDriver(f.ctx, { log: () => {} })
+    await restarted.ensure(GRAPH)
+    expect(f.spawns).toHaveLength(1)
+    expect(f.recoveries).toEqual([])
+    restarted.stop()
   })
 
   it('counts terminal rounds of either kind and continues from the last one', async () => {
@@ -677,14 +815,14 @@ describe('the RSI loop driver', () => {
   })
 
   it('keeps the final failed run and its cause when the execution count is exhausted', async () => {
-    const f = fixture({ rsi: { ...RSI, iterationRounds: 1 }, round1: 'failed' })
+    const f = fixture({ rsi: { ...RSI, iterationRounds: 1 }, round1: 'failed', supervisorReply: NO_CHANGE_REPLY })
     await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
-    expect(f.spawns).toEqual([])
+    expect(f.spawns).toHaveLength(1)
     expect(f.recoveries).toEqual([])
-    expect(f.progressWrites).toEqual([{
+    expect(f.progressWrites.at(-1)).toEqual({
       round: 1, phase: 'failed',
-      note: '1/1 rounds settled; final round failed: mandatory criteria not satisfied: ac-1 fail; the loop is finished',
-    }])
+      note: '1/1 rounds settled; final round failed: mandatory criteria not satisfied: ac-1 fail; final library review settled; the loop is finished',
+    })
   })
 
   it('revokes a pending watcher when RSI is cleared, including without an event', async () => {
@@ -723,7 +861,7 @@ describe('the RSI loop driver', () => {
       expect(f.spawns).toHaveLength(2)
       expect(f.recoveries).toHaveLength(1)
     } else {
-      expect(f.spawns).toHaveLength(1)
+      expect(f.spawns).toHaveLength(2)
       expect(f.progressWrites.at(-1)).toMatchObject({ phase: 'done' })
     }
     driver.stop()

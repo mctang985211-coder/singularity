@@ -85,11 +85,23 @@ describe('TaskRuntime.adoptRoot', () => {
     expect((await h2.task.snapshotIn(STORE)).tasks).toHaveLength(1)
 
     // A store with no root at all is the state a graph's store starts in, not a
-    // failure: adoption reports it and writes nothing.
-    const empty = rootTaskStoreId('a-fresh-session')
-    const nothing = await runtime2.adoptRoot(empty, 'a-fresh-session')
+    // failure: adoption reports it and writes nothing. The graph registry is what
+    // names that store's owning session, so the fresh graph is declared here.
+    const freshSession = 'a-fresh-session'
+    const empty = rootTaskStoreId(freshSession)
+    h2.graphs.list.mockResolvedValue([
+      {
+        id: 'g1', name: 'graph', envId: 'env1', rootSessionId: ROOT_SESSION,
+        graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root', createdAt: 0, ready: true,
+      },
+      {
+        id: 'g2', name: 'graph', envId: 'env2', rootSessionId: freshSession,
+        graphStoreId: 'sg-g-fresh', layoutStoreId: 'sg-l-fresh', createdAt: 0, ready: true,
+      },
+    ])
+    const nothing = await runtime2.adoptRoot(empty, freshSession)
     expect(nothing.adopted).toBe(false)
-    expect((await runtime2.adoptRoot(empty, 'a-fresh-session')).adopted).toBe(false)
+    expect((await runtime2.adoptRoot(empty, freshSession)).adopted).toBe(false)
     expect((await h2.task.snapshotIn(empty)).tasks).toHaveLength(0)
   })
 

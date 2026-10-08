@@ -145,3 +145,6 @@ export default TaskRuntime
 
 export * from './task-template.ts'
 export { parseSkillFile } from '@dangosys/dsh-singularity-agent-runtime'
+
+export * from './library.ts'
+export { rebaseWorkspacePaths } from './replay-paths.ts'

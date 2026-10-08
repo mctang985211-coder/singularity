@@ -1,3 +1,4 @@
+import { evolutionForSession } from './evolution-scope.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@dangosys/dsh-singularity-graphs'
@@ -23,7 +24,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
     name: 'evolution_propose',
     description:
       'Record an evidenced shared change as a proposal. Executable targetType names are task_definition (a TaskTemplate), skill ' +
-      '(an existing Skill), and capability (one whole row with optional new MCP definitions and an optional new execution Skill). Use evolution_candidate, ' +
+      '(a new or existing Skill in this graph library), and capability (one whole row with optional new MCP definitions and an optional new execution Skill). Use evolution_candidate, ' +
       'evolution_prepare, evolution_replay and evolution_gate before recording the model decision through evolution_decide. ' +
       'evolution_apply publishes under the deployment publication approval policy. Other target types remain suggestions. Existing Task contracts and Run bindings stay fixed.',
     parameters: {
@@ -34,7 +35,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
         enum: ['L1', 'L2', 'L3', 'L4'],
         description: 'Evolution level (L1 execution adaptation / L2 capability / L3 workflow / L4 harness); publication follows the deployment approval policy',
       },
-      baseVersion: { type: 'string', required: true, description: 'Current target version; a first Task template uses absent with candidate version 1' },
+      baseVersion: { type: 'string', required: true, description: 'Current target version; a first Task template or new Skill uses absent (first template version 1)' },
       targetType: { type: 'string', enum: PROPOSAL_TARGET_TYPES, description: 'Executable: task_definition for a TaskTemplate, skill or capability. Other types remain suggestions. Required unless fromDiagnosis.' },
       targetId: { type: 'string', description: 'Name of the concrete target (required unless fromDiagnosis)' },
       rationale: { type: 'string', description: 'Why this change would address the diagnosed cause (required unless fromDiagnosis)' },
@@ -52,6 +53,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
       const caller = sessionId(exec, 'evolution_propose')
+      const evolution = await evolutionForSession(ctx, caller)
       // A transcription carries whatever the diagnosis recorded — an open name
       // — so the local is the open type and the check below narrows it.
       let targetType: string | undefined = args.targetType
@@ -90,7 +92,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
         throw new Error(`evolution_propose: targetType must be one of ${PROPOSAL_TARGET_TYPES.join(' / ')}, got "${String(targetType)}"`)
       }
       try {
-        const proposal = await ctx.evolution.propose(
+        const proposal = await evolution.propose(
           {
             proposalId: args.proposalId,
             targetType,
@@ -104,7 +106,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
         )
         const skillReplacement =
           'ledger entry only — nothing was executed or changed; next: evolution_candidate with mutationJson as JSON text carrying the full replacement ' +
-          "text of the existing skill's SKILL.md — the only input a candidate submits, because an execution skill's " +
+          "text of the Skill's SKILL.md (use baseVersion absent for its first version). An execution skill's " +
           'SKILL.contract.json is derived from production at evolution_prepare (only its content.skillMdSha256 is ' +
           'recomputed, so a content update cannot move a capability, a required tool or a verifier)'
         const capabilityReplacement =

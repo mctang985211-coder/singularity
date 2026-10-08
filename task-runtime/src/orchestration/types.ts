@@ -210,7 +210,7 @@ export interface OrchestrateEnv {
    * The provider pre-check, for the one case that has no verdict to carry: a
    * batch whose admission happened in an earlier process. A freshly admitted
    */
-  precheck?(capabilities: readonly string[], cwd: string | undefined): Promise<ProviderPrecheck>
+  precheck?(capabilities: readonly string[], cwd: string | undefined, manifest?: CapabilityManifest): Promise<ProviderPrecheck>
   /**
    * Best-effort owner notification (`agent.followup` on a live session, DSH's
    * tool-jobs notice precedent). A session with no live agent is skipped, and

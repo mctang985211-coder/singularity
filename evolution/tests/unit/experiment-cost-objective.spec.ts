@@ -107,7 +107,7 @@ describe('complete subtree cost evidence', () => {
 
   it.each(['no-review', 'no-counter', 'in-flight', 'invalid-counter'] as const)('marks a %s descendant as unknown', missing => {
     const snapshot = subtree()
-    if (missing === 'no-review') snapshot.reviews.splice(1, 1)
+    if (missing === 'no-review') (snapshot.reviews as ReviewRecord[]).splice(1, 1)
     if (missing === 'no-counter') snapshot.reviews[1]!.metrics = {}
     if (missing === 'in-flight') snapshot.runs[1]!.status = 'running'
     if (missing === 'invalid-counter') snapshot.reviews[1]!.metrics!.toolCalls!.calls = Number.NaN

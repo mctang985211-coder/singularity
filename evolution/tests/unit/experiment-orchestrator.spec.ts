@@ -29,6 +29,7 @@ import { resumeExperiment, runExperiment } from '../../src/experiment/runner.ts'
 import type { ExperimentBudget, FrozenExperiment, SkillContentIdentity } from '../../src/replay.ts'
 import { assertExperimentReport, compareExperimentSides, digestOf, foldExperiments, frozenDigestOf, modelSelectionOf, OUTCOME_JUDGE_PROMPT } from '../../src/index.ts'
 import { assertOutcomeEvidence } from '../../src/experiment/outcome.ts'
+import { assertExperimentCostWithinBudget } from '../../src/promotion/binding.ts'
 
 const PROPOSAL = 'p1'
 const SKILL = 'fixture-skill'
@@ -58,6 +59,7 @@ interface ScriptedOutcome {
 /** A little world: one prepared skill proposal, one store, one scripted runtime, one ledger. */
 async function world(
   options: {
+    libraryId?: string
     outcomes?: ScriptedOutcome[]
     /** The judge the sample criteria pin (S4-E §Q3). Default `command`; `null` leaves them mode-only. */
     sampleJudge?: string | null
@@ -221,6 +223,7 @@ async function world(
   const folded = (): Map<string, ExperimentView> => foldExperiments(records, proposals)
   const ledger: ExperimentLedger = {
     root: ledgerRoot,
+    ...(options.libraryId === undefined ? {} : { libraryId: options.libraryId }),
     get: async () => proposal,
     readSkillCandidate: async () => ({ skillMd: Buffer.from(CANDIDATE_BYTES, 'utf8') }),
     readCapabilityCandidate: async () => {
@@ -403,8 +406,9 @@ it('runs four isolated sides concurrently and shares a concurrent repeat call wi
   } finally { await rm(w.root, { recursive: true, force: true }) }
 })
 
-it('judges real command output for successful observed and holdout cases once, preserves acceptance and rechecks saved artifacts', async () => {
-  const w = await world()
+it.each([[false, false], [true, false], [true, true]])('judges successful Task measurements once and rechecks original acceptance and artifacts (graph-local: %s, mapped paths: %s)', async (graphLocal, mapped) => {
+  const w = await world(graphLocal ? { libraryId: 's-root' } : {})
+  const sides = graphLocal ? 2 : 4
   try {
     w.tasks[0]!.status = 'verified'
     w.reviews[0]!.outcome = 'verified'
@@ -412,33 +416,49 @@ it('judges real command output for successful observed and holdout cases once, p
     const model = modelSelectionOf({ provider: 'scripted', model: 'judge' })!
     const evaluation = {
       goal: 'improve the measured output', rubric: 'observed improvement and no holdout regression',
-      measurements: [{ id: 'metric', command: 'cat metric.txt' }],
+      measurements: [{ id: 'metric', command: mapped ? `cat '${join(w.snapshotDir, 'metric.txt')}'` : 'cat metric.txt' }],
       judge: { model, prompt: OUTCOME_JUDGE_PROMPT, digest: digestOf({ model, prompt: OUTCOME_JUDGE_PROMPT }) },
+      generatedResponse: 'A synthetic provider returned the fixed plan above',
+      generatedUsage: { uncachedInputTokens: 9, outputTokens: 1, cacheReadTokens: 2, cacheWriteTokens: 3 },
     }
     let judged = 0
     const judge = async (_model: unknown, _prompt: unknown, input: string) => {
       judged++
       const facts = JSON.parse(input)
-      expect(facts.measurements).toHaveLength(4)
+      expect(facts.measurements).toHaveLength(sides)
       expect(facts.measurements.every((item: { stdout: string; exitCode: number }) => item.stdout === '42\n' && item.exitCode === 0)).toBe(true)
-      return JSON.stringify({ samples: facts.samples.map((sample: { taskId: string; role: string }) => ({
+      return { response: JSON.stringify({ samples: facts.samples.map((sample: { taskId: string; role: string }) => ({
         taskId: sample.taskId,
         verdict: sample.role === 'observed-success' ? 'improved' : 'not-improved',
         findings: [{ claim: 'synthetic model decision grounded in actual shell output', evidenceRefs: [`${sample.taskId}/baseline/metric`, `${sample.taskId}/candidate/metric`] }],
         uncertainties: ['scripted model judgement verifies control flow, not domain improvement'],
-      })) })
+      })) }), usage: { uncachedInputTokens: 30, outputTokens: 5, cacheReadTokens: 7, cacheWriteTokens: 2 } }
     }
     const spec = { ...w.spec(), objective: 'llm-outcome' as const, evaluation,
-      samples: [{ taskId: 't-fix', role: 'observed-success' as const }, { taskId: 't-holdout', role: 'holdout' as const }] }
+      ...(mapped ? { snapshot: { sourceDir: w.snapshotDir, paths: ['input.txt', 'metric.txt'], rebaseFrom: w.snapshotDir } } : {}),
+      samples: [{ taskId: 't-fix', role: 'observed-success' as const },
+        ...(graphLocal ? [] : [{ taskId: 't-holdout', role: 'holdout' as const }])] }
     const result = await runExperiment(w.sources, { spec, caller: CALLER, actor: 'root', judge })
     expect(result.report.verdict).toBe('improved')
-    expect(result.report.samples[1]!.verdict).toBe('maintained')
+    expect(result.report.frozen.libraryId).toBe(graphLocal ? 's-root' : undefined)
+    if (!graphLocal) expect(result.report.samples[1]!.verdict).toBe('maintained')
     expect(result.report.evaluation!.judgement.samples[0]!.uncertainties).toHaveLength(1)
+    expect(result.report.frozen.evaluation!.generatedUsage).toEqual(evaluation.generatedUsage)
+    expect(result.report.evaluation!.judgeUsage).toEqual({ uncachedInputTokens: 30, outputTokens: 5, cacheReadTokens: 7, cacheWriteTokens: 2 })
+    expect(() => assertExperimentCostWithinBudget({ ...result.report, frozen: { ...result.report.frozen, budget: { maxTokens: 500 } } })).not.toThrow()
+    expect(() => assertExperimentCostWithinBudget({ ...result.report, frozen: { ...result.report.frozen, budget: { maxTokens: 1 } } })).toThrow(/over the ceiling/)
     await assertOutcomeEvidence(w.ledgerRoot, result.report)
+    if (mapped) {
+      expect(result.report.frozen.snapshot).toMatchObject({ paths: ['input.txt', 'metric.txt'], rebaseFrom: w.snapshotDir })
+      const measurements = JSON.parse(result.report.evaluation!.input).measurements
+      expect(measurements.every((item: { command: string; workspace: string }) => item.command === `cat '${join(item.workspace, 'metric.txt')}'`)).toBe(true)
+      const resumed = await resumeExperiment(w.sources, { experimentId: result.experimentId, caller: CALLER, actor: 'root', judge })
+      expect(resumed.report).toEqual(result.report)
+    }
     const repeated = await runExperiment(w.sources, { spec, caller: CALLER, actor: 'root', judge })
     expect(repeated.report).toEqual(result.report)
     expect(judged).toBe(1)
-    expect(w.calls).toHaveLength(4)
+    expect(w.calls).toHaveLength(sides)
     expect(() => assertExperimentReport({ ...result.report,
       frozen: { ...result.report.frozen, evaluation: { ...evaluation, rubric: 'a changed scoring rule' } },
     })).toThrow()
@@ -487,8 +507,8 @@ async function refusal(action: Promise<unknown>): Promise<string> {
 }
 
 describe('the two-sided orchestrator', () => {
-  it('resumes the frozen cost objective without opening new sides or reverting to failure repair', async () => {
-    const w = await world({ outcomes: [
+  it.each([false, true])('resumes measured call-reduction without new sides (graph-local observed only: %s)', async graphLocal => {
+    const w = await world({ ...(graphLocal ? { libraryId: 's-root' } : {}), outcomes: [
       { outcome: 'verified', toolCalls: 8, criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }] },
       { outcome: 'verified', toolCalls: 3, criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }] },
       { outcome: 'verified', toolCalls: 4, criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }] },
@@ -500,13 +520,14 @@ describe('the two-sided orchestrator', () => {
     review.outcome = 'verified'
     review.criteria![0]!.verdict = 'pass'
     const spec = { ...w.spec(), objective: 'tool-call-reduction' as const, samples: [
-      { taskId: 't-fix', role: 'observed-success' as const }, { taskId: 't-holdout', role: 'holdout' as const },
+      { taskId: 't-fix', role: 'observed-success' as const },
+      ...(graphLocal ? [] : [{ taskId: 't-holdout', role: 'holdout' as const }]),
     ] }
     const result = await runExperiment(w.sources, { spec, caller: CALLER, actor: 'root-1' })
     expect(result.report.verdict).toBe('improved')
     const resumed = await resumeExperiment(w.sources, { experimentId: result.experimentId, caller: CALLER, actor: 'root-1' })
     expect(resumed.report).toEqual(result.report)
-    expect(w.calls).toHaveLength(4)
+    expect(w.calls).toHaveLength(graphLocal ? 2 : 4)
   })
 
   it('runs both sides from one frozen snapshot, and reuses every key on a repeat call', async () => {

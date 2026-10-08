@@ -33,6 +33,7 @@ import {
   setStoreOverride,
   taskStoreId,
   type ViewSnapshot,
+  type GraphPatch,
 } from './api'
 
 export type FlowNode = Node<AgentData & Record<string, unknown>>
@@ -119,6 +120,7 @@ interface Store {
   loadModels: () => Promise<void>
   updateGraphModel: (id: string, model: ModelRef | null) => Promise<void>
   updateGraphRsi: (id: string, rsi: RsiConfig | null) => Promise<void>
+  updateGraphSettings: (id: string, settings: GraphPatch) => Promise<void>
   taskStoreId: () => string | null
   loadTask: () => Promise<void>
   setSelectedRun: (id: string | null) => void
@@ -422,11 +424,13 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
   async updateGraphModel(id, model) {
-    await patchGraph(id, { model })
-    await get().loadGraphs()
+    await get().updateGraphSettings(id, { model })
   },
   async updateGraphRsi(id, rsi) {
-    await patchGraph(id, { rsi })
+    await get().updateGraphSettings(id, { rsi })
+  },
+  async updateGraphSettings(id, settings) {
+    await patchGraph(id, settings)
     await get().loadGraphs()
   },
   taskStoreId() {
@@ -470,7 +474,9 @@ export const useStore = create<Store>((set, get) => ({
     const epoch = get().evolutionEpoch + 1
     set({ evolutionEpoch: epoch, evolutionError: null })
     try {
-      const data = await fetchEvolution()
+      const graphId = get().graphId
+      if (graphId === null) { set({ evolution: null }); return }
+      const data = await fetchEvolution(graphId)
       if (get().evolutionEpoch !== epoch) return
       set({ evolution: data })
     } catch (error) {

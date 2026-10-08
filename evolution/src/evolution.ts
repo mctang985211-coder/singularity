@@ -36,7 +36,8 @@ import {
   readPreparedCapability,
   validateCapabilityMutation,
 } from './capability-candidate.ts'
-import type { SkillContentIdentity } from './replay.ts'
+import type { SkillContentIdentity, ModelSelection } from './replay.ts'
+import { modelSelectionOf } from './replay.ts'
 import type { CommitRequest } from './commit.ts'
 import { commitIntent } from './commit.ts'
 import { capabilityTableIdentity } from './capability-config.ts'
@@ -53,6 +54,7 @@ import { assertSkillPromotionEvidence } from './promotion/skill.ts'
 import type { CapabilityPromotionSources } from './promotion/capability.ts'
 import type { SkillPromotionSources } from './promotion/shared.ts'
 import { EvolutionServiceCore } from './service/core.ts'
+import { assertDecisionTransition } from './ledger/state-machine.ts'
 import { capabilityBytes, readVerifiedSkillCandidate } from './service/skill-files.ts'
 import { materialize } from './service/sandbox.ts'
 import { sessionLog, verifierVocabularyOf } from './service/sources.ts'
@@ -79,9 +81,52 @@ import type {
   ProposeInput,
   SkillMutation,
 } from './types.ts'
-import { EVOLUTION_DECISIONS, EVOLUTION_LEVELS, promotionProviderOf } from './types.ts'
+import { EVOLUTION_LEVELS, promotionProviderOf } from './types.ts'
 
 export class EvolutionService extends EvolutionServiceCore {
+  /** Graph-scoped services are cached by the library id so every tool call in a
+   * graph folds the same ledger and a restart can reopen that exact root. */
+  private readonly scopedServices = new Map<string, Promise<EvolutionService>>()
+  private readonly scopedModelSelections = new Map<string, ModelSelection>()
+  /** A scoped instance resolves through its owner rather than opening a second cache on the same ledger. */
+  private resolveScopedService?: (sessionId: string) => Promise<EvolutionService>
+
+  async forSession(sessionId: string): Promise<EvolutionService> {
+    if (this.resolveScopedService !== undefined) return this.resolveScopedService(sessionId)
+    const runtime = optionalService<{
+      libraryForSession?: (id: string) => Promise<{ id: string; root: string; taskTemplatesRoot: string; skillRoot: string }>
+    }>(this.ctx, 'taskRuntime')
+    if (runtime?.libraryForSession === undefined) return this
+    const library = await runtime.libraryForSession(sessionId)
+    const graphs = optionalService<{ graphForSession(id: SessionId): Promise<{ model?: Parameters<typeof modelSelectionOf>[0] }> }>(this.ctx, 'graphs')
+    const pinned = graphs === undefined ? undefined : modelSelectionOf((await graphs.graphForSession(SessionId(sessionId))).model)
+    if (pinned === undefined) this.scopedModelSelections.delete(library.id)
+    else this.scopedModelSelections.set(library.id, pinned)
+    const existing = this.scopedServices.get(library.id)
+    if (existing !== undefined) return existing
+    const context = typeof this.ctx.isolate === 'function' ? this.ctx.isolate('evolution') : this.ctx
+    const scoped = new EvolutionService(context, {
+      libraryId: library.id,
+      root: join(library.root, 'evolution'),
+      skillRoot: library.skillRoot,
+      taskTemplatesRoot: library.taskTemplatesRoot,
+      repoRoot: this.repoRoot,
+      modelSelection: () => this.scopedModelSelections.get(library.id) ?? this.modelSelection(),
+      ...(this.commitProbe === undefined ? {} : { commitProbe: this.commitProbe }),
+      ...(this.capabilityConfigProbe === undefined ? {} : { capabilityConfigProbe: this.capabilityConfigProbe }),
+      ...(this.capabilityConfigPath === undefined ? {} : { capabilityConfig: this.capabilityConfigPath }),
+    })
+    scoped.resolveScopedService = id => this.forSession(id)
+    const ready = scoped.reconcile().then(() => scoped)
+    this.scopedServices.set(library.id, ready)
+    try {
+      return await ready
+    } catch (error) {
+      if (this.scopedServices.get(library.id) === ready) this.scopedServices.delete(library.id)
+      throw error
+    }
+  }
+
   async propose(input: ProposeInput, actor: string): Promise<EvolutionProposal> {
     const record: EvolutionRecord = {
       formatVersion: 4,
@@ -166,6 +211,19 @@ export class EvolutionService extends EvolutionServiceCore {
     // P3: one verified read of the production object, before anything is materialized.
     const loaded = await loadSkillSidecar(directory)
     if (loaded.content === undefined) {
+      if (current.baseVersion === 'absent') {
+        if (await readProductionSkill(this.skillRoot, productionSkillRelative(name)) !== null)
+          throw new Error(`evolution: Skill "${name}" already has bytes in this graph library; prepare its readable current version as the baseline`)
+        const dir = join(this.root, 'sandbox', proposalId)
+        const written = await materialize(dir, mutation, null)
+        const skillContent = await skillObjectIdentity(join(dir, 'skills', name), name)
+        await this.append({
+          formatVersion: 4, kind: 'prepared', proposalId, sandbox: `sandbox/${proposalId}`,
+          mechanical: true, champion: 'absent', skillBaseline: null,
+          skillContent, files: written.files, actor, at: new Date().toISOString(),
+        })
+        return this.get(proposalId)
+      }
       throw new Error(
         `evolution: the production skill "${join(directory, 'SKILL.md')}" does not exist, so proposal ` +
           `"${proposalId}" has nothing to replace — this build prepares and promotes a replacement of an existing loadable skill ` +
@@ -466,7 +524,7 @@ export class EvolutionService extends EvolutionServiceCore {
     return this.get(proposalId)
   }
 
-  /** Move gated → decided and retain the caller decision reference. Publication authorization belongs to apply. */
+  /** Settle a gated promotion or decline an open proposal, retaining the caller decision reference. */
   async decide(
     proposalId: string,
     decision: EvolutionDecision,
@@ -474,10 +532,7 @@ export class EvolutionService extends EvolutionServiceCore {
     approvalRef: string,
     note?: string,
   ): Promise<EvolutionProposal> {
-    await this.assertNext(proposalId, 'decided')
-    if (!EVOLUTION_DECISIONS.includes(decision)) {
-      throw new Error(`evolution: decision must be one of ${EVOLUTION_DECISIONS.join(' / ')}`)
-    }
+    assertDecisionTransition(await this.get(proposalId), decision, note)
     nonEmpty(approvalRef, 'approvalRef')
     if (note !== undefined) nonEmpty(note, 'note')
     if (decision === 'PROMOTE') await this.checkPromotion(proposalId)
@@ -611,6 +666,7 @@ export class EvolutionService extends EvolutionServiceCore {
     const sessions = new Map<string, ReturnType<typeof sessionLog>>()
     return {
       root: this.root,
+      ...(this.libraryId === undefined ? {} : { libraryId: this.libraryId }),
       experiments: proposalId => this.experiments(proposalId),
       task,
       verifierVocabulary: () => verifierVocabularyOf(this.ctx),
@@ -643,21 +699,7 @@ export class EvolutionService extends EvolutionServiceCore {
           'a promotion writes only a skill a worker could load and, when it claims execution, only one whose verifier and tools the deployment can grant',
       )
     }
-    if (identity.contract === undefined) {
-      if (verdict.role !== 'guidance') {
-        throw new Error(
-          `evolution: skill candidate "${name}" at ${directory} loads as ${verdict.role}, but the object prepare froze is guidance ` +
-            '(no sidecar) — a candidate that changed roles is not the object the experiment evaluated, so the promotion is refused',
-        )
-      }
-      return promotionProviderOf(verdict)
-    }
-    if (verdict.role !== 'execution-provider') {
-      throw new Error(
-        `evolution: skill candidate "${name}" at ${directory} loads as ${verdict.role}, but the object prepare froze carries an ` +
-          'execution sidecar — a candidate that changed roles is not the object the experiment evaluated, so the promotion is refused',
-      )
-    }
+    if (identity.contract === undefined) return promotionProviderOf(verdict)
     const contract = identity.contract
     const championSidecar = await readVerifiedFile(
       this.root,
@@ -685,12 +727,6 @@ export class EvolutionService extends EvolutionServiceCore {
         `evolution: the candidate sidecar of skill "${name}" is not the declaration derived from production — the production object ` +
           '(the champion snapshot) with its content identity rewritten to candidate files; a content update may not ' +
           'move capabilities, required tools, verifier or any other declaration field, so the promotion is refused',
-      )
-    }
-    if (verdict.contractDigest !== contract.contractDigest) {
-      throw new Error(
-        `evolution: the candidate sidecar of skill "${name}" loads to declaration digest ${verdict.contractDigest}, not the ` +
-          `${contract.contractDigest} prepared and recorded — a declaration the record does not name is not one this promotion may install`,
       )
     }
     return promotionProviderOf(verdict)
@@ -767,11 +803,16 @@ export class EvolutionService extends EvolutionServiceCore {
     const prepared = proposal.prepared
     if (prepared?.mechanical !== true || prepared.sandbox == null) return
     const { name } = proposal.mutation as unknown as SkillMutation
-    const target = `${this.skillRoot}/${name}/SKILL.md`
     const guidance =
       'create a new candidate from the current production state and re-evaluate it; ' +
       'an apply never overwrites a production skill it cannot verify'
     const identity = prepared.skillBaseline
+    if (identity === null && prepared.champion === 'absent') {
+      const loaded = await loadSkillSidecar(join(this.skillRoot, name))
+      if (loaded.content !== undefined || await readProductionSkill(this.skillRoot, productionSkillRelative(name)) !== null)
+        throw new Error(`evolution: new Skill "${name}" appeared after prepare; freeze and evaluate the current object`)
+      return
+    }
     if (identity === undefined || identity === null) {
       // The fold requires a non-null baseline on every skill prepare, so this branch is a belt for the view's optional field.
       throw new Error(
@@ -779,57 +820,6 @@ export class EvolutionService extends EvolutionServiceCore {
       )
     }
     await assertSkillObjectIdentity(join(this.skillRoot, name), identity)
-    let current: { bytes: Buffer; sha256: string } | null
-    try {
-      current = await readProductionSkill(this.skillRoot, productionSkillRelative(name))
-    } catch (error) {
-      throw new Error(
-        `evolution: the production skill "${target}" is no longer a readable regular file ` +
-          `(${(error as Error).message.replace(/^evolution: /, '')}) — ${guidance}`,
-      )
-    }
-    if (current === null) {
-      throw new Error(
-        `evolution: the production skill "${target}" recorded at prepare (sha256 ${identity.sha256}) no longer exists — ${guidance}`,
-      )
-    }
-    if (current.sha256 !== identity.sha256) {
-      throw new Error(
-        `evolution: the production skill "${target}" changed since prepare ` +
-          `(sha256 ${current.sha256} != ${identity.sha256}) — ${guidance}`,
-      )
-    }
-    let sidecar: { bytes: Buffer; sha256: string } | null
-    try {
-      sidecar = await readProductionSkill(this.skillRoot, productionSidecarRelative(name))
-    } catch (error) {
-      throw new Error(
-        `evolution: the production sidecar "${this.skillRoot}/${name}/${SKILL_SIDECAR_FILE}" is no longer a readable regular file ` +
-          `(${(error as Error).message.replace(/^evolution: /, '')}) — ${guidance}`,
-      )
-    }
-    if (identity.contract !== undefined) {
-      if (sidecar === null) {
-        throw new Error(
-          `evolution: the production sidecar "${this.skillRoot}/${name}/${SKILL_SIDECAR_FILE}" recorded at prepare ` +
-            `(sha256 ${identity.contract.sha256}) no longer exists — ${guidance}`,
-        )
-      }
-      if (sidecar.sha256 !== identity.contract.sha256) {
-        throw new Error(
-          `evolution: the production sidecar "${this.skillRoot}/${name}/${SKILL_SIDECAR_FILE}" changed since prepare ` +
-            `(sha256 ${sidecar.sha256} != ${identity.contract.sha256}) — ${guidance}`,
-        )
-      }
-      return
-    }
-    if (sidecar !== null) {
-      throw new Error(
-        `evolution: the production skill "${name}" now carries a ${SKILL_SIDECAR_FILE} the baseline prepare recorded did not have ` +
-          `(sha256 ${sidecar.sha256}) — the object production would load is not the object the candidate was prepared and evaluated ` +
-          `against; ${guidance}`,
-      )
-    }
   }
 
   /** Move applied → rolledback: undo the apply by restoring the champion snapshot through the same commit path. */
@@ -863,7 +853,8 @@ export class EvolutionService extends EvolutionServiceCore {
       }
       const prepared = proposal.prepared!
       await assertSkillObjectIdentity(join(this.skillRoot, prepared.skillContent!.name), prepared.skillContent!)
-      await assertSkillObjectIdentity(join(this.root, prepared.sandbox!, 'champion', 'skills', prepared.skillBaseline!.name), prepared.skillBaseline!)
+      if (prepared.skillBaseline != null)
+        await assertSkillObjectIdentity(join(this.root, prepared.sandbox!, 'champion', 'skills', prepared.skillBaseline.name), prepared.skillBaseline)
       const championFiles: (Buffer | undefined)[] = []
       for (const file of request.files) {
         const current = await readProductionSkill(this.skillRoot, relative(this.skillRoot, file.target))
@@ -923,7 +914,7 @@ export class EvolutionService extends EvolutionServiceCore {
     options: { signal?: AbortSignal; judge?: OutcomeModelCall; maxParallel?: number } = {},
   ): Promise<ExperimentResult> {
     await this.assertSupportedSource(await this.get(spec.proposalId), await this.storeOfSession(String(caller)), spec)
-    return runExperiment(this.experimentSources(), {
+    return runExperiment(await this.experimentSources(caller), {
       spec,
       caller,
       actor,
@@ -946,7 +937,7 @@ export class EvolutionService extends EvolutionServiceCore {
       experiment.storeId ?? (await this.storeOfSession(String(caller))),
       experiment.frozen,
     )
-    return resumeExperiment(this.experimentSources(), {
+    return resumeExperiment(await this.experimentSources(caller), {
       experimentId,
       caller,
       actor,
@@ -1003,7 +994,7 @@ export class EvolutionService extends EvolutionServiceCore {
   }
 
   /** The services one experiment runs on, resolved softly: the ledger, the task store, the runtime seam and the judge vocabulary. */
-  private experimentSources(): ExperimentSources {
+  private async experimentSources(caller: string): Promise<ExperimentSources> {
     const graphs = optionalService<ExperimentSources['graphs']>(this.ctx, 'graphs')
     const task = optionalService<ExperimentSources['task']>(this.ctx, 'task')
     const taskRuntime = optionalService<ExperimentSources['taskRuntime']>(this.ctx, 'taskRuntime')
@@ -1013,6 +1004,10 @@ export class EvolutionService extends EvolutionServiceCore {
           `(missing: ${[graphs === undefined ? 'graphs' : undefined, task === undefined ? 'task' : undefined, taskRuntime === undefined ? 'taskRuntime' : undefined].filter(Boolean).join(', ')})`,
       )
     }
+    const scopedRuntime = taskRuntime as ExperimentSources['taskRuntime'] & {
+      capabilitiesForSession?: (sessionId: string) => Promise<Readonly<Record<string, CapabilityConfig>>>
+    }
+    const table = await scopedRuntime.capabilitiesForSession?.(caller) ?? this.effectiveCapabilities()
     return {
       evolution: this,
       graphs,
@@ -1025,8 +1020,7 @@ export class EvolutionService extends EvolutionServiceCore {
           taskRuntime.capabilityProviderReport(sessionId, capabilities),
         ...(typeof (taskRuntime as { listCapabilities?: unknown }).listCapabilities === 'function'
           ? {
-              listCapabilities: () =>
-                (taskRuntime as { listCapabilities(): Readonly<Record<string, CapabilityConfig>> }).listCapabilities(),
+              listCapabilities: () => table!,
             }
           : {}),
         listMcpServers: () => this.effectiveMcpServers(),
@@ -1042,7 +1036,7 @@ export class EvolutionService extends EvolutionServiceCore {
             capabilities: request.capabilities,
             table: request.table,
             mcpRegistry: request.mcpRegistry ?? this.effectiveMcpServers(),
-            view: { extraRoots: [...request.extraRoots] },
+            view: { extraRoots: [...request.extraRoots, this.skillRoot] },
             ...(verifierRefs === undefined ? {} : { verifierRefs }),
             commitLedger: this,
           })

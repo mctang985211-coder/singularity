@@ -40,15 +40,17 @@ import {
   frozenCapabilitySample,
   frozenProviderIdentity,
   frozenSampleOf,
+  firstSkillOverlay,
 } from './freeze.ts'
 import { buildWorkspace } from './workspace.ts'
 import { judgeExperiment } from './outcome.ts'
+import { normalizeSnapshot } from '../replay/snapshot.ts'
 
 const runningExperiments = new WeakMap<ExperimentLedger, Map<string, Promise<ExperimentResult>>>()
 
 export function runExperiment(sources: ExperimentSources, request: ExperimentRequest): Promise<ExperimentResult> {
   const key = canonicalJson({ ...request.spec,
-    snapshot: { sourceDir: resolve(request.spec.snapshot.sourceDir) },
+    snapshot: normalizeSnapshot(request.spec.snapshot),
     model: { ...request.spec.model, label: `${request.spec.model.provider}/${request.spec.model.model}` },
   })
   let running = runningExperiments.get(sources.evolution)
@@ -70,6 +72,7 @@ async function executeExperiment(sources: ExperimentSources, request: Experiment
   if (request.maxParallel !== undefined && (!Number.isInteger(request.maxParallel) || request.maxParallel < 1))
     throw new Error('experiment: maxParallel must be a positive integer')
   const { sandbox, candidate, capability, taskDefinition, overlay, proposal } = await experimentCandidate(sources, spec.proposalId)
+  const firstSkill = proposal.targetType === 'skill' && proposal.prepared?.skillBaseline === null
   const { storeId, snapshot } = await experimentStore(sources, caller)
   // The judge vocabulary the criteria are frozen against, read before anything
   const vocabulary = await sources.verifierVocabulary?.()
@@ -89,7 +92,7 @@ async function executeExperiment(sources: ExperimentSources, request: Experiment
     assertSampleRole(sample, task, review)
     // Before anything runs: what each side of this sample must bind, read
     const providers: SampleProviders =
-      capability === undefined && taskDefinition === undefined
+      capability === undefined && taskDefinition === undefined && !firstSkill
         ? {
             provider: await frozenProviderIdentity({
               sources,
@@ -105,20 +108,21 @@ async function executeExperiment(sources: ExperimentSources, request: Experiment
             caller,
             sampleTaskId: sample.taskId,
             required: task.requestedCapabilities,
-            overlay: overlay ?? { capabilityOverrides: {}, extraSkillRoots: [] },
+            overlay: firstSkill ? firstSkillOverlay(sources, candidate!, sandbox, task.requestedCapabilities) : overlay ?? { capabilityOverrides: {}, extraSkillRoots: [] },
           })
     samples.push(frozenSampleOf(sample, task, review, providers, vocabulary))
   }
   if (taskDefinition !== undefined) await freezeCriterionRepair(taskDefinition, proposal, snapshot, samples, vocabulary)
   const frozen = freezeExperiment({
     proposalId: spec.proposalId,
+    ...(sources.evolution.libraryId === undefined ? {} : { libraryId: sources.evolution.libraryId }),
     spec,
     ...(candidate === undefined ? {} : { candidate }),
     ...(proposal.prepared?.skillBaseline == null ? {} : { productionBaseline: proposal.prepared.skillBaseline }),
     ...(capability === undefined ? {} : { capability }),
     ...(taskDefinition === undefined ? {} : { taskDefinition }),
     sandbox,
-    snapshotDigest: await directoryDigest(spec.snapshot.sourceDir),
+    snapshotDigest: await directoryDigest(spec.snapshot.sourceDir, spec.snapshot.paths),
     samples,
   })
   // The model selection, verbatim, as every side's `agentOptions` (S4-E §Q3): one read, shared by both sides.
@@ -157,7 +161,7 @@ async function executeExperiment(sources: ExperimentSources, request: Experiment
 
   // The frozen budget's one count, read off the ledger once (§F.2; the review's
   const budget = view.frozen.budget
-  let spentTokens = reportedTokensSpent(view.samples)
+  let spentTokens = reportedTokensSpent(view.samples) + Object.values(view.frozen.evaluation?.generatedUsage ?? {}).reduce((sum, value) => sum + value, 0)
   let settledSides = view.samples.length
 
   const runtimeLimit = sources.taskRuntime.config?.maxActiveWorkers ?? 2
@@ -200,7 +204,7 @@ async function executeExperiment(sources: ExperimentSources, request: Experiment
           settledSides,
           where: `sample "${sample.taskId}" ${side} side`,
         })
-        const real = await buildWorkspace(spec.snapshot.sourceDir, workspace, view.frozen.snapshot.digest)
+        const real = await buildWorkspace(spec.snapshot.sourceDir, workspace, view.frozen.snapshot.digest, view.frozen.snapshot.paths)
         // A6: the frozen production configuration refuses this sample, so its baseline is recorded as not-admitted without a run.
         if (side === 'baseline' && sample.admission !== undefined) {
           const refusal = await refusedBaselineRun({
@@ -209,6 +213,7 @@ async function executeExperiment(sources: ExperimentSources, request: Experiment
             sample,
             lineage,
             workspace: real,
+            ...(view.frozen.snapshot.rebaseFrom === undefined ? {} : { rebaseFrom: view.frozen.snapshot.rebaseFrom }),
             agentOptions,
             caller,
             ...(request.signal === undefined ? {} : { signal: request.signal }),
@@ -248,12 +253,12 @@ async function executeExperiment(sources: ExperimentSources, request: Experiment
           sample.taskId,
           {
             lineage,
-            workspace: { path: real },
+            workspace: { path: real, ...(view.frozen.snapshot.rebaseFrom === undefined ? {} : { rebaseFrom: view.frozen.snapshot.rebaseFrom }) },
             agentOptions: { ...agentOptions },
             ...(taskDefinition !== undefined
               ? { overlay: { taskTemplatesRoot: resolve(sources.evolution.root, sandbox, 'task-templates', side) } }
               : side === 'candidate'
-              ? { overlay: overlay ?? { extraSkillRoots: [resolve(sources.evolution.root, sandbox, 'skills')] } }
+              ? { overlay: firstSkill ? firstSkillOverlay(sources, candidate!, sandbox, sample.provider!.capabilities) : overlay ?? { extraSkillRoots: [resolve(sources.evolution.root, sandbox, 'skills')] } }
               : {}),
             ...(request.signal === undefined ? {} : { signal: request.signal }),
           },
@@ -285,7 +290,7 @@ async function executeExperiment(sources: ExperimentSources, request: Experiment
           evidenceRefs: facts.evidenceRefs,
           workspace: real,
           initialDigest: view.frozen.snapshot.digest,
-          cost: costOf(facts.review, view.frozen.objective === 'tool-call-reduction' ? after : undefined),
+          cost: costOf(facts.review, after),
           ...(facts.reason === undefined ? {} : { reason: facts.reason }),
           actor,
         })
@@ -339,7 +344,7 @@ export async function resumeExperiment(
   const spec: ExperimentSpec = {
     proposalId: view.proposalId,
     samples: view.frozen.samples.map(sample => ({ taskId: sample.taskId, role: sample.role })),
-    snapshot: { sourceDir: view.frozen.snapshot.sourceDir },
+    snapshot: normalizeSnapshot(view.frozen.snapshot),
     model: view.frozen.model,
     ...(view.frozen.objective === undefined ? {} : { objective: view.frozen.objective }),
     ...(view.frozen.evaluation === undefined ? {} : { evaluation: view.frozen.evaluation }),

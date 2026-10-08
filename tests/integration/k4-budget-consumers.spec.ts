@@ -122,22 +122,15 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
     expect(atTotal.runs).toHaveLength(2)
 
     // The ordinary new-batch entry is refused *whole* at the configured total:
-    // the reservation cannot fit one more run, so no child task is created, no
-    // run starts and no admission event is written. The request itself is left on
-    // the record by the entry's own protocol (T2/T3 §6: a refusal is read back
-    // and a revision — or, here, the same request once a person has paid for it —
-    // is what continues it), and every other fact is untouched.
+    // the store's own budget is exhausted, so no child task is created, no run
+    // starts, no admission event is written and nothing is left on the record.
     const batchRefusal = await h.runtime.decomposeAndRun(STORE, root.taskId, root.runId, String(ROOT), {
       reason: 'a second round the budget cannot afford',
       children: children('batch B child'),
     }).then(() => undefined, (error: unknown) => error as Error)
-    expect(batchRefusal?.message).toContain('would need 1 run slot(s) and the root budget allows 2 run(s) in total')
+    expect(batchRefusal?.message).toContain('root run budget is exhausted')
     const afterBatchRefusal = await h.snapshot(STORE)
-    expect({ ...afterBatchRefusal, proposals: atTotal.proposals }).toEqual(atTotal)
-    const knownProposals = new Set(atTotal.proposals!.all.map(proposal => proposal.proposalId))
-    const refusedRequest = afterBatchRefusal.proposals!.all.filter(proposal => !knownProposals.has(proposal.proposalId))
-    expect(refusedRequest).toHaveLength(1)
-    expect(refusedRequest[0]!.status).toBe('ready')
+    expect(afterBatchRefusal).toEqual(atTotal)
     // The root contract's own admission rides the same event kind under the
     // reserved envelope task id; the store holds the batch's admission only,
     // which is the first batch — the refused one was never admitted.
@@ -168,7 +161,7 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
     expect(effectiveCeiling(await h.snapshot(STORE), limits).maxRuns).toBe(4)
 
     // Exactly what the approved total says: the refused replay starts, and the
-    // batch the configured total refused is admitted — the same request, and the
+    // batch the configured total refused is admitted — the same content, and the
     // two runs the person paid for, no more.
     const replay = await h.runtime.replayTask(STORE, championTaskId, { lineage: 'evolution-replay:k4-runs', spawn: false }, String(ROOT))
     expect(replay.status).toBe('verified')
@@ -176,15 +169,15 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
       reason: 'a second round the budget cannot afford',
       children: children('batch B child'),
     })
-    expect(second.proposalId).toBe(refusedRequest[0]!.proposalId)
+    expect(second.status).toBe('admitted')
     expect((await h.runtime.awaitBatch(STORE, second.batchId)).map(outcome => outcome.status)).toEqual(['verified'])
     const spent = await h.snapshot(STORE)
     expect(spent.runs).toHaveLength(4)
 
     // And the approved total is the ceiling, not a fresh allowance: the runs the
     // tree already had still count against it, so both entries refuse again. The
-    // replay writes nothing at all; the batch, refused whole, leaves only its own
-    // request on the record — no fifth run, no child task, no admission.
+    // replay writes nothing at all; the batch, refused whole, writes nothing
+    // either — no fifth run, no child task, no admission and no request record.
     const spentEvents = eventKinds(h)
     const refusedReplay = await h.runtime.replayTask(STORE, championTaskId, { lineage: 'evolution-replay:k4-runs-2', spawn: false }, String(ROOT))
       .then(() => undefined, (error: unknown) => error as Error)
@@ -195,17 +188,14 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
       reason: 'a third round the approved total cannot afford',
       children: children('batch C child'),
     }).then(() => undefined, (error: unknown) => error as Error)
-    expect(refusedBatch?.message).toContain('(5 > 4)')
+    expect(refusedBatch?.message).toContain('root run budget is exhausted')
     const afterRefusedBatch = await h.snapshot(STORE)
-    expect({ ...afterRefusedBatch, proposals: spent.proposals }).toEqual(spent)
-    const knownAtSecondRefusal = new Set(afterBatchRefusal.proposals!.all.map(proposal => proposal.proposalId))
-    const refusedAgain = afterRefusedBatch.proposals!.all.filter(proposal => !knownAtSecondRefusal.has(proposal.proposalId))
-    expect(refusedAgain).toHaveLength(1)
-    expect(refusedAgain[0]!.status).toBe('ready')
+    expect(afterRefusedBatch).toEqual(spent)
     expect(afterRefusedBatch.runs).toHaveLength(4)
     expect(h.spawns).toHaveLength(2)
-    // The refused batch appended exactly one thing: the record of the request.
-    expect(eventKinds(h).slice(spentEvents.length)).toEqual(['TaskProposalSubmitted'])
+    // Neither refusal appended anything: an entry that cannot fit a run writes
+    // nothing at all.
+    expect(eventKinds(h).slice(spentEvents.length)).toEqual([])
   }, 60_000)
 
   it('lets only one of two grants approved against one reading stand, and writes nothing for the other', async () => {

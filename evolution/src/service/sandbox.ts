@@ -15,8 +15,8 @@ import type { SkillMutation } from '../types.ts'
 export async function materialize(
   dir: string,
   mutation: Record<string, unknown>,
-  production: { skillMd: Buffer; sidecar?: Buffer; resources: Record<string, Buffer> },
-): Promise<{ files: string[]; skillBaseline: SkillContentIdentity }> {
+  production: { skillMd: Buffer; sidecar?: Buffer; resources: Record<string, Buffer> } | null,
+): Promise<{ files: string[]; skillBaseline: SkillContentIdentity | null }> {
   await rm(dir, { recursive: true, force: true })
   const files: string[] = []
   const write = async (rel: string, content: string | Buffer): Promise<void> => {
@@ -28,17 +28,18 @@ export async function materialize(
   // This build materializes a skill candidate and nothing else: `candidate`
   const { name, content, resources } = mutation as unknown as SkillMutation
   const candidateMd = Buffer.from(content, 'utf8')
-  const candidateResources = resources === undefined ? production.resources : Object.fromEntries(Object.entries(resources).map(([path, text]) => [path, Buffer.from(text)]))
+  const candidateResources = resources === undefined ? production?.resources ?? {} : Object.fromEntries(Object.entries(resources).map(([path, text]) => [path, Buffer.from(text)]))
   const resourceIdentity = (files: Record<string, Buffer>) => Object.entries(files).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([path, bytes]) => ({ path, sha256: sha256Hex(bytes) }))
-  const baselineResources = resourceIdentity(production.resources)
+  const baselineResources = resourceIdentity(production?.resources ?? {})
   await write(`skills/${name}/SKILL.md`, candidateMd)
-  if (production.sidecar !== undefined) {
+  if (production?.sidecar !== undefined) {
     await write(
       `skills/${name}/${SKILL_SIDECAR_FILE}`,
       candidateSidecar(loadedSidecar(production.sidecar), sha256Hex(candidateMd), resourceIdentity(candidateResources)),
     )
   }
   for (const [path, bytes] of Object.entries(candidateResources)) await write(`skills/${name}/${path}`, bytes)
+  if (production === null) return { files, skillBaseline: null }
   await write(`champion/skills/${name}/SKILL.md`, production.skillMd)
   for (const [path, bytes] of Object.entries(production.resources)) await write(`champion/skills/${name}/${path}`, bytes)
   if (production.sidecar !== undefined) {

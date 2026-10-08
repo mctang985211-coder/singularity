@@ -7,6 +7,8 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { TaskTemplate } from '../../task/src/index.ts'
 import { rootTaskStoreId } from '../../task/src/index.ts'
 import { modelSelectionOf } from '../../evolution/src/index.ts'
+import { defineEvolutionReplayTool } from '../../agent-singularity/src/tools/evolution-replay.ts'
+import { registerTaskTemplate } from '../../task-runtime/src/index.ts'
 import { disposeScriptedLoops, startScriptedLoop, type ScriptedLoop, type ScriptEntry } from '../support/scripted-loop.ts'
 
 const ROOT = 's-root'
@@ -65,7 +67,7 @@ async function seedHoldout(h: ScriptedLoop, sourceDir: string) {
 async function fixture(holdoutCandidate = '42') {
   let h!: ScriptedLoop
   h = await startScriptedLoop({
-    roots: [ROOT, 's-control'], evolution: { ledgerRoot: ledger }, approvalService: 'native', approvalAnswer: ask => ask.toolName.startsWith('evolution_') ? undefined : 'allowed-once',
+    roots: [ROOT, 's-control'], graphRootFor: () => ROOT, evolution: { ledgerRoot: ledger }, approvalService: 'native', approvalAnswer: ask => ask.toolName.startsWith('evolution_') ? undefined : 'allowed-once',
     script: (sessionId, index): readonly ScriptEntry[] => {
       if (sessionId === 's-control') return [
         { tool: 'evolution_decide', args: { proposalId: PROPOSAL, decision: 'PROMOTE' } },
@@ -106,7 +108,7 @@ async function fixture(holdoutCandidate = '42') {
       return [{ text: 'idle' }]
     },
   })
-  await h.runtime.registerTaskTemplate(plan())
+  await registerTaskTemplate((await h.runtime.libraryForSession(ROOT)).taskTemplatesRoot, plan())
   const source = await h.begin({ objective: 'deliver the answer', acceptanceCriteria: criteria, requiredCapabilities: ['execute-task'] })
   await vi.waitFor(async () => expect((await h.snapshot(STORE)).tasks.find(task => task.taskId === source.taskId)?.status,
     JSON.stringify(h.calls.map(call => ({ name: call.name, result: call.result })))).toBe('failed'), { timeout: 15_000 })
@@ -121,13 +123,16 @@ async function fixture(holdoutCandidate = '42') {
     scope: 'direct-child content and DAG', localizedCause: 'recipe lacks the dependency and writes 41', evidenceRefs: oldEvidence.map(bundle => bundle.evidenceId),
     reviewRefs: [`${source.taskId}#${source.runId}`], confidence: 'high', proposals: [{ targetType: 'task_definition', targetId: ID, rationale: 'repair content and dependency' }],
   }, ROOT)
-  await h.ctx.evolution.propose({ proposalId: PROPOSAL, targetType: 'task_definition', targetId: ID, baseVersion: '1', level: 'L2',
+  // The deployment's evolution plane, resolved the way every entry resolves it:
+  // scoped to the caller's graph library.
+  const evolution = await h.ctx.evolution.forSession(ROOT)
+  await evolution.propose({ proposalId: PROPOSAL, targetType: 'task_definition', targetId: ID, baseVersion: '1', level: 'L2',
     rationale: 'repair content and ordering under the same parent goal', sourceRefs: ['diagnosis:d-plan'] }, ROOT)
-  await h.ctx.evolution.candidate(PROPOSAL, { [ID]: '2' }, ROOT, { template: plan(2) })
-  await h.ctx.evolution.prepare(PROPOSAL, ROOT)
+  await evolution.candidate(PROPOSAL, { [ID]: '2' }, ROOT, { template: plan(2) })
+  await evolution.prepare(PROPOSAL, ROOT)
   const spec = { proposalId: PROPOSAL, samples: [{ taskId: source.taskId, role: 'observed-failure' as const }, { taskId: 't-holdout', role: 'holdout' as const }],
     snapshot: { sourceDir: input }, model: modelSelectionOf({ provider: 'mock', model: 'mock' })!, budget: { note: 'recorded scripted model traffic' }, repetition: 0 }
-  return { h, source, oldRun, oldEvidence, oldProposal, spec }
+  return { h, evolution, source, oldRun, oldEvidence, oldProposal, spec }
 }
 
 async function approve(h: ScriptedLoop, tool: string) {
@@ -138,18 +143,25 @@ async function approve(h: ScriptedLoop, tool: string) {
 describe('Task decomposition recipe Evolution', () => {
   it('evaluates content and edges, publishes with approval and replans only on a new parent Run', async () => {
     const f = await fixture()
-    await expect(f.h.ctx.evolution.runExperiment({ ...f.spec, samples: [f.spec.samples[0]!] }, ROOT as SessionId, ROOT))
-      .rejects.toThrow(/at least one holdout/)
-    const result = await f.h.ctx.evolution.runExperiment(f.spec, ROOT as SessionId, ROOT)
+    // The entry refuses a sample set that names no case the candidate is meant to
+    // fix — the frozen block owes an observed-failure sample for its objective —
+    // before anything is frozen or run.
+    const noFailure = await defineEvolutionReplayTool(f.h.ctx).execute(
+      { proposalId: PROPOSAL, taskIds: ['t-holdout'], holdoutTaskIds: [f.source.taskId] },
+      { agent: f.h.agent(ROOT), signal: new AbortController().signal } as never,
+    ) as string
+    expect(noFailure).toContain('evolution_replay rejected:')
+    expect(noFailure).toContain('must include at least one observed-failure')
+    const result = await f.evolution.runExperiment(f.spec, ROOT as SessionId, ROOT)
     expect(result.report.verdict, JSON.stringify(result.report.samples)).toBe('fixed')
     expect(result.report.samples.map(sample => sample.candidate.outcome)).toEqual(['verified', 'verified'])
     const reads = vi.spyOn(f.h.ctx.sessionQuery, 'readSession')
-    await f.h.ctx.evolution.checkPromotion(PROPOSAL)
+    await f.evolution.checkPromotion(PROPOSAL)
     const firstReads = reads.mock.calls.map(([sessionId]) => String(sessionId))
     expect(firstReads.length).toBeGreaterThan(0)
     expect(new Set(firstReads).size).toBe(firstReads.length)
     reads.mockClear()
-    await f.h.ctx.evolution.checkPromotion(PROPOSAL)
+    await f.evolution.checkPromotion(PROPOSAL)
     const freshReads = reads.mock.calls.map(([sessionId]) => String(sessionId))
     expect(freshReads.sort()).toEqual(firstReads.sort())
     reads.mockRestore()
@@ -177,7 +189,7 @@ describe('Task decomposition recipe Evolution', () => {
           return { ...event, data: { ...event.data, arguments: JSON.stringify({ reason: 'same batch without selecting the frozen recipe', children: [] }) } }
         }) }
       })
-      await expect(f.h.ctx.evolution.checkPromotion(PROPOSAL)).rejects.toThrow(/no logged recipe consumption/)
+      await expect(f.evolution.checkPromotion(PROPOSAL)).rejects.toThrow(/no logged recipe consumption/)
       logSpy.mockRestore()
       for (const kind of ['provenance', 'batch', 'edge', 'consumption'] as const) {
         const spy = vi.spyOn(f.h.task, 'openStore').mockImplementation(async storeId => {
@@ -191,7 +203,7 @@ describe('Task decomposition recipe Evolution', () => {
           if (kind === 'consumption') delete proposal.consumption
           return snapshot
         })
-        await expect(f.h.ctx.evolution.checkPromotion(PROPOSAL)).rejects.toThrow(/recipe|decomposition|consumption/)
+        await expect(f.evolution.checkPromotion(PROPOSAL)).rejects.toThrow(/recipe|decomposition|consumption/)
         spy.mockRestore()
       }
     }
@@ -206,19 +218,19 @@ describe('Task decomposition recipe Evolution', () => {
         child.templateRef = { id: ID, version: 2, digest: result.report.frozen.taskDefinition!.candidate.digest }
         return snapshot
       })
-      await expect(f.h.ctx.evolution.checkPromotion(PROPOSAL)).rejects.toThrow(historicalIntact
+      await expect(f.evolution.checkPromotion(PROPOSAL)).rejects.toThrow(historicalIntact
         ? /template sample .* baseline consumed no frozen decomposition recipe/
         : /candidate parent replay consumed no frozen decomposition recipe/)
       noRecipe.mockRestore()
     }
-    await f.h.ctx.evolution.gate(PROPOSAL, {
+    await f.evolution.gate(PROPOSAL, {
       targetFailureFixed: 'original parent oracle verified', originalAcceptanceMaintained: 'same frozen command', existingRegressionMaintained: 'independent holdout verified',
       noUnacceptableSideEffects: 'isolated frozen libraries and workspaces', holdoutPerformanceAcceptable: 'verified', resourceCostAcceptable: 'traffic measured', regressionEvidenceRefs: [result.reportPath],
     }, ROOT)
     f.h.userSays('publish the evaluated content and dependency repair', 's-control')
     await approve(f.h, 'evolution_decide')
     await approve(f.h, 'evolution_apply')
-    await vi.waitFor(async () => expect((await f.h.ctx.evolution.get(PROPOSAL)).status).toBe('applied'), { timeout: 10_000 })
+    await vi.waitFor(async () => expect((await f.evolution.get(PROPOSAL)).status).toBe('applied'), { timeout: 10_000 })
     const recovered = await f.h.runtime.recoverRootTask(STORE, {
       sourceTaskId: f.source.taskId, sourceRunId: f.source.runId, sourceDiagnosisId: 'd-plan', requestKey: 'recipe-replan', proposalIds: [PROPOSAL],
     }, { sessionId: ROOT })
@@ -237,14 +249,14 @@ describe('Task decomposition recipe Evolution', () => {
     expect(snapshot.evidence.filter(bundle => bundle.taskRunId === f.source.runId)).toEqual(f.oldEvidence)
     expect(snapshot.proposals.byId[f.oldProposal.proposalId]).toEqual(f.oldProposal)
     expect(snapshot.tasks.find(task => task.taskId === f.source.taskId)?.acceptanceCriteria[0]?.command).toBe(GOAL)
-    expect((await f.h.runtime.findTaskTemplates())[0]?.templateRef.version).toBe(2)
+    expect((await f.h.runtime.findTaskTemplates(undefined, ROOT))[0]?.templateRef.version).toBe(2)
   }, 60_000)
 
   it('rejects promotion when an independent leaf holdout regresses', async () => {
     const f = await fixture('41')
-    const result = await f.h.ctx.evolution.runExperiment(f.spec, ROOT as SessionId, ROOT)
+    const result = await f.evolution.runExperiment(f.spec, ROOT as SessionId, ROOT)
     expect(result.report.verdict).toBe('fixed-with-regression')
     expect(result.report.samples.find(sample => sample.taskId === 't-holdout')!.verdict).toBe('regressed')
-    await expect(f.h.ctx.evolution.checkPromotion(PROPOSAL)).rejects.toThrow(/requires a clean independent parent result/)
+    await expect(f.evolution.checkPromotion(PROPOSAL)).rejects.toThrow(/requires a clean independent parent result/)
   }, 30_000)
 })

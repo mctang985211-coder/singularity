@@ -35,6 +35,9 @@ importers:
       '@deepseek-ai/dsh-permission-presets':
         specifier: link:../../../thirdparty/deepseek-harness/packages/interaction/permission-presets
         version: link:../../../thirdparty/deepseek-harness/packages/interaction/permission-presets
+      '@deepseek-ai/dsh-scope':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/core/scope
+        version: link:../../../thirdparty/deepseek-harness/packages/core/scope
       '@deepseek-ai/dsh-session':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/session
         version: link:../../../thirdparty/deepseek-harness/packages/core/session
@@ -44,12 +47,21 @@ importers:
       '@deepseek-ai/dsh-session-query':
         specifier: link:../../../thirdparty/deepseek-harness/packages/session-query/session-query
         version: link:../../../thirdparty/deepseek-harness/packages/session-query/session-query
+      '@deepseek-ai/dsh-skill':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/skill/skill
+        version: link:../../../thirdparty/deepseek-harness/packages/skill/skill
+      '@deepseek-ai/dsh-skill-filesystem':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/skill/skill-filesystem
+        version: link:../../../thirdparty/deepseek-harness/packages/skill/skill-filesystem
       '@deepseek-ai/dsh-subagent':
         specifier: link:../../../thirdparty/deepseek-harness/packages/subagent/subagent
         version: link:../../../thirdparty/deepseek-harness/packages/subagent/subagent
       '@deepseek-ai/dsh-system-prompt':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/system-prompt
         version: link:../../../thirdparty/deepseek-harness/packages/core/system-prompt
+      '@deepseek-ai/dsh-tool-skill':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/skill/tool-skill
+        version: link:../../../thirdparty/deepseek-harness/packages/skill/tool-skill
       '@deepseek-ai/dsh-tools':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/tools
         version: link:../../../thirdparty/deepseek-harness/packages/core/tools

@@ -261,6 +261,7 @@ export async function fixture(options: { storeError?: Error; sessions?: Map<stri
       proposalIn: vi.fn(),
       cancelProposal: vi.fn(),
       listCapabilities: vi.fn(() => structuredClone(RENDER_TABLE)),
+      capabilitiesForSession: vi.fn(async (_sessionId: string) => structuredClone(RENDER_TABLE)),
       listMcpServers: vi.fn(() => ({})),
       capabilityProviderReport: vi.fn(async (_sessionId: string) => providerReport()),
       verifyTimeoutMs: 1234,

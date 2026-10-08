@@ -66,8 +66,8 @@ describe('guidance on actual model requests', () => {
       expect(textOf(h, session).length).toBeGreaterThan(0)
       for (const text of textOf(h, session)) {
         expect(text).toContain('### Skill task-coordination')
-        expect(text).toContain('An atomic leaf takes explicit inputs')
-        expect(text).toContain('Existing admitted or verified Tasks and Runs remain fixed.')
+        expect(text).toContain("Read a fitting template's full contract and conditions, then bind its exact reference and parameters.")
+        expect(text).toContain('One unfinished batch at a time: answer questions, yield for its end, read results and integrate artifacts.')
       }
     }
     for (const text of textOf(h, leaf)) {
@@ -76,7 +76,13 @@ describe('guidance on actual model requests', () => {
     }
     expect(h.calls.some(call => call.name === 'skill')).toBe(false)
     expect((await h.runForSession(leaf)).task.contract?.requiredCapabilities).toEqual(['answer-guidance', 'native-auxiliary'])
-    for (const name of ['read', 'write', 'edit', 'bash']) expect(h.visible(h.agent(ROOT))).not.toContain(name)
+    // The root's own allow-list: the coordination plane plus the execution
+    // baseline every root works with, and no evolution tool while the deployment's
+    // switch is off. The leaf's grant offers the execution tools and none of the
+    // coordination plane.
+    for (const name of ['read', 'write', 'edit', 'bash', 'task_decompose']) expect(h.visible(h.agent(ROOT))).toContain(name)
+    expect(h.visible(h.agent(ROOT))).not.toContain('evolution_apply')
+    for (const name of ['graph_spawn', 'evolution_apply']) expect(h.visible(h.agent(leaf))).not.toContain(name)
     for (const name of ['read', 'write', 'bash']) expect(h.visible(h.agent(leaf))).toContain(name)
   })
 
@@ -84,7 +90,10 @@ describe('guidance on actual model requests', () => {
     const h = await startScriptedLoop({ capabilities, roots: [ROOT, 's-new-root'], script: () => [{ text: 'coordinating with the admitted method' }],
     })
     await install(h)
-    const production = join(h.home, 'skills', 'task-coordination', 'SKILL.md')
+    // Each root graph's own library holds its production method, and a run
+    // binding discovers it there before the deployment catalog: the edit below is
+    // the production method the graph's next binding reads.
+    const production = join((await h.runtime.libraryForRoot(ROOT)).skillRoot, 'task-coordination', 'SKILL.md')
     await writeFile(production, `${await readFile(production, 'utf8')}\nFROZEN_COORDINATION_ORIGINAL\n`)
     const root = await h.begin(contract('coordinate the first answer'))
     await h.agent(ROOT).whenIdle()
@@ -96,6 +105,10 @@ describe('guidance on actual model requests', () => {
     expect(textOf(h, ROOT).at(-1)).not.toContain('PRODUCTION_COORDINATION_REVISED')
     await h.runtime.submitResult(ROOT, { summary: 'the first accepted coordination is complete' })
     await vi.waitFor(async () => expect((await h.runForSession(ROOT)).run.status).toBe('verified'))
+    // The second graph's own production method carries the edit: a binding built
+    // now reads the revised bytes, while the first run stayed on its snapshot.
+    const second = join((await h.runtime.libraryForRoot('s-new-root')).skillRoot, 'task-coordination', 'SKILL.md')
+    await writeFile(second, `${await readFile(second, 'utf8')}\nPRODUCTION_COORDINATION_REVISED\n`)
     h.recordRequest('coordinate the second answer', 's-new-root')
     const fresh = await h.runtime.intakeRootContract(rootTaskStoreId('s-new-root'), 's-new-root', contract('coordinate the second answer'))
     expect(fresh.status).toBe('activated')

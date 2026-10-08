@@ -90,6 +90,13 @@ function harness() {
         throw new Error('the mocked driver must not spawn a worker')
       },
     },
+    /**
+     * The deployment's verifier vocabulary: admission validates every criterion's
+     * judge against the registry it lists, so a contract cannot be admitted
+     * without one. The batch's verification is the mocked driver's business, so
+     * no `verifyRun` is mounted here.
+     */
+    verifier: { verifierIds: () => ['command', 'composite', 'review'] },
   }
   const task = new TaskService(ctx as never)
   ctx.task = task
@@ -148,8 +155,12 @@ describe('the pre-check a batch passed travels with its batch (S1-C)', () => {
       'guidance',
     ])
     // The roots were the ones discovery actually walked, and the revision is the
-    // value a run can cite later.
-    expect(providers!.roots[0]).toBe(join(home, 'skills'))
+    // value a run can cite later. The graph's own library leads the search; the
+    // deployment's user root — where this fixture installed the skill — is still
+    // covered behind it.
+    const library = await h.runtime.libraryForRoot(ROOT_SESSION)
+    expect(providers!.roots[0]).toBe(library.skillRoot)
+    expect(providers!.roots).toContain(join(home, 'skills'))
     expect(providers!.revision).toMatch(/^[0-9a-f]{64}$/)
 
     // The children the store holds are the ones those rows were resolved for:

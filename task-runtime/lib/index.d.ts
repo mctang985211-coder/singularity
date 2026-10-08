@@ -94,6 +94,59 @@ interface PermissionSpec {
   approval: string;
 }
 //#endregion
+//#region src/library.d.ts
+interface TaskLibrary {
+  id: string;
+  root: string;
+  taskTemplatesRoot: string;
+  skillRoot: string;
+}
+type LibraryStatus = 'temporary' | 'retained' | 'retired';
+interface LibrarySkill {
+  name: string;
+  version: number;
+  digest: string;
+  status: LibraryStatus;
+  reason?: string;
+  reviewedBy?: string;
+}
+interface LibraryTask {
+  templateRef: TaskTemplateRef;
+  status: LibraryStatus;
+  skills: string[];
+  reason?: string;
+  reviewedBy?: string;
+}
+interface TaskLibraryIndex {
+  version: 1;
+  tasks: LibraryTask[];
+  skills: LibrarySkill[];
+}
+type LibraryWrite = {
+  kind: 'task';
+  template: TaskTemplate;
+} | {
+  kind: 'skill';
+  name: string;
+  skillMd: string;
+  expectedVersion?: number;
+};
+interface LibraryReview {
+  kind: 'task' | 'skill';
+  name: string;
+  version: number;
+  status: 'retained' | 'retired';
+  reason: string;
+}
+/** Derived from the graph's immutable root identity; no second persistent binding. */
+declare function graphLibrary(rootSessionId: string, home?: string): TaskLibrary;
+/** Generic platform guidance is seeded once; domain libraries are authored by the graph's agents. */
+declare function ensureTaskLibrary(library: TaskLibrary): Promise<TaskLibrary>;
+declare function readTaskLibrary(library: TaskLibrary): Promise<TaskLibrary & TaskLibraryIndex>;
+declare function writeTaskLibrary(library: TaskLibrary, input: LibraryWrite, table?: Readonly<Record<string, CapabilityConfig>>): Promise<LibraryTask | LibrarySkill>;
+declare function reviewTaskLibrary(library: TaskLibrary, review: LibraryReview, reviewedBy: string): Promise<LibraryTask | LibrarySkill>;
+declare function libraryCapabilities(library: TaskLibrary): Promise<Record<string, CapabilityConfig>>;
+//#endregion
 //#region src/skill-contract.d.ts
 /**
  * The typed skill sidecar contract: the declaration that sits beside a skill's
@@ -1141,7 +1194,7 @@ interface OrchestrateEnv {
    * The provider pre-check, for the one case that has no verdict to carry: a
    * batch whose admission happened in an earlier process. A freshly admitted
    */
-  precheck?(capabilities: readonly string[], cwd: string | undefined): Promise<ProviderPrecheck>;
+  precheck?(capabilities: readonly string[], cwd: string | undefined, manifest?: CapabilityManifest): Promise<ProviderPrecheck>;
   /**
    * Best-effort owner notification (`agent.followup` on a live session, DSH's
    * tool-jobs notice precedent). A session with no live agent is skipped, and
@@ -1501,6 +1554,7 @@ interface ReplayTaskOptions {
    */
   workspace?: {
     path: string;
+    rebaseFrom?: string;
   };
   /**
    * The model selection this replay runs under (S4-E §Q3), replacing the
@@ -1813,7 +1867,7 @@ declare function parseTaskTemplate(raw: unknown): TaskTemplate;
 /** Append one immutable version. An identical repeat returns the same reference. */
 declare function registerTaskTemplate(root: string, input: TaskTemplate): Promise<TaskTemplateRef>;
 /** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery. */
-declare function findTaskTemplates(root: string | undefined, query?: string, scope?: TemplateScope): Promise<TaskTemplateMatch[]>;
+declare function findTaskTemplates(root: string | undefined, query?: string, scope?: TemplateScope, includeRetired?: boolean): Promise<TaskTemplateMatch[]>;
 /** Expand into the same authoring fields as a free contract; no template-specific execution path follows. */
 declare function bindTaskTemplate<T extends TaskContractInput>(root: string | undefined, spec: T, scope?: TemplateScope): Promise<T & TaskContractInput>;
 declare function bindTaskDecomposition(root: string | undefined, spec: DecomposeSpec, scope?: TemplateScope): Promise<DecomposeSpec>;
@@ -1851,6 +1905,8 @@ declare function taskTemplatePage(root: string | undefined, request?: Omit<TaskT
   templateRef?: undefined;
 }, scope?: TemplateScope): Promise<TaskTemplateCatalogPage>;
 declare function taskTemplatePage(root: string | undefined, request: TaskTemplateQuery, scope?: TemplateScope): Promise<TaskTemplateMatch | TaskTemplateCatalogPage>;
+/** Freeze the complete catalog for a replay; immutable older refs in recipes remain available. */
+declare function snapshotTaskTemplates(root: string | undefined, target: string): Promise<void>;
 //#endregion
 //#region src/run-binding.d.ts
 /** Everything one run needs to bind its content: the verdicts, the rows, and where the snapshot goes. */
@@ -2091,7 +2147,35 @@ declare class TaskRuntime extends Service {
   rootBudgetApproval?: RootBudgetApproval;
   readonly terminalReviewListeners: Set<(fact: TerminalReviewFact) => void | Promise<void>>;
   constructor(ctx: Context, config?: Partial<Config>);
-  taskTemplatesRootFor(sessionId?: string): string | undefined;
+  libraryForRoot(rootSessionId: string): Promise<TaskLibrary>;
+  libraryForSession(sessionId: string): Promise<TaskLibrary>;
+  comparisonRunForSession(sessionId: string): Promise<TaskRun | undefined>;
+  libraryRead(sessionId: string): Promise<(TaskLibrary & TaskLibraryIndex) | {
+    id: string;
+    graphLibraryId: string;
+    root: string;
+    taskTemplatesRoot: string;
+    skillRoot: string;
+    version: number;
+    readOnly: boolean;
+    message: string;
+    tasks: {
+      templateRef: _dangosys_dsh_singularity_task0.TaskTemplateRef;
+      status: string;
+      skills: string[];
+    }[];
+    skills: {
+      name: string;
+      version: number;
+      digest: string;
+      status: string;
+    }[];
+  }>;
+  libraryWrite(sessionId: string, input: LibraryWrite): Promise<LibraryTask | LibrarySkill>;
+  libraryReview(sessionId: string, review: LibraryReview): Promise<LibraryTask | LibrarySkill>;
+  capabilitiesForSession(sessionId: string): Promise<Record<string, CapabilityConfig>>;
+  skillViewForSession(sessionId: string, extraRoots?: readonly string[]): Promise<SkillDiscoveryView>;
+  taskTemplatesRootFor(sessionId?: string): Promise<string | undefined>;
   findTaskTemplates(query?: string, callerSessionId?: string): Promise<TaskTemplateMatch[]>;
   /** Pure store reads: catalog queries never adopt a Run or alter its gate. */
   templateCaller(sessionId: string): Promise<{
@@ -2099,7 +2183,7 @@ declare class TaskRuntime extends Service {
     scope?: TemplateScope;
   }>;
   listTaskTemplates(request: TaskTemplateQuery, callerSessionId: string): Promise<TaskTemplateMatch | TaskTemplateCatalogPage>;
-  registerTaskTemplate(template: TaskTemplate): Promise<_dangosys_dsh_singularity_task0.TaskTemplateRef>;
+  registerTaskTemplate(template: TaskTemplate, callerSessionId?: string): Promise<_dangosys_dsh_singularity_task0.TaskTemplateRef>;
   unload(): Promise<void>;
   [Service.init](): Promise<void>;
   providerLoadReport(): Promise<ProviderLoadReport>;
@@ -2155,7 +2239,7 @@ declare class TaskRuntime extends Service {
     ok: false;
     refusal: DecompositionRefusal;
   }>;
-  manifestsOf(batch: NormalizedBatch, callerSessionId?: string): CapabilityManifest[];
+  manifestsOf(batch: NormalizedBatch, callerSessionId?: string): Promise<CapabilityManifest[]>;
   storedBatchOf(proposal: TaskProposal): NormalizedBatch;
   decompositionState(sessionId: string): Promise<{
     reasons: string[];
@@ -2219,7 +2303,7 @@ declare class TaskRuntime extends Service {
   cancelBatch(storeId: string, batchId: string, callerSessionId: string): Promise<ChildOutcome[]>;
   cancelGraph(storeId: string, reason: string): Promise<void>;
   awaitBatch(storeId: string, batchId: string): Promise<ChildOutcome[]>;
-  reconcileStore(storeId: string): Promise<ReconcileReport>;
+  reconcileStore(storeId: string, rootSessionId?: string): Promise<ReconcileReport>;
   wakeUnclaimedQuestionMessages(storeId: string, deliveries: readonly QuestionReconcileReport[]): Promise<void>;
   wakeUnclaimedBatchResults(unread: readonly {
     sessionId: string;
@@ -2263,7 +2347,7 @@ declare class TaskRuntime extends Service {
   observeSession(sessionId: string): Promise<SessionObservation | undefined>;
   softService<T>(name: string): T | undefined;
   registeredVerifierIds(): Promise<readonly string[] | undefined>;
-  providerPrecheck(capabilities: readonly string[], view: SkillDiscoveryView, table?: Readonly<Record<string, CapabilityConfig>>, mcpRegistry?: Readonly<Record<string, McpServerTemplate>>): Promise<ProviderPrecheck>;
+  providerPrecheck(capabilities: readonly string[], view: SkillDiscoveryView, table?: Readonly<Record<string, CapabilityConfig>>, mcpRegistry?: Readonly<Record<string, McpServerTemplate>>, callerSessionId?: string): Promise<ProviderPrecheck>;
   capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheck>;
   readRunBinding(binding: RunProviderBinding): Promise<RunBindingRead | undefined>;
   assertKnownVerifierRefs(declared: readonly {
@@ -2425,6 +2509,10 @@ declare function owedBatchResults(snapshot: TaskSnapshot): OwedBatchResult[];
  */
 declare function settleRunFromRuntime(env: RuntimeSettlementEnv, storeId: string, run: TaskRun, status: 'cancelled' | 'failed', reason: string): Promise<void>;
 //#endregion
+//#region src/replay-paths.d.ts
+/** Relocate declared workspace paths, retaining every other contract value. */
+declare function rebaseWorkspacePaths<T>(value: T, from: string, to: string): T;
+//#endregion
 //#region src/index.d.ts
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -2440,4 +2528,4 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 //#endregion
-export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, type McpServerTemplate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskRuntime, TaskRuntime as default, TaskTemplateCatalogPage, TaskTemplateMatch, TaskTemplateQuery, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultTaskTemplatesRoot, driveBatch, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, inFlightRecoveryAttempt, isOpenProposal, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readVerifiedFile, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, LibraryReview, LibrarySkill, LibraryStatus, LibraryTask, LibraryWrite, type McpServerTemplate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskLibrary, TaskLibraryIndex, TaskRuntime, TaskRuntime as default, TaskTemplateCatalogPage, TaskTemplateMatch, TaskTemplateQuery, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultTaskTemplatesRoot, driveBatch, ensureTaskLibrary, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, graphLibrary, inFlightRecoveryAttempt, isOpenProposal, libraryCapabilities, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readTaskLibrary, readVerifiedFile, rebaseWorkspacePaths, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, reviewTaskLibrary, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, snapshotTaskTemplates, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline, writeTaskLibrary };

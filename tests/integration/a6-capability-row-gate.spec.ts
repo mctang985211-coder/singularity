@@ -241,14 +241,19 @@ async function boot(
     } as never))
     await writeCapabilityConfig(configFile, { [STORE_ROW]: STORE_ENTRY })
   }
-  const evolution = new EvolutionService(h.ctx, {
-    root: join(workspace, 'evolution'),
-    skillRoot,
+  // The ledger every session of this deployment reads is its graph library's
+  // (`EvolutionService.forSession`), which is the same service the deployment's
+  // own evolution tools resolve through. The instance built here is that
+  // deployment's, so a commit this spec makes and the admission gate the runtime
+  // runs read one ledger rather than two.
+  const parent = new EvolutionService(h.ctx, {
     modelSelection: () => SELECTION,
     capabilityConfig: configFile,
     ...(options.probe === undefined ? {} : { capabilityConfigProbe: options.probe as never }),
     ...(options.commitProbe === undefined ? {} : { commitProbe: options.commitProbe }),
   })
+  const evolution = await parent.forSession(ROOT)
+  const ledgerFile = join(evolution.root, 'proposals.jsonl')
   if (options.chain === 'reuse') {
     return {
       h,
@@ -256,7 +261,7 @@ async function boot(
       workspace,
       configFile,
       ledgerLines: async () => {
-        const text = await readFile(join(workspace, 'evolution', 'proposals.jsonl'), 'utf8')
+        const text = await readFile(ledgerFile, 'utf8')
         return text.split('\n').filter(line => line.trim().length > 0).map(line => JSON.parse(line) as Record<string, unknown>)
       },
     }
@@ -315,7 +320,7 @@ async function boot(
     configFile,
     root,
     ledgerLines: async () => {
-      const text = await readFile(join(workspace, 'evolution', 'proposals.jsonl'), 'utf8')
+      const text = await readFile(ledgerFile, 'utf8')
       return text.split('\n').filter(line => line.trim().length > 0).map(line => JSON.parse(line) as Record<string, unknown>)
     },
   }
@@ -529,6 +534,18 @@ describe('A6 EVO-2: a capability row under an open commit intent', () => {
     expect(await readFile(f.configFile, 'utf8')).toBe(baseline)
     expect(await applied(f)).toHaveLength(0)
 
+    // A third party moves the deployment's table while the intent stands. Opening
+    // a graph's evolution plane reconciles that graph's ledger — a restart's own
+    // recovery entry — and a commit whose table the directory no longer holds is
+    // the one such a pass cannot settle: it stops by name and the intent stays
+    // open, which is the state the admission gate below has to refuse.
+    const thirdParty = baseline.replace(
+      `      ${STORE_ROW}: { skills: [${STORE_SKILL}], tools: [filesystem] }`,
+      `      ${STORE_ROW}: { skills: [${STORE_SKILL}], tools: [filesystem] }\n      a6-third-party-row: { skills: [${STORE_SKILL}] }`,
+    )
+    expect(thirdParty).not.toBe(baseline)
+    await writeFile(f.configFile, thirdParty, 'utf8')
+
     // The restart: the first image is gone (its descriptors with it) and a second
     // one boots over the same directory. Its table is the one the file holds —
     // which does not carry the row — and the ledger still holds the open intent.
@@ -538,8 +555,10 @@ describe('A6 EVO-2: a capability row under an open commit intent', () => {
     expect(rowRefusals(await restarted.h.runtime.capabilityProviderReport(ROOT, [ROW]), ROW)).toEqual(['commit-intent-open'])
     expect((await restarted.evolution.get(PROPOSAL)).openIntent?.intentId).toBe(`${PROPOSAL}/apply`)
 
-    // Only the explicit reconciliation settles it — and then the row is in the
-    // registry, in the file and admissible.
+    // The person puts the table back into the state the intent recorded, and the
+    // explicit reconciliation then settles it: the row is in the registry, in the
+    // file and admissible.
+    await writeFile(restarted.configFile, baseline, 'utf8')
     const outcomes = await restarted.evolution.reconcile()
     expect(outcomes).toHaveLength(1)
     expect(outcomes[0]!.result, outcomes[0]!.detail ?? '').toBe('completed-redone')
@@ -549,6 +568,6 @@ describe('A6 EVO-2: a capability row under an open commit intent', () => {
     const report = await restarted.h.runtime.capabilityProviderReport(ROOT, [ROW])
     expect(providerRefusals(report)).toEqual([])
     expect(report.capabilities.find(row => row.capability === ROW)!.skills.map(skill => (skill.valid ? skill.role : 'invalid'))).toEqual(['execution-provider'])
-    expect(existsSync(join(workspace, 'evolution', 'sandbox', PROPOSAL, 'capability', `${ROW}.json`))).toBe(true)
+    expect(existsSync(join(restarted.evolution.root, 'sandbox', PROPOSAL, 'capability', `${ROW}.json`))).toBe(true)
   })
 })

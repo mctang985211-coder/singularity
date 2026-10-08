@@ -18,6 +18,7 @@ import type {
 } from '../replay.ts'
 import { EXPERIMENT_SAMPLE_ROLES } from '../replay.ts'
 import { assertSegment as sharedSegment, nonEmpty as sharedNonEmpty } from '../shared.ts'
+import { normalizeSnapshot, type ExperimentSnapshot } from '../replay/snapshot.ts'
 
 /** One sample as the caller's specification names it. */
 export interface ExperimentSampleSpec {
@@ -32,7 +33,7 @@ export interface ExperimentSpec {
   evaluation?: OutcomeEvaluationPlan
   samples: ExperimentSampleSpec[]
   /** The directory whose recursive content is the frozen input both workspaces are built from. */
-  snapshot: { sourceDir: string }
+  snapshot: ExperimentSnapshot
   /** The deployment's own model selection, frozen before the first run (S4-E §Q3). */
   model: ModelSelection
   budget: ExperimentBudget
@@ -52,7 +53,8 @@ export interface ExperimentRequest {
   readonly judge?: OutcomeModelCall
 }
 
-export type OutcomeModelCall = (model: ModelSelection, prompt: string, input: string, signal?: AbortSignal) => Promise<string>
+export interface OutcomeModelResult { response: string; usage?: import('@dangosys/dsh-singularity-task').ReviewTokenUsage }
+export type OutcomeModelCall = (model: ModelSelection, prompt: string, input: string, signal?: AbortSignal) => Promise<string | OutcomeModelResult>
 
 export interface ExperimentJudgedRecord {
   formatVersion: 4
@@ -162,6 +164,7 @@ export function validateSpec(spec: ExperimentSpec): void {
   if (typeof spec.snapshot?.sourceDir !== 'string' || spec.snapshot.sourceDir.trim().length === 0) {
     throw new Error('experiment: snapshot.sourceDir must be the directory both sides are built from')
   }
+  normalizeSnapshot(spec.snapshot)
   if (!Number.isInteger(spec.repetition) || spec.repetition < 0) {
     throw new Error("experiment: repetition must be the experiment's non-negative integer repeat index")
   }

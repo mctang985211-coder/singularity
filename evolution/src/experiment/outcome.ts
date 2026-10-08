@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { sha256Hex } from '@dangosys/dsh-singularity-task'
 import type { TaskSnapshot } from '@dangosys/dsh-singularity-task'
+import { rebaseWorkspacePaths } from '@dangosys/dsh-singularity-task-runtime'
 import type { ExperimentView, ExperimentLedger } from './freeze.ts'
 import type { OutcomeModelCall } from './spec.ts'
 import type { ExperimentReport, OutcomeMeasurement } from '../replay.ts'
@@ -66,6 +67,8 @@ export async function judgeExperiment(input: {
   const directory = dirname(view.report)
   const evidencePath = `${directory}/outcome-input.json`
   const responsePath = resolve(ledger.root, `${directory}/outcome-response.json`)
+  const usagePath = resolve(ledger.root, `${directory}/outcome-usage.json`)
+  let judgeUsage: import('@dangosys/dsh-singularity-task').ReviewTokenUsage | undefined
   await mkdir(resolve(ledger.root, directory), { recursive: true })
   // A crash leaves this marker. Unknown executions/responses must not be silently repeated.
   let existingResponse: string | undefined
@@ -74,6 +77,8 @@ export async function judgeExperiment(input: {
   let fixedInput: string
   if (existingResponse !== undefined) {
     fixedInput = await readFile(resolve(ledger.root, evidencePath), 'utf8')
+    try { judgeUsage = JSON.parse(await readFile(usagePath, 'utf8')) ?? undefined }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   } else {
     try { await writeFile(resolve(ledger.root, `${directory}/outcome.pending`), view.frozenDigest, { flag: 'wx' }) }
     catch (error) {
@@ -86,13 +91,15 @@ export async function judgeExperiment(input: {
       for (const side of ['baseline', 'candidate'] as const) {
         const detail = sample[side]
         for (const measurement of plan.measurements) {
-          const result = await measure(measurement.command, detail.workspace, input.signal)
+          const command = view.frozen.snapshot.rebaseFrom === undefined ? measurement.command
+            : rebaseWorkspacePaths(measurement.command, view.frozen.snapshot.rebaseFrom, detail.workspace)
+          const result = await measure(command, detail.workspace, input.signal)
           measurements.push({
             ref: `${sample.taskId}/${side}/${measurement.id}`,
             sampleTaskId: sample.taskId,
             side,
             id: measurement.id,
-            command: measurement.command,
+            command,
             workspace: detail.workspace,
             workspaceDigest: await directoryDigest(detail.workspace),
             ...result,
@@ -108,7 +115,10 @@ export async function judgeExperiment(input: {
     })
     fixedInput = canonicalJson({ frozenDigest: view.frozenDigest, plan, contracts, samples, measurements })
     await writeFile(resolve(ledger.root, evidencePath), fixedInput, { flag: 'wx' })
-    existingResponse = await input.judge(plan.judge.model, plan.judge.prompt, fixedInput, input.signal)
+    const judged = await input.judge(plan.judge.model, plan.judge.prompt, fixedInput, input.signal)
+    existingResponse = typeof judged === 'string' ? judged : judged.response
+    judgeUsage = typeof judged === 'string' ? undefined : judged.usage
+    await writeFile(usagePath, canonicalJson(judgeUsage ?? null), { flag: 'wx' })
     await writeFile(responsePath, existingResponse, { flag: 'wx' })
   }
   const evaluation = {
@@ -119,6 +129,7 @@ export async function judgeExperiment(input: {
     response: existingResponse,
     responseDigest: sha256Hex(existingResponse),
     judgement: parseOutcomeJudgement(existingResponse, fixedInput),
+    ...(judgeUsage === undefined ? {} : { judgeUsage }),
   }
   // Validate before append; the fold also checks this response against its frozen side facts.
   assertOutcomeEvaluation(evaluation)
@@ -145,13 +156,17 @@ export async function assertOutcomeEvidence(root: string, report: ExperimentRepo
   const response = await readFile(resolve(root, expectedDirectory, 'outcome-response.json'), 'utf8')
   if (evidence !== evaluation.input || sha256Hex(evidence) !== evaluation.evidenceDigest || response !== evaluation.response)
     throw new Error('evolution: saved outcome input or full judge response changed')
+  if (evaluation.judgeUsage !== undefined &&
+      canonicalJson(JSON.parse(await readFile(resolve(root, expectedDirectory, 'outcome-usage.json'), 'utf8'))) !== canonicalJson(evaluation.judgeUsage))
+    throw new Error('evolution: saved independent judge token usage changed')
   const parsed = JSON.parse(evidence) as { measurements: OutcomeMeasurement[] }
   for (const sample of report.samples) {
     for (const side of ['baseline', 'candidate'] as const) {
       const measurements = parsed.measurements.filter(item => item.sampleTaskId === sample.taskId && item.side === side)
       const expected = report.frozen.evaluation!.measurements
       if (measurements.length !== expected.length || measurements.some((item, index) =>
-        item.id !== expected[index]!.id || item.command !== expected[index]!.command ||
+        item.id !== expected[index]!.id || item.command !== (report.frozen.snapshot.rebaseFrom === undefined ? expected[index]!.command
+          : rebaseWorkspacePaths(expected[index]!.command, report.frozen.snapshot.rebaseFrom, sample[side].workspace)) ||
         item.workspace !== sample[side].workspace || item.ref !== `${sample.taskId}/${side}/${item.id}` || item.exitCode !== 0))
         throw new Error('evolution: outcome measurements do not match the frozen commands or a command failed')
       const current = await directoryDigest(sample[side].workspace)

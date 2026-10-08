@@ -183,7 +183,7 @@ it('drives evolution_propose and evolution_list through the plugin context onto 
       actor: 'root-1',
     })
 
-    const listed = await list.execute({ status: 'proposed' })
+    const listed = await list.execute({ status: 'proposed' }, exec('root-1'))
     expect(listed).toContain('evolution ledger (1):')
     expect(listed).toContain('p-plugin-1 [proposed] L2 verifier verifier:build (base v3)')
   } finally {
@@ -297,7 +297,7 @@ it('refuses a capability mutation of the shape this build does not write, at the
     expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind)).toEqual(['proposed'])
     expect(existsSync(join(home, 'evolution', 'sandbox'))).toBe(false)
 
-    const listed = await list.execute({ status: 'proposed' })
+    const listed = await list.execute({ status: 'proposed' }, exec('root-1'))
     expect(listed).toContain('p-cap-1 [proposed]')
   } finally {
     vi.unstubAllEnvs()

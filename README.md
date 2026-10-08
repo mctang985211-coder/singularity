@@ -21,6 +21,24 @@ From a local checkout, add the bundle directory — it composes the whole worksp
 pnpm dsh plugin --profile web add /absolute/path/to/packages/singularity/bundle
 ```
 
+## Start from a goal
+
+Create a graph with a task and optional natural-language metrics. A new environment can be empty; repositories, model selection, round count and human review are optional launch choices. For example:
+
+```json
+{"createEnv":true,"rsi":{"task":"Implement and improve a Python word counter","metrics":["correctness","latency","model cost"]}}
+```
+
+The default launch runs three task attempts with autonomous review. The root investigates the workspace, defines measurements and this task's acceptance, then delegates useful independent results. The model creates task-specific checks as needed.
+
+Every graph owns a Task/Skill library at `$DSH_HOME/singularity/environments/<rootSessionId>/`: `task-templates/` holds reusable contracts and decomposition, `skills/` holds methods, and `index.json` projects their versions, bindings and review status. `task_library` reads and authors temporary entries; `task_template_list` supplies full contracts; `method:<skill-name>` binds a method through `requiredCapabilities`. The supervisor retains, revises or retires experience during RSI. Each Run freezes its own template and Skill content, so later edits preserve historical execution evidence.
+
+Execution workers receive the full frozen bodies of their bound Skills before the first model action. The Session records actual delivery for review, reuses visible instructions across steps and resume, and restores them after compaction removes their original message.
+
+Evolution uses the same graph library for production methods, replay candidates and promotion; its ledger is under that library's `evolution/`. New Skills support an absent baseline. The loop runs task → evidence and cost → supervisor library review and experiment → publication or reasoned no-change → next task attempt and consumption. The last attempt also receives a library review. Four attempts exercise three opportunities to publish and consume a change. Recorded execution, replay and coordination token/tool costs are considered together; auxiliary measurement-plan/judge calls retain their actual usage, and monetary cost is unknown without a price source.
+
+Read the selected graph's library at `GET /singularity/graphs/:id/library` and its experiments at `GET /singularity/evolution?graphId=:id`.
+
 ## Quick start: bundled tutorial
 
 [tutorial/](tutorial/) is a small React kanban app (no EDA dependencies) whose red-baseline test suite is the spec. From the harness root:

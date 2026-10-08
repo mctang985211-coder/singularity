@@ -91,6 +91,10 @@ async function mount(approvalOutcome: string = 'allowed-once') {
   ctx.provide('tools', registry.service as never)
   ctx.provide('userQuestions', userQuestions as never)
   ctx.provide('approval', approval as never)
+  // The root contract's command-judged criterion resolves to the `command`
+  // verifierRef, so the deployment must be able to list its verifier vocabulary
+  // for the intake to be judged (A0 §1.2).
+  ctx.provide('verifier', { verifierIds: () => ['command', 'composite', 'review'] } as never)
 
   const task = new TaskService(ctx)
   const runtime = new TaskRuntime(ctx, { capabilities: { ...TASK_GUIDANCE } } as never)

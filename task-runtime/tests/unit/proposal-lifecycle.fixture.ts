@@ -157,6 +157,24 @@ export function harness(
     ),
   }
   const graphs = {
+    /**
+     * The deployment's graph registry: one graph per durable session this fixture
+     * holds. A graph owns exactly its own root session's store
+     * (`rootTaskStoreId(rootSessionId)`), which is what a store with no run yet is
+     * recovered through, so every session with a log here is a graph root.
+     */
+    list: vi.fn(async () =>
+      [...sessions.keys()].map(rootSessionId => ({
+        id: 'g1',
+        name: 'graph',
+        envId: 'env1',
+        rootSessionId,
+        graphStoreId: 'sg-g-root',
+        layoutStoreId: 'sg-l-root',
+        createdAt: 0,
+        ready: true,
+      })),
+    ),
     graphForSession: vi.fn(async (_sessionId: string) => ({
       id: 'g1',
       name: 'graph',

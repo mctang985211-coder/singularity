@@ -1,3 +1,4 @@
+import { evolutionForSession } from './evolution-scope.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import { message, sessionId, text } from '../shared.ts'
@@ -15,12 +16,13 @@ export function defineEvolutionPrepareTool(ctx: Context) {
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
       const caller = sessionId(exec, 'evolution_prepare')
+      const evolution = await evolutionForSession(ctx, caller)
       try {
-        const prepared = await ctx.evolution.prepare(args.proposalId, caller)
+        const prepared = await evolution.prepare(args.proposalId, caller)
         const view = prepared.prepared!
         if (view.templateCandidate !== undefined) {
           return [
-            `proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
+            `proposal ${prepared.proposalId} [prepared] sandbox: ${evolution.root}/${view.sandbox}`,
             ...view.files.map(file => `  wrote ${file}`),
             `candidate template: ${view.templateCandidate.template.id}@${view.templateCandidate.template.version} sha256:${view.templateCandidate.digest}`,
             view.templateBaseline == null ? 'template baseline: absent' : `template baseline: ${view.templateBaseline.template.id}@${view.templateBaseline.template.version} sha256:${view.templateBaseline.digest}`,
@@ -32,7 +34,7 @@ export function defineEvolutionPrepareTool(ctx: Context) {
           // candidate carries one. The production baseline this arm compares
           const rowBaseline = view.capabilityBaseline ?? null
           return [
-            `proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
+            `proposal ${prepared.proposalId} [prepared] sandbox: ${evolution.root}/${view.sandbox}`,
             ...view.files.map(file => `  wrote ${file}`),
             `candidate row: ${view.capabilityRow.name} sha256:${view.capabilityRow.digest.slice(0, 12)}…`,
             rowBaseline === null
@@ -48,18 +50,18 @@ export function defineEvolutionPrepareTool(ctx: Context) {
         }
         // The skill arm: the fold admits one prepared shape, a materialized skill
         // prepare that carries both content identities (P2/P3), so the render reads
-        const baseline = view.skillBaseline!
+        const baseline = view.skillBaseline
         return [
-          `proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
+          `proposal ${prepared.proposalId} [prepared] sandbox: ${evolution.root}/${view.sandbox}`,
           ...view.files.map(file => `  wrote ${file}`),
           view.skillContent!.contract === undefined
             ? 'candidate object: guidance (SKILL.md and its frozen text resources)'
             : 'candidate object: execution provider (SKILL.md + SKILL.contract.json) — the sidecar is derived from production ' +
               'with the candidate content identity, so this candidate cannot move a capability, a required tool or a verifier',
           `frozen resources: ${(view.skillContent!.resources ?? []).map(resource => `${resource.path} sha256:${resource.sha256}`).join(', ') || 'none'}`,
-          'champion snapshot: captured under champion/',
-          `production baseline: ${baseline.name} sha256:${baseline.sha256.slice(0, 12)}… (an apply refuses if the production ` +
-            'object changed since this read)',
+          baseline == null ? 'champion snapshot: absent; both experiment sides execute the original Task' : 'champion snapshot: captured under champion/',
+          baseline == null ? 'production baseline: absent; candidate introduces this Skill' :
+            `production baseline: ${baseline.name} sha256:${baseline.sha256.slice(0, 12)}… (an apply refuses if the production object changed since this read)`,
           'sandbox only — production was not touched; next: evolution_replay (the two-sided experiment), then evolution_gate',
         ].join('\n')
       } catch (error) {

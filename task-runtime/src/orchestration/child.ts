@@ -413,7 +413,7 @@ async function startChildRound(
        * A resumed batch carries no verdicts — the process that judged them is
        * gone — so the pre-check is re-run from this run's own viewpoint and a
        */
-      const fresh = await env.precheck(Object.keys(manifest.capabilities), env.workspacePath)
+      const fresh = await env.precheck(Object.keys(manifest.capabilities), env.workspacePath, manifest)
       const refusals = providerRefusals(fresh, Object.keys(manifest.capabilities))
       if (refusals.length > 0) {
         throw new Error(`the provider pre-check refused this run on resume:\n- ${refusals.join('\n- ')}`)

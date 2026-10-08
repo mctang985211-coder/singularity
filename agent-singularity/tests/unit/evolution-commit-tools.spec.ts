@@ -465,7 +465,7 @@ describe('evolution_list', () => {
 
   it('renders a prepared capability row without a new skill', async () => {
     const h = await fixture({ lines: capabilityLines(false) })
-    const listed = (await defineEvolutionListTool(h.ctx).execute({ targetType: 'capability' })) as string
+    const listed = (await defineEvolutionListTool(h.ctx).execute({ targetType: 'capability' }, exec())) as string
 
     expect(listed).toContain('c1 [prepared] L2 capability research (base v1)')
     expect(listed).toContain('candidate row: research sha256:3520b89bb04d')
@@ -475,7 +475,7 @@ describe('evolution_list', () => {
 
   it('renders a prepared capability row with its new execution skill and absent production baselines', async () => {
     const h = await fixture({ lines: capabilityLines(true) })
-    const listed = (await defineEvolutionListTool(h.ctx).execute({ targetType: 'capability' })) as string
+    const listed = (await defineEvolutionListTool(h.ctx).execute({ targetType: 'capability' }, exec())) as string
 
     expect(listed).toContain('c1 [prepared] L2 capability research (base v1)')
     expect(listed).toContain('candidate row: research sha256:e4cef40c66dc')
@@ -488,7 +488,7 @@ describe('evolution_list', () => {
     const h = await fixture({ lines: openApplyIntent() })
     const before = await readFile(join(h.root, 'proposals.jsonl'), 'utf8')
 
-    const listed = (await defineEvolutionListTool(h.ctx).execute({})) as string
+    const listed = (await defineEvolutionListTool(h.ctx).execute({}, exec())) as string
     expect(listed).toContain(`${PROPOSAL_ID} [decided PROMOTE] L2 skill ${SKILL} (base v1)`)
     expect(listed).toContain(
       `  open commit intent: ${PROPOSAL_ID}/apply (apply) recorded ${AT(5)} — production targets [${TARGET(h.skillRoot)}]`,
@@ -510,7 +510,7 @@ describe('evolution_list', () => {
     const h = await fixture({ lines: openApplyIntent(true) })
     const sidecar = join(h.skillRoot, SKILL, 'SKILL.contract.json')
 
-    const listed = (await defineEvolutionListTool(h.ctx).execute({})) as string
+    const listed = (await defineEvolutionListTool(h.ctx).execute({}, exec())) as string
     expect(listed).toContain(`  open commit intent: ${PROPOSAL_ID}/apply (apply) recorded ${AT(5)} — production targets [${TARGET(h.skillRoot)}, ${sidecar}]`)
     expect(listed).toContain('execution provider (SKILL.md + SKILL.contract.json)')
     expect(listed).toContain('(4 files, execution provider')
@@ -522,7 +522,7 @@ describe('evolution_list', () => {
       lines: [...decidedLines(), intentLine('apply', 'approval:decide'), completionLine('apply', 'approval:decide')],
       production: CANDIDATE,
     })
-    const listed = (await defineEvolutionListTool(h.ctx).execute({})) as string
+    const listed = (await defineEvolutionListTool(h.ctx).execute({}, exec())) as string
     expect(listed).not.toContain('open commit intent')
     expect(listed).toContain(`applied: [${TARGET(h.skillRoot)}] (approval approval:decide)`)
   })

@@ -170,7 +170,8 @@ export async function serviceInit(self: TaskRuntime): Promise<void> {
       async (exec, next) => {
         const sessionId = exec.agent?.id
         if (sessionId === undefined) return await next()
-        const decision = self.executionGate.decide(String(sessionId), exec.name)
+        const gatedName = exec.name === 'task_library' && typeof exec.arguments === 'object' && exec.arguments !== null && (exec.arguments as { action?: string }).action === 'read' ? 'task_read' : exec.name
+        const decision = self.executionGate.decide(String(sessionId), gatedName)
         if (!decision.allow) return { kind: 'deny', reason: decision.reason }
         // Only an allowed call is registered: a denied call never runs, so
         // waiting for its result would wait for work that does not exist.

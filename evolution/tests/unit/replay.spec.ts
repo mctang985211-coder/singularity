@@ -211,13 +211,19 @@ describe('evolution_replay tool', () => {
     // Four runs: every sample twice, the baseline under the production
     // configuration and the candidate under the sandbox's skills dir.
     expect(replayTask).toHaveBeenCalledTimes(4)
-    const sides = replayTask.mock.calls.map(call => [call[1], call[2].overlay === undefined ? 'baseline' : 'candidate'])
-    expect(sides).toEqual([
-      ['t-fail', 'baseline'],
-      ['t-fail', 'candidate'],
-      ['t-holdout', 'baseline'],
-      ['t-holdout', 'candidate'],
-    ])
+    // The four sides as a set: the runner dispatches them through a worker pool,
+    // so the order the mock observes them in is not fixed.
+    const sides = replayTask.mock.calls
+      .map(call => [call[1], call[2].overlay === undefined ? 'baseline' : 'candidate'])
+      .sort()
+    expect(sides).toEqual(
+      [
+        ['t-fail', 'baseline'],
+        ['t-fail', 'candidate'],
+        ['t-holdout', 'baseline'],
+        ['t-holdout', 'candidate'],
+      ].sort(),
+    )
     for (const [storeId, _sample, options, caller] of replayTask.mock.calls.map(
       call => call as unknown as [string, string, ReplayTaskOptions, string],
     )) {
@@ -257,7 +263,7 @@ describe('evolution_replay tool', () => {
     // The candidate's line names the complete object the sandbox root is loaded
     // from (K3), never a bare root a reader could mistake for one file.
     expect(started.frozen.overlay.candidate).toBe(
-      'extraSkillRoots: [sandbox/s1/skills] — the complete candidate object: the guidance object "verify" (SKILL.md alone, no sidecar), ' +
+      'extraSkillRoots: [sandbox/s1/skills] — the complete candidate object: the guidance object "verify" (SKILL.md and frozen resources, no sidecar), ' +
         "loaded whole through the runtime's own discovery",
     )
     expect(lines.filter(line => line.kind === 'experiment_sample')).toHaveLength(4)

@@ -26,9 +26,7 @@ import {
   assertInterruptedState,
   stagedNow,
   boot,
-  ROOT_B,
   rootContract,
-  ROW,
   captureWarnings,
   settledComplete,
   admitChild,
@@ -265,20 +263,21 @@ describe.skipIf(EXIT_WINDOW !== undefined)(
         // is gone with the rename, and the window before the first stage never wrote one.
         expect(await stagedNow(h)).toEqual([])
 
-        // The reopen: a second process image over the same directory. The open intent
-        // is what it sees, and the directory it names is refused before any recovery ran.
+        // The reopen: a second process image over the same directory, and the one that
+        // settles what the killed image left. The open intent is what this boot's own
+        // recovery reads first, and reconciling it is the same settlement a real next
+        // process runs before it serves anything: the intent closes and the directory
+        // converges on the one complete version the intent named.
         await h.runtime.submitResult(ROOT_A, { summary: 'the first boot hands its checkout back' })
         const reopened = await boot({ workspace: directory })
         const h2 = reopened.h
-        expect(await reopened.svc.openIntentTargets()).toEqual(targets)
-        expect(await productionObject(h2)).toEqual(left)
-        await expect(h2.root(ROOT_B, rootContract('ship the killed release', [ROW]))).rejects.toThrow(
-          /commit-intent-open/,
-        )
-        expect(await reopened.svc.openIntentTargets()).toEqual(targets)
+        expect(await reopened.svc.openIntentTargets()).toEqual([])
+        expect(await productionObject(h2)).toEqual(settledState(world, direction))
 
-        // The host's own recovery entry, and the settlement it must reach: the whole
-        // object at the version this direction committed.
+        // The host's own recovery entry over the same graph ledger — the barrier the
+        // runtime runs before it takes a store over, through the instance this context
+        // holds — finds nothing left to settle, and the settlement it must reach is
+        // the whole object at the version this direction committed.
         const adoptedStore = rootTaskStoreId(ROOT_A)
         await h2.task.createStore(adoptedStore)
         const warnings = captureWarnings(h2)

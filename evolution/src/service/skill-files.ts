@@ -126,17 +126,15 @@ export async function readVerifiedSkillCandidate(
         `file (${reason}) — propose a new candidate and re-evaluate it`,
     )
   }
-  if (identity.contract === undefined) {
-    throw new Error(
-      `evolution: skill candidate "${sidecarRel}" exists in the sandbox, but the content identity recorded at prepare is guidance ` +
-        '(no sidecar) — the candidate is no longer the object the experiment evaluated: propose a new candidate and re-evaluate it',
-    )
-  }
+  // A readable read reaches this point only when the frozen identity carries a
+  // contract: `assertSkillObjectIdentity` above refused a guidance identity
+  // against a directory that holds a sidecar.
+  const contract = identity.contract!
   const sidecarDigest = sha256Hex(sidecar)
-  if (sidecarDigest !== identity.contract.sha256) {
+  if (sidecarDigest !== contract.sha256) {
     throw new Error(
       `evolution: skill candidate "${sidecarRel}" no longer matches the content identity recorded at prepare ` +
-        `(sha256 ${sidecarDigest} != ${identity.contract.sha256}) — propose a new candidate and re-evaluate it; recorded identities are never re-digested`,
+        `(sha256 ${sidecarDigest} != ${contract.sha256}) — propose a new candidate and re-evaluate it; recorded identities are never re-digested`,
     )
   }
   return { skillMd, sidecar, resources }

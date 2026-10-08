@@ -30,6 +30,7 @@ type Spy = ReturnType<typeof vi.fn>
  * plane.
  */
 const ROOT_CORE_TOOLS = [
+  'read', 'glob', 'grep', 'write', 'edit', 'bash', 'job_list', 'job_output', 'job_kill', 'task_library',
   'graph_spawn',
   'graph_mark_ready',
   'hitl_ask',
@@ -173,6 +174,11 @@ interface Assembly {
   readonly presentAs: Spy
 }
 
+function catalogScopeStub() {
+  const skills = { register: vi.fn(() => () => {}), registerProvider: vi.fn(() => () => {}) }
+  return { get: (name: string) => name === 'skills' ? skills : undefined, plugin: async () => {}, on: () => {} }
+}
+
 /** Runs one root assembly's `setup` the way the agent factory does — after the preset mount, before the first prompt. */
 async function assemble(options: unknown): Promise<Assembly> {
   const restrict = vi.fn()
@@ -181,7 +187,8 @@ async function assemble(options: unknown): Promise<Assembly> {
   const session = { append: vi.fn() }
   const presentAs = vi.fn()
   const skills = { register: vi.fn(() => () => {}) }
-  const agentCtx = { tools: { restrict, guard, presentAs }, systemPrompt: { section }, get: (name: string) => name === 'skills' ? skills : undefined }
+  const agentCtx = { tools: { restrict, guard, presentAs }, systemPrompt: { section }, get: (name: string) => name === 'skills' ? skills : undefined,
+    isolate: catalogScopeStub }
   await (options as { setup: (ctx: unknown, agent: unknown) => Promise<void> }).setup(agentCtx, { session })
   return { agentCtx, session, restrict, section, guard, presentAs }
 }
@@ -249,7 +256,7 @@ async function runSetup(options: { setup?: (ctx: unknown, agent: unknown) => Pro
   const section = vi.fn()
   const guard = vi.fn()
   const session = { append: vi.fn() }
-  await options.setup?.({ tools: { restrict, guard }, systemPrompt: { section } }, { session })
+  await options.setup?.({ tools: { restrict, guard }, systemPrompt: { section }, isolate: catalogScopeStub }, { session })
   return { restrict, section, guard, session }
 }
 
@@ -473,6 +480,16 @@ describe('AgentRuntime root lifecycle', () => {
     // deployment for its own root, and the log has to say so.
     expect(followup).toHaveBeenCalledOnce()
     expect(sourceOf(followup)).toEqual({ kind: 'runtime-prompt', channel: 'prompt' })
+    followup.mockClear()
+    await runtime.promptUser(state.root, [{ type: 'text', text: 'Improve latency and measure cost.' }])
+    expect(sourceOf(followup)).toEqual({ kind: 'user' })
+    followup.mockClear()
+    const inject = vi.fn()
+    Object.assign(state.root, { inject })
+    await runtime.promptUser(state.root, [{ type: 'text', text: 'User goal' }], [{ type: 'text', text: 'Runtime setup facts' }])
+    expect(sourceOf(inject)).toEqual({ kind: 'runtime-prompt', channel: 'prompt' })
+    expect(sourceOf(followup)).toEqual({ kind: 'user' })
+    expect(inject.mock.invocationCallOrder[0]).toBeLessThan(followup.mock.invocationCallOrder[0]!)
   })
 
   test('spawn setup applies the capability-granted permission preset instead of the default posture', async () => {
@@ -611,10 +628,11 @@ describe('AgentRuntime root lifecycle', () => {
     expect(prompt).toContain('load task-coordination with skill')
     expect(prompt).toContain('through requiredCapabilities')
     expect(prompt).toContain("Declare each Task's execution capabilities and relevant guidance through requiredCapabilities")
-    expect(prompt).toContain('delegate execution to Tasks through requiredCapabilities')
+    expect(prompt).toContain('Delegate execution to Tasks through requiredCapabilities')
     expect(prompt).not.toContain('An assumption is not an answer')
     const method = await readFile(new URL('../../skills/task-coordination/SKILL.md', import.meta.url), 'utf8')
-    expect(method).toContain('An assumption is not an answer')
+    expect(method).toContain("Start with the user's task and metrics")
+    expect(method).toContain('graph library')
     expect(method).toContain('At least one mandatory root criterion')
     expect(method).toContain('One unfinished batch')
     expect(method).toContain('task_budget_extend')
@@ -762,15 +780,15 @@ describe('the spawn request contract (A2)', () => {
       text: WORKER_POLICY_TEXT,
       interpolate: false,
     })
-    // The stable, unconditional rules migrated from the old spawn prompt...
+    // Short positive guidance keeps each task's result, verification and library explicit.
     for (const rule of [
-      'Never declare completion yourself',
-      'use `task_verify`: it runs the contracted criteria under the verifier deadline',
-      'Do not copy an acceptance command into bash or a background job',
-      'protected inputs must not be modified',
-      'hand it in with `task_submit_result`',
-      'Going idle is not a submission',
-      '`task_verify` is only a self-check',
+      'Use task_verify for a useful self-check under the verifier deadline',
+      'Preserve authoritative checks, protected inputs',
+      'Finish with task_submit_result',
+      'the external verifier judges this task',
+      'temporary TaskTemplate in the graph library',
+      'Record reusable paths, methods, conditions and experience as Skills',
+      'a small task-specific check',
     ]) {
       expect(WORKER_POLICY_TEXT).toContain(rule)
     }
@@ -792,8 +810,38 @@ describe('the spawn request contract (A2)', () => {
       expect(section.mock.calls[0]![0].text).toContain('evolution_decide and evolution_apply')
     } else {
       expect(session.append).not.toHaveBeenCalled()
-      expect(section.mock.calls[0]![0].text).toContain('You do not change files')
+      expect(section.mock.calls[0]![0].text).toContain('Use your granted reads')
     }
+  })
+
+  test('initializes a supervisor catalog through its published parent before adding the child node', async () => {
+    const state = await spawnContext()
+    const libraryForSession = vi.fn(async (sessionId: string) => {
+      if (!state.nodes.some(node => node.id === sessionId)) throw new Error('session is not yet in graph')
+      return { skillRoot: '/graph-owned/skills' }
+    })
+    const readService = state.ctx.get
+    Object.assign(state.ctx, {
+      get: (name: string) => name === 'taskRuntime' ? { libraryForSession } : readService(name),
+    })
+    const create = state.ctx.agents.create
+    state.ctx.agents.create = async options => {
+      const handle = await create(options)
+      const request = options as unknown as { meta: object; setup?: (ctx: unknown, agent: unknown) => Promise<void> }
+      Object.assign(handle.agent.session.header, request.meta)
+      expect(state.nodes.some(node => node.id === options.sessionId)).toBe(false)
+      await request.setup?.({
+        tools: { restrict: vi.fn(), guard: vi.fn() },
+        systemPrompt: { section: vi.fn() }, isolate: catalogScopeStub,
+      }, handle.agent)
+      return handle
+    }
+    await state.runtime.spawn(state.root, {
+      sessionId: id('supervisor'), name: 'supervisor', coordinationRole: 'supervisor',
+      prompt: [{ type: 'text', text: 'review graph experience' }],
+    })
+    expect(libraryForSession).toHaveBeenCalledExactlyOnceWith('root')
+    expect(state.nodes.some(node => node.id === id('supervisor'))).toBe(true)
   })
 
   test('a spawn with a prompt but no taskWorker installs no worker policy and no kickoff rewrite', async () => {
@@ -912,20 +960,8 @@ describe('the spawn request contract (A2)', () => {
       const allowed = enabled ? ROOT_TOOLS_OPEN : ROOT_TOOLS_CLOSED
       expect(assembly.presentAs).toHaveBeenCalledExactlyOnceWith('native')
       for (const name of allowed) expect(denialOf(assembly.guard, name), name).toBeUndefined()
-      for (const name of [
-        'run_code',
-        'subagent',
-        'subagent_fork',
-        'read',
-        'grep',
-        'glob',
-        'write',
-        'edit',
-        'bash',
-        'jobs',
-        'mcp_custom',
-      ]) {
-        expect(denialOf(assembly.guard, name), name).toContain('delegate engineering work with task_decompose')
+      for (const name of ['run_code', 'subagent', 'subagent_fork', 'jobs', 'mcp_custom']) {
+        expect(denialOf(assembly.guard, name), name).toContain('task_decompose')
       }
       for (const name of EVOLUTION_TOOLS) {
         if (enabled) expect(denialOf(assembly.guard, name), name).toBeUndefined()

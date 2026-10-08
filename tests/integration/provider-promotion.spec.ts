@@ -10,6 +10,7 @@ import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-se
 import { EvolutionService, modelSelectionOf } from '../../evolution/src/index.ts'
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
 import { recordPromotionExperiment } from '../support/promotion-experiment.ts'
+import { defineEvolutionCandidateTool } from '../../agent-singularity/src/tools/evolution-candidate.ts'
 import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
 import { defineEvolutionPrepareTool } from '../../agent-singularity/src/tools/evolution-prepare.ts'
 import type { TaskEvent } from '../../task/src/index.ts'
@@ -38,9 +39,10 @@ import { personRequest } from '../../task-runtime/tests/support/person-request.t
  *    providers, discovered from the harness process's own roots, judged before
  *    the row becomes effective in the running table.
  * 4. **the evolution lifecycle** — the production object the same-name candidate
- *    replaces, and the candidate object derived from it: `checkPromotion` where
- *    the shape can be frozen and re-derived, `evolution_prepare` where the loader
- *    refuses it before a candidate can exist (K3).
+ *    replaces, and the candidate object derived from it: `evolution_candidate`
+ *    where the bytes never declare the name the proposal targets, `checkPromotion`
+ *    where the shape can be frozen and re-derived, and `evolution_prepare` where
+ *    the loader refuses it before a candidate can exist (K3).
  *
  * The evolution *capability* promotion entry is no longer one of them: S4-E
  * §F.2/EVAL-4 refuses a PROMOTE without an evaluator, so the row check's live
@@ -86,6 +88,12 @@ const CONFIG_FIXTURE = [
 
 interface Harness {
   runtime: TaskRuntime
+  /**
+   * The process-wide service a deployment mounts as `ctx.evolution`, and the door
+   * every entry reaches its graph library's own ledger through.
+   */
+  plane: EvolutionService
+  /** The ledger this session's library owns, as {@link plane} resolves it. */
   evolution: EvolutionService
   task: TaskService
   /** The tools the agent plugin registered; the evolution tools are driven through them. */
@@ -265,13 +273,16 @@ async function harness(options: { capabilities?: Readonly<Record<string, Capabil
     capabilities: { ...TASK_GUIDANCE, ...(options.capabilities ?? TABLE) },
     runBindingRoot: join(workspace, 'run-bindings'),
   } as Config)
-  const evolution = new EvolutionService(ctx, {
-    root: join(workspace, 'evolution'),
-    skillRoot: join(workspace, 'production-skills'),
+  // The deployment's own construction: one process-wide service, whose ledger and
+  // production skill root are the caller graph library's own. The tools reach the
+  // same scoped instance through `ctx.evolution`, so the ledger they read is the
+  // one the service methods wrote.
+  const base = new EvolutionService(ctx, {
     // The deployment's model selection: the experiment freezes it, the promotion
     // gate re-reads the runs' own requests against it (S4-E §F.2/§Q3).
     modelSelection: () => modelSelectionOf({ provider: 'p', model: 'm' })!,
   })
+  const evolution = await base.forSession(ROOT_SESSION)
   await writeFile(join(workspace, 'config.yml'), CONFIG_FIXTURE)
   ctx.provide('tools', {
     register: (tool: { name: string; execute: (args: Record<string, unknown>, exec?: unknown) => unknown }) => {
@@ -289,12 +300,13 @@ async function harness(options: { capabilities?: Readonly<Record<string, Capabil
     ctx,
     workspace,
     runtime,
+    plane: base,
     evolution,
     task,
     tools,
     approval,
     configFile: join(workspace, 'config.yml'),
-    skillRoot: join(workspace, 'production-skills'),
+    skillRoot: evolution.skillRoot,
     home,
     checkout,
     taskEvents,
@@ -372,12 +384,17 @@ async function skillCandidateGated(h: Harness, content: string, proposalId = 's1
  * prepare derived from those bytes. Returns the first refusal's message, so the
  * caller compares it with the other three entries' codes; a lifecycle that
  * admitted the provider is this helper's own failure.
+ *
+ * The entries are tried in lifecycle order, because each later one only ever sees
+ * the shapes the earlier ones admitted: the bytes are recorded as a candidate only
+ * once they declare the name the proposal targets, so a candidate that carries
+ * another name is refused there and no object of it is ever materialized.
  */
 async function lifecycleRefusal(
   h: Harness,
   content: string,
   shape: (typeof ILLEGAL_SHAPES)[number],
-): Promise<{ entry: 'prepare' | 'promotion'; message: string }> {
+): Promise<{ entry: 'candidate' | 'prepare' | 'promotion'; message: string }> {
   const declaredName = 'declaredName' in shape ? shape.declaredName : SKILL
   await writeSkillDirectory(join(h.skillRoot, SKILL), SKILL, content, shape.shape)
   const svc = h.evolution
@@ -390,7 +407,11 @@ async function lifecycleRefusal(
     rationale: 'the fixture skill should carry newer wording',
     sourceRefs: ['diagnosis:d1'],
   }, ROOT_SESSION)
-  await svc.candidate('s1', { skill: 'v2' }, ROOT_SESSION, { name: SKILL, content: skillText('# the illegal provider, improved', declaredName) })
+  try {
+    await svc.candidate('s1', { skill: 'v2' }, ROOT_SESSION, { name: SKILL, content: skillText('# the illegal provider, improved', declaredName) })
+  } catch (error) {
+    return { entry: 'candidate', message: error instanceof Error ? error.message : String(error) }
+  }
   try {
     await svc.prepare('s1', ROOT_SESSION)
   } catch (error) {
@@ -459,18 +480,25 @@ const ILLEGAL_SHAPES = [
   {
     label: 'an execution provider whose verifier is not registered',
     defect: 'verifier-unknown',
+    lifecycle: 'verifier-unknown:',
     row: TABLE,
     shape: { sidecar: 'execution', verifierRef: 'ghost-verifier', capabilities: [ROW], requiredTools: ['bash'] } as SkillShape,
   },
   {
     label: 'an execution provider whose required tools its capability does not grant',
     defect: 'tool-not-covered',
+    lifecycle: 'tool-not-covered:',
     row: NARROW_TABLE,
     shape: { sidecar: 'execution', verifierRef: 'command', capabilities: [ROW], requiredTools: ['bash'] } as SkillShape,
   },
   {
     label: 'a provider whose SKILL.md declares another name',
     defect: 'skill-name-mismatch',
+    // The name a candidate carries is the first thing the lifecycle judges: the
+    // bytes are recorded only when they declare the name the proposal targets, so
+    // this shape is refused before any object of it exists and the refusal carries
+    // the candidate door's own words rather than a loader defect code.
+    lifecycle: 'frontmatter name must equal mutation.name',
     row: TABLE,
     shape: { sidecar: 'execution', verifierRef: 'command', capabilities: [ROW], requiredTools: ['bash'] } as SkillShape,
     declaredName: 's1c-other-skill-name',
@@ -478,6 +506,7 @@ const ILLEGAL_SHAPES = [
   {
     label: 'a provider whose declared resource identity is not the bytes on disk',
     defect: 'content-mismatch',
+    lifecycle: 'content-mismatch:',
     row: TABLE,
     shape: {
       sidecar: 'execution',
@@ -491,6 +520,7 @@ const ILLEGAL_SHAPES = [
   {
     label: 'a provider whose declaration is not a shape the contract reads',
     defect: 'sidecar-shape',
+    lifecycle: 'sidecar-shape:',
     row: TABLE,
     shape: { sidecar: 'execution', verifierRef: 'command', capabilities: [], requiredTools: [] } as SkillShape,
   },
@@ -535,29 +565,48 @@ describe('one illegal provider, one defect code, every entry that still judges i
     //    skill the candidate replaces (K3). A same-name improvement freezes that
     //    object and re-derives the candidate's sidecar from it, so the provider the
     //    promotion judges *is* the bytes installed here — and the entry that judges
-    //    them names the same code: the promotion check for a shape the lifecycle
-    //    can freeze and re-derive, and `evolution_prepare` for the two shapes the
-    //    loader refuses outright (a provider with unsupported resources, and a
-    //    declaration the contract does not read), which therefore never become a
-    //    candidate at all.
+    //    them names the same code: `evolution_candidate` for the shape the lifecycle
+    //    refuses before anything is recorded, `evolution_prepare` for the two shapes
+    //    the loader refuses outright (a provider with unsupported resources, and a
+    //    declaration the contract does not read), and the promotion check for the
+    //    shapes it can freeze and re-derive.
     const promotion = await lifecycleRefusal(h, content, shape)
-    expect(promotion.message).toContain(`${shape.defect}:`)
+    expect(promotion.message).toContain(shape.lifecycle)
 
-    // Four entries, one code — the property a per-entry check could not prove.
-    expect([admission, load.defects[0]!, capabilityRefusal, promotion.message].every(entry => entry.includes(`${shape.defect}:`))).toBe(true)
+    // Four entries, one code — the property a per-entry check could not prove. The
+    // three consumer entries name the loader's own defect code; the lifecycle entry
+    // names the refusal its own entry produces, which is the code for the shapes it
+    // judges and the candidate door's boundary for the one it never records.
+    expect([admission, load.defects[0]!, capabilityRefusal].every(entry => entry.includes(`${shape.defect}:`))).toBe(true)
 
     // The same refusal through the tool a human decision goes through. A candidate
     // the lifecycle could freeze is refused by `evolution_decide`, which runs the
     // promotion check *before* it asks for approval — so a proposal that cannot be
     // promoted never burns a sign-off. A shape the loader refuses never reaches
-    // that state, and the tool that judges it is `evolution_prepare` itself; both
-    // are driven here the way the loop dispatches them, and neither may ask.
-    const toolCtx = { evolution: h.evolution, approval: h.approval, taskRuntime: h.runtime } as never
-    const toolRefusal = promotion.entry === 'prepare'
-      ? (await defineEvolutionPrepareTool(toolCtx).execute({ proposalId: 's1' }, exec(ROOT_SESSION))) as string
-      : (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
+    // that state, and the tool that judges it is `evolution_prepare` itself; a
+    // candidate that declares another name is refused where a candidate is
+    // recorded. Each is driven here the way the loop dispatches it, and none may
+    // ask the human.
+    const toolCtx = { evolution: h.plane, approval: h.approval, taskRuntime: h.runtime } as never
+    const declaredName = 'declaredName' in shape ? shape.declaredName : SKILL
+    const toolRefusal =
+      promotion.entry === 'candidate'
+        ? (await defineEvolutionCandidateTool(toolCtx).execute(
+            {
+              proposalId: 's1',
+              versionSet: { skill: 'v2' },
+              mutationJson: JSON.stringify({
+                name: SKILL,
+                content: skillText('# the illegal provider, improved', declaredName),
+              }),
+            },
+            exec(ROOT_SESSION),
+          )) as string
+        : promotion.entry === 'prepare'
+          ? (await defineEvolutionPrepareTool(toolCtx).execute({ proposalId: 's1' }, exec(ROOT_SESSION))) as string
+          : (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
     expect(toolRefusal).toContain('rejected:')
-    expect(toolRefusal).toContain(`${shape.defect}:`)
+    expect(toolRefusal).toContain(shape.lifecycle)
     expect(h.approval.request).not.toHaveBeenCalled()
 
     // None of the refusals had a side effect: no row written, no applied record,
@@ -615,7 +664,7 @@ describe('one illegal provider, one defect code, every entry that still judges i
     //    provider it declares itself to be).
     const candidate = skillText('# the candidate the executor can carry', 'verify')
     await skillCandidateGated(h, candidate, 's2', 'verify')
-    const toolCtx = { evolution: h.evolution, approval: h.approval, taskRuntime: h.runtime } as never
+    const toolCtx = { evolution: h.plane, approval: h.approval, taskRuntime: h.runtime } as never
     const decided = (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 's2', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
     expect(decided).toContain('[decided] PROMOTE')
 
@@ -626,9 +675,9 @@ describe('one illegal provider, one defect code, every entry that still judges i
     expect(await readFile(join(h.skillRoot, 'verify', 'SKILL.md'))).toEqual(Buffer.from(candidate, 'utf8'))
 
     // The same candidate with a declaration added to its sandbox is refused at
-    // the promotion entry — the executor writes one file, so the entry names the
-    // boundary instead of reporting a provider production would never receive —
-    // and the human is never asked about it.
+    // the promotion entry — the executor promotes the one object the experiment
+    // evaluated, so a file the frozen identity does not name is refused, and the
+    // human is never asked about it.
     const withSidecar = skillText('# a candidate the executor cannot carry', 'verify')
     await skillCandidateGated(h, withSidecar, 's3', 'verify')
     await writeSkillDirectory(join(h.evolution.root, 'sandbox', 's3', 'skills', 'verify'), 'verify', withSidecar, {
@@ -641,9 +690,9 @@ describe('one illegal provider, one defect code, every entry that still judges i
     const refusedDecide = (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 's3', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
     expect(refusedDecide).toContain('evolution_decide rejected:')
     // The candidate's sandbox holds a file the frozen identity does not name: the
-    // shape boundary answers, because the executor promotes the fixed file set of
-    // one guidance object and the sidecar is not part of the object prepare froze.
-    expect(refusedDecide).toContain('exists in the sandbox, but the content identity recorded at prepare is guidance')
+    // object it now describes is not the guidance object prepare recorded, so the
+    // candidate is refused by its own identity before any provider is judged.
+    expect(refusedDecide).toContain('no longer matches its frozen content identity')
     expect(h.approval.request.mock.calls.length).toBe(approvalsBefore)
     expect((await h.evolution.get('s3')).status).toBe('gated')
     // production still holds exactly what was promoted, and nothing else.

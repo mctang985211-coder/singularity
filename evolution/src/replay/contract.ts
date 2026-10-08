@@ -1,6 +1,7 @@
 import type { McpServerIdentity } from '../capability-candidate.ts'
 import type { RunMcpServerBinding } from '@dangosys/dsh-singularity-task'
 import type { FrozenTaskDefinition } from '../task-definition.ts'
+import type { ExperimentSnapshot } from './snapshot.ts'
 /** The experiment contract: its frozen and reported schema, the comparison verdicts and the digest primitives.
  * @module dsh-singularity-evolution/replay/contract */
 
@@ -193,6 +194,8 @@ export interface OutcomeEvaluationPlan {
   judge: { model: ModelSelection; prompt: string; digest: string }
   /** The complete response when an LLM generated the rubric and commands. */
   generatedResponse?: string
+  /** Authoritative four-bucket usage of the plan generation call. Omitted when unavailable. */
+  generatedUsage?: import('@dangosys/dsh-singularity-task').ReviewTokenUsage
 }
 
 export interface OutcomeMeasurement {
@@ -225,6 +228,8 @@ export interface OutcomeEvaluation {
   response: string
   responseDigest: string
   judgement: OutcomeJudgement
+  /** Authoritative usage of the independent judge; missing means unknown, never free. */
+  judgeUsage?: import('@dangosys/dsh-singularity-task').ReviewTokenUsage
 }
 
 /** One criterion's verdict on one side, with the verifier that decided it (v1's report dropped the verifier identity; every generation since keeps it). */
@@ -445,6 +450,8 @@ export interface FrozenSample {
 /** The identity block fixed before the first run (§F.2). Everything a reader needs to reproduce the comparison. */
 export interface FrozenExperiment {
   proposalId: string
+  /** Server-bound graph scope; graph-local evidence leaves fresh Task transfer unknown without a holdout. */
+  libraryId?: string
   objective?: ExperimentObjective
   evaluation?: OutcomeEvaluationPlan
   /** The repetition index this experiment froze. A higher index is a *different* experiment. */
@@ -461,7 +468,7 @@ export interface FrozenExperiment {
   budget: ExperimentBudget
   samples: FrozenSample[]
   /** The input snapshot both sides' workspaces are built from, and its recursive content digest. */
-  snapshot: { sourceDir: string; digest: string }
+  snapshot: ExperimentSnapshot & { digest: string }
   /** The comparer that produced the report's verdicts. */
   comparerVersion: string
   /** What each side runs under, in words: the candidate's overlay and the baseline's plain configuration. */

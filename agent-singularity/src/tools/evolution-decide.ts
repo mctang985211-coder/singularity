@@ -1,8 +1,9 @@
+import { evolutionForSession } from './evolution-scope.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { GateAnswers } from '@dangosys/dsh-singularity-evolution'
-import { EVOLUTION_DECISIONS } from '@dangosys/dsh-singularity-evolution'
+import { assertDecisionTransition, EVOLUTION_DECISIONS } from '@dangosys/dsh-singularity-evolution'
 import { denialReason, message, sessionId, text } from '../shared.ts'
 
 /** The six verbatim gate questions with their answers, the regression evidence on the third — what the human approves. */
@@ -24,32 +25,36 @@ export function defineEvolutionDecideTool(ctx: Context) {
   return defineTool({
     name: 'evolution_decide',
     description:
-      'Record the model decision for a gated proposal: PROMOTE, REJECT or KEEP_FOR_FURTHER_RESEARCH. PROMOTE rechecks ' +
+      'Settle a proposal with PROMOTE, REJECT or KEEP_FOR_FURTHER_RESEARCH. REJECT and KEEP_FOR_FURTHER_RESEARCH can ' +
+      'conclude an open proposal before gate with a reason in note. PROMOTE requires a gated proposal and rechecks ' +
       'the frozen Task template, Skill or capability candidate and completed experiment. The decision is recorded only ' +
       'after one approval is requested through the native seam — a graph whose RSI settings run without a human resolves ' +
       'it on the spot; evolution_apply handles the production write afterwards.',
     parameters: {
-      proposalId: { type: 'string', required: true, description: 'Gated proposal to decide' },
+      proposalId: { type: 'string', required: true, description: 'Open or gated proposal to decide' },
       decision: { type: 'string', required: true, enum: EVOLUTION_DECISIONS, description: 'Model decision to record' },
-      note: { type: 'string', description: 'Optional rationale attached to the decision record' },
+      note: { type: 'string', description: 'Rationale attached to the decision; required to conclude an ungated proposal' },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
       const caller = sessionId(exec, 'evolution_decide')
+      const evolution = await evolutionForSession(ctx, caller)
       const agent = exec.agent
       if (agent === undefined) throw new Error('evolution_decide: missing agent')
       let proposal
       try {
-        proposal = await ctx.evolution.get(args.proposalId)
+        proposal = await evolution.get(args.proposalId)
       } catch (error) {
         return `evolution_decide rejected: ${message(error)}`
       }
-      if (proposal.status !== 'gated') {
-        return `evolution_decide rejected: proposal ${proposal.proposalId} is ${proposal.status}; only a gated proposal can be decided`
+      try {
+        assertDecisionTransition(proposal, args.decision, args.note)
+      } catch (error) {
+        return `evolution_decide rejected: ${message(error)}`
       }
       if (args.decision === 'PROMOTE') {
         try {
-          await ctx.evolution.checkPromotion(proposal.proposalId)
+          await evolution.checkPromotion(proposal.proposalId)
         } catch (error) {
           return `evolution_decide rejected: ${message(error)}`
         }
@@ -75,7 +80,7 @@ export function defineEvolutionDecideTool(ctx: Context) {
         return `evolution_decide: no decision recorded — ${why}; proposal ${proposal.proposalId} stays ${proposal.status}`
       }
       try {
-        const decided = await ctx.evolution.decide(args.proposalId, args.decision, caller, `approval:${exec.callId}`, args.note)
+        const decided = await evolution.decide(args.proposalId, args.decision, caller, `approval:${exec.callId}`, args.note)
         return [
           `proposal ${decided.proposalId} [decided] ${decided.decision}${decided.decisionNote === undefined ? '' : ` — ${decided.decisionNote}`}`,
           decided.decision === 'PROMOTE'

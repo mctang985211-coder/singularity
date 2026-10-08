@@ -331,8 +331,9 @@ describe('cold recovery closes the loop (A4 §F.1)', () => {
     expect(childRunRecord?.sessionId).toBe(childSession)
     expect(second.runtime.gate.questionsBlocked(childSession)).toBe(true)
     // The question the first process could not deliver reached the parent exactly
-    // once, and the parent's own model request carries it.
-    expect(second.copiesOf(ROOT, recorded!.messageId)).toBe(1)
+    // once, and the parent's own model request carries it. The delivery is the
+    // recovery pass's, so it is awaited rather than assumed landed.
+    await vi.waitFor(() => expect(second.copiesOf(ROOT, recorded!.messageId)).toBe(1), { timeout: 20_000 })
     await vi.waitFor(
       () =>
         expect(
@@ -469,15 +470,10 @@ describe('the crash points of one exchange, reopened (A4-3)', () => {
     })
     await second.root()
     // The recovery barrier's own pass is what delivers it: the identity the first
-    // process reported but did not leave behind is owed, and the pass makes it.
+    // process reported but did not leave behind is owed, and the pass makes it —
+    // the delivery is that pass's, so it is awaited before it is counted.
     await second.adopt()
-    expect(second.copiesOf(ROOT, messageId)).toBe(1)
-    // …and a second activation has nothing left to deliver: the same identity is
-    // present, so no copy is added.
-    const reports = await second.runtime.reconcileStore(STORE)
-    expect(
-      reports.questionDeliveries.filter(delivery => delivery.messageId === messageId).map(delivery => delivery.status),
-    ).toEqual(['already-present'])
+    await vi.waitFor(() => expect(second.copiesOf(ROOT, messageId)).toBe(1), { timeout: 20_000 })
     // One domain effect: one durable copy, and the parent's own request carries
     // the words the first process could not leave behind.
     await vi.waitFor(
@@ -489,6 +485,13 @@ describe('the crash points of one exchange, reopened (A4-3)', () => {
         ).toBe(true),
       { timeout: 20_000 },
     )
+    expect(second.copiesOf(ROOT, messageId)).toBe(1)
+    // …and a second activation, over the Session that has taken it, has nothing
+    // left to deliver: the same identity is present, so no copy is added.
+    const reports = await second.runtime.reconcileStore(STORE)
+    expect(
+      reports.questionDeliveries.filter(delivery => delivery.messageId === messageId).map(delivery => delivery.status),
+    ).toEqual(['already-present'])
     expect(second.copiesOf(ROOT, messageId)).toBe(1)
     await second.dispose()
   }, 60_000)
@@ -509,10 +512,6 @@ describe('the crash points of one exchange, reopened (A4-3)', () => {
     })
     await second.root()
     await second.adopt()
-    const reports = await second.runtime.reconcileStore(STORE)
-    expect(reports.questionDeliveries.filter(delivery => delivery.messageId === messageId)).toEqual([
-      { subject: `question "${questionId}"`, messageId, status: 'already-present' },
-    ])
     // The message survived the restart exactly once — a retry that steered a
     // second copy would show up here as two.
     expect(second.copiesOf(ROOT, messageId)).toBe(1)
@@ -548,6 +547,13 @@ describe('the crash points of one exchange, reopened (A4-3)', () => {
         ).toBe(true),
       { timeout: 20_000 },
     )
+    expect(second.copiesOf(ROOT, messageId)).toBe(1)
+    // A second activation, over the Session that has taken the delivery, has
+    // nothing left to deliver: the same identity is present, so no copy is added.
+    const reports = await second.runtime.reconcileStore(STORE)
+    expect(reports.questionDeliveries.filter(delivery => delivery.messageId === messageId)).toEqual([
+      { subject: `question "${questionId}"`, messageId, status: 'already-present' },
+    ])
     expect(second.copiesOf(ROOT, messageId)).toBe(1)
     await second.dispose()
   }, 60_000)
@@ -594,13 +600,8 @@ describe('the crash points of one exchange, reopened (A4-3)', () => {
       },
     })
     await second.root()
-    // The barrier's pass redelivers what the claim never left behind, and a
-    // second activation finds it present.
+    // The barrier's pass redelivers what the claim never left behind.
     await second.adopt()
-    const reports = await second.runtime.reconcileStore(STORE)
-    expect(
-      reports.questionDeliveries.filter(delivery => delivery.messageId === messageId).map(delivery => delivery.status),
-    ).toEqual(['already-present'])
     await vi.waitFor(
       () =>
         expect(
@@ -611,9 +612,23 @@ describe('the crash points of one exchange, reopened (A4-3)', () => {
       { timeout: 20_000 },
     )
     // The redelivered identity is the one that lands, once: the claim the dead
-    // process made is not a copy, and the history holds exactly one entry.
+    // process made is not a copy, and the history holds exactly one entry. The
+    // entry is durable only once the resumed Session's own write lands, so it is
+    // awaited rather than read straight out of the request that carried it.
+    await vi.waitFor(
+      () => {
+        expect(second.copiesOf(ROOT, messageId)).toBe(1)
+        expect(second.messagesOf(ROOT).filter(message => message.id === messageId)).toHaveLength(1)
+      },
+      { timeout: 20_000 },
+    )
+    // …and a second activation, over the Session that has taken it, finds the
+    // identity present.
+    const reports = await second.runtime.reconcileStore(STORE)
+    expect(
+      reports.questionDeliveries.filter(delivery => delivery.messageId === messageId).map(delivery => delivery.status),
+    ).toEqual(['already-present'])
     expect(second.copiesOf(ROOT, messageId)).toBe(1)
-    expect(second.messagesOf(ROOT).filter(message => message.id === messageId)).toHaveLength(1)
     await second.dispose()
   }, 60_000)
 

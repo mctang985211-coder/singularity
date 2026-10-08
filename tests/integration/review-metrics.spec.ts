@@ -148,6 +148,7 @@ function harness() {
   const task = new TaskService(ctx)
   let verifierResults: VerificationResult[] = []
   ctx.provide('verifier', {
+    verifierIds: () => ['command', 'composite', 'review'],
     verifyRun: async (storeId: string, runId: string): Promise<EvidenceBundle> => {
       const run = await task.runIn(storeId, runId)
       const instance = await task.taskIn(storeId, run.taskId)

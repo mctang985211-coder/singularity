@@ -46,8 +46,9 @@ describe('EvolutionService mutation schemas', () => {
   it('accepts the skill mutation — the only candidate mutation this build admits', async () => {
     const svc = await service()
     await svc.propose(skillProposal, 'root-1')
-    await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: 'new SKILL.md text' })
-    expect((await svc.get('s1')).mutation).toEqual({ name: 'verify', content: 'new SKILL.md text' })
+    const content = skillText('new SKILL.md text')
+    await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content })
+    expect((await svc.get('s1')).mutation).toEqual({ name: 'verify', content })
   })
 
   it.each([

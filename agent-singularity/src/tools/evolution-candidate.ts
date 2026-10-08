@@ -1,3 +1,4 @@
+import { evolutionForSession } from './evolution-scope.ts'
 import { createHash } from 'node:crypto'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
@@ -37,6 +38,7 @@ export function defineEvolutionCandidateTool(ctx: Context) {
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
       const caller = sessionId(exec, 'evolution_candidate')
+      const evolution = await evolutionForSession(ctx, caller)
       const versions = args.versionSet as Record<string, unknown>
       try {
         const mutation = JSON.parse(args.mutationJson) as unknown
@@ -72,7 +74,7 @@ export function defineEvolutionCandidateTool(ctx: Context) {
             content: { skillMdSha256: createHash('sha256').update(skill.content).digest('hex'), resources: [] },
           }
         }
-        const proposal = await ctx.evolution.candidate(
+        const proposal = await evolution.candidate(
           args.proposalId,
           versions as Record<string, string>,
           caller,

@@ -6,9 +6,9 @@ export function setupPromptText(graphId: string, env: EnvRecord): string {
   const present = env.components.filter(component => component.status !== 'installing')
   const names = (components: typeof env.components) =>
     components.map(component => `${component.owner}/${component.repo}`).join(', ')
-  const presentLine = present.length === 0 ? '' : `\nAlready present (do not reinstall): ${names(present)}.`
+  const presentLine = present.length === 0 ? '' : `\nAlready present: ${names(present)}.`
   return `Set up Singularity graph ${graphId}. Environment ${env.id} is at ${env.path}.
 Planned repositories: ${names(pending) || '(none)'}.${presentLine}
 
-This setup work is not the graph's goal: the goal is the user's own objective, and when the user states it, accept it with task_intake — before that the graph has no root task, so task_read reports the session as not activated and there is nothing to decompose. For each planned repository, delegate installation and registration to a worker with graph_spawn — never with task_decompose, which only has a task to work on once a root contract has been accepted. The worker must install it with bash according to the repository instructions and then call env_register_component. If a worker needs human input, you may use hitl_ask or hitl_approve. When all setup workers complete successfully, call graph_mark_ready. If there are no planned repositories, call graph_mark_ready immediately.`
+Install and register planned repositories through graph_spawn, then call graph_mark_ready. An empty workspace is ready immediately. After setup, explore the user's objective and measures, read this graph's task_library, and establish the task_intake contract for this execution. Record useful goals, decomposition paths and experience as TaskTemplates or Skills in the graph library; the supervisor reviews them during iteration.`
 }

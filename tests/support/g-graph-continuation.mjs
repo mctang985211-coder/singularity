@@ -245,6 +245,19 @@ singularityContext[Service.init]()
 // graph that declares `rsi` settings (this one does not).
 const singularity = new SingularityAgent(ctx, { evolution: 'off' })
 await singularity[Service.init]()
+// The rest of the root's core tool plane (`agent-runtime`'s `ROOT_CORE_TOOLS`):
+// a real bundle mounts these, and the root's own `tools.restrict` is fail-closed
+// on a declared name the composition does not offer. This fixture's model never
+// calls them, so they stand in for the composition's shape.
+for (const name of ['glob', 'grep', 'edit', 'bash', 'job_list', 'job_output', 'job_kill']) {
+  ctx.tools.register({
+    name,
+    description: `tool ${name}`,
+    parameters: { type: 'object', properties: {} },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    execute: async () => `${name}: fixture answer`,
+  })
+}
 ctx.tools.register({
   name: 'skill',
   description: 'Read the task execution method selected by this Task.',

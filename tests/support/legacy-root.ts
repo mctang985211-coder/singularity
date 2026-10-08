@@ -120,7 +120,11 @@ export async function seedLegacyRoot(seed: LegacyRootSeed): Promise<{ taskId: st
   }
   const taskId = `t-${randomUUID()}`
   const runId = `r-${randomUUID()}`
-  const table = { ...TASK_GUIDANCE, ...(seed.capabilities ?? runtime.listCapabilities()) }
+  // The table the session's own admission resolves against, not the deployment's
+  // raw configuration: a session's effective table is its graph library's rows
+  // merged over the configured ones (`TaskRuntime.capabilitiesForSession`), and
+  // the provider pre-check below is asked for exactly this session.
+  const table = { ...TASK_GUIDANCE, ...(seed.capabilities ?? await runtime.capabilitiesForSession(rootSessionId)) }
   const manifest = resolveCapabilities(RootTaskSpec.requiredCapabilities, table)
   const contract = {
     contractVersion: 1 as const,

@@ -16,7 +16,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { DEFAULT_ROOT, type GraphEvent } from '@dangosys/dsh-singularity-graph'
-import { applySkillRoots, applyWorkerGrant } from './grants.ts'
+import { installGraphSkillCatalog, applyWorkerGrant, type GraphSkillCatalogOptions } from './grants.ts'
 import { fileURLToPath } from 'node:url'
 import { ensureAgentMessageDelivered, readToolCallBody, reconcileAgentMessageDeliveries } from './messages.ts'
 import type {
@@ -341,6 +341,15 @@ export class AgentRuntime extends Service {
   }
 
   async prompt(agent: Agent, prompt: readonly ContentBlock[]): Promise<void> {
+    await this.deliverPrompt(agent, prompt, false)
+  }
+
+  /** Deliver a goal submitted through the host's graph creation API as user input. */
+  async promptUser(agent: Agent, prompt: readonly ContentBlock[], context?: readonly ContentBlock[]): Promise<void> {
+    await this.deliverPrompt(agent, prompt, true, context)
+  }
+
+  private async deliverPrompt(agent: Agent, prompt: readonly ContentBlock[], user: boolean, context?: readonly ContentBlock[]): Promise<void> {
     if (this.closing) throw new Error('agent-runtime: closing')
     this.live(agent)
     const scope = this.scope(agent.id)
@@ -350,7 +359,8 @@ export class AgentRuntime extends Service {
       throw new Error(`agent-runtime: agent "${agent.id}" is not in graph`)
     }
     this.live(agent)
-    agent.followup(createUserMessage({ content: [...prompt], source: runtimePrompt('prompt') }))
+    if (context !== undefined) agent.inject(createUserMessage({ content: [...context], source: runtimePrompt('prompt') }))
+    agent.followup(createUserMessage({ content: [...prompt], source: user ? { kind: 'user' } : runtimePrompt('prompt') }))
   }
 
   /** Read back the body of a `tool/call` a question or answer cites, flushing the sender first (A4 §F.1). */
@@ -446,6 +456,8 @@ const EVOLUTION_TOOLS = [
 
 /** The tools every root may call whatever the deployment's evolution switch says (README Design notes). */
 const ROOT_CORE_TOOLS = [
+  'read', 'glob', 'grep', 'write', 'edit', 'bash', 'job_list', 'job_output', 'job_kill',
+  'task_library',
   'graph_spawn',
   'graph_mark_ready',
   'hitl_ask',
@@ -493,8 +505,29 @@ function sealRootTools(agentCtx: Context, enabled: boolean): void {
   agentCtx.tools.guard(execution =>
     allowed.has(execution.name)
       ? undefined
-      : 'singularity: the root coordinates through task tools; delegate engineering work with task_decompose',
+      : 'singularity: use the root execution tools and task_decompose for delegated task work',
   )
+}
+
+interface TaskLibrariesLike {
+  libraryForRoot(id: string): Promise<{ skillRoot: string }>
+  libraryForSession?(id: string): Promise<{ skillRoot: string }>
+  libraryRead?(id: string): ReturnType<NonNullable<GraphSkillCatalogOptions['readLibrary']>>
+}
+
+async function graphCatalogFor(ctx: Context, agent: Agent, root: boolean): Promise<GraphSkillCatalogOptions> {
+  const libraries = ctx.get('taskRuntime') as TaskLibrariesLike | undefined
+  // Setup precedes publication of the child graph node. Its durable parent
+  // already belongs to this graph; later catalog reads use the published child.
+  const ownerSessionId = root ? agent.id : agent.session.header?.parentSession ?? agent.id
+  const library = libraries === undefined ? undefined : root
+    ? await libraries.libraryForRoot(agent.id)
+    : await libraries.libraryForSession?.(ownerSessionId)
+  return {
+    skillRoots: [library?.skillRoot ?? fileURLToPath(new URL('../skills/', import.meta.url))],
+    ...(libraries?.libraryRead === undefined || library === undefined ? {}
+      : { readLibrary: () => libraries.libraryRead!(agent.id) }),
+  }
 }
 
 /** Compose one root's scoped world; `createRoot` and `resumeRoot` both hand this to the agent factory. */
@@ -507,10 +540,7 @@ function rootSetup(ctx: Context, agentPreset: string): AgentSetup {
     const evolution = evolutionEnabled(ctx)
     agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
     agentCtx.tools.restrict({ allow: rootToolsFor(evolution) })
-    await applySkillRoots(agentCtx, {
-      capabilities: [], baseline: [], keepPresetTools: false,
-      skillRoots: [fileURLToPath(new URL('../skills/', import.meta.url))],
-    })
+    await installGraphSkillCatalog(agentCtx, await graphCatalogFor(ctx, agent, true))
     sealRawSessionReads(agentCtx)
     sealRootTools(agentCtx, evolution)
   }
@@ -538,7 +568,11 @@ function workerSetup(ctx: Context, role: WorkerRole): AgentSetup {
         interpolate: false,
       })
     }
-    if (role.grant !== undefined) await applyWorkerGrant(agentCtx, agent, role.grant)
+    if (role.grant !== undefined)
+      await applyWorkerGrant(agentCtx, agent, role.grant, role.coordinationRole === 'supervisor'
+        ? await graphCatalogFor(ctx, agent, false) : undefined)
+    else if (role.coordinationRole === 'supervisor')
+      await installGraphSkillCatalog(agentCtx, await graphCatalogFor(ctx, agent, false))
     sealRawSessionReads(agentCtx)
     sealNativeDelegation(agentCtx)
   }

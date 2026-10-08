@@ -292,7 +292,7 @@ export async function submitProposalOnce(
             proposal: stored,
             parentTask,
             batch: storedBatch,
-            manifests: self.manifestsOf(storedBatch, callerSessionId),
+            manifests: await self.manifestsOf(storedBatch, callerSessionId),
           })
         : undefined
     return {
@@ -310,15 +310,6 @@ export async function submitProposalOnce(
    *     may propose one, and the batch has to clear every admission rule. Two
    */
   await self.assertDecomposableRun(storeId, parentTask, parentRun, callerSessionId, options.exec?.signal)
-  const inFlight = await self.inFlightProposalsOf(storeId, parentRunId)
-  if (inFlight.length > 0) {
-    const held = inFlight[0]!
-    throw new Error(
-      `task-runtime: run "${parentRunId}" already has a proposal in flight — "${held.proposalId}" is ${held.status}; ` +
-        'a run has at most one batch proposal at a time, so continue that one (or withdraw it with task_proposal_cancel) ' +
-        'rather than proposing a second, and nothing was recorded',
-    )
-  }
   const checked = await self.checkDerivedBatch({
     identity,
     parentTask,

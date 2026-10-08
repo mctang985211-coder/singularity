@@ -1,6 +1,6 @@
 /** The task template library: JSON files, pinned references and parameter binding before normal admission. */
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { canonicalize, taskTemplateDigest, parseCatalogPath, parseTemplateScope, catalogPathWithin } from '@dangosys/dsh-singularity-task'
 import type {
@@ -120,7 +120,7 @@ export async function registerTaskTemplate(root: string, input: TaskTemplate): P
 }
 
 /** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery. */
-export async function findTaskTemplates(root: string | undefined, query?: string, scope?: TemplateScope): Promise<TaskTemplateMatch[]> {
+export async function findTaskTemplates(root: string | undefined, query?: string, scope?: TemplateScope, includeRetired = false): Promise<TaskTemplateMatch[]> {
   if (root === undefined) return []
   let files: string[]
   try {
@@ -129,12 +129,20 @@ export async function findTaskTemplates(root: string | undefined, query?: string
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw error
   }
+  const retired = new Set<string>()
+  if (!includeRetired) {
+    try {
+      const index = JSON.parse(await readFile(join(dirname(root), 'index.json'), 'utf8'))
+      for (const item of index.tasks ?? []) if (item.status === 'retired') retired.add(`${item.templateRef.id}@${item.templateRef.version}`)
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  }
   const newest = new Map<string, TaskTemplateMatch>()
   for (const file of files.filter(file => file.endsWith('.json')).sort()) {
     const template = parseTaskTemplate(JSON.parse(await readFile(join(root, file), 'utf8')))
     if (file !== `${template.id}@${template.version}.json`) {
       throw new Error(`task-template: ${file} must be named ${template.id}@${template.version}.json`)
     }
+    if (retired.has(`${template.id}@${template.version}`)) continue
     const previous = newest.get(template.id)
     if (previous === undefined || previous.template.version < template.version) {
       newest.set(template.id, {
@@ -176,7 +184,7 @@ export async function bindTaskTemplate<T extends TaskContractInput>(root: string
 /** The same exact reference, parameter and visibility checks bind contracts and direct-child proposals. */
 async function readBinding(root: string | undefined, spec: TaskContractInput, scope?: TemplateScope) {
   const ref = spec.templateRef!
-  const template = await readReferencedTemplate(root, ref, scope)
+  const template = await readReferencedTemplate(root, ref, scope, true)
   for (const field of ['objective', 'acceptanceCriteria', 'assumptions', 'constraints', 'requiredCapabilities']) {
     if (Object.hasOwn(spec, field)) throw new Error(`task-template: ${field} cannot override a template contract`)
   }
@@ -212,12 +220,19 @@ async function readBinding(root: string | undefined, spec: TaskContractInput, sc
 }
 
 /** Exact lookup and binding share reference, content and caller-authority checks. */
-async function readReferencedTemplate(root: string | undefined, ref: TaskTemplateRef, scope?: TemplateScope): Promise<TaskTemplate> {
+async function readReferencedTemplate(root: string | undefined, ref: TaskTemplateRef, scope?: TemplateScope, forBinding = false): Promise<TaskTemplate> {
   if (root === undefined) throw new Error('task-template: taskTemplatesRoot is not configured')
   if (!isPlainObject(ref) || !validId(ref.id) || !Number.isSafeInteger(ref.version) || ref.version < 1 ||
     typeof ref.digest !== 'string' || !/^[a-f0-9]{64}$/.test(ref.digest) ||
     Object.keys(ref).some(key => !['id', 'version', 'digest'].includes(key))) {
     throw new Error('task-template: templateRef requires id, positive version and SHA-256 digest')
+  }
+  if (forBinding) {
+    try {
+      const index = JSON.parse(await readFile(join(dirname(root), 'index.json'), 'utf8'))
+      if ((index.tasks ?? []).some((item: { templateRef: TaskTemplateRef; status: string }) => item.templateRef.id === ref.id && item.templateRef.version === ref.version && item.status === 'retired'))
+        throw new Error('task-template: this version is retired; choose a current reusable template or author the next contract')
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
   const template = parseTaskTemplate(JSON.parse(await readFile(join(root, `${ref.id}@${ref.version}.json`), 'utf8')))
   if (!templateVisible(template.catalogPath, scope)) throw new Error('task-template: templateRef is outside the caller templateScope')
@@ -290,8 +305,8 @@ export async function taskTemplatePage(root: string | undefined, request: TaskTe
     categories.set(key, entry)
   }
   const catalog = [...categories.values()].sort((a, b) => a.catalogPath.join('/').localeCompare(b.catalogPath.join('/')))
-  // Before root intake, browse category summaries first; select a branch to inspect its templates.
-  const summaries = scope === undefined && path === undefined ? [] : filtered.map(({ templateRef, template }) => ({
+  // A graph library is small and local: finite summaries are visible immediately, with optional explicit scope.
+  const summaries = filtered.map(({ templateRef, template }) => ({
     templateRef, catalogPath: template.catalogPath, appliesTo: template.appliesTo.slice(0, 3).map(text => text.slice(0, 300)),
     objective: template.contract.objective.slice(0, 500), parameters: Object.keys(template.parametersSchema.properties).slice(0, 12),
     decomposition: template.decomposition !== undefined,
@@ -307,4 +322,21 @@ export async function taskTemplatePage(root: string | undefined, request: TaskTe
     page.entries.pop()
   }
   return page
+}
+
+/** Freeze the complete catalog for a replay; immutable older refs in recipes remain available. */
+export async function snapshotTaskTemplates(root: string | undefined, target: string): Promise<void> {
+  await mkdir(target, { recursive: true })
+  if (root === undefined) return
+  let files: string[]
+  try { files = await readdir(root) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+  for (const file of files.filter(file => file.endsWith('.json'))) {
+    const template = parseTaskTemplate(JSON.parse(await readFile(join(root, file), 'utf8')))
+    if (file !== `${template.id}@${template.version}.json`) throw new Error(`task-template: invalid file ${file}`)
+    await registerTaskTemplate(target, template)
+  }
+  try {
+    const index = await readFile(join(dirname(root), 'index.json'), 'utf8')
+    await writeFile(join(dirname(target), 'index.json'), index, { flag: 'wx' })
+  } catch (error) { if (!['ENOENT', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error }
 }

@@ -6,6 +6,8 @@ import { taskContractIdentity } from '@dangosys/dsh-singularity-task'
 
 import type { TaskRuntime } from './runtime.ts'
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
+import { snapshotTaskTemplates } from '../task-template.ts'
 import type { TaskContract, TaskId, TaskInstance } from '@dangosys/dsh-singularity-task'
 import { TASK_CONTRACT_VERSION } from '@dangosys/dsh-singularity-task'
 import { resolveCapabilities, resolvePreset } from '../capability.ts'
@@ -19,6 +21,7 @@ import { WorkspaceBusyError, describeOwner, normalizeWorkspacePath, releaseLayer
 import type { WorkspaceOwner } from '../workspace.ts'
 import type { ReplayTaskOptions } from '../types.ts'
 import { now } from '../helpers.ts'
+import { rebaseWorkspacePaths } from '../replay-paths.ts'
 
 export async function replayTask(
   self: TaskRuntime,
@@ -43,13 +46,18 @@ export async function replayTask(
   // champion run the replay's own run descends from (execution lineage).
   const championRunId = champion.runIds[champion.runIds.length - 1]!
   const championRun = await self.context.task.runIn(storeId, championRunId)
-  const taskTemplatesRoot = options.overlay?.taskTemplatesRoot ?? championRun.taskTemplatesRoot ?? self.taskTemplatesRootFor(callerSessionId)
-  const effective = options.contract ?? {
+  let taskTemplatesRoot = options.overlay?.taskTemplatesRoot ?? championRun.taskTemplatesRoot ?? await self.taskTemplatesRootFor(callerSessionId)
+  const original = options.contract ?? {
     objective: champion.objective,
     acceptanceCriteria: champion.acceptanceCriteria,
     requiredCapabilities: champion.requestedCapabilities,
   }
-  const table = { ...self.config.capabilities, ...(options.overlay?.capabilityOverrides ?? {}) }
+  const named = options.workspace === undefined ? undefined : await normalizeWorkspacePath(options.workspace.path)
+  const effective = options.workspace?.rebaseFrom === undefined ? original
+    : rebaseWorkspacePaths(original, options.workspace.rebaseFrom, named!)
+  const context = options.workspace?.rebaseFrom === undefined ? champion.contract
+    : rebaseWorkspacePaths(champion.contract, options.workspace.rebaseFrom, named!)
+  const table = { ...await self.capabilitiesForSession(callerSessionId), ...(options.overlay?.capabilityOverrides ?? {}) }
   const mcpRegistry = parseMcpServerRegistry({ ...self.config.mcpServers, ...options.overlay?.mcpServers })
   const manifest = resolveCapabilities(effective.requiredCapabilities, table, mcpRegistry)
   if (manifest.missing.length > 0) {
@@ -61,7 +69,6 @@ export async function replayTask(
    * The checkout this replay's everything resolves against: the workspace the
    * caller named, resolved to its real path first so the claim, the cwd and the
    */
-  const named = options.workspace === undefined ? undefined : await normalizeWorkspacePath(options.workspace.path)
   const envPath = named ?? (await self.envPathForSession(callerSessionId))
   /**
    * The same provider pre-check the ordinary decomposition runs (S1-C item 1),
@@ -71,10 +78,11 @@ export async function replayTask(
     Object.keys(manifest.capabilities),
     {
       ...(envPath === undefined ? {} : { cwd: envPath }),
-      ...(options.overlay?.extraSkillRoots === undefined ? {} : { extraRoots: [...options.overlay.extraSkillRoots] }),
+      extraRoots: (await self.skillViewForSession(callerSessionId, options.overlay?.extraSkillRoots)).extraRoots,
     },
     table,
     mcpRegistry,
+    callerSessionId,
   )
   const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities))
   if (refusals.length > 0) {
@@ -112,8 +120,8 @@ export async function replayTask(
     contractVersion: TASK_CONTRACT_VERSION,
     objective: `[${options.lineage}] ${effective.objective}`,
     acceptanceCriteria: structuredClone([...fixed.criteria]),
-    assumptions: [...(champion.contract?.assumptions ?? [])],
-    constraints: [...(champion.contract?.constraints ?? [])],
+    assumptions: [...(context?.assumptions ?? [])],
+    constraints: [...(context?.constraints ?? [])],
     requiredCapabilities: [...effective.requiredCapabilities],
     ...(champion.contract?.templateScope === undefined ? {} : { templateScope: structuredClone(champion.contract.templateScope) }),
   }
@@ -130,6 +138,11 @@ export async function replayTask(
     childTaskIds: [],
     contract,
     ...(champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}),
+  }
+  if (options.overlay?.taskTemplatesRoot === undefined) {
+    const frozenCatalog = join(self.config.runBindingRoot!, 'replay-libraries', task.taskId, 'task-templates')
+    await snapshotTaskTemplates(taskTemplatesRoot, frozenCatalog)
+    taskTemplatesRoot = frozenCatalog
   }
   const spawn = options.spawn !== false
   /**

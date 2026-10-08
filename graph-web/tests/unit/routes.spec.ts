@@ -93,6 +93,45 @@ const emptySnapshot = {
 }
 
 describe('singularity console routes', () => {
+  it('reads Evolution from the requested graph regardless of selected graph and refuses unknown graphs', async () => {
+    const plane = { forSession: vi.fn(async (root: string) => ({
+      list: async () => [{ proposalId: `proposal-${root}` }], experiments: async () => [],
+      get: async (id: string) => ({ proposalId: id, owner: root }),
+    })) }
+    const { ctx, handlers } = mockCtx({
+      evolution: plane,
+      graphs: {
+        current: async () => ({ rootSessionId: 'selected-root' }),
+        get: async (id: string) => {
+          if (id === 'unknown') throw new Error('graphs: unknown graph')
+          return { rootSessionId: `${id}-root` }
+        },
+      },
+    })
+    apply(ctx as never)
+    const res = mockRes()
+    await handlers.get('/singularity/evolution')!(mockReq('GET', '/singularity/evolution?graphId=graph-b'), res as never)
+    expect(json(res)).toEqual({ proposals: [{ proposalId: 'proposal-graph-b-root' }], experiments: [] })
+    const detail = mockRes()
+    await handlers.get('/singularity/evolution/*')!(mockReq('GET', '/singularity/evolution/p-b?graphId=graph-b'), detail as never)
+    expect(json(detail)).toEqual({ proposal: { proposalId: 'p-b', owner: 'graph-b-root' } })
+    const before = plane.forSession.mock.calls.length
+    const missing = mockRes()
+    await handlers.get('/singularity/evolution')!(mockReq('GET', '/singularity/evolution?graphId=unknown'), missing as never)
+    expect(missing.statusCode).toBe(400)
+    expect(plane.forSession.mock.calls).toHaveLength(before)
+  })
+
+  it('serves the requested graph library with its root identity', async () => {
+    const libraryRead = vi.fn(async (root: string) => ({ id: root, tasks: [], skills: [] }))
+    const { ctx, handlers } = mockCtx({ graphs: { get: async (id: string) => ({ rootSessionId: `${id}-root` }) }, taskRuntime: { libraryRead } })
+    apply(ctx as never)
+    const res = mockRes()
+    await handlers.get('/singularity/graphs/*')!(mockReq('GET', '/singularity/graphs/graph-b/library'), res as never)
+    expect(json(res)).toEqual({ id: 'graph-b-root', tasks: [], skills: [] })
+    expect(libraryRead).toHaveBeenCalledExactlyOnceWith('graph-b-root')
+  })
+
   it('GET /singularity/task serves the native snapshot and answers 404 for an unknown store', async () => {
     const { ctx, handlers } = mockCtx({
       task: {

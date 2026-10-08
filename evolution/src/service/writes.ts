@@ -14,7 +14,7 @@ export async function objectWriteRefusal(intent: CommitIntentView): Promise<stri
     try { entries = await readdir(at, { withFileTypes: true }) }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
-      throw error
+      return `${at} cannot be read to check what it holds`
     }
     for (const entry of entries) {
       const path = prefix + entry.name

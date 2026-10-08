@@ -1,10 +1,11 @@
 import { assertMcpServerIdentity, assertCapabilityRow, capabilityRowDigest } from '../capability-candidate.ts'
 import { assertTemplateIdentity } from '../task-definition.ts'
 import { resourceIdentities } from '../ledger/records.ts'
+import { normalizeSnapshot } from './snapshot.ts'
 /** The experiment comparer and the schema validators the report read path runs.
  * @module dsh-singularity-evolution/replay/comparer */
 
-import { isHex64, isRecord } from '../shared.ts'
+import { assertSegment, isHex64, isRecord } from '../shared.ts'
 import { assertOutcomeEvaluation, assertOutcomeMeasurements, assertOutcomePlan } from './outcome.ts'
 import type {
   ExperimentAdmissionRefusal,
@@ -152,6 +153,7 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
   if (typeof value.proposalId !== 'string' || value.proposalId.length === 0) {
     throw new Error('evolution: experiment report frozen.proposalId must be a non-empty string')
   }
+  if (value.libraryId !== undefined) assertSegment(value.libraryId, 'frozen.libraryId')
   if (value.objective !== undefined && value.objective !== 'tool-call-reduction' && value.objective !== 'llm-outcome') {
     throw new Error('evolution: experiment report frozen.objective must be tool-call-reduction or llm-outcome')
   }
@@ -200,6 +202,7 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
       'evolution: experiment report frozen.snapshot must be { sourceDir, digest } with a SHA-256 content digest',
     )
   }
+  normalizeSnapshot(value.snapshot as unknown as import('./snapshot.ts').ExperimentSnapshot)
   if (value.comparerVersion !== EXPERIMENT_COMPARER_VERSION) {
     throw new Error(
       `evolution: experiment report frozen.comparerVersion must be "${EXPERIMENT_COMPARER_VERSION}" — ` +
@@ -220,7 +223,10 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
   }
   const taskIds = new Set<string>()
   value.samples.forEach((sample, index) =>
-    assertFrozenSample(sample, `frozen.samples[${index}]`, taskIds, value.capability !== undefined || value.taskDefinition !== undefined),
+    assertFrozenSample(sample, `frozen.samples[${index}]`, taskIds,
+      value.capability !== undefined || value.taskDefinition !== undefined ||
+      (value.candidate !== undefined && value.productionBaseline === undefined &&
+        isRecord(sample) && sample.candidateProvider !== undefined)),
   )
   const roles = value.samples.map(sample => (sample as FrozenSample).role)
   const requiredRole = value.objective !== undefined ? 'observed-success' : 'observed-failure'
@@ -230,9 +236,9 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
       `evolution: an experiment frozen block needs at least one ${requiredRole} sample and no ${incompatibleRole} samples for its objective`,
     )
   }
-  if (!roles.includes('holdout')) {
+  if (!roles.includes('holdout') && (value.libraryId === undefined || value.capability !== undefined)) {
     throw new Error(
-      'evolution: an experiment frozen block needs at least one holdout sample (§F.2: the candidate must not be selected on every case)',
+      'evolution: shared publication or a shared capability change needs at least one holdout sample',
     )
   }
 }
@@ -768,7 +774,7 @@ export function assertExperimentReport(report: unknown): asserts report is Exper
     if (input.frozenDigest !== report.frozenDigest || canonicalJson(input.plan) !== canonicalJson(frozen.evaluation) ||
         canonicalJson(input.samples) !== canonicalJson(samples))
       throw new Error('evolution: saved judge input differs from this experiment’s frozen plan or side facts')
-    assertOutcomeMeasurements(input.measurements, samples, frozen.evaluation!)
+    assertOutcomeMeasurements(input.measurements, samples, frozen.evaluation!, frozen.snapshot.rebaseFrom)
   }
   if (frozen.proposalId !== report.proposalId) {
     throw new Error(

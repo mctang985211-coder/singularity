@@ -295,7 +295,7 @@ describe('task_read', () => {
 describe('capability_list', () => {
   it('shows registered servers even before a capability grants them', async () => {
     const { ctx } = await fixture()
-    ctx.taskRuntime.listCapabilities.mockReturnValue({})
+    ctx.taskRuntime.capabilitiesForSession.mockResolvedValue({})
     ctx.taskRuntime.listMcpServers.mockReturnValue({ echo: { serverName: 'echo-fixture', description: 'Echo service', command: 'node' } })
     const result = await defineCapabilityListTool(ctx as never).execute({}, exec('root-1'))
     expect(result).toContain('registered MCP servers (1):')
@@ -306,7 +306,7 @@ describe('capability_list', () => {
     const { ctx } = await fixture()
     const tool = defineCapabilityListTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
-    expect(ctx.taskRuntime.listCapabilities).toHaveBeenCalledOnce()
+    expect(ctx.taskRuntime.capabilitiesForSession).toHaveBeenCalledExactlyOnceWith('root-1')
     expect(result).toContain(`capabilities (${Object.keys(RENDER_TABLE).length}):`)
     expect(result).toContain(
       '- design-ball — tools: [filesystem → read, write, edit; bash → bash] skills: [ball-align]',
@@ -330,7 +330,7 @@ describe('capability_list', () => {
     // (A2): `context_read` is the reference reader a worker gets instead.
     expect(result).toContain(
       'task machinery: task_read, task_status, context_read, task_decompose, task_submit_result, task_cancel, task_verify, capability_list, task_template_list, ' +
-        'task_proposal_read, task_proposal_continue, task_proposal_cancel',
+        'task_library, task_proposal_read, task_proposal_continue, task_proposal_cancel, task_ask_parent, task_answer',
     )
     expect(result).toContain('baseline labels: filesystem, bash, jobs, search, skill, ask-user;')
     expect(result).not.toContain('session-history')
@@ -345,7 +345,7 @@ describe('capability_list', () => {
 
   it('flags a label outside the vocabulary instead of resolving it silently', async () => {
     const { ctx } = await fixture()
-    ctx.taskRuntime.listCapabilities.mockReturnValue({ broken: { tools: ['filesystem', 'filesytem'] } })
+    ctx.taskRuntime.capabilitiesForSession.mockResolvedValue({ broken: { tools: ['filesystem', 'filesytem'] } })
     const tool = defineCapabilityListTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(result).toContain(
@@ -355,7 +355,7 @@ describe('capability_list', () => {
 
   it('renders the provider verdict of every declared skill under its capability row', async () => {
     const { ctx } = await fixture()
-    ctx.taskRuntime.listCapabilities.mockReturnValue(structuredClone(RENDER_TABLE))
+    ctx.taskRuntime.capabilitiesForSession.mockResolvedValue(structuredClone(RENDER_TABLE))
     const tool = defineCapabilityListTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
 

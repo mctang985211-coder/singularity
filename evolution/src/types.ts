@@ -346,6 +346,8 @@ export interface ListFilter {
 
 /** Plugin config; every field optional — the constructor resolves defaults. */
 export interface Config {
+  /** Graph library identity supplied by the server when it constructs a scoped service. */
+  libraryId?: string
   /** Directory of the ledger file `proposals.jsonl`; sandboxes materialize under it. Defaults to `$DSH_HOME/evolution`. */
   root?: string
   /** Production skill root — champion snapshots read from here; apply/rollback write here. Defaults to `$DSH_HOME/skills`. */
@@ -360,4 +362,6 @@ export interface Config {
   capabilityConfig?: string
   /** The typed test seam of the capability-config write (A6), the same shape as the commit probe. */
   capabilityConfigProbe?: (stage: 'before-write' | 'staged' | 'written', row: string) => void
+  /** Task template catalog root for this graph's library. When omitted the task-runtime default is used. */
+  taskTemplatesRoot?: string
 }

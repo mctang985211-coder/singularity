@@ -33,7 +33,6 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
     const child = await h.task.taskIn(STORE, outcomes[0]!.taskId)
     expect(child.contract).toEqual({
       contractVersion: 1,
-      templateScope: [],
       objective: 'child a',
       acceptanceCriteria: [
         {
@@ -43,6 +42,9 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
           requiredEvidence: [],
           mandatory: true,
           command: 'true',
+          // The judge an absent `verifierRef` resolves to for this mode: the
+          // normalized contract carries it, so the digest covers it.
+          verifierRef: 'command',
         },
       ],
       assumptions: ['a cycle-accurate reference model exists'],
@@ -66,7 +68,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
     // The runtime writes the same batch identity the pure normalization entry
     // computes for the same proposal and parent — the ids it minted per child
     // are not part of it.
-    const expected = normalizeDecomposition({ ...spec, children: spec.children!.map(child => ({ ...child, templateScope: [] })) }, {
+    const expected = normalizeDecomposition(spec, {
       storeId: STORE,
       parentTaskId: rootTaskId,
       parentRunId: rootRunId,

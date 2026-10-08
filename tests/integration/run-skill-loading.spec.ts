@@ -9,14 +9,17 @@ import { disposeRunStacks, startRunStack, writeKnowledgeSkill } from '../support
  * S1-C acceptance: "loading an unselected skill does not widen a worker's tool
  * permissions".
  *
- * The run's capability grant authorizes; a skill body is content. DSH has no
- * per-agent skill *hiding* (`agent-runtime/src/grants.ts` names that boundary), so
- * the unselected skill really is reachable from the deployment catalog — through
- * the real `skill` loader, mounted here as `tool-skill` registers it. What the
- * grant owns is the tool plane, and that is what this spec reads back twice: from
- * the registry's own view of the worker's composition, and from actual dispatches
- * — before and after the load, and after a second attempt at a tool the worker was
- * never granted.
+ * The run's capability grant authorizes; a skill body is content. The grant owns
+ * both planes of a worker (`agent-runtime/src/grants.ts`): the tool surface is
+ * restricted to the capability's labels plus the baseline, and the worker's own
+ * catalog is an isolated registry holding exactly its Run's frozen grant skills,
+ * so the deployment catalog's other skills are not in this worker's catalog at
+ * all. The unselected skill is therefore not merely ungranted here: the worker's
+ * real `skill` loader refuses it by name, while the deployment's own registry
+ * still holds it. What the grant owns is also the tool plane, and that is what
+ * this spec reads back twice: from the registry's own view of the worker's
+ * composition, and from actual dispatches — before and after the refused load, and
+ * after a second attempt at a tool the worker was never granted.
  *
  * What is real: the store, admission, the pre-check, the run binding and snapshot,
  * the real `AgentRuntime.spawn`, the real skill registry with the filesystem
@@ -73,7 +76,7 @@ function rootContract(objective: string): RootContractSpec {
 }
 
 describe('an unselected skill and a worker\'s tool plane (S1-C)', () => {
-  it('loads the deployment catalog skill without moving a single tool the grant did not give', async () => {
+  it('refuses the deployment catalog skill to a granted worker without moving a single tool the grant did not give', async () => {
     const capabilities: Record<string, CapabilityConfig> = { [ROW]: { skills: [GRANTED], tools: ['filesystem', 'bash'] } }
     const h = await startRunStack({
       capabilities,
@@ -126,15 +129,18 @@ describe('an unselected skill and a worker\'s tool plane (S1-C)', () => {
     expect(denied.isError).toBe(true)
     expect(denied.text).toContain('graph_spawn')
 
-    // The unselected skill is loadable — the catalog is the deployment's, and DSH
-    // has no per-agent hiding — and its body comes from the catalog copy.
+    // The deployment catalog really holds the unselected skill, and its body comes
+    // from the catalog copy: nothing is hidden from the deployment's own registry.
     const catalog = await h.ctx.skills.get(UNSELECTED, { scope: worker, cwd: h.checkout })
     expect(catalog?.content).toContain('UNSELECTED BODY')
     expect(catalog!.path!.startsWith(unselected)).toBe(true)
 
+    // The worker's own catalog is its Run's frozen grant, not the deployment's:
+    // the real loader refuses a name the grant never named, before it reads any
+    // body.
     const loaded = await h.call(worker, 'skill', { name: UNSELECTED })
-    expect(loaded.isError).toBe(false)
-    expect(loaded.text).toContain('UNSELECTED BODY')
+    expect(loaded.isError).toBe(true)
+    expect(loaded.text).toContain(UNSELECTED)
 
     // The surface did not move: same names, same schemas, and the ungranted tool is
     // still refused afterwards.
@@ -149,10 +155,13 @@ describe('an unselected skill and a worker\'s tool plane (S1-C)', () => {
     expect((await h.call(worker, 'read', { file_path: join(h.checkout, 'nothing') })).isError).toBe(false)
     expect((await h.call(worker, 'task_read', {})).isError).toBe(false)
 
-    // The run's own record is what the worker loads for the granted skill: the
-    // unselected one was never part of the binding.
-    const granted = await h.ctx.skills.get(GRANTED, { scope: worker, cwd: h.checkout })
-    expect(granted!.path!.startsWith(run.providerBinding!.snapshotRoot!)).toBe(true)
+    // The granted skill is what this worker loads, out of the Run's own frozen
+    // snapshot — the binding is the catalog, and the unselected name was never
+    // part of it.
+    const granted = await h.call(worker, 'skill', { name: GRANTED })
+    expect(granted.isError).toBe(false)
+    expect(granted.text).toContain('GRANTED BODY')
+    expect(granted.text).toContain(run.providerBinding!.snapshotRoot!)
     expect(run.providerBinding!.skills.map(skill => skill.name)).toEqual([GRANTED])
   })
 })

@@ -173,7 +173,7 @@ export async function releaseStoreWorkspace(self: TaskRuntime, storeId: string):
   if (self.workspaces === undefined) return
   await Promise.all(self.workspaceReleases)
   const snapshot = await self.context.task.snapshotIn(storeId)
-  const sessionId = recoverySessionFor(self, snapshot, storeId)
+  const sessionId = await self.sessionForStore(storeId)
   const rootWorkspace = await workspacePathForSession(self, sessionId)
   const paths = new Set(snapshot.runs.flatMap(run => run.placement === undefined ? [] : [run.placement.workspacePath]))
   if (rootWorkspace !== undefined) paths.add(rootWorkspace)
@@ -199,11 +199,14 @@ export function recoverySessionFor(self: TaskRuntime, snapshot: TaskSnapshot | u
 }
 
 export async function sessionForStore(self: TaskRuntime, storeId: string): Promise<string> {
-  try {
-    return recoverySessionFor(self, await self.context.task.snapshotIn(storeId), storeId)
-  } catch {
-    return storeId
-  }
+  const snapshot = await self.context.task.snapshotIn(storeId)
+  const recorded = recoverySessionFor(self, snapshot, storeId)
+  if (recorded !== storeId) return recorded
+  // Before first intake the store has no Run; its graph still owns an exact root session.
+  const graphs = await self.context.graphs.list()
+  const graph = graphs.find(item => rootTaskStoreId(item.rootSessionId) === storeId)
+  if (graph === undefined) throw new Error(`task-runtime: store "${storeId}" has no recorded Run or owning graph`)
+  return graph.rootSessionId
 }
 
 export async function runForSession(

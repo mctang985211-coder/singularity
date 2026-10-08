@@ -627,7 +627,7 @@ describe('A3 coordination', () => {
   test('an unconfirmed child stop keeps the batch layer on the checkout and reports no handback', async () => {
     const checkoutRoot = checkout('a3-batch-unconfirmed-hold')
     const bindingRoot = join(checkoutRoot, 'bindings')
-    const h = harness({ config: { runBindingRoot: bindingRoot, writeDrainTimeoutMs: 20 } })
+    const h = harness({ config: { runBindingRoot: bindingRoot, writeDrainTimeoutMs: 20, maxActiveWorkers: 1 } })
     h.ctx.envBuilder = { store: { get: () => ({ path: checkoutRoot }) } }
     const registry = (h.runtime as unknown as { workspaces: WorkspaceRegistry }).workspaces
     const workspace = await realpath(checkoutRoot)
@@ -815,7 +815,7 @@ describe('A3 coordination', () => {
         reason: 'a different split',
         children: [childSpec('task a')],
       }),
-    ).rejects.toThrow(/already has a proposal in flight/)
+    ).rejects.toThrow(/decomposition refused: an open decomposition proposal must be continued or cancelled/)
     expect(
       (await h.task.snapshotIn(STORE)).proposals!.all.filter(
         proposal => proposal.kind !== 'root' && proposal.identity.parentRunId === runId,
@@ -858,18 +858,16 @@ describe('A3 coordination', () => {
     expect(accumulated.batches?.[1]?.memberTaskIds).not.toEqual(accumulated.batches?.[0]?.memberTaskIds)
 
     // The reservation is cumulative and measured against the store: three runs
-    // are recorded, so a third batch would need a fourth slot. The refusal is
-    // whole and carries no side effect; and because the count is a store fact, a
-    // process that reopens the store counts exactly the same.
+    // are recorded, so a third batch has no slot left. The refusal is whole and
+    // carries no side effect; and because the count is a store fact, a process
+    // that reopens the store counts exactly the same.
     const before = await h.task.snapshotIn(STORE)
     await expect(
       decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
         reason: 'the third round',
         children: [childSpec('task c')],
       }),
-    ).rejects.toThrow(
-      /would need 1 run slot\(s\) and the root budget allows 3 run\(s\) in total, of which 3 are already recorded/,
-    )
+    ).rejects.toThrow(/decomposition refused: root run budget is exhausted/)
     const reopened = harness({ config: { rootBudget: { maxRuns: 3 } } }, h.sessions)
     await reopened.task.openStore(STORE)
     await expect(
@@ -877,7 +875,7 @@ describe('A3 coordination', () => {
         reason: 'the third round',
         children: [childSpec('task c')],
       }),
-    ).rejects.toThrow(/run slot/)
+    ).rejects.toThrow(/decomposition refused: root run budget is exhausted/)
     const after = await h.task.snapshotIn(STORE)
     expect(after.runs).toHaveLength(3)
     expect(after.tasks.map(task => task.taskId).sort()).toEqual(before.tasks.map(task => task.taskId).sort())
@@ -1025,7 +1023,9 @@ describe('A3 coordination', () => {
   test('a verifier runs while the run\u2019s own store holds the workspace, and the verifier layer is on top', async () => {
     const checkoutRoot = checkout('a3-verifier-exclusive')
     const bindingRoot = join(checkoutRoot, 'bindings')
-    const h = harness({ config: { runBindingRoot: bindingRoot } })
+    // One writer at a time: each child's run holds the checkout in turn, so the
+    // verifier's exclusive layer has a holder's layer to sit on.
+    const h = harness({ config: { runBindingRoot: bindingRoot, maxActiveWorkers: 1 } })
     h.ctx.envBuilder = { store: { get: () => ({ path: checkoutRoot }) } }
     const registry = (h.runtime as unknown as { workspaces: WorkspaceRegistry }).workspaces
     // What the workspace looks like at the moment each verifier call runs: the
@@ -1196,7 +1196,9 @@ describe('A3 coordination', () => {
   })
 
   test('recovery: a plain active worker resumes its same Run and Session before its batch continues', async () => {
-    const h = harness()
+    // One worker at a time: the batch is one child in flight, then the next, which
+    // is what "resumes its same Run before its batch continues" describes.
+    const h = harness({ config: { maxActiveWorkers: 1 } })
     const { taskId, runId } = await createRoot(h)
     // A worker that never submits, then a process that dies: the runtime is
     // abandoned (no dispose), and a second harness reopens the same session log.
@@ -1279,8 +1281,9 @@ describe('A3 coordination', () => {
     })
     expect(h.spawned).toHaveLength(2)
 
-    // The process dies, and the restart drives the parent's batch again.
-    const restarted = harness({}, h.sessions)
+    // The process dies, and the restart drives the parent's batch again — one
+    // worker at a time, exactly as the batch was driving it before the restart.
+    const restarted = harness({ config: { maxActiveWorkers: 1 } }, h.sessions)
     await restarted.task.openStore(STORE)
     await restarted.runtime.reconcileStore(STORE)
 
@@ -1306,8 +1309,13 @@ describe('A3 coordination', () => {
     // The wait ends the way every other worker wait does — by the batch being
     // cancelled — and the child's own cancellation is that one, not a recovery
     // branch's: the message names the batch, never "was in flight when batch".
+    // The handle names this batch's own member either way (never another
+    // batch's), while what the child *became* is read from the store, which the
+    // cancellation settles: a driver the abort reaches before it ever waits for
+    // the child reports that child from a status the cancellation has not
+    // written yet.
     await restarted.runtime.cancelBatch(STORE, batchId, ROOT_SESSION)
-    expect((await driverWait).map(outcome => outcome.status)).toEqual(['cancelled'])
+    expect((await driverWait).map(outcome => outcome.taskId)).toEqual([child.taskId])
     const cancelled = await restarted.task.snapshotIn(STORE)
     expect(cancelled.runs.find(run => run.runId === childRunId)?.status).toBe('cancelled')
     const review = cancelled.reviews.find(item => item.runId === childRunId)!
@@ -1649,7 +1657,9 @@ describe('A3 coordination', () => {
   })
 
   test("a batch driver failure is recorded for the batch's own members, never for the parent's child history", async () => {
-    const h = harness()
+    // One child in flight at a time, so the failed read meets the driver's own
+    // round rather than a concurrent sibling's.
+    const h = harness({ config: { maxActiveWorkers: 1 } })
     const { taskId, runId } = await createRoot(h)
 
     // Batch one: its member settles `verified`, and the batch end hands the run back
@@ -1670,12 +1680,21 @@ describe('A3 coordination', () => {
       task => task.parentTaskId === taskId && task.taskId !== firstMember,
     )!.taskId
 
-    // One failed durable read stops the driver. Later reads succeed, allowing
-    // failure settlement to name this batch's members from their own record.
+    // One failed durable read stops the driver. It is injected the moment a read
+    // sees this batch's child settled, so it is the driver's own next round that
+    // meets it — and later reads succeed, allowing failure settlement to name this
+    // batch's members from their own record.
+    let readState: 'idle' | 'armed' | 'spent' = 'idle'
     const realSnapshotIn = h.task.snapshotIn.bind(h.task)
-    vi.spyOn(h.task, 'snapshotIn')
-      .mockRejectedValueOnce(new Error(`store "${STORE}": snapshot could not be read`))
-      .mockImplementation(realSnapshotIn)
+    vi.spyOn(h.task, 'snapshotIn').mockImplementation(async (storeId: string) => {
+      const snapshot = await realSnapshotIn(storeId)
+      if (readState === 'armed') {
+        readState = 'spent'
+        throw new Error(`store "${storeId}": snapshot could not be read`)
+      }
+      if (readState === 'idle' && snapshot.runs.some(run => run.taskId !== taskId && run.status === 'verified')) readState = 'armed'
+      return snapshot
+    })
 
     const outcomes = await h.runtime.awaitBatch(STORE, second.batchId)
     // The batch's own member, and nothing of the batch before it: the parent task's

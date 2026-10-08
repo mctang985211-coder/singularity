@@ -91,8 +91,10 @@ describe('the batch end across the restart (K1 §5)', () => {
     expect(parent.batchId).toBeUndefined()
     expect(parent.batches?.map(batch => batch.batchId)).toEqual([batchId])
     expect(after.reviews.some(review => review.runId === rootRun)).toBe(false)
-    // …and it was told exactly once, under the identity the batch derives.
-    expect(second.copiesOf(ROOT, `m-batchend-${batchId}`)).toBe(1)
+    // …and it was told exactly once, under the identity the batch derives. The
+    // phase is durable before the delivery is made (the handback, then the wake),
+    // so the message is awaited the way the second window awaits its redelivery.
+    await vi.waitFor(() => expect(second.copiesOf(ROOT, `m-batchend-${batchId}`)).toBe(1), { timeout: 20_000 })
     expect(after.runs).toHaveLength(2)
     await second.dispose()
   }, 90_000)

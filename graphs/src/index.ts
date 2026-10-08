@@ -54,7 +54,7 @@ function nextGraphId(existing: readonly string[]): string {
 }
 
 /** The fields an RSI config carries: anything else is refused by name rather than ignored. */
-const RSI_FIELDS: readonly string[] = ['task', 'iterationRounds', 'humanReview']
+const RSI_FIELDS: readonly string[] = ['task', 'metrics', 'iterationRounds', 'humanReview']
 
 /** Validates one RSI config, refusing a malformed one with the offending field named. */
 function assertRsiConfig(rsi: unknown): asserts rsi is RsiConfig {
@@ -72,6 +72,9 @@ function assertRsiConfig(rsi: unknown): asserts rsi is RsiConfig {
   if (typeof fields.task !== 'string' || fields.task.trim().length === 0) {
     throw new Error('graphs: rsi.task must be a non-empty string')
   }
+  if (fields.metrics !== undefined && (!Array.isArray(fields.metrics) || fields.metrics.some(
+    metric => typeof metric !== 'string' || metric.trim().length === 0,
+  ))) throw new Error('graphs: rsi.metrics must be an array of non-empty descriptions')
   const rounds = fields.iterationRounds
   if (typeof rounds !== 'number' || !Number.isInteger(rounds) || rounds < 1) {
     throw new Error('graphs: rsi.iterationRounds must be an integer >= 1')
@@ -173,7 +176,9 @@ export class GraphsService extends Service {
     return this.transition(async () => {
       await this.ready
       if (request.model !== undefined) await this.assertModel(request.model)
-      if (request.rsi !== undefined) assertRsiConfig(request.rsi)
+      if (request.rsi !== undefined && (typeof request.rsi !== 'object' || request.rsi === null || Array.isArray(request.rsi))) assertRsiConfig(request.rsi)
+      const rsi = request.rsi === undefined ? undefined : { iterationRounds: 3, humanReview: false, ...request.rsi }
+      if (rsi !== undefined) assertRsiConfig(rsi)
       const modelOptions = request.model === undefined ? undefined : graphAgentOptions({ model: request.model })
       let createdEnvId: string | undefined
       let attached: { envId: string; sessionId: SessionId } | undefined
@@ -189,7 +194,6 @@ export class GraphsService extends Service {
           reused = true
         } else {
           const { label, repos } = choice.create
-          if (repos.length === 0) throw new Error('graphs: new environment requires at least one repository')
           const env = label === undefined ? store.create() : store.create(label)
           envId = createdEnvId = env.id
           for (const ref of repos) store.planComponent(envId, ref)
@@ -227,18 +231,19 @@ export class GraphsService extends Service {
           createdAt: Date.now(),
           ready: false,
           ...(request.model === undefined ? {} : { model: request.model }),
-          ...(request.rsi === undefined ? {} : { rsi: request.rsi }),
+          ...(rsi === undefined ? {} : { rsi }),
         }
         await this.commit([{ kind: 'graph/add', graph }])
         committed = true
         await this.activate(graph)
         const env = store.get(envId)
-        await this.ctx.agentRuntime.prompt(handle.agent, [
-          {
-            type: 'text',
-            text: setupPromptText(id, env),
-          },
-        ])
+        const setup = [{ type: 'text' as const, text: setupPromptText(id, env) }]
+        if (rsi === undefined) await this.ctx.agentRuntime.prompt(handle.agent, setup)
+        else await this.ctx.agentRuntime.promptUser(handle.agent, [
+          { type: 'text', text: [rsi.task,
+            ...(rsi.metrics?.length ? ['关注指标：', ...rsi.metrics.map(metric => `- ${metric}`)] : []),
+          ].join('\n') },
+        ], setup)
         return { graph, reused }
       } catch (error) {
         if (committed) throw error
@@ -280,7 +285,6 @@ export class GraphsService extends Service {
     }
     if (request.createEnv === true) {
       const repos = request.repos ?? []
-      if (repos.length === 0) throw new Error('graphs: new environment requires at least one repository')
       if (request.fresh !== true) {
         const bound = (await this.state()).boundEnvIds()
         const match = store.findByRepos(repos).find(env => isReusableEnv(env, bound))
@@ -303,7 +307,6 @@ export class GraphsService extends Service {
       )
     }
     const env = this.ctx.envBuilder.store.get(envId)
-    if (env.components.length === 0) throw new Error(`graphs: environment "${envId}" has no repositories`)
     if (env.sessionIds.length > 0) throw new Error(`graphs: environment "${envId}" still has sessions`)
   }
 

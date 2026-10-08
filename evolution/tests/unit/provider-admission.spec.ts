@@ -270,13 +270,12 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
     const refusal = await svc
       .checkPromotion('s1')
       .catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
-    expect(refusal).toContain('SKILL.contract.json')
-    expect(refusal).toContain('the content identity recorded at prepare is guidance')
+    expect(refusal).toContain('no longer matches its frozen content identity')
 
     // decide(PROMOTE), the tool before it asks a human, and the service entry
     // refuse alike: no decision recorded, no approval burned, no production write.
     await expect(svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow(
-      'the content identity recorded at prepare is guidance',
+      'no longer matches its frozen content identity',
     )
     expect((await svc.get('s1')).status).toBe('gated')
     const { ctx, approval } = toolCtx(svc)
@@ -285,7 +284,7 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
       exec('root-1'),
     )) as string
     expect(viaDecideTool).toContain('evolution_decide rejected:')
-    expect(viaDecideTool).toContain('the content identity recorded at prepare is guidance')
+    expect(viaDecideTool).toContain('no longer matches its frozen content identity')
     expect(approval.request).not.toHaveBeenCalled()
     await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "applied"')
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(P3_BASELINE)
@@ -304,8 +303,9 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
     const refusal = await svc
       .checkPromotion('s1')
       .catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
-    expect(refusal).toContain('"references/"')
-    expect(refusal).toContain('one skill object is a fixed file set')
+    // A resource the executor would never write makes the directory a different
+    // object than the one prepare froze, so the whole-object identity refuses it.
+    expect(refusal).toContain('no longer matches its frozen content identity')
     await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "applied"')
     expect((await svc.get('s1')).status).toBe('gated')
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(P3_BASELINE)
@@ -367,7 +367,7 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
     const { ctx, approval } = toolCtx(svc)
     const refused = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
     expect(refused).toContain('evolution_apply rejected:')
-    expect(refused).toContain('the content identity recorded at prepare is guidance')
+    expect(refused).toContain('no longer matches its frozen content identity')
     expect(approval.request).not.toHaveBeenCalled()
     expect((await svc.get('s1')).status).toBe('decided')
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(P3_BASELINE)
@@ -397,7 +397,7 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
     const result = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
     expect(approval.request).toHaveBeenCalledOnce()
     expect(result).toContain('evolution_apply rejected:')
-    expect(result).toContain('the content identity recorded at prepare is guidance')
+    expect(result).toContain('no longer matches its frozen content identity')
     expect((await svc.get('s1')).status).toBe('decided')
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(P3_BASELINE)
     expect(await ledgerKinds(svc.root)).not.toContain('applied')

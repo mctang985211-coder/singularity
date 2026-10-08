@@ -315,7 +315,9 @@ describe('a stopped tree with a spent run allowance can still be extended by a p
     expect({ ...after, budgetExtensions: before.budgetExtensions }).toEqual(before)
 
     // The narrow half: the same terminal phase still refuses a business write,
-    // before its body ever runs.
+    // before its body ever runs. The root's tail reaches that call last, so the
+    // assertion waits for it to be dispatched before reading what it answered.
+    await vi.waitFor(() => expect(h.calls.some(call => call.name === 'graph_spawn')).toBe(true), { timeout: 15_000, interval: 25 })
     const write = h.calls.find(call => call.name === 'graph_spawn')!
     expect(write.sessionId).toBe(String(ROOT))
     expect(write.result?.isError).toBe(true)

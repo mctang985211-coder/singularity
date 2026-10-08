@@ -7,7 +7,7 @@ import type { TaskTemplate, TemplateScope } from '@dangosys/dsh-singularity-task
  * Every method delegates to the function module that owns it (see `./<block>.ts`), so the class
  */
 
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -33,6 +33,8 @@ import type {
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
 import { type CapabilityConfig } from '../capability.ts'
+import { ensureTaskLibrary, graphLibrary, libraryCapabilities, readTaskLibrary, writeTaskLibrary, reviewTaskLibrary } from '../library.ts'
+import type { LibraryWrite, LibraryReview, TaskLibrary } from '../library.ts'
 import { ExecutionGate } from '../gate.ts'
 import type { ProviderPrecheck, SkillDiscoveryView } from '../provider-precheck.ts'
 import { assertRootBudgetConfig } from '../root-budget.ts'
@@ -204,8 +206,100 @@ export class TaskRuntime extends Service {
     ctx.effect(() => () => this.unload())
   }
 
-  taskTemplatesRootFor(sessionId?: string): string | undefined {
-    return (sessionId === undefined ? undefined : this.sessionExecutionBindings.get(sessionId)?.taskTemplatesRoot) ?? this.config.taskTemplatesRoot
+  async libraryForRoot(rootSessionId: string): Promise<TaskLibrary> {
+    return ensureTaskLibrary(graphLibrary(rootSessionId))
+  }
+
+  async libraryForSession(sessionId: string): Promise<TaskLibrary> {
+    const graph = await this.context.graphs.graphForSession(SessionId(sessionId))
+    return this.libraryForRoot(graph.rootSessionId)
+  }
+
+  async comparisonRunForSession(sessionId: string): Promise<TaskRun | undefined> {
+    const library = await this.libraryForSession(sessionId)
+    const graph = await this.context.graphs.graphForSession(SessionId(sessionId))
+    const snapshot = await this.context.task.openStore(rootTaskStoreId(graph.rootSessionId)).catch(error => {
+      if (error instanceof Error && /does not exist/.test(error.message)) return undefined
+      throw error
+    })
+    const run = snapshot?.runs.filter(item => item.sessionId === sessionId).at(-1)
+    if (run === undefined) return undefined
+    const within = (root: string, target: string) => { const path = relative(root, target); return path === '' || (!path.startsWith('..') && !path.startsWith('/')) }
+    return this.sessionExecutionBindings.get(sessionId)?.overlay !== undefined ||
+      (run.taskTemplatesRoot !== undefined && (within(join(library.root, 'evolution'), run.taskTemplatesRoot) || within(join(this.config.runBindingRoot!, 'replay-libraries'), run.taskTemplatesRoot)))
+      ? run : undefined
+  }
+
+  async libraryRead(sessionId: string) {
+    const library = await this.libraryForSession(sessionId)
+    const execution = this.sessionExecutionBindings.get(sessionId)
+    const run = await this.comparisonRunForSession(sessionId)
+    if (run !== undefined) {
+      const taskTemplatesRoot = run.taskTemplatesRoot ?? execution?.taskTemplatesRoot!
+      const skillRoot = run.providerBinding?.snapshotRoot ?? execution?.overlay?.extraSkillRoots?.[0] ?? library.skillRoot
+      return {
+        ...library, id: run.runId, graphLibraryId: library.id, root: dirname(taskTemplatesRoot), taskTemplatesRoot, skillRoot, version: 1,
+        readOnly: true,
+        message: 'This Run uses a frozen comparison view. Include findings in task_submit_result; the supervisor can add useful experience to the graph library.',
+        tasks: (await findTaskTemplates(taskTemplatesRoot)).map(({ templateRef, template }) => ({ templateRef, status: 'temporary', skills: [...new Set((template.contract.requiredCapabilities ?? []).flatMap(capability => capability.startsWith('method:') ? [capability.slice(7)] : (run.providerBinding?.skills ?? []).filter(skill => skill.capabilities.includes(capability)).map(skill => skill.name)))] })),
+        skills: (run.providerBinding?.skills ?? []).map(item => ({ name: item.name, version: 0, digest: item.contentDigest, status: 'temporary' })),
+      }
+    }
+    return readTaskLibrary(library)
+  }
+
+  async libraryWrite(sessionId: string, input: LibraryWrite) {
+    if (await this.comparisonRunForSession(sessionId) !== undefined)
+      throw new Error('Include findings in task_submit_result; the supervisor can add useful experience to the graph library after comparison')
+    // The caller's recorded task/delegation gives authority; temporary writes still belong to active work.
+    await this.templateCaller(sessionId)
+    const graph = await this.context.graphs.graphForSession(SessionId(sessionId))
+    const core = this.softService<{ resolveCaller(id: string): Promise<{ kind: string; delegation?: { role?: string } }> }>('singularityContext')
+    const caller = await core?.resolveCaller(sessionId)
+    const supervisor = caller?.kind === 'reviewer' && caller.delegation?.role === 'supervisor'
+    if (!supervisor) {
+      const binding = this.sessions.get(sessionId)
+      const snapshot = await this.context.task.openStore(binding?.storeId ?? rootTaskStoreId(graph.rootSessionId)).catch(error => {
+        if (graph.rootSessionId === sessionId && error instanceof Error && /does not exist/.test(error.message)) return undefined
+        throw error
+      })
+      const run = binding === undefined
+        ? snapshot?.runs.filter(item => item.sessionId === sessionId).at(-1)
+        : snapshot?.runs.find(item => item.runId === binding.runId)
+      if (run === undefined ? graph.rootSessionId !== sessionId : run.status !== 'running' || (run.executionPhase !== undefined && run.executionPhase !== 'active'))
+        throw new Error('task-library: temporary writes belong to root planning, an active Task, or delegated method supervision')
+    }
+    return writeTaskLibrary(await this.libraryForSession(sessionId), input, await this.capabilitiesForSession(sessionId))
+  }
+
+  async libraryReview(sessionId: string, review: LibraryReview) {
+    if (await this.comparisonRunForSession(sessionId) !== undefined)
+      throw new Error('Include comparison findings in task_submit_result for graph method supervision')
+    const graph = await this.context.graphs.graphForSession(SessionId(sessionId))
+    if (graph.rootSessionId !== sessionId || graph.rsi !== undefined) {
+      const core = this.softService<{ resolveCaller(id: string): Promise<{ kind: string; delegation?: { role?: string } }> }>('singularityContext')
+      const caller = await core?.resolveCaller(sessionId)
+      if (caller?.kind !== 'reviewer' || caller.delegation?.role !== 'supervisor')
+        throw new Error('task-library: retention decisions belong to the graph root or delegated supervisor')
+    }
+    return reviewTaskLibrary(await this.libraryForSession(sessionId), review, sessionId)
+  }
+
+  async capabilitiesForSession(sessionId: string): Promise<Record<string, CapabilityConfig>> {
+    const overlay = this.sessionExecutionBindings.get(sessionId)?.overlay
+    return { ...this.config.capabilities, ...await libraryCapabilities(await this.libraryForSession(sessionId)), ...overlay?.capabilityOverrides }
+  }
+
+  async skillViewForSession(sessionId: string, extraRoots: readonly string[] = []): Promise<SkillDiscoveryView> {
+    const overlay = this.sessionExecutionBindings.get(sessionId)?.overlay
+    const library = await this.libraryForSession(sessionId)
+    const cwd = await this.envPathForSession(sessionId)
+    return { ...(cwd === undefined ? {} : { cwd }), extraRoots: [...extraRoots, ...(overlay?.extraSkillRoots ?? []), library.skillRoot] }
+  }
+
+  async taskTemplatesRootFor(sessionId?: string): Promise<string | undefined> {
+    if (sessionId === undefined) return this.config.taskTemplatesRoot
+    return this.sessionExecutionBindings.get(sessionId)?.taskTemplatesRoot ?? (await this.libraryForSession(sessionId)).taskTemplatesRoot
   }
 
   async findTaskTemplates(query?: string, callerSessionId?: string) {
@@ -226,16 +320,18 @@ export class TaskRuntime extends Service {
     let task = run === undefined ? undefined : snapshot?.tasks.find(item => item.taskId === run?.taskId)
     if (task === undefined && graph?.rootSessionId !== sessionId) {
       // Coordination sessions have no business Run. The existing read core checks their recorded delegation.
-      const core = this.softService<{ resolveCaller(id: string): Promise<{ kind: string; storeId?: string; task?: TaskInstance }> }>('singularityContext')
+      const core = this.softService<{ resolveCaller(id: string): Promise<{ kind: string; storeId?: string; task?: TaskInstance; delegation?: { sourceRunId?: string | null } }> }>('singularityContext')
       const delegated = await core?.resolveCaller(sessionId)
       if (delegated?.kind !== 'reviewer' || delegated.storeId !== storeId || delegated.task === undefined)
         throw new Error('task-template: caller has no bound Task, valid delegation or root intake authority')
       task = delegated.task
-      run = snapshot?.runs.filter(item => item.taskId === task!.taskId).at(-1)
+      run = delegated.delegation?.sourceRunId === undefined
+        ? snapshot?.runs.filter(item => item.taskId === task!.taskId).at(-1)
+        : snapshot?.runs.find(item => item.runId === delegated.delegation?.sourceRunId && item.taskId === task!.taskId)
     }
     return {
-      root: run?.taskTemplatesRoot ?? this.taskTemplatesRootFor(sessionId),
-      ...(task === undefined ? {} : { scope: task.contract?.templateScope ?? [] }),
+      root: run?.taskTemplatesRoot ?? await this.taskTemplatesRootFor(sessionId),
+      ...(task === undefined ? {} : { scope: task.contract?.templateScope }),
     }
   }
 
@@ -244,7 +340,11 @@ export class TaskRuntime extends Service {
     return taskTemplatePage(caller.root, request, caller.scope)
   }
 
-  async registerTaskTemplate(template: TaskTemplate) {
+  async registerTaskTemplate(template: TaskTemplate, callerSessionId?: string) {
+    if (callerSessionId !== undefined) {
+      const result = await this.libraryWrite(callerSessionId, { kind: 'task', template })
+      return (result as import('../library.ts').LibraryTask).templateRef
+    }
     if (this.config.taskTemplatesRoot === undefined) throw new Error('task-runtime: taskTemplatesRoot is not configured')
     return registerTaskTemplate(this.config.taskTemplatesRoot, template)
   }
@@ -427,7 +527,7 @@ export class TaskRuntime extends Service {
     return svcAdmission.deriveBatch(this, identity, spec)
   }
 
-  manifestsOf(batch: NormalizedBatch, callerSessionId?: string): CapabilityManifest[] {
+  async manifestsOf(batch: NormalizedBatch, callerSessionId?: string): Promise<CapabilityManifest[]> {
     return svcAdmission.manifestsOf(this, batch, callerSessionId)
   }
 
@@ -593,8 +693,8 @@ export class TaskRuntime extends Service {
     return svcDrivers.awaitBatch(this, storeId, batchId)
   }
 
-  async reconcileStore(storeId: string): Promise<ReconcileReport> {
-    return svcDrivers.reconcileStore(this, storeId)
+  async reconcileStore(storeId: string, rootSessionId?: string): Promise<ReconcileReport> {
+    return svcDrivers.reconcileStore(this, storeId, rootSessionId)
   }
 
   async wakeUnclaimedQuestionMessages(storeId: string, deliveries: readonly QuestionReconcileReport[]): Promise<void> {
@@ -755,8 +855,9 @@ export class TaskRuntime extends Service {
     view: SkillDiscoveryView,
     table: Readonly<Record<string, CapabilityConfig>> = this.config.capabilities,
     mcpRegistry: Readonly<Record<string, import('../mcp-servers.ts').McpServerTemplate>> = this.config.mcpServers ?? {},
+    callerSessionId?: string,
   ): Promise<ProviderPrecheck> {
-    return svcEnv.providerPrecheck(this, capabilities, view, table, mcpRegistry)
+    return svcEnv.providerPrecheck(this, capabilities, view, table, mcpRegistry, callerSessionId)
   }
 
   async capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheck> {

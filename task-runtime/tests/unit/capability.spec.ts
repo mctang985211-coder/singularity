@@ -315,6 +315,7 @@ describe('tool labels', () => {
       'task_verify',
       'capability_list',
       'task_template_list',
+      'task_library',
       'task_proposal_read',
       'task_proposal_continue',
       'task_proposal_cancel',

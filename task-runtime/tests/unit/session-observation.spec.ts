@@ -4,6 +4,18 @@ import type { TaskRuntime } from '../../src/index.ts'
 import { observeSession } from '../../src/service/env.ts'
 
 describe('recorded Skill loads', () => {
+  test('records injected frozen Task methods without inventing tool calls', async () => {
+    const events = [
+      { type: 'user/message', data: { source: { kind: 'task-skills', form: 'instructions', names: ['bound-method'] } } },
+      { type: 'user/message', data: { source: { kind: 'user', names: ['ordinary-text'] } } },
+    ] as unknown as SessionEvent[]
+    const runtime = { softService: (name: string) => name === 'sessionQuery'
+      ? { readSession: async () => ({ events }) } : undefined } as unknown as TaskRuntime
+    const observation = await observeSession(runtime, 'worker')
+    expect(observation?.skillCalls).toEqual(['bound-method'])
+    expect(observation?.tools).toEqual({ calls: [], failures: 0 })
+  })
+
   test('counts only a successful result for the matching Skill call', async () => {
     const events = [
       { type: 'tool/call', data: { callId: 'ok', name: 'skill', arguments: '{"name":"loaded-method"}' } },

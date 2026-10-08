@@ -217,7 +217,7 @@ async function bindingOf(
 describe('BB2-2: the installed layout is what discovery, the run binding and admission read', () => {
   it('installs the Task reference into the run checkout, and a run binds the installed bytes rather than the global copy', async () => {
     const table: Record<string, CapabilityConfig> = { [UNLISTED]: { skills: [OBLIGATIONS_SKILL] } }
-    const h = await startRunStack({ capabilities: table })
+    const h = await startRunStack({ capabilities: table, skillTool: true })
 
     const installed: Record<string, string> = {
       [REFERENCE_SKILL]: await installSkill(h.checkout, REPO_SKILLS, REFERENCE_SKILL),
@@ -319,7 +319,7 @@ describe('BB2-2: the installed layout is what discovery, the run binding and adm
     expect(spawn.grant?.skillRoots).toEqual([snapshotRoot])
     const worker = h.agent(run.sessionId as SessionId)!
     const registered = await registeredSkill(h, worker, OBLIGATIONS_SKILL)
-    expect(registered.path?.startsWith(snapshotRoot)).toBe(true)
+    expect(registered.resourceBase?.path.startsWith(snapshotRoot)).toBe(true)
     expect(registered.content).toBe(
       (await readSkillFile(join(installed[OBLIGATIONS_SKILL]!, 'SKILL.md'), OBLIGATIONS_SKILL)).content,
     )
@@ -336,7 +336,7 @@ describe.skipIf(METHOD_SOURCE === undefined)(
         [LISTED_MODEL]: { skills: ['model-integration'] },
         [UNLISTED]: { skills: [OBLIGATIONS_SKILL] },
       }
-      const h = await startRunStack({ capabilities: table })
+      const h = await startRunStack({ capabilities: table, skillTool: true })
 
       const installed: Record<string, string> = {}
       for (const name of METHOD_SKILLS) installed[name] = await installSkill(h.checkout, source, name)
@@ -443,9 +443,19 @@ describe.skipIf(METHOD_SOURCE === undefined)(
   },
 )
 
-/** The body a worker's own skill layer holds for one name, as its scope serves it. */
-async function registeredSkill(h: RunStack, agent: Agent, name: string): Promise<{ content: string; path?: string }> {
-  const skill = await h.ctx.skills.get(name, { scope: agent, cwd: h.checkout })
-  if (skill === undefined) throw new Error(`the worker's skill layer holds no "${name}"`)
-  return skill as { content: string; path?: string }
+/**
+ * The body a worker's own skill layer holds for one name, read through the real
+ * `skill` loader mounted on that worker's own (isolated) registry — the layer the
+ * run's frozen binding registered, not the deployment catalog.
+ */
+async function registeredSkill(
+  h: RunStack,
+  agent: Agent,
+  name: string,
+): Promise<{ content: string; resourceBase?: { path: string } }> {
+  const loader = h.ctx.tools.get('skill', agent)
+  if (loader === undefined) throw new Error(`the worker has no skill loader for "${name}"`)
+  return await loader.execute({ name }, {
+    agent, callId: 'read-bound-skill', signal: new AbortController().signal,
+  } as never) as { content: string; resourceBase?: { path: string } }
 }

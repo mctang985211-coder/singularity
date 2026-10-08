@@ -41,7 +41,7 @@ import { effectiveCapabilitiesOf, effectiveMcpServersOf } from './sources.ts'
 import { assertLedgerFormatVersion, capabilityTableStates } from '../ledger/records.ts'
 import { applyTargets, assertTransition } from '../ledger/state-machine.ts'
 import { productionSidecarRelative, productionSkillRelative, readProductionSkill } from './skill-files.ts'
-import { ledgerDirectories, ProductionReadError, resolveWithin } from '../shared.ts'
+import { assertSegment, ledgerDirectories, ProductionReadError, resolveWithin } from '../shared.ts'
 import type {
   CapabilityRowWriter,
   CommitCapability,
@@ -56,6 +56,8 @@ import type {
 } from '../types.ts'
 
 export class EvolutionServiceCore extends Service {
+  /** The server-bound graph library; undefined denotes the shared/global service. */
+  readonly libraryId?: string
   /** Absolute ledger directory resolved at construction. */
   readonly root: string
   /** Production skill root — champion snapshots read from here; apply/rollback write here. */
@@ -68,6 +70,8 @@ export class EvolutionServiceCore extends Service {
   protected readonly commitProbe?: (stage: CommitStage, target?: string) => void
   /** The deployment's capability table file, when it named one (see {@link Config.capabilityConfig}). */
   protected readonly capabilityConfigPath?: string
+  /** Explicit TaskTemplate catalog for a graph-scoped evolution service. */
+  protected readonly configuredTaskTemplatesRoot?: string
   /** The capability-config write's typed test seam, when this instance was built with one (see {@link Config.capabilityConfigProbe}). */
   protected readonly capabilityConfigProbe?: (stage: 'before-write' | 'staged' | 'written', row: string) => void
   protected records: EvolutionRecord[] = []
@@ -77,11 +81,14 @@ export class EvolutionServiceCore extends Service {
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'evolution')
+    if (config.libraryId !== undefined) assertSegment(config.libraryId, 'libraryId')
+    this.libraryId = config.libraryId
     // Explicitly configured, never derived here: see Config.repoRoot.
     this.repoRoot = config.repoRoot ?? process.cwd()
     this.resolveModelSelection = config.modelSelection
     this.commitProbe = config.commitProbe
     this.capabilityConfigPath = config.capabilityConfig === undefined ? undefined : resolve(config.capabilityConfig)
+    this.configuredTaskTemplatesRoot = config.taskTemplatesRoot === undefined ? undefined : resolve(config.taskTemplatesRoot)
     this.capabilityConfigProbe = config.capabilityConfigProbe
     const dshHome = process.env.DSH_HOME ?? join(this.repoRoot, '.dsh')
     this.root = resolve(config.root ?? join(dshHome, 'evolution'))
@@ -225,6 +232,7 @@ export class EvolutionServiceCore extends Service {
 
   /** The production paths a commit of this proposal may write: for a skill object its files, for a capability its new skill. */
   taskTemplatesRoot(): string {
+    if (this.configuredTaskTemplatesRoot !== undefined) return this.configuredTaskTemplatesRoot
     const runtime = optionalService<{ config: { taskTemplatesRoot?: string } }>(this.ctx, 'taskRuntime')
     const root = runtime?.config.taskTemplatesRoot
     if (root === undefined) throw new Error('evolution: runtime taskTemplatesRoot is unavailable')
@@ -264,7 +272,7 @@ export class EvolutionServiceCore extends Service {
 
   /** The narrow host the commit path runs on (see `commit.ts`): the roots, the record funnel, the source reads and the write refusals. */
   protected commitHost(): CommitHost {
-    const taskLibrary = optionalService<{ config?: { taskTemplatesRoot?: string } }>(this.ctx, 'taskRuntime')?.config?.taskTemplatesRoot
+    const taskLibrary = this.configuredTaskTemplatesRoot ?? optionalService<{ config?: { taskTemplatesRoot?: string } }>(this.ctx, 'taskRuntime')?.config?.taskTemplatesRoot
     return {
       root: this.root,
       skillRoot: this.skillRoot,
@@ -283,7 +291,7 @@ export class EvolutionServiceCore extends Service {
       },
       readProduction: async relative => {
         try {
-          const library = optionalService<{ config?: { taskTemplatesRoot?: string } }>(this.ctx, 'taskRuntime')?.config?.taskTemplatesRoot
+          const library = taskLibrary
           return library !== undefined && dirname(relative) === resolve(library)
             ? await readProductionSkill(resolve(library), basename(relative))
             : await readProductionSkill(this.skillRoot, relative)
@@ -765,11 +773,10 @@ export class EvolutionServiceCore extends Service {
     const baseline = prepared?.skillBaseline
     if (
       prepared?.sandbox == null ||
-      prepared.champion !== 'captured' ||
+      !['captured', 'absent'].includes(prepared.champion) ||
       proposal.mutation === undefined ||
       content === undefined ||
-      baseline === undefined ||
-      baseline === null
+      baseline === undefined
     ) {
       // The fold admits only a materialized skill prepare (sandbox, champion
       throw new Error(
@@ -777,15 +784,15 @@ export class EvolutionServiceCore extends Service {
       )
     }
     const { name } = proposal.mutation as unknown as SkillMutation
-    if (content.name !== name || baseline.name !== name) {
+    if (content.name !== name || (baseline !== null && baseline.name !== name)) {
       throw new Error(
-        `evolution: proposal "${proposal.proposalId}" records content identities for skill "${content.name}/${baseline.name}" but its ` +
+        `evolution: proposal "${proposal.proposalId}" records content identities for skill "${content.name}/${baseline?.name ?? 'absent'}" but its ` +
           `mutation names "${name}" — the commit cannot write one skill's verified bytes onto another skill's target`,
       )
     }
     const contentContract = content.contract
-    const baselineContract = baseline.contract
-    if ((contentContract === undefined) !== (baselineContract === undefined)) {
+    const baselineContract = baseline?.contract
+    if (baseline !== null && (contentContract === undefined) !== (baselineContract === undefined)) {
       throw new Error(
         `evolution: proposal "${proposal.proposalId}" records a candidate object and a production baseline of different shapes ` +
           `(${contentContract === undefined ? 'guidance' : 'execution'} vs ${baselineContract === undefined ? 'guidance' : 'execution'}) ` +
@@ -793,11 +800,11 @@ export class EvolutionServiceCore extends Service {
       )
     }
     const candidateFiles = new Map<string, string>([['SKILL.md', content.sha256]])
-    const baselineFiles = new Map<string, string>([['SKILL.md', baseline.sha256]])
+    const baselineFiles = new Map<string, string>(baseline === null ? [] : [['SKILL.md', baseline.sha256]])
     if (contentContract !== undefined) candidateFiles.set(SKILL_SIDECAR_FILE, contentContract.sha256)
     if (baselineContract !== undefined) baselineFiles.set(SKILL_SIDECAR_FILE, baselineContract.sha256)
     for (const resource of content.resources ?? []) candidateFiles.set(resource.path, resource.sha256)
-    for (const resource of baseline.resources ?? []) baselineFiles.set(resource.path, resource.sha256)
+    for (const resource of baseline?.resources ?? []) baselineFiles.set(resource.path, resource.sha256)
     const paths = [...candidateFiles.keys(), ...baselineFiles.keys()].filter((path, index, all) => all.indexOf(path) === index)
     const before = direction === 'apply' ? baselineFiles : candidateFiles
     const after = direction === 'apply' ? candidateFiles : baselineFiles
@@ -913,6 +920,9 @@ export class EvolutionServiceCore extends Service {
     const run = this.writes.then(async () => {
       // One format at this door too, before anything is decided about the record.
       assertLedgerFormatVersion(record, `the experiment_started record for "${record.experimentId}"`)
+      if (record.frozen.libraryId !== this.libraryId) {
+        throw new Error('evolution: the experiment belongs to a different graph library or publication scope')
+      }
       // The line must stand on its own before anything is decided about it:
       // frozen block, digest, id, budget and report path all re-derived.
       assertExperimentStartRecord(record, fold(this.records))

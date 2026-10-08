@@ -586,7 +586,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     // the runtime wrote the identity the pure entry computes over the fixed
     // proposal: the fixed digest, not a later read, is what it covers
     const fixed = await fixSpecProtectedInputs(spec, checkout)
-    const expected = normalizeDecomposition({ ...fixed.spec, children: fixed.spec.children!.map(child => ({ ...child, templateScope: [] })) }, {
+    const expected = normalizeDecomposition(fixed.spec, {
       storeId: STORE,
       parentTaskId: rootTaskId,
       parentRunId: rootRunId,

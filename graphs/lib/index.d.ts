@@ -20,6 +20,8 @@ interface GraphPinsUpdate {
 interface RsiConfig {
   /** Objective text recorded for launch/UI; changing it never rewrites an existing frozen root task. */
   readonly task: string;
+  /** Natural-language outcome and resource measures the agent investigates and makes concrete. */
+  readonly metrics?: readonly string[];
   /** Total improvement iterations the graph should run (integer >= 1). */
   readonly iterationRounds: number;
   /** true: HITL approval gates queue for a human; false: the platform auto-resolves them. */
@@ -88,6 +90,8 @@ type GraphsEvent = {
   readonly id: string;
   readonly archive: GraphArchive;
 };
+/** Launch needs only a goal; iteration controls have platform defaults. */
+type RsiLaunch = Pick<RsiConfig, 'task' | 'metrics'> & Partial<Pick<RsiConfig, 'iterationRounds' | 'humanReview'>>;
 interface CreateGraphRequest {
   readonly name?: string;
   readonly createEnv?: true;
@@ -101,7 +105,7 @@ interface CreateGraphRequest {
   /** Model pinned for the new graph; absent follows the deployment default selection. */
   readonly model?: GraphModel;
   /** RSI settings to stamp on the new graph; absent leaves it without an improvement loop. */
-  readonly rsi?: RsiConfig;
+  readonly rsi?: RsiLaunch;
 }
 interface CreateGraphResult {
   readonly graph: GraphRecord;
@@ -110,7 +114,7 @@ interface CreateGraphResult {
 }
 //#endregion
 //#region src/service/state.d.ts
-/** Whether an existing environment can be bound by a new graph: it has repositories, no graph, and no sessions. */
+/** Whether an existing workspace can be bound by a new graph: no graph and no sessions. */
 declare function isReusableEnv(env: Pick<EnvRecord, 'id' | 'components' | 'sessionIds'>, boundEnvIds: ReadonlySet<string>): boolean;
 declare class GraphsState {
   private value;
@@ -211,4 +215,4 @@ declare class GraphsService extends Service {
   private state;
 }
 //#endregion
-export { CreateGraphRequest, CreateGraphResult, GraphArchive, GraphModel, GraphPinsUpdate, GraphRecord, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState, type ModelCatalogReader, RsiConfig, RsiProgress, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertModelServiceable, graphAgentOptions, isReusableEnv };
+export { CreateGraphRequest, CreateGraphResult, GraphArchive, GraphModel, GraphPinsUpdate, GraphRecord, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState, type ModelCatalogReader, RsiConfig, RsiLaunch, RsiProgress, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertModelServiceable, graphAgentOptions, isReusableEnv };

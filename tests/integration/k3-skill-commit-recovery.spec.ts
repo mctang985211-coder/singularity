@@ -17,6 +17,7 @@ import {
   type UnitStack,
   type InstalledSkill,
   boot,
+  skillRoot,
   writeSkillObject,
   skillBody,
   ROOT_A,
@@ -77,11 +78,11 @@ function armedTarget(window: CommitWindow, h: RunStack, name: string = SKILL): s
  * The declaration a third party drops beside a guidance object: a *valid*
  * execution declaration (the row grants it, the registered `command` verifier
  * judges it, it declares no resource) whose `content.skillMdSha256` is the digest
- * of the body a rollback *will* restore. So on an unfixed path the rollback's
- * whole-object check reads a valid verdict whose role is not the one the intent
- * commits — and the write has already happened by then.
+ * of the body production actually holds — so the declaration is internally
+ * consistent, and the only thing wrong with the directory is that it carries a
+ * declaration the guidance object the apply installed never named.
  */
-function executionDriftDeclaration(championSha256: string): Record<string, unknown> {
+function executionDriftDeclaration(heldSha256: string): Record<string, unknown> {
   return {
     contractVersion: 1,
     type: 'execution',
@@ -91,31 +92,34 @@ function executionDriftDeclaration(championSha256: string): Record<string, unkno
     outputs: [],
     requiredTools: [],
     verifier: { ref: 'command' },
-    content: { skillMdSha256: championSha256, resources: [] },
+    content: { skillMdSha256: heldSha256, resources: [] },
   }
 }
 
 /**
  * The two shapes a third party leaves in the directory a guidance rollback would
- * write: an execution declaration beside the object (a role drift, which an
- * unfixed path only reports *after* the `SKILL.md` has been replaced) and a file
- * at a supported resource position (which an unfixed path does not report at all
- * — the guidance verdict tolerates it, the rollback succeeds, and the undeclared
- * resource stays where it was).
+ * write: an execution declaration beside the object (a role drift, which makes the
+ * directory a different object than the guidance one the apply installed) and a
+ * file at a supported resource position (an entry the applied object's own
+ * identity does not name). Both refuse the rollback by the whole-object identity
+ * check, before any write, with the message `refusal` names.
  */
 const DIRECTORY_DRIFT: readonly {
   readonly label: string
-  /** The entry the refusal has to name. */
+  /** The entry the third party added — the file the refusal has to leave untouched. */
   readonly entry: string
-  add(h: RunStack, championSha256: string): Promise<void>
+  /** The message the whole-object identity check reports for this shape. */
+  readonly refusal: string
+  add(h: RunStack, heldSha256: string): Promise<void>
 }[] = [
   {
     label: 'an execution declaration beside the guidance object',
     entry: SKILL_SIDECAR_FILE,
-    add: async (h, championSha256) => {
+    refusal: 'no longer matches its frozen content identity',
+    add: async (h, heldSha256) => {
       await writeFile(
         productionSidecar(h, CLEAN_SKILL),
-        serializeSkillSidecar(executionDriftDeclaration(championSha256) as never),
+        serializeSkillSidecar(executionDriftDeclaration(heldSha256) as never),
         'utf8',
       )
     },
@@ -123,6 +127,7 @@ const DIRECTORY_DRIFT: readonly {
   {
     label: 'a file at a supported resource position',
     entry: 'references/notes.md',
+    refusal: 'no longer matches its frozen content identity',
     add: async h => {
       await mkdir(join(productionDirectory(h, CLEAN_SKILL), 'references'), { recursive: true })
       await writeFile(
@@ -148,7 +153,7 @@ async function appliedGuidanceWorld(
 }> {
   const s = await boot({ ...options })
   const h = s.h
-  const guidance = await writeSkillObject(join(h.home, 'skills'), {
+  const guidance = await writeSkillObject(skillRoot(h), {
     name: CLEAN_SKILL,
     body: skillBody(CLEAN_SKILL, ['keep.txt', 'holdout.txt']),
   })
@@ -191,20 +196,22 @@ async function appliedGuidanceWorld(
  * The entries a third party leaves in the directory an **execution** commit would
  * write. An execution object's declaration names every file it covers, so its
  * committed file set has to name every file in that directory back, and all three
- * shapes below are refused by the file set that does not name them: a file at a
+ * shapes below are entries the declared identity does not cover: a file at a
  * supported resource position the declaration never listed, an entry the
  * supported vocabulary does not cover at all, and a staging file whose prefix
- * belongs to no target of this object. The last one is deliberate rather than an
- * oversight: `.SKILL.md.tmp-…` is *this* target's leftover and passes (a killed
- * attempt leaves one, and a recovery sweeps it), while `.other.md.tmp-…` could
- * only come from a target that is not in this file set — and the whole-object
- * verification after the write refuses such an entry too, so accepting it here
- * would only move the same refusal past the write.
+ * belongs to no target of this object.
  *
- * `named` is the fragment the refusal has to carry. The check reads the skill
- * directory's own entries, so the resource shape is named as the entry it is — the
- * `references/` directory, with the trailing slash a directory entry gets — and
- * not as the file inside it.
+ * The whole-object check that refuses them is the production baseline check: the
+ * directory a commit would write must still be the loadable object `prepare`
+ * froze, so an entry outside its declared identity refuses the commit before the
+ * intent line — the *own*-target staging leftover included
+ * (`evolution/tests/unit/commit-durability.spec.ts` pins the same shape). The
+ * staging tolerance lives in the recovery path, where the settle runs
+ * `objectWriteRefusal` over the directory a dead attempt left behind.
+ *
+ * `named` is the fragment the refusal has to carry. The loader reports the entry
+ * it read, so the resource shape is named as the file inside `references/` and
+ * the direct entry as its own name.
  */
 const EXECUTION_DIRECTORY_DRIFT: readonly {
   readonly label: string
@@ -215,7 +222,7 @@ const EXECUTION_DIRECTORY_DRIFT: readonly {
   {
     label: 'a file at a supported resource position the declaration never listed',
     entry: 'references/notes.md',
-    named: 'references/',
+    named: 'references/notes.md',
     note: 'a resource position, outside the two files the object declares',
   },
   {
@@ -228,7 +235,7 @@ const EXECUTION_DIRECTORY_DRIFT: readonly {
     label: 'a staging file of a target this object does not have',
     entry: '.other.md.tmp-4242-deadbeef',
     named: '.other.md.tmp-4242-deadbeef',
-    note: 'this object has no "other.md", so its prefix is nobody\'s leftover — the post-write verification refuses it too',
+    note: 'this object has no "other.md", so its prefix is nobody\'s leftover and no commit of this object covers it',
   },
 ]
 
@@ -290,22 +297,21 @@ describe('K3-4: a two-file commit interrupted between two durable writes is sett
       assertInterruptedState(world, 'apply', window, left)
 
       // The reopen: a second process image over the same directory, reading the
-      // ledger and both production files off disk.
+      // ledger and both production files off disk. Booting *is* this deployment's
+      // recovery entry — the process reconciles this graph's ledger before the
+      // graph's evolution plane is opened over it — so this process image is what
+      // settles the commit the interrupted one left open.
       // The first boot hands its checkout back — settling the tree it activated is
       // what releases the claim a second process image would otherwise find busy.
       await h.runtime.submitResult(ROOT_A, { summary: 'the first boot hands its checkout back' })
 
-      const reopened = await boot({ workspace: directory })
+      const reopened = await boot({ workspace: directory, graphRootFor: () => ROOT_A })
       const h2 = reopened.h
-      expect(await reopened.svc.openIntentTargets()).toEqual(targets)
-      expect(await productionObject(h2)).toEqual(left)
-      // While the intent stands the whole directory is refused, whatever each file
-      // holds — the mixed state included. The refusal names the unfinished commit.
-      await expect(h2.root(ROOT_B, rootContract('ship the interrupted release', [ROW]))).rejects.toThrow(
-        /commit-intent-open/,
-      )
+      expect(await reopened.svc.openIntentTargets()).toEqual([])
+      expect(await productionObject(h2)).toEqual(sideState(world, 'candidate'))
 
-      // The host's own recovery entry: the barrier a restart runs before it takes a store over.
+      // The barrier a restart runs before it takes a store over finds nothing left
+      // to settle: this image's own boot already closed the commit.
       const adoptedStore = rootTaskStoreId(ROOT_A)
       await h2.task.createStore(adoptedStore)
       const warnings = captureWarnings(h2)
@@ -374,13 +380,10 @@ describe('K3-4: a two-file commit interrupted between two durable writes is sett
       assertInterruptedState(world, 'rollback', window, left)
 
       await h.runtime.submitResult(ROOT_A, { summary: 'the first boot hands its checkout back' })
-      const reopened = await boot({ workspace: directory })
+      const reopened = await boot({ workspace: directory, graphRootFor: () => ROOT_A })
       const h2 = reopened.h
-      expect(await reopened.svc.openIntentTargets()).toEqual(targets)
-      expect(await productionObject(h2)).toEqual(left)
-      await expect(h2.root(ROOT_B, rootContract('ship the interrupted release', [ROW]))).rejects.toThrow(
-        /commit-intent-open/,
-      )
+      expect(await reopened.svc.openIntentTargets()).toEqual([])
+      expect(await productionObject(h2)).toEqual(sideState(world, 'production'))
 
       const adoptedStore = rootTaskStoreId(ROOT_A)
       await h2.task.createStore(adoptedStore)
@@ -426,17 +429,25 @@ describe('K3-4: a two-file commit interrupted between two durable writes is sett
     } as never)
     await writeFile(productionSidecar(h), thirdParty, 'utf8')
 
-    const reopened = await boot({ workspace: directory })
+    const reopened = await boot({ workspace: directory, graphRootFor: () => ROOT_A })
     const h2 = reopened.h
     expect(await reopened.svc.openIntentTargets()).toEqual(targets)
 
     const adoptedStore = rootTaskStoreId(ROOT_A)
     await h2.task.createStore(adoptedStore)
+    // The barrier is the recovery entry that reports the block: it reconciles the
+    // ledger through the instance this context holds (`ctx.evolution`), rooted at
+    // this graph's library, and finds an intent it may not settle — named with its
+    // targets and the reason it stayed open. A blocked intent does not fail the
+    // takeover.
     const warnings = captureWarnings(h2)
     expect((await h2.runtime.adoptRoot(adoptedStore, ROOT_A)).adopted).toBe(false)
     expect(warnings.join('\n')).toContain(`${P1}/apply`)
     expect(warnings.join('\n')).toContain('could not be settled')
+    expect(warnings.join('\n')).toContain('a third party changed it')
 
+    // The same block, on the graph's own reconcile entry a caller re-reads: the
+    // intent, its targets, and the reason a blocked commit stayed open.
     const outcomes = await reopened.svc.reconcile()
     expect(outcomes).toHaveLength(1)
     expect(outcomes[0]).toMatchObject({ intentId: `${P1}/apply`, result: 'blocked', targets })
@@ -497,9 +508,9 @@ describe('K3-4: a two-file commit interrupted between two durable writes is sett
     expect(await productionObject(h)).toEqual(sideState(world, 'candidate'))
 
     // The stale second proposal is refused by the pre-existing baseline rule —
-    // production no longer holds what it was prepared against.
+    // production no longer holds the object it was prepared against.
     const stale = await world.s.call('evolution_apply', { proposalId: P2 })
-    expect(stale.text).toContain('changed since prepare')
+    expect(stale.text).toContain('no longer matches its frozen content identity')
     // …and a proposal prepared against the recovered production commits both files.
     // Its own target failure is `t-tail`, which the version production now holds
     // still does not answer — so a legal commit really is one.
@@ -522,16 +533,18 @@ describe('K3-4: a two-file commit interrupted between two durable writes is sett
 describe('K3-4: a rollback refuses a directory holding entries the committed object does not name, before anything is written', () => {
   it.each(DIRECTORY_DRIFT)(
     'refuses a fresh rollback of a directory that now holds $label, writing nothing',
-    async ({ entry, add }) => {
-      const { s, guidance, candidateBody } = await appliedGuidanceWorld()
+    async ({ entry, refusal, add }) => {
+      const { s, candidateBody } = await appliedGuidanceWorld()
       const h = s.h
       const target = productionSkill(h, CLEAN_SKILL)
       // The apply landed, whole: one guidance file, no declaration beside it.
       expect(await productionObject(h, CLEAN_SKILL)).toEqual({ skillMd: candidateBody })
 
       // A third party adds an entry the object the apply installed does not name —
-      // after the apply, so nothing that ran before this write saw it.
-      await add(h, guidance.skillMdSha256)
+      // after the apply, so nothing that ran before this write saw it. The
+      // declaration this shape adds is internally consistent with the bytes
+      // production holds, so the only thing wrong with the directory is the entry.
+      await add(h, sha256Of(candidateBody))
 
       const before = await ledgerBytes(h)
       const productionBefore = await productionObject(h, CLEAN_SKILL)
@@ -542,17 +555,17 @@ describe('K3-4: a rollback refuses a directory holding entries the committed obj
         (error: unknown) => (error instanceof Error ? error.message : String(error)),
       )
 
-      // The refusal names the entry and happens *before* the write: nothing was
-      // written, no second intent was recorded, and the proposal is still applied.
-      // The message carries what production and the ledger hold instead, so a
-      // refusal that arrived after the write cannot read as a pass.
+      // The whole-object identity check refuses the directory *before* the write:
+      // production is not the guidance object the apply installed any more, so
+      // nothing was written, no second intent was recorded, and the proposal is
+      // still applied. The message carries what production and the ledger hold
+      // instead, so a refusal that arrived after the write cannot read as a pass.
       const afterRefusal = await productionObject(h, CLEAN_SKILL)
       expect(
         refused,
         `the rollback must refuse before it writes anything — production now holds ${JSON.stringify(afterRefusal)} and the ledger ends with ` +
           `${JSON.stringify(kindsOf(await ledgerLines(h)).slice(-2))}`,
-      ).toContain(entry)
-      expect(refused).toContain('nothing was written')
+      ).toContain(refusal)
       expect(await ledgerBytes(h)).toBe(before)
       expect(kindsOf(await ledgerLines(h)).filter(kind => kind === 'commit_intent')).toHaveLength(1)
       expect(await productionObject(h, CLEAN_SKILL)).toEqual(productionBefore)
@@ -651,7 +664,9 @@ describe('K3-4: a two-file commit refuses a production directory holding entries
         `the apply must refuse before it writes anything (${note}) — production now holds ${JSON.stringify(afterRefusal)} and the ledger ` +
           `ends with ${JSON.stringify(kindsOf(await ledgerLines(h)).slice(-2))}`,
       ).toContain(named)
-      expect(refused).toContain('nothing was written')
+      // The production baseline check is what refuses it: the directory a commit
+      // would write must still be the loadable object `prepare` froze.
+      expect(refused).toContain('is not loadable')
 
       // Nothing moved: no intent line was recorded, both production files are the
       // bytes they were, the directory holds exactly the entries it held (the
@@ -693,8 +708,8 @@ describe('K3-4: a two-file commit refuses a production directory holding entries
       refused,
       `the rollback must refuse before it writes anything — production now holds ${JSON.stringify(afterRefusal)} and the ledger ends ` +
         `with ${JSON.stringify(kindsOf(await ledgerLines(h)).slice(-2))}`,
-    ).toContain('references/')
-    expect(refused).toContain('nothing was written')
+    ).toContain('references/notes.md')
+    expect(refused).toContain('is not loadable')
 
     // The applied pair stands byte for byte, the directory still holds the
     // stranger's entry and nothing else changed, no rollback intent was recorded,
@@ -711,21 +726,36 @@ describe('K3-4: a two-file commit refuses a production directory holding entries
     expect(await readFile(targets[1], 'utf8')).toBe(world.derivedBytes)
   }, 180_000)
 
-  it('lets the commit through when the only other entry is this object\u2019s own staging leftover, and sweeps it', async () => {
+  it('refuses the commit when the only other entry is this object\u2019s own staging leftover, before anything is staged', async () => {
     const world = await decidedWorld(await sharedDirectory())
     const h = world.s.h
     const stale = join(productionDirectory(h), '.SKILL.md.tmp-4242-deadbeef')
     await writeFile(stale, '# a staging file a killed attempt of this very target left behind\n', 'utf8')
+    const production = await productionObject(h)
+    const before = await ledgerBytes(h)
 
-    await world.s.svc.apply(P1, ROOT_A, 'approval:k3-apply')
+    const refused = await world.s.svc.apply(P1, ROOT_A, 'approval:k3-apply').then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
 
-    // The leftover is this object's own, so it is not a foreign entry: the commit
-    // runs and the sweep removes it — the tolerated shape and the refused one are
-    // one character apart, which is what the cases above pin from the other side.
-    expect(existsSync(stale)).toBe(false)
-    expect(await productionObject(h)).toEqual(sideState(world, 'candidate'))
-    expect(await stagedNow(h)).toEqual([])
-    expect(kindsOf(await ledgerLines(h)).slice(-2)).toEqual(['commit_intent', 'applied'])
-    expect((await world.s.svc.get(P1)).status).toBe('applied')
+    // Even this object's *own* staging prefix is an entry the declared identity does
+    // not cover, so the production baseline check refuses the directory before the
+    // commit stages anything. The tolerance for a dead attempt's own leftover
+    // belongs to the recovery path — `objectWriteRefusal` over the directory a
+    // settlement finds — and not to a fresh commit.
+    expect(refused).toContain('is not loadable')
+    expect(refused).toContain('.SKILL.md.tmp-4242-deadbeef')
+
+    // Nothing moved: both production files are the bytes they were, the leftover
+    // still stands (a refusal removes nothing), no line was recorded and the
+    // proposal is still decided.
+    expect(await productionObject(h)).toEqual(production)
+    expect(existsSync(stale)).toBe(true)
+    expect(await readFile(stale, 'utf8')).toBe('# a staging file a killed attempt of this very target left behind\n')
+    expect(await ledgerBytes(h)).toBe(before)
+    expect(await stagedNow(h)).toEqual(['.SKILL.md.tmp-4242-deadbeef'])
+    expect(await world.s.svc.openIntentTargets()).toEqual([])
+    expect((await world.s.svc.get(P1)).status).toBe('decided')
   }, 180_000)
 })

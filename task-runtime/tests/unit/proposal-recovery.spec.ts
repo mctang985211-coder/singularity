@@ -248,7 +248,7 @@ describe('TaskRuntime post-approval re-check (§6)', () => {
     // process that raced this one (a second process's approval).
     const first = await h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, specA)
     await expect(h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, specB)).rejects.toThrow(
-      /already has a proposal in flight/,
+      /decomposition refused: an open decomposition proposal must be continued or cancelled/,
     )
     await approveInStore(h, first.proposalId)
 
@@ -991,8 +991,37 @@ describe('TaskRuntime root budget through the proposal path (§6)', () => {
     await h.runtime.cancelProposal(STORE, tooBig.proposalId, ROOT_SESSION)
     expect((await h.task.snapshotIn(STORE)).runs.length).toBe(runsBefore)
 
-    // The accounting happens at admission: a batch that fits is admitted, and the
-    // run it starts is what the budget then counts.
+    // The accounting happens at admission. An oversized batch proposed in its own
+    // right is recorded — a proposal holds no run slot — and it is the admission
+    // that refuses it, from the store's own count.
+    const oversized = await h.runtime.submitDecompositionProposal(
+      STORE,
+      taskId,
+      runId,
+      ROOT_SESSION,
+      batchSpec([childSpec('task a'), childSpec('task b')], 'the same oversized split, proposed again'),
+    )
+    expect((await proposalOf(h, oversized.proposalId)).status).toBe('pending_review')
+    expect((await h.task.snapshotIn(STORE)).runs.length).toBe(runsBefore)
+    const decision = await h.runtime.decideProposal(STORE, oversized.proposalId, { outcome: 'approved' }, REVIEWER)
+    // The approval landed and the continuation could not admit the batch, so the
+    // answer is the pair of facts: the outcome, and where the proposal stands —
+    // `ready`, the phase a passed re-check leaves it in.
+    expect(decision.outcome).toBe('approved')
+    expect(decision.status).toBe('ready')
+    expect(decision.detail).toContain('the root budget allows 2 run(s)')
+    // The approval and the re-check that passed are both on the record — `ready`
+    // is where the phase machine leaves a batch that may run — while the
+    // admission itself was refused, so nothing is consumed and a later
+    // continuation may admit the same batch once the budget allows it.
+    const refusedProposal = await proposalOf(h, oversized.proposalId)
+    expect(refusedProposal.status).toBe('ready')
+    expect(refusedProposal.consumption).toBeUndefined()
+    expect(refusedProposal.decision?.outcome).toBe('approved')
+    await h.runtime.cancelProposal(STORE, oversized.proposalId, ROOT_SESSION)
+
+    // A batch that fits is admitted, and the run it starts is what the budget
+    // then counts.
     const fits = await h.runtime.submitDecompositionProposal(
       STORE,
       taskId,
@@ -1006,31 +1035,19 @@ describe('TaskRuntime root budget through the proposal path (§6)', () => {
     await h.runtime.awaitBatch(STORE, admitted.continuation.batchId)
     expect((await h.task.snapshotIn(STORE)).runs.length).toBe(runsBefore + 1)
 
-    // No slot is left now: another parent's approved batch is refused by name,
-    // the approval stays on the record and nothing is consumed.
+    // No slot is left now. The count is the store's, so it is read where the
+    // batch would start: another tree's proposal is refused by name before it is
+    // recorded, and nothing about it exists afterwards.
     const second = await createSecondParent(h)
-    const refused = await h.runtime.submitDecompositionProposal(
-      STORE,
-      second.taskId,
-      second.runId,
-      second.sessionId,
-      batchSpec([childSpec('task d')]),
-    )
-    const decision = await h.runtime.decideProposal(STORE, refused.proposalId, { outcome: 'approved' }, REVIEWER)
-    // The approval landed and the continuation could not admit the batch, so the
-    // answer is the pair of facts: the outcome, and where the proposal stands —
-    // `ready`, the phase a passed re-check leaves it in.
-    expect(decision.outcome).toBe('approved')
-    expect(decision.status).toBe('ready')
-    expect(decision.detail).toContain('the root budget allows 2 run(s)')
-    // The approval and the re-check that passed are both on the record — `ready`
-    // is where the phase machine leaves a batch that may run — while the
-    // admission itself was refused, so nothing is consumed and a later
-    // continuation may admit the same batch once the budget allows it.
-    const refusedProposal = await proposalOf(h, refused.proposalId)
-    expect(refusedProposal.status).toBe('ready')
-    expect(refusedProposal.consumption).toBeUndefined()
-    expect(refusedProposal.decision?.outcome).toBe('approved')
+    await expect(
+      h.runtime.submitDecompositionProposal(
+        STORE,
+        second.taskId,
+        second.runId,
+        second.sessionId,
+        batchSpec([childSpec('task d')]),
+      ),
+    ).rejects.toThrow(/decomposition refused: root run budget is exhausted/)
     expect(h.spawned).toHaveLength(1)
   })
 })

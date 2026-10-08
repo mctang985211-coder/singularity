@@ -142,6 +142,8 @@ function harness(
 
   let taskService!: TaskService
   const verifier = {
+    /** The registry admission validates every contract's judge against. */
+    verifierIds: vi.fn(() => ['command', 'composite', 'review']),
     verifyRun: vi.fn(async (storeId: string, runId: string): Promise<EvidenceBundle> => {
       const run = await taskService.runIn(storeId, runId)
       const instance = await taskService.taskIn(storeId, run.taskId)
@@ -549,9 +551,41 @@ describe('review dimensions and metrics (P4)', () => {
       taskSpecification: { objectivePresent: true, criteriaCount: 1, criteriaWithCommand: 1 },
       acceptance: { criteria: [{ criterionId: 'ac1-1', mode: 'deterministic', hasCommand: true, mandatory: true }] },
       decomposition: { depth: 1, decompositionStatus: 'leaf', childCount: 0, incomingEdges: 0, outgoingEdges: 1 },
-      capabilityCoverage: { closure: 'closed', granted: ['task-execution'], missing: [] },
-      skillFit: { granted: ['task-execution'] },
-      toolFit: { granted: [] },
+      // The platform's own `execute-task` row leads the deployment's table (it is
+      // the graph library's), so the grant is that row's method and the labels it
+      // declares — expanded to the real tool names the worker baseline carries.
+      capabilityCoverage: {
+        closure: 'closed',
+        granted: [
+          'bash',
+          'edit',
+          'glob',
+          'grep',
+          'job_kill',
+          'job_list',
+          'job_output',
+          'read',
+          'skill',
+          'task-coordination',
+          'write',
+        ],
+        missing: [],
+      },
+      skillFit: { granted: ['task-coordination'] },
+      toolFit: {
+        granted: [
+          'bash',
+          'edit',
+          'glob',
+          'grep',
+          'job_kill',
+          'job_list',
+          'job_output',
+          'read',
+          'skill',
+          'write',
+        ],
+      },
     })
     expect(failed.dimensions?.contextEfficiency).toBeUndefined()
 
@@ -661,7 +695,20 @@ describe('review dimensions and metrics (P4)', () => {
       retries: 0,
       evidenceLogs: 1,
     })
-    expect(child.dimensions?.toolFit).toEqual({ granted: [] })
+    expect(child.dimensions?.toolFit).toEqual({
+      granted: [
+        'bash',
+        'edit',
+        'glob',
+        'grep',
+        'job_kill',
+        'job_list',
+        'job_output',
+        'read',
+        'skill',
+        'write',
+      ],
+    })
     expect(child.dimensions?.contextEfficiency).toEqual({
       tokens: { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 },
     })

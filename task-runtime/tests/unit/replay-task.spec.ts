@@ -609,7 +609,6 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       // this is what both a `task_read` and the run's own criteria see.
       expect(replayTask.contract).toEqual({
         contractVersion: 1,
-        templateScope: [],
         objective: '[evolution-replay:candidate] candidate definition replay',
         acceptanceCriteria: [
           {

@@ -112,7 +112,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
     const supervisor = h.spawns.find(spawn => spawn.name.startsWith('rsi supervisor'))
     expect(supervisor, JSON.stringify(h.spawns.map(spawn => spawn.name))).toBeDefined()
     expect(supervisor!.prompt).toContain(`Cite diagnosis:${roundDiagnosisId(GRAPH, 1)}`)
-    expect(supervisor!.prompt).toContain('task_recover is deliberately not granted')
+    expect(supervisor!.prompt).toContain('The platform driver opens the next round')
     expect(await readReviewAgentAttempts(STORE)).toEqual([
       expect.objectContaining({
         role: 'supervisor', diagnosisId: roundDiagnosisId(GRAPH, 1), started: true,
@@ -155,7 +155,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
     const review = snapshot.reviews.find(item => item.runId === root.runId)!
     expect(diagnosis?.observedFailure).toBe(review.localizedCause)
     const supervisor = h.spawns.find(spawn => spawn.name.startsWith('rsi supervisor'))
-    expect(supervisor!.prompt).toContain('debug that failure')
+    expect(supervisor!.prompt).toContain('Debug that failure')
     const next = snapshot.runs.find(run => run.recovery?.requestKey === roundRequestKey(GRAPH, 2))
     expect(next?.recovery).toMatchObject({ kind: 'recovery', sourceDiagnosisId: roundDiagnosisId(GRAPH, 1) })
     expect(h.rsiProgressOf()).toMatchObject({ round: 2, phase: 'running' })
@@ -250,7 +250,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
       expect((await h.task.runMembersIn(STORE, next.runId)).map(task => task.taskId)).toEqual(secondBatch.childTaskIds)
       await driver.ensure(GRAPH)
       expect(h.rsiProgressOf()).toMatchObject({ round: 2, phase: 'done' })
-      expect(h.spawns.filter(spawn => spawn.name.startsWith('rsi supervisor'))).toHaveLength(1)
+      expect(h.spawns.filter(spawn => spawn.name.startsWith('rsi supervisor'))).toHaveLength(2)
     } finally {
       driver.stop()
     }
@@ -279,7 +279,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
     const driver = new RsiLoopDriver(h.ctx, { log: () => {} })
     try {
       await driver.ensure(GRAPH)
-      expect((await h.ctx.evolution.list()).find(proposal => proposal.proposalId === 'p-unfinished')?.status).toBe('proposed')
+      expect((await (await h.ctx.evolution.forSession(ROOT)).list()).find(proposal => proposal.proposalId === 'p-unfinished')?.status).toBe('proposed')
       expect((await h.snapshot(STORE)).runs.some(run => run.recovery !== undefined)).toBe(false)
       expect(h.rsiProgressOf()).toMatchObject({ round: 1, phase: 'failed' })
       expect((h.rsiProgressOf() as { note: string }).note).toContain('p-unfinished [proposed]')
@@ -289,7 +289,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
     }
   }, 30_000)
 
-  it('retains the final failed execution without an extra publication phase', async () => {
+  it('reviews final failure experience and retains the execution outcome without another execution', async () => {
     let h!: ScriptedLoop
     h = await startScriptedLoop({ rsi: { ...RSI, iterationRounds: 1 }, evolution: { ledgerRoot: ledger }, script: scriptOf(() => h) })
     const root = await h.begin({ objective: 'deliver the answer', requiredCapabilities: ['execute-task'], acceptanceCriteria: criterion('false') })
@@ -300,8 +300,12 @@ describe('the platform RSI loop driver on the real deployment', () => {
       expect((await h.snapshot(STORE)).runs.find(run => run.runId === root.runId)?.status).toBe('failed')
       expect(h.rsiProgressOf()).toMatchObject({ round: 1, phase: 'failed' })
       expect((h.rsiProgressOf() as { note: string }).note).toContain('final round failed')
-      expect(h.spawns).toEqual([])
-      expect(await readReviewAgentAttempts(STORE)).toEqual([])
+      expect((await h.snapshot(STORE)).runs.filter(run => run.taskId === root.taskId)).toHaveLength(1)
+      expect(h.spawns.filter(spawn => spawn.name.startsWith('rsi supervisor'))).toHaveLength(1)
+      expect(await readReviewAgentAttempts(STORE)).toEqual([expect.objectContaining({
+        role: 'supervisor', diagnosisId: roundDiagnosisId(GRAPH, 1), started: true,
+        settlement: expect.objectContaining({ status: 'recorded' }),
+      })])
     } finally {
       driver.stop()
     }
@@ -331,6 +335,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
       approvalAnswer: () => 'allowed-once',
       script: (sessionId): readonly ScriptEntry[] => {
         const name = h.spawns.find(spawn => spawn.sessionId === sessionId)?.name ?? ''
+        if (name.startsWith('rsi supervisor') && name.includes('round 2')) return [{ text: NO_CHANGE_REPLY }]
         if (name.startsWith('rsi supervisor')) return [
           { tool: 'evolution_propose', args: {
             proposalId, targetType: 'task_definition', targetId: templateId, baseVersion: 'absent', level: 'L2',
@@ -408,13 +413,9 @@ describe('the platform RSI loop driver on the real deployment', () => {
     const driver = new RsiLoopDriver(h.ctx, { log: () => {} })
     try {
       await driver.ensure(GRAPH)
-      const publication = await h.ctx.evolution.get(proposalId)
+      const evolution = await h.ctx.evolution.forSession(ROOT)
+      const publication = await evolution.get(proposalId)
       const supervisor = h.spawns.find(spawn => spawn.name.startsWith('rsi supervisor'))!
-      expect(await readReviewAgentAttempts(STORE)).toEqual([expect.objectContaining({
-        role: 'supervisor', source: { taskId: root.taskId, runId: root.runId },
-        sessionId: supervisor.sessionId, diagnosisId: roundDiagnosisId(GRAPH, 1), started: true,
-        settlement: expect.objectContaining({ status: 'recorded' }),
-      })])
       const chain = ['evolution_propose', 'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply']
       const supervisedCalls = h.calls.filter(call => call.sessionId === supervisor.sessionId && chain.includes(call.name))
       expect(supervisedCalls.map(call => call.name)).toEqual(chain)
@@ -423,10 +424,15 @@ describe('the platform RSI loop driver on the real deployment', () => {
         expect(call.result?.text, call.name).not.toContain('rejected:')
       }
       expect(publication.status, JSON.stringify(supervisedCalls.map(call => ({ name: call.name, result: call.result })))).toBe('applied')
+      expect(await readReviewAgentAttempts(STORE)).toEqual([expect.objectContaining({
+        role: 'supervisor', source: { taskId: root.taskId, runId: root.runId },
+        sessionId: supervisor.sessionId, diagnosisId: roundDiagnosisId(GRAPH, 1), started: true,
+        settlement: expect.objectContaining({ status: 'recorded' }),
+      })])
       expect(publication.prepared?.templateBaseline).toBeNull()
       expect(publication.prepared?.templateCandidate?.digest).toBe(taskTemplateDigest(candidate))
-      const [experiment] = await h.ctx.evolution.experiments(proposalId)
-      const report = JSON.parse(readFileSync(join(ledger, experiment!.report), 'utf8')) as ExperimentReport
+      const [experiment] = await evolution.experiments(proposalId)
+      const report = JSON.parse(readFileSync(join(evolution.root, experiment!.report), 'utf8')) as ExperimentReport
       expect(report.verdict).toBe('fixed')
       expect(report.frozen.taskDefinition?.baseline).toBeNull()
       expect(report.frozen.taskDefinition?.candidate.template).toEqual(candidate)
@@ -447,14 +453,15 @@ describe('the platform RSI loop driver on the real deployment', () => {
       expect(bound.contract?.objective).toBe(candidate.contract.objective)
       expect(bound.acceptanceCriteria[0]?.command).toBe(oracle)
       expect(boundRun).toMatchObject({ parentRunId: next.runId, status: 'verified' })
-      expect(JSON.parse(readFileSync(join(h.runtime.config.taskTemplatesRoot!, `${templateId}@1.json`), 'utf8'))).toEqual(candidate)
+      const library = await h.runtime.libraryForSession(ROOT)
+      expect(JSON.parse(readFileSync(join(library!.taskTemplatesRoot, `${templateId}@1.json`), 'utf8'))).toEqual(candidate)
       expect(completed.tasks.find(task => task.taskId === root.taskId)?.contract).toEqual(originalRoot.contract)
       expect(completed.tasks.find(task => task.taskId === oneOff.taskId)).toEqual(oneOff)
       expect(completed.runs.find(run => run.runId === root.runId)).toEqual(original.runs.find(run => run.runId === root.runId))
       expect(h.eventsOf(supervisor.sessionId).filter(event => event.type === 'approval/asked')).toHaveLength(2)
       await driver.ensure(GRAPH)
       expect(h.rsiProgressOf()).toMatchObject({ round: 2, phase: 'done' })
-      expect(h.spawns.filter(spawn => spawn.name.startsWith('rsi supervisor'))).toHaveLength(1)
+      expect(h.spawns.filter(spawn => spawn.name.startsWith('rsi supervisor'))).toHaveLength(2)
     } finally {
       driver.stop()
     }

@@ -371,12 +371,16 @@ async function returnedParent(): Promise<ReturnedParent> {
   expect(told.status).toContain('refused')
 
   // The process dies with its claim on disk: the marker the deployment's own
-  // entries wrote is what the next process reads. Its holder is the returned
-  // parent's own run — the run that was `active` and therefore held the checkout.
+  // entries wrote is what the next process reads.
   await first.crash()
   const leaving = onlyMarker(first)
   expect(leaving.owner.storeId).toBe(storeId)
-  expect(leaving.owner.runId).toBe(middle.runId)
+  // The checkout's holder is the run that claimed it: the root's own run. Its
+  // delegated children share the checkout this deployment keeps (the default
+  // `maxActiveWorkers: 2`), so ownership never moves to the returned parent —
+  // what the next process reads is the root's claim, with the marker's pid the
+  // fact that decides the takeover.
+  expect(leaving.owner.runId).toBe(root.runId)
   expect(leaving.path).toBe(realpathSync(first.checkout))
   return { first, dir, storeId, rootTaskId: root.taskId, rootRunId: root.runId, middle, middleTaskId, middleSession, middleBatchId, endMessageId, leaving }
 }

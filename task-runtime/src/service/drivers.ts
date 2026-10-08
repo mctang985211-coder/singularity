@@ -465,7 +465,7 @@ export async function cancelGraph(self: TaskRuntime, storeId: string, reason: st
     await Promise.all(entries.map(entry => entry.promise.catch(() => [])))
 
     const snapshot = await self.context.task.snapshotIn(storeId)
-    const env = await self.orchestrateEnv(self.recoverySessionFor(snapshot, storeId), `cancel-graph:${storeId}`)
+    const env = await self.orchestrateEnv(await self.sessionForStore(storeId), `cancel-graph:${storeId}`)
     const stillRunning = snapshot.runs.filter(run => run.status === 'running')
     for (const run of stillRunning) {
       await settleRunFromRuntime(env, storeId, run, 'cancelled', `cancelled with the graph: ${reason}`)
@@ -513,14 +513,14 @@ async function stopUnidentifiedBatch(
   await self.reconcileSessionJobs(run.sessionId)
 }
 
-export async function reconcileStore(self: TaskRuntime, storeId: string): Promise<ReconcileReport> {
+export async function reconcileStore(self: TaskRuntime, storeId: string, rootSessionId?: string): Promise<ReconcileReport> {
   const snapshot = await self.context.task.snapshotIn(storeId)
   self.reindex(storeId, snapshot)
   const depthOf = (taskId: TaskId): number => snapshot.tasks.find(task => task.taskId === taskId)?.depth ?? 0
   const ordered = snapshot.runs
     .filter(run => run.status === 'running')
     .sort((left, right) => depthOf(right.taskId) - depthOf(left.taskId))
-  const env = await self.orchestrateEnv(self.recoverySessionFor(snapshot, storeId), `recovery:${storeId}`)
+  const env = await self.orchestrateEnv(rootSessionId ?? await self.sessionForStore(storeId), `recovery:${storeId}`)
   const questionResumes: QuestionResumeReport[] = []
   const waiting: TaskRun[] = []
   const submitted: TaskRun[] = []

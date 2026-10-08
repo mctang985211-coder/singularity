@@ -4,8 +4,8 @@
 import { join } from 'node:path'
 import { SKILL_SIDECAR_FILE } from '@dangosys/dsh-singularity-task-runtime'
 
-import type { EvolutionProposal, EvolutionStatus, SkillMutation } from '../types.ts'
-import { APPLYABLE_TARGET_TYPES } from '../types.ts'
+import type { EvolutionDecision, EvolutionProposal, EvolutionStatus, SkillMutation } from '../types.ts'
+import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS } from '../types.ts'
 
 /** Whether a decided proposal's `applied` record is admissible: a PROMOTE decision, a level below L4, a mechanically moveable target and a materialized sandbox. */
 export function applyable(proposal: EvolutionProposal): boolean {
@@ -51,6 +51,22 @@ export function assertTransition(current: EvolutionProposal, kind: EvolutionStat
           : ' — only a materialized skill mutation at L1–L3 applies in this build'
         : ''
   throw new Error(`evolution: proposal "${current.proposalId}" is ${current.status}; cannot record "${kind}"${hint}`)
+}
+
+/** Declining an open candidate writes no production bytes and needs no successful experiment. */
+export function assertDecisionTransition(
+  current: EvolutionProposal,
+  decision: EvolutionDecision,
+  note?: string,
+): void {
+  if (!EVOLUTION_DECISIONS.includes(decision))
+    throw new Error(`evolution: decision must be one of ${EVOLUTION_DECISIONS.join(' / ')}`)
+  if (decision !== 'PROMOTE' && ['proposed', 'candidate', 'prepared'].includes(current.status)) {
+    if (typeof note !== 'string' || !note.trim())
+      throw new Error('evolution: settling an ungated proposal with REJECT or KEEP_FOR_FURTHER_RESEARCH requires a reason in note')
+    return
+  }
+  assertTransition(current, 'decided')
 }
 
 /** The production write targets of an apply (and its matching rollback), for the commit's fixed file set and for audit. */

@@ -9,18 +9,18 @@
  * One round is one **terminal-settled Run of the store's root task**. Round 1 is
  * the original attempt; round N+1 is opened by this driver as a recovery of
  * round N's run — `mode: 'improve'` when that run verified, `mode: 'recovery'`
- * when it failed. Before opening a further attempt the driver records one platform diagnosis for
- * each non-final round (`proposals: []`), spawns a **supervisor** agent (read/glob/grep plus
+ * when it failed. The driver records one platform diagnosis for
+ * each settled round (`proposals: []`), spawns a **supervisor** agent (read/glob/grep plus
  * the evolution chain), watches it to its settlement, and then opens the next
  * round itself through `taskRuntime.recoverRootTask` — platform to platform, no
  * agent tool in the path, `proposalIds` carrying whatever the round published.
  * `iterationRounds` counts execution attempts: N attempts provide N-1 chances
  * to publish and consume a method change. The final attempt keeps its actual
- * verified/failed outcome and opens no further supervision or execution.
+ * verified/failed outcome, receives a final library review and opens no further execution.
  *
  * The supervisor is the *only* place a coordination supervisor exists (F): it
  * holds no `task_recover`, because round scheduling belongs to this driver
- * alone. A non-final round that settles (verified or failed) is handled here and nowhere
+ * alone. A round that settles (verified or failed) is handled here and nowhere
  * else; a graph without `rsi` settings has no supervisor and no autonomous
  * iteration at all — a failed task there is simply failed.
  *
@@ -41,7 +41,8 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
 import { APPLYABLE_TARGET_TYPES, type EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
 import type { GraphRecord, RsiConfig, RsiProgress } from '@dangosys/dsh-singularity-graphs'
@@ -51,19 +52,21 @@ import {
   rootTaskStoreId,
   sha256Hex,
   type Diagnosis,
+  type ReviewMetrics,
   type ReviewRecord,
   type TaskRun,
   type TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
 import {
   recoveryAttemptWithKey,
+  optionalService,
   type RecoveryMode,
   type RootRecoveryRequest,
   type TerminalReviewFact,
 } from '@dangosys/dsh-singularity-task-runtime'
 import { warnLine } from '../log.ts'
 import { message } from '../shared.ts'
-import { COORDINATION_PRESET, lastAssistantText, renderSupervisorReviewFacts, supervisorOutcomeOf } from './handoff-rules.ts'
+import { COORDINATION_PRESET, lastAssistantText, renderRecordedCostFacts, renderSupervisorReviewFacts, runSubtree, supervisorOutcomeOf } from './handoff-rules.ts'
 import { liveRootAgentOf } from './identity.ts'
 import {
   admitReviewAgent,
@@ -96,6 +99,7 @@ export const SUPERVISOR_BASELINE: readonly string[] = [
   'task_status',
   'context_read',
   'capability_list',
+  'task_library',
   'task_template_list',
   'evolution_propose',
   'evolution_candidate',
@@ -215,11 +219,28 @@ function publicationOf(proposals: readonly EvolutionProposal[]): {
   return { done: executable.length > 0 && unresolved.length === 0, applied, unresolved, note: proposalLine(proposals) }
 }
 
-/** The evolution ledger as this driver reads it: the shipped service when the deployment mounts one. */
-function evolutionOf(ctx: Context): { list(): Promise<EvolutionProposal[]> } | undefined {
-  const evolution = ctx.evolution as { list?: () => Promise<EvolutionProposal[]> } | undefined
+interface EvolutionLedgerRead {
+  list(): Promise<EvolutionProposal[]>
+  experiments?(proposalId: string): Promise<readonly {
+    experimentId: string
+    frozen: { evaluation?: { generatedResponse?: string; generatedUsage?: ReviewMetrics['tokens'] } }
+    judged?: { evaluation: { judgeUsage?: ReviewMetrics['tokens'] } }
+  }[]>
+}
+
+/** Driver and agents read the same graph-scoped ledger. Legacy compositions retain their global reader. */
+async function evolutionOf(ctx: Context, sessionId: string): Promise<EvolutionLedgerRead | undefined> {
+  const plane = ctx.evolution as {
+    list?: () => Promise<EvolutionProposal[]>
+    experiments?: EvolutionLedgerRead['experiments']
+    forSession?: (sessionId: string) => Promise<EvolutionLedgerRead>
+  } | undefined
+  const evolution = typeof plane?.forSession === 'function' ? await plane.forSession(sessionId) : plane
   const list = evolution?.list
-  return typeof list !== 'function' ? undefined : { list: () => list.call(evolution) }
+  return typeof list !== 'function' ? undefined : {
+    list: () => list.call(evolution),
+    ...(evolution?.experiments === undefined ? {} : { experiments: proposalId => evolution.experiments!(proposalId) }),
+  }
 }
 
 /** One graph's loop, as this process holds it while it drives it. */
@@ -430,15 +451,7 @@ export class RsiLoopDriver {
     this.byStore.set(storeId, graphId)
     const rounds = terminalRootRuns(snapshot, root.taskId)
     if (rounds.length >= config.iterationRounds) {
-      state.stopped = true
-      const final = rounds.at(-1)!
-      const cause = final.status === 'verified' ? undefined : reviewOfRun(snapshot, final.runId)?.localizedCause
-      await this.mark(state, {
-        round: rounds.length,
-        phase: final.status === 'verified' ? 'done' : 'failed',
-        note: `${rounds.length}/${config.iterationRounds} rounds settled; final round ${final.status}` +
-          `${cause === undefined ? '' : `: ${cause}`}; the loop is finished`,
-      })
+      await this.superviseRound(state, graph, snapshot, rounds.length, rounds.at(-1)!)
       return
     }
     const next = rounds.length + 1
@@ -502,6 +515,17 @@ export class RsiLoopDriver {
         await this.mark(state, { round, phase: 'failed', note: supervision.note })
         return
       case 'proceed':
+        if (round >= state.config.iterationRounds) {
+          state.stopped = true
+          const cause = verified ? undefined : review?.localizedCause
+          await this.mark(state, {
+            round,
+            phase: verified ? 'done' : 'failed',
+            note: `${round}/${state.config.iterationRounds} rounds settled; final round ${run.status}` +
+              `${cause === undefined ? '' : `: ${cause}`}; final library review settled; the loop is finished`,
+          })
+          return
+        }
         await this.openRound(
           state,
           graph,
@@ -543,7 +567,9 @@ export class RsiLoopDriver {
           `Round ${round} of graph "${graph.name}" (${state.graphId}) settled ${run.status}: the root task's run "${run.runId}" ` +
             `did not pass the store's own acceptance criteria.`,
       scope: `the root task ${state.rootTaskId} of this store; graph ${state.graphId} runs a platform RSI loop of ${state.config.iterationRounds} round(s)`,
-      localizedCause: verified
+      localizedCause: round >= state.config.iterationRounds
+        ? `The platform RSI loop reviews round ${round}'s library experience before completing this graph: ${state.config.task}.`
+        : verified
         ? `The platform RSI loop continues this graph's verified goal with round ${round + 1}: ${state.config.task}.` +
           (consumed.length === 0
             ? ' No published change was consumed by this round.'
@@ -587,7 +613,7 @@ export class RsiLoopDriver {
     diagnosisId: string,
     verified: boolean,
   ): Promise<RoundSupervision> {
-    const already = publicationOf(await this.proposalsFor(diagnosisId))
+    const already = publicationOf(await this.proposalsFor(state, diagnosisId))
     const attempts = await readReviewAgentAttempts(state.storeId).catch(() => [])
     const settled = supervisorAttemptOf(attempts, diagnosisId)
     // An operator re-setting the graph's RSI config drops the stored loop progress; read at the start of
@@ -607,7 +633,7 @@ export class RsiLoopDriver {
       settled.settlement.note?.startsWith('no_change:') === true
     if (recordedNoChange) {
       if (already.applied.length === 0 && already.unresolved.length === 0) return { kind: 'proceed', applied: [] }
-    } else if (already.done) {
+    } else if (already.done && (round < state.config.iterationRounds || settled?.settlement?.status === 'recorded')) {
       return { kind: 'proceed', applied: already.applied }
     }
     const delegator = liveRootAgentOf(this.ctx, state.storeId)
@@ -707,7 +733,7 @@ export class RsiLoopDriver {
           await this.settleSupervisor(state, sessionId, 'closed', `${outcome.outcome}: ${outcome.reason}`)
           return { kind: 'stop', outcome: outcome.outcome, reason: outcome.reason }
         }
-        const publication = publicationOf(await this.proposalsFor(diagnosisId))
+        const publication = publicationOf(await this.proposalsFor(state, diagnosisId))
         if (await this.currentGraph(state) === undefined) {
           await this.settleSupervisor(state, sessionId, 'interrupted', 'the RSI config changed or the driver was unloaded')
           return { kind: 'deferred', note: 'the RSI config changed while reading the publication ledger' }
@@ -735,15 +761,14 @@ export class RsiLoopDriver {
             type: 'text',
             text:
               `Round ${round} of graph ${state.graphId} remains yours. Durable proposal state: ${publication.note}. ` +
-              'A ledger entry does not finish the round: continue the next candidate/prepare/replay/gate/decide/apply step on the ' +
-              'existing proposal, or record a decision that closes it (REJECT / KEEP_FOR_FURTHER_RESEARCH with the reason). ' +
+              'Continue the existing proposal through its next candidate/prepare/replay/gate/decide/apply step, ' +
+              'or settle it with REJECT / KEEP_FOR_FURTHER_RESEARCH and a reason. ' +
               `Unfinished executable proposals: ${publication.unresolved.join(', ') || 'none'}. ` +
               (invalidNoChange ? 'Your no_change outcome contradicts the ledger: resolve the executable proposals or correct your final answer. ' : '') +
-              'Do not schedule rounds: task_recover is not granted to you and the platform driver opens the next round itself. ' +
-              'If no shared method change is justified, and no applied or unfinished executable proposal remains, conclude with ' +
-              '{"outcome":"no_change","reason":"..."} in a fenced json block. Research-only target suggestions do not block that answer. ' +
+              'The platform driver opens the next round after you settle. To retain the current method with an empty or negatively settled executable ledger, finish with ' +
+              '{"outcome":"no_change","reason":"..."} in a fenced json block. Keep research suggestions as findings. ' +
               'Otherwise finish the chain or end with {"outcome":"blocked","reason":"..."} for a concrete obstruction, or ' +
-              '{"outcome":"closed","reason":"..."} if the loop must not be continued, in a fenced json block.',
+              '{"outcome":"closed","reason":"..."} to end the loop, in a fenced json block.',
           },
         ])
       }
@@ -754,8 +779,8 @@ export class RsiLoopDriver {
   }
 
   /** The proposal facts one round's publication left, read from the ledger the agents write. */
-  private async proposalsFor(diagnosisId: string): Promise<EvolutionProposal[]> {
-    const evolution = evolutionOf(this.ctx)
+  private async proposalsFor(state: LoopState, diagnosisId: string): Promise<EvolutionProposal[]> {
+    const evolution = await evolutionOf(this.ctx, state.rootSessionId)
     if (evolution === undefined) return []
     const all = await evolution.list()
     return all.filter(proposal => proposal.sourceRefs.includes(`diagnosis:${diagnosisId}`))
@@ -763,7 +788,7 @@ export class RsiLoopDriver {
 
   /** Every proposal this loop's rounds produced, oldest last, for the supervisor's "what is published now" line. */
   private async loopProposals(state: LoopState): Promise<EvolutionProposal[]> {
-    const evolution = evolutionOf(this.ctx)
+    const evolution = await evolutionOf(this.ctx, state.rootSessionId)
     if (evolution === undefined) return []
     const marker = `diagnosis:rsi-${state.graphId}-round-`
     return (await evolution.list()).filter(proposal => proposal.sourceRefs.some(ref => ref.startsWith(marker)))
@@ -844,12 +869,10 @@ export class RsiLoopDriver {
         const after = await this.ctx.task.snapshotIn(state.storeId).catch(() => undefined)
         const recorded = after === undefined ? undefined : roundRunOf(after, state.rootTaskId!, requestKey)
         if (recorded !== undefined) {
-          const exhausted = terminalRootRuns(after!, state.rootTaskId!).length >= state.config.iterationRounds
           await this.mark(state, {
             round,
             phase: recorded.status === 'running' ? 'running' : recorded.status === 'verified'
-              ? exhausted ? 'done' : 'publishing'
-              : exhausted ? 'failed' : 'debugging',
+              ? 'publishing' : 'debugging',
             note: `round ${round} was recorded ${recorded.status} despite its opening error: ${message(error)}; the next activation reconciles the stored attempt`,
           })
           return
@@ -878,7 +901,8 @@ export class RsiLoopDriver {
     return [
       `Store: ${state.storeId}; root task: ${state.rootTaskId}; this round's run: ${run.runId} (session ${run.sessionId ?? 'unrecorded'}).`,
       `Round objective as recorded on the graph: ${state.config.task}`,
-      'That text guides method improvement; it does not replace the frozen root contract or acceptance. A new business goal needs a new graph.',
+      `Metrics to explore and improve: ${state.config.metrics?.join('; ') || 'derive useful measurements from the task and state the assumptions'}.`,
+      'Use the current task criteria to judge this execution, and its findings to improve reusable paths and experience.',
       review === undefined
         ? 'The store holds no review record for this run.'
         : `The round's review settled ${review.outcome}. ${renderSupervisorReviewFacts(review)}`,
@@ -898,15 +922,102 @@ export class RsiLoopDriver {
     ]
   }
 
-  /** The lines both supervisor prompts share: the chain to walk, the task plane it must not touch, and how the round ends. */
+  /** Existing review/session counters cover execution, replay and past coordination without a second cost ledger. */
+  private async costFeedback(state: LoopState, run: TaskRun): Promise<string[]> {
+    const snapshot = await this.ctx.task.snapshotIn(state.storeId)
+    const attempts = await readReviewAgentAttempts(state.storeId)
+    const sessions = [...new Set([
+      ...snapshot.runs.map(item => item.sessionId),
+      ...attempts.filter(attempt => attempt.started).map(attempt => attempt.sessionId),
+    ])]
+    const observations = new Map<string, ReviewMetrics>()
+    for (const item of snapshot.reviews) {
+      const sessionId = item.sessionId ?? snapshot.runs.find(candidate => candidate.runId === item.runId)?.sessionId
+      if (sessionId !== undefined && item.metrics !== undefined) observations.set(sessionId, item.metrics)
+    }
+    const query = optionalService<{ readSession(id: SessionId): Promise<{ events: readonly SessionEvent[]; session?: SessionHeader; inheritedEventCount?: SessionLogOffset }> }>(this.ctx, 'sessionQuery')
+    const live = optionalService<{ get(id: SessionId): unknown }>(this.ctx, 'sessions')
+    const projections = optionalService<{
+      snapshot(session: never, keys: readonly string[]): { values: Record<string, unknown> }
+      restore?(checkpoint: Record<string, never>, events: readonly SessionEvent[], baseSeq: SessionLogOffset, header: SessionHeader,
+        inheritedEventCount: SessionLogOffset): { snapshot: { values: Record<string, unknown> } }
+    }>(this.ctx, 'sessionProjections')
+    const graphObservations = new Map<string, ReviewMetrics>()
+    const validTokens = (value: unknown): value is NonNullable<ReviewMetrics['tokens']> =>
+      value !== undefined && value !== null && typeof value === 'object' &&
+      ['uncachedInputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'].every(key => {
+        const count = (value as Record<string, unknown>)[key]
+        return typeof count === 'number' && Number.isFinite(count) && count >= 0
+      })
+    await Promise.all(sessions.map(async sessionId => {
+      // Review metrics freeze the execution comparison. Graph totals read the
+      // complete session, including model calls after the Task submitted.
+      const observed: ReviewMetrics = {}
+      if (live !== undefined && projections !== undefined) {
+        try {
+          const session = live.get(SessionId(sessionId))
+          if (session !== undefined) {
+            const value = projections.snapshot(session as never, ['tokenUsage']).values.tokenUsage
+            if (validTokens(value)) observed.tokens = value
+          }
+        } catch { /* The coverage line reports an unavailable projection. */ }
+      }
+      if (query !== undefined) {
+        try {
+          const log = await query.readSession(SessionId(sessionId))
+          const { events } = log
+          observed.toolCalls = {
+            calls: events.filter(event => event.type === 'tool/call').length,
+            failures: events.filter(event => event.type === 'tool/result' &&
+              ((event.data as { error?: unknown; message?: { isError?: boolean } } | undefined)?.error !== undefined ||
+                (event.data as { message?: { isError?: boolean } } | undefined)?.message?.isError === true)).length,
+          }
+          if (observed.tokens === undefined && projections?.restore !== undefined && log.session !== undefined && log.inheritedEventCount !== undefined) {
+            const value = projections.restore({}, events, SessionLogOffset(0), log.session, log.inheritedEventCount).snapshot.values.tokenUsage
+            if (validTokens(value)) observed.tokens = value
+          }
+        } catch { /* A missing durable log remains unknown. */ }
+      }
+      graphObservations.set(sessionId, observed)
+      observations.set(sessionId, { ...observed, ...observations.get(sessionId) })
+    }))
+    const auxiliary = new Map<string, ReviewMetrics>()
+    const evolution = await evolutionOf(this.ctx, state.rootSessionId)
+    let auxiliaryUnavailable = evolution?.experiments === undefined
+    if (evolution?.experiments !== undefined) {
+      for (const proposal of await evolution.list()) {
+        const experiments = await evolution.experiments(proposal.proposalId).catch(() => {
+          auxiliaryUnavailable = true
+          return []
+        })
+        for (const experiment of experiments) {
+          const plan = experiment.frozen.evaluation
+          if (plan?.generatedResponse !== undefined) auxiliary.set(`plan:${experiment.experimentId}`, {
+            ...(plan.generatedUsage === undefined ? {} : { tokens: plan.generatedUsage }), toolCalls: { calls: 0, failures: 0 },
+          })
+          if (experiment.judged !== undefined) auxiliary.set(`judge:${experiment.experimentId}`, {
+            ...(experiment.judged.evaluation.judgeUsage === undefined ? {} : { tokens: experiment.judged.evaluation.judgeUsage }), toolCalls: { calls: 0, failures: 0 },
+          })
+        }
+      }
+    }
+    return [
+      renderRecordedCostFacts('Current round execution tree', runSubtree(snapshot, run.runId).map(item => item.sessionId), observations),
+      renderRecordedCostFacts('Graph usage to date (executions, replay experiments and recorded coordination)', sessions, graphObservations),
+      auxiliaryUnavailable ? 'Auxiliary evaluation plan/judge usage: unknown; some experiment cost reports were unavailable.' :
+        auxiliary.size === 0 ? 'Auxiliary evaluation plan/judge usage: no recorded model calls.' :
+        renderRecordedCostFacts('Auxiliary evaluation plan/judge usage', [...auxiliary.keys()], auxiliary, 'model calls'),
+      'Compare task effects with this recorded effort, including evaluation overhead. Coverage shows available counters; an unavailable reading remains unknown.',
+    ]
+  }
+
+  /** A short method prompt: library, evidence, comparison, publication and a clear ending. */
   private readonly supervisorMethod: readonly string[] = [
-    'Read the exact target before constructing a candidate: skill loads its instructions and resource base; read the complete SKILL.md including frontmatter and each relevant resource. Use context_read and task_read/task_status for the store\'s own records; do not search session pages for asset bytes. Read the executed task tree, its templateRef or contract:hash, child batches and verification facts before extracting a reusable change.',
-    'Executable evolution targets in this build are skill (the method guidance a worker loads), capability (the tools or skill provider row) and task_definition (a reusable TaskTemplate); choose the target the round\'s evidence implicates, and say in the proposal rationale which round fact makes the change reusable rather than one-off.',
-    'Then decide and carry it out: evolution_propose → evolution_candidate → evolution_prepare → evolution_replay → evolution_gate → evolution_decide → evolution_apply. Use clean original inputs for the replay; a contract carrying the old workspace\'s absolute paths cannot be evaluated in an isolated copy. Missing artifacts alone do not establish a shared gap.',
-    'A proposed ledger entry for an apply-supported target is unfinished work: conclude every skill, capability or task_definition proposal of this round. One applied proposal does not finish another executable candidate. Research-only target suggestions do not block publication. If tools, inputs or budget are unavailable, report proposalId, its status and one concrete obstruction.',
-    'A one-off full task contract is valid execution input, not an automatically published template. Extract a task_definition candidate only when verified repeated use or an observed reusable repair supports it: a TaskTemplate defines goal, inputs, acceptance, capabilities and optionally direct-child decomposition; a Skill teaches the method and its conditions. Read matching templates and skills before adding one. Supervisor review is not business acceptance: promotion still requires real baseline/candidate experiments, unseen holdout, gate and apply; a previously seen case is regression, not clean holdout. Later execution must bind the published version to establish consumption.',
-    'You do not schedule rounds. Round scheduling belongs to the platform driver alone: task_recover is deliberately not granted to you, the driver opens the next round itself, and you must not touch the task plane (no recovery, no intake, no decomposition).',
-    'If the evidence justifies no shared method change, conclude with exactly one fenced json block {"outcome":"no_change","reason":"..."}; it is valid only with no applied proposal and no unfinished apply-supported proposal. REJECT, KEEP_FOR_FURTHER_RESEARCH and rollback also finish a candidate with a negative result. Otherwise finish the chain, or report {"outcome":"blocked","reason":"..."} with a concrete obstruction or {"outcome":"closed","reason":"..."} if the loop must not be continued, in a fenced json block. The latter two stop the platform loop and mark it failed.',
+    'Read task_library and matching task_template_list entries, then the exact Skill or template bytes and this run\'s contracts, batches and evidence. Review temporary exploratory goals and experience; record retention or retirement with task_library review and write useful revisions in this graph\'s library.',
+    'Choose the responsible skill, capability or task_definition. TaskTemplates record reusable goals and decomposition; Skills record paths, methods and conditions. Cite the evidence that supports your choice and weigh task effects with model usage and cost.',
+    'Compare a useful candidate through evolution_propose → evolution_candidate → evolution_prepare → evolution_replay → evolution_gate → evolution_decide → evolution_apply. For llm-outcome, evaluation.goal is enough for an LLM-generated frozen plan; reuse real tools and artifacts. Preserve each task\'s original checks, use comparable budgets and fresh starting inputs, and identify seen cases as regression evidence.',
+    'Conclude every executable proposal, keeping useful negative results and research findings. After publication inspect exact later template and Skill bindings and outcomes. The platform driver opens the next round after your supervision settles.',
+    'When retaining the current methods, finish with fenced json {"outcome":"no_change","reason":"..."} and a settled proposal ledger. REJECT, KEEP_FOR_FURTHER_RESEARCH and rollback finish candidates as negative results. For a concrete obstruction use {"outcome":"blocked","reason":"..."}; for a reason to end the loop use {"outcome":"closed","reason":"..."}.',
   ]
 
   /** The first prompt one round's supervisor receives after a **verified** round: publish the method change the round's evidence shows. */
@@ -927,16 +1038,16 @@ export class RsiLoopDriver {
     return [
       `You are the platform RSI loop's supervisor for graph "${graph.name}" (${state.graphId}), round ${round} of ${state.config.iterationRounds}.`,
       ...this.roundHeader(state, graph, round, run, review),
+      ...await this.costFeedback(state, run),
       `Current published skill of this loop: ${publishedSkill === undefined ? 'none yet — the ledger holds no applied skill for this loop' : `${publishedSkill.targetId} (proposal ${publishedSkill.proposalId}, applied)`}`,
       publishedTemplate === undefined
         ? 'Current published task template of this loop: none yet'
         : `Current published task template of this loop: ${publishedTemplate.targetId} (proposal ${publishedTemplate.proposalId}, applied)`,
       `Cite diagnosis:${diagnosisId} in evolution_propose.sourceRefs.`,
       '',
-      'The round settled verified against the store\'s own acceptance criteria. Your round is to read that delivery and its evidence and publish the method change it shows.',
-      ...this.supervisorMethod.slice(0, 3),
-      "If the round's evidence does not support a method change, use no_change with the reason, or conclude an existing candidate with REJECT / KEEP_FOR_FURTHER_RESEARCH. A negative method result is a finished supervision, not a business verification.",
-      ...this.supervisorMethod.slice(3),
+      'The round settled verified against the store\'s own acceptance criteria. Review its delivery and library experience; choose a useful improvement or retain the current method with no_change.',
+      ...(round < state.config.iterationRounds ? [] : ['Final library review: review this execution\'s paths and experience for retention or revision. Settle your findings; this graph completes after review, and subsequent Tasks can test any final publication.']),
+      ...this.supervisorMethod,
     ].join('\n')
   }
 
@@ -958,16 +1069,16 @@ export class RsiLoopDriver {
     return [
       `You are the platform RSI loop's supervisor for graph "${graph.name}" (${state.graphId}), round ${round} of ${state.config.iterationRounds}.`,
       ...this.roundHeader(state, graph, round, run, review),
+      ...await this.costFeedback(state, run),
       `Current published skill of this loop: ${publishedSkill === undefined ? 'none yet — the ledger holds no applied skill for this loop' : `${publishedSkill.targetId} (proposal ${publishedSkill.proposalId}, applied)`}`,
       publishedTemplate === undefined
         ? 'Current published task template of this loop: none yet'
         : `Current published task template of this loop: ${publishedTemplate.targetId} (proposal ${publishedTemplate.proposalId}, applied)`,
       `Cite diagnosis:${diagnosisId} in evolution_propose.sourceRefs.`,
       '',
-      `The round settled ${run.status}: it did not pass the store's own acceptance criteria. Your round is to debug that failure — read the run's own evidence, the review and the deliverable — and publish the method change that makes the next attempt succeed.`,
-      ...this.supervisorMethod.slice(0, 3),
-      'If the failure is a one-off environment, input or transient defect that no shared asset explains, use no_change with the reason, or conclude an existing candidate with REJECT / KEEP_FOR_FURTHER_RESEARCH; the driver still opens the next round as a recovery of this attempt.',
-      ...this.supervisorMethod.slice(3),
+      `The round settled ${run.status}. Debug that failure using its evidence, review and delivery, and choose the reusable method change that helps the next attempt. For a one-off environmental or input repair, retain the current methods with no_change and explain the next useful recovery.`,
+      ...(round < state.config.iterationRounds ? [] : ['Final library review: retain useful failure conditions and experience, and revise methods when justified. Settle your findings; this graph completes with the recorded task outcome after review, and subsequent Tasks can test any final publication.']),
+      ...this.supervisorMethod,
     ].join('\n')
   }
 
@@ -1059,7 +1170,8 @@ function supervisorAttemptOf(attempts: readonly ReviewAgentAttempt[], diagnosisI
 /** Whether two readings agree; replacement revokes a watcher while the same frozen root's facts remain authoritative. */
 function sameRsiConfig(left: RsiConfig, right: RsiConfig): boolean {
   return (
-    left.task === right.task && left.iterationRounds === right.iterationRounds && left.humanReview === right.humanReview
+    left.task === right.task && left.iterationRounds === right.iterationRounds && left.humanReview === right.humanReview &&
+    canonicalize(left.metrics ?? []) === canonicalize(right.metrics ?? [])
   )
 }
 

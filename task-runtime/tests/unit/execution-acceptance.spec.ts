@@ -535,8 +535,12 @@ describe('TaskRuntime criterion verifierRef (KISS §4.1, VRTC plan 1.4)', () => 
   })
 
   test('a declared verifierRef with no verifier service to validate against fails loudly before anything persists', async () => {
-    const h = harness({ verifier: 'absent' })
+    const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    // The deployment's verifier service goes away after the root exists: its
+    // registry can no longer be listed, so a declared ref cannot be validated —
+    // and the refusal lands before any child of the batch is persisted.
+    delete h.ctx.verifier
     await expect(
       decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
         reason: 'split the work',

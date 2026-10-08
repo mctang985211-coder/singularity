@@ -858,8 +858,13 @@ describe("the root contract's origin (A0 §1.10)", () => {
  * reconciliation fails the barrier rather than taking a store over.
  */
 describe('the recovery barrier reconciles an open production commit first', () => {
-  /** A fresh store id no other case in this file holds: the barrier creates it. */
-  const FRESH = 'sg-k2-barrier'
+  /**
+   * The store the barrier adopts: the graph's own root session's store, empty and
+   * not yet open — this harness holds no root in it, so the barrier is what
+   * creates it. `adoptRoot` is called the way a graph activation calls it, with
+   * the graph's own store and its root session.
+   */
+  const FRESH = STORE
 
   /** The reconciliation one barrier reported, as the runtime hands it to the warning door. */
   function warningsSeen(h: Harness): string[] {

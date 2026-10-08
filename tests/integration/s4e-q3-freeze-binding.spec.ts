@@ -201,6 +201,8 @@ interface Fixture {
   evolution: EvolutionService
   storeId: string
   snapshotDir: string
+  /** The graph library's own skill root: where this graph's production skills are installed and written. */
+  skillRoot: string
   /** The deployment's default selection as the deployment resolves it — the value a settings write moves. */
   defaultSelection: { current: { provider: string; model: string } }
   /** Every worker session of the experiment, in spawn order (baseline and candidate, sample by sample). */
@@ -281,15 +283,22 @@ async function fixture(options: {
   let offJudge: (() => void) | undefined
   if (options.judge !== undefined) offJudge = await h.verifier.register(testJudge(options.judge.id, options.judge.version), { testDouble: true })
 
-  const skillRoot = join(h.home, 'skills')
+  // The deployment's own construction (A6): one process-wide service whose
+  // entries resolve the *graph library's* ledger and skill root per caller
+  // session, so the service this fixture drives and the service a tool reaches
+  // are the same graph-scoped instance.
+  const skillRoot = (await h.runtime.libraryForSession(String(ROOT))).skillRoot
   await mkdir(join(skillRoot, SKILL), { recursive: true })
   await writeFile(join(skillRoot, SKILL, 'SKILL.md'), PRODUCTION_BODY, 'utf8')
+  // The deployment's own catalog carries the same bytes: the deployment-wide
+  // `applyCapabilityRow` the provider-plane arm drives checks a row's providers
+  // from the deployment's viewpoint, which does not include a graph library root.
+  await mkdir(join(h.home, 'skills', SKILL), { recursive: true })
+  await writeFile(join(h.home, 'skills', SKILL, 'SKILL.md'), PRODUCTION_BODY, 'utf8')
 
-  const evolution = new EvolutionService(h.ctx, {
-    root: join(h.workspace, 'evolution'),
-    skillRoot,
+  const evolution = await new EvolutionService(h.ctx, {
     modelSelection: () => options.unresolvableSelection === true ? undefined : modelSelectionOf(defaultSelection.current),
-  })
+  }).forSession(String(ROOT))
   await evolution.propose({
     proposalId: PROPOSAL,
     targetType: 'skill',
@@ -352,6 +361,7 @@ async function fixture(options: {
     evolution,
     storeId: root.storeId,
     snapshotDir,
+    skillRoot,
     defaultSelection,
     workerSessions: () => [...sessions],
     routes: sessionId => h.requestsOf(sessionId).map(request => `${request.options.provider}/${request.options.model}`),
@@ -444,9 +454,9 @@ describe('S4-E §Q3: the frozen identity constrains the runs that really happen'
     await f.evolution.gate(PROPOSAL, gateAnswers(result.reportPath), ROOT)
     await f.evolution.decide(PROPOSAL, 'PROMOTE', ROOT, 'approval:decide')
     await f.evolution.apply(PROPOSAL, ROOT, 'approval:apply')
-    expect(await readFile(join(f.h.home, 'skills', SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE_BODY)
+    expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE_BODY)
     await f.evolution.rollback(PROPOSAL, ROOT, 'approval:rollback')
-    expect(await readFile(join(f.h.home, 'skills', SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION_BODY)
+    expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION_BODY)
   })
 
   it('refuses a deployment whose default is still B at promotion time, though the runs themselves were frozen', async () => {

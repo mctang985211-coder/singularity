@@ -1,3 +1,4 @@
+import { evolutionForSession } from './evolution-scope.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-user-approval'
@@ -46,11 +47,12 @@ export function defineEvolutionApplyTool(ctx: Context) {
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
       const caller = sessionId(exec, 'evolution_apply')
+      const evolution = await evolutionForSession(ctx, caller)
       const agent = exec.agent
       if (agent === undefined) throw new Error('evolution_apply: missing agent')
       let proposal
       try {
-        proposal = await ctx.evolution.get(args.proposalId)
+        proposal = await evolution.get(args.proposalId)
       } catch (error) {
         return `evolution_apply rejected: ${message(error)}`
       }
@@ -58,7 +60,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
       // retry asks the service the only question that is still open — what does
       if (proposal.openIntent !== undefined) {
         try {
-          const recovered = await ctx.evolution.apply(args.proposalId, caller, proposal.openIntent.approvalRef)
+          const recovered = await evolution.apply(args.proposalId, caller, proposal.openIntent.approvalRef)
           return [
             `proposal ${recovered.proposal.proposalId} [applied] ${recovered.proposal.level} ${recovered.proposal.targetType} ${recovered.proposal.targetId} — PROMOTE in effect`,
             ...renderOpenIntentRecovery(proposal.openIntent, recovered.recovered),
@@ -83,14 +85,14 @@ export function defineEvolutionApplyTool(ctx: Context) {
       if (manual !== null) return `evolution_apply rejected: ${manual}`
       let promotion
       try {
-        promotion = await ctx.evolution.checkPromotion(proposal.proposalId)
+        promotion = await evolution.checkPromotion(proposal.proposalId)
         // P3: the production baseline must still be the one this candidate was
         // evaluated against, checked BEFORE the human is asked. The service
-        await ctx.evolution.checkProductionBaseline(proposal.proposalId)
+        await evolution.checkProductionBaseline(proposal.proposalId)
       } catch (error) {
         return `evolution_apply rejected: ${message(error)}`
       }
-      const targets = applyTargets(proposal, ctx.evolution)
+      const targets = applyTargets(proposal, evolution)
       const reason = [
         `Evolution apply for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
         `rationale: ${proposal.rationale}`,
@@ -125,7 +127,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
       }
       const approvalRef = `approval:${exec.callId}`
       try {
-        const applied = await ctx.evolution.apply(args.proposalId, caller, approvalRef)
+        const applied = await evolution.apply(args.proposalId, caller, approvalRef)
         return [
           `proposal ${applied.proposal.proposalId} [applied] ${applied.proposal.level} ${applied.proposal.targetType} ${applied.proposal.targetId} — PROMOTE in effect`,
           'wrote production targets:',

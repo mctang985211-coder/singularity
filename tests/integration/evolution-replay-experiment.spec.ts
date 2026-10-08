@@ -29,8 +29,8 @@
  * 4. **The report is traceable.** Every side cites a real task, run, review
  *    record and evidence bundle of this graph's store, and the report on disk
  *    is the report the tool rendered.
- * 5. **Refusals are named and side-effect free.** No failed sample, an empty
- *    holdout, overlapping lists, and a task that is not terminal are refused
+ * 5. **Refusals are named and side-effect free.** No failed sample, overlapping
+ *    lists, and a task that is not terminal are refused
  *    with nothing written — no ledger line, no run, no report.
  * 6. **Idempotency.** The same call again reuses every settled side: no new
  *    task, no new run, no new spawn, the same experiment id. A higher
@@ -263,11 +263,11 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
     evolution: true,
     worker: (sessionId: SessionId, agent: Agent) => replayedWorker(h, sessionId, agent),
   })
-  const skillRoot = join(h.home, 'skills')
+  const skillRoot = (await h.runtime.libraryForSession(ROOT)).skillRoot
   await mkdir(join(skillRoot, SKILL), { recursive: true })
   await writeFile(join(skillRoot, SKILL, 'SKILL.md'), PRODUCTION_BODY, 'utf8')
   const candidateBody = options.candidateBody ?? CANDIDATE_BODY
-  const evolution = new EvolutionService(h.ctx, {
+  const hostEvolution = new EvolutionService(h.ctx, {
     root: join(h.workspace, 'evolution'),
     skillRoot,
     // The deployment's model selection: the experiment freezes it, places every
@@ -275,6 +275,7 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
     // requests against it (S4-E §F.2/§Q3).
     modelSelection: () => deploymentModelSelection(h.ctx),
   })
+  const evolution = await hostEvolution.forSession(ROOT)
   await evolution.propose({
     proposalId: PROPOSAL,
     targetType: 'skill',
@@ -329,7 +330,7 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
 
 /** The ledger's own lines, read from disk (the append-only file, never the service's memory). */
 async function ledgerLines(f: Fixture): Promise<Record<string, unknown>[]> {
-  const file = join(f.h.workspace, 'evolution', 'proposals.jsonl')
+  const file = join(f.evolution.root, 'proposals.jsonl')
   if (!existsSync(file)) return []
   const text = await readFile(file, 'utf8')
   return text.split('\n').filter(line => line.trim().length > 0).map(line => JSON.parse(line) as Record<string, unknown>)
@@ -337,7 +338,7 @@ async function ledgerLines(f: Fixture): Promise<Record<string, unknown>[]> {
 
 /** The experiment report one tool answer names, read back from disk. */
 async function reportOnDisk(f: Fixture, reportPath: string): Promise<ExperimentReport> {
-  return JSON.parse(await readFile(join(f.h.workspace, 'evolution', reportPath), 'utf8')) as ExperimentReport
+  return JSON.parse(await readFile(join(f.evolution.root, reportPath), 'utf8')) as ExperimentReport
 }
 
 /** The side detail of one sample in a report. */
@@ -510,19 +511,42 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     expect(after.tasks).toHaveLength(before.tasks.length)
     expect(after.runs).toHaveLength(before.runs.length)
     expect(f.h.spawns).toHaveLength(spawnsBefore)
-    expect(existsSync(join(f.h.workspace, 'evolution', 'sandbox', PROPOSAL, 'exp'))).toBe(false)
+    expect(existsSync(join(f.evolution.root, 'sandbox', PROPOSAL, 'exp'))).toBe(false)
   })
 
-  it('refuses a call with an empty holdout, writing nothing', async () => {
+  it('evaluates a graph-local candidate on one observed Task while leaving transfer unverified', async () => {
     const f = await fixture()
     const before = await f.h.snapshot(f.storeId)
     const spawnsBefore = f.h.spawns.length
     const answer = await f.replay({ proposalId: PROPOSAL, taskIds: ['t-fix'], budget: BUDGET })
-    expect(answer).toContain('evolution_replay rejected:')
-    expect(answer).toContain('holdoutTaskIds must name at least one task that did not select this candidate')
+    expect(answer).toContain('verdict: fixed')
+    expect(answer).toContain('transfer to unseen Tasks: unknown')
+    const report = await reportOnDisk(f, `sandbox/${PROPOSAL}/exp-${await experimentIdOf(f)}/experiment-report.json`)
+    expect(report.frozen.libraryId).toBe(ROOT)
+    expect(report.frozen.samples.map(sample => sample.role)).toEqual(['observed-failure'])
+    expect(report.verdict).toBe('fixed')
     const after = await f.h.snapshot(f.storeId)
-    expect(after.tasks).toHaveLength(before.tasks.length)
-    expect(f.h.spawns).toHaveLength(spawnsBefore)
+    expect(after.tasks).toHaveLength(before.tasks.length + 2)
+    expect(f.h.spawns).toHaveLength(spawnsBefore + 2)
+  })
+
+  it('keeps independent holdout required for shared publication through the direct service API', async () => {
+    const f = await fixture()
+    const shared = new EvolutionService(f.h.ctx.isolate('evolution'), {
+      root: join(f.h.workspace, 'shared-evolution'),
+      skillRoot: f.evolution.skillRoot,
+      modelSelection: () => deploymentModelSelection(f.h.ctx),
+    })
+    await shared.propose({ proposalId: 'p-shared', targetType: 'skill', targetId: SKILL, baseVersion: '1', level: 'L2', rationale: 'Evaluate the method for shared publication', sourceRefs: ['diagnosis:d1'] }, ROOT)
+    await shared.candidate('p-shared', { skill: '2' }, ROOT, { name: SKILL, content: CANDIDATE_BODY })
+    await shared.prepare('p-shared', ROOT)
+    const before = await f.h.snapshot(f.storeId)
+    await expect(shared.runExperiment({
+      proposalId: 'p-shared', samples: [{ taskId: 't-fix', role: 'observed-failure' }],
+      snapshot: { sourceDir: f.h.checkout }, model: deploymentModelSelection(f.h.ctx)!, budget: BUDGET, repetition: 0,
+    }, ROOT, ROOT)).rejects.toThrow(/holdout/)
+    expect((await f.h.snapshot(f.storeId)).runs).toEqual(before.runs)
+    expect(await shared.experiments()).toEqual([])
   })
 
   it('refuses overlapping lists and a sample with no terminal history, naming each and starting no run', async () => {
@@ -557,7 +581,7 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     const unknown = await f.replay({ proposalId: PROPOSAL, taskIds: ['t-nope'], holdoutTaskIds: ['t-holdout'], budget: BUDGET })
     expect(unknown).toContain('unknown task "t-nope" in this graph\'s task store')
 
-    await writeFile(join(f.h.workspace, 'evolution', 'sandbox', PROPOSAL, 'skills', SKILL, 'SKILL.md'), 'tampered\n', 'utf8')
+    await writeFile(join(f.evolution.root, 'sandbox', PROPOSAL, 'skills', SKILL, 'SKILL.md'), 'tampered\n', 'utf8')
     const tampered = await f.replay({ proposalId: PROPOSAL, taskIds: ['t-fix'], holdoutTaskIds: ['t-holdout'], budget: BUDGET })
     expect(tampered).toContain('evolution_replay rejected:')
     expect(tampered).toContain('no longer matches the content identity')
@@ -623,7 +647,7 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     expect(f.h.spawns).toHaveLength(spawnsBefore)
     expect((await ledgerLines(f)).map(line => line.kind)).toEqual(linesBefore.map(line => line.kind))
     expect((await ledgerLines(f)).map(line => line.kind)).not.toContain('experiment_started')
-    expect(existsSync(join(f.h.workspace, 'evolution', 'sandbox', PRESET_PROPOSAL))).toBe(false)
+    expect(existsSync(join(f.evolution.root, 'sandbox', PRESET_PROPOSAL))).toBe(false)
 
     // The same shape is refused where its lifecycle would start, before any write.
     const candidateRefusal = await f.evolution
@@ -655,7 +679,7 @@ describe('S4-E: the promotion gate promotes a fixed skill candidate end to end',
 
   it('runs the experiment → gate → decide → apply → rollback, with each step asked of the real tools', async () => {
     const f = await fixture()
-    const production = join(f.h.home, 'skills', SKILL, 'SKILL.md')
+    const production = join(f.evolution.skillRoot, SKILL, 'SKILL.md')
     expect(readFileSync(production, 'utf8')).toBe(PRODUCTION_BODY)
 
     // 1. The evaluation: both sides of both samples, as this experiment's own runs.
@@ -687,7 +711,7 @@ describe('S4-E: the promotion gate promotes a fixed skill candidate end to end',
     const decided = await f.call('evolution_decide', { proposalId: PROPOSAL, decision: 'PROMOTE', note: 'the fix holds' })
     expect(decided.isError, decided.text).toBe(false)
     expect(decided.text).toContain('proposal p1 [decided] PROMOTE — the fix holds')
-    expect(decided.text).toContain('nothing applied yet; continue with evolution_apply')
+    expect(decided.text).toContain('nothing applied yet; evolution_apply')
     expect(readFileSync(production, 'utf8')).toBe(PRODUCTION_BODY)
 
     // 4. The publication approval: the apply writes exactly the candidate bytes.
@@ -756,7 +780,27 @@ describe('S4-E: the promotion gate promotes a fixed skill candidate end to end',
 
     const promote = await f.call('evolution_decide', { proposalId: PROPOSAL, decision: 'PROMOTE' })
     expect(promote.text).toContain('evolution_decide rejected:')
-    expect(promote.text).toContain('is prepared; only a gated proposal can be decided')
+    expect(promote.text).toContain('is prepared; cannot record "decided"')
     expect(await ledgerLines(f)).toHaveLength(3)
   })
+
+  it.each(['REJECT', 'KEEP_FOR_FURTHER_RESEARCH'] as const)(
+    'settles a prepared no-op candidate with %s after experiment gate refuses it',
+    async decision => {
+      const f = await fixture({ candidateBody: PRODUCTION_BODY, skipSamples: true })
+      const gate = await f.call('evolution_gate', { proposalId: PROPOSAL, ...gateAnswers(['evidence:missing']) })
+      expect(gate.text).toContain('has no two-sided experiment')
+      const decided = await f.call('evolution_decide', {
+        proposalId: PROPOSAL, decision,
+        note: 'The candidate has the same bytes as the available Skill; retain the current method.',
+      })
+      expect(decided.isError).toBe(false)
+      expect(decided.text).toContain(`[decided] ${decision}`)
+      expect(await f.evolution.experiments(PROPOSAL)).toEqual([])
+      expect((await ledgerLines(f)).map(line => line.kind)).toEqual(['proposed', 'candidate', 'prepared', 'decided'])
+      const applied = await f.call('evolution_apply', { proposalId: PROPOSAL })
+      expect(applied.text).toContain('rejected:')
+      expect(readFileSync(join(f.evolution.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION_BODY)
+    },
+  )
 })

@@ -1,12 +1,12 @@
 import type { EnvRecord } from '@dangosys/dsh-env-builder'
 import type { GraphsEvent, GraphsSnapshot, GraphRecord } from '../types.ts'
 
-/** Whether an existing environment can be bound by a new graph: it has repositories, no graph, and no sessions. */
+/** Whether an existing workspace can be bound by a new graph: no graph and no sessions. */
 export function isReusableEnv(
   env: Pick<EnvRecord, 'id' | 'components' | 'sessionIds'>,
   boundEnvIds: ReadonlySet<string>,
 ): boolean {
-  return env.components.length > 0 && !boundEnvIds.has(env.id) && env.sessionIds.length === 0
+  return !boundEnvIds.has(env.id) && env.sessionIds.length === 0
 }
 
 function copy<T>(value: T): T {

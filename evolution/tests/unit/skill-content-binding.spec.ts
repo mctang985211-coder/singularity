@@ -76,8 +76,6 @@ async function prepareSkill(svc: EvolutionService, content: string = SKILL_CANDI
   return prepared.prepared!.skillContent!
 }
 
-const P3_CONFLICT_GUIDANCE = 'create a new candidate from the current production state and re-evaluate it'
-
 /** Rewrite a live ledger as a P2-era one: the prepared line loses `skillBaseline`, the field P3 added. */
 async function dropBaselineField(root: string) {
   const path = join(root, 'proposals.jsonl')
@@ -262,19 +260,18 @@ describe('skill candidate content binding (P2)', () => {
     await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
 
     const candidate = skillCandidateFile(root)
-    const replacement = 'replaced after the candidate read\n'
+    const replacement = skillText('replaced after the candidate read')
     let reads = 0
     let fired = 0
     candidateReadHooks.onCandidateRead = async path => {
       if (path !== candidate) return
       reads += 1
-      // apply reads the candidate three times — checkPromotion's identity read,
-      // the promotion's provider check (S1-C item 3), and the write's own read.
-      // The source is replaced only after that last read completes,
-      // deterministically, with no sleep-based race; the commit's own re-read of
-      // the source it is about to name in the intent is a fourth read, and that
-      // is the one the replacement is caught by.
-      if (reads === 3) {
+      // apply reads the candidate several times — checkPromotion's identity read,
+      // its whole-object re-read, the promotion's provider check, the write's own
+      // reads — and only after the last of those is the commit's own re-read of
+      // the source it is about to name in the intent left. The source is replaced
+      // exactly then, deterministically, with no sleep-based race.
+      if (reads === 6) {
         fired += 1
         await writeFile(candidate, replacement)
       }
@@ -465,13 +462,13 @@ describe('production baseline check (P3)', () => {
       const { ctx, approval } = toolCtx(svc)
       const viaTool = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
       expect(viaTool).toContain('evolution_apply rejected:')
-      expect(viaTool).toContain(P3_CONFLICT_GUIDANCE)
+      // The production object no longer loads as the one prepare froze — changed
+      // bytes or a vanished SKILL.md — so the whole-object check refuses it.
+      expect(viaTool).toContain('is not loadable')
       expect(approval.request).not.toHaveBeenCalled()
 
       // and a direct service call cannot bypass the same check
-      await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(
-        next === null ? /no longer exists/ : /changed since prepare/,
-      )
+      await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(/is not loadable/)
       expect((await svc.get('s1')).status).toBe('decided')
       expect((await svc.get('s1')).applied).toBeUndefined()
       expect(await ledgerKinds(root)).not.toContain('applied')
@@ -531,8 +528,8 @@ describe('production baseline check (P3)', () => {
     // 1. the SKILL.md path becomes a directory
     await rm(skillProductionFile(skillRoot))
     await mkdir(skillProductionFile(skillRoot))
-    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('is no longer a readable regular file')
-    await expect(svc.checkProductionBaseline('s1')).rejects.toThrow('is no longer a readable regular file')
+    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('is not a regular file')
+    await expect(svc.checkProductionBaseline('s1')).rejects.toThrow('is not a regular file')
     await rm(skillProductionFile(skillRoot), { recursive: true })
 
     // 2. the SKILL.md path becomes a symbolic link to a file outside the skill root
@@ -567,8 +564,9 @@ describe('production baseline check (P3)', () => {
 
     const second = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's2' }, exec('root-1'))) as string
     expect(second).toContain('evolution_apply rejected:')
-    expect(second).toContain('changed since prepare')
-    expect(second).toContain(P3_CONFLICT_GUIDANCE)
+    // Production now carries the first candidate, so the second baseline is no
+    // longer the object its prepare froze.
+    expect(second).toContain('no longer matches its frozen content identity')
     // the second never reaches the human: one approval for the whole serial run
     expect(approval.request).toHaveBeenCalledOnce()
 
@@ -588,14 +586,14 @@ describe('production baseline check (P3)', () => {
     const { svc, skillRoot } = await serviceWithProduction()
     await productionSkill(skillRoot)
     await walkSkillToDecided(svc, 's1', P3_CANDIDATE_A)
-    await writeFile(skillProductionFile(skillRoot), '# moved before the review\n')
+    await writeFile(skillProductionFile(skillRoot), skillText('# moved before the review'))
 
     const { ctx, approval } = toolCtx(svc)
     const result = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
     expect(result).toContain('evolution_apply rejected:')
-    expect(result).toContain('changed since prepare')
+    expect(result).toContain('no longer matches its frozen content identity')
     expect(approval.request).not.toHaveBeenCalled()
-    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe('# moved before the review\n')
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(skillText('# moved before the review'))
   })
 
   it('P3-F: a baseline that moves while the approval is pending is refused by the recheck after the grant', async () => {
@@ -625,29 +623,35 @@ describe('production baseline check (P3)', () => {
     const applying = defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))
 
     await humanDeciding
-    await writeFile(skillProductionFile(skillRoot), '# moved while the human was deciding\n')
+    await writeFile(skillProductionFile(skillRoot), skillText('# moved while the human was deciding'))
     grant()
     const result = (await applying) as string
 
     expect(approval.request).toHaveBeenCalledOnce()
     expect(result).toContain('evolution_apply rejected:')
-    expect(result).toContain('changed since prepare')
+    expect(result).toContain('no longer matches its frozen content identity')
     expect((await svc.get('s1')).status).toBe('decided')
     expect(await ledgerKinds(root)).not.toContain('applied')
     // production keeps the externally edited bytes — no overwrite, no merge
-    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe('# moved while the human was deciding\n')
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(
+      skillText('# moved while the human was deciding'),
+    )
   })
 
   it('P3-G: a reopened service identifies the same production-baseline conflict', async () => {
     const { svc, root, skillRoot } = await serviceWithProduction()
     await productionSkill(skillRoot)
     await walkSkillToDecided(svc, 's1', P3_CANDIDATE_A)
-    await writeFile(skillProductionFile(skillRoot), '# moved across a restart\n')
+    await writeFile(skillProductionFile(skillRoot), skillText('# moved across a restart'))
 
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot })
-    await expect(reopened.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('changed since prepare')
-    await expect(reopened.checkProductionBaseline('s1')).rejects.toThrow('changed since prepare')
-    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe('# moved across a restart\n')
+    await expect(reopened.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(
+      'no longer matches its frozen content identity',
+    )
+    await expect(reopened.checkProductionBaseline('s1')).rejects.toThrow(
+      'no longer matches its frozen content identity',
+    )
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(skillText('# moved across a restart'))
     const reloaded = await reopened.get('s1')
     expect(reloaded.status).toBe('decided')
     expect(reloaded.applied).toBeUndefined()
@@ -691,12 +695,14 @@ describe('production baseline check (P3)', () => {
     // over: rollback would restore a baseline on top of a version newer than the
     // one it is undoing. Nothing is written, no intent is recorded, and the
     // proposal stays applied with the external bytes untouched.
-    await writeFile(skillProductionFile(skillRoot), '# edited after the apply\n')
+    await writeFile(skillProductionFile(skillRoot), skillText('# edited after the apply'))
     const before = await readFile(join(root, 'proposals.jsonl'), 'utf8')
+    // The production object no longer matches the candidate this proposal
+    // applied, so the whole-object identity check refuses the rollback.
     await expect(svc.rollback('s1', 'root-1', 'approval:call-2')).rejects.toThrow(
-      /does not hold the content proposal "s1" applied/,
+      /no longer matches its frozen content identity/,
     )
-    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe('# edited after the apply\n')
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(skillText('# edited after the apply'))
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect((await svc.get('s1')).status).toBe('applied')
     expect((await svc.get('s1')).rolledback).toBeUndefined()

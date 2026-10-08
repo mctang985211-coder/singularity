@@ -46,6 +46,8 @@ export interface VerifierVocabulary {
 
 /** The services and facts the gate reads. Every one of them is resolved by the caller from its own context. */
 export interface SkillPromotionSources {
+  /** Server-bound publication scope, compared with the frozen experiment. */
+  readonly libraryId?: string
   /** Absolute ledger root: the report path is resolved inside it. */
   readonly root: string
   /** Every experiment folded under one proposal, newest first. */

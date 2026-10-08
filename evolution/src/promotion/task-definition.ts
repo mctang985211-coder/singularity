@@ -2,7 +2,7 @@
 import { resolve } from 'node:path'
 import { canonicalize, contractDigest, decompositionDigest } from '@dangosys/dsh-singularity-task'
 import type { TaskInstance, TaskSnapshot, TaskTemplate, TaskTemplateRef } from '@dangosys/dsh-singularity-task'
-import { bindTaskDecomposition, bindTaskTemplate, fixSpecProtectedInputs, normalizeDecomposition } from '@dangosys/dsh-singularity-task-runtime'
+import { bindTaskDecomposition, bindTaskTemplate, fixSpecProtectedInputs, normalizeDecomposition, rebaseWorkspacePaths } from '@dangosys/dsh-singularity-task-runtime'
 import type { DecomposeSpec } from '@dangosys/dsh-singularity-task-runtime'
 import type { EvolutionProposal } from '../types.ts'
 import type { SkillPromotionSources } from './shared.ts'
@@ -73,7 +73,9 @@ async function assertRecipeConsumption(input: {
       } catch { return false }
     })
     if (!observed) throw new Error(`evolution: ${where} has no logged recipe consumption matching its committed batch`)
-    const scope = parent.contract?.templateScope ?? []
+    // The parent's own scope verbatim: a parent without one binds children without
+    // one, exactly as the runtime's own `deriveBatch` binds them.
+    const scope = parent.contract?.templateScope
     const expanded = await bindTaskDecomposition(library, {
       templateRef: wanted, templateParameters: proposal.identity.templateParameters ?? {},
     } as DecomposeSpec, scope)
@@ -259,12 +261,14 @@ export async function assertTaskDefinitionPromotion(
         const contract = oracle
           ? { acceptanceCriteria: independentOracleCriteria(source), requiredCapabilities: source.requestedCapabilities }
           : await criterionGuardContract(resolve(sources.root, sandbox, 'task-templates/candidate'), view, label)
+        const effective = frozen.snapshot.rebaseFrom === undefined ? contract : rebaseWorkspacePaths(contract,
+          frozen.snapshot.rebaseFrom, resolve(sources.root, `sandbox/${view.proposalId}/exp-${view.experimentId}/criterion-${label}${oracle ? '-oracle' : ''}`))
         const actual = task.acceptanceCriteria.map(({ protectedInputs: _inputs, ...criterion }) => criterion)
-        const wanted = contract.acceptanceCriteria.map(({ protectedInputs: _inputs, ...criterion }) => criterion)
+        const wanted = effective.acceptanceCriteria.map(({ protectedInputs: _inputs, ...criterion }) => criterion)
         if (canonicalize(actual) !== canonicalize(wanted) ||
             canonicalize(task.requestedCapabilities) !== canonicalize(contract.requiredCapabilities ?? []))
           throw new Error('evolution: criterion guard judged a different contract')
-        for (const criterion of contract.acceptanceCriteria) {
+        for (const criterion of effective.acceptanceCriteria) {
           const fixed = task.acceptanceCriteria.find(item => item.criterionId === criterion.criterionId)!
           const declared = (criterion.protectedInputs ?? []) as unknown as (string | { path: string; sha256: string })[]
           const paths = declared.map(input => typeof input === 'string' ? input : input.path)

@@ -43,7 +43,7 @@ const STORE = rootTaskStoreId(ROOT_SESSION)
 
 /** Exactly the root agent's allow-list, so the root setup path is exercised for real. */
 const ROOT_TOOLS = [
-  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'task_template_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
+  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'task_template_list', 'task_library', 'context_read', 'skill', 'task_intake', 'task_decompose',
   'task_submit_result', 'task_answer', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'task_budget_extend', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
@@ -302,11 +302,12 @@ async function runOne(h: Harness, objective = 'align the ball', capabilities: re
   return { taskId: childTaskId, runId: childRunId }
 }
 
-/** The body the worker's own skill layer holds for one skill, as the registry serves it. */
-async function registeredSkill(h: Harness, agent: Agent, name: string): Promise<{ content: string; path?: string; resourceBase?: { path: string } }> {
-  const skill = await h.ctx.skills.get(name, { scope: agent, cwd })
-  if (skill === undefined) throw new Error(`the worker's skill layer holds no "${name}"`)
-  return skill as { content: string; path?: string; resourceBase?: { path: string } }
+/** Read through the model's scoped loader, which resolves its isolated registry. */
+async function registeredSkill(h: Harness, agent: Agent, name: string): Promise<{ content: string; resourceBase?: { path: string } }> {
+  const loader = h.ctx.tools.get('skill', agent)
+  if (loader === undefined) throw new Error('the worker has no skill loader')
+  const skill = await loader.execute({ name }, { agent, callId: 'read-bound-skill', signal: new AbortController().signal } as never)
+  return skill as { content: string; resourceBase?: { path: string } }
 }
 
 
@@ -348,12 +349,10 @@ describe('the content a worker loads (S1-C)', () => {
     const worker = h.agent(run.sessionId as SessionId)!
     const registered = await registeredSkill(h, worker, 'ball-align')
     expect(registered.content).toContain('ADMITTED BODY')
-    // The worker's copy comes from the snapshot, not from the checkout: the
-    // resource base and the file it was read from both sit in the run's own
-    // directory, which is outside the worker's checkout.
-    expect(registered.path!.startsWith(binding.snapshotRoot!)).toBe(true)
+    // The model's loader exposes the frozen snapshot's resource base outside
+    // the checkout, and the recorded binding below verifies its exact bytes.
     expect(registered.resourceBase!.path.startsWith(binding.snapshotRoot!)).toBe(true)
-    expect(registered.path!.startsWith(cwd)).toBe(false)
+    expect(registered.resourceBase!.path.startsWith(cwd)).toBe(false)
 
     // And the record's own re-check of those bytes is clean.
     expect((await h.runtime.readRunBinding(binding))?.defects).toEqual([])
@@ -420,18 +419,16 @@ describe('the content a worker loads (S1-C)', () => {
     const worker = h.agent(sessionId)!
 
     const before = h.visible(worker)
-    // The unselected skill stays reachable from the deployment's own catalog
-    // (DSH has no per-agent hiding — the honest boundary)…
+    // The deployment keeps its own catalog; the model uses an isolated loader.
     const other = await h.ctx.skills.get('other-skill', { scope: worker, cwd })
     expect(other).toBeDefined()
-    // …while the run's snapshot holds exactly the bound skill, so nothing else
-    // can reach the worker's own layer through this run's skill roots.
+    await expect(registeredSkill(h, worker, 'other-skill')).rejects.toThrow('unknown or no longer available')
+    // The run's snapshot and model view contain exactly its granted method.
     const binding = (await h.task.runIn(STORE, runId)).providerBinding!
     expect((await listSkillFiles(binding.snapshotRoot!)).map(file => file.name)).toEqual(['ball-align'])
     expect(binding.skills.map(skill => skill.name)).toEqual(['ball-align'])
 
-    // Loading it changes nothing about what the worker may call: authorization
-    // is the capability grant, and a skill body is content, not a permission.
+    // A rejected method request keeps the original tool grant intact.
     expect(h.visible(worker)).toEqual(before)
     for (const name of before) {
       expect(['graph_spawn', 'evolution_decide', 'evolution_apply', 'task_review_pack', 'task_diagnose', 'hitl_ask', 'escalate']).not.toContain(name)
@@ -447,9 +444,10 @@ describe('the binding record (S1-C)', () => {
     const h = await harness()
     const { taskId, runId: rootRunId } = await activateRoot(h)
     const rootRun = await h.task.runIn(STORE, rootRunId)
-    // The root explicitly selects its Task method and freezes those instructions.
-    expect(rootRun.capabilitySnapshot).toEqual(['task-execution'])
-    expect(rootRun.providerBinding!.skills.map(skill => skill.name)).toEqual(['task-execution'])
+    // The root selects generic execution and freezes this graph's guidance.
+    expect((await h.task.taskIn(STORE, taskId)).requestedCapabilities).toEqual(['execute-task'])
+    expect(rootRun.capabilitySnapshot).toContain('task-coordination')
+    expect(rootRun.providerBinding!.skills.map(skill => skill.name)).toEqual(['task-coordination'])
     expect(rootRun.providerBinding!.mcpServers).toEqual([])
     expect(rootRun.providerBinding!.snapshotRoot).toBeDefined()
     expect(rootRun.providerBinding!.registryRevision).toMatch(/^[0-9a-f]{64}$/)

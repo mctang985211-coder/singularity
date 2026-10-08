@@ -1030,30 +1030,27 @@ describe('K2 durability: the source, the intent line and the rename', () => {
     expect((await svc.get('s1')).openIntent).toBeUndefined()
   })
 
-  it('refuses a commit whose stale staging file cannot be swept, before anything is staged', async () => {
+  it('refuses a commit whose production directory carries a staging leftover, before anything is staged', async () => {
     const { svc, root, skillRoot } = await decidedSkillFixture()
     const directory = dirname(targetOf(skillRoot))
     const stale = join(directory, '.SKILL.md.tmp-4242-deadbeef')
     await writeFile(stale, '# a staging file a killed attempt left behind\n')
     const before = await readFile(join(root, 'proposals.jsonl'))
 
-    failOn('rm', stale, 'simulated staging sweep failure')
+    // The production directory is no longer the loadable object prepare froze —
+    // the leftover is an entry the object's file set does not cover — so the
+    // baseline check stops before the commit stages anything.
     const message = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
 
-    expect(message).toMatch(/simulated staging sweep failure/)
-    expect(message).toContain(stale)
-    expect(message).toMatch(/stale staging file/)
-    // The sweep failure stops the commit before it stages its own bytes:
-    // production still holds the old version, the leftover is still there, and
-    // no completion was recorded. The intent line was appended before the write
-    // (that is the commit order), so it is the last line the ledger holds — and
-    // nothing else was added.
+    expect(message).toContain('is not loadable')
+    expect(message).toContain('.SKILL.md.tmp-4242-deadbeef')
+    // Production still holds the old version, the leftover is still there, and no
+    // line at all was recorded: the refusal lands before the intent line.
     expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(PRODUCTION_BASELINE)
     expect(existsSync(stale)).toBe(true)
-    const after = await readFile(join(root, 'proposals.jsonl'))
-    expect(after.subarray(0, before.length)).toEqual(before)
+    expect(await readFile(join(root, 'proposals.jsonl'))).toEqual(before)
     const kinds = await ledgerKinds(root)
-    expect(kinds.at(-1)).toBe('commit_intent')
+    expect(kinds).not.toContain('commit_intent')
     expect(kinds).not.toContain('applied')
   })
 })
@@ -1071,9 +1068,11 @@ describe('K2 durability: the source the intent would name', () => {
     // replaced exactly then, with no sleep-based race, so the bytes the commit
     // would name are no longer the bytes it verified.
     fsLayer.onRead = async (path, reads) => {
-      if (path !== source || reads !== 3) return
+      if (path !== source || reads !== 6) return
       fired += 1
-      await writeFile(source, '# replaced between the verified read and the intent\n')
+      // Loadable bytes, so the promotion's provider read still admits the
+      // candidate: only the commit's own re-read of the source may notice the swap.
+      await writeFile(source, skillText('# replaced between the verified read and the intent'))
     }
 
     const message = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
@@ -1248,7 +1247,7 @@ describe('K2 durability: the source the intent would name', () => {
 })
 
 describe('K2 durability: the staging file, and a real fs failure', () => {
-  it('removes the stale staging files of this target and leaves every other entry alone', async () => {
+  it('refuses an apply whose production directory holds entries outside the frozen file set', async () => {
     const { svc, root, skillRoot } = await decidedSkillFixture()
     const directory = dirname(targetOf(skillRoot))
     const stale = join(directory, '.SKILL.md.tmp-4242-deadbeef')
@@ -1258,27 +1257,25 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
     await writeFile(otherTarget, "# another target's staging file, or a stranger's\n")
     await writeFile(plain, '# a file nobody staged\n')
 
-    await svc.apply('s1', 'root-1', 'approval:call-1')
+    const message = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
 
-    // This target's own leftover is gone, and only it: the sweep is confined to
-    // the target's directory and the target's own staging prefix.
-    expect(existsSync(stale)).toBe(false)
+    // A directory the object check cannot account for is a refusal, not a sweep:
+    // production keeps every entry it had and no completion is recorded.
+    expect(message).toContain('is not loadable')
+    expect(existsSync(stale)).toBe(true)
     expect(await readFile(otherTarget, 'utf8')).toBe("# another target's staging file, or a stranger's\n")
     expect(await readFile(plain, 'utf8')).toBe('# a file nobody staged\n')
-    // Swept before the new staging file is created, and production holds exactly
-    // the committed version.
-    const swept = opIndex(op => op.op === 'rm' && op.path === stale)
-    const stagedOpen = opIndex(
-      op => op.op === 'open' && op.path.startsWith(join(directory, '.SKILL.md.tmp-')) && op.detail === 'wx',
-    )
-    expect(swept).toBeGreaterThanOrEqual(0)
-    expect(stagedOpen).toBeGreaterThan(swept)
-    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(SKILL_CANDIDATE)
-    expect((await readdir(directory)).filter(entry => entry.includes('.tmp-'))).toEqual(['.other.md.tmp-4242-deadbeef'])
-    expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
+    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(PRODUCTION_BASELINE)
+    expect((await readdir(directory)).sort()).toEqual([
+      '.SKILL.md.tmp-4242-deadbeef',
+      '.other.md.tmp-4242-deadbeef',
+      'SKILL.md',
+      'notes.txt',
+    ])
+    expect(await ledgerKinds(root)).not.toContain('applied')
   })
 
-  it("sweeps this target's staging leftovers when a settlement only records a completion", async () => {
+  it("refuses a settlement whose production directory carries a foreign entry", async () => {
     const { svc, root, skillRoot } = await decidedSkillFixture()
     const directory = dirname(targetOf(skillRoot))
     const target = targetOf(skillRoot)
@@ -1289,7 +1286,8 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
     await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
     expect(await readFile(target, 'utf8')).toBe(SKILL_CANDIDATE)
     // A staging file of this target that a killed attempt left beside it, and a
-    // stranger's file: the settlement must remove the one and not touch the other.
+    // stranger's file: the object check tolerates the target's own prefix but not
+    // an entry outside the frozen file set, so the settlement stops by name.
     const stale = join(directory, '.SKILL.md.tmp-4242-deadbeef')
     const otherTarget = join(directory, '.other.md.tmp-4242-deadbeef')
     await writeFile(stale, '# a staging file a killed attempt left behind\n')
@@ -1302,28 +1300,18 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
         proposalId: 's1',
         direction: 'apply',
         targets: [target],
-        result: 'completed-written',
+        result: 'blocked',
+        detail: expect.stringContaining('outside the frozen commit file set'),
       },
     ])
 
-    expect(existsSync(stale)).toBe(false)
+    // Nothing was swept or completed: both leftovers are still there, no
+    // completion landed and the intent stays open.
+    expect(existsSync(stale)).toBe(true)
     expect(await readFile(otherTarget, 'utf8')).toBe("# another target's staging file, or a stranger's\n")
-    expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
-    expect((await svc.get('s1')).openIntent).toBeUndefined()
+    expect(await ledgerKinds(root)).not.toContain('applied')
+    expect((await svc.get('s1')).openIntent?.intentId).toBe('s1/apply')
     expect(await readFile(target, 'utf8')).toBe(SKILL_CANDIDATE)
-    // The sweep runs *before* the completion is recorded, so a settlement that
-    // cannot sweep stops while the intent is still open (and a later
-    // reconciliation can retry it) instead of recording a completion over a
-    // leftover nothing is looking at any more.
-    const swept = opIndex(op => op.op === 'rm' && op.path === stale)
-    const completion = opIndex(
-      op =>
-        op.op === 'write' &&
-        op.path === join(root, 'proposals.jsonl') &&
-        op.detail?.includes('"kind":"applied"') === true,
-    )
-    expect(swept).toBeGreaterThanOrEqual(0)
-    expect(completion).toBeGreaterThan(swept)
   })
 
   it('stops a completion-only settlement when a staging leftover cannot be swept', async () => {
@@ -1673,7 +1661,7 @@ describe('K3 durability: two files, two sources, one intent', () => {
     expect(await ledgerKinds(root)).not.toContain('applied')
   })
 
-  it('sweeps each file\u2019s own staging prefix and never another target\u2019s', async () => {
+  it('refuses an apply whose production directory carries a staging leftover beside the pair', async () => {
     const { svc, root, skillRoot } = await objectDecidedFixture()
     const directory = dirname(targetOf(skillRoot))
     const skillStale = join(directory, '.SKILL.md.tmp-4242-deadbeef')
@@ -1681,15 +1669,21 @@ describe('K3 durability: two files, two sources, one intent', () => {
     await writeFile(skillStale, '# a staging file of the first file\n')
     await writeFile(sidecarStale, '# a staging file of the second file\n')
 
-    await svc.apply('s1', 'root-1', 'approval:call-1')
+    const message = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
 
-    // Each file sweeps its own prefix, and only its own: a leftover of the same
-    // prefix is gone, and the directory holds the pair and nothing else.
-    expect(existsSync(skillStale)).toBe(false)
-    expect(existsSync(sidecarStale)).toBe(false)
-    expect((await readdir(directory)).sort()).toEqual(['SKILL.contract.json', 'SKILL.md'])
-    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(SKILL_CANDIDATE)
-    expect(await readFile(sidecarTargetOf(skillRoot), 'utf8')).toBe(await expectedCandidateSidecar(root))
+    // The leftovers are entries the declared identity does not cover, so the
+    // whole-object baseline check refuses the directory before any write.
+    expect(message).toContain('is not loadable')
+    expect(existsSync(skillStale)).toBe(true)
+    expect(existsSync(sidecarStale)).toBe(true)
+    expect((await readdir(directory)).sort()).toEqual([
+      '.SKILL.contract.json.tmp-4242-deadbeef',
+      '.SKILL.md.tmp-4242-deadbeef',
+      'SKILL.contract.json',
+      'SKILL.md',
+    ])
+    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(PRODUCTION_BASELINE)
+    expect(await ledgerKinds(root)).not.toContain('applied')
   })
 
   it('refuses a two-file intent whose sources or targets leave their roots, writing nothing', async () => {
@@ -1785,8 +1779,10 @@ describe('K3 durability: two files, two sources, one intent', () => {
 
     const message = await refusalOf(svc.rollback('s1', 'root-1', 'approval:call-2'))
 
-    expect(message).toContain(sidecarTargetOf(skillRoot))
-    expect(message).toContain('does not hold the content proposal "s1" applied')
+    // The production pair no longer loads as the candidate object this proposal
+    // applied, so the whole-object identity check refuses the rollback.
+    expect(message).toContain('is not loadable')
+    expect(message).toContain(SKILL_SIDECAR_FILE)
     expect(await readFile(ledger)).toEqual(before)
     expect(await svc.openIntentTargets()).toEqual([])
     expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(SKILL_CANDIDATE)

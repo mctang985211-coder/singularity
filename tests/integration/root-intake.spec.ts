@@ -415,7 +415,10 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     // The composite conjunction alone: a goal satisfied by its own decomposition
     // (A0 §1.2). Both doors are exercised — the tool the root holds, and the
     // service entry a direct caller reaches — and both must refuse before a
-    // record exists.
+    // record exists. The tool's own criteria schema no longer declares the
+    // `composite` mode at all (the conjunction is the runtime's, never the
+    // caller's), so the tool door is the schema's own refusal and the service
+    // door is where the root's rule is named.
     const compositeOnly = contractFor(USER_GOAL, [
       { criterionId: 'root-children', description: 'all mandatory children verified', mode: 'composite', mandatory: true },
     ])
@@ -432,11 +435,11 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     h.userSays(USER_GOAL)
 
     const refused = await answered(h, 'task_intake')
-    // A refusal is an answer, not a crash: the model learns why and what would
-    // change it.
-    expect(refused.result?.isError).toBe(false)
-    expect(refused.result?.text).toContain('task_intake rejected')
-    expect(refused.result?.text).toContain('requires at least one mandatory acceptance criterion judged by something other than the composite conjunction')
+    // The tool's declared parameter schema is the first gate: `composite` is not
+    // one of the modes a caller may declare, and the refusal names the field.
+    expect(refused.result?.isError).toBe(true)
+    expect(refused.result?.text).toContain('"acceptanceCriteria[0].mode" must be one of')
+    expect(refused.result?.text).not.toContain('"composite"')
 
     // The same rule, from the entry the tool calls: the gate is not the tool's.
     await expect(h.runtime.intakeRootContract(storeId, String(ROOT), compositeOnly))
@@ -990,9 +993,10 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     // The delegated task on the worker's own log is the runtime's own kickoff
     // (A2): the contract and state moved into the assembled context, so what the
     // spawn sends is a pointer at it — the attribution ('runtime-prompt'/'spawn')
-    // is unchanged. Everything else on the log is the deployment's
-    // runtime-context plane: the dynamic half of the assembled context, written
-    // as a snapshot when it changes (the `runtime-context` producer).
+    // is unchanged. Everything else on the log is the deployment's own planes:
+    // the dynamic half of the assembled context written as a snapshot when it
+    // changes (the `runtime-context` producer) and the skill catalog the skill
+    // tool publishes for the worker (the `skill-catalog` producer).
     const userMessages = h.eventsOf(worker).filter(event => event.type === 'user/message')
     const delegated = userMessages.filter(event => (event.data as { source?: { channel?: string } }).source?.kind === 'runtime-prompt')
     expect(delegated).toHaveLength(1)
@@ -1002,7 +1006,7 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     for (const message of userMessages) {
       const source = (message.data as { source?: { kind?: string } }).source
       expect(
-        source?.kind === 'runtime-prompt' || source?.kind === 'runtime-context',
+        source?.kind === 'runtime-prompt' || source?.kind === 'runtime-context' || source?.kind === 'skill-catalog',
         JSON.stringify(source),
       ).toBe(true)
     }

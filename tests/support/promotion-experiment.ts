@@ -373,6 +373,7 @@ export async function recordPromotionExperiment(
   await writeSample({ taskId: holdoutSample, role: 'holdout', criterionId: 'ac-holdout', command: 'test -f holdout.txt', outcome: 'verified' })
 
   const frozen: FrozenExperiment = {
+    ...(svc.libraryId === undefined ? {} : { libraryId: svc.libraryId }),
     proposalId,
     repetition: 0,
     candidate: {

@@ -31,7 +31,7 @@ import {
   rootProposalId,
   rootTaskStoreId,
 } from '@dangosys/dsh-singularity-task'
-import { capabilitySnapshot } from '../capability.ts'
+import { resolveCapabilities, capabilitySnapshot } from '../capability.ts'
 import { commandSyntaxDefects, contractDefects, rootIndependenceDefects } from '../admission.ts'
 import { providerContentIdentities, providerRefusals } from '../provider-precheck.ts'
 import { bindRunProviders, readRunBinding } from '../run-binding.ts'
@@ -203,7 +203,7 @@ export async function adoptRootThroughBarrier(
      * No root on the record is not the end of the question: the recovery pass
      * is what continues an approval that was recorded before the process died
      */
-    await self.reconcileStore(storeId)
+    await self.reconcileStore(storeId, rootSessionId)
     snapshot = await self.context.task.snapshotIn(storeId)
     root = snapshot.tasks.find(task => task.parentTaskId === undefined)
     if (root === undefined) {
@@ -232,6 +232,9 @@ export async function adoptRootThroughBarrier(
   const rootWasStarted = self.startedSessions.has(rootSessionId)
   self.sessions.set(rootSessionId, { storeId, taskId: root.taskId, runId: run.runId })
   self.startedSessions.add(rootSessionId)
+  if (run.taskTemplatesRoot !== undefined) self.sessionExecutionBindings.set(rootSessionId, {
+    ...self.sessionExecutionBindings.get(rootSessionId), taskTemplatesRoot: run.taskTemplatesRoot,
+  })
   if (
     !rootWasStarted &&
     (phase === 'active' || (phase === 'waiting_children' && pendingCoordinationOf(snapshot, run.runId).length > 0))
@@ -254,7 +257,7 @@ export async function adoptRootThroughBarrier(
    * Adoption is the recovery entry (§3.6): runs this process is not driving
    * are settled or restarted, then the workspace layers are rebuilt from the
    */
-  await self.reconcileStore(storeId)
+  await self.reconcileStore(storeId, rootSessionId)
   await self.rebuildWorkspaceOwnership(storeId)
   return {
     adopted: true,
@@ -506,7 +509,7 @@ export async function submitRootProposalOnce(
    * protected acceptance inputs are read against, the provider pre-check
    */
   const envPath = await self.envPathForSession(rootSessionId)
-  const derived = await deriveRootContract(self, spec, envPath)
+  const derived = await deriveRootContract(self, spec, envPath, rootSessionId)
   if (!derived.ok) throw derived.refusal
   const { contract } = derived
   const requestKey = rootRequestKey(storeId, rootSessionId, contract, options.requestKey)
@@ -525,7 +528,7 @@ export async function submitRootProposalOnce(
             proposal: stored,
             rootSessionId,
             contract: structuredClone(stored.contract),
-            manifests: rootManifests(self, stored.contract),
+            manifests: await rootManifests(self, stored.contract, rootSessionId),
           })
         : undefined
     return {
@@ -638,9 +641,10 @@ export async function deriveRootContract(
   self: TaskRuntime,
   spec: RootContractSpec,
   envPath: string | undefined,
+  callerSessionId?: string,
 ): Promise<{ ok: true; contract: TaskContract } | { ok: false; refusal: Error }> {
   try {
-    spec = await bindTaskTemplate(self.config.taskTemplatesRoot, spec)
+    spec = await bindTaskTemplate(await self.taskTemplatesRootFor(callerSessionId), spec)
   } catch (error) {
     return { ok: false, refusal: rootRefusal([message(error)]) }
   }
@@ -657,8 +661,8 @@ export function rootRefusal(reasons: readonly string[]): Error {
   return new Error(`task-runtime: root contract rejected:\n- ${reasons.join('\n- ')}`)
 }
 
-export function rootManifests(self: TaskRuntime, contract: TaskContract): CapabilityManifest[] {
-  return [self.resolveCapabilities(contract.requiredCapabilities)]
+export async function rootManifests(self: TaskRuntime, contract: TaskContract, sessionId?: string): Promise<CapabilityManifest[]> {
+  return [resolveCapabilities(contract.requiredCapabilities, sessionId === undefined ? self.config.capabilities : await self.capabilitiesForSession(sessionId), self.config.mcpServers)]
 }
 
 export async function existingRootTask(self: TaskRuntime, storeId: string): Promise<TaskInstance | undefined> {
@@ -679,11 +683,12 @@ export async function checkRootContract(self: TaskRuntime, request: CheckRootCon
   if (defects.length > 0) {
     return { ok: false, refusal: { error: rootRefusal(defects), reasons: defects } }
   }
-  const manifests = rootManifests(self, contract)
+  const manifests = await rootManifests(self, contract, rootSessionId)
   const manifest = manifests[0] as CapabilityManifest
   const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
     ...(request.envPath === undefined ? {} : { cwd: request.envPath }),
-  })
+    extraRoots: (await self.skillViewForSession(rootSessionId)).extraRoots,
+  }, await self.capabilitiesForSession(rootSessionId), self.config.mcpServers ?? {}, rootSessionId)
   const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities))
   if (refusals.length > 0) {
     return {
@@ -848,7 +853,7 @@ export async function activateRootContract(
       runId,
       manifest,
       providers: request.providers,
-      table: self.config.capabilities,
+      table: await self.capabilitiesForSession(rootSessionId),
       root: self.config.runBindingRoot,
     })
     const task: TaskInstance = {
@@ -869,6 +874,7 @@ export async function activateRootContract(
       taskId,
       sessionId: rootSessionId,
       capabilitySnapshot: capabilitySnapshot(manifest),
+      taskTemplatesRoot: await self.taskTemplatesRootFor(rootSessionId),
       providerBinding,
       /**
        * Born active (§1.1): the root decides its own work — it may decompose,

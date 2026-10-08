@@ -827,7 +827,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
         reason: 'split the work',
         children: [childSpec('task a')],
       }),
-    ).rejects.toThrow(/children would exceed maxDepth 0 \(depth 1\)/)
+    ).rejects.toThrow(/decomposition refused: depth 0 reaches maxDepth 0/)
 
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(1)
     expect(h.spawned).toHaveLength(0)
@@ -935,7 +935,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     })
 
     expect(nested.refusal).toMatch(
-      /decomposition is not allowed: it is admitted as leaf and runtime decomposition is off \(allowRuntimeDecomposition: false\)/,
+      /decomposition refused: task is leaf and runtime decomposition is disabled/,
     )
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(2)
     expect(h.spawned).toHaveLength(1)
@@ -951,7 +951,9 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('cancelBatch cancels the in-flight child, blocks the siblings it never started, and cancels the parent', async () => {
-    const h = harness()
+    // One writer at a time: the sibling is the batch's next round, never started,
+    // so its block names the in-flight child the cancellation stopped.
+    const h = harness({ config: { maxActiveWorkers: 1 } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     // A worker mid-turn: its idle is a promise only the cancellation ends, which
     // is what "in flight" means for the batch.
@@ -1026,7 +1028,13 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('a missing verifier fails the submitted run and settles the batch by name instead of rejecting', async () => {
-    const h = harness({ verifier: 'absent' })
+    const h = harness({ config: { maxActiveWorkers: 1 } })
+    // The deployment still lists its registry — a contract is admitted against
+    // it — but it mounts no verifier able to run one, which is the absence the
+    // submission path meets (`orchestrateEnv.verifyRun`'s own named refusal).
+    delete (h.ctx.verifier as { verifyRun?: unknown }).verifyRun
+    // One writer at a time, so the second child is the next round and never
+    // starts: the failure seam blocks it rather than cancelling work in flight.
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     // The submission path is where a missing verifier surfaces now: the worker
     // submits, its run cannot be judged, and the batch's failure seam settles the

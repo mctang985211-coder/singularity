@@ -39,6 +39,7 @@ function harness() {
       return { agent }
     }),
     ensureRoot: vi.fn(async (sessionId: SessionId) => ({ agent: { id: sessionId } })),
+    promptUser: vi.fn(async (_agent: { id: SessionId }, _prompt: { type: string; text: string }[]) => {}),
     prompt: vi.fn(async (_agent: { id: SessionId }, _prompt: { type: string; text: string }[]) => {}),
     stopAgents: vi.fn(async (_ids: readonly SessionId[]) => {}),
     stopGraph: vi.fn(async (): Promise<void> => {
@@ -95,9 +96,9 @@ describe('graphs environment reuse', () => {
     expect(result.graph.envId).toBe(first.id)
     expect(store.list()).toHaveLength(2)
     const text = runtime.prompt.mock.calls[0][1][0].text
-    expect(text).toContain('Already present (do not reinstall): acme/widget.')
+    expect(text).toContain('Already present: acme/widget.')
     expect(text).toContain('Planned repositories: (none).')
-    expect(text).toContain('call graph_mark_ready immediately')
+    expect(text).toContain('call graph_mark_ready')
   })
 
   it('creates a fresh environment when no available environment matches the repo set', async () => {
@@ -187,9 +188,8 @@ describe('graphs environment reuse', () => {
     await expect(service.create({ createEnv: true, workspace: ' ', repos: ['acme/widget'] })).rejects.toThrow(
       'workspace is empty',
     )
-    await expect(service.create({ workspace: 'missing' })).rejects.toThrow(
-      'new environment requires at least one repository',
-    )
+    const { graph } = await service.create({ workspace: 'missing' })
+    expect(graph.envId).toBeDefined()
   })
 
   it('setup prompt keeps installing components planned in a partially set-up env', async () => {
@@ -204,7 +204,7 @@ describe('graphs environment reuse', () => {
     expect(result.reused).toBe(true)
     const text = runtime.prompt.mock.calls[0][1][0].text
     expect(text).toContain('Planned repositories: acme/todo.')
-    expect(text).toContain('Already present (do not reinstall): acme/done.')
+    expect(text).toContain('Already present: acme/done.')
     expect(text).toContain('graph_spawn')
   })
 })

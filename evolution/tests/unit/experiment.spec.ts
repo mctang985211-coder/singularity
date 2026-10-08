@@ -37,6 +37,7 @@ import type {
 } from '../../src/replay.ts'
 import {
   assertExperimentReport,
+  assertFrozenExperiment,
   canonicalJson,
   compareExperimentSides,
   digestOf,
@@ -46,6 +47,7 @@ import {
   overallExperimentVerdict,
   protectedInputsDigest,
 } from '../../src/replay.ts'
+import { capabilityRowDigest } from '../../src/capability-candidate.ts'
 
 function fixtureCtx() {
   return { reflect: { provide: () => {} }, effect: () => {} } as never
@@ -544,6 +546,23 @@ describe('assertExperimentReport', () => {
     const missingTask = reportFixture()
     missingTask.samples[0]!.baseline.taskId = undefined
     expect(() => assertExperimentReport(missingTask)).toThrow(/settled a run and must name the replayed task/)
+  })
+
+  it('requires a holdout for shared publication while graph-local evidence can compare one observed Task', () => {
+    const samples = [frozenSample()]
+    expect(() => assertFrozenExperiment(frozenFixture({ samples }))).toThrow(/at least one holdout sample/)
+    expect(() => assertFrozenExperiment(frozenFixture({ libraryId: 's-root', samples }))).not.toThrow()
+    expect(() => assertFrozenExperiment(frozenFixture({ libraryId: '../s-root', samples }))).toThrow(/single safe path segment/)
+    expect(() => assertFrozenExperiment(frozenFixture({ libraryId: '', samples }))).toThrow(/non-empty/)
+  })
+
+  it('keeps the independent holdout requirement for a shared capability change inside a graph scope', () => {
+    const entry = { skills: ['fixture-skill'] }
+    const observed = frozenSample()
+    observed.candidateProvider = { capabilities: [], registryRevision: HEX('4'), mcpServers: [], preset: null, skills: [] }
+    const capability = { row: { name: 'shared-row', entry, digest: capabilityRowDigest(entry) }, baseline: null, sourceRefs: ['diagnosis:d1'] }
+    expect(() => assertFrozenExperiment(frozenFixture({ libraryId: 's-root', capability, samples: [observed] })))
+      .toThrow(/shared capability change needs at least one holdout/)
   })
 
   it('refuses a frozen block with no failure sample, no holdout, or an unknown comparer', () => {

@@ -13,7 +13,7 @@ import {
   validateMutation,
   validateVersionSet,
 } from './records.ts'
-import { assertTransition } from './state-machine.ts'
+import { assertDecisionTransition, assertTransition } from './state-machine.ts'
 import type {
   CommitDirection,
   CommitIntentView,
@@ -82,7 +82,8 @@ export function fold(records: readonly EvolutionRecord[]): Map<string, Evolution
       continue
     }
     if (current === undefined) throw new Error(`evolution: unknown proposal "${record.proposalId}"`)
-    assertTransition(current, record.kind)
+    if (record.kind === 'decided') assertDecisionTransition(current, record.decision, record.note)
+    else assertTransition(current, record.kind)
     current.history.push({ status: record.kind, actor: record.actor, at: record.at })
     switch (record.kind) {
       case 'candidate': {
@@ -103,7 +104,8 @@ export function fold(records: readonly EvolutionRecord[]): Map<string, Evolution
       case 'prepared': {
         // One prepared shape per candidate lifecycle: the materialized skill
         const capabilityPrepare = current.targetType === 'capability'
-        const champion = capabilityPrepare || (current.targetType === 'task_definition' && record.templateBaseline === null) ? 'absent' : 'captured'
+        const newSkill = current.targetType === 'skill' && current.baseVersion === 'absent' && record.skillBaseline === null
+        const champion = capabilityPrepare || newSkill || (current.targetType === 'task_definition' && record.templateBaseline === null) ? 'absent' : 'captured'
         if (
           record.mechanical !== true ||
           record.champion !== champion ||
@@ -185,9 +187,10 @@ export function fold(records: readonly EvolutionRecord[]): Map<string, Evolution
         }
         // P2/P3, required (S4-E 收尾): a prepare without the candidate's
         const skillContent = preparedIdentity(record.skillContent, 'skillContent', record.proposalId)
-        const skillBaseline = preparedIdentity(record.skillBaseline, 'skillBaseline', record.proposalId)
+        const skillBaseline = newSkill ? null : preparedIdentity(record.skillBaseline, 'skillBaseline', record.proposalId)
+        if (newSkill && skillContent.contract !== undefined) throw new Error('evolution: a first Skill is guidance; execution declarations use a capability candidate')
         // The object's shape is fixed at prepare: one half with a sidecar and the other without is a mixed object, refused.
-        if ((skillContent.contract === undefined) !== (skillBaseline.contract === undefined)) {
+        if (skillBaseline !== null && (skillContent.contract === undefined) !== (skillBaseline.contract === undefined)) {
           throw new Error(
             `evolution: prepared record for "${record.proposalId}" mixes object shapes — its candidate identity is ` +
               `${skillContent.contract === undefined ? 'guidance (no sidecar)' : 'an execution object (with a sidecar)'} while its ` +
@@ -204,7 +207,7 @@ export function fold(records: readonly EvolutionRecord[]): Map<string, Evolution
         current.prepared = {
           sandbox: record.sandbox,
           mechanical: true,
-          champion: 'captured',
+          champion,
           skillContent,
           skillBaseline,
           files: [...record.files],

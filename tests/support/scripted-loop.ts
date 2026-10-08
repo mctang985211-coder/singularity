@@ -99,6 +99,7 @@ import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.
 import { defineTaskStatusTool } from '../../agent-singularity/src/tools/task-status.ts'
 import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/task-submit-result.ts'
 import type { CapabilityConfig, Config, RootContractSpec } from '../../task-runtime/src/index.ts'
+import { defineTaskLibraryTool } from '../../agent-singularity/src/tools/task-library.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import type { RsiConfig } from '../../graphs/src/index.ts'
 import { defineRootBudgetApproval, defineTaskBudgetExtendTool } from '../../agent-singularity/src/tools/budget-extend.ts'
@@ -109,7 +110,7 @@ import { graphRegistry, sessionQueryReads } from './context-plane.ts'
 
 /** The root agent's allow-list, exactly as `agent-runtime` composes it. Exported so a fixture that mounts no loop still composes the deployment's root surface. */
 export const ROOT_TOOLS = [
-  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'task_template_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
+  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_library', 'task_read', 'capability_list', 'task_template_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
   'task_submit_result', 'task_answer', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'task_budget_extend', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
@@ -139,6 +140,7 @@ export const OTHER_TOOLS = [
 
 /** The tools this fixture registers for real; every other name is a stand-in. */
 export const REAL_TOOLS = [
+  'task_library',
   'task_read', 'task_status', 'context_read', 'capability_list', 'task_template_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel',
   'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
   'task_ask_parent', 'task_answer',
@@ -896,7 +898,9 @@ class ScriptedLoopImpl implements ScriptedLoop {
             ...record(),
             rootSessionId: this.options.graphRootFor?.(String(sessionId)) ?? this.sessionRoot.get(sessionId) ?? this.primary,
           }),
-          list: async () => [record()],
+          // One graph per root session, the registry's own shape: a store with
+          // no Run yet is still owned by the graph its root session created.
+          list: async () => this.roots.map(root => ({ ...record(), rootSessionId: root })),
           // Membership is the graph store's own record — the node a root or a spawn
           // published — so a session reference is checked against it before any log
           // is read.
@@ -977,6 +981,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
     // The review pair (K4), registered for real: a review is a read plus one
     // published read-only node, and the acceptance is that the *tool* decides it
     // — a stand-in could not show a spawn, a ledger row or a recorded judgement.
+    ctx.tools.register(defineTaskLibraryTool(ctx))
     ctx.tools.register(defineTaskReviewPackTool(ctx))
     ctx.tools.register(defineTaskReviewAgentTool(ctx))
     // The budget tool (K4) as well: what it appends is a person's decision and

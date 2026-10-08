@@ -4,6 +4,47 @@ Purpose: The evolution plane — the append-only proposal ledger, the two-sided
 experiment that evaluates a candidate, the promotion gate, and the durable
 apply/rollback commit into production (skill objects and capability rows).
 
+Live tools resolve `await ctx.evolution.forSession(callerSessionId)`. Each graph
+uses its stable library at `$DSH_HOME/singularity/environments/<rootSessionId>`:
+`evolution/` holds the proposal ledger and experiment sandboxes, `skills/` is
+both the baseline and publication root, and `task-templates/` is the contract
+catalog. The first access reconciles that graph's open commits. Direct service
+calls keep the configured legacy roots for embedded hosts and existing tests.
+Repeated resolution through a scoped service returns the owner's cached graph
+service, keeping tool writes and Web reads on one in-memory ledger.
+
+A first guidance Skill uses `baseVersion: absent`; its experiment runs the same
+Task with and without the new guidance through a capability already granted by
+the Task, such as `execute-task`. After publication a TaskTemplate can select
+`method:<skill-name>` on later Runs. Existing Task contracts and prior Run
+snapshots remain fixed. A root or supervisor uses the graph library's review
+operation to retain or retire reusable experience.
+
+Graph-local experiments can compare one terminal observed Task with its original
+acceptance and measured cost. The server freezes the graph `libraryId`, and the
+promotion gate requires the same library. An independent holdout adds transfer
+evidence; without one, transfer to unseen Tasks remains unknown. Shared/global
+publication and changes to the shared capability registry still require a
+holdout. Criterion repair retains the independent
+parent oracle and its positive/negative guard examples in either scope.
+
+Replay records actual token and tool-call counters over each side's executed
+Run subtree. LLM-generated evaluation plans and independent judgements carry
+their own four token buckets in `generatedUsage` and `judgeUsage`; the token
+budget includes those calls. Missing usage stays unknown. Monetary cost stays
+unknown until the host supplies an authoritative pricing source.
+
+For replay, `snapshot.paths` selects the relative files or subdirectories needed
+by the Task. Its digest and selection are frozen and retained on resume. Each
+side gets an independent copy, using filesystem copy-on-write when available;
+hashing streams file content instead of buffering entire large files. Omission
+keeps the whole-input behavior. Contracts and checks can use workspace-relative
+paths. For existing absolute contracts, `snapshot.rebaseFrom` explicitly maps
+their workspace root into each side, including protected paths and measurement
+commands. Frozen original contracts and content checks remain intact. File
+contents are copied unchanged: embedded absolute paths inside scripts or
+binaries still require task-specific adaptation.
+
 Package: `@dangosys/dsh-singularity-evolution`
 
 Dependencies: workspace `task`, `task-runtime`; peers `cordis` + `dsh-session`.
@@ -47,6 +88,12 @@ its evaluation is the two-sided experiment, which is evidence and not a lifecycl
 transition (it stays `prepared` while samples run). Only a PROMOTE on an
 applyable, materialized, sub-L4 mutation can be applied, and only an applied
 proposal can be rolled back.
+
+REJECT and KEEP_FOR_FURTHER_RESEARCH can also settle a proposed, candidate or
+prepared proposal with a recorded reason and native decision approval. These
+terminal decisions preserve production bytes and let the RSI driver continue
+when a comparison is unnecessary or unavailable. PROMOTE follows the full gated
+path. The same rule validates live writes and ledger replay after restart.
 
 **Commit durability (K2).** A production write is a commit: the `commit_intent`
 line is durable before production changes (binding the proposal, direction, human

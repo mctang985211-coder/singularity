@@ -70,9 +70,9 @@ export async function deriveBatch(
   return { ok: true, batch: normalized.batch, ...(envPath === undefined ? {} : { envPath }) }
 }
 
-export function manifestsOf(self: TaskRuntime, batch: NormalizedBatch, callerSessionId?: string): CapabilityManifest[] {
+export async function manifestsOf(self: TaskRuntime, batch: NormalizedBatch, callerSessionId?: string): Promise<CapabilityManifest[]> {
   const overlay = callerSessionId === undefined ? undefined : self.sessionExecutionBindings.get(callerSessionId)?.overlay
-  const table = { ...self.config.capabilities, ...overlay?.capabilityOverrides }
+  const table = callerSessionId === undefined ? self.config.capabilities : await self.capabilitiesForSession(callerSessionId)
   const registry = { ...self.config.mcpServers, ...overlay?.mcpServers }
   return batch.children.map(child => resolveCapabilities(child.contract.requiredCapabilities, table, registry))
 }
@@ -252,7 +252,7 @@ export async function checkDerivedBatch(
     }
   }
 
-  const manifests = manifestsOf(self, batch, identity.callerSessionId)
+  const manifests = await manifestsOf(self, batch, identity.callerSessionId)
   const rejected = batch.children
     .map((child, index) => ({ child, index, manifest: manifests[index]! }))
     .filter(({ child, manifest }) => manifest.missing.length > 0 && !child.decomposable)
@@ -296,10 +296,11 @@ export async function checkDerivedBatch(
     [...new Set(manifests.flatMap(manifest => Object.keys(manifest.capabilities)))],
     {
       ...(request.envPath === undefined ? {} : { cwd: request.envPath }),
-      ...(overlay?.extraSkillRoots === undefined ? {} : { extraRoots: [...overlay.extraSkillRoots] }),
+      extraRoots: (await self.skillViewForSession(identity.callerSessionId)).extraRoots,
     },
-    { ...self.config.capabilities, ...overlay?.capabilityOverrides },
+    await self.capabilitiesForSession(identity.callerSessionId),
     { ...self.config.mcpServers, ...overlay?.mcpServers },
+    identity.callerSessionId,
   )
   const refusals = manifests.flatMap((manifest, childIndex) =>
     providerRefusals(precheck, Object.keys(manifest.capabilities)).map(reason => `child ${childIndex}: ${reason}`),

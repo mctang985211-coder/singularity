@@ -69,6 +69,7 @@ describe('a child that decomposes further (S1-C)', () => {
       capabilities,
       roots: [ROOT],
       tools: true,
+      skillTool: true,
       worker: async (sessionId: SessionId, agent: Agent) => {
         const { task } = await h.runtime.runForSession(sessionId)
         // The child (depth 1) splits further; the grandchild does its work here and
@@ -164,10 +165,15 @@ describe('a child that decomposes further (S1-C)', () => {
     expect(listed.text).toContain(`skill roots searched for this session: `)
     expect(listed.text).toContain(join(h.home, 'skills'))
 
-    // 4. And the grandchild's worker holds the bytes its own run was bound to.
-    const registered = await h.ctx.skills.get(SKILL, { scope: grandchild, cwd: h.checkout })
+    // 4. And the grandchild's worker holds the bytes its own run was bound to,
+    // read through the real `skill` loader mounted on its own isolated layer.
+    const loader = h.ctx.tools.get('skill', grandchild)
+    if (loader === undefined) throw new Error('the grandchild has no skill loader')
+    const registered = await loader.execute({ name: SKILL }, {
+      agent: grandchild, callId: 'read-bound-skill', signal: new AbortController().signal,
+    } as never) as { content: string; resourceBase?: { path: string } }
     expect(registered?.content).toContain(BODY)
-    expect(registered!.path!.startsWith(grandchildBinding.snapshotRoot!)).toBe(true)
+    expect(registered!.resourceBase!.path.startsWith(grandchildBinding.snapshotRoot!)).toBe(true)
     expect((await h.runtime.readRunBinding(grandchildBinding))?.defects).toEqual([])
     // The child's own run was bound separately: the snapshot is per run.
     const childRun = await h.task.runIn(root.storeId, childTask.runIds[0]!)

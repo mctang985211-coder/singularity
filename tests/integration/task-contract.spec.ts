@@ -456,7 +456,7 @@ const REJECTION_CASES: RejectionCase[] = [
     }),
     defect: 'verificationMode "banana" is not one of',
     toolSchemaRefusal: 'invalid arguments: "children[0].acceptanceCriteria[0].mode" must be one of '
-      + '["deterministic","simulation","formal","measurement","review","composite"]',
+      + '["deterministic","simulation","formal","measurement","review"]',
   },
   {
     name: 'an unknown contract version',
@@ -541,7 +541,6 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
 
     expect(first.contract).toEqual({
       contractVersion: 1,
-      templateScope: [],
       objective: 'the first contracted child',
       acceptanceCriteria: [{
         criterionId: 'first-1',
@@ -550,6 +549,7 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
         requiredEvidence: [],
         mandatory: true,
         command: 'true',
+        verifierRef: 'command',
       }],
       assumptions: ['assumption A', 'assumption B'],
       constraints: ['constraint X'],
@@ -557,7 +557,6 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
     })
     expect(second.contract).toEqual({
       contractVersion: 1,
-      templateScope: [],
       objective: 'the second contracted child',
       acceptanceCriteria: [{
         criterionId: 'second-1',
@@ -566,6 +565,7 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
         requiredEvidence: [],
         mandatory: true,
         command: 'true',
+        verifierRef: 'command',
       }],
       assumptions: ['assumption C'],
       constraints: ['constraint Y'],
@@ -613,7 +613,6 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
     const before = taskWithObjective(await h.task.snapshotIn(root.storeId), 'the child whose contract is read back twice').contract!
     expect(before).toEqual({
       contractVersion: 1,
-      templateScope: [],
       objective: 'the child whose contract is read back twice',
       acceptanceCriteria: [{
         criterionId: 'readback-1',
@@ -622,6 +621,7 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
         requiredEvidence: [],
         mandatory: true,
         command: 'true',
+        verifierRef: 'command',
       }],
       assumptions: ['declared assumption'],
       constraints: ['declared constraint'],

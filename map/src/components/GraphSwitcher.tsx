@@ -52,7 +52,7 @@ export default function GraphSwitcher() {
   const switchGraph = useStore(s => s.switchGraph)
   const createGraph = useStore(s => s.createGraph)
   const removeGraph = useStore(s => s.removeGraph)
-  const updateGraphModel = useStore(s => s.updateGraphModel)
+  const updateGraphSettings = useStore(s => s.updateGraphSettings)
   const updateGraphRsi = useStore(s => s.updateGraphRsi)
   const loadGraphs = useStore(s => s.loadGraphs)
   const [createOpen, setCreateOpen] = useState(false)
@@ -64,10 +64,11 @@ export default function GraphSwitcher() {
   const [envId, setEnvId] = useState('')
   const [repos, setRepos] = useState('')
   const [createModel, setCreateModel] = useState<ModelRef | null>(null)
-  const [rsiOn, setRsiOn] = useState(false)
+  const [rsiOn, setRsiOn] = useState(true)
   const [rsiTask, setRsiTask] = useState('')
+  const [rsiMetrics, setRsiMetrics] = useState('')
   const [rsiRounds, setRsiRounds] = useState(DEFAULT_ROUNDS)
-  const [rsiHumanReview, setRsiHumanReview] = useState(true)
+  const [rsiHumanReview, setRsiHumanReview] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
   const [editModel, setEditModel] = useState<ModelRef | null>(null)
   const [editRounds, setEditRounds] = useState(DEFAULT_ROUNDS)
@@ -107,12 +108,12 @@ export default function GraphSwitcher() {
     }
   }
 
-  // A blank objective with the toggle on is no config at all: the body then simply omits `rsi`.
   const rsiBody = (): RsiConfig | null => {
     if (!rsiOn) return null
     const task = rsiTask.trim()
-    if (task.length === 0) return null
-    return { task, iterationRounds: parseRounds(rsiRounds), humanReview: rsiHumanReview }
+    if (task.length === 0) throw new Error('map: enter a task')
+    const metrics = rsiMetrics.split('\n').map(metric => metric.trim()).filter(Boolean)
+    return { task, metrics, iterationRounds: parseRounds(rsiRounds), humanReview: rsiHumanReview }
   }
 
   const submit = async (event: React.FormEvent) => {
@@ -126,7 +127,6 @@ export default function GraphSwitcher() {
       let body: CreateGraphBody
       if (envId === NEW_ENV) {
         const list = parseRepos(repos)
-        if (list.length === 0) throw new Error('map: add at least one repository')
         body = { ...(trimmed.length === 0 ? {} : { name: trimmed }), createEnv: true, repos: list }
       } else {
         if (envId.length === 0) throw new Error('map: pick an environment')
@@ -141,10 +141,11 @@ export default function GraphSwitcher() {
       setName('')
       setRepos('')
       setCreateModel(null)
-      setRsiOn(false)
+      setRsiOn(true)
       setRsiTask('')
+      setRsiMetrics('')
       setRsiRounds(DEFAULT_ROUNDS)
-      setRsiHumanReview(true)
+      setRsiHumanReview(false)
     } catch (error) {
       setActionError(message(error))
     } finally {
@@ -206,8 +207,7 @@ export default function GraphSwitcher() {
       return
     }
     setBusy(true)
-    void updateGraphModel(graphId, editModel)
-      .then(() => (nextRsi === null ? undefined : updateGraphRsi(graphId, nextRsi)))
+    void updateGraphSettings(graphId, { model: editModel, ...(nextRsi === null ? {} : { rsi: nextRsi }) })
       .then(() => setEditOpen(false))
       .catch(error => setActionError(message(error)))
       .finally(() => setBusy(false))
@@ -311,12 +311,12 @@ export default function GraphSwitcher() {
                   {env.componentCount === undefined ? '' : ` (${env.componentCount} components)`}
                 </option>
               ))}
-              <option value={NEW_ENV}>New environment (clone repositories)</option>
+              <option value={NEW_ENV}>New environment</option>
             </select>
           </label>
           {envId === NEW_ENV && (
             <label>
-              Repositories
+              Repositories (optional)
               <input
                 type="text"
                 value={repos}
@@ -340,14 +340,20 @@ export default function GraphSwitcher() {
             {rsiOn && (
               <>
                 <label>
-                  Objective
+                  Task
                   <textarea
                     value={rsiTask}
                     disabled={busy}
                     rows={3}
-                    placeholder="the objective every round works towards"
+                    placeholder="Describe the goal; the agent explores methods and acceptance"
                     onChange={event => setRsiTask(event.target.value)}
                   />
+                </label>
+                <label>
+                  Metrics to explore
+                  <textarea value={rsiMetrics} disabled={busy} rows={3}
+                    placeholder="One metric per line, e.g. correctness, latency, model cost"
+                    onChange={event => setRsiMetrics(event.target.value)} />
                 </label>
                 <label>
                   Iteration rounds

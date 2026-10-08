@@ -2,6 +2,9 @@
  * @module dsh-singularity-evolution/experiment/record */
 
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import { join } from 'node:path'
 import { rootTaskStoreId, sha256Hex, TERMINAL_RUN_STATUSES } from '@dangosys/dsh-singularity-task'
 import type {
   ReviewCriterion,
@@ -80,12 +83,18 @@ function experimentSampleLabel(key: ExperimentKey): string {
 }
 
 /** The recursive content digest of a directory — the input snapshot identity the freeze fixes. */
-export async function directoryDigest(directory: string): Promise<string> {
+export async function directoryDigest(directory: string, paths?: readonly string[]): Promise<string> {
   const lines: string[] = []
   await walkSnapshotInput(directory, async entry => {
     if (entry.kind !== 'file') return
-    lines.push(`${entry.rel}\0${sha256Hex(entry.bytes)}`)
-  })
+    const hash = createHash('sha256')
+    try {
+      for await (const chunk of createReadStream(entry.path)) hash.update(chunk)
+    } catch (error) {
+      throw new Error(`experiment: the input snapshot file "${join(directory, entry.rel)}" cannot be read: ${(error as Error).message}`)
+    }
+    lines.push(`${entry.rel}\0${hash.digest('hex')}`)
+  }, paths)
   return sha256Hex(lines.join('\n'))
 }
 
@@ -127,21 +136,28 @@ export function costOf(review: ReviewRecord | undefined, snapshot?: TaskSnapshot
   }
   let calls = 0
   let failures = 0
+  let completeCalls = true
+  const tokens = { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  let completeTokens = true
+  let incompleteRun: string | undefined
+  let incompleteCallsRun: string | undefined
   for (const run of snapshot.runs.filter(item => runIds.has(item.runId))) {
     const record = snapshot.reviews.find(item => item.runId === run.runId && item.taskId === run.taskId)
     const counters = record?.metrics?.toolCalls
     if (!TERMINAL_RUN_STATUSES.has(run.status) || counters === undefined ||
         !Number.isSafeInteger(counters.calls) || counters.calls < 0 ||
-        !Number.isSafeInteger(counters.failures) || counters.failures < 0) {
-      return { status: 'unknown', reason: `Run ${run.runId} in the executed subtree has no complete terminal tool-call counters` }
-    }
-    calls += counters.calls
-    failures += counters.failures
+        !Number.isSafeInteger(counters.failures) || counters.failures < 0) { completeCalls = false; incompleteCallsRun ??= run.runId }
+    else { calls += counters.calls; failures += counters.failures }
+    const usage = record?.metrics?.tokens
+    if (usage === undefined || Object.values(usage).some(value => !Number.isSafeInteger(value) || value < 0)) { completeTokens = false; incompleteRun ??= run.runId }
+    else for (const key of Object.keys(tokens) as (keyof typeof tokens)[]) tokens[key] += usage[key]
   }
   if (!Number.isSafeInteger(calls) || !Number.isSafeInteger(failures)) {
     return { status: 'unknown', reason: 'the executed subtree tool-call counters exceed safe integer range' }
   }
-  return { status: 'reported', metrics: { ...structuredClone(metrics), toolCalls: { calls, failures } } }
+  if (!completeCalls && !completeTokens) return { status: 'unknown', reason: `Run ${incompleteCallsRun ?? incompleteRun} in the executed subtree has incomplete token and tool-call counters` }
+  const { tokens: _rootOnly, toolCalls: _rootCalls, ...other } = structuredClone(metrics)
+  return { status: 'reported', metrics: { ...other, ...(completeTokens ? { tokens } : {}), ...(completeCalls ? { toolCalls: { calls, failures } } : {}) } }
 }
 
 /** The evidence ids of one run: the review record's own list, or the store's verdict evidence when the review carries none. */
@@ -334,7 +350,7 @@ export function recoveredSampleRecord(input: {
     evidenceRefs: facts.evidenceRefs,
     workspace: input.workspace,
     initialDigest: input.view.frozen.snapshot.digest,
-    cost: costOf(facts.review, input.view.frozen.objective === 'tool-call-reduction' ? input.snapshot : undefined),
+    cost: costOf(facts.review, input.snapshot),
     ...(facts.reason === undefined ? {} : { reason: facts.reason }),
     actor: input.actor,
   })
@@ -474,6 +490,7 @@ export async function refusedBaselineRun(input: {
   sample: FrozenSample
   lineage: string
   workspace: string
+  rebaseFrom?: string
   agentOptions: ReplayTaskOptions['agentOptions']
   caller: SessionId
   signal?: AbortSignal
@@ -488,7 +505,7 @@ export async function refusedBaselineRun(input: {
       sample.taskId,
       {
         lineage,
-        workspace: { path: workspace },
+        workspace: { path: workspace, ...(input.rebaseFrom === undefined ? {} : { rebaseFrom: input.rebaseFrom }) },
         agentOptions: { ...input.agentOptions },
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       },

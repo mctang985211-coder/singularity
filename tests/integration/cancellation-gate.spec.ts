@@ -205,7 +205,9 @@ describe('a cancellation’s write barrier against the store’s older record', 
       expect(ran(h, 'graph_spawn')).toHaveLength(1)
       expect(ran(h, 'graph_spawn')[0]).toContain(ACTIVE_WRITE)
       expect(h.runtime.gate.inFlightWrites(ROOT)).toEqual([])
-      expect(h.requestsOf(ROOT).some(request => request.texts.includes(WINDOW_ASK))).toBe(true)
+      await vi.waitFor(() => {
+        expect(h.requestsOf(ROOT).some(request => request.texts.includes(WINDOW_ASK))).toBe(true)
+      })
 
       release.resolve()
       await cancelling

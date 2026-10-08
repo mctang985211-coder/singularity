@@ -226,11 +226,23 @@ describe('the coordination protocol on the real loop (A3)', () => {
   it('denies a write a closed phase does not admit, on the real tool waterfall, while the reads still answer', async () => {
     const childInFlight = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
+    const siblingHolds = Promise.withResolvers<void>()
     const h = await startScriptedLoop({
       probes: ['graph_spawn', 'bash'],
+      // Two children, the second depending on the first: the worker below hands
+      // its result in while its sibling holds the batch open, so its own turn is
+      // still running when its next requests are judged. A batch that ended with
+      // the worker's run takes its turn down with it (`awaitWorker`'s abort), and
+      // a turn nothing survives is a call the gate never has to judge.
       script: (_sessionId, index): readonly ScriptEntry[] => index === 0
         ? [
-          { tool: 'task_decompose', args: { reason: 'split the work', children: children('align the ball') } },
+          {
+            tool: 'task_decompose',
+            args: {
+              reason: 'split the work',
+              children: [...children('align the ball'), { ...children('hold the batch open')[0]!, dependsOn: [0] }],
+            },
+          },
           { waitFor: () => childInFlight.promise },
           // A write the root's own composition offers, attempted in the phase
           // where admission has already closed.
@@ -238,16 +250,22 @@ describe('the coordination protocol on the real loop (A3)', () => {
           { tool: 'task_read', args: {} },
           { text: 'root: done coordinating' },
         ]
-        : [
-          { waitFor: () => release.promise },
-          { tool: 'task_submit_result', args: { summary: 'aligned the ball' } },
-          // The worker's composition does hold the filesystem tools, so this is
-          // where a write is denied for the phase rather than for the surface.
-          { tool: 'bash', args: { command: 'touch should-not-exist' } },
-          { tool: 'read', args: { path: 'README.md' } },
-          { tool: 'task_read', args: {} },
-          { text: 'worker: handed in' },
-        ],
+        : index === 1
+          ? [
+            { waitFor: () => release.promise },
+            { tool: 'task_submit_result', args: { summary: 'aligned the ball' } },
+            // The worker's composition does hold the filesystem tools, so this is
+            // where a write is denied for the phase rather than for the surface.
+            { tool: 'bash', args: { command: 'touch should-not-exist' } },
+            { tool: 'read', args: { path: 'README.md' } },
+            { tool: 'task_read', args: {} },
+            { text: 'worker: handed in' },
+          ]
+          : [
+            { waitFor: () => siblingHolds.promise },
+            { tool: 'task_submit_result', args: { summary: 'held the batch open' } },
+            { text: 'sibling: handed in' },
+          ],
     })
     const root = await h.begin(ROOT_CONTRACT)
     // The batch is admitted and the child is truly mid-turn before the root's
@@ -274,15 +292,14 @@ describe('the coordination protocol on the real loop (A3)', () => {
     await vi.waitFor(() => expect(h.calls.find(call => call.name === 'task_read' && call.sessionId === ROOT)?.result).toBeDefined())
     const read = h.calls.find(call => call.name === 'task_read' && call.sessionId === ROOT)!
     expect(read.result?.isError).toBe(false)
-    expect(read.result?.text).toContain('children: 1')
+    expect(read.result?.text).toContain('children: 2')
     expect(read.result?.text).toContain('phase active')
 
     release.resolve()
-    await h.runtime.awaitBatch(root.storeId, batchId)
 
-    // The worker's run had already settled by the time its next turn asked for
-    // those tools, so both names are late calls: the write is denied, the reads
-    // answer. Which phase a call is judged in is the store's own fact.
+    // The worker's own submission settles its run while its sibling holds the
+    // batch open, so both names below are late calls: the write is denied, the
+    // reads answer. Which phase a call is judged in is the store's own fact.
     await vi.waitFor(() => expect(h.calls.find(call => call.name === 'bash' && call.sessionId === child)?.result).toBeDefined())
     const late = h.calls.find(call => call.name === 'bash' && call.sessionId === child)!
     expect(late.result?.isError).toBe(true)
@@ -300,6 +317,10 @@ describe('the coordination protocol on the real loop (A3)', () => {
     // A denied call is not an in-flight write: nothing is left to drain for that
     // session, which is why the batch could settle without a convergence failure.
     expect(h.runtime.gate.inFlightWrites(child)).toEqual([])
+
+    // The sibling hands its own result in and the batch ends.
+    siblingHolds.resolve()
+    await h.runtime.awaitBatch(root.storeId, batchId)
     // The batch end gave the root back its execution and judged nothing (K1 §2);
     // the root's own submission is what settles the tree's acceptance.
     expect((await h.task.runIn(root.storeId, root.runId)).executionPhase).toBe('active')
@@ -308,9 +329,17 @@ describe('the coordination protocol on the real loop (A3)', () => {
   })
 
   it('cancels a batch with a worker in flight, and cannot cancel it twice', async () => {
+    const childInFlight = Promise.withResolvers<void>()
     const h = await startScriptedLoop({
       script: (_sessionId, index): readonly ScriptEntry[] => index === 0
-        ? [{ tool: 'task_decompose', args: { reason: 'split the work', children: children('long child') } }]
+        ? [
+          { tool: 'task_decompose', args: { reason: 'split the work', children: children('long child') } },
+          // The cancellation comes from the run that admitted the batch, through
+          // the shipped tool, once the worker really is parked mid-turn.
+          { waitFor: () => childInFlight.promise },
+          { tool: 'task_cancel', args: { reason: 'the plan changed' } },
+          { text: 'root: the batch is over' },
+        ]
         // The worker never finishes on its own: only the cancellation ends it.
         : [{ hang: true }],
     })
@@ -320,9 +349,20 @@ describe('the coordination protocol on the real loop (A3)', () => {
     const child = childSession(h)
     const childRun = (await h.runForSession(child)).run
     expect(childRun.status).toBe('running')
+    // The worker really is in flight — its own turn has asked the model once —
+    // before the cancellation is sent: a spawn record alone does not say that,
+    // and a turn that never started has no abort for the log to record.
+    await vi.waitFor(() => expect(h.requestsOf(child).length).toBeGreaterThan(0))
+    childInFlight.resolve()
 
-    const outcomes = await h.runtime.cancelBatch(root.storeId, batchId, ROOT)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])
+    // The tool call itself is the bound: a cancellation the driver never observes
+    // would never return, and this case would time out instead of asserting.
+    await vi.waitFor(() => expect(h.calls.find(call => call.name === 'task_cancel')?.result).toBeDefined())
+    const cancelled = h.calls.find(call => call.name === 'task_cancel')!
+    expect(cancelled.sessionId).toBe(ROOT)
+    expect(cancelled.result?.isError).toBe(false)
+    expect(cancelled.result?.text).toContain(`cancelled batch ${batchId}`)
+
     const snapshot = await h.snapshot(root.storeId)
     expect(snapshot.runs.find(run => run.runId === childRun.runId)?.status).toBe('cancelled')
     expect(snapshot.reviews.find(review => review.runId === childRun.runId)?.outcome).toBe('cancelled')
@@ -331,7 +371,9 @@ describe('the coordination protocol on the real loop (A3)', () => {
 
     // The cancellation reached the worker's own loop: its session log records the
     // turn ending under the parent's cancel cause, which is the abort the driver
-    // sends (`awaitWorker` cancels with `{ kind: 'parent' }`).
+    // sends (`awaitWorker` cancels with `{ kind: 'parent' }`). The turn's own end
+    // is what writes that record, so it is awaited before the log is read.
+    await vi.waitFor(() => expect(h.eventsOf(child).some(event => event.type === 'turn/end')).toBe(true), { timeout: 20_000 })
     const turnEnds = h.eventsOf(child).filter(event => event.type === 'turn/end')
     expect(turnEnds.length).toBeGreaterThan(0)
     expect(turnEnds[turnEnds.length - 1]!.data).toMatchObject({ reason: { kind: 'aborted', reason: { kind: 'parent' } } })

@@ -12,6 +12,7 @@ import {
   SKILL,
   loadedSkillFile,
   ledgerRoot,
+  skillRoot,
   boot,
   writeSkillObject,
   skillBody,
@@ -163,7 +164,7 @@ describe('K3-1: a registered execution skill is improved and applied as one whol
   it('fails on the old body and passes on the new one, and the derived two-file object lands through one real publication approval', async () => {
     const s = await boot()
     const h = s.h
-    const production = await writeSkillObject(join(h.home, 'skills'), {
+    const production = await writeSkillObject(skillRoot(h), {
       body: skillBody(SKILL, ['keep.txt', 'holdout.txt']),
       sidecar: 'execution',
     })
@@ -244,15 +245,15 @@ describe('K3-1: a registered execution skill is improved and applied as one whol
       ])
     }
 
-    // --- the model decision: the decision changes the ledger and nothing else ---
+    // --- the first human gate: the decision changes the ledger and nothing else ---
     const beforeDecision = await productionObject(h)
     await decideThroughTool(s, P1)
     expect(await productionObject(h)).toEqual(beforeDecision)
-    expect(approvalCalls(h).map(call => call.toolName)).toEqual([])
+    expect(approvalCalls(h).map(call => call.toolName)).toEqual(['evolution_decide'])
 
     // --- the publication approval: the write ---
     await applyThroughTool(s, P1)
-    expect(approvalCalls(h).map(call => call.toolName)).toEqual(['evolution_apply'])
+    expect(approvalCalls(h).map(call => call.toolName)).toEqual(['evolution_decide', 'evolution_apply'])
     expect(await productionObject(h)).toEqual({ skillMd: candidateBody, sidecar: derivedBytes })
 
     // --- one commit, two files: the intent named both, the completion closed both ---
@@ -318,7 +319,7 @@ describe('K3-2: the refusals that come before any write', () => {
   it('refuses to prepare a knowledge skill by name, writing no sandbox and no prepared line', async () => {
     const s = await boot({ quiet: true })
     const h = s.h
-    await writeSkillObject(join(h.home, 'skills'), { body: skillBody(SKILL, ['keep.txt']), sidecar: 'knowledge' })
+    await writeSkillObject(skillRoot(h), { body: skillBody(SKILL, ['keep.txt']), sidecar: 'knowledge' })
     const proposal = {
       proposalId: P1,
       level: 'L2',
@@ -348,10 +349,10 @@ describe('K3-2: the refusals that come before any write', () => {
     expect((await s.call('evolution_prepare', { proposalId: P1 })).text).toContain('knowledge sidecar')
   })
 
-  it('refuses to prepare a production object that declares resources, by name and with nothing written', async () => {
+  it('freezes a production object that declares resources whole, resource included, writing nothing to production', async () => {
     const s = await boot({ quiet: true })
     const h = s.h
-    await writeSkillObject(join(h.home, 'skills'), {
+    const production = await writeSkillObject(skillRoot(h), {
       body: skillBody(SKILL, ['keep.txt']),
       sidecar: 'execution',
       resources: [{ path: 'references/notes.md', bytes: 'the declared notes\n' }],
@@ -371,26 +372,67 @@ describe('K3-2: the refusals that come before any write', () => {
       mutationJson: JSON.stringify({ name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt']) }),
     })
 
-    const refused = await s.call('evolution_prepare', { proposalId: P1 })
-    expect(refused.text).toContain('evolution_prepare rejected:')
-    expect(refused.text).toContain('resource(s)')
-    expect(refused.text).toContain('nothing was written')
-    expect(existsSync(join(ledgerRoot(h), 'sandbox'))).toBe(false)
-    expect(kindsOf(await ledgerLines(h))).toEqual(['proposed', 'candidate'])
+    // This build's executor carries the whole object, not `SKILL.md` alone: the
+    // production declaration's resource collection is frozen with the candidate,
+    // so the resource it declares is part of the identity a promotion installs.
+    const prepared = await s.call('evolution_prepare', { proposalId: P1 })
+    expect(prepared.text).toContain('[prepared]')
+    expect(prepared.text).toContain('references/notes.md')
+    expect((await s.svc.get(P1)).prepared!.skillContent!.resources).toEqual([
+      { path: 'references/notes.md', sha256: sha256Of('the declared notes\n') },
+    ])
+    expect(await readFile(join(ledgerRoot(h), 'sandbox', P1, 'skills', SKILL, 'references/notes.md'), 'utf8')).toBe(
+      'the declared notes\n',
+    )
+    // Production is untouched: the same two files, byte for byte, and its resource.
+    expect(await productionObject(h)).toEqual({ skillMd: production.skillMd, sidecar: production.sidecar })
+    expect(await readFile(join(skillRoot(h), SKILL, 'references/notes.md'), 'utf8')).toBe('the declared notes\n')
+    expect(kindsOf(await ledgerLines(h))).toEqual(['proposed', 'candidate', 'prepared'])
   })
 
-  it.each([
-    { label: 'a file at a supported resource position', file: 'references/notes.md' },
-    { label: 'an entry outside the supported vocabulary', file: 'helper.sh' },
-  ])('refuses to prepare a guidance object that leaves a file undeclared — $label', async ({ file }) => {
+  it('freezes a guidance object with the files at its supported resource positions, writing nothing to production', async () => {
     const s = await boot({ quiet: true })
     const h = s.h
-    // Guidance: no sidecar anywhere, so nothing declares this file and nothing
-    // covers it — the one shape where the loader has no declaration to compare
-    // against and the file would otherwise be left behind silently.
-    await writeSkillObject(join(h.home, 'skills'), {
+    // Guidance: no sidecar anywhere. The file stands at a supported resource
+    // position, so it is part of the object the loader reads — this build freezes
+    // it with the candidate rather than leaving it behind undeclared.
+    const production = await writeSkillObject(skillRoot(h), {
       body: skillBody(SKILL, ['keep.txt']),
-      resources: [{ path: file, bytes: 'a file nobody declared\n' }],
+      resources: [{ path: 'references/notes.md', bytes: 'a file nobody declared\n' }],
+    })
+    await s.call('evolution_propose', {
+      proposalId: P1,
+      level: 'L2',
+      baseVersion: 'v1',
+      targetType: 'skill',
+      targetId: SKILL,
+      rationale: 'improve it',
+      sourceRefs: ['diagnosis:k3'],
+    })
+    await s.call('evolution_candidate', {
+      proposalId: P1,
+      versionSet: { skill: 'v2' },
+      mutationJson: JSON.stringify({ name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt']) }),
+    })
+
+    const prepared = await s.call('evolution_prepare', { proposalId: P1 })
+    expect(prepared.text).toContain('[prepared]')
+    expect((await s.svc.get(P1)).prepared!.skillContent!.resources).toEqual([
+      { path: 'references/notes.md', sha256: sha256Of('a file nobody declared\n') },
+    ])
+    expect(
+      await readFile(join(ledgerRoot(h), 'sandbox', P1, 'skills', SKILL, 'references/notes.md'), 'utf8'),
+    ).toBe('a file nobody declared\n')
+    expect(await productionObject(h)).toEqual({ skillMd: production.skillMd })
+    expect(kindsOf(await ledgerLines(h))).toEqual(['proposed', 'candidate', 'prepared'])
+  })
+
+  it('refuses to prepare a guidance object that leaves an entry outside the supported vocabulary', async () => {
+    const s = await boot({ quiet: true })
+    const h = s.h
+    await writeSkillObject(skillRoot(h), {
+      body: skillBody(SKILL, ['keep.txt']),
+      resources: [{ path: 'helper.sh', bytes: 'a file nobody declared\n' }],
     })
     await s.call('evolution_propose', {
       proposalId: P1,
@@ -409,8 +451,8 @@ describe('K3-2: the refusals that come before any write', () => {
 
     const refused = await s.call('evolution_prepare', { proposalId: P1 })
     expect(refused.text).toContain('evolution_prepare rejected:')
-    expect(refused.text).toContain(file)
-    expect(refused.text).toContain('nothing was written')
+    expect(refused.text).toContain('unsupported files')
+    expect(refused.text).toContain('helper.sh')
     expect(existsSync(join(ledgerRoot(h), 'sandbox'))).toBe(false)
     expect(kindsOf(await ledgerLines(h))).toEqual(['proposed', 'candidate'])
     expect((await s.svc.get(P1)).status).toBe('candidate')
@@ -421,8 +463,8 @@ describe('K3-2: the refusals that come before any write', () => {
       () => '',
       (error: unknown) => (error instanceof Error ? error.message : String(error)),
     )
-    expect(direct).toContain(file)
-    expect(direct).toContain('nothing was written')
+    expect(direct).toContain('unsupported files')
+    expect(direct).toContain('helper.sh')
     expect(existsSync(join(ledgerRoot(h), 'sandbox'))).toBe(false)
     expect(kindsOf(await ledgerLines(h))).toEqual(['proposed', 'candidate'])
     expect((await s.svc.get(P1)).status).toBe('candidate')
@@ -431,7 +473,7 @@ describe('K3-2: the refusals that come before any write', () => {
   it('refuses a production declaration whose content digest is not the bytes it covers, before anything is frozen', async () => {
     const s = await boot({ quiet: true })
     const h = s.h
-    await writeSkillObject(join(h.home, 'skills'), {
+    await writeSkillObject(skillRoot(h), {
       body: skillBody(SKILL, ['keep.txt']),
       sidecar: 'execution',
       declaredSkillMdSha256: 'f'.repeat(64),
@@ -461,10 +503,15 @@ describe('K3-2: the refusals that come before any write', () => {
   it.each([
     {
       label: 'a non-digest field (requiredTools) moved',
+      // The object still loads, so the refusal is the identity comparison's.
+      refusal: 'no longer matches its frozen content identity',
       move: (declaration: Record<string, unknown>) => ({ ...declaration, requiredTools: ['bash'] }),
     },
     {
       label: 'the content digest no longer matches the candidate body',
+      // The declaration no longer covers the bytes beside it, so the loader is
+      // the entry that refuses the object first.
+      refusal: 'SKILL.md is not the declared content',
       move: (declaration: Record<string, unknown>) => ({
         ...declaration,
         content: { ...(declaration.content as object), skillMdSha256: '0'.repeat(64) },
@@ -472,10 +519,10 @@ describe('K3-2: the refusals that come before any write', () => {
     },
   ])(
     'refuses the apply when the sandbox sidecar was rewritten after prepare — $label',
-    async ({ move }) => {
+    async ({ move, refusal }) => {
       const s = await boot()
       const h = s.h
-      await writeSkillObject(join(h.home, 'skills'), {
+      await writeSkillObject(skillRoot(h), {
         body: skillBody(SKILL, ['keep.txt', 'holdout.txt']),
         sidecar: 'execution',
       })
@@ -494,7 +541,8 @@ describe('K3-2: the refusals that come before any write', () => {
 
       const refused = await s.call('evolution_apply', { proposalId: P1 })
       expect(refused.text).toContain('evolution_apply rejected:')
-      expect(refused.text).toContain('no longer matches the content identity recorded at prepare')
+      expect(refused.text).toContain(refusal)
+      expect(refused.text).toContain(join(ledgerRoot(h), 'sandbox', P1, 'skills', SKILL))
       // Nothing was written and nothing was recorded — and no human was asked.
       expect(await productionObject(h)).toEqual(productionBefore)
       expect(await ledgerBytes(h)).toBe(before)
@@ -505,7 +553,7 @@ describe('K3-2: the refusals that come before any write', () => {
         () => '',
         (error: unknown) => (error instanceof Error ? error.message : String(error)),
       )
-      expect(direct).toContain('no longer matches the content identity recorded at prepare')
+      expect(direct).toContain(refusal)
       expect(await ledgerBytes(h)).toBe(before)
     },
     180_000,
@@ -514,7 +562,7 @@ describe('K3-2: the refusals that come before any write', () => {
   it('refuses a candidate whose SKILL.md declares another name, where the object is admitted', async () => {
     const s = await boot()
     const h = s.h
-    const production = await writeSkillObject(join(h.home, 'skills'), {
+    const production = await writeSkillObject(skillRoot(h), {
       body: skillBody(SKILL, ['keep.txt', 'holdout.txt']),
       sidecar: 'execution',
     })
@@ -530,38 +578,36 @@ describe('K3-2: the refusals that come before any write', () => {
       rationale: 'improve it',
       sourceRefs: ['diagnosis:k3'],
     })
-    // The model's own text names another skill: `prepare` materializes exactly the
-    // bytes it was handed, so the object the candidate side would load declares a
-    // name the row does not grant.
+    // The model's own text names another skill. The candidate is the door this
+    // build judges that at: the bytes are recorded only once they carry the name
+    // the proposal targets, so a candidate the row does not grant never becomes
+    // an object the experiment could run.
     const renamed = skillBody('k3-a-different-skill-name', ['fix.txt', 'keep.txt', 'holdout.txt'])
-    await s.call('evolution_candidate', {
+    const spawnsBefore = h.spawns.length
+    const refused = await s.call('evolution_candidate', {
       proposalId: P1,
       versionSet: { skill: 'v2' },
       mutationJson: JSON.stringify({ name: SKILL, content: renamed }),
     })
-    expect((await s.call('evolution_prepare', { proposalId: P1 })).text).toContain('[prepared]')
+    expect(refused.text).toContain('evolution_candidate rejected:')
+    expect(refused.text).toContain('frontmatter name must equal mutation.name')
 
-    const spawnsBefore = h.spawns.length
-    const refused = await s.call('evolution_replay', {
-      proposalId: P1,
-      taskIds: [...SAMPLES],
-      holdoutTaskIds: [...HOLDOUT],
-    })
-    expect(refused.text).toContain('evolution_replay rejected:')
-    expect(refused.text).toContain('skill-name-mismatch')
-    expect(refused.text).toContain(join(ledgerRoot(h), 'sandbox', P1, 'skills', SKILL))
-
-    // No promotion can be reached from here: nothing is gated, nothing is decided,
-    // nothing is written, and no human is asked.
-    const kinds = kindsOf(await ledgerLines(h))
-    expect(kinds.slice(0, 3)).toEqual(['proposed', 'candidate', 'prepared'])
-    expect(kinds).not.toContain('gated')
-    expect(kinds).not.toContain('decided')
-    expect(kinds).not.toContain('commit_intent')
-    expect((await s.svc.get(P1)).status).toBe('prepared')
+    // Nothing was recorded, nothing was materialized, nothing ran — and the same
+    // refusal is the service entry's, not the tool's rendering of it.
+    expect(kindsOf(await ledgerLines(h))).toEqual(['proposed'])
+    expect(existsSync(join(ledgerRoot(h), 'sandbox'))).toBe(false)
+    expect((await s.svc.get(P1)).status).toBe('proposed')
+    const direct = await s.svc
+      .candidate(P1, { skill: 'v2' }, ROOT_A, { name: SKILL, content: renamed })
+      .then(
+        () => '',
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      )
+    expect(direct).toContain('frontmatter name must equal mutation.name')
+    expect(kindsOf(await ledgerLines(h))).toEqual(['proposed'])
     expect(await productionObject(h)).toEqual({ skillMd: production.skillMd, sidecar: production.sidecar })
     expect(approvalCalls(h).map(call => call.toolName)).toEqual([])
-    expect(h.spawns.length).toBeGreaterThanOrEqual(spawnsBefore)
+    expect(h.spawns).toHaveLength(spawnsBefore)
   }, 180_000)
 
   it('refuses the apply when the judge the declaration pins was unregistered after the decision', async () => {
@@ -569,7 +615,7 @@ describe('K3-2: the refusals that come before any write', () => {
     const h = s.h
     const offJudge = await h.verifier.register(testJudge('k3-judge', '1'), { testDouble: true })
     try {
-      await writeSkillObject(join(h.home, 'skills'), {
+      await writeSkillObject(skillRoot(h), {
         body: skillBody(SKILL, ['keep.txt', 'holdout.txt']),
         sidecar: 'execution',
         verifierRef: 'k3-judge',
@@ -600,7 +646,7 @@ describe('K3-2: the refusals that come before any write', () => {
   it('refuses the apply when the capability grant the promotion counted on is gone', async () => {
     const s = await boot()
     const h = s.h
-    await writeSkillObject(join(h.home, 'skills'), {
+    await writeSkillObject(skillRoot(h), {
       body: skillBody(SKILL, ['keep.txt', 'holdout.txt']),
       sidecar: 'execution',
     })
@@ -631,7 +677,7 @@ describe('K3-2: the refusals that come before any write', () => {
   it('refuses to freeze an experiment for a provider whose required tools its row does not grant, starting no run', async () => {
     const s = await boot({ capabilities: { [ROW]: { skills: [SKILL], tools: ['filesystem'] } } })
     const h = s.h
-    await writeSkillObject(join(h.home, 'skills'), {
+    await writeSkillObject(skillRoot(h), {
       body: skillBody(SKILL, ['keep.txt', 'holdout.txt']),
       sidecar: 'execution',
       requiredTools: ['bash'],
@@ -672,7 +718,7 @@ describe('K3-2: the refusals that come before any write', () => {
     const s = await boot()
     const h = s.h
     // The one file the guidance object has, with no declaration anywhere near it.
-    const guidance = await writeSkillObject(join(h.home, 'skills'), {
+    const guidance = await writeSkillObject(skillRoot(h), {
       name: CLEAN_SKILL,
       body: skillBody(CLEAN_SKILL, ['keep.txt', 'holdout.txt']),
     })
@@ -735,14 +781,25 @@ describe('K3-2: the refusals that come before any write', () => {
 
 describe('K3-3: a file that moves after the freeze refuses by name, and the two sides stay complete and isolated', () => {
   it.each([
-    { label: 'the candidate SKILL.md', file: 'SKILL.md' },
-    { label: 'the candidate SKILL.contract.json', file: SKILL_SIDECAR_FILE },
+    {
+      label: 'the candidate SKILL.md',
+      file: 'SKILL.md',
+      // The rewritten bytes are also the declaration's subject, so the digest
+      // comparison against the recorded identity is the entry that refuses first.
+      refusal: 'no longer matches the content identity recorded at prepare',
+    },
+    {
+      label: 'the candidate SKILL.contract.json',
+      file: SKILL_SIDECAR_FILE,
+      // The object still loads; the sandbox identity is what moved.
+      refusal: 'no longer matches its frozen content identity',
+    },
   ])(
     'refuses to freeze the experiment when $label moved in the sandbox after prepare, starting nothing',
-    async ({ file }) => {
+    async ({ file, refusal }) => {
       const s = await boot()
       const h = s.h
-      await writeSkillObject(join(h.home, 'skills'), {
+      await writeSkillObject(skillRoot(h), {
         body: skillBody(SKILL, ['keep.txt', 'holdout.txt']),
         sidecar: 'execution',
       })
@@ -789,7 +846,7 @@ describe('K3-3: a file that moves after the freeze refuses by name, and the two 
         holdoutTaskIds: [...HOLDOUT],
       })
       expect(refused.text).toContain('evolution_replay rejected:')
-      expect(refused.text).toContain('no longer matches the content identity recorded at prepare')
+      expect(refused.text).toContain(refusal)
       expect(kindsOf(await ledgerLines(h))).toEqual(['proposed', 'candidate', 'prepared'])
       expect(h.spawns).toHaveLength(spawnsBefore)
       expect((await s.svc.get(P1)).status).toBe('prepared')
@@ -798,14 +855,25 @@ describe('K3-3: a file that moves after the freeze refuses by name, and the two 
   )
 
   it.each([
-    { label: 'the production SKILL.md', file: 'SKILL.md' },
-    { label: 'the production SKILL.contract.json', file: SKILL_SIDECAR_FILE },
+    {
+      label: 'the production SKILL.md',
+      file: 'SKILL.md',
+      // A body the declaration above it does not cover: the object no longer loads,
+      // and that is the refusal the production baseline check reaches first.
+      refusal: 'SKILL.md is not the declared content',
+    },
+    {
+      label: 'the production SKILL.contract.json',
+      file: SKILL_SIDECAR_FILE,
+      // The object still loads; the baseline identity is what moved.
+      refusal: 'no longer matches its frozen content identity',
+    },
   ])(
     'refuses the write when $label moved after the decision, and never overwrites it',
-    async ({ file }) => {
+    async ({ file, refusal }) => {
       const s = await boot()
       const h = s.h
-      const production = await writeSkillObject(join(h.home, 'skills'), {
+      const production = await writeSkillObject(skillRoot(h), {
         body: skillBody(SKILL, ['keep.txt', 'holdout.txt']),
         sidecar: 'execution',
       })
@@ -831,7 +899,9 @@ describe('K3-3: a file that moves after the freeze refuses by name, and the two 
       const approvalsBefore = approvalCalls(h).length
       const refused = await s.call('evolution_apply', { proposalId: P1 })
       expect(refused.text).toContain('evolution_apply rejected:')
-      expect(refused.text).toContain('changed since prepare')
+      expect(refused.text).toContain(refusal)
+      // The baseline the write would replace is the object the refusal names.
+      expect(refused.text).toContain(join(skillRoot(h), SKILL))
       expect(await ledgerBytes(h)).toBe(before)
       expect(kindsOf(await ledgerLines(h)).slice(-1)).toEqual(['decided'])
       expect(approvalCalls(h)).toHaveLength(approvalsBefore)
@@ -845,7 +915,7 @@ describe('K3-3: a file that moves after the freeze refuses by name, and the two 
         () => '',
         (error: unknown) => (error instanceof Error ? error.message : String(error)),
       )
-      expect(direct).toContain('changed since prepare')
+      expect(direct).toContain(refusal)
       expect(await ledgerBytes(h)).toBe(before)
     },
     180_000,
@@ -854,7 +924,7 @@ describe('K3-3: a file that moves after the freeze refuses by name, and the two 
   it('runs both sides of every sample as complete, isolated objects from one frozen input', async () => {
     const s = await boot()
     const h = s.h
-    const production = await writeSkillObject(join(h.home, 'skills'), {
+    const production = await writeSkillObject(skillRoot(h), {
       body: skillBody(SKILL, ['keep.txt', 'holdout.txt']),
       sidecar: 'execution',
     })
