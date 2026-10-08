@@ -1,64 +1,50 @@
 # dsh-singularity-evolution
 
-Purpose: The evolution plane — the append-only proposal ledger, the two-sided
-experiment that evaluates a candidate, the promotion gate, and the durable
-apply/rollback commit into production (skill objects and capability rows).
+Purpose: The evolution plane — one method draft ledger, one evaluation pipeline,
+one publish pointer switch, and the read-only projection of a legacy ledger.
 
-Live tools resolve `await ctx.evolution.forSession(callerSessionId)`. Each graph
-uses its stable library at `$DSH_HOME/singularity/environments/<rootSessionId>`:
-`evolution/` holds the proposal ledger and experiment sandboxes, `skills/` is
-both the baseline and publication root, and `task-templates/` is the contract
-catalog. The first access reconciles that graph's open commits. Direct service
-calls keep the configured legacy roots for embedded hosts and existing tests.
-Repeated resolution through a scoped service returns the owner's cached graph
-service, keeping tool writes and Web reads on one in-memory ledger.
+A method changes through exactly one path: a `draft` on the method ledger, one
+`evaluate` that freezes both sides and runs them, one report, and a publish or
+rollback that switches the environment pointer. Every graph's library lives at
+`$DSH_HOME/singularity/environments/<rootSessionId>`; a draft materializes in
+that library's draft directory and the ledger records its id.
 
-A first guidance Skill uses `baseVersion: absent`; its experiment runs the same
-Task with and without the new guidance through a capability already granted by
-the Task, such as `execute-task`. After publication a TaskTemplate can select
-`method:<skill-name>` on later Runs. Existing Task contracts and prior Run
-snapshots remain fixed. A root or supervisor uses the graph library's review
-operation to retain or retire reusable experience.
+The pipeline freezes one `EvaluationPlan` before anything runs: both sides'
+revisions, the input snapshot, the model selection, the sample's own original
+acceptance, the scoring rules, the budget and the strategy policy. Both sides go
+through the same `freezeSide`, so a run cannot be judged by another criterion
+set. Each side runs in its own workspace built from the frozen input and each
+run's facts come from the runtime's own sealed `ExecutionReceipt` — never from a
+second read of evidence the runtime already read. `TrialResult` is the only
+side-fact schema this plane keeps; `EvaluationReport` is the only report schema.
 
-Graph-local experiments can compare one terminal observed Task with its original
-acceptance and measured cost. The server freezes the graph `libraryId`, and the
-promotion gate requires the same library. An independent holdout adds transfer
-evidence; without one, transfer to unseen Tasks remains unknown. Shared/global
-publication and changes to the shared capability registry still require a
-holdout. Criterion repair retains the independent
-parent oracle and its positive/negative guard examples in either scope.
+An llm-outcome evaluation freezes its rubric, its measurement commands and the
+independent judge's exact prompt; the judge answers once, and the answer, its
+input and both digests are written beside the report. A missing usage stays
+unknown. Monetary cost stays unknown until the host supplies an authoritative
+pricing source.
 
-Replay records actual token and tool-call counters over each side's executed
-Run subtree. LLM-generated evaluation plans and independent judgements carry
-their own four token buckets in `generatedUsage` and `judgeUsage`; the token
-budget includes those calls. Missing usage stays unknown. Monetary cost stays
-unknown until the host supplies an authoritative pricing source.
-
-For replay, `snapshot.paths` selects the relative files or subdirectories needed
-by the Task. Its digest and selection are frozen and retained on resume. Each
-side gets an independent copy, using filesystem copy-on-write when available;
-hashing streams file content instead of buffering entire large files. Omission
-keeps the whole-input behavior. Contracts and checks can use workspace-relative
-paths. For existing absolute contracts, `snapshot.rebaseFrom` explicitly maps
-their workspace root into each side, including protected paths and measurement
-commands. Frozen original contracts and content checks remain intact. File
-contents are copied unchanged: embedded absolute paths inside scripts or
-binaries still require task-specific adaptation.
+For a snapshot, `snapshot.paths` selects the relative files or subdirectories the
+Task needs; the selection and its digest are frozen and re-checked when each side
+is built. Each side gets an independent copy, using filesystem copy-on-write when
+available, and hashing streams file content instead of buffering whole files.
+For contracts that carry absolute workspace paths, `snapshot.rebaseFrom` maps
+their workspace root into each side.
 
 Package: `@dangosys/dsh-singularity-evolution`
 
 Dependencies: workspace `task`, `task-runtime`; peers `cordis` + `dsh-session` +
 `dsh-sandbox` + `dsh-sandbox-policy` + `dsh-subprocess`.
 
-config.yaml: optional `root` (default `$DSH_HOME/evolution`), `skillRoot`
-(default `$DSH_HOME/skills`), `capabilityConfig` (the deployment `config.yml`
-whose `task-runtime` `capabilities:` row a capability commit writes); injected
-by the assembly: `repoRoot`, `modelSelection`, `commitProbe` /
-`capabilityConfigProbe` (typed test seams).
+config.yaml: optional `root` (default `$DSH_HOME/evolution`, the ledger
+directory), `skillRoot` (default `$DSH_HOME/skills`, the legacy production
+root), `libraryId`, `taskTemplatesRoot`, `capabilityConfig` and the injected
+`repoRoot` / `modelSelection` — the members the legacy v4 service and the
+assembly still name.
 
 ### Tools
 
-none (the nine `evolution_*` tools are adapters in `@dangosys/dsh-singularity-agent`)
+none (the six `method_*` tools are adapters in `@dangosys/dsh-singularity-agent`)
 
 ### Web APIs
 
@@ -66,96 +52,66 @@ none
 
 ### Service state
 
-1. ctx.evolution: propose / candidate / prepare / gate / decide / apply /
-   rollback / reconcile / openIntentTargets / openIntentCapabilities /
-   experiment(s) / runExperiment / resumeExperiment /
-   readSkillCandidate / readCapabilityCandidate / checkPromotion /
-   checkProductionBaseline
+1. `ctx.evolution` — the legacy v4 ledger: read-only projection plus the one
+   recovery that settles an open `commit_intent` from the bytes the intent
+   recorded (`reconcile` / `openIntentTargets` / `openIntentCapabilities`). No
+   new protocol state is stored here.
 
-2. ledger `<root>/proposals.jsonl` (formatVersion 4) + `<root>/sandbox/<proposalId>/`
+2. The method ledger `<root>/methods.jsonl` (`formatVersion: 5`) — one line per
+   draft fact: `draft` / `plan` / `trial` / `evaluation` / `discard` /
+   `published` / `rolledback`.
 
 ## Design notes
 
-**One ledger format, no migration (K3).** Every line declares `formatVersion: 4`;
-the load refuses a v1/v2/v3, an unversioned or a mixed ledger by name, and every
-write door refuses a record declaring anything else before a byte changes. There
-is no dual-format reader and no fallback: the operator archives an older ledger
-and starts a new one.
+**One draft protocol, no version set.** A `draft` line carries the revision the
+candidate was written against and the candidate revision it proposes. The four
+states are `draft → evaluated → discarded | published`; one wrong transition
+refuses the whole ledger rather than folding into a state no legitimate sequence
+could produce. The fields the old protocol hand-filled — a version set, six gate
+answers, an always-true `mechanical` flag and a derivable `champion` — are not
+merely ignored: a line that carries them is refused (`validateDraftRecord`).
 
-**The state machine.** proposed → candidate → prepared → gated → decided →
-applied → rolledback. A candidate carries a materialized mutation; `prepared` is
-the one state it admits. A prepared skill candidate gates straight from prepared:
-its evaluation is the two-sided experiment, which is evidence and not a lifecycle
-transition (it stays `prepared` while samples run). Only a PROMOTE on an
-applyable, materialized, sub-L4 mutation can be applied, and only an applied
-proposal can be rolled back.
+**A candidate's content digest is content, never identity.** `CandidateRevision.digest`
+is `candidateContentDigestOf(files)` — the candidate's own files, in path order.
+The draft id, the revision id and the staging timestamp are identity and live in
+`revisionId` / `manifestDigest`. This is what makes the strategy's same-bytes
+refutation reachable: two drafts carrying the same bytes freeze the same content
+digest, so the second one is closed by name without a measurement.
 
-REJECT and KEEP_FOR_FURTHER_RESEARCH can also settle a proposed, candidate or
-prepared proposal with a recorded reason and native decision approval. These
-terminal decisions preserve production bytes and let the RSI driver continue
-when a comparison is unnecessary or unavailable. PROMOTE follows the full gated
-path. The same rule validates live writes and ledger replay after restart.
+**One validator, two modes.** `validateEvaluation` is the only validation entry:
+`evaluate` runs it before a report is recorded, and a publish runs it again in
+`pre-publish` mode — the same checks against the same frozen plan, so a receipt,
+a cost, a criterion, the baseline revision, the model or the candidate that moved
+between the two is a named refusal.
 
-**Commit durability (K2).** A production write is a commit: the `commit_intent`
-line is durable before production changes (binding the proposal, direction, human
-grant, the whole fixed file set, and the recoverable source bytes under the ledger
-root); each target is then replaced atomically (same-directory staging file,
-fsynced and renamed, never truncated) in the intent's own order; the completion
-line closes the intent only after every file was read back and the whole object
-was verified as one loadable object carrying this direction's identity.
-Reconciliation settles an open intent from what production really holds — redo
-when it still holds the pre-commit state, completion-only when it already holds
-the committed content — and stops by name when a third party moved a file.
+**Publishing is one pointer switch.** A publish or rollback builds one plan (the
+pointer's exact expected state, the revision to switch to and its digest) and
+hands it to the runtime's own pointer transaction. This module owns no
+production bytes: the revision directory already holds them, and the legacy
+`proposals.jsonl` write path was retired with it.
 
-**Snapshot link policy.** An experiment's frozen input snapshot is walked as the
-content it really names: a link that resolves inside the snapshot is followed and
-materialized as real content; a link whose target escapes the snapshot root, whose
-chain loops, or whose target cannot be resolved is a named refusal wherever the
-tree is first read. Without this, a kept link would be a shared target a run could
-write through into the production checkout the snapshot was taken from.
+**Snapshot link policy.** A frozen input snapshot is walked as the content it
+really names: a link that resolves inside the snapshot is followed and
+materialized as real content; a link whose target escapes the snapshot root,
+whose chain loops, or whose target cannot be resolved is a named refusal wherever
+the tree is first read. Without this, a kept link would be a shared target a run
+could write through into the production checkout the snapshot was taken from.
 
-**Measurement confinement.** A frozen measurement command runs confined when the
-experiment's context mounts the deployment's confinement seam: `ctx.sandbox.confine`
-wraps `['/bin/sh', '-c', command]`, `ctx.subprocess` spawns the wrapped argv, and
-the policy's mode is `ctx.sandboxPolicy.resolve()` with that sample side's own
-workspace as its writable root — a measurement may write the artifacts the frozen
-digest is later taken over, so its workspace is exactly the subtree the
-confinement keeps writable. A context without both seams runs the command
-directly. The stream caps, the 300s deadline and the cancellation contract are
-the same either way.
+**Legacy ledgers are history.** A graph without the new protocol marker is read
+through `readLegacyMethods` — a pure projection of `formatVersion ≤ 4` lines that
+adopts nothing, restores nothing, publishes nothing and writes no progress. A v5
+line read through that projection is refused by name, and a v4 line read through
+the v5 fold is refused too.
 
-**Promotion evidence.** A promotion re-reads the proposal's newest completed
-two-sided experiment from the ledger, recomputes the report, and checks the sides
-are runs of that experiment's lineage, that frozen contracts, protected inputs,
-judge versions and model selection still hold, that the verdict is `fixed`, and
-that cost is known whenever the frozen budget declares a ceiling. Every condition
-is a named refusal; a historical report is never upgraded into new evidence.
-
-**Candidate scope.** Besides the same-name skill update (K3: `SKILL.md` plus the
-derived `SKILL.contract.json` when the object is an execution provider), this
-build admits exactly one capability candidate: one whole capability row plus an
-optional new execution skill. The row and the files move in one commit, each
-file's two sides may be `null` to mean "must not exist", and the capability
-table's composed whole-file identity is frozen at prepare so a third party's
-edit of the deployment `config.yml` is a named stop with nothing written.
-
-**Provider pre-check.** `checkPromotion` runs the unified `validateSkillProvider`
-before a human is asked, so a candidate whose verifier is unregistered or whose
-required tools the deployment cannot grant is refused before an approval is
-burned; the roles are reported (`renderProviderRoles`) and never persisted.
-
-**Why the service is two files.** `EvolutionService` (lifecycle, promotion, experiment)
-extends `EvolutionServiceCore` (ledger plumbing, commit host, recovery) only to stay under the 2000-line cap.
-
-**Layout.** `types.ts` is the public vocabulary; `shared/` holds the cross-module
-guards, digests, refusals and fs helpers; `ledger/` holds the state machine,
-record validators and the fold; `service/` holds the service core (ledger
-plumbing, durable commit host), sandbox materialization, the production-write
-refusals and the soft service lookups; `replay/`, `promotion/` and `experiment/`
-hold the comparer/validators, the evidence gates and the experiment itself.
-`evolution.ts`, `replay.ts` and `commit.ts` keep their historical import paths
-(`replay.ts` is a facade over its folder); `experiment/`, `promotion/` and the
-rest are imported from their own modules.
+**Layout.** `types.ts` is the public vocabulary; `shared.ts` holds the canonical
+JSON, its digests and the shape guards; `model.ts` the model-selection shape;
+`draft/` the draft write door, the candidate adapters and their content digest;
+`ledger/` the v5 record validators and the four-state fold; `pipeline/` the plan,
+the run, the one validator, the score and the report; `evidence/` the receipts,
+the consumption proofs, the snapshot builder and the independent judge;
+`publish/` the publish request and the pointer switch; `history/` the legacy
+projection; `service/` the ledger file and the deployment's seams; `strategy/`
+the RRSI search strategy; `legacy/` the v4 service.
 
 ## RRSI strategy port
 
@@ -209,7 +165,6 @@ mistaken for an upstream output).
   closed by `refutationFor` without measurement, and `mayRetest` requiring new
   evidence or a new scope. `steering: 'stop-search'` ends only the method search;
   whether the business run continues is the supervisor's own decision.
-
-`observe.ts` (adapting real experiment reports into strategy inputs, plus the
-recomputable `StrategyDecisionRecord`) lands with the evolution pipeline batch;
-until then the strategy surface is pure and free of fs / cordis / replay imports.
+- `observe.ts` — adapts a real `EvaluationReport` into the strategy's inputs and
+  produces the recomputable `StrategyDecisionRecord` (every input fingerprinted in
+  the record, so a decision recomputes from the record and the report alone).

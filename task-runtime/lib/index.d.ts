@@ -864,7 +864,17 @@ type EnvironmentEdit = {
   readonly kind: 'capability';
   readonly edit: CapabilityRowEdit;
 };
-/** The content digest of a manifest: canonical form without the digest field itself, so key order never moves it. */
+/**
+ * The content digest of a manifest: what the revision **holds** — its skill
+ * entries, its task templates and its capability table — plus the generation it
+ * belongs to, and nothing else. The identity it is filed under (`revisionId`,
+ * which for a candidate is derived from the draft id, the revision it was based
+ * on, and when it was staged) is identity, not content: two drafts carrying the
+ * same bytes therefore read the same content digest, and a client that keys a
+ * candidate by its content (the strategy's same-bytes refutation) matches on it.
+ * The identity members are pinned elsewhere — the revision id by the directory
+ * name it must equal, and the base and timestamp by the draft record.
+ */
 declare function manifestDigest(manifest: Omit<EnvironmentRevisionManifest, 'contentDigest'>): string;
 /** The manifest of a revision that holds nothing yet; `ensureInitialRevision` fills it, a draft copies and edits it. */
 declare function emptyRevisionManifest(input: {

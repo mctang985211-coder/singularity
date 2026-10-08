@@ -8,7 +8,7 @@
 import type { ExecutionReceipt, RunId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { TERMINAL_RUN_STATUSES } from '@dangosys/dsh-singularity-task'
 import type { ReplayRunOutcome, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
-import { agentOptionsOf, modelSelectionOf } from '../replay.ts'
+import { agentOptionsOf, modelSelectionOf } from '../model.ts'
 import { digestOf } from '../shared.ts'
 import { receiptRefOf } from '../evidence/receipt.ts'
 import { materializeSideWorkspace } from '../evidence/snapshot.ts'

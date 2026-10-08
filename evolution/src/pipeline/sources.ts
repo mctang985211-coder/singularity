@@ -36,6 +36,19 @@ export interface VerifierVocabulary {
   readonly versions: Readonly<Record<string, string>>
 }
 
+/** Every provider one pre-check refused, as a refusal line names it — the one rendering a freeze and an admission record share. */
+export function refusedProviderLines(precheck: ProviderPrecheckView): string[] {
+  return precheck.capabilities.flatMap(row => [
+    ...(row.refusals ?? []).map(item => `${row.capability}: ${item.code}: ${item.detail}`),
+    ...row.skills
+      .filter(skill => !skill.valid)
+      .map(
+        skill =>
+          `${row.capability}: skill "${skill.name}" (${(skill.defects ?? []).map(defect => `${defect.code}: ${defect.detail}`).join('; ')})`,
+      ),
+  ])
+}
+
 /** The environment and replay surface one evaluation reads. */
 export interface EvaluationRuntime {
   /** The graph's root task store, derived from the caller's own graph. */

@@ -2060,9 +2060,27 @@ const STATUSES = [
 function isRecord$1(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-/** The content digest of a manifest: canonical form without the digest field itself, so key order never moves it. */
+/**
+* The content digest of a manifest: what the revision **holds** — its skill
+* entries, its task templates and its capability table — plus the generation it
+* belongs to, and nothing else. The identity it is filed under (`revisionId`,
+* which for a candidate is derived from the draft id, the revision it was based
+* on, and when it was staged) is identity, not content: two drafts carrying the
+* same bytes therefore read the same content digest, and a client that keys a
+* candidate by its content (the strategy's same-bytes refutation) matches on it.
+* The identity members are pinned elsewhere — the revision id by the directory
+* name it must equal, and the base and timestamp by the draft record.
+*/
 function manifestDigest(manifest) {
-	return sha256Hex(canonicalize(manifest));
+	const { formatVersion, libraryId, kind, skills, taskTemplates, capabilities } = manifest;
+	return sha256Hex(canonicalize({
+		formatVersion,
+		libraryId,
+		kind,
+		skills,
+		taskTemplates,
+		capabilities
+	}));
 }
 function withDigest(manifest) {
 	const { contentDigest: _dropped,...rest } = manifest;

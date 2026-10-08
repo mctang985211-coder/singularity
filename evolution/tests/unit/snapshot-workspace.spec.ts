@@ -2,9 +2,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { normalizeSnapshot, normalizeSnapshotPaths } from '../../src/replay/snapshot.ts'
-import { buildWorkspace } from '../../src/experiment/workspace.ts'
-import { directoryDigest } from '../../src/experiment/record.ts'
+import { buildWorkspace, directoryDigest, normalizeSnapshot, normalizeSnapshotPaths } from '../../src/evidence/snapshot.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })

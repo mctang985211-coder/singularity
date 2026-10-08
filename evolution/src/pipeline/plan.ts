@@ -6,13 +6,13 @@
  */
 
 import type { AcceptanceCriterion, ReviewRecord, TaskInstance } from '@dangosys/dsh-singularity-task'
+import { sha256Hex } from '@dangosys/dsh-singularity-task'
 import type { CapabilityConfig, McpServerTemplate } from '@dangosys/dsh-singularity-task-runtime'
-import { frozenCriterionOf, refusedProviderLines } from '../experiment/freeze.ts'
-import type { VerifierVocabularyView } from '../experiment/freeze.ts'
-import { digestOf } from '../shared.ts'
+import { digestOf, isHex64 } from '../shared.ts'
 import { freezeInput } from '../evidence/snapshot.ts'
 import type { InputSnapshot } from '../evidence/snapshot.ts'
-import type { EvaluationSources, ProviderPrecheckView } from './sources.ts'
+import { refusedProviderLines } from './sources.ts'
+import type { EvaluationSources, ProviderPrecheckView, VerifierVocabulary } from './sources.ts'
 import type {
   AdmissionRefusal,
   EvaluationBudget,
@@ -28,6 +28,66 @@ import type {
   RevisionView,
   SidePlan,
 } from '../types.ts'
+
+/** SHA-256 over a criterion's protected input identities, in path order — the acceptance input identity of one criterion. */
+export function protectedInputsDigest(inputs: readonly { path: string; sha256: string }[]): string {
+  const lines = inputs.map(input => `${input.path}\0${input.sha256}`).sort()
+  return sha256Hex(lines.join('\n'))
+}
+
+/** One criterion's frozen judge identity, read from the criterion's verifier ref and the live vocabulary. */
+export function frozenCriterionOf(
+  criterion: AcceptanceCriterion,
+  where: string,
+  vocabulary: VerifierVocabulary | undefined,
+): FrozenCriterion {
+  const inputs = criterion.protectedInputs ?? []
+  for (const input of inputs) {
+    if (typeof input?.path !== 'string' || input.path.length === 0 || !isHex64(input?.sha256)) {
+      throw new Error(
+        `the sample's criterion "${criterion.criterionId}" carries a protected input that was never fixed to { path, sha256 } — ` +
+          'an acceptance input nobody fixed is not a frozen input',
+      )
+    }
+  }
+  const ref = criterion.verifierRef
+  if (ref === undefined) {
+    throw new Error(
+      `${where} criterion "${criterion.criterionId}" pins no verifierRef — the judge a verdict belongs to is fixed before the first ` +
+        'run, so a criterion that lets the registry choose by mode cannot be frozen; pin the registered, versioned verifier that decides it',
+    )
+  }
+  if (vocabulary === undefined) {
+    throw new Error(
+      `${where} criterion "${criterion.criterionId}" pins verifier "${ref}" but this deployment cannot list its verifier registry ` +
+        '(verifierIds()/verifierVersions() are unavailable), so the judge identity cannot be frozen — an experiment whose judge nobody ' +
+        'can name is refused before it runs',
+    )
+  }
+  if (!vocabulary.ids.includes(ref)) {
+    throw new Error(
+      `${where} criterion "${criterion.criterionId}" pins verifier "${ref}", which the registry does not hold ` +
+        `(registered: ${vocabulary.ids.length === 0 ? 'none' : vocabulary.ids.join(', ')}) — the criterion would be judged inconclusive ` +
+        'by a judge that does not exist; name a registered verifier before freezing the experiment',
+    )
+  }
+  const declared = vocabulary.versions[ref]
+  if (declared === undefined) {
+    throw new Error(
+      `${where} criterion "${criterion.criterionId}" pins verifier "${ref}", which the registry holds but declares no version for — ` +
+        'a verdict belongs to the instance that judged it, so a judge nobody can recall by version is refused before the experiment runs',
+    )
+  }
+  return {
+    criterionId: criterion.criterionId,
+    verificationMode: criterion.verificationMode,
+    ...(criterion.command === undefined ? {} : { command: criterion.command }),
+    protectedInputsDigest: protectedInputsDigest(inputs),
+    verifierRef: ref,
+    verifierVersion: declared,
+    verifierAnchor: `registered verifier "${ref}" declares version "${declared}"`,
+  }
+}
 
 /** The frozen scale every side's acceptance is mirrored from. */
 export interface FreezeSideInput {
@@ -208,7 +268,7 @@ export async function buildEvaluationPlan(sources: EvaluationSources, input: Pla
 
   const storeId = await sources.runtime.storeOfSession(sources.caller)
   const snapshot = await sources.tasks.openStore(storeId)
-  const vocabulary: VerifierVocabularyView | undefined = await sources.verifierVocabulary()
+  const vocabulary: VerifierVocabulary | undefined = await sources.verifierVocabulary()
   const mcpRegistry = sources.runtime.mcpServers()
   const activeTable = await sources.runtime.capabilitiesForSession(sources.caller)
   const candidateTable = { ...activeTable, ...candidate.capabilityRows }
