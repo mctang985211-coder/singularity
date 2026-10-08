@@ -15,11 +15,13 @@ let root: string
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'graphs-lifecycle-'))
+  vi.stubEnv('DSH_HOME', root)
 })
 
 afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
   rmSync(root, { recursive: true, force: true })
 })
 
@@ -81,6 +83,9 @@ function harness(overrides: { sessionPersistence?: unknown; events?: SessionEven
     // driver still running would keep spawning workers into an environment that
     // is being cleaned, so the store's task tree is cancelled first (§3.6).
     cancelGraph: vi.fn(async (_storeId: string, _reason: string) => {}),
+    // The live mapping `GraphsService.create` writes: the root session works in
+    // round 1's bubble, and the runtime resolves the checkout from here.
+    sessionWorkspaces: new Map<string, string>(),
   }
   ctx.provide(
     'sessionPersistence',
@@ -135,7 +140,7 @@ describe('graphs creation lifecycle', () => {
     expect(runtime.prompt).not.toHaveBeenCalled()
   })
 
-  it('uses the environment cwd and sends setup only after registry persistence completes', async () => {
+  it('uses the round-1 bubble workspace and sends setup only after registry persistence completes', async () => {
     const { service, store, append, events, runtime, taskRuntime } = harness()
     const persisted = Promise.withResolvers<void>()
     append.mockImplementationOnce(async records => {
@@ -148,14 +153,19 @@ describe('graphs creation lifecycle', () => {
     expect(await service.list()).toEqual([])
     persisted.resolve()
     const { graph } = await creating
+    const bubble = join(root, 'singularity', 'environments', graph.rootSessionId, 'bubbles', 'round-1', 'workspace')
 
     expect(runtime.createRoot).toHaveBeenCalledWith(
       expect.objectContaining({
-        cwd: store.get(graph.envId).path,
+        // The root works in round 1's bubble, not in the environment checkout.
+        cwd: bubble,
         sessionId: graph.rootSessionId,
         scope: { graphStoreId: graph.graphStoreId, layoutStoreId: graph.layoutStoreId },
       }),
     )
+    // The root session's own workspace is that bubble: the runtime resolves the
+    // graph's checkout from this mapping rather than from the environment's path.
+    expect(taskRuntime.sessionWorkspaces.get(graph.rootSessionId)).toBe(bubble)
     // The graph creates no task: it opens the store and adopts the root it holds,
     // and the graph's own name never becomes an objective (A0 §1.2, §1.5).
     expect(taskRuntime.adoptRoot).toHaveBeenCalledExactlyOnceWith(`sg-t-${graph.rootSessionId}`, graph.rootSessionId)

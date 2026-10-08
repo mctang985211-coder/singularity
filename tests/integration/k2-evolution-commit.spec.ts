@@ -1232,11 +1232,12 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
     expect((await svc.get(P2)).openIntent).toBeUndefined()
     expect((await svc.get(P1)).openIntent?.intentId).toBe(`${P1}/apply`)
 
-    // The real entry a root agent calls answers with the same refusal: the tool
+    // The real entry a supervisor calls answers with the same refusal: the tool
     // returns the service's own text, not a commit — production and the ledger
     // stand exactly as the interrupted commit left them.
-    h.rootAgent(ROOT_A).ctx.tools.register(defineEvolutionApplyTool(h.ctx))
-    const answered = await h.call(h.rootAgent(ROOT_A), 'evolution_apply', { proposalId: P2 })
+    const supervisor = await h.supervisor()
+    supervisor.ctx.tools.register(defineEvolutionApplyTool(h.ctx))
+    const answered = await h.call(supervisor, 'evolution_apply', { proposalId: P2 })
     expect(answered.isError, answered.text).toBe(false)
     expect(answered.text).toContain('evolution_apply rejected:')
     expect(answered.text).toContain(productionDirectory(h))
@@ -1395,9 +1396,10 @@ describe('K2-5: a reopened instance rolls an applied proposal back through the r
     expect((await reopened.get(P1)).status).toBe('applied')
     expect((await reopened.get(P1)).openIntent).toBeUndefined()
 
-    // The rollback runs through the real tool on the reopened process's own surface.
-    h2.rootAgent(ROOT_A).ctx.tools.register(defineEvolutionRollbackTool(h2.ctx))
-    const answer = await h2.call(h2.rootAgent(ROOT_A), 'evolution_rollback', { proposalId: P1 })
+    // The rollback runs through the real tool on the reopened process's own supervisor surface.
+    const supervisor = await h2.supervisor()
+    supervisor.ctx.tools.register(defineEvolutionRollbackTool(h2.ctx))
+    const answer = await h2.call(supervisor, 'evolution_rollback', { proposalId: P1 })
     expect(answer.isError, answer.text).toBe(false)
     expect(answer.text).toContain('champion restored')
     expect(answer.text).toContain(target)
@@ -1419,7 +1421,7 @@ describe('K2-5: a reopened instance rolls an applied proposal back through the r
 
     // A further rollback is the state machine's answer, not a second write.
     const afterRollback = await ledgerBytes(h2)
-    const again = await h2.call(h2.rootAgent(ROOT_A), 'evolution_rollback', { proposalId: P1 })
+    const again = await h2.call(supervisor, 'evolution_rollback', { proposalId: P1 })
     expect(again.text).toContain('is rolledback; only an applied proposal can be rolled back')
     expect(await ledgerBytes(h2)).toBe(afterRollback)
     expect(kindsOf(await ledgerLines(h2)).slice(-2)).toEqual(['commit_intent', 'rolledback'])

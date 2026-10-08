@@ -1186,6 +1186,13 @@ interface ExperimentSources {
   };
   /** The registered judge vocabulary at freeze time (S4-E §Q3), or `undefined` */
   verifierVocabulary?(): Promise<VerifierVocabularyView | undefined>;
+  /**
+   * The deployment context one sample's measurement commands are confined
+   * through: the sandbox seam, the subprocess seam that spawns the confined
+   * argv, and the policy home the sample's own workspace is rooted in. Absent
+   * leaves a measurement to this package's own spawn.
+   */
+  readonly ctx?: Context;
 }
 /** What one experiment call evaluates: the proposal, its sandbox, and the identity it froze the candidate as. */
 interface ExperimentCandidate {

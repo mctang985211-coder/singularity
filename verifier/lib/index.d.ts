@@ -52,15 +52,23 @@ interface VerifyRequest {
 //#region src/command-verifier.d.ts
 /** Runs each criterion's `command` through a shell and judges by exit code; output goes to the criterion log. */
 declare class CommandVerifier implements Verifier {
+  private readonly ctx;
   private readonly evidenceRoot;
   readonly id = "command";
   readonly version = "1";
   /** Known samples: an exit-zero command must come back `pass`, an exit-non-zero one must come back `fail`. */
   readonly selftest: VerifierSelftest;
-  constructor(evidenceRoot: string);
+  constructor(ctx: Context, evidenceRoot: string);
   supports(mode: VerificationMode): boolean;
   verify(req: VerifyRequest): Promise<VerificationResult[]>;
   private runCriterion;
+  /**
+   * Run one criterion command in the workspace it judges. A context that mounts
+   * the deployment's confinement seam runs it through that seam, under the
+   * resolved mode rooted at `cwd`; a context without one spawns the command
+   * itself, exactly as before.
+   */
+  private execute;
 }
 //#endregion
 //#region src/composite-verifier.d.ts

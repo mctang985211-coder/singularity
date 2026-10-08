@@ -58,7 +58,7 @@ const ROOT_CORE_TOOLS = [
   'task_budget_extend',
 ]
 
-/** The nine tools `ctx.singularityEvolution.enabled` gates: registered by the deployment, named here only when it is on. */
+/** The nine tools the evolution chain is reached through; the deployment's switch registers them for the supervisor. */
 const EVOLUTION_TOOLS = [
   'evolution_propose',
   'evolution_candidate',
@@ -71,11 +71,8 @@ const EVOLUTION_TOOLS = [
   'evolution_list',
 ]
 
-/** The root's allow-list with the chain off — the shipped default, and every composition that mounts no exposure. */
-const ROOT_TOOLS_CLOSED = [...ROOT_CORE_TOOLS, 'escalate']
-
-/** The same list with the chain on: the deployment's previous assembly, name for name. */
-const ROOT_TOOLS_OPEN = [...ROOT_CORE_TOOLS, ...EVOLUTION_TOOLS, 'escalate']
+/** The root's allow-list: the core tools plus `escalate`; the evolution chain is the supervisor's. */
+const ROOT_TOOLS = [...ROOT_CORE_TOOLS, 'escalate']
 
 function context(
   roots: readonly SessionId[],
@@ -449,7 +446,7 @@ describe('AgentRuntime root lifecycle', () => {
     const childSession = {}
     const childCtx = { tools: { guard: vi.fn() }, systemPrompt: { section: vi.fn() } }
     await create.mock.calls[0][0].setup(childCtx, { session: childSession })
-    expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(childSession, 'danger-full-access')
+    expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(childSession, 'workspace-isolated')
     expect(order).toEqual(['topology', 'bind', 'prompt'])
     expect(followup).toHaveBeenCalledOnce()
     // The delegated task is this runtime's own voice — the worker's turn was
@@ -607,14 +604,14 @@ describe('AgentRuntime root lifecycle', () => {
     ])
     const { agentCtx, session, restrict, section } = await assemble(state.resumeOptions[0])
     expect(state.mounted).toEqual([[agentCtx, 'standard']])
-    expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(session, 'danger-full-access')
-    // hitl_approve routes through ctx.approval; the danger-full-access bundle's
-    // 'never' policy would auto-reject it, so the root session is pinned to 'ask'.
+    expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(session, 'workspace-isolated')
+    // hitl_approve routes through ctx.approval; the root session is pinned to
+    // 'ask' whatever the bubble's bundle says, so the request reaches the answerer.
     expect(session.append).toHaveBeenCalledExactlyOnceWith('approval/policy', { policy: 'ask' })
     // The composition carries no evolution exposure (this context mounts none),
     // so neither its allow-list nor its prompt names the chain: a root that
     // cannot call evolution_propose must not be told to.
-    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_CLOSED })
+    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS })
     const prompt = promptTextOf(section)
     expect(section).toHaveBeenCalledWith({
       name: 'singularity:root',
@@ -641,17 +638,19 @@ describe('AgentRuntime root lifecycle', () => {
     expect(prompt).not.toContain('task_recover')
   })
 
-  test('resumes a root with the full allow-list and the evolution protocol when the deployment turned the chain on', async () => {
+  test('resumes a root on the same allow-list and states the evolution boundary when the deployment turned the chain on', async () => {
     const state = context([id('root')], 'idle', { evolution: { enabled: true } })
     const runtime = new AgentRuntime(state.ctx as never)
     await runtime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
 
     const { restrict, section } = await assemble(state.resumeOptions[0])
-    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
+    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS })
     const prompt = promptTextOf(section)
-    expect(prompt).toContain('Evolution tools are available')
-    expect(prompt).toContain('Task and Skill improvements')
-    expect(prompt).toContain('capability/MCP changes when execution means are missing')
+    // The switch opens the chain for the supervisor; this surface still cannot
+    // call it, so the prompt names the boundary instead of tools it does not hold.
+    expect(prompt).not.toContain('Evolution tools are available')
+    expect(prompt).toContain('You hold no evolution tools')
+    expect(prompt).toContain('Return improvement leads and capability gaps')
     expect(prompt).toContain('recorded human decisions')
     // The domain reference map is a deployed skill, not part of the general root prompt.
     expect(prompt).not.toContain('Buckyball')
@@ -670,7 +669,7 @@ describe('AgentRuntime root lifecycle', () => {
     expect(read).toHaveBeenCalledWith('singularityEvolution')
     const allow = (restrict.mock.calls[0]?.[0] as { allow: readonly string[] }).allow
     expect(allow.filter(name => name.startsWith('evolution_'))).toEqual([])
-    expect(allow).toEqual(ROOT_TOOLS_CLOSED)
+    expect(allow).toEqual(ROOT_TOOLS)
     expect(promptTextOf(section)).not.toContain('evolution')
   })
 
@@ -695,7 +694,7 @@ describe('AgentRuntime root lifecycle', () => {
 
     expect(openAllow).toContain('task_intake')
     expect(promptTextOf(openAssembly.section)).toContain('load task-coordination with skill')
-    expect(promptTextOf(openAssembly.section)).toContain('Evolution tools are available')
+    expect(promptTextOf(openAssembly.section)).toContain('You hold no evolution tools')
   })
 
   test('ensureRoot returns an interrupted running root to idle before resuming it', async () => {
@@ -725,11 +724,11 @@ describe('AgentRuntime root lifecycle', () => {
       },
     ])
     const { session, restrict, section } = await assemble(state.createOptions[0])
-    expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(session, 'danger-full-access')
+    expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(session, 'workspace-isolated')
     expect(session.append).toHaveBeenCalledExactlyOnceWith('approval/policy', { policy: 'ask' })
     // A newly created root is assembled on the same facts as a resumed one: with
     // no exposure mounted, the nine names and the protocol behind them are absent.
-    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_CLOSED })
+    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS })
     const prompt = promptTextOf(section)
     expect(prompt).toContain("coordinate the user's complete objective through task workers")
     expect(prompt).not.toContain('evolution')
@@ -737,7 +736,7 @@ describe('AgentRuntime root lifecycle', () => {
     expect(state.added).toEqual([['graph', { id: id('root'), name: 'Singularity', status: 'idle' }, true]])
   })
 
-  test('createRoot assembles the evolution chain when the deployment turned it on', async () => {
+  test('createRoot states the evolution boundary in the prompt when the deployment turned it on', async () => {
     const state = context([], 'idle', { evolution: { enabled: true } })
     const runtime = new AgentRuntime(state.ctx as never)
     await runtime.createRoot({
@@ -747,10 +746,11 @@ describe('AgentRuntime root lifecycle', () => {
     })
 
     const { restrict, section } = await assemble(state.createOptions[0])
-    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
+    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS })
     const prompt = promptTextOf(section)
-    expect(prompt).toContain('Evolution tools are available')
-    expect(prompt).toContain('Task and Skill improvements')
+    expect(prompt).toContain('You hold no evolution tools')
+    expect(prompt).toContain('the RSI supervisor reviews the library')
+    expect(prompt).not.toContain('Evolution tools are available')
     expect(prompt).not.toContain('Buckyball')
   })
 })
@@ -957,16 +957,13 @@ describe('the spawn request contract (A2)', () => {
       layoutStoreId: 'layout',
     })
     for (const assembly of [await assemble(created.createOptions[0]), await assemble(resumed.resumeOptions[0])]) {
-      const allowed = enabled ? ROOT_TOOLS_OPEN : ROOT_TOOLS_CLOSED
       expect(assembly.presentAs).toHaveBeenCalledExactlyOnceWith('native')
-      for (const name of allowed) expect(denialOf(assembly.guard, name), name).toBeUndefined()
+      for (const name of ROOT_TOOLS) expect(denialOf(assembly.guard, name), name).toBeUndefined()
       for (const name of ['run_code', 'subagent', 'subagent_fork', 'jobs', 'mcp_custom']) {
         expect(denialOf(assembly.guard, name), name).toContain('task_decompose')
       }
-      for (const name of EVOLUTION_TOOLS) {
-        if (enabled) expect(denialOf(assembly.guard, name), name).toBeUndefined()
-        else expect(denialOf(assembly.guard, name), name).toBeDefined()
-      }
+      // The chain is the supervisor's: a root denies it even in a deployment that registered it.
+      for (const name of EVOLUTION_TOOLS) expect(denialOf(assembly.guard, name), name).toBeDefined()
     }
   })
 

@@ -3,6 +3,8 @@
  */
 
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
 import type { CapabilityManifest, RunProviderBinding, TaskRun } from '@dangosys/dsh-singularity-task'
 import { resolvePermission, workerBaseline } from '../capability.ts'
@@ -41,7 +43,7 @@ export async function resumeAdoptedWorker(
   let grant: WorkerGrant
   let permissionPreset: string | undefined
   try {
-    grant = await authorizedGrant(env, manifest, skillRootsForRun([], run.providerBinding))
+    grant = await authorizedGrant(env, manifest, skillRootsForRun(bubbleSkillRoots(env.workspacePath), run.providerBinding))
     permissionPreset = permissionFor(env, manifest)
   } catch (error) {
     return { status: 'refused', reason: `the run's authorization could not be rebuilt: ${message(error)}` }
@@ -94,6 +96,13 @@ export function skillRootsForRun(overlayRoots: readonly string[], binding: RunPr
   return [...overlayRoots, ...(binding?.snapshotRoot === undefined ? [] : [binding.snapshotRoot])]
 }
 
+/** The bubble's method volume as an overlay skill root, when `workspace` is a bubble workspace; the environment's own libraries are hidden there. */
+export function bubbleSkillRoots(workspace: string | undefined): string[] {
+  if (workspace === undefined) return []
+  const root = join(workspace, '.bubble', 'method-volume')
+  return existsSync(root) ? [root] : []
+}
+
 /**
  * Spawn one task worker (A2 §1.2, A6 §F.4): the composition every spawn builds
  * — the deployment's preset, the capability grant the manifest authorizes, the
@@ -101,7 +110,7 @@ export function skillRootsForRun(overlayRoots: readonly string[], binding: RunPr
 export async function spawnTaskWorker(env: OrchestrateEnv, request: TaskWorkerSpawn): Promise<AgentHandle> {
   await assertPresetUsable(env, request.manifest, request.agentPreset)
   const permissionPreset = permissionFor(env, request.manifest)
-  const grant = await authorizedGrant(env, request.manifest, skillRootsForRun([], request.providerBinding))
+  const grant = await authorizedGrant(env, request.manifest, skillRootsForRun(bubbleSkillRoots(request.cwd), request.providerBinding))
   return await env.spawn({
     sessionId: request.sessionId,
     name: request.name,

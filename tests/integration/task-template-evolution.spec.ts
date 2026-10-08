@@ -130,12 +130,15 @@ async function fixture(
     allowRollback = resolve
   })
   h = await startScriptedLoop({
-    roots: [ROOT, 's-control'],
+    roots: [ROOT],
+    supervisors: ['s-control'],
     graphRootFor: () => ROOT,
     evolution: { ledgerRoot: ledger },
     approvalService: 'native',
     approvalAnswer: ask => (ask.toolName.startsWith('evolution_') ? undefined : 'allowed-once'),
     script: (sessionId, index): readonly ScriptEntry[] => {
+      // The supervisor's spawn carries the fixture's kickoff, which the spec's own
+      // `userSays` turn claims; the chain runs on that turn.
       if (sessionId === 's-control')
         return [
           { tool: 'evolution_decide', args: { proposalId: PROPOSAL, decision: 'PROMOTE' } },

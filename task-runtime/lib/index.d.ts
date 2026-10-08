@@ -775,6 +775,8 @@ interface RootRecoveryRequest {
   proposalIds?: readonly string[];
   /** The verified siblings the new attempt reads at its leading positions, in position order. */
   reuses?: readonly RootRecoveryReuse[];
+  /** The bubble workspace this round's worker works in, when the caller materialized one; absent falls back to the session's own checkout. */
+  workspacePath?: string;
 }
 /** The attempt one request key names on a source task, or `undefined`. */
 declare function recoveryAttemptWithKey(snapshot: TaskSnapshot, sourceTaskId: TaskId, requestKey: string): TaskRun | undefined;
@@ -2450,6 +2452,42 @@ declare function priorRoundNotice(snapshot: TaskSnapshot, source: TaskInstance, 
 /** The same notice for a run the store resumed: the attempt's own recovery record names the round before it. */
 declare function priorRoundNoticeForRun(snapshot: TaskSnapshot, run: TaskRun): string | undefined;
 //#endregion
+//#region src/service/bubble.d.ts
+/**
+ * Bubble materialization and settlement: one RSI round's isolated workspace.
+ *
+ * A bubble is a fresh clone of every environment component at one round's
+ * branch, plus the round's method volume. It hides the environment checkout and
+ * `$DSH_HOME` from the round's agents: what a bubble was materialized with is
+ * all a round can see, so a round cannot read the mother port's dirty tree or a
+ * previous round's state.
+ *
+ * @module @dangosys/dsh-singularity-task-runtime/bubble
+ */
+/** The absolute path of one round's bubble workspace, whether or not it has been materialized. */
+declare function bubbleWorkspacePath(dshHome: string, rootSessionId: string, round: number): string;
+/**
+ * The workspace of the graph's latest materialized round, or `undefined` when
+ * this graph has no bubble at all. A restarted deployment re-pins an adopted
+ * root here: the round's bubble is where its Runs work, and without the mapping
+ * the runtime falls back to the environment checkout the bubble was cloned from.
+ */
+declare function latestBubbleWorkspacePath(dshHome: string, rootSessionId: string): string | undefined;
+/**
+ * Materialize one round's bubble workspace: every environment component cloned
+ * at `rsi/<graphId>/round-<N-1>` (round 1 folds the environment into `round-0`
+ * first), plus the method volume and the round's manifest. Idempotent: a
+ * manifest already naming this round returns its workspace untouched.
+ */
+declare function materializeBubble(envPath: string, dshHome: string, rootSessionId: string, graphId: string, round: number): Promise<string>;
+/**
+ * Settle one round's bubble: commit each component's work on the bubble and
+ * push it to `rsi/<graphId>/round-<N>` on the environment's own repo, so the
+ * next round's materialization can read it. A component with nothing to commit
+ * still has its branch published. Returns each component's new SHA.
+ */
+declare function settleBubble(envPath: string, workspacePath: string, graphId: string, round: number): Promise<Record<string, string>>;
+//#endregion
 //#region src/verified-read.d.ts
 /**
  * Reading files without following a link: the one implementation of "a path
@@ -2528,4 +2566,4 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 //#endregion
-export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, LibraryReview, LibrarySkill, LibraryStatus, LibraryTask, LibraryWrite, type McpServerTemplate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskLibrary, TaskLibraryIndex, TaskRuntime, TaskRuntime as default, TaskTemplateCatalogPage, TaskTemplateMatch, TaskTemplateQuery, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultTaskTemplatesRoot, driveBatch, ensureTaskLibrary, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, graphLibrary, inFlightRecoveryAttempt, isOpenProposal, libraryCapabilities, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readTaskLibrary, readVerifiedFile, rebaseWorkspacePaths, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, reviewTaskLibrary, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, snapshotTaskTemplates, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline, writeTaskLibrary };
+export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, LibraryReview, LibrarySkill, LibraryStatus, LibraryTask, LibraryWrite, type McpServerTemplate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskLibrary, TaskLibraryIndex, TaskRuntime, TaskRuntime as default, TaskTemplateCatalogPage, TaskTemplateMatch, TaskTemplateQuery, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, bubbleWorkspacePath, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultTaskTemplatesRoot, driveBatch, ensureTaskLibrary, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, graphLibrary, inFlightRecoveryAttempt, isOpenProposal, latestBubbleWorkspacePath, libraryCapabilities, loadObligationTemplates, loadSkillSidecar, materializeBubble, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readTaskLibrary, readVerifiedFile, rebaseWorkspacePaths, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, reviewTaskLibrary, serializeSkillSidecar, settleBubble, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, snapshotTaskTemplates, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline, writeTaskLibrary };

@@ -166,11 +166,12 @@ export interface PermissionSpec {
 
 /**
  * Strictness order for conflicting capability permissions (strictest wins):
- * sandbox decides first (`read-only` > `workspace-write` > `danger-full-access`),
+ * sandbox decides first (`read-only` > `workspace-write` > `workspace-isolated` > `danger-full-access`),
  */
 const SANDBOX_STRICTNESS: Readonly<Record<string, number>> = {
   'read-only': 2,
   'workspace-write': 1,
+  'workspace-isolated': 0.5,
   'danger-full-access': 0,
 }
 const APPROVAL_STRICTNESS: Readonly<Record<string, number>> = { ask: 1, never: 0 }

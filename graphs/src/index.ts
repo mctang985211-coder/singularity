@@ -1,13 +1,15 @@
 /** @module dsh-singularity-graphs */
 
 import { randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { EventStoreSet } from '@dangosys/dsh-singularity-task'
 import type { EnvRecord, EnvStore } from '@dangosys/dsh-env-builder'
 import type {} from '@dangosys/dsh-singularity-graph'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
-import type {} from '@dangosys/dsh-singularity-task-runtime'
+import { latestBubbleWorkspacePath, materializeBubble } from '@dangosys/dsh-singularity-task-runtime'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type {
   CreateGraphRequest,
@@ -209,9 +211,23 @@ export class GraphsService extends Service {
         const graphStoreId = `sg-g-${rootSessionId}`
         const layoutStoreId = `sg-l-${rootSessionId}`
 
+        // The graph's root runs in round 1's bubble, never in the environment
+        // checkout: materializing folds the environment's components into
+        // `rsi/<graph>/round-0` and clones them behind the bubble's wall.
+        const envPath = store.get(envId).path
+        const workspace = await materializeBubble(
+          envPath,
+          process.env.DSH_HOME || join(homedir(), '.dsh'),
+          rootSessionId,
+          id,
+          1,
+        )
+        // The root session's own workspace is that bubble: the runtime resolves the
+        // graph's checkout from this mapping, never from the environment's path.
+        this.taskRuntime()?.sessionWorkspaces.set(rootSessionId, workspace)
         const handle = await this.ctx.agentRuntime.createRoot({
           sessionId: rootSessionId,
-          cwd: store.get(envId).path,
+          cwd: workspace,
           scope: { graphStoreId, layoutStoreId },
           ...(modelOptions === undefined ? {} : { agentOptions: modelOptions }),
         })
@@ -433,6 +449,12 @@ export class GraphsService extends Service {
     if (taskRuntime === undefined) {
       throw new Error('graphs: taskRuntime service is not loaded; cannot recover the root store')
     }
+    // Re-entering a graph re-pins its root into the latest bubble round: that
+    // round's workspace is where its Runs work, and without the mapping a
+    // restarted process resolves the checkout to the environment port the
+    // bubble was cloned from. A graph with no bubble keeps the environment path.
+    const bubble = latestBubbleWorkspacePath(process.env.DSH_HOME || join(homedir(), '.dsh'), graph.rootSessionId)
+    if (bubble !== undefined) taskRuntime.sessionWorkspaces.set(graph.rootSessionId, bubble)
     await taskRuntime.adoptRoot(rootTaskStoreId(graph.rootSessionId), graph.rootSessionId)
     await this.ctx.graph.switchStore(graph.graphStoreId)
     await this.ctx.layout.switchStore(graph.layoutStoreId)

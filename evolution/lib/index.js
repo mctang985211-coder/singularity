@@ -2416,8 +2416,108 @@ function reportBytes(report) {
 //#endregion
 //#region src/experiment/outcome.ts
 const OUTPUT_LIMIT = 1024 * 1024;
-async function measure(command, cwd, signal) {
+/** Grace the subprocess provider's own termination procedure gets to end a measurement's process range. */
+const TERMINATION_GRACE_MS = 5e3;
+/**
+* The policy one sample's measurement runs under: the deployment's own mode,
+* rooted at that sample side's workspace. The measured workspace is exactly
+* the subtree the confinement must keep writable, because a measurement may
+* write the artifacts the frozen digest is taken over. `undefined` means the
+* resolved policy grants full access, so the measurement runs unconfined.
+*/
+function measurementPolicy(resolved, cwd) {
+	if (resolved?.mode === "danger-full-access") return void 0;
+	return {
+		mode: resolved?.mode === "read-only" ? "read-only" : "workspace-write",
+		workspaceRoot: cwd
+	};
+}
+/** Resolve once one piped stream has no writer left, so a measurement is never read before it finished writing. */
+function drained(stream) {
+	return new Promise((resolve$1) => {
+		if (stream === void 0 || stream.readableEnded) {
+			resolve$1();
+			return;
+		}
+		stream.once("end", () => resolve$1());
+		stream.once("close", () => resolve$1());
+	});
+}
+async function measure(ctx, command, cwd, signal) {
 	signal?.throwIfAborted();
+	const sandbox = ctx?.get?.("sandbox");
+	const subprocess = ctx?.get?.("subprocess");
+	if (ctx !== void 0 && sandbox !== void 0 && subprocess !== void 0) {
+		const policy = measurementPolicy(ctx.get("sandboxPolicy")?.resolve(), cwd);
+		if (policy !== void 0) return measureConfined(subprocess, (await sandbox.confine([
+			"/bin/sh",
+			"-c",
+			command
+		], policy)).argv, cwd, signal);
+	}
+	return measureDirect(command, cwd, signal);
+}
+/** Measure one command through the subprocess seam: termination is the provider's own managed-range procedure. */
+function measureConfined(subprocess, argv, cwd, signal) {
+	return new Promise((resolveResult, reject) => {
+		let handle;
+		try {
+			handle = subprocess.spawn({
+				argv,
+				cwd,
+				stdio: {
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "pipe"
+				},
+				graceMs: TERMINATION_GRACE_MS
+			});
+		} catch (error) {
+			reject(error);
+			return;
+		}
+		const output = {
+			stdout: [],
+			stderr: []
+		};
+		const sizes = {
+			stdout: 0,
+			stderr: 0
+		};
+		let failure;
+		const stop = (error) => {
+			failure ??= error;
+			handle.terminate();
+		};
+		for (const stream of ["stdout", "stderr"]) handle[stream]?.on("data", (chunk) => {
+			sizes[stream] += chunk.length;
+			if (sizes[stream] > OUTPUT_LIMIT) stop(/* @__PURE__ */ new Error(`evolution: measurement ${stream} exceeded 1 MiB; no truncated evidence was accepted`));
+			else output[stream].push(chunk);
+		});
+		const abort = () => stop(/* @__PURE__ */ new Error("evolution: outcome measurement cancelled"));
+		signal?.addEventListener("abort", abort, { once: true });
+		if (signal?.aborted) abort();
+		const timeout = setTimeout(() => stop(/* @__PURE__ */ new Error("evolution: outcome measurement exceeded 300s")), 3e5);
+		const settle = (error, code) => {
+			clearTimeout(timeout);
+			signal?.removeEventListener("abort", abort);
+			if (error !== void 0) reject(error);
+			else if (code === null || code === void 0) reject(/* @__PURE__ */ new Error("evolution: outcome measurement did not report an exit code"));
+			else resolveResult({
+				stdout: Buffer.concat(output.stdout).toString("utf8"),
+				stderr: Buffer.concat(output.stderr).toString("utf8"),
+				exitCode: code
+			});
+		};
+		handle.done.then((outcome) => void Promise.all([drained(handle.stdout), drained(handle.stderr)]).then(() => {
+			if (failure !== void 0) settle(failure);
+			else if (outcome.exitCode === null) settle(/* @__PURE__ */ new Error(`evolution: outcome measurement terminated by ${outcome.signal ?? "a signal"}`));
+			else settle(void 0, outcome.exitCode);
+		}), (error) => settle(error instanceof Error ? error : new Error(String(error))));
+	});
+}
+/** Measure one command this package spawns itself, for a context that mounts no confinement seam. */
+function measureDirect(command, cwd, signal) {
 	return new Promise((resolveResult, reject) => {
 		const child = spawn("/bin/sh", ["-c", command], {
 			cwd,
@@ -2509,7 +2609,7 @@ async function judgeExperiment(input) {
 			const detail = sample[side];
 			for (const measurement of plan.measurements) {
 				const command = view.frozen.snapshot.rebaseFrom === void 0 ? measurement.command : rebaseWorkspacePaths(measurement.command, view.frozen.snapshot.rebaseFrom, detail.workspace);
-				const result = await measure(command, detail.workspace, input.signal);
+				const result = await measure(input.ctx, command, detail.workspace, input.signal);
 				measurements.push({
 					ref: `${sample.taskId}/${side}/${measurement.id}`,
 					sampleTaskId: sample.taskId,
@@ -4419,6 +4519,7 @@ async function executeExperiment(sources, request) {
 		throw new Error(`${message$1} (the experiment stopped; ${started} sample run(s) it started settled and stay in the ledger and the task store as evidence — resume experiment ${experimentId} to continue it)`);
 	}
 	await judgeExperiment({
+		...sources.ctx === void 0 ? {} : { ctx: sources.ctx },
 		ledger: sources.evolution,
 		view: await sources.evolution.experiment(experimentId),
 		snapshot: await sources.task.openStore(storeId),
@@ -6242,7 +6343,8 @@ var EvolutionService = class EvolutionService extends EvolutionServiceCore {
 					});
 				}
 			},
-			verifierVocabulary: () => verifierVocabularyOf(this.ctx)
+			verifierVocabulary: () => verifierVocabularyOf(this.ctx),
+			ctx: this.ctx
 		};
 	}
 };

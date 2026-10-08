@@ -92,6 +92,11 @@ async function harness(): Promise<Harness> {
   ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
   ctx.provide('permissionPresets', { set: vi.fn() })
   ctx.provide('sessions', {})
+  // The confinement seam the stdio MCP transport resolves against: this
+  // harness's world is danger-full-access, so the fixture server spawns
+  // unchanged and `confine` stays uncalled.
+  ctx.provide('sandbox', { confine: () => { throw new Error('this harness spawns MCP servers unconfined') } } as never)
+  ctx.provide('sandboxPolicy', { resolve: () => ({ mode: 'danger-full-access', workspaceRoot: cwd }) } as never)
   ctx.provide('sessionPersistence', { list: async () => [{ header: { id: ROOT_SESSION, agentPreset: 'standard' } }] })
   ctx.provide('layout', { setIn: async () => {} })
   const graphAgents = [{ id: ROOT_SESSION, name: 'Singularity', status: 'idle' as const }]

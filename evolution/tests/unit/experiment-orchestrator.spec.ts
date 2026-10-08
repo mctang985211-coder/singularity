@@ -18,6 +18,8 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import type { ReviewCriterion, ReviewRecord, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { ReplayRunOutcome, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
 import { registryRevision, skillContentDigest } from '@dangosys/dsh-singularity-task-runtime'
@@ -55,6 +57,25 @@ interface ScriptedOutcome {
   /** The failed run's own cause, as the store's review record carries it. */
   localizedCause?: string
 }
+
+/** What the sandbox seam was asked to confine, in order; each case starts from an empty record. */
+const confinements: { argv: readonly string[]; policy: { mode: string; workspaceRoot: string } }[] = []
+
+/**
+ * The deployment-shaped context every case's measurements run through: the real
+ * subprocess seam and a sandbox seam that records what it confined. One context
+ * for the whole file — a subprocess provider mounts a host-exit listener per
+ * instance, and the deployment mounts exactly one.
+ */
+const measurementCtx = new Context()
+await measurementCtx.plugin(LocalSubprocessRuntime)
+measurementCtx.provide('sandbox', {
+  confine: async (argv: readonly string[], policy: { mode: string; workspaceRoot: string }) => {
+    confinements.push({ argv, policy })
+    return { argv, enforcement: 'full', denialSignatures: [], runnerFailureRules: [] }
+  },
+} as never)
+measurementCtx.provide('sandboxPolicy', { resolve: () => ({ mode: 'workspace-write', workspaceRoot: tmpdir() }) } as never)
 
 /** A little world: one prepared skill proposal, one store, one scripted runtime, one ledger. */
 async function world(
@@ -251,7 +272,13 @@ async function world(
     },
   }
 
+  // A deployment-shaped context: the real subprocess seam, and a sandbox seam
+  // that records what a measurement asked to be confined under — including the
+  // workspace root, which must be the sample side's own workspace.
+  confinements.length = 0
+
   const sources: ExperimentSources = {
+    ctx: measurementCtx,
     evolution: ledger,
     graphs: { graphForSession: async () => ({ rootSessionId: 's-root' as never }) },
     task: { openStore: async () => snapshot() },
@@ -347,6 +374,7 @@ async function world(
     ledger,
     records,
     calls,
+    confinements,
     tasks,
     runs,
     reviews,
@@ -459,6 +487,12 @@ it.each([[false, false], [true, false], [true, true]])('judges successful Task m
     expect(repeated.report).toEqual(result.report)
     expect(judged).toBe(1)
     expect(w.calls).toHaveLength(sides)
+    // Every measurement ran confined, under a policy rooted at the workspace it
+    // measured — the subtree the confinement keeps writable.
+    expect(w.confinements).toHaveLength(sides)
+    expect(w.confinements.every(item => item.argv[0] === '/bin/sh' && item.argv[1] === '-c')).toBe(true)
+    expect(w.confinements.map(item => item.policy.workspaceRoot).sort())
+      .toEqual(w.calls.map(call => call.workspace).sort())
     expect(() => assertExperimentReport({ ...result.report,
       frozen: { ...result.report.frozen, evaluation: { ...evaluation, rubric: 'a changed scoring rule' } },
     })).toThrow()

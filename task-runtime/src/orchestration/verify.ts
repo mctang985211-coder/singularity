@@ -164,9 +164,21 @@ async function withTimeout<T>(work: Promise<T>, timeoutMs: number, runId: RunId)
   }
 }
 
-/** Hand the verifier its own deadline and keep the safety net one margin behind it. */
-export function verifyWithDeadline(env: OrchestrateEnv, storeId: string, runId: RunId): Promise<EvidenceBundle> {
-  return withTimeout(env.verifyRun(storeId, runId, { timeoutMs: env.verifyTimeoutMs }), env.verifyTimeoutMs, runId)
+/**
+ * Hand the verifier its own deadline, the workspace its run works in, and keep
+ * the safety net one margin behind it. The run's placement workspace is what
+ * the criterion commands run in: the verifier confines them to it, so a run
+ * whose workspace this deployment still holds is judged in that workspace and
+ * not in whatever directory the caller happened to work in.
+ */
+export async function verifyWithDeadline(env: OrchestrateEnv, storeId: string, runId: RunId): Promise<EvidenceBundle> {
+  const run = await env.task.runIn(storeId, runId)
+  const cwd = run.placement?.workspacePath
+  return withTimeout(
+    env.verifyRun(storeId, runId, { ...(cwd === undefined ? {} : { cwd }), timeoutMs: env.verifyTimeoutMs }),
+    env.verifyTimeoutMs,
+    runId,
+  )
 }
 
 /**

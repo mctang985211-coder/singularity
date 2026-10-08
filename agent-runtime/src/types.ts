@@ -85,7 +85,7 @@ export interface SpawnRequest {
   readonly grant?: WorkerGrant
   /** Preset id mounted for the child, overriding the inherit-the-parent default. */
   readonly agentPreset?: string
-  /** Permission preset applied to the child's session, overriding the `danger-full-access` default posture. */
+  /** Permission preset applied to the child's session, overriding the worker default posture. */
   readonly permissionPreset?: string
   /** Working directory the child starts in, replacing the inherit-the-parent default; absent keeps the parent's. */
   readonly cwd?: string

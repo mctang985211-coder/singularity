@@ -34,6 +34,10 @@ Date.now = () => realNow() + Number(process.env.G_CONTINUE_CLOCK_ADVANCE_MS ?? 0
 process.env.DSH_HOME = join(directory, 'home')
 mkdirSync(join(process.env.DSH_HOME, 'skills', 'task-execution'), { recursive: true })
 copyFileSync(new URL('../../agent-runtime/skills/task-execution/SKILL.md', import.meta.url), join(process.env.DSH_HOME, 'skills', 'task-execution', 'SKILL.md'))
+/** The graph's round-1 bubble: the directory its agents work in and its verifiers run criteria in. */
+function graphWorkspace(graph) {
+  return join(process.env.DSH_HOME, 'singularity', 'environments', graph.rootSessionId, 'bubbles', 'round-1', 'workspace')
+}
 const ctx = new Context()
 const requests = []
 const calls = []
@@ -143,7 +147,7 @@ class FrozenProvider extends LlmAdapter {
         })
       } else if (
         task.objective === 'prepare release evidence' &&
-        !existsSync(join(ctx.envBuilder.store.get(graph.envId).path, 'sibling.txt'))
+        !existsSync(join(graphWorkspace(graph), 'sibling.txt'))
       ) {
         response = toolChunks('write', { path: 'sibling.txt', content: 'evidence' })
       } else if (task.objective === 'write release artifact' && crash && boundary === 'active') {
@@ -167,7 +171,7 @@ class FrozenProvider extends LlmAdapter {
         return
       } else if (
         task.objective === 'write release artifact' &&
-        !existsSync(join(ctx.envBuilder.store.get(graph.envId).path, 'release.txt'))
+        !existsSync(join(graphWorkspace(graph), 'release.txt'))
       ) {
         response = toolChunks('write', { path: 'release.txt', content: 'delivered' })
       } else if (
@@ -270,7 +274,7 @@ ctx.tools.register({
   description: 'Read an artifact to check an interrupted local write.',
   parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
   output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-  execute: async args => readFileSync(join(ctx.envBuilder.store.get(graph.envId).path, args.path), 'utf8'),
+  execute: async args => readFileSync(join(graphWorkspace(graph), args.path), 'utf8'),
 })
 ctx.tools.register({
   name: 'write',
@@ -282,7 +286,7 @@ ctx.tools.register({
   },
   output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
   execute: async (args, exec) => {
-    const cwd = ctx.envBuilder.store.get(graph.envId).path
+    const cwd = graphWorkspace(graph)
     writeFileSync(join(cwd, args.path), args.content)
     appendFileSync(
       join(directory, 'effects.jsonl'),
@@ -377,7 +381,7 @@ if (crash) {
     if (boundary === 'question') return (snapshot.questions?.all ?? []).length === 1
     if (boundary === 'submitted') return run.executionPhase === 'submitted' && verifierEntered
     if (boundary === 'missing-receipt')
-      return existsSync(join(ctx.envBuilder.store.get(graph.envId).path, 'release.txt'))
+      return existsSync(join(graphWorkspace(graph), 'release.txt'))
     return run.executionPhase === 'active' && requests.some(request => request.sessionId === run.sessionId)
   }, boundary)
   if (entry === 'button') {

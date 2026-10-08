@@ -1,6 +1,11 @@
 import { spawn } from 'node:child_process'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
+import type { Readable } from 'node:stream'
+import type { Context } from '@deepseek-ai/cordis'
+import type { SandboxExecutionPolicy, SandboxPolicy } from '@deepseek-ai/dsh-sandbox'
+import type {} from '@deepseek-ai/dsh-sandbox-policy'
+import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { sha256Hex } from '@dangosys/dsh-singularity-task'
 import type { TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rebaseWorkspacePaths } from '@dangosys/dsh-singularity-task-runtime'
@@ -12,8 +17,115 @@ import { buildExperimentReport, directoryDigest } from './record.ts'
 
 const OUTPUT_LIMIT = 1024 * 1024
 
-async function measure(command: string, cwd: string, signal?: AbortSignal): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+/** Grace the subprocess provider's own termination procedure gets to end a measurement's process range. */
+const TERMINATION_GRACE_MS = 5000
+
+/**
+ * The policy one sample's measurement runs under: the deployment's own mode,
+ * rooted at that sample side's workspace. The measured workspace is exactly
+ * the subtree the confinement must keep writable, because a measurement may
+ * write the artifacts the frozen digest is taken over. `undefined` means the
+ * resolved policy grants full access, so the measurement runs unconfined.
+ */
+function measurementPolicy(resolved: SandboxExecutionPolicy | undefined, cwd: string): SandboxPolicy | undefined {
+  if (resolved?.mode === 'danger-full-access') return undefined
+  return { mode: resolved?.mode === 'read-only' ? 'read-only' : 'workspace-write', workspaceRoot: cwd }
+}
+
+/** Resolve once one piped stream has no writer left, so a measurement is never read before it finished writing. */
+function drained(stream: Readable | undefined): Promise<void> {
+  return new Promise(resolve => {
+    if (stream === undefined || stream.readableEnded) {
+      resolve()
+      return
+    }
+    stream.once('end', () => resolve())
+    stream.once('close', () => resolve())
+  })
+}
+
+async function measure(
+  ctx: Context | undefined,
+  command: string,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   signal?.throwIfAborted()
+  const sandbox = ctx?.get?.('sandbox')
+  const subprocess = ctx?.get?.('subprocess')
+  if (ctx !== undefined && sandbox !== undefined && subprocess !== undefined) {
+    const policy = measurementPolicy(ctx.get('sandboxPolicy')?.resolve(), cwd)
+    if (policy !== undefined) {
+      const confined = await sandbox.confine(['/bin/sh', '-c', command], policy)
+      return measureConfined(subprocess, confined.argv, cwd, signal)
+    }
+  }
+  return measureDirect(command, cwd, signal)
+}
+
+/** Measure one command through the subprocess seam: termination is the provider's own managed-range procedure. */
+function measureConfined(
+  subprocess: SubprocessRuntime,
+  argv: readonly string[],
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolveResult, reject) => {
+    let handle
+    try {
+      handle = subprocess.spawn({
+        argv,
+        cwd,
+        stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' },
+        graceMs: TERMINATION_GRACE_MS,
+      })
+    } catch (error) {
+      reject(error)
+      return
+    }
+    const output = { stdout: [] as Buffer[], stderr: [] as Buffer[] }
+    const sizes = { stdout: 0, stderr: 0 }
+    let failure: Error | undefined
+    const stop = (error: Error) => {
+      failure ??= error
+      handle.terminate()
+    }
+    for (const stream of ['stdout', 'stderr'] as const) {
+      handle[stream]?.on('data', (chunk: Buffer) => {
+        sizes[stream] += chunk.length
+        if (sizes[stream] > OUTPUT_LIMIT) stop(new Error(`evolution: measurement ${stream} exceeded 1 MiB; no truncated evidence was accepted`))
+        else output[stream].push(chunk)
+      })
+    }
+    const abort = () => stop(new Error('evolution: outcome measurement cancelled'))
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
+    const timeout = setTimeout(() => stop(new Error('evolution: outcome measurement exceeded 300s')), 300_000)
+    const settle = (error?: Error, code?: number | null): void => {
+      clearTimeout(timeout)
+      signal?.removeEventListener('abort', abort)
+      if (error !== undefined) reject(error)
+      else if (code === null || code === undefined) reject(new Error('evolution: outcome measurement did not report an exit code'))
+      else resolveResult({ stdout: Buffer.concat(output.stdout).toString('utf8'), stderr: Buffer.concat(output.stderr).toString('utf8'), exitCode: code })
+    }
+    handle.done.then(
+      outcome =>
+        void Promise.all([drained(handle.stdout), drained(handle.stderr)]).then(() => {
+          if (failure !== undefined) settle(failure)
+          else if (outcome.exitCode === null) settle(new Error(`evolution: outcome measurement terminated by ${outcome.signal ?? 'a signal'}`))
+          else settle(undefined, outcome.exitCode)
+        }),
+      error => settle(error instanceof Error ? error : new Error(String(error))),
+    )
+  })
+}
+
+/** Measure one command this package spawns itself, for a context that mounts no confinement seam. */
+function measureDirect(
+  command: string,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolveResult, reject) => {
     const child = spawn('/bin/sh', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
     const output = { stdout: [] as Buffer[], stderr: [] as Buffer[] }
@@ -50,6 +162,7 @@ async function measure(command: string, cwd: string, signal?: AbortSignal): Prom
 
 /** One saved input and one independent model response. Published judgements are never sampled again. */
 export async function judgeExperiment(input: {
+  ctx?: Context
   ledger: ExperimentLedger
   view: ExperimentView
   snapshot: TaskSnapshot
@@ -93,7 +206,7 @@ export async function judgeExperiment(input: {
         for (const measurement of plan.measurements) {
           const command = view.frozen.snapshot.rebaseFrom === undefined ? measurement.command
             : rebaseWorkspacePaths(measurement.command, view.frozen.snapshot.rebaseFrom, detail.workspace)
-          const result = await measure(command, detail.workspace, input.signal)
+          const result = await measure(input.ctx, command, detail.workspace, input.signal)
           measurements.push({
             ref: `${sample.taskId}/${side}/${measurement.id}`,
             sampleTaskId: sample.taskId,

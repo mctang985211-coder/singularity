@@ -415,9 +415,10 @@ describe('applyWorkerGrant MCP server mounts', () => {
 
   test('each granted server mounts as one mcp-client instance with failOnStartupError, after the restrict', async () => {
     const h = harness({ global: ['read'], preset: [] })
+    const agent = worker()
     await applyWorkerGrant(
       h.ctx,
-      worker(),
+      agent,
       grant({
         capabilities: [{ capability: 'check-ball-registration', tools: ['read'], skills: [] }],
         mcpServers: [BB_DEV],
@@ -434,6 +435,8 @@ describe('applyWorkerGrant MCP server mounts', () => {
           args: [],
           env: {},
           cwd: BB_DEV.cwd,
+          // The mount hands the worker's own session to the sandbox policy resolve.
+          session: agent.session,
           failOnStartupError: true,
         },
       },

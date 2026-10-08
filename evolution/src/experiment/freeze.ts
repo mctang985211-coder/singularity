@@ -5,6 +5,7 @@ import { directoryDigest, latestReview } from './record.ts'
  * @module dsh-singularity-evolution/experiment/freeze */
 
 import { resolve } from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { AcceptanceCriterion, ReviewRecord, TaskInstance, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { McpServerTemplate, CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
@@ -144,6 +145,13 @@ export interface ExperimentSources {
   }
   /** The registered judge vocabulary at freeze time (S4-E §Q3), or `undefined` */
   verifierVocabulary?(): Promise<VerifierVocabularyView | undefined>
+  /**
+   * The deployment context one sample's measurement commands are confined
+   * through: the sandbox seam, the subprocess seam that spawns the confined
+   * argv, and the policy home the sample's own workspace is rooted in. Absent
+   * leaves a measurement to this package's own spawn.
+   */
+  readonly ctx?: Context
 }
 
 /** What one experiment call evaluates: the proposal, its sandbox, and the identity it froze the candidate as. */

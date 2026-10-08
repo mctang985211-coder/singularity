@@ -14,7 +14,7 @@ import { messageOf, ownSuffix } from './messages.ts'
 import type { WorkerGrant, WorkerResumeRequest } from './types.ts'
 
 /** The permission posture a worker runs under when nobody decided one for it — the spawn's own default. */
-export const WORKER_DEFAULT_PERMISSION_PRESET = 'danger-full-access'
+export const WORKER_DEFAULT_PERMISSION_PRESET = 'workspace-isolated'
 
 /** The composition one worker's scoped world is built from, computed by the runtime and reused verbatim. */
 export interface WorkerRole {

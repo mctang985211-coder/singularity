@@ -1044,6 +1044,7 @@ export class EvolutionService extends EvolutionServiceCore {
       },
       // Both freeze-time reads go through the same entries every other consumer
       verifierVocabulary: () => verifierVocabularyOf(this.ctx),
+      ctx: this.ctx,
     }
   }
 }

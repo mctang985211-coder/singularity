@@ -513,7 +513,8 @@ async function frozenGrantSkills(agentCtx, agent, grant) {
 	}
 	return [...definitions.values()];
 }
-/** Mount every MCP server one grant declares, one mcp-client instance per spec, fail-closed on startup. */
+/** Mount every MCP server one grant declares, one mcp-client instance per spec, fail-closed on startup.
+* Each instance carries the worker's own session, so the spawned server is confined to the worker's sandbox mode. */
 async function mountMcpServers(agentCtx, agent, grant) {
 	for (const spec of grant.mcpServers ?? []) try {
 		await agentCtx.plugin(McpClient, {
@@ -523,6 +524,7 @@ async function mountMcpServers(agentCtx, agent, grant) {
 			args: [...spec.args],
 			env: { ...spec.env },
 			cwd: spec.cwd,
+			session: agent.session,
 			...spec.toolCallTimeoutMs === void 0 ? {} : { toolCallTimeoutMs: spec.toolCallTimeoutMs },
 			failOnStartupError: true
 		});
@@ -559,7 +561,7 @@ function rootPromptText(evolutionEnabled$1) {
 
 Before intake, load task-coordination with skill and read task_library, capability_list and relevant task_template_list entries. The graph's library holds reusable TaskTemplates and their guidance Skills. Bind a fitting template and its exact parameters, or author the contract the current task needs. Declare each Task's execution capabilities and relevant guidance through requiredCapabilities, using actual catalog names. Define useful direct children with owned results, inputs and checks; they choose their descendants. Integrate their evidence and deliver the complete objective.
 
-A Task owns this execution's goal and acceptance. A TaskTemplate records reusable goals and decomposition; a Skill records methods, conditions and experience. You may record useful exploratory goals or methods in the graph library as temporary templates or Skills. ${evolutionEnabled$1 ? "Evolution tools are available for Task and Skill improvements and capability/MCP changes when execution means are missing. The RSI supervisor reviews the library and actual results, chooses what to retain or modify, compares candidates, publishes, and inspects later consumption. Weigh task quality and performance together with recorded model tokens, cache traffic, tool work and cost. Work within budget and recorded human decisions." : "Return useful goals, methods and capability gaps with Task/Run and evidence references. Delegate execution to Tasks through requiredCapabilities."}`;
+A Task owns this execution's goal and acceptance. A TaskTemplate records reusable goals and decomposition; a Skill records methods, conditions and experience. You may record useful exploratory goals or methods in the graph library as temporary templates or Skills. ${evolutionEnabled$1 ? "You hold no evolution tools: the RSI supervisor reviews the library and actual results, chooses what to retain or modify, compares candidates, publishes, and inspects later consumption, and owns Task and Skill improvements and capability/MCP changes when execution means are missing. Return improvement leads and capability gaps with Task/Run and evidence references. Weigh task quality and performance together with recorded model tokens, cache traffic, tool work and cost. Work within budget and recorded human decisions." : "Return useful goals, methods and capability gaps with Task/Run and evidence references. Delegate execution to Tasks through requiredCapabilities."}`;
 }
 
 //#endregion
@@ -604,7 +606,7 @@ function sealRawSessionReads(agentCtx) {
 //#endregion
 //#region src/worker-resume.ts
 /** The permission posture a worker runs under when nobody decided one for it — the spawn's own default. */
-const WORKER_DEFAULT_PERMISSION_PRESET = "danger-full-access";
+const WORKER_DEFAULT_PERMISSION_PRESET = "workspace-isolated";
 /** One refused resume, with the stable name of what could not be established. */
 var WorkerResumeRefusal = class extends Error {
 	code;
@@ -1068,18 +1070,6 @@ function runtimePrompt(channel) {
 		channel
 	};
 }
-/** The nine tools the evolution chain is reached through; a deployment's switch is what registers them. */
-const EVOLUTION_TOOLS = [
-	"evolution_propose",
-	"evolution_candidate",
-	"evolution_prepare",
-	"evolution_replay",
-	"evolution_gate",
-	"evolution_decide",
-	"evolution_apply",
-	"evolution_rollback",
-	"evolution_list"
-];
 /** The tools every root may call whatever the deployment's evolution switch says (README Design notes). */
 const ROOT_CORE_TOOLS = [
 	"read",
@@ -1120,18 +1110,12 @@ const ROOT_CORE_TOOLS = [
 function evolutionEnabled(ctx) {
 	return ctx.get("singularityEvolution")?.enabled ?? false;
 }
-/** The root's tool allow-list for one composition: the core tools plus `escalate`, plus the chain when it is on. */
-function rootToolsFor(enabled) {
-	return enabled ? [
-		...ROOT_CORE_TOOLS,
-		...EVOLUTION_TOOLS,
-		"escalate"
-	] : [...ROOT_CORE_TOOLS, "escalate"];
-}
+/** The root's tool allow-list: the core tools plus `escalate`; the evolution chain belongs to the supervisor. */
+const ROOT_TOOLS = [...ROOT_CORE_TOOLS, "escalate"];
 /** Root-local registrations also obey the coordination allow-list. */
-function sealRootTools(agentCtx, enabled) {
+function sealRootTools(agentCtx) {
 	agentCtx.tools.presentAs("native");
-	const allowed = new Set(rootToolsFor(enabled));
+	const allowed = new Set(ROOT_TOOLS);
 	agentCtx.tools.guard((execution) => allowed.has(execution.name) ? void 0 : "singularity: use the root execution tools and task_decompose for delegated task work");
 }
 async function graphCatalogFor(ctx, agent, root) {
@@ -1147,7 +1131,7 @@ async function graphCatalogFor(ctx, agent, root) {
 function rootSetup(ctx, agentPreset) {
 	return async (agentCtx, agent) => {
 		await ctx.agentPresets.mount(agentCtx, agentPreset);
-		ctx.permissionPresets.set(agent.session, "danger-full-access");
+		ctx.permissionPresets.set(agent.session, "workspace-isolated");
 		setApprovalPolicy(agent.session, "ask");
 		const evolution = evolutionEnabled(ctx);
 		agentCtx.systemPrompt.section({
@@ -1155,10 +1139,10 @@ function rootSetup(ctx, agentPreset) {
 			order: 70,
 			text: rootPromptText(evolution)
 		});
-		agentCtx.tools.restrict({ allow: rootToolsFor(evolution) });
+		agentCtx.tools.restrict({ allow: ROOT_TOOLS });
 		await installGraphSkillCatalog(agentCtx, await graphCatalogFor(ctx, agent, true));
 		sealRawSessionReads(agentCtx);
-		sealRootTools(agentCtx, evolution);
+		sealRootTools(agentCtx);
 	};
 }
 /** The one composition a worker's scoped world is built from; `spawn` and a resume both hand this to the factory. */

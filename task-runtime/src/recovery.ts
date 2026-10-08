@@ -74,6 +74,8 @@ export interface RootRecoveryRequest {
   proposalIds?: readonly string[]
   /** The verified siblings the new attempt reads at its leading positions, in position order. */
   reuses?: readonly RootRecoveryReuse[]
+  /** The bubble workspace this round's worker works in, when the caller materialized one; absent falls back to the session's own checkout. */
+  workspacePath?: string
 }
 
 /** The fields one request may carry: anything else is refused by name rather than ignored. */
@@ -85,6 +87,7 @@ const REQUEST_FIELDS: readonly string[] = [
   'mode',
   'reuses',
   'proposalIds',
+  'workspacePath',
 ]
 /** The fields one reuse declaration may carry. */
 const REUSE_FIELDS: readonly string[] = [
@@ -115,6 +118,9 @@ export function recoveryRequestDefects(request: unknown): string[] {
   if (!nonBlank(request.requestKey)) defects.push('requestKey must be a non-empty string')
   if (request.mode !== undefined && request.mode !== 'recovery' && request.mode !== 'improve') {
     defects.push('mode must be "recovery" (the default) or "improve"')
+  }
+  if (request.workspacePath !== undefined && !nonBlank(request.workspacePath)) {
+    defects.push('workspacePath, when given, must be a non-empty path')
   }
   if (
     request.proposalIds !== undefined &&

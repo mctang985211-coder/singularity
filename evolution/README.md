@@ -47,7 +47,8 @@ binaries still require task-specific adaptation.
 
 Package: `@dangosys/dsh-singularity-evolution`
 
-Dependencies: workspace `task`, `task-runtime`; peers `cordis` + `dsh-session`.
+Dependencies: workspace `task`, `task-runtime`; peers `cordis` + `dsh-session` +
+`dsh-sandbox` + `dsh-sandbox-policy` + `dsh-subprocess`.
 
 config.yaml: optional `root` (default `$DSH_HOME/evolution`), `skillRoot`
 (default `$DSH_HOME/skills`), `capabilityConfig` (the deployment `config.yml`
@@ -112,6 +113,16 @@ materialized as real content; a link whose target escapes the snapshot root, who
 chain loops, or whose target cannot be resolved is a named refusal wherever the
 tree is first read. Without this, a kept link would be a shared target a run could
 write through into the production checkout the snapshot was taken from.
+
+**Measurement confinement.** A frozen measurement command runs confined when the
+experiment's context mounts the deployment's confinement seam: `ctx.sandbox.confine`
+wraps `['/bin/sh', '-c', command]`, `ctx.subprocess` spawns the wrapped argv, and
+the policy's mode is `ctx.sandboxPolicy.resolve()` with that sample side's own
+workspace as its writable root — a measurement may write the artifacts the frozen
+digest is later taken over, so its workspace is exactly the subtree the
+confinement keeps writable. A context without both seams runs the command
+directly. The stream caps, the 300s deadline and the cancellation contract are
+the same either way.
 
 **Promotion evidence.** A promotion re-reads the proposal's newest completed
 two-sided experiment from the ledger, recomputes the report, and checks the sides

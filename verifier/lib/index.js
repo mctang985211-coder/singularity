@@ -31,6 +31,32 @@ const EXECUTABLE_MODES = [
 	"simulation",
 	"measurement"
 ];
+/** Grace the subprocess provider's own termination procedure gets to end a timed-out command's process range. */
+const TERMINATION_GRACE_MS = 5e3;
+/**
+* The confined policy one criterion command runs under: the deployment's own
+* mode, rooted at the workspace the command runs in — that workspace is the one
+* subtree a confined command may write. `undefined` means the resolved policy
+* grants full access, so the command runs unconfined.
+*/
+function confinedPolicy(resolved, cwd) {
+	if (resolved?.mode === "danger-full-access") return void 0;
+	return {
+		mode: resolved?.mode === "read-only" ? "read-only" : "workspace-write",
+		workspaceRoot: cwd
+	};
+}
+/** Resolve once one piped stream has no writer left, so an outcome never settles before its output reached the log. */
+function drained(stream) {
+	return new Promise((resolve$1) => {
+		if (stream === void 0 || stream.readableEnded) {
+			resolve$1();
+			return;
+		}
+		stream.once("end", () => resolve$1());
+		stream.once("close", () => resolve$1());
+	});
+}
 /** Kill the command and everything it started: `shell: true` forks compound commands, and the negative-pid kill reaches the tree. */
 function killTree(child) {
 	if (child.pid === void 0) return;
@@ -86,6 +112,63 @@ function runCommand(command, cwd, timeoutMs, logPath) {
 		}));
 	});
 }
+/**
+* Run one confined command through the subprocess seam, piping its output into
+* the criterion log exactly as the unconfined path does. Termination is the
+* provider's own managed-range procedure, so a timed-out command's whole tree
+* dies with it.
+*/
+function runConfined(subprocess, argv, cwd, timeoutMs, logPath) {
+	return new Promise((resolveOutcome) => {
+		let handle;
+		try {
+			handle = subprocess.spawn({
+				argv,
+				cwd,
+				stdio: {
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "pipe"
+				},
+				graceMs: TERMINATION_GRACE_MS
+			});
+		} catch (error) {
+			resolveOutcome({ error: messageError(error) });
+			return;
+		}
+		const log = createWriteStream(logPath);
+		let outputBytes = 0;
+		const ends = [];
+		for (const stream of [handle.stdout, handle.stderr]) {
+			stream?.on("data", (chunk) => {
+				outputBytes += chunk.length;
+			});
+			stream?.pipe(log, { end: false });
+			ends.push(drained(stream));
+		}
+		let timedOut = false;
+		let settled = false;
+		const timer = timeoutMs === void 0 ? void 0 : setTimeout(() => {
+			timedOut = true;
+			handle.terminate();
+		}, timeoutMs);
+		const finish = (outcome) => {
+			if (settled) return;
+			settled = true;
+			if (timer !== void 0) clearTimeout(timer);
+			if (outputBytes === 0) log.write(`${outcomeLine(outcome)}\n`);
+			log.end(() => resolveOutcome(outcome));
+		};
+		handle.done.then((outcome) => void Promise.all(ends).then(() => finish(outcome.exitCode === null ? { timedOut } : {
+			exitCode: outcome.exitCode,
+			timedOut
+		})), (error) => finish({ error: messageError(error) }));
+	});
+}
+/** The thrown error's message, or the value itself when it is not an error. */
+function messageError(error) {
+	return error instanceof Error ? error : new Error(String(error));
+}
 function logFileName(criterionId) {
 	return `${criterionId.replace(/[^A-Za-z0-9._-]/g, "_")}.log`;
 }
@@ -111,7 +194,8 @@ var CommandVerifier = class {
 		}),
 		expect: "fail"
 	}] };
-	constructor(evidenceRoot) {
+	constructor(ctx, evidenceRoot) {
+		this.ctx = ctx;
 		this.evidenceRoot = evidenceRoot;
 	}
 	supports(mode) {
@@ -135,7 +219,7 @@ var CommandVerifier = class {
 		await mkdir(req.logDir, { recursive: true });
 		const logPath = join(req.logDir, logFileName(criterion.criterionId));
 		const logRef = relative(this.evidenceRoot, logPath);
-		const outcome = await runCommand(criterion.command, req.cwd, req.timeoutMs, logPath);
+		const outcome = await this.execute(criterion.command, req.cwd, req.timeoutMs, logPath);
 		if (outcome.error !== void 0) return {
 			...base,
 			status: "inconclusive",
@@ -156,6 +240,24 @@ var CommandVerifier = class {
 			exitCode: outcome.exitCode,
 			logRef
 		};
+	}
+	/**
+	* Run one criterion command in the workspace it judges. A context that mounts
+	* the deployment's confinement seam runs it through that seam, under the
+	* resolved mode rooted at `cwd`; a context without one spawns the command
+	* itself, exactly as before.
+	*/
+	async execute(command, cwd, timeoutMs, logPath) {
+		const sandbox = this.ctx.get?.("sandbox");
+		const subprocess = this.ctx.get?.("subprocess");
+		if (sandbox === void 0 || subprocess === void 0) return runCommand(command, cwd, timeoutMs, logPath);
+		const policy = confinedPolicy(this.ctx.get?.("sandboxPolicy")?.resolve(), cwd);
+		if (policy === void 0) return runCommand(command, cwd, timeoutMs, logPath);
+		return runConfined(subprocess, (await sandbox.confine([
+			"bash",
+			"-c",
+			command
+		], policy)).argv, cwd, timeoutMs, logPath);
 	}
 };
 
@@ -484,7 +586,7 @@ var VerifierRegistry = class extends Service {
 		return this.readyPromise;
 	}
 	async registerBuiltins() {
-		await this.register(new CommandVerifier(this.evidenceRoot));
+		await this.register(new CommandVerifier(this.ctx, this.evidenceRoot));
 		await this.register(this.composite);
 		await this.register(new ReviewVerifier());
 	}

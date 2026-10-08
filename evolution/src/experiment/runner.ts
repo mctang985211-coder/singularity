@@ -318,7 +318,8 @@ async function executeExperiment(sources: ExperimentSources, request: Experiment
     )
   }
 
-  await judgeExperiment({ ledger: sources.evolution, view: await sources.evolution.experiment(experimentId),
+  await judgeExperiment({ ...(sources.ctx === undefined ? {} : { ctx: sources.ctx }),
+    ledger: sources.evolution, view: await sources.evolution.experiment(experimentId),
     snapshot: await sources.task.openStore(storeId), actor, judge: request.judge, signal: request.signal })
   const finalView = await sources.evolution.experiment(experimentId)
   let report: ExperimentReport

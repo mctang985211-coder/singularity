@@ -38,6 +38,8 @@ export function defineSpawnTool(ctx: Context) {
         name: args.name,
         prompt: [{ type: 'text', text: 'Prepare the environment only. Do not delegate agents, accept business tasks, or publish methods. ' + args.task }],
         grant: { capabilities: [], baseline: SETUP_TOOLS, keepPresetTools: false },
+        // Setup works the home port before the round's bubble exists; it is not a round worker.
+        permissionPreset: 'danger-full-access',
         signal: exec.signal,
         ...(pinned === undefined ? {} : { agentOptions: pinned }),
       })

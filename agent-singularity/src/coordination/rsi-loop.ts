@@ -40,6 +40,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
@@ -58,8 +60,11 @@ import {
   type TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
 import {
-  recoveryAttemptWithKey,
+  bubbleWorkspacePath,
+  materializeBubble,
   optionalService,
+  recoveryAttemptWithKey,
+  settleBubble,
   type RecoveryMode,
   type RootRecoveryRequest,
   type TerminalReviewFact,
@@ -133,6 +138,11 @@ export function roundRequestKey(graphId: string, round: number): string {
 /** The request key of one round's supervision attempt: one round is one supervisor hand-off, however many attempts it takes. */
 export function supervisorRequestKey(graphId: string, round: number): string {
   return `rsi-supervise-${graphId}-round-${round}`
+}
+
+/** The `$DSH_HOME` this deployment's graph libraries and bubbles live under, by the same fallback the library uses. */
+function bubbleHome(): string {
+  return process.env.DSH_HOME || join(homedir(), '.dsh')
 }
 
 /** What one round's supervision settled as: proceed with what it published, stop the loop, or defer to a later activation. */
@@ -491,6 +501,9 @@ export class RsiLoopDriver {
     run: TaskRun,
   ): Promise<void> {
     if (await this.currentGraph(state) === undefined) return
+    // The round's own work is persisted behind the graph before its method
+    // change is judged: the next round materializes from this branch.
+    await this.settleRoundBubble(state, graph, round)
     const verified = run.status === 'verified'
     const review = reviewOfRun(snapshot, run.runId)
     const diagnosisId = roundDiagnosisId(state.graphId, round)
@@ -812,6 +825,24 @@ export class RsiLoopDriver {
     )
   }
 
+  /** The environment checkout one graph binds, when this deployment has an env-builder; `undefined` in test contexts and deployments without one. */
+  private async envPathOf(graph: GraphRecord): Promise<string | undefined> {
+    const envBuilder = optionalService<{ store?: { get(id: string): { path: string } } }>(this.ctx, 'envBuilder')
+    if (typeof envBuilder?.store?.get !== 'function') return undefined
+    try {
+      return envBuilder.store.get(graph.envId).path
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Persist one settled round's bubble to `rsi/<graph>/round-<N>`, so the next round materializes from it. */
+  private async settleRoundBubble(state: LoopState, graph: GraphRecord, round: number): Promise<void> {
+    const envPath = await this.envPathOf(graph)
+    if (envPath === undefined) return
+    await settleBubble(envPath, bubbleWorkspacePath(bubbleHome(), state.rootSessionId, round), state.graphId, round)
+  }
+
   /**
    * Open the next round through the runtime's own recovery entry: one attempt of
    * the round's run under the round's request key — `improve` after a verified
@@ -841,6 +872,12 @@ export class RsiLoopDriver {
         })
         return
       }
+      const envPath = await this.envPathOf(graph)
+      // The round works behind a bubble: its own fresh clone of every component
+      // at the previous round's branch, and the graph's method volume.
+      const workspacePath = envPath === undefined
+        ? undefined
+        : await materializeBubble(envPath, bubbleHome(), state.rootSessionId, state.graphId, round)
       const request: RootRecoveryRequest = {
         sourceTaskId: state.rootTaskId!,
         sourceRunId,
@@ -853,6 +890,7 @@ export class RsiLoopDriver {
         // keeps the generic runtime's evidence-based member reuse.
         ...(mode === 'improve' ? { reuses: [] } : {}),
         ...(applied.length === 0 ? {} : { proposalIds: [...applied] }),
+        ...(workspacePath === undefined ? {} : { workspacePath }),
       }
       try {
         if (await this.currentGraph(state) === undefined) return

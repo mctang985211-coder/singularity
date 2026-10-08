@@ -105,6 +105,7 @@ import type { RsiConfig } from '../../graphs/src/index.ts'
 import { defineRootBudgetApproval, defineTaskBudgetExtendTool } from '../../agent-singularity/src/tools/budget-extend.ts'
 import { defineTaskReviewAgentTool } from '../../agent-singularity/src/tools/review-agent.ts'
 import { defineTaskReviewPackTool } from '../../agent-singularity/src/tools/task-review-pack.ts'
+import { supervisorGrant } from '../../agent-singularity/src/coordination/rsi-loop.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import { graphRegistry, sessionQueryReads } from './context-plane.ts'
 
@@ -253,6 +254,16 @@ export interface ScriptedLoopOptions {
   readonly tools?: readonly ToolDefinition[]
   /** Root sessions of this deployment, in order; the first is the primary. Defaults to `['s-root']`. */
   readonly roots?: readonly string[]
+  /**
+   * Sessions composed as supervisors rather than roots (the RSI round's agent,
+   * `supervisorGrant()`): the nine `evolution_*` tools and the read-only
+   * investigation tools, with the root's own allow-list keeping the chain off a
+   * root's surface. Each is spawned under the primary root, so its session owns
+   * the graph scope a replay's worker spawns resolve under. Spawned with the
+   * fixture's own kickoff, so a spec drives its real turns with {@link
+   * ScriptedLoop.userSays} exactly as it drives a root's.
+   */
+  readonly supervisors?: readonly string[]
   readonly verifyTimeoutMs?: number
   readonly writeDrainTimeoutMs?: number
   /** The per-run budget this deployment enforces (`Config.budget`) — the deadline a spec drives a blocked wait into. */
@@ -736,6 +747,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
   readonly home: string
   readonly checkout: string
   private readonly roots: readonly SessionId[]
+  private readonly supervisors: readonly SessionId[]
   readonly ctx: Context
   readonly task: TaskService
   readonly review: ReviewDesk
@@ -763,6 +775,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
     mkdirSync(this.checkout, { recursive: true })
     mkdirSync(join(this.home, 'skills'), { recursive: true })
     this.roots = (options.roots ?? ['s-root']).map(id => id as SessionId)
+    this.supervisors = (options.supervisors ?? []).map(id => id as SessionId)
     this.primary = this.roots[0]!
     this.storeId = rootTaskStoreId(this.primary)
     this.ctx = new Context()
@@ -777,8 +790,11 @@ class ScriptedLoopImpl implements ScriptedLoop {
     this.adapter = new ScriptedModelAdapter(options.script, sessionId => {
       const rootIndex = this.roots.indexOf(sessionId as SessionId)
       if (rootIndex >= 0) return rootIndex
+      const supervisorIndex = this.supervisors.indexOf(sessionId as SessionId)
+      if (supervisorIndex >= 0) return this.roots.length + supervisorIndex
       const spawned = this.spawnRecords.findIndex(record => record.sessionId === sessionId)
-      return spawned < 0 ? this.roots.length : this.roots.length + spawned
+      const base = this.roots.length + this.supervisors.length
+      return spawned < 0 ? base : base + spawned
     }, () => this.callRecords)
     this.task = new TaskService(this.ctx)
   }
@@ -949,6 +965,9 @@ class ScriptedLoopImpl implements ScriptedLoop {
     // deployment mounts that plane (see the `evolution` arm below); until then
     // the name stays a stand-in like every other tool this fixture does not run.
     const evolutionTools = new Set(EVOLUTION_TOOLS)
+    // The nine definitions the plane registers, kept so a supervisor's own scope
+    // can carry the same surface the deployment's grant names.
+    const evolutionDefinitions: ToolDefinition[] = []
     for (const name of [...ROOT_TOOLS, ...OTHER_TOOLS]) {
       if (REAL_TOOLS.includes(name) && (shippedQuestionTools || !QUESTION_TOOLS.includes(name))) continue
       if (this.options.evolution !== undefined && evolutionTools.has(name)) continue
@@ -1017,6 +1036,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
         defineEvolutionRollbackTool(ctx),
         defineEvolutionListTool(ctx),
       ]) {
+        evolutionDefinitions.push(tool)
         ctx.tools.register(tool)
       }
     }
@@ -1110,6 +1130,24 @@ class ScriptedLoopImpl implements ScriptedLoop {
     // graph, the persisted header and the agent preset, so what runs here is the
     // deployment's root composition (its prompt section and its allow-list).
     for (const root of this.roots) await this.agentRuntime.ensureRoot(root, { graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root' })
+    // One supervisor per named session, spawned under the primary root through
+    // the deployment's own path: the grant, the policy section and the graph
+    // scope a replay run's worker spawns resolve under are the live agent's.
+    for (const supervisor of this.supervisors) {
+      const handle = await this.agentRuntime.spawn(this.agent(this.primary), {
+        sessionId: supervisor,
+        name: 'supervisor',
+        agentPreset: 'standard',
+        coordinationRole: 'supervisor',
+        grant: supervisorGrant(),
+        permissionPreset: 'danger-full-access',
+        prompt: [{ type: 'text', text: 'supervise' }],
+      })
+      // The chain's own nine tools on the supervisor's scope, the surface the
+      // deployment's grant names: `evolution_rollback` is not in
+      // `SUPERVISOR_BASELINE` even though a case here drives it.
+      for (const tool of evolutionDefinitions) handle.agent.ctx.tools.register(tool)
+    }
     return this
   }
 

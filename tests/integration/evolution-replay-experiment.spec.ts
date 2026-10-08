@@ -300,8 +300,10 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
     await writeSample(h, first.storeId, { taskId: 't-holdout', runId: 'r-holdout-history', objective: 'the held-out answer file is produced', acceptance: criterion('ac-holdout', 'test -f holdout.txt'), outcome: 'verified' })
     await writeSample(h, first.storeId, { taskId: 't-regression', runId: 'r-regression-history', objective: 'the regression answer file is produced', acceptance: criterion('ac-keep', 'test -f keep.txt'), outcome: 'verified' })
   }
-  // The switch is on, so the root allow-list carries these names; each one already
-  // has a global stand-in on this stack, and a scoped registration shadows the global one.
+  // The chain belongs to the supervisor now. Each name already has a real global
+  // registration on this stack, and this scoped registration is the surface a
+  // live supervisor's own grant composes.
+  const supervisor = await h.supervisor()
   for (const tool of [
     defineEvolutionReplayTool(h.ctx),
     defineEvolutionGateTool(h.ctx),
@@ -309,20 +311,20 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
     defineEvolutionApplyTool(h.ctx),
     defineEvolutionRollbackTool(h.ctx),
   ]) {
-    h.rootAgent(ROOT).ctx.tools.register(tool)
+    supervisor.ctx.tools.register(tool)
   }
   return {
     h,
     evolution,
     storeId: first.storeId,
     async replay(args) {
-      const result = await h.call(h.rootAgent(ROOT), 'evolution_replay', args)
+      const result = await h.call(supervisor, 'evolution_replay', args)
       expect(result.isError, result.text).toBe(false)
       return result.text
     },
     /** One evolution tool call as the loop dispatches it: the answer's own text, and its error flag. */
     async call(name: string, args: Record<string, unknown>) {
-      const result = await h.call(h.rootAgent(ROOT), name, args)
+      const result = await h.call(supervisor, name, args)
       return { text: result.text, isError: result.isError }
     },
   }

@@ -252,9 +252,21 @@ importers:
       '@deepseek-ai/cordis':
         specifier: link:../../../thirdparty/deepseek-harness/vendor/cordis
         version: link:../../../thirdparty/deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-sandbox':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/sandbox/sandbox
+        version: link:../../../thirdparty/deepseek-harness/packages/sandbox/sandbox
+      '@deepseek-ai/dsh-sandbox-policy':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/sandbox/sandbox-policy
+        version: link:../../../thirdparty/deepseek-harness/packages/sandbox/sandbox-policy
       '@deepseek-ai/dsh-session':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/session
         version: link:../../../thirdparty/deepseek-harness/packages/core/session
+      '@deepseek-ai/dsh-subprocess':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/subprocess/subprocess
+        version: link:../../../thirdparty/deepseek-harness/packages/subprocess/subprocess
+      '@deepseek-ai/dsh-subprocess-local':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/subprocess/subprocess-local
+        version: link:../../../thirdparty/deepseek-harness/packages/subprocess/subprocess-local
       '@types/node':
         specifier: ^22.20.0
         version: 22.20.1
@@ -486,6 +498,18 @@ importers:
       '@deepseek-ai/cordis':
         specifier: link:../../../thirdparty/deepseek-harness/vendor/cordis
         version: link:../../../thirdparty/deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-sandbox':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/sandbox/sandbox
+        version: link:../../../thirdparty/deepseek-harness/packages/sandbox/sandbox
+      '@deepseek-ai/dsh-sandbox-policy':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/sandbox/sandbox-policy
+        version: link:../../../thirdparty/deepseek-harness/packages/sandbox/sandbox-policy
+      '@deepseek-ai/dsh-subprocess':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/subprocess/subprocess
+        version: link:../../../thirdparty/deepseek-harness/packages/subprocess/subprocess
+      '@deepseek-ai/dsh-subprocess-local':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/subprocess/subprocess-local
+        version: link:../../../thirdparty/deepseek-harness/packages/subprocess/subprocess-local
       '@deepseek-ai/schemastery':
         specifier: link:../../../thirdparty/deepseek-harness/vendor/schemastery
         version: link:../../../thirdparty/deepseek-harness/vendor/schemastery

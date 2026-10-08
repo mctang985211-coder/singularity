@@ -57,6 +57,8 @@ export async function spawnUnderClaim(input: ClaimedSpawnRequest): Promise<Claim
     prompt: [{ type: 'text', text: prompt }],
     agentPreset: input.preset,
     grant: input.grant,
+    // The evaluation plane stays outside the round's bubble: a reviewer or supervisor reads history the round's workspace does not carry.
+    permissionPreset: 'danger-full-access',
     coordinationRole: input.request.role === 'supervisor' ? 'supervisor' : 'reviewer',
     ...(pinned === undefined ? {} : { agentOptions: pinned }),
     // The delegation ledger is written between "the agent is a published graph

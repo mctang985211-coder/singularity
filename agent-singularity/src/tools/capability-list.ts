@@ -15,7 +15,7 @@ function renderTools(entry: CapabilityConfig): string {
 }
 
 function renderPermission(entry: CapabilityConfig): string {
-  return entry.permission === undefined ? 'permission: (none — the worker keeps danger-full-access)' : `permission: ${entry.permission}`
+  return entry.permission === undefined ? 'permission: (none — the worker keeps workspace-isolated)' : `permission: ${entry.permission}`
 }
 
 function renderMcpServers(entry: CapabilityConfig): string {
@@ -111,7 +111,7 @@ export function defineCapabilityListTool(ctx: Context) {
         'provider verdicts are the same pre-check admission runs, from this session\'s own skill roots: execution-provider means the skill carries an execution sidecar whose verifier is registered and whose required tools its capabilities grant; knowledge and guidance are loadable but never count as an execution provider; invalid means admission refuses a batch that requires this capability, with the defects shown.',
         ...(report === undefined ? [] : [`skill roots searched for this session: ${report.roots.join(', ')}`]),
         'mcpServers grant whole MCP servers (never single tools): each mounts as one mcp-client instance on the worker at spawn, bound to that run\'s environment checkout; a server that cannot start fails the spawn loudly.',
-        'permissions: a capability that declares none leaves the worker on the deployment default (danger-full-access); flipping the default is blocked until worker approvals reliably reach the canvas (#17 in the working guide).',
+        'permissions: a capability that declares none leaves the worker on the deployment default (workspace-isolated).',
       ].join('\n')
     },
   })

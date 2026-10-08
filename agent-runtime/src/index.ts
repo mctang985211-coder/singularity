@@ -441,19 +441,6 @@ function runtimePrompt(channel: RuntimePromptSource['channel']): RuntimePromptSo
   return { kind: 'runtime-prompt', channel }
 }
 
-/** The nine tools the evolution chain is reached through; a deployment's switch is what registers them. */
-const EVOLUTION_TOOLS = [
-  'evolution_propose',
-  'evolution_candidate',
-  'evolution_prepare',
-  'evolution_replay',
-  'evolution_gate',
-  'evolution_decide',
-  'evolution_apply',
-  'evolution_rollback',
-  'evolution_list',
-]
-
 /** The tools every root may call whatever the deployment's evolution switch says (README Design notes). */
 const ROOT_CORE_TOOLS = [
   'read', 'glob', 'grep', 'write', 'edit', 'bash', 'job_list', 'job_output', 'job_kill',
@@ -493,15 +480,13 @@ function evolutionEnabled(ctx: Context): boolean {
   return (ctx.get('singularityEvolution') as EvolutionExposureLike | undefined)?.enabled ?? false
 }
 
-/** The root's tool allow-list for one composition: the core tools plus `escalate`, plus the chain when it is on. */
-function rootToolsFor(enabled: boolean): readonly string[] {
-  return enabled ? [...ROOT_CORE_TOOLS, ...EVOLUTION_TOOLS, 'escalate'] : [...ROOT_CORE_TOOLS, 'escalate']
-}
+/** The root's tool allow-list: the core tools plus `escalate`; the evolution chain belongs to the supervisor. */
+const ROOT_TOOLS = [...ROOT_CORE_TOOLS, 'escalate']
 
 /** Root-local registrations also obey the coordination allow-list. */
-function sealRootTools(agentCtx: Context, enabled: boolean): void {
+function sealRootTools(agentCtx: Context): void {
   agentCtx.tools.presentAs('native')
-  const allowed = new Set(rootToolsFor(enabled))
+  const allowed = new Set(ROOT_TOOLS)
   agentCtx.tools.guard(execution =>
     allowed.has(execution.name)
       ? undefined
@@ -534,15 +519,15 @@ async function graphCatalogFor(ctx: Context, agent: Agent, root: boolean): Promi
 function rootSetup(ctx: Context, agentPreset: string): AgentSetup {
   return async (agentCtx, agent) => {
     await ctx.agentPresets.mount(agentCtx, agentPreset)
-    ctx.permissionPresets.set(agent.session, 'danger-full-access')
-    // danger-full-access bundles approval policy 'never', which auto-rejects hitl_approve; pin the root to 'ask'.
+    ctx.permissionPresets.set(agent.session, 'workspace-isolated')
+    // The bubble's own approval policy is not the root's business: hitl_approve must reach the answerer, so pin the root to 'ask'.
     setApprovalPolicy(agent.session, 'ask')
     const evolution = evolutionEnabled(ctx)
     agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
-    agentCtx.tools.restrict({ allow: rootToolsFor(evolution) })
+    agentCtx.tools.restrict({ allow: ROOT_TOOLS })
     await installGraphSkillCatalog(agentCtx, await graphCatalogFor(ctx, agent, true))
     sealRawSessionReads(agentCtx)
-    sealRootTools(agentCtx, evolution)
+    sealRootTools(agentCtx)
   }
 }
 

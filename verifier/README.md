@@ -4,7 +4,8 @@ Purpose: Judge each acceptance criterion of a task run and record the verdicts a
 
 Package: `@dangosys/dsh-singularity-verifier`
 
-Dependencies: task
+Dependencies: task; peer services `ctx.sandbox` + `ctx.subprocess` +
+`ctx.sandboxPolicy`, absent when this context mounts no confinement seam
 
 config.yaml: optional `evidenceRoot` (default `$DSH_HOME/task-evidence`, falling back to `<repo>/.dsh/task-evidence`)
 
@@ -35,3 +36,5 @@ The selftest gate (KISS §4.3) executes the samples a verifier declares — posi
 The composite judge (KISS §6 C2) judges a criterion by its child-status conjunction — pass iff the run's member sequence has at least one member and every position is verified, with an unfilled position failing by name — and, when the criterion declares a `childEvidence` map, by every entry resolving against the store: an incomplete map fails and names the missing items, and a heuristic criterion keeps the conjunction verdict but carries the explicit heuristic label (KISS §5.1). The judgement is pure: the criterion, the run's member sequence, and a snapshot getter are the whole input.
 
 A criterion's protected inputs are re-read against the run's cwd and compared by sha256 with the admitted digest before anything is dispatched, so an acceptance script rewritten after admission can never be the thing that passes; a defect refuses the verdict with a `fail`.
+
+A criterion command runs confined when the context mounts the deployment's confinement seam: `ctx.sandbox.confine(['bash', '-c', command], policy)` wraps it, `ctx.subprocess` spawns the wrapped argv, and the policy's mode is `ctx.sandboxPolicy.resolve()` with the run's workspace as its writable root. A context without both seams spawns the command itself. Either way the criterion log is exactly what the command wrote, and a timeout ends the command and everything it started.

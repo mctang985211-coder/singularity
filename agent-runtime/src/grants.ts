@@ -240,7 +240,8 @@ async function frozenGrantSkills(agentCtx: Context, agent: Agent, grant: WorkerG
   return [...definitions.values()]
 }
 
-/** Mount every MCP server one grant declares, one mcp-client instance per spec, fail-closed on startup. */
+/** Mount every MCP server one grant declares, one mcp-client instance per spec, fail-closed on startup.
+ * Each instance carries the worker's own session, so the spawned server is confined to the worker's sandbox mode. */
 async function mountMcpServers(agentCtx: Context, agent: Agent, grant: WorkerGrant): Promise<void> {
   for (const spec of grant.mcpServers ?? []) {
     try {
@@ -251,6 +252,7 @@ async function mountMcpServers(agentCtx: Context, agent: Agent, grant: WorkerGra
         args: [...spec.args],
         env: { ...spec.env },
         cwd: spec.cwd,
+        session: agent.session,
         ...(spec.toolCallTimeoutMs === undefined ? {} : { toolCallTimeoutMs: spec.toolCallTimeoutMs }),
         failOnStartupError: true,
       })

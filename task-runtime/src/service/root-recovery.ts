@@ -40,6 +40,7 @@ import {
 import type { RecoveryRounds, ReuseContext, RootRecoveryRequest } from '../recovery.ts'
 import { improvementCapFor, recoveryCapFor } from './lifecycle.ts'
 import type { WorkspaceOwner } from '../workspace.ts'
+import { normalizeWorkspacePath } from '../workspace.ts'
 import type {
   StoreRecoveryStatus,
   RootRecoveryCaller,
@@ -428,7 +429,11 @@ export async function startRecoveryAttempt(
    * so a resume rebuilds the same composition rather than the deployment's
    */
   const preset = resolvePreset(manifest, self.config.defaultPreset)
-  const workspacePath = await self.workspacePathForSession(rootSessionId)
+  // The round's bubble, when the caller materialized one, is the worker's own
+  // checkout: it is claimed and resumed exactly like the session's own.
+  const workspacePath = request.workspacePath === undefined
+    ? await self.workspacePathForSession(rootSessionId)
+    : await normalizeWorkspacePath(request.workspacePath)
   let claimed: WorkspaceOwner | undefined
   if (workspacePath !== undefined && self.workspaces !== undefined) {
     await self.workspaces.claim(workspacePath, { kind: 'run', storeId, taskId: source.taskId, runId, since: now() })
@@ -466,7 +471,12 @@ export async function startRecoveryAttempt(
     self.sessions.set(sessionId, { storeId, taskId: source.taskId, runId })
     self.startedSessions.add(sessionId)
     self.executionGate.setPhase(sessionId, 'active')
-    if (workspacePath !== undefined) self.sessionWorkspaces.set(sessionId, workspacePath)
+    if (workspacePath !== undefined) {
+      // The round's bubble is the attempt's own checkout, and the session whose
+      // workspace this attempt continues follows it there.
+      self.sessionWorkspaces.set(sessionId, workspacePath)
+      self.sessionWorkspaces.set(rootSessionId, workspacePath)
+    }
   } catch (error) {
     if (workspacePath !== undefined && claimed !== undefined) {
       await self.workspaces?.release(workspacePath, claimed).catch(cause => {

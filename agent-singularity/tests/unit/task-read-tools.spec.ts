@@ -337,9 +337,9 @@ describe('capability_list', () => {
     expect(result).toContain('tool grants are fail-closed: ')
     expect(result).toContain('skill grants are not exclusive: DSH has no per-agent skill hiding')
     expect(result).toContain('mcpServers grant whole MCP servers')
-    expect(result).toContain('leaves the worker on the deployment default (danger-full-access)')
+    expect(result).toContain('leaves the worker on the deployment default (workspace-isolated)')
     expect(result).toContain(
-      '- design-chip — tools: [] skills: [chip-designer] permission: (none — the worker keeps danger-full-access)',
+      '- design-chip — tools: [] skills: [chip-designer] permission: (none — the worker keeps workspace-isolated)',
     )
   })
 

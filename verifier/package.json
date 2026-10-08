@@ -27,6 +27,9 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-sandbox": "*",
+    "@deepseek-ai/dsh-sandbox-policy": "*",
+    "@deepseek-ai/dsh-subprocess": "*",
     "@deepseek-ai/schemastery": "*"
   },
   "dependencies": {
@@ -38,6 +41,10 @@
     "tsdown": "^0.15.0",
     "typescript": "^5.9.0",
     "@deepseek-ai/cordis": "link:../../../thirdparty/deepseek-harness/vendor/cordis",
+    "@deepseek-ai/dsh-sandbox": "link:../../../thirdparty/deepseek-harness/packages/sandbox/sandbox",
+    "@deepseek-ai/dsh-sandbox-policy": "link:../../../thirdparty/deepseek-harness/packages/sandbox/sandbox-policy",
+    "@deepseek-ai/dsh-subprocess": "link:../../../thirdparty/deepseek-harness/packages/subprocess/subprocess",
+    "@deepseek-ai/dsh-subprocess-local": "link:../../../thirdparty/deepseek-harness/packages/subprocess/subprocess-local",
     "@deepseek-ai/schemastery": "link:../../../thirdparty/deepseek-harness/vendor/schemastery",
     "@dangosys/dsh-singularity-task": "link:../task"
   },

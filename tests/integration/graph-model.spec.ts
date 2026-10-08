@@ -57,7 +57,10 @@ function harness() {
     ctx.provide('graph', graph as never)
     ctx.provide('layout', layout as never)
     ctx.provide('agentRuntime', runtime as never)
-    ctx.provide('taskRuntime', { adoptRoot: vi.fn(async () => ({ adopted: false, detail: 'none' })) } as never)
+    ctx.provide('taskRuntime', {
+      adoptRoot: vi.fn(async () => ({ adopted: false, detail: 'none' })),
+      sessionWorkspaces: new Map<string, string>(),
+    } as never)
     ctx.provide('llm', catalog() as never)
   }
   const ctx = new Context()

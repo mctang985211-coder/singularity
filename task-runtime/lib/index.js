@@ -2,14 +2,16 @@ import { copyFile, cp, lstat, mkdir, readFile, readdir, readlink, realpath, rena
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TERMINAL_RUN_STATUSES, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest } from "@dangosys/dsh-singularity-task";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { answerMessageText, findSkillFileIn, parseSkillFile, parseSkillFile as parseSkillFile$1, questionMessageText, skillRootsFor, toolCallRefIn } from "@dangosys/dsh-singularity-agent-runtime";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
+import "@dangosys/dsh-singularity-task-runtime";
 
 //#region src/mcp-servers.ts
 /** Parse deployment and candidate definitions through one schema and namespace policy. */
@@ -1436,11 +1438,12 @@ function resolvePreset(manifest, defaultPreset) {
 }
 /**
 * Strictness order for conflicting capability permissions (strictest wins):
-* sandbox decides first (`read-only` > `workspace-write` > `danger-full-access`),
+* sandbox decides first (`read-only` > `workspace-write` > `workspace-isolated` > `danger-full-access`),
 */
 const SANDBOX_STRICTNESS = {
 	"read-only": 2,
 	"workspace-write": 1,
+	"workspace-isolated": .5,
 	"danger-full-access": 0
 };
 const APPROVAL_STRICTNESS = {
@@ -5976,9 +5979,19 @@ async function withTimeout(work, timeoutMs, runId) {
 		clearTimeout(timer);
 	}
 }
-/** Hand the verifier its own deadline and keep the safety net one margin behind it. */
-function verifyWithDeadline(env, storeId, runId) {
-	return withTimeout(env.verifyRun(storeId, runId, { timeoutMs: env.verifyTimeoutMs }), env.verifyTimeoutMs, runId);
+/**
+* Hand the verifier its own deadline, the workspace its run works in, and keep
+* the safety net one margin behind it. The run's placement workspace is what
+* the criterion commands run in: the verifier confines them to it, so a run
+* whose workspace this deployment still holds is judged in that workspace and
+* not in whatever directory the caller happened to work in.
+*/
+async function verifyWithDeadline(env, storeId, runId) {
+	const cwd = (await env.task.runIn(storeId, runId)).placement?.workspacePath;
+	return withTimeout(env.verifyRun(storeId, runId, {
+		...cwd === void 0 ? {} : { cwd },
+		timeoutMs: env.verifyTimeoutMs
+	}), env.verifyTimeoutMs, runId);
 }
 /**
 * The L4 exit pointer (KISS §7, VRTC plan phase 3.1), appended to the feedback
@@ -6833,7 +6846,7 @@ async function resumeAdoptedWorker(env, storeId, run) {
 	let grant;
 	let permissionPreset;
 	try {
-		grant = await authorizedGrant(env, manifest, skillRootsForRun([], run.providerBinding));
+		grant = await authorizedGrant(env, manifest, skillRootsForRun(bubbleSkillRoots(env.workspacePath), run.providerBinding));
 		permissionPreset = permissionFor(env, manifest);
 	} catch (error) {
 		return {
@@ -6887,6 +6900,12 @@ async function authorizedGrant(env, manifest, skillRoots = []) {
 function skillRootsForRun(overlayRoots, binding) {
 	return [...overlayRoots, ...binding?.snapshotRoot === void 0 ? [] : [binding.snapshotRoot]];
 }
+/** The bubble's method volume as an overlay skill root, when `workspace` is a bubble workspace; the environment's own libraries are hidden there. */
+function bubbleSkillRoots(workspace) {
+	if (workspace === void 0) return [];
+	const root = join(workspace, ".bubble", "method-volume");
+	return existsSync(root) ? [root] : [];
+}
 /**
 * Spawn one task worker (A2 §1.2, A6 §F.4): the composition every spawn builds
 * — the deployment's preset, the capability grant the manifest authorizes, the
@@ -6894,7 +6913,7 @@ function skillRootsForRun(overlayRoots, binding) {
 async function spawnTaskWorker(env, request) {
 	await assertPresetUsable(env, request.manifest, request.agentPreset);
 	const permissionPreset = permissionFor(env, request.manifest);
-	const grant = await authorizedGrant(env, request.manifest, skillRootsForRun([], request.providerBinding));
+	const grant = await authorizedGrant(env, request.manifest, skillRootsForRun(bubbleSkillRoots(request.cwd), request.providerBinding));
 	return await env.spawn({
 		sessionId: request.sessionId,
 		name: request.name,
@@ -6952,7 +6971,8 @@ const REQUEST_FIELDS = [
 	"requestKey",
 	"mode",
 	"reuses",
-	"proposalIds"
+	"proposalIds",
+	"workspacePath"
 ];
 /** The fields one reuse declaration may carry. */
 const REUSE_FIELDS = [
@@ -6977,6 +6997,7 @@ function recoveryRequestDefects(request) {
 	if (!nonBlank(request.sourceDiagnosisId)) defects.push("sourceDiagnosisId must be a non-empty diagnosis id");
 	if (!nonBlank(request.requestKey)) defects.push("requestKey must be a non-empty string");
 	if (request.mode !== void 0 && request.mode !== "recovery" && request.mode !== "improve") defects.push("mode must be \"recovery\" (the default) or \"improve\"");
+	if (request.workspacePath !== void 0 && !nonBlank(request.workspacePath)) defects.push("workspacePath, when given, must be a non-empty path");
 	if (request.proposalIds !== void 0 && (!Array.isArray(request.proposalIds) || request.proposalIds.some((id) => !nonBlank(id)) || new Set(request.proposalIds).size !== request.proposalIds.length)) defects.push("proposalIds must be an array of unique non-empty proposal ids");
 	if (request.reuses !== void 0) if (!Array.isArray(request.reuses)) defects.push("reuses must be an array of declarations");
 	else {
@@ -7448,7 +7469,7 @@ async function startRecoveryAttempt(self, input) {
 	* so a resume rebuilds the same composition rather than the deployment's
 	*/
 	const preset = resolvePreset(manifest, self.config.defaultPreset);
-	const workspacePath = await self.workspacePathForSession(rootSessionId);
+	const workspacePath = request.workspacePath === void 0 ? await self.workspacePathForSession(rootSessionId) : await normalizeWorkspacePath(request.workspacePath);
 	let claimed;
 	if (workspacePath !== void 0 && self.workspaces !== void 0) {
 		await self.workspaces.claim(workspacePath, {
@@ -7494,7 +7515,10 @@ async function startRecoveryAttempt(self, input) {
 		});
 		self.startedSessions.add(sessionId);
 		self.executionGate.setPhase(sessionId, "active");
-		if (workspacePath !== void 0) self.sessionWorkspaces.set(sessionId, workspacePath);
+		if (workspacePath !== void 0) {
+			self.sessionWorkspaces.set(sessionId, workspacePath);
+			self.sessionWorkspaces.set(rootSessionId, workspacePath);
+		}
 	} catch (error) {
 		if (workspacePath !== void 0 && claimed !== void 0) await self.workspaces?.release(workspacePath, claimed).catch((cause) => {
 			self.warn(`workspace ${workspacePath} could not be released after a refused attempt (${message(cause)})`);
@@ -9618,6 +9642,16 @@ async function reconcileStore(self, storeId, rootSessionId) {
 	const depthOf = (taskId) => snapshot.tasks.find((task) => task.taskId === taskId)?.depth ?? 0;
 	const ordered = snapshot.runs.filter((run) => run.status === "running").sort((left, right) => depthOf(right.taskId) - depthOf(left.taskId));
 	const env = await self.orchestrateEnv(rootSessionId ?? await self.sessionForStore(storeId), `recovery:${storeId}`);
+	/**
+	* Every run this pass brings back works in the store's shared checkout, and
+	* the mapping its own Session resolves that checkout from is what `spawn`
+	* wrote while the process was alive. A restarted process rebuilds it here:
+	* without it a resuming worker's own submission is verified against the
+	* environment port the graph's checkout was materialized from.
+	*/
+	if (env.workerCwd !== void 0) {
+		for (const run of ordered) if (run.placement === void 0) self.sessionWorkspaces.set(run.sessionId, env.workerCwd);
+	}
 	const questionResumes = [];
 	const waiting = [];
 	const submitted = [];
@@ -11183,8 +11217,205 @@ function checkObligationCoverage(templates, snapshot) {
 }
 
 //#endregion
+//#region src/service/bubble.ts
+const BUBBLE_GIT = [
+	"-c",
+	"user.name=bubble",
+	"-c",
+	"user.email=bubble@local"
+];
+function runGit(args, cwd) {
+	const result = spawnSync("git", [...cwd === void 0 ? [] : ["-C", cwd], ...args], { encoding: "utf8" });
+	if (result.status !== 0) {
+		const detail = (result.stderr || result.stdout || result.error?.message || "unknown git failure").trim();
+		throw new Error(`bubble: git ${args.join(" ")}${cwd === void 0 ? "" : ` in ${cwd}`} failed: ${detail}`);
+	}
+	return result.stdout.trim();
+}
+/** One environment's component repos: the owner/repo directories that carry a `.git`, never the nested repos inside them. */
+function componentRepos(root) {
+	const found = [];
+	for (const entry of directoryEntries(root)) {
+		if (existsSync(join(root, entry, ".git"))) {
+			found.push(entry);
+			continue;
+		}
+		for (const child of directoryEntries(join(root, entry))) if (existsSync(join(root, entry, child, ".git"))) found.push(`${entry}/${child}`);
+	}
+	return found.sort();
+}
+function directoryEntries(dir) {
+	let entries;
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const names = [];
+	for (const entry of entries) {
+		if (entry.name === ".git" || entry.name.startsWith(".")) continue;
+		let isDirectory = false;
+		try {
+			isDirectory = statSync(join(dir, entry.name)).isDirectory();
+		} catch {
+			isDirectory = false;
+		}
+		if (isDirectory) names.push(entry.name);
+	}
+	return names;
+}
+function hasCommit(repo) {
+	return spawnSync("git", [
+		"-C",
+		repo,
+		"rev-parse",
+		"--verify",
+		"HEAD"
+	], { encoding: "utf8" }).status === 0;
+}
+/** The directory holding one round's bubble manifest and workspace. */
+function bubbleDir(dshHome, rootSessionId, round) {
+	return join(dshHome, "singularity", "environments", rootSessionId, "bubbles", `round-${round}`);
+}
+/** The absolute path of one round's bubble workspace, whether or not it has been materialized. */
+function bubbleWorkspacePath(dshHome, rootSessionId, round) {
+	return join(bubbleDir(dshHome, rootSessionId, round), "workspace");
+}
+/**
+* The workspace of the graph's latest materialized round, or `undefined` when
+* this graph has no bubble at all. A restarted deployment re-pins an adopted
+* root here: the round's bubble is where its Runs work, and without the mapping
+* the runtime falls back to the environment checkout the bubble was cloned from.
+*/
+function latestBubbleWorkspacePath(dshHome, rootSessionId) {
+	const bubbles = join(dshHome, "singularity", "environments", rootSessionId, "bubbles");
+	let latest;
+	for (const entry of directoryEntries(bubbles)) {
+		const round = /^round-(\d+)$/.exec(entry);
+		if (round === null) continue;
+		if (latest === void 0 || Number(round[1]) > latest) latest = Number(round[1]);
+	}
+	return latest === void 0 ? void 0 : bubbleWorkspacePath(dshHome, rootSessionId, latest);
+}
+function readManifest(path) {
+	try {
+		return JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		return;
+	}
+}
+/** Fold each env component's current (dirty) tree into a fresh `rsi/<graphId>/round-0` branch, on the mother port's own repo. */
+function genesisRound(envPath, graphId) {
+	const branch = `rsi/${graphId}/round-0`;
+	for (const rel of componentRepos(envPath)) {
+		const repo = join(envPath, rel);
+		if (!hasCommit(repo)) continue;
+		runGit([
+			"checkout",
+			"-B",
+			branch
+		], repo);
+		runGit(["add", "-A"], repo);
+		if (runGit(["status", "--porcelain"], repo).length > 0) runGit([
+			...BUBBLE_GIT,
+			"commit",
+			"-m",
+			"round-0"
+		], repo);
+	}
+}
+/** Copy the graph's production skills and task templates into the bubble's method volume, when the graph has them. */
+function copyMethodVolume(dshHome, rootSessionId, workspace) {
+	const library = join(dshHome, "singularity", "environments", rootSessionId);
+	const skills = join(library, "skills");
+	const templates = join(library, "task-templates");
+	if (!existsSync(skills) && !existsSync(templates)) return;
+	const volume = join(workspace, ".bubble", "method-volume");
+	mkdirSync(volume, { recursive: true });
+	if (existsSync(skills)) cpSync(skills, volume, { recursive: true });
+	if (existsSync(templates)) cpSync(templates, join(volume, "task-templates"), { recursive: true });
+}
+/**
+* Materialize one round's bubble workspace: every environment component cloned
+* at `rsi/<graphId>/round-<N-1>` (round 1 folds the environment into `round-0`
+* first), plus the method volume and the round's manifest. Idempotent: a
+* manifest already naming this round returns its workspace untouched.
+*/
+async function materializeBubble(envPath, dshHome, rootSessionId, graphId, round) {
+	const dir = bubbleDir(dshHome, rootSessionId, round);
+	const workspace = join(dir, "workspace");
+	const manifestPath = join(dir, "bubble-manifest.json");
+	if (readManifest(manifestPath)?.round === round) return workspace;
+	mkdirSync(workspace, { recursive: true });
+	if (round === 1) genesisRound(envPath, graphId);
+	const branch = `rsi/${graphId}/round-${round - 1}`;
+	const components = {};
+	for (const rel of componentRepos(envPath)) {
+		const target = join(workspace, rel);
+		mkdirSync(dirname(target), { recursive: true });
+		rmSync(target, {
+			recursive: true,
+			force: true
+		});
+		runGit([
+			"clone",
+			join(envPath, rel),
+			target
+		]);
+		const checkout = spawnSync("git", [
+			"-C",
+			target,
+			"checkout",
+			branch
+		], { encoding: "utf8" });
+		if (checkout.status !== 0) {
+			const detail = (checkout.stderr || checkout.stdout || "").trim();
+			throw new Error(`bubble: branch "${branch}" is not in ${join(envPath, rel)}: ${detail}`);
+		}
+		components[rel] = runGit(["rev-parse", "HEAD"], target);
+	}
+	copyMethodVolume(dshHome, rootSessionId, workspace);
+	const manifest = {
+		graphId,
+		round,
+		components,
+		createdAt: (/* @__PURE__ */ new Date()).toISOString()
+	};
+	writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+	return workspace;
+}
+/**
+* Settle one round's bubble: commit each component's work on the bubble and
+* push it to `rsi/<graphId>/round-<N>` on the environment's own repo, so the
+* next round's materialization can read it. A component with nothing to commit
+* still has its branch published. Returns each component's new SHA.
+*/
+async function settleBubble(envPath, workspacePath, graphId, round) {
+	const shas = {};
+	if (!existsSync(workspacePath)) return shas;
+	const branch = `rsi/${graphId}/round-${round}`;
+	for (const rel of componentRepos(workspacePath)) {
+		const repo = join(workspacePath, rel);
+		runGit(["add", "-A"], repo);
+		if (runGit(["status", "--porcelain"], repo).length > 0) runGit([
+			...BUBBLE_GIT,
+			"commit",
+			"-m",
+			`round-${round}`
+		], repo);
+		runGit([
+			"push",
+			"origin",
+			`HEAD:refs/heads/${branch}`
+		], repo);
+		shas[rel] = runGit(["rev-parse", "HEAD"], repo);
+	}
+	return shas;
+}
+
+//#endregion
 //#region src/index.ts
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, ensureTaskLibrary, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, graphLibrary, inFlightRecoveryAttempt, isOpenProposal, libraryCapabilities, loadObligationTemplates, loadSkillSidecar, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readTaskLibrary, readVerifiedFile, rebaseWorkspacePaths, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, reviewTaskLibrary, serializeSkillSidecar, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, snapshotTaskTemplates, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline, writeTaskLibrary };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, bubbleWorkspacePath, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, ensureTaskLibrary, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, graphLibrary, inFlightRecoveryAttempt, isOpenProposal, latestBubbleWorkspacePath, libraryCapabilities, loadObligationTemplates, loadSkillSidecar, materializeBubble, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readTaskLibrary, readVerifiedFile, rebaseWorkspacePaths, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, reviewTaskLibrary, serializeSkillSidecar, settleBubble, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, snapshotTaskTemplates, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline, writeTaskLibrary };

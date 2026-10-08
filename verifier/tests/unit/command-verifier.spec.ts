@@ -3,9 +3,14 @@ import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { describe, expect, test } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import type { AcceptanceCriterion } from '../../../task/src/types.ts'
 import type { VerifyRequest } from '../../src/types.ts'
 import { CommandVerifier } from '../../src/command-verifier.ts'
+
+/** A context without the deployment's confinement services: this suite judges the command path itself. */
+const UNCONFINED = {} as never
 
 function criterion(overrides: Partial<AcceptanceCriterion> = {}): AcceptanceCriterion {
   return {
@@ -21,7 +26,7 @@ function criterion(overrides: Partial<AcceptanceCriterion> = {}): AcceptanceCrit
 async function setup() {
   const evidenceRoot = await mkdtemp(join(tmpdir(), 'verifier-evidence-'))
   const cwd = await mkdtemp(join(tmpdir(), 'verifier-cwd-'))
-  const verifier = new CommandVerifier(evidenceRoot)
+  const verifier = new CommandVerifier(UNCONFINED, evidenceRoot)
   const request = (criteria: AcceptanceCriterion[], timeoutMs?: number): VerifyRequest => ({
     taskId: 't1',
     runId: 'r1',
@@ -172,6 +177,62 @@ describe('CommandVerifier', () => {
     const [result] = await verifier.verify(request([criterion({ command: 'printf "only this\\n"; exit 3' })]))
     expect(result.status).toBe('fail')
     expect(await readFile(join(evidenceRoot, result.logRef!), 'utf8')).toBe('only this\n')
+  })
+})
+
+describe('CommandVerifier confinement', () => {
+  /**
+   * A deployment-shaped context: the real subprocess seam, and a sandbox seam
+   * that records the argv and policy it was asked to confine. The deployment's
+   * fallback root differs from the run's workspace on purpose — the policy the
+   * verifier passes must carry the workspace the command runs in, because that
+   * is the subtree the confinement keeps writable.
+   */
+  async function confinedSetup() {
+    const evidenceRoot = await mkdtemp(join(tmpdir(), 'verifier-confined-evidence-'))
+    const cwd = await mkdtemp(join(tmpdir(), 'verifier-confined-cwd-'))
+    const ctx = new Context()
+    await ctx.plugin(LocalSubprocessRuntime)
+    const confined: { argv: readonly string[]; policy: { mode: string; workspaceRoot: string } }[] = []
+    ctx.provide('sandbox', {
+      confine: async (argv: readonly string[], policy: { mode: string; workspaceRoot: string }) => {
+        confined.push({ argv, policy })
+        return { argv, enforcement: 'full', denialSignatures: [], runnerFailureRules: [] }
+      },
+    } as never)
+    ctx.provide('sandboxPolicy', { resolve: () => ({ mode: 'workspace-write', workspaceRoot: tmpdir() }) } as never)
+    const verifier = new CommandVerifier(ctx, evidenceRoot)
+    const request = (criteria: AcceptanceCriterion[], timeoutMs?: number): VerifyRequest => ({
+      taskId: 't1',
+      runId: 'r1',
+      criteria,
+      cwd,
+      logDir: join(evidenceRoot, 'sg-t-root', 'r1'),
+      timeoutMs,
+    })
+    return { evidenceRoot, cwd, verifier, request, confined }
+  }
+
+  test('a criterion command is confined in the workspace it judges and judged by its exit code', async () => {
+    const { evidenceRoot, cwd, verifier, request, confined } = await confinedSetup()
+    const [result] = await verifier.verify(request([criterion({ command: 'printf "confined\\n"; exit 0' })]))
+
+    expect(confined).toEqual([
+      { argv: ['bash', '-c', 'printf "confined\\n"; exit 0'], policy: { mode: 'workspace-write', workspaceRoot: cwd } },
+    ])
+    expect(result.status).toBe('pass')
+    expect(await readFile(join(evidenceRoot, result.logRef!), 'utf8')).toBe('confined\n')
+  })
+
+  test('a confined timeout ends the command through the provider and still reports the timeout', async () => {
+    const { verifier, request, confined } = await confinedSetup()
+    const started = Date.now()
+    const [result] = await verifier.verify(request([criterion({ command: SLEEP_MARKER })], 300))
+
+    expect(confined).toHaveLength(1)
+    expect(Date.now() - started).toBeLessThan(10_000)
+    expect(result).toMatchObject({ status: 'inconclusive', details: 'timeout after 300ms' })
+    expect(liveProcesses(SLEEP_MARKER)).toEqual([])
   })
 })
 

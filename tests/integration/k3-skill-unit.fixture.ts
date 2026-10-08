@@ -124,14 +124,14 @@ afterEach(async () => {
  * The stack
  * ------------------------------------------------------------------------- */
 
-/** One boot: the stack, the evolution plane over the shared ledger and skill roots, and the tools on the root's surface. */
+/** One boot: the stack, the evolution plane over the shared ledger and skill roots, and the tools on the supervisor's surface. */
 export interface UnitStack {
   readonly h: RunStack
   readonly svc: EvolutionService
   /** Every tool name this stack's own dispatcher was asked for, in order — the record of which entries ran. */
   readonly called: string[]
   /** One evolution tool call as the loop dispatches it: the answer's own text, and its error flag. */
-  call(name: string, args: Record<string, unknown>, sessionId?: SessionId): Promise<{ text: string; isError: boolean }>
+  call(name: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>
 }
 
 /**
@@ -195,22 +195,23 @@ export async function boot(
   // would stop folding while on disk it looked settled.
   await base.reconcile()
   const svc = await base.forSession(roots[0]!)
+  // The supervisor-equivalent session the chain is dispatched through: the root
+  // no longer carries `evolution_*`, so the nine tools are registered on a
+  // session composed with `supervisorGrant()`, the surface a live one drives.
+  const supervisor = await h.supervisor()
   if (options.tools !== false) {
-    for (const root of roots) {
-      const scope = h.rootAgent(root).ctx
-      for (const tool of [
-        defineEvolutionProposeTool(h.ctx),
-        defineEvolutionCandidateTool(h.ctx),
-        defineEvolutionPrepareTool(h.ctx),
-        defineEvolutionReplayTool(h.ctx),
-        defineEvolutionGateTool(h.ctx),
-        defineEvolutionDecideTool(h.ctx),
-        defineEvolutionApplyTool(h.ctx),
-        defineEvolutionRollbackTool(h.ctx),
-        defineEvolutionListTool(h.ctx),
-      ]) {
-        scope.tools.register(tool)
-      }
+    for (const tool of [
+      defineEvolutionProposeTool(h.ctx),
+      defineEvolutionCandidateTool(h.ctx),
+      defineEvolutionPrepareTool(h.ctx),
+      defineEvolutionReplayTool(h.ctx),
+      defineEvolutionGateTool(h.ctx),
+      defineEvolutionDecideTool(h.ctx),
+      defineEvolutionApplyTool(h.ctx),
+      defineEvolutionRollbackTool(h.ctx),
+      defineEvolutionListTool(h.ctx),
+    ]) {
+      supervisor.ctx.tools.register(tool)
     }
   }
   const called: string[] = []
@@ -218,8 +219,8 @@ export async function boot(
     h,
     svc,
     called,
-    async call(name, args, sessionId = ROOT_A) {
-      const result = await h.call(h.rootAgent(sessionId), name, args)
+    async call(name, args) {
+      const result = await h.call(supervisor, name, args)
       called.push(name)
       return { text: result.text, isError: result.isError }
     },
@@ -750,13 +751,11 @@ export async function walkToGated(
     proposalId: string
     name?: string
     content: string
-    actor?: SessionId
     samples?: readonly string[]
     holdout?: readonly string[]
   },
 ): Promise<{ reportPath: string; experimentId: string; report: ExperimentReport }> {
   const name = input.name ?? SKILL
-  const actor = input.actor ?? ROOT_A
   const steps: [string, Record<string, unknown>][] = [
     [
       'evolution_propose',
@@ -790,7 +789,7 @@ export async function walkToGated(
     ],
   ]
   for (const [tool, args] of steps) {
-    const answer = await s.call(tool, args, actor)
+    const answer = await s.call(tool, args)
     expect(answer.isError, `${tool}: ${answer.text}`).toBe(false)
     // Every evolution tool answers a refusal as text, so "not an error" is not the
     // same fact as "the call succeeded": a step that refused would otherwise walk
@@ -803,15 +802,14 @@ export async function walkToGated(
   const gated = await s.call(
     'evolution_gate',
     { proposalId: input.proposalId, ...gateAnswers([experiment.report]) },
-    actor,
   )
   expect(gated.isError, gated.text).toBe(false)
   return { reportPath: experiment.report, experimentId: experiment.experimentId, report }
 }
 
 /** Record the model decision through the real tool and its `decided` line. */
-export async function decideThroughTool(s: UnitStack, proposalId: string, actor: SessionId = ROOT_A): Promise<string> {
-  const answer = await s.call('evolution_decide', { proposalId, decision: 'PROMOTE', note: 'the fix holds' }, actor)
+export async function decideThroughTool(s: UnitStack, proposalId: string): Promise<string> {
+  const answer = await s.call('evolution_decide', { proposalId, decision: 'PROMOTE', note: 'the fix holds' })
   expect(answer.isError, answer.text).toBe(false)
   expect(answer.text).toContain('[decided] PROMOTE')
   expect(answer.text).toContain('nothing applied yet')
@@ -819,8 +817,8 @@ export async function decideThroughTool(s: UnitStack, proposalId: string, actor:
 }
 
 /** Apply through the real tool: the publication approval, the two-file commit, and the applied record. */
-export async function applyThroughTool(s: UnitStack, proposalId: string, actor: SessionId = ROOT_A): Promise<string> {
-  const answer = await s.call('evolution_apply', { proposalId }, actor)
+export async function applyThroughTool(s: UnitStack, proposalId: string): Promise<string> {
+  const answer = await s.call('evolution_apply', { proposalId })
   expect(answer.isError, answer.text).toBe(false)
   expect(answer.text).toContain('[applied]')
   return answer.text

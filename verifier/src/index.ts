@@ -146,7 +146,7 @@ export class VerifierRegistry extends Service {
   }
 
   private async registerBuiltins(): Promise<void> {
-    await this.register(new CommandVerifier(this.evidenceRoot))
+    await this.register(new CommandVerifier(this.ctx, this.evidenceRoot))
     await this.register(this.composite)
     await this.register(new ReviewVerifier())
   }

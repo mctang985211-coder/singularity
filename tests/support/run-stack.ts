@@ -73,6 +73,7 @@ import type { CapabilityConfig, Config, RootBudgetApproval, RootBudgetApprovalAs
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import { configureSupervision } from '../../agent-singularity/src/coordination/supervision.ts'
+import { supervisorGrant } from '../../agent-singularity/src/coordination/rsi-loop.ts'
 import { graphRegistry, sessionQueryReads } from './context-plane.ts'
 import type { SupervisionOptions } from './scripted-loop.ts'
 
@@ -213,6 +214,16 @@ export interface RunStack {
    * the thing a plausible-looking default would paper over.
    */
   root(sessionId: SessionId, contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }>
+  /**
+   * Spawn the supervisor-equivalent session a spec dispatches the evolution
+   * chain through. The root no longer carries `evolution_*`, so a case that
+   * drives those tools spawns this session under the primary root with
+   * `supervisorGrant()` — the read-only investigation tools and the chain the
+   * grant names — and registers the tool definitions on its own scope, exactly
+   * as the cases built on this fixture do. One per stack: a second call names a
+   * session id of its own.
+   */
+  supervisor(sessionId?: SessionId): Promise<Agent>
   /** Dispatch one tool call on behalf of one agent, the way the loop does. */
   call(agent: Agent, name: string, args: Record<string, unknown>): Promise<ToolCallResult>
   /**
@@ -406,6 +417,11 @@ class RunStackImpl implements RunStack {
     ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
     ctx.provide('permissionPresets', { set: vi.fn(), resolve: () => ({}) })
     ctx.provide('sessions', {})
+    // The confinement seam the stdio MCP transport resolves against: this
+    // fixture's world is danger-full-access, so a worker's MCP server spawns
+    // unchanged and `confine` stays uncalled.
+    ctx.provide('sandbox', { confine: () => { throw new Error('this fixture spawns MCP servers unconfined') } } as never)
+    ctx.provide('sandboxPolicy', { resolve: () => ({ mode: 'danger-full-access', workspaceRoot: this.checkout }) } as never)
     ctx.provide('approval', { request: vi.fn(async () => 'allowed-once') })
     ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
     // The deployment's evolution switch: read by the root assembly before any root exists.
@@ -692,6 +708,23 @@ class RunStackImpl implements RunStack {
       )
     }
     return { storeId, taskId: activated.taskId, runId: activated.runId }
+  }
+
+  async supervisor(sessionId: SessionId = 's-supervisor' as SessionId): Promise<Agent> {
+    // Through the real spawn, so the supervisor's own session carries the
+    // graph scope the runtime resolves a replay's worker spawns under: the
+    // experiment runs under the caller, and a caller with no scope fails every
+    // spawn.
+    const handle = await this.agentRuntime.spawn(this.rootAgent(), {
+      sessionId,
+      name: 'supervisor',
+      agentPreset: 'standard',
+      coordinationRole: 'supervisor',
+      grant: supervisorGrant(),
+      permissionPreset: 'danger-full-access',
+      prompt: [{ type: 'text', text: 'supervise' }],
+    })
+    return handle.agent
   }
 
   /**

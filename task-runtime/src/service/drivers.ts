@@ -521,6 +521,16 @@ export async function reconcileStore(self: TaskRuntime, storeId: string, rootSes
     .filter(run => run.status === 'running')
     .sort((left, right) => depthOf(right.taskId) - depthOf(left.taskId))
   const env = await self.orchestrateEnv(rootSessionId ?? await self.sessionForStore(storeId), `recovery:${storeId}`)
+  /**
+   * Every run this pass brings back works in the store's shared checkout, and
+   * the mapping its own Session resolves that checkout from is what `spawn`
+   * wrote while the process was alive. A restarted process rebuilds it here:
+   * without it a resuming worker's own submission is verified against the
+   * environment port the graph's checkout was materialized from.
+   */
+  if (env.workerCwd !== undefined)
+    for (const run of ordered)
+      if (run.placement === undefined) self.sessionWorkspaces.set(run.sessionId, env.workerCwd)
   const questionResumes: QuestionResumeReport[] = []
   const waiting: TaskRun[] = []
   const submitted: TaskRun[] = []

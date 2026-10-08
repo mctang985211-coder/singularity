@@ -2,12 +2,13 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, optionalService, recoveryAttemptWithKey, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
+import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, bubbleWorkspacePath, materializeBubble, optionalService, recoveryAttemptWithKey, settleBubble, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
 import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EvolutionService, OUTCOME_JUDGE_PROMPT, applyTargets, assertDecisionTransition, assertOutcomePlan, canonicalJson, digestOf, modelSelectionOf, normalizeSnapshot, renderProviderRoles } from "@dangosys/dsh-singularity-evolution";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, canonicalize, isTerminalRunStatus, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
 import { CONTEXT_OUTPUT_LIMIT_BYTES, OutputBudget, ReviewerBindingError, budgetList, utf8Bytes } from "@dangosys/dsh-singularity-context";
+import { homedir } from "node:os";
 import { SessionId, SessionLogOffset } from "@deepseek-ai/dsh-session";
 import { graphAgentOptions } from "@dangosys/dsh-singularity-graphs";
 import { defineTool } from "@deepseek-ai/dsh-tools";
@@ -1249,6 +1250,7 @@ async function spawnUnderClaim(input) {
 		}],
 		agentPreset: input.preset,
 		grant: input.grant,
+		permissionPreset: "danger-full-access",
 		coordinationRole: input.request.role === "supervisor" ? "supervisor" : "reviewer",
 		...pinned === void 0 ? {} : { agentOptions: pinned },
 		beforePrompt: async () => {
@@ -1347,6 +1349,10 @@ function roundRequestKey(graphId, round) {
 /** The request key of one round's supervision attempt: one round is one supervisor hand-off, however many attempts it takes. */
 function supervisorRequestKey(graphId, round) {
 	return `rsi-supervise-${graphId}-round-${round}`;
+}
+/** The `$DSH_HOME` this deployment's graph libraries and bubbles live under, by the same fallback the library uses. */
+function bubbleHome() {
+	return process.env.DSH_HOME || join(homedir(), ".dsh");
 }
 /** The store's own root task: the one task that never had a parent (§1.6: one root per store, ever). */
 function rootTaskOf(snapshot) {
@@ -1594,6 +1600,7 @@ var RsiLoopDriver = class {
 	*/
 	async superviseRound(state, graph, snapshot, round, run) {
 		if (await this.currentGraph(state) === void 0) return;
+		await this.settleRoundBubble(state, graph, round);
 		const verified = run.status === "verified";
 		const review = reviewOfRun(snapshot, run.runId);
 		const diagnosisId = roundDiagnosisId(state.graphId, round);
@@ -1883,6 +1890,22 @@ var RsiLoopDriver = class {
 			note
 		}).catch((error) => this.log(`rsi loop ${state.graphId}: the supervisor attempt could not be settled (${message(error)})`));
 	}
+	/** The environment checkout one graph binds, when this deployment has an env-builder; `undefined` in test contexts and deployments without one. */
+	async envPathOf(graph) {
+		const envBuilder = optionalService(this.ctx, "envBuilder");
+		if (typeof envBuilder?.store?.get !== "function") return void 0;
+		try {
+			return envBuilder.store.get(graph.envId).path;
+		} catch {
+			return;
+		}
+	}
+	/** Persist one settled round's bubble to `rsi/<graph>/round-<N>`, so the next round materializes from it. */
+	async settleRoundBubble(state, graph, round) {
+		const envPath = await this.envPathOf(graph);
+		if (envPath === void 0) return;
+		await settleBubble(envPath, bubbleWorkspacePath(bubbleHome(), state.rootSessionId, round), state.graphId, round);
+	}
 	/**
 	* Open the next round through the runtime's own recovery entry: one attempt of
 	* the round's run under the round's request key — `improve` after a verified
@@ -1903,6 +1926,8 @@ var RsiLoopDriver = class {
 				});
 				return;
 			}
+			const envPath = await this.envPathOf(graph);
+			const workspacePath = envPath === void 0 ? void 0 : await materializeBubble(envPath, bubbleHome(), state.rootSessionId, state.graphId, round);
 			const request = {
 				sourceTaskId: state.rootTaskId,
 				sourceRunId,
@@ -1910,7 +1935,8 @@ var RsiLoopDriver = class {
 				requestKey,
 				mode,
 				...mode === "improve" ? { reuses: [] } : {},
-				...applied.length === 0 ? {} : { proposalIds: [...applied] }
+				...applied.length === 0 ? {} : { proposalIds: [...applied] },
+				...workspacePath === void 0 ? {} : { workspacePath }
 			};
 			try {
 				if (await this.currentGraph(state) === void 0) return;
@@ -2447,7 +2473,7 @@ function renderTools(entry) {
 	return `tools: [${labels.map((label) => TOOL_LABELS[label] === void 0 ? `${label} → (unknown label)` : `${label} → ${TOOL_LABELS[label].join(", ")}`).join("; ")}]`;
 }
 function renderPermission(entry) {
-	return entry.permission === void 0 ? "permission: (none — the worker keeps danger-full-access)" : `permission: ${entry.permission}`;
+	return entry.permission === void 0 ? "permission: (none — the worker keeps workspace-isolated)" : `permission: ${entry.permission}`;
 }
 function renderMcpServers(entry) {
 	const servers = entry.mcpServers ?? [];
@@ -2521,7 +2547,7 @@ function defineCapabilityListTool(ctx) {
 				"provider verdicts are the same pre-check admission runs, from this session's own skill roots: execution-provider means the skill carries an execution sidecar whose verifier is registered and whose required tools its capabilities grant; knowledge and guidance are loadable but never count as an execution provider; invalid means admission refuses a batch that requires this capability, with the defects shown.",
 				...report === void 0 ? [] : [`skill roots searched for this session: ${report.roots.join(", ")}`],
 				"mcpServers grant whole MCP servers (never single tools): each mounts as one mcp-client instance on the worker at spawn, bound to that run's environment checkout; a server that cannot start fails the spawn loudly.",
-				"permissions: a capability that declares none leaves the worker on the deployment default (danger-full-access); flipping the default is blocked until worker approvals reliably reach the canvas (#17 in the working guide)."
+				"permissions: a capability that declares none leaves the worker on the deployment default (workspace-isolated)."
 			].join("\n");
 		}
 	});
@@ -3881,6 +3907,7 @@ function defineSpawnTool(ctx) {
 					baseline: SETUP_TOOLS,
 					keepPresetTools: false
 				},
+				permissionPreset: "danger-full-access",
 				signal: exec.signal,
 				...pinned === void 0 ? {} : { agentOptions: pinned }
 			});

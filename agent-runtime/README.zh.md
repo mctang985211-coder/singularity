@@ -25,7 +25,7 @@ none
 
 ## Design notes
 
-**Root 组装。** `createRoot` 与 `resumeRoot` 通过同一个 `rootSetup`（`src/index.ts`）组装 root：挂载 preset、应用 `danger-full-access` 权限预设、把会话审批策略钉为 `ask`（该预设自带 `never`，会直接拒绝 `hitl_approve`）、注册 `singularity:root` 提示段（order 70）、限制工具面并安装两道封印。允许列表为 21 个核心工具加 `escalate`，仅当 `ctx.get('singularityEvolution')?.enabled` 为真时再加九个 `evolution_*`——提示词绝不提及工具面不存在的工具。`sealRootTools` 用同一列表约束 root 本地注册；`sealRawSessionReads` 对本运行时拥有的每个 agent 在执行层拒绝四个原始跨会话读取工具，preset 或 MCP 合并都无法解除。每个 root/worker 组装按 graph store 串行；停止图时先排空已接纳的创建，再释放 agent。
+**Root 组装。** `createRoot` 与 `resumeRoot` 通过同一个 `rootSetup`（`src/index.ts`）组装 root：挂载 preset、应用 `workspace-isolated` 权限预设（本轮气泡）、把会话审批策略钉为 `ask`，使 `hitl_approve` 一定能到达 answerer、注册 `singularity:root` 提示段（order 70）、限制工具面并安装两道封印。允许列表为核心工具加 `escalate`；九个 `evolution_*` 属于 supervisor，deployment 的开关只决定 root 的提示词文本。`sealRootTools` 用同一列表约束 root 本地注册；`sealRawSessionReads` 对本运行时拥有的每个 agent 在执行层拒绝四个原始跨会话读取工具，preset 或 MCP 合并都无法解除。每个 root/worker 组装按 graph store 串行；停止图时先排空已接纳的创建，再释放 agent。
 
 **Worker 组装。** `spawn` 与 `resumeWorkerAgent` 共用 `workerSetup`（`src/index.ts`）：挂载 preset、应用解析出的权限预设、为 task worker 注册稳定的 `singularity:worker` 策略段（order 75，`interpolate: false`）、应用能力授权、安装原始会话封印。spawn 发布 `agent/add` 节点与 `spawn` 边、发出 `agentRuntime/spawned`、运行调用方的 `beforePrompt` 门，最后发送 kickoff——归属为 `runtime-prompt`/`spawn`，绝不记作人的输入。既无 prompt 又未声明 `taskWorker: true` 的 spawn 直接拒绝；回滚会释放 handle 并把已发布节点标记为 `failed`。
 

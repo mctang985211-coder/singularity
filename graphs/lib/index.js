@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { EventStoreSet, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
+import { latestBubbleWorkspacePath, materializeBubble } from "@dangosys/dsh-singularity-task-runtime";
 
 //#region src/service/state.ts
 /** Whether an existing workspace can be bound by a new graph: no graph and no sessions. */
@@ -317,9 +320,12 @@ var GraphsService = class extends Service {
 				const rootSessionId = SessionId(randomUUID());
 				const graphStoreId = `sg-g-${rootSessionId}`;
 				const layoutStoreId = `sg-l-${rootSessionId}`;
+				const envPath = store.get(envId).path;
+				const workspace = await materializeBubble(envPath, process.env.DSH_HOME || join(homedir(), ".dsh"), rootSessionId, id, 1);
+				this.taskRuntime()?.sessionWorkspaces.set(rootSessionId, workspace);
 				const handle = await this.ctx.agentRuntime.createRoot({
 					sessionId: rootSessionId,
-					cwd: store.get(envId).path,
+					cwd: workspace,
 					scope: {
 						graphStoreId,
 						layoutStoreId
@@ -532,6 +538,8 @@ var GraphsService = class extends Service {
 		else await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, scope, modelOptions);
 		const taskRuntime = this.taskRuntime();
 		if (taskRuntime === void 0) throw new Error("graphs: taskRuntime service is not loaded; cannot recover the root store");
+		const bubble = latestBubbleWorkspacePath(process.env.DSH_HOME || join(homedir(), ".dsh"), graph.rootSessionId);
+		if (bubble !== void 0) taskRuntime.sessionWorkspaces.set(graph.rootSessionId, bubble);
 		await taskRuntime.adoptRoot(rootTaskStoreId(graph.rootSessionId), graph.rootSessionId);
 		await this.ctx.graph.switchStore(graph.graphStoreId);
 		await this.ctx.layout.switchStore(graph.layoutStoreId);

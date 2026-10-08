@@ -31,6 +31,8 @@ describe('graph_spawn', () => {
       name: 'test-worker',
       prompt: [{ type: 'text', text: expect.stringContaining('Run the test suite') }],
       grant: { capabilities: [], baseline: expect.arrayContaining(['bash', 'env_register_component']), keepPresetTools: false },
+      // Setup works the home port before the round's bubble exists.
+      permissionPreset: 'danger-full-access',
       signal: expect.any(AbortSignal),
     })
     expect(worker.whenIdle).toHaveBeenCalledOnce()

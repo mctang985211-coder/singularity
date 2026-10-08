@@ -602,8 +602,8 @@ describe('task_review_agent', () => {
     expect(request.grant).toEqual(reviewerGrant())
     // A graph with no pin leaves the spawn request exactly as the deployment default has it.
     expect(request.agentOptions).toBeUndefined()
-    // The permission preset must stay at the spawn default (`read-only` bundles `approval: ask`).
-    expect(request.permissionPreset).toBeUndefined()
+    // The evaluation plane stays outside the round's bubble: the coordinator spawn names its posture.
+    expect(request.permissionPreset).toBe('danger-full-access')
     // The grant actually restricts: resolve the exact grant the tool passed.
     const allow = resolveGrant(grantHarness().ctx, worker(), request.grant as never).allow
     for (const name of FORBIDDEN) expect(allow).not.toContain(name)
