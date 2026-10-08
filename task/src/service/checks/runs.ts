@@ -14,6 +14,44 @@ import type {
 import { runMemberSlots } from '../../types.ts'
 import { isDigest, isRecord, nonEmpty, taskIn } from './primitives.ts'
 
+/** The one id shape an environment revision or candidate reference may carry (`task-runtime` `EnvironmentRevisionManifest.revisionId`). */
+const ENVIRONMENT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
+
+/** The environment-version fields a run record may carry, judged when present: old-protocol runs and bindings carry neither, and absence is not a defect. */
+export function assertEnvironmentRevision(runId: RunId, run: TaskRun): void {
+  if (run.environmentRevisionId !== undefined && !ENVIRONMENT_ID.test(run.environmentRevisionId)) {
+    throw new Error(
+      `task: run "${runId}" environment revision id ${JSON.stringify(run.environmentRevisionId)} is not a valid revision id (^[a-z0-9][a-z0-9-]{0,63}$)`,
+    )
+  }
+  if (run.trialCandidateRef !== undefined) {
+    if (!ENVIRONMENT_ID.test(run.trialCandidateRef)) {
+      throw new Error(
+        `task: run "${runId}" trial candidate ref ${JSON.stringify(run.trialCandidateRef)} is not a valid revision id (^[a-z0-9][a-z0-9-]{0,63}$)`,
+      )
+    }
+    if (run.trialCandidateRef === run.environmentRevisionId) {
+      throw new Error(
+        `task: run "${runId}" trial candidate ref must differ from its environment revision id; a trial binds a candidate on top of the active revision, not the active revision itself`,
+      )
+    }
+  }
+}
+
+/** The binding-level environment fields, judged when present; on a trial binding the candidate ref names the candidate the bytes were read from. */
+function assertBindingEnvironment(runId: RunId, binding: RunProviderBinding): void {
+  if (binding.environmentRevisionId !== undefined && !ENVIRONMENT_ID.test(binding.environmentRevisionId)) {
+    throw new Error(
+      `task: run "${runId}" provider binding environment revision id ${JSON.stringify(binding.environmentRevisionId)} is not a valid revision id (^[a-z0-9][a-z0-9-]{0,63}$)`,
+    )
+  }
+  if (binding.trialCandidateRef !== undefined && !ENVIRONMENT_ID.test(binding.trialCandidateRef)) {
+    throw new Error(
+      `task: run "${runId}" provider binding trial candidate ref ${JSON.stringify(binding.trialCandidateRef)} is not a valid revision id (^[a-z0-9][a-z0-9-]{0,63}$)`,
+    )
+  }
+}
+
 /** The content identity a run records is what a later reader re-checks the snapshot against, so a malformed record is refused rather than stored: a digest that is not a digest, or a skill entry without a name, would make the record unusable … */
 export function assertProviderBinding(runId: RunId, binding: RunProviderBinding): void {
   if (typeof binding.registryRevision !== 'string' || binding.registryRevision.length === 0) {
@@ -77,6 +115,7 @@ export function assertProviderBinding(runId: RunId, binding: RunProviderBinding)
   ) {
     throw new Error(`task: run "${runId}" provider binding snapshotRoot must be a non-empty path when present`)
   }
+  assertBindingEnvironment(runId, binding)
 }
 
 /** The submission record is what a reader trusts instead of re-reading the worker's transcript, so a malformed one is refused rather than stored: an unnamed summary or a ref list that is not a list would leave the record unusable exactly when … */

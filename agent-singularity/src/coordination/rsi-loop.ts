@@ -2,9 +2,8 @@
  * The platform-side RSI loop driver: iteration scheduling for a graph that runs
  * a recursive-self-improvement loop lives here — in the platform — and not in
  * the root agent's prompt. A graph carries its settings in `GraphRecord.rsi`
- * (round objective, total rounds, whether a human reviews), the driver writes
- * its position to `GraphRecord.rsiProgress`, and the root is never asked to
- * schedule anything.
+ * (round objective, total rounds, whether a human reviews), the driver keeps
+ * its position in memory, and the root is never asked to schedule anything.
  *
  * One round is one **terminal-settled Run of the store's root task**. Round 1 is
  * the original attempt; round N+1 is opened by this driver as a recovery of
@@ -47,7 +46,7 @@ import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
 import { APPLYABLE_TARGET_TYPES, type EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
-import type { GraphRecord, RsiConfig, RsiProgress } from '@dangosys/dsh-singularity-graphs'
+import type { GraphRecord, RsiConfig } from '@dangosys/dsh-singularity-graphs'
 import {
   canonicalize,
   isTerminalRunStatus,
@@ -253,6 +252,15 @@ async function evolutionOf(ctx: Context, sessionId: string): Promise<EvolutionLe
   }
 }
 
+/** The driver's live position in the loop, held in memory only; the graph registry no longer stores one (progress is derived from coordination facts). */
+export interface LoopProgress {
+  /** 1-based round currently in flight (or last completed when phase is done/failed). */
+  readonly round: number
+  /** `running`/`publishing`/`debugging` while a round is in flight, `done` when the loop finished its rounds, `failed` when it stopped. */
+  readonly phase: 'running' | 'publishing' | 'debugging' | 'done' | 'failed'
+  readonly note?: string
+}
+
 /** One graph's loop, as this process holds it while it drives it. */
 interface LoopState {
   readonly graphId: string
@@ -261,8 +269,8 @@ interface LoopState {
   config: RsiConfig
   /** The store's root task, read from the store; nothing is scheduled before it exists. */
   rootTaskId?: string
-  /** The position the driver last wrote, so a repeated activation does not rewrite the same fact. */
-  progress?: RsiProgress
+  /** The position the driver last reached, so a repeated activation does not redo the same step. */
+  progress?: LoopProgress
   /** The loop finished its configured rounds, stopped on a defect, or its graph stopped being one: it takes no further step here. */
   stopped: boolean
 }
@@ -270,6 +278,8 @@ interface LoopState {
 export interface RsiLoopOptions {
   /** Where the driver's lines go; absent uses the deployment's soft logger. */
   readonly log?: (line: string) => void
+  /** Observer of each position the driver reaches; the position itself is held in memory only. */
+  readonly onProgress?: (graphId: string, progress: LoopProgress) => void
 }
 
 /**
@@ -280,6 +290,7 @@ export interface RsiLoopOptions {
 export class RsiLoopDriver {
   private readonly ctx: Context
   private readonly log: (line: string) => void
+  private readonly onProgress?: (graphId: string, progress: LoopProgress) => void
   private readonly loops = new Map<string, LoopState>()
   private readonly byStore = new Map<string, string>()
   private readonly registered = new Set<string>()
@@ -291,6 +302,7 @@ export class RsiLoopDriver {
   constructor(ctx: Context, options: RsiLoopOptions = {}) {
     this.ctx = ctx
     this.log = options.log ?? warnLine(ctx)
+    this.onProgress = options.onProgress
   }
 
   /** Subscribe to the two facts that move a loop — one terminal review, one graph activation — and seed from the persisted registry. */
@@ -501,6 +513,12 @@ export class RsiLoopDriver {
     run: TaskRun,
   ): Promise<void> {
     if (await this.currentGraph(state) === undefined) return
+    // A fresh attachment holds no in-memory position: an RSI config replacement
+    // (an epoch bump) forgets this loop's state, so a pass that starts without one
+    // IS the operator's resume after clearing the obstruction a `blocked` settlement
+    // named. A plain `closed` — the supervisor's own judgement that the round must
+    // not be retried — is final and never re-delegated by the platform.
+    const operatorResume = state.progress === undefined
     // The round's own work is persisted behind the graph before its method
     // change is judged: the next round materializes from this branch.
     await this.settleRoundBubble(state, graph, round)
@@ -511,7 +529,7 @@ export class RsiLoopDriver {
     await this.mark(state, verified
       ? { round, phase: 'publishing', note: `round ${round} verified; supervising its method change` }
       : { round, phase: 'debugging', note: `round ${round} settled ${run.status}; supervising its repair` })
-    const supervision = await this.takeUpSupervision(state, graph, round, run, review, diagnosisId, verified)
+    const supervision = await this.takeUpSupervision(state, graph, round, run, review, diagnosisId, verified, operatorResume)
     // The supervisor can outlive a clear/replace event; its old loop never marks
     // progress or opens an execution on behalf of the newly configured graph.
     if (await this.currentGraph(state) === undefined) return
@@ -625,15 +643,11 @@ export class RsiLoopDriver {
     review: ReviewRecord | undefined,
     diagnosisId: string,
     verified: boolean,
+    operatorResume: boolean,
   ): Promise<RoundSupervision> {
     const already = publicationOf(await this.proposalsFor(state, diagnosisId))
     const attempts = await readReviewAgentAttempts(state.storeId).catch(() => [])
     const settled = supervisorAttemptOf(attempts, diagnosisId)
-    // An operator re-setting the graph's RSI config drops the stored loop progress; read at the start of
-    // this pass, an absent progress IS the operator's resume after clearing the obstruction a `blocked`
-    // settlement named. A plain `closed` — the supervisor's own judgement that the round must not be
-    // retried — is final and never re-delegated by the platform.
-    const operatorResume = graph.rsiProgress === undefined
     if (settled?.settlement?.status === 'closed') {
       const note = settled.settlement.note ?? 'the round was closed'
       const blocked = note.startsWith('blocked:')
@@ -1120,8 +1134,8 @@ export class RsiLoopDriver {
     ].join('\n')
   }
 
-  /** Write one loop position, skipping a rewrite of the position the registry already holds. */
-  private async mark(state: LoopState, progress: RsiProgress): Promise<void> {
+  /** Record one loop position in memory, skipping a rewrite of the position this loop already holds. */
+  private async mark(state: LoopState, progress: LoopProgress): Promise<void> {
     if (await this.currentGraph(state) === undefined) return
     const current = state.progress
     if (
@@ -1131,25 +1145,18 @@ export class RsiLoopDriver {
       current.note === progress.note
     )
       return
-    try {
-      await this.ctx.graphs.markRsiProgress(state.graphId, progress)
-      state.progress = progress
-    } catch (error) {
-      this.log(`rsi loop ${state.graphId}: the loop position could not be recorded (${message(error)})`)
-    }
+    state.progress = progress
+    this.onProgress?.(state.graphId, progress)
   }
 
   /** The loop state of one graph, created on first sight and aligned with the graph record every time it is read. */
   private loopFor(graph: GraphRecord, storeId: string): LoopState {
     const existing = this.loops.get(graph.id)
     if (existing !== undefined) {
-      // Replacing config revokes the previous watcher and clears progress.
+      // Replacing config (including an epoch bump) revokes the previous watcher.
       // Resume derives from the same frozen root's recorded attempts; it does
       // not create a new business contract or reset the execution count.
-      if (this.matchesGraph(existing, graph)) {
-        if (existing.progress === undefined && graph.rsiProgress !== undefined) existing.progress = graph.rsiProgress
-        return existing
-      }
+      if (this.matchesGraph(existing, graph)) return existing
       this.forget(graph.id)
     }
     const state: LoopState = {
@@ -1157,7 +1164,6 @@ export class RsiLoopDriver {
       storeId,
       rootSessionId: String(graph.rootSessionId),
       config: graph.rsi!,
-      ...(graph.rsiProgress === undefined ? {} : { progress: graph.rsiProgress }),
       stopped: false,
     }
     this.loops.set(graph.id, state)
@@ -1181,10 +1187,10 @@ export class RsiLoopDriver {
     }
   }
 
-  /** Config replacement drops progress even when it writes identical settings. */
+  /** A config carrying a different epoch or different settings replaces the loop; an identical re-set does not. */
   private matchesGraph(state: LoopState, graph: GraphRecord): boolean {
     return graph.rsi !== undefined && String(graph.rootSessionId) === state.rootSessionId &&
-      sameRsiConfig(state.config, graph.rsi) && !(state.progress !== undefined && graph.rsiProgress === undefined)
+      sameRsiConfig(state.config, graph.rsi)
   }
 
   /** Re-read authority after an await and immediately before graph/recovery side effects. */
@@ -1209,6 +1215,7 @@ function supervisorAttemptOf(attempts: readonly ReviewAgentAttempt[], diagnosisI
 function sameRsiConfig(left: RsiConfig, right: RsiConfig): boolean {
   return (
     left.task === right.task && left.iterationRounds === right.iterationRounds && left.humanReview === right.humanReview &&
+    (left.epoch ?? 1) === (right.epoch ?? 1) &&
     canonicalize(left.metrics ?? []) === canonicalize(right.metrics ?? [])
   )
 }

@@ -1,4 +1,4 @@
-import { i as LayoutState, n as DEFAULT_ROOT, r as LayoutService } from "./layout-B0makwfJ.js";
+import { i as LayoutState, n as DEFAULT_ROOT, r as LayoutService } from "./layout-CjcKKRu7.js";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { EventStoreSet } from "@dangosys/dsh-singularity-task";
 
@@ -178,6 +178,10 @@ var GraphService = class extends Service {
 	}
 	async snapshotIn(id) {
 		return await this.stores.snapshot(id);
+	}
+	/** The zero-write read door ({@link EventStoreSet.readOnlySnapshot}): a missing store answers `exists:false`, never a creation. */
+	async snapshotReadOnlyIn(id) {
+		return await this.stores.readOnlySnapshot(id);
 	}
 	async addAgent(agent, root = false) {
 		await this.addAgentIn(this.activeStoreId(), agent, root);

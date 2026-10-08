@@ -1651,4 +1651,429 @@ declare function walkSnapshotInput(root: string, visit: (entry: SnapshotInputEnt
 /** Build one side's workspace from the frozen snapshot, then prove it holds the frozen digest. */
 declare function buildWorkspace(sourceDir: string, target: string, snapshotDigest: string, paths?: readonly string[]): Promise<string>;
 //#endregion
-export { APPLYABLE_TARGET_TYPES, type ApplyOutcome, CapabilityRow, CapabilityRowIdentity, CapabilitySkill, CapabilityStoreView, type CommitCapability, type CommitDirection, type CommitIntentRecord, type CommitIntentView, type Config, CriterionRepairExample, EVOLUTION_DECISIONS, EXPERIMENT_ADMISSION_SOURCES, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, EvolutionService as default, type EvolutionStatus, ExperimentAdmissionRefusal, ExperimentAdmissionSource, ExperimentBudget, ExperimentCandidate, ExperimentCost, ExperimentCriterionDetail, ExperimentJudgedRecord, ExperimentKey, ExperimentLedger, ExperimentObjective, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSnapshot, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCapability, FrozenCapabilityRow, FrozenCapabilitySide, FrozenCriterion, FrozenCriterionExample, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, FrozenSampleAdmission, FrozenTaskDefinition, type GateAnswers, McpServerIdentity, ModelSelection, OUTCOME_JUDGE_PROMPT, OUTCOME_RANK, OutcomeEvaluation, OutcomeEvaluationPlan, OutcomeJudgement, OutcomeMeasurement, OutcomeModelCall, OutcomeModelResult, PrecheckSkillVerdict, PreparedCapability, type PreparedView, type PromotionCheck, type ProposeInput, ProviderPrecheckView, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, RunFacts, SampleProviders, SideRelation, SkillContentIdentity, SkillContractIdentity, type SkillMutation, TaskDefinitionIdentity, TaskDefinitionMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertAdmissionRecord, assertBudgetAllowsStart, assertCapabilityCandidateAdmissible, assertCapabilityRow, assertDecisionTransition, assertExperimentReport, assertExperimentSample, assertExperimentStartRecord, assertFrozenExperiment, assertMcpServerIdentity, assertOutcomeEvaluation, assertOutcomeMeasurements, assertOutcomePlan, assertRecordedRunOrigin, assertSampleCriteria, assertSampleRole, assertTemplateBaseline, assertTemplateIdentity, buildExperimentReport, buildWorkspace, candidateRegistryRevisionOf, canonicalJson, capabilityOverlay, capabilityRefusal, capabilityRowBytes, capabilityRowDigest, capabilityRowIdentity, capabilityTableWith, compareExperimentSides, compareReplaySides, costOf, criteriaOf, criterionDetail, digestOf, directoryDigest, discoverSkill, evidenceRefsOf, experimentCandidate, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentStore, firstSkillOverlay, foldExperiments, freezeCriterionRepair, freezeExperiment, frozenCapabilitySample, frozenCapabilitySideOf, frozenCriterionOf, frozenDigestOf, frozenIdentityOf, frozenProviderIdentity, frozenSampleOf, independentOracleCriteria, isExperimentRecord, latestReview, mcpServerIdentity, modelSelectionOf, nonEmpty, normalizeSnapshot, normalizeSnapshotPaths, oracleContractDigest, overallExperimentVerdict, parseOutcomeJudgement, prepareTaskDefinition, preparedContentDigestOf, protectedInputsDigest, readPreparedCapability, readTaskDefinition, recoveredSampleRecord, refusedBaselineRun, refusedProviderLines, renderProviderRoles, reportedTokensSpent, resolveLink, resumeExperiment, reviewRefOf, runExperiment, runFactsOf, safeSegment, sameKeyRefusal, sampleRecord, sideDetailOf, templateBytes, templateCommitRequest, templateIdentity, templateLibraryDigest, tokensOfRecord, validateCapabilityMutation, validateSpec, validateTaskDefinitionMutation, walkSnapshotInput };
+//#region src/strategy/policy.d.ts
+/** 一次搜索使用的机制词表。与上游 K（rrsi/components.py:44）不同，机制不是根据 diff 正则猜出来的文件名信号，
+ *  而是候选适配器按真实资产改动核验后的标签。 */
+declare const MECHANISM_KINDS: readonly ["skill", "capability", "task-template", "text", "parameter"];
+type MechanismKind = (typeof MECHANISM_KINDS)[number];
+/** 增加机器结构的机制（对应上游 K_STR，rrsi/components.py:46）。 */
+declare const STRUCTURAL_MECHANISM_KINDS: readonly MechanismKind[];
+/** plan §4 的搜索侧策略。随评估范围一起冻结，任何字段变化都换 scope。 */
+interface StrategyPolicy {
+  version: 'rrsi-strategy@1';
+  /** 搜索轮数 T，t = 0..T-1。 */
+  rounds: number;
+  /** 每任务独立求解次数 k（plan §4「同版本独立求解至少三次」）。 */
+  trials: number;
+  /** 每轮候选数 m。plan §4 首版为 1。 */
+  candidatesPerRound: number;
+  /** L0 退火编辑预算端点：bundled 独立编辑数从 max 退火到 min。 */
+  editBudget: {
+    min: number;
+    max: number;
+  };
+  /** 停滞窗口与停滞时保留给未测机制的候选槽位数。 */
+  stall: {
+    window: number;
+    reservedDrafts: number;
+  };
+  noise: {
+    /** δ = z · sd(null ΔS)。 */
+    z: number;
+    /** plan §4 要求的最少独立重复求解次数；少于该值不得声称观察到噪声。 */
+    minIndependentEvaluations: number;
+    /** 任务内 bootstrap 重采样次数与种子。 */
+    bootstrapReps: number;
+    seed: number;
+    /** 观测不到任何噪声时的声明天花板（绝不用 0，plan §4「单 trial 不产生零噪声结论」）。 */
+    floor: number;
+  };
+  /** ΔS > δ 时的成本准入：ΔC ≤ min(base + slope·ΔS, maxRelativeIncrease)。 */
+  cost: {
+    baseAllowance: number;
+    gainFundedIncrease: number;
+    maxRelativeIncrease: number;
+  };
+  /** 带内整形：成本必须至少改善 max(relativeCostBand, minRelief)。 */
+  inBand: {
+    minRelief: number;
+  };
+  /** 首版无 novelty 放宽（plan §4）。 */
+  noveltyRelaxation: false;
+  /** 近期收益窗口 n_prune（上游 rrsi/config.py:75）。 */
+  pruneWindow: number;
+  /** 连续多少轮无有效质量增益就转向未测机制（plan §4：两轮）。 */
+  stallRounds: number;
+  /** baseline admission refusal 的预先声明绝对成本上限（token）；0 表示部署未声明，
+   *  未声明时 admission-refusal 候选一律拒绝，不允许伪造相对成本（plan §4）。 */
+  baselineAdmissionCeilingTokens: number;
+  /** 评估前 critic：一次调用，无修补链（plan §4）。 */
+  critic: 'required';
+}
+declare const DEFAULT_STRATEGY_POLICY: StrategyPolicy;
+/** plan §5 三臂对照的第二臂：同一条管线、正则化全部关闭。 */
+declare const UNREGULARIZED_STRATEGY_POLICY: StrategyPolicy;
+declare function assertStrategyPolicy(value: unknown): asserts value is StrategyPolicy;
+/** 哪个正则器处于开启状态，进报告与对照实验分组。只做字段读取，判定路径没有 mode 分支。 */
+declare function regularizersActive(policy: StrategyPolicy): {
+  editBudget: boolean;
+  noiseFloor: boolean;
+  costAdmission: boolean;
+  inBandShaping: boolean;
+  stallSteering: boolean;
+  pruning: boolean;
+};
+/** 冻结策略的内容摘要：对字段变化敏感、对键顺序不敏感。policy.ts 不 import replay 的 digestOf，
+ *  避免策略纯函数依赖 replay 实现；规范化规则与 replay/contract.ts 的 canonicalJson 同形。 */
+declare function strategyPolicyDigest(policy: StrategyPolicy): string;
+//#endregion
+//#region src/strategy/schedule.d.ts
+interface EditBudgetPolicy {
+  rounds: number;
+  min: number;
+  max: number;
+}
+/** 第 round 轮（0-based）允许的独立编辑数。
+ *
+ *  plan §4 override：上游 rrsi/schedule.py:48 的分母是 T，t 只取 0..T-1，因此末轮
+ *  b(T-1) ≠ b_min（T=20,b_min=1,b_max=4 时 b(19)=2），上游靠越界端点 edit_budget(T,T,…)
+ *  才等于 b_min。本移植分母为 rounds-1，table[rounds-1] === min 精确成立（plan §4
+ *  「最后一轮确实为一项」），并消掉上游为掩盖浮点误差加的 round(v, 9) 保护。 */
+declare function editBudget(round: number, policy: EditBudgetPolicy): number;
+declare function editBudgetTable(policy: EditBudgetPolicy): readonly number[];
+//#endregion
+//#region src/strategy/scale.d.ts
+/** 冻结的 [0,1] 质量标尺（plan §4）。领域 command / judge 提供数值时必须提前固定标尺。 */
+type QualityScale = {
+  kind: 'acceptance-success-rate';
+} | {
+  kind: 'fixed-numeric-scale';
+  /** 冻结的 measurement id，必须在本次实验的 measurement 列表内。 */
+  metricId: string;
+  atLeast: number;
+  atMost: number;
+  direction: 'higher-is-better' | 'lower-is-better';
+};
+/** 一次 trial 的原始观测。acceptance 由原验收决定，永远不是 LLM 给的。 */
+interface QualitySample {
+  acceptance: 'pass' | 'fail' | 'inconclusive';
+  /** 领域 command / judge 的数值，缺席即该 trial 未测。 */
+  readonly numeric?: number;
+  /** 本 trial 上报的四桶 token 总额；缺席即成本未知。 */
+  readonly tokens?: number;
+  /** trial 内冻结判据权重，默认 1。 */
+  readonly weight?: number;
+}
+/** trial → [0,1] 质量。原验收不可被数值补偿（plan §4）。
+ *
+ *  判定顺序不可交换：fail → 0（即使 numeric 满分）；inconclusive → 0 且调用方必须记为
+ *  missing（分母不缩小）；pass 才允许标尺数值进入。LLM judge 的分数只能经预先冻结的
+ *  fixed-numeric-scale 进入，且仍以原验收为前置条件。 */
+declare function qualityOf(scale: QualityScale, sample: QualitySample): number;
+/** 标尺必须指向本次实验已冻结的 measurement / 判据；否则拒绝，避免事后挑标尺。 */
+declare function assertScaleAddressesFrozenMeasurement(scale: QualityScale, frozen: {
+  readonly measurements: readonly {
+    id: string;
+  }[];
+}): void;
+//#endregion
+//#region src/strategy/measure.d.ts
+/** 一次 trial 的折后观测。 */
+interface TrialObservation {
+  quality: number;
+  weight: number;
+  tokens?: number;
+}
+/** 一个任务下同一侧的全部 trial。missing 的 trial 以 quality 0、权重不变占据分母。 */
+interface TaskMeasurement {
+  taskId: string;
+  trials: readonly TrialObservation[];
+}
+/** 一次独立求解（上游 EvalResult 的可比子集）。 */
+interface EvaluationMeasurement {
+  /** 冻结评估范围身份：同一 scope 才可比较、才可聚合重复。 */
+  scope: string;
+  /** 本次冻结的每任务 trial 数 k。 */
+  trials: number;
+  tasks: readonly TaskMeasurement[];
+  /** 运行期从未落地的 trial（崩溃 / 超时 / 基础设施），每个记 0 且占满分母（plan §4）。 */
+  missing: number;
+}
+interface AggregateScore {
+  /** Ŝ ∈ [0,1]，判据加权成功率。 */
+  quality: number;
+  /** Ĉ = 已知正成本 trial 的均值；全部未知时 undefined（绝不当 0）。 */
+  cost?: number;
+  /** 冻结分母 |D|·k。 */
+  expected: number;
+  missing: number;
+  /** 任一 trial 缺失或缺成本。 */
+  incomplete: boolean;
+}
+/** 聚合口径照抄 rrsi/evaluate.py:104-119：缺失 slot 以 r = 0 计入，分母不减。 */
+declare function aggregateEvaluation(input: EvaluationMeasurement): AggregateScore;
+/** 同一 (candidate, scope) 的全部重复求解合并，不取最新一次（plan §4）。
+ *  scope 不一致即拒绝合并，不退化为按顺序取新。 */
+declare function poolEvaluations(evals: readonly EvaluationMeasurement[]): EvaluationMeasurement;
+interface NoiseCalibration {
+  /** δ_quality：未改动方法两次独立评估的 |ΔŜ| 上限。 */
+  qualityBand: number;
+  /** δ_cost：未改动方法相对成本的观测散布，用于带内「超过成本噪声」判据。 */
+  relativeCostBand: number;
+  method: 'repeated-baseline-evaluations' | 'within-task-bootstrap' | 'declared-floor';
+  evaluations: number;
+  standardError: number;
+  /** 无法观测到噪声：band 取 policy.noise.floor，调用方必须把它记进报告。 */
+  degenerate: boolean;
+}
+/** se(Ŝ) 的注入确定性重采样实现（对照上游 rrsi/calibrate.py:54 的 bootstrap_se）。
+ *  重采样器是 32 位 LCG（state = state·1664525 + 1013904223 mod 2³²），取高位
+ *  index = floor(state / 65536) % n（低位随奇偶翻转，不可用），无隐藏 RNG，
+ *  TS 与提取脚本 extract-rrsi-vectors.py 逐位复算同一序列。 */
+declare function bootstrapStdError(ev: EvaluationMeasurement, reps: number, seed: number): number;
+/** δ = z · sd(null ΔS)。plan §4 override（对照 rrsi/calibrate.py:85）：
+ *  - 直接观测要求 ≥ policy.noise.minIndependentEvaluations（默认 3）次独立求解，上游 ≥2；
+ *  - 任何路径观测不到正散布时不得声称 δ = 0：degenerate + noise.floor（plan §4
+ *    「单 trial 不产生零噪声结论」）。 */
+declare function calibrateNoise(evals: readonly EvaluationMeasurement[], policy: StrategyPolicy): NoiseCalibration;
+//#endregion
+//#region src/strategy/screen.d.ts
+/** 候选声明的编辑。机制标签必须由候选适配器按真实资产改动核验（不是 diff 正则）。 */
+interface DeclaredEdit {
+  id: string;
+  mechanism: MechanismKind;
+  hypothesis?: string;
+  /** 真实改动到的资产路径，由适配器核验后填入。 */
+  targets: readonly string[];
+  /** 声明机制未被真实改动佐证：该编辑不计入独立机制。 */
+  mechanismUnverified?: boolean;
+}
+/** 评估前的结构检查结果，由候选适配器产出（identity 一致、资产可加载、改动与声明相符、原验收未被换）。 */
+interface StructuralCheck {
+  ok: boolean;
+  findings: readonly string[];
+}
+/** 一次独立 critic 的判定（plan §4：至多一次，无修补链；对照上游 critic.py 的 repair_rounds = 5）。 */
+interface CriticVerdict {
+  verdict: 'accept' | 'reject';
+  reason: string;
+  evidenceRefs: readonly string[];
+  criticId: string;
+  at: string;
+}
+type ScreenRefusalCode = 'over-budget' | 'no-independent-mechanism' | 'structure-failed' | 'critic-missing' | 'critic-reject';
+type Screen = {
+  ok: true;
+  bundleLevel: boolean;
+} | {
+  ok: false;
+  reasonCode: ScreenRefusalCode;
+  reason: string;
+};
+/** 评估前闸门：结构检查与 critic 都发生在任何测量之前，被拒绝的候选不消耗 replay
+ *  预算、不进入 measured 历史（照抄 rrsi/history.py:113 的 measured() 语义）。
+ *  独立编辑数 = 核验通过的编辑数，必须 1 ≤ n ≤ editBudget(round)（上游 propose.py
+ *  的 ‖z‖₀ ≤ b_t 约束）。 */
+declare function screenBeforeMeasurement(input: {
+  round: number;
+  edits: readonly DeclaredEdit[];
+  structure: StructuralCheck;
+  critic?: CriticVerdict;
+  policy: StrategyPolicy;
+}): Screen;
+//#endregion
+//#region src/strategy/selection.d.ts
+interface CandidateMeasurement {
+  candidateId: string;
+  /** 候选完整内容摘要；同字节候选靠它直接结案。 */
+  contentDigest: string;
+  /** 本条测量所属的冻结 scope。 */
+  scope: string;
+  edits: readonly DeclaredEdit[];
+  /** 未评估（被 screen 拒绝、或本轮无预算）时为 undefined。 */
+  aggregate?: AggregateScore;
+  /** 运行时的 admission refusal（能力缺失的 baseline 侧），带预先声明的绝对成本。 */
+  admissionRefusal?: {
+    source: 'capability-gap' | 'provider-refused';
+    /** 声明为拒绝该侧所使用的绝对 token 上限；不是从被测侧推算出的相对值。 */
+    ceilingTokens: number;
+    /** 该侧实际消耗，缺席即无法判定。 */
+    spentTokens?: number;
+  };
+  /** 未评估时的拒绝码，进历史与紧凑摘要。 */
+  refusedBy?: ScreenRefusalCode;
+}
+type AdmissionReasonCode = 'admissible' | 'not-measured' | 'scope-mismatch' | 'below-floor' | 'quality-inconclusive' | 'cost-inconclusive' | 'cost-rule-failed' | 'in-band-no-relief' | 'guard-violated' | 'refused-admission-baseline';
+interface Admission {
+  candidateId: string;
+  admissible: boolean;
+  reasonCode: AdmissionReasonCode;
+  reason: string;
+  quality?: number;
+  cost?: number;
+  deltaQuality?: number;
+  /** 相对成本变化；任一侧成本未知时为 undefined，绝不置 0（plan §4 override：
+   *  上游 rrsi/evaluate.py:131 在同样输入下返回 0，成本准入静默恒真）。 */
+  deltaCost?: number;
+  novelty: number;
+  bundleLevel: boolean;
+  guards: readonly string[];
+}
+/** 结构性机制新颖度，对应上游 rrsi/components.py:103：候选触到的、 incumbent 从未
+ *  接受过编辑的结构性机制数。只作记录与 selectRound 的确定性 tie-break，不放宽准入。 */
+declare function noveltyOf(mechanisms: readonly MechanismKind[], incumbentCounts: Readonly<Partial<Record<MechanismKind, number>>>): number;
+/** 上游 cost_rule:81 的 TS 版。plan §4 override：
+ *  - 增益分支追加 maxRelativeIncrease = 25% 硬上限（plan §4「默认上限 25% 且受收益约束」）；
+ *  - 任一侧成本未知 → cost-inconclusive 拒绝，不按上游 ΔC = 0 放行；
+ *  - 带内只认成本改善 ≥ max(relativeCostBand, minRelief)，novelty 不参与放宽
+ *    （plan §4「首版无 novelty 放宽」，上游 selection.py:90 的 +w_n·ν 项删除）。 */
+declare function costRule(deltaQuality: number, deltaCost: number | undefined, novelty: number, calibration: NoiseCalibration, policy: StrategyPolicy): {
+  ok: boolean;
+  reasonCode: AdmissionReasonCode;
+  reason: string;
+};
+declare function admit(input: {
+  candidate: CandidateMeasurement;
+  incumbent: AggregateScore;
+  /** incumbent 所属的冻结 scope；与 candidate.scope 不一致即 scope-mismatch。 */
+  incumbentScope: string;
+  /** 同一冻结 scope 的历史最佳质量（plan §4 的 floor）。 */
+  bestQuality: number;
+  calibration: NoiseCalibration;
+  /** incumbent 已接受编辑的机制计数（novelty 的唯一用途是记录与 tie-break）。 */
+  incumbentMechanismCounts?: Readonly<Partial<Record<MechanismKind, number>>>;
+  /** 领域非补偿守卫（原验收、holdout、能力消费），非空即拒绝。 */
+  guards: readonly string[];
+  policy: StrategyPolicy;
+}): Admission;
+/** 多候选时取 admissible 中质量最高；首版 m=1，保留形态供对照实验使用。
+ *  质量相同的确定性 tie-break：novelty 高者优先，bundleLevel 候选劣后，最后按 candidateId。 */
+declare function selectRound(input: {
+  candidates: readonly CandidateMeasurement[];
+  incumbent: AggregateScore;
+  incumbentScope: string;
+  bestQuality: number;
+  calibration: NoiseCalibration;
+  incumbentMechanismCounts?: Readonly<Partial<Record<MechanismKind, number>>>;
+  guardsFor: (candidate: CandidateMeasurement) => readonly string[];
+  policy: StrategyPolicy;
+}): {
+  winner?: CandidateMeasurement;
+  admissions: readonly Admission[];
+};
+//#endregion
+//#region src/strategy/history.d.ts
+interface CandidateFact {
+  candidateId: string;
+  libraryId: string;
+  contentDigest: string;
+  round: number;
+  edits: readonly DeclaredEdit[];
+  scope?: string;
+}
+interface EvaluationFact {
+  candidateId: string;
+  scope: string;
+  measurement: EvaluationMeasurement;
+  verdict: string;
+  evidenceRefs: readonly string[];
+}
+interface ConsumptionFact {
+  candidateId: string;
+  consumedBy: readonly string[];
+}
+interface VersionFact {
+  round: number;
+  libraryId: string;
+  revisionId: string;
+  contentDigest: string;
+}
+interface RefutationFact {
+  candidateId: string;
+  contentDigest: string;
+  mechanism?: MechanismKind;
+  hypothesis?: string;
+  reasonCode: AdmissionReasonCode | ScreenRefusalCode;
+  reason: string;
+  evidenceRefs: readonly string[];
+  round: number;
+}
+interface HistoryFacts {
+  candidates: readonly CandidateFact[];
+  evaluations: readonly EvaluationFact[];
+  consumption: readonly ConsumptionFact[];
+  refutations: readonly RefutationFact[];
+  versions: readonly VersionFact[];
+}
+interface HistoryEntry {
+  round: number;
+  candidateId: string;
+  mechanism?: MechanismKind;
+  hypothesis?: string;
+  measured: boolean;
+  deltaQuality?: number;
+  deltaCost?: number;
+  outcome: 'accepted' | 'rejected' | 'lost' | 'unmeasured';
+  reasonCode?: string;
+  evidenceRefs: readonly string[];
+}
+interface MechanismYield {
+  mechanism: MechanismKind;
+  tried: boolean;
+  recentBestGain?: number;
+  acceptedEdits: number;
+}
+interface SimplificationCandidate {
+  kind: 'delete-candidate';
+  mechanism: MechanismKind;
+  candidateIds: readonly string[];
+  recentBestGain?: number;
+}
+interface HistoryView {
+  scope: string;
+  bestQuality?: number;
+  entries: readonly HistoryEntry[];
+  triedMechanisms: readonly MechanismKind[];
+  untestedMechanisms: readonly MechanismKind[];
+  yieldByMechanism: readonly MechanismYield[];
+  /** 只给出「待删除候选」，绝不给出「按组件标签删功能」（plan §4 override：上游
+   *  rrsi/history.py:152 的 prune_set 给出要删的组件）。没有候选 id 的机制不产生条目。 */
+  simplificationCandidates: readonly SimplificationCandidate[];
+  refutations: readonly RefutationFact[];
+  roundsWithoutQualityGain: number;
+  steering: 'continue' | 'steer-untested' | 'stop-search';
+}
+/** 紧凑历史渲染时未测量 abort 的保留上限（照抄 rrsi/history.py:174 的 4）。 */
+declare const UNMEASURED_RENDER_LIMIT = 4;
+/** 历史由候选、评估、版本和消费事实派生（plan §4 override：上游 history.py:60 读自己写的
+ *  JSONL）。同一 (candidateId, scope) 的全部重复评估经 poolEvaluations 聚合，绝不取最新一次。 */
+declare function foldHistory(facts: HistoryFacts, policy: StrategyPolicy, now: number): HistoryView;
+/** 同字节候选直接结案（plan §4）：同 library 内已否证过的 contentDigest 立即拒绝，不再测量。
+ *  调用方先把草稿登记为 CandidateFact 再调用；digest 未命中否证时退到同假设匹配。 */
+declare function refutationFor(facts: HistoryFacts, libraryId: string, contentDigest: string): {
+  kind: 'same-bytes';
+  refutation: RefutationFact;
+} | {
+  kind: 'same-hypothesis';
+  refutation: RefutationFact;
+} | undefined;
+/** 已否证假设需要新证据才能重测（plan §4）。scope 变化也算新情境。 */
+declare function mayRetest(facts: HistoryFacts, refutation: RefutationFact, input: {
+  scope: string;
+  evidenceRefs: readonly string[];
+}): boolean;
+/** σ_t = 1[S_t − S_{t−w} ≤ δ]，w 轮以内历史不足时为 0（照抄 rrsi/history.py:189）。 */
+declare function stallFlag(trajectory: readonly number[], t: number, window: number, band: number): 0 | 1;
+/** E_t = (σ_t, U_t, m_draft) 加交给 proposer 的文本（对照 rrsi/history.py:196，
+ *  机制词表换成本移植的 MECHANISM_KINDS）。 */
+declare function exploration(t: number, stall: 0 | 1, tried: readonly MechanismKind[], reservedDrafts: number): {
+  sigma: 0 | 1;
+  untried: readonly MechanismKind[];
+  reservedDrafts: number;
+  text: string;
+};
+/** 紧凑历史：measured 主导，未测量 abort 最多保留 UNMEASURED_RENDER_LIMIT 条
+ *  （照抄 rrsi/history.py:166-185）。 */
+declare function renderHistory(view: HistoryView, limit: number): readonly HistoryEntry[];
+//#endregion
+export { APPLYABLE_TARGET_TYPES, Admission, AdmissionReasonCode, AggregateScore, type ApplyOutcome, CandidateFact, CandidateMeasurement, CapabilityRow, CapabilityRowIdentity, CapabilitySkill, CapabilityStoreView, type CommitCapability, type CommitDirection, type CommitIntentRecord, type CommitIntentView, type Config, ConsumptionFact, CriterionRepairExample, CriticVerdict, DEFAULT_STRATEGY_POLICY, DeclaredEdit, EVOLUTION_DECISIONS, EXPERIMENT_ADMISSION_SOURCES, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EditBudgetPolicy, EvaluationFact, EvaluationMeasurement, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, EvolutionService as default, type EvolutionStatus, ExperimentAdmissionRefusal, ExperimentAdmissionSource, ExperimentBudget, ExperimentCandidate, ExperimentCost, ExperimentCriterionDetail, ExperimentJudgedRecord, ExperimentKey, ExperimentLedger, ExperimentObjective, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSnapshot, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCapability, FrozenCapabilityRow, FrozenCapabilitySide, FrozenCriterion, FrozenCriterionExample, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, FrozenSampleAdmission, FrozenTaskDefinition, type GateAnswers, HistoryEntry, HistoryFacts, HistoryView, MECHANISM_KINDS, McpServerIdentity, MechanismKind, MechanismYield, ModelSelection, NoiseCalibration, OUTCOME_JUDGE_PROMPT, OUTCOME_RANK, OutcomeEvaluation, OutcomeEvaluationPlan, OutcomeJudgement, OutcomeMeasurement, OutcomeModelCall, OutcomeModelResult, PrecheckSkillVerdict, PreparedCapability, type PreparedView, type PromotionCheck, type ProposeInput, ProviderPrecheckView, QualitySample, QualityScale, RefutationFact, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, RunFacts, STRUCTURAL_MECHANISM_KINDS, SampleProviders, Screen, ScreenRefusalCode, SideRelation, SimplificationCandidate, SkillContentIdentity, SkillContractIdentity, type SkillMutation, StrategyPolicy, StructuralCheck, TaskDefinitionIdentity, TaskDefinitionMutation, TaskMeasurement, TrialObservation, UNMEASURED_RENDER_LIMIT, UNREGULARIZED_STRATEGY_POLICY, VerifierVocabularyView, VersionFact, admit, agentOptionsOf, aggregateEvaluation, applyTargets, assertAdmissionRecord, assertBudgetAllowsStart, assertCapabilityCandidateAdmissible, assertCapabilityRow, assertDecisionTransition, assertExperimentReport, assertExperimentSample, assertExperimentStartRecord, assertFrozenExperiment, assertMcpServerIdentity, assertOutcomeEvaluation, assertOutcomeMeasurements, assertOutcomePlan, assertRecordedRunOrigin, assertSampleCriteria, assertSampleRole, assertScaleAddressesFrozenMeasurement, assertStrategyPolicy, assertTemplateBaseline, assertTemplateIdentity, bootstrapStdError, buildExperimentReport, buildWorkspace, calibrateNoise, candidateRegistryRevisionOf, canonicalJson, capabilityOverlay, capabilityRefusal, capabilityRowBytes, capabilityRowDigest, capabilityRowIdentity, capabilityTableWith, compareExperimentSides, compareReplaySides, costOf, costRule, criteriaOf, criterionDetail, digestOf, directoryDigest, discoverSkill, editBudget, editBudgetTable, evidenceRefsOf, experimentCandidate, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentStore, exploration, firstSkillOverlay, foldExperiments, foldHistory, freezeCriterionRepair, freezeExperiment, frozenCapabilitySample, frozenCapabilitySideOf, frozenCriterionOf, frozenDigestOf, frozenIdentityOf, frozenProviderIdentity, frozenSampleOf, independentOracleCriteria, isExperimentRecord, latestReview, mayRetest, mcpServerIdentity, modelSelectionOf, nonEmpty, normalizeSnapshot, normalizeSnapshotPaths, noveltyOf, oracleContractDigest, overallExperimentVerdict, parseOutcomeJudgement, poolEvaluations, prepareTaskDefinition, preparedContentDigestOf, protectedInputsDigest, qualityOf, readPreparedCapability, readTaskDefinition, recoveredSampleRecord, refusedBaselineRun, refusedProviderLines, refutationFor, regularizersActive, renderHistory, renderProviderRoles, reportedTokensSpent, resolveLink, resumeExperiment, reviewRefOf, runExperiment, runFactsOf, safeSegment, sameKeyRefusal, sampleRecord, screenBeforeMeasurement, selectRound, sideDetailOf, stallFlag, strategyPolicyDigest, templateBytes, templateCommitRequest, templateIdentity, templateLibraryDigest, tokensOfRecord, validateCapabilityMutation, validateSpec, validateTaskDefinitionMutation, walkSnapshotInput };

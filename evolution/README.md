@@ -156,3 +156,60 @@ hold the comparer/validators, the evidence gates and the experiment itself.
 `evolution.ts`, `replay.ts` and `commit.ts` keep their historical import paths
 (`replay.ts` is a facade over its folder); `experiment/`, `promotion/` and the
 rest are imported from their own modules.
+
+## RRSI strategy port
+
+`src/strategy/` ports the RRSI search strategy as pure functions, derived from
+google-research/rrsi @ be50316 (Apache-2.0, `rrsi/LICENSE`):
+`rrsi/{schedule,evaluate,calibrate,selection,history}.py`. Provenance and license
+notices are kept at the top of every ported file, and Python→TS test vectors live in
+`tests/vectors/rrsi-vectors.json` (regenerate with
+`tests/vectors/extract-rrsi-vectors.py <checkout>`; vectors are tagged
+`deterministic` / `port-adapted` / `upstream-native` so a divergence is never
+mistaken for an upstream output).
+
+- `policy.ts` — the frozen `StrategyPolicy` (`rrsi-strategy@1`), the mechanism
+  vocabulary (`skill / capability / task-template / text / parameter`, verified by
+  candidate adapters rather than diff regexps), `DEFAULT_STRATEGY_POLICY`, the
+  three-arm comparison arm `UNREGULARIZED_STRATEGY_POLICY`, `regularizersActive`
+  (the grouping key for the plan §5 comparison) and `strategyPolicyDigest`.
+- `schedule.ts` — annealed L0 edit budget. **Port change:** denominator
+  `rounds - 1`, so `editBudgetTable(p)[p.rounds-1] === p.min` holds exactly
+  (plan §4); upstream divides by `T` and only its out-of-range endpoint
+  `edit_budget(T, T, …)` reaches `b_min` (rrsi/schedule.py:48, tests/test_core.py:63).
+  With `b_min=1, b_max=2` the cosine quantizes to 2 until the final round; this is
+  pinned literally rather than smoothed.
+- `scale.ts` — the frozen [0,1] quality scale. Original acceptance is never
+  compensable: `fail`/`inconclusive` yield 0 before any numeric is read, and an
+  LLM judge only enters through a pre-frozen `fixed-numeric-scale` that must
+  address a frozen measurement.
+- `measure.ts` — Ŝ/Ĉ aggregation (missing trials keep the full denominator,
+  unknown cost stays `undefined`, never 0), `poolEvaluations` over **all**
+  repetitions of a frozen scope, and `calibrateNoise` with a deterministic LCG
+  bootstrap (bit-identical in TS and in the extraction script). **Port change:**
+  direct observation needs ≥ 3 independent solves; any path that observes no
+  positive spread degrades to `declared-floor` (`policy.noise.floor`), so a single
+  trial never yields a zero noise band (upstream rrsi/calibrate.py:103 collapses
+  to δ = 0 at k = 1).
+- `screen.ts` — structural check plus exactly one independent critic before any
+  measurement (no repair chain, unlike upstream critic.py's `repair_rounds = 5`);
+  refused candidates consume no replay budget and never enter measured history.
+- `selection.ts` — noise floor, cost rule, argmax. **Port changes:** the gaining
+  branch is capped at `maxRelativeIncrease = 0.25` (plan §4; upstream beta1 = 40 is
+  unbounded, so gains above +0.375pp buy no extra allowance); unknown cost is
+  `cost-inconclusive` (upstream returns ΔC = 0 and silently passes,
+  rrsi/evaluate.py:131); in-band candidates need cost relief ≥ max(cost noise, 5%)
+  and novelty never relaxes anything (`noveltyRelaxation: false`, vs the `+w_n·ν`
+  term in rrsi/selection.py:90); a refused-at-admission baseline uses a
+  pre-declared absolute token ceiling and never fabricates a relative cost.
+- `history.ts` — history derived from candidate / evaluation / version /
+  consumption facts (not a self-written JSONL, rrsi/history.py:60), pruning as
+  `simplificationCandidates` = delete-candidate evaluations with real candidate
+  ids (never "delete a component", rrsi/history.py:152), byte-identical candidates
+  closed by `refutationFor` without measurement, and `mayRetest` requiring new
+  evidence or a new scope. `steering: 'stop-search'` ends only the method search;
+  whether the business run continues is the supervisor's own decision.
+
+`observe.ts` (adapting real experiment reports into strategy inputs, plus the
+recomputable `StrategyDecisionRecord`) lands with the evolution pipeline batch;
+until then the strategy surface is pure and free of fs / cordis / replay imports.

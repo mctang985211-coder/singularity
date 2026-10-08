@@ -691,6 +691,10 @@ interface RunProviderBinding {
   mcpServers: RunMcpServerBinding[];
   /** Absolute path of this run's snapshot skill root — the directory whose `<name>/SKILL.md` entries the worker's skill layer registers — present exactly when the run materialized the content it was bound to. */
   snapshotRoot?: string;
+  /** The immutable environment revision (`task-runtime` `EnvironmentRevisionManifest.revisionId`) this binding's bytes were read from. Absent on every binding recorded before environment revisions existed — an old-protocol binding. */
+  environmentRevisionId?: string;
+  /** The unpublished candidate revision an explicit trial bound, same value as the run's own `trialCandidateRef`; absent on an ordinary binding of the active revision. */
+  trialCandidateRef?: string;
 }
 /** Where one run sits in the A3 coordination protocol. `active` is the phase a run is born in, and the only one in which it may write, decompose or submit; `waiting_children` is a run whose decomposition batch was admitted atomically and … */
 type ExecutionPhase = 'active' | 'waiting_children' | 'submitted';
@@ -797,6 +801,10 @@ interface TaskRun {
   agentPreset?: string;
   /** What this run was bound to and loaded (S1-C item 4). Absent on every run created before the field existed, and on a run whose caller assembled its plan without an admission-time pre-check: neither loaded content this build can vouch for … */
   providerBinding?: RunProviderBinding;
+  /** The environment revision this run was admitted against (`task-runtime` `EnvironmentRevisionManifest.revisionId`); a child run inherits its parent's. Absent on every run written before environment revisions existed — an old-protocol run, which no receipt is sealed for. */
+  environmentRevisionId?: string;
+  /** The unpublished candidate revision this run explicitly trials, when it does: its presence marks the run as a trial that must not advance the active revision, and it is never the same id as {@link environmentRevisionId}. */
+  trialCandidateRef?: string;
   /** Frozen replay template library, inherited by descendants and restored on adoption. */
   taskTemplatesRoot?: string;
   /** Where this run sits in the A3 coordination protocol. A new run is born `active`, or `submitted` when it has no worker at all (a `spawn: false` replay). */
@@ -1297,15 +1305,6 @@ interface TaskEventEnvelope<K$1 extends TaskEventKind, P> {
 }
 type TaskEvent = { [K in TaskEventKind]: TaskEventEnvelope<K, TaskEventPayloads[K]> }[TaskEventKind];
 //#endregion
-//#region src/service/state.d.ts
-declare class TaskState {
-  private value;
-  constructor(id: string, snapshot?: TaskSnapshot);
-  clone(): TaskState;
-  snapshot(): TaskSnapshot;
-  apply(event: TaskEvent): void;
-}
-//#endregion
 //#region src/service/store.d.ts
 /** The reducer one store set replays: a private snapshot, one event at a time, read detached. */
 interface EventStoreState<Event, Snapshot> {
@@ -1340,6 +1339,13 @@ interface EventStoreConfig<K$1 extends SessionEventType, Snapshot, State extends
   /** Open a store nobody opened yet on first access instead of refusing it, and keep a failed open registered so `close()` reports it. */
   readonly onDemand?: boolean;
 }
+/** The answer of a read-only snapshot door: a missing store reports `exists:false` instead of being created. */
+type ReadOnlyStoreSnapshot<Snapshot> = {
+  readonly exists: false;
+} | {
+  readonly exists: true;
+  readonly snapshot: Snapshot;
+};
 /** The `sessionPersistence`-backed stores one service owns: allocation, replay, serial writes and disposal. */
 declare class EventStoreSet<K$1 extends SessionEventType, Snapshot, State extends EventStoreState<SessionEventMap[K$1], Snapshot>> {
   private readonly ctx;
@@ -1359,6 +1365,11 @@ declare class EventStoreSet<K$1 extends SessionEventType, Snapshot, State extend
   snapshot(id: string): Promise<Snapshot>;
   /** The snapshot every accepted write so far has left: open, then the shared write queue, then a detached read. */
   settledSnapshot(id: string): Promise<Snapshot>;
+  /**
+   * The one zero-write door: replays the stored events into a throwaway state over a `'read'` handle and closes it.
+   * A missing store answers `exists:false`; nothing is created, no write lease is taken, and `this.stores` is never touched.
+   */
+  readOnlySnapshot(id: string): Promise<ReadOnlyStoreSnapshot<Snapshot>>;
   /** One batch, applied to a clone inside the store's write queue and appended only if the reducer accepted it. */
   commit(id: string, events: readonly SessionEventMap[K$1][]): Promise<void>;
   /** Runs `work` inside the store's single write queue and answers what it returned. */
@@ -1379,6 +1390,15 @@ declare class EventStoreSet<K$1 extends SessionEventType, Snapshot, State extend
   private record;
   private broadcast;
   private header;
+}
+//#endregion
+//#region src/service/state.d.ts
+declare class TaskState {
+  private value;
+  constructor(id: string, snapshot?: TaskSnapshot);
+  clone(): TaskState;
+  snapshot(): TaskSnapshot;
+  apply(event: TaskEvent): void;
 }
 //#endregion
 //#region src/index.d.ts
@@ -1403,6 +1423,8 @@ declare class TaskService extends Service {
   createStore(storeId: string): Promise<TaskSnapshot>;
   openStore(storeId: string): Promise<TaskSnapshot>;
   snapshotIn(storeId: string): Promise<TaskSnapshot>;
+  /** The zero-write read door ({@link EventStoreSet.readOnlySnapshot}): a missing store answers `exists:false`, never a creation. */
+  snapshotReadOnly(storeId: string): Promise<ReadOnlyStoreSnapshot<TaskSnapshot>>;
   taskIn(storeId: string, taskId: TaskId): Promise<TaskInstance>;
   runIn(storeId: string, runId: RunId): Promise<TaskRun>;
   /** The tasks one run has admitted altogether, in the order their batches were admitted ({@link runMemberTaskIds} of the run's own projection) — the run's accumulative membership, which is the sequence a parent criterion's `childIndex` names. */
@@ -1462,4 +1484,4 @@ declare class TaskService extends Service {
   private proposalEnvelopeTaskIn;
 }
 //#endregion
-export { AcceptanceCriterion, AdmissionContext, ArtifactRef, BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, BudgetExtensionProposal, BudgetExtensionRequest, CapabilityManifest, CatalogPath, ChildEvidenceRef, CriterionSpec, DecompositionAdmission, DecompositionIdentity, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, type EventStoreConfig, EventStoreSet, type EventStoreState, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, RootProposalIdentity, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunPlacement, RunProviderBinding, RunRecovery, RunSkillBinding, RunStatus, type StoreEntry, type StoreOpenMode, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskBudgetExtension, TaskBudgetExtensionClaim, TaskBudgetExtensionIndex, TaskContract, TaskContractInput, TaskContractVersion, TaskEvent, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskState, TaskStatus, TaskTemplate, TaskTemplateContract, TaskTemplateRef, TemplateParameter, TemplateParameters, TemplateParametersSchema, TemplateScope, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, decompositionDigest, definedKeys, describeBudgetExtension, describeBudgetReading, isTerminalRunStatus, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest };
+export { AcceptanceCriterion, AdmissionContext, ArtifactRef, BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, BudgetExtensionProposal, BudgetExtensionRequest, CapabilityManifest, CatalogPath, ChildEvidenceRef, CriterionSpec, DecompositionAdmission, DecompositionIdentity, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, type EventStoreConfig, EventStoreSet, type EventStoreState, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, type ReadOnlyStoreSnapshot, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, RootProposalIdentity, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunPlacement, RunProviderBinding, RunRecovery, RunSkillBinding, RunStatus, type StoreEntry, type StoreOpenMode, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskBudgetExtension, TaskBudgetExtensionClaim, TaskBudgetExtensionIndex, TaskContract, TaskContractInput, TaskContractVersion, TaskEvent, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskState, TaskStatus, TaskTemplate, TaskTemplateContract, TaskTemplateRef, TemplateParameter, TemplateParameters, TemplateParametersSchema, TemplateScope, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, decompositionDigest, definedKeys, describeBudgetExtension, describeBudgetReading, isTerminalRunStatus, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest };

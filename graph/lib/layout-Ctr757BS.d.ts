@@ -1,4 +1,5 @@
 import { Context, Service } from "@deepseek-ai/cordis";
+import { ReadOnlyStoreSnapshot } from "@dangosys/dsh-singularity-task";
 import { SessionId } from "@deepseek-ai/dsh-session";
 
 //#region src/layout-types.d.ts
@@ -38,6 +39,8 @@ declare class LayoutService extends Service {
   clearActive(): void;
   snapshot(): Promise<LayoutSnapshot>;
   snapshotIn(id: string): Promise<LayoutSnapshot>;
+  /** The zero-write read door ({@link EventStoreSet.readOnlySnapshot}): a missing store answers `exists:false`, never a creation. */
+  snapshotReadOnlyIn(id: string): Promise<ReadOnlyStoreSnapshot<LayoutSnapshot>>;
   set(sessionId: SessionId, node: CanvasNode): Promise<void>;
   setIn(id: string, sessionId: SessionId, node: CanvasNode): Promise<void>;
   commitIn(id: string, events: readonly LayoutEvent[]): Promise<void>;

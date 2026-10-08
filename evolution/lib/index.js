@@ -158,23 +158,23 @@ function evolutionFail(detail) {
 function isRecord(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-function nonEmpty$1(value, field, fail = evolutionFail) {
-	if (typeof value !== "string" || value.trim().length === 0) throw fail(`${field} must be a non-empty string`);
+function nonEmpty$1(value, field, fail$1 = evolutionFail) {
+	if (typeof value !== "string" || value.trim().length === 0) throw fail$1(`${field} must be a non-empty string`);
 	return value;
 }
-function assertOnlyKeys(value, allowed, field, fail = evolutionFail) {
-	for (const key of Object.keys(value)) if (!allowed.includes(key)) throw fail(`${field} has unknown key "${key}"`);
+function assertOnlyKeys(value, allowed, field, fail$1 = evolutionFail) {
+	for (const key of Object.keys(value)) if (!allowed.includes(key)) throw fail$1(`${field} has unknown key "${key}"`);
 }
 /** A single safe path segment (one directory name): no separators, never `.`/`..`, never absolute. */
-function assertSegment(value, field, fail = evolutionFail) {
-	const text = nonEmpty$1(value, field, fail);
-	if (text === "." || text === ".." || text.includes("/") || text.includes("\\") || isAbsolute(text)) throw fail(`${field} must be a single safe path segment, got "${text}"`);
+function assertSegment(value, field, fail$1 = evolutionFail) {
+	const text = nonEmpty$1(value, field, fail$1);
+	if (text === "." || text === ".." || text.includes("/") || text.includes("\\") || isAbsolute(text)) throw fail$1(`${field} must be a single safe path segment, got "${text}"`);
 	return text;
 }
 /** Resolve `rel` under `base`, refusing anything that would land outside — the sandbox confinement belt. */
-function resolveWithin(base, rel, fail = evolutionFail) {
+function resolveWithin(base, rel, fail$1 = evolutionFail) {
 	const abs = resolve(base, rel);
-	if (abs !== base && !abs.startsWith(`${base}${sep}`)) throw fail(`sandbox path "${rel}" escapes ${base}`);
+	if (abs !== base && !abs.startsWith(`${base}${sep}`)) throw fail$1(`sandbox path "${rel}" escapes ${base}`);
 	return abs;
 }
 /** One coded refusal, carrying its machine-readable code as the message's second word. */
@@ -2459,7 +2459,7 @@ async function measure(ctx, command, cwd, signal) {
 }
 /** Measure one command through the subprocess seam: termination is the provider's own managed-range procedure. */
 function measureConfined(subprocess, argv, cwd, signal) {
-	return new Promise((resolveResult, reject) => {
+	return new Promise((resolveResult, reject$1) => {
 		let handle;
 		try {
 			handle = subprocess.spawn({
@@ -2473,7 +2473,7 @@ function measureConfined(subprocess, argv, cwd, signal) {
 				graceMs: TERMINATION_GRACE_MS
 			});
 		} catch (error) {
-			reject(error);
+			reject$1(error);
 			return;
 		}
 		const output = {
@@ -2501,8 +2501,8 @@ function measureConfined(subprocess, argv, cwd, signal) {
 		const settle = (error, code) => {
 			clearTimeout(timeout);
 			signal?.removeEventListener("abort", abort);
-			if (error !== void 0) reject(error);
-			else if (code === null || code === void 0) reject(/* @__PURE__ */ new Error("evolution: outcome measurement did not report an exit code"));
+			if (error !== void 0) reject$1(error);
+			else if (code === null || code === void 0) reject$1(/* @__PURE__ */ new Error("evolution: outcome measurement did not report an exit code"));
 			else resolveResult({
 				stdout: Buffer.concat(output.stdout).toString("utf8"),
 				stderr: Buffer.concat(output.stderr).toString("utf8"),
@@ -2518,7 +2518,7 @@ function measureConfined(subprocess, argv, cwd, signal) {
 }
 /** Measure one command this package spawns itself, for a context that mounts no confinement seam. */
 function measureDirect(command, cwd, signal) {
-	return new Promise((resolveResult, reject) => {
+	return new Promise((resolveResult, reject$1) => {
 		const child = spawn("/bin/sh", ["-c", command], {
 			cwd,
 			detached: true,
@@ -2542,7 +2542,7 @@ function measureDirect(command, cwd, signal) {
 			if (child.pid !== void 0) try {
 				process.kill(-child.pid, "SIGKILL");
 			} catch (error$1) {
-				if (error$1.code !== "ESRCH") reject(error$1);
+				if (error$1.code !== "ESRCH") reject$1(error$1);
 			}
 		};
 		for (const stream of ["stdout", "stderr"]) child[stream].on("data", (chunk) => {
@@ -2560,8 +2560,8 @@ function measureDirect(command, cwd, signal) {
 		child.once("close", (code, killedBy) => {
 			clearTimeout(timeout);
 			signal?.removeEventListener("abort", abort);
-			if (failure !== void 0) reject(failure);
-			else if (code === null) reject(/* @__PURE__ */ new Error(`evolution: outcome measurement terminated by ${killedBy}`));
+			if (failure !== void 0) reject$1(failure);
+			else if (code === null) reject$1(/* @__PURE__ */ new Error(`evolution: outcome measurement terminated by ${killedBy}`));
 			else resolveResult({
 				stdout: Buffer.concat(output.stdout).toString("utf8"),
 				stderr: Buffer.concat(output.stderr).toString("utf8"),
@@ -6351,4 +6351,698 @@ var EvolutionService = class EvolutionService extends EvolutionServiceCore {
 var evolution_default = EvolutionService;
 
 //#endregion
-export { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EXPERIMENT_ADMISSION_SOURCES, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, OUTCOME_JUDGE_PROMPT, OUTCOME_RANK, agentOptionsOf, applyTargets, assertAdmissionRecord, assertBudgetAllowsStart, assertCapabilityCandidateAdmissible, assertCapabilityRow, assertDecisionTransition, assertExperimentReport, assertExperimentSample, assertExperimentStartRecord, assertFrozenExperiment, assertMcpServerIdentity, assertOutcomeEvaluation, assertOutcomeMeasurements, assertOutcomePlan, assertRecordedRunOrigin, assertSampleCriteria, assertSampleRole, assertTemplateBaseline, assertTemplateIdentity, buildExperimentReport, buildWorkspace, candidateRegistryRevisionOf, canonicalJson, capabilityOverlay, capabilityRefusal, capabilityRowBytes, capabilityRowDigest, capabilityRowIdentity, capabilityTableWith, compareExperimentSides, compareReplaySides, costOf, criteriaOf, criterionDetail, evolution_default as default, digestOf, directoryDigest, discoverSkill, evidenceRefsOf, experimentCandidate, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentStore, firstSkillOverlay, foldExperiments, freezeCriterionRepair, freezeExperiment, frozenCapabilitySample, frozenCapabilitySideOf, frozenCriterionOf, frozenDigestOf, frozenIdentityOf, frozenProviderIdentity, frozenSampleOf, independentOracleCriteria, isExperimentRecord, latestReview, mcpServerIdentity, modelSelectionOf, nonEmpty, normalizeSnapshot, normalizeSnapshotPaths, oracleContractDigest, overallExperimentVerdict, parseOutcomeJudgement, prepareTaskDefinition, preparedContentDigestOf, protectedInputsDigest, readPreparedCapability, readTaskDefinition, recoveredSampleRecord, refusedBaselineRun, refusedProviderLines, renderProviderRoles, reportedTokensSpent, resolveLink, resumeExperiment, reviewRefOf, runExperiment, runFactsOf, safeSegment, sameKeyRefusal, sampleRecord, sideDetailOf, templateBytes, templateCommitRequest, templateIdentity, templateLibraryDigest, tokensOfRecord, validateCapabilityMutation, validateSpec, validateTaskDefinitionMutation, walkSnapshotInput };
+//#region src/strategy/policy.ts
+/** 一次搜索使用的机制词表。与上游 K（rrsi/components.py:44）不同，机制不是根据 diff 正则猜出来的文件名信号，
+*  而是候选适配器按真实资产改动核验后的标签。 */
+const MECHANISM_KINDS = [
+	"skill",
+	"capability",
+	"task-template",
+	"text",
+	"parameter"
+];
+/** 增加机器结构的机制（对应上游 K_STR，rrsi/components.py:46）。 */
+const STRUCTURAL_MECHANISM_KINDS = [
+	"skill",
+	"capability",
+	"task-template"
+];
+const DEFAULT_STRATEGY_POLICY = {
+	version: "rrsi-strategy@1",
+	rounds: 20,
+	trials: 3,
+	candidatesPerRound: 1,
+	editBudget: {
+		min: 1,
+		max: 2
+	},
+	stall: {
+		window: 2,
+		reservedDrafts: 1
+	},
+	noise: {
+		z: 2,
+		minIndependentEvaluations: 3,
+		bootstrapReps: 2e3,
+		seed: 7,
+		floor: .02
+	},
+	cost: {
+		baseAllowance: .1,
+		gainFundedIncrease: 40,
+		maxRelativeIncrease: .25
+	},
+	inBand: { minRelief: .05 },
+	noveltyRelaxation: false,
+	pruneWindow: 4,
+	stallRounds: 2,
+	baselineAdmissionCeilingTokens: 0,
+	critic: "required"
+};
+/** plan §5 三臂对照的第二臂：同一条管线、正则化全部关闭。 */
+const UNREGULARIZED_STRATEGY_POLICY = {
+	...DEFAULT_STRATEGY_POLICY,
+	editBudget: {
+		min: DEFAULT_STRATEGY_POLICY.editBudget.max,
+		max: DEFAULT_STRATEGY_POLICY.editBudget.max
+	},
+	noise: {
+		...DEFAULT_STRATEGY_POLICY.noise,
+		z: 0,
+		floor: 0
+	},
+	cost: {
+		baseAllowance: 0,
+		gainFundedIncrease: 0,
+		maxRelativeIncrease: Number.POSITIVE_INFINITY
+	},
+	inBand: { minRelief: 0 },
+	pruneWindow: 0,
+	stallRounds: DEFAULT_STRATEGY_POLICY.rounds
+};
+function fail(path, expected) {
+	throw new Error(`StrategyPolicy.${path}: expected ${expected}`);
+}
+function intAt(value, path, min) {
+	if (typeof value !== "number" || !Number.isInteger(value) || value < min) fail(path, `an integer >= ${min}`);
+	return value;
+}
+function numAt(value, path, min, exclusiveMin = false) {
+	if (typeof value !== "number" || Number.isNaN(value)) fail(path, "a number");
+	if (exclusiveMin ? value <= min : value < min) fail(path, `a number ${exclusiveMin ? ">" : ">="} ${min}`);
+	return value;
+}
+function assertStrategyPolicy(value) {
+	if (typeof value !== "object" || value === null) fail("", "an object");
+	const p = value;
+	if (p.version !== "rrsi-strategy@1") fail("version", "'rrsi-strategy@1'");
+	intAt(p.rounds, "rounds", 1);
+	intAt(p.trials, "trials", 1);
+	intAt(p.candidatesPerRound, "candidatesPerRound", 1);
+	const eb = p.editBudget;
+	if (typeof eb !== "object" || eb === null) fail("editBudget", "an object");
+	intAt(eb.min, "editBudget.min", 1);
+	intAt(eb.max, "editBudget.max", 1);
+	if (eb.min > eb.max) fail("editBudget", "min <= max");
+	const stall = p.stall;
+	if (typeof stall !== "object" || stall === null) fail("stall", "an object");
+	intAt(stall.window, "stall.window", 1);
+	intAt(stall.reservedDrafts, "stall.reservedDrafts", 0);
+	const noise = p.noise;
+	if (typeof noise !== "object" || noise === null) fail("noise", "an object");
+	numAt(noise.z, "noise.z", 0);
+	intAt(noise.minIndependentEvaluations, "noise.minIndependentEvaluations", 1);
+	intAt(noise.bootstrapReps, "noise.bootstrapReps", 1);
+	intAt(noise.seed, "noise.seed", 0);
+	numAt(noise.floor, "noise.floor", 0);
+	const cost = p.cost;
+	if (typeof cost !== "object" || cost === null) fail("cost", "an object");
+	numAt(cost.baseAllowance, "cost.baseAllowance", 0);
+	numAt(cost.gainFundedIncrease, "cost.gainFundedIncrease", 0);
+	numAt(cost.maxRelativeIncrease, "cost.maxRelativeIncrease", 0, true);
+	const inBand = p.inBand;
+	if (typeof inBand !== "object" || inBand === null) fail("inBand", "an object");
+	numAt(inBand.minRelief, "inBand.minRelief", 0);
+	if (p.noveltyRelaxation !== false) fail("noveltyRelaxation", "false (首版无 novelty 放宽)");
+	intAt(p.pruneWindow, "pruneWindow", 0);
+	intAt(p.stallRounds, "stallRounds", 1);
+	intAt(p.baselineAdmissionCeilingTokens, "baselineAdmissionCeilingTokens", 0);
+	if (p.critic !== "required") fail("critic", "'required'");
+}
+/** 哪个正则器处于开启状态，进报告与对照实验分组。只做字段读取，判定路径没有 mode 分支。 */
+function regularizersActive(policy) {
+	return {
+		editBudget: policy.editBudget.min !== policy.editBudget.max,
+		noiseFloor: policy.noise.z > 0 && policy.noise.floor > 0,
+		costAdmission: Number.isFinite(policy.cost.maxRelativeIncrease) || policy.cost.baseAllowance > 0 || policy.cost.gainFundedIncrease > 0,
+		inBandShaping: policy.inBand.minRelief > 0,
+		stallSteering: policy.stallRounds < policy.rounds,
+		pruning: policy.pruneWindow > 0
+	};
+}
+function canonical(value) {
+	if (value === null || typeof value !== "object") {
+		if (typeof value === "number" && !Number.isFinite(value)) return JSON.stringify(String(value));
+		return JSON.stringify(value) ?? "undefined";
+	}
+	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+	const record = value;
+	return `{${Object.keys(record).sort().map((k) => `${JSON.stringify(k)}:${canonical(record[k])}`).join(",")}}`;
+}
+/** 冻结策略的内容摘要：对字段变化敏感、对键顺序不敏感。policy.ts 不 import replay 的 digestOf，
+*  避免策略纯函数依赖 replay 实现；规范化规则与 replay/contract.ts 的 canonicalJson 同形。 */
+function strategyPolicyDigest(policy) {
+	return createHash("sha256").update(canonical(policy)).digest("hex");
+}
+
+//#endregion
+//#region src/strategy/schedule.ts
+function assertEditBudgetPolicy(policy) {
+	if (!Number.isInteger(policy.rounds) || policy.rounds < 1) throw new Error(`EditBudgetPolicy.rounds: expected an integer >= 1, got ${policy.rounds}`);
+	if (!Number.isInteger(policy.min) || policy.min < 1) throw new Error(`EditBudgetPolicy.min: expected an integer >= 1, got ${policy.min}`);
+	if (!Number.isInteger(policy.max) || policy.max < policy.min) throw new Error(`EditBudgetPolicy.max: expected an integer >= min (${policy.min}), got ${policy.max}`);
+}
+/** 第 round 轮（0-based）允许的独立编辑数。
+*
+*  plan §4 override：上游 rrsi/schedule.py:48 的分母是 T，t 只取 0..T-1，因此末轮
+*  b(T-1) ≠ b_min（T=20,b_min=1,b_max=4 时 b(19)=2），上游靠越界端点 edit_budget(T,T,…)
+*  才等于 b_min。本移植分母为 rounds-1，table[rounds-1] === min 精确成立（plan §4
+*  「最后一轮确实为一项」），并消掉上游为掩盖浮点误差加的 round(v, 9) 保护。 */
+function editBudget(round, policy) {
+	assertEditBudgetPolicy(policy);
+	if (policy.rounds <= 1) return policy.min;
+	const t = Math.max(0, Math.min(Math.trunc(round), policy.rounds - 1));
+	const v = policy.min + (policy.max - policy.min) * .5 * (1 + Math.cos(Math.PI * t / (policy.rounds - 1)));
+	return Math.ceil(v);
+}
+function editBudgetTable(policy) {
+	assertEditBudgetPolicy(policy);
+	return Array.from({ length: policy.rounds }, (_, t) => editBudget(t, policy));
+}
+
+//#endregion
+//#region src/strategy/scale.ts
+/** trial → [0,1] 质量。原验收不可被数值补偿（plan §4）。
+*
+*  判定顺序不可交换：fail → 0（即使 numeric 满分）；inconclusive → 0 且调用方必须记为
+*  missing（分母不缩小）；pass 才允许标尺数值进入。LLM judge 的分数只能经预先冻结的
+*  fixed-numeric-scale 进入，且仍以原验收为前置条件。 */
+function qualityOf(scale, sample) {
+	let quality;
+	if (sample.acceptance === "fail" || sample.acceptance === "inconclusive") quality = 0;
+	else if (scale.kind === "acceptance-success-rate") quality = 1;
+	else {
+		if (!(scale.atMost > scale.atLeast)) throw new Error(`QualityScale ${scale.metricId}: expected atMost > atLeast, got [${scale.atLeast}, ${scale.atMost}]`);
+		if (sample.numeric === void 0) quality = 0;
+		else {
+			if (!Number.isFinite(sample.numeric)) throw new Error(`QualitySample.numeric: expected a finite number, got ${sample.numeric}`);
+			const t = (sample.numeric - scale.atLeast) / (scale.atMost - scale.atLeast);
+			quality = Math.min(1, Math.max(0, scale.direction === "lower-is-better" ? 1 - t : t));
+		}
+	}
+	if (!Number.isFinite(quality) || quality < 0 || quality > 1) throw new Error(`qualityOf: result ${quality} escapes [0,1]`);
+	return quality;
+}
+/** 标尺必须指向本次实验已冻结的 measurement / 判据；否则拒绝，避免事后挑标尺。 */
+function assertScaleAddressesFrozenMeasurement(scale, frozen) {
+	if (scale.kind === "acceptance-success-rate") return;
+	if (!frozen.measurements.some((m) => m.id === scale.metricId)) throw new Error(`QualityScale ${scale.metricId}: not a frozen measurement of this experiment`);
+}
+
+//#endregion
+//#region src/strategy/measure.ts
+/** 聚合口径照抄 rrsi/evaluate.py:104-119：缺失 slot 以 r = 0 计入，分母不减。 */
+function aggregateEvaluation(input) {
+	let num = 0;
+	let den = 0;
+	let costSum = 0;
+	let costCount = 0;
+	let costUnknown = false;
+	for (const task of input.tasks) for (const trial of task.trials) {
+		const w = trial.weight;
+		num += trial.quality * w;
+		den += w;
+		if (trial.tokens === void 0) costUnknown = true;
+		else if (trial.tokens > 0) {
+			costSum += trial.tokens;
+			costCount += 1;
+		}
+	}
+	return {
+		quality: den > 0 ? num / den : 0,
+		cost: costCount > 0 ? costSum / costCount : void 0,
+		expected: input.tasks.length * input.trials,
+		missing: input.missing,
+		incomplete: input.missing > 0 || costUnknown
+	};
+}
+/** 同一 (candidate, scope) 的全部重复求解合并，不取最新一次（plan §4）。
+*  scope 不一致即拒绝合并，不退化为按顺序取新。 */
+function poolEvaluations(evals) {
+	if (evals.length === 0) throw new Error("poolEvaluations: no evaluations to pool");
+	const scope = evals[0].scope;
+	const tasks = [];
+	const byTask = /* @__PURE__ */ new Map();
+	let trials = 0;
+	let missing = 0;
+	for (const ev of evals) {
+		if (ev.scope !== scope) throw new Error(`poolEvaluations: scope mismatch (${ev.scope} vs ${scope}); refusing to merge across frozen scopes`);
+		trials += ev.trials;
+		missing += ev.missing;
+		for (const task of ev.tasks) {
+			let slot = byTask.get(task.taskId);
+			if (slot === void 0) {
+				slot = [];
+				byTask.set(task.taskId, slot);
+				tasks.push({
+					taskId: task.taskId,
+					trials: slot
+				});
+			}
+			slot.push(...task.trials);
+		}
+	}
+	return {
+		scope,
+		trials,
+		tasks,
+		missing
+	};
+}
+function meanOf(values) {
+	return values.reduce((a, b) => a + b, 0) / values.length;
+}
+function sampleStdev(values) {
+	if (values.length < 2) return 0;
+	const mean = meanOf(values);
+	return Math.sqrt(values.reduce((a, v) => a + (v - mean) ** 2, 0) / (values.length - 1));
+}
+function populationStdev(values) {
+	if (values.length < 2) return 0;
+	const mean = meanOf(values);
+	return Math.sqrt(values.reduce((a, v) => a + (v - mean) ** 2, 0) / values.length);
+}
+/** se(Ŝ) 的注入确定性重采样实现（对照上游 rrsi/calibrate.py:54 的 bootstrap_se）。
+*  重采样器是 32 位 LCG（state = state·1664525 + 1013904223 mod 2³²），取高位
+*  index = floor(state / 65536) % n（低位随奇偶翻转，不可用），无隐藏 RNG，
+*  TS 与提取脚本 extract-rrsi-vectors.py 逐位复算同一序列。 */
+function bootstrapStdError(ev, reps, seed) {
+	const tasks = ev.tasks.filter((t) => t.trials.length > 0);
+	let state = seed % 4294967296;
+	const values = [];
+	for (let rep = 0; rep < reps; rep += 1) {
+		let num = 0;
+		let den = 0;
+		for (const task of tasks) {
+			const n = task.trials.length;
+			for (let j = 0; j < n; j += 1) {
+				state = (state * 1664525 + 1013904223) % 4294967296;
+				const trial = task.trials[Math.floor(state / 65536) % n];
+				num += trial.quality * trial.weight;
+				den += trial.weight;
+			}
+		}
+		values.push(den > 0 ? num / den : 0);
+	}
+	return populationStdev(values);
+}
+/** δ = z · sd(null ΔS)。plan §4 override（对照 rrsi/calibrate.py:85）：
+*  - 直接观测要求 ≥ policy.noise.minIndependentEvaluations（默认 3）次独立求解，上游 ≥2；
+*  - 任何路径观测不到正散布时不得声称 δ = 0：degenerate + noise.floor（plan §4
+*    「单 trial 不产生零噪声结论」）。 */
+function calibrateNoise(evals, policy) {
+	if (evals.length === 0) throw new Error("calibrateNoise: no base evaluations");
+	const aggregates = evals.map(aggregateEvaluation);
+	const z = policy.noise.z;
+	let observed;
+	if (evals.length >= policy.noise.minIndependentEvaluations) {
+		const se = sampleStdev(aggregates.map((a) => a.quality));
+		const sdNull = se * Math.SQRT2;
+		if (sdNull > 0) observed = {
+			band: z * sdNull,
+			method: "repeated-baseline-evaluations",
+			se
+		};
+	}
+	if (observed === void 0) {
+		const pooledEv = poolEvaluations(evals);
+		const se = bootstrapStdError(pooledEv, policy.noise.bootstrapReps, policy.noise.seed);
+		const sdBoot = Math.SQRT2 * se * Math.sqrt(pooledEv.trials / evals[0].trials);
+		if (sdBoot > 0) observed = {
+			band: z * sdBoot,
+			method: "within-task-bootstrap",
+			se
+		};
+	}
+	let degenerate = observed === void 0;
+	const qualityBand = observed?.band ?? policy.noise.floor;
+	const method = observed?.method ?? "declared-floor";
+	const standardError = observed?.se ?? 0;
+	const costs = aggregates.map((a) => a.cost).filter((c) => c !== void 0 && c > 0);
+	let relativeCostBand;
+	if (costs.length >= 2) {
+		const spread = z * sampleStdev(costs) / meanOf(costs);
+		if (spread > 0) relativeCostBand = spread;
+		else {
+			relativeCostBand = policy.noise.floor;
+			degenerate = true;
+		}
+	} else {
+		relativeCostBand = policy.noise.floor;
+		degenerate = true;
+	}
+	return {
+		qualityBand,
+		relativeCostBand,
+		method,
+		evaluations: evals.length,
+		standardError,
+		degenerate
+	};
+}
+
+//#endregion
+//#region src/strategy/screen.ts
+function refuse(reasonCode, reason) {
+	return {
+		ok: false,
+		reasonCode,
+		reason
+	};
+}
+/** 评估前闸门：结构检查与 critic 都发生在任何测量之前，被拒绝的候选不消耗 replay
+*  预算、不进入 measured 历史（照抄 rrsi/history.py:113 的 measured() 语义）。
+*  独立编辑数 = 核验通过的编辑数，必须 1 ≤ n ≤ editBudget(round)（上游 propose.py
+*  的 ‖z‖₀ ≤ b_t 约束）。 */
+function screenBeforeMeasurement(input) {
+	const verified = input.edits.filter((e) => e.mechanismUnverified !== true);
+	const budget = editBudget(input.round, {
+		rounds: input.policy.rounds,
+		...input.policy.editBudget
+	});
+	if (verified.length === 0) return refuse("no-independent-mechanism", `no verified independent edit: ${input.edits.length} declared, 0 verified`);
+	if (verified.length > budget) return refuse("over-budget", `${verified.length} independent edits exceed the round ${input.round} L0 budget ${budget}`);
+	if (!input.structure.ok) return refuse("structure-failed", `structural check failed: ${input.structure.findings.join("; ")}`);
+	if (input.policy.critic === "required" && input.critic === void 0) return refuse("critic-missing", "policy requires one independent critic verdict before measurement");
+	if (input.critic !== void 0 && input.critic.verdict === "reject") return refuse("critic-reject", `critic ${input.critic.criticId} rejected: ${input.critic.reason}`);
+	return {
+		ok: true,
+		bundleLevel: verified.length > 1
+	};
+}
+
+//#endregion
+//#region src/strategy/selection.ts
+/** 结构性机制新颖度，对应上游 rrsi/components.py:103：候选触到的、 incumbent 从未
+*  接受过编辑的结构性机制数。只作记录与 selectRound 的确定性 tie-break，不放宽准入。 */
+function noveltyOf(mechanisms, incumbentCounts) {
+	const seen = new Set(mechanisms);
+	return STRUCTURAL_MECHANISM_KINDS.filter((k) => seen.has(k) && (incumbentCounts[k] ?? 0) === 0).length;
+}
+/** 上游 cost_rule:81 的 TS 版。plan §4 override：
+*  - 增益分支追加 maxRelativeIncrease = 25% 硬上限（plan §4「默认上限 25% 且受收益约束」）；
+*  - 任一侧成本未知 → cost-inconclusive 拒绝，不按上游 ΔC = 0 放行；
+*  - 带内只认成本改善 ≥ max(relativeCostBand, minRelief)，novelty 不参与放宽
+*    （plan §4「首版无 novelty 放宽」，上游 selection.py:90 的 +w_n·ν 项删除）。 */
+function costRule(deltaQuality, deltaCost, novelty, calibration, policy) {
+	if (deltaQuality > calibration.qualityBand) {
+		const budget = Math.min(policy.cost.baseAllowance + policy.cost.gainFundedIncrease * deltaQuality, policy.cost.maxRelativeIncrease);
+		if (deltaCost === void 0) return {
+			ok: false,
+			reasonCode: "cost-inconclusive",
+			reason: `cost unknown for a gaining candidate (gain ${deltaQuality.toFixed(4)} > band ${calibration.qualityBand.toFixed(4)}); refusing instead of assuming dC = 0`
+		};
+		const ok$1 = deltaCost <= budget;
+		return {
+			ok: ok$1,
+			reasonCode: ok$1 ? "admissible" : "cost-rule-failed",
+			reason: `gain ${deltaQuality.toFixed(4)} > band ${calibration.qualityBand.toFixed(4)}; cost change ${deltaCost.toFixed(3)} ${ok$1 ? "<=" : ">"} budget ${budget.toFixed(3)} (min(base ${policy.cost.baseAllowance} + slope ${policy.cost.gainFundedIncrease} * dS, cap ${policy.cost.maxRelativeIncrease}))`
+		};
+	}
+	const relief = Math.max(calibration.relativeCostBand, policy.inBand.minRelief);
+	if (deltaCost === void 0) return {
+		ok: false,
+		reasonCode: "cost-inconclusive",
+		reason: `cost unknown for an in-band candidate (|gain| <= band ${calibration.qualityBand.toFixed(4)}); refusing instead of assuming dC = 0`
+	};
+	const ok = deltaCost <= -relief;
+	return {
+		ok,
+		reasonCode: ok ? "admissible" : "in-band-no-relief",
+		reason: `gain ${deltaQuality.toFixed(4)} within band ${calibration.qualityBand.toFixed(4)}; cost change ${deltaCost.toFixed(3)} must be <= -max(cost band ${calibration.relativeCostBand.toFixed(3)}, min relief ${policy.inBand.minRelief}) = ${(-relief).toFixed(3)}`
+	};
+}
+function reject(candidateId, reasonCode, reason, partial = {}) {
+	return {
+		candidateId,
+		admissible: false,
+		reasonCode,
+		reason,
+		novelty: 0,
+		bundleLevel: false,
+		guards: [],
+		...partial
+	};
+}
+function admit(input) {
+	const { candidate, incumbent, calibration, policy } = input;
+	const verified = candidate.edits.filter((e) => e.mechanismUnverified !== true);
+	const novelty = noveltyOf(verified.map((e) => e.mechanism), input.incumbentMechanismCounts ?? {});
+	const base = {
+		novelty,
+		bundleLevel: verified.length > 1,
+		guards: input.guards
+	};
+	if (candidate.scope !== input.incumbentScope) return reject(candidate.candidateId, "scope-mismatch", `candidate scope ${candidate.scope} differs from the frozen incumbent scope ${input.incumbentScope}`, base);
+	const aggregate = candidate.aggregate;
+	if (aggregate === void 0) return reject(candidate.candidateId, "not-measured", candidate.refusedBy ?? "not evaluated", base);
+	const quality = aggregate.quality;
+	const cost = aggregate.cost;
+	const deltaQuality = quality - incumbent.quality;
+	const deltaCost = cost !== void 0 && incumbent.cost !== void 0 && incumbent.cost > 0 ? (cost - incumbent.cost) / incumbent.cost : void 0;
+	const measured = {
+		...base,
+		quality,
+		cost,
+		deltaQuality,
+		deltaCost
+	};
+	if (candidate.admissionRefusal !== void 0) {
+		const refusal$2 = candidate.admissionRefusal;
+		if (refusal$2.spentTokens === void 0) return reject(candidate.candidateId, "cost-inconclusive", `admission-refusal side (${refusal$2.source}) reported no spend; cannot check the declared ceiling`, measured);
+		if (policy.baselineAdmissionCeilingTokens <= 0 || refusal$2.ceilingTokens > policy.baselineAdmissionCeilingTokens) return reject(candidate.candidateId, "refused-admission-baseline", `declared ceiling ${refusal$2.ceilingTokens} tokens is not authorized by the frozen policy ceiling ${policy.baselineAdmissionCeilingTokens}`, measured);
+		if (refusal$2.spentTokens > refusal$2.ceilingTokens) return reject(candidate.candidateId, "refused-admission-baseline", `admission-refusal side spent ${refusal$2.spentTokens} tokens, above the declared absolute ceiling ${refusal$2.ceilingTokens}`, measured);
+		if (input.guards.length > 0) return reject(candidate.candidateId, "guard-violated", `domain guard violated: ${input.guards.join("; ")}`, measured);
+		return {
+			candidateId: candidate.candidateId,
+			admissible: true,
+			reasonCode: "admissible",
+			reason: `admissible: admission-refusal side spent ${refusal$2.spentTokens} <= declared ceiling ${refusal$2.ceilingTokens} tokens (absolute path, no relative cost fabricated)`,
+			...measured
+		};
+	}
+	if (aggregate.missing > 0) return reject(candidate.candidateId, "quality-inconclusive", `${aggregate.missing} trial(s) missing or inconclusive out of ${aggregate.expected}; original acceptance cannot be compensated`, measured);
+	if (quality < input.bestQuality - calibration.qualityBand) return reject(candidate.candidateId, "below-floor", `below noise-adjusted floor: quality ${quality.toFixed(4)} < best ${input.bestQuality.toFixed(4)} - band ${calibration.qualityBand.toFixed(4)}`, measured);
+	if (input.guards.length > 0) return reject(candidate.candidateId, "guard-violated", `domain guard violated: ${input.guards.join("; ")}`, measured);
+	const rule = costRule(deltaQuality, deltaCost, novelty, calibration, policy);
+	if (!rule.ok) return reject(candidate.candidateId, rule.reasonCode, `${rule.reasonCode === "cost-inconclusive" ? "cost inconclusive" : rule.reasonCode === "in-band-no-relief" ? "in-band candidate without sufficient cost relief" : "cost rule failed"}: ${rule.reason}`, measured);
+	return {
+		candidateId: candidate.candidateId,
+		admissible: true,
+		reasonCode: "admissible",
+		reason: `admissible: ${rule.reason}`,
+		...measured
+	};
+}
+/** 多候选时取 admissible 中质量最高；首版 m=1，保留形态供对照实验使用。
+*  质量相同的确定性 tie-break：novelty 高者优先，bundleLevel 候选劣后，最后按 candidateId。 */
+function selectRound(input) {
+	const admissions = input.candidates.map((candidate) => admit({
+		candidate,
+		incumbent: input.incumbent,
+		incumbentScope: input.incumbentScope,
+		bestQuality: input.bestQuality,
+		calibration: input.calibration,
+		incumbentMechanismCounts: input.incumbentMechanismCounts,
+		guards: input.guardsFor(candidate),
+		policy: input.policy
+	}));
+	const better = (a, b) => {
+		const qa = a.quality ?? -1;
+		const qb = b.quality ?? -1;
+		if (qa !== qb) return qa > qb;
+		if (a.novelty !== b.novelty) return a.novelty > b.novelty;
+		if (a.bundleLevel !== b.bundleLevel) return !a.bundleLevel;
+		return a.candidateId < b.candidateId;
+	};
+	let winner;
+	let best;
+	for (const [i, admission] of admissions.entries()) {
+		if (!admission.admissible) continue;
+		if (best === void 0 || better(admission, best)) {
+			best = admission;
+			winner = input.candidates[i];
+		}
+	}
+	return {
+		winner,
+		admissions
+	};
+}
+
+//#endregion
+//#region src/strategy/history.ts
+const SCREEN_CODES = [
+	"over-budget",
+	"no-independent-mechanism",
+	"structure-failed",
+	"critic-missing",
+	"critic-reject"
+];
+/** 紧凑历史渲染时未测量 abort 的保留上限（照抄 rrsi/history.py:174 的 4）。 */
+const UNMEASURED_RENDER_LIMIT = 4;
+/** 历史由候选、评估、版本和消费事实派生（plan §4 override：上游 history.py:60 读自己写的
+*  JSONL）。同一 (candidateId, scope) 的全部重复评估经 poolEvaluations 聚合，绝不取最新一次。 */
+function foldHistory(facts, policy, now) {
+	const candidateById = new Map(facts.candidates.map((c) => [c.candidateId, c]));
+	const roundOf = (candidateId) => candidateById.get(candidateId)?.round ?? -1;
+	let scope = "";
+	let scopeRound = -1;
+	for (const ev of facts.evaluations) {
+		const r = roundOf(ev.candidateId);
+		if (r > scopeRound || r === scopeRound && ev.scope > scope) {
+			scope = ev.scope;
+			scopeRound = r;
+		}
+	}
+	const candidates = facts.candidates.filter((c) => c.scope === void 0 || c.scope === scope);
+	const latestVersion = facts.versions.reduce((best, v) => best === void 0 || v.round > best.round ? v : best, void 0);
+	const pooled = /* @__PURE__ */ new Map();
+	for (const ev of facts.evaluations) {
+		if (ev.scope !== scope) continue;
+		const list = pooled.get(ev.candidateId) ?? [];
+		list.push(ev.measurement);
+		pooled.set(ev.candidateId, list);
+	}
+	const aggregateOf = (candidateId) => {
+		const evals = pooled.get(candidateId);
+		return evals === void 0 ? void 0 : aggregateEvaluation(poolEvaluations(evals));
+	};
+	const incumbent = latestVersion === void 0 ? void 0 : candidates.find((c) => c.contentDigest === latestVersion.contentDigest);
+	const baseline = incumbent === void 0 ? void 0 : aggregateOf(incumbent.candidateId);
+	const entries = [];
+	const measuredQualities = [];
+	for (const candidate of candidates) {
+		const aggregate = aggregateOf(candidate.candidateId);
+		const refutation = facts.refutations.find((r) => r.candidateId === candidate.candidateId);
+		const evaluationRefs = facts.evaluations.filter((e) => e.candidateId === candidate.candidateId && e.scope === scope).flatMap((e) => e.evidenceRefs);
+		const measured = aggregate !== void 0 || refutation !== void 0 && !SCREEN_CODES.includes(refutation.reasonCode);
+		const outcome = facts.versions.some((v) => v.contentDigest === candidate.contentDigest) ? "accepted" : !measured ? "unmeasured" : refutation !== void 0 ? "rejected" : "lost";
+		const deltaQuality = aggregate !== void 0 && baseline !== void 0 ? aggregate.quality - baseline.quality : void 0;
+		const deltaCost = aggregate?.cost !== void 0 && baseline?.cost !== void 0 && baseline.cost > 0 ? (aggregate.cost - baseline.cost) / baseline.cost : void 0;
+		const verified = candidate.edits.filter((e) => e.mechanismUnverified !== true);
+		entries.push({
+			round: candidate.round,
+			candidateId: candidate.candidateId,
+			mechanism: verified.length === 1 ? verified[0].mechanism : void 0,
+			hypothesis: verified.length === 1 ? verified[0].hypothesis : void 0,
+			measured,
+			deltaQuality,
+			deltaCost,
+			outcome,
+			reasonCode: refutation?.reasonCode,
+			evidenceRefs: refutation?.evidenceRefs ?? evaluationRefs
+		});
+		if (aggregate !== void 0) measuredQualities.push(aggregate.quality);
+	}
+	entries.sort((a, b) => a.round - b.round || (a.candidateId < b.candidateId ? -1 : 1));
+	const mechanismsOf = (entry) => {
+		const candidate = candidateById.get(entry.candidateId);
+		return candidate === void 0 ? [] : candidate.edits.filter((e) => e.mechanismUnverified !== true).map((e) => e.mechanism);
+	};
+	const tried = /* @__PURE__ */ new Set();
+	for (const entry of entries) if (entry.measured) for (const m of mechanismsOf(entry)) tried.add(m);
+	const yieldByMechanism = MECHANISM_KINDS.map((mechanism) => {
+		const gains = entries.filter((e) => e.measured && e.deltaQuality !== void 0 && now - e.round <= policy.pruneWindow && mechanismsOf(e).includes(mechanism)).map((e) => e.deltaQuality);
+		return {
+			mechanism,
+			tried: tried.has(mechanism),
+			recentBestGain: gains.length === 0 ? void 0 : Math.max(...gains),
+			acceptedEdits: entries.filter((e) => e.outcome === "accepted" && mechanismsOf(e).includes(mechanism)).length
+		};
+	});
+	const simplificationCandidates = [];
+	for (const y of yieldByMechanism) {
+		if (!y.tried || y.recentBestGain === void 0 || y.recentBestGain > 0) continue;
+		const candidateIds = entries.filter((e) => e.outcome === "accepted" && mechanismsOf(e).includes(y.mechanism)).map((e) => e.candidateId);
+		if (candidateIds.length === 0) continue;
+		simplificationCandidates.push({
+			kind: "delete-candidate",
+			mechanism: y.mechanism,
+			candidateIds,
+			recentBestGain: y.recentBestGain
+		});
+	}
+	const bestQuality = measuredQualities.length === 0 ? void 0 : Math.max(...measuredQualities);
+	let roundsWithoutQualityGain = 0;
+	for (let r = now - 1; r >= 0; r -= 1) {
+		if (entries.some((e) => e.round === r && e.outcome === "accepted" && e.deltaQuality !== void 0 && e.deltaQuality > policy.noise.floor)) break;
+		roundsWithoutQualityGain += 1;
+	}
+	const untestedMechanisms = MECHANISM_KINDS.filter((m) => !tried.has(m));
+	const steering = roundsWithoutQualityGain >= policy.stallRounds ? untestedMechanisms.length > 0 ? "steer-untested" : "stop-search" : "continue";
+	return {
+		scope,
+		bestQuality,
+		entries,
+		triedMechanisms: MECHANISM_KINDS.filter((m) => tried.has(m)),
+		untestedMechanisms,
+		yieldByMechanism,
+		simplificationCandidates,
+		refutations: facts.refutations,
+		roundsWithoutQualityGain,
+		steering
+	};
+}
+/** 同字节候选直接结案（plan §4）：同 library 内已否证过的 contentDigest 立即拒绝，不再测量。
+*  调用方先把草稿登记为 CandidateFact 再调用；digest 未命中否证时退到同假设匹配。 */
+function refutationFor(facts, libraryId, contentDigest) {
+	const libraryOf = (candidateId) => facts.candidates.find((c) => c.candidateId === candidateId)?.libraryId;
+	const sameBytes = facts.refutations.find((r) => r.contentDigest === contentDigest && libraryOf(r.candidateId) === libraryId);
+	if (sameBytes !== void 0) return {
+		kind: "same-bytes",
+		refutation: sameBytes
+	};
+	const hypotheses = (facts.candidates.find((c) => c.libraryId === libraryId && c.contentDigest === contentDigest)?.edits ?? []).map((e) => e.hypothesis).filter((h) => h !== void 0);
+	if (hypotheses.length > 0) {
+		const sameHypothesis = facts.refutations.find((r) => r.hypothesis !== void 0 && hypotheses.includes(r.hypothesis) && libraryOf(r.candidateId) === libraryId);
+		if (sameHypothesis !== void 0) return {
+			kind: "same-hypothesis",
+			refutation: sameHypothesis
+		};
+	}
+}
+/** 已否证假设需要新证据才能重测（plan §4）。scope 变化也算新情境。 */
+function mayRetest(facts, refutation, input) {
+	if (input.evidenceRefs.some((ref) => !refutation.evidenceRefs.includes(ref))) return true;
+	const candidate = facts.candidates.find((c) => c.candidateId === refutation.candidateId);
+	return candidate?.scope !== void 0 && candidate.scope !== input.scope;
+}
+/** σ_t = 1[S_t − S_{t−w} ≤ δ]，w 轮以内历史不足时为 0（照抄 rrsi/history.py:189）。 */
+function stallFlag(trajectory, t, window, band) {
+	if (t < window || t >= trajectory.length || t - window < 0) return 0;
+	return trajectory[t] - trajectory[t - window] <= band ? 1 : 0;
+}
+/** E_t = (σ_t, U_t, m_draft) 加交给 proposer 的文本（对照 rrsi/history.py:196，
+*  机制词表换成本移植的 MECHANISM_KINDS）。 */
+function exploration(t, stall, tried, reservedDrafts) {
+	const untried = MECHANISM_KINDS.filter((m) => !tried.includes(m));
+	let text;
+	if (stall === 1 && untried.length > 0) text = `STALL: the incumbent has not moved by more than the noise band over the last rounds (sigma_t = 1). ${reservedDrafts} candidate slot(s) this round are RESERVED for exploratory edits on mechanisms the run has never exercised: ${untried.join(", ")}. A variant holding a reserved slot must put at least one edit on one of those mechanisms.`;
+	else if (untried.length > 0) text = `Mechanisms not yet exercised in this run: ${untried.join(", ")}. Not mandatory this round (sigma_t = 0), but evidence about them is still missing.`;
+	else text = "Every mechanism in K has been exercised at least once.";
+	return {
+		sigma: stall,
+		untried,
+		reservedDrafts,
+		text
+	};
+}
+/** 紧凑历史：measured 主导，未测量 abort 最多保留 UNMEASURED_RENDER_LIMIT 条
+*  （照抄 rrsi/history.py:166-185）。 */
+function renderHistory(view, limit) {
+	const kept = [];
+	let unmeasured = 0;
+	for (const entry of [...view.entries].reverse()) {
+		if (!entry.measured) {
+			unmeasured += 1;
+			if (unmeasured > UNMEASURED_RENDER_LIMIT) continue;
+		}
+		kept.push(entry);
+		if (kept.length >= limit) break;
+	}
+	return kept.reverse();
+}
+
+//#endregion
+export { APPLYABLE_TARGET_TYPES, DEFAULT_STRATEGY_POLICY, EVOLUTION_DECISIONS, EXPERIMENT_ADMISSION_SOURCES, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, MECHANISM_KINDS, OUTCOME_JUDGE_PROMPT, OUTCOME_RANK, STRUCTURAL_MECHANISM_KINDS, UNMEASURED_RENDER_LIMIT, UNREGULARIZED_STRATEGY_POLICY, admit, agentOptionsOf, aggregateEvaluation, applyTargets, assertAdmissionRecord, assertBudgetAllowsStart, assertCapabilityCandidateAdmissible, assertCapabilityRow, assertDecisionTransition, assertExperimentReport, assertExperimentSample, assertExperimentStartRecord, assertFrozenExperiment, assertMcpServerIdentity, assertOutcomeEvaluation, assertOutcomeMeasurements, assertOutcomePlan, assertRecordedRunOrigin, assertSampleCriteria, assertSampleRole, assertScaleAddressesFrozenMeasurement, assertStrategyPolicy, assertTemplateBaseline, assertTemplateIdentity, bootstrapStdError, buildExperimentReport, buildWorkspace, calibrateNoise, candidateRegistryRevisionOf, canonicalJson, capabilityOverlay, capabilityRefusal, capabilityRowBytes, capabilityRowDigest, capabilityRowIdentity, capabilityTableWith, compareExperimentSides, compareReplaySides, costOf, costRule, criteriaOf, criterionDetail, evolution_default as default, digestOf, directoryDigest, discoverSkill, editBudget, editBudgetTable, evidenceRefsOf, experimentCandidate, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentStore, exploration, firstSkillOverlay, foldExperiments, foldHistory, freezeCriterionRepair, freezeExperiment, frozenCapabilitySample, frozenCapabilitySideOf, frozenCriterionOf, frozenDigestOf, frozenIdentityOf, frozenProviderIdentity, frozenSampleOf, independentOracleCriteria, isExperimentRecord, latestReview, mayRetest, mcpServerIdentity, modelSelectionOf, nonEmpty, normalizeSnapshot, normalizeSnapshotPaths, noveltyOf, oracleContractDigest, overallExperimentVerdict, parseOutcomeJudgement, poolEvaluations, prepareTaskDefinition, preparedContentDigestOf, protectedInputsDigest, qualityOf, readPreparedCapability, readTaskDefinition, recoveredSampleRecord, refusedBaselineRun, refusedProviderLines, refutationFor, regularizersActive, renderHistory, renderProviderRoles, reportedTokensSpent, resolveLink, resumeExperiment, reviewRefOf, runExperiment, runFactsOf, safeSegment, sameKeyRefusal, sampleRecord, screenBeforeMeasurement, selectRound, sideDetailOf, stallFlag, strategyPolicyDigest, templateBytes, templateCommitRequest, templateIdentity, templateLibraryDigest, tokensOfRecord, validateCapabilityMutation, validateSpec, validateTaskDefinitionMutation, walkSnapshotInput };

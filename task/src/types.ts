@@ -165,6 +165,10 @@ export interface RunProviderBinding {
   mcpServers: RunMcpServerBinding[]
   /** Absolute path of this run's snapshot skill root — the directory whose `<name>/SKILL.md` entries the worker's skill layer registers — present exactly when the run materialized the content it was bound to. */
   snapshotRoot?: string
+  /** The immutable environment revision (`task-runtime` `EnvironmentRevisionManifest.revisionId`) this binding's bytes were read from. Absent on every binding recorded before environment revisions existed — an old-protocol binding. */
+  environmentRevisionId?: string
+  /** The unpublished candidate revision an explicit trial bound, same value as the run's own `trialCandidateRef`; absent on an ordinary binding of the active revision. */
+  trialCandidateRef?: string
 }
 
 /** Where one run sits in the A3 coordination protocol. `active` is the phase a run is born in, and the only one in which it may write, decompose or submit; `waiting_children` is a run whose decomposition batch was admitted atomically and … */
@@ -281,6 +285,10 @@ export interface TaskRun {
   agentPreset?: string
   /** What this run was bound to and loaded (S1-C item 4). Absent on every run created before the field existed, and on a run whose caller assembled its plan without an admission-time pre-check: neither loaded content this build can vouch for … */
   providerBinding?: RunProviderBinding
+  /** The environment revision this run was admitted against (`task-runtime` `EnvironmentRevisionManifest.revisionId`); a child run inherits its parent's. Absent on every run written before environment revisions existed — an old-protocol run, which no receipt is sealed for. */
+  environmentRevisionId?: string
+  /** The unpublished candidate revision this run explicitly trials, when it does: its presence marks the run as a trial that must not advance the active revision, and it is never the same id as {@link environmentRevisionId}. */
+  trialCandidateRef?: string
   /** Frozen replay template library, inherited by descendants and restored on adoption. */
   taskTemplatesRoot?: string
   /** Where this run sits in the A3 coordination protocol. A new run is born `active`, or `submitted` when it has no worker at all (a `spawn: false` replay). */

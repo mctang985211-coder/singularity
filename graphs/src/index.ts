@@ -21,13 +21,14 @@ import type {
   GraphsEvent,
   GraphsSnapshot,
   RsiConfig,
-  RsiProgress,
 } from './types.ts'
+import { GRAPH_PROTOCOL_V2 } from './protocol.ts'
 import { GraphsState, isReusableEnv } from './service/state.ts'
 import { assertModelServiceable, graphAgentOptions, type ModelCatalogReader } from './model.ts'
 import { setupPromptText } from './prompts/setup.prompts.ts'
 
 export * from './types.ts'
+export * from './protocol.ts'
 export { GraphsState, isReusableEnv } from './service/state.ts'
 export { assertModelServiceable, graphAgentOptions } from './model.ts'
 export type { ModelCatalogReader } from './model.ts'
@@ -56,7 +57,7 @@ function nextGraphId(existing: readonly string[]): string {
 }
 
 /** The fields an RSI config carries: anything else is refused by name rather than ignored. */
-const RSI_FIELDS: readonly string[] = ['task', 'metrics', 'iterationRounds', 'humanReview']
+const RSI_FIELDS: readonly string[] = ['task', 'metrics', 'iterationRounds', 'humanReview', 'epoch']
 
 /** Validates one RSI config, refusing a malformed one with the offending field named. */
 function assertRsiConfig(rsi: unknown): asserts rsi is RsiConfig {
@@ -83,6 +84,9 @@ function assertRsiConfig(rsi: unknown): asserts rsi is RsiConfig {
   }
   if (typeof fields.humanReview !== 'boolean') {
     throw new Error('graphs: rsi.humanReview must be a boolean')
+  }
+  if (fields.epoch !== undefined && (typeof fields.epoch !== 'number' || !Number.isInteger(fields.epoch) || fields.epoch < 1)) {
+    throw new Error('graphs: rsi.epoch must be an integer >= 1')
   }
 }
 
@@ -179,7 +183,7 @@ export class GraphsService extends Service {
       await this.ready
       if (request.model !== undefined) await this.assertModel(request.model)
       if (request.rsi !== undefined && (typeof request.rsi !== 'object' || request.rsi === null || Array.isArray(request.rsi))) assertRsiConfig(request.rsi)
-      const rsi = request.rsi === undefined ? undefined : { iterationRounds: 3, humanReview: false, ...request.rsi }
+      const rsi = request.rsi === undefined ? undefined : { iterationRounds: 3, humanReview: false, epoch: 1, ...request.rsi }
       if (rsi !== undefined) assertRsiConfig(rsi)
       const modelOptions = request.model === undefined ? undefined : graphAgentOptions({ model: request.model })
       let createdEnvId: string | undefined
@@ -246,6 +250,7 @@ export class GraphsService extends Service {
           layoutStoreId,
           createdAt: Date.now(),
           ready: false,
+          protocol: { id: GRAPH_PROTOCOL_V2, version: 2, since: Date.now() },
           ...(request.model === undefined ? {} : { model: request.model }),
           ...(rsi === undefined ? {} : { rsi }),
         }
@@ -357,7 +362,7 @@ export class GraphsService extends Service {
   }
 
   /**
-   * Set, replace, or clear (null) one graph's RSI config, dropping its stored driver progress.
+   * Set, replace, or clear (null) one graph's RSI config.
    * A configured driver reconciles the same frozen root task; a new objective requires a new graph.
    */
   async setRsi(id: string, rsi: RsiConfig | null): Promise<GraphRecord> {
@@ -381,12 +386,6 @@ export class GraphsService extends Service {
       await this.commit(events)
       return (await this.state()).get(id)
     })
-  }
-
-  /** Record the loop driver's live position on one graph; the registry stores it verbatim. */
-  async markRsiProgress(id: string, progress: RsiProgress): Promise<void> {
-    await this.get(id)
-    await this.commit([{ kind: 'graph/rsi-progress', id, progress }])
   }
 
   /** Refuse a pin the current provider registry cannot serve; the message names the offending field. */

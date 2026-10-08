@@ -6,6 +6,44 @@ import { SessionId } from "@deepseek-ai/dsh-session";
 import { EventStoreSet, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 import { latestBubbleWorkspacePath, materializeBubble } from "@dangosys/dsh-singularity-task-runtime";
 
+//#region src/protocol.ts
+/** Graph protocol marker and access mode: the single source that tells a current graph from a sealed legacy one. */
+/** The literal identity of the current protocol; a graph's protocol is fixed at creation and never rewritten. */
+const GRAPH_PROTOCOL_V2 = "singularity/graph@2";
+/** The protocol marker a record carries; absent means the graph predates marking. */
+function protocolOf(graph) {
+	return graph.protocol;
+}
+/** A marked graph is current, an unmarked one is sealed legacy read-only history; there is no third state. */
+function graphAccess(graph) {
+	const protocol = protocolOf(graph);
+	if (protocol === void 0) return {
+		mode: "legacy-readonly",
+		reason: `graph "${graph.id}" carries no protocol marker; it predates ${GRAPH_PROTOCOL_V2}`
+	};
+	return {
+		mode: "current",
+		protocol
+	};
+}
+/** The error every write path on a sealed legacy graph answers with. */
+var GraphSealedError = class extends Error {
+	code = "graph-sealed";
+	graphId;
+	constructor(graphId) {
+		super(`graphs: graph "${graphId}" is sealed legacy history (no ${GRAPH_PROTOCOL_V2} marker); it is read-only`);
+		this.name = "GraphSealedError";
+		this.graphId = graphId;
+	}
+};
+/** The marker a current graph carries; throws {@link GraphSealedError} on a sealed legacy graph. */
+function assertCurrentGraph(graph) {
+	const protocol = protocolOf(graph);
+	if (protocol === void 0) throw new GraphSealedError(graph.id);
+	return protocol;
+}
+
+//#endregion
 //#region src/service/state.ts
 /** Whether an existing workspace can be bound by a new graph: no graph and no sessions. */
 function isReusableEnv(env, boundEnvIds) {
@@ -89,25 +127,10 @@ var GraphsState = class GraphsState {
 			case "graph/rsi": {
 				const idx = this.value.graphs.findIndex((g) => g.id === event.id);
 				if (idx < 0) throw new Error(`graphs: unknown graph "${event.id}"`);
-				const { rsi: _previous, rsiProgress: _progress,...bare } = this.value.graphs[idx];
+				const { rsi: _previous,...bare } = this.value.graphs[idx];
 				const next = event.rsi === null ? bare : {
 					...bare,
 					rsi: event.rsi
-				};
-				const graphs = [...this.value.graphs];
-				graphs[idx] = next;
-				this.value = {
-					...this.value,
-					graphs
-				};
-				return;
-			}
-			case "graph/rsi-progress": {
-				const idx = this.value.graphs.findIndex((g) => g.id === event.id);
-				if (idx < 0) throw new Error(`graphs: unknown graph "${event.id}"`);
-				const next = {
-					...this.value.graphs[idx],
-					rsiProgress: event.progress
 				};
 				const graphs = [...this.value.graphs];
 				graphs[idx] = next;
@@ -129,7 +152,9 @@ var GraphsState = class GraphsState {
 				};
 				return;
 			}
-			default: throw new Error(`graphs: unknown event kind "${event.kind}"`);
+			default:
+				if (event.kind === "graph/rsi-progress") return;
+				throw new Error(`graphs: unknown event kind "${event.kind}"`);
 		}
 	}
 	get(id) {
@@ -190,7 +215,8 @@ const RSI_FIELDS = [
 	"task",
 	"metrics",
 	"iterationRounds",
-	"humanReview"
+	"humanReview",
+	"epoch"
 ];
 /** Validates one RSI config, refusing a malformed one with the offending field named. */
 function assertRsiConfig(rsi) {
@@ -202,6 +228,7 @@ function assertRsiConfig(rsi) {
 	const rounds = fields.iterationRounds;
 	if (typeof rounds !== "number" || !Number.isInteger(rounds) || rounds < 1) throw new Error("graphs: rsi.iterationRounds must be an integer >= 1");
 	if (typeof fields.humanReview !== "boolean") throw new Error("graphs: rsi.humanReview must be a boolean");
+	if (fields.epoch !== void 0 && (typeof fields.epoch !== "number" || !Number.isInteger(fields.epoch) || fields.epoch < 1)) throw new Error("graphs: rsi.epoch must be an integer >= 1");
 }
 /** The registry's own answer when no graph publishes a session; distinguishable by code from a failed read. */
 const SESSION_NOT_IN_GRAPH = "graph-session-not-found";
@@ -292,6 +319,7 @@ var GraphsService = class extends Service {
 			const rsi = request.rsi === void 0 ? void 0 : {
 				iterationRounds: 3,
 				humanReview: false,
+				epoch: 1,
 				...request.rsi
 			};
 			if (rsi !== void 0) assertRsiConfig(rsi);
@@ -348,6 +376,11 @@ var GraphsService = class extends Service {
 					layoutStoreId,
 					createdAt: Date.now(),
 					ready: false,
+					protocol: {
+						id: GRAPH_PROTOCOL_V2,
+						version: 2,
+						since: Date.now()
+					},
 					...request.model === void 0 ? {} : { model: request.model },
 					...rsi === void 0 ? {} : { rsi }
 				};
@@ -445,7 +478,7 @@ var GraphsService = class extends Service {
 		return this.setPins(id, { model });
 	}
 	/**
-	* Set, replace, or clear (null) one graph's RSI config, dropping its stored driver progress.
+	* Set, replace, or clear (null) one graph's RSI config.
 	* A configured driver reconciles the same frozen root task; a new objective requires a new graph.
 	*/
 	async setRsi(id, rsi) {
@@ -474,15 +507,6 @@ var GraphsService = class extends Service {
 			await this.commit(events);
 			return (await this.state()).get(id);
 		});
-	}
-	/** Record the loop driver's live position on one graph; the registry stores it verbatim. */
-	async markRsiProgress(id, progress) {
-		await this.get(id);
-		await this.commit([{
-			kind: "graph/rsi-progress",
-			id,
-			progress
-		}]);
 	}
 	/** Refuse a pin the current provider registry cannot serve; the message names the offending field. */
 	async assertModel(model) {
@@ -563,4 +587,4 @@ var GraphsService = class extends Service {
 var src_default = GraphsService;
 
 //#endregion
-export { GraphsService, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertModelServiceable, src_default as default, graphAgentOptions, isReusableEnv };
+export { GRAPH_PROTOCOL_V2, GraphSealedError, GraphsService, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertCurrentGraph, assertModelServiceable, src_default as default, graphAccess, graphAgentOptions, isReusableEnv, protocolOf };

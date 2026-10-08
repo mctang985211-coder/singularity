@@ -1,0 +1,13 @@
+{
+  "formatVersion": 1,
+  "roots": [
+    {
+      "key": "event:task/event",
+      "kind": "event",
+      "event": "task/event",
+      "payload": "TaskEvent",
+      "digest": "196cc188ad25ba96df9a04597d81352c73fd2c9aae593c63b64e54d0de22a861",
+      "source": "task/src/index.ts"
+    }
+  ]
+}

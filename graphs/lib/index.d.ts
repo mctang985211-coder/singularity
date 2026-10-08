@@ -1,118 +1,10 @@
+import { _ as protocolOf, a as GraphPinsUpdate, c as GraphsSnapshot, d as GRAPH_PROTOCOL_V2, f as GraphAccess, g as graphAccess, h as assertCurrentGraph, i as GraphModel, l as RsiConfig, m as GraphSealedError, n as CreateGraphResult, o as GraphRecord, p as GraphProtocol, r as GraphArchive, s as GraphsEvent, t as CreateGraphRequest, u as RsiLaunch } from "./types-HAFfajhv.js";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import * as _dangosys_dsh_singularity_graph0 from "@dangosys/dsh-singularity-graph";
 import { EnvRecord } from "@dangosys/dsh-env-builder";
 import { AgentOptions } from "@dangosys/dsh-singularity-agent-runtime";
 
-//#region src/types.d.ts
-/** A model pinned on a graph; absent means the graph follows the deployment default selection. */
-interface GraphModel {
-  readonly provider: string;
-  readonly model: string;
-  readonly reasoningEffort?: string;
-}
-/** Graph settings to change together; omitted fields stay as-is and null clears a setting. */
-interface GraphPinsUpdate {
-  readonly model?: GraphModel | null;
-  readonly rsi?: RsiConfig | null;
-}
-/** The autonomous-improvement settings one graph runs under; absent means the graph runs no RSI loop. */
-interface RsiConfig {
-  /** Objective text recorded for launch/UI; changing it never rewrites an existing frozen root task. */
-  readonly task: string;
-  /** Natural-language outcome and resource measures the agent investigates and makes concrete. */
-  readonly metrics?: readonly string[];
-  /** Total improvement iterations the graph should run (integer >= 1). */
-  readonly iterationRounds: number;
-  /** true: HITL approval gates queue for a human; false: the platform auto-resolves them. */
-  readonly humanReview: boolean;
-}
-/** Where a running RSI loop stands; the driver writes it and the UI reads it. */
-interface RsiProgress {
-  /** 1-based round currently in flight (or last completed when phase is done/failed). */
-  readonly round: number;
-  /** `running`/`publishing`/`debugging` while a round is in flight, `done` when the loop finished its rounds, `failed` when it stopped. */
-  readonly phase: 'running' | 'publishing' | 'debugging' | 'done' | 'failed';
-  readonly note?: string;
-}
-interface GraphRecord {
-  readonly id: string;
-  readonly name: string;
-  readonly envId: string;
-  readonly rootSessionId: SessionId;
-  readonly graphStoreId: string;
-  readonly layoutStoreId: string;
-  readonly createdAt: number;
-  readonly ready: boolean;
-  /** Pinned model applied to agents this graph spawns after the pin; absent = deployment default. */
-  readonly model?: GraphModel;
-  /** RSI settings this graph runs under; absent = no autonomous improvement loop. */
-  readonly rsi?: RsiConfig;
-  /** Live RSI loop position; absent until the driver reports one. */
-  readonly rsiProgress?: RsiProgress;
-}
-interface GraphArchive {
-  readonly graph: GraphRecord;
-  readonly agentIds: readonly SessionId[];
-  readonly archivedAt: number;
-}
-interface GraphsSnapshot {
-  readonly version: 1;
-  readonly graphs: readonly GraphRecord[];
-  readonly selectedId?: string;
-  readonly archives: readonly GraphArchive[];
-}
-type GraphsEvent = {
-  readonly kind: 'graph/add';
-  readonly graph: GraphRecord;
-} | {
-  readonly kind: 'graph/select';
-  readonly id: string;
-} | {
-  readonly kind: 'graph/ready';
-  readonly id: string;
-} | {
-  readonly kind: 'graph/model';
-  readonly id: string;
-  readonly model: GraphModel | null;
-}
-/** Sets or clears (`null`) the RSI config and drops driver progress without replacing the graph's frozen root task. */ | {
-  readonly kind: 'graph/rsi';
-  readonly id: string;
-  readonly rsi: RsiConfig | null;
-}
-/** The driver's live position in the loop; it never touches the config. */ | {
-  readonly kind: 'graph/rsi-progress';
-  readonly id: string;
-  readonly progress: RsiProgress;
-} | {
-  readonly kind: 'graph/remove';
-  readonly id: string;
-  readonly archive: GraphArchive;
-};
-/** Launch needs only a goal; iteration controls have platform defaults. */
-type RsiLaunch = Pick<RsiConfig, 'task' | 'metrics'> & Partial<Pick<RsiConfig, 'iterationRounds' | 'humanReview'>>;
-interface CreateGraphRequest {
-  readonly name?: string;
-  readonly createEnv?: true;
-  readonly envId?: string;
-  /** Planned github owner/repo refs when createEnv is set. Cloned later by env agents. */
-  readonly repos?: readonly string[];
-  /** Named workspace: reuse the environment labeled with it, or create and label a new one. */
-  readonly workspace?: string;
-  /** With createEnv, skip reuse matching and always create a fresh environment. */
-  readonly fresh?: boolean;
-  /** Model pinned for the new graph; absent follows the deployment default selection. */
-  readonly model?: GraphModel;
-  /** RSI settings to stamp on the new graph; absent leaves it without an improvement loop. */
-  readonly rsi?: RsiLaunch;
-}
-interface CreateGraphResult {
-  readonly graph: GraphRecord;
-  /** True when the graph bound a pre-existing environment instead of a newly created one. */
-  readonly reused: boolean;
-}
-//#endregion
 //#region src/service/state.d.ts
 /** Whether an existing workspace can be bound by a new graph: no graph and no sessions. */
 declare function isReusableEnv(env: Pick<EnvRecord, 'id' | 'components' | 'sessionIds'>, boundEnvIds: ReadonlySet<string>): boolean;
@@ -193,14 +85,12 @@ declare class GraphsService extends Service {
   /** Pin, replace, or clear (null) one graph's model. Only later spawns read it; existing sessions keep theirs. */
   setModel(id: string, model: GraphModel | null): Promise<GraphRecord>;
   /**
-   * Set, replace, or clear (null) one graph's RSI config, dropping its stored driver progress.
+   * Set, replace, or clear (null) one graph's RSI config.
    * A configured driver reconciles the same frozen root task; a new objective requires a new graph.
    */
   setRsi(id: string, rsi: RsiConfig | null): Promise<GraphRecord>;
   /** Validate all supplied settings before committing one event batch in the graph transition queue. */
   setPins(id: string, update: GraphPinsUpdate): Promise<GraphRecord>;
-  /** Record the loop driver's live position on one graph; the registry stores it verbatim. */
-  markRsiProgress(id: string, progress: RsiProgress): Promise<void>;
   /** Refuse a pin the current provider registry cannot serve; the message names the offending field. */
   private assertModel;
   graphForSession(sessionId: SessionId): Promise<GraphRecord>;
@@ -215,4 +105,4 @@ declare class GraphsService extends Service {
   private state;
 }
 //#endregion
-export { CreateGraphRequest, CreateGraphResult, GraphArchive, GraphModel, GraphPinsUpdate, GraphRecord, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState, type ModelCatalogReader, RsiConfig, RsiLaunch, RsiProgress, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertModelServiceable, graphAgentOptions, isReusableEnv };
+export { CreateGraphRequest, CreateGraphResult, GRAPH_PROTOCOL_V2, GraphAccess, GraphArchive, GraphModel, GraphPinsUpdate, GraphProtocol, GraphRecord, GraphSealedError, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState, type ModelCatalogReader, RsiConfig, RsiLaunch, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertCurrentGraph, assertModelServiceable, graphAccess, graphAgentOptions, isReusableEnv, protocolOf };

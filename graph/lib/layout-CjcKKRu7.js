@@ -86,6 +86,10 @@ var LayoutService = class extends Service {
 	async snapshotIn(id) {
 		return await this.stores.snapshot(id);
 	}
+	/** The zero-write read door ({@link EventStoreSet.readOnlySnapshot}): a missing store answers `exists:false`, never a creation. */
+	async snapshotReadOnlyIn(id) {
+		return await this.stores.readOnlySnapshot(id);
+	}
 	async set(sessionId, node) {
 		await this.setIn(this.activeIdOf(), sessionId, node);
 	}

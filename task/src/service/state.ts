@@ -20,6 +20,7 @@ import { buildBudgetExtension, budgetExtensionIndex } from './checks/budget.ts'
 import { assertAdmission, assertContract } from './checks/contract.ts'
 import {
   assertBirthPhase,
+  assertEnvironmentRevision,
   assertProviderBinding,
   assertQuestionIds,
   assertRunRecovery,
@@ -181,6 +182,7 @@ export function start(
   if (typeof run.sessionId !== 'string' || run.sessionId.length === 0)
     throw new Error(`task: run "${run.runId}" session id must be non-empty`)
   if (run.providerBinding !== undefined) assertProviderBinding(run.runId, run.providerBinding)
+  assertEnvironmentRevision(run.runId, run)
   if (run.recovery !== undefined) assertRunRecovery(snapshot, taskId, run.recovery)
   assertBirthPhase(run)
   if (run.parentRunId !== undefined) runIn(snapshot, run.parentRunId)

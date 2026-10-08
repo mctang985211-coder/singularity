@@ -1,0 +1,2142 @@
+{
+ "provenance": {
+  "repository": "https://github.com/google-research/rrsi",
+  "commit": "be50316",
+  "license": "Apache-2.0",
+  "licenseFile": "rrsi/LICENSE",
+  "extractedBy": "evolution/tests/vectors/extract-rrsi-vectors.py"
+ },
+ "vectors": [
+  {
+   "id": "schedule.anneal.20.1.4",
+   "source": "rrsi/schedule.py:53",
+   "kind": "upstream-native",
+   "function": "editBudgetTable",
+   "input": {
+    "rounds": 20,
+    "min": 1,
+    "max": 4
+   },
+   "expected": [
+    4,
+    4,
+    4,
+    4,
+    4,
+    4,
+    4,
+    4,
+    3,
+    3,
+    3,
+    3,
+    3,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2
+   ],
+   "provenance": {
+    "commit": "be50316",
+    "file": "rrsi/schedule.py",
+    "line": 53,
+    "license": "Apache-2.0"
+   },
+   "portNote": "upstream denominator T: the last in-range round stays at 2; only the out-of-range endpoint reaches min"
+  },
+  {
+   "id": "schedule.anneal.port.20.1.4",
+   "source": "rrsi/schedule.py:43",
+   "kind": "port-adapted",
+   "function": "editBudgetTable",
+   "input": {
+    "rounds": 20,
+    "min": 1,
+    "max": 4
+   },
+   "expected": [
+    4,
+    4,
+    4,
+    4,
+    4,
+    4,
+    4,
+    4,
+    3,
+    3,
+    3,
+    3,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    1
+   ],
+   "provenance": {
+    "commit": "be50316",
+    "file": "rrsi/schedule.py",
+    "line": 43,
+    "license": "Apache-2.0"
+   },
+   "portNote": "denominator rounds-1 (plan \u00a74 override): table[rounds-1] === min exactly"
+  },
+  {
+   "id": "schedule.anneal.port.20.1.2",
+   "source": "rrsi/schedule.py:43",
+   "kind": "port-adapted",
+   "function": "editBudgetTable",
+   "input": {
+    "rounds": 20,
+    "min": 1,
+    "max": 2
+   },
+   "expected": [
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    1
+   ],
+   "provenance": {
+    "commit": "be50316",
+    "file": "rrsi/schedule.py",
+    "line": 43,
+    "license": "Apache-2.0"
+   },
+   "portNote": "denominator rounds-1 (plan \u00a74 override): table[rounds-1] === min exactly"
+  },
+  {
+   "id": "schedule.anneal.port.8.1.2",
+   "source": "rrsi/schedule.py:43",
+   "kind": "port-adapted",
+   "function": "editBudgetTable",
+   "input": {
+    "rounds": 8,
+    "min": 1,
+    "max": 2
+   },
+   "expected": [
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    1
+   ],
+   "provenance": {
+    "commit": "be50316",
+    "file": "rrsi/schedule.py",
+    "line": 43,
+    "license": "Apache-2.0"
+   },
+   "portNote": "denominator rounds-1 (plan \u00a74 override): table[rounds-1] === min exactly"
+  },
+  {
+   "id": "schedule.anneal.port.5.1.2",
+   "source": "rrsi/schedule.py:43",
+   "kind": "port-adapted",
+   "function": "editBudgetTable",
+   "input": {
+    "rounds": 5,
+    "min": 1,
+    "max": 2
+   },
+   "expected": [
+    2,
+    2,
+    2,
+    2,
+    1
+   ],
+   "provenance": {
+    "commit": "be50316",
+    "file": "rrsi/schedule.py",
+    "line": 43,
+    "license": "Apache-2.0"
+   },
+   "portNote": "denominator rounds-1 (plan \u00a74 override): table[rounds-1] === min exactly"
+  },
+  {
+   "id": "schedule.anneal.port.3.1.4",
+   "source": "rrsi/schedule.py:43",
+   "kind": "port-adapted",
+   "function": "editBudgetTable",
+   "input": {
+    "rounds": 3,
+    "min": 1,
+    "max": 4
+   },
+   "expected": [
+    4,
+    3,
+    1
+   ],
+   "provenance": {
+    "commit": "be50316",
+    "file": "rrsi/schedule.py",
+    "line": 43,
+    "license": "Apache-2.0"
+   },
+   "portNote": "denominator rounds-1 (plan \u00a74 override): table[rounds-1] === min exactly"
+  },
+  {
+   "id": "schedule.anneal.port.1.1.2",
+   "source": "rrsi/schedule.py:43",
+   "kind": "port-adapted",
+   "function": "editBudgetTable",
+   "input": {
+    "rounds": 1,
+    "min": 1,
+    "max": 2
+   },
+   "expected": [
+    1
+   ],
+   "provenance": {
+    "commit": "be50316",
+    "file": "rrsi/schedule.py",
+    "line": 43,
+    "license": "Apache-2.0"
+   },
+   "portNote": "denominator rounds-1 (plan \u00a74 override): table[rounds-1] === min exactly"
+  },
+  {
+   "id": "schedule.anneal.upstream.endpoint",
+   "source": "tests/test_core.py:63",
+   "kind": "upstream-native",
+   "function": "editBudget",
+   "input": {
+    "round": 20,
+    "rounds": 20,
+    "min": 1,
+    "max": 4
+   },
+   "expected": 1,
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 63,
+    "license": "Apache-2.0"
+   },
+   "portNote": "upstream needs the out-of-range endpoint to hit b_min; the TS port clamps round to rounds-1"
+  },
+  {
+   "id": "evaluate.aggregate.unweighted",
+   "source": "tests/test_core.py:67",
+   "kind": "deterministic",
+   "function": "aggregateEvaluation",
+   "input": {
+    "scope": "s",
+    "trials": 2,
+    "missing": 0,
+    "tasks": [
+     {
+      "taskId": "a",
+      "trials": [
+       {
+        "quality": 1,
+        "weight": 1,
+        "tokens": 1000
+       },
+       {
+        "quality": 0,
+        "weight": 1,
+        "tokens": 1000
+       }
+      ]
+     },
+     {
+      "taskId": "b",
+      "trials": [
+       {
+        "quality": 1,
+        "weight": 1,
+        "tokens": 1000
+       },
+       {
+        "quality": 1,
+        "weight": 1,
+        "tokens": 1000
+       }
+      ]
+     }
+    ]
+   },
+   "expected": {
+    "quality": 0.75,
+    "cost": 1000.0,
+    "expected": 4,
+    "missing": 0,
+    "incomplete": false
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 67,
+    "license": "Apache-2.0"
+   }
+  },
+  {
+   "id": "evaluate.aggregate.weighted",
+   "source": "tests/test_core.py:69",
+   "kind": "deterministic",
+   "function": "aggregateEvaluation",
+   "input": {
+    "scope": "s",
+    "trials": 2,
+    "missing": 0,
+    "tasks": [
+     {
+      "taskId": "a",
+      "trials": [
+       {
+        "quality": 0.5,
+        "weight": 10,
+        "tokens": 1000
+       },
+       {
+        "quality": 1.0,
+        "weight": 10,
+        "tokens": 1000
+       }
+      ]
+     },
+     {
+      "taskId": "b",
+      "trials": [
+       {
+        "quality": 0.0,
+        "weight": 90,
+        "tokens": 1000
+       },
+       {
+        "quality": 0.0,
+        "weight": 90,
+        "tokens": 1000
+       }
+      ]
+     }
+    ]
+   },
+   "expected": {
+    "quality": 0.075,
+    "cost": 1000.0,
+    "expected": 4,
+    "missing": 0,
+    "incomplete": false
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 69,
+    "license": "Apache-2.0"
+   }
+  },
+  {
+   "id": "evaluate.missing.denominator",
+   "source": "rrsi/evaluate.py:104",
+   "kind": "deterministic",
+   "function": "aggregateEvaluation",
+   "input": {
+    "scope": "s",
+    "trials": 2,
+    "missing": 1,
+    "tasks": [
+     {
+      "taskId": "a",
+      "trials": [
+       {
+        "quality": 1,
+        "weight": 1,
+        "tokens": 10
+       },
+       {
+        "quality": 0,
+        "weight": 1,
+        "tokens": null
+       }
+      ]
+     }
+    ]
+   },
+   "expected": {
+    "quality": 0.5,
+    "cost": 10.0,
+    "expected": 2,
+    "missing": 1,
+    "incomplete": true
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "rrsi/evaluate.py",
+    "line": 104,
+    "license": "Apache-2.0"
+   },
+   "portNote": "missing trial keeps the full denominator and unknown cost stays out of the mean"
+  },
+  {
+   "id": "calibrate.three-evals",
+   "source": "rrsi/calibrate.py:89",
+   "kind": "deterministic",
+   "function": "calibrateNoise",
+   "input": {
+    "evals": [
+     {
+      "scope": "s",
+      "trials": 2,
+      "missing": 0,
+      "tasks": [
+       {
+        "taskId": "t0",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t1",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t2",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t3",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t4",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t5",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t6",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t7",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t8",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t9",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "scope": "s",
+      "trials": 2,
+      "missing": 0,
+      "tasks": [
+       {
+        "taskId": "t0",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1100
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1100
+         }
+        ]
+       },
+       {
+        "taskId": "t1",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1100
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1100
+         }
+        ]
+       },
+       {
+        "taskId": "t2",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1100
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1100
+         }
+        ]
+       },
+       {
+        "taskId": "t3",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         }
+        ]
+       },
+       {
+        "taskId": "t4",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1100
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         }
+        ]
+       },
+       {
+        "taskId": "t5",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         }
+        ]
+       },
+       {
+        "taskId": "t6",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         }
+        ]
+       },
+       {
+        "taskId": "t7",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         }
+        ]
+       },
+       {
+        "taskId": "t8",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         }
+        ]
+       },
+       {
+        "taskId": "t9",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1100
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "scope": "s",
+      "trials": 2,
+      "missing": 0,
+      "tasks": [
+       {
+        "taskId": "t0",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 950
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 950
+         }
+        ]
+       },
+       {
+        "taskId": "t1",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 950
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 950
+         }
+        ]
+       },
+       {
+        "taskId": "t2",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 950
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 950
+         }
+        ]
+       },
+       {
+        "taskId": "t3",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 950
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 950
+         }
+        ]
+       },
+       {
+        "taskId": "t4",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 950
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 950
+         }
+        ]
+       },
+       {
+        "taskId": "t5",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 950
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 950
+         }
+        ]
+       },
+       {
+        "taskId": "t6",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 950
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 950
+         }
+        ]
+       },
+       {
+        "taskId": "t7",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 950
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 950
+         }
+        ]
+       },
+       {
+        "taskId": "t8",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 950
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 950
+         }
+        ]
+       },
+       {
+        "taskId": "t9",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 950
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 950
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "policy": {
+     "noise": {
+      "z": 2.0,
+      "bootstrapReps": 200
+     }
+    }
+   },
+   "expected": {
+    "qualityBand": 0.244949,
+    "relativeCostBand": 0.150248,
+    "method": "repeated-baseline-evaluations",
+    "evaluations": 3,
+    "standardError": 0.086603,
+    "degenerate": false
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "rrsi/calibrate.py",
+    "line": 89,
+    "license": "Apache-2.0"
+   },
+   "portNote": "3 independent base evaluations satisfy minIndependentEvaluations; port and upstream agree"
+  },
+  {
+   "id": "calibrate.single-eval",
+   "source": "tests/test_core.py:75",
+   "kind": "port-adapted",
+   "function": "calibrateNoise",
+   "input": {
+    "evals": [
+     {
+      "scope": "s",
+      "trials": 2,
+      "missing": 0,
+      "tasks": [
+       {
+        "taskId": "t0",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t1",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t2",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t3",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t4",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t5",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t6",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t7",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t8",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t9",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t10",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t11",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t12",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t13",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t14",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t15",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t16",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t17",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t18",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t19",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t20",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t21",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t22",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t23",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t24",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t25",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t26",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t27",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t28",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t29",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t30",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t31",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t32",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t33",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t34",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t35",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t36",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t37",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t38",
+        "trials": [
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       },
+       {
+        "taskId": "t39",
+        "trials": [
+         {
+          "quality": 1,
+          "weight": 1,
+          "tokens": 1000
+         },
+         {
+          "quality": 0,
+          "weight": 1,
+          "tokens": 1000
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "policy": {
+     "noise": {
+      "z": 2.0,
+      "bootstrapReps": 300
+     }
+    }
+   },
+   "expected": {
+    "qualityBand": 0.151292,
+    "relativeCostBand": 0.02,
+    "method": "within-task-bootstrap",
+    "evaluations": 1,
+    "standardError": 0.05349,
+    "degenerate": true
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 75,
+    "license": "Apache-2.0"
+   },
+   "portNote": "fewer than 3 independent evaluations -> within-task bootstrap; identical trial costs make cost noise unobservable, so degenerate is true and relativeCostBand falls back to the floor"
+  },
+  {
+   "id": "cost_rule.gaining.within",
+   "source": "tests/test_core.py:87",
+   "kind": "deterministic",
+   "function": "costRule",
+   "input": {
+    "deltaQuality": 0.05,
+    "deltaCost": 2.09,
+    "novelty": 0,
+    "calibration": {
+     "qualityBand": 0.02,
+     "relativeCostBand": 0.02
+    },
+    "policy": "upstream-equivalent"
+   },
+   "expected": {
+    "ok": true,
+    "reasonCode": "admissible"
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 87,
+    "license": "Apache-2.0"
+   }
+  },
+  {
+   "id": "cost_rule.gaining.over",
+   "source": "tests/test_core.py:89",
+   "kind": "deterministic",
+   "function": "costRule",
+   "input": {
+    "deltaQuality": 0.05,
+    "deltaCost": 2.11,
+    "novelty": 0,
+    "calibration": {
+     "qualityBand": 0.02,
+     "relativeCostBand": 0.02
+    },
+    "policy": "upstream-equivalent"
+   },
+   "expected": {
+    "ok": false,
+    "reasonCode": "cost-rule-failed"
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 89,
+    "license": "Apache-2.0"
+   }
+  },
+  {
+   "id": "cost_rule.band.cheaper",
+   "source": "tests/test_core.py:91",
+   "kind": "deterministic",
+   "function": "costRule",
+   "input": {
+    "deltaQuality": 0.0,
+    "deltaCost": -0.1,
+    "novelty": 0,
+    "calibration": {
+     "qualityBand": 0.02,
+     "relativeCostBand": 0.02
+    },
+    "policy": "upstream-equivalent"
+   },
+   "expected": {
+    "ok": true,
+    "reasonCode": "admissible"
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 91,
+    "license": "Apache-2.0"
+   }
+  },
+  {
+   "id": "cost_rule.band.costlier",
+   "source": "tests/test_core.py:93",
+   "kind": "deterministic",
+   "function": "costRule",
+   "input": {
+    "deltaQuality": 0.0,
+    "deltaCost": 0.1,
+    "novelty": 0,
+    "calibration": {
+     "qualityBand": 0.02,
+     "relativeCostBand": 0.02
+    },
+    "policy": "upstream-equivalent"
+   },
+   "expected": {
+    "ok": false,
+    "reasonCode": "in-band-no-relief"
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 93,
+    "license": "Apache-2.0"
+   }
+  },
+  {
+   "id": "cost_rule.band.novel",
+   "source": "tests/test_core.py:95",
+   "kind": "port-adapted",
+   "function": "costRule",
+   "input": {
+    "deltaQuality": 0.0,
+    "deltaCost": 0.0,
+    "novelty": 1,
+    "calibration": {
+     "qualityBand": 0.02,
+     "relativeCostBand": 0.02
+    },
+    "policy": "upstream-equivalent"
+   },
+   "expected": {
+    "ok": false,
+    "reasonCode": "in-band-no-relief"
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 95,
+    "license": "Apache-2.0"
+   },
+   "portNote": "plan \u00a74 override: upstream admits this on +w_n*nu (selection.py:90); the port never relaxes on novelty"
+  },
+  {
+   "id": "cost_rule.gaining.capped",
+   "source": "rrsi/config.py:70",
+   "kind": "port-adapted",
+   "function": "costRule",
+   "input": {
+    "deltaQuality": 0.05,
+    "deltaCost": 2.09,
+    "novelty": 0,
+    "calibration": {
+     "qualityBand": 0.02,
+     "relativeCostBand": 0.02
+    },
+    "policy": "default"
+   },
+   "expected": {
+    "ok": false,
+    "reasonCode": "cost-rule-failed"
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "rrsi/config.py",
+    "line": 70,
+    "license": "Apache-2.0"
+   },
+   "portNote": "plan \u00a74 override: the 25% maxRelativeIncrease cap binds where upstream beta1 = 40 would allow +209%"
+  },
+  {
+   "id": "cost_rule.gaining.missing-cost",
+   "source": "rrsi/evaluate.py:131",
+   "kind": "port-adapted",
+   "function": "costRule",
+   "input": {
+    "deltaQuality": 0.05,
+    "deltaCost": null,
+    "novelty": 0,
+    "calibration": {
+     "qualityBand": 0.02,
+     "relativeCostBand": 0.02
+    },
+    "policy": "default"
+   },
+   "expected": {
+    "ok": false,
+    "reasonCode": "cost-inconclusive"
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "rrsi/evaluate.py",
+    "line": 131,
+    "license": "Apache-2.0"
+   },
+   "portNote": "plan \u00a74 override: upstream relative_cost_change returns 0 here and the L1 rule silently passes"
+  },
+  {
+   "id": "selection.argmax.floor",
+   "source": "tests/test_core.py:99",
+   "kind": "port-adapted",
+   "function": "selectRound",
+   "input": {
+    "candidates": [
+     {
+      "candidateId": "A",
+      "contentDigest": "aaaaaaaa",
+      "scope": "s",
+      "edits": [
+       {
+        "id": "C1",
+        "mechanism": "text",
+        "targets": [
+         "x"
+        ]
+       }
+      ],
+      "aggregate": {
+       "quality": 0.7,
+       "cost": 1000,
+       "expected": 20,
+       "missing": 0,
+       "incomplete": false
+      },
+      "refusedBy": null
+     },
+     {
+      "candidateId": "B",
+      "contentDigest": "bbbbbbbb",
+      "scope": "s",
+      "edits": [
+       {
+        "id": "C1",
+        "mechanism": "skill",
+        "targets": [
+         "x"
+        ]
+       }
+      ],
+      "aggregate": {
+       "quality": 0.6,
+       "cost": 1000,
+       "expected": 20,
+       "missing": 0,
+       "incomplete": false
+      },
+      "refusedBy": null
+     },
+     {
+      "candidateId": "C",
+      "contentDigest": "cccccccc",
+      "scope": "s",
+      "edits": [
+       {
+        "id": "C1",
+        "mechanism": "parameter",
+        "targets": [
+         "x"
+        ]
+       }
+      ],
+      "aggregate": {
+       "quality": 0.3,
+       "cost": 1000,
+       "expected": 20,
+       "missing": 0,
+       "incomplete": false
+      },
+      "refusedBy": null
+     },
+     {
+      "candidateId": "D",
+      "contentDigest": "dddddddd",
+      "scope": "s",
+      "edits": [],
+      "aggregate": null,
+      "refusedBy": "critic-reject"
+     }
+    ],
+    "incumbent": {
+     "quality": 0.5,
+     "cost": 1000,
+     "expected": 20,
+     "missing": 0,
+     "incomplete": false
+    },
+    "incumbentScope": "s",
+    "bestQuality": 0.55,
+    "calibration": {
+     "qualityBand": 0.05,
+     "relativeCostBand": 0.02
+    },
+    "guards": {},
+    "policy": "default"
+   },
+   "expected": {
+    "winner": "A",
+    "admissions": [
+     {
+      "candidateId": "A",
+      "admissible": true,
+      "reasonCode": "admissible"
+     },
+     {
+      "candidateId": "B",
+      "admissible": true,
+      "reasonCode": "admissible"
+     },
+     {
+      "candidateId": "C",
+      "admissible": false,
+      "reasonCode": "below-floor"
+     },
+     {
+      "candidateId": "D",
+      "admissible": false,
+      "reasonCode": "not-measured"
+     }
+    ]
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 99,
+    "license": "Apache-2.0"
+   },
+   "portNote": "mechanisms mapped to the port vocabulary (prompt->text, config->parameter); the critic-rejected candidate reports not-measured with refusedBy instead of upstream's gate_failure string"
+  },
+  {
+   "id": "selection.cost.blocked",
+   "source": "tests/test_core.py:117",
+   "kind": "deterministic",
+   "function": "selectRound",
+   "input": {
+    "candidates": [
+     {
+      "candidateId": "E",
+      "contentDigest": "eeeeeeee",
+      "scope": "s",
+      "edits": [
+       {
+        "id": "C1",
+        "mechanism": "text",
+        "targets": [
+         "x"
+        ]
+       }
+      ],
+      "aggregate": {
+       "quality": 0.7,
+       "cost": 9600.0,
+       "expected": 20,
+       "missing": 0,
+       "incomplete": false
+      },
+      "refusedBy": null
+     }
+    ],
+    "incumbent": {
+     "quality": 0.5,
+     "cost": 1000,
+     "expected": 20,
+     "missing": 0,
+     "incomplete": false
+    },
+    "incumbentScope": "s",
+    "bestQuality": 0.55,
+    "calibration": {
+     "qualityBand": 0.05,
+     "relativeCostBand": 0.02
+    },
+    "guards": {},
+    "policy": "default"
+   },
+   "expected": {
+    "winner": null,
+    "admissions": [
+     {
+      "candidateId": "E",
+      "admissible": false,
+      "reasonCode": "cost-rule-failed"
+     }
+    ]
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 117,
+    "license": "Apache-2.0"
+   },
+   "portNote": "dC = 8.6 exceeds both the upstream budget 8.1 and the port cap 0.25"
+  },
+  {
+   "id": "selection.guard.noncompensatory",
+   "source": "tests/test_core.py:123",
+   "kind": "deterministic",
+   "function": "selectRound",
+   "input": {
+    "candidates": [
+     {
+      "candidateId": "A",
+      "contentDigest": "aaaaaaaa",
+      "scope": "s",
+      "edits": [
+       {
+        "id": "C1",
+        "mechanism": "text",
+        "targets": [
+         "x"
+        ]
+       }
+      ],
+      "aggregate": {
+       "quality": 0.7,
+       "cost": 1000,
+       "expected": 20,
+       "missing": 0,
+       "incomplete": false
+      },
+      "refusedBy": null
+     }
+    ],
+    "incumbent": {
+     "quality": 0.5,
+     "cost": 1000,
+     "expected": 20,
+     "missing": 0,
+     "incomplete": false
+    },
+    "incumbentScope": "s",
+    "bestQuality": 0.55,
+    "calibration": {
+     "qualityBand": 0.05,
+     "relativeCostBand": 0.02
+    },
+    "guards": {
+     "A": [
+      "valid rate fell"
+     ]
+    },
+    "policy": "default"
+   },
+   "expected": {
+    "winner": null,
+    "admissions": [
+     {
+      "candidateId": "A",
+      "admissible": false,
+      "reasonCode": "guard-violated"
+     }
+    ]
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 123,
+    "license": "Apache-2.0"
+   },
+   "portNote": "guards reject regardless of the quality gain"
+  },
+  {
+   "id": "novelty.structural",
+   "source": "tests/test_core.py:151",
+   "kind": "port-adapted",
+   "function": "noveltyOf",
+   "input": {
+    "cases": [
+     {
+      "mechanisms": [
+       "capability",
+       "text"
+      ],
+      "incumbentCounts": {
+       "text": 1
+      }
+     },
+     {
+      "mechanisms": [
+       "skill"
+      ],
+      "incumbentCounts": {
+       "skill": 2
+      }
+     }
+    ]
+   },
+   "expected": [
+    1,
+    0
+   ],
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 151,
+    "license": "Apache-2.0"
+   },
+   "portNote": "vocabulary mapping of the upstream vector (client_tool->capability, prompt->text)"
+  },
+  {
+   "id": "stall.flag",
+   "source": "tests/test_core.py:154",
+   "kind": "deterministic",
+   "function": "stallFlag",
+   "input": {
+    "trajectory": [
+     0.5,
+     0.53,
+     0.53,
+     0.535,
+     0.6
+    ],
+    "band": 0.02,
+    "cases": [
+     {
+      "t": 3,
+      "window": 3
+     },
+     {
+      "t": 3,
+      "window": 2
+     },
+     {
+      "t": 4,
+      "window": 2
+     },
+     {
+      "t": 1,
+      "window": 3
+     }
+    ]
+   },
+   "expected": [
+    0,
+    1,
+    0,
+    0
+   ],
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 154,
+    "license": "Apache-2.0"
+   }
+  },
+  {
+   "id": "exploration.stall",
+   "source": "tests/test_core.py:159",
+   "kind": "port-adapted",
+   "function": "exploration",
+   "input": {
+    "t": 3,
+    "stall": 1,
+    "tried": [
+     "text"
+    ],
+    "reservedDrafts": 1
+   },
+   "expected": {
+    "sigma": 1,
+    "untried": [
+     "skill",
+     "capability",
+     "task-template",
+     "parameter"
+    ],
+    "reservedDrafts": 1,
+    "textIncludes": "RESERVED"
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 159,
+    "license": "Apache-2.0"
+   },
+   "portNote": "mechanism vocabulary differs from upstream K; the RESERVED wording is kept"
+  },
+  {
+   "id": "history.tried.yield.prune",
+   "source": "tests/test_core.py:128",
+   "kind": "upstream-native",
+   "function": "foldHistory",
+   "input": {
+    "scenario": "test_core.py:128-153 verbatim append_candidate calls"
+   },
+   "expected": {
+    "tried": [
+     "memory",
+     "prompt",
+     "skill"
+    ],
+    "yieldAt3": {
+     "memory": -0.02,
+     "prompt": 0.03,
+     "skill": -0.02
+    },
+    "yieldPromptAt5": -0.01,
+    "yieldPromptAt6": null,
+    "pruneComponentsAt5": [
+     "memory",
+     "prompt",
+     "skill"
+    ],
+    "incumbentPromptEdits": 1
+   },
+   "provenance": {
+    "commit": "be50316",
+    "file": "tests/test_core.py",
+    "line": 128,
+    "license": "Apache-2.0"
+   },
+   "portNote": "documentation of upstream semantics; the port derives these from facts with a single frozen incumbent baseline and its own vocabulary, pinned inline in strategy-history.spec.ts"
+  }
+ ]
+}

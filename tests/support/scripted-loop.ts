@@ -515,8 +515,10 @@ export interface ScriptedLoop {
   recordRequest(text: string, sessionId?: SessionId | string): void
   /** The run a session is bound to, with the store and task it belongs to. */
   runForSession(sessionId: SessionId | string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun }>
-  /** The loop position the graph registry last stored, as the RSI loop driver writes it (F). */
+  /** The loop position the RSI loop driver last reached, observed by this harness (the registry no longer stores one) (F). */
   rsiProgressOf(): unknown
+  /** Observe one position the driver reached; specs wire this to the driver's `onProgress`. */
+  observeRsiProgress(progress: unknown): void
   dispose(): Promise<void>
 }
 
@@ -762,7 +764,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
   private readonly callRecords: ToolCallRecord[] = []
   private readonly executedNames: string[] = []
   private readonly graphEvents: GraphCommit[] = []
-  /** The loop position the graph registry last stored, as the RSI loop driver writes it (F). */
+  /** The loop position the driver last reached, observed through its `onProgress` (F). */
   private rsiProgress: unknown
   private readonly primary: SessionId
   private previousHome: string | undefined
@@ -906,7 +908,6 @@ class ScriptedLoopImpl implements ScriptedLoop {
         graphStoreId: 'sg-g-root',
         layoutStoreId: 'sg-l-root',
         ...(this.options.rsi === undefined ? {} : { rsi: { ...this.options.rsi } }),
-        ...(this.rsiProgress === undefined ? {} : { rsiProgress: this.rsiProgress }),
       })
       return {
         ...graphRegistry({
@@ -933,16 +934,12 @@ class ScriptedLoopImpl implements ScriptedLoop {
               : []
           }),
         }),
-        // What an RSI loop driver (F) reads: one graph record, and the position it
-        // writes back. A fixture whose spec declared no `rsi` settings is never
-        // scheduled, exactly as a real graph without them is not.
+        // What an RSI loop driver (F) reads: one graph record. A fixture whose
+        // spec declared no `rsi` settings is never scheduled, exactly as a real
+        // graph without them is not.
         get: async (id: string) => {
           if (id !== 'g1') throw new Error(`graphs: no graph "${id}" in this fixture`)
           return structuredClone(record())
-        },
-        markRsiProgress: async (id: string, progress: unknown) => {
-          if (id !== 'g1') throw new Error(`graphs: no graph "${id}" in this fixture`)
-          this.rsiProgress = progress as never
         },
       }
     })() as never)
@@ -1219,6 +1216,10 @@ class ScriptedLoopImpl implements ScriptedLoop {
 
   rsiProgressOf(): unknown {
     return this.rsiProgress
+  }
+
+  observeRsiProgress(progress: unknown): void {
+    this.rsiProgress = progress
   }
 
   async begin(contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }> {

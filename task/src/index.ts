@@ -41,7 +41,7 @@ import type {
   QuestionRecord,
 } from './question.ts'
 import { TaskState } from './service/state.ts'
-import { EventStoreSet } from './service/store.ts'
+import { EventStoreSet, type ReadOnlyStoreSnapshot } from './service/store.ts'
 import { runIn, taskIn } from './service/checks/primitives.ts'
 
 export * from './types.ts'
@@ -53,7 +53,7 @@ export * from './proposal.ts'
 export * from './question.ts'
 export { TaskState } from './service/state.ts'
 export { EventStoreSet } from './service/store.ts'
-export type { EventStoreConfig, EventStoreState, StoreEntry, StoreOpenMode } from './service/store.ts'
+export type { EventStoreConfig, EventStoreState, ReadOnlyStoreSnapshot, StoreEntry, StoreOpenMode } from './service/store.ts'
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
@@ -132,6 +132,11 @@ export class TaskService extends Service {
 
   async snapshotIn(storeId: string): Promise<TaskSnapshot> {
     return await this.stores.snapshot(storeId)
+  }
+
+  /** The zero-write read door ({@link EventStoreSet.readOnlySnapshot}): a missing store answers `exists:false`, never a creation. */
+  async snapshotReadOnly(storeId: string): Promise<ReadOnlyStoreSnapshot<TaskSnapshot>> {
+    return await this.stores.readOnlySnapshot(storeId)
   }
 
   async taskIn(storeId: string, taskId: TaskId): Promise<TaskInstance> {

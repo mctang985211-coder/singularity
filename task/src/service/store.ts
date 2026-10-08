@@ -65,6 +65,11 @@ export interface EventStoreConfig<
   readonly onDemand?: boolean
 }
 
+/** The answer of a read-only snapshot door: a missing store reports `exists:false` instead of being created. */
+export type ReadOnlyStoreSnapshot<Snapshot> =
+  | { readonly exists: false }
+  | { readonly exists: true; readonly snapshot: Snapshot }
+
 /** The `sessionPersistence`-backed stores one service owns: allocation, replay, serial writes and disposal. */
 export class EventStoreSet<
   K extends SessionEventType,
@@ -136,6 +141,35 @@ export class EventStoreSet<
     await store.ready
     await store.writes
     return store.state.snapshot()
+  }
+
+  /**
+   * The one zero-write door: replays the stored events into a throwaway state over a `'read'` handle and closes it.
+   * A missing store answers `exists:false`; nothing is created, no write lease is taken, and `this.stores` is never touched.
+   */
+  async readOnlySnapshot(id: string): Promise<ReadOnlyStoreSnapshot<Snapshot>> {
+    this.guard(id)
+    const sessionId = makeSessionId(id)
+    const listed = (await this.ctx.sessionPersistence.list()).filter(item => item.header.id === sessionId)
+    if (listed.length === 0) return { exists: false }
+    if (listed.length > 1) throw new Error(`${this.config.namespace}: duplicate store session "${id}"`)
+    const handle = await this.ctx.sessionPersistence.open(sessionId, 'read')
+    try {
+      const { events } = await handle.read()
+      let state = this.config.createState(id)
+      const migratedType = `plugin:${this.config.eventType}`
+      for (const event of events) {
+        if ((event.type !== this.config.eventType && event.type !== migratedType) || event.ignorable !== true) {
+          throw new Error(`${this.config.namespace}: invalid persisted event at seq ${event.seq}`)
+        }
+        const next = state.clone()
+        next.apply(event.data as SessionEventMap[K])
+        state = next
+      }
+      return { exists: true, snapshot: state.snapshot() }
+    } finally {
+      await handle.close()
+    }
   }
 
   /** One batch, applied to a clone inside the store's write queue and appended only if the reducer accepted it. */

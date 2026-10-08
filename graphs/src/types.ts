@@ -1,4 +1,5 @@
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { GraphProtocol } from './protocol.ts'
 
 /** A model pinned on a graph; absent means the graph follows the deployment default selection. */
 export interface GraphModel {
@@ -23,15 +24,8 @@ export interface RsiConfig {
   readonly iterationRounds: number
   /** true: HITL approval gates queue for a human; false: the platform auto-resolves them. */
   readonly humanReview: boolean
-}
-
-/** Where a running RSI loop stands; the driver writes it and the UI reads it. */
-export interface RsiProgress {
-  /** 1-based round currently in flight (or last completed when phase is done/failed). */
-  readonly round: number
-  /** `running`/`publishing`/`debugging` while a round is in flight, `done` when the loop finished its rounds, `failed` when it stopped. */
-  readonly phase: 'running' | 'publishing' | 'debugging' | 'done' | 'failed'
-  readonly note?: string
+  /** Objective epoch (integer >= 1, default 1): bumping it is the one explicit way to start the search over. */
+  readonly epoch?: number
 }
 
 export interface GraphRecord {
@@ -43,12 +37,12 @@ export interface GraphRecord {
   readonly layoutStoreId: string
   readonly createdAt: number
   readonly ready: boolean
+  /** Protocol marker fixed at creation; absent means a sealed legacy graph (read-only history). */
+  readonly protocol?: GraphProtocol
   /** Pinned model applied to agents this graph spawns after the pin; absent = deployment default. */
   readonly model?: GraphModel
   /** RSI settings this graph runs under; absent = no autonomous improvement loop. */
   readonly rsi?: RsiConfig
-  /** Live RSI loop position; absent until the driver reports one. */
-  readonly rsiProgress?: RsiProgress
 }
 
 export interface GraphArchive {
@@ -69,14 +63,12 @@ export type GraphsEvent =
   | { readonly kind: 'graph/select'; readonly id: string }
   | { readonly kind: 'graph/ready'; readonly id: string }
   | { readonly kind: 'graph/model'; readonly id: string; readonly model: GraphModel | null }
-  /** Sets or clears (`null`) the RSI config and drops driver progress without replacing the graph's frozen root task. */
+  /** Sets or clears (`null`) the RSI config without replacing the graph's frozen root task. */
   | { readonly kind: 'graph/rsi'; readonly id: string; readonly rsi: RsiConfig | null }
-  /** The driver's live position in the loop; it never touches the config. */
-  | { readonly kind: 'graph/rsi-progress'; readonly id: string; readonly progress: RsiProgress }
   | { readonly kind: 'graph/remove'; readonly id: string; readonly archive: GraphArchive }
 
 /** Launch needs only a goal; iteration controls have platform defaults. */
-export type RsiLaunch = Pick<RsiConfig, 'task' | 'metrics'> & Partial<Pick<RsiConfig, 'iterationRounds' | 'humanReview'>>
+export type RsiLaunch = Pick<RsiConfig, 'task' | 'metrics'> & Partial<Pick<RsiConfig, 'iterationRounds' | 'humanReview' | 'epoch'>>
 
 export interface CreateGraphRequest {
   readonly name?: string

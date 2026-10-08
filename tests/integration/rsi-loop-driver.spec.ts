@@ -97,7 +97,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
     await h.agent(ROOT).whenIdle()
     expect((await h.snapshot(root.storeId)).runs.find(run => run.runId === root.runId)?.status).toBe('verified')
 
-    const driver = new RsiLoopDriver(h.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(h.ctx, { log: () => {}, onProgress: (_id, progress) => h.observeRsiProgress(progress) })
     try {
       await driver.ensure(GRAPH)
     } finally {
@@ -141,7 +141,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
     await h.agent(ROOT).whenIdle()
     expect((await h.snapshot(root.storeId)).runs.find(run => run.runId === root.runId)?.status).toBe('failed')
 
-    const driver = new RsiLoopDriver(h.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(h.ctx, { log: () => {}, onProgress: (_id, progress) => h.observeRsiProgress(progress) })
     try {
       await driver.ensure(GRAPH)
     } finally {
@@ -181,7 +181,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
     })
     await h.agent(ROOT).whenIdle()
 
-    const driver = new RsiLoopDriver(h.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(h.ctx, { log: () => {}, onProgress: (_id, progress) => h.observeRsiProgress(progress) })
     try {
       await driver.ensure(GRAPH)
     } finally {
@@ -231,7 +231,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
     expect((await h.runtime.submitResult(ROOT, { summary: 'the original parent result holds' })).status).toBe('verified')
     const firstChild = firstBatch.childTaskIds[0]!
 
-    const driver = new RsiLoopDriver(h.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(h.ctx, { log: () => {}, onProgress: (_id, progress) => h.observeRsiProgress(progress) })
     try {
       await driver.ensure(GRAPH)
       const started = await h.snapshot(STORE)
@@ -276,7 +276,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
     })
     const root = await h.begin({ objective: 'deliver the answer', requiredCapabilities: ['execute-task'], acceptanceCriteria: criterion('true') })
     await h.agent(ROOT).whenIdle()
-    const driver = new RsiLoopDriver(h.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(h.ctx, { log: () => {}, onProgress: (_id, progress) => h.observeRsiProgress(progress) })
     try {
       await driver.ensure(GRAPH)
       expect((await (await h.ctx.evolution.forSession(ROOT)).list()).find(proposal => proposal.proposalId === 'p-unfinished')?.status).toBe('proposed')
@@ -294,7 +294,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
     h = await startScriptedLoop({ rsi: { ...RSI, iterationRounds: 1 }, evolution: { ledgerRoot: ledger }, script: scriptOf(() => h) })
     const root = await h.begin({ objective: 'deliver the answer', requiredCapabilities: ['execute-task'], acceptanceCriteria: criterion('false') })
     await h.agent(ROOT).whenIdle()
-    const driver = new RsiLoopDriver(h.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(h.ctx, { log: () => {}, onProgress: (_id, progress) => h.observeRsiProgress(progress) })
     try {
       await driver.ensure(GRAPH)
       expect((await h.snapshot(STORE)).runs.find(run => run.runId === root.runId)?.status).toBe('failed')
@@ -410,7 +410,7 @@ describe('the platform RSI loop driver on the real deployment', () => {
     holdoutTaskId = await verifiedTemplateHoldout(h, oracle)
     cleanInputs = join(h.workspace, 'clean-template-replay-input')
     mkdirSync(cleanInputs)
-    const driver = new RsiLoopDriver(h.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(h.ctx, { log: () => {}, onProgress: (_id, progress) => h.observeRsiProgress(progress) })
     try {
       await driver.ensure(GRAPH)
       const evolution = await h.ctx.evolution.forSession(ROOT)

@@ -5,7 +5,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { EventStoreSet } from '@dangosys/dsh-singularity-task'
+import { EventStoreSet, type ReadOnlyStoreSnapshot } from '@dangosys/dsh-singularity-task'
 import type { AgentNode, AgentStatus, GraphConfig, GraphEvent, GraphSnapshot } from './types.ts'
 import { GraphState } from './service/state.ts'
 
@@ -66,6 +66,11 @@ export class GraphService extends Service {
 
   async snapshotIn(id: string): Promise<GraphSnapshot> {
     return await this.stores.snapshot(id)
+  }
+
+  /** The zero-write read door ({@link EventStoreSet.readOnlySnapshot}): a missing store answers `exists:false`, never a creation. */
+  async snapshotReadOnlyIn(id: string): Promise<ReadOnlyStoreSnapshot<GraphSnapshot>> {
+    return await this.stores.readOnlySnapshot(id)
   }
 
   async addAgent(agent: AgentNode, root = false): Promise<void> {

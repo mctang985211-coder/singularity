@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
-import type { GraphRecord, RsiConfig, RsiProgress } from '@dangosys/dsh-singularity-graphs'
+import type { GraphRecord, RsiConfig } from '@dangosys/dsh-singularity-graphs'
 import type { Diagnosis, ReviewRecord, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { RootRecoveryRequest } from '@dangosys/dsh-singularity-task-runtime'
 import {
@@ -22,6 +22,7 @@ import {
 } from '../../src/coordination/ledger.ts'
 import {
   installRsiLoopDriver,
+  type LoopProgress,
   roundDiagnosisId,
   roundHandoffDigest,
   roundRequestKey,
@@ -124,7 +125,6 @@ function roundRun(
 interface FixtureOptions {
   /** The graph's RSI settings; `null` leaves the graph without any (the default is {@link RSI}). */
   rsi?: RsiConfig | null
-  progress?: RsiProgress
   proposals?: EvolutionProposal[]
   runs?: TaskRun[]
   /** The status round 1 settled at (the default is `verified`). */
@@ -143,7 +143,7 @@ interface FixtureOptions {
 function fixture(options: FixtureOptions = {}) {
   const store = options.empty === true ? { tasks: [], runs: [], reviews: [], diagnoses: [] } : storeView(options.round1)
   if (options.runs !== undefined) store.runs = [...store.runs, ...options.runs]
-  const progressWrites: RsiProgress[] = []
+  const progressWrites: LoopProgress[] = []
   const spawns: { sessionId: string; name: string; prompt: string; grant: unknown }[] = []
   const prompts: string[] = []
   const recoveries: { storeId: string; request: RootRecoveryRequest; caller: string }[] = []
@@ -158,7 +158,6 @@ function fixture(options: FixtureOptions = {}) {
       createdAt: 1,
       ready: true,
       ...(options.rsi === null ? {} : { rsi: options.rsi ?? RSI }),
-      ...(options.progress === undefined ? {} : { rsiProgress: options.progress }),
     } as GraphRecord,
   }
   let proposals: EvolutionProposal[] = options.proposals ?? []
@@ -212,11 +211,6 @@ function fixture(options: FixtureOptions = {}) {
       list: async () => [structuredClone(graph.record)],
       snapshot: async () => ({ version: 1, graphs: [structuredClone(graph.record)], selectedId: GRAPH, archives: [] }),
       graphForSession: async () => structuredClone(graph.record),
-      markRsiProgress: async (id: string, progress: RsiProgress) => {
-        expect(id).toBe(GRAPH)
-        progressWrites.push(progress)
-        graph.record = { ...graph.record, rsiProgress: progress }
-      },
     },
     evolution: {
       list: async () => proposals,
@@ -296,6 +290,13 @@ function fixture(options: FixtureOptions = {}) {
     store,
     graph,
     progressWrites,
+    /** The driver options wired to this fixture's progress observer. */
+    driverOptions: {
+      log: () => {},
+      onProgress: (_id: string, progress: LoopProgress) => {
+        progressWrites.push(progress)
+      },
+    },
     spawns,
     prompts,
     recoveries,
@@ -381,7 +382,7 @@ describe('the RSI loop driver', () => {
       return { list: async () => scopedProposals, experiments: async () => [] }
     })
     Object.assign(f.ctx.evolution, { forSession, list: vi.fn(async () => { throw new Error('global ledger belongs to another library') }) })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.recoveries[0]!.request.proposalIds).toEqual(['scoped-p'])
     expect(forSession).toHaveBeenCalled()
   })
@@ -393,7 +394,7 @@ describe('the RSI loop driver', () => {
       frozen: { evaluation: { generatedResponse: '{}', generatedUsage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 } } },
       judged: { evaluation: { judgeUsage: { uncachedInputTokens: 5, outputTokens: 6, cacheReadTokens: 7, cacheWriteTokens: 8 } } },
     }] })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.spawns[0]!.prompt).toContain('Auxiliary evaluation plan/judge usage: 2 model calls; tokens 36 (input 6, output 8, cache read 10, cache write 12)')
     expect(f.recoveries).toHaveLength(1)
   })
@@ -405,7 +406,7 @@ describe('the RSI loop driver', () => {
     f.store.reviews[0]!.metrics = { tokens: { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 300, cacheWriteTokens: 4 }, toolCalls: { calls: 2, failures: 0 } }
     f.store.reviews.push({ taskId: 't-child', runId: 'r-child', outcome: 'verified', evidenceRefs: [], anomalies: [], metrics: { tokens: { uncachedInputTokens: 50, outputTokens: 10, cacheReadTokens: 100, cacheWriteTokens: 0 }, toolCalls: { calls: 3, failures: 1 } } })
     f.store.reviews.push({ taskId: 't-old', runId: 'r-old', outcome: 'verified', evidenceRefs: [], anomalies: [], metrics: { toolCalls: { calls: 7, failures: 0 } } })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     const prompt = f.spawns[0]!.prompt
     expect(prompt).toContain('Metrics to explore and improve: reduce latency; model cost')
     expect(prompt).toContain('Current round execution tree: 2 sessions; tokens 584 (input 150, output 30, cache read 400, cache write 4); toolCalls 5 (1 failed); coverage tokens 2/2, tools 2/2')
@@ -439,7 +440,7 @@ describe('the RSI loop driver', () => {
         : { uncachedInputTokens: 9, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 } } }) },
       sessionQuery: { readSession: async (id: string) => ({ events: logs.get(id) ?? [] }) },
     })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     const prompt = f.spawns[0]!.prompt
     expect(prompt).toContain('Current round execution tree: 1 sessions; tokens 120 (input 100, output 20, cache read 0, cache write 0); toolCalls 2 (0 failed)')
     expect(prompt).toContain('Graph usage to date (executions, replay experiments and recorded coordination): 2 sessions; tokens 217 (input 159, output 48, cache read 10, cache write 0); toolCalls 6 (2 failed); coverage tokens 2/2, tools 2/2')
@@ -458,7 +459,7 @@ describe('the RSI loop driver', () => {
       sessionProjections: { restore },
       sessionQuery: { readSession: async () => ({ session: header, inheritedEventCount: 0, events }) },
     })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(restore).toHaveBeenCalledWith({}, events, 0, header, 0)
     expect(f.spawns[0]!.prompt).toContain('Graph usage to date (executions, replay experiments and recorded coordination): 1 sessions; tokens 30 (input 20, output 6, cache read 4, cache write 0); toolCalls 1 (0 failed); coverage tokens 1/1, tools 1/1')
     expect(f.spawns[0]!.prompt).toContain('Current round execution tree: 1 sessions; tokens 12')
@@ -471,7 +472,7 @@ describe('the RSI loop driver', () => {
       { type: 'tool/call', data: { name: 'bash' } },
       { type: 'tool/result', data: { message: { isError: true } } },
     ] }) } })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.spawns[0]!.prompt).toContain('Current round execution tree: 1 sessions; tokens unknown; toolCalls 2 (1 failed); coverage tokens 0/1, tools 1/1')
   })
 
@@ -491,7 +492,7 @@ describe('the RSI loop driver', () => {
   it('supervises the verified round and opens the next one under the round key, consuming what was applied', async () => {
     // The supervisor applies one proposal while it runs.
     const f = fixture({ onSpawn: () => f.setProposals([appliedProposal(1, 'p-1')]) })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
 
     expect(f.progressWrites).toEqual([
       { round: 1, phase: 'publishing', note: 'round 1 verified; supervising its method change' },
@@ -525,7 +526,7 @@ describe('the RSI loop driver', () => {
       rsi: { ...RSI, iterationRounds: 3 },
       onSpawn: () => f.setProposals([appliedProposal(1, 'p-1')]),
     })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
 
     // The round failed, so its supervision is the debug variant and the next
     // round is a recovery of this attempt.
@@ -553,7 +554,7 @@ describe('the RSI loop driver', () => {
 
   it('marks the loop failed and opens nothing when the supervisor reports the loop closed', async () => {
     const f = fixture({ rsi: { ...RSI, iterationRounds: 3 }, supervisorReply: CLOSED_REPLY })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.recoveries).toEqual([])
     expect(f.spawns).toHaveLength(1)
     expect(f.progressWrites).toEqual([
@@ -568,7 +569,7 @@ describe('the RSI loop driver', () => {
 
   it('marks the loop failed and opens nothing when the supervisor reports a concrete obstruction', async () => {
     const f = fixture({ rsi: { ...RSI, iterationRounds: 3 }, supervisorReply: BLOCKED_REPLY })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.recoveries).toEqual([])
     expect(f.spawns).toHaveLength(1)
     expect(f.progressWrites.at(-1)).toEqual({
@@ -580,7 +581,7 @@ describe('the RSI loop driver', () => {
 
   it('records the round diagnosis with no proposals', async () => {
     const f = fixture({ onSpawn: () => f.setProposals([appliedProposal(1, 'p-1')]) })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     const diagnosis = f.store.diagnoses[0]
     expect(diagnosis).toBeDefined()
     expect(diagnosis!.diagnosisId).toBe(roundDiagnosisId(GRAPH, 1))
@@ -592,7 +593,7 @@ describe('the RSI loop driver', () => {
 
   it('reviews final library experience and finishes without opening another execution', async () => {
     const f = fixture({ rsi: { ...RSI, iterationRounds: 1 }, supervisorReply: NO_CHANGE_REPLY })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.recoveries).toEqual([])
     expect(f.spawns).toHaveLength(1)
     expect(f.spawns[0]!.prompt).toContain('Final library review')
@@ -604,7 +605,7 @@ describe('the RSI loop driver', () => {
     let release!: () => void
     const idle = new Promise<void>(resolve => { release = resolve })
     const f = fixture({ rsi: { ...RSI, iterationRounds: 1 }, supervisorReply: NO_CHANGE_REPLY, onSupervisorIdle: () => idle })
-    const driver = new RsiLoopDriver(f.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(f.ctx, f.driverOptions)
     const pending = driver.ensure(GRAPH)
     await vi.waitFor(() => expect(f.spawns).toHaveLength(1))
     expect(f.progressWrites.at(-1)).toMatchObject({ round: 1, phase: 'publishing' })
@@ -613,7 +614,7 @@ describe('the RSI loop driver', () => {
     await pending
     expect(f.progressWrites.at(-1)).toMatchObject({ phase: 'done' })
     driver.stop()
-    const restarted = new RsiLoopDriver(f.ctx, { log: () => {} })
+    const restarted = new RsiLoopDriver(f.ctx, f.driverOptions)
     await restarted.ensure(GRAPH)
     expect(f.spawns).toHaveLength(1)
     expect(f.recoveries).toEqual([])
@@ -633,7 +634,7 @@ describe('the RSI loop driver', () => {
       ],
       onSpawn: () => f.setProposals([appliedProposal(2, 'p-2')]),
     })
-    const driver = new RsiLoopDriver(f.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(f.ctx, f.driverOptions)
     await driver.ensure(GRAPH)
     expect(f.progressWrites).toEqual([
       { round: 2, phase: 'debugging', note: 'round 2 settled failed; supervising its repair' },
@@ -649,7 +650,7 @@ describe('the RSI loop driver', () => {
 
   it('never opens a round the store already holds under its request key', async () => {
     const f = fixture({ runs: [roundRun(roundRequestKey(GRAPH, 2), 'running')] })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.recoveries).toEqual([])
     expect(f.spawns).toEqual([])
     expect(f.progressWrites).toEqual([{ round: 2, phase: 'running', note: 'round 2 is running' }])
@@ -657,7 +658,7 @@ describe('the RSI loop driver', () => {
 
   it('resumes a round without a second supervisor when its publication already settled', async () => {
     const f = fixture({ proposals: [appliedProposal(1, 'p-9')] })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.spawns).toEqual([])
     expect(f.recoveries).toHaveLength(1)
     expect(f.recoveries[0]!.request.proposalIds).toEqual(['p-9'])
@@ -669,37 +670,39 @@ describe('the RSI loop driver', () => {
     // the next round. The ledger keeps that reason across the restart.
     const f = fixture()
     await previousSupervisor(1, 'recorded', 'no_change: the evidence supports no shared change')
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.spawns).toEqual([])
     expect(f.recoveries).toHaveLength(1)
     expect(f.recoveries[0]!.request.requestKey).toBe(roundRequestKey(GRAPH, 2))
   })
 
-  it('stops the loop from a supervision a previous process closed, while a stored failed progress stands', async () => {
-    // The loop already marked itself failed from this settlement: a later
-    // activation re-derives that answer, and no new supervisor is delegated.
-    const f = fixture({
-      rsi: { ...RSI, iterationRounds: 3 },
-      progress: { round: 1, phase: 'failed', note: "round 1's supervisor reported blocked: blocked: the toolchain is absent; the loop stops" },
-    })
-    await previousSupervisor(1, 'closed', 'blocked: the toolchain is absent')
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
-    expect(f.spawns).toEqual([])
-    expect(f.recoveries).toEqual([])
+  it('stops the loop it marked failed from a blocked closure when the graph is re-activated', async () => {
+    // The stop is this loop's in-memory position: a re-activation of the same
+    // driver takes no further step and delegates no second supervisor.
+    const f = fixture({ rsi: { ...RSI, iterationRounds: 3 }, supervisorReply: BLOCKED_REPLY })
+    const driver = new RsiLoopDriver(f.ctx, f.driverOptions)
+    await driver.ensure(GRAPH)
+    expect(f.spawns).toHaveLength(1)
     expect(f.progressWrites.at(-1)).toEqual({
       round: 1,
       phase: 'failed',
-      note: "round 1's supervisor reported blocked: blocked: the toolchain is absent; the loop stops",
+      note: "round 1's supervisor reported blocked: the toolchain is absent; the loop stops",
     })
+    await driver.ensure(GRAPH)
+    expect(f.spawns).toHaveLength(1)
+    expect(f.recoveries).toEqual([])
+    driver.stop()
   })
 
-  it('resumes a blocked round when the operator re-set the RSI config (progress cleared)', async () => {
-    // The operator cleared the obstruction the blocked settlement named and
-    // re-issued the config: the round gets one fresh supervisor attempt under
-    // the same round key, and the loop goes on.
+  it('resumes a blocked round when the operator re-enters the loop (a fresh attachment)', async () => {
+    // The registry no longer stores loop progress, so a driver that attaches
+    // with no in-memory position treats the round as operator-resumed: the
+    // operator cleared the obstruction the blocked settlement named and bumped
+    // the epoch (or re-issued the config), and the round gets one fresh
+    // supervisor attempt under the same round key.
     const f = fixture({ rsi: { ...RSI, iterationRounds: 3 }, supervisorReply: NO_CHANGE_REPLY })
     await previousSupervisor(1, 'closed', 'blocked: the toolchain is absent')
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.spawns).toHaveLength(1)
     expect(f.spawns[0]!.name).toContain('round 1')
     expect(f.progressWrites[0]).toMatchObject({ round: 1, phase: 'publishing' })
@@ -710,7 +713,7 @@ describe('the RSI loop driver', () => {
     // bounds the retries.
     const f = fixture({ supervisorReply: NO_CHANGE_REPLY })
     await previousSupervisor(1, 'interrupted')
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.spawns).toHaveLength(1)
     expect(f.recoveries).toHaveLength(1)
     expect(f.recoveries[0]!.request.requestKey).toBe(roundRequestKey(GRAPH, 2))
@@ -721,7 +724,7 @@ describe('the RSI loop driver', () => {
     // spawn its supervisor from the store plus the ledger, not from memory.
     const f = fixture({ round1: 'failed', rsi: { ...RSI, iterationRounds: 3 }, supervisorReply: NO_CHANGE_REPLY })
     expect(f.store.diagnoses).toEqual([])
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.spawns).toHaveLength(1)
     expect(f.store.diagnoses.map(item => item.diagnosisId)).toEqual([roundDiagnosisId(GRAPH, 1)])
     expect(f.recoveries[0]!.request.mode).toBe('recovery')
@@ -730,7 +733,7 @@ describe('the RSI loop driver', () => {
   it('spawns a bounded supervisor whose grant never carries task_recover', async () => {
     // The supervisor drives the chain; silence never completes that work.
     const f = fixture()
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.spawns).toHaveLength(1)
     expect(SUPERVISOR_BASELINE).toContain('evolution_apply')
     expect(SUPERVISOR_BASELINE).not.toContain('task_recover')
@@ -746,7 +749,7 @@ describe('the RSI loop driver', () => {
 
   it('accepts an explicit no_change with a reason and preserves it for restart', async () => {
     const f = fixture({ supervisorReply: NO_CHANGE_REPLY })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.prompts).toEqual([])
     expect(f.recoveries[0]!.request).toMatchObject({ mode: 'improve', reuses: [] })
     expect((await readReviewAgentAttempts(STORE)).at(-1)?.settlement).toMatchObject({
@@ -760,7 +763,7 @@ describe('the RSI loop driver', () => {
         ...(result === 'rollback' ? { status: 'rolledback' } : { status: 'decided', decision: result }),
       } as EvolutionProposal
       const f = fixture({ proposals: [proposal] })
-      await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+      await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
       expect(f.spawns).toEqual([])
       expect(f.recoveries).toHaveLength(1)
       expect(f.recoveries[0]!.request.proposalIds).toBeUndefined()
@@ -770,7 +773,7 @@ describe('the RSI loop driver', () => {
   it('does not let one applied proposal hide another unfinished executable candidate', async () => {
     const unfinished = { ...appliedProposal(1, 'p-unfinished'), status: 'prepared' } as EvolutionProposal
     const f = fixture({ proposals: [appliedProposal(1, 'p-applied'), unfinished] })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.recoveries).toEqual([])
     expect(f.prompts).toHaveLength(3)
     expect(f.progressWrites.at(-1)!.note).toContain('p-unfinished [prepared]')
@@ -782,7 +785,7 @@ describe('the RSI loop driver', () => {
       supervisorReply: NO_CHANGE_REPLY,
       onSpawn: () => f.setProposals([{ ...appliedProposal(1, 'p-candidate'), status } as EvolutionProposal]),
     })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.recoveries).toEqual([])
     expect(f.progressWrites.at(-1)!.note).toContain('no_change contradicts the publication ledger')
     expect((await readReviewAgentAttempts(STORE)).at(-1)?.settlement?.status).toBe('closed')
@@ -791,7 +794,7 @@ describe('the RSI loop driver', () => {
   it('does not let a research-only suggestion block an applied executable publication', async () => {
     const suggestion = { ...appliedProposal(1, 'p-research'), targetType: 'runtime_policy', status: 'proposed', level: 'L4' } as EvolutionProposal
     const f = fixture({ proposals: [appliedProposal(1, 'p-applied'), suggestion] })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.spawns).toEqual([])
     expect(f.recoveries[0]!.request.proposalIds).toEqual(['p-applied'])
   })
@@ -799,7 +802,7 @@ describe('the RSI loop driver', () => {
   it('permits no_change alongside a research-only suggestion', async () => {
     const suggestion = { ...appliedProposal(1, 'p-research'), targetType: 'runtime_policy', status: 'proposed', level: 'L4' } as EvolutionProposal
     const f = fixture({ proposals: [suggestion], supervisorReply: NO_CHANGE_REPLY })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.prompts).toEqual([])
     expect(f.recoveries).toHaveLength(1)
     expect(f.recoveries[0]!.request.proposalIds).toBeUndefined()
@@ -808,7 +811,7 @@ describe('the RSI loop driver', () => {
   it('does not treat the legacy recorded reminder bound as a completed publication', async () => {
     const f = fixture()
     await previousSupervisor(1, 'recorded', 'no proposal settled after 3 re-prompts')
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.spawns).toHaveLength(1)
     expect(f.recoveries).toEqual([])
     expect(f.progressWrites.at(-1)).toMatchObject({ round: 1, phase: 'failed' })
@@ -816,7 +819,7 @@ describe('the RSI loop driver', () => {
 
   it('keeps the final failed run and its cause when the execution count is exhausted', async () => {
     const f = fixture({ rsi: { ...RSI, iterationRounds: 1 }, round1: 'failed', supervisorReply: NO_CHANGE_REPLY })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.spawns).toHaveLength(1)
     expect(f.recoveries).toEqual([])
     expect(f.progressWrites.at(-1)).toEqual({
@@ -829,35 +832,35 @@ describe('the RSI loop driver', () => {
     let release!: () => void
     const idle = new Promise<void>(resolve => { release = resolve })
     const f = fixture({ supervisorReply: NO_CHANGE_REPLY, onSupervisorIdle: () => idle })
-    const driver = new RsiLoopDriver(f.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(f.ctx, f.driverOptions)
     const pending = driver.ensure(GRAPH)
     await vi.waitFor(() => expect(f.spawns).toHaveLength(1))
-    const { rsi: _config, rsiProgress: _progress, ...bare } = f.graph.record
+    const { rsi: _config, ...bare } = f.graph.record
     f.graph.record = bare
     release()
     await pending
     expect(f.recoveries).toEqual([])
     expect(f.progressWrites).toHaveLength(1)
-    expect(f.graph.record.rsiProgress).toBeUndefined()
     expect((await readReviewAgentAttempts(STORE)).at(-1)?.settlement?.status).toBe('interrupted')
     driver.stop()
   })
 
-  it.each([true, false])('revokes a pending watcher when RSI is replaced (same values: %s)', async sameValues => {
+  it.each([true, false])('revokes a pending watcher when RSI is replaced (epoch bump: %s)', async epochBump => {
     let release!: () => void
     const idle = new Promise<void>(resolve => { release = resolve })
     const f = fixture({ supervisorReply: NO_CHANGE_REPLY, onSupervisorIdle: () => idle })
-    const driver = new RsiLoopDriver(f.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(f.ctx, f.driverOptions)
     const pending = driver.ensure(GRAPH)
     await vi.waitFor(() => expect(f.spawns).toHaveLength(1))
-    const { rsiProgress: _progress, ...bare } = f.graph.record
-    f.graph.record = { ...bare, rsi: { ...RSI, iterationRounds: sameValues ? 2 : 1 } }
+    // An epoch bump is the explicit re-entry: it revokes the watcher even when
+    // every other setting is identical. A plain settings change revokes it too.
+    f.graph.record = { ...f.graph.record, rsi: epochBump ? { ...RSI, epoch: 2 } : { ...RSI, iterationRounds: 1 } }
     release()
     await pending
     expect(f.recoveries).toEqual([])
     expect(f.progressWrites).toHaveLength(1)
     await driver.ensure(GRAPH)
-    if (sameValues) {
+    if (epochBump) {
       expect(f.spawns).toHaveLength(2)
       expect(f.recoveries).toHaveLength(1)
     } else {
@@ -873,7 +876,7 @@ describe('the RSI loop driver', () => {
       f.store.runs.push(roundRun(request.requestKey, status))
       throw new Error('worker spawn acknowledgement failed')
     })
-    const driver = new RsiLoopDriver(f.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(f.ctx, f.driverOptions)
     await driver.ensure(GRAPH)
     expect(f.store.runs).toHaveLength(2)
     expect(f.progressWrites.at(-1)!.note).toContain(`was recorded ${status} despite its opening error`)
@@ -886,7 +889,7 @@ describe('the RSI loop driver', () => {
 
   it('ignores graphs without RSI settings and leaves the runtime cap alone for them', async () => {
     const f = fixture({ rsi: null })
-    await new RsiLoopDriver(f.ctx, { log: () => {} }).ensure(GRAPH)
+    await new RsiLoopDriver(f.ctx, f.driverOptions).ensure(GRAPH)
     expect(f.recoveries).toEqual([])
     expect(f.spawns).toEqual([])
     expect(f.progressWrites).toEqual([])
@@ -895,7 +898,7 @@ describe('the RSI loop driver', () => {
 
   it('declares the graph round count as the store cap, and drops it with the loop', async () => {
     const f = fixture()
-    const driver = new RsiLoopDriver(f.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(f.ctx, f.driverOptions)
     driver.observeGraph(f.graph.record)
     expect(graphImprovementCap(STORE)).toBe(2)
     driver.stop()
@@ -904,7 +907,7 @@ describe('the RSI loop driver', () => {
 
   it('clears routing and the cap even before the activation creates loop state', async () => {
     const f = fixture()
-    const driver = new RsiLoopDriver(f.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(f.ctx, f.driverOptions)
     driver.observeGraph(f.graph.record)
     expect(graphImprovementCap(STORE)).toBe(2)
     const { rsi: _config, ...bare } = f.graph.record
@@ -919,7 +922,7 @@ describe('the RSI loop driver', () => {
 
   it('ignores the terminal facts of stores no graph declared as an RSI loop', async () => {
     const f = fixture()
-    const driver = new RsiLoopDriver(f.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(f.ctx, f.driverOptions)
     driver.install()
     for (const listener of f.listeners)
       listener({ storeId: 'sg-t-other', taskId: 't-root', runId: 'r-1', outcome: 'verified' })
@@ -931,7 +934,7 @@ describe('the RSI loop driver', () => {
 
   it('waits for the root task, then picks the loop up from the first terminal fact', async () => {
     const f = fixture({ empty: true })
-    const driver = new RsiLoopDriver(f.ctx, { log: () => {} })
+    const driver = new RsiLoopDriver(f.ctx, f.driverOptions)
     driver.install()
     // The graph activation happens before the store holds a root task: nothing
     // is scheduled, and the store stays bound to its graph.
@@ -953,7 +956,7 @@ describe('the RSI loop driver', () => {
 
   it('wires install() to the terminal-review listener and the graph activation event', async () => {
     const f = fixture({ onSpawn: () => f.setProposals([appliedProposal(1, 'p-1')]) })
-    const dispose = installRsiLoopDriver(f.ctx, { log: () => {} })
+    const dispose = installRsiLoopDriver(f.ctx, f.driverOptions)
     expect(f.listeners.length).toBeGreaterThan(0)
     for (const handler of f.events['graphs/selected'] ?? []) handler(f.graph.record as never)
     await vi.waitFor(() => expect(f.recoveries).toHaveLength(1))

@@ -80,18 +80,8 @@ export class GraphsState {
       case 'graph/rsi': {
         const idx = this.value.graphs.findIndex(g => g.id === event.id)
         if (idx < 0) throw new Error(`graphs: unknown graph "${event.id}"`)
-        // Clear driver bookkeeping, not the frozen root task or its historical rounds.
-        const { rsi: _previous, rsiProgress: _progress, ...bare } = this.value.graphs[idx]
+        const { rsi: _previous, ...bare } = this.value.graphs[idx]
         const next = event.rsi === null ? bare : { ...bare, rsi: event.rsi }
-        const graphs = [...this.value.graphs]
-        graphs[idx] = next
-        this.value = { ...this.value, graphs }
-        return
-      }
-      case 'graph/rsi-progress': {
-        const idx = this.value.graphs.findIndex(g => g.id === event.id)
-        if (idx < 0) throw new Error(`graphs: unknown graph "${event.id}"`)
-        const next = { ...this.value.graphs[idx], rsiProgress: event.progress }
         const graphs = [...this.value.graphs]
         graphs[idx] = next
         this.value = { ...this.value, graphs }
@@ -112,6 +102,8 @@ export class GraphsState {
         return
       }
       default:
+        // Logs written before the protocol marker may still carry `graph/rsi-progress`; progress is derived now, so they replay to nothing.
+        if ((event as { kind?: unknown }).kind === 'graph/rsi-progress') return
         throw new Error(`graphs: unknown event kind "${(event as { kind?: unknown }).kind}"`)
     }
   }

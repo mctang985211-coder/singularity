@@ -11,6 +11,7 @@ export * from './replay.ts'
 export * from './replay/snapshot.ts'
 export * from './capability-candidate.ts'
 export * from './task-definition.ts'
+export * from './strategy/index.ts'
 export { assertDecisionTransition } from './ledger/state-machine.ts'
 
 export { default } from './evolution.ts'

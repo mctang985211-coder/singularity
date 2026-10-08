@@ -1,5 +1,6 @@
-import { a as LayoutConfig, c as NodeShape, i as DEFAULT_ROOT, n as LayoutService, o as LayoutEvent, r as CanvasNode, s as LayoutSnapshot, t as LayoutState } from "./layout-BLFonytT.js";
+import { a as LayoutConfig, c as NodeShape, i as DEFAULT_ROOT, n as LayoutService, o as LayoutEvent, r as CanvasNode, s as LayoutSnapshot, t as LayoutState } from "./layout-Ctr757BS.js";
 import { Context, Service } from "@deepseek-ai/cordis";
+import { ReadOnlyStoreSnapshot } from "@dangosys/dsh-singularity-task";
 import { SessionId } from "@deepseek-ai/dsh-session";
 
 //#region src/types.d.ts
@@ -99,6 +100,8 @@ declare class GraphService extends Service {
   clearActive(): void;
   snapshot(): Promise<GraphSnapshot>;
   snapshotIn(id: string): Promise<GraphSnapshot>;
+  /** The zero-write read door ({@link EventStoreSet.readOnlySnapshot}): a missing store answers `exists:false`, never a creation. */
+  snapshotReadOnlyIn(id: string): Promise<ReadOnlyStoreSnapshot<GraphSnapshot>>;
   addAgent(agent: AgentNode, root?: boolean): Promise<void>;
   addAgentIn(storeId: string, agent: AgentNode, root?: boolean): Promise<void>;
   setStatusIn(storeId: string, agentId: SessionId, status: AgentStatus): Promise<void>;

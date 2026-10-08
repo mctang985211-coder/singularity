@@ -469,6 +469,21 @@ function assertAdmissionLimits(where, context) {
 
 //#endregion
 //#region src/service/checks/runs.ts
+/** The one id shape an environment revision or candidate reference may carry (`task-runtime` `EnvironmentRevisionManifest.revisionId`). */
+const ENVIRONMENT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** The environment-version fields a run record may carry, judged when present: old-protocol runs and bindings carry neither, and absence is not a defect. */
+function assertEnvironmentRevision(runId, run) {
+	if (run.environmentRevisionId !== void 0 && !ENVIRONMENT_ID.test(run.environmentRevisionId)) throw new Error(`task: run "${runId}" environment revision id ${JSON.stringify(run.environmentRevisionId)} is not a valid revision id (^[a-z0-9][a-z0-9-]{0,63}$)`);
+	if (run.trialCandidateRef !== void 0) {
+		if (!ENVIRONMENT_ID.test(run.trialCandidateRef)) throw new Error(`task: run "${runId}" trial candidate ref ${JSON.stringify(run.trialCandidateRef)} is not a valid revision id (^[a-z0-9][a-z0-9-]{0,63}$)`);
+		if (run.trialCandidateRef === run.environmentRevisionId) throw new Error(`task: run "${runId}" trial candidate ref must differ from its environment revision id; a trial binds a candidate on top of the active revision, not the active revision itself`);
+	}
+}
+/** The binding-level environment fields, judged when present; on a trial binding the candidate ref names the candidate the bytes were read from. */
+function assertBindingEnvironment(runId, binding) {
+	if (binding.environmentRevisionId !== void 0 && !ENVIRONMENT_ID.test(binding.environmentRevisionId)) throw new Error(`task: run "${runId}" provider binding environment revision id ${JSON.stringify(binding.environmentRevisionId)} is not a valid revision id (^[a-z0-9][a-z0-9-]{0,63}$)`);
+	if (binding.trialCandidateRef !== void 0 && !ENVIRONMENT_ID.test(binding.trialCandidateRef)) throw new Error(`task: run "${runId}" provider binding trial candidate ref ${JSON.stringify(binding.trialCandidateRef)} is not a valid revision id (^[a-z0-9][a-z0-9-]{0,63}$)`);
+}
 /** The content identity a run records is what a later reader re-checks the snapshot against, so a malformed record is refused rather than stored: a digest that is not a digest, or a skill entry without a name, would make the record unusable … */
 function assertProviderBinding(runId, binding) {
 	if (typeof binding.registryRevision !== "string" || binding.registryRevision.length === 0) throw new Error(`task: run "${runId}" provider binding requires a registry revision`);
@@ -499,6 +514,7 @@ function assertProviderBinding(runId, binding) {
 		digest(`MCP server "${entry.serverName}" templateDigest`, entry.templateDigest, true);
 	}
 	if (binding.snapshotRoot !== void 0 && (typeof binding.snapshotRoot !== "string" || binding.snapshotRoot.length === 0)) throw new Error(`task: run "${runId}" provider binding snapshotRoot must be a non-empty path when present`);
+	assertBindingEnvironment(runId, binding);
 }
 /** The submission record is what a reader trusts instead of re-reading the worker's transcript, so a malformed one is refused rather than stored: an unnamed summary or a ref list that is not a list would leave the record unusable exactly when … */
 function assertSubmissionShape(runId, submission) {
@@ -1416,6 +1432,7 @@ function start(snapshot, taskId, envelopeRunId, run) {
 	if (run.status !== "running") throw new Error(`task: run "${run.runId}" must start in status "running"`);
 	if (typeof run.sessionId !== "string" || run.sessionId.length === 0) throw new Error(`task: run "${run.runId}" session id must be non-empty`);
 	if (run.providerBinding !== void 0) assertProviderBinding(run.runId, run.providerBinding);
+	assertEnvironmentRevision(run.runId, run);
 	if (run.recovery !== void 0) assertRunRecovery(snapshot, taskId, run.recovery);
 	assertBirthPhase(run);
 	if (run.parentRunId !== void 0) runIn(snapshot, run.parentRunId);
@@ -1790,6 +1807,35 @@ var EventStoreSet = class {
 		await store.writes;
 		return store.state.snapshot();
 	}
+	/**
+	* The one zero-write door: replays the stored events into a throwaway state over a `'read'` handle and closes it.
+	* A missing store answers `exists:false`; nothing is created, no write lease is taken, and `this.stores` is never touched.
+	*/
+	async readOnlySnapshot(id) {
+		this.guard(id);
+		const sessionId = SessionId(id);
+		const listed = (await this.ctx.sessionPersistence.list()).filter((item) => item.header.id === sessionId);
+		if (listed.length === 0) return { exists: false };
+		if (listed.length > 1) throw new Error(`${this.config.namespace}: duplicate store session "${id}"`);
+		const handle = await this.ctx.sessionPersistence.open(sessionId, "read");
+		try {
+			const { events } = await handle.read();
+			let state = this.config.createState(id);
+			const migratedType = `plugin:${this.config.eventType}`;
+			for (const event$1 of events) {
+				if (event$1.type !== this.config.eventType && event$1.type !== migratedType || event$1.ignorable !== true) throw new Error(`${this.config.namespace}: invalid persisted event at seq ${event$1.seq}`);
+				const next = state.clone();
+				next.apply(event$1.data);
+				state = next;
+			}
+			return {
+				exists: true,
+				snapshot: state.snapshot()
+			};
+		} finally {
+			await handle.close();
+		}
+	}
 	/** One batch, applied to a clone inside the store's write queue and appended only if the reducer accepted it. */
 	async commit(id, events) {
 		if (events.length === 0) throw new Error(`${this.config.namespace}: cannot commit an empty event batch`);
@@ -1961,6 +2007,10 @@ var TaskService = class extends Service {
 	}
 	async snapshotIn(storeId) {
 		return await this.stores.snapshot(storeId);
+	}
+	/** The zero-write read door ({@link EventStoreSet.readOnlySnapshot}): a missing store answers `exists:false`, never a creation. */
+	async snapshotReadOnly(storeId) {
+		return await this.stores.readOnlySnapshot(storeId);
 	}
 	async taskIn(storeId, taskId) {
 		return taskIn(await this.snapshotIn(storeId), taskId);

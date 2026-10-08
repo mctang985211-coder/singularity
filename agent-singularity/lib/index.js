@@ -1413,6 +1413,7 @@ async function evolutionOf(ctx, sessionId$1) {
 var RsiLoopDriver = class {
 	ctx;
 	log;
+	onProgress;
 	loops = /* @__PURE__ */ new Map();
 	byStore = /* @__PURE__ */ new Map();
 	registered = /* @__PURE__ */ new Set();
@@ -1423,6 +1424,7 @@ var RsiLoopDriver = class {
 	constructor(ctx, options = {}) {
 		this.ctx = ctx;
 		this.log = options.log ?? warnLine(ctx);
+		this.onProgress = options.onProgress;
 	}
 	/** Subscribe to the two facts that move a loop — one terminal review, one graph activation — and seed from the persisted registry. */
 	install() {
@@ -1600,6 +1602,7 @@ var RsiLoopDriver = class {
 	*/
 	async superviseRound(state, graph, snapshot, round, run) {
 		if (await this.currentGraph(state) === void 0) return;
+		const operatorResume = state.progress === void 0;
 		await this.settleRoundBubble(state, graph, round);
 		const verified = run.status === "verified";
 		const review = reviewOfRun(snapshot, run.runId);
@@ -1614,7 +1617,7 @@ var RsiLoopDriver = class {
 			phase: "debugging",
 			note: `round ${round} settled ${run.status}; supervising its repair`
 		});
-		const supervision = await this.takeUpSupervision(state, graph, round, run, review, diagnosisId, verified);
+		const supervision = await this.takeUpSupervision(state, graph, round, run, review, diagnosisId, verified, operatorResume);
 		if (await this.currentGraph(state) === void 0) return;
 		switch (supervision.kind) {
 			case "stop":
@@ -1688,10 +1691,9 @@ var RsiLoopDriver = class {
 	* restart neither spawns a second supervisor for a round that already had one
 	* nor forgets the outcome that stopped the loop.
 	*/
-	async takeUpSupervision(state, graph, round, run, review, diagnosisId, verified) {
+	async takeUpSupervision(state, graph, round, run, review, diagnosisId, verified, operatorResume) {
 		const already = publicationOf(await this.proposalsFor(state, diagnosisId));
 		const settled = supervisorAttemptOf(await readReviewAgentAttempts(state.storeId).catch(() => []), diagnosisId);
-		const operatorResume = graph.rsiProgress === void 0;
 		if (settled?.settlement?.status === "closed") {
 			const note = settled.settlement.note ?? "the round was closed";
 			const blocked = note.startsWith("blocked:");
@@ -2116,26 +2118,19 @@ var RsiLoopDriver = class {
 			...this.supervisorMethod
 		].join("\n");
 	}
-	/** Write one loop position, skipping a rewrite of the position the registry already holds. */
+	/** Record one loop position in memory, skipping a rewrite of the position this loop already holds. */
 	async mark(state, progress) {
 		if (await this.currentGraph(state) === void 0) return;
 		const current$1 = state.progress;
 		if (current$1 !== void 0 && current$1.round === progress.round && current$1.phase === progress.phase && current$1.note === progress.note) return;
-		try {
-			await this.ctx.graphs.markRsiProgress(state.graphId, progress);
-			state.progress = progress;
-		} catch (error) {
-			this.log(`rsi loop ${state.graphId}: the loop position could not be recorded (${message(error)})`);
-		}
+		state.progress = progress;
+		this.onProgress?.(state.graphId, progress);
 	}
 	/** The loop state of one graph, created on first sight and aligned with the graph record every time it is read. */
 	loopFor(graph, storeId) {
 		const existing = this.loops.get(graph.id);
 		if (existing !== void 0) {
-			if (this.matchesGraph(existing, graph)) {
-				if (existing.progress === void 0 && graph.rsiProgress !== void 0) existing.progress = graph.rsiProgress;
-				return existing;
-			}
+			if (this.matchesGraph(existing, graph)) return existing;
 			this.forget(graph.id);
 		}
 		const state = {
@@ -2143,7 +2138,6 @@ var RsiLoopDriver = class {
 			storeId,
 			rootSessionId: String(graph.rootSessionId),
 			config: graph.rsi,
-			...graph.rsiProgress === void 0 ? {} : { progress: graph.rsiProgress },
 			stopped: false
 		};
 		this.loops.set(graph.id, state);
@@ -2163,9 +2157,9 @@ var RsiLoopDriver = class {
 			this.registered.delete(storeId);
 		}
 	}
-	/** Config replacement drops progress even when it writes identical settings. */
+	/** A config carrying a different epoch or different settings replaces the loop; an identical re-set does not. */
 	matchesGraph(state, graph) {
-		return graph.rsi !== void 0 && String(graph.rootSessionId) === state.rootSessionId && sameRsiConfig(state.config, graph.rsi) && !(state.progress !== void 0 && graph.rsiProgress === void 0);
+		return graph.rsi !== void 0 && String(graph.rootSessionId) === state.rootSessionId && sameRsiConfig(state.config, graph.rsi);
 	}
 	/** Re-read authority after an await and immediately before graph/recovery side effects. */
 	async currentGraph(state) {
@@ -2185,7 +2179,7 @@ function supervisorAttemptOf(attempts, diagnosisId) {
 }
 /** Whether two readings agree; replacement revokes a watcher while the same frozen root's facts remain authoritative. */
 function sameRsiConfig(left, right) {
-	return left.task === right.task && left.iterationRounds === right.iterationRounds && left.humanReview === right.humanReview && canonicalize(left.metrics ?? []) === canonicalize(right.metrics ?? []);
+	return left.task === right.task && left.iterationRounds === right.iterationRounds && left.humanReview === right.humanReview && (left.epoch ?? 1) === (right.epoch ?? 1) && canonicalize(left.metrics ?? []) === canonicalize(right.metrics ?? []);
 }
 /**
 * One round's supervision identity: the hand-off content this driver promises

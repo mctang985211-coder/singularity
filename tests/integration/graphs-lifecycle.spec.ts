@@ -133,7 +133,7 @@ describe('graphs creation lifecycle', () => {
     const { service, store, runtime } = harness()
     const result = await service.create({ createEnv: true, rsi: { task: 'Improve a word counter', metrics: ['correctness', 'latency'] } })
     expect(store.get(result.graph.envId).components).toEqual([])
-    expect(result.graph.rsi).toEqual({ task: 'Improve a word counter', metrics: ['correctness', 'latency'], iterationRounds: 3, humanReview: false })
+    expect(result.graph.rsi).toEqual({ task: 'Improve a word counter', metrics: ['correctness', 'latency'], iterationRounds: 3, humanReview: false, epoch: 1 })
     expect(runtime.promptUser).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: result.graph.rootSessionId }), [
       { type: 'text', text: 'Improve a word counter\n关注指标：\n- correctness\n- latency' },
     ], [{ type: 'text', text: expect.stringContaining('Set up Singularity graph') }])
@@ -282,14 +282,14 @@ function patchGraph(service: GraphsService, store: EnvStore) {
 }
 
 describe('graph RSI settings persistence and HTTP updates', () => {
-  it('creates and reopens the configured graph with its recorded driver position', async () => {
+  it('creates and reopens the configured graph with its protocol marker and epoch default', async () => {
     const { service, reopen, events } = harness()
     const { graph } = await service.create({ createEnv: true, repos: ['acme/widget'], rsi: rsiConfig })
-    const progress = { round: 2, phase: 'publishing' as const, note: 'Candidate under evaluation' }
-    await service.markRsiProgress(graph.id, progress)
 
+    expect(graph.protocol).toMatchObject({ id: 'singularity/graph@2', version: 2 })
+    expect(graph.rsi).toEqual({ ...rsiConfig, epoch: 1 })
     expect(events[0]).toMatchObject({ data: { kind: 'graph/add', graph: { rsi: rsiConfig } } })
-    expect(await reopen().get(graph.id)).toEqual({ ...graph, rsiProgress: progress })
+    expect(await reopen().get(graph.id)).toEqual(graph)
   })
 
   it.each([
@@ -311,29 +311,32 @@ describe('graph RSI settings persistence and HTTP updates', () => {
     expect(events).toEqual([])
   })
 
-  it('set, repeated set, and clear drop driver progress while preserving the same graph root', async () => {
+  it('set, repeated set, and clear replace the config while preserving the same graph root', async () => {
     const { service, reopen, runtime } = harness()
     const { graph } = await service.create({ createEnv: true, repos: ['acme/widget'], rsi: rsiConfig })
     const replacement = { ...rsiConfig, iterationRounds: 5, humanReview: false }
-    const progress = { round: 2, phase: 'running' as const }
 
-    await service.markRsiProgress(graph.id, progress)
     const replaced = await service.setRsi(graph.id, replacement)
     expect(replaced).toEqual({ ...graph, rsi: replacement })
     expect(await reopen().get(graph.id)).toEqual(replaced)
 
-    await service.markRsiProgress(graph.id, progress)
     const repeated = await service.setRsi(graph.id, replacement)
-    expect(repeated.rsiProgress).toBeUndefined()
+    expect(repeated.rsi).toEqual(replacement)
     expect(repeated.rootSessionId).toBe(graph.rootSessionId)
 
-    await service.markRsiProgress(graph.id, progress)
     const cleared = await service.setRsi(graph.id, null)
     expect('rsi' in cleared).toBe(false)
-    expect('rsiProgress' in cleared).toBe(false)
     expect(cleared.rootSessionId).toBe(graph.rootSessionId)
     expect(await reopen().get(graph.id)).toEqual(cleared)
     expect(runtime.createRoot).toHaveBeenCalledOnce()
+  })
+
+  it('stamps an explicit epoch on the config it stores', async () => {
+    const { service, reopen } = harness()
+    const { graph } = await service.create({ createEnv: true, repos: ['acme/widget'], rsi: rsiConfig })
+    const bumped = await service.setRsi(graph.id, { ...rsiConfig, epoch: 2 })
+    expect(bumped.rsi?.epoch).toBe(2)
+    expect(await reopen().get(graph.id)).toEqual(bumped)
   })
 
   it('replays an older graph with no RSI settings without adding defaults', async () => {
@@ -342,7 +345,6 @@ describe('graph RSI settings persistence and HTTP updates', () => {
     const read = await reopen().get(graph.id)
     expect(read).toEqual(graph)
     expect('rsi' in read).toBe(false)
-    expect('rsiProgress' in read).toBe(false)
   })
 
   it.each([
@@ -358,7 +360,6 @@ describe('graph RSI settings persistence and HTTP updates', () => {
       model: { provider: 'p1', model: 'm1' },
       rsi: rsiConfig,
     })
-    await service.markRsiProgress(graph.id, { round: 2, phase: 'running' })
     const before = await service.get(graph.id)
     const recorded = structuredClone(events)
     append.mockClear()
@@ -375,7 +376,6 @@ describe('graph RSI settings persistence and HTTP updates', () => {
   it('HTTP combined success persists both pins once and broadcasts only the complete result', async () => {
     const { ctx, service, store, reopen, append } = harness()
     const { graph } = await service.create({ createEnv: true, repos: ['acme/widget'], rsi: rsiConfig })
-    await service.markRsiProgress(graph.id, { round: 2, phase: 'running' })
     const changed = vi.fn()
     ctx.on('graphs/change', changed)
     append.mockClear()
@@ -447,11 +447,10 @@ describe('graph RSI settings persistence and HTTP updates', () => {
     expect((await service.get(graph.id)).rsi).toBeUndefined()
   })
 
-  it('refuses settings and progress for unknown graphs without appending events', async () => {
+  it('refuses settings for unknown graphs without appending events', async () => {
     const { service, events } = harness()
     await expect(service.setRsi('missing', rsiConfig)).rejects.toThrow('unknown graph')
     await expect(service.setPins('missing', { model: null, rsi: null })).rejects.toThrow('unknown graph')
-    await expect(service.markRsiProgress('missing', { round: 1, phase: 'running' })).rejects.toThrow('unknown graph')
     expect(events).toEqual([])
   })
 })
