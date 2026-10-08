@@ -28,9 +28,9 @@ export interface MembershipEdge {
 export interface ReadOnlyGraphs {
   graphForSession(sessionId: string): Promise<GraphRecordFacts>
   list(): Promise<readonly GraphRecordFacts[]>
-  /** One graph's published members and edges, read by the registry's own graph id. */
+  /** One graph's published members and edges, read by the registry's own graph id; `null` when its store does not exist. */
   view(id: string): Promise<{
-    readonly graph: { readonly agents: readonly MembershipNode[]; readonly edges: readonly MembershipEdge[] }
+    readonly graph: { readonly agents: readonly MembershipNode[]; readonly edges: readonly MembershipEdge[] } | null
   }>
 }
 
@@ -133,5 +133,5 @@ export function callerGraph(graph: GraphRecordFacts): CallerGraph {
 /** Whether one session is a published member of a graph — the check every session reference passes. */
 export async function isGraphMember(graphs: ReadOnlyGraphs, graphId: string, sessionId: string): Promise<boolean> {
   const view = await graphs.view(graphId)
-  return view.graph.agents.some(agent => String(agent.id) === sessionId)
+  return (view.graph?.agents ?? []).some(agent => String(agent.id) === sessionId)
 }

@@ -1,9 +1,10 @@
 import { Context, Service } from "@deepseek-ai/cordis";
-import { SESSION_NOT_IN_GRAPH, graphAccess } from "@dangosys/dsh-singularity-graphs";
+import { SESSION_NOT_IN_GRAPH } from "@dangosys/dsh-singularity-graphs";
 import { blockingQuestionsOf, questionsAwaitingAnswerOf, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
 import { TextRetainer, formatRetentionNotice } from "@deepseek-ai/dsh-output-retention";
 import { SESSION_QUERY_READ_WINDOW_MAX, extractSessionEventText } from "@deepseek-ai/dsh-session-query";
 import { checkObligationCoverage, findRepoRoot, loadObligationTemplates } from "@dangosys/dsh-singularity-task-runtime";
+import { graphAccessWire } from "@dangosys/dsh-singularity-graphs/wire";
 
 //#region src/refusals.ts
 /** The same vocabulary as a value, so a tool schema or a test can pin the whole set. */
@@ -188,7 +189,7 @@ function callerGraph(graph) {
 }
 /** Whether one session is a published member of a graph — the check every session reference passes. */
 async function isGraphMember(graphs, graphId, sessionId) {
-	return (await graphs.view(graphId)).graph.agents.some((agent) => String(agent.id) === sessionId);
+	return ((await graphs.view(graphId)).graph?.agents ?? []).some((agent) => String(agent.id) === sessionId);
 }
 
 //#endregion
@@ -348,7 +349,9 @@ async function graphOfSession(graphs, sessionId) {
 /** Whether the graph itself spawned one session into it — the graph store's own `spawn` edge. */
 async function spawnedInto(deps, graph, sessionId) {
 	try {
-		return (await deps.graphs.view(graph.id)).graph.edges.some((edge) => edge.kind === "spawn" && String(edge.to) === sessionId) ? { kind: "spawned" } : { kind: "member" };
+		const view = await deps.graphs.view(graph.id);
+		if (view.graph === null) throw new Error("the graph store does not exist");
+		return view.graph.edges.some((edge) => edge.kind === "spawn" && String(edge.to) === sessionId) ? { kind: "spawned" } : { kind: "member" };
 	} catch (error) {
 		return {
 			kind: "failed",
@@ -2003,14 +2006,6 @@ var ReadSourceUnavailableError = class extends Error {
 		this.source = source;
 	}
 };
-/** How a graph stands: current, or sealed legacy history with the reason named. */
-function accessWire(graph) {
-	const access = graphAccess(graph);
-	return access.mode === "current" ? { mode: "current" } : {
-		mode: "legacy-readonly",
-		reason: access.reason
-	};
-}
 /**
 * The fingerprint of one graph's read facts: the registry record, the revision,
 * the evaluation and the assignment states. Two reads of the same facts carry
@@ -2105,7 +2100,7 @@ var GraphViewService = class extends Service {
 				name: facts.graph.name,
 				createdAt: facts.graph.createdAt
 			},
-			access: accessWire(facts.graph),
+			access: graphAccessWire(facts.graph),
 			revision: facts.revision,
 			evaluation: facts.evaluation,
 			progress: deriveProgress(facts.graph.rsi?.iterationRounds, facts.assignments),

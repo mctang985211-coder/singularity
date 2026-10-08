@@ -1,17 +1,16 @@
 import type {
   CanvasNode,
   CreateGraphBody,
-  EvolutionInvalidation,
-  EvolutionProposalWire,
-  EvolutionResponse,
+  GraphAccess,
   GraphEntry,
   GraphEnv,
   GraphSnapshot,
+  GraphViewResponse,
   GraphsResponse,
   LayoutSnapshot,
+  LegacyHistoryResponse,
   ModelRef,
   ModelsResponse,
-  ProposalDecision,
   RecoveryResponse,
   ReviewResponse,
   RsiConfig,
@@ -37,13 +36,9 @@ export function setStoreOverride(id: string | null): void {
 
 export interface ViewSnapshot {
   meta: GraphMeta
-  graph: GraphSnapshot
-  layout: LayoutSnapshot
-}
-
-export interface ProposalDecisionResult {
-  readonly ok: boolean
-  readonly error?: string
+  access: GraphAccess
+  graph: GraphSnapshot | null
+  layout: LayoutSnapshot | null
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -67,6 +62,16 @@ function post<T>(path: string, body: unknown): Promise<T> {
 
 export function fetchGraph(graphId: string): Promise<ViewSnapshot> {
   return request<ViewSnapshot>('/singularity/graph' + graphQuery(graphId))
+}
+
+/** The unified read model: the same revision, evaluation and progress the tool plane reads. */
+export function fetchView(graphId: string): Promise<GraphViewResponse> {
+  return request<GraphViewResponse>('/singularity/view' + graphQuery(graphId))
+}
+
+/** One sealed graph's history: the old records verbatim, read-only. */
+export function fetchHistory(graphId: string): Promise<LegacyHistoryResponse> {
+  return request<LegacyHistoryResponse>('/singularity/graphs/' + encodeURIComponent(graphId) + '/history')
 }
 
 export function fetchHitl(): Promise<{ pending: HitlPending[] }> {
@@ -130,23 +135,6 @@ export function fetchTask(storeId: string): Promise<{ snapshot: TaskSnapshotWire
   return request<{ snapshot: TaskSnapshotWire | null }>('/singularity/task?storeId=' + encodeURIComponent(storeId))
 }
 
-export function decideProposal(body: {
-  storeId: string
-  proposalId: string
-  decision: ProposalDecision
-  reason?: string
-}): Promise<ProposalDecisionResult> {
-  return post<ProposalDecisionResult>('/singularity/task/proposals/decide', body)
-}
-
-export function fetchEvolution(graphId?: string): Promise<EvolutionResponse> {
-  return request<EvolutionResponse>('/singularity/evolution' + (graphId === undefined ? '' : '?graphId=' + encodeURIComponent(graphId)))
-}
-
-export function fetchEvolutionProposal(id: string, graphId?: string): Promise<{ proposal: EvolutionProposalWire | null }> {
-  return request<{ proposal: EvolutionProposalWire | null }>('/singularity/evolution/' + encodeURIComponent(id) + (graphId === undefined ? '' : '?graphId=' + encodeURIComponent(graphId)))
-}
-
 export function fetchRecovery(storeId: string): Promise<RecoveryResponse> {
   return request<RecoveryResponse>('/singularity/recovery?storeId=' + encodeURIComponent(storeId))
 }
@@ -173,7 +161,7 @@ export function openEvents(
     onSnapshot: (view: ViewSnapshot) => void
     onHitl: (pending: HitlPending[]) => void
     onTask: (hint: TaskInvalidation) => void
-    onEvolution: (hint: EvolutionInvalidation) => void
+    onMethods: () => void
     onError: () => void
   },
 ): EventSource {
@@ -189,9 +177,9 @@ export function openEvents(
   source.addEventListener('task', event => {
     handlers.onTask(parse<TaskInvalidation>(event) ?? {})
   })
-  source.addEventListener('evolution', event => {
-    handlers.onEvolution(parse<EvolutionInvalidation>(event) ?? {})
-  })
+  // A method frame names the record that moved; the projection itself is re-read
+  // from the one read source rather than assembled from the frame.
+  source.addEventListener('methods', () => handlers.onMethods())
   source.onerror = () => {
     if (source.readyState !== EventSource.CLOSED) return
     handlers.onError()

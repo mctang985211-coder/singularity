@@ -22,6 +22,7 @@
     "zustand": "^5.0.11"
   },
   "devDependencies": {
+    "@dangosys/dsh-singularity-graphs": "workspace:*",
     "@tailwindcss/vite": "^4.1.18",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",

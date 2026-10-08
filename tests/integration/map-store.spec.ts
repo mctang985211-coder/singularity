@@ -5,6 +5,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.resetModules() })
 it('binds HTTP and SSE to the URL graph, preserves cleared selection, and awaits prompt acknowledgement', async () => {
   const view = {
     meta: { id: 'a', name: 'A', rootSessionId: 'root-a', graphStoreId: 'g-a', layoutStoreId: 'l-a', ready: true },
+    access: { mode: 'current' },
     graph: { version: 1, id: 'g-a', roots: ['root-a'], agents: [{ id: 'root-a', name: 'A', status: 'idle' }], edges: [], groups: [] },
     layout: { version: 1, id: 'l-a', nodes: { 'root-a': { x: 80, y: 80, width: 168, height: 76, shape: 'card' } } },
   }
@@ -34,6 +35,8 @@ it('binds HTTP and SSE to the URL graph, preserves cleared selection, and awaits
   expect(useStore.getState().selectedId).toBeNull()
   expect(useStore.getState().nodes).toHaveLength(1)
   expect(() => useStore.getState().applySnapshot({ ...view, meta: { ...view.meta, id: 'b' } } as never)).toThrow('wrong graph')
+  expect(useStore.getState().access).toBe('current')
+  expect(useStore.getState().readOnly).toBe(false)
   const prompt = useStore.getState().sendPrompt('root-a', 'hello')
   const rejected = expect(prompt).rejects.toThrow('submission rejected')
   const request = postMessage.mock.calls.at(-1)![0]

@@ -2,9 +2,9 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { AcceptanceCriterion, Diagnosis, EvidenceBundle, ExecutionPhase, ReadOnlyStoreSnapshot, ReviewRecord, RunProviderBinding, TaskHandoff, TaskInstance, TaskRun, TaskSnapshot } from "@dangosys/dsh-singularity-task";
 import { RetentionNotice } from "@deepseek-ai/dsh-output-retention";
 import { RunBindingRead, StoreRecoveryStatus } from "@dangosys/dsh-singularity-task-runtime";
+import { ApprovalSourceWire, GraphEvaluationWire, GraphProgressWire, GraphRevisionWire, GraphViewWire } from "@dangosys/dsh-singularity-graphs/wire";
 import { SessionEvent } from "@deepseek-ai/dsh-session";
 import { AssembleContext, PromptAssembly } from "@deepseek-ai/dsh-system-prompt";
-import { ApprovalSourceWire, GraphEvaluationWire, GraphProgressWire, GraphRevisionWire, GraphViewWire } from "@dangosys/dsh-singularity-graphs/wire";
 
 //#region src/refusals.d.ts
 /** The named vocabulary every read answers in, the read algebra built on it, and the one place an error is read. @module @dangosys/dsh-singularity-context/refusals */
@@ -56,12 +56,12 @@ interface MembershipEdge {
 interface ReadOnlyGraphs {
   graphForSession(sessionId: string): Promise<GraphRecordFacts>;
   list(): Promise<readonly GraphRecordFacts[]>;
-  /** One graph's published members and edges, read by the registry's own graph id. */
+  /** One graph's published members and edges, read by the registry's own graph id; `null` when its store does not exist. */
   view(id: string): Promise<{
     readonly graph: {
       readonly agents: readonly MembershipNode[];
       readonly edges: readonly MembershipEdge[];
-    };
+    } | null;
   }>;
 }
 /** The fields of a registry graph this package reads. */

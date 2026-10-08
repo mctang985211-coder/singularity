@@ -1,3 +1,4 @@
+import { a as graphAccess, i as assertCurrentGraph, n as GRAPH_PROTOCOL_V2, o as protocolOf, r as GraphSealedError, t as graphAccessWire } from "./wire-BJWK8tlL.js";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -6,44 +7,6 @@ import { SessionId } from "@deepseek-ai/dsh-session";
 import { EventStoreSet, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 import { latestBubbleWorkspacePath, materializeBubble } from "@dangosys/dsh-singularity-task-runtime";
 
-//#region src/protocol.ts
-/** Graph protocol marker and access mode: the single source that tells a current graph from a sealed legacy one. */
-/** The literal identity of the current protocol; a graph's protocol is fixed at creation and never rewritten. */
-const GRAPH_PROTOCOL_V2 = "singularity/graph@2";
-/** The protocol marker a record carries; absent means the graph predates marking. */
-function protocolOf(graph) {
-	return graph.protocol;
-}
-/** A marked graph is current, an unmarked one is sealed legacy read-only history; there is no third state. */
-function graphAccess(graph) {
-	const protocol = protocolOf(graph);
-	if (protocol === void 0) return {
-		mode: "legacy-readonly",
-		reason: `graph "${graph.id}" carries no protocol marker; it predates ${GRAPH_PROTOCOL_V2}`
-	};
-	return {
-		mode: "current",
-		protocol
-	};
-}
-/** The error every write path on a sealed legacy graph answers with. */
-var GraphSealedError = class extends Error {
-	code = "graph-sealed";
-	graphId;
-	constructor(graphId) {
-		super(`graphs: graph "${graphId}" is sealed legacy history (no ${GRAPH_PROTOCOL_V2} marker); it is read-only`);
-		this.name = "GraphSealedError";
-		this.graphId = graphId;
-	}
-};
-/** The marker a current graph carries; throws {@link GraphSealedError} on a sealed legacy graph. */
-function assertCurrentGraph(graph) {
-	const protocol = protocolOf(graph);
-	if (protocol === void 0) throw new GraphSealedError(graph.id);
-	return protocol;
-}
-
-//#endregion
 //#region src/service/state.ts
 /** Whether an existing workspace can be bound by a new graph: no graph and no sessions. */
 function isReusableEnv(env, boundEnvIds) {
@@ -204,6 +167,63 @@ Install and register planned repositories through graph_spawn, then call graph_m
 }
 
 //#endregion
+//#region src/read/legacy.ts
+/** One door read, with a failure named by the source it came from. */
+async function readDoor(kind, graphId, read) {
+	try {
+		return await read();
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		throw new Error(`graphs: reading the ${kind} of legacy graph "${graphId}" failed: ${detail}`);
+	}
+}
+/**
+* One legacy graph's whole history: its registry record, the three stores it may
+* hold, and the old evolution and completion records, each kept verbatim. The
+* stores are read in a fixed order (topology, layout, tasks) through read-only
+* doors, so a read creates nothing and a missing store is reported rather than
+* treated as a failure. `writable` is `false` by construction: no caller can
+* mistake this projection for a write path.
+*/
+async function readLegacyGraph(deps, graph) {
+	const key = rootTaskStoreId(graph.rootSessionId);
+	const topology = await readDoor("topology", graph.id, () => deps.graph.snapshotReadOnlyIn(graph.graphStoreId));
+	const layout = await readDoor("layout", graph.id, () => deps.layout.snapshotReadOnlyIn(graph.layoutStoreId));
+	const tasks = await readDoor("tasks", graph.id, () => deps.task.snapshotReadOnly(key));
+	const evolution = deps.legacyEvolution === void 0 ? void 0 : await deps.legacyEvolution(key);
+	const completions = deps.legacyCompletions === void 0 ? [] : await deps.legacyCompletions(key);
+	return {
+		formatVersion: "legacy-v1",
+		writable: false,
+		graph,
+		access: graphAccessWire(graph),
+		topology: topology.exists ? topology.snapshot : null,
+		layout: layout.exists ? layout.snapshot : null,
+		tasks: tasks.exists ? tasks.snapshot : null,
+		proposals: evolution?.proposals ?? [],
+		experiments: evolution?.experiments ?? [],
+		completions,
+		sources: [
+			{
+				id: graph.graphStoreId,
+				kind: "topology",
+				exists: topology.exists
+			},
+			{
+				id: graph.layoutStoreId,
+				kind: "layout",
+				exists: layout.exists
+			},
+			{
+				id: key,
+				kind: "tasks",
+				exists: tasks.exists
+			}
+		]
+	};
+}
+
+//#endregion
 //#region src/index.ts
 function nextGraphId(existing) {
 	let n = 1;
@@ -273,7 +293,7 @@ var GraphsService = class extends Service {
 		ctx.effect(async () => {
 			await this.ready;
 			const selected = (await this.state()).selected();
-			if (selected !== void 0) await this.transition(() => this.activate(selected));
+			if (selected !== void 0) await this.transition(() => this.enterSelected(selected));
 			return () => {};
 		}, "graphs: boot selected");
 	}
@@ -289,12 +309,20 @@ var GraphsService = class extends Service {
 	async get(id) {
 		return (await this.state()).get(id);
 	}
+	/**
+	* One graph's metadata, topology and layout. Every store is read through the
+	* zero-write door: a graph whose store this process never opened answers
+	* `null` rather than being created by the read, which is what keeps a sealed
+	* legacy graph readable without a single write.
+	*/
 	async view(id) {
 		const meta = await this.get(id);
+		const [graph, layout] = await Promise.all([this.ctx.graph.snapshotReadOnlyIn(meta.graphStoreId), this.ctx.layout.snapshotReadOnlyIn(meta.layoutStoreId)]);
 		return {
 			meta,
-			graph: await this.ctx.graph.snapshotIn(meta.graphStoreId),
-			layout: await this.ctx.layout.snapshotIn(meta.layoutStoreId)
+			access: graphAccessWire(meta),
+			graph: graph.exists ? graph.snapshot : null,
+			layout: layout.exists ? layout.snapshot : null
 		};
 	}
 	async list() {
@@ -302,7 +330,7 @@ var GraphsService = class extends Service {
 	}
 	async select(id) {
 		return this.transition(async () => {
-			const graph = await this.get(id);
+			const graph = await this.writableGraph(id);
 			await this.activate(graph);
 			await this.commit([{
 				kind: "graph/select",
@@ -467,6 +495,7 @@ var GraphsService = class extends Service {
 		}).join(", ")}; release the occupying graph with POST /singularity/graphs/<id>/delete or choose another workspace name`;
 	}
 	async markReady(id) {
+		await this.writableGraph(id);
 		await this.commit([{
 			kind: "graph/ready",
 			id
@@ -488,7 +517,7 @@ var GraphsService = class extends Service {
 	async setPins(id, update) {
 		return this.transition(async () => {
 			await this.ready;
-			await this.get(id);
+			await this.writableGraph(id);
 			const { model, rsi } = update;
 			if (model === void 0 && rsi === void 0) throw new Error("graphs: model or rsi is required (pass null to clear either)");
 			if (rsi !== void 0 && rsi !== null) assertRsiConfig(rsi);
@@ -514,24 +543,35 @@ var GraphsService = class extends Service {
 		if (llm === void 0) throw new Error("graphs: llm service is not loaded; cannot validate a model pin");
 		await assertModelServiceable(llm, model);
 	}
+	/** Which graph publishes a session, read through the zero-write door: a read never opens a store as a side effect. */
 	async graphForSession(sessionId) {
-		for (const graph of (await this.state()).snapshot().graphs) if ((await this.ctx.graph.snapshotIn(graph.graphStoreId)).agents.some((agent) => agent.id === sessionId)) return graph;
+		for (const graph of (await this.state()).snapshot().graphs) {
+			const snapshot = await this.ctx.graph.snapshotReadOnlyIn(graph.graphStoreId);
+			if (snapshot.exists && snapshot.snapshot.agents.some((agent) => agent.id === sessionId)) return graph;
+		}
 		throw new SessionNotInGraphError(sessionId);
 	}
 	async remove(id) {
 		return this.transition(async () => {
 			const graph = await this.get(id);
-			const scope = {
-				graphStoreId: graph.graphStoreId,
-				layoutStoreId: graph.layoutStoreId
-			};
-			const taskRuntime = this.taskRuntime();
-			if (taskRuntime !== void 0) await taskRuntime.cancelGraph(rootTaskStoreId(graph.rootSessionId), "graph removed");
-			await this.ctx.agentRuntime.stopGraph(scope);
-			this.ctx.envBuilder.store.markClean(graph.envId);
+			const access = graphAccess(graph);
+			let agentIds;
+			if (access.mode === "current") {
+				const taskRuntime = this.taskRuntime();
+				if (taskRuntime !== void 0) await taskRuntime.cancelGraph(rootTaskStoreId(graph.rootSessionId), "graph removed");
+				await this.ctx.agentRuntime.stopGraph({
+					graphStoreId: graph.graphStoreId,
+					layoutStoreId: graph.layoutStoreId
+				});
+				this.ctx.envBuilder.store.markClean(graph.envId);
+				agentIds = (await this.ctx.graph.snapshotIn(graph.graphStoreId)).agents.map((agent) => agent.id);
+			} else {
+				const snapshot = await this.ctx.graph.snapshotReadOnlyIn(graph.graphStoreId);
+				agentIds = snapshot.exists ? snapshot.snapshot.agents.map((agent) => agent.id) : [];
+			}
 			const archive = {
 				graph,
-				agentIds: (await this.ctx.graph.snapshotIn(graph.graphStoreId)).agents.map((agent) => agent.id),
+				agentIds: [...agentIds],
 				archivedAt: Date.now()
 			};
 			await this.commit([{
@@ -540,7 +580,7 @@ var GraphsService = class extends Service {
 				archive
 			}]);
 			const selected = (await this.state()).selected();
-			if (selected !== void 0) Promise.resolve().then(() => this.activate(selected)).catch(() => {});
+			if (selected !== void 0) Promise.resolve().then(() => this.enterSelected(selected)).catch(() => {});
 			else {
 				this.ctx.graph.clearActive();
 				this.ctx.layout.clearActive();
@@ -550,6 +590,29 @@ var GraphsService = class extends Service {
 	/** Resolved lazily: task-runtime injects graphs, so a hard inject here would deadlock the plugin loader. */
 	taskRuntime() {
 		return this.ctx.get("taskRuntime");
+	}
+	/**
+	* The one write gate: every entry that would change one graph's settings,
+	* readiness or selection resolves its record through here first, and a sealed
+	* legacy graph answers {@link GraphSealedError} before anything is committed.
+	*/
+	async writableGraph(id) {
+		const graph = await this.get(id);
+		assertCurrentGraph(graph);
+		return graph;
+	}
+	/**
+	* The selected graph becomes this process's running environment. A sealed
+	* legacy graph is history: it is never activated, so selecting it — or booting
+	* with it selected — writes nothing, adopts nothing and publishes nothing.
+	*/
+	async enterSelected(graph) {
+		if (graphAccess(graph).mode === "legacy-readonly") {
+			this.ctx.graph.clearActive();
+			this.ctx.layout.clearActive();
+			return;
+		}
+		await this.activate(graph);
 	}
 	/** One graph becomes this process's running environment: recovery barrier, then store and env switch (A2 §E). */
 	async activate(graph) {
@@ -587,4 +650,4 @@ var GraphsService = class extends Service {
 var src_default = GraphsService;
 
 //#endregion
-export { GRAPH_PROTOCOL_V2, GraphSealedError, GraphsService, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertCurrentGraph, assertModelServiceable, src_default as default, graphAccess, graphAgentOptions, isReusableEnv, protocolOf };
+export { GRAPH_PROTOCOL_V2, GraphSealedError, GraphsService, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertCurrentGraph, assertModelServiceable, src_default as default, graphAccess, graphAccessWire, graphAgentOptions, isReusableEnv, protocolOf, readLegacyGraph };

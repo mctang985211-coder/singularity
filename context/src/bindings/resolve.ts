@@ -108,6 +108,7 @@ async function spawnedInto(
 ): Promise<{ kind: 'spawned' } | { kind: 'member' } | { kind: 'failed'; detail: string }> {
   try {
     const view = await deps.graphs.view(graph.id)
+    if (view.graph === null) throw new Error('the graph store does not exist')
     const spawned = view.graph.edges.some(edge => edge.kind === 'spawn' && String(edge.to) === sessionId)
     return spawned ? { kind: 'spawned' } : { kind: 'member' }
   } catch (error) {

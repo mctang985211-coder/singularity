@@ -1,29 +1,15 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ReviewRecord, TaskProposal, TaskService } from '@dangosys/dsh-singularity-task'
+import type { ReviewRecord, TaskService } from '@dangosys/dsh-singularity-task'
 import type { TaskRuntime } from '@dangosys/dsh-singularity-task-runtime'
 import { optionalService } from '@dangosys/dsh-singularity-task-runtime'
-import { RECOVERY_PATH, REVIEW_PATH, TASK_DECIDE_PATH, TASK_PATH } from '../../constants.ts'
-import { fail, guardMethod, messageOf, queryOf, readJson, sendJson } from '../libs/http.ts'
+import { RECOVERY_PATH, REVIEW_PATH, TASK_PATH } from '../../constants.ts'
+import { fail, guardMethod, queryOf, sendJson } from '../libs/http.ts'
 
 /** The verifier entry this boundary reads a criterion log through. */
 interface VerifierReader {
   logTail(logRef: string): Promise<string | undefined>
 }
-
-type ProposalDecision = 'approve' | 'reject' | 'continue' | 'cancel'
-
-interface DecideBody {
-  readonly storeId: string
-  readonly proposalId: string
-  readonly decision: ProposalDecision
-  readonly reason?: string
-}
-
-const DECISIONS: readonly ProposalDecision[] = ['approve', 'reject', 'continue', 'cancel']
-
-/** The console carries no session; a decision it records names the operator seat. */
-const DECIDED_BY = 'operator'
 
 /** The `storeId` query parameter, answered with the route's own refusal when it is missing. */
 function storeIdOf(req: IncomingMessage, who: string, res: ServerResponse): string | undefined {
@@ -35,33 +21,14 @@ function storeIdOf(req: IncomingMessage, who: string, res: ServerResponse): stri
   }
 }
 
-/** The session a proposal belongs to: the one its continuation and withdrawal act on behalf of. */
-function callerOf(proposal: TaskProposal): string {
-  return proposal.kind === 'root' ? proposal.identity.rootSessionId : proposal.identity.callerSessionId
-}
-
-/** The one decision call a console action maps to, in the runtime's own signatures. */
-async function decide(runtime: TaskRuntime, body: DecideBody): Promise<void> {
-  if (body.decision === 'approve' || body.decision === 'reject') {
-    await runtime.decideProposal(
-      body.storeId,
-      body.proposalId,
-      {
-        outcome: body.decision === 'approve' ? 'approved' : 'rejected',
-        ...(body.reason === undefined || body.reason.length === 0 ? {} : { reason: body.reason }),
-      },
-      DECIDED_BY,
-    )
-    return
-  }
-  const proposal = await runtime.readProposal(body.storeId, body.proposalId)
-  if (proposal === undefined) throw new Error(`task-runtime: store "${body.storeId}" holds no proposal "${body.proposalId}"`)
-  const caller = callerOf(proposal)
-  if (body.decision === 'continue') {
-    await runtime.continueProposal(body.storeId, body.proposalId, caller)
-    return
-  }
-  await runtime.cancelProposal(body.storeId, body.proposalId, caller)
+/**
+ * The task store this boundary reads, through the zero-write door: a store that
+ * does not exist answers `exists:false` instead of being created by the read, so
+ * a legacy graph's console never writes anything.
+ */
+async function snapshotOf(task: TaskService, storeId: string): Promise<unknown> {
+  const read = await task.snapshotReadOnly(storeId)
+  return read.exists ? read.snapshot : null
 }
 
 export function registerTask(ctx: Context): () => void {
@@ -74,47 +41,13 @@ export function registerTask(ctx: Context): () => void {
       if (storeId === undefined) return
       const task = optionalService<TaskService>(ctx, 'task')
       if (task === undefined) {
-        sendJson(res, 503, { error: 'task: this deployment mounts no task store' })
+        sendJson(res, 503, { error: 'task: this deployment mounts no task store', source: 'task' })
         return
       }
       try {
-        sendJson(res, 200, { snapshot: await task.openStore(storeId) })
+        sendJson(res, 200, { snapshot: await snapshotOf(task, storeId) })
       } catch (error) {
-        sendJson(res, 404, { error: messageOf(error) })
-      }
-    },
-  })
-}
-
-export function registerProposalDecide(ctx: Context): () => void {
-  return ctx.webServer.register({
-    kind: 'exact',
-    path: TASK_DECIDE_PATH,
-    handler: async (req: IncomingMessage, res: ServerResponse) => {
-      if (!guardMethod(req, res, 'POST')) return
-      let body: DecideBody
-      try {
-        body = await readJson<DecideBody>(req)
-        if (typeof body.storeId !== 'string' || body.storeId.length === 0) throw new Error('decide: storeId required')
-        if (typeof body.proposalId !== 'string' || body.proposalId.length === 0) {
-          throw new Error('decide: proposalId required')
-        }
-        if (!DECISIONS.includes(body.decision)) throw new Error(`decide: unknown decision ${String(body.decision)}`)
-        if (body.reason !== undefined && typeof body.reason !== 'string') throw new Error('decide: reason must be a string')
-      } catch (error) {
-        fail(res, error)
-        return
-      }
-      const runtime = optionalService<TaskRuntime>(ctx, 'taskRuntime')
-      if (runtime === undefined) {
-        sendJson(res, 200, { ok: false, error: 'task-runtime: this deployment mounts no task runtime' })
-        return
-      }
-      try {
-        await decide(runtime, body)
-        sendJson(res, 200, { ok: true })
-      } catch (error) {
-        sendJson(res, 200, { ok: false, error: messageOf(error) })
+        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
       }
     },
   })
@@ -157,14 +90,15 @@ export function registerReview(ctx: Context): () => void {
       }
       const task = optionalService<TaskService>(ctx, 'task')
       if (task === undefined) {
-        sendJson(res, 503, { error: 'task: this deployment mounts no task store' })
+        sendJson(res, 503, { error: 'task: this deployment mounts no task store', source: 'task' })
         return
       }
       let reviews: readonly ReviewRecord[]
       try {
-        reviews = (await task.openStore(storeId)).reviews
+        const read = await task.snapshotReadOnly(storeId)
+        reviews = read.exists ? read.snapshot.reviews : []
       } catch (error) {
-        sendJson(res, 404, { error: messageOf(error) })
+        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
         return
       }
       const review = reviews.find(record => record.runId === runId)

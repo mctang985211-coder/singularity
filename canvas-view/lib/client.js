@@ -253,6 +253,11 @@ window.__ModuleLoader__.load({
           const submit = async () => {
             const view = await request(GRAPH + '?graphId=' + encodeURIComponent(data.graphId))
             if (generation !== chatGeneration) throw new Error('singularity: session changed during submission')
+            // A sealed legacy graph is history: the runtime owns no inbox for it,
+            // so a prompt is refused here rather than queued against nothing.
+            if (view.access !== undefined && view.access.mode === 'legacy-readonly') {
+              throw new Error('singularity: this graph is sealed legacy history and takes no prompt')
+            }
             if (!view.meta.ready) throw new Error('singularity: graph is not ready')
             if (!view.graph.agents.some(agent => agent.id === data.sessionId))
               throw new Error('singularity: session is not in this graph')

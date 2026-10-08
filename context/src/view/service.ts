@@ -6,9 +6,9 @@
  */
 
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { graphAccess, type GraphProtocol } from '@dangosys/dsh-singularity-graphs'
+import type { GraphProtocol } from '@dangosys/dsh-singularity-graphs'
+import { graphAccessWire } from '@dangosys/dsh-singularity-graphs/wire'
 import type {
-  GraphAccessWire,
   GraphEvaluationWire,
   GraphRevisionWire,
   GraphViewWire,
@@ -49,12 +49,6 @@ interface ViewFacts {
   readonly revision: GraphRevisionWire | null
   readonly evaluation: GraphEvaluationWire | null
   readonly assignments: readonly CoordinationAssignmentFacts[]
-}
-
-/** How a graph stands: current, or sealed legacy history with the reason named. */
-function accessWire(graph: ViewGraph): GraphAccessWire {
-  const access = graphAccess(graph)
-  return access.mode === 'current' ? { mode: 'current' } : { mode: 'legacy-readonly', reason: access.reason }
 }
 
 /**
@@ -157,7 +151,7 @@ export class GraphViewService extends Service {
     const view: GraphViewWire = {
       formatVersion: 2,
       graph: { id: facts.graph.id, name: facts.graph.name, createdAt: facts.graph.createdAt },
-      access: accessWire(facts.graph),
+      access: graphAccessWire(facts.graph),
       revision: facts.revision,
       evaluation: facts.evaluation,
       progress: deriveProgress(facts.graph.rsi?.iterationRounds, facts.assignments),

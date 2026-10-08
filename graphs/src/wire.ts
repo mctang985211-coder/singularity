@@ -6,9 +6,17 @@
 
 import type { GraphSnapshot, LayoutSnapshot } from '@dangosys/dsh-singularity-graph'
 import type { TaskSnapshot } from '@dangosys/dsh-singularity-task'
+import { graphAccess } from './protocol.ts'
+import type { GraphProtocol } from './protocol.ts'
 import type { GraphRecord } from './types.ts'
 
 export type GraphAccessWire = { readonly mode: 'current' | 'legacy-readonly'; readonly reason?: string }
+
+/** One graph record's access mode, as every wire and route reports it. */
+export function graphAccessWire(graph: { readonly id: string; readonly protocol?: GraphProtocol }): GraphAccessWire {
+  const access = graphAccess(graph)
+  return access.mode === 'current' ? { mode: 'current' } : { mode: 'legacy-readonly', reason: access.reason }
+}
 
 export interface GraphProgressWire {
   /** 1-based round currently in flight; 0 when nothing is scheduled. */

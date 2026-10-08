@@ -66,7 +66,7 @@ describe('graph-web routes and SSE', () => {
       graphs: {
         view: async (id: string) => {
           expect(id).toBe('graph-a')
-          return { meta: { id }, graph: snapshot, layout }
+          return { meta: { id }, access: { mode: 'current' }, graph: snapshot, layout }
         },
         snapshot: async () => ({
           version: 1 as const,
@@ -151,7 +151,9 @@ describe('graph-web routes and SSE', () => {
       res as unknown as ServerResponse,
     )
     expect(res.statusCode).toBe(200)
-    expect(JSON.parse(res.body)).toEqual({ meta: { id: 'graph-a' }, graph: snapshot, layout })
+    // Every read of a graph's own canvas carries its access mode, so the console
+    // never has to guess whether the graph it holds is writeable.
+    expect(JSON.parse(res.body)).toEqual({ meta: { id: 'graph-a' }, access: { mode: 'current' }, graph: snapshot, layout })
 
     const graphsRes = mockRes()
     await handlers.get('/singularity/graphs')!(
@@ -165,7 +167,7 @@ describe('graph-web routes and SSE', () => {
   it('forwards named events onto SSE clients', () => {
     const broadcast = new GraphBroadcast({} as never)
     const res = mockRes()
-    broadcast.clients.set(res as unknown as ServerResponse, { graph: {} as never, writes: Promise.resolve() })
+    broadcast.clients.set(res as unknown as ServerResponse, { graphId: 'graph-a', writes: Promise.resolve() })
     broadcast.publishEvent('pr-chat/path', {
       path: 'pr',
       target: { repo: 'DangoSys/buckyball', number: 7 },

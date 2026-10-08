@@ -327,11 +327,15 @@ export default function TasksPanel() {
   const bootError = useStore(s => s.bootError)
   const graphMeta = useStore(s => s.graphMeta)
   const empty = useStore(s => s.empty)
+  const progress = useStore(s => s.graphView?.progress)
+  const loadView = useStore(s => s.loadView)
   const rootSessionId = graphMeta?.rootSessionId ?? null
 
   useEffect(() => {
     void loadTask()
-  }, [loadTask, rootSessionId])
+    // The round this panel counts against is the read model's own derivation.
+    void loadView()
+  }, [loadTask, loadView, rootSessionId])
 
   const view = useMemo(() => buildView(task), [task])
 
@@ -349,6 +353,11 @@ export default function TasksPanel() {
         <span className="sg-count">
           {asArray(task?.tasks).length} tasks · {view.runs.length} runs
         </span>
+        {progress !== undefined && (
+          <span className="sg-count">
+            round {progress.round}/{progress.rounds || '—'} · {progress.phase}
+          </span>
+        )}
         {loading && <span className="sg-muted">refreshing…</span>}
         <button type="button" className="sg-ghost" onClick={() => void loadTask()}>
           Refresh

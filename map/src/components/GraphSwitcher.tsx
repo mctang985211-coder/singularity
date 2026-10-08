@@ -26,14 +26,28 @@ function modelLabel(model: ModelRef | undefined): string {
     : `${model.provider}/${model.model} · ${model.reasoningEffort}`
 }
 
-/** The graph row's RSI badge: rounds done of the configured total (0 until the driver reports progress), the phase, and who gates a round. */
+/**
+ * The graph row's RSI badge: the server's own derived progress (round of the
+ * configured total, and the phase) with who gates a round. A sealed graph shows
+ * `sealed` instead: its progress is history, not a running loop.
+ */
 function rsiBadge(entry: GraphEntry): string | null {
+  if (entry.access?.mode === 'legacy-readonly') return 'sealed · read-only'
   const rsi = entry.rsi
   if (rsi === undefined) return null
-  const progress = entry.rsiProgress
+  const progress = entry.progress
   return `RSI ${progress?.round ?? 0}/${rsi.iterationRounds} · ${progress?.phase ?? 'not started'} · ${
     rsi.humanReview ? 'human' : 'unmanned'
   }`
+}
+
+/**
+ * The header controls one access mode offers. A sealed legacy graph renders no
+ * Settings and no Delete: every control that would write is absent, not merely
+ * disabled.
+ */
+export function headControls(mode: 'current' | 'legacy-readonly'): readonly ('settings' | 'delete')[] {
+  return mode === 'current' ? ['settings', 'delete'] : []
 }
 
 function parseRounds(raw: string): number {
@@ -224,6 +238,8 @@ export default function GraphSwitcher() {
   }
 
   const error = actionError ?? graphsError
+  const sealed = current?.access?.mode === 'legacy-readonly'
+  const controls = headControls(sealed ? 'legacy-readonly' : 'current')
   const currentBadge = current === undefined ? null : rsiBadge(current)
 
   return (
@@ -259,9 +275,9 @@ export default function GraphSwitcher() {
       {current !== undefined && <span className="sg-model-chip">{modelLabel(current.model)}</span>}
       {currentBadge !== null && (
         <span
-          className="sg-rsi-chip"
-          data-phase={current?.rsiProgress?.phase ?? 'idle'}
-          title={current?.rsiProgress?.note}
+          className={`sg-rsi-chip${sealed ? ' sealed' : ''}`}
+          data-phase={current?.progress?.phase ?? 'idle'}
+          title={current?.progress?.note}
         >
           {currentBadge}
         </span>
@@ -272,22 +288,21 @@ export default function GraphSwitcher() {
       <button type="button" className="sg-head-btn" disabled={busy} onClick={() => void openCreate()}>
         New
       </button>
-      <button
-        type="button"
-        className="sg-head-btn"
-        disabled={graphId === null || busy}
-        onClick={toggleEdit}
-      >
-        Settings
-      </button>
-      <button
-        type="button"
-        className={`sg-head-btn${confirmDelete ? ' danger' : ''}`}
-        disabled={graphId === null || busy}
-        onClick={remove}
-      >
-        {confirmDelete ? 'Confirm delete' : 'Delete'}
-      </button>
+      {controls.includes('settings') && (
+        <button type="button" className="sg-head-btn" disabled={graphId === null || busy} onClick={toggleEdit}>
+          Settings
+        </button>
+      )}
+      {controls.includes('delete') && (
+        <button
+          type="button"
+          className={`sg-head-btn${confirmDelete ? ' danger' : ''}`}
+          disabled={graphId === null || busy}
+          onClick={remove}
+        >
+          {confirmDelete ? 'Confirm delete' : 'Delete'}
+        </button>
+      )}
       {createOpen && (
         <form className="sg-create-card" onSubmit={submit}>
           <h3>New graph</h3>

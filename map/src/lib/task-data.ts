@@ -1,10 +1,4 @@
-import type {
-  SnapshotCollection,
-  TaskInstanceWire,
-  TaskProposalWire,
-  TaskRunWire,
-  TaskSnapshotWire,
-} from '../types'
+import type { SnapshotCollection, TaskInstanceWire, TaskRunWire, TaskSnapshotWire } from '../types'
 
 function isIndex<T>(value: SnapshotCollection<T>): value is Readonly<Record<string, T>> {
   return !Array.isArray(value)
@@ -62,18 +56,6 @@ export function taskTree(snapshot: TaskSnapshotWire | null): TaskNode[] {
 export function runsOf(task: TaskInstanceWire, runs: readonly TaskRunWire[]): TaskRunWire[] {
   const ids = new Set(task.runIds ?? [])
   return runs.filter(run => run.taskId === task.taskId || ids.has(run.runId))
-}
-
-export function proposalsOf(snapshot: TaskSnapshotWire | null): TaskProposalWire[] {
-  const value = snapshot?.proposals
-  if (value === undefined) return []
-  if (Array.isArray(value)) return [...(value as readonly TaskProposalWire[])]
-  const index = value as {
-    all?: readonly TaskProposalWire[]
-    byId?: Readonly<Record<string, TaskProposalWire>>
-  }
-  if (Array.isArray(index.all)) return [...(index.all as readonly TaskProposalWire[])]
-  return index.byId === undefined ? [] : Object.values(index.byId)
 }
 
 export function shortId(id: string, keep = 12): string {

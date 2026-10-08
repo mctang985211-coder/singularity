@@ -7,14 +7,14 @@ import type {} from '@dangosys/dsh-singularity-graph'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-agent'
 import type {} from '@dangosys/dsh-singularity-task'
-import type {} from '@dangosys/dsh-singularity-evolution'
 import { registerEvents, registerGraph, registerHitl, registerLayout } from './web/api/routes.ts'
-import { registerEvolution } from './web/api/evolution.ts'
 import { registerGraphEnvs } from './web/api/graph-envs.ts'
 import { registerGraphs } from './web/api/graphs.ts'
 import { registerMapStatic } from './web/api/map-static.ts'
+import { registerMethods, subscribeMethods } from './web/api/methods.ts'
 import { registerModels } from './web/api/models.ts'
-import { registerProposalDecide, registerRecovery, registerReview, registerTask } from './web/api/task.ts'
+import { registerRecovery, registerReview, registerTask } from './web/api/task.ts'
+import { registerView } from './web/api/view.ts'
 import { GraphBroadcast } from './web/libs/broadcast.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -34,35 +34,36 @@ export function apply(ctx: Context): void {
   ctx.on('graphs/change', snapshot => broadcast.publishGraphs(snapshot))
   ctx.on('hitl/change', pending => broadcast.publishEvent('hitl', { pending }))
   ctx.on('task/change', snapshot => broadcast.publishEvent('task', { storeId: snapshot.id }))
-  ctx.on('evolution/change', ({ proposalId }) => broadcast.publishEvent('evolution', { id: proposalId }))
   ctx.on('pr-chat/path', event => broadcast.publishEvent('pr-chat/path', event))
   ctx.on('pr-chat/sent', event => broadcast.publishEvent('pr-chat/sent', event))
   ctx.effect(() => {
     const graph = registerGraph(ctx)
     const layout = registerLayout(ctx)
     const graphs = registerGraphs(ctx)
+    const view = registerView(ctx)
+    const methods = registerMethods(ctx)
     const models = registerModels(ctx)
     const graphEnvs = registerGraphEnvs(ctx)
     const hitl = registerHitl(ctx)
     const task = registerTask(ctx)
-    const propose = registerProposalDecide(ctx)
     const recovery = registerRecovery(ctx)
     const review = registerReview(ctx)
-    const evolution = registerEvolution(ctx)
+    const methodEvents = subscribeMethods(ctx, broadcast)
     const events = registerEvents(ctx, broadcast)
     const map = registerMapStatic(ctx)
     return () => {
       graph()
       layout()
       graphs()
+      view()
+      methods()
       models()
       graphEnvs()
       hitl()
       task()
-      propose()
       recovery()
       review()
-      evolution()
+      methodEvents()
       events()
       map()
       broadcast.close()

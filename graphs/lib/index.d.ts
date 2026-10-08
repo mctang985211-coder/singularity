@@ -1,10 +1,54 @@
-import { _ as protocolOf, a as GraphPinsUpdate, c as GraphsSnapshot, d as GRAPH_PROTOCOL_V2, f as GraphAccess, g as graphAccess, h as assertCurrentGraph, i as GraphModel, l as RsiConfig, m as GraphSealedError, n as CreateGraphResult, o as GraphRecord, p as GraphProtocol, r as GraphArchive, s as GraphsEvent, t as CreateGraphRequest, u as RsiLaunch } from "./types-HAFfajhv.js";
+import { C as GraphSealedError, E as protocolOf, S as GraphProtocol, T as graphAccess, _ as GraphsSnapshot, a as GraphRevisionWire, b as GRAPH_PROTOCOL_V2, c as LegacyGraphViewWire, d as CreateGraphResult, f as GraphArchive, g as GraphsEvent, h as GraphRecord, i as GraphProgressWire, l as graphAccessWire, m as GraphPinsUpdate, n as GraphAccessWire, o as GraphViewWire, p as GraphModel, r as GraphEvaluationWire, s as LegacyCompletionWire, t as ApprovalSourceWire, u as CreateGraphRequest, v as RsiConfig, w as assertCurrentGraph, x as GraphAccess, y as RsiLaunch } from "./wire-WRlk4WlI.js";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
+import { TaskSnapshot } from "@dangosys/dsh-singularity-task";
 import * as _dangosys_dsh_singularity_graph0 from "@dangosys/dsh-singularity-graph";
+import { GraphSnapshot, LayoutSnapshot } from "@dangosys/dsh-singularity-graph";
 import { EnvRecord } from "@dangosys/dsh-env-builder";
 import { AgentOptions } from "@dangosys/dsh-singularity-agent-runtime";
 
+//#region src/read/legacy.d.ts
+
+/** What a read-only door answers: a missing store reports `exists:false` instead of being created. */
+type ReadOnlyDoorAnswer<TSnapshot> = {
+  readonly exists: false;
+} | {
+  readonly exists: true;
+  readonly snapshot: TSnapshot;
+};
+/** The only read door this reader uses: the store set's own zero-write snapshot. */
+interface ReadOnlySnapshotDoor<TSnapshot> {
+  snapshotReadOnly(id: string): Promise<ReadOnlyDoorAnswer<TSnapshot>>;
+}
+/** The graph and layout services' door: the same zero-write snapshot, named by those two services' own method. */
+interface ReadOnlySnapshotDoorIn<TSnapshot> {
+  snapshotReadOnlyIn(id: string): Promise<ReadOnlyDoorAnswer<TSnapshot>>;
+}
+/** The legacy evolution facts one graph holds, as the old ledger projects them. */
+interface LegacyEvolutionFacts {
+  readonly proposals: readonly unknown[];
+  readonly experiments: readonly unknown[];
+}
+/** Where one legacy graph's records are read; every door is read-only and nothing here writes. */
+interface LegacyReadDeps {
+  readonly graph: ReadOnlySnapshotDoorIn<GraphSnapshot>;
+  readonly layout: ReadOnlySnapshotDoorIn<LayoutSnapshot>;
+  readonly task: ReadOnlySnapshotDoor<TaskSnapshot>;
+  /** The old evolution ledger's own reader, projected verbatim; absent when this deployment keeps none. */
+  readonly legacyEvolution?: (graphKey: string) => Promise<LegacyEvolutionFacts>;
+  /** The old completion formats (note prefix / fenced JSON), read for history display only. */
+  readonly legacyCompletions?: (graphKey: string) => Promise<readonly LegacyCompletionWire[]>;
+}
+/**
+ * One legacy graph's whole history: its registry record, the three stores it may
+ * hold, and the old evolution and completion records, each kept verbatim. The
+ * stores are read in a fixed order (topology, layout, tasks) through read-only
+ * doors, so a read creates nothing and a missing store is reported rather than
+ * treated as a failure. `writable` is `false` by construction: no caller can
+ * mistake this projection for a write path.
+ */
+declare function readLegacyGraph(deps: LegacyReadDeps, graph: GraphRecord): Promise<LegacyGraphViewWire>;
+//#endregion
 //#region src/service/state.d.ts
 /** Whether an existing workspace can be bound by a new graph: no graph and no sessions. */
 declare function isReusableEnv(env: Pick<EnvRecord, 'id' | 'components' | 'sessionIds'>, boundEnvIds: ReadonlySet<string>): boolean;
@@ -70,10 +114,17 @@ declare class GraphsService extends Service {
   /** The selected graph; throws when no graph is selected. */
   current(): Promise<GraphRecord>;
   get(id: string): Promise<GraphRecord>;
+  /**
+   * One graph's metadata, topology and layout. Every store is read through the
+   * zero-write door: a graph whose store this process never opened answers
+   * `null` rather than being created by the read, which is what keeps a sealed
+   * legacy graph readable without a single write.
+   */
   view(id: string): Promise<{
     meta: GraphRecord;
-    graph: _dangosys_dsh_singularity_graph0.GraphSnapshot;
-    layout: _dangosys_dsh_singularity_graph0.LayoutSnapshot;
+    access: GraphAccessWire;
+    graph: _dangosys_dsh_singularity_graph0.GraphSnapshot | null;
+    layout: _dangosys_dsh_singularity_graph0.LayoutSnapshot | null;
   }>;
   list(): Promise<readonly GraphRecord[]>;
   select(id: string): Promise<GraphRecord>;
@@ -93,10 +144,23 @@ declare class GraphsService extends Service {
   setPins(id: string, update: GraphPinsUpdate): Promise<GraphRecord>;
   /** Refuse a pin the current provider registry cannot serve; the message names the offending field. */
   private assertModel;
+  /** Which graph publishes a session, read through the zero-write door: a read never opens a store as a side effect. */
   graphForSession(sessionId: SessionId): Promise<GraphRecord>;
   remove(id: string): Promise<void>;
   /** Resolved lazily: task-runtime injects graphs, so a hard inject here would deadlock the plugin loader. */
   private taskRuntime;
+  /**
+   * The one write gate: every entry that would change one graph's settings,
+   * readiness or selection resolves its record through here first, and a sealed
+   * legacy graph answers {@link GraphSealedError} before anything is committed.
+   */
+  private writableGraph;
+  /**
+   * The selected graph becomes this process's running environment. A sealed
+   * legacy graph is history: it is never activated, so selecting it — or booting
+   * with it selected — writes nothing, adopts nothing and publishes nothing.
+   */
+  private enterSelected;
   /** One graph becomes this process's running environment: recovery barrier, then store and env switch (A2 §E). */
   private activate;
   private commit;
@@ -105,4 +169,4 @@ declare class GraphsService extends Service {
   private state;
 }
 //#endregion
-export { CreateGraphRequest, CreateGraphResult, GRAPH_PROTOCOL_V2, GraphAccess, GraphArchive, GraphModel, GraphPinsUpdate, GraphProtocol, GraphRecord, GraphSealedError, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState, type ModelCatalogReader, RsiConfig, RsiLaunch, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertCurrentGraph, assertModelServiceable, graphAccess, graphAgentOptions, isReusableEnv, protocolOf };
+export { ApprovalSourceWire, CreateGraphRequest, CreateGraphResult, GRAPH_PROTOCOL_V2, GraphAccess, GraphAccessWire, GraphArchive, GraphEvaluationWire, GraphModel, GraphPinsUpdate, GraphProgressWire, GraphProtocol, GraphRecord, GraphRevisionWire, GraphSealedError, GraphViewWire, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState, LegacyCompletionWire, type LegacyEvolutionFacts, LegacyGraphViewWire, type LegacyReadDeps, type ModelCatalogReader, type ReadOnlyDoorAnswer, type ReadOnlySnapshotDoor, type ReadOnlySnapshotDoorIn, RsiConfig, RsiLaunch, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, assertCurrentGraph, assertModelServiceable, graphAccess, graphAccessWire, graphAgentOptions, isReusableEnv, protocolOf, readLegacyGraph };

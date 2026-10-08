@@ -1,3 +1,14 @@
+import type {
+  GraphAccessWire,
+  GraphEvaluationWire,
+  GraphProgressWire,
+  GraphRevisionWire,
+} from '@dangosys/dsh-singularity-graphs/wire'
+
+export type GraphAccess = GraphAccessWire
+export type GraphProgress = GraphProgressWire
+export type GraphEvaluation = GraphEvaluationWire
+
 export type AgentStatus = 'idle' | 'running' | 'waiting' | 'done' | 'failed'
 export type EdgeKind = 'spawn' | 'handoff'
 export type NodeShape = 'card' | 'circle' | 'diamond'
@@ -46,8 +57,10 @@ export interface AgentData extends AgentNode {
   readonly root: boolean
 }
 
-// Wire forks for the operator console (graphs list, task snapshot, evolution): browser-local copies
-// with the same rule as above, optional where the projection may omit or later extend a field.
+// Wire forks for the operator console (graphs list, task snapshot, recovery, review): browser-local
+// copies with the same rule as above, optional where the projection may omit or later extend a field.
+// The graph read model is not forked: `GraphEntry.access`, `progress` and `evaluation` are the
+// server's own `GraphViewWire` members, so the console shows what the tools read.
 
 /** A pinned model choice; omitted on a graph or create body means follow the deployment default. */
 export interface ModelRef {
@@ -81,14 +94,6 @@ export interface RsiConfig {
   readonly humanReview: boolean
 }
 
-/** How far a running RSI loop has got; absent until the driver reports its first round. */
-export interface RsiProgress {
-  /** 1-based round in flight, or the last completed one when the phase is `done`/`failed`. */
-  readonly round: number
-  readonly phase: 'running' | 'publishing' | 'debugging' | 'done' | 'failed'
-  readonly note?: string
-}
-
 export interface GraphEntry {
   readonly id: string
   readonly name: string
@@ -101,12 +106,56 @@ export interface GraphEntry {
   readonly repos?: readonly string[]
   readonly model?: ModelRef
   readonly rsi?: RsiConfig
-  readonly rsiProgress?: RsiProgress
+  /** The protocol marker's absence is what makes a graph sealed history; every write control reads this. */
+  readonly access?: GraphAccessWire
+  /** The derived progress the server reduced from the round count and the recorded assignments. */
+  readonly progress?: GraphProgressWire
+  readonly evaluation?: GraphEvaluationWire
 }
 
 export interface GraphsResponse {
   readonly graphs?: readonly GraphEntry[]
   readonly selectedId?: string | null
+  /** The named refusal when this deployment mounts no fact producer for the read model; the list still serves. */
+  readonly viewError?: { readonly error?: string; readonly source?: string }
+}
+
+/** One graph's read model, as `GET /singularity/view` serves it. */
+export interface GraphViewResponse {
+  readonly formatVersion: 2
+  readonly graph: { readonly id: string; readonly name: string; readonly createdAt: number }
+  readonly access: GraphAccessWire
+  readonly revision: GraphRevisionWire | null
+  readonly evaluation: GraphEvaluationWire | null
+  readonly progress: GraphProgressWire
+  readonly generation: number
+}
+
+/** One legacy completion row, shown verbatim: the old text formats are never read as completions again. */
+export interface LegacyCompletionWire {
+  readonly format: 'legacy-v1'
+  readonly sessionId: string
+  readonly taskId: string
+  readonly note: string
+  readonly recordedAt: string
+}
+
+/**
+ * One sealed graph's history, as `GET /singularity/graphs/<id>/history` serves
+ * it: the old records verbatim, forever `writable: false`.
+ */
+export interface LegacyHistoryResponse {
+  readonly formatVersion: 'legacy-v1'
+  readonly writable: false
+  readonly graph: GraphEntry
+  readonly access: GraphAccessWire
+  readonly topology: GraphSnapshot | null
+  readonly layout: LayoutSnapshot | null
+  readonly tasks: TaskSnapshotWire | null
+  readonly proposals: readonly unknown[]
+  readonly experiments: readonly unknown[]
+  readonly completions: readonly LegacyCompletionWire[]
+  readonly sources: readonly { readonly id: string; readonly kind: 'topology' | 'layout' | 'tasks'; readonly exists: boolean }[]
 }
 
 export interface GraphEnv {
@@ -139,10 +188,6 @@ export type ExecutionPhase = 'active' | 'waiting_children' | 'submitted'
 export type ReviewOutcome = 'verified' | 'failed' | 'cancelled' | 'blocked'
 export type TaskStatus =
   'created' | 'admitted' | 'ready' | 'running' | 'blocked' | 'verifying' | 'verified' | 'failed' | 'cancelled'
-export type ProposalStatus =
-  'ready' | 'pending_review' | 'approved' | 'rejected' | 'cancelled' | 'stale' | 'admitted' | 'expired'
-export type ProposalDecision = 'approve' | 'reject' | 'continue' | 'cancel'
-
 /** A projection collection: the snapshot may index records by id or list them; readers normalize. */
 export type SnapshotCollection<T> = readonly T[] | Readonly<Record<string, T>>
 
@@ -175,13 +220,6 @@ export interface TaskInstanceWire {
   readonly childTaskIds?: readonly string[]
   readonly requestedCapabilities?: readonly string[]
   readonly acceptanceCriteria?: readonly AcceptanceCriterionWire[]
-  readonly requiresIndependentAcceptance?: boolean
-}
-
-export interface TaskProposalChildWire {
-  readonly contract?: TaskContractWire
-  readonly dependsOn?: readonly number[]
-  readonly decomposable?: boolean
   readonly requiresIndependentAcceptance?: boolean
 }
 
@@ -273,66 +311,6 @@ export interface EvidenceWire {
   readonly generatedAt?: string
 }
 
-export interface AdmissionContextWire {
-  readonly maxDepth?: number
-  readonly maxChildren?: number
-  readonly auditOnly?: {
-    readonly maxToolCalls?: number
-    readonly tokens?: number
-    readonly attempts?: number
-  }
-}
-
-export interface ReviewContextWire {
-  readonly capabilityManifestDigest?: string
-  readonly verifiers?: readonly {
-    readonly verifierId: string
-    readonly version?: string
-    readonly configurationDigest?: string
-  }[]
-}
-
-export interface ProposalDecisionWire {
-  readonly outcome?: string
-  readonly decidedBy?: string
-  readonly decidedAt?: string
-  readonly reason?: string
-}
-
-export interface TaskProposalWire {
-  readonly proposalId: string
-  readonly requestKey?: string
-  readonly supersedes?: string
-  readonly kind?: string
-  readonly status: string
-  readonly policy?: string
-  readonly proposalDigest?: string
-  readonly admissionContext?: AdmissionContextWire
-  readonly admissionContextDigest?: string
-  readonly reviewContext?: ReviewContextWire
-  readonly reviewContextDigest?: string
-  readonly createdAt?: string
-  readonly updatedAt?: string
-  readonly identity?: {
-    readonly storeId?: string
-    readonly parentTaskId?: string
-    readonly parentRunId?: string
-    readonly callerSessionId?: string
-    readonly rootSessionId?: string
-    readonly reason?: string
-  }
-  readonly batch?: readonly TaskProposalChildWire[]
-  readonly contract?: TaskContractWire
-  readonly decision?: ProposalDecisionWire
-  readonly consumption?: {
-    readonly kind?: string
-    readonly childTaskIds?: readonly string[]
-    readonly rootTaskId?: string
-    readonly rootRunId?: string
-    readonly admittedAt?: string
-  }
-}
-
 export interface DiagnosisWire {
   readonly diagnosisId: string
   readonly taskId?: string
@@ -348,11 +326,6 @@ export interface ObligationWire {
   readonly sourceTaskId?: string
 }
 
-export interface TaskProposalIndexWire {
-  readonly all?: readonly TaskProposalWire[]
-  readonly byId?: Readonly<Record<string, TaskProposalWire>>
-}
-
 export interface TaskSnapshotWire {
   readonly version?: number
   readonly id: string
@@ -361,147 +334,10 @@ export interface TaskSnapshotWire {
   readonly edges?: SnapshotCollection<{ readonly from: string; readonly to: string }>
   readonly evidence?: SnapshotCollection<EvidenceWire>
   readonly reviews?: SnapshotCollection<ReviewWire>
-  readonly proposals?: SnapshotCollection<TaskProposalWire> | TaskProposalIndexWire
+  /** The store's proposal records: no console surface reads them any more, so the member stays opaque. */
+  readonly proposals?: SnapshotCollection<unknown>
   readonly diagnoses?: SnapshotCollection<DiagnosisWire>
   readonly obligations?: SnapshotCollection<ObligationWire>
-}
-
-// Evolution, recovery and review wire forks (canonical types live in evolution, task-runtime and
-// task); optional where a projection may omit a member the record itself requires.
-
-export type EvolutionLevel = 'L1' | 'L2' | 'L3' | 'L4'
-export type EvolutionStatus = 'proposed' | 'candidate' | 'prepared' | 'gated' | 'decided' | 'applied' | 'rolledback'
-export type EvolutionDecision = 'PROMOTE' | 'REJECT' | 'KEEP_FOR_FURTHER_RESEARCH'
-
-/** The six verbatim Validation Gate questions a human answers, plus the evidence the regression answers cite. */
-export interface GateAnswersWire {
-  readonly targetFailureFixed?: string
-  readonly originalAcceptanceMaintained?: string
-  readonly existingRegressionMaintained?: string
-  readonly noUnacceptableSideEffects?: string
-  readonly holdoutPerformanceAcceptable?: string
-  readonly resourceCostAcceptable?: string
-  readonly regressionEvidenceRefs?: readonly string[]
-}
-
-export interface CommitFileWire {
-  readonly target?: string
-  readonly baselineSha256?: string | null
-  readonly contentSha256?: string | null
-  readonly source?: string
-}
-
-export interface CommitCapabilityWire {
-  readonly name?: string
-  readonly baselineSha256?: string | null
-  readonly contentSha256?: string | null
-  readonly source?: string
-}
-
-/** One open commit intent: production is only settled once its intent is closed. */
-export interface CommitIntentWire {
-  readonly intentId?: string
-  readonly proposalId?: string
-  readonly direction?: 'apply' | 'rollback'
-  readonly approvalRef?: string
-  readonly files?: readonly CommitFileWire[]
-  readonly capability?: CommitCapabilityWire
-  readonly actor?: string
-  readonly at?: string
-}
-
-/** The folded decision record, for projections that emit the whole record instead of the bare value. */
-export interface EvolutionDecisionWire {
-  readonly decision?: EvolutionDecision
-  readonly note?: string
-  readonly approvalRef?: string
-  readonly actor?: string
-  readonly at?: string
-}
-
-export interface EvolutionHistoryEntryWire {
-  readonly status?: EvolutionStatus
-  readonly actor?: string
-  readonly at?: string
-}
-
-export interface EvolutionProposalWire {
-  readonly proposalId: string
-  readonly targetType?: string
-  readonly targetId?: string
-  readonly baseVersion?: string
-  readonly level?: EvolutionLevel
-  readonly rationale?: string
-  readonly sourceRefs?: readonly string[]
-  readonly status?: EvolutionStatus
-  /** The ledger folds `GateAnswers`; the detail projection may name the same block `gateAnswers`. */
-  readonly gate?: GateAnswersWire
-  readonly gateAnswers?: GateAnswersWire
-  readonly decision?: EvolutionDecision | EvolutionDecisionWire
-  readonly decisionNote?: string
-  readonly decisionApprovalRef?: string
-  readonly openIntent?: CommitIntentWire
-  readonly history?: readonly EvolutionHistoryEntryWire[]
-}
-
-export type SideRelation = 'not-worse' | 'worse' | 'inconclusive'
-export type ExperimentOutcome = 'verified' | 'failed' | 'cancelled' | 'interrupted' | 'not-admitted'
-export type ExperimentSampleRole = 'observed-failure' | 'observed-regression' | 'holdout'
-export type ExperimentSampleVerdict =
-  'fixed' | 'both-failed' | 'not-fixed' | 'maintained' | 'regressed' | 'inconclusive'
-export type ExperimentVerdict =
-  'fixed' | 'fixed-with-regression' | 'not-fixed' | 'both-failed' | 'regressed' | 'inconclusive'
-
-export interface ExperimentCriterionWire {
-  readonly criterionId: string
-  readonly verdict: 'pass' | 'fail' | 'inconclusive'
-  readonly verifierId?: string
-  readonly verifierVersion?: string
-  readonly command?: string
-  readonly exitCode?: number
-}
-
-/** One side of one sample's comparison: this experiment's own replay of that side. */
-export interface ExperimentSideWire {
-  readonly taskId?: string
-  readonly role?: ExperimentSampleRole
-  readonly side?: 'baseline' | 'candidate'
-  readonly outcome?: ExperimentOutcome
-  readonly runId?: string
-  readonly reviewRef?: string
-  readonly evidenceRefs?: readonly string[]
-  readonly workspace?: string
-  readonly criteria?: readonly ExperimentCriterionWire[]
-  readonly reason?: string
-}
-
-export interface ExperimentSampleWire {
-  readonly taskId: string
-  readonly role?: ExperimentSampleRole
-  readonly baseline?: ExperimentSideWire
-  readonly candidate?: ExperimentSideWire
-  readonly verdict?: ExperimentSampleVerdict
-  /** Present when the comparer's side relation is projected; the panel derives it from both sides otherwise. */
-  readonly relation?: SideRelation
-}
-
-export interface ExperimentReportWire {
-  readonly formatVersion?: number
-  readonly proposalId?: string
-  readonly experimentId?: string
-  readonly at?: string
-  readonly frozen?: {
-    readonly repetition?: number
-    readonly model?: { readonly provider?: string; readonly model?: string; readonly label?: string }
-    readonly budget?: { readonly maxTokens?: number; readonly note?: string }
-  }
-  readonly samples?: readonly ExperimentSampleWire[]
-  readonly verdict?: ExperimentVerdict
-}
-
-export interface EvolutionResponse {
-  readonly proposals?: readonly EvolutionProposalWire[]
-  readonly experiments?: readonly ExperimentReportWire[]
 }
 
 /** The store barrier's status plus the deferred work it still holds (`StoreRecoveryState` counts). */
@@ -568,6 +404,3 @@ export interface TaskInvalidation {
   readonly storeId?: string
 }
 
-export interface EvolutionInvalidation {
-  readonly id?: string
-}

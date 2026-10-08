@@ -4,27 +4,27 @@ import type {
   AgentData,
   CanvasNode,
   CreateGraphBody,
-  EvolutionResponse,
   GraphEntry,
   GraphSnapshot,
+  GraphViewResponse,
   LayoutSnapshot,
+  LegacyHistoryResponse,
   ModelRef,
   ModelsResponse,
-  ProposalDecision,
   RsiConfig,
   TaskSnapshotWire,
 } from './types'
 import {
   answerHitl,
   createGraph,
-  decideProposal,
   deleteGraph,
-  fetchEvolution,
   fetchGraph,
   fetchGraphs,
+  fetchHistory,
   fetchHitl,
   fetchModels,
   fetchTask,
+  fetchView,
   INITIAL_GRAPH_ID,
   openEvents,
   patchGraph,
@@ -46,6 +46,13 @@ export interface GraphMeta {
   readonly graphStoreId: string
   readonly layoutStoreId: string
   readonly rootSessionId: string
+}
+
+/** How the open graph may be used: a sealed legacy graph is history, and nothing here writes to one. */
+export type AccessMode = 'current' | 'legacy-readonly'
+
+export function readOnlyOf(mode: AccessMode): boolean {
+  return mode !== 'current'
 }
 
 export interface ChatRow {
@@ -95,9 +102,12 @@ interface Store {
   taskError: string | null
   taskEpoch: number
   selectedRunId: string | null
-  evolution: EvolutionResponse | null
-  evolutionError: string | null
-  evolutionEpoch: number
+  access: AccessMode
+  readOnly: boolean
+  history: LegacyHistoryResponse | null
+  historyError: string | null
+  graphView: GraphViewResponse | null
+  graphViewError: string | null
   finishPrompt: (id: string, error?: string) => void
   boot: () => Promise<void>
   applySnapshot: (view: ViewSnapshot) => void
@@ -124,8 +134,8 @@ interface Store {
   taskStoreId: () => string | null
   loadTask: () => Promise<void>
   setSelectedRun: (id: string | null) => void
-  decideProposal: (proposalId: string, decision: ProposalDecision, reason?: string) => Promise<void>
-  loadEvolution: () => Promise<void>
+  loadView: () => Promise<void>
+  openHistory: () => Promise<void>
 }
 
 function build(
@@ -228,9 +238,12 @@ export const useStore = create<Store>((set, get) => ({
   taskError: null,
   taskEpoch: 0,
   selectedRunId: null,
-  evolution: null,
-  evolutionError: null,
-  evolutionEpoch: 0,
+  access: 'current',
+  readOnly: false,
+  history: null,
+  historyError: null,
+  graphView: null,
+  graphViewError: null,
   async boot() {
     get().source?.close()
     set({ source: null, error: null, bootError: null })
@@ -269,10 +282,22 @@ export const useStore = create<Store>((set, get) => ({
       taskError: null,
       taskEpoch: get().taskEpoch + 1,
       selectedRunId: null,
+      history: null,
+      historyError: null,
+      graphView: null,
+      graphViewError: null,
     })
     try {
       const [view, hitl] = await Promise.all([fetchGraph(graphId), fetchHitl()])
       if (get().generation !== generation) return
+      const mode: AccessMode = view.access.mode === 'current' ? 'current' : 'legacy-readonly'
+      set({ access: mode, readOnly: readOnlyOf(mode), graphMeta: view.meta })
+      if (readOnlyOf(mode)) {
+        // A sealed graph is history: no canvas, no event stream, no session — only its own read.
+        set({ selectedId: null, nodes: [], edges: [], graph: null, layout: null, hitl: hitl.pending })
+        await get().openHistory()
+        return
+      }
       set({ selectedId: view.meta.rootSessionId })
       get().applySnapshot(view)
       const source = openEvents(graphId, {
@@ -288,8 +313,8 @@ export const useStore = create<Store>((set, get) => ({
           if (hint.storeId !== undefined && storeId !== null && hint.storeId !== storeId) return
           if (get().task !== null) void get().loadTask()
         },
-        onEvolution: () => {
-          if (get().generation === generation && get().evolution !== null) void get().loadEvolution()
+        onMethods: () => {
+          if (get().generation === generation && get().graphView !== null) void get().loadView()
         },
         onError: () => {
           set({ error: 'singularity: event stream closed' })
@@ -310,8 +335,22 @@ export const useStore = create<Store>((set, get) => ({
       })
     }
   },
-  applySnapshot({ graph, layout, meta }) {
+  applySnapshot({ graph, layout, meta, access }) {
     if (meta.id !== get().graphId) throw new Error('map: wrong graph snapshot')
+    if (access.mode !== 'current') throw new Error('map: a sealed graph has no canvas')
+    if (graph === null || layout === null) {
+      // A registered graph whose own stores do not exist yet: the console says so
+      // instead of drawing a canvas nobody wrote, and nothing is created for it.
+      set({
+        graph: null,
+        layout: null,
+        graphMeta: meta,
+        nodes: [],
+        edges: [],
+        error: 'singularity: this graph has no topology store yet',
+      })
+      return
+    }
     if (graph.id !== meta.graphStoreId || layout.id !== meta.layoutStoreId)
       throw new Error('map: store identity mismatch')
     const selectedId = get().selectedId
@@ -345,6 +384,7 @@ export const useStore = create<Store>((set, get) => ({
     set({ nodes })
   },
   async moveNode(id, x, y) {
+    if (get().readOnly) throw new Error('map: this graph is sealed legacy history; its canvas is read-only')
     const layout = get().layout
     const graphId = get().graphId
     if (layout === null || graphId === null) throw new Error('map: layout missing')
@@ -354,6 +394,7 @@ export const useStore = create<Store>((set, get) => ({
     await putLayout(graphId, id, node)
   },
   async sendPrompt(sessionId, text) {
+    if (get().readOnly) throw new Error('map: this graph is sealed legacy history; it takes no prompt')
     if (get().submission !== null) throw new Error('map: prompt already submitting')
     const requestId = crypto.randomUUID()
     const done = new Promise<void>((resolve, reject) => set({ submission: { id: requestId, resolve, reject } }))
@@ -371,6 +412,7 @@ export const useStore = create<Store>((set, get) => ({
     else submission.resolve()
   },
   async answerHitl(id, answer) {
+    if (get().readOnly) throw new Error('map: this graph is sealed legacy history; it takes no intervention')
     // The list is the SSE stream's to publish: a response that lands after a newer frame must not overwrite it.
     await answerHitl(id, answer)
   },
@@ -388,7 +430,11 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
   async switchGraph(id) {
-    await selectGraph(id)
+    // The registry's own access mode decides how the graph is opened; a sealed
+    // graph is never selected, because selecting it is a write.
+    await get().loadGraphs()
+    const entry = get().graphs.find(graph => graph.id === id)
+    if (entry?.access?.mode !== 'legacy-readonly') await selectGraph(id)
     set({ graphId: id, graphsError: null })
     setStoreOverride(null)
     syncUrl(id)
@@ -430,6 +476,7 @@ export const useStore = create<Store>((set, get) => ({
     await get().updateGraphSettings(id, { rsi })
   },
   async updateGraphSettings(id, settings) {
+    if (get().readOnly) throw new Error('map: this graph is sealed legacy history; its settings are read-only')
     await patchGraph(id, settings)
     await get().loadGraphs()
   },
@@ -458,33 +505,48 @@ export const useStore = create<Store>((set, get) => ({
   setSelectedRun(id) {
     set({ selectedRunId: id })
   },
-  async decideProposal(proposalId, decision, reason) {
-    const storeId = get().taskStoreId()
-    if (storeId === null) throw new Error('map: no graph selected')
-    const result = await decideProposal({
-      storeId,
-      proposalId,
-      decision,
-      ...(reason === undefined || reason.length === 0 ? {} : { reason }),
-    })
-    if (!result.ok) throw new Error(result.error ?? 'map: proposal decision refused')
-    await get().loadTask()
-  },
-  async loadEvolution() {
-    const epoch = get().evolutionEpoch + 1
-    set({ evolutionEpoch: epoch, evolutionError: null })
+  async loadView() {
+    const graphId = get().graphId
+    if (graphId === null) {
+      set({ graphView: null, graphViewError: null })
+      return
+    }
+    set({ graphViewError: null })
     try {
-      const graphId = get().graphId
-      if (graphId === null) { set({ evolution: null }); return }
-      const data = await fetchEvolution(graphId)
-      if (get().evolutionEpoch !== epoch) return
-      set({ evolution: data })
+      const data = await fetchView(graphId)
+      if (get().graphId !== graphId) return
+      set({ graphView: data })
     } catch (error) {
-      if (get().evolutionEpoch !== epoch) return
-      set({ evolutionError: message(error) })
+      if (get().graphId !== graphId) return
+      set({ graphViewError: message(error) })
+    }
+  },
+  async openHistory() {
+    const graphId = get().graphId
+    if (graphId === null) {
+      set({ history: null, historyError: null })
+      return
+    }
+    set({ historyError: null })
+    try {
+      const data = await fetchHistory(graphId)
+      if (get().graphId !== graphId) return
+      set({ history: data, historyError: null, graphMeta: metaOf(data.graph) })
+    } catch (error) {
+      if (get().graphId !== graphId) return
+      set({ history: null, historyError: message(error) })
     }
   },
 }))
+
+/** The registry record a legacy history carries as the console's own meta; it is the same record the list serves. */
+function metaOf(entry: GraphEntry): GraphMeta {
+  const { id, name, ready, graphStoreId, layoutStoreId, rootSessionId } = entry
+  if (graphStoreId === undefined || layoutStoreId === undefined || rootSessionId === undefined) {
+    throw new Error(`map: graph "${id}" is missing the store identities its history needs`)
+  }
+  return { id, name, ready, graphStoreId, layoutStoreId, rootSessionId }
+}
 
 function postOpen(graphId: string | null, sessionId: string, title?: string, parentSessionId?: string): void {
   window.parent.postMessage(

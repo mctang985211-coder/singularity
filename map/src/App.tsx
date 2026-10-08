@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import GraphSwitcher from './components/GraphSwitcher'
-import { PANELS, panelById } from './panels'
+import { panelsFor, panelById } from './panels'
 import { useStore } from './store'
 
 export default function App() {
@@ -11,7 +11,9 @@ export default function App() {
   const applyChat = useStore(s => s.applyChat)
   const bootError = useStore(s => s.bootError)
   const graphsError = useStore(s => s.graphsError)
-  const Active = panelById(tab).component
+  const access = useStore(s => s.access)
+  const panels = panelsFor(access)
+  const Active = panelById(tab, access).component
 
   useEffect(() => {
     void boot()
@@ -47,7 +49,7 @@ export default function App() {
       <header className="sg-head">
         <GraphSwitcher />
         <nav className="sg-tabs" role="tablist" aria-label="Panels">
-          {PANELS.map(panel => (
+          {panels.map(panel => (
             <button
               key={panel.id}
               type="button"

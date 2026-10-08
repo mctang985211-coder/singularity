@@ -93,35 +93,6 @@ const emptySnapshot = {
 }
 
 describe('singularity console routes', () => {
-  it('reads Evolution from the requested graph regardless of selected graph and refuses unknown graphs', async () => {
-    const plane = { forSession: vi.fn(async (root: string) => ({
-      list: async () => [{ proposalId: `proposal-${root}` }], experiments: async () => [],
-      get: async (id: string) => ({ proposalId: id, owner: root }),
-    })) }
-    const { ctx, handlers } = mockCtx({
-      evolution: plane,
-      graphs: {
-        current: async () => ({ rootSessionId: 'selected-root' }),
-        get: async (id: string) => {
-          if (id === 'unknown') throw new Error('graphs: unknown graph')
-          return { rootSessionId: `${id}-root` }
-        },
-      },
-    })
-    apply(ctx as never)
-    const res = mockRes()
-    await handlers.get('/singularity/evolution')!(mockReq('GET', '/singularity/evolution?graphId=graph-b'), res as never)
-    expect(json(res)).toEqual({ proposals: [{ proposalId: 'proposal-graph-b-root' }], experiments: [] })
-    const detail = mockRes()
-    await handlers.get('/singularity/evolution/*')!(mockReq('GET', '/singularity/evolution/p-b?graphId=graph-b'), detail as never)
-    expect(json(detail)).toEqual({ proposal: { proposalId: 'p-b', owner: 'graph-b-root' } })
-    const before = plane.forSession.mock.calls.length
-    const missing = mockRes()
-    await handlers.get('/singularity/evolution')!(mockReq('GET', '/singularity/evolution?graphId=unknown'), missing as never)
-    expect(missing.statusCode).toBe(400)
-    expect(plane.forSession.mock.calls).toHaveLength(before)
-  })
-
   it('serves the requested graph library with its root identity', async () => {
     const libraryRead = vi.fn(async (root: string) => ({ id: root, tasks: [], skills: [] }))
     const { ctx, handlers } = mockCtx({ graphs: { get: async (id: string) => ({ rootSessionId: `${id}-root` }) }, taskRuntime: { libraryRead } })
@@ -132,12 +103,13 @@ describe('singularity console routes', () => {
     expect(libraryRead).toHaveBeenCalledExactlyOnceWith('graph-b-root')
   })
 
-  it('GET /singularity/task serves the native snapshot and answers 404 for an unknown store', async () => {
+  it('GET /singularity/task reads the store through the zero-write door and answers null for a store that does not exist', async () => {
+    const storeIds: string[] = []
     const { ctx, handlers } = mockCtx({
       task: {
-        openStore: async (id: string) => {
-          if (id === 'missing') throw new Error(`task: store "missing" does not exist`)
-          return emptySnapshot
+        snapshotReadOnly: async (id: string) => {
+          storeIds.push(id)
+          return id === 'missing' ? { exists: false } : { exists: true, snapshot: emptySnapshot }
         },
       },
     })
@@ -149,122 +121,27 @@ describe('singularity console routes', () => {
     expect(ok.statusCode).toBe(200)
     expect(json(ok)).toEqual({ snapshot: emptySnapshot })
 
+    // A store that does not exist is a fact, not a creation: the read answers null.
     const missing = mockRes()
     await serve(mockReq('GET', '/singularity/task?storeId=missing'), missing as never)
-    expect(missing.statusCode).toBe(404)
-    expect(json(missing)).toEqual({ error: 'task: store "missing" does not exist' })
+    expect(missing.statusCode).toBe(200)
+    expect(json(missing)).toEqual({ snapshot: null })
 
     const malformed = mockRes()
     await serve(mockReq('GET', '/singularity/task'), malformed as never)
     expect(malformed.statusCode).toBe(400)
+
+    // No write is ever asked of the task service: the console reads, and nothing else.
+    expect(storeIds).toEqual(['sg-t-root', 'missing'])
   })
 
-  it('POST /singularity/task/proposals/decide maps every decision onto the runtime entry it names', async () => {
-    const calls: unknown[][] = []
-    const runtime = {
-      decideProposal: async (...args: unknown[]) => {
-        calls.push(['decide', ...args])
-      },
-      continueProposal: async (...args: unknown[]) => {
-        calls.push(['continue', ...args])
-      },
-      cancelProposal: async (...args: unknown[]) => {
-        calls.push(['cancel', ...args])
-      },
-      readProposal: async () => ({ kind: 'root', identity: { rootSessionId: 's-root' } }),
-      recoveryStatus: async () => ({ status: 'ready' }),
-    }
-    const { ctx, handlers } = mockCtx({ taskRuntime: runtime })
+  it('GET /singularity/task names the missing service instead of pretending the store is empty', async () => {
+    const { ctx, handlers } = mockCtx({})
     apply(ctx as never)
-    const serve = handlers.get('/singularity/task/proposals/decide')!
-
-    const approved = mockRes()
-    await serve(mockReq('POST', '/singularity/task/proposals/decide', {
-      storeId: 'sg-t-root',
-      proposalId: 'p1',
-      decision: 'approve',
-      reason: 'looks right',
-    }), approved as never)
-    expect(approved.statusCode).toBe(200)
-    expect(json(approved)).toEqual({ ok: true })
-    expect(calls[0]).toEqual(['decide', 'sg-t-root', 'p1', { outcome: 'approved', reason: 'looks right' }, 'operator'])
-
-    await serve(
-      mockReq('POST', '/singularity/task/proposals/decide', { storeId: 'sg-t-root', proposalId: 'p2', decision: 'continue' }),
-      mockRes() as never,
-    )
-    expect(calls[1]).toEqual(['continue', 'sg-t-root', 'p2', 's-root'])
-
-    await serve(
-      mockReq('POST', '/singularity/task/proposals/decide', { storeId: 'sg-t-root', proposalId: 'p3', decision: 'cancel' }),
-      mockRes() as never,
-    )
-    expect(calls[2]).toEqual(['cancel', 'sg-t-root', 'p3', 's-root'])
-  })
-
-  it('POST /singularity/task/proposals/decide answers a domain refusal with 200 and non-2xx only for a malformed request', async () => {
-    const runtime = {
-      decideProposal: async () => {
-        throw new Error('task-runtime: proposal "p1" is not awaiting a decision')
-      },
-    }
-    const { ctx, handlers } = mockCtx({ taskRuntime: runtime })
-    apply(ctx as never)
-    const serve = handlers.get('/singularity/task/proposals/decide')!
-
-    const refused = mockRes()
-    await serve(
-      mockReq('POST', '/singularity/task/proposals/decide', { storeId: 'sg-t-root', proposalId: 'p1', decision: 'reject' }),
-      refused as never,
-    )
-    expect(refused.statusCode).toBe(200)
-    expect(json(refused)).toEqual({ ok: false, error: 'task-runtime: proposal "p1" is not awaiting a decision' })
-
-    const malformed = mockRes()
-    await serve(mockReq('POST', '/singularity/task/proposals/decide', { storeId: 'sg-t-root' }), malformed as never)
-    expect(malformed.statusCode).toBe(400)
-  })
-
-  it('GET /singularity/evolution serves the ledger, and empty arrays while the chain is off', async () => {
-    const proposal = { proposalId: 'evo-1', status: 'decided' }
-    const evolution = {
-      list: async () => [proposal],
-      experiments: async () => [{ experimentId: 'exp-1' }],
-      get: async (id: string) => {
-        if (id !== 'evo-1') throw new Error(`evolution: unknown proposal "${id}"`)
-        return proposal
-      },
-    }
-
-    const on = mockCtx({ evolution, singularityEvolution: { enabled: true } })
-    apply(on.ctx as never)
-    const listed = mockRes()
-    await on.handlers.get('/singularity/evolution')!(mockReq('GET', '/singularity/evolution'), listed as never)
-    expect(listed.statusCode).toBe(200)
-    expect(json(listed)).toEqual({ proposals: [proposal], experiments: [{ experimentId: 'exp-1' }] })
-
-    const detail = mockRes()
-    await on.handlers.get('/singularity/evolution/*')!(
-      mockReq('GET', '/singularity/evolution/evo-1'),
-      detail as never,
-    )
-    expect(detail.statusCode).toBe(200)
-    expect(json(detail)).toEqual({ proposal })
-
-    const unknown = mockRes()
-    await on.handlers.get('/singularity/evolution/*')!(
-      mockReq('GET', '/singularity/evolution/nope'),
-      unknown as never,
-    )
-    expect(unknown.statusCode).toBe(404)
-    expect(json(unknown)).toEqual({ error: 'evolution: unknown proposal "nope"' })
-
-    const off = mockCtx({ evolution, singularityEvolution: { enabled: false } })
-    apply(off.ctx as never)
-    const disabled = mockRes()
-    await off.handlers.get('/singularity/evolution')!(mockReq('GET', '/singularity/evolution'), disabled as never)
-    expect(disabled.statusCode).toBe(200)
-    expect(json(disabled)).toEqual({ proposals: [], experiments: [] })
+    const res = mockRes()
+    await handlers.get('/singularity/task')!(mockReq('GET', '/singularity/task?storeId=sg-t-root'), res as never)
+    expect(res.statusCode).toBe(503)
+    expect(json(res)).toEqual({ error: 'task: this deployment mounts no task store', source: 'task' })
   })
 
   it('GET /singularity/recovery pairs the runtime recovery status with a null reconcile report', async () => {
@@ -305,7 +182,7 @@ describe('singularity console routes', () => {
       criteria: [{ criterionId: 'c1', verdict: 'fail', logRef: 'sg-t-root/r1/c1.log' }],
     }
     const services = {
-      task: { openStore: async () => ({ ...emptySnapshot, reviews: [review] }) },
+      task: { snapshotReadOnly: async () => ({ exists: true, snapshot: { ...emptySnapshot, reviews: [review] } }) },
       verifier: { logTail: async (logRef: string) => `tail of ${logRef}` },
     }
     const { ctx, handlers } = mockCtx(services)
@@ -331,11 +208,11 @@ describe('singularity console routes', () => {
     expect(json(noVerifier)).toEqual({ review, logTail: null })
   })
 
-  it('forwards task-store changes onto SSE clients as a task frame', async () => {
+  it('forwards task-store changes and method changes onto SSE clients as their own frames', async () => {
     const { ctx, handlers, listeners } = mockCtx({
       graphs: {
         get: async () => ({ id: 'graph1' }),
-        view: async () => ({ meta: { id: 'graph1' }, graph: {}, layout: {} }),
+        view: async () => ({ meta: { id: 'graph1' }, access: { mode: 'current' }, graph: {}, layout: {} }),
       },
       hitl: { list: () => [] },
     })
@@ -345,32 +222,21 @@ describe('singularity console routes', () => {
     await handlers.get('/singularity/events')!(mockReq('GET', '/singularity/events?graphId=graph1'), res as never)
     await new Promise(resolve => setTimeout(resolve, 0))
 
-    const forwards = [...(listeners.get('task/change') ?? [])]
-    expect(forwards.length).toBe(1)
-    forwards[0]!({ id: 'sg-t-root' } as never)
+    const task = [...(listeners.get('task/change') ?? [])]
+    expect(task.length).toBe(1)
+    task[0]!({ id: 'sg-t-root' } as never)
     expect(res.body).toContain('event: task')
     expect(res.body).toContain('"storeId":"sg-t-root"')
-  })
 
-  it('forwards ledger changes onto SSE clients as an evolution frame', async () => {
-    const { ctx, handlers, listeners } = mockCtx({
-      graphs: {
-        get: async () => ({ id: 'graph1' }),
-        view: async () => ({ meta: { id: 'graph1' }, graph: {}, layout: {} }),
-      },
-      hitl: { list: () => [] },
-    })
-    apply(ctx as never)
+    // The snapshot frame carries the graph's own access mode, so a client needs no graph record of its own.
+    expect(res.body).toContain('event: snapshot')
+    expect(res.body).toContain('"mode":"current"')
 
-    const res = mockRes()
-    await handlers.get('/singularity/events')!(mockReq('GET', '/singularity/events?graphId=graph1'), res as never)
-    await new Promise(resolve => setTimeout(resolve, 0))
-
-    const forwards = [...(listeners.get('evolution/change') ?? [])]
-    expect(forwards.length).toBe(1)
-    forwards[0]!({ proposalId: 'p-1' } as never)
-    expect(res.body).toContain('event: evolution')
-    expect(res.body).toContain('"id":"p-1"')
+    const methods = [...(listeners.get('methods/change') ?? [])]
+    expect(methods.length).toBe(1)
+    methods[0]!({ draftId: 'd0001' } as never)
+    expect(res.body).toContain('event: methods')
+    expect(res.body).toContain('"draftId":"d0001"')
   })
 })
 

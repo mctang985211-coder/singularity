@@ -1,8 +1,9 @@
 import type { ComponentType } from 'react'
+import type { AccessMode } from '../store'
 import CanvasPanel from './canvas'
+import HistoryPanel from './history'
 import TasksPanel from './tasks'
-import ProposalsPanel from './proposals'
-import EvolutionPanel from './evolution'
+import ViewPanel from './view'
 import RecoveryPanel from './recovery'
 import VerifierPanel from './verifier'
 
@@ -12,16 +13,24 @@ export interface PanelDef {
   readonly component: ComponentType
 }
 
-/** Tab registry: later waves append panels here; App renders whatever this list holds. */
-export const PANELS: readonly PanelDef[] = [
+/** The panels a current-protocol graph shows: its canvas, its method read model, its task plane. */
+const CURRENT_PANELS: readonly PanelDef[] = [
   { id: 'canvas', label: 'Canvas', component: CanvasPanel },
+  { id: 'view', label: 'View', component: ViewPanel },
   { id: 'tasks', label: 'Tasks', component: TasksPanel },
-  { id: 'proposals', label: 'Proposals', component: ProposalsPanel },
-  { id: 'evolution', label: 'Evolution', component: EvolutionPanel },
   { id: 'recovery', label: 'Recovery', component: RecoveryPanel },
   { id: 'verifier', label: 'Verifier', component: VerifierPanel },
 ]
 
-export function panelById(id: string): PanelDef {
-  return PANELS.find(panel => panel.id === id) ?? PANELS[0]
+/** The one panel a sealed legacy graph shows: its own history, and every write control with it. */
+const LEGACY_PANELS: readonly PanelDef[] = [{ id: 'history', label: 'History', component: HistoryPanel }]
+
+/** The panels one access mode shows; a sealed graph has no canvas, no settings and no method surface. */
+export function panelsFor(mode: AccessMode): readonly PanelDef[] {
+  return mode === 'current' ? CURRENT_PANELS : LEGACY_PANELS
+}
+
+export function panelById(id: string, mode: AccessMode): PanelDef {
+  const panels = panelsFor(mode)
+  return panels.find(panel => panel.id === id) ?? panels[0]!
 }

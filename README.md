@@ -37,7 +37,7 @@ Execution workers receive the full frozen bodies of their bound Skills before th
 
 Evolution uses the same graph library for production methods, replay candidates and promotion; its ledger is under that library's `evolution/`. New Skills support an absent baseline. The loop runs task → evidence and cost → supervisor library review and experiment → publication or reasoned no-change → next task attempt and consumption. The last attempt also receives a library review. Four attempts exercise three opportunities to publish and consume a change. Recorded execution, replay and coordination token/tool costs are considered together; auxiliary measurement-plan/judge calls retain their actual usage, and monetary cost is unknown without a price source.
 
-Read the selected graph's library at `GET /singularity/graphs/:id/library` and its experiments at `GET /singularity/evolution?graphId=:id`.
+Read the selected graph's library at `GET /singularity/graphs/:id/library` and its method state — the active revision, the latest evaluation and the derived progress — at `GET /singularity/view?graphId=:id`; a graph without the protocol marker is sealed history and is served read-only at `GET /singularity/graphs/:id/history`.
 
 ## Quick start: bundled tutorial
 

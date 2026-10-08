@@ -62,6 +62,8 @@ function harness(overrides: { sessionPersistence?: unknown; events?: SessionEven
     switchStore: vi.fn(async (_id: string) => {}),
     snapshot: async () => ({ agents: [...agents] }),
     snapshotIn: async (_id: string) => ({ agents: [...agents] }),
+    // The zero-write door every read of a graph's own members now goes through.
+    snapshotReadOnlyIn: async (id: string) => ({ exists: true, snapshot: { version: 1, id, agents: [...agents], edges: [] } }),
     clearActive: vi.fn(),
   }
   const layout = {
@@ -455,11 +457,35 @@ describe('graph RSI settings persistence and HTTP updates', () => {
   })
 })
 
+/** The registry one restart replays: a single graph, already selected, with the protocol marker the caller chose. */
+function seededRegistry(graph: Record<string, unknown>) {
+  const appended: unknown[] = []
+  return {
+    appended,
+    persistence: {
+      list: async () => [{ header: { id: 'graphs-registry' } }],
+      create: async () => {
+        throw new Error('unreachable')
+      },
+      open: async () => ({
+        read: async () => ({
+          events: [
+            { type: 'graphs/event', seq: 0, time: 1, data: { kind: 'graph/add', graph }, ignorable: true },
+            { type: 'graphs/event', seq: 1, time: 2, data: { kind: 'graph/select', id: graph.id }, ignorable: true },
+          ],
+        }),
+        append: async (records: unknown[]) => {
+          appended.push(...records)
+        },
+        flush: async () => {},
+        close: async () => {},
+      }),
+    },
+  }
+}
+
 describe('graphs boot recovery', () => {
-  it('recovers the selected graph at boot through the same activation entry', async () => {
-    // A registry that already holds a selected graph — the state a restart
-    // replays — provided before the service opens its store, so what it reads
-    // is what the previous process left.
+  it('recovers the selected current-protocol graph at boot through the same activation entry', async () => {
     const rootSessionId = 's-root-1' as SessionId
     const graph = {
       id: 'graph1',
@@ -470,22 +496,10 @@ describe('graphs boot recovery', () => {
       layoutStoreId: 'sg-l-s-root-1',
       createdAt: 1,
       ready: false,
+      protocol: { id: 'singularity/graph@2', version: 2, since: 1 },
     }
-    const seeded = {
-      list: async () => [{ header: { id: 'graphs-registry' } }],
-      create: async () => {
-        throw new Error('unreachable')
-      },
-      open: async () => ({
-        read: async () => ({
-          events: [{ type: 'graphs/event', seq: 0, time: 1, data: { kind: 'graph/add', graph }, ignorable: true }],
-        }),
-        append: async () => {},
-        flush: async () => {},
-        close: async () => {},
-      }),
-    }
-    const { ctx, service, store, taskRuntime } = harness({ sessionPersistence: seeded })
+    const { persistence } = seededRegistry(graph)
+    const { ctx, service, store, taskRuntime } = harness({ sessionPersistence: persistence })
     store.create()
 
     // The boot recovers the selected graph by activating it (A2 §E): the
@@ -495,6 +509,86 @@ describe('graphs boot recovery', () => {
       expect(taskRuntime.adoptRoot).toHaveBeenCalledExactlyOnceWith('sg-t-s-root-1', rootSessionId),
     )
     expect((await service.snapshot()).selectedId).toBe('graph1')
+    await ctx.fiber.dispose()
+  })
+
+  it('leaves a selected sealed graph alone at boot: no adoption, no activation, no commit', async () => {
+    const rootSessionId = 's-root-1' as SessionId
+    const graph = {
+      id: 'graph0',
+      name: 'graph0',
+      envId: 'project1',
+      rootSessionId,
+      graphStoreId: 'sg-g-s-root-1',
+      layoutStoreId: 'sg-l-s-root-1',
+      createdAt: 1,
+      ready: false,
+    }
+    const { persistence, appended } = seededRegistry(graph)
+    const { ctx, service, taskRuntime, runtime, store } = harness({ sessionPersistence: persistence })
+    store.create()
+
+    // A sealed graph is history: booting with it selected recovers nothing and writes nothing.
+    await service.snapshot()
+    await new Promise(resolve => setTimeout(resolve, 5))
+    expect(taskRuntime.adoptRoot).not.toHaveBeenCalled()
+    expect(runtime.ensureRoot).not.toHaveBeenCalled()
+    expect(appended).toEqual([])
+    expect((await service.snapshot()).selectedId).toBe('graph0')
+    await ctx.fiber.dispose()
+  })
+})
+
+describe('sealed graphs refuse every write path', () => {
+  /** A registry holding one sealed legacy graph, selected, backed by the harness' fakes. */
+  async function legacyHarness() {
+    const rootSessionId = 's-root-0' as SessionId
+    const graph = {
+      id: 'graph0',
+      name: 'graph0',
+      envId: 'project1',
+      rootSessionId,
+      graphStoreId: 'sg-g-s-root-0',
+      layoutStoreId: 'sg-l-s-root-0',
+      createdAt: 1,
+      ready: false,
+    }
+    const { persistence, appended } = seededRegistry(graph)
+    const built = harness({ sessionPersistence: persistence })
+    built.store.create()
+    await built.service.snapshot()
+    return { ...built, graph, appended }
+  }
+
+  it('refuses select, ready and settings pins with graph-sealed and zero commits', async () => {
+    const { ctx, service, graph, appended, runtime, taskRuntime, store } = await legacyHarness()
+
+    await expect(service.select(graph.id)).rejects.toThrow('sealed legacy history')
+    await expect(service.markReady(graph.id)).rejects.toThrow('sealed legacy history')
+    await expect(service.setRsi(graph.id, rsiConfig)).rejects.toThrow('sealed legacy history')
+
+    expect(appended).toEqual([])
+    // Nothing was activated on the way through: a refusal happens before any recovery.
+    expect(taskRuntime.adoptRoot).not.toHaveBeenCalled()
+    expect(runtime.ensureRoot).not.toHaveBeenCalled()
+    expect(store.get(graph.envId).sessionIds).toEqual([])
+    expect((await service.snapshot()).selectedId).toBe('graph0')
+    await ctx.fiber.dispose()
+  })
+
+  it('archives a sealed graph from the registry alone instead of stopping or cleaning it', async () => {
+    const { ctx, service, graph, appended, runtime, taskRuntime, store } = await legacyHarness()
+
+    await service.remove(graph.id)
+
+    expect(runtime.stopGraph).not.toHaveBeenCalled()
+    expect(taskRuntime.cancelGraph).not.toHaveBeenCalled()
+    expect(appended.map(record => (record as { data: { kind: string } }).data.kind)).toEqual(['graph/remove'])
+    const snapshot = await service.snapshot()
+    expect(snapshot.graphs).toEqual([])
+    expect(snapshot.archives.map(archive => archive.graph.id)).toEqual(['graph0'])
+    // The environment keeps its sessions: nothing about it was touched.
+    expect(store.get(graph.envId).sessionIds).toEqual([])
     await ctx.fiber.dispose()
   })
 })
