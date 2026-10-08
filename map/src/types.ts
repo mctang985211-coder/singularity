@@ -404,3 +404,59 @@ export interface TaskInvalidation {
   readonly storeId?: string
 }
 
+// The method read surface (`GET /singularity/methods`): a browser-local fork of
+// the server's own payload. The graph-level projection stays the server's
+// `GraphViewResponse`; the draft rows carry only what this thin panel renders.
+
+/** One method draft, as the methods route serves it. */
+export interface MethodDraftRow {
+  readonly draftId: string
+  readonly kind: string
+  readonly identity: string
+  readonly status: 'draft' | 'evaluated' | 'discarded' | 'published'
+  readonly rationale: string
+  readonly actor: string
+  readonly at: string
+  readonly evaluation?: { readonly evaluationId?: string; readonly verdict?: string } | null
+  readonly admission?: { readonly admissible?: boolean; readonly reasonCode?: string; readonly reason?: string } | null
+  readonly published?: { readonly revisionId?: string; readonly at?: string } | null
+  readonly discardReason?: string | null
+  readonly trialSides?: number
+}
+
+/** The environment revision plane's own view, relayed by the methods route. */
+export interface MethodEnvironmentWire {
+  readonly libraryId: string
+  readonly revisionId: string
+  readonly generation: number
+  readonly manifestDigest: string
+  readonly protocol: string
+  readonly readOnly: boolean
+}
+
+/** One publication approval the process holds a HITL card for. */
+export interface MethodApprovalWire {
+  readonly id: string
+  readonly prompt: string
+  readonly createdAt: number
+}
+
+/** The pointer switch that is in flight, as the environment plane records it. */
+export interface MethodIntentWire {
+  readonly intentId: string
+  readonly direction: string
+  readonly next: { readonly revisionId: string }
+}
+
+/** The method read surface, as `GET /singularity/methods` serves it. */
+export interface MethodsResponse {
+  readonly graphId: string
+  readonly libraryId: string
+  readonly environment: MethodEnvironmentWire
+  readonly drafts: readonly MethodDraftRow[]
+  readonly intent: MethodIntentWire | null
+  readonly approvals: readonly MethodApprovalWire[]
+  readonly view: GraphViewResponse | null
+  readonly viewRefusal: string | null
+}
+

@@ -1,18 +1,12 @@
 /**
- * The startup reconciliation (K2-3, §E): the plugin mounts, and before it is
- * ready every commit intent its ledger left open is settled against what
- * production actually holds.
- *
- * The switch is not part of that question. `methodTools: 'off'` removes the six
- * model-facing method tools — the composition R0 asks for — and changes nothing
- * about recovery: production is reconciled whether or not the deployment ever
- * exposes a method tool, which is exactly the point of wiring it into the
- * plugin's own startup rather than into a tool. What is real here: the `EvolutionService`, the
- * ledger file under a pinned `$DSH_HOME`, the sandbox and production `SKILL.md`
- * files, the atomic write and its read-back, and the plugin the loader mounts.
- * The blocked and unreadable cases are the two the wiring has to tell apart — one
- * reported by name over a deployment that still starts, one the reason a mount
- * fails.
+ * The plugin's startup boundary after the v4 settle retired. The legacy
+ * evolution ledger stays mounted — the task runtime's own activation barrier
+ * reconciles its commit intents when a graph is taken over — but this plugin
+ * no longer settles them at mount: it reads the ledger once, refusing by name
+ * when it holds a line this build does not read, and otherwise leaves the
+ * timeline exactly where the barrier will pick it up. What is real here: the
+ * `EvolutionService`, the ledger file under a pinned `$DSH_HOME`, and the plugin
+ * the loader mounts.
  */
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -27,10 +21,9 @@ const PROPOSAL_ID = 's1'
 const SKILL = 'verify'
 const CANDIDATE = skillText('# the candidate version\n')
 const BASELINE = skillText('# the production version\n')
-const THIRD_PARTY = skillText('# a version no commit of this proposal wrote\n')
 
 function skillText(body: string): string {
-  return `---\nname: ${SKILL}\ndescription: a fixture skill for the startup reconciliation\n---\n\n${body}`
+  return `---\nname: ${SKILL}\ndescription: a fixture skill for the startup boundary\n---\n\n${body}`
 }
 
 function sha256Of(text: string): string {
@@ -153,10 +146,10 @@ async function mount(options: {
     home,
     target: join(home, 'skills', SKILL, 'SKILL.md'),
     /**
-     * Every warning the mount reported except the coordination plane's own
-     * startup lines: this fixture mounts no view service, and the assembly and
-     * its driver say where assignments live and that no derived progress can be
-     * read rather than degrading silently.
+     * Every warning the mount reported except the two planes' own missing-view
+     * lines: this fixture mounts no view service, and the assembly says where
+     * assignments live and that no derived progress or method fact can be read
+     * rather than degrading silently.
      */
     get warnings(): string[] {
       return warnings.filter(line => !line.startsWith('coordination:') && !line.includes('no singularityGraphView service'))
@@ -174,54 +167,35 @@ async function ledgerKinds(home: string): Promise<string[]> {
     .map(line => (JSON.parse(line) as { kind: string }).kind)
 }
 
-describe('SingularityAgent startup reconciliation', () => {
-  it('settles an open commit intent before the plugin is ready, with the tool switch off', async () => {
+describe('SingularityAgent startup boundary', () => {
+  it('mounts a deployment whose v4 ledger holds an open commit intent, and settles nothing at mount', async () => {
     const open = await mount({ ledger: home => ledgerLines(home, []) })
     expect(DEFAULT_METHOD_TOOLS).toBe('on')
     await open.mount
 
-    // The recovery ran whatever the switch says: the v4 ledger's own open commit
-    // intent is settled by the plugin's startup, not by a model tool — the
-    // composition is not a licence to leave production inconsistent with its
-    // ledger.
+    // The v4 ledger is history the task runtime's own activation barrier
+    // reconciles; this plugin no longer touches it — no `evolution_*` model tool
+    // and no startup settle — so production and the ledger are left exactly where
+    // they were found.
     expect([...open.tools.keys()].filter(name => name.startsWith('evolution_'))).toEqual([])
-    expect(await readFile(open.target, 'utf8')).toBe(CANDIDATE)
+    expect(await readFile(open.target, 'utf8')).toBe(BASELINE)
     expect(await ledgerKinds(open.home)).toEqual([
-      'proposed', 'candidate', 'prepared', 'gated', 'decided', 'commit_intent', 'applied',
+      'proposed', 'candidate', 'prepared', 'gated', 'decided', 'commit_intent',
     ])
     expect(open.warnings).toEqual([])
     await open.ctx.fiber.dispose()
   })
 
-  it('starts anyway when an intent cannot be settled, and reports it by name', async () => {
-    // A third party replaced production after the commit recorded its baseline:
-    // the recovery must not overwrite it, and a deployment must not refuse to run
-    // because of it — the admission gate is what keeps the target out of use.
-    const blocked = await mount({ ledger: home => ledgerLines(home, []), production: THIRD_PARTY })
-    await expect(blocked.mount).resolves.toBeDefined()
-
-    expect(await readFile(blocked.target, 'utf8')).toBe(THIRD_PARTY)
-    expect(await ledgerKinds(blocked.home)).toEqual(['proposed', 'candidate', 'prepared', 'gated', 'decided', 'commit_intent'])
-    const warnings = blocked.warnings
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain(`${PROPOSAL_ID}/apply`)
-    expect(warnings[0]).toContain(`apply of proposal "${PROPOSAL_ID}"`)
-    expect(warnings[0]).toContain(blocked.target)
-    expect(warnings[0]).toContain('could not be settled')
-    expect(warnings[0]).toContain('a third party changed it')
-    await blocked.ctx.fiber.dispose()
-  })
-
   it('refuses to become ready when the ledger cannot be read, naming the cause', async () => {
     // A ledger this build does not read (here a v1 line, the shape a deployment
-    // upgraded from an older release carries) is not a `blocked` commit: the
-    // reconciliation never happened, and the plugin fails its own load with the
-    // reason rather than serving a deployment whose production is anyone's guess.
+    // upgraded from an older release carries) is refused by the readiness gate:
+    // the plugin fails its own load with the reason rather than serving a
+    // deployment whose legacy history is unreadable.
     const unreadable = await mount({
       ledger: () => [{ formatVersion: 1, kind: 'proposed', proposalId: PROPOSAL_ID, actor: 'root-1', at: '2026-09-01T00:00:00.000Z' }],
     })
-    await expect(unreadable.mount).rejects.toThrow(/could not be reconciled at startup/)
-    // The reason the reconciliation could not run is part of the same refusal.
+    await expect(unreadable.mount).rejects.toThrow(/could not be read at startup/)
+    // The reason the read could not run is part of the same refusal.
     const refusal = await Promise.resolve(unreadable.mount).then(
       () => '',
       (error: Error) => error.message,
@@ -229,7 +203,7 @@ describe('SingularityAgent startup reconciliation', () => {
     expect(refusal).toMatch(/formatVersion 1/)
   })
 
-  it('mounts with no ledger at all, and with no open intent', async () => {
+  it('mounts with no ledger at all, and with a fully applied one', async () => {
     const absent = await mount()
     await expect(absent.mount).resolves.toBeDefined()
     expect(await readFile(absent.target, 'utf8')).toBe(BASELINE)

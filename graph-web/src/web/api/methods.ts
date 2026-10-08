@@ -58,7 +58,16 @@ import type {
   EnvironmentView,
   LibraryRoots,
 } from '@dangosys/dsh-singularity-task-runtime'
+import type { MethodsChangeFrame } from '@dangosys/dsh-singularity-agent'
 import { fail, graphIdOf, guardMethod, messageOf, sendJson, urlOf } from '../libs/http.ts'
+
+/**
+ * The one wire shape a method change carries. The producer — the method plane in
+ * `@dangosys/dsh-singularity-agent` — declares both the shape and the
+ * `methods/change` event, so this boundary re-exports the type rather than
+ * declaring a second copy that could drift.
+ */
+export type { MethodsChangeFrame }
 
 export const METHODS_PATH = '/singularity/methods'
 
@@ -74,26 +83,6 @@ const DECISION_FILE = 'strategy-decision.json'
 
 /** Revision-directory bookkeeping no asset difference counts as an asset. */
 const METADATA_FILES = new Set(['manifest.json', 'draft.json'])
-
-/**
- * One method change, as the stores announce it and the console forwards it. The
- * id is whichever of them moved: a draft, a published revision, or a pointer
- * switch that is in flight.
- */
-export interface MethodsChangeFrame {
-  readonly draftId?: string
-  readonly revisionId?: string
-  readonly intentId?: string
-  readonly actor?: string
-  readonly at?: string
-}
-
-declare module '@deepseek-ai/cordis' {
-  interface Events {
-    /** A method store moved: a draft, a measurement, a publication or a pointer switch. */
-    'methods/change'(frame: MethodsChangeFrame): void
-  }
-}
 
 /** The one SSE sink a method change is published to; `GraphBroadcast` satisfies it. */
 export interface MethodBroadcaster {

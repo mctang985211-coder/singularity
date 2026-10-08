@@ -3,7 +3,6 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type { ProjectedRead } from '@dangosys/dsh-singularity-context'
-import type { ApplyOutcome, CommitIntentView } from '@dangosys/dsh-singularity-evolution'
 
 export const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -85,23 +84,4 @@ export function questionCall(exec: ToolRunContext, tool: string): QuestionCall {
     )
   }
   return { caller, callId }
-}
-
-/** The lines a commit tool reports for an intent it settled instead of starting a second commit. */
-export function renderOpenIntentRecovery(intent: CommitIntentView, recovered: ApplyOutcome['recovered']): string[] {
-  return [
-    `recovered commit intent ${intent.intentId} (${recovered ?? 'unreported'}): ${recoveryNote(recovered)}`,
-    `no second approval was asked — the intent already binds ${intent.approvalRef}`,
-  ]
-}
-
-function recoveryNote(recovered: ApplyOutcome['recovered']): string {
-  switch (recovered) {
-    case 'redone':
-      return 'production still held the state before this commit, so the same write was carried out and its completion recorded'
-    case 'written':
-      return 'production already held the content this commit installed, so only its completion was recorded and production was not written again'
-    default:
-      return 'the service reported no recovery result for a proposal that had an open commit intent — production was left exactly as the intent found it'
-  }
 }

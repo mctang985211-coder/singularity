@@ -1,7 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest } from "@dangosys/dsh-singularity-task-runtime";
-import { ModelSelection } from "@dangosys/dsh-singularity-evolution";
+import { ModelSelection, aggregateEvaluation, calibrateNoise, exploration, refutationFor, renderHistory, screenBeforeMeasurement } from "@dangosys/dsh-singularity-evolution";
 
 //#region src/coordination/supervision.d.ts
 
@@ -163,6 +163,29 @@ declare class ProposalReviewService extends Service implements ProposalReviewCha
   private info;
 }
 //#endregion
+//#region src/tools/method-shared.d.ts
+/**
+ * One method change, as the console reads it off the event stream. The id is
+ * whichever store moved: a draft, a published revision, or the pointer switch a
+ * publication or rollback opened. The producer is the method plane; the console
+ * re-reads `/singularity/methods` when one arrives rather than assembling a
+ * projection from the frame.
+ */
+interface MethodsChangeFrame {
+  readonly draftId?: string;
+  readonly revisionId?: string;
+  readonly intentId?: string;
+  readonly actor?: string;
+  readonly at?: string;
+}
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /** A method store moved: a draft, a measurement, a publication or a pointer switch. */
+    'methods/change'(frame: MethodsChangeFrame): void;
+  }
+}
+/** Which decision path a graph's own record puts method publication in. */
+//#endregion
 //#region src/index.d.ts
 /** Plugin configuration — the deployment's composition, not a model's choice. */
 interface Config {
@@ -207,10 +230,17 @@ declare function deploymentModelSelection(ctx: Context): ModelSelection | undefi
 declare class SingularityAgent extends Service {
   static inject: string[];
   static Config: z<Config>;
-  /** The evolution ledger this assembly owns — kept as a field because the startup reconciliation (`[Service.init]`, below) settles its open commit intents before this plugin becomes ready, whether or not. */
+  /** The v4 evolution ledger this assembly mounts — kept as a field so `[Service.init]` can await its readiness (see below); its commit intents are settled by the task runtime's barrier, not here. */
   private readonly evolution;
   constructor(ctx: Context, config?: Config);
-  /** The startup reconciliation (K2): before this plugin is ready — and whatever the tool switch says — every commit intent the ledger left open is settled against what production actually holds. */
+  /**
+   * The startup readiness gate: before this plugin is ready, the legacy ledger
+   * this assembly mounts is read once, so an unreadable one is refused by name
+   * here rather than surfacing later as an unhandled rejection. Its open commit
+   * intents are not settled — the task runtime's activation barrier calls
+   * `reconcileEvolutionCommits` when a graph is taken over, and the v5 pointer
+   * intent is the task runtime's `reconcilePointer`.
+   */
   protected [Service.init](): Promise<void>;
   /** Refuse a configuration member this plugin does not read. The schema keeps unknown keys on the object it validates, so this is where a caller's typo is caught: */
   private assertClosedConfig;
@@ -218,4 +248,4 @@ declare class SingularityAgent extends Service {
   private warn;
 }
 //#endregion
-export { Config, DEFAULT_METHOD_TOOLS, DEFAULT_SUPERVISION, EscalationService, type HitlAnswer, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, type SupervisionConfig, deploymentModelSelection };
+export { Config, DEFAULT_METHOD_TOOLS, DEFAULT_SUPERVISION, EscalationService, type HitlAnswer, HitlService, type MethodsChangeFrame, ProposalReviewService, SingularityAgent, SingularityAgent as default, type SupervisionConfig, deploymentModelSelection };

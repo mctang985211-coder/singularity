@@ -90,6 +90,28 @@ import type {
 } from '@dangosys/dsh-singularity-task-runtime'
 import type {} from '@dangosys/dsh-singularity-graphs'
 
+/**
+ * One method change, as the console reads it off the event stream. The id is
+ * whichever store moved: a draft, a published revision, or the pointer switch a
+ * publication or rollback opened. The producer is the method plane; the console
+ * re-reads `/singularity/methods` when one arrives rather than assembling a
+ * projection from the frame.
+ */
+export interface MethodsChangeFrame {
+  readonly draftId?: string
+  readonly revisionId?: string
+  readonly intentId?: string
+  readonly actor?: string
+  readonly at?: string
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /** A method store moved: a draft, a measurement, a publication or a pointer switch. */
+    'methods/change'(frame: MethodsChangeFrame): void
+  }
+}
+
 /** Which decision path a graph's own record puts method publication in. */
 export type MethodMode = 'auto' | 'manual'
 
@@ -378,6 +400,15 @@ export async function methodLedgerPlaneOf(ctx: Context, caller: string): Promise
     return await evaluationOfDraft(sources, view.draft.draftId)
   }
 
+  /**
+   * Announce one method change on the deployment's event bus, after the write
+   * that caused it has landed and never before. The console subscribes to it and
+   * re-reads `/singularity/methods`; the projection is never assembled here.
+   */
+  const announce = (frame: MethodsChangeFrame): void => {
+    ctx.emit('methods/change', frame)
+  }
+
   return {
     libraryId: library.id,
     root: library.root,
@@ -395,11 +426,13 @@ export async function methodLedgerPlaneOf(ctx: Context, caller: string): Promise
     },
     async createDraft(request) {
       const { ledger } = await open()
-      return await createLedgerDraft(ledger, request)
+      const created = await createLedgerDraft(ledger, request)
+      announce({ draftId: created.draft.draftId, actor: created.draft.actor, at: created.draft.at })
+      return created
     },
     async evaluate(input, signal) {
       const { sources } = await open()
-      return await evaluateDraft(sources, {
+      const report = await evaluateDraft(sources, {
         draftId: input.draftId,
         samples: input.samples,
         input: input.input,
@@ -414,6 +447,8 @@ export async function methodLedgerPlaneOf(ctx: Context, caller: string): Promise
         policy,
         actor: caller,
       })
+      announce({ draftId: report.draftId, actor: caller, at: report.at })
+      return report
     },
     async decisionFor(draftId) {
       const view = await viewOf(draftId)
@@ -435,15 +470,32 @@ export async function methodLedgerPlaneOf(ctx: Context, caller: string): Promise
     },
     async discardDraft(input) {
       const { ledger } = await open()
-      return await discardLedgerDraft(ledger, input)
+      const discarded = await discardLedgerDraft(ledger, input)
+      const at = discarded.history[discarded.history.length - 1]?.at ?? new Date().toISOString()
+      announce({ draftId: discarded.draft.draftId, actor: input.actor, at })
+      return discarded
     },
     async markPublished(input) {
       const { sources } = await open()
       await markPublishedDraft(sources, input)
+      announce({
+        draftId: input.draftId,
+        revisionId: input.revisionId,
+        intentId: input.intentId,
+        actor: input.actor,
+        at: new Date().toISOString(),
+      })
     },
     async markRolledback(input) {
       const { sources } = await open()
       await markRolledbackDraft(sources, input)
+      announce({
+        ...(input.draftId === null ? {} : { draftId: input.draftId }),
+        revisionId: input.revisionId,
+        intentId: input.intentId,
+        actor: input.actor,
+        at: new Date().toISOString(),
+      })
     },
     async history() {
       const { ledger, sources } = await open()

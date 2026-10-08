@@ -2,6 +2,7 @@ import type { ComponentType } from 'react'
 import type { AccessMode } from '../store'
 import CanvasPanel from './canvas'
 import HistoryPanel from './history'
+import MethodsPanel from './methods'
 import TasksPanel from './tasks'
 import ViewPanel from './view'
 import RecoveryPanel from './recovery'
@@ -13,10 +14,11 @@ export interface PanelDef {
   readonly component: ComponentType
 }
 
-/** The panels a current-protocol graph shows: its canvas, its method read model, its task plane. */
+/** The panels a current-protocol graph shows: its canvas, its unified read model, its method library, its task plane. */
 const CURRENT_PANELS: readonly PanelDef[] = [
   { id: 'canvas', label: 'Canvas', component: CanvasPanel },
   { id: 'view', label: 'View', component: ViewPanel },
+  { id: 'methods', label: 'Methods', component: MethodsPanel },
   { id: 'tasks', label: 'Tasks', component: TasksPanel },
   { id: 'recovery', label: 'Recovery', component: RecoveryPanel },
   { id: 'verifier', label: 'Verifier', component: VerifierPanel },

@@ -59,12 +59,12 @@ Full guide: [tutorial/TUTORIAL.md](tutorial/TUTORIAL.md).
 | [`@dangosys/dsh-singularity-task`](task/README.md) | Event-sourced task store: decomposition tree, dependency DAG, run state machine, proposals, questions, budget extensions; shared `EventStoreSet` factory and types |
 | [`@dangosys/dsh-singularity-task-runtime`](task-runtime/README.md) | Orchestration facade (`service/` + `orchestration/`): intake, decomposition admission, capability resolution, worker/verifier execution, recovery, handoff |
 | [`@dangosys/dsh-singularity-agent-runtime`](agent-runtime/README.md) | Root and worker sessions: composition, permissions, presets via `agent-preset-registry`, tracked message delivery, worker resume, subagent descriptor publishing |
-| [`@dangosys/dsh-singularity-agent`](agent-singularity/README.md) | Root tool surface (`tools/`, `coordination/`, `services/`): delegation, task intake/decompose, review agents, HITL, escalation, evolution tools |
+| [`@dangosys/dsh-singularity-agent`](agent-singularity/README.md) | Root tool surface (`tools/`, `coordination/`, `services/`): delegation, task intake/decompose, review agents, HITL, escalation, the six `method_*` tools |
 | [`@dangosys/dsh-singularity-context`](context/README.md) | Reads, bindings, session and render projections: derive a live session's read domain and feed prompt assembly plus the read tools |
 | [`@dangosys/dsh-singularity-evolution`](evolution/README.md) | Evolution plane: proposal ledger, two-sided replay experiments, promotion gate, durable apply/rollback — off by default |
 | [`@dangosys/dsh-singularity-verifier`](verifier/README.md) | Verifier registry: command, composite and review judges; verdicts are recorded as an EvidenceBundle |
-| [`@dangosys/dsh-singularity-graph-web`](graph-web/README.md) | HTTP + SSE boundary: `/singularity/graph\|layout\|events\|graphs\|graph-envs\|task\|task/proposals/decide\|evolution[/:id]\|recovery\|review\|hitl\|map/` (plus `repo-check`) |
-| [`@dangosys/dsh-singularity-map`](map/README.md) | React 19 SPA served at `/singularity/map/`: Canvas / Tasks / Proposals / Evolution / Recovery / Verifier tabs plus the graph switcher |
+| [`@dangosys/dsh-singularity-graph-web`](graph-web/README.md) | HTTP + SSE boundary: `/singularity/graph\|view\|layout\|events\|graphs[/<id>/history]\|graph-envs\|methods[/:draftId]\|task\|recovery\|review\|hitl\|map/` (plus `repo-check`) |
+| [`@dangosys/dsh-singularity-map`](map/README.md) | React 19 SPA served at `/singularity/map/`: Canvas / View / Methods / Tasks / Recovery / Verifier tabs plus the graph switcher |
 | [`@dangosys/dsh-singularity-canvas-view`](canvas-view/README.md) | DSH shell citizen: `sidebar.panellist` entry `singularity` and the `main` page hosting the map iframe; postMessage chat bridge (retain/release + inbox projection) |
 
 Each package README carries its own service state, web APIs and design notes.

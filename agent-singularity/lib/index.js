@@ -2,7 +2,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, bubbleWorkspacePath, executionUsage, materializeBubble, optionalService, readEnvironmentDraft, readRevision, recoveryAttemptWithKey, settleBubble, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
+import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, bubbleWorkspacePath, executionUsage, listPointerCompletions, materializeBubble, optionalService, readEnvironmentDraft, readPointer, readRevision, recoveryAttemptWithKey, settleBubble, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
 import { DEFAULT_STRATEGY_POLICY, EvolutionService, OUTCOME_JUDGE_PROMPT, adapterFor, admit, aggregateEvaluation, assertOutcomePlan, calibrateNoise, canonicalJson, cohortDigestOf, createDraft, digestOf, discardDraft, editBudget, evaluate, evaluationOf, evaluationSourcesOf, exploration, foldHistory, foldMethods, markPublished, markRolledback, methodList, modelSelectionOf, openMethodLedger, refutationFor, renderHistory, revisionViewOf, scaleOf, screenBeforeMeasurement, sideMeasurementOf, stallFlag, strategyDecisionOf, validateEvaluation } from "@dangosys/dsh-singularity-evolution";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, open, readFile, readdir, writeFile } from "node:fs/promises";
@@ -114,10 +114,10 @@ var HitlService = class extends Service {
 			this.waiters.delete(id);
 			this.ctx.emit("hitl/change", this.list());
 		};
-		const promise = new Promise((resolve$1, reject) => {
+		const promise = new Promise((resolve$2, reject) => {
 			this.waiters.set(id, {
 				pending,
-				resolve: resolve$1,
+				resolve: resolve$2,
 				reject,
 				dispose: () => signal.removeEventListener("abort", abort)
 			});
@@ -2112,6 +2112,14 @@ async function methodLedgerPlaneOf(ctx, caller) {
 		const { sources } = await open$1();
 		return await evaluationOf(sources, view.draft.draftId);
 	};
+	/**
+	* Announce one method change on the deployment's event bus, after the write
+	* that caused it has landed and never before. The console subscribes to it and
+	* re-reads `/singularity/methods`; the projection is never assembled here.
+	*/
+	const announce = (frame) => {
+		ctx.emit("methods/change", frame);
+	};
 	return {
 		libraryId: library.id,
 		root: library.root,
@@ -2128,11 +2136,17 @@ async function methodLedgerPlaneOf(ctx, caller) {
 		},
 		async createDraft(request) {
 			const { ledger } = await open$1();
-			return await createDraft(ledger, request);
+			const created = await createDraft(ledger, request);
+			announce({
+				draftId: created.draft.draftId,
+				actor: created.draft.actor,
+				at: created.draft.at
+			});
+			return created;
 		},
 		async evaluate(input, signal) {
 			const { sources } = await open$1();
-			return await evaluate(sources, {
+			const report = await evaluate(sources, {
 				draftId: input.draftId,
 				samples: input.samples,
 				input: input.input,
@@ -2147,6 +2161,12 @@ async function methodLedgerPlaneOf(ctx, caller) {
 				policy,
 				actor: caller
 			});
+			announce({
+				draftId: report.draftId,
+				actor: caller,
+				at: report.at
+			});
+			return report;
 		},
 		async decisionFor(draftId) {
 			const view = await viewOf(draftId);
@@ -2175,15 +2195,36 @@ async function methodLedgerPlaneOf(ctx, caller) {
 		},
 		async discardDraft(input) {
 			const { ledger } = await open$1();
-			return await discardDraft(ledger, input);
+			const discarded = await discardDraft(ledger, input);
+			const at = discarded.history[discarded.history.length - 1]?.at ?? (/* @__PURE__ */ new Date()).toISOString();
+			announce({
+				draftId: discarded.draft.draftId,
+				actor: input.actor,
+				at
+			});
+			return discarded;
 		},
 		async markPublished(input) {
 			const { sources } = await open$1();
 			await markPublished(sources, input);
+			announce({
+				draftId: input.draftId,
+				revisionId: input.revisionId,
+				intentId: input.intentId,
+				actor: input.actor,
+				at: (/* @__PURE__ */ new Date()).toISOString()
+			});
 		},
 		async markRolledback(input) {
 			const { sources } = await open$1();
 			await markRolledback(sources, input);
+			announce({
+				...input.draftId === null ? {} : { draftId: input.draftId },
+				revisionId: input.revisionId,
+				intentId: input.intentId,
+				actor: input.actor,
+				at: (/* @__PURE__ */ new Date()).toISOString()
+			});
 		},
 		async history() {
 			const { ledger, sources } = await open$1();
@@ -2822,7 +2863,7 @@ var CoordinationDriver = class {
 		const deadline = Date.now() + this.settleGraceMs;
 		while (Date.now() < deadline) {
 			if (await persistence.stat(sessionId$1).catch(() => void 0) !== void 0) return;
-			await new Promise((resolve$1) => setTimeout(resolve$1, 50));
+			await new Promise((resolve$2) => setTimeout(resolve$2, 50));
 		}
 	}
 	/** The one supervision request one round's supervisor receives. */
@@ -2925,6 +2966,140 @@ function installCoordinationDriver(ctx, options = {}) {
 	return {
 		driver,
 		dispose: driver.install()
+	};
+}
+
+//#endregion
+//#region src/method-facts.ts
+/**
+* The graph a store key names: the one registry record whose root store is this
+* key. The projection's own key is `rootTaskStoreId(rootSessionId)`, so the
+* reader resolves it back through the registry rather than parsing the id's
+* shape — a key no graph publishes resolves to nothing.
+*/
+async function resolve$1(ctx, graphKey) {
+	const graphs = optionalService(ctx, "graphs");
+	const runtime = optionalService(ctx, "taskRuntime");
+	if (graphs === void 0 || runtime === void 0) return void 0;
+	const graph = (await graphs.list()).find((entry) => rootTaskStoreId(String(entry.rootSessionId)) === graphKey);
+	if (graph === void 0) return void 0;
+	const caller = String(graph.rootSessionId);
+	const library = await runtime.libraryForSession(caller);
+	return {
+		caller,
+		library: {
+			id: library.id,
+			root: library.root
+		},
+		protocol: library.protocol,
+		humanReview: graph.rsi?.humanReview !== false
+	};
+}
+/** A legacy library holds no v5 draft ledger and no pointer, so both method facts are absent rather than refused. */
+function legacy(resolved) {
+	return resolved.protocol === "legacy";
+}
+/** The settled switch that installed one pointer's revision, or nothing for a library's first revision. */
+function settledSwitch(completions, revisionId) {
+	for (let index = completions.length - 1; index >= 0; index -= 1) {
+		const completion = completions[index];
+		if (completion.revisionId === revisionId) return completion;
+	}
+}
+/** The effective revision the library's pointer holds, or `null` for a root the v5 plane never wrote. */
+async function activeRevisionOf(resolved) {
+	const pointer = await readPointer(resolved.library);
+	if (pointer === null) return null;
+	const settled = settledSwitch(await listPointerCompletions(resolved.library), pointer.revisionId);
+	const origin = settled === void 0 ? "graph-initial" : settled.direction === "rollback" ? "rolled-back" : "published";
+	return {
+		revisionId: pointer.revisionId,
+		manifestDigest: pointer.manifestDigest,
+		origin,
+		publishedAt: pointer.publishedAt
+	};
+}
+/** The `at` of the last record that moved one draft, or `null` when the ledger holds none. */
+function lastAtOf(view) {
+	return view.history[view.history.length - 1]?.at ?? null;
+}
+/** The `at` of one draft's evaluation record, from the trail the fold derived. */
+function evaluationAtOf(view) {
+	for (let index = view.history.length - 1; index >= 0; index -= 1) {
+		const entry = view.history[index];
+		if (entry.kind === "evaluation") return entry.at;
+	}
+	return null;
+}
+/**
+* One draft as the graph's latest evaluation: the state its own record puts it
+* in, the report it settled, and the decision that moved it. A draft merely
+* staged is `screening`; a frozen plan without a verdict is `evaluating`; a
+* settled verdict is `decided`, and a published or discarded draft carries the
+* decision its record recorded. Nothing here recomputes a verdict.
+*/
+function evaluationOf$1(view, humanReview) {
+	const candidateRef = view.draft.draftId;
+	const reportRef = view.evaluation?.reportPath ?? null;
+	const outcome = view.rolledback !== void 0 ? "rollback" : view.status === "discarded" ? "discard" : view.status === "published" ? "promote" : null;
+	if (outcome === null) {
+		if (view.evaluation === void 0) return {
+			state: view.plan === void 0 ? "screening" : "evaluating",
+			reportRef,
+			candidateRef,
+			decidedAt: null
+		};
+		return {
+			state: "decided",
+			reportRef,
+			candidateRef,
+			decidedAt: evaluationAtOf(view)
+		};
+	}
+	const at = view.rolledback?.at ?? view.published?.at ?? lastAtOf(view) ?? (/* @__PURE__ */ new Date()).toISOString();
+	return {
+		state: view.status === "discarded" ? "rejected" : view.rolledback !== void 0 ? "decided" : "published",
+		reportRef,
+		candidateRef,
+		decidedAt: at,
+		decision: {
+			kind: outcome,
+			source: { kind: humanReview ? "human" : "platform_policy" },
+			at
+		}
+	};
+}
+/**
+* The read model's one method fact producer: the environment pointer and the v5
+* ledger, resolved from the graph registry alone. A deployment without a
+* registry or a task runtime answers nothing, so the projection refuses by name
+* rather than reading a default.
+*/
+function methodFactsReader(ctx) {
+	return {
+		async activeRevision(graphKey) {
+			const resolved = await resolve$1(ctx, graphKey);
+			if (resolved === void 0 || legacy(resolved)) return null;
+			return await activeRevisionOf(resolved);
+		},
+		async latestEvaluation(graphKey) {
+			const resolved = await resolve$1(ctx, graphKey);
+			if (resolved === void 0 || legacy(resolved)) return null;
+			const ledger = await openMethodLedger({
+				root: resolved.library.root,
+				libraryId: resolved.library.id
+			});
+			const drafts = methodList(evaluationSourcesOf({
+				ctx,
+				caller: resolved.caller,
+				root: resolved.library.root,
+				libraryId: resolved.library.id,
+				ledger
+			}), {});
+			const latest = drafts[drafts.length - 1];
+			if (latest === void 0) return null;
+			return evaluationOf$1(latest, resolved.humanReview);
+		}
 	};
 }
 
@@ -6473,13 +6648,13 @@ async function runReviewAgentAttempt(input) {
 */
 async function waitForCompletion(input, sessionId$1, handle) {
 	const idle = handle.agent.whenIdle().catch(() => void 0);
-	await (input.signal === void 0 ? idle : Promise.race([idle, new Promise((resolve$1) => input.signal.addEventListener("abort", () => resolve$1(), { once: true }))]));
+	await (input.signal === void 0 ? idle : Promise.race([idle, new Promise((resolve$2) => input.signal.addEventListener("abort", () => resolve$2(), { once: true }))]));
 	const deadline = Date.now() + COMPLETION_GRACE_MS;
 	let found;
 	for (;;) {
 		found = (await readCoordinationRows().catch(() => []) ?? []).find((row) => row.kind === "completion" && row.sessionId === sessionId$1);
 		if (found !== void 0 || Date.now() >= deadline) break;
-		await new Promise((resolve$1) => setTimeout(resolve$1, COMPLETION_POLL_MS));
+		await new Promise((resolve$2) => setTimeout(resolve$2, COMPLETION_POLL_MS));
 	}
 	if (found === void 0 && input.signal?.aborted !== true) await abandon(sessionId$1).catch(() => void 0);
 	return found;
@@ -6807,7 +6982,7 @@ var SingularityAgent = class extends Service {
 		"approval"
 	];
 	static Config = ConfigSchema;
-	/** The evolution ledger this assembly owns — kept as a field because the startup reconciliation (`[Service.init]`, below) settles its open commit intents before this plugin becomes ready, whether or not. */
+	/** The v4 evolution ledger this assembly mounts — kept as a field so `[Service.init]` can await its readiness (see below); its commit intents are settled by the task runtime's barrier, not here. */
 	evolution;
 	constructor(ctx, config) {
 		super(ctx, "singularityAgent");
@@ -6834,6 +7009,14 @@ var SingularityAgent = class extends Service {
 			}
 			return view.registerCoordinationFacts(coordinationFactsReader());
 		}, "singularityAgent: coordination facts");
+		ctx.effect(() => {
+			const view = ctx.get("singularityGraphView");
+			if (view === void 0) {
+				this.warn("singularity-agent: no singularityGraphView service is mounted, so this deployment reads no derived active revision or latest evaluation; the method tools still read the same stores directly");
+				return () => void 0;
+			}
+			return view.registerMethodFacts(methodFactsReader(ctx));
+		}, "singularityAgent: method facts");
 		ctx.effect(() => ctx.taskRuntime.registerRootBudgetApproval(defineRootBudgetApproval(ctx)), "singularityAgent: root budget approval");
 		ctx.tools.register(defineMarkReadyTool(ctx));
 		ctx.tools.register(defineSpawnTool(ctx));
@@ -6871,17 +7054,19 @@ var SingularityAgent = class extends Service {
 		}
 		ctx.tools.register(defineEscalateTool(ctx));
 	}
-	/** The startup reconciliation (K2): before this plugin is ready — and whatever the tool switch says — every commit intent the ledger left open is settled against what production actually holds. */
+	/**
+	* The startup readiness gate: before this plugin is ready, the legacy ledger
+	* this assembly mounts is read once, so an unreadable one is refused by name
+	* here rather than surfacing later as an unhandled rejection. Its open commit
+	* intents are not settled — the task runtime's activation barrier calls
+	* `reconcileEvolutionCommits` when a graph is taken over, and the v5 pointer
+	* intent is the task runtime's `reconcilePointer`.
+	*/
 	async [Service.init]() {
-		let outcomes;
 		try {
-			outcomes = await this.evolution.reconcile();
+			await this.evolution.ready();
 		} catch (error) {
-			throw new Error(`singularity-agent: the evolution ledger could not be reconciled at startup (${error instanceof Error ? error.message : String(error)}); refusing to become ready with an unreconciled production commit rather than serving a deployment whose production may not match its ledger`);
-		}
-		for (const outcome of outcomes) {
-			if (outcome.result !== "blocked") continue;
-			this.warn(`evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ${outcome.targets.join(", ")} could not be settled — ${outcome.detail ?? "no reason reported"}`);
+			throw new Error(`singularity-agent: the evolution ledger could not be read at startup (${error instanceof Error ? error.message : String(error)}); refusing to become ready with a ledger this build does not read rather than serving a deployment whose legacy history is unreadable`);
 		}
 	}
 	/** Refuse a configuration member this plugin does not read. The schema keeps unknown keys on the object it validates, so this is where a caller's typo is caught: */

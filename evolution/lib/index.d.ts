@@ -1905,6 +1905,15 @@ declare class EvolutionService extends Service {
   /** Ledger file path (`<root>/proposals.jsonl`). */
   get file(): string;
   /**
+   * Resolve once the ledger file has been read, rejecting with the reader's own
+   * refusal when it holds a line this build does not read. A deployment that
+   * mounts this service awaits it, so an unreadable legacy ledger is named at
+   * startup rather than surfacing as an unhandled rejection nobody settles —
+   * settling the open intents themselves is the caller's decision, not this
+   * read's.
+   */
+  ready(): Promise<void>;
+  /**
    * Settle every open commit intent, in ledger order. An intent whose
    * production state is the one it recorded is carried out; an intent whose
    * production moved is reported by name and left alone.

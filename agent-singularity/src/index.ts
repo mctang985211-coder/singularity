@@ -7,7 +7,7 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
-import type {} from '@dangosys/dsh-singularity-context'
+import type { MethodFactsReader } from '@dangosys/dsh-singularity-context'
 import type {} from '@dangosys/dsh-singularity-task'
 import { optionalService } from '@dangosys/dsh-singularity-task-runtime'
 import { EvolutionService, modelSelectionOf } from '@dangosys/dsh-singularity-evolution'
@@ -19,6 +19,7 @@ import { coordinationBindingSource } from './coordination/store.ts'
 import { coordinationFactsReader } from './coordination/facts-reader.ts'
 import { configureSupervision, graphImprovementCap, DEFAULT_SUPERVISION, type SupervisionConfig } from './coordination/supervision.ts'
 import { installCoordinationDriver } from './coordination/driver.ts'
+import { methodFactsReader } from './method-facts.ts'
 import { defineReviewerCompleteTool, defineSupervisorCompleteTool } from './tools/completion-tools.ts'
 import { logOf } from './log.ts'
 import { defineApproveTool } from './tools/approve.ts'
@@ -59,6 +60,7 @@ export { EscalationService } from './services/escalation.ts'
 export { ProposalReviewService } from './services/proposal-review.ts'
 export { DEFAULT_SUPERVISION } from './coordination/supervision.ts'
 export type { SupervisionConfig } from './coordination/supervision.ts'
+export type { MethodsChangeFrame } from './tools/method-shared.ts'
 
 /** Plugin configuration — the deployment's composition, not a model's choice. */
 export interface Config {
@@ -147,7 +149,7 @@ export class SingularityAgent extends Service {
   static inject = ['tools', 'graphs', 'agentRuntime', 'task', 'taskRuntime', 'singularityContext', 'userQuestions', 'approval']
   static Config: z<Config> = ConfigSchema
 
-  /** The evolution ledger this assembly owns — kept as a field because the startup reconciliation (`[Service.init]`, below) settles its open commit intents before this plugin becomes ready, whether or not. */
+  /** The v4 evolution ledger this assembly mounts — kept as a field so `[Service.init]` can await its readiness (see below); its commit intents are settled by the task runtime's barrier, not here. */
   private readonly evolution: EvolutionService
 
   constructor(ctx: Context, config?: Config) {
@@ -157,8 +159,10 @@ export class SingularityAgent extends Service {
     const methodTools = config?.methodTools ?? DEFAULT_METHOD_TOOLS
     ctx.plugin(HitlService)
     // The v4 evolution ledger stays mounted while old graphs are still readable:
-    // a deployment with a legacy library keeps its own startup reconciliation, and
-    // no model tool writes it any more.
+    // a legacy library keeps its history projection and the task runtime's own
+    // commit-intent barrier, and no model tool writes it any more. This plugin
+    // no longer settles its open commit intents — the v5 pointer intent is the
+    // current path, and its reconcile is the task runtime's (`reconcilePointer`).
     this.evolution = new EvolutionService(ctx, {
       repoRoot: REPO_ROOT,
       modelSelection: () => deploymentModelSelection(ctx),
@@ -203,6 +207,21 @@ export class SingularityAgent extends Service {
       }
       return view.registerCoordinationFacts(coordinationFactsReader())
     }, 'singularityAgent: coordination facts')
+    // The one method fact producer the read model folds into a graph view: the
+    // environment pointer and the v5 ledger, so the console's method surface and
+    // the `method_*` tools read the same facts. A deployment without the view
+    // service is named at startup rather than reading a projection nobody can make.
+    ctx.effect(() => {
+      const view = ctx.get('singularityGraphView') as { registerMethodFacts(reader: MethodFactsReader): () => void } | undefined
+      if (view === undefined) {
+        this.warn(
+          'singularity-agent: no singularityGraphView service is mounted, so this deployment reads no derived ' +
+            'active revision or latest evaluation; the method tools still read the same stores directly',
+        )
+        return () => undefined
+      }
+      return view.registerMethodFacts(methodFactsReader(ctx))
+    }, 'singularityAgent: method facts')
     // The one approval a budget extension can be granted through (K4): the
     // runtime asks it alone — for the one request that is not already recorded —
     ctx.effect(
@@ -258,23 +277,21 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineEscalateTool(ctx))
   }
 
-  /** The startup reconciliation (K2): before this plugin is ready — and whatever the tool switch says — every commit intent the ledger left open is settled against what production actually holds. */
+  /**
+   * The startup readiness gate: before this plugin is ready, the legacy ledger
+   * this assembly mounts is read once, so an unreadable one is refused by name
+   * here rather than surfacing later as an unhandled rejection. Its open commit
+   * intents are not settled — the task runtime's activation barrier calls
+   * `reconcileEvolutionCommits` when a graph is taken over, and the v5 pointer
+   * intent is the task runtime's `reconcilePointer`.
+   */
   protected async [Service.init](): Promise<void> {
-    let outcomes: Awaited<ReturnType<EvolutionService['reconcile']>>
     try {
-      outcomes = await this.evolution.reconcile()
+      await this.evolution.ready()
     } catch (error) {
       throw new Error(
-        `singularity-agent: the evolution ledger could not be reconciled at startup (${error instanceof Error ? error.message : String(error)}); ` +
-        'refusing to become ready with an unreconciled production commit rather than serving a deployment whose production may not ' +
-        'match its ledger',
-      )
-    }
-    for (const outcome of outcomes) {
-      if (outcome.result !== 'blocked') continue
-      this.warn(
-        `evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ` +
-        `${outcome.targets.join(', ')} could not be settled — ${outcome.detail ?? 'no reason reported'}`,
+        `singularity-agent: the evolution ledger could not be read at startup (${error instanceof Error ? error.message : String(error)}); ` +
+        'refusing to become ready with a ledger this build does not read rather than serving a deployment whose legacy history is unreadable',
       )
     }
   }

@@ -72,6 +72,8 @@ export interface MethodWorld {
   readonly calls: Record<string, number>
   /** Every approval request the tools made, in order. */
   readonly approvals: { toolName?: string; callId?: string; reason?: string }[]
+  /** Every event this world's context emitted, in order, as `emit(name, frame)` recorded it. */
+  readonly frames: { readonly name: string; readonly frame: unknown }[]
   /** The graph's own rsi settings, as `methodModeFor` reads them. */
   readonly rsi: { humanReview: boolean }
   revision: (revisionId: string) => Promise<EnvironmentRevision | undefined>
@@ -165,6 +167,7 @@ export async function methodWorld(
   }
 
   const rsi = { humanReview: options.humanReview ?? false }
+  const frames: { name: string; frame: unknown }[] = []
   const ctx: Record<string, unknown> = {
     taskRuntime: runtime,
     task: { openStore: async () => ({ tasks: [], runs: options.runs ?? [], reviews: [], diagnoses: [], evidence: [], obligations: [], capabilities: {}, receipts: [] }) },
@@ -178,6 +181,9 @@ export async function methodWorld(
       }),
     },
     get: (name: string) => (name === 'singularityMethods' ? { enabled: true } : undefined),
+    emit: (name: string, frame: unknown) => {
+      frames.push({ name, frame })
+    },
     llmStream: undefined,
   }
   const exec = { agent: { id: CALLER }, callId: 'call-1', signal: new AbortController().signal }
@@ -189,6 +195,7 @@ export async function methodWorld(
     exec,
     calls,
     approvals,
+    frames,
     rsi,
     revision: (revisionId: string) => readRevision(library, revisionId),
     draft: (draftId: string) => readEnvironmentDraft(library, draftId),

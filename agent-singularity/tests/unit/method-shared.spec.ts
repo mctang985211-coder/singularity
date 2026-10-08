@@ -14,7 +14,7 @@ import {
   methodModeFor,
   strategyPlaneOf,
 } from '../../src/tools/method-shared.ts'
-import { methodWorld } from './method-tools.fixture.ts'
+import { CALLER, DECLARED_EDIT, methodWorld, skillPayload } from './method-tools.fixture.ts'
 
 describe('the method mode one graph runs in', () => {
   it('is auto only when the graph record says no human reviews, and manual otherwise', async () => {
@@ -79,5 +79,36 @@ describe('the frozen edit budget', () => {
   it('is the same pure schedule the strategy owns: no second budget implementation exists here', () => {
     const strategy = strategyPlaneOf()
     expect(strategy.editBudget(3, strategy.policy)).toBe(strategy.editBudget(3, { ...strategy.policy }))
+  })
+})
+
+describe('the method change announcement', () => {
+  it('emits one methods/change frame naming the draft once a write lands, and nothing before it', async () => {
+    const world = await methodWorld()
+    try {
+      expect(world.frames).toEqual([])
+      const { defineMethodDraftTool } = await import('../../src/tools/method-draft.ts')
+      const answer = (await defineMethodDraftTool(world.ctx as never).execute(
+        {
+          kind: 'skill',
+          identity: 'verify',
+          edits: [DECLARED_EDIT],
+          editPayload: skillPayload('# candidate: check the acceptance'),
+          rationale: 'answer the observed failure',
+          sourceRefs: ['diagnosis:d1'],
+          expectedBaseRevision: 'r0001',
+          round: 0,
+          critic: { verdict: 'accept', reason: 'one mechanism, the asset parses', evidenceRefs: ['diagnosis:d1'] },
+        },
+        world.exec as never,
+      )) as string
+      const draftId = /draft (d[0-9]{4})/.exec(answer)?.[1]
+      expect(draftId).toBeDefined()
+      // The frame names the draft that moved and the actor the ledger recorded;
+      // the console re-reads `/singularity/methods` from it.
+      expect(world.frames).toEqual([{ name: 'methods/change', frame: { draftId, actor: CALLER, at: expect.any(String) } }])
+    } finally {
+      await world.dispose()
+    }
   })
 })

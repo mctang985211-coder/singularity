@@ -9,6 +9,7 @@ import type {
   GraphsResponse,
   LayoutSnapshot,
   LegacyHistoryResponse,
+  MethodsResponse,
   ModelRef,
   ModelsResponse,
   RecoveryResponse,
@@ -72,6 +73,11 @@ export function fetchView(graphId: string): Promise<GraphViewResponse> {
 /** One sealed graph's history: the old records verbatim, read-only. */
 export function fetchHistory(graphId: string): Promise<LegacyHistoryResponse> {
   return request<LegacyHistoryResponse>('/singularity/graphs/' + encodeURIComponent(graphId) + '/history')
+}
+
+/** The method read surface: the same v5 ledger and environment pointer the `method_*` tools read. */
+export function fetchMethods(graphId: string): Promise<MethodsResponse> {
+  return request<MethodsResponse>('/singularity/methods' + graphQuery(graphId))
 }
 
 export function fetchHitl(): Promise<{ pending: HitlPending[] }> {

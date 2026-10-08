@@ -9,6 +9,7 @@ import type {
   GraphViewResponse,
   LayoutSnapshot,
   LegacyHistoryResponse,
+  MethodsResponse,
   ModelRef,
   ModelsResponse,
   RsiConfig,
@@ -22,6 +23,7 @@ import {
   fetchGraphs,
   fetchHistory,
   fetchHitl,
+  fetchMethods,
   fetchModels,
   fetchTask,
   fetchView,
@@ -108,6 +110,8 @@ interface Store {
   historyError: string | null
   graphView: GraphViewResponse | null
   graphViewError: string | null
+  methods: MethodsResponse | null
+  methodsError: string | null
   finishPrompt: (id: string, error?: string) => void
   boot: () => Promise<void>
   applySnapshot: (view: ViewSnapshot) => void
@@ -135,6 +139,7 @@ interface Store {
   loadTask: () => Promise<void>
   setSelectedRun: (id: string | null) => void
   loadView: () => Promise<void>
+  loadMethods: () => Promise<void>
   openHistory: () => Promise<void>
 }
 
@@ -244,6 +249,8 @@ export const useStore = create<Store>((set, get) => ({
   historyError: null,
   graphView: null,
   graphViewError: null,
+  methods: null,
+  methodsError: null,
   async boot() {
     get().source?.close()
     set({ source: null, error: null, bootError: null })
@@ -286,6 +293,8 @@ export const useStore = create<Store>((set, get) => ({
       historyError: null,
       graphView: null,
       graphViewError: null,
+      methods: null,
+      methodsError: null,
     })
     try {
       const [view, hitl] = await Promise.all([fetchGraph(graphId), fetchHitl()])
@@ -314,7 +323,11 @@ export const useStore = create<Store>((set, get) => ({
           if (get().task !== null) void get().loadTask()
         },
         onMethods: () => {
-          if (get().generation === generation && get().graphView !== null) void get().loadView()
+          if (get().generation !== generation) return
+          // A method change is why the projection and the method surface are re-read: the frame names
+          // what moved, and both reads are the same stores a `method_*` tool reads.
+          if (get().graphView !== null) void get().loadView()
+          if (get().methods !== null) void get().loadMethods()
         },
         onError: () => {
           set({ error: 'singularity: event stream closed' })
@@ -519,6 +532,22 @@ export const useStore = create<Store>((set, get) => ({
     } catch (error) {
       if (get().graphId !== graphId) return
       set({ graphViewError: message(error) })
+    }
+  },
+  async loadMethods() {
+    const graphId = get().graphId
+    if (graphId === null) {
+      set({ methods: null, methodsError: null })
+      return
+    }
+    set({ methodsError: null })
+    try {
+      const data = await fetchMethods(graphId)
+      if (get().graphId !== graphId) return
+      set({ methods: data })
+    } catch (error) {
+      if (get().graphId !== graphId) return
+      set({ methodsError: message(error) })
     }
   },
   async openHistory() {
