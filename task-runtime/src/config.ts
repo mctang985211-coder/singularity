@@ -130,6 +130,12 @@ export interface Config {
    */
   runBindingRoot?: string
   /**
+   * The DSH home holding `singularity/environments/<libraryId>`, the immutable
+   * environment revisions and drafts of every graph library. Absent means the
+   * segment `runBindingRoot` already sits under (or `DSH_HOME`).
+   */
+  environmentRevisionRoot?: string
+  /**
    * What the whole tree may spend (A3 §3.5): a cap on the runs the tree may
    * start, and the concurrent-writer count — which this deployment can only
    */
@@ -201,6 +207,7 @@ export const ConfigSchema: z<Config> = z.object({
   mcpServers: z.dict(z.any()).default({}),
   defaultPreset: z.string(),
   taskTemplatesRoot: z.string(),
+  environmentRevisionRoot: z.string(),
   verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),
   maxDepth: z.number().default(DEFAULT_MAX_DEPTH),
   maxChildren: z.number().default(DEFAULT_MAX_CHILDREN),

@@ -867,9 +867,8 @@ describe('A6 recovery entry: what it refuses, with no run started', () => {
     expect(message).toContain('capability gap this attempt is for is still open')
     expect(message).toContain('cap-missing')
     expect(await runsOf(h, 'root')).toHaveLength(1)
-    // Applying the row closes the gap: the same request is then an attempt.
-    h.runtime.listCapabilities()
-    await h.runtime.applyCapabilityRow('cap-missing', { skills: [] } as never)
+    // Adding the deployment row closes the gap: the same request is then an attempt.
+    h.runtime.config.capabilities['cap-missing'] = { skills: [] } as never
     const started = await recover(h)
     expect(started.attempt).toBe('started')
     expect(await runsOf(h, 'root')).toHaveLength(2)

@@ -116,7 +116,7 @@ async function mountAgent() {
     // `tests/integration/context-assembly.spec.ts`, so this sibling provides the
     // one call the plugin makes at load time (registering its reviewer binding
     // source) and nothing else.
-    ['singularityContext', { registerReviewerBindingSource: () => () => {} }],
+    ['singularityContext', { registerCoordinationBindingSource: () => () => {} }],
     ['userQuestions', userQuestions],
     ['approval', approval],
   ]

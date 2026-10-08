@@ -644,7 +644,8 @@ export async function deriveRootContract(
   callerSessionId?: string,
 ): Promise<{ ok: true; contract: TaskContract } | { ok: false; refusal: Error }> {
   try {
-    spec = await bindTaskTemplate(await self.taskTemplatesRootFor(callerSessionId), spec)
+    const retired = callerSessionId === undefined ? new Set<string>() : await self.retiredTaskTemplates(callerSessionId)
+    spec = await bindTaskTemplate(await self.taskTemplatesRootFor(callerSessionId), spec, undefined, retired)
   } catch (error) {
     return { ok: false, refusal: rootRefusal([message(error)]) }
   }
@@ -847,6 +848,8 @@ export async function activateRootContract(
     claimed = self.workspaces.ownerOf(workspacePath)
   }
   try {
+    const environment = await self.ensureInitialEnvironment(rootSessionId, rootSessionId)
+    const revision = environment.revision
     const providerBinding = await bindRunProviders({
       mcpRegistry: self.config.mcpServers,
       storeId,
@@ -855,6 +858,7 @@ export async function activateRootContract(
       providers: request.providers,
       table: await self.capabilitiesForSession(rootSessionId),
       root: self.config.runBindingRoot,
+      ...(revision === undefined ? {} : { revision }),
     })
     const task: TaskInstance = {
       taskId,
@@ -875,6 +879,7 @@ export async function activateRootContract(
       sessionId: rootSessionId,
       capabilitySnapshot: capabilitySnapshot(manifest),
       taskTemplatesRoot: await self.taskTemplatesRootFor(rootSessionId),
+      ...(revision === undefined ? {} : { environmentRevisionId: revision.manifest.revisionId }),
       providerBinding,
       /**
        * Born active (§1.1): the root decides its own work — it may decompose,

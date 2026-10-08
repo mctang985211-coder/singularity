@@ -24,7 +24,9 @@ import { optionalService, precheckProviders, registeredVerifierIds } from '../pr
 import type { EvolutionCommitLedger, ProviderPrecheck, SkillDiscoveryView } from '../provider-precheck.ts'
 import { readRunBinding } from '../run-binding.ts'
 import type { RunBindingRead } from '../run-binding.ts'
+import * as svcEnvironment from './environment.ts'
 import { VerifierUnavailableError, type OrchestrateEnv, type ReplayOverlay, type SessionObservation } from '../orchestration/types.ts'
+import { sessionFactsOf } from '../session-facts.ts'
 import { message } from '../helpers.ts'
 import { captureWorkspacePatch, prepareChildWorkspace, releaseLayer } from '../workspace.ts'
 import type {
@@ -37,24 +39,7 @@ import type {
   SessionLogSource,
 } from '../config.ts'
 
-export const HUMAN_TOOLS: ReadonlySet<string> = new Set(['hitl_ask', 'hitl_approve', 'ask_user_question'])
-
-export function toolResultFailed(data: {
-  error?: unknown
-  message?: { isError?: boolean }
-}): boolean {
-  if (data.error !== undefined) return true
-  return data.message?.isError === true
-}
-
-export function skillNameFrom(rawArguments: string): string | undefined {
-  try {
-    const parsed = JSON.parse(rawArguments) as { name?: unknown }
-    return typeof parsed.name === 'string' && parsed.name.length > 0 ? parsed.name : undefined
-  } catch {
-    return undefined
-  }
-}
+export { HUMAN_TOOLS, skillNameFrom, toolResultFailed } from '../session-facts.ts'
 
 export function tokenUsageOf(value: unknown): ReviewTokenUsage | undefined {
   if (typeof value !== 'object' || value === null) return undefined
@@ -166,6 +151,14 @@ export async function orchestrateEnv(
   const mcpRegistry = { ...self.config.mcpServers, ...overlay?.mcpServers }
   const callerBinding = self.sessions.get(callerSessionId)
   const callerRun = callerBinding === undefined ? undefined : await self.context.task.runIn(callerBinding.storeId, callerBinding.runId)
+  /**
+   * The environment revision every Run this env admits binds: the caller Run's
+   * own frozen version (a child inherits its parent's), falling back to the
+   * library's active revision for a session that holds no bound run yet.
+   */
+  const environmentRevision =
+    (callerRun === undefined ? undefined : await svcEnvironment.revisionForRun(self, callerRun)) ??
+    (await svcEnvironment.activeRevisionOrUndefined(self, callerSessionId))
   const taskTemplatesRoot = binding?.taskTemplatesRoot ?? callerRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(callerSessionId)
   const skillView = await self.skillViewForSession(callerSessionId, replayOverlay?.extraSkillRoots)
   return {
@@ -208,6 +201,8 @@ export async function orchestrateEnv(
     ...(workspacePath === undefined ? {} : { workspacePath }),
     ...(named === undefined ? {} : { workerCwd: named }),
     ...(taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot }),
+    ...(environmentRevision === undefined ? {} : { environmentRevision }),
+    ...(callerRun?.trialCandidateRef === undefined ? {} : { trialCandidateRef: callerRun.trialCandidateRef }),
     ...(binding?.agentOptions === undefined ? {} : { agentOptions: binding.agentOptions }),
     writeDrainTimeoutMs: self.config.writeDrainTimeoutMs,
     ...(self.config.rootBudget === undefined ? {} : { rootBudget: { ...self.config.rootBudget } }),
@@ -349,6 +344,9 @@ export async function orchestrateEnv(
     readLogTail: async logRef => runVerifier(self)?.logTail?.(logRef),
     observeSession: async sessionId => observeSession(self, sessionId),
     onTerminalReview: fact => self.notifyTerminalReview(fact),
+    sealReceipt: async (storeId, taskId, runId) => {
+      await self.sealReceiptBounded(storeId, taskId, runId)
+    },
     onRunBound: (sessionId, binding) => {
       self.sessions.set(sessionId, binding)
       self.startedSessions.add(sessionId)
@@ -416,61 +414,16 @@ export async function observeSession(self: TaskRuntime, sessionId: string): Prom
   const tokens = sessionTokens(self, sessionId)
   const events = await sessionEvents(self, sessionId)
   if (tokens === undefined && events === undefined) return undefined
-
-  const calls = new Map<string, number>()
-  const humanCallIds: string[] = []
-  const approvalCallIds = new Set<string>()
-  const skillCalls: string[] = []
-  const requestedSkills = new Map<string, string>()
-  let failures = 0
-  let approvals = 0
-  let compactions = 0
-  for (const event of events ?? []) {
-    if (event.type === 'user/message') {
-      const source = event.data.source as { kind?: string; names?: unknown }
-      if (source.kind === 'task-skills' && Array.isArray(source.names))
-        for (const name of source.names) if (typeof name === 'string') skillCalls.push(name)
-    } else if (event.type === 'tool/call') {
-      const name = event.data.name
-      if (typeof name !== 'string') continue
-      calls.set(name, (calls.get(name) ?? 0) + 1)
-      if (HUMAN_TOOLS.has(name)) humanCallIds.push(String(event.data.callId))
-      if (name === 'skill') {
-        const skill = skillNameFrom(event.data.arguments)
-        if (skill !== undefined) requestedSkills.set(String(event.data.callId), skill)
-      }
-    } else if (event.type === 'tool/result') {
-      if (toolResultFailed(event.data)) failures += 1
-      else if (event.data.message !== undefined) {
-        const skill = requestedSkills.get(String(event.data.message.source.callId))
-        if (skill !== undefined) skillCalls.push(skill)
-      }
-    } else if (event.type === 'approval/asked') {
-      approvals += 1
-      if (typeof event.data.callId === 'string') approvalCallIds.add(event.data.callId)
-    } else if ((event.type as string) === 'compaction/start') {
-      // Written by the compaction plugin, whose event map this package does not load.
-      compactions += 1
-    }
-  }
-
-  const tools =
-    events === undefined
-      ? undefined
-      : {
-          calls: [...calls]
-            .map(([name, count]) => ({ name, count }))
-            .sort((left, right) => left.name.localeCompare(right.name)),
-          failures,
-        }
+  // One parse, one meaning: the observation is a projection of the session facts.
+  const facts = sessionFactsOf(events ?? [], tokens)
   return {
     ...(tokens === undefined ? {} : { tokens }),
-    ...(tools === undefined ? {} : { tools }),
-    ...(events === undefined ? {} : { skillCalls }),
-    ...(events === undefined
-      ? {}
-      : { humanInterventions: approvals + humanCallIds.filter(id => !approvalCallIds.has(id)).length }),
-    ...(events === undefined ? {} : { compactions }),
+    ...(events === undefined ? {} : {
+      tools: { calls: [...(facts.toolCalls?.calls ?? [])], failures: facts.toolCalls?.failures ?? 0 },
+      skillCalls: [...(facts.skillCalls ?? [])],
+      humanInterventions: facts.humanInterventions ?? 0,
+      compactions: facts.compactions ?? 0,
+    }),
   }
 }
 

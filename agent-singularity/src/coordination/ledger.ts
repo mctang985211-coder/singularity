@@ -2,8 +2,8 @@
 
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ReviewerBindingError } from '@dangosys/dsh-singularity-context'
-import type { ReviewerBindingRecord } from '@dangosys/dsh-singularity-context'
+import { CoordinationBindingError } from '@dangosys/dsh-singularity-context'
+import type { CoordinationBinding, CoordinationBindingSource } from '@dangosys/dsh-singularity-context'
 import { appendJsonlRow, readJsonlFile } from '../jsonl-ledger.ts'
 import { sameSource } from './identity.ts'
 import { DEFAULT_SUPERVISION, supervisionSettings } from './supervision.ts'
@@ -566,13 +566,24 @@ export async function admitReviewAgent<T>(
   return result
 }
 
-/** The one delegation a session is recorded under, as the context package's reviewer binding source reads it (A2 §D): */
-export async function readReviewerDelegation(sessionId: string): Promise<ReviewerBindingRecord | undefined> {
+/** The ledger's own projection of one delegation, before it is narrowed to the context binding (A2 §D). */
+export interface ReviewDelegation {
+  readonly rootStoreId: string
+  readonly taskId: string
+  readonly actor: string
+  readonly at: string
+  /** The role the attempt's claim names; absent is a claim written before the supervisor role existed. */
+  readonly role?: ReviewAgentRole
+  readonly sourceRunId?: string | null
+}
+
+/** The one delegation a session is recorded under, as the context package's binding source reads it (A2 §D): */
+export async function readReviewerDelegation(sessionId: string): Promise<ReviewDelegation | undefined> {
   let rows: ReviewAgentLedgerRow[] | undefined
   try {
     rows = await readLedgerRows()
   } catch (error) {
-    throw new ReviewerBindingError(
+    throw new CoordinationBindingError(
       'unreadable',
       `the reviewer ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`,
     )
@@ -582,7 +593,7 @@ export async function readReviewerDelegation(sessionId: string): Promise<Reviewe
   const first = matches[0]!
   const claims = (rows ?? []).filter((row): row is ReviewAgentClaimRecord => row.kind === 'claim' && row.sessionId === sessionId)
   const claim = claims[0]
-  const record: ReviewerBindingRecord = {
+  const record: ReviewDelegation = {
     rootStoreId: first.rootStoreId,
     taskId: first.taskId,
     actor: first.actor,
@@ -595,7 +606,7 @@ export async function readReviewerDelegation(sessionId: string): Promise<Reviewe
   const claimConflict = claims.some(row => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId ||
     row.actor !== record.actor || (row.role ?? 'reviewer') !== record.role || row.runId !== record.sourceRunId)
   if (conflicting || claimConflict) {
-    throw new ReviewerBindingError(
+    throw new CoordinationBindingError(
       'binding-conflict',
       `session "${sessionId}" is recorded under more than one reviewer delegation: ` +
         matches.map(row => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join('; '),
@@ -604,7 +615,30 @@ export async function readReviewerDelegation(sessionId: string): Promise<Reviewe
   return record
 }
 
+/**
+ * The ledger row as the context binding: the shape is projected, and a row
+ * whose claim names no role is refused rather than read as a reviewer's.
+ */
+async function coordinationBindingOf(sessionId: string): Promise<CoordinationBinding | undefined> {
+  const row = await readReviewerDelegation(sessionId)
+  if (row === undefined) return undefined
+  if (row.role === undefined) {
+    throw new CoordinationBindingError(
+      'role-missing',
+      `session "${sessionId}" is recorded as a review delegation whose claim names no role; a role is never assumed`,
+    )
+  }
+  return {
+    role: row.role,
+    sourceTaskId: row.taskId,
+    sourceRunId: row.sourceRunId ?? null,
+    actor: row.actor,
+    rootStoreId: row.rootStoreId,
+    at: row.at,
+  }
+}
+
 /** The binding source the plugin registers into the context service: this deployment's ledger, as the narrow read door above. */
-export function reviewerBindingSource(): { read(sessionId: string): Promise<ReviewerBindingRecord | undefined> } {
-  return { read: readReviewerDelegation }
+export function reviewerBindingSource(): CoordinationBindingSource {
+  return { read: coordinationBindingOf }
 }

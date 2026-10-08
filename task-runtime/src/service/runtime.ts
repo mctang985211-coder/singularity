@@ -1,13 +1,15 @@
 import { parseMcpServerRegistry } from '../mcp-servers.ts'
-import { defaultTaskTemplatesRoot, findTaskTemplates, registerTaskTemplate, taskTemplatePage } from '../task-template.ts'
+import { message } from '../helpers.ts'
+import { defaultTaskTemplatesRoot, findTaskTemplates, parseTaskTemplate, registerTaskTemplate, taskTemplatePage } from '../task-template.ts'
 import type { TaskTemplateQuery } from '../task-template.ts'
+import { taskTemplateDigest } from '@dangosys/dsh-singularity-task'
 import type { TaskTemplate, TemplateScope } from '@dangosys/dsh-singularity-task'
 /**
  * The Singularity task runtime service: the class the deployment mounts as `ctx.taskRuntime`.
  * Every method delegates to the function module that owns it (see `./<block>.ts`), so the class
  */
 
-import { dirname, join, relative } from 'node:path'
+import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -33,8 +35,6 @@ import type {
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
 import { type CapabilityConfig } from '../capability.ts'
-import { ensureTaskLibrary, graphLibrary, libraryCapabilities, readTaskLibrary, writeTaskLibrary, reviewTaskLibrary } from '../library.ts'
-import type { LibraryWrite, LibraryReview, TaskLibrary } from '../library.ts'
 import { ExecutionGate } from '../gate.ts'
 import type { ProviderPrecheck, SkillDiscoveryView } from '../provider-precheck.ts'
 import { assertRootBudgetConfig } from '../root-budget.ts'
@@ -114,6 +114,24 @@ import * as svcDrivers from './drivers.ts'
 import * as svcQuestions from './questions.ts'
 import * as svcSessions from './sessions.ts'
 import * as svcEnv from './env.ts'
+import * as svcEnvironment from './environment.ts'
+import * as svcReceipts from './receipts.ts'
+import type { ReceiptReconcileReport, ReceiptSealStatus } from './receipts.ts'
+import type { ExecutionReceipt } from '@dangosys/dsh-singularity-task'
+import type {
+  EnvironmentDraft,
+  EnvironmentEdit,
+  EnvironmentLibrary,
+  EnvironmentPointerIntent,
+  EnvironmentPointerReconcile,
+  EnvironmentRevision,
+  EnvironmentRevisionRef,
+  EnvironmentView,
+  LibraryEditResult,
+  LibraryReview,
+  LibraryWrite,
+} from './environment.ts'
+import type { EnvironmentCommitHost, PublishOutcome, PublishRequest } from '../environment/index.ts'
 
 export class TaskRuntime extends Service {
   static inject = ['task', 'agentRuntime', 'graphs', 'sessionQuery']
@@ -154,6 +172,12 @@ export class TaskRuntime extends Service {
 
   readonly parentChains = new Map<string, Promise<void>>()
 
+  /** Runs whose receipt is sealed but not yet written, per store: the queue a reconciliation pass drains. */
+  readonly receiptSeals = new Map<string, Set<RunId>>()
+
+  /** One write tail per store for receipt sealing, so two settlements never seal the same store concurrently. */
+  readonly receiptSealTails = new Map<string, Promise<void>>()
+
   rootBudgetApproval?: RootBudgetApproval
 
   readonly terminalReviewListeners = new Set<(fact: TerminalReviewFact) => void | Promise<void>>()
@@ -192,6 +216,7 @@ export class TaskRuntime extends Service {
       generatedTaskReview: config?.generatedTaskReview ?? DEFAULT_GENERATED_TASK_REVIEW,
       ...(config?.supervision === undefined ? {} : { supervision: { ...config.supervision } }),
       runBindingRoot: config?.runBindingRoot ?? defaultRunBindingRoot(),
+      ...(config?.environmentRevisionRoot === undefined ? {} : { environmentRevisionRoot: config.environmentRevisionRoot }),
       ...(rootBudget === undefined ? {} : { rootBudget }),
       writeDrainTimeoutMs: config?.writeDrainTimeoutMs ?? DEFAULT_WRITE_DRAIN_TIMEOUT_MS,
     }
@@ -206,88 +231,89 @@ export class TaskRuntime extends Service {
     ctx.effect(() => () => this.unload())
   }
 
-  async libraryForRoot(rootSessionId: string): Promise<TaskLibrary> {
-    return ensureTaskLibrary(graphLibrary(rootSessionId))
+  /** The immutable revision roots a session's graph library is served from; reading creates nothing. */
+  async libraryForRoot(rootSessionId: string): Promise<EnvironmentLibrary> {
+    return await svcEnvironment.environmentLibraryForRoot(this, rootSessionId)
   }
 
-  async libraryForSession(sessionId: string): Promise<TaskLibrary> {
-    const graph = await this.context.graphs.graphForSession(SessionId(sessionId))
-    return this.libraryForRoot(graph.rootSessionId)
+  async libraryForSession(sessionId: string): Promise<EnvironmentLibrary> {
+    return await svcEnvironment.environmentLibraryForSession(this, sessionId)
+  }
+
+  /** The revision one run is bound to, or `undefined` on an old-protocol run. */
+  async environmentRevisionForRun(run: TaskRun): Promise<EnvironmentRevision | undefined> {
+    return await svcEnvironment.revisionForRun(this, run)
+  }
+
+  /** Fix the initial revision of a brand-new graph before anything binds to it. */
+  async ensureInitialEnvironment(rootSessionId: string, actor: string): Promise<EnvironmentLibrary> {
+    return await svcEnvironment.ensureInitialEnvironment(this, rootSessionId, actor)
+  }
+
+  /** The retired task templates of a session's active revision, as `id@version` keys. */
+  async retiredTaskTemplates(sessionId: string): Promise<ReadonlySet<string>> {
+    return await svcEnvironment.retiredTemplatesFor(this, sessionId)
   }
 
   async comparisonRunForSession(sessionId: string): Promise<TaskRun | undefined> {
-    const library = await this.libraryForSession(sessionId)
-    const graph = await this.context.graphs.graphForSession(SessionId(sessionId))
-    const snapshot = await this.context.task.openStore(rootTaskStoreId(graph.rootSessionId)).catch(error => {
-      if (error instanceof Error && /does not exist/.test(error.message)) return undefined
-      throw error
-    })
-    const run = snapshot?.runs.filter(item => item.sessionId === sessionId).at(-1)
-    if (run === undefined) return undefined
-    const within = (root: string, target: string) => { const path = relative(root, target); return path === '' || (!path.startsWith('..') && !path.startsWith('/')) }
-    return this.sessionExecutionBindings.get(sessionId)?.overlay !== undefined ||
-      (run.taskTemplatesRoot !== undefined && (within(join(library.root, 'evolution'), run.taskTemplatesRoot) || within(join(this.config.runBindingRoot!, 'replay-libraries'), run.taskTemplatesRoot)))
-      ? run : undefined
+    return await svcEnvironment.comparisonRunFor(this, sessionId)
   }
 
-  async libraryRead(sessionId: string) {
+  /** The library as a reader sees it: the effective revision's entries and identity, with no write of any kind. */
+  async libraryRead(sessionId: string): Promise<EnvironmentView & { taskTemplatesRoot: string; skillRoot: string }> {
     const library = await this.libraryForSession(sessionId)
-    const execution = this.sessionExecutionBindings.get(sessionId)
     const run = await this.comparisonRunForSession(sessionId)
-    if (run !== undefined) {
-      const taskTemplatesRoot = run.taskTemplatesRoot ?? execution?.taskTemplatesRoot!
-      const skillRoot = run.providerBinding?.snapshotRoot ?? execution?.overlay?.extraSkillRoots?.[0] ?? library.skillRoot
-      return {
-        ...library, id: run.runId, graphLibraryId: library.id, root: dirname(taskTemplatesRoot), taskTemplatesRoot, skillRoot, version: 1,
-        readOnly: true,
-        message: 'This Run uses a frozen comparison view. Include findings in task_submit_result; the supervisor can add useful experience to the graph library.',
-        tasks: (await findTaskTemplates(taskTemplatesRoot)).map(({ templateRef, template }) => ({ templateRef, status: 'temporary', skills: [...new Set((template.contract.requiredCapabilities ?? []).flatMap(capability => capability.startsWith('method:') ? [capability.slice(7)] : (run.providerBinding?.skills ?? []).filter(skill => skill.capabilities.includes(capability)).map(skill => skill.name)))] })),
-        skills: (run.providerBinding?.skills ?? []).map(item => ({ name: item.name, version: 0, digest: item.contentDigest, status: 'temporary' })),
-      }
-    }
-    return readTaskLibrary(library)
+    const view = run === undefined
+      ? await svcEnvironment.activeEnvironmentView(this, sessionId)
+      : await svcEnvironment.environmentViewForRun(this, run)
+    return { ...view, taskTemplatesRoot: library.taskTemplatesRoot, skillRoot: library.skillRoot }
   }
 
-  async libraryWrite(sessionId: string, input: LibraryWrite) {
-    if (await this.comparisonRunForSession(sessionId) !== undefined)
-      throw new Error('Include findings in task_submit_result; the supervisor can add useful experience to the graph library after comparison')
-    // The caller's recorded task/delegation gives authority; temporary writes still belong to active work.
-    await this.templateCaller(sessionId)
-    const graph = await this.context.graphs.graphForSession(SessionId(sessionId))
-    const core = this.softService<{ resolveCaller(id: string): Promise<{ kind: string; delegation?: { role?: string } }> }>('singularityContext')
-    const caller = await core?.resolveCaller(sessionId)
-    const supervisor = caller?.kind === 'reviewer' && caller.delegation?.role === 'supervisor'
-    if (!supervisor) {
-      const binding = this.sessions.get(sessionId)
-      const snapshot = await this.context.task.openStore(binding?.storeId ?? rootTaskStoreId(graph.rootSessionId)).catch(error => {
-        if (graph.rootSessionId === sessionId && error instanceof Error && /does not exist/.test(error.message)) return undefined
-        throw error
-      })
-      const run = binding === undefined
-        ? snapshot?.runs.filter(item => item.sessionId === sessionId).at(-1)
-        : snapshot?.runs.find(item => item.runId === binding.runId)
-      if (run === undefined ? graph.rootSessionId !== sessionId : run.status !== 'running' || (run.executionPhase !== undefined && run.executionPhase !== 'active'))
-        throw new Error('task-library: temporary writes belong to root planning, an active Task, or delegated method supervision')
-    }
-    return writeTaskLibrary(await this.libraryForSession(sessionId), input, await this.capabilitiesForSession(sessionId))
+  /** Stage one library write into the caller's draft; the active revision does not move. */
+  async libraryWrite(sessionId: string, input: LibraryWrite): Promise<LibraryEditResult> {
+    await this.assertLibraryWriteAuthority(sessionId)
+    return await svcEnvironment.writeLibraryDraft(this, sessionId, input)
   }
 
-  async libraryReview(sessionId: string, review: LibraryReview) {
-    if (await this.comparisonRunForSession(sessionId) !== undefined)
-      throw new Error('Include comparison findings in task_submit_result for graph method supervision')
+  /** Stage one retention review into the caller's draft; retention decisions belong to the root or its supervisor. */
+  async libraryReview(sessionId: string, review: LibraryReview): Promise<LibraryEditResult> {
     const graph = await this.context.graphs.graphForSession(SessionId(sessionId))
     if (graph.rootSessionId !== sessionId || graph.rsi !== undefined) {
-      const core = this.softService<{ resolveCaller(id: string): Promise<{ kind: string; delegation?: { role?: string } }> }>('singularityContext')
-      const caller = await core?.resolveCaller(sessionId)
-      if (caller?.kind !== 'reviewer' || caller.delegation?.role !== 'supervisor')
-        throw new Error('task-library: retention decisions belong to the graph root or delegated supervisor')
+      if (!(await svcEnvironment.isDelegatedSupervisor(this, sessionId))) {
+        throw new Error('task-runtime: retention decisions belong to the graph root or delegated supervisor')
+      }
     }
-    return reviewTaskLibrary(await this.libraryForSession(sessionId), review, sessionId)
+    if ((await this.comparisonRunForSession(sessionId)) !== undefined) {
+      throw new Error('Include comparison findings in task_submit_result for graph method supervision')
+    }
+    return await svcEnvironment.reviewLibraryDraft(this, sessionId, review)
+  }
+
+  /** The authority a temporary library write needs: the graph root, an active Run, or delegated method supervision. */
+  private async assertLibraryWriteAuthority(sessionId: string): Promise<void> {
+    if ((await this.comparisonRunForSession(sessionId)) !== undefined) {
+      throw new Error('Include findings in task_submit_result; the supervisor can add useful experience to the graph library after comparison')
+    }
+    await this.templateCaller(sessionId)
+    const graph = await this.context.graphs.graphForSession(SessionId(sessionId))
+    if (await svcEnvironment.isDelegatedSupervisor(this, sessionId)) return
+    const binding = this.sessions.get(sessionId)
+    const snapshot = await this.context.task.openStore(binding?.storeId ?? rootTaskStoreId(graph.rootSessionId)).catch(error => {
+      if (graph.rootSessionId === sessionId && error instanceof Error && /does not exist/.test(error.message)) return undefined
+      throw error
+    })
+    const run = binding === undefined
+      ? snapshot?.runs.filter(item => item.sessionId === sessionId).at(-1)
+      : snapshot?.runs.find(item => item.runId === binding.runId)
+    if (run === undefined ? graph.rootSessionId !== sessionId : run.status !== 'running' || (run.executionPhase !== undefined && run.executionPhase !== 'active')) {
+      throw new Error('task-runtime: temporary writes belong to root planning, an active Task, or delegated method supervision')
+    }
   }
 
   async capabilitiesForSession(sessionId: string): Promise<Record<string, CapabilityConfig>> {
     const overlay = this.sessionExecutionBindings.get(sessionId)?.overlay
-    return { ...this.config.capabilities, ...await libraryCapabilities(await this.libraryForSession(sessionId)), ...overlay?.capabilityOverrides }
+    const library = await this.libraryForSession(sessionId)
+    return { ...this.config.capabilities, ...await svcEnvironment.capabilityRowsForLibrary(this, library), ...overlay?.capabilityOverrides }
   }
 
   async skillViewForSession(sessionId: string, extraRoots: readonly string[] = []): Promise<SkillDiscoveryView> {
@@ -304,7 +330,8 @@ export class TaskRuntime extends Service {
 
   async findTaskTemplates(query?: string, callerSessionId?: string) {
     const caller = callerSessionId === undefined ? undefined : await this.templateCaller(callerSessionId)
-    return findTaskTemplates(caller?.root ?? this.config.taskTemplatesRoot, query, caller?.scope)
+    const retired = callerSessionId === undefined ? new Set<string>() : await this.retiredTaskTemplates(callerSessionId)
+    return findTaskTemplates(caller?.root ?? this.config.taskTemplatesRoot, query, caller?.scope, retired)
   }
 
   /** Pure store reads: catalog queries never adopt a Run or alter its gate. */
@@ -319,15 +346,15 @@ export class TaskRuntime extends Service {
     let run = snapshot?.runs.filter(item => item.sessionId === sessionId).at(-1)
     let task = run === undefined ? undefined : snapshot?.tasks.find(item => item.taskId === run?.taskId)
     if (task === undefined && graph?.rootSessionId !== sessionId) {
-      // Coordination sessions have no business Run. The existing read core checks their recorded delegation.
-      const core = this.softService<{ resolveCaller(id: string): Promise<{ kind: string; storeId?: string; task?: TaskInstance; delegation?: { sourceRunId?: string | null } }> }>('singularityContext')
+      // Coordination sessions have no business Run. The existing read core checks their recorded binding.
+      const core = this.softService<{ resolveCaller(id: string): Promise<{ kind: string; storeId?: string; task?: TaskInstance; binding?: { sourceRunId?: string | null } }> }>('singularityContext')
       const delegated = await core?.resolveCaller(sessionId)
-      if (delegated?.kind !== 'reviewer' || delegated.storeId !== storeId || delegated.task === undefined)
+      if (delegated?.kind !== 'coordinator' || delegated.storeId !== storeId || delegated.task === undefined)
         throw new Error('task-template: caller has no bound Task, valid delegation or root intake authority')
       task = delegated.task
-      run = delegated.delegation?.sourceRunId === undefined
+      run = delegated.binding?.sourceRunId == null
         ? snapshot?.runs.filter(item => item.taskId === task!.taskId).at(-1)
-        : snapshot?.runs.find(item => item.runId === delegated.delegation?.sourceRunId && item.taskId === task!.taskId)
+        : snapshot?.runs.find(item => item.runId === delegated.binding?.sourceRunId && item.taskId === task!.taskId)
     }
     return {
       root: run?.taskTemplatesRoot ?? await this.taskTemplatesRootFor(sessionId),
@@ -342,8 +369,8 @@ export class TaskRuntime extends Service {
 
   async registerTaskTemplate(template: TaskTemplate, callerSessionId?: string) {
     if (callerSessionId !== undefined) {
-      const result = await this.libraryWrite(callerSessionId, { kind: 'task', template })
-      return (result as import('../library.ts').LibraryTask).templateRef
+      await this.libraryWrite(callerSessionId, { kind: 'task', template })
+      return { id: template.id, version: template.version, digest: taskTemplateDigest(parseTaskTemplate(template)) }
     }
     if (this.config.taskTemplatesRoot === undefined) throw new Error('task-runtime: taskTemplatesRoot is not configured')
     return registerTaskTemplate(this.config.taskTemplatesRoot, template)
@@ -393,12 +420,58 @@ export class TaskRuntime extends Service {
     return svcLifecycle.listCapabilities(this)
   }
 
-  async applyCapabilityRow(
-    name: string,
-    entry: CapabilityConfig | null,
-    options: { commitTargets?: readonly string[]; commitRow?: string; mcpServers?: Record<string, import('../mcp-servers.ts').McpServerTemplate | null> } = {},
-  ): Promise<void> {
-    return svcLifecycle.applyCapabilityRow(this, name, entry, options)
+  /** Open a draft on the session's active revision; the only mutable region of a library. */
+  async createDraft(sessionId: string, request: { basedOn?: string; purpose?: string } = {}): Promise<EnvironmentDraft> {
+    return await svcEnvironment.createDraft(this, sessionId, request)
+  }
+
+  /** Stage one environment edit into one draft. */
+  async stageDraftEdit(sessionId: string, draftId: string, edit: EnvironmentEdit): Promise<EnvironmentDraft> {
+    return await svcEnvironment.stageDraftEdit(this, sessionId, draftId, edit)
+  }
+
+  /** Remove one draft; a removed draft can no longer be published. */
+  async removeEnvironmentDraft(sessionId: string, draftId: string): Promise<void> {
+    await svcEnvironment.removeEnvironmentDraft(this, sessionId, draftId)
+  }
+
+  /** Freeze one draft into a candidate revision without moving the pointer — the entry an explicit trial binds. */
+  async freezeDraft(sessionId: string, draftId: string): Promise<EnvironmentRevision> {
+    return await svcEnvironment.freezeDraft(this, sessionId, draftId)
+  }
+
+  /** Switch the effective pointer to one draft or frozen revision, under an expected-pointer CAS. */
+  async publishRevision(sessionId: string, request: PublishRequest): Promise<PublishOutcome> {
+    return await svcEnvironment.publishRevision(this, sessionId, request)
+  }
+
+  /** Switch the effective pointer back to a frozen revision. */
+  async rollbackRevision(sessionId: string, request: PublishRequest): Promise<PublishOutcome> {
+    return await svcEnvironment.rollbackRevision(this, sessionId, request)
+  }
+
+  /** Settle any pointer intent a killed process left open. */
+  async reconcilePointer(sessionId: string): Promise<EnvironmentPointerReconcile[]> {
+    return await svcEnvironment.reconcilePointer(this, sessionId)
+  }
+
+  /** The in-flight pointer switch of the session's library, or `null`; the single admission exclusion point. */
+  async openPointerIntent(sessionId: string): Promise<EnvironmentPointerIntent | null> {
+    return await svcEnvironment.openPointerIntentFor(this, sessionId)
+  }
+
+  async listRevisions(sessionId: string): Promise<EnvironmentRevisionRef[]> {
+    return await svcEnvironment.listRevisionsImpl(this, sessionId)
+  }
+
+  /** The legacy mutable layout read as a read-only view: no index rebuilt, no byte written. */
+  async legacyLibraryView(sessionId: string): Promise<EnvironmentView> {
+    return await svcEnvironment.legacyLibraryView(this, await svcEnvironment.libraryRootsForSession(this, sessionId))
+  }
+
+  /** The one write tail of a library, for a caller that stages several edits as one unit. */
+  async serializeEnvironment<T>(rootSessionId: string, work: () => Promise<T>): Promise<T> {
+    return await svcEnvironment.serializeEnvironmentFor(this, rootSessionId, work)
   }
 
   async adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption> {
@@ -502,6 +575,46 @@ export class TaskRuntime extends Service {
 
   notifyTerminalReview(fact: TerminalReviewFact): void {
     return svcNotify.notifyTerminalReview(this, fact)
+  }
+
+  /** Seal one Run's execution receipt. The store's own check decides; a repeat is `already-sealed`. */
+  async sealRunReceipt(storeId: string, taskId: TaskId, runId: RunId): Promise<ReceiptSealStatus> {
+    return await svcReceipts.sealRunReceipt(this, storeId, taskId, runId)
+  }
+
+  /**
+   * Seal one receipt as part of a settlement: awaited, bounded by the sealer's
+   * own limits, and never throwing — an unsealed receipt is queued for the next
+   * recovery pass rather than turning a settlement into a failure.
+   */
+  async sealReceiptBounded(storeId: string, taskId: TaskId, runId: RunId): Promise<void> {
+    try {
+      const status = await svcReceipts.sealRunReceipt(this, storeId, taskId, runId)
+      if (status.status === 'sealed' || status.status === 'already-sealed' || status.status === 'unsupported') return
+      svcReceipts.queueReceiptSeal(this, storeId, taskId, runId)
+      this.warn(`store ${storeId}: the receipt of run "${runId}" is queued rather than sealed now (${status.reason})`)
+    } catch (error) {
+      svcReceipts.queueReceiptSeal(this, storeId, taskId, runId)
+      this.warn(`store ${storeId}: sealing the receipt of run "${runId}" failed (${message(error)}); the settlement stands and the receipt stays queued`)
+    }
+  }
+
+  /** Advance every queued seal of one store. */
+  async flushReceiptSeals(storeId: string): Promise<ReceiptReconcileReport> {
+    return await svcReceipts.flushReceiptSeals(this, storeId)
+  }
+
+  /** Seal every terminal new-protocol Run of one store that has no receipt yet. */
+  async reconcileRunReceipts(storeId: string): Promise<ReceiptReconcileReport> {
+    return await svcReceipts.reconcileRunReceipts(this, storeId)
+  }
+
+  async receiptFor(storeId: string, runId: RunId): Promise<ExecutionReceipt | undefined> {
+    return await svcReceipts.receiptFor(this, storeId, runId)
+  }
+
+  async receiptsOfStore(storeId: string): Promise<readonly ExecutionReceipt[]> {
+    return await svcReceipts.receiptsOfStore(this, storeId)
   }
 
   async extendRootBudget(

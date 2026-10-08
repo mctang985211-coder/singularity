@@ -263,7 +263,7 @@ describe('the question plane is bounded and ordered', () => {
 })
 
 describe('a caller with no question plane', () => {
-  test('a plain member and a reviewer hold no list; a session outside the domain is refused by name', async () => {
+  test('a plain member and a coordinator hold no list; a session outside the domain is refused by name', async () => {
     const { stack, chain } = await chainStack()
     stack.member(chain.graph, 's-bystander')
     stack.sessionLog('s-bystander', ['request'])
@@ -273,9 +273,9 @@ describe('a caller with no question plane', () => {
     expect(expectRefused(await stack.service.questionProjection('s-nowhere'), 'unbound')).toContain(
       'not a published member',
     )
-    // A reviewer has no business Run: no question is its own to ask or answer.
+    // A coordinator has no business Run: no question is its own to ask or answer.
     stack.bindingSource(
-      stack.ledger({ rootStoreId: chain.storeId, taskId: 't-c1', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }),
+      stack.ledger({ rootStoreId: chain.storeId, sourceTaskId: 't-c1', sourceRunId: null, role: 'reviewer', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }),
     )
     expect(expectOk(await stack.service.questionProjection('s-review')).text).toBe('')
   })

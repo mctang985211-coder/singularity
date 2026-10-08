@@ -180,8 +180,8 @@ export class SingularityAgent extends Service {
     // The reviewer ledger is the one delegation source this deployment has (A2
     // §D): the context read core resolves a reviewer's read domain from it, and
     ctx.effect(
-      () => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()),
-      'singularityAgent: reviewer binding source',
+      () => ctx.singularityContext.registerCoordinationBindingSource(reviewerBindingSource()),
+      'singularityAgent: coordination binding source',
     )
     // The platform-side RSI loop driver (F): a graph that carries `rsi` settings
     // has its rounds scheduled here, from the platform, rather than by the root

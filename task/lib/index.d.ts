@@ -567,6 +567,153 @@ declare function blockingQuestionsOf(snapshot: TaskSnapshot, childRunId: RunId):
 /** The questions one parent run has been asked and has not resolved, in ask order — the parent-side pending list (§7.3: an unanswered question and an unread answer both keep their reference until the model has actually seen them). */
 declare function questionsAwaitingAnswerOf(snapshot: TaskSnapshot, parentRunId: RunId): QuestionRecord[];
 //#endregion
+//#region src/receipt.d.ts
+/** The minimal persistent pin of one immutable environment revision: the id and the revision content's digest. */
+interface RevisionPin {
+  readonly revisionId: string;
+  /** `EnvironmentRevisionManifest.contentDigest` of the revision the Run bound. */
+  readonly digest: string;
+}
+/** One real request's calling configuration, normalized by `(provider, model, effort, maxTokens)`. */
+interface ReceiptRequestIdentity {
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort?: string;
+  readonly maxTokens?: number;
+}
+/** One calling configuration and how many requests a run made under it. */
+interface ReceiptRequestCount {
+  readonly identity: ReceiptRequestIdentity;
+  readonly count: number;
+}
+/** What one run's session log shows about the models it actually called. */
+interface ReceiptRunModelUse {
+  readonly runId: RunId;
+  readonly sessionId?: string;
+  /** `observed` = a durable log was read; `no-worker` = this run never had a worker session; `unavailable` = the log could not be read. */
+  readonly status: 'observed' | 'no-worker' | 'unavailable';
+  /** Distinct identities in first-appearance order, each with its request count. */
+  readonly requests: readonly ReceiptRequestCount[];
+  /** Events the persisted log held when it was read (0 when the reading failed). */
+  readonly logEvents: number;
+}
+/** One skill a run's grant was built from, as its binding records it. */
+interface ReceiptBoundSkill {
+  readonly name: string;
+  readonly role: 'execution-provider' | 'knowledge' | 'guidance';
+  readonly contentDigest: string;
+  readonly contractDigest: string | null;
+}
+/** One run's skill consumption: what it was granted, and what its session actually loaded. */
+interface ReceiptSkillUse {
+  readonly runId: RunId;
+  readonly bound: readonly ReceiptBoundSkill[];
+  readonly loaded: readonly string[];
+  /** Names the session loaded that its grant does not cover. */
+  readonly loadedOutsideGrant: readonly string[];
+}
+/** One consumed task-template batch, with the session observation that a caller really requested it. */
+interface ReceiptTemplateUse {
+  /** The run that admitted the batch. */
+  readonly runId: RunId;
+  readonly proposalId: string;
+  readonly batchId: string;
+  readonly templateRef: TaskTemplateRef;
+  readonly templateParameters: Readonly<Record<string, unknown>>;
+  readonly childTaskIds: readonly TaskId[];
+  /** `observed` = the session log shows the call; `not-observed` = it does not; `unavailable` = no log could be read. */
+  readonly observation: 'observed' | 'not-observed' | 'unavailable';
+}
+/** The contract facts a receipt pins: `null` digests mean the store holds no such field on that record. */
+interface ReceiptContractFacts {
+  readonly contractDigest: string | null;
+  readonly criteriaDigest: string;
+  readonly requestedCapabilities: readonly string[];
+}
+/** The environment facts a receipt pins. */
+interface ReceiptEnvironmentFacts {
+  readonly revision: RevisionPin;
+  /** `sha256(canonicalize(run.providerBinding))`, or `null` when the run recorded no content binding. */
+  readonly bindingDigest: string | null;
+  readonly providerRegistryRevision: string | null;
+  readonly templatesRoot: string | null;
+  readonly preset: string | null;
+}
+/** The business input the run worked from. */
+interface ReceiptInputFacts {
+  readonly workspacePath: string | null;
+  readonly snapshotPath: string | null;
+  readonly snapshotDigest: string | null;
+}
+/** The terminal review the receipt rests on, or the explicit statement that the store holds none. */
+interface ReceiptReviewFacts {
+  /** `<taskId>#<runId>`, or `null` when the store holds no review for this run. */
+  readonly reviewRef: string | null;
+  readonly criteria: readonly ReviewCriterion[];
+  readonly criteriaDigest: string;
+  readonly evidenceRefs: readonly string[];
+  readonly anomalies: readonly string[];
+  /** The submitting worker's own account, contrasted with what the store backs. `null` when the run submitted nothing. */
+  readonly claims: {
+    readonly submitted: readonly string[];
+    readonly backed: readonly string[];
+    readonly unbacked: readonly string[];
+  } | null;
+}
+/** One fact a receipt could not establish. */
+type ReceiptMissingFact = 'session-log' | 'model-requests' | 'template-consumption' | 'subtree-usage' | 'drain' | 'review';
+/** Whether a receipt established every fact it is made of, and what it could not. */
+interface ReceiptCompleteness {
+  readonly status: 'complete' | 'incomplete';
+  readonly missing: readonly {
+    readonly fact: ReceiptMissingFact;
+    readonly detail: string;
+  }[];
+}
+/**
+ * One Run's execution receipt. It is a runtime-produced record: the store
+ * refuses any receipt that disagrees with its own records, and no tool, service
+ * method or event parameter accepts one from a caller.
+ */
+interface ExecutionReceipt {
+  readonly formatVersion: 1;
+  readonly runId: RunId;
+  readonly taskId: TaskId;
+  readonly storeId: string;
+  readonly sessionId?: string;
+  readonly parentRunId?: RunId;
+  /** The store's own terminal status for this run, copied — not a caller's statement. */
+  readonly outcome: RunStatus;
+  readonly contract: ReceiptContractFacts;
+  readonly environment: ReceiptEnvironmentFacts;
+  readonly input: ReceiptInputFacts;
+  readonly review: ReceiptReviewFacts;
+  readonly modelUse: readonly ReceiptRunModelUse[];
+  readonly skills: readonly ReceiptSkillUse[];
+  readonly templates: readonly ReceiptTemplateUse[];
+  /** The execution subtree frozen at sealing time: this run first, then every descendant, in store order. */
+  readonly subtree: readonly RunId[];
+  readonly drain: 'in-process' | 'reconciled' | 'unconfirmed';
+  readonly completeness: ReceiptCompleteness;
+  readonly sealedAt: string;
+  /** `sha256(canonicalize(receipt without this field))`. */
+  readonly digest: string;
+}
+/** The canonical digest of one criterion set — the same function the sealer and the store check use. */
+declare function criteriaDigestOf(criteria: readonly ReviewCriterion[]): string;
+/** The canonical digest of one evidence reference list. */
+declare function evidenceDigestOf(refs: readonly string[]): string;
+/** The content digest of one receipt, over its canonical form without the digest field. */
+declare function executionReceiptDigest(receipt: ExecutionReceipt): string;
+/** One run's receipt, or `undefined` when the store holds none. */
+declare function receiptOf(snapshot: TaskSnapshot, runId: RunId): ExecutionReceipt | undefined;
+/** Every receipt of one task's runs, in store order. */
+declare function receiptsOfTask(snapshot: TaskSnapshot, taskId: TaskId): readonly ExecutionReceipt[];
+/** One task-template reference as a receipt records it. */
+type ReceiptTemplateRef = TaskTemplateRef;
+/** The parameters one consumed template was instantiated with. */
+type ReceiptTemplateParameters = TemplateParameters;
+//#endregion
 //#region src/types.d.ts
 type TaskId = string;
 type RunId = string;
@@ -1159,6 +1306,8 @@ interface TaskSnapshot {
   readonly questions?: TaskQuestionIndex;
   /** The ceilings a person raised on this tree's own budget (K4), in the order they were recorded and by request key. */
   readonly budgetExtensions?: TaskBudgetExtensionIndex;
+  /** Every sealed Run's execution receipt, in sealing order. Absent on a store whose Runs predate the receipt protocol — an old Run has none. */
+  readonly receipts?: readonly ExecutionReceipt[];
 }
 interface TaskEventPayloads {
   /** A task instance enters the store (created status, no runs or children attached). */
@@ -1290,6 +1439,10 @@ interface TaskEventPayloads {
   TaskProposalPhaseChanged: TaskProposalPhaseChange;
   /** A proposal is consumed (T2/T3, §6; root contracts A0 §2): what it asked for now exists, bound to the ids this event carries. */
   TaskProposalAdmitted: TaskProposalConsumption;
+  /** One Run's execution receipt is sealed: the runtime generated it from the store and the persisted session facts, and it is immutable from here (one run, one receipt). No caller and no model supplies one. */
+  RunReceiptSealed: {
+    receipt: ExecutionReceipt;
+  };
 }
 type TaskEventKind = keyof TaskEventPayloads;
 interface TaskEventEnvelope<K$1 extends TaskEventKind, P> {
@@ -1472,6 +1625,8 @@ declare class TaskService extends Service {
   consumeProposalIn(storeId: string, consumption: TaskProposalConsumption, actor: string): Promise<void>;
   recordEvidenceIn(storeId: string, evidence: EvidenceBundle, actor: string): Promise<void>;
   recordReviewIn(storeId: string, review: ReviewRecord, actor: string): Promise<void>;
+  /** Record one Run's execution receipt; the store's own check decides, and one run accepts exactly one. */
+  recordReceiptIn(storeId: string, receipt: ExecutionReceipt, actor: string): Promise<void>;
   recordDiagnosisIn(storeId: string, diagnosis: Diagnosis, actor: string): Promise<void>;
   recordObligationIn(storeId: string, obligation: Obligation, actor: string): Promise<void>;
   /** Records one approved budget extension (K4), or answers a repeat of one the store already holds. */
@@ -1484,4 +1639,4 @@ declare class TaskService extends Service {
   private proposalEnvelopeTaskIn;
 }
 //#endregion
-export { AcceptanceCriterion, AdmissionContext, ArtifactRef, BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, BudgetExtensionProposal, BudgetExtensionRequest, CapabilityManifest, CatalogPath, ChildEvidenceRef, CriterionSpec, DecompositionAdmission, DecompositionIdentity, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, type EventStoreConfig, EventStoreSet, type EventStoreState, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, type ReadOnlyStoreSnapshot, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, RootProposalIdentity, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunPlacement, RunProviderBinding, RunRecovery, RunSkillBinding, RunStatus, type StoreEntry, type StoreOpenMode, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskBudgetExtension, TaskBudgetExtensionClaim, TaskBudgetExtensionIndex, TaskContract, TaskContractInput, TaskContractVersion, TaskEvent, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskState, TaskStatus, TaskTemplate, TaskTemplateContract, TaskTemplateRef, TemplateParameter, TemplateParameters, TemplateParametersSchema, TemplateScope, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, decompositionDigest, definedKeys, describeBudgetExtension, describeBudgetReading, isTerminalRunStatus, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest };
+export { AcceptanceCriterion, AdmissionContext, ArtifactRef, BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, BudgetExtensionProposal, BudgetExtensionRequest, CapabilityManifest, CatalogPath, ChildEvidenceRef, CriterionSpec, DecompositionAdmission, DecompositionIdentity, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, type EventStoreConfig, EventStoreSet, type EventStoreState, EvidenceBundle, EvidenceClaim, ExecutionPhase, ExecutionReceipt, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, type ReadOnlyStoreSnapshot, ReceiptBoundSkill, ReceiptCompleteness, ReceiptContractFacts, ReceiptEnvironmentFacts, ReceiptInputFacts, ReceiptMissingFact, ReceiptRequestCount, ReceiptRequestIdentity, ReceiptReviewFacts, ReceiptRunModelUse, ReceiptSkillUse, ReceiptTemplateParameters, ReceiptTemplateRef, ReceiptTemplateUse, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, RevisionPin, RootProposalIdentity, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunPlacement, RunProviderBinding, RunRecovery, RunSkillBinding, RunStatus, type StoreEntry, type StoreOpenMode, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TERMINAL_RUN_STATUSES, TaskBudgetExtension, TaskBudgetExtensionClaim, TaskBudgetExtensionIndex, TaskContract, TaskContractInput, TaskContractVersion, TaskEvent, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskState, TaskStatus, TaskTemplate, TaskTemplateContract, TaskTemplateRef, TemplateParameter, TemplateParameters, TemplateParametersSchema, TemplateScope, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, criteriaDigestOf, decompositionDigest, definedKeys, describeBudgetExtension, describeBudgetReading, evidenceDigestOf, executionReceiptDigest, isTerminalRunStatus, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, receiptOf, receiptsOfTask, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest };

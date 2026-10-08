@@ -9,6 +9,7 @@ import type {
   TaskProposalPhaseChange,
 } from './proposal.ts'
 import type { QuestionAnswerRecord, QuestionRecord, TaskQuestionIndex } from './question.ts'
+import type { ExecutionReceipt } from './receipt.ts'
 
 export type TaskId = string
 export type RunId = string
@@ -722,6 +723,8 @@ export interface TaskSnapshot {
   readonly questions?: TaskQuestionIndex
   /** The ceilings a person raised on this tree's own budget (K4), in the order they were recorded and by request key. */
   readonly budgetExtensions?: TaskBudgetExtensionIndex
+  /** Every sealed Run's execution receipt, in sealing order. Absent on a store whose Runs predate the receipt protocol — an old Run has none. */
+  readonly receipts?: readonly ExecutionReceipt[]
 }
 
 export interface TaskEventPayloads {
@@ -812,6 +815,8 @@ export interface TaskEventPayloads {
   TaskProposalPhaseChanged: TaskProposalPhaseChange
   /** A proposal is consumed (T2/T3, §6; root contracts A0 §2): what it asked for now exists, bound to the ids this event carries. */
   TaskProposalAdmitted: TaskProposalConsumption
+  /** One Run's execution receipt is sealed: the runtime generated it from the store and the persisted session facts, and it is immutable from here (one run, one receipt). No caller and no model supplies one. */
+  RunReceiptSealed: { receipt: ExecutionReceipt }
 }
 
 export type TaskEventKind = keyof TaskEventPayloads

@@ -1,14 +1,14 @@
-import { copyFile, cp, lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
-import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TERMINAL_RUN_STATUSES, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest } from "@dangosys/dsh-singularity-task";
+import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TERMINAL_RUN_STATUSES, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalize, capabilityManifestDigest, catalogPathWithin, contractDigest, criteriaDigestOf, decompositionDigest, describeBudgetExtension, executionReceiptDigest, openQuestionsOf, parseCatalogPath, parseTemplateScope, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberSlots, runMemberTaskIds, sha256Hex, taskContractIdentity, taskProposalId, taskTemplateDigest } from "@dangosys/dsh-singularity-task";
 import { spawn, spawnSync } from "node:child_process";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { fileURLToPath } from "node:url";
-import { createHash, randomUUID } from "node:crypto";
 import { answerMessageText, findSkillFileIn, parseSkillFile, parseSkillFile as parseSkillFile$1, questionMessageText, skillRootsFor, toolCallRefIn } from "@dangosys/dsh-singularity-agent-runtime";
+import { randomBytes, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
 import "@dangosys/dsh-singularity-task-runtime";
@@ -16,7 +16,7 @@ import "@dangosys/dsh-singularity-task-runtime";
 //#region src/mcp-servers.ts
 /** Parse deployment and candidate definitions through one schema and namespace policy. */
 function parseMcpServerRegistry(value) {
-	const record = (item) => item !== null && typeof item === "object" && !Array.isArray(item);
+	const record$1 = (item) => item !== null && typeof item === "object" && !Array.isArray(item);
 	const fail = (where, detail) => {
 		throw new Error(`task-runtime: MCP ${where} ${detail}`);
 	};
@@ -24,7 +24,7 @@ function parseMcpServerRegistry(value) {
 		if (typeof item !== "string" || item.includes("\0") || nonempty && item.trim().length === 0) fail(where, "must be a string without NUL bytes" + (nonempty ? " and must be non-empty" : ""));
 		return item;
 	};
-	if (!record(value)) fail("registry", "must be an object");
+	if (!record$1(value)) fail("registry", "must be an object");
 	const registry = {};
 	const namespaces = /* @__PURE__ */ new Set();
 	const fields = [
@@ -42,7 +42,7 @@ function parseMcpServerRegistry(value) {
 			"constructor",
 			"prototype"
 		].includes(key)) fail(`registry key ${JSON.stringify(key)}`, "must be a safe name");
-		if (!record(raw)) fail(`server ${key}`, "must be an object");
+		if (!record$1(raw)) fail(`server ${key}`, "must be an object");
 		const item = raw;
 		for (const field of Object.keys(item)) if (!fields.includes(field)) fail(`server ${key}`, `declares unknown field ${field}`);
 		const serverName = string(item.serverName, `${key}.serverName`, true);
@@ -59,7 +59,7 @@ function parseMcpServerRegistry(value) {
 			template.args = item.args.map((arg) => string(arg, `${key}.args`));
 		}
 		if (item.env !== void 0) {
-			if (!record(item.env)) fail(`${key}.env`, "must be an object");
+			if (!record$1(item.env)) fail(`${key}.env`, "must be an object");
 			template.env = Object.fromEntries(Object.entries(item.env).map(([name, val]) => {
 				if (!name || /[=\0]/.test(name)) fail(`${key}.env`, "has an invalid variable name");
 				return [name, string(val, `${key}.env.${name}`)];
@@ -1069,8 +1069,13 @@ async function registerTaskTemplate(root, input) {
 	}
 	return ref;
 }
-/** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery. */
-async function findTaskTemplates(root, query, scope, includeRetired = false) {
+/** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery.
+*
+* `retired` names the `id@version` keys the owning environment revision holds
+* retired; the caller passes them in, because a template's status is a field of
+* the immutable revision, never of an index a read may rewrite.
+*/
+async function findTaskTemplates(root, query, scope, retired = /* @__PURE__ */ new Set()) {
 	if (root === void 0) return [];
 	let files;
 	try {
@@ -1078,13 +1083,6 @@ async function findTaskTemplates(root, query, scope, includeRetired = false) {
 	} catch (error) {
 		if (error.code === "ENOENT") return [];
 		throw error;
-	}
-	const retired = /* @__PURE__ */ new Set();
-	if (!includeRetired) try {
-		const index = JSON.parse(await readFile(join(dirname(root), "index.json"), "utf8"));
-		for (const item of index.tasks ?? []) if (item.status === "retired") retired.add(`${item.templateRef.id}@${item.templateRef.version}`);
-	} catch (error) {
-		if (error.code !== "ENOENT") throw error;
 	}
 	const newest = /* @__PURE__ */ new Map();
 	for (const file of files.filter((file$1) => file$1.endsWith(".json")).sort()) {
@@ -1109,7 +1107,7 @@ async function findTaskTemplates(root, query, scope, includeRetired = false) {
 	}).sort((left, right) => left.template.id.localeCompare(right.template.id));
 }
 /** Expand into the same authoring fields as a free contract; no template-specific execution path follows. */
-async function bindTaskTemplate(root, spec, scope) {
+async function bindTaskTemplate(root, spec, scope, retired = /* @__PURE__ */ new Set()) {
 	if (!isPlainObject(spec)) return spec;
 	const selected = spec.templateScope === void 0 ? scope : parseTemplateScope(spec.templateScope);
 	if (scope !== void 0 && selected?.some((path) => !templateVisible(path, scope))) throw new Error("task-template: child templateScope cannot widen its parent scope");
@@ -1120,7 +1118,7 @@ async function bindTaskTemplate(root, spec, scope) {
 			templateScope: structuredClone(selected)
 		};
 	}
-	const { template, parameters, ref, bind } = await readBinding(root, spec, selected);
+	const { template, parameters, ref, bind } = await readBinding(root, spec, selected, retired);
 	const templateScope = selected ?? (template.catalogPath[0] === "general" ? void 0 : [template.catalogPath]);
 	return {
 		...spec,
@@ -1131,9 +1129,9 @@ async function bindTaskTemplate(root, spec, scope) {
 	};
 }
 /** The same exact reference, parameter and visibility checks bind contracts and direct-child proposals. */
-async function readBinding(root, spec, scope) {
+async function readBinding(root, spec, scope, retired = /* @__PURE__ */ new Set()) {
 	const ref = spec.templateRef;
-	const template = await readReferencedTemplate(root, ref, scope, true);
+	const template = await readReferencedTemplate(root, ref, scope, retired);
 	for (const field of [
 		"objective",
 		"acceptanceCriteria",
@@ -1171,28 +1169,24 @@ async function readBinding(root, spec, scope) {
 		bind
 	};
 }
-/** Exact lookup and binding share reference, content and caller-authority checks. */
-async function readReferencedTemplate(root, ref, scope, forBinding = false) {
+/** Exact lookup and binding share reference, content and caller-authority checks. The retired status comes from the revision the caller names. */
+async function readReferencedTemplate(root, ref, scope, retired = /* @__PURE__ */ new Set()) {
 	if (root === void 0) throw new Error("task-template: taskTemplatesRoot is not configured");
 	if (!isPlainObject(ref) || !validId(ref.id) || !Number.isSafeInteger(ref.version) || ref.version < 1 || typeof ref.digest !== "string" || !/^[a-f0-9]{64}$/.test(ref.digest) || Object.keys(ref).some((key) => ![
 		"id",
 		"version",
 		"digest"
 	].includes(key))) throw new Error("task-template: templateRef requires id, positive version and SHA-256 digest");
-	if (forBinding) try {
-		if ((JSON.parse(await readFile(join(dirname(root), "index.json"), "utf8")).tasks ?? []).some((item) => item.templateRef.id === ref.id && item.templateRef.version === ref.version && item.status === "retired")) throw new Error("task-template: this version is retired; choose a current reusable template or author the next contract");
-	} catch (error) {
-		if (error.code !== "ENOENT") throw error;
-	}
+	if (retired.has(`${ref.id}@${ref.version}`)) throw new Error("task-template: this version is retired; choose a current reusable template or author the next contract");
 	const template = parseTaskTemplate(JSON.parse(await readFile(join(root, `${ref.id}@${ref.version}.json`), "utf8")));
 	if (!templateVisible(template.catalogPath, scope)) throw new Error("task-template: templateRef is outside the caller templateScope");
 	if (template.id !== ref.id || template.version !== ref.version || taskTemplateDigest(template) !== ref.digest) throw new Error(`task-template: ${ref.id}@${ref.version} content does not match its pinned reference`);
 	return template;
 }
-async function bindTaskDecomposition(root, spec, scope) {
+async function bindTaskDecomposition(root, spec, scope, retired = /* @__PURE__ */ new Set()) {
 	if (!isPlainObject(spec) || spec.templateRef === void 0) return spec;
 	if (Object.hasOwn(spec, "reason") || Object.hasOwn(spec, "children")) throw new Error("task-template: reason and children cannot override a template decomposition");
-	const { template, parameters, ref, bind } = await readBinding(root, spec, scope);
+	const { template, parameters, ref, bind } = await readBinding(root, spec, scope, retired);
 	if (template.decomposition === void 0) throw new Error("task-template: selected template has no decomposition");
 	return {
 		...spec,
@@ -1266,28 +1260,6 @@ async function taskTemplatePage(root, request = {}, scope) {
 	return page;
 }
 /** Freeze the complete catalog for a replay; immutable older refs in recipes remain available. */
-async function snapshotTaskTemplates(root, target) {
-	await mkdir(target, { recursive: true });
-	if (root === void 0) return;
-	let files;
-	try {
-		files = await readdir(root);
-	} catch (error) {
-		if (error.code === "ENOENT") return;
-		throw error;
-	}
-	for (const file of files.filter((file$1) => file$1.endsWith(".json"))) {
-		const template = parseTaskTemplate(JSON.parse(await readFile(join(root, file), "utf8")));
-		if (file !== `${template.id}@${template.version}.json`) throw new Error(`task-template: invalid file ${file}`);
-		await registerTaskTemplate(target, template);
-	}
-	try {
-		const index = await readFile(join(dirname(root), "index.json"), "utf8");
-		await writeFile(join(dirname(target), "index.json"), index, { flag: "wx" });
-	} catch (error) {
-		if (!["ENOENT", "EEXIST"].includes(error.code ?? "")) throw error;
-	}
-}
 
 //#endregion
 //#region src/capability.ts
@@ -1468,208 +1440,6 @@ function resolvePermission(manifest, resolveSpec) {
 		name,
 		rank: rank(name)
 	})).reduce((strictest, item) => item.rank[0] > strictest.rank[0] || item.rank[0] === strictest.rank[0] && item.rank[1] > strictest.rank[1] ? item : strictest).name;
-}
-
-//#endregion
-//#region src/library.ts
-/** Derived from the graph's immutable root identity; no second persistent binding. */
-function graphLibrary(rootSessionId, home = process.env.DSH_HOME || join(homedir(), ".dsh")) {
-	if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,199}$/.test(rootSessionId)) throw new Error("task-library: invalid graph root session id");
-	const root = join(home, "singularity", "environments", rootSessionId);
-	return {
-		id: rootSessionId,
-		root,
-		taskTemplatesRoot: join(root, "task-templates"),
-		skillRoot: join(root, "skills")
-	};
-}
-const tails = /* @__PURE__ */ new Map();
-async function serial(library, work) {
-	const pending = (tails.get(library.root) ?? Promise.resolve()).catch(() => {}).then(work);
-	tails.set(library.root, pending);
-	try {
-		return await pending;
-	} finally {
-		if (tails.get(library.root) === pending) tails.delete(library.root);
-	}
-}
-async function readIndex(library) {
-	try {
-		const index = JSON.parse(await readFile(join(library.root, "index.json"), "utf8"));
-		if (index.version !== 1 || !Array.isArray(index.tasks) || !Array.isArray(index.skills)) throw new Error("task-library: unsupported index");
-		return index;
-	} catch (error) {
-		if (error.code !== "ENOENT") throw error;
-		return {
-			version: 1,
-			tasks: [],
-			skills: []
-		};
-	}
-}
-async function saveIndex(library, index) {
-	const temporary = join(library.root, `.index-${randomUUID()}.json`);
-	await writeFile(temporary, `${JSON.stringify(index, null, 2)}\n`, { flag: "wx" });
-	await rename(temporary, join(library.root, "index.json"));
-}
-const digest = (text$1) => createHash("sha256").update(text$1).digest("hex");
-function skillsOf(template, table = {}) {
-	return [...new Set((template.contract.requiredCapabilities ?? []).flatMap((name) => name.startsWith("method:") ? [name.slice(7)] : name === "execute-task" ? ["task-coordination"] : table[name]?.skills ?? []))];
-}
-/** Generic platform guidance is seeded once; domain libraries are authored by the graph's agents. */
-async function ensureTaskLibrary(library) {
-	return serial(library, async () => {
-		await mkdir(library.taskTemplatesRoot, { recursive: true });
-		await mkdir(library.skillRoot, { recursive: true });
-		const installed = join(library.root, ".initialized");
-		try {
-			await stat(installed);
-			return library;
-		} catch (error) {
-			if (error.code !== "ENOENT") throw error;
-		}
-		const text$1 = await readFile(join(dirname(fileURLToPath(import.meta.resolve("@dangosys/dsh-singularity-agent-runtime/package.json"))), "skills/task-coordination/SKILL.md"), "utf8");
-		const target = join(library.skillRoot, "task-coordination");
-		await mkdir(target, { recursive: true });
-		try {
-			await writeFile(join(target, "SKILL.md"), text$1, { flag: "wx" });
-		} catch (error) {
-			if (error.code !== "EEXIST") throw error;
-		}
-		const index = await scanIndex(library, await readIndex(library));
-		const builtIn = index.skills.find((item) => item.name === "task-coordination");
-		if (builtIn !== void 0 && builtIn.reason === void 0) {
-			builtIn.status = "retained";
-			builtIn.reason = "Generic platform task coordination guidance";
-		}
-		await saveIndex(library, index);
-		await writeFile(installed, "1\n", { flag: "wx" });
-		return library;
-	});
-}
-/** Include methods published through Evolution in the same small table as temporary agent drafts. */
-async function scanIndex(library, index) {
-	for (const { templateRef, template } of await findTaskTemplates(library.taskTemplatesRoot, void 0, void 0, true)) if (!index.tasks.some((item) => item.templateRef.id === templateRef.id && item.templateRef.version === templateRef.version)) index.tasks.push({
-		templateRef,
-		status: "temporary",
-		skills: skillsOf(template)
-	});
-	for (const entry of await readdir(library.skillRoot, { withFileTypes: true })) {
-		if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-		let text$1;
-		try {
-			text$1 = await readFile(join(library.skillRoot, entry.name, "SKILL.md"), "utf8");
-		} catch (error) {
-			if (error.code === "ENOENT") continue;
-			throw error;
-		}
-		const parsed = parseSkillFile$1(text$1, join(library.skillRoot, entry.name, "SKILL.md"));
-		if (parsed.name !== entry.name) throw new Error(`task-library: ${entry.name} declares ${parsed.name}`);
-		const latest = index.skills.filter((item) => item.name === entry.name).at(-1);
-		if (latest?.digest !== digest(text$1)) index.skills.push({
-			name: entry.name,
-			version: (latest?.version ?? 0) + 1,
-			digest: digest(text$1),
-			status: "temporary"
-		});
-	}
-	return index;
-}
-async function readTaskLibrary(library) {
-	await ensureTaskLibrary(library);
-	return serial(library, async () => {
-		const index = await scanIndex(library, await readIndex(library));
-		await saveIndex(library, index);
-		return {
-			...library,
-			...index
-		};
-	});
-}
-async function writeTaskLibrary(library, input, table) {
-	await ensureTaskLibrary(library);
-	return serial(library, async () => {
-		const index = await scanIndex(library, await readIndex(library));
-		if (input.kind === "task") {
-			const templateRef = await registerTaskTemplate(library.taskTemplatesRoot, input.template);
-			let row$1 = index.tasks.find((item) => item.templateRef.id === templateRef.id && item.templateRef.version === templateRef.version);
-			if (row$1 === void 0) {
-				row$1 = {
-					templateRef,
-					status: "temporary",
-					skills: skillsOf(input.template, table)
-				};
-				index.tasks.push(row$1);
-			}
-			await saveIndex(library, index);
-			return row$1;
-		}
-		if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(input.name)) throw new Error("task-library: invalid Skill name");
-		const file = join(library.skillRoot, input.name, "SKILL.md");
-		if (parseSkillFile$1(input.skillMd, file).name !== input.name) throw new Error("task-library: Skill frontmatter name must match");
-		const previous = index.skills.filter((item) => item.name === input.name).at(-1);
-		if (previous?.digest === digest(input.skillMd)) return previous;
-		if (input.expectedVersion !== (previous?.version ?? 0)) throw new Error(`task-library: expectedVersion must be ${previous?.version ?? 0}; read the current version before changing a Skill`);
-		if (previous !== void 0) {
-			const archive = join(library.root, "skill-versions", input.name, String(previous.version));
-			await mkdir(dirname(archive), { recursive: true });
-			await cp(dirname(file), archive, {
-				recursive: true,
-				errorOnExist: true,
-				force: false
-			}).catch((error) => {
-				if (error.code !== "EEXIST") throw error;
-			});
-		}
-		await mkdir(dirname(file), { recursive: true });
-		const temporary = join(dirname(file), `.SKILL-${randomUUID()}.md`);
-		await writeFile(temporary, input.skillMd, { flag: "wx" });
-		await rename(temporary, file);
-		const row = {
-			name: input.name,
-			version: (previous?.version ?? 0) + 1,
-			digest: digest(input.skillMd),
-			status: "temporary"
-		};
-		index.skills.push(row);
-		await saveIndex(library, index);
-		return row;
-	});
-}
-async function reviewTaskLibrary(library, review, reviewedBy) {
-	await ensureTaskLibrary(library);
-	return serial(library, async () => {
-		if (review.kind === "skill" && review.name === "task-coordination" && review.status === "retired") throw new Error("task-coordination supplies execute-task; retain or revise it to keep generic tasks executable");
-		if (!review.reason.trim()) throw new Error("task-library: review requires a reason from execution evidence");
-		const index = await scanIndex(library, await readIndex(library));
-		const row = review.kind === "task" ? index.tasks.find((item) => item.templateRef.id === review.name && item.templateRef.version === review.version) : index.skills.find((item) => item.name === review.name && item.version === review.version);
-		if (row === void 0) throw new Error("task-library: reviewed version is absent");
-		row.status = review.status;
-		row.reason = review.reason;
-		row.reviewedBy = reviewedBy;
-		await saveIndex(library, index);
-		return row;
-	});
-}
-async function libraryCapabilities(library) {
-	const index = await readTaskLibrary(library);
-	const latest = new Map(index.skills.map((item) => [item.name, item]));
-	return {
-		"execute-task": {
-			skills: ["task-coordination"],
-			tools: [
-				"filesystem",
-				"search",
-				"bash",
-				"jobs",
-				"skill"
-			]
-		},
-		...Object.fromEntries([...latest.values()].filter((item) => item.status !== "retired").map((item) => [`method:${item.name}`, {
-			skills: [item.name],
-			tools: ["skill"]
-		}]))
-	};
 }
 
 //#endregion
@@ -2270,6 +2040,287 @@ function serializeSkillSidecar(sidecar) {
 }
 
 //#endregion
+//#region src/environment/revision.ts
+/** The one id shape a revision directory, a pointer and a run record all agree on. */
+const ENVIRONMENT_REVISION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** The id shape of a draft directory; allocated monotonically per library. */
+const ENVIRONMENT_DRAFT_ID = /^d[0-9]{4}$/;
+/** The id a draft's prospective revision carries: deterministic, so a killed publish replays onto the same name. */
+function candidateRevisionId(draftId) {
+	if (!ENVIRONMENT_DRAFT_ID.test(draftId)) throw new Error(`environment: "${draftId}" is not a draft id (^d[0-9]{4}$)`);
+	return `c-${draftId}`;
+}
+const DIGEST = /^[0-9a-f]{64}$/;
+const SKILL_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
+const STATUSES = [
+	"temporary",
+	"retained",
+	"retired"
+];
+function isRecord$1(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+/** The content digest of a manifest: canonical form without the digest field itself, so key order never moves it. */
+function manifestDigest(manifest) {
+	return sha256Hex(canonicalize(manifest));
+}
+function withDigest(manifest) {
+	const { contentDigest: _dropped,...rest } = manifest;
+	return {
+		...rest,
+		contentDigest: manifestDigest(rest)
+	};
+}
+/** The manifest of a revision that holds nothing yet; `ensureInitialRevision` fills it, a draft copies and edits it. */
+function emptyRevisionManifest(input) {
+	if (!ENVIRONMENT_REVISION_ID.test(input.revisionId)) throw new Error(`environment: revision id ${JSON.stringify(input.revisionId)} is not a valid revision id`);
+	return withDigest({
+		formatVersion: 1,
+		...input,
+		skills: [],
+		taskTemplates: [],
+		capabilities: {
+			rows: {},
+			mcpServers: {}
+		}
+	});
+}
+function parseSkillEntry(raw, where) {
+	if (!isRecord$1(raw)) throw new Error(`${where}: a skill entry must be an object`);
+	if (typeof raw.name !== "string" || !SKILL_NAME.test(raw.name)) throw new Error(`${where}: a skill entry requires a valid name`);
+	if (!Number.isInteger(raw.version) || raw.version < 1) throw new Error(`${where}: skill "${raw.name}" version must be a positive integer`);
+	if (typeof raw.digest !== "string" || !DIGEST.test(raw.digest)) throw new Error(`${where}: skill "${raw.name}" digest must be a lowercase SHA-256 hex digest`);
+	if (typeof raw.contentDigest !== "string" || !DIGEST.test(raw.contentDigest)) throw new Error(`${where}: skill "${raw.name}" contentDigest must be a lowercase SHA-256 hex digest`);
+	if (raw.contractDigest !== null && (typeof raw.contractDigest !== "string" || !DIGEST.test(raw.contractDigest))) throw new Error(`${where}: skill "${raw.name}" contractDigest must be a lowercase SHA-256 hex digest or null`);
+	if (typeof raw.status !== "string" || !STATUSES.includes(raw.status)) throw new Error(`${where}: skill "${raw.name}" has an unknown status ${JSON.stringify(raw.status)}`);
+	if (raw.reason !== void 0 && typeof raw.reason !== "string") throw new Error(`${where}: skill "${raw.name}" reason must be a string when present`);
+	if (raw.reviewedBy !== void 0 && typeof raw.reviewedBy !== "string") throw new Error(`${where}: skill "${raw.name}" reviewedBy must be a string when present`);
+	return raw;
+}
+function parseTemplateEntry(raw, where) {
+	if (!isRecord$1(raw)) throw new Error(`${where}: a task template entry must be an object`);
+	const ref = raw.templateRef;
+	if (!isRecord$1(ref) || typeof ref.id !== "string" || ref.id.length === 0 || !Number.isInteger(ref.version) || ref.version < 1 || typeof ref.digest !== "string" || !DIGEST.test(ref.digest)) throw new Error(`${where}: a task template entry requires a valid templateRef (id, positive integer version, digest)`);
+	if (typeof raw.status !== "string" || !STATUSES.includes(raw.status)) throw new Error(`${where}: task template "${ref.id}" has an unknown status ${JSON.stringify(raw.status)}`);
+	if (!Array.isArray(raw.skills) || raw.skills.some((item) => typeof item !== "string")) throw new Error(`${where}: task template "${ref.id}" skills must be an array of strings`);
+	if (raw.reason !== void 0 && typeof raw.reason !== "string") throw new Error(`${where}: task template "${ref.id}" reason must be a string when present`);
+	if (raw.reviewedBy !== void 0 && typeof raw.reviewedBy !== "string") throw new Error(`${where}: task template "${ref.id}" reviewedBy must be a string when present`);
+	return raw;
+}
+/** Parse and fully validate one manifest, including its self-digest: a manifest whose bytes were edited is refused by name. */
+function parseRevisionManifest(raw, where) {
+	if (!isRecord$1(raw)) throw new Error(`${where}: a revision manifest must be an object`);
+	if (raw.formatVersion !== 1) throw new Error(`${where}: unsupported revision manifest formatVersion ${JSON.stringify(raw.formatVersion)}`);
+	if (typeof raw.revisionId !== "string" || !ENVIRONMENT_REVISION_ID.test(raw.revisionId)) throw new Error(`${where}: a revision manifest requires a valid revisionId`);
+	if (typeof raw.libraryId !== "string" || raw.libraryId.length === 0) throw new Error(`${where}: a revision manifest requires a libraryId`);
+	if (raw.kind !== "official" && raw.kind !== "candidate") throw new Error(`${where}: revision kind must be "official" or "candidate"`);
+	if (raw.basedOn !== null && (typeof raw.basedOn !== "string" || !ENVIRONMENT_REVISION_ID.test(raw.basedOn))) throw new Error(`${where}: basedOn must be a revision id or null`);
+	if (typeof raw.createdAt !== "string" || raw.createdAt.length === 0) throw new Error(`${where}: a revision manifest requires createdAt`);
+	if (!Array.isArray(raw.skills)) throw new Error(`${where}: skills must be an array`);
+	const skills = raw.skills.map((entry, index) => parseSkillEntry(entry, `${where} skills[${index}]`));
+	const seen = /* @__PURE__ */ new Set();
+	for (const entry of skills) {
+		if (seen.has(entry.name)) throw new Error(`${where}: skill "${entry.name}" appears twice; a revision holds one entry per name`);
+		seen.add(entry.name);
+	}
+	if (!Array.isArray(raw.taskTemplates)) throw new Error(`${where}: taskTemplates must be an array`);
+	raw.taskTemplates.map((entry, index) => parseTemplateEntry(entry, `${where} taskTemplates[${index}]`));
+	if (!isRecord$1(raw.capabilities) || !isRecord$1(raw.capabilities.rows) || !isRecord$1(raw.capabilities.mcpServers)) throw new Error(`${where}: capabilities must hold a rows record and an mcpServers record`);
+	if (typeof raw.contentDigest !== "string" || !DIGEST.test(raw.contentDigest)) throw new Error(`${where}: a revision manifest requires a contentDigest`);
+	const manifest = raw;
+	const { contentDigest,...rest } = manifest;
+	const computed = manifestDigest(rest);
+	if (computed !== contentDigest) throw new Error(`${where}: manifest contentDigest ${contentDigest} does not match its content (${computed}); the manifest was edited outside the draft machinery`);
+	return manifest;
+}
+/** The current entry of one skill name in a revision. */
+function revisionSkillOf(manifest, name) {
+	return manifest.skills.find((entry) => entry.name === name);
+}
+/** The newest entry of one template id in a revision. */
+function revisionTemplateOf(manifest, id) {
+	return manifest.taskTemplates.filter((entry) => entry.templateRef.id === id).sort((left, right) => right.templateRef.version - left.templateRef.version)[0];
+}
+/** The listing projection of one manifest. */
+function revisionRefOf(manifest) {
+	return {
+		revisionId: manifest.revisionId,
+		kind: manifest.kind,
+		basedOn: manifest.basedOn,
+		contentDigest: manifest.contentDigest,
+		createdAt: manifest.createdAt,
+		skills: manifest.skills.length,
+		taskTemplates: manifest.taskTemplates.length
+	};
+}
+/** The graph-internal capability rows of one revision; replaces the old index-derived `libraryCapabilities`. */
+function revisionCapabilityRows(manifest) {
+	const rows = { "execute-task": {
+		skills: ["task-coordination"],
+		tools: [
+			"filesystem",
+			"search",
+			"bash",
+			"jobs",
+			"skill"
+		]
+	} };
+	for (const skill of manifest.skills) {
+		const row = `method:${skill.name}`;
+		if (skill.status === "retired" || row in rows) continue;
+		rows[row] = {
+			skills: [skill.name],
+			tools: ["skill"]
+		};
+	}
+	return {
+		...rows,
+		...manifest.capabilities.rows
+	};
+}
+/** The skills one template consumes, resolved against a capability table (the rule the old library applied at write time). */
+function templateSkillsOf(template, table) {
+	return [...new Set((template.contract.requiredCapabilities ?? []).flatMap((name) => name.startsWith("method:") ? [name.slice(7)] : name === "execute-task" ? ["task-coordination"] : table[name]?.skills ?? []))].sort();
+}
+/** The hard rules any draft edit must pass, checked before any byte moves; the apply functions re-check them. */
+function assertDraftEditAllowed(manifest, edit) {
+	if (edit.kind === "skill") {
+		const { name, skillMd, expectedVersion, resources } = edit.edit;
+		if (!SKILL_NAME.test(name)) throw new Error(`environment: invalid Skill name ${JSON.stringify(name)}`);
+		if (parseSkillFile$1(skillMd, `skills/${name}/SKILL.md`).name !== name) throw new Error("environment: Skill frontmatter name must match");
+		for (const path of Object.keys(resources ?? {})) if (path !== SKILL_SIDECAR_FILE && !isSupportedSkillResourcePath(path)) throw new Error(`environment: resource path ${JSON.stringify(path)} is not a supported skill resource path`);
+		const current = revisionSkillOf(manifest, name);
+		if (expectedVersion !== (current?.version ?? 0)) throw new Error(`environment: expectedVersion must be ${current?.version ?? 0}; read the current version before changing a Skill`);
+		return;
+	}
+	if (edit.kind === "review") {
+		const review = edit.review;
+		if (review.kind === "skill" && review.name === "task-coordination" && review.status === "retired") throw new Error("task-coordination supplies execute-task; retain or revise it to keep generic tasks executable");
+		if (!review.reason.trim()) throw new Error("environment: review requires a reason from execution evidence");
+		return;
+	}
+	if (edit.kind === "capability") {
+		if (typeof edit.edit.name !== "string" || edit.edit.name.length === 0) throw new Error("environment: a capability row edit requires a name");
+	}
+}
+/** Apply one skill edit to a manifest, purely: the entry's digests come from the edit's declared bytes. */
+function applySkillEdit(manifest, edit) {
+	assertDraftEditAllowed(manifest, {
+		kind: "skill",
+		edit
+	});
+	const resourceList = Object.entries(edit.resources ?? {}).filter(([path]) => path !== SKILL_SIDECAR_FILE).map(([path, content]) => ({
+		path,
+		sha256: sha256Hex(content)
+	})).sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+	const skillMdSha256 = sha256Hex(edit.skillMd);
+	let contractDigest$1 = null;
+	const sidecarText = edit.resources?.[SKILL_SIDECAR_FILE];
+	if (sidecarText !== void 0) {
+		let declared;
+		try {
+			declared = JSON.parse(sidecarText);
+		} catch (error) {
+			throw new Error(`environment: ${SKILL_SIDECAR_FILE} of skill "${edit.name}" is not readable JSON: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		contractDigest$1 = skillContractDigest(declared);
+	}
+	const current = revisionSkillOf(manifest, edit.name);
+	const entry = {
+		name: edit.name,
+		version: (current?.version ?? 0) + 1,
+		digest: skillMdSha256,
+		contentDigest: skillContentDigest({
+			skillMdSha256,
+			resources: resourceList
+		}),
+		contractDigest: contractDigest$1,
+		status: "temporary"
+	};
+	if (current !== void 0 && current.digest === entry.digest && current.contentDigest === entry.contentDigest && current.contractDigest === entry.contractDigest) return manifest;
+	return withDigest({
+		...manifest,
+		skills: [...manifest.skills.filter((item) => item.name !== edit.name), entry].sort((left, right) => left.name < right.name ? -1 : 1)
+	});
+}
+/** Apply one task template edit to a manifest, purely: an identical repeat is a no-op, a conflicting version is refused. */
+function applyTemplateEdit(manifest, template, table) {
+	const parsed = parseTaskTemplate(template);
+	const ref = {
+		id: parsed.id,
+		version: parsed.version,
+		digest: taskTemplateDigest(parsed)
+	};
+	const existing = manifest.taskTemplates.find((entry$1) => entry$1.templateRef.id === ref.id && entry$1.templateRef.version === ref.version);
+	if (existing !== void 0) {
+		if (existing.templateRef.digest === ref.digest) return manifest;
+		throw new Error(`environment: ${ref.id}@${ref.version} already exists with different content; publish a new version`);
+	}
+	const entry = {
+		templateRef: ref,
+		status: "temporary",
+		skills: templateSkillsOf(parsed, table ?? manifest.capabilities.rows)
+	};
+	return withDigest({
+		...manifest,
+		taskTemplates: [...manifest.taskTemplates, entry]
+	});
+}
+/** Apply one retention review to a manifest, purely: status is a field of the revision, never an in-place edit of a shared index. */
+function applyReviewEdit(manifest, review, reviewedBy) {
+	assertDraftEditAllowed(manifest, {
+		kind: "review",
+		review
+	});
+	if (review.kind === "skill") {
+		const current$1 = manifest.skills.find((entry) => entry.name === review.name && entry.version === review.version);
+		if (current$1 === void 0) throw new Error(`environment: reviewed skill "${review.name}" version ${review.version} is absent`);
+		const updated$1 = {
+			...current$1,
+			status: review.status,
+			reason: review.reason,
+			reviewedBy
+		};
+		return withDigest({
+			...manifest,
+			skills: manifest.skills.map((entry) => entry === current$1 ? updated$1 : entry)
+		});
+	}
+	const current = manifest.taskTemplates.find((entry) => entry.templateRef.id === review.name && entry.templateRef.version === review.version);
+	if (current === void 0) throw new Error(`environment: reviewed task template "${review.name}" version ${review.version} is absent`);
+	const updated = {
+		...current,
+		status: review.status,
+		reason: review.reason,
+		reviewedBy
+	};
+	return withDigest({
+		...manifest,
+		taskTemplates: manifest.taskTemplates.map((entry) => entry === current ? updated : entry)
+	});
+}
+/** Apply one capability-row edit to a manifest, purely: a null entry removes the row, a null MCP template removes it. */
+function applyCapabilityRowEdit(manifest, edit) {
+	assertDraftEditAllowed(manifest, {
+		kind: "capability",
+		edit
+	});
+	const rows = { ...manifest.capabilities.rows };
+	if (edit.entry === null) delete rows[edit.name];
+	else rows[edit.name] = edit.entry;
+	const mcpServers = { ...manifest.capabilities.mcpServers };
+	for (const [name, template] of Object.entries(edit.mcpServers ?? {})) if (template === null) delete mcpServers[name];
+	else mcpServers[name] = template;
+	return withDigest({
+		...manifest,
+		capabilities: {
+			rows,
+			mcpServers
+		}
+	});
+}
+
+//#endregion
 //#region src/verified-read.ts
 /** Resolve `rel` under `base`, refusing anything that would land outside. */
 function resolveWithin(base, rel) {
@@ -2853,8 +2904,14 @@ function mcpServerBindings(manifest, registry) {
 /**
 * Copy one selected provider's admitted bytes into the run's snapshot.
 * Every file is read through the verified walk (a link or a wrong type anywhere
+* in the source directory is reported rather than followed), and every byte is
+* checked against the identity the run is bound to before it is written.
+*
+* `from` is the directory the bytes are read from: the bound environment
+* revision's skill root for a new-protocol run, the admitted verdict's own
+* directory for an old-protocol one.
 */
-async function materializeProvider(provider, snapshotRoot, runId) {
+async function materializeProvider(provider, snapshotRoot, runId, from) {
 	const { verdict } = provider;
 	const target = join(snapshotRoot, verdict.name);
 	await mkdir(target, { recursive: true });
@@ -2868,12 +2925,12 @@ async function materializeProvider(provider, snapshotRoot, runId) {
 	for (const file of files) {
 		let bytes;
 		try {
-			bytes = await readVerifiedFile(verdict.directory, file.rel);
+			bytes = await readVerifiedFile(from, file.rel);
 		} catch (error) {
 			throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${message(error)}`);
 		}
 		const read = sha256Hex(bytes);
-		if (read !== file.sha256) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${file.rel} at ${verdict.directory} is not the admitted content (admitted ${file.sha256}, read ${read}); the provider changed after it was judged`);
+		if (read !== file.sha256) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${file.rel} at ${from} is not the admitted content (admitted ${file.sha256}, read ${read}); the provider changed after it was judged`);
 		const at = join(target, file.rel);
 		await mkdir(dirname(at), { recursive: true });
 		await writeFile(at, bytes);
@@ -2881,7 +2938,7 @@ async function materializeProvider(provider, snapshotRoot, runId) {
 	if (verdict.role === "guidance") return;
 	let sidecarBytes;
 	try {
-		sidecarBytes = await readVerifiedFile(verdict.directory, SKILL_SIDECAR_FILE);
+		sidecarBytes = await readVerifiedFile(from, SKILL_SIDECAR_FILE);
 	} catch (error) {
 		throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${message(error)}`);
 	}
@@ -2892,10 +2949,36 @@ async function materializeProvider(provider, snapshotRoot, runId) {
 		throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${SKILL_SIDECAR_FILE} is not readable JSON: ${message(error)}`);
 	}
 	const defects = skillContractDefects(declared);
-	if (defects.length > 0) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${verdict.directory} is not a valid sidecar (${defects.map((item) => `${item.code}: ${item.reason}`).join("; ")})`);
-	const digest$1 = skillContractDigest(declared);
-	if (digest$1 !== verdict.contractDigest) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${verdict.directory} is not the one it was judged against (judged ${verdict.contractDigest}, read ${digest$1})`);
+	if (defects.length > 0) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${from} is not a valid sidecar (${defects.map((item) => `${item.code}: ${item.reason}`).join("; ")})`);
+	const digest = skillContractDigest(declared);
+	if (digest !== verdict.contractDigest) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${from} is not the one it was judged against (judged ${verdict.contractDigest}, read ${digest})`);
 	await writeFile(join(target, SKILL_SIDECAR_FILE), sidecarBytes);
+}
+/**
+* Refuse a run whose admission judged one revision and would now bind another:
+* when the bound revision declares the skill, its own entry must be exactly the
+* content the verdict accepted, or the run would load bytes nobody judged under
+* the name the record cites.
+*
+* A skill the revision does not declare is not this graph library's content: it
+* comes from a discovery root the deployment supplies (the shipped platform
+* skills, a run's overlay), and the verdict's own directory stays its source.
+*/
+function assertRevisionHoldsVerdict(revision, provider, runId) {
+	const { verdict } = provider;
+	const entry = revisionSkillOf(revision.manifest, verdict.name);
+	if (entry === void 0) return;
+	if (entry.status === "retired") throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": revision "${revision.manifest.revisionId}" holds it retired`);
+	const mismatches = [];
+	if (entry.digest !== verdict.content.skillMdSha256) mismatches.push(`SKILL.md digest (revision ${entry.digest}, judged ${verdict.content.skillMdSha256})`);
+	if (entry.contentDigest !== verdict.contentDigest) mismatches.push(`content digest (revision ${entry.contentDigest}, judged ${verdict.contentDigest})`);
+	if ((entry.contractDigest ?? null) !== (verdict.contractDigest ?? null)) mismatches.push(`contract digest (revision ${entry.contractDigest ?? "none"}, judged ${verdict.contractDigest ?? "none"})`);
+	if (mismatches.length > 0) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": revision "${revision.manifest.revisionId}" is not the content it was judged against — ${mismatches.join("; ")}`);
+}
+/** The directory one selected provider's bytes are read from: the bound revision's copy, or the judged directory. */
+function providerSource(revision, provider) {
+	if (revision === void 0) return provider.verdict.directory;
+	return revisionSkillOf(revision.manifest, provider.verdict.name) === void 0 ? provider.verdict.directory : join(revision.skillRoot, provider.verdict.name);
 }
 /**
 * Bind one run's content: identify the providers its admission judged,
@@ -2912,10 +2995,13 @@ async function bindRunProviders(request) {
 		registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, [], request.mcpRegistry),
 		capabilities: [...rows].sort(),
 		skills: selected.map(skillBinding),
-		mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? {})
+		mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? {}),
+		...request.revision === void 0 ? {} : { environmentRevisionId: request.revision.manifest.revisionId },
+		...request.trialCandidateRef === void 0 ? {} : { trialCandidateRef: request.trialCandidateRef }
 	};
 	const root = request.root;
 	if (root === void 0) throw new Error(`run "${request.runId}" selects skills [${selected.map((provider) => provider.verdict.name).join(", ")}] but this deployment configures no run binding root (\`Config.runBindingRoot\`); without one the run cannot load content it was admitted against`);
+	for (const provider of selected) if (request.revision !== void 0) assertRevisionHoldsVerdict(request.revision, provider, request.runId);
 	const runDirectory = join(root, request.storeId, request.runId);
 	const snapshotRoot = join(runDirectory, RUN_BINDING_SKILLS_DIR);
 	await mkdir(dirname(runDirectory), { recursive: true });
@@ -2929,7 +3015,7 @@ async function bindRunProviders(request) {
 		throw new Error(`run "${request.runId}" cannot bind content: ${runDirectory} already exists (${message(error)}); a run materializes once`);
 	}
 	try {
-		for (const provider of selected) await materializeProvider(provider, snapshotRoot, request.runId);
+		for (const provider of selected) await materializeProvider(provider, snapshotRoot, request.runId, providerSource(request.revision, provider));
 	} catch (error) {
 		await rm(runDirectory, {
 			recursive: true,
@@ -2975,8 +3061,8 @@ async function readRunBinding(binding) {
 		if (loaded.content === void 0) {
 			if (defects.length === 0) defects.push(`skill-missing: ${join(root, skill.name)} holds no readable SKILL.md`);
 		} else {
-			const digest$1 = skillContentDigest(loaded.content);
-			if (digest$1 !== skill.contentDigest) defects.push(`content-mismatch: ${join(root, skill.name, "SKILL.md")} and its resources are not the bound content: bound ${skill.contentDigest}, read ${digest$1}`);
+			const digest = skillContentDigest(loaded.content);
+			if (digest !== skill.contentDigest) defects.push(`content-mismatch: ${join(root, skill.name, "SKILL.md")} and its resources are not the bound content: bound ${skill.contentDigest}, read ${digest}`);
 			if (loaded.frontmatter === void 0 && defects.length === 0) defects.push(`skill-file-invalid: ${join(root, skill.name, "SKILL.md")} declares no frontmatter a worker could load`);
 			else if (loaded.frontmatter !== void 0 && loaded.frontmatter.name !== skill.name) defects.push(`skill-name-mismatch: skill file ${join(root, skill.name, "SKILL.md")} declares name "${loaded.frontmatter.name}" but the record binds "${skill.name}"`);
 			const declared = loaded.sidecar === void 0 ? null : skillContractDigest(loaded.sidecar);
@@ -3135,13 +3221,13 @@ async function recordedText(deps, ref, field, where) {
 * Compose and deliver one recorded message, reporting rather than throwing: by
 * this point the store's record is durable, so a delivery that cannot be decided
 */
-async function deliverRecorded(deps, record) {
+async function deliverRecorded(deps, record$1) {
 	try {
 		const intent = {
-			targetSessionId: SessionId(record.targetSessionId),
-			senderSessionId: SessionId(record.senderSessionId),
-			messageId: record.messageId,
-			text: record.render(await recordedText(deps, record.ref, record.field, record.where))
+			targetSessionId: SessionId(record$1.targetSessionId),
+			senderSessionId: SessionId(record$1.senderSessionId),
+			messageId: record$1.messageId,
+			text: record$1.render(await recordedText(deps, record$1.ref, record$1.field, record$1.where))
 		};
 		const delivery = await deps.messages.ensureAgentMessageDelivered(intent);
 		return {
@@ -3150,7 +3236,7 @@ async function deliverRecorded(deps, record) {
 		};
 	} catch (error) {
 		return {
-			messageId: record.messageId,
+			messageId: record$1.messageId,
 			status: "refused",
 			reason: message(error)
 		};
@@ -3253,8 +3339,8 @@ async function answerParentQuestion(deps, caller, request) {
 function pendingQuestionMessages(snapshot) {
 	const index = snapshot.questions;
 	if (index === void 0) throw new Error("task-runtime: this store's snapshot carries no question index, so its pending question messages cannot be read");
-	const open = /* @__PURE__ */ new Set();
-	for (const run of snapshot.runs) for (const question of openQuestionsOf(snapshot, run.runId)) open.add(question.questionId);
+	const open$1 = /* @__PURE__ */ new Set();
+	for (const run of snapshot.runs) for (const question of openQuestionsOf(snapshot, run.runId)) open$1.add(question.questionId);
 	const messages = [];
 	const refused = [];
 	for (const question of index.all) {
@@ -3270,7 +3356,7 @@ function pendingQuestionMessages(snapshot) {
 			});
 			continue;
 		}
-		if (open.has(question.questionId)) messages.push({
+		if (open$1.has(question.questionId)) messages.push({
 			subject,
 			kind: "question",
 			questionId: question.questionId,
@@ -3336,8 +3422,8 @@ async function reconcileQuestionDeliveries(deps, storeId) {
 		});
 	});
 	return [...pending.refused, ...pending.messages.flatMap((pendingMessage) => {
-		const record = reported.get(pendingMessage.messageId) ?? unreadable.get(pendingMessage.messageId);
-		return record === void 0 ? [] : [record];
+		const record$1 = reported.get(pendingMessage.messageId) ?? unreadable.get(pendingMessage.messageId);
+		return record$1 === void 0 ? [] : [record$1];
 	})];
 }
 /**
@@ -3840,6 +3926,7 @@ const ConfigSchema = z.object({
 	mcpServers: z.dict(z.any()).default({}),
 	defaultPreset: z.string(),
 	taskTemplatesRoot: z.string(),
+	environmentRevisionRoot: z.string(),
 	verifyTimeoutMs: z.number().default(DEFAULT_VERIFY_TIMEOUT_MS),
 	maxDepth: z.number().default(DEFAULT_MAX_DEPTH),
 	maxChildren: z.number().default(DEFAULT_MAX_CHILDREN),
@@ -4202,13 +4289,13 @@ function assertSupervisionConfig(policy) {
 	]);
 	const unknown = Object.keys(policy).filter((key) => !known.has(key));
 	if (unknown.length > 0) throw new Error(`task-runtime: supervision names [${unknown.join(", ")}], which this policy does not declare; a member nobody reads refuses to start rather than being silently ignored`);
-	const record = policy;
+	const record$1 = policy;
 	for (const name of [
 		"maxRecoveryRounds",
 		"maxImprovementRounds",
 		"coordinationBudget"
 	]) {
-		const value = record[name];
+		const value = record$1[name];
 		if (value === void 0) continue;
 		if (typeof value !== "number" || !Number.isInteger(value) || value < (name === "coordinationBudget" ? 1 : 0)) throw new Error(`task-runtime: supervision.${name} is ${JSON.stringify(value)}; it must be a whole ${name === "coordinationBudget" ? "count of at least 1" : "count of at least 0"}`);
 	}
@@ -4361,49 +4448,6 @@ function resolveCapabilitiesImpl(self, required) {
 }
 function listCapabilities(self) {
 	return structuredClone(self.config.capabilities);
-}
-async function applyCapabilityRow(self, name, entry, options = {}) {
-	const registry = { ...self.config.mcpServers };
-	for (const [key, definition] of Object.entries(options.mcpServers ?? {})) if (definition === null) delete registry[key];
-	else registry[key] = definition;
-	const parsed = parseMcpServerRegistry(registry);
-	if (entry === null) {
-		const rest = { ...self.config.capabilities };
-		delete rest[name];
-		self.config.capabilities = rest;
-		self.config.mcpServers = parsed;
-		return;
-	}
-	await assertReplacementRow(self, name, entry, {
-		...options,
-		mcpServers: parsed
-	});
-	self.config.mcpServers = parsed;
-	self.config.capabilities = {
-		...self.config.capabilities,
-		[name]: structuredClone(entry)
-	};
-}
-async function assertReplacementRow(self, name, entry, options = {}) {
-	const verifierRefs = await self.registeredVerifierIds();
-	const ledger = self.softService("evolution");
-	const owned = new Set((options.commitTargets ?? []).map((target) => dirname(resolve(target))));
-	const exemptRow = options.commitRow;
-	const commitLedger = ledger === void 0 || owned.size === 0 && exemptRow === void 0 ? ledger : {
-		...ledger.openIntentTargets === void 0 ? {} : { openIntentTargets: async () => (await ledger.openIntentTargets()).filter((target) => !owned.has(dirname(resolve(target)))) },
-		...ledger.openIntentCapabilities === void 0 ? {} : { openIntentCapabilities: async () => (await ledger.openIntentCapabilities()).filter((row) => row !== exemptRow) }
-	};
-	const { refusals } = await precheckReplacedCapabilityRow({
-		name,
-		entry,
-		table: self.config.capabilities,
-		mcpRegistry: parseMcpServerRegistry(options.mcpServers ?? self.config.mcpServers ?? {}),
-		view: { cwd: process.cwd() },
-		...verifierRefs === void 0 ? {} : { verifierRefs },
-		...commitLedger === void 0 ? {} : { commitLedger }
-	});
-	if (refusals.length === 0) return;
-	throw new Error(`task-runtime: capability "${name}" was not replaced — the row grants providers that are not usable:\n` + refusals.map((line) => `- ${line}`).join("\n"));
 }
 
 //#endregion
@@ -4712,8 +4756,8 @@ async function initializeStoreGates(self, storeId) {
 	applyStoreQuestionBlocking(self.executionGate, snapshot, (sessionId) => tokens.get(sessionId) ?? 0);
 }
 function nothingAdoptedDetail(storeId, rootSessionId, snapshot) {
-	const open = (snapshot.proposals?.all ?? []).filter(isOpenProposal);
-	return `store "${storeId}" holds no root task for session "${rootSessionId}" after its recovery pass, which created no task, no run and no proposal; ${open.length === 0 ? "no proposal is open on it" : `${open.length === 1 ? "1 proposal is" : `${open.length} proposals are`} still open: ` + open.map((proposal) => `"${proposal.proposalId}" (${proposal.status})`).join(", ")}; a root task is created by a root contract intake, never by adoption`;
+	const open$1 = (snapshot.proposals?.all ?? []).filter(isOpenProposal);
+	return `store "${storeId}" holds no root task for session "${rootSessionId}" after its recovery pass, which created no task, no run and no proposal; ${open$1.length === 0 ? "no proposal is open on it" : `${open$1.length === 1 ? "1 proposal is" : `${open$1.length} proposals are`} still open: ` + open$1.map((proposal) => `"${proposal.proposalId}" (${proposal.status})`).join(", ")}; a root task is created by a root contract intake, never by adoption`;
 }
 function runGatePhase(run) {
 	if (run.status !== "running") return "terminal";
@@ -4933,7 +4977,8 @@ async function submitRootProposalOnce(self, storeId, rootSessionId, spec, option
 }
 async function deriveRootContract(self, spec, envPath, callerSessionId) {
 	try {
-		spec = await bindTaskTemplate(await self.taskTemplatesRootFor(callerSessionId), spec);
+		const retired = callerSessionId === void 0 ? /* @__PURE__ */ new Set() : await self.retiredTaskTemplates(callerSessionId);
+		spec = await bindTaskTemplate(await self.taskTemplatesRootFor(callerSessionId), spec, void 0, retired);
 	} catch (error) {
 		return {
 			ok: false,
@@ -5110,6 +5155,7 @@ async function activateRootContract(self, request) {
 		claimed = self.workspaces.ownerOf(workspacePath);
 	}
 	try {
+		const revision = (await self.ensureInitialEnvironment(rootSessionId, rootSessionId)).revision;
 		const providerBinding = await bindRunProviders({
 			mcpRegistry: self.config.mcpServers,
 			storeId,
@@ -5117,7 +5163,8 @@ async function activateRootContract(self, request) {
 			manifest,
 			providers: request.providers,
 			table: await self.capabilitiesForSession(rootSessionId),
-			root: self.config.runBindingRoot
+			root: self.config.runBindingRoot,
+			...revision === void 0 ? {} : { revision }
 		});
 		const task = {
 			taskId,
@@ -5138,6 +5185,7 @@ async function activateRootContract(self, request) {
 			sessionId: rootSessionId,
 			capabilitySnapshot: capabilitySnapshot(manifest),
 			taskTemplatesRoot: await self.taskTemplatesRootFor(rootSessionId),
+			...revision === void 0 ? {} : { environmentRevisionId: revision.manifest.revisionId },
 			providerBinding,
 			executionPhase: "active",
 			artifacts: [],
@@ -6038,10 +6086,11 @@ async function deriveBatch(self, identity, spec) {
 	let bound;
 	try {
 		const { root, scope } = await self.templateCaller(identity.callerSessionId);
-		const expanded = await bindTaskDecomposition(root, spec, scope);
+		const retired = await self.retiredTaskTemplates(identity.callerSessionId);
+		const expanded = await bindTaskDecomposition(root, spec, scope, retired);
 		bound = Array.isArray(expanded?.children) ? {
 			...expanded,
-			children: await Promise.all(expanded.children.map((child) => bindTaskTemplate(root, child, scope)))
+			children: await Promise.all(expanded.children.map((child) => bindTaskTemplate(root, child, scope, retired)))
 		} : expanded;
 	} catch (error) {
 		const failure = error instanceof Error ? error : new Error(String(error));
@@ -6532,6 +6581,1414 @@ function judgeBudgetExtension(request, budget$1, existing) {
 }
 
 //#endregion
+//#region src/environment/store.ts
+/** A library root is derived from the graph's immutable root session identity; no second persistent binding. */
+function libraryRoots(rootSessionId, home = process.env.DSH_HOME || join(homedir(), ".dsh")) {
+	if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,199}$/.test(rootSessionId)) throw new Error("environment: invalid graph root session id");
+	return {
+		id: rootSessionId,
+		root: join(home, "singularity", "environments", rootSessionId)
+	};
+}
+function environmentProtocolMarker(library) {
+	return join(library.root, "protocol.json");
+}
+function revisionsRoot(library) {
+	return join(library.root, "revisions");
+}
+function draftsRoot(library) {
+	return join(library.root, "drafts");
+}
+/** The directory of one revision; the id is validated before it ever becomes a path component. */
+function revisionRoot(library, revisionId) {
+	if (!ENVIRONMENT_REVISION_ID.test(revisionId)) throw new Error(`environment: ${JSON.stringify(revisionId)} is not a revision id`);
+	return join(revisionsRoot(library), revisionId);
+}
+/** fsync one directory so an entry created, renamed or removed inside it is durable. */
+async function syncDirectory(directory) {
+	const handle = await open(directory, "r");
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+/** Replace `target` with exactly `bytes`, durably: staging sibling, file fsync, rename, directory fsync. */
+async function writeFileAtomic(target, bytes) {
+	const directory = dirname(target);
+	const staging = join(directory, `.${basename(target)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
+	let handle;
+	try {
+		await mkdir(directory, { recursive: true });
+		handle = await open(staging, "wx");
+		await handle.writeFile(bytes);
+		await handle.sync();
+		await handle.close();
+		handle = void 0;
+		await rename(staging, target);
+		await syncDirectory(directory);
+	} catch (error) {
+		if (handle !== void 0) await handle.close().catch(() => {});
+		await rm(staging, { force: true }).catch(() => {});
+		throw error;
+	}
+}
+/** Append one line to a JSONL log, durably: append, file fsync, directory fsync. */
+async function appendLineDurable(target, line) {
+	await mkdir(dirname(target), { recursive: true });
+	const handle = await open(target, "a");
+	try {
+		await handle.writeFile(line);
+		await handle.sync();
+	} finally {
+		await handle.close().catch(() => {});
+	}
+	await syncDirectory(dirname(target));
+}
+/** Create the two directories every library of the new protocol holds. */
+async function ensureEnvironmentLayout(library) {
+	await mkdir(revisionsRoot(library), { recursive: true });
+	await mkdir(draftsRoot(library), { recursive: true });
+}
+/** The new-protocol marker, written once when a library's initial revision is created; a legacy layout never gets one. */
+async function ensureProtocolMarker(library) {
+	const marker = environmentProtocolMarker(library);
+	const text$1 = `${JSON.stringify({
+		formatVersion: 1,
+		protocol: "environment-revision"
+	}, null, 2)}\n`;
+	try {
+		await writeFile(marker, text$1, { flag: "wx" });
+		await syncDirectory(library.root);
+	} catch (error) {
+		if (error.code !== "EEXIST") throw error;
+		if (await readFile(marker, "utf8").catch(() => "") !== text$1) throw new Error(`environment: ${marker} exists with different content; the protocol marker is written once and never edited`);
+	}
+}
+async function pathExists(path) {
+	try {
+		await stat(path);
+		return true;
+	} catch (error) {
+		if (error.code === "ENOENT") return false;
+		throw error;
+	}
+}
+/** Whether this library root predates the revision protocol: no marker, but the old mutable layout's tell-tale entries. */
+async function hasLegacyLayout(library) {
+	if (await pathExists(environmentProtocolMarker(library))) return false;
+	for (const name of [
+		"index.json",
+		"skills",
+		"task-templates"
+	]) if (await pathExists(join(library.root, name))) return true;
+	return false;
+}
+/** Per-library write serialization: one tail promise per root, shared by draft staging and the pointer transaction. */
+const tails = /* @__PURE__ */ new Map();
+async function serialEnvironment(library, work) {
+	const pending = (tails.get(library.root) ?? Promise.resolve()).catch(() => {}).then(work);
+	tails.set(library.root, pending);
+	try {
+		return await pending;
+	} finally {
+		if (tails.get(library.root) === pending) tails.delete(library.root);
+	}
+}
+async function readManifestFile(directory, where) {
+	let text$1;
+	try {
+		text$1 = await readFile(join(directory, "manifest.json"), "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") throw new Error(`environment: ${where} holds no manifest.json`);
+		throw error;
+	}
+	let raw;
+	try {
+		raw = JSON.parse(text$1);
+	} catch (error) {
+		throw new Error(`environment: ${where} manifest.json is not readable JSON: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	return parseRevisionManifest(raw, `environment: ${where}`);
+}
+/** Read and fully validate one revision's manifest, including its self-digest. */
+async function readRevisionManifest(library, revisionId) {
+	const directory = revisionRoot(library, revisionId);
+	const manifest = await readManifestFile(directory, `revision "${revisionId}"`);
+	if (manifest.revisionId !== revisionId) throw new Error(`environment: ${directory} holds a manifest for "${manifest.revisionId}", not "${revisionId}"; a revision directory and its manifest name one revision`);
+	if (manifest.libraryId !== library.id) throw new Error(`environment: revision "${revisionId}" belongs to library "${manifest.libraryId}", not "${library.id}"`);
+	return manifest;
+}
+/** Resolve one revision directory, or `undefined` when it does not exist. */
+async function readRevision(library, revisionId) {
+	const root = revisionRoot(library, revisionId);
+	if (!await pathExists(root)) return void 0;
+	return {
+		manifest: await readRevisionManifest(library, revisionId),
+		root,
+		skillRoot: join(root, "skills"),
+		taskTemplatesRoot: join(root, "task-templates")
+	};
+}
+/** List every revision of one library as listing projections, sorted by id. */
+async function listRevisions(library) {
+	let entries;
+	try {
+		entries = await readdir(revisionsRoot(library), { withFileTypes: true });
+	} catch (error) {
+		if (error.code === "ENOENT") return [];
+		throw error;
+	}
+	const revisions = [];
+	for (const entry of entries) {
+		if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+		revisions.push(revisionRefOf(await readRevisionManifest(library, entry.name)));
+	}
+	return revisions.sort((left, right) => left.revisionId < right.revisionId ? -1 : 1);
+}
+/** Write one manifest into its directory, durably; the manifest's self-digest is re-checked before a byte moves. */
+async function writeRevisionManifest(directory, manifest) {
+	const { contentDigest,...rest } = manifest;
+	if (manifestDigest(rest) !== contentDigest) throw new Error(`environment: refusing to write a manifest whose contentDigest does not match its content (${directory})`);
+	await writeFileAtomic(join(directory, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+}
+/**
+* Freeze one draft into an immutable revision: an atomic same-filesystem rename,
+* then fsync of both the revisions directory and the library root, in that order —
+* a pointer may only ever be written after this returns.
+*/
+async function freezeDraftDirectory(library, draftId, revisionId) {
+	const from = join(draftsRoot(library), draftId);
+	const to = revisionRoot(library, revisionId);
+	if (await readdir(to).then(() => true, () => false)) throw new Error(`environment: revision "${revisionId}" already exists; a frozen revision is immutable`);
+	try {
+		await rename(from, to);
+	} catch (error) {
+		const code = error.code;
+		if (code === "EXDEV") throw new Error(`environment: drafts and revisions of library "${library.id}" are on different filesystems; freezing a draft requires an atomic rename`);
+		if (code === "ENOENT") throw new Error(`environment: draft "${draftId}" is absent; nothing to freeze`);
+		throw error;
+	}
+	await syncDirectory(revisionsRoot(library));
+	await syncDirectory(library.root);
+}
+/** Copy one revision directory as the starting content of a draft; a draft never edits its base in place. */
+async function copyRevisionDirectory(from, to) {
+	await mkdir(dirname(to), { recursive: true });
+	await cp(from, to, {
+		recursive: true,
+		errorOnExist: true,
+		force: false
+	});
+	await syncDirectory(dirname(to));
+}
+/**
+* Verify one whole revision directory against its manifest: every skill's bytes
+* and sidecar, every template file, and the capability table — the single check
+* that replaces the old commit path's per-file and per-row read-backs.
+*/
+async function verifyRevisionDirectory(directory, manifest) {
+	const defects = [];
+	const skillsDir = join(directory, "skills");
+	const skillEntries = await readdir(skillsDir, { withFileTypes: true }).catch((error) => {
+		if (error.code === "ENOENT") {
+			if (manifest.skills.length > 0) defects.push(`${skillsDir} is absent but the manifest declares ${manifest.skills.length} skills`);
+			return null;
+		}
+		throw error;
+	});
+	if (skillEntries !== null) {
+		const declared = new Set(manifest.skills.map((entry) => entry.name));
+		for (const entry of skillEntries) {
+			if (entry.name.startsWith(".")) continue;
+			if (!declared.has(entry.name)) defects.push(`${join(skillsDir, entry.name)} is not declared by the manifest; a revision holds declared entries only`);
+		}
+		for (const entry of manifest.skills) {
+			const loaded = await loadSkillSidecar(join(skillsDir, entry.name));
+			defects.push(...loaded.defects.map((defect$2) => `skill "${entry.name}": ${defect$2.code}: ${defect$2.detail}`));
+			if (loaded.content === void 0) continue;
+			if (loaded.content.skillMdSha256 !== entry.digest) defects.push(`skill "${entry.name}": SKILL.md is not the declared content: manifest ${entry.digest}, read ${loaded.content.skillMdSha256}`);
+			const contentDigest = skillContentDigest(loaded.content);
+			if (contentDigest !== entry.contentDigest) defects.push(`skill "${entry.name}": content identity mismatch: manifest ${entry.contentDigest}, read ${contentDigest}`);
+			const declared3 = loaded.sidecar === void 0 ? null : skillContractDigest(loaded.sidecar);
+			if (declared3 !== entry.contractDigest) defects.push(`skill "${entry.name}": sidecar mismatch: manifest ${entry.contractDigest ?? "none"}, read ${declared3 ?? "none"}`);
+		}
+	}
+	const templatesDir = join(directory, "task-templates");
+	const templateEntries = await readdir(templatesDir, { withFileTypes: true }).catch((error) => {
+		if (error.code === "ENOENT") {
+			if (manifest.taskTemplates.length > 0) defects.push(`${templatesDir} is absent but the manifest declares ${manifest.taskTemplates.length} task templates`);
+			return null;
+		}
+		throw error;
+	});
+	if (templateEntries !== null) {
+		const declared = new Set(manifest.taskTemplates.map((entry) => `${entry.templateRef.id}@${entry.templateRef.version}.json`));
+		for (const entry of templateEntries) {
+			if (entry.name.startsWith(".")) continue;
+			if (!declared.has(entry.name)) defects.push(`${join(templatesDir, entry.name)} is not declared by the manifest`);
+		}
+		for (const entry of manifest.taskTemplates) {
+			const file = join(templatesDir, `${entry.templateRef.id}@${entry.templateRef.version}.json`);
+			let template;
+			try {
+				template = parseTaskTemplate(JSON.parse(await readFile(file, "utf8")));
+			} catch (error) {
+				defects.push(`task template "${entry.templateRef.id}@${entry.templateRef.version}": ${file} is not a readable template: ${error instanceof Error ? error.message : String(error)}`);
+				continue;
+			}
+			const digest = taskTemplateDigest(template);
+			if (digest !== entry.templateRef.digest) defects.push(`task template "${entry.templateRef.id}@${entry.templateRef.version}": content mismatch: manifest ${entry.templateRef.digest}, read ${digest}`);
+		}
+	}
+	const capabilitiesFile = join(directory, "capabilities.json");
+	let capabilitiesText;
+	try {
+		capabilitiesText = await readFile(capabilitiesFile, "utf8");
+	} catch (error) {
+		if (error.code !== "ENOENT") throw error;
+		defects.push(`${capabilitiesFile} is absent; every revision declares its capability table`);
+	}
+	if (capabilitiesText !== void 0) try {
+		if (canonicalize(JSON.parse(capabilitiesText)) !== canonicalize(manifest.capabilities)) defects.push(`${capabilitiesFile} does not match the manifest's capability table`);
+	} catch (error) {
+		defects.push(`${capabilitiesFile} is not readable JSON: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	return { defects };
+}
+/** Read one file of one skill inside one revision, through the verified walk: no links, no escapes, real entries only. */
+async function readRevisionSkillFile(revision, name, rel) {
+	return readVerifiedFile(join(revision.skillRoot, name), rel);
+}
+
+//#endregion
+//#region src/environment/pointer.ts
+function isRecord(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function pointerPath(library) {
+	return join(library.root, "pointer.json");
+}
+function intentPath(library) {
+	return join(library.root, "pointer-intent.json");
+}
+function completionsPath(library) {
+	return join(library.root, "completions.jsonl");
+}
+async function readJson(path) {
+	let text$1;
+	try {
+		text$1 = await readFile(path, "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return void 0;
+		throw error;
+	}
+	try {
+		return JSON.parse(text$1);
+	} catch (error) {
+		throw new Error(`environment: ${path} is not readable JSON: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+function parsePointer(raw, where) {
+	if (!isRecord(raw)) throw new Error(`${where}: a pointer must be an object`);
+	if (raw.formatVersion !== 1) throw new Error(`${where}: unsupported pointer formatVersion ${JSON.stringify(raw.formatVersion)}`);
+	if (typeof raw.libraryId !== "string" || raw.libraryId.length === 0) throw new Error(`${where}: a pointer requires a libraryId`);
+	if (typeof raw.revisionId !== "string" || !ENVIRONMENT_REVISION_ID.test(raw.revisionId)) throw new Error(`${where}: a pointer requires a valid revisionId`);
+	if (typeof raw.manifestDigest !== "string" || !/^[0-9a-f]{64}$/.test(raw.manifestDigest)) throw new Error(`${where}: a pointer requires a manifestDigest`);
+	if (!Number.isInteger(raw.generation) || raw.generation < 1) throw new Error(`${where}: a pointer generation must be a positive integer`);
+	if (typeof raw.publishedAt !== "string" || raw.publishedAt.length === 0) throw new Error(`${where}: a pointer requires publishedAt`);
+	if (typeof raw.publishedBy !== "string" || raw.publishedBy.length === 0) throw new Error(`${where}: a pointer requires publishedBy`);
+	if (raw.approvalRef !== void 0 && typeof raw.approvalRef !== "string") throw new Error(`${where}: approvalRef must be a string when present`);
+	return raw;
+}
+function parseIntent(raw, where) {
+	if (!isRecord(raw)) throw new Error(`${where}: a pointer intent must be an object`);
+	if (raw.formatVersion !== 1) throw new Error(`${where}: unsupported intent formatVersion ${JSON.stringify(raw.formatVersion)}`);
+	for (const name of [
+		"intentId",
+		"libraryId",
+		"actor",
+		"at"
+	]) if (typeof raw[name] !== "string" || raw[name].length === 0) throw new Error(`${where}: a pointer intent requires a non-empty ${name}`);
+	if (raw.direction !== "publish" && raw.direction !== "rollback") throw new Error(`${where}: intent direction must be "publish" or "rollback"`);
+	if (raw.expected !== null) {
+		if (!isRecord(raw.expected) || typeof raw.expected.revisionId !== "string" || !Number.isInteger(raw.expected.generation)) throw new Error(`${where}: intent expected must be { revisionId, generation } or null`);
+	}
+	if (!isRecord(raw.next) || typeof raw.next.revisionId !== "string" || !ENVIRONMENT_REVISION_ID.test(raw.next.revisionId) || typeof raw.next.manifestDigest !== "string") throw new Error(`${where}: intent next must be { revisionId, manifestDigest }`);
+	if (raw.draftId !== void 0 && (typeof raw.draftId !== "string" || !ENVIRONMENT_DRAFT_ID.test(raw.draftId))) throw new Error(`${where}: intent draftId must be a draft id when present`);
+	if (raw.approvalRef !== void 0 && typeof raw.approvalRef !== "string") throw new Error(`${where}: approvalRef must be a string when present`);
+	return raw;
+}
+function parseCompletion(raw, where) {
+	if (!isRecord(raw)) throw new Error(`${where}: a pointer completion must be an object`);
+	if (raw.formatVersion !== 1) throw new Error(`${where}: unsupported completion formatVersion ${JSON.stringify(raw.formatVersion)}`);
+	for (const name of [
+		"intentId",
+		"libraryId",
+		"revisionId",
+		"manifestDigest",
+		"actor",
+		"at"
+	]) if (typeof raw[name] !== "string" || raw[name].length === 0) throw new Error(`${where}: a completion requires a non-empty ${name}`);
+	if (raw.direction !== "publish" && raw.direction !== "rollback") throw new Error(`${where}: completion direction must be "publish" or "rollback"`);
+	if (!Number.isInteger(raw.generation) || raw.generation < 1) throw new Error(`${where}: a completion generation must be a positive integer`);
+	if (raw.supersededRevisionId !== null && typeof raw.supersededRevisionId !== "string") throw new Error(`${where}: supersededRevisionId must be a string or null`);
+	return raw;
+}
+/** Read the current pointer, or `null` when the library has none yet (a fresh or a legacy root). */
+async function readPointer(library) {
+	const raw = await readJson(pointerPath(library));
+	if (raw === void 0) return null;
+	return parsePointer(raw, `environment: ${pointerPath(library)}`);
+}
+/** The in-flight switch's intent, or `null` outside a switch window; the single concurrency exclusion point. */
+async function openPointerIntent(library) {
+	const raw = await readJson(intentPath(library));
+	if (raw === void 0) return null;
+	return parseIntent(raw, `environment: ${intentPath(library)}`);
+}
+/** Every settled switch of one library, in append order. */
+async function listPointerCompletions(library) {
+	let text$1;
+	try {
+		text$1 = await readFile(completionsPath(library), "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return [];
+		throw error;
+	}
+	return text$1.split("\n").filter((line) => line.trim().length > 0).map((line, index) => parseCompletion(JSON.parse(line), `environment: ${completionsPath(library)} line ${index + 1}`));
+}
+/** The revision the pointer currently names; both must exist and agree, or the library is broken by name. */
+async function readActiveRevision(library) {
+	const pointer = await readPointer(library);
+	if (pointer === null) throw new Error(`environment: library "${library.id}" has no active revision; a new-protocol library is born with one`);
+	const revision = await readRevision(library, pointer.revisionId);
+	if (revision === void 0) throw new Error(`environment: pointer of library "${library.id}" names revision "${pointer.revisionId}", which does not exist on disk`);
+	if (revision.manifest.contentDigest !== pointer.manifestDigest) throw new Error(`environment: pointer of library "${library.id}" names digest ${pointer.manifestDigest} but revision "${pointer.revisionId}" reads ${revision.manifest.contentDigest}`);
+	return revision;
+}
+/**
+* Create the initial revision `r0001` of a new-protocol library, seeded with the
+* generic task-coordination guidance, and point at it (generation 1). A library
+* with the old mutable layout is refused by name: it enters the legacy read-only
+* view instead, and no `pointer.json` is ever created for it.
+*/
+async function ensureInitialRevision(library, seed) {
+	return serialEnvironment(library, async () => {
+		if (await readPointer(library) !== null) return readActiveRevision(library);
+		if (await hasLegacyLayout(library)) throw new Error(`environment: library "${library.id}" has the legacy mutable layout (index.json / flat skills); it is read-only and never gets an environment pointer`);
+		await ensureEnvironmentLayout(library);
+		await ensureProtocolMarker(library);
+		const at = seed.at ?? (/* @__PURE__ */ new Date()).toISOString();
+		const root = revisionRoot(library, "r0001");
+		if (await readRevision(library, "r0001") === void 0) {
+			const skillDir = join(root, "skills", "task-coordination");
+			await mkdir(skillDir, { recursive: true });
+			const skillMd = await readFile(join(dirname(fileURLToPath(import.meta.resolve("@dangosys/dsh-singularity-agent-runtime/package.json"))), "skills/task-coordination/SKILL.md"), "utf8");
+			await writeFile(join(skillDir, "SKILL.md"), skillMd);
+			await writeFile(join(root, "capabilities.json"), `${JSON.stringify({
+				rows: {},
+				mcpServers: {}
+			}, null, 2)}\n`);
+			const skillMdSha256 = sha256Hex(skillMd);
+			const { contentDigest: _,...rest } = {
+				...emptyRevisionManifest({
+					libraryId: library.id,
+					revisionId: "r0001",
+					kind: "official",
+					basedOn: null,
+					createdAt: at
+				}),
+				skills: [{
+					name: "task-coordination",
+					version: 1,
+					digest: skillMdSha256,
+					contentDigest: skillContentDigest({
+						skillMdSha256,
+						resources: []
+					}),
+					contractDigest: null,
+					status: "retained",
+					reason: "Generic platform task coordination guidance"
+				}]
+			};
+			await writeRevisionManifest(root, {
+				...rest,
+				contentDigest: manifestDigest(rest)
+			});
+		}
+		const manifest = await readRevisionManifest(library, "r0001");
+		const written = {
+			formatVersion: 1,
+			libraryId: library.id,
+			revisionId: "r0001",
+			manifestDigest: manifest.contentDigest,
+			generation: 1,
+			publishedAt: at,
+			publishedBy: seed.actor
+		};
+		await writeFileAtomic(pointerPath(library), `${JSON.stringify(written, null, 2)}\n`);
+		if (canonicalize(parsePointer(await readJson(pointerPath(library)), `environment: ${pointerPath(library)} readback`)) !== canonicalize(written)) throw new Error("environment: pointer.json did not read back as written; the initial revision is not in effect");
+		const revision = await readRevision(library, "r0001");
+		if (revision === void 0) throw new Error("environment: revision \"r0001\" is absent after seeding");
+		return revision;
+	});
+}
+/** Resolve the request's source to the revision it switches to, re-checking draft bytes against their recorded digest. */
+async function resolveSource(library, request) {
+	if (request.source.kind === "revision") {
+		const revision = await readRevision(library, request.source.revisionId);
+		if (revision === void 0) throw new Error(`environment: revision "${request.source.revisionId}" is absent; a switch names a frozen revision on disk`);
+		return { next: {
+			revisionId: revision.manifest.revisionId,
+			manifestDigest: revision.manifest.contentDigest
+		} };
+	}
+	if (request.direction !== "publish") throw new Error("environment: a rollback switches to a frozen revision, never to a draft");
+	const draftId = request.source.draftId;
+	if (!ENVIRONMENT_DRAFT_ID.test(draftId)) throw new Error(`environment: ${JSON.stringify(draftId)} is not a draft id`);
+	const draftDir = join(draftsRoot(library), draftId);
+	const draftRecord = await readJson(join(draftDir, "draft.json"));
+	if (draftRecord === void 0) throw new Error(`environment: draft "${draftId}" is absent; a discarded or never-created draft cannot be published`);
+	const manifest = await parseDraftManifest(draftDir, draftId);
+	if (isRecord(draftRecord) && isRecord(draftRecord.manifest) && draftRecord.manifest.contentDigest !== manifest.contentDigest) throw new Error(`environment: draft "${draftId}" draft.json and manifest.json disagree; the draft was edited outside the draft machinery`);
+	return {
+		next: {
+			revisionId: manifest.revisionId,
+			manifestDigest: manifest.contentDigest
+		},
+		draftId
+	};
+}
+async function parseDraftManifest(draftDir, draftId) {
+	let text$1;
+	try {
+		text$1 = await readFile(join(draftDir, "manifest.json"), "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") throw new Error(`environment: draft "${draftId}" holds no manifest.json`);
+		throw error;
+	}
+	let raw;
+	try {
+		raw = JSON.parse(text$1);
+	} catch (error) {
+		throw new Error(`environment: draft "${draftId}" manifest.json is not readable JSON: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	return parseRevisionManifest(raw, `environment: draft "${draftId}"`);
+}
+/** One full transaction: `publish` freezes its draft source first; `rollback` verifies its target instead. */
+async function commitPointer(host, request) {
+	const library = host.library;
+	return serialEnvironment(library, async () => {
+		const before = await readPointer(library);
+		if (before === null) throw new Error(`environment: library "${library.id}" has no pointer to switch; the initial revision creates generation 1`);
+		if (before.revisionId !== request.expected.revisionId || before.generation !== request.expected.generation) throw new Error(`environment-pointer-changed: library "${library.id}" is at "${before.revisionId}" generation ${before.generation}, not the expected "${request.expected.revisionId}" generation ${request.expected.generation}; re-read the pointer before publishing`);
+		const open$1 = await openPointerIntent(library);
+		if (open$1 !== null) throw new Error(`environment-intent-open: library "${library.id}" has an open pointer intent "${open$1.intentId}"; reconcile it before publishing`);
+		const source = await resolveSource(library, request);
+		if (source.draftId !== void 0 && await readRevision(library, source.next.revisionId) !== void 0) throw new Error(`environment: revision "${source.next.revisionId}" already exists; if a previous attempt was killed, reconcile the pointer instead of re-publishing`);
+		const intent = {
+			formatVersion: 1,
+			intentId: `${library.id}/g${before.generation + 1}/${source.next.revisionId}`,
+			libraryId: library.id,
+			direction: request.direction,
+			expected: {
+				revisionId: before.revisionId,
+				generation: before.generation
+			},
+			next: source.next,
+			...source.draftId !== void 0 ? { draftId: source.draftId } : {},
+			...request.approvalRef !== void 0 ? { approvalRef: request.approvalRef } : {},
+			actor: request.actor,
+			at: (/* @__PURE__ */ new Date()).toISOString()
+		};
+		await writeFileAtomic(intentPath(library), `${JSON.stringify(intent, null, 2)}\n`);
+		await host.probe?.("intent-recorded", intent.intentId);
+		if (source.draftId !== void 0) await freezeDraftDirectory(library, source.draftId, source.next.revisionId);
+		await host.probe?.("revision-frozen", source.next.revisionId);
+		const manifest = await readRevisionManifest(library, source.next.revisionId);
+		const { defects } = await verifyRevisionDirectory(revisionRoot(library, source.next.revisionId), manifest);
+		if (defects.length > 0) throw new Error(`environment: revision "${source.next.revisionId}" does not verify against its manifest:\n- ${defects.join("\n- ")}`);
+		if (manifest.contentDigest !== source.next.manifestDigest) throw new Error(`environment: revision "${source.next.revisionId}" reads digest ${manifest.contentDigest}, expected ${source.next.manifestDigest}`);
+		await host.probe?.("revision-verified", source.next.revisionId);
+		const recheck = await readPointer(library);
+		if (recheck === null || recheck.revisionId !== before.revisionId || recheck.generation !== before.generation) throw new Error(`environment-pointer-changed: library "${library.id}" moved to ${recheck === null ? "no pointer" : `"${recheck.revisionId}" generation ${recheck.generation}`} while this switch was in flight; the frozen revision stays, the intent stays open, and the third-party pointer is not overwritten`);
+		const pointer = await switchPointer(library, intent, before, manifest, request);
+		await host.probe?.("pointer-switched", pointer.revisionId);
+		await assertPointerReadback(library, pointer);
+		const completion = await recordCompletion(library, intent, pointer, before.revisionId, request);
+		await host.probe?.("completion-recorded", completion.intentId);
+		await clearIntent(library);
+		await host.probe?.("intent-cleared", intent.intentId);
+		return {
+			pointer,
+			supersededRevisionId: before.revisionId,
+			completion,
+			recovered: "fresh"
+		};
+	});
+}
+async function switchPointer(library, intent, before, manifest, request) {
+	const pointer = {
+		formatVersion: 1,
+		libraryId: library.id,
+		revisionId: intent.next.revisionId,
+		manifestDigest: manifest.contentDigest,
+		generation: before.generation + 1,
+		publishedAt: (/* @__PURE__ */ new Date()).toISOString(),
+		publishedBy: request.actor,
+		...request.approvalRef !== void 0 ? { approvalRef: request.approvalRef } : {}
+	};
+	await writeFileAtomic(pointerPath(library), `${JSON.stringify(pointer, null, 2)}\n`);
+	return pointer;
+}
+async function assertPointerReadback(library, pointer) {
+	const readback = await readPointer(library);
+	if (readback === null || canonicalize(readback) !== canonicalize(pointer)) throw new Error(`environment: pointer.json did not read back as the switch wrote it; the completion is not recorded and the intent stays open until reconcile settles it`);
+}
+async function recordCompletion(library, intent, pointer, supersededRevisionId, request) {
+	const completion = {
+		formatVersion: 1,
+		intentId: intent.intentId,
+		libraryId: library.id,
+		direction: intent.direction,
+		revisionId: pointer.revisionId,
+		manifestDigest: pointer.manifestDigest,
+		generation: pointer.generation,
+		supersededRevisionId,
+		...request.approvalRef !== void 0 ? { approvalRef: request.approvalRef } : {},
+		actor: request.actor,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	};
+	await appendLineDurable(completionsPath(library), `${JSON.stringify(completion)}\n`);
+	return completion;
+}
+async function clearIntent(library) {
+	await rm(intentPath(library), { force: true });
+	await syncDirectory(library.root);
+}
+/** Publish a draft or a frozen candidate revision: one CAS-checked pointer switch. */
+async function publishEnvironmentRevision(host, request) {
+	if (request.direction !== "publish") throw new Error("environment: publishEnvironmentRevision requires direction \"publish\"");
+	return commitPointer(host, request);
+}
+/** Roll back to a frozen revision: the same transaction, freezing skipped, target verified. */
+async function rollbackEnvironmentRevision(host, request) {
+	if (request.direction !== "rollback") throw new Error("environment: rollbackEnvironmentRevision requires direction \"rollback\"");
+	if (request.source.kind !== "revision") throw new Error("environment: a rollback switches to a frozen revision, never to a draft");
+	return commitPointer(host, request);
+}
+/**
+* Settle every open intent of one library after a crash or at startup. The
+* classification reads only disk facts: a switched pointer is completed and
+* cleared, a frozen-but-unswitched intent is finished from step 7, an unfrozen
+* publish intent is redone from step 5, and a pointer moved by a third party
+* blocks the intent without touching anything.
+*/
+async function reconcileEnvironmentPointer(host) {
+	const library = host.library;
+	return serialEnvironment(library, async () => {
+		const intent = await openPointerIntent(library);
+		if (intent === null) return [];
+		const report = (result, detail) => [{
+			intentId: intent.intentId,
+			direction: intent.direction,
+			result,
+			revisionId: intent.next.revisionId,
+			...detail !== void 0 ? { detail } : {}
+		}];
+		const pointer = await readPointer(library);
+		const expectedGeneration = (intent.expected?.generation ?? 0) + 1;
+		if (pointer !== null && pointer.revisionId === intent.next.revisionId && pointer.generation === expectedGeneration) {
+			const manifest = await readRevisionManifest(library, intent.next.revisionId);
+			const { defects } = await verifyRevisionDirectory(revisionRoot(library, intent.next.revisionId), manifest);
+			if (defects.length > 0) return report("blocked", `revision "${intent.next.revisionId}" does not verify: ${defects.join("; ")}`);
+			if (!(await listPointerCompletions(library)).some((item) => item.intentId === intent.intentId)) {
+				await appendLineDurable(completionsPath(library), `${JSON.stringify({
+					formatVersion: 1,
+					intentId: intent.intentId,
+					libraryId: library.id,
+					direction: intent.direction,
+					revisionId: pointer.revisionId,
+					manifestDigest: pointer.manifestDigest,
+					generation: pointer.generation,
+					supersededRevisionId: intent.expected?.revisionId ?? null,
+					...intent.approvalRef !== void 0 ? { approvalRef: intent.approvalRef } : {},
+					actor: intent.actor,
+					at: (/* @__PURE__ */ new Date()).toISOString()
+				})}\n`);
+				await host.probe?.("completion-recorded", intent.intentId);
+			}
+			await clearIntent(library);
+			await host.probe?.("intent-cleared", intent.intentId);
+			return report("completed-switched");
+		}
+		const expected = intent.expected;
+		if (!(expected === null ? pointer === null : pointer !== null && pointer.revisionId === expected.revisionId && pointer.generation === expected.generation)) return report("blocked", `pointer is at ${pointer === null ? "none" : `"${pointer.revisionId}" generation ${pointer.generation}`}, which is neither the expected ${expected === null ? "none" : `"${expected.revisionId}" generation ${expected.generation}`} nor the intent's target; a third party moved the pointer, and the intent stays open`);
+		const frozen = await readRevision(library, intent.next.revisionId);
+		if (frozen !== void 0) {
+			if (pointer === null) return report("blocked", "the library has no pointer at all; an intent without a prior pointer is not a state this build produces");
+			const { defects } = await verifyRevisionDirectory(frozen.root, frozen.manifest);
+			if (defects.length > 0) return report("blocked", `revision "${intent.next.revisionId}" does not verify: ${defects.join("; ")}`);
+			if (frozen.manifest.contentDigest !== intent.next.manifestDigest) return report("blocked", `revision "${intent.next.revisionId}" reads ${frozen.manifest.contentDigest}, intent expected ${intent.next.manifestDigest}`);
+			const request = {
+				direction: intent.direction,
+				source: {
+					kind: "revision",
+					revisionId: intent.next.revisionId
+				},
+				expected: expected ?? {
+					revisionId: "",
+					generation: 0
+				},
+				...intent.approvalRef !== void 0 ? { approvalRef: intent.approvalRef } : {},
+				actor: intent.actor
+			};
+			const switched = await switchPointer(library, intent, pointer, frozen.manifest, request);
+			await host.probe?.("pointer-switched", switched.revisionId);
+			await assertPointerReadback(library, switched);
+			const completion = await recordCompletion(library, intent, switched, pointer.revisionId, request);
+			await host.probe?.("completion-recorded", completion.intentId);
+			await clearIntent(library);
+			await host.probe?.("intent-cleared", intent.intentId);
+			return report("completed-switched");
+		}
+		if (intent.direction === "publish" && intent.draftId !== void 0) {
+			if (await readJson(join(draftsRoot(library), intent.draftId, "draft.json")) !== void 0) {
+				if (pointer === null) return report("blocked", "the library has no pointer at all; an intent without a prior pointer is not a state this build produces");
+				await freezeDraftDirectory(library, intent.draftId, intent.next.revisionId);
+				await host.probe?.("revision-frozen", intent.next.revisionId);
+				const manifest = await readRevisionManifest(library, intent.next.revisionId);
+				const { defects } = await verifyRevisionDirectory(revisionRoot(library, intent.next.revisionId), manifest);
+				if (defects.length > 0) return report("blocked", `revision "${intent.next.revisionId}" does not verify after refreezing: ${defects.join("; ")}`);
+				await host.probe?.("revision-verified", intent.next.revisionId);
+				const request = {
+					direction: intent.direction,
+					source: {
+						kind: "revision",
+						revisionId: intent.next.revisionId
+					},
+					expected: expected ?? {
+						revisionId: "",
+						generation: 0
+					},
+					...intent.approvalRef !== void 0 ? { approvalRef: intent.approvalRef } : {},
+					actor: intent.actor
+				};
+				const switched = await switchPointer(library, intent, pointer, manifest, request);
+				await host.probe?.("pointer-switched", switched.revisionId);
+				await assertPointerReadback(library, switched);
+				const completion = await recordCompletion(library, intent, switched, pointer.revisionId, request);
+				await host.probe?.("completion-recorded", completion.intentId);
+				await clearIntent(library);
+				await host.probe?.("intent-cleared", intent.intentId);
+				return report("completed-frozen");
+			}
+		}
+		return report("blocked", `revision "${intent.next.revisionId}" is absent and there is no draft to re-freeze; a human must settle the intent by name`);
+	});
+}
+
+//#endregion
+//#region src/environment/draft.ts
+function draftRoot(library, draftId) {
+	if (!ENVIRONMENT_DRAFT_ID.test(draftId)) throw new Error(`environment: ${JSON.stringify(draftId)} is not a draft id (^d[0-9]{4}$)`);
+	return join(draftsRoot(library), draftId);
+}
+function draftRecordOf(draft, purpose) {
+	return {
+		formatVersion: 1,
+		libraryId: draft.libraryId,
+		draftId: draft.draftId,
+		basedOn: draft.basedOn,
+		actor: draft.actor,
+		...purpose !== void 0 ? { purpose } : {},
+		createdAt: draft.createdAt,
+		edits: draft.edits,
+		manifest: draft.manifest
+	};
+}
+async function writeDraftRecord(draft, purpose) {
+	await writeFileAtomic(join(draft.root, "draft.json"), `${JSON.stringify(draftRecordOf(draft, purpose), null, 2)}\n`);
+}
+async function readDraftRecord(library, draftId) {
+	const root = draftRoot(library, draftId);
+	let text$1;
+	try {
+		text$1 = await readFile(join(root, "draft.json"), "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return void 0;
+		throw error;
+	}
+	let raw;
+	try {
+		raw = JSON.parse(text$1);
+	} catch (error) {
+		throw new Error(`environment: draft "${draftId}" draft.json is not readable JSON: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const record$1 = raw;
+	if (record$1.formatVersion !== 1 || record$1.draftId !== draftId || typeof record$1.basedOn !== "string" || !Array.isArray(record$1.edits)) throw new Error(`environment: draft "${draftId}" draft.json is not a valid draft record`);
+	const manifest = parseRevisionManifest(record$1.manifest, `environment: draft "${draftId}" draft.json`);
+	return {
+		record: {
+			...record$1,
+			manifest
+		},
+		root
+	};
+}
+function draftOf(library, record$1, root) {
+	return {
+		libraryId: library.id,
+		draftId: record$1.draftId,
+		basedOn: record$1.basedOn,
+		root,
+		manifest: record$1.manifest,
+		actor: record$1.actor,
+		createdAt: record$1.createdAt,
+		edits: record$1.edits
+	};
+}
+/**
+* The next draft id of one library: monotonic `d0001`, `d0002`, …, allocated
+* under the library's write tail. A frozen draft leaves `drafts/` for
+* `revisions/c-<draftId>`, so the highest id is read from both directories —
+* otherwise a second draft would take a name whose candidate revision exists.
+*/
+async function nextDraftId(library) {
+	const used = [];
+	const collect = async (directory, pattern, slice) => {
+		let entries;
+		try {
+			entries = await readdir(directory);
+		} catch (error) {
+			if (error.code === "ENOENT") return;
+			throw error;
+		}
+		for (const name of entries) if (pattern.exec(name) !== null) used.push(Number(name.slice(slice)));
+	};
+	await collect(draftsRoot(library), ENVIRONMENT_DRAFT_ID, 1);
+	await collect(revisionsRoot(library), /^c-d[0-9]{4}$/, 3);
+	const highest = used.reduce((max, value) => Math.max(max, value), 0);
+	return `d${String(highest + 1).padStart(4, "0")}`;
+}
+/**
+* Open a draft on top of a revision (the active one by default): a full copy of
+* the base's directory under `drafts/<draftId>` with a candidate manifest. A
+* legacy-layout library is refused by name — drafts belong to the new protocol.
+*/
+async function createEnvironmentDraft(library, request) {
+	return serialEnvironment(library, async () => {
+		if (await hasLegacyLayout(library)) throw new Error(`environment: library "${library.id}" has the legacy mutable layout; it is read-only and never gets drafts`);
+		const basedOn = request.basedOn ?? (await readPointer(library))?.revisionId;
+		if (basedOn === void 0) throw new Error(`environment: library "${library.id}" has no revision to base a draft on; the initial revision comes first`);
+		const base = await readRevision(library, basedOn);
+		if (base === void 0) throw new Error(`environment: revision "${basedOn}" is absent; a draft copies a frozen revision`);
+		const draftId = await nextDraftId(library);
+		const root = join(draftsRoot(library), draftId);
+		await copyRevisionDirectory(base.root, root);
+		const createdAt = (/* @__PURE__ */ new Date()).toISOString();
+		const { contentDigest: _,...baseRest } = base.manifest;
+		const prospective = {
+			...baseRest,
+			revisionId: candidateRevisionId(draftId),
+			kind: "candidate",
+			basedOn: base.manifest.revisionId,
+			createdAt
+		};
+		const finalized = {
+			...prospective,
+			contentDigest: manifestDigest(prospective)
+		};
+		await writeRevisionManifest(root, finalized);
+		const draft = draftOf(library, {
+			formatVersion: 1,
+			libraryId: library.id,
+			draftId,
+			basedOn: base.manifest.revisionId,
+			actor: request.actor,
+			createdAt,
+			edits: [],
+			manifest: finalized
+		}, root);
+		await writeDraftRecord(draft, request.purpose);
+		return draft;
+	});
+}
+/** Read one draft, or `undefined` when it does not exist. */
+async function readEnvironmentDraft(library, draftId) {
+	const loaded = await readDraftRecord(library, draftId);
+	if (loaded === void 0) return void 0;
+	return draftOf(library, loaded.record, loaded.root);
+}
+/** List every draft of one library, sorted by id. */
+async function listEnvironmentDrafts(library) {
+	let entries;
+	try {
+		entries = await readdir(draftsRoot(library), { withFileTypes: true });
+	} catch (error) {
+		if (error.code === "ENOENT") return [];
+		throw error;
+	}
+	const drafts = [];
+	for (const entry of entries) {
+		if (!entry.isDirectory() || !ENVIRONMENT_DRAFT_ID.test(entry.name)) continue;
+		const loaded = await readDraftRecord(library, entry.name);
+		if (loaded === void 0) continue;
+		drafts.push({
+			draftId: entry.name,
+			basedOn: loaded.record.basedOn,
+			edits: loaded.record.edits.length,
+			createdAt: loaded.record.createdAt
+		});
+	}
+	return drafts.sort((left, right) => left.draftId < right.draftId ? -1 : 1);
+}
+/** The newest draft one actor opened, when one exists. */
+async function latestDraftFor(library, actor) {
+	const refs = await listEnvironmentDrafts(library);
+	for (const ref of [...refs].reverse()) {
+		const draft = await readEnvironmentDraft(library, ref.draftId);
+		if (draft?.actor === actor) return draft;
+	}
+}
+/** Write the payload files of one edit into the draft directory, so the disk holds exactly what the new manifest declares. */
+async function stageEditFiles(draft, edit, manifest) {
+	if (edit.kind === "skill") {
+		if (revisionSkillOf(manifest, edit.edit.name) === void 0) return;
+		const directory = join(draft.root, "skills", edit.edit.name);
+		await mkdir(directory, { recursive: true });
+		const declared = new Map(Object.entries(edit.edit.resources ?? {}));
+		for (const [path, content] of declared) {
+			if (path !== SKILL_SIDECAR_FILE && !isSupportedSkillResourcePath(path)) throw new Error(`environment: resource path ${JSON.stringify(path)} is not a supported skill resource path`);
+			const target = join(directory, path);
+			await mkdir(dirname(target), { recursive: true });
+			await writeFile(target, content);
+		}
+		await writeFile(join(directory, "SKILL.md"), edit.edit.skillMd);
+		const existing = await readdir(directory, { withFileTypes: true });
+		for (const item of existing) {
+			if (item.name === "SKILL.md") continue;
+			if (item.isFile() && item.name === SKILL_SIDECAR_FILE && !declared.has(SKILL_SIDECAR_FILE)) {
+				await rm(join(directory, item.name));
+				continue;
+			}
+			if (!item.isDirectory()) continue;
+			if (![
+				"references",
+				"scripts",
+				"resources"
+			].includes(item.name)) continue;
+			for (const file of await readdir(join(directory, item.name))) if (!declared.has(`${item.name}/${file}`)) await rm(join(directory, item.name, file));
+			if ((await readdir(join(directory, item.name))).length === 0) await rm(join(directory, item.name), { recursive: true });
+		}
+		return;
+	}
+	if (edit.kind === "task") {
+		await registerTaskTemplate(join(draft.root, "task-templates"), edit.edit.template);
+		return;
+	}
+	if (edit.kind === "capability") await writeFileAtomic(join(draft.root, "capabilities.json"), `${JSON.stringify(manifest.capabilities, null, 2)}\n`);
+}
+/** A short human-readable line appended to the draft's edit log. */
+function editSummary(edit) {
+	if (edit.kind === "skill") return `skill ${edit.edit.name} by ${edit.edit.actor}`;
+	if (edit.kind === "task") return `task template ${edit.edit.template.id}@${edit.edit.template.version} by ${edit.edit.actor}`;
+	if (edit.kind === "review") return `review ${edit.review.kind} ${edit.review.name} → ${edit.review.status} by ${edit.review.reason}`;
+	return `capability row ${edit.edit.name} ${edit.edit.entry === null ? "removed" : "set"} by ${edit.edit.actor}`;
+}
+/**
+* Stage one edit into one draft: payload bytes first, then the manifest, then the
+* draft record — all under the library's single write tail, so concurrent stages
+* of one library serialize.
+*/
+async function stageEnvironmentEdit(library, draftId, edit, table) {
+	return serialEnvironment(library, async () => {
+		const draft = await readEnvironmentDraft(library, draftId);
+		if (draft === void 0) throw new Error(`environment: draft "${draftId}" is absent; a discarded or frozen draft takes no edits`);
+		assertDraftEditAllowed(draft.manifest, edit);
+		const manifest = edit.kind === "skill" ? applySkillEdit(draft.manifest, edit.edit) : edit.kind === "task" ? applyTemplateEdit(draft.manifest, edit.edit.template, table) : edit.kind === "review" ? applyReviewEdit(draft.manifest, edit.review, edit.review.actor) : applyCapabilityRowEdit(draft.manifest, edit.edit);
+		await stageEditFiles(draft, edit, manifest);
+		await writeRevisionManifest(draft.root, manifest);
+		const updated = {
+			...draft,
+			manifest,
+			edits: [...draft.edits, editSummary(edit)]
+		};
+		await writeDraftRecord(updated);
+		return updated;
+	});
+}
+/** Delete one draft's directory; a discarded draft cannot be published, because publishing reads the draft record first. */
+async function discardEnvironmentDraft(library, draftId) {
+	return serialEnvironment(library, async () => {
+		const root = draftRoot(library, draftId);
+		if (await readEnvironmentDraft(library, draftId) === void 0) throw new Error(`environment: draft "${draftId}" is absent; nothing to discard`);
+		await rm(root, {
+			recursive: true,
+			force: true
+		});
+		await syncDirectory(draftsRoot(library));
+	});
+}
+/**
+* Freeze one draft into an immutable candidate revision (`revisions/c-<draftId>`
+* unless the caller names another id). The pointer does not move: only a publish
+* switches it. This is the standalone entry an explicit trial uses; a publish
+* runs the same freeze inside its transaction.
+*/
+async function freezeEnvironmentDraft(library, draftId, revisionId) {
+	return serialEnvironment(library, async () => {
+		const draft = await readEnvironmentDraft(library, draftId);
+		if (draft === void 0) throw new Error(`environment: draft "${draftId}" is absent; nothing to freeze`);
+		const target = revisionId ?? draft.manifest.revisionId;
+		let manifest = draft.manifest;
+		if (target !== manifest.revisionId) {
+			const { contentDigest: _,...rest } = manifest;
+			const renamed = {
+				...rest,
+				revisionId: target
+			};
+			manifest = {
+				...renamed,
+				contentDigest: manifestDigest(renamed)
+			};
+			await writeRevisionManifest(draft.root, manifest);
+		}
+		const { defects } = await verifyRevisionDirectory(draft.root, manifest);
+		if (defects.length > 0) throw new Error(`environment: draft "${draftId}" does not verify against its manifest:\n- ${defects.join("\n- ")}`);
+		await freezeDraftDirectory(library, draftId, target);
+		const revision = await readRevision(library, target);
+		if (revision === void 0) throw new Error(`environment: revision "${target}" is absent after freezing draft "${draftId}"`);
+		return revision;
+	});
+}
+
+//#endregion
+//#region src/service/environment.ts
+/** The revision id a library's first revision always carries. */
+const INITIAL_REVISION_ID = "r0001";
+/** The DSH home holding `singularity/environments/<libraryId>`; the same segment `runBindingRoot` sits under. */
+function environmentHome(self) {
+	const configured = self.config.environmentRevisionRoot;
+	if (configured !== void 0) return configured;
+	const bindings = self.config.runBindingRoot;
+	if (bindings !== void 0 && basename(dirname(resolve(bindings))) === "singularity") return dirname(dirname(resolve(bindings)));
+	return process.env.DSH_HOME !== void 0 && process.env.DSH_HOME.length > 0 ? process.env.DSH_HOME : join(homedir(), ".dsh");
+}
+function libraryRootsForRoot(self, rootSessionId) {
+	return libraryRoots(rootSessionId, environmentHome(self));
+}
+async function libraryRootsForSession(self, sessionId) {
+	return libraryRootsForRoot(self, (await self.context.graphs.graphForSession(SessionId(sessionId))).rootSessionId);
+}
+/**
+* Resolve one library root to the roots a reader works in: the active revision's
+* directory, the legacy mutable layout (read-only), or the directory the initial
+* revision will occupy. Reading never creates anything.
+*/
+async function environmentLibraryForRoot(self, rootSessionId) {
+	const library = libraryRootsForRoot(self, rootSessionId);
+	const pointer = await readPointer(library);
+	if (pointer !== null) {
+		const revision = await readRevision(library, pointer.revisionId);
+		if (revision === void 0) throw new Error(`task-runtime: the pointer of library "${library.id}" names revision "${pointer.revisionId}", which does not exist on disk`);
+		return {
+			id: library.id,
+			root: revision.root,
+			protocol: "environment-revision",
+			taskTemplatesRoot: revision.taskTemplatesRoot,
+			skillRoot: revision.skillRoot,
+			revision
+		};
+	}
+	if (await hasLegacyLayout(library)) return {
+		id: library.id,
+		root: library.root,
+		protocol: "legacy",
+		taskTemplatesRoot: join(library.root, "task-templates"),
+		skillRoot: join(library.root, "skills")
+	};
+	const prospective = revisionRoot(library, INITIAL_REVISION_ID);
+	return {
+		id: library.id,
+		root: prospective,
+		protocol: "uninitialized",
+		taskTemplatesRoot: join(prospective, "task-templates"),
+		skillRoot: join(prospective, "skills")
+	};
+}
+async function environmentLibraryForSession(self, sessionId) {
+	return await environmentLibraryForRoot(self, (await self.context.graphs.graphForSession(SessionId(sessionId))).rootSessionId);
+}
+/** The commit host of one library: the library root the transaction runs against. */
+function environmentCommitHost(self, library) {
+	return { library };
+}
+/**
+* Fix one new graph's initial revision before anything binds to it. A library
+* that already holds the legacy mutable layout keeps it: it enters the read-only
+* view instead, and no pointer is ever created for it.
+*/
+async function ensureInitialEnvironment(self, rootSessionId, actor) {
+	const library = libraryRootsForRoot(self, rootSessionId);
+	if (!await hasLegacyLayout(library)) await ensureInitialRevision(library, { actor });
+	return await environmentLibraryForRoot(self, rootSessionId);
+}
+/** The active revision of one library, or `undefined` when the library holds none (legacy or uninitialized). */
+async function activeRevisionOrUndefined(self, sessionId) {
+	return (await environmentLibraryForSession(self, sessionId)).revision;
+}
+/** One frozen revision of one library root, by id. */
+async function revisionForManifest(self, libraryId, revisionId) {
+	const revision = await readRevision(libraryRootsForRoot(self, libraryId), revisionId);
+	if (revision === void 0) throw new Error(`task-runtime: library "${libraryId}" holds no revision "${revisionId}"; a bound revision is a frozen directory`);
+	return revision;
+}
+/** The revision one run is bound to: its trial candidate when it trials one, else the revision it was admitted against. */
+async function revisionForRun(self, run) {
+	if (run.environmentRevisionId === void 0) return void 0;
+	return await revisionForManifest(self, await rootSessionIdFor(self, run.sessionId), run.trialCandidateRef ?? run.environmentRevisionId);
+}
+/** The library a *writer* addresses: legacy roots are refused by name, an uninitialized one is fixed first. */
+async function activeEnvironmentLibrary(self, sessionId) {
+	const library = await environmentLibraryForSession(self, sessionId);
+	if (library.protocol === "legacy") throw new Error(`task-runtime: library "${library.id}" holds the legacy mutable layout (index.json / flat skills); it is read-only and takes no environment edit`);
+	if (library.protocol === "uninitialized") {
+		await ensureInitialEnvironment(self, library.id, sessionId);
+		return await environmentLibraryForSession(self, sessionId);
+	}
+	return library;
+}
+/** The capability rows in force for one library: the revision's derived rows plus its declared rows, or the legacy read. */
+async function capabilityRowsForLibrary(_self, library) {
+	if (library.revision !== void 0) return revisionCapabilityRows(library.revision.manifest);
+	return await legacyCapabilityRows(library);
+}
+/** Task templates retired by one library, as `id@version` keys for the binding gate. */
+async function retiredTemplatesFor(self, sessionId) {
+	return retiredTemplatesOf(await environmentLibraryForSession(self, sessionId));
+}
+function retiredTemplatesOf(library) {
+	return new Set((library.revision?.manifest.taskTemplates ?? []).filter((entry) => entry.status === "retired").map((entry) => `${entry.templateRef.id}@${entry.templateRef.version}`));
+}
+/** The effective view one run consumes, including the trial candidate it explicitly bound. */
+async function environmentViewForRun(self, run) {
+	const library = await environmentLibraryForSession(self, run.sessionId);
+	const revision = await revisionForRun(self, run);
+	if (revision === void 0) return await legacyViewOfLibrary(library, run.trialCandidateRef);
+	const pointer = await readPointer(libraryRootsForRoot(self, library.id));
+	return {
+		libraryId: library.id,
+		revisionId: revision.manifest.revisionId,
+		generation: pointer?.generation ?? 0,
+		manifestDigest: revision.manifest.contentDigest,
+		...run.trialCandidateRef === void 0 ? {} : { trialCandidateRef: run.trialCandidateRef },
+		readOnly: true,
+		protocol: library.protocol,
+		skills: revision.manifest.skills,
+		taskTemplates: revision.manifest.taskTemplates
+	};
+}
+/** The active revision view of one graph library, as the library tools and the Web read it — a pure read. */
+async function activeEnvironmentView(self, sessionId, options = {}) {
+	const library = await environmentLibraryForSession(self, sessionId);
+	const trial = options.trialCandidateRef;
+	if (library.revision === void 0) return await legacyViewOfLibrary(library, trial);
+	const revision = trial === void 0 ? library.revision : await revisionForManifest(self, library.id, trial);
+	const pointer = await readPointer(libraryRootsForRoot(self, library.id));
+	return {
+		libraryId: library.id,
+		revisionId: revision.manifest.revisionId,
+		generation: pointer?.generation ?? 0,
+		manifestDigest: revision.manifest.contentDigest,
+		...trial === void 0 ? {} : { trialCandidateRef: trial },
+		readOnly: trial !== void 0,
+		protocol: library.protocol,
+		skills: revision.manifest.skills,
+		taskTemplates: revision.manifest.taskTemplates
+	};
+}
+/** The read-only view of a legacy library: the flat layout read directly, with no index rebuilt and no byte written. */
+async function legacyLibraryView(self, library) {
+	return await legacyViewOfLibrary({
+		id: library.id,
+		root: library.root,
+		protocol: "legacy",
+		taskTemplatesRoot: join(library.root, "task-templates"),
+		skillRoot: join(library.root, "skills")
+	});
+}
+async function legacyViewOfLibrary(library, trialCandidateRef) {
+	const skills = await legacySkillsOf(library);
+	const taskTemplates = await legacyTemplatesOf(library);
+	return {
+		libraryId: library.id,
+		revisionId: "legacy",
+		generation: 0,
+		manifestDigest: "legacy",
+		...trialCandidateRef === void 0 ? {} : { trialCandidateRef },
+		readOnly: true,
+		protocol: library.protocol,
+		skills,
+		taskTemplates
+	};
+}
+/** The legacy flat skills, read as the old index would have listed them — and never written back. */
+async function legacySkillsOf(library) {
+	const directory = join(library.root, "skills");
+	let names;
+	try {
+		names = (await readdir(directory, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name).sort();
+	} catch (error) {
+		if (error.code === "ENOENT") return [];
+		throw error;
+	}
+	const retired = await legacyRetiredSkills(library);
+	const skills = [];
+	for (const name of names) {
+		let text$1;
+		try {
+			text$1 = await readFile(join(directory, name, "SKILL.md"), "utf8");
+		} catch (error) {
+			if (error.code === "ENOENT") continue;
+			throw error;
+		}
+		const parsed = parseSkillFile$1(text$1, join(directory, name, "SKILL.md"));
+		if (parsed.name !== name) throw new Error(`task-runtime: legacy skill ${name} declares ${parsed.name}`);
+		skills.push({
+			name,
+			version: 1,
+			digest: sha256Hex(text$1),
+			contentDigest: sha256Hex(text$1),
+			contractDigest: null,
+			status: retired.has(name) ? "retired" : "temporary"
+		});
+	}
+	return skills;
+}
+async function legacyTemplatesOf(library) {
+	let files;
+	try {
+		files = (await readdir(library.taskTemplatesRoot)).filter((file) => file.endsWith(".json")).sort();
+	} catch (error) {
+		if (error.code === "ENOENT") return [];
+		throw error;
+	}
+	const retired = await legacyRetiredTemplates(library);
+	const entries = [];
+	for (const file of files) {
+		const template = parseTaskTemplate(JSON.parse(await readFile(join(library.taskTemplatesRoot, file), "utf8")));
+		const ref = {
+			id: template.id,
+			version: template.version,
+			digest: taskTemplateDigest(template)
+		};
+		entries.push({
+			templateRef: ref,
+			status: retired.has(`${ref.id}@${ref.version}`) ? "retired" : "temporary",
+			skills: []
+		});
+	}
+	return entries;
+}
+async function legacyRetiredSkills(library) {
+	const names = /* @__PURE__ */ new Set();
+	for (const item of await legacyIndex(library, "skills")) if (item.status === "retired" && typeof item.name === "string") names.add(item.name);
+	return names;
+}
+async function legacyRetiredTemplates(library) {
+	const keys = /* @__PURE__ */ new Set();
+	for (const item of await legacyIndex(library, "tasks")) {
+		if (item.status !== "retired") continue;
+		const ref = item.templateRef;
+		if (typeof ref?.id === "string" && typeof ref.version === "number") keys.add(`${ref.id}@${ref.version}`);
+	}
+	return keys;
+}
+async function legacyIndex(library, key) {
+	try {
+		const entries = JSON.parse(await readFile(join(library.root, "index.json"), "utf8"))[key];
+		return Array.isArray(entries) ? entries : [];
+	} catch (error) {
+		if (error.code === "ENOENT") return [];
+		throw error;
+	}
+}
+/** The legacy capability rows, derived by reading the flat layout — the same rule the old index applied, with no write. */
+async function legacyCapabilityRows(library) {
+	const retired = await legacyRetiredSkills(library);
+	const skills = await legacySkillsOf(library);
+	return {
+		"execute-task": {
+			skills: ["task-coordination"],
+			tools: [
+				"filesystem",
+				"search",
+				"bash",
+				"jobs",
+				"skill"
+			]
+		},
+		...Object.fromEntries(skills.filter((skill) => !retired.has(skill.name)).map((skill) => [`method:${skill.name}`, {
+			skills: [skill.name],
+			tools: ["skill"]
+		}]))
+	};
+}
+/** Whether one run is a comparison view: an explicit trial, or a run frozen on a revision the pointer moved past. */
+async function comparisonRunFor(self, sessionId) {
+	const binding = self.sessions.get(sessionId);
+	const graph = await self.context.graphs.graphForSession(SessionId(sessionId));
+	const snapshot = await self.context.task.openStore(binding?.storeId ?? rootTaskStoreId(graph.rootSessionId)).catch((error) => {
+		if (error instanceof Error && /does not exist/.test(error.message)) return void 0;
+		throw error;
+	});
+	const run = binding === void 0 ? snapshot?.runs.filter((item) => item.sessionId === sessionId).at(-1) : snapshot?.runs.find((item) => item.runId === binding.runId);
+	if (run === void 0 || run.environmentRevisionId === void 0) return void 0;
+	if (run.trialCandidateRef !== void 0) return run;
+	return (await environmentLibraryForRoot(self, graph.rootSessionId)).revision?.manifest.revisionId === run.environmentRevisionId ? void 0 : run;
+}
+/** The graph's root session id, or the caller's own when the session belongs to no graph. */
+async function rootSessionIdFor(self, sessionId) {
+	return (await self.context.graphs.graphForSession(SessionId(sessionId))).rootSessionId;
+}
+/** One caller's authority to edit a library: the graph root itself, or a delegated supervisor. */
+async function isDelegatedSupervisor(self, sessionId) {
+	const caller = await self.softService("singularityContext")?.resolveCaller(sessionId);
+	return caller?.kind === "coordinator" && caller.role === "supervisor";
+}
+/** Open a draft on the active revision of one graph library, reusing this caller's newest one when it exists. */
+async function createDraft(self, sessionId, request = {}) {
+	const roots = libraryRootsForRoot(self, (await activeEnvironmentLibrary(self, sessionId)).id);
+	if (request.reuse !== false && request.basedOn === void 0) {
+		const existing = await latestDraftFor(roots, sessionId);
+		if (existing !== void 0) return existing;
+	}
+	return await createEnvironmentDraft(roots, {
+		...request.basedOn === void 0 ? {} : { basedOn: request.basedOn },
+		...request.purpose === void 0 ? {} : { purpose: request.purpose },
+		actor: sessionId
+	});
+}
+/** Stage one edit into one draft of one graph library. */
+async function stageDraftEdit(self, sessionId, draftId, edit) {
+	const library = await activeEnvironmentLibrary(self, sessionId);
+	const roots = libraryRootsForRoot(self, library.id);
+	if (edit.kind === "capability") await assertCandidateRowUsable(self, sessionId, library, draftId, edit.edit);
+	return await stageEnvironmentEdit(roots, draftId, edit);
+}
+/**
+* The one check a capability-row edit must pass before it lands: the row's
+* declared providers must be usable against the table the draft will freeze into,
+* read from the candidate's own skill roots. This is the same guarantee the old
+* online row replacement gave, moved to the candidate revision — the row becomes
+* effective through a publish, never through a process-local table write.
+*/
+async function assertCandidateRowUsable(self, sessionId, library, draftId, edit) {
+	const draft = await readEnvironmentDraft(libraryRootsForRoot(self, library.id), draftId);
+	if (draft === void 0) throw new Error(`environment: draft "${draftId}" is absent; a discarded or frozen draft takes no edits`);
+	if (edit.entry === null) return;
+	const table = {
+		...revisionCapabilityRows(draft.manifest),
+		[edit.name]: edit.entry
+	};
+	const mcpRegistry = {
+		...self.config.mcpServers,
+		...draft.manifest.capabilities.mcpServers
+	};
+	for (const [name, template] of Object.entries(edit.mcpServers ?? {})) if (template === null) delete mcpRegistry[name];
+	else mcpRegistry[name] = template;
+	const cwd = await self.envPathForSession(sessionId);
+	const refusals = providerRefusals(await self.providerPrecheck([edit.name], {
+		...cwd === void 0 ? {} : { cwd },
+		extraRoots: [join(draft.root, "skills"), library.skillRoot]
+	}, table, mcpRegistry, sessionId), [edit.name]);
+	if (refusals.length === 0) return;
+	throw new Error(`task-runtime: capability "${edit.name}" was not staged — the row grants providers that are not usable:\n` + refusals.map((line) => `- ${line}`).join("\n"));
+}
+/** Remove one draft of one graph library; the namesake of the evolution ledger's `discardDraft`. */
+async function removeEnvironmentDraft(self, sessionId, draftId) {
+	await discardEnvironmentDraft(libraryRootsForRoot(self, (await activeEnvironmentLibrary(self, sessionId)).id), draftId);
+}
+/** Freeze one draft into a candidate revision without moving the pointer: the entry an explicit trial binds. */
+async function freezeDraft(self, sessionId, draftId) {
+	return await freezeEnvironmentDraft(libraryRootsForRoot(self, (await activeEnvironmentLibrary(self, sessionId)).id), draftId);
+}
+/** Switch the effective pointer to one draft or frozen revision. */
+async function publishRevision(self, sessionId, request) {
+	return await publishEnvironmentRevision(environmentCommitHost(self, libraryRootsForRoot(self, (await activeEnvironmentLibrary(self, sessionId)).id)), request);
+}
+/** Switch the effective pointer back to a frozen revision. */
+async function rollbackRevision(self, sessionId, request) {
+	return await rollbackEnvironmentRevision(environmentCommitHost(self, libraryRootsForRoot(self, (await activeEnvironmentLibrary(self, sessionId)).id)), request);
+}
+/** Settle any pointer intent a killed process left open. */
+async function reconcilePointer(self, sessionId) {
+	return await reconcileEnvironmentPointer(environmentCommitHost(self, await libraryRootsForSession(self, sessionId)));
+}
+/** The in-flight pointer switch of one library, or `null`; the single concurrency exclusion point. */
+async function openPointerIntentFor(self, sessionId) {
+	return await openPointerIntent(await libraryRootsForSession(self, sessionId));
+}
+async function listRevisionsImpl(self, sessionId) {
+	return await listRevisions(await libraryRootsForSession(self, sessionId));
+}
+/** The one write tail of a library, for callers that stage several edits as one unit. */
+async function serializeEnvironmentFor(self, rootSessionId, work) {
+	return await serialEnvironment(libraryRootsForRoot(self, rootSessionId), work);
+}
+/**
+* Stage one library write into the caller's draft. The change is recorded against
+* the draft's prospective candidate revision; nothing is in effect until a publish
+* switches the pointer, and the answer says exactly that.
+*/
+async function writeLibraryDraft(self, sessionId, input) {
+	const draft = await createDraft(self, sessionId, {});
+	const edit = input.kind === "task" ? {
+		kind: "task",
+		edit: {
+			template: input.template,
+			actor: sessionId
+		}
+	} : {
+		kind: "skill",
+		edit: {
+			name: input.name,
+			skillMd: input.skillMd,
+			...input.expectedVersion === void 0 ? {} : { expectedVersion: input.expectedVersion },
+			actor: sessionId
+		}
+	};
+	const staged = await stageDraftEdit(self, sessionId, draft.draftId, edit);
+	const what = input.kind === "task" ? `task template ${input.template.id}@${input.template.version}` : `Skill ${input.name}`;
+	return {
+		libraryId: staged.libraryId,
+		draftId: staged.draftId,
+		revisionId: staged.manifest.revisionId,
+		applied: "draft",
+		message: `${what} is staged in draft ${staged.draftId} as the prospective revision ${staged.manifest.revisionId}; the active revision is unchanged until it is published`
+	};
+}
+/** Stage one retention review into the caller's draft, with the same draft semantics as a library write. */
+async function reviewLibraryDraft(self, sessionId, review) {
+	const staged = await stageDraftEdit(self, sessionId, (await createDraft(self, sessionId, {})).draftId, {
+		kind: "review",
+		review: {
+			...review,
+			actor: sessionId
+		}
+	});
+	return {
+		libraryId: staged.libraryId,
+		draftId: staged.draftId,
+		revisionId: staged.manifest.revisionId,
+		applied: "draft",
+		message: `${review.kind} ${review.name}@${review.version} → ${review.status} is staged in draft ${staged.draftId} as the prospective revision ${staged.manifest.revisionId}; the active revision is unchanged until it is published`
+	};
+}
+
+//#endregion
 //#region src/orchestration/settlement.ts
 /**
 * The review dimensions and the effort counters for one terminal record,
@@ -6675,6 +8132,18 @@ async function recordTerminalReview(env, storeId, taskId, outcome, options = {})
 		...enrichment.dimensions === void 0 ? {} : { dimensions: enrichment.dimensions },
 		...enrichment.metrics === void 0 ? {} : { metrics: enrichment.metrics }
 	}, env.actor);
+	/**
+	* The run's execution receipt is sealed before the fact is handed over: a
+	* supervisor woken by this settlement reads a Run whose receipt already
+	* exists. A seal that cannot complete is warned, queued for recovery and
+	* never turned into a failed settlement — the receipt is evidence, not a step.
+	*/
+	if (options.run !== void 0 && env.sealReceipt !== void 0) try {
+		await env.sealReceipt(storeId, taskId, options.run.runId);
+	} catch (error) {
+		const warn$1 = env.warn;
+		warn$1?.(`the execution receipt of run "${options.run.runId}" could not be sealed (${message(error)}); the settlement stands and the receipt stays queued`);
+	}
 	/**
 	* The record is durable: the deployment may now be told about it. Handing the
 	* fact over is not waiting for what it does with it (A5) — a listener runs the
@@ -7377,9 +8846,9 @@ function recoveryAttemptForRequest(snapshot, request) {
 	* The key is bound to the *request*, not to the binding it produced: a
 	* request that names no reuse has its citations derived from the store (a
 	*/
-	const digest$1 = stored.requestDigest ?? recoveryAttemptDigest(stored);
+	const digest = stored.requestDigest ?? recoveryAttemptDigest(stored);
 	const wanted = requestAttemptDigest(request);
-	if (digest$1 !== wanted) throw new Error(`task-runtime: request key "${request.requestKey}" already names a recovery attempt of "${request.sourceTaskId}" (run "${existing.runId}", session "${existing.sessionId}", request ${digest$1}); this request's content is ${wanted} — one key names one request, and a different request is a different key`);
+	if (digest !== wanted) throw new Error(`task-runtime: request key "${request.requestKey}" already names a recovery attempt of "${request.sourceTaskId}" (run "${existing.runId}", session "${existing.sessionId}", request ${digest}); this request's content is ${wanted} — one key names one request, and a different request is a different key`);
 	return {
 		attempt: "existing",
 		storeId: snapshot.id,
@@ -7482,6 +8951,7 @@ async function startRecoveryAttempt(self, input) {
 		claimed = self.workspaces.ownerOf(workspacePath);
 	}
 	let binding;
+	const revision = (input.sourceRun === void 0 ? void 0 : await self.environmentRevisionForRun(input.sourceRun)) ?? await activeRevisionOrUndefined(self, rootSessionId);
 	try {
 		binding = await bindRunProviders({
 			mcpRegistry: self.config.mcpServers,
@@ -7490,7 +8960,8 @@ async function startRecoveryAttempt(self, input) {
 			manifest,
 			providers: input.precheck,
 			table: await self.capabilitiesForSession(rootSessionId),
-			root: self.config.runBindingRoot
+			root: self.config.runBindingRoot,
+			...revision === void 0 ? {} : { revision }
 		});
 		const run = {
 			runId,
@@ -7498,6 +8969,8 @@ async function startRecoveryAttempt(self, input) {
 			sessionId,
 			capabilitySnapshot: capabilitySnapshot(manifest),
 			taskTemplatesRoot: input.sourceRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(rootSessionId),
+			...revision === void 0 ? {} : { environmentRevisionId: revision.manifest.revisionId },
+			...input.sourceRun?.trialCandidateRef === void 0 ? {} : { trialCandidateRef: input.sourceRun.trialCandidateRef },
 			...preset === void 0 ? {} : { agentPreset: preset },
 			...binding === void 0 ? {} : { providerBinding: binding },
 			executionPhase: "active",
@@ -8491,6 +9964,8 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 		sessionId,
 		parentRunId: parentRun.runId,
 		...env.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: env.taskTemplatesRoot },
+		...parentRun.environmentRevisionId === void 0 ? {} : { environmentRevisionId: parentRun.environmentRevisionId },
+		...parentRun.trialCandidateRef === void 0 ? {} : { trialCandidateRef: parentRun.trialCandidateRef },
 		capabilitySnapshot: capabilitySnapshot(manifest),
 		...placement === void 0 ? {} : { placement },
 		...!env.isolatedChildren && (env.maxActiveWorkers ?? 1) > 1 ? { sharedWorkspace: true } : {},
@@ -8521,7 +9996,9 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 			runId: run.runId,
 			manifest,
 			...providers === void 0 ? {} : { providers },
-			...env.runBindingRoot === void 0 ? {} : { root: env.runBindingRoot }
+			...env.runBindingRoot === void 0 ? {} : { root: env.runBindingRoot },
+			...env.environmentRevision === void 0 ? {} : { revision: env.environmentRevision },
+			...env.trialCandidateRef === void 0 ? {} : { trialCandidateRef: env.trialCandidateRef }
 		});
 	} catch (error) {
 		const reason = `content binding failed: ${message(error)}`;
@@ -8966,6 +10443,8 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 		...init.championRunId === void 0 ? {} : { parentRunId: init.championRunId },
 		capabilitySnapshot: capabilitySnapshot(init.manifest),
 		...init.taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot: init.taskTemplatesRoot },
+		...init.revision === void 0 ? {} : { environmentRevisionId: init.environmentRevisionId ?? init.revision.manifest.revisionId },
+		...init.trialCandidateRef === void 0 ? {} : { trialCandidateRef: init.trialCandidateRef },
 		...init.agentPreset === void 0 ? {} : { agentPreset: init.agentPreset },
 		executionPhase: init.spawn ? "active" : "submitted",
 		...birthSubmission === void 0 ? {} : { submission: birthSubmission },
@@ -8995,7 +10474,9 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 			runId: run.runId,
 			manifest: init.manifest,
 			...init.providers === void 0 ? {} : { providers: init.providers },
-			...env.runBindingRoot === void 0 ? {} : { root: env.runBindingRoot }
+			...env.runBindingRoot === void 0 ? {} : { root: env.runBindingRoot },
+			...init.revision === void 0 ? {} : { revision: init.revision },
+			...init.trialCandidateRef === void 0 ? {} : { trialCandidateRef: init.trialCandidateRef }
 		});
 	} catch (error) {
 		const reason = `content binding failed: ${message(error)}`;
@@ -9102,14 +10583,14 @@ function statusOutcome(status) {
 */
 async function finishReplay(env, storeId, run, status) {
 	const snapshot = await env.task.snapshotIn(storeId);
-	const record = snapshot.reviews.find((item) => item.runId === run.runId);
+	const record$1 = snapshot.reviews.find((item) => item.runId === run.runId);
 	const evidenceId = snapshot.evidence.find((item) => item.taskRunId === run.runId)?.evidenceId;
 	return {
 		taskId: run.taskId,
 		runId: run.runId,
 		status,
-		...record?.durationMs === void 0 ? { durationMs: await runDurationMs(env, storeId, run) } : { durationMs: record.durationMs },
-		...record?.criteria === void 0 ? {} : { criteria: record.criteria.map((item) => ({ ...item })) },
+		...record$1?.durationMs === void 0 ? { durationMs: await runDurationMs(env, storeId, run) } : { durationMs: record$1.durationMs },
+		...record$1?.criteria === void 0 ? {} : { criteria: record$1.criteria.map((item) => ({ ...item })) },
 		...evidenceId === void 0 ? {} : { evidenceId }
 	};
 }
@@ -9142,7 +10623,8 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 		"spawn",
 		"workspace",
 		"agentOptions",
-		"signal"
+		"signal",
+		"trialCandidateRef"
 	]);
 	const unknown = Object.keys(options).filter((key) => !known.has(key));
 	if (unknown.length > 0) throw new Error(`task-runtime: replayTask does not accept options [${unknown.join(", ")}]`);
@@ -9150,8 +10632,16 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 	const champion = await self.context.task.taskIn(storeId, championTaskId);
 	if (champion.status !== "verified" && champion.status !== "failed") throw new Error(`task-runtime: champion task "${championTaskId}" is ${champion.status}; only a terminal (verified or failed) task can be replayed`);
 	const championRunId = champion.runIds[champion.runIds.length - 1];
-	const championRun = await self.context.task.runIn(storeId, championRunId);
-	let taskTemplatesRoot = options.overlay?.taskTemplatesRoot ?? championRun.taskTemplatesRoot ?? await self.taskTemplatesRootFor(callerSessionId);
+	await self.context.task.runIn(storeId, championRunId);
+	/**
+	* The immutable environment revision this replay binds: the candidate a
+	* caller explicitly trials when it names one, else the active revision. An
+	* overlay's own frozen library root still wins when a caller passes one.
+	*/
+	const environment = await environmentLibraryForSession(self, callerSessionId);
+	if (options.trialCandidateRef !== void 0 && environment.revision === void 0) throw new Error(`task-runtime: library "${environment.id}" holds no active revision to trial a candidate against`);
+	const revision = options.trialCandidateRef === void 0 ? environment.revision : await revisionForManifest(self, environment.id, options.trialCandidateRef);
+	let taskTemplatesRoot = options.overlay?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(callerSessionId);
 	const original = options.contract ?? {
 		objective: champion.objective,
 		acceptanceCriteria: champion.acceptanceCriteria,
@@ -9179,9 +10669,15 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 	* The same provider pre-check the ordinary decomposition runs (S1-C item 1),
 	* from the replay's checkout and under the overlay's own capability
 	*/
+	/**
+	* A trial's providers must be judged against the candidate's own bytes: the
+	* verdicts become the Run binding's content identity, and a revision that no
+	* longer holds what was judged is refused rather than silently re-read.
+	*/
+	const candidateRoots = revision !== void 0 && options.trialCandidateRef !== void 0 ? [revision.skillRoot] : [];
 	const precheck = await self.providerPrecheck(Object.keys(manifest.capabilities), {
 		...envPath === void 0 ? {} : { cwd: envPath },
-		extraRoots: (await self.skillViewForSession(callerSessionId, options.overlay?.extraSkillRoots)).extraRoots
+		extraRoots: (await self.skillViewForSession(callerSessionId, [...options.overlay?.extraSkillRoots ?? [], ...candidateRoots])).extraRoots
 	}, table, mcpRegistry, callerSessionId);
 	const refusals = providerRefusals(precheck, Object.keys(manifest.capabilities));
 	if (refusals.length > 0) throw new Error(`task-runtime: provider pre-check rejected replay of "${championTaskId}":\n- ${refusals.join("\n- ")}`);
@@ -9232,11 +10728,7 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 		contract,
 		...champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}
 	};
-	if (options.overlay?.taskTemplatesRoot === void 0) {
-		const frozenCatalog = join(self.config.runBindingRoot, "replay-libraries", task.taskId, "task-templates");
-		await snapshotTaskTemplates(taskTemplatesRoot, frozenCatalog);
-		taskTemplatesRoot = frozenCatalog;
-	}
+	if (options.overlay?.taskTemplatesRoot === void 0 && revision !== void 0 && self.sessionExecutionBindings.get(callerSessionId)?.taskTemplatesRoot === void 0) taskTemplatesRoot = revision.taskTemplatesRoot;
 	const spawn$1 = options.spawn !== false;
 	/**
 	* A replayed worker reads its context the way every task worker does (A2):
@@ -9268,6 +10760,11 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 				...options.overlay?.extraSkillRoots === void 0 ? {} : { skillRoots: [...options.overlay.extraSkillRoots] },
 				...options.agentOptions === void 0 ? {} : { agentOptions: { ...options.agentOptions } },
 				...taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot },
+				...revision === void 0 ? {} : {
+					revision,
+					environmentRevisionId: environment.revision?.manifest.revisionId ?? revision.manifest.revisionId
+				},
+				...options.trialCandidateRef === void 0 ? {} : { trialCandidateRef: options.trialCandidateRef },
 				spawn: spawn$1,
 				championRunId
 			}, {
@@ -9275,11 +10772,39 @@ async function replayTask(self, storeId, championTaskId, options, callerSessionI
 				advance: controller.signal
 			});
 			/**
+			* The receipt this replay sealed, read back rather than assumed: a consumer
+			* of the replay (an experiment side, a comparison) must be able to tell
+			* "sealed and complete" from "no receipt" before it reads any other fact.
+			*/
+			let receiptReport;
+			try {
+				const sealed = await self.sealRunReceipt(storeId, outcome.taskId, outcome.runId);
+				receiptReport = sealed.status === "sealed" || sealed.status === "already-sealed" ? {
+					status: "sealed",
+					digest: sealed.receipt.digest,
+					completeness: sealed.receipt.completeness.status,
+					missing: sealed.receipt.completeness.missing.map((entry) => entry.fact)
+				} : {
+					status: "absent",
+					reason: sealed.reason
+				};
+			} catch (error) {
+				self.warn(`store ${storeId}: the receipt of replay run "${outcome.runId}" could not be sealed (${message(error)})`);
+				receiptReport = {
+					status: "absent",
+					reason: message(error)
+				};
+			}
+			const withReceipt = {
+				...outcome,
+				receipt: receiptReport
+			};
+			/**
 			* A named workspace is what the outcome of this replay reports: the
 			* comparison report names the directory each side's run went through. An
 			*/
-			return named === void 0 ? outcome : {
-				...outcome,
+			return named === void 0 ? withReceipt : {
+				...withReceipt,
 				workspace: named
 			};
 		} finally {
@@ -9390,6 +10915,9 @@ function settlementParts(self, actor) {
 			runSettledFromRuntime(self, storeId, taskId, runId, status);
 		},
 		onTerminalReview: (fact) => self.notifyTerminalReview(fact),
+		sealReceipt: async (storeId, taskId, runId) => {
+			await self.sealReceiptBounded(storeId, taskId, runId);
+		},
 		gate: self.executionGate
 	};
 }
@@ -9742,8 +11270,19 @@ async function reconcileStore(self, storeId, rootSessionId) {
 	* The proposal pass comes last (T2/T3 §5–§6): a batch it admits is driven by
 	* the driver it starts, and the workspace question is already settled above,
 	*/
+	const unresolvedProposals = await self.reconcileProposals(storeId);
+	/**
+	* The receipt pass finishes the recovery: a process that died between a run's
+	* terminal record and its receipt makes that receipt up here, exactly once.
+	* Its own failures are reported, never raised — a settlement already happened.
+	*/
+	try {
+		await self.reconcileRunReceipts(storeId);
+	} catch (error) {
+		self.warn(`store ${storeId}: the receipt reconciliation pass failed (${message(error)})`);
+	}
 	return {
-		unresolvedProposals: await self.reconcileProposals(storeId),
+		unresolvedProposals,
 		questionDeliveries,
 		questionResumes
 	};
@@ -10103,16 +11642,19 @@ function graphAgentOptions(graph) {
 }
 
 //#endregion
-//#region src/service/env.ts
+//#region src/session-facts.ts
+/** The human-facing tools: calling one is a person's intervention, not the worker's own work. */
 const HUMAN_TOOLS = new Set([
 	"hitl_ask",
 	"hitl_approve",
 	"ask_user_question"
 ]);
+/** Whether one tool result reported a failure. */
 function toolResultFailed(data) {
 	if (data.error !== void 0) return true;
 	return data.message?.isError === true;
 }
+/** The `name` a `skill` tool call asked to load, when its arguments name one. */
 function skillNameFrom(rawArguments) {
 	try {
 		const parsed = JSON.parse(rawArguments);
@@ -10121,6 +11663,137 @@ function skillNameFrom(rawArguments) {
 		return;
 	}
 }
+/** One `request/header` event's calling configuration, as the identity it is. */
+function requestIdentityOf(event) {
+	const config = event.data.header?.config;
+	if (config === void 0 || typeof config.provider !== "string" || typeof config.model !== "string") return void 0;
+	return {
+		provider: config.provider,
+		model: config.model,
+		...typeof config.reasoningEffort === "string" ? { reasoningEffort: config.reasoningEffort } : {},
+		...typeof config.maxTokens === "number" ? { maxTokens: config.maxTokens } : {}
+	};
+}
+/** The text one `tool/result` carried, when it succeeded and held any. */
+function resultTextOf(event) {
+	if (toolResultFailed(event.data)) return void 0;
+	const text$1 = (event.data.message?.content ?? []).filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("");
+	return text$1.length === 0 ? void 0 : text$1;
+}
+/** The call id one `tool/result` answers, in either shape the log and older records use. */
+function answeredCallId(event) {
+	const message$1 = event.data.message;
+	return message$1?.toolCallId ?? message$1?.source?.callId;
+}
+/** The result event that answers one call, when the log holds one. */
+function resultFor(events, callId) {
+	return events.find((event) => event.type === "tool/result" && String(answeredCallId(event)) === callId);
+}
+/** Whether one `task_decompose` call is the one a committed batch records: same reference, same parameters, a successful result naming the batch. */
+function decompositionMatches(fact, wanted, names) {
+	let args;
+	try {
+		args = JSON.parse(fact.arguments);
+	} catch {
+		return false;
+	}
+	if (args.reason !== void 0 || args.children !== void 0) return false;
+	if (JSON.stringify(args.templateRef ?? null) !== JSON.stringify(wanted.templateRef ?? null)) return false;
+	const parameters = wanted.templateParameters ?? {};
+	if (JSON.stringify(args.templateParameters ?? {}) !== JSON.stringify(parameters)) return false;
+	if (fact.resultText === void 0) return false;
+	return names.some((name) => fact.resultText.includes(name));
+}
+/** The dedup key of one request identity: the four fields that make two requests the same call configuration. */
+function identityKey(identity) {
+	return JSON.stringify([
+		identity.provider,
+		identity.model,
+		identity.reasoningEffort ?? null,
+		identity.maxTokens ?? null
+	]);
+}
+/** Parse one session's events and token reading into the facts every reader consumes. One parse, one meaning. */
+function sessionFactsOf(events, tokens) {
+	const calls = /* @__PURE__ */ new Map();
+	const humanCallIds = [];
+	const approvalCallIds = /* @__PURE__ */ new Set();
+	const skillCalls = [];
+	const requestedSkills = /* @__PURE__ */ new Map();
+	const requestCounts = /* @__PURE__ */ new Map();
+	const decompositions = [];
+	let failures = 0;
+	let approvals = 0;
+	let compactions = 0;
+	for (const event of events) if (event.type === "user/message") {
+		const source = event.data.source;
+		if (source.kind === "task-skills" && Array.isArray(source.names)) {
+			for (const name of source.names) if (typeof name === "string") skillCalls.push(name);
+		}
+	} else if (event.type === "request/header") {
+		const identity = requestIdentityOf(event);
+		if (identity !== void 0) {
+			const key = identityKey(identity);
+			const prior = requestCounts.get(key);
+			requestCounts.set(key, {
+				identity,
+				count: (prior?.count ?? 0) + 1
+			});
+		}
+	} else if (event.type === "tool/call") {
+		const name = event.data.name;
+		if (typeof name !== "string") continue;
+		calls.set(name, (calls.get(name) ?? 0) + 1);
+		const callId = String(event.data.callId);
+		if (HUMAN_TOOLS.has(name)) humanCallIds.push(callId);
+		if (name === "skill") {
+			const skill = skillNameFrom(event.data.arguments);
+			if (skill !== void 0) requestedSkills.set(callId, skill);
+		}
+		if (name === "task_decompose") {
+			const result = resultFor(events, callId);
+			const text$1 = result === void 0 ? void 0 : resultTextOf(result);
+			decompositions.push({
+				callId,
+				arguments: String(event.data.arguments ?? ""),
+				...text$1 === void 0 ? {} : { resultText: text$1 }
+			});
+		}
+	} else if (event.type === "tool/result") {
+		if (toolResultFailed(event.data)) failures += 1;
+		else if (event.data.message !== void 0) {
+			const skill = requestedSkills.get(String(event.data.message.source.callId));
+			if (skill !== void 0) skillCalls.push(skill);
+		}
+	} else if (event.type === "approval/asked") {
+		approvals += 1;
+		if (typeof event.data.callId === "string") approvalCallIds.add(event.data.callId);
+	} else if (event.type === "compaction/start") compactions += 1;
+	const last = events.at(-1);
+	return {
+		...tokens === void 0 ? {} : { tokens },
+		toolCalls: {
+			calls: [...calls].map(([name, count]) => ({
+				name,
+				count
+			})).sort((left, right) => left.name.localeCompare(right.name)),
+			failures
+		},
+		skillCalls,
+		humanInterventions: approvals + humanCallIds.filter((id) => !approvalCallIds.has(id)).length,
+		compactions,
+		modelRequests: [...requestCounts.values()].map((entry) => ({
+			identity: entry.identity,
+			count: entry.count
+		})),
+		decompositions,
+		logEvents: events.length,
+		...typeof last?.time === "number" ? { lastEventAt: new Date(last.time).toISOString() } : {}
+	};
+}
+
+//#endregion
+//#region src/service/env.ts
 function tokenUsageOf(value) {
 	if (typeof value !== "object" || value === null) return void 0;
 	const buckets = value;
@@ -10227,6 +11900,12 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 	};
 	const callerBinding = self.sessions.get(callerSessionId);
 	const callerRun = callerBinding === void 0 ? void 0 : await self.context.task.runIn(callerBinding.storeId, callerBinding.runId);
+	/**
+	* The environment revision every Run this env admits binds: the caller Run's
+	* own frozen version (a child inherits its parent's), falling back to the
+	* library's active revision for a session that holds no bound run yet.
+	*/
+	const environmentRevision = (callerRun === void 0 ? void 0 : await revisionForRun(self, callerRun)) ?? await activeRevisionOrUndefined(self, callerSessionId);
 	const taskTemplatesRoot = binding?.taskTemplatesRoot ?? callerRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(callerSessionId);
 	const skillView = await self.skillViewForSession(callerSessionId, replayOverlay?.extraSkillRoots);
 	return {
@@ -10271,6 +11950,8 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 		...workspacePath === void 0 ? {} : { workspacePath },
 		...named === void 0 ? {} : { workerCwd: named },
 		...taskTemplatesRoot === void 0 ? {} : { taskTemplatesRoot },
+		...environmentRevision === void 0 ? {} : { environmentRevision },
+		...callerRun?.trialCandidateRef === void 0 ? {} : { trialCandidateRef: callerRun.trialCandidateRef },
 		...binding?.agentOptions === void 0 ? {} : { agentOptions: binding.agentOptions },
 		writeDrainTimeoutMs: self.config.writeDrainTimeoutMs,
 		...self.config.rootBudget === void 0 ? {} : { rootBudget: { ...self.config.rootBudget } },
@@ -10396,6 +12077,9 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 		readLogTail: async (logRef) => runVerifier(self)?.logTail?.(logRef),
 		observeSession: async (sessionId) => observeSession(self, sessionId),
 		onTerminalReview: (fact) => self.notifyTerminalReview(fact),
+		sealReceipt: async (storeId, taskId, runId) => {
+			await self.sealReceiptBounded(storeId, taskId, runId);
+		},
 		onRunBound: (sessionId, binding$1) => {
 			self.sessions.set(sessionId, binding$1);
 			self.startedSessions.add(sessionId);
@@ -10439,51 +12123,18 @@ async function observeSession(self, sessionId) {
 	const tokens = sessionTokens(self, sessionId);
 	const events = await sessionEvents(self, sessionId);
 	if (tokens === void 0 && events === void 0) return void 0;
-	const calls = /* @__PURE__ */ new Map();
-	const humanCallIds = [];
-	const approvalCallIds = /* @__PURE__ */ new Set();
-	const skillCalls = [];
-	const requestedSkills = /* @__PURE__ */ new Map();
-	let failures = 0;
-	let approvals = 0;
-	let compactions = 0;
-	for (const event of events ?? []) if (event.type === "user/message") {
-		const source = event.data.source;
-		if (source.kind === "task-skills" && Array.isArray(source.names)) {
-			for (const name of source.names) if (typeof name === "string") skillCalls.push(name);
-		}
-	} else if (event.type === "tool/call") {
-		const name = event.data.name;
-		if (typeof name !== "string") continue;
-		calls.set(name, (calls.get(name) ?? 0) + 1);
-		if (HUMAN_TOOLS.has(name)) humanCallIds.push(String(event.data.callId));
-		if (name === "skill") {
-			const skill = skillNameFrom(event.data.arguments);
-			if (skill !== void 0) requestedSkills.set(String(event.data.callId), skill);
-		}
-	} else if (event.type === "tool/result") {
-		if (toolResultFailed(event.data)) failures += 1;
-		else if (event.data.message !== void 0) {
-			const skill = requestedSkills.get(String(event.data.message.source.callId));
-			if (skill !== void 0) skillCalls.push(skill);
-		}
-	} else if (event.type === "approval/asked") {
-		approvals += 1;
-		if (typeof event.data.callId === "string") approvalCallIds.add(event.data.callId);
-	} else if (event.type === "compaction/start") compactions += 1;
-	const tools = events === void 0 ? void 0 : {
-		calls: [...calls].map(([name, count]) => ({
-			name,
-			count
-		})).sort((left, right) => left.name.localeCompare(right.name)),
-		failures
-	};
+	const facts = sessionFactsOf(events ?? [], tokens);
 	return {
 		...tokens === void 0 ? {} : { tokens },
-		...tools === void 0 ? {} : { tools },
-		...events === void 0 ? {} : { skillCalls },
-		...events === void 0 ? {} : { humanInterventions: approvals + humanCallIds.filter((id) => !approvalCallIds.has(id)).length },
-		...events === void 0 ? {} : { compactions }
+		...events === void 0 ? {} : {
+			tools: {
+				calls: [...facts.toolCalls?.calls ?? []],
+				failures: facts.toolCalls?.failures ?? 0
+			},
+			skillCalls: [...facts.skillCalls ?? []],
+			humanInterventions: facts.humanInterventions ?? 0,
+			compactions: facts.compactions ?? 0
+		}
 	};
 }
 function sessionTokens(self, sessionId) {
@@ -10568,6 +12219,557 @@ function agentOrUndefined(self, sessionId) {
 }
 
 //#endregion
+//#region src/receipt.ts
+/** The execution subtree one run froze: itself first, then every descendant, in store order. */
+function executionSubtree(snapshot, runId) {
+	const found = new Set([runId]);
+	for (;;) {
+		const size = found.size;
+		for (const run of snapshot.runs) if (run.parentRunId !== void 0 && found.has(run.parentRunId)) found.add(run.runId);
+		if (found.size === size) break;
+	}
+	return snapshot.runs.filter((run) => found.has(run.runId)).map((run) => run.runId);
+}
+/** One run's model use, from the facts its session log yielded. */
+function modelUseOf(run, facts) {
+	const base = {
+		runId: run.runId,
+		...run.sessionId === void 0 ? {} : { sessionId: run.sessionId }
+	};
+	if (run.submission?.origin === "runtime") return {
+		...base,
+		status: "no-worker",
+		requests: [],
+		logEvents: 0
+	};
+	if (facts === void 0 || facts.logEvents === void 0) return {
+		...base,
+		status: "unavailable",
+		requests: [],
+		logEvents: 0
+	};
+	return {
+		...base,
+		status: "observed",
+		requests: facts.modelRequests ?? [],
+		logEvents: facts.logEvents
+	};
+}
+/** One run's skill consumption: what its binding granted, and what its log shows being loaded. */
+function skillUseOf(run, facts) {
+	const bound = (run.providerBinding?.skills ?? []).map((skill) => ({
+		name: skill.name,
+		role: skill.role,
+		contentDigest: skill.contentDigest,
+		contractDigest: skill.contractDigest
+	}));
+	const loaded = [...new Set(facts?.skillCalls ?? [])];
+	const granted = new Set(bound.map((skill) => skill.name));
+	return {
+		runId: run.runId,
+		bound,
+		loaded,
+		loadedOutsideGrant: loaded.filter((name) => !granted.has(name))
+	};
+}
+/**
+* Every consumed task-template batch of the sealed subtree, with the session
+* observation that the batch's own call was really made: a batch admitted from a
+* template must be able to show the call that asked for it.
+*/
+function templateUseOf(snapshot, run, facts) {
+	const entries = [];
+	for (const batch of run.batches ?? []) {
+		const proposal = snapshot.proposals?.byId[batch.proposalId];
+		if (proposal === void 0 || proposal.kind === "root") continue;
+		const identity = proposal.identity;
+		if (identity.templateRef === void 0) continue;
+		const observation = facts === void 0 || facts.decompositions === void 0 ? "unavailable" : facts.decompositions.some((fact) => decompositionMatches(fact, {
+			templateRef: identity.templateRef,
+			templateParameters: identity.templateParameters ?? {}
+		}, [batch.batchId, batch.proposalId])) ? "observed" : "not-observed";
+		entries.push({
+			runId: run.runId,
+			proposalId: batch.proposalId,
+			batchId: batch.batchId,
+			templateRef: identity.templateRef,
+			templateParameters: identity.templateParameters ?? {},
+			childTaskIds: [...batch.memberTaskIds],
+			observation
+		});
+	}
+	return entries;
+}
+/** The submitting worker's own account, contrasted with the references the store backs. */
+function claimsOf(run, evidenceRefs) {
+	if (run.submission === void 0) return null;
+	const backed = new Set(evidenceRefs);
+	const submitted = [...run.submission.evidenceRefs];
+	return {
+		submitted,
+		backed: submitted.filter((ref) => backed.has(ref)),
+		unbacked: submitted.filter((ref) => !backed.has(ref))
+	};
+}
+/** Build one Run's receipt from the store's records and the session facts handed in. */
+function buildExecutionReceipt(input) {
+	const { snapshot, run } = input;
+	if (!TERMINAL_RUN_STATUSES.has(run.status)) return {
+		status: "refused",
+		reason: `run "${run.runId}" is ${run.status}; only a terminal run is sealed`
+	};
+	const task = snapshot.tasks.find((item) => item.taskId === run.taskId);
+	if (task === void 0) return {
+		status: "refused",
+		reason: `run "${run.runId}" names unknown task "${run.taskId}"`
+	};
+	const subtree = executionSubtree(snapshot, run.runId);
+	const members = subtree.flatMap((runId) => snapshot.runs.filter((candidate) => candidate.runId === runId));
+	const factsOf = (runId) => input.sessionFacts.get(runId);
+	const review = snapshot.reviews.find((item) => item.runId === run.runId);
+	const recordedCriteria = review?.criteria ?? [];
+	const reviewRef = review === void 0 ? null : `${review.taskId}#${run.runId}`;
+	const missing = [];
+	const modelUse = members.map((member) => modelUseOf(member, factsOf(member.runId)));
+	const unreadable = members.filter((member) => modelUse.find((entry) => entry.runId === member.runId)?.status === "unavailable");
+	if (unreadable.length > 0) missing.push({
+		fact: "session-log",
+		detail: `no persisted session log could be read for run${unreadable.length > 1 ? "s" : ""} ${unreadable.map((member) => member.runId).join(", ")}`
+	});
+	const withoutRequests = modelUse.filter((entry) => entry.status !== "observed" || entry.requests.length === 0);
+	if (withoutRequests.length > 0) {
+		const readable = withoutRequests.filter((entry) => entry.status === "observed").map((entry) => entry.runId);
+		const unreadable$1 = withoutRequests.filter((entry) => entry.status !== "observed").map((entry) => entry.runId);
+		const parts = [];
+		if (readable.length > 0) parts.push(`the persisted log of run${readable.length > 1 ? "s" : ""} ${readable.join(", ")} records no request header`);
+		if (unreadable$1.length > 0) parts.push(`no request identity could be read for run${unreadable$1.length > 1 ? "s" : ""} ${unreadable$1.join(", ")}`);
+		missing.push({
+			fact: "model-requests",
+			detail: parts.join("; ")
+		});
+	}
+	const templates = members.flatMap((member) => templateUseOf(snapshot, member, factsOf(member.runId)));
+	const unavailable = templates.filter((entry) => entry.observation === "unavailable");
+	if (unavailable.length > 0) missing.push({
+		fact: "template-consumption",
+		detail: `no persisted session log could be read to confirm ${unavailable.length} template consumption${unavailable.length > 1 ? "s" : ""}`
+	});
+	const stillRunning = members.filter((member) => !TERMINAL_RUN_STATUSES.has(member.status));
+	if (stillRunning.length > 0) missing.push({
+		fact: "subtree-usage",
+		detail: `run${stillRunning.length > 1 ? "s" : ""} ${stillRunning.map((member) => member.runId).join(", ")} of the sealed subtree had not reached a terminal state, so its usage is unknown`
+	});
+	if (input.drain === "unconfirmed") missing.push({
+		fact: "drain",
+		detail: "the run's managed work was not confirmed stopped before sealing"
+	});
+	if (reviewRef === null) missing.push({
+		fact: "review",
+		detail: `the store holds no terminal review for run "${run.runId}"`
+	});
+	const digestOf = (value) => sha256Hex(canonicalize(value));
+	const receipt = {
+		formatVersion: 1,
+		runId: run.runId,
+		taskId: run.taskId,
+		storeId: input.storeId,
+		...run.sessionId === void 0 ? {} : { sessionId: run.sessionId },
+		...run.parentRunId === void 0 ? {} : { parentRunId: run.parentRunId },
+		outcome: run.status,
+		contract: {
+			contractDigest: task.contractDigest ?? null,
+			criteriaDigest: criteriaDigestOf(task.acceptanceCriteria),
+			requestedCapabilities: [...task.requestedCapabilities]
+		},
+		environment: {
+			revision: input.revision,
+			bindingDigest: run.providerBinding === void 0 ? null : digestOf(run.providerBinding),
+			providerRegistryRevision: run.providerBinding?.registryRevision ?? null,
+			templatesRoot: run.taskTemplatesRoot ?? null,
+			preset: run.agentPreset ?? null
+		},
+		input: {
+			workspacePath: run.placement?.workspacePath ?? null,
+			snapshotPath: run.placement?.inputSnapshotPath ?? null,
+			snapshotDigest: run.placement?.inputSnapshotDigest ?? null
+		},
+		review: {
+			reviewRef,
+			criteria: recordedCriteria.map((item) => ({ ...item })),
+			criteriaDigest: criteriaDigestOf(recordedCriteria),
+			evidenceRefs: [...review?.evidenceRefs ?? []],
+			anomalies: [...review?.anomalies ?? []],
+			claims: claimsOf(run, review?.evidenceRefs ?? [])
+		},
+		modelUse,
+		skills: members.map((member) => skillUseOf(member, factsOf(member.runId))),
+		templates,
+		subtree: [...subtree],
+		drain: input.drain,
+		completeness: {
+			status: "complete",
+			missing: []
+		},
+		sealedAt: input.sealedAt,
+		completeness: {
+			status: missing.length === 0 ? "complete" : "incomplete",
+			missing
+		},
+		digest: ""
+	};
+	return {
+		status: "built",
+		receipt: {
+			...receipt,
+			digest: executionReceiptDigest(receipt)
+		}
+	};
+}
+/**
+* Aggregate a sealed subtree's usage from the store's review metrics — never by
+* walking `parentRunId` now: the members are the ones the receipt froze, so a
+* later replay cannot be counted into a run that had already settled.
+*/
+function executionUsage(snapshot, receipt) {
+	const members = receipt.subtree.flatMap((runId) => snapshot.runs.filter((run) => run.runId === runId));
+	const incompleteRuns = [];
+	let calls = 0;
+	let failures = 0;
+	let completeCalls = true;
+	let completeTokens = true;
+	const tokens = {
+		uncachedInputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0
+	};
+	for (const run of members) {
+		const record$1 = snapshot.reviews.find((item) => item.runId === run.runId && item.taskId === run.taskId);
+		const terminal = TERMINAL_RUN_STATUSES.has(run.status);
+		const counters = record$1?.metrics?.toolCalls;
+		if (!terminal || counters === void 0 || !Number.isSafeInteger(counters.calls) || counters.calls < 0 || !Number.isSafeInteger(counters.failures) || counters.failures < 0) {
+			completeCalls = false;
+			if (!incompleteRuns.includes(run.runId)) incompleteRuns.push(run.runId);
+		} else {
+			calls += counters.calls;
+			failures += counters.failures;
+		}
+		const usage = record$1?.metrics?.tokens;
+		if (!terminal || usage === void 0 || Object.values(usage).some((value) => !Number.isSafeInteger(value) || value < 0)) {
+			completeTokens = false;
+			if (!incompleteRuns.includes(run.runId)) incompleteRuns.push(run.runId);
+		} else for (const key of Object.keys(tokens)) tokens[key] += usage[key];
+	}
+	const runIds = members.map((run) => run.runId);
+	if (!Number.isSafeInteger(calls) || !Number.isSafeInteger(failures)) return {
+		status: "unknown",
+		reason: "the sealed subtree tool-call counters exceed safe integer range",
+		runIds,
+		incompleteRuns
+	};
+	if (!completeCalls && !completeTokens) return {
+		status: "unknown",
+		reason: `run${incompleteRuns.length > 1 ? "s" : ""} ${incompleteRuns.join(", ")} in the sealed subtree carr${incompleteRuns.length > 1 ? "y" : "ies"} incomplete token and tool-call counters`,
+		runIds,
+		incompleteRuns
+	};
+	return {
+		status: "reported",
+		runIds,
+		...completeTokens ? { tokens } : {},
+		...completeCalls ? { toolCalls: {
+			calls,
+			failures
+		} } : {},
+		incompleteRuns
+	};
+}
+/** Refuse a receipt that cannot establish the facts a consumer needs, naming them. */
+function requireReceiptFacts(receipt, facts, where) {
+	const absent = facts.filter((fact) => receipt.completeness.missing.some((entry) => entry.fact === fact));
+	if (absent.length === 0) return;
+	const details = receipt.completeness.missing.filter((entry) => absent.includes(entry.fact));
+	throw new Error(`${where}: the execution receipt of run "${receipt.runId}" is incomplete — it cannot establish ${absent.join(", ")} (${details.map((entry) => entry.detail).join("; ")}); a fact that was never established is never assumed`);
+}
+
+//#endregion
+//#region src/service/receipts.ts
+/** The actor every receipt is written under; no caller may write one. */
+const RECEIPT_ACTOR = "task-runtime:receipt";
+/** How long the sealer waits for a session log to pass a run's terminal boundary. */
+const RECEIPT_PERSIST_WAIT_MS = 2e3;
+/** How often the sealer re-reads the log while it waits. */
+const RECEIPT_PERSIST_POLL_MS = 50;
+/**
+* How long the sealer's own drain may take. A receipt is evidence, not a step of
+* a settlement: the settlement's callers have already drained, so this window is
+* only meant to catch the tail of a writer that is still finishing, and an
+* unconfirmed result becomes the receipt's recorded `drain` fact rather than a
+* settlement that waits out the full write-drain window.
+*/
+const RECEIPT_DRAIN_TIMEOUT_MS = 2e3;
+function emptyReport() {
+	return {
+		sealed: [],
+		alreadySealed: 0,
+		deferred: [],
+		unsupported: []
+	};
+}
+function record(report, runId, status) {
+	if (status.status === "sealed") report.sealed.push(runId);
+	else if (status.status === "already-sealed") report.alreadySealed += 1;
+	else if (status.status === "deferred") report.deferred.push({
+		runId,
+		reason: status.reason
+	});
+	else if (status.status === "unsupported") report.unsupported.push({
+		runId,
+		reason: status.reason
+	});
+}
+/** Whether one run is the sealed run or a descendant of it, by `parentRunId`. */
+function atOrUnder(snapshot, root, candidate) {
+	const parentOf = new Map(snapshot.runs.map((run) => [run.runId, run.parentRunId]));
+	let current = candidate;
+	const seen = /* @__PURE__ */ new Set();
+	while (current !== void 0 && !seen.has(current)) {
+		if (current === root) return true;
+		seen.add(current);
+		current = parentOf.get(current);
+	}
+	return false;
+}
+/**
+* Seal one Run's receipt. Its preconditions are the store's own terminal status,
+* the drain conclusion, and a persisted session log that has reached the run's
+* terminal boundary; when the last is not there yet the sealer waits inside a
+* bounded window before it records the fact as missing.
+*/
+async function sealRunReceipt(self, storeId, taskId, runId) {
+	return await serialSeal(self, storeId, () => sealOnce(self, storeId, taskId, runId));
+}
+/** Run one sealing attempt on the store's own tail. */
+async function serialSeal(self, storeId, work) {
+	const pending = (self.receiptSealTails.get(storeId) ?? Promise.resolve()).catch(() => {}).then(work);
+	self.receiptSealTails.set(storeId, pending.then(() => {}, () => {}));
+	return await pending;
+}
+/** One sealing attempt, without the store's serialization. */
+async function sealOnce(self, storeId, taskId, runId) {
+	const snapshot = await self.context.task.snapshotIn(storeId);
+	const run = snapshot.runs.find((candidate) => candidate.runId === runId);
+	if (run === void 0) return {
+		status: "deferred",
+		reason: `run "${runId}" is absent from store "${storeId}"`
+	};
+	if (run.taskId !== taskId) return {
+		status: "deferred",
+		reason: `run "${runId}" belongs to task "${run.taskId}", not "${taskId}"`
+	};
+	if (!TERMINAL_RUN_STATUSES.has(run.status)) return {
+		status: "not-terminal",
+		reason: `run "${runId}" is ${run.status}`
+	};
+	const existing = snapshot.receipts?.find((receipt) => receipt.runId === runId);
+	if (existing !== void 0) return {
+		status: "already-sealed",
+		receipt: existing
+	};
+	if (run.environmentRevisionId === void 0) return {
+		status: "unsupported",
+		reason: `run "${runId}" is an old-protocol run with no environment revision; no receipt is sealed for it`
+	};
+	const revision = await self.environmentRevisionForRun(run);
+	if (revision === void 0) return {
+		status: "unsupported",
+		reason: `run "${runId}" binds revision "${run.environmentRevisionId}", which the library no longer holds`
+	};
+	const drain = await drainForSealing(self, run.sessionId);
+	const built = buildExecutionReceipt({
+		storeId,
+		snapshot,
+		run,
+		drain,
+		sessionFacts: await gatherSessionFacts(self, snapshot, runId, drain),
+		revision: {
+			revisionId: revision.manifest.revisionId,
+			digest: revision.manifest.contentDigest
+		},
+		sealedAt: (/* @__PURE__ */ new Date()).toISOString()
+	});
+	if (built.status === "refused") return {
+		status: "deferred",
+		reason: built.reason
+	};
+	await self.context.task.recordReceiptIn(storeId, built.receipt, RECEIPT_ACTOR);
+	return {
+		status: "sealed",
+		receipt: built.receipt
+	};
+}
+/** The drain conclusion for one session: the in-process drain, or the reconcile pass when the session is gone. */
+async function drainForSealing(self, sessionId) {
+	const agent = self.agentOrUndefined(sessionId);
+	if (self.startedSessions.has(sessionId) && agent !== void 0) try {
+		return (await drainSession(self.executionGate, sessionId, {
+			timeoutMs: Math.min(self.config.writeDrainTimeoutMs, RECEIPT_DRAIN_TIMEOUT_MS),
+			jobs: self.softService("jobs"),
+			agent
+		})).confirmed ? "in-process" : "unconfirmed";
+	} catch (error) {
+		self.warn(`session ${sessionId}: the write drain before sealing failed (${message(error)})`);
+		return "unconfirmed";
+	}
+	try {
+		await self.reconcileSessionJobs(sessionId);
+		return "reconciled";
+	} catch (error) {
+		self.warn(`session ${sessionId}: the adopted-work reconcile before sealing failed (${message(error)})`);
+		return "unconfirmed";
+	}
+}
+/**
+* Read the session facts of every run of one sealed subtree.
+*
+* A confirmed drain means the writer stopped, so the log is read exactly as it
+* stands. An *unconfirmed* drain is the one case where the log may still be
+* arriving: that read waits inside a bounded window for the log to catch up with
+* the run, and records the fact as unread when the window closes rather than
+* reading a half-written log as if it were whole.
+*/
+async function gatherSessionFacts(self, snapshot, runId, drain) {
+	const members = snapshot.runs.filter((run) => atOrUnder(snapshot, runId, run.runId));
+	const facts = /* @__PURE__ */ new Map();
+	const deadline = Date.now() + RECEIPT_PERSIST_WAIT_MS;
+	for (const member of members) {
+		const boundary = member.startedAt;
+		for (;;) {
+			const events = await sessionEvents(self, member.sessionId);
+			if (events === void 0) {
+				facts.set(member.runId, {});
+				break;
+			}
+			if (drain !== "unconfirmed" || logPassedBoundary(events, boundary)) {
+				facts.set(member.runId, sessionFactsOf(events, sessionTokens(self, member.sessionId)));
+				break;
+			}
+			if (Date.now() >= deadline) {
+				facts.set(member.runId, {
+					...sessionFactsOf(events, sessionTokens(self, member.sessionId)),
+					logEvents: void 0
+				});
+				break;
+			}
+			await new Promise((resolve$1) => setTimeout(resolve$1, RECEIPT_PERSIST_POLL_MS));
+		}
+	}
+	return facts;
+}
+/**
+* Whether one session log has already recorded this run's own window: its last
+* event is not older than the run's start. A log that still holds nothing from
+* the run has, by definition, not been flushed yet — waiting is then the honest
+* answer, and the wait is bounded. The log's own `time` is epoch milliseconds.
+*/
+function logPassedBoundary(events, startedAt) {
+	if (events.length === 0) return false;
+	const last = events.at(-1);
+	if (typeof last?.time !== "number") return true;
+	return new Date(last.time).toISOString() >= startedAt;
+}
+/**
+* The seal one settlement asks for: queued on a per-store tail and advanced
+* without blocking the caller. A failure is warned and kept for the next flush.
+*/
+function queueReceiptSeal(self, storeId, taskId, runId) {
+	const pending = self.receiptSeals.get(storeId) ?? /* @__PURE__ */ new Set();
+	pending.add(runId);
+	self.receiptSeals.set(storeId, pending);
+	serialSeal(self, storeId, async () => {
+		try {
+			const status = await sealOnce(self, storeId, taskId, runId);
+			if (status.status === "sealed" || status.status === "already-sealed" || status.status === "unsupported") {
+				pending.delete(runId);
+				return;
+			}
+			self.warn(`store ${storeId}: the receipt of run "${runId}" was not sealed (${status.reason}); it stays queued for the next pass`);
+		} catch (error) {
+			self.warn(`store ${storeId}: sealing the receipt of run "${runId}" failed (${message(error)}); the settlement is unaffected and the receipt stays queued`);
+		}
+	});
+}
+/** Advance every queued seal of one store; a receipt is evidence, so a failure here never throws at the caller. */
+async function flushReceiptSeals(self, storeId) {
+	const report = emptyReport();
+	const pending = self.receiptSeals.get(storeId);
+	if (pending === void 0) return report;
+	const snapshot = await self.context.task.snapshotIn(storeId);
+	for (const runId of [...pending]) {
+		const taskId = snapshot.runs.find((run) => run.runId === runId)?.taskId;
+		if (taskId === void 0) {
+			pending.delete(runId);
+			report.deferred.push({
+				runId,
+				reason: `run "${runId}" is absent from store "${storeId}"`
+			});
+			continue;
+		}
+		try {
+			const status = await sealRunReceipt(self, storeId, taskId, runId);
+			record(report, runId, status);
+			if (status.status === "sealed" || status.status === "already-sealed" || status.status === "unsupported") pending.delete(runId);
+		} catch (error) {
+			report.deferred.push({
+				runId,
+				reason: message(error)
+			});
+		}
+	}
+	return report;
+}
+/**
+* The crash-recovery pass: seal every terminal new-protocol run of one store
+* that has no receipt yet. It runs after `reconcileStore`, so a process that
+* died between the terminal record and the seal makes the receipt up once.
+*/
+async function reconcileRunReceipts(self, storeId) {
+	const snapshot = await self.context.task.snapshotIn(storeId);
+	const report = emptyReport();
+	for (const run of snapshot.runs) {
+		if (!TERMINAL_RUN_STATUSES.has(run.status)) continue;
+		if (snapshot.receipts?.some((receipt) => receipt.runId === run.runId) === true) {
+			report.alreadySealed += 1;
+			continue;
+		}
+		if (run.environmentRevisionId === void 0) {
+			report.unsupported.push({
+				runId: run.runId,
+				reason: "the run is old-protocol and carries no environment revision"
+			});
+			continue;
+		}
+		try {
+			record(report, run.runId, await sealRunReceipt(self, storeId, run.taskId, run.runId));
+		} catch (error) {
+			report.deferred.push({
+				runId: run.runId,
+				reason: message(error)
+			});
+		}
+	}
+	return report;
+}
+/** One run's receipt, or `undefined`. */
+async function receiptFor(self, storeId, runId) {
+	return (await self.context.task.snapshotIn(storeId)).receipts?.find((receipt) => receipt.runId === runId);
+}
+/** Every receipt one store holds, in sealing order. */
+async function receiptsOfStore(self, storeId) {
+	return (await self.context.task.snapshotIn(storeId)).receipts ?? [];
+}
+
+//#endregion
 //#region src/service/runtime.ts
 var TaskRuntime = class extends Service {
 	static inject = [
@@ -10594,6 +12796,10 @@ var TaskRuntime = class extends Service {
 	workspaces;
 	providerLoad;
 	parentChains = /* @__PURE__ */ new Map();
+	/** Runs whose receipt is sealed but not yet written, per store: the queue a reconciliation pass drains. */
+	receiptSeals = /* @__PURE__ */ new Map();
+	/** One write tail per store for receipt sealing, so two settlements never seal the same store concurrently. */
+	receiptSealTails = /* @__PURE__ */ new Map();
 	rootBudgetApproval;
 	terminalReviewListeners = /* @__PURE__ */ new Set();
 	constructor(ctx, config) {
@@ -10635,6 +12841,7 @@ var TaskRuntime = class extends Service {
 			generatedTaskReview: config?.generatedTaskReview ?? DEFAULT_GENERATED_TASK_REVIEW,
 			...config?.supervision === void 0 ? {} : { supervision: { ...config.supervision } },
 			runBindingRoot: config?.runBindingRoot ?? defaultRunBindingRoot(),
+			...config?.environmentRevisionRoot === void 0 ? {} : { environmentRevisionRoot: config.environmentRevisionRoot },
 			...rootBudget === void 0 ? {} : { rootBudget },
 			writeDrainTimeoutMs: config?.writeDrainTimeoutMs ?? DEFAULT_WRITE_DRAIN_TIMEOUT_MS
 		};
@@ -10646,89 +12853,72 @@ var TaskRuntime = class extends Service {
 		*/
 		ctx.effect(() => () => this.unload());
 	}
+	/** The immutable revision roots a session's graph library is served from; reading creates nothing. */
 	async libraryForRoot(rootSessionId) {
-		return ensureTaskLibrary(graphLibrary(rootSessionId));
+		return await environmentLibraryForRoot(this, rootSessionId);
 	}
 	async libraryForSession(sessionId) {
-		const graph = await this.context.graphs.graphForSession(SessionId(sessionId));
-		return this.libraryForRoot(graph.rootSessionId);
+		return await environmentLibraryForSession(this, sessionId);
+	}
+	/** The revision one run is bound to, or `undefined` on an old-protocol run. */
+	async environmentRevisionForRun(run) {
+		return await revisionForRun(this, run);
+	}
+	/** Fix the initial revision of a brand-new graph before anything binds to it. */
+	async ensureInitialEnvironment(rootSessionId, actor) {
+		return await ensureInitialEnvironment(this, rootSessionId, actor);
+	}
+	/** The retired task templates of a session's active revision, as `id@version` keys. */
+	async retiredTaskTemplates(sessionId) {
+		return await retiredTemplatesFor(this, sessionId);
 	}
 	async comparisonRunForSession(sessionId) {
-		const library = await this.libraryForSession(sessionId);
-		const graph = await this.context.graphs.graphForSession(SessionId(sessionId));
-		const run = (await this.context.task.openStore(rootTaskStoreId(graph.rootSessionId)).catch((error) => {
-			if (error instanceof Error && /does not exist/.test(error.message)) return void 0;
-			throw error;
-		}))?.runs.filter((item) => item.sessionId === sessionId).at(-1);
-		if (run === void 0) return void 0;
-		const within = (root, target) => {
-			const path = relative(root, target);
-			return path === "" || !path.startsWith("..") && !path.startsWith("/");
-		};
-		return this.sessionExecutionBindings.get(sessionId)?.overlay !== void 0 || run.taskTemplatesRoot !== void 0 && (within(join(library.root, "evolution"), run.taskTemplatesRoot) || within(join(this.config.runBindingRoot, "replay-libraries"), run.taskTemplatesRoot)) ? run : void 0;
+		return await comparisonRunFor(this, sessionId);
 	}
+	/** The library as a reader sees it: the effective revision's entries and identity, with no write of any kind. */
 	async libraryRead(sessionId) {
 		const library = await this.libraryForSession(sessionId);
-		const execution = this.sessionExecutionBindings.get(sessionId);
 		const run = await this.comparisonRunForSession(sessionId);
-		if (run !== void 0) {
-			const taskTemplatesRoot = run.taskTemplatesRoot ?? execution?.taskTemplatesRoot;
-			const skillRoot = run.providerBinding?.snapshotRoot ?? execution?.overlay?.extraSkillRoots?.[0] ?? library.skillRoot;
-			return {
-				...library,
-				id: run.runId,
-				graphLibraryId: library.id,
-				root: dirname(taskTemplatesRoot),
-				taskTemplatesRoot,
-				skillRoot,
-				version: 1,
-				readOnly: true,
-				message: "This Run uses a frozen comparison view. Include findings in task_submit_result; the supervisor can add useful experience to the graph library.",
-				tasks: (await findTaskTemplates(taskTemplatesRoot)).map(({ templateRef, template }) => ({
-					templateRef,
-					status: "temporary",
-					skills: [...new Set((template.contract.requiredCapabilities ?? []).flatMap((capability) => capability.startsWith("method:") ? [capability.slice(7)] : (run.providerBinding?.skills ?? []).filter((skill) => skill.capabilities.includes(capability)).map((skill) => skill.name)))]
-				})),
-				skills: (run.providerBinding?.skills ?? []).map((item) => ({
-					name: item.name,
-					version: 0,
-					digest: item.contentDigest,
-					status: "temporary"
-				}))
-			};
-		}
-		return readTaskLibrary(library);
+		return {
+			...run === void 0 ? await activeEnvironmentView(this, sessionId) : await environmentViewForRun(this, run),
+			taskTemplatesRoot: library.taskTemplatesRoot,
+			skillRoot: library.skillRoot
+		};
 	}
+	/** Stage one library write into the caller's draft; the active revision does not move. */
 	async libraryWrite(sessionId, input) {
+		await this.assertLibraryWriteAuthority(sessionId);
+		return await writeLibraryDraft(this, sessionId, input);
+	}
+	/** Stage one retention review into the caller's draft; retention decisions belong to the root or its supervisor. */
+	async libraryReview(sessionId, review) {
+		const graph = await this.context.graphs.graphForSession(SessionId(sessionId));
+		if (graph.rootSessionId !== sessionId || graph.rsi !== void 0) {
+			if (!await isDelegatedSupervisor(this, sessionId)) throw new Error("task-runtime: retention decisions belong to the graph root or delegated supervisor");
+		}
+		if (await this.comparisonRunForSession(sessionId) !== void 0) throw new Error("Include comparison findings in task_submit_result for graph method supervision");
+		return await reviewLibraryDraft(this, sessionId, review);
+	}
+	/** The authority a temporary library write needs: the graph root, an active Run, or delegated method supervision. */
+	async assertLibraryWriteAuthority(sessionId) {
 		if (await this.comparisonRunForSession(sessionId) !== void 0) throw new Error("Include findings in task_submit_result; the supervisor can add useful experience to the graph library after comparison");
 		await this.templateCaller(sessionId);
 		const graph = await this.context.graphs.graphForSession(SessionId(sessionId));
-		const caller = await this.softService("singularityContext")?.resolveCaller(sessionId);
-		if (!(caller?.kind === "reviewer" && caller.delegation?.role === "supervisor")) {
-			const binding = this.sessions.get(sessionId);
-			const snapshot = await this.context.task.openStore(binding?.storeId ?? rootTaskStoreId(graph.rootSessionId)).catch((error) => {
-				if (graph.rootSessionId === sessionId && error instanceof Error && /does not exist/.test(error.message)) return void 0;
-				throw error;
-			});
-			const run = binding === void 0 ? snapshot?.runs.filter((item) => item.sessionId === sessionId).at(-1) : snapshot?.runs.find((item) => item.runId === binding.runId);
-			if (run === void 0 ? graph.rootSessionId !== sessionId : run.status !== "running" || run.executionPhase !== void 0 && run.executionPhase !== "active") throw new Error("task-library: temporary writes belong to root planning, an active Task, or delegated method supervision");
-		}
-		return writeTaskLibrary(await this.libraryForSession(sessionId), input, await this.capabilitiesForSession(sessionId));
-	}
-	async libraryReview(sessionId, review) {
-		if (await this.comparisonRunForSession(sessionId) !== void 0) throw new Error("Include comparison findings in task_submit_result for graph method supervision");
-		const graph = await this.context.graphs.graphForSession(SessionId(sessionId));
-		if (graph.rootSessionId !== sessionId || graph.rsi !== void 0) {
-			const caller = await this.softService("singularityContext")?.resolveCaller(sessionId);
-			if (caller?.kind !== "reviewer" || caller.delegation?.role !== "supervisor") throw new Error("task-library: retention decisions belong to the graph root or delegated supervisor");
-		}
-		return reviewTaskLibrary(await this.libraryForSession(sessionId), review, sessionId);
+		if (await isDelegatedSupervisor(this, sessionId)) return;
+		const binding = this.sessions.get(sessionId);
+		const snapshot = await this.context.task.openStore(binding?.storeId ?? rootTaskStoreId(graph.rootSessionId)).catch((error) => {
+			if (graph.rootSessionId === sessionId && error instanceof Error && /does not exist/.test(error.message)) return void 0;
+			throw error;
+		});
+		const run = binding === void 0 ? snapshot?.runs.filter((item) => item.sessionId === sessionId).at(-1) : snapshot?.runs.find((item) => item.runId === binding.runId);
+		if (run === void 0 ? graph.rootSessionId !== sessionId : run.status !== "running" || run.executionPhase !== void 0 && run.executionPhase !== "active") throw new Error("task-runtime: temporary writes belong to root planning, an active Task, or delegated method supervision");
 	}
 	async capabilitiesForSession(sessionId) {
 		const overlay = this.sessionExecutionBindings.get(sessionId)?.overlay;
+		const library = await this.libraryForSession(sessionId);
 		return {
 			...this.config.capabilities,
-			...await libraryCapabilities(await this.libraryForSession(sessionId)),
+			...await capabilityRowsForLibrary(this, library),
 			...overlay?.capabilityOverrides
 		};
 	}
@@ -10751,7 +12941,8 @@ var TaskRuntime = class extends Service {
 	}
 	async findTaskTemplates(query, callerSessionId) {
 		const caller = callerSessionId === void 0 ? void 0 : await this.templateCaller(callerSessionId);
-		return findTaskTemplates(caller?.root ?? this.config.taskTemplatesRoot, query, caller?.scope);
+		const retired = callerSessionId === void 0 ? /* @__PURE__ */ new Set() : await this.retiredTaskTemplates(callerSessionId);
+		return findTaskTemplates(caller?.root ?? this.config.taskTemplatesRoot, query, caller?.scope, retired);
 	}
 	/** Pure store reads: catalog queries never adopt a Run or alter its gate. */
 	async templateCaller(sessionId) {
@@ -10766,9 +12957,9 @@ var TaskRuntime = class extends Service {
 		let task = run === void 0 ? void 0 : snapshot?.tasks.find((item) => item.taskId === run?.taskId);
 		if (task === void 0 && graph?.rootSessionId !== sessionId) {
 			const delegated = await this.softService("singularityContext")?.resolveCaller(sessionId);
-			if (delegated?.kind !== "reviewer" || delegated.storeId !== storeId || delegated.task === void 0) throw new Error("task-template: caller has no bound Task, valid delegation or root intake authority");
+			if (delegated?.kind !== "coordinator" || delegated.storeId !== storeId || delegated.task === void 0) throw new Error("task-template: caller has no bound Task, valid delegation or root intake authority");
 			task = delegated.task;
-			run = delegated.delegation?.sourceRunId === void 0 ? snapshot?.runs.filter((item) => item.taskId === task.taskId).at(-1) : snapshot?.runs.find((item) => item.runId === delegated.delegation?.sourceRunId && item.taskId === task.taskId);
+			run = delegated.binding?.sourceRunId == null ? snapshot?.runs.filter((item) => item.taskId === task.taskId).at(-1) : snapshot?.runs.find((item) => item.runId === delegated.binding?.sourceRunId && item.taskId === task.taskId);
 		}
 		return {
 			root: run?.taskTemplatesRoot ?? await this.taskTemplatesRootFor(sessionId),
@@ -10780,10 +12971,17 @@ var TaskRuntime = class extends Service {
 		return taskTemplatePage(caller.root, request, caller.scope);
 	}
 	async registerTaskTemplate(template, callerSessionId) {
-		if (callerSessionId !== void 0) return (await this.libraryWrite(callerSessionId, {
-			kind: "task",
-			template
-		})).templateRef;
+		if (callerSessionId !== void 0) {
+			await this.libraryWrite(callerSessionId, {
+				kind: "task",
+				template
+			});
+			return {
+				id: template.id,
+				version: template.version,
+				digest: taskTemplateDigest(parseTaskTemplate(template))
+			};
+		}
 		if (this.config.taskTemplatesRoot === void 0) throw new Error("task-runtime: taskTemplatesRoot is not configured");
 		return registerTaskTemplate(this.config.taskTemplatesRoot, template);
 	}
@@ -10820,8 +13018,48 @@ var TaskRuntime = class extends Service {
 	listCapabilities() {
 		return listCapabilities(this);
 	}
-	async applyCapabilityRow(name, entry, options = {}) {
-		return applyCapabilityRow(this, name, entry, options);
+	/** Open a draft on the session's active revision; the only mutable region of a library. */
+	async createDraft(sessionId, request = {}) {
+		return await createDraft(this, sessionId, request);
+	}
+	/** Stage one environment edit into one draft. */
+	async stageDraftEdit(sessionId, draftId, edit) {
+		return await stageDraftEdit(this, sessionId, draftId, edit);
+	}
+	/** Remove one draft; a removed draft can no longer be published. */
+	async removeEnvironmentDraft(sessionId, draftId) {
+		await removeEnvironmentDraft(this, sessionId, draftId);
+	}
+	/** Freeze one draft into a candidate revision without moving the pointer — the entry an explicit trial binds. */
+	async freezeDraft(sessionId, draftId) {
+		return await freezeDraft(this, sessionId, draftId);
+	}
+	/** Switch the effective pointer to one draft or frozen revision, under an expected-pointer CAS. */
+	async publishRevision(sessionId, request) {
+		return await publishRevision(this, sessionId, request);
+	}
+	/** Switch the effective pointer back to a frozen revision. */
+	async rollbackRevision(sessionId, request) {
+		return await rollbackRevision(this, sessionId, request);
+	}
+	/** Settle any pointer intent a killed process left open. */
+	async reconcilePointer(sessionId) {
+		return await reconcilePointer(this, sessionId);
+	}
+	/** The in-flight pointer switch of the session's library, or `null`; the single admission exclusion point. */
+	async openPointerIntent(sessionId) {
+		return await openPointerIntentFor(this, sessionId);
+	}
+	async listRevisions(sessionId) {
+		return await listRevisionsImpl(this, sessionId);
+	}
+	/** The legacy mutable layout read as a read-only view: no index rebuilt, no byte written. */
+	async legacyLibraryView(sessionId) {
+		return await legacyLibraryView(this, await libraryRootsForSession(this, sessionId));
+	}
+	/** The one write tail of a library, for a caller that stages several edits as one unit. */
+	async serializeEnvironment(rootSessionId, work) {
+		return await serializeEnvironmentFor(this, rootSessionId, work);
 	}
 	async adoptRoot(storeId, rootSessionId) {
 		return adoptRoot(this, storeId, rootSessionId);
@@ -10867,6 +13105,40 @@ var TaskRuntime = class extends Service {
 	}
 	notifyTerminalReview(fact) {
 		return notifyTerminalReview(this, fact);
+	}
+	/** Seal one Run's execution receipt. The store's own check decides; a repeat is `already-sealed`. */
+	async sealRunReceipt(storeId, taskId, runId) {
+		return await sealRunReceipt(this, storeId, taskId, runId);
+	}
+	/**
+	* Seal one receipt as part of a settlement: awaited, bounded by the sealer's
+	* own limits, and never throwing — an unsealed receipt is queued for the next
+	* recovery pass rather than turning a settlement into a failure.
+	*/
+	async sealReceiptBounded(storeId, taskId, runId) {
+		try {
+			const status = await sealRunReceipt(this, storeId, taskId, runId);
+			if (status.status === "sealed" || status.status === "already-sealed" || status.status === "unsupported") return;
+			queueReceiptSeal(this, storeId, taskId, runId);
+			this.warn(`store ${storeId}: the receipt of run "${runId}" is queued rather than sealed now (${status.reason})`);
+		} catch (error) {
+			queueReceiptSeal(this, storeId, taskId, runId);
+			this.warn(`store ${storeId}: sealing the receipt of run "${runId}" failed (${message(error)}); the settlement stands and the receipt stays queued`);
+		}
+	}
+	/** Advance every queued seal of one store. */
+	async flushReceiptSeals(storeId) {
+		return await flushReceiptSeals(this, storeId);
+	}
+	/** Seal every terminal new-protocol Run of one store that has no receipt yet. */
+	async reconcileRunReceipts(storeId) {
+		return await reconcileRunReceipts(this, storeId);
+	}
+	async receiptFor(storeId, runId) {
+		return await receiptFor(this, storeId, runId);
+	}
+	async receiptsOfStore(storeId) {
+		return await receiptsOfStore(this, storeId);
 	}
 	async extendRootBudget(sessionId, host, request) {
 		return extendRootBudget(this, sessionId, host, request);
@@ -11418,4 +13690,4 @@ async function settleBubble(envPath, workspacePath, graphId, round) {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ExecutionGate, IterationCapRefusal, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, bubbleWorkspacePath, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, driveBatch, ensureTaskLibrary, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, graphLibrary, inFlightRecoveryAttempt, isOpenProposal, latestBubbleWorkspacePath, libraryCapabilities, loadObligationTemplates, loadSkillSidecar, materializeBubble, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readTaskLibrary, readVerifiedFile, rebaseWorkspacePaths, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, reviewTaskLibrary, serializeSkillSidecar, settleBubble, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, snapshotTaskTemplates, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline, writeTaskLibrary };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, ENVIRONMENT_DRAFT_ID, ENVIRONMENT_REVISION_ID, ExecutionGate, HUMAN_TOOLS, IterationCapRefusal, RECEIPT_ACTOR, RECEIPT_PERSIST_WAIT_MS, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, WorkspaceRegistry, appendLineDurable, applyCapabilityRowEdit, applyReviewEdit, applySkillEdit, applyTemplateEdit, assertDraftEditAllowed, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, bubbleWorkspacePath, buildExecutionReceipt, candidateRevisionId, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, copyRevisionDirectory, createEnvironmentDraft, decompositionIdentity, src_default as default, defaultTaskTemplatesRoot, discardEnvironmentDraft, draftsRoot, driveBatch, emptyRevisionManifest, ensureEnvironmentLayout, ensureInitialRevision, ensureProtocolMarker, environmentProtocolMarker, escalationHint, executionProviders, executionSubtree, executionUsage, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, freezeDraftDirectory, freezeEnvironmentDraft, hasLegacyLayout, inFlightRecoveryAttempt, isOpenProposal, latestBubbleWorkspacePath, latestDraftFor, libraryRoots, listEnvironmentDrafts, listPointerCompletions, listRevisions, loadObligationTemplates, loadSkillSidecar, manifestDigest, materializeBubble, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openPointerIntent, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseRevisionManifest, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, publishEnvironmentRevision, readActiveRevision, readEnvironmentDraft, readPointer, readRevision, readRevisionManifest, readRevisionSkillFile, readVerifiedFile, rebaseWorkspacePaths, reconcileEnvironmentPointer, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requireReceiptFacts, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, revisionCapabilityRows, revisionRefOf, revisionRoot, revisionSkillOf, revisionTemplateOf, revisionsRoot, rollbackEnvironmentRevision, serialEnvironment, serializeSkillSidecar, sessionFactsOf, settleBubble, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillNameFrom, skillSearchRoots, stageEnvironmentEdit, syncDirectory, taskTemplatePage, toolResultFailed, unlistableVerifierRefusal, validateSkillProvider, verifyRevisionDirectory, walkVerified, workerBaseline, writeFileAtomic, writeRevisionManifest };

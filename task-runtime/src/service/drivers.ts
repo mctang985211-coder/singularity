@@ -106,6 +106,9 @@ export function settlementParts(self: TaskRuntime, actor: string): RuntimeSettle
       runSettledFromRuntime(self, storeId, taskId, runId, status)
     },
     onTerminalReview: fact => self.notifyTerminalReview(fact),
+    sealReceipt: async (storeId, taskId, runId) => {
+      await self.sealReceiptBounded(storeId, taskId, runId)
+    },
     gate: self.executionGate,
   }
 }
@@ -654,7 +657,18 @@ export async function reconcileStore(self: TaskRuntime, storeId: string, rootSes
    * The proposal pass comes last (T2/T3 §5–§6): a batch it admits is driven by
    * the driver it starts, and the workspace question is already settled above,
    */
-  return { unresolvedProposals: await self.reconcileProposals(storeId), questionDeliveries, questionResumes }
+  const unresolvedProposals = await self.reconcileProposals(storeId)
+  /**
+   * The receipt pass finishes the recovery: a process that died between a run's
+   * terminal record and its receipt makes that receipt up here, exactly once.
+   * Its own failures are reported, never raised — a settlement already happened.
+   */
+  try {
+    await self.reconcileRunReceipts(storeId)
+  } catch (error) {
+    self.warn(`store ${storeId}: the receipt reconciliation pass failed (${message(error)})`)
+  }
+  return { unresolvedProposals, questionDeliveries, questionResumes }
 }
 
 export async function failBatch(self: TaskRuntime, storeId: string, batchId: string, reason: string): Promise<void> {

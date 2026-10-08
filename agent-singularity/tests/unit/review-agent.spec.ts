@@ -372,7 +372,7 @@ describe('the ledger as the reviewer binding source (A2)', () => {
       '',
     ].join('\n'))
     await expect(readReviewerDelegation('s-review')).rejects.toMatchObject({
-      name: 'ReviewerBindingError',
+      name: 'CoordinationBindingError',
       kind: 'binding-conflict',
     })
   })

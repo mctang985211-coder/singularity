@@ -18,6 +18,7 @@ import type {
 } from '../types.ts'
 import { buildBudgetExtension, budgetExtensionIndex } from './checks/budget.ts'
 import { assertAdmission, assertContract } from './checks/contract.ts'
+import { assertReceiptRecord } from './checks/receipt.ts'
 import {
   assertBirthPhase,
   assertEnvironmentRevision,
@@ -542,6 +543,10 @@ export class TaskState {
         return
       case 'TaskProposalAdmitted':
         this.value = admitProposal(this.value, event.taskId, event.payload, event.timestamp)
+        return
+      case 'RunReceiptSealed':
+        assertReceiptRecord(this.value, event.payload.receipt)
+        this.value = { ...this.value, receipts: [...(this.value.receipts ?? []), copy(event.payload.receipt)] }
         return
       default:
         throw new Error(`task: unknown event kind "${(event as { kind?: unknown }).kind}"`)

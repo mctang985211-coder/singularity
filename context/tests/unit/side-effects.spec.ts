@@ -183,12 +183,14 @@ describe('projections are stable', () => {
 })
 
 describe('refusals of a read that cannot answer', () => {
-  test('a reviewer whose delegated task vanished cannot widen its read boundary', async () => {
+  test('a coordinator whose delegated task vanished cannot widen its read boundary', async () => {
     const { stack } = await chainStack()
     stack.bindingSource(
       stack.ledger({
         rootStoreId: 'sg-t-s-root',
-        taskId: 't-missing',
+        sourceTaskId: 't-missing',
+        sourceRunId: null,
+        role: 'reviewer',
         actor: 's-root',
         at: '2026-09-25T00:00:00.000Z',
       }),

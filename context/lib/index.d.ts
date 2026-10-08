@@ -1,9 +1,10 @@
 import { Context, Service } from "@deepseek-ai/cordis";
-import { AcceptanceCriterion, Diagnosis, EvidenceBundle, ExecutionPhase, ReviewRecord, RunProviderBinding, TaskHandoff, TaskInstance, TaskRun, TaskSnapshot } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, Diagnosis, EvidenceBundle, ExecutionPhase, ReadOnlyStoreSnapshot, ReviewRecord, RunProviderBinding, TaskHandoff, TaskInstance, TaskRun, TaskSnapshot } from "@dangosys/dsh-singularity-task";
 import { RetentionNotice } from "@deepseek-ai/dsh-output-retention";
 import { RunBindingRead, StoreRecoveryStatus } from "@dangosys/dsh-singularity-task-runtime";
 import { SessionEvent } from "@deepseek-ai/dsh-session";
 import { AssembleContext, PromptAssembly } from "@deepseek-ai/dsh-system-prompt";
+import { ApprovalSourceWire, GraphEvaluationWire, GraphProgressWire, GraphRevisionWire, GraphViewWire } from "@dangosys/dsh-singularity-graphs/wire";
 
 //#region src/refusals.d.ts
 /** The named vocabulary every read answers in, the read algebra built on it, and the one place an error is read. @module @dangosys/dsh-singularity-context/refusals */
@@ -41,32 +42,6 @@ declare function read(text: string, source: string, continuation?: ReadContinuat
 declare function refused(refusal: NamedRefusal, detail: string): ProjectedReadRefused;
 //#endregion
 //#region src/bindings/types.d.ts
-/** One recorded reviewer delegation, exactly the fields the ledger holds. */
-interface ReviewerBindingRecord {
-  /** The root task store the delegated graph reads through. */
-  readonly rootStoreId: string;
-  /** The task the reviewer was delegated to review. */
-  readonly taskId: string;
-  /** Coordination responsibility; old binding sources omit it and mean reviewer. */
-  readonly role?: 'reviewer' | 'supervisor';
-  /** The exact source Run from the claim; null means the task never ran. */
-  readonly sourceRunId?: string | null;
-  /** The session that started the reviewer. */
-  readonly actor: string;
-  /** When the delegation was recorded. */
-  readonly at: string;
-}
-/** Where a reviewer's delegation is read from: the ledger finds the rows, this package reads them. */
-interface ReviewerBindingSource {
-  read(sessionId: string): Promise<ReviewerBindingRecord | undefined>;
-}
-/** Why a binding source could not answer: a conflicting ledger, or one this process cannot read. */
-type ReviewerBindingFailure = 'binding-conflict' | 'unreadable';
-/** What a source raises instead of picking a row: a conflict, or a ledger this process cannot read. */
-declare class ReviewerBindingError extends Error {
-  readonly kind: ReviewerBindingFailure;
-  constructor(kind: ReviewerBindingFailure, message: string);
-}
 /** A published graph member, as the graph store holds it. */
 interface MembershipNode {
   readonly id: string;
@@ -97,9 +72,9 @@ interface GraphRecordFacts {
   readonly rootSessionId: string;
   readonly graphStoreId: string;
 }
-/** The task service's read-only open (A2 §D: `openStore` / `snapshotIn`, never a write). */
+/** The task service's zero-write read door (A2 §D): a missing store answers `exists:false`, never a creation. */
 interface ReadOnlyTaskStore {
-  openStore(storeId: string): Promise<TaskSnapshot>;
+  snapshotReadOnly(storeId: string): Promise<ReadOnlyStoreSnapshot<TaskSnapshot>>;
 }
 /** The runtime's read-only observation surface; nothing here can start, recover or settle anything. */
 interface ReadOnlyTaskRuntime {
@@ -124,8 +99,8 @@ interface BindingDeps {
   readonly task: ReadOnlyTaskStore;
   readonly graphs: ReadOnlyGraphs;
   readonly taskRuntime: ReadOnlyTaskRuntime;
-  /** The one registered delegation source, when this deployment has one. */
-  readonly reviewerSource?: ReviewerBindingSource;
+  /** The one registered coordination binding source, when this deployment has one. */
+  readonly coordinationSource?: CoordinationBindingSource;
 }
 /** The graph facts a resolution carries, so a reader never has to re-derive them. */
 interface CallerGraph {
@@ -164,9 +139,10 @@ type CallerResolution = (CallerBase & {
   readonly task: TaskInstance;
   readonly run: TaskRun;
 }) | (CallerBase & {
-  readonly kind: 'reviewer';
+  readonly kind: 'coordinator';
+  readonly role: CoordinationRole;
   readonly task?: TaskInstance;
-  readonly delegation: ReviewerBindingRecord;
+  readonly binding: CoordinationBinding;
 }) | (CallerBase & {
   readonly kind: 'member';
 }) | CallerUnbound;
@@ -178,6 +154,58 @@ interface LoadedCaller {
 }
 /** Whether one session is a published member of a graph — the check every session reference passes. */
 declare function isGraphMember(graphs: ReadOnlyGraphs, graphId: string, sessionId: string): Promise<boolean>;
+//#endregion
+//#region src/bindings/coordination.d.ts
+/** The coordination responsibilities a delegation can carry. */
+type CoordinationRole = 'reviewer' | 'supervisor' | 'coordinator';
+/** One coordination binding: the role and its source, exact to the Run, all of them required. */
+interface CoordinationBinding {
+  /** What the delegated session is responsible for; a row without one is refused, never a default. */
+  readonly role: CoordinationRole;
+  /** The task the delegation names as its source. */
+  readonly sourceTaskId: string;
+  /** The exact source Run; null means the task never ran. */
+  readonly sourceRunId: string | null;
+  /** The session that recorded the delegation. */
+  readonly actor: string;
+  /** The delegated root task domain, checked against the graph the session is published in. */
+  readonly rootStoreId: string;
+  readonly at: string;
+}
+/** Where a coordination binding is read from: the ledger finds the rows, this package reads them. */
+interface CoordinationBindingSource {
+  read(sessionId: string): Promise<CoordinationBinding | undefined>;
+}
+/** Why a binding source could not answer: a conflicting ledger, one this process cannot read, or a role that is missing. */
+type CoordinationBindingFailure = 'binding-conflict' | 'unreadable' | 'role-missing';
+/** What a source raises instead of picking a row: a conflict, an unreadable ledger, or a binding with no role. */
+declare class CoordinationBindingError extends Error {
+  readonly kind: CoordinationBindingFailure;
+  constructor(kind: CoordinationBindingFailure, message: string);
+}
+/** The answer one binding read can give: nothing, one record, or a named refusal. */
+type CoordinationRead = {
+  readonly kind: 'none';
+} | {
+  readonly kind: 'record';
+  readonly record: CoordinationBinding;
+} | {
+  readonly kind: 'refused';
+  readonly refusal: NamedRefusal;
+  readonly detail: string;
+};
+/** The one delegation recorded for a session; a source that cannot answer is reported as-is. */
+declare function readCoordination(deps: BindingDeps, sessionId: string): Promise<CoordinationRead>;
+/** Whether the session a delegation names as its delegator is really a session of the graph it delegated into. */
+type DelegatorStanding = {
+  readonly kind: 'member';
+} | {
+  readonly kind: 'refused';
+  readonly refusal: NamedRefusal;
+  readonly detail: string;
+};
+/** The delegator check is the registry's published members, and a registry that cannot be read refuses. */
+declare function delegatorStanding(deps: BindingDeps, sessionId: string, graph: GraphRecordFacts, actor: string): Promise<DelegatorStanding>;
 //#endregion
 //#region src/types.d.ts
 /** The status scopes a caller may ask for (A2 §D). */
@@ -414,6 +442,113 @@ declare function reviewRecordText(review: ReviewRecord): string;
 /** The complete rendering of one diagnosis record. */
 declare function diagnosisRecordText(diagnosis: Diagnosis): string;
 //#endregion
+//#region src/view/types.d.ts
+/** The read model's fact key: the graph's root task store id, never the id the UI selects a graph by. */
+type GraphKey = string;
+/** One coordination assignment a graph holds, as its store records it. */
+interface CoordinationAssignmentFacts {
+  readonly assignmentId: string;
+  readonly role: 'reviewer' | 'supervisor' | 'coordinator';
+  readonly round: number;
+  readonly sessionId: string;
+  readonly sourceTaskId: string;
+  readonly sourceRunId: string | null;
+  readonly state: 'open' | 'settled' | 'interrupted';
+  /** The structured completion the assignment settled with; absent means the round produced no completion. */
+  readonly completion?: CoordinationCompletionFacts;
+}
+/** One structured completion; without it there is no completion, and the legacy text formats are not one. */
+interface CoordinationCompletionFacts {
+  readonly businessAction: 'continue' | 'recover' | 'finish';
+  readonly searchNext: 'explore' | 'stop';
+  readonly methodDecision: 'retain' | 'trial' | 'promote' | 'discard' | 'rollback';
+  readonly reason: string;
+  readonly evidenceRefs: readonly string[];
+  readonly trialCandidateRef?: string;
+  readonly approval?: ApprovalSourceWire;
+  readonly at: string;
+}
+/** Where a graph's coordination facts are read: produced by the coordination plane, consumed here. */
+interface CoordinationFactsReader {
+  assignments(graphKey: GraphKey): Promise<readonly CoordinationAssignmentFacts[]>;
+}
+/** Where a graph's method facts are read: the active revision and the latest evaluation. */
+interface MethodFactsReader {
+  activeRevision(graphKey: GraphKey): Promise<GraphRevisionWire | null>;
+  latestEvaluation(graphKey: GraphKey): Promise<GraphEvaluationWire | null>;
+}
+/** The fact producers one deployment registers; a missing producer is refused by name, never defaulted. */
+interface ViewFactSources {
+  readonly coordination?: CoordinationFactsReader;
+  readonly method?: MethodFactsReader;
+}
+//#endregion
+//#region src/view/service.d.ts
+/** Which producer a read needed and did not have; the route maps this to a named refusal. */
+type ViewFactSource = 'coordination' | 'method';
+/** A read that cannot answer because this deployment registers no such fact producer. */
+declare class ReadSourceUnavailableError extends Error {
+  readonly code = "read-source-unavailable";
+  readonly source: ViewFactSource;
+  constructor(source: ViewFactSource, detail: string);
+}
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    singularityGraphView: GraphViewService;
+  }
+}
+/**
+ * A graph's version, evaluation, access mode and derived progress, from the one
+ * registered fact source per plane. Web and tools read exactly this projection;
+ * a missing producer is refused by name rather than answered with a default.
+ */
+declare class GraphViewService extends Service {
+  static inject: string[];
+  private coordination;
+  private method;
+  private readonly cached;
+  /** Bumped by every change the stores publish; a projection made under an older epoch is stale. */
+  private epoch;
+  constructor(ctx: Context);
+  /** Every store change a projection reads is a reason to reduce it again. */
+  private watchEvents;
+  /** Register the one coordination fact source; the returned disposer removes it again. */
+  registerCoordinationFacts(reader: CoordinationFactsReader): () => void;
+  /** Register the one method fact source; the returned disposer removes it again. */
+  registerMethodFacts(reader: MethodFactsReader): () => void;
+  /** One graph's complete read state, from the facts the current epoch covers. */
+  view(graphId: string): Promise<GraphViewWire>;
+  /** Every registered graph's view, in the registry's own order, from the same cache. */
+  summaries(): Promise<readonly GraphViewWire[]>;
+  /** The facts the projection is made of; a producer this deployment lacks refuses the read by name. */
+  private facts;
+  private requireCoordination;
+  private requireMethod;
+  private invalidate;
+}
+//#endregion
+//#region src/view/facts.d.ts
+/** How much of a completion's reason a progress note carries. */
+declare const PROGRESS_NOTE_LIMIT = 200;
+/** A completion in the legacy text formats (note prefix / fenced JSON) is not a completion any more. */
+declare class LegacyCompletionError extends Error {
+  readonly code = "legacy-completion-format";
+  constructor(detail: string);
+}
+/**
+ * Read one recorded completion. A row in the legacy text formats — a
+ * `blocked:`/`no_change:` note or a fenced JSON outcome block — and a row whose
+ * structured fields are missing or malformed both refuse: no read ever derives
+ * "completed" from prose.
+ */
+declare function readCompletion(row: unknown): CoordinationCompletionFacts;
+/**
+ * The one derivation of a graph's progress, from the configured round count and
+ * the recorded assignments alone. Every reader reports this and nothing else
+ * computes it: a phase is never written down, only reduced again.
+ */
+declare function deriveProgress(rounds: number | undefined, assignments: readonly CoordinationAssignmentFacts[]): GraphProgressWire;
+//#endregion
 //#region src/index.d.ts
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -422,13 +557,13 @@ declare module '@deepseek-ai/cordis' {
 }
 declare class SingularityContextService extends Service {
   static inject: string[];
-  /** The one registered delegation source, when this deployment has one. */
-  private reviewerSource;
+  /** The one registered coordination binding source, when this deployment has one. */
+  private coordinationSource;
   constructor(ctx: Context);
   /** Mount the one `system-prompt/assemble` waterfall listener this service owns. */
   [Service.init](): void;
-  /** Register the one reviewer-delegation source; the returned disposer removes it again. */
-  registerReviewerBindingSource(source: ReviewerBindingSource): () => void;
+  /** Register the one coordination binding source; the returned disposer removes it again. */
+  registerCoordinationBindingSource(source: CoordinationBindingSource): () => void;
   /** The domain a live session may read, from durable facts. */
   resolveCaller(sessionId: string, signal?: AbortSignal): Promise<LoadedCaller['resolution']>;
   /** The caller's own complete contract and run (A2 §D `task_read`). */
@@ -457,4 +592,4 @@ declare class SingularityContextService extends Service {
   private envBuilder;
 }
 //#endregion
-export { AssemblyRefusalError, type BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, type CallerBase, type CallerGraph, type CallerResolution, type CallerUnbound, type ContextReadQuery, type EnvPathSource, type GraphRecordFacts, type LoadedCaller, type MembershipEdge, type MembershipNode, NAMED_REFUSALS, type NamedRefusal, type OmissionReport, OutputBudget, type ProjectedRead, type ProjectedReadOk, type ProjectedReadRefused, QUESTIONS_CONTEXT_NAME, QUESTIONS_CONTEXT_ORDER, type ReadContinuation, type ReadDeps, type ReadOnlyGraphs, type ReadOnlyTaskRuntime, type ReadOnlyTaskStore, type RelatedEntry, type ReviewReference, ReviewerBindingError, type ReviewerBindingRecord, type ReviewerBindingSource, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, type SessionEventReference, type SessionQueryReads, SingularityContextService, SingularityContextService as default, type StatusQuery, type StatusScope, type Utf8Slice, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, budgetList, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, questionProjection, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
+export { AssemblyRefusalError, type BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, type CallerBase, type CallerGraph, type CallerResolution, type CallerUnbound, type ContextReadQuery, type CoordinationAssignmentFacts, type CoordinationBinding, CoordinationBindingError, type CoordinationBindingSource, type CoordinationCompletionFacts, type CoordinationFactsReader, type CoordinationRead, type CoordinationRole, type DelegatorStanding, type EnvPathSource, type GraphKey, type GraphRecordFacts, GraphViewService, LegacyCompletionError, type LoadedCaller, type MembershipEdge, type MembershipNode, type MethodFactsReader, NAMED_REFUSALS, type NamedRefusal, type OmissionReport, OutputBudget, PROGRESS_NOTE_LIMIT, type ProjectedRead, type ProjectedReadOk, type ProjectedReadRefused, QUESTIONS_CONTEXT_NAME, QUESTIONS_CONTEXT_ORDER, type ReadContinuation, type ReadDeps, type ReadOnlyGraphs, type ReadOnlyTaskRuntime, type ReadOnlyTaskStore, ReadSourceUnavailableError, type RelatedEntry, type ReviewReference, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, type SessionEventReference, type SessionQueryReads, SingularityContextService, SingularityContextService as default, type StatusQuery, type StatusScope, type Utf8Slice, type ViewFactSource, type ViewFactSources, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, budgetList, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, delegatorStanding, deriveProgress, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, questionProjection, read, readCompletion, readCoordination, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };

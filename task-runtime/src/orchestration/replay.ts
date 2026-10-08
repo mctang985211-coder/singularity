@@ -69,6 +69,10 @@ export async function runReplayTask(
     ...(init.championRunId === undefined ? {} : { parentRunId: init.championRunId }),
     capabilitySnapshot: capabilitySnapshot(init.manifest),
     ...(init.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: init.taskTemplatesRoot }),
+    ...(init.revision === undefined
+      ? {}
+      : { environmentRevisionId: init.environmentRevisionId ?? init.revision.manifest.revisionId }),
+    ...(init.trialCandidateRef === undefined ? {} : { trialCandidateRef: init.trialCandidateRef }),
     ...(init.agentPreset === undefined ? {} : { agentPreset: init.agentPreset }),
     executionPhase: init.spawn ? 'active' : 'submitted',
     ...(birthSubmission === undefined ? {} : { submission: birthSubmission }),
@@ -103,6 +107,8 @@ export async function runReplayTask(
       manifest: init.manifest,
       ...(init.providers === undefined ? {} : { providers: init.providers }),
       ...(env.runBindingRoot === undefined ? {} : { root: env.runBindingRoot }),
+      ...(init.revision === undefined ? {} : { revision: init.revision }),
+      ...(init.trialCandidateRef === undefined ? {} : { trialCandidateRef: init.trialCandidateRef }),
     })
   } catch (error) {
     const reason = `content binding failed: ${message(error)}`

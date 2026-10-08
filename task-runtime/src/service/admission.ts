@@ -50,9 +50,10 @@ export async function deriveBatch(
   let bound: DecomposeSpec
   try {
     const { root, scope } = await self.templateCaller(identity.callerSessionId)
-    const expanded = await bindTaskDecomposition(root, spec, scope)
+    const retired = await self.retiredTaskTemplates(identity.callerSessionId)
+    const expanded = await bindTaskDecomposition(root, spec, scope, retired)
     bound = Array.isArray(expanded?.children)
-      ? { ...expanded, children: await Promise.all(expanded.children.map(child => bindTaskTemplate(root, child, scope))) }
+      ? { ...expanded, children: await Promise.all(expanded.children.map(child => bindTaskTemplate(root, child, scope, retired))) }
       : expanded
   } catch (error) {
     const failure = error instanceof Error ? error : new Error(String(error))

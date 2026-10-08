@@ -6,8 +6,7 @@ import { taskContractIdentity } from '@dangosys/dsh-singularity-task'
 
 import type { TaskRuntime } from './runtime.ts'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
-import { snapshotTaskTemplates } from '../task-template.ts'
+import * as svcEnvironment from './environment.ts'
 import type { TaskContract, TaskId, TaskInstance } from '@dangosys/dsh-singularity-task'
 import { TASK_CONTRACT_VERSION } from '@dangosys/dsh-singularity-task'
 import { resolveCapabilities, resolvePreset } from '../capability.ts'
@@ -16,11 +15,11 @@ import { providerRefusals } from '../provider-precheck.ts'
 import { checkRunStart, hasRootLimits, resolveRootBudget } from '../root-budget.ts'
 import { fixCriteriaProtectedInputs } from '../protected-inputs.ts'
 import { runReplayTask } from '../orchestration/replay.ts'
-import type { ReplayRunOutcome } from '../orchestration/types.ts'
+import type { ReplayReceiptReport, ReplayRunOutcome } from '../orchestration/types.ts'
 import { WorkspaceBusyError, describeOwner, normalizeWorkspacePath, releaseLayer } from '../workspace.ts'
 import type { WorkspaceOwner } from '../workspace.ts'
 import type { ReplayTaskOptions } from '../types.ts'
-import { now } from '../helpers.ts'
+import { message, now } from '../helpers.ts'
 import { rebaseWorkspacePaths } from '../replay-paths.ts'
 
 export async function replayTask(
@@ -30,7 +29,7 @@ export async function replayTask(
   options: ReplayTaskOptions,
   callerSessionId: string,
 ): Promise<ReplayRunOutcome> {
-  const known = new Set(['lineage', 'overlay', 'contract', 'spawn', 'workspace', 'agentOptions', 'signal'])
+  const known = new Set(['lineage', 'overlay', 'contract', 'spawn', 'workspace', 'agentOptions', 'signal', 'trialCandidateRef'])
   const unknown = Object.keys(options).filter(key => !known.has(key))
   if (unknown.length > 0) {
     throw new Error(`task-runtime: replayTask does not accept options [${unknown.join(', ')}]`)
@@ -46,7 +45,19 @@ export async function replayTask(
   // champion run the replay's own run descends from (execution lineage).
   const championRunId = champion.runIds[champion.runIds.length - 1]!
   const championRun = await self.context.task.runIn(storeId, championRunId)
-  let taskTemplatesRoot = options.overlay?.taskTemplatesRoot ?? championRun.taskTemplatesRoot ?? await self.taskTemplatesRootFor(callerSessionId)
+  /**
+   * The immutable environment revision this replay binds: the candidate a
+   * caller explicitly trials when it names one, else the active revision. An
+   * overlay's own frozen library root still wins when a caller passes one.
+   */
+  const environment = await svcEnvironment.environmentLibraryForSession(self, callerSessionId)
+  if (options.trialCandidateRef !== undefined && environment.revision === undefined) {
+    throw new Error(`task-runtime: library "${environment.id}" holds no active revision to trial a candidate against`)
+  }
+  const revision = options.trialCandidateRef === undefined
+    ? environment.revision
+    : await svcEnvironment.revisionForManifest(self, environment.id, options.trialCandidateRef)
+  let taskTemplatesRoot = options.overlay?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(callerSessionId)
   const original = options.contract ?? {
     objective: champion.objective,
     acceptanceCriteria: champion.acceptanceCriteria,
@@ -74,11 +85,17 @@ export async function replayTask(
    * The same provider pre-check the ordinary decomposition runs (S1-C item 1),
    * from the replay's checkout and under the overlay's own capability
    */
+  /**
+   * A trial's providers must be judged against the candidate's own bytes: the
+   * verdicts become the Run binding's content identity, and a revision that no
+   * longer holds what was judged is refused rather than silently re-read.
+   */
+  const candidateRoots = revision !== undefined && options.trialCandidateRef !== undefined ? [revision.skillRoot] : []
   const precheck = await self.providerPrecheck(
     Object.keys(manifest.capabilities),
     {
       ...(envPath === undefined ? {} : { cwd: envPath }),
-      extraRoots: (await self.skillViewForSession(callerSessionId, options.overlay?.extraSkillRoots)).extraRoots,
+      extraRoots: (await self.skillViewForSession(callerSessionId, [...(options.overlay?.extraSkillRoots ?? []), ...candidateRoots])).extraRoots,
     },
     table,
     mcpRegistry,
@@ -139,10 +156,8 @@ export async function replayTask(
     contract,
     ...(champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}),
   }
-  if (options.overlay?.taskTemplatesRoot === undefined) {
-    const frozenCatalog = join(self.config.runBindingRoot!, 'replay-libraries', task.taskId, 'task-templates')
-    await snapshotTaskTemplates(taskTemplatesRoot, frozenCatalog)
-    taskTemplatesRoot = frozenCatalog
+  if (options.overlay?.taskTemplatesRoot === undefined && revision !== undefined && self.sessionExecutionBindings.get(callerSessionId)?.taskTemplatesRoot === undefined) {
+    taskTemplatesRoot = revision.taskTemplatesRoot
   }
   const spawn = options.spawn !== false
   /**
@@ -194,6 +209,10 @@ export async function replayTask(
            */
           ...(options.agentOptions === undefined ? {} : { agentOptions: { ...options.agentOptions } }),
           ...(taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot }),
+          ...(revision === undefined
+            ? {}
+            : { revision, environmentRevisionId: environment.revision?.manifest.revisionId ?? revision.manifest.revisionId }),
+          ...(options.trialCandidateRef === undefined ? {} : { trialCandidateRef: options.trialCandidateRef }),
           spawn,
           championRunId,
         },
@@ -203,10 +222,33 @@ export async function replayTask(
         },
       )
       /**
+       * The receipt this replay sealed, read back rather than assumed: a consumer
+       * of the replay (an experiment side, a comparison) must be able to tell
+       * "sealed and complete" from "no receipt" before it reads any other fact.
+       */
+      let receiptReport: ReplayReceiptReport
+      try {
+        const sealed = await self.sealRunReceipt(storeId, outcome.taskId, outcome.runId)
+        receiptReport = sealed.status === 'sealed' || sealed.status === 'already-sealed'
+          ? {
+              status: 'sealed',
+              digest: sealed.receipt.digest,
+              completeness: sealed.receipt.completeness.status,
+              missing: sealed.receipt.completeness.missing.map(entry => entry.fact),
+            }
+          : { status: 'absent', reason: sealed.reason }
+      } catch (error) {
+        // A replay that settled is a replay; a receipt it could not write is
+        // reported as absent and left queued, never turned into a replay failure.
+        self.warn(`store ${storeId}: the receipt of replay run "${outcome.runId}" could not be sealed (${message(error)})`)
+        receiptReport = { status: 'absent', reason: message(error) }
+      }
+      const withReceipt = { ...outcome, receipt: receiptReport }
+      /**
        * A named workspace is what the outcome of this replay reports: the
        * comparison report names the directory each side's run went through. An
        */
-      return named === undefined ? outcome : { ...outcome, workspace: named }
+      return named === undefined ? withReceipt : { ...withReceipt, workspace: named }
     } finally {
       if (workspacePath !== undefined && workspaceOwner !== undefined)
         await releaseReplayWorkspace(self, workspacePath, workspaceOwner)

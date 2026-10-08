@@ -1,18 +1,20 @@
 /**
  * Where a read is allowed to look (A2 §D/§E), on the fixture's real store: the
- * caller's own membership and its persistent `TaskStarted`, the reviewer
+ * caller's own membership and its persistent `TaskStarted`, the coordination
  * ledger's delegation, and every named way a binding can fail.
  */
 
 import { describe, expect, test, vi } from 'vitest'
 import { rootTaskStoreId } from '../../../task/src/index.ts'
-import { ReviewerBindingError } from '../../src/index.ts'
+import { CoordinationBindingError } from '../../src/index.ts'
 import { FixtureStack, seedChain, type Chain } from '../support/stack.ts'
 import { expectOk, expectRefused, expectResolved } from '../support/stack.ts'
 
 const DEPARTMENT = {
   rootStoreId: 'sg-t-s-root',
-  taskId: 't-c1',
+  sourceTaskId: 't-c1',
+  sourceRunId: null,
+  role: 'reviewer',
   actor: 's-root',
   at: '2026-09-25T00:00:00.000Z',
 } as const
@@ -154,30 +156,30 @@ describe('cross-graph reads', () => {
   })
 })
 
-describe('reviewer delegation', () => {
+describe('coordination delegation', () => {
   test.each(['s-review', 's-unpublished-reviewer'])('resolves %s from one domain snapshot and one recovery observation', async sessionId => {
     const { stack, chain } = await chainStack()
     stack.bindingSource(stack.ledger(DEPARTMENT))
     stack.recoveryStatus(chain.storeId, { status: 'ready' })
-    const open = vi.spyOn(stack.task, 'openStore')
+    const open = vi.spyOn(stack.task, 'snapshotReadOnly')
     stack.observed.recoveryStatus.mockClear()
 
     const loaded = await stack.service.load(sessionId)
 
-    expect(loaded.resolution).toMatchObject({ kind: 'reviewer', task: { taskId: 't-c1' }, recovery: { status: 'ready' } })
+    expect(loaded.resolution).toMatchObject({ kind: 'coordinator', task: { taskId: 't-c1' }, recovery: { status: 'ready' } })
     expect(loaded.snapshot?.id).toBe(chain.storeId)
     expect(open).toHaveBeenCalledExactlyOnceWith(chain.storeId)
     expect(stack.observed.recoveryStatus).toHaveBeenCalledExactlyOnceWith(chain.storeId)
   })
 
-  test('a ledger row binds the reviewer to the delegated graph, review-only', async () => {
+  test('a ledger row binds the coordinator to the delegated graph, review-only', async () => {
     const { stack } = await chainStack()
     stack.bindingSource(stack.ledger(DEPARTMENT))
     const resolution = expectResolved(await stack.service.resolveCaller('s-review'))
-    expect(resolution.kind).toBe('reviewer')
-    if (resolution.kind !== 'reviewer') throw new Error('expected a reviewer')
+    expect(resolution.kind).toBe('coordinator')
+    if (resolution.kind !== 'coordinator') throw new Error('expected a coordinator')
     expect(resolution.task?.taskId).toBe('t-c1')
-    expect(resolution.delegation.actor).toBe('s-root')
+    expect(resolution.binding.actor).toBe('s-root')
 
     const read = expectOk(await stack.service.taskRead('s-review'))
     expect(read.text).toContain('review-only')
@@ -192,7 +194,7 @@ describe('reviewer delegation', () => {
     )
   })
 
-  test("a reviewer's dynamic state is the delegated task, under its review-only label", async () => {
+  test("a coordinator's dynamic state is the delegated task, under its review-only label", async () => {
     const { stack } = await chainStack()
     stack.bindingSource(stack.ledger(DEPARTMENT))
     const text = expectOk(await stack.service.dynamicProjection('s-review')).text
@@ -203,7 +205,7 @@ describe('reviewer delegation', () => {
     expect(text).toContain('gate phase: not tracked for this session')
   })
 
-  test('without a ledger row the reviewer session is only a member, and reads no contract', async () => {
+  test('without a ledger row the coordinator session is only a member, and reads no contract', async () => {
     const { stack } = await chainStack()
     const resolution = expectResolved(await stack.service.resolveCaller('s-review'))
     expect(resolution.kind).toBe('member')
@@ -214,7 +216,7 @@ describe('reviewer delegation', () => {
     const { stack } = await chainStack()
     stack.bindingSource({
       read: async () => {
-        throw new ReviewerBindingError('binding-conflict', 'two conflicting rows for one session')
+        throw new CoordinationBindingError('binding-conflict', 'two conflicting rows for one session')
       },
     })
     const resolution = await stack.service.resolveCaller('s-review')
@@ -229,17 +231,17 @@ describe('reviewer delegation', () => {
   test('a delegation naming another graph store is cross-graph', async () => {
     const { stack } = await chainStack()
     await secondGraph(stack)
-    stack.bindingSource(stack.ledger({ ...DEPARTMENT, rootStoreId: rootTaskStoreId('s-root-2'), taskId: 't-other' }))
+    stack.bindingSource(stack.ledger({ ...DEPARTMENT, rootStoreId: rootTaskStoreId('s-root-2'), sourceTaskId: 't-other' }))
     const detail = expectRefused(await stack.service.taskRead('s-review'), 'cross-graph')
     expect(detail).toContain('never moves a session into another graph')
   })
 
   test('a delegation naming a task the store does not hold reads not-found', async () => {
     const { stack } = await chainStack()
-    stack.bindingSource(stack.ledger({ ...DEPARTMENT, taskId: 't-nope' }))
+    stack.bindingSource(stack.ledger({ ...DEPARTMENT, sourceTaskId: 't-nope' }))
     const resolution = expectResolved(await stack.service.resolveCaller('s-review'))
-    expect(resolution.kind).toBe('reviewer')
-    if (resolution.kind !== 'reviewer') throw new Error('expected a reviewer')
+    expect(resolution.kind).toBe('coordinator')
+    if (resolution.kind !== 'coordinator') throw new Error('expected a coordinator')
     expect(resolution.task).toBeUndefined()
     expect(expectRefused(await stack.service.taskRead('s-review'), 'not-found')).toContain('t-nope')
   })
@@ -248,7 +250,7 @@ describe('reviewer delegation', () => {
     const { stack } = await chainStack()
     stack.bindingSource(stack.ledger(DEPARTMENT))
     const resolution = expectResolved(await stack.service.resolveCaller('s-unpublished-reviewer'))
-    expect(resolution.kind).toBe('reviewer')
+    expect(resolution.kind).toBe('coordinator')
     expect(expectOk(await stack.service.taskRead('s-unpublished-reviewer')).text).toContain('review-only')
   })
 
@@ -296,7 +298,7 @@ describe('not activated', () => {
  * model request with nothing in it, so the resolution has to say which one it
  * is (`placement`). The distinction the rework fixes is exactly this:
  * a *failure* to read the facts a binding is derived from (the graph registry,
- * the domain store, the reviewer ledger) is not the fact "no binding exists".
+ * the domain store, the coordination ledger) is not the fact "no binding exists".
  */
 describe('a binding failure is not "outside the deployment" (Q1)', () => {
   /** The placement of one refusal, on the resolution the assembly decides from. */
@@ -374,7 +376,7 @@ describe('a binding failure is not "outside the deployment" (Q1)', () => {
     const { stack } = await chainStack()
     stack.bindingSource({
       read: async () => {
-        throw new ReviewerBindingError('binding-conflict', 'two conflicting rows for one session')
+        throw new CoordinationBindingError('binding-conflict', 'two conflicting rows for one session')
       },
     })
     expect(await placementOf(stack, 's-review')).toBe('failed')
@@ -403,7 +405,7 @@ describe('a delegation must come from a session of the graph it delegates into (
     const { stack, chain } = await chainStack()
     stack.bindingSource(stack.ledger(DEPARTMENT))
     const resolution = expectResolved(await stack.service.resolveCaller('s-review'))
-    expect(resolution.kind).toBe('reviewer')
+    expect(resolution.kind).toBe('coordinator')
     // The whole delegated domain, not one task: the delegated task's contract,
     // the sibling's evidence and a session of the graph.
     expect(expectOk(await stack.service.taskRead('s-review')).text).toContain('review-only')

@@ -17,6 +17,8 @@ import type {
 import { SKILL_SIDECAR_FILE, skillContractDefects, skillContractDigest, skillContentDigest } from './skill-contract.ts'
 import type { SkillSidecar } from './skill-contract.ts'
 import type { CapabilityConfig } from './capability.ts'
+import { revisionSkillOf } from './environment/revision.ts'
+import type { EnvironmentRevision } from './environment/revision.ts'
 import { manifestMcpServers, type McpServerTemplate } from './mcp-servers.ts'
 import type { ProviderPrecheck } from './provider-precheck.ts'
 import type { AcceptedSkillProviderVerdict, SkillDefect } from './sidecar.ts'
@@ -58,6 +60,16 @@ interface RunBindingRequest {
   root?: string
   /** The MCP template registry the granted server names resolve against (tests pass their own). */
   mcpRegistry?: Readonly<Record<string, McpServerTemplate>>
+  /**
+   * The immutable environment revision this run is admitted against. Present on
+   * every new-protocol run: the bytes are read from the revision's own skill
+   * root and the binding records the revision id. Absent on an old-protocol run
+   * (or a caller with no revision), where the admitted verdicts' directories
+   * remain the source and no revision id is recorded.
+   */
+  revision?: EnvironmentRevision
+  /** The unpublished candidate revision an explicit trial binds; recorded on the binding beside the revision. */
+  trialCandidateRef?: string
 }
 
 /** One provider selected for a run: the verdict it came from plus the run's rows that grant it. */
@@ -155,8 +167,14 @@ export function mcpServerBindings(
 /**
  * Copy one selected provider's admitted bytes into the run's snapshot.
  * Every file is read through the verified walk (a link or a wrong type anywhere
+ * in the source directory is reported rather than followed), and every byte is
+ * checked against the identity the run is bound to before it is written.
+ *
+ * `from` is the directory the bytes are read from: the bound environment
+ * revision's skill root for a new-protocol run, the admitted verdict's own
+ * directory for an old-protocol one.
  */
-async function materializeProvider(provider: SelectedProvider, snapshotRoot: string, runId: RunId): Promise<void> {
+async function materializeProvider(provider: SelectedProvider, snapshotRoot: string, runId: RunId, from: string): Promise<void> {
   const { verdict } = provider
   const target = join(snapshotRoot, verdict.name)
   await mkdir(target, { recursive: true })
@@ -167,14 +185,14 @@ async function materializeProvider(provider: SelectedProvider, snapshotRoot: str
   for (const file of files) {
     let bytes: Buffer
     try {
-      bytes = await readVerifiedFile(verdict.directory, file.rel)
+      bytes = await readVerifiedFile(from, file.rel)
     } catch (error) {
       throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${message(error)}`)
     }
     const read = sha256Hex(bytes)
     if (read !== file.sha256) {
       throw new Error(
-        `run "${runId}" cannot bind skill "${verdict.name}": ${file.rel} at ${verdict.directory} is not the admitted content ` +
+        `run "${runId}" cannot bind skill "${verdict.name}": ${file.rel} at ${from} is not the admitted content ` +
           `(admitted ${file.sha256}, read ${read}); the provider changed after it was judged`,
       )
     }
@@ -185,7 +203,7 @@ async function materializeProvider(provider: SelectedProvider, snapshotRoot: str
   if (verdict.role === 'guidance') return
   let sidecarBytes: Buffer
   try {
-    sidecarBytes = await readVerifiedFile(verdict.directory, SKILL_SIDECAR_FILE)
+    sidecarBytes = await readVerifiedFile(from, SKILL_SIDECAR_FILE)
   } catch (error) {
     throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${message(error)}`)
   }
@@ -200,17 +218,57 @@ async function materializeProvider(provider: SelectedProvider, snapshotRoot: str
   const defects = skillContractDefects(declared)
   if (defects.length > 0) {
     throw new Error(
-      `run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${verdict.directory} is not a valid sidecar (${defects.map(item => `${item.code}: ${item.reason}`).join('; ')})`,
+      `run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${from} is not a valid sidecar (${defects.map(item => `${item.code}: ${item.reason}`).join('; ')})`,
     )
   }
   const digest = skillContractDigest(declared as SkillSidecar)
   if (digest !== verdict.contractDigest) {
     throw new Error(
-      `run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${verdict.directory} is not the one it was judged against ` +
+      `run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${from} is not the one it was judged against ` +
         `(judged ${verdict.contractDigest}, read ${digest})`,
     )
   }
   await writeFile(join(target, SKILL_SIDECAR_FILE), sidecarBytes)
+}
+
+/**
+ * Refuse a run whose admission judged one revision and would now bind another:
+ * when the bound revision declares the skill, its own entry must be exactly the
+ * content the verdict accepted, or the run would load bytes nobody judged under
+ * the name the record cites.
+ *
+ * A skill the revision does not declare is not this graph library's content: it
+ * comes from a discovery root the deployment supplies (the shipped platform
+ * skills, a run's overlay), and the verdict's own directory stays its source.
+ */
+function assertRevisionHoldsVerdict(revision: EnvironmentRevision, provider: SelectedProvider, runId: RunId): void {
+  const { verdict } = provider
+  const entry = revisionSkillOf(revision.manifest, verdict.name)
+  if (entry === undefined) return
+  if (entry.status === 'retired') {
+    throw new Error(
+      `run "${runId}" cannot bind skill "${verdict.name}": revision "${revision.manifest.revisionId}" holds it retired`,
+    )
+  }
+  const mismatches: string[] = []
+  if (entry.digest !== verdict.content.skillMdSha256) mismatches.push(`SKILL.md digest (revision ${entry.digest}, judged ${verdict.content.skillMdSha256})`)
+  if (entry.contentDigest !== verdict.contentDigest) mismatches.push(`content digest (revision ${entry.contentDigest}, judged ${verdict.contentDigest})`)
+  if ((entry.contractDigest ?? null) !== (verdict.contractDigest ?? null)) {
+    mismatches.push(`contract digest (revision ${entry.contractDigest ?? 'none'}, judged ${verdict.contractDigest ?? 'none'})`)
+  }
+  if (mismatches.length > 0) {
+    throw new Error(
+      `run "${runId}" cannot bind skill "${verdict.name}": revision "${revision.manifest.revisionId}" is not the content it was judged against — ${mismatches.join('; ')}`,
+    )
+  }
+}
+
+/** The directory one selected provider's bytes are read from: the bound revision's copy, or the judged directory. */
+function providerSource(revision: EnvironmentRevision | undefined, provider: SelectedProvider): string {
+  if (revision === undefined) return provider.verdict.directory
+  return revisionSkillOf(revision.manifest, provider.verdict.name) === undefined
+    ? provider.verdict.directory
+    : join(revision.skillRoot, provider.verdict.name)
 }
 
 /**
@@ -239,6 +297,8 @@ export async function bindRunProviders(request: RunBindingRequest): Promise<RunP
     capabilities: [...rows].sort(),
     skills: selected.map(skillBinding),
     mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? {}),
+    ...(request.revision === undefined ? {} : { environmentRevisionId: request.revision.manifest.revisionId }),
+    ...(request.trialCandidateRef === undefined ? {} : { trialCandidateRef: request.trialCandidateRef }),
   }
   const root = request.root
   if (root === undefined) {
@@ -246,6 +306,9 @@ export async function bindRunProviders(request: RunBindingRequest): Promise<RunP
       `run "${request.runId}" selects skills [${selected.map(provider => provider.verdict.name).join(', ')}] but this deployment configures no run binding root ` +
         '(`Config.runBindingRoot`); without one the run cannot load content it was admitted against',
     )
+  }
+  for (const provider of selected) {
+    if (request.revision !== undefined) assertRevisionHoldsVerdict(request.revision, provider, request.runId)
   }
   const runDirectory = join(root, request.storeId, request.runId)
   const snapshotRoot = join(runDirectory, RUN_BINDING_SKILLS_DIR)
@@ -262,7 +325,9 @@ export async function bindRunProviders(request: RunBindingRequest): Promise<RunP
     )
   }
   try {
-    for (const provider of selected) await materializeProvider(provider, snapshotRoot, request.runId)
+    for (const provider of selected) {
+      await materializeProvider(provider, snapshotRoot, request.runId, providerSource(request.revision, provider))
+    }
   } catch (error) {
     await rm(runDirectory, { recursive: true, force: true })
     throw error

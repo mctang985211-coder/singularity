@@ -1,6 +1,7 @@
 /** The immutable half of a caller's context: root briefing, contract, handoff (A2 §D/§9). @module @dangosys/dsh-singularity-context/reads-contract */
 
 import type { TaskInstance } from '@dangosys/dsh-singularity-task'
+import type { CoordinationRole } from '../bindings/coordination.ts'
 import type { LoadedCaller } from '../bindings/types.ts'
 import { CONTEXT_OUTPUT_LIMIT_BYTES, OutputBudget, budgetList, itemsClause, itemsFloor, utf8Bytes } from '../limits.ts'
 import { message, refused, read, type ProjectedRead } from '../refusals.ts'
@@ -57,9 +58,9 @@ export async function contractProjection(deps: ReadDeps, loaded: LoadedCaller): 
   }
   const task = target.task as TaskInstance
   const run = target.run
-  const role: 'worker' | 'root' | 'reviewer' | 'supervisor' | 'replay' =
-    resolution.kind === 'reviewer'
-      ? resolution.delegation.role ?? 'reviewer'
+  const role: 'worker' | 'root' | CoordinationRole | 'replay' =
+    resolution.kind === 'coordinator'
+      ? resolution.binding.role
       : resolution.kind === 'root'
         ? 'root'
         : task.parentTaskId === undefined && run?.parentRunId !== undefined
@@ -111,22 +112,22 @@ export async function contractProjection(deps: ReadDeps, loaded: LoadedCaller): 
     return tooLarge('your contract', taskPageHint(task.taskId))
   }
 
-  if (resolution.kind === 'reviewer') {
+  if (resolution.kind === 'coordinator') {
     const label = [
       '',
       `- this session has no business Run: the contract above belongs to the task it was delegated to review ` +
-        `(delegated by session ${resolution.delegation.actor}, recorded ${resolution.delegation.at}), and reading it is not executing it.`,
+        `(delegated by session ${resolution.binding.actor}, recorded ${resolution.binding.at}), and reading it is not executing it.`,
       ...(role === 'supervisor' ? ['- responsibility: investigate and compare reusable method candidates through Evolution; the platform owns round scheduling.'] : []),
-      ...(resolution.delegation.sourceRunId == null ? [] : [`- exact source Run: ${resolution.delegation.sourceRunId}`]),
+      ...(resolution.binding.sourceRunId == null ? [] : [`- exact source Run: ${resolution.binding.sourceRunId}`]),
     ]
     if (budget.addAll(label) > 0) return tooLarge('the review-only label', taskPageHint(task.taskId))
   }
 
   // Blocks owed after the bounded lists are measured before them: the lists hand
   // their room forward, so a long reference list is cut and named instead.
-  const summaryLines: string[] = resolution.kind === 'reviewer' && run?.providerBinding !== undefined
+  const summaryLines: string[] = resolution.kind === 'coordinator' && run?.providerBinding !== undefined
     ? await bindingLines(deps.taskRuntime, run.providerBinding) : []
-  if (resolution.kind !== 'reviewer') {
+  if (resolution.kind !== 'coordinator') {
     if (run?.providerBinding === undefined || run.providerBinding.skills.length === 0) {
       return refused('unreadable', `task "${task.taskId}" has no bound guidance Skill; its model request cannot execute unguided work.`)
     }

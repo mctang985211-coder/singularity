@@ -4,7 +4,7 @@ import { SESSION_NOT_IN_GRAPH } from '@dangosys/dsh-singularity-graphs'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { message, type NamedRefusal } from '../refusals.ts'
-import { delegatorStanding, readDelegation } from './reviewer.ts'
+import { delegatorStanding, readCoordination, type CoordinationBinding } from './coordination.ts'
 import {
   callerGraph,
   type BindingDeps,
@@ -14,20 +14,18 @@ import {
   type LoadedCaller,
   type ReadOnlyGraphs,
   type ReadOnlyTaskStore,
-  type ReviewerBindingRecord,
 } from './types.ts'
 
-/** The one legal shape of a store this deployment cannot open: it does not exist yet. */
+/** The domain store's own answer: its snapshot, or nothing when this deployment owns no such store. */
 async function openDomain(
   task: ReadOnlyTaskStore,
   storeId: string,
 ): Promise<{ snapshot?: TaskSnapshot; failure?: string }> {
   try {
-    return { snapshot: await task.openStore(storeId) }
+    const door = await task.snapshotReadOnly(storeId)
+    return door.exists ? { snapshot: door.snapshot } : {}
   } catch (error) {
-    const detail = message(error)
-    if (/does not exist/.test(detail)) return {}
-    return { failure: detail }
+    return { failure: message(error) }
   }
 }
 
@@ -131,9 +129,9 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
   const graph = membership.kind === 'graph' ? membership.graph : undefined
 
   if (graph === undefined) {
-    const delegation = await readDelegation(deps, sessionId)
-    if (delegation.kind === 'refused') return failed(sessionId, delegation.refusal, delegation.detail)
-    if (delegation.kind === 'none') {
+    const coordination = await readCoordination(deps, sessionId)
+    if (coordination.kind === 'refused') return failed(sessionId, coordination.refusal, coordination.detail)
+    if (coordination.kind === 'none') {
       return outside(
         sessionId,
         'unbound',
@@ -143,12 +141,12 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
     }
     let placed: GraphRecordFacts | undefined
     try {
-      placed = await graphForStore(deps.graphs, delegation.record.rootStoreId)
+      placed = await graphForStore(deps.graphs, coordination.record.rootStoreId)
     } catch (error) {
       return failed(
         sessionId,
         'unreadable',
-        `the delegation of session "${sessionId}" names store "${delegation.record.rootStoreId}", and the graph registry ` +
+        `the delegation of session "${sessionId}" names store "${coordination.record.rootStoreId}", and the graph registry ` +
           `could not be listed to place it: ${message(error)}`,
       )
     }
@@ -156,11 +154,11 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
       return failed(
         sessionId,
         'unbound',
-        `session "${sessionId}" is delegated to store "${delegation.record.rootStoreId}", which no graph in this ` +
+        `session "${sessionId}" is delegated to store "${coordination.record.rootStoreId}", which no graph in this ` +
           'deployment owns; the delegation cannot be placed, so there is no domain to read.',
       )
     }
-    return await reviewerOf(deps, sessionId, placed, delegation.record, signal)
+    return await coordinatorOf(deps, sessionId, placed, coordination.record, signal)
   }
 
   const facts = callerGraph(graph)
@@ -201,7 +199,7 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
   const workerRun = !isRoot && own !== undefined && task !== undefined
   // The ledger is the authority only for a session with no run of its own: an
   // unreadable ledger does not refuse a session its own run already binds.
-  const ledger = isRoot || workerRun ? await readDelegation(deps, sessionId) : undefined
+  const ledger = isRoot || workerRun ? await readCoordination(deps, sessionId) : undefined
   if (ledger?.kind === 'refused' && ledger.refusal === 'binding-conflict') {
     return failed(sessionId, ledger.refusal, ledger.detail, facts)
   }
@@ -223,12 +221,12 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
       ...(snapshot === undefined ? {} : { snapshot }),
     }
   }
-  const delegation = ledger ?? (await readDelegation(deps, sessionId))
-  if (delegation.kind === 'refused') {
-    return failed(sessionId, delegation.refusal, delegation.detail, facts)
+  const coordination = ledger ?? (await readCoordination(deps, sessionId))
+  if (coordination.kind === 'refused') {
+    return failed(sessionId, coordination.refusal, coordination.detail, facts)
   }
-  if (delegation.kind === 'record') {
-    return await reviewerOf(deps, sessionId, graph, delegation.record, signal, { ...opened, recovery })
+  if (coordination.kind === 'record') {
+    return await coordinatorOf(deps, sessionId, graph, coordination.record, signal, { ...opened, recovery })
   }
   return {
     resolution: { ...base, kind: 'member' },
@@ -236,12 +234,12 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
   }
 }
 
-/** A reviewer's resolved domain: the delegation, its graph and its delegator, all checked (Q2). */
-async function reviewerOf(
+/** A coordinator's resolved domain: the delegation, its graph and its delegator, all checked (Q2). */
+async function coordinatorOf(
   deps: BindingDeps,
   sessionId: string,
   graph: GraphRecordFacts,
-  record: ReviewerBindingRecord,
+  record: CoordinationBinding,
   signal?: AbortSignal,
   domain?: Awaited<ReturnType<typeof openDomain>> & { readonly recovery: CallerBase['recovery'] },
 ): Promise<LoadedCaller> {
@@ -264,16 +262,17 @@ async function reviewerOf(
     return failed(sessionId, 'unreadable', `the delegated store "${storeId}" cannot be read: ${opened.failure}`, facts)
   }
   const recovery = domain?.recovery ?? await deps.taskRuntime.recoveryStatus(storeId)
-  const task = opened.snapshot?.tasks.find(item => item.taskId === record.taskId)
+  const task = opened.snapshot?.tasks.find(item => item.taskId === record.sourceTaskId)
   return {
     resolution: {
       sessionId,
       graph: facts,
       storeId,
       recovery,
-      kind: 'reviewer',
+      kind: 'coordinator',
+      role: record.role,
       ...(task === undefined ? {} : { task }),
-      delegation: record,
+      binding: record,
     },
     ...(opened.snapshot === undefined ? {} : { snapshot: opened.snapshot }),
   }

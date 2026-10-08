@@ -40,6 +40,7 @@ import type {
   QuestionAskResult,
   QuestionRecord,
 } from './question.ts'
+import type { ExecutionReceipt } from './receipt.ts'
 import { TaskState } from './service/state.ts'
 import { EventStoreSet, type ReadOnlyStoreSnapshot } from './service/store.ts'
 import { runIn, taskIn } from './service/checks/primitives.ts'
@@ -51,6 +52,7 @@ export * from './template.ts'
 export * from './budget.ts'
 export * from './proposal.ts'
 export * from './question.ts'
+export * from './receipt.ts'
 export { TaskState } from './service/state.ts'
 export { EventStoreSet } from './service/store.ts'
 export type { EventStoreConfig, EventStoreState, ReadOnlyStoreSnapshot, StoreEntry, StoreOpenMode } from './service/store.ts'
@@ -565,6 +567,13 @@ export class TaskService extends Service {
   async recordReviewIn(storeId: string, review: ReviewRecord, actor: string): Promise<void> {
     await this.commitIn(storeId, [
       event('ReviewRecorded', { taskId: review.taskId, runId: review.runId, actor, payload: { review } }),
+    ])
+  }
+
+  /** Record one Run's execution receipt; the store's own check decides, and one run accepts exactly one. */
+  async recordReceiptIn(storeId: string, receipt: ExecutionReceipt, actor: string): Promise<void> {
+    await this.commitIn(storeId, [
+      event('RunReceiptSealed', { taskId: receipt.taskId, runId: receipt.runId, actor, payload: { receipt } }),
     ])
   }
 

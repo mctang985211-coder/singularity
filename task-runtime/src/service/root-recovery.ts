@@ -21,6 +21,7 @@ import { resolveCapabilities, capabilitySnapshot, resolvePreset } from '../capab
 import { providerRefusals } from '../provider-precheck.ts'
 import { checkRunStart, hasRootLimits, resolveRootBudget } from '../root-budget.ts'
 import { bindRunProviders } from '../run-binding.ts'
+import * as svcEnvironment from './environment.ts'
 import { settleRunFromRuntime } from '../orchestration/settlement.ts'
 import { spawnTaskWorker } from '../orchestration/spawn.ts'
 import {
@@ -440,6 +441,13 @@ export async function startRecoveryAttempt(
     claimed = self.workspaces.ownerOf(workspacePath)
   }
   let binding: RunProviderBinding | undefined
+  /**
+   * A recovery attempt keeps the source run's frozen environment version: an
+   * attempt re-earns the same criteria under the same content. An attempt with
+   * no source run (a first attempt the runtime opened) reads the active revision.
+   */
+  const inherited = input.sourceRun === undefined ? undefined : await self.environmentRevisionForRun(input.sourceRun)
+  const revision = inherited ?? (await svcEnvironment.activeRevisionOrUndefined(self, rootSessionId))
   try {
     binding = await bindRunProviders({
       mcpRegistry: self.config.mcpServers,
@@ -449,6 +457,7 @@ export async function startRecoveryAttempt(
       providers: input.precheck,
       table: await self.capabilitiesForSession(rootSessionId),
       root: self.config.runBindingRoot,
+      ...(revision === undefined ? {} : { revision }),
     })
     const run: TaskRun = {
       runId,
@@ -456,6 +465,8 @@ export async function startRecoveryAttempt(
       sessionId,
       capabilitySnapshot: capabilitySnapshot(manifest),
       taskTemplatesRoot: input.sourceRun?.taskTemplatesRoot ?? await self.taskTemplatesRootFor(rootSessionId),
+      ...(revision === undefined ? {} : { environmentRevisionId: revision.manifest.revisionId }),
+      ...(input.sourceRun?.trialCandidateRef === undefined ? {} : { trialCandidateRef: input.sourceRun.trialCandidateRef }),
       ...(preset === undefined ? {} : { agentPreset: preset }),
       ...(binding === undefined ? {} : { providerBinding: binding }),
       // Born active, exactly as a first attempt is (§1.1): the new attempt

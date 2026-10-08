@@ -1,8 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { createHash } from 'node:crypto'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { describe, expect, test } from 'vitest'
 import {
   capabilitySnapshot,
   resolveCapabilities,
@@ -15,7 +11,6 @@ import {
   type CapabilityConfig,
   type PermissionSpec,
 } from '../../src/capability.ts'
-import { TaskRuntime } from '../../src/index.ts'
 
 /**
  * The capability table a deployment configures (`config.yml`, document 1) —
@@ -38,66 +33,6 @@ const DEPLOYMENT_CAPABILITIES: Readonly<Record<string, CapabilityConfig>> = {
   'integrate-model': { skills: ['model-integration'] },
   'analyze-waveform': { skills: ['waveform'], mcpServers: ['waveform'] },
   research: { preset: 'standard' },
-}
-
-/**
- * The skill a capability row grants in this file. A name no deployment installs,
- * so the replacement check (S1-C item 3, D6) can only ever discover the copy
- * this suite wrote into a pinned `$DSH_HOME/skills`.
- */
-const ROW_SKILL = 'capability-row-fixture-skill'
-
-let workspace: string
-let home: string
-
-beforeEach(async () => {
-  workspace = await mkdtemp(join(tmpdir(), 'capability-row-'))
-  home = join(workspace, 'home')
-  await mkdir(join(home, 'skills'), { recursive: true })
-  vi.stubEnv('DSH_HOME', home)
-  vi.stubEnv('HOME', home)
-})
-
-afterEach(async () => {
-  vi.unstubAllEnvs()
-  await rm(workspace, { recursive: true, force: true })
-})
-
-/**
- * Install the one skill this file's rows grant: a `SKILL.md` whose frontmatter
- * declares the granted name, plus — when a sidecar is asked for — a declaration
- * whose content identity is the digest of exactly those bytes. The digest is
- * computed here, so the validator is never confirmed against itself.
- */
-async function installExecutionSkill(sidecar?: {
-  verifierRef: string
-  capabilities: readonly string[]
-  requiredTools: readonly string[]
-}): Promise<string> {
-  const directory = join(home, 'skills', ROW_SKILL)
-  await mkdir(directory, { recursive: true })
-  const skillMd = `---\nname: ${ROW_SKILL}\ndescription: fixture skill for the capability replacement check\n---\n\n# ${ROW_SKILL}\n`
-  await writeFile(join(directory, 'SKILL.md'), skillMd)
-  if (sidecar === undefined) return directory
-  await writeFile(
-    join(directory, 'SKILL.contract.json'),
-    `${JSON.stringify(
-      {
-        contractVersion: 1,
-        type: 'execution',
-        capabilities: [...sidecar.capabilities],
-        precondition: 'the fixture skill is installed where discovery looks',
-        inputs: [],
-        outputs: [],
-        requiredTools: [...sidecar.requiredTools],
-        verifier: { ref: sidecar.verifierRef },
-        content: { skillMdSha256: createHash('sha256').update(skillMd, 'utf8').digest('hex'), resources: [] },
-      },
-      null,
-      2,
-    )}\n`,
-  )
-  return directory
 }
 
 const PERMISSION_BUNDLES: Record<string, PermissionSpec> = {
@@ -166,93 +101,6 @@ describe('resolveCapabilities', () => {
   test('a config override replaces the default registry', () => {
     const manifest = resolveCapabilities(['research'], { research: { skills: ['web'] } })
     expect(manifest.capabilities['research']).toEqual({ skills: ['web'], tools: [] })
-  })
-})
-
-describe('TaskRuntime.applyCapabilityRow (W16 evolution apply/rollback seam)', () => {
-  function runtime(table: Readonly<Record<string, CapabilityConfig>> = {}): TaskRuntime {
-    // The verifier vocabulary a replacement's execution providers are judged
-    // against, resolved softly from the context: the three built-ins.
-    const ctx = {
-      reflect: { provide: () => {} },
-      effect: () => {},
-      verifier: { ready: async () => {}, verifierIds: () => ['command', 'composite', 'review'] },
-    }
-    return new TaskRuntime(ctx as never, { capabilities: { ...table } } as never)
-  }
-
-  test('replaces a row whole, adds a new one, removes one — resolution sees each immediately', async () => {
-    await installExecutionSkill()
-    const rt = runtime()
-    await rt.applyCapabilityRow('research', { preset: 'standard', skills: [ROW_SKILL] })
-    expect(rt.listCapabilities()['research']).toEqual({ preset: 'standard', skills: [ROW_SKILL] })
-    expect(resolveCapabilities(['research'], rt.listCapabilities()).capabilities['research']).toEqual({
-      preset: 'standard',
-      skills: [ROW_SKILL],
-      tools: [],
-    })
-    await rt.applyCapabilityRow('new-cap', { tools: ['bash'] })
-    expect(rt.listCapabilities()['new-cap']).toEqual({ tools: ['bash'] })
-    await rt.applyCapabilityRow('research', null)
-    expect(rt.listCapabilities()['research']).toBeUndefined()
-    // the removal stayed on this runtime's own table — the core ships no table,
-    // so a runtime built without a deployment config starts empty
-    expect(runtime().listCapabilities()).toEqual({})
-  })
-
-  test('a rollback restores the champion row after the candidate ruled', async () => {
-    await installExecutionSkill()
-    const rt = runtime()
-    await rt.applyCapabilityRow('research', { preset: 'standard', skills: [ROW_SKILL] })
-    await rt.applyCapabilityRow('research', { preset: 'standard' })
-    expect(rt.listCapabilities()['research']).toEqual({ preset: 'standard' })
-  })
-
-  test('refuses a replacement whose provider skill is not discoverable, leaving the running table unchanged', async () => {
-    const rt = runtime({ research: { preset: 'standard' } })
-    const before = rt.listCapabilities()
-    const refusal = await rt
-      .applyCapabilityRow('research', { skills: ['no-such-provider-skill'] })
-      .catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
-    expect(refusal).toContain('capability "research"')
-    expect(refusal).toContain('skill "no-such-provider-skill"')
-    expect(refusal).toContain('skill-missing')
-    expect(rt.listCapabilities()).toEqual(before)
-    expect(rt.listCapabilities()['research']).toEqual({ preset: 'standard' })
-  })
-
-  test('refuses a replacement whose execution provider is unusable, and names every defect', async () => {
-    await installExecutionSkill({ verifierRef: 'ghost-verifier', capabilities: ['research'], requiredTools: [] })
-    const rt = runtime()
-    const before = rt.listCapabilities()
-    const unknownVerifier = await rt
-      .applyCapabilityRow('research', { skills: [ROW_SKILL] })
-      .catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
-    expect(unknownVerifier).toContain('verifier-unknown')
-    expect(unknownVerifier).toContain('ghost-verifier')
-    expect(rt.listCapabilities()).toEqual(before)
-
-    // The same row with a registered verifier but tools the row does not grant.
-    await installExecutionSkill({ verifierRef: 'command', capabilities: ['research'], requiredTools: ['bash'] })
-    const uncoveredTools = await rt
-      .applyCapabilityRow('research', { skills: [ROW_SKILL], tools: ['filesystem'] })
-      .catch((error: unknown) => (error instanceof Error ? error.message : String(error)))
-    expect(uncoveredTools).toContain('tool-not-covered')
-    expect(rt.listCapabilities()).toEqual(before)
-
-    // And the row the same checks accept lands, whole.
-    await rt.applyCapabilityRow('research', { skills: [ROW_SKILL], tools: ['filesystem', 'bash'] })
-    expect(rt.listCapabilities()['research']).toEqual({ skills: [ROW_SKILL], tools: ['filesystem', 'bash'] })
-  })
-
-  test('removes a row without asking about providers — the rollback path removes, it never replaces', async () => {
-    const rt = runtime()
-    // `null` needs no discovery at all: no skill is checked, and a name that is
-    // not there is a no-op rather than a refusal.
-    await rt.applyCapabilityRow('absent-capability', null)
-    await rt.applyCapabilityRow('research', null)
-    expect(rt.listCapabilities()['research']).toBeUndefined()
-    expect(Object.keys(rt.listCapabilities())).not.toContain('absent-capability')
   })
 })
 

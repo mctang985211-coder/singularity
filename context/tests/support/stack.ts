@@ -47,16 +47,21 @@ import type {
 } from '../../../task/src/index.ts'
 import { ExecutionGate } from '../../../task-runtime/src/gate.ts'
 import type { RunBindingRead, StoreRecoveryStatus } from '../../../task-runtime/src/index.ts'
-import { SessionNotInGraphError } from '../../../graphs/src/index.ts'
+import type { GraphEvaluationWire, GraphRevisionWire } from '../../../graphs/src/wire.ts'
+import { GRAPH_PROTOCOL_V2, SessionNotInGraphError } from '../../../graphs/src/index.ts'
 import { SingularityContextService } from '../../src/index.ts'
 import type {
   CallerResolution,
+  CoordinationAssignmentFacts,
+  CoordinationBinding,
+  CoordinationBindingSource,
+  CoordinationFactsReader,
   EnvPathSource,
+  GraphViewService,
+  MethodFactsReader,
   ProjectedRead,
   ProjectedReadOk,
   NamedRefusal,
-  ReviewerBindingRecord,
-  ReviewerBindingSource,
 } from '../../src/index.ts'
 
 /** One graph the fixture registry publishes. */
@@ -67,6 +72,11 @@ export interface GraphSpec {
   readonly envId?: string
   /** Sessions this graph publishes as members. The root session is one by construction. */
   readonly members?: readonly string[]
+  /** The improvement rounds the registry record carries; absent = no RSI loop, so progress is never "finished". */
+  readonly rounds?: number
+  /** Publish the graph without the protocol marker: a sealed legacy graph, readable as history only. */
+  readonly sealed?: boolean
+  readonly createdAt?: number
 }
 
 /** One store record the fixture seeds through the store's own entries. */
@@ -170,14 +180,24 @@ export class FixtureStack {
   readonly observed = { recoveryStatus: vi.fn(), readRunBinding: vi.fn(), gatePhaseOf: vi.fn() }
   private readonly headers = new Map<string, SessionHeader>()
   private readonly logs = new Map<string, { header: SessionHeader; events: SessionEvent[] }>()
-  private readonly stores = new Map<string, { header: SessionHeader; events: TaskEvent[] }>()
+  private readonly stores = new Map<string, { header: SessionHeader; events: SessionEvent[] }>()
   private readonly graphs = new Map<string, { spec: Required<GraphSpec>; members: Set<string>; spawned: Set<string> }>()
   private readonly recovery = new Map<string, StoreRecoveryStatus>()
+  /** The view facts each graph's registered readers answer with, keyed by that graph's root store id. */
+  private readonly viewFacts = new Map<
+    string,
+    { revision: GraphRevisionWire | null; evaluation: GraphEvaluationWire | null; assignments: CoordinationAssignmentFacts[] }
+  >()
+  /** Every fact read the view service made, so a spec can assert one read per fingerprint. */
+  readonly viewReads = { activeRevision: vi.fn(), latestEvaluation: vi.fn(), assignments: vi.fn() }
+  private readonly coordination: CoordinationFactsReader
+  private readonly method: MethodFactsReader
   private envPath: string | undefined
   private time = 1_760_000_000_000
   /** The registry stand-in itself, so a spec can break one of its reads without replacing the whole plane. */
   private graphsService!: {
     graphForSession(sessionId: string): Promise<unknown>
+    get(id: string): Promise<unknown>
     list(): Promise<readonly unknown[]>
     view(id: string): Promise<{
       graph: {
@@ -220,6 +240,11 @@ export class FixtureStack {
         throw new SessionNotInGraphError(sessionId)
       },
       list: async () => [...this.graphs.values()].map(entry => this.record(entry)),
+      get: async (id: string) => {
+        const entry = this.graphs.get(id)
+        if (entry === undefined) throw new Error(`graphs: unknown graph "${id}"`)
+        return this.record(entry)
+      },
       view: async (id: string) => {
         const entry = this.graphs.get(id)
         if (entry === undefined) throw new Error(`graphs: unknown graph "${id}"`)
@@ -312,6 +337,25 @@ export class FixtureStack {
     this.ctx.provide('sessionQuery', sessionQuery as never)
     this.sessionQueryService = sessionQuery
     this.service = new SingularityContextService(this.ctx)
+    // The view service exists from the context service's construction; its fact
+    // sources stay unregistered until a spec registers them, the way a real
+    // deployment with a missing plane would answer.
+    this.coordination = {
+      assignments: async (graphKey: string) => {
+        this.viewReads.assignments(graphKey)
+        return [...(this.viewFacts.get(graphKey)?.assignments ?? [])]
+      },
+    }
+    this.method = {
+      activeRevision: async (graphKey: string) => {
+        this.viewReads.activeRevision(graphKey)
+        return this.viewFacts.get(graphKey)?.revision ?? null
+      },
+      latestEvaluation: async (graphKey: string) => {
+        this.viewReads.latestEvaluation(graphKey)
+        return this.viewFacts.get(graphKey)?.evaluation ?? null
+      },
+    }
   }
 
   /** Publish one graph, with its root session among its members. */
@@ -323,6 +367,9 @@ export class FixtureStack {
         name: spec.name ?? spec.id,
         envId: spec.envId ?? `env-${spec.id}`,
         members: [spec.rootSessionId, ...(spec.members ?? [])],
+        rounds: spec.rounds ?? 0,
+        sealed: spec.sealed ?? false,
+        createdAt: spec.createdAt ?? 1_760_000_000_000,
       },
       members: new Set([spec.rootSessionId, ...(spec.members ?? [])]),
       spawned: new Set(),
@@ -757,14 +804,56 @@ export class FixtureStack {
     this.envPath = undefined
   }
 
-  /** Register one reviewer delegation source; the disposer removes it again. */
-  bindingSource(source: ReviewerBindingSource): () => void {
-    return this.service.registerReviewerBindingSource(source)
+  /** Register one coordination binding source; the disposer removes it again. */
+  bindingSource(source: CoordinationBindingSource): () => void {
+    return this.service.registerCoordinationBindingSource(source)
   }
 
-  /** A source that answers one fixed record, or nothing. */
-  ledger(record?: ReviewerBindingRecord): ReviewerBindingSource {
+  /** A source that answers one fixed binding, or nothing. */
+  ledger(record?: CoordinationBinding): CoordinationBindingSource {
     return { read: async () => record }
+  }
+
+  /** The one view service this deployment mounts, as the context service constructs it. */
+  get graphView(): GraphViewService {
+    return this.ctx.singularityGraphView
+  }
+
+  /** Register one view fact plane; a plane a spec leaves out is refused by name. */
+  registerViewFacts(...planes: readonly ('coordination' | 'method')[]): void {
+    for (const plane of planes) {
+      if (plane === 'coordination') this.graphView.registerCoordinationFacts(this.coordination)
+      else this.graphView.registerMethodFacts(this.method)
+    }
+  }
+
+  /** The fact key one graph's readers are asked under: its root task store id. */
+  graphKeyOf(graphId: string): string {
+    const entry = this.graphs.get(graphId)
+    if (entry === undefined) throw new Error(`fixture: unknown graph "${graphId}"`)
+    return rootTaskStoreId(entry.spec.rootSessionId)
+  }
+
+  /** What one graph's registered readers answer with; omitted fields keep the facts set before them. */
+  viewFactsOf(
+    graphKey: string,
+    facts: {
+      readonly revision?: GraphRevisionWire | null
+      readonly evaluation?: GraphEvaluationWire | null
+      readonly assignments?: readonly CoordinationAssignmentFacts[]
+    },
+  ): void {
+    const current = this.viewFacts.get(graphKey) ?? { revision: null, evaluation: null, assignments: [] }
+    this.viewFacts.set(graphKey, {
+      revision: facts.revision === undefined ? current.revision : facts.revision,
+      evaluation: facts.evaluation === undefined ? current.evaluation : facts.evaluation,
+      assignments: facts.assignments === undefined ? current.assignments : [...facts.assignments],
+    })
+  }
+
+  /** Publish one store's change event, the way the store that owns it would. */
+  publishChange(event: 'graphs/change' | 'task/change' | 'graph/change'): void {
+    ;(this.ctx.emit as unknown as (name: string) => void)(event)
   }
 
   /**
@@ -785,7 +874,7 @@ export class FixtureStack {
   }
 
   storeEvents(storeId: string): readonly TaskEvent[] {
-    return this.stores.get(storeId)?.events ?? []
+    return (this.stores.get(storeId)?.events ?? []).map(event => event.data as TaskEvent)
   }
 
   /** Every read this fixture's planes saw, so a spec can assert a read happened without a write. */
@@ -805,19 +894,28 @@ export class FixtureStack {
     throw new Error(`fixture: session "${sessionId}" is in no graph`)
   }
 
+  /** Every `TaskStarted` this fixture's stores hold, as the task events they carry. */
+  private startedEvents(): readonly (TaskEvent & { readonly kind: 'TaskStarted' })[] {
+    return [...this.stores.values()].flatMap(store =>
+      store.events
+        .map(event => event.data as TaskEvent)
+        .filter((data): data is TaskEvent & { readonly kind: 'TaskStarted' } => data.kind === 'TaskStarted'),
+    )
+  }
+
   private sessionOf(taskId: string): string {
-    for (const store of this.stores.values()) {
-      const event = store.events.find(item => item.kind === 'TaskStarted' && item.taskId === taskId)
-      if (event !== undefined) return String(event.sessionId)
-    }
-    throw new Error(`fixture: no run was seeded for task "${taskId}"`)
+    const started = this.startedEvents().find(event => event.taskId === taskId)
+    if (started === undefined) throw new Error(`fixture: no run was seeded for task "${taskId}"`)
+    return String(started.sessionId)
   }
 
   /** Where one seeded run lives: its store, its session, and the task it executes. */
   private runFactsOf(runId: string): { readonly storeId: string; readonly sessionId: string; readonly taskId: string } {
     for (const [storeId, store] of this.stores) {
-      const event = store.events.find(item => item.kind === 'TaskStarted' && item.runId === runId)
-      if (event !== undefined) return { storeId, sessionId: String(event.sessionId), taskId: String(event.taskId) }
+      const started = store.events
+        .map(event => event.data as TaskEvent)
+        .find((data): data is TaskEvent & { readonly kind: 'TaskStarted' } => data.kind === 'TaskStarted' && data.runId === runId)
+      if (started !== undefined) return { storeId, sessionId: String(started.sessionId), taskId: String(started.taskId) }
     }
     throw new Error(`fixture: no run "${runId}" was seeded`)
   }
@@ -853,8 +951,11 @@ export class FixtureStack {
     rootSessionId: string
     graphStoreId: string
     layoutStoreId: string
+    createdAt: number
+    protocol?: { readonly id: typeof GRAPH_PROTOCOL_V2; readonly version: 2; readonly since: number }
+    rsi?: { readonly iterationRounds: number }
   } {
-    const { id, name, envId, rootSessionId } = entry.spec
+    const { id, name, envId, rootSessionId, createdAt, sealed, rounds } = entry.spec
     return {
       id,
       name,
@@ -862,6 +963,9 @@ export class FixtureStack {
       rootSessionId,
       graphStoreId: `sg-g-${rootSessionId}`,
       layoutStoreId: `sg-l-${rootSessionId}`,
+      createdAt,
+      ...(sealed ? {} : { protocol: { id: GRAPH_PROTOCOL_V2, version: 2 as const, since: createdAt } }),
+      ...(rounds === 0 ? {} : { rsi: { iterationRounds: rounds } }),
     }
   }
 
@@ -871,7 +975,9 @@ export class FixtureStack {
       append: async (records: readonly SessionEvent[]) => {
         const store = this.stores.get(id)
         if (store === undefined) throw new Error(`fixture: store "${id}" was never created`)
-        for (const record of records) store.events.push((record as unknown as { data: TaskEvent }).data)
+        // The store writes session events (`{type, seq, ignorable, data}`); the
+        // fixture keeps them wrapped, the way the log a read replays holds them.
+        for (const record of records) store.events.push(record)
       },
       flush: async () => {},
       close: async () => {},

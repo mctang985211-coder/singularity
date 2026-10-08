@@ -259,6 +259,20 @@ export async function recordTerminalReview(
     env.actor,
   )
   /**
+   * The run's execution receipt is sealed before the fact is handed over: a
+   * supervisor woken by this settlement reads a Run whose receipt already
+   * exists. A seal that cannot complete is warned, queued for recovery and
+   * never turned into a failed settlement — the receipt is evidence, not a step.
+   */
+  if (options.run !== undefined && env.sealReceipt !== undefined) {
+    try {
+      await env.sealReceipt(storeId, taskId, options.run.runId)
+    } catch (error) {
+      const warn = (env as { warn?: (message: string) => void }).warn
+      warn?.(`the execution receipt of run "${options.run.runId}" could not be sealed (${message(error)}); the settlement stands and the receipt stays queued`)
+    }
+  }
+  /**
    * The record is durable: the deployment may now be told about it. Handing the
    * fact over is not waiting for what it does with it (A5) — a listener runs the
    */

@@ -34,13 +34,13 @@ export async function taskRead(deps: ReadDeps, loaded: LoadedCaller): Promise<Pr
   ]
   if (budget.addAll(header) > 0) return tooLarge('the task_read header', taskPageHint(task.taskId))
 
-  if (resolution.kind === 'reviewer') {
+  if (resolution.kind === 'coordinator') {
     const lines = [
       '',
-      resolution.delegation.role === 'supervisor'
+      resolution.binding.role === 'supervisor'
         ? 'source task (method supervision): this session has no business Run. Preserve this contract while comparing reusable method candidates; the platform schedules rounds.'
         : 'delegated task (review-only): this session has no business Run. The contract below is the task it was delegated to review.',
-      ...(resolution.delegation.sourceRunId == null ? [] : [`exact source Run: ${resolution.delegation.sourceRunId}`]),
+      ...(resolution.binding.sourceRunId == null ? [] : [`exact source Run: ${resolution.binding.sourceRunId}`]),
       ...contractBody(task),
     ]
     if (budget.addAll(lines) > 0) return tooLarge('the delegated contract', taskPageHint(task.taskId))

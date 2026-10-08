@@ -2,6 +2,7 @@
 
 import type {
   ExecutionPhase,
+  ReadOnlyStoreSnapshot,
   RunProviderBinding,
   TaskInstance,
   TaskRun,
@@ -9,41 +10,7 @@ import type {
 } from '@dangosys/dsh-singularity-task'
 import type { RunBindingRead, StoreRecoveryStatus } from '@dangosys/dsh-singularity-task-runtime'
 import type { NamedRefusal } from '../refusals.ts'
-
-/** One recorded reviewer delegation, exactly the fields the ledger holds. */
-export interface ReviewerBindingRecord {
-  /** The root task store the delegated graph reads through. */
-  readonly rootStoreId: string
-  /** The task the reviewer was delegated to review. */
-  readonly taskId: string
-  /** Coordination responsibility; old binding sources omit it and mean reviewer. */
-  readonly role?: 'reviewer' | 'supervisor'
-  /** The exact source Run from the claim; null means the task never ran. */
-  readonly sourceRunId?: string | null
-  /** The session that started the reviewer. */
-  readonly actor: string
-  /** When the delegation was recorded. */
-  readonly at: string
-}
-
-/** Where a reviewer's delegation is read from: the ledger finds the rows, this package reads them. */
-export interface ReviewerBindingSource {
-  read(sessionId: string): Promise<ReviewerBindingRecord | undefined>
-}
-
-/** Why a binding source could not answer: a conflicting ledger, or one this process cannot read. */
-type ReviewerBindingFailure = 'binding-conflict' | 'unreadable'
-
-/** What a source raises instead of picking a row: a conflict, or a ledger this process cannot read. */
-export class ReviewerBindingError extends Error {
-  readonly kind: ReviewerBindingFailure
-
-  constructor(kind: ReviewerBindingFailure, message: string) {
-    super(message)
-    this.name = 'ReviewerBindingError'
-    this.kind = kind
-  }
-}
+import type { CoordinationBinding, CoordinationBindingSource, CoordinationRole } from './coordination.ts'
 
 /** A published graph member, as the graph store holds it. */
 export interface MembershipNode {
@@ -76,9 +43,9 @@ export interface GraphRecordFacts {
   readonly graphStoreId: string
 }
 
-/** The task service's read-only open (A2 §D: `openStore` / `snapshotIn`, never a write). */
+/** The task service's zero-write read door (A2 §D): a missing store answers `exists:false`, never a creation. */
 export interface ReadOnlyTaskStore {
-  openStore(storeId: string): Promise<TaskSnapshot>
+  snapshotReadOnly(storeId: string): Promise<ReadOnlyStoreSnapshot<TaskSnapshot>>
 }
 
 /** The runtime's read-only observation surface; nothing here can start, recover or settle anything. */
@@ -96,8 +63,8 @@ export interface BindingDeps {
   readonly task: ReadOnlyTaskStore
   readonly graphs: ReadOnlyGraphs
   readonly taskRuntime: ReadOnlyTaskRuntime
-  /** The one registered delegation source, when this deployment has one. */
-  readonly reviewerSource?: ReviewerBindingSource
+  /** The one registered coordination binding source, when this deployment has one. */
+  readonly coordinationSource?: CoordinationBindingSource
 }
 
 /** The graph facts a resolution carries, so a reader never has to re-derive them. */
@@ -143,9 +110,10 @@ export type CallerResolution =
       readonly run: TaskRun
     })
   | (CallerBase & {
-      readonly kind: 'reviewer'
+      readonly kind: 'coordinator'
+      readonly role: CoordinationRole
       readonly task?: TaskInstance
-      readonly delegation: ReviewerBindingRecord
+      readonly binding: CoordinationBinding
     })
   | (CallerBase & { readonly kind: 'member' })
   | CallerUnbound

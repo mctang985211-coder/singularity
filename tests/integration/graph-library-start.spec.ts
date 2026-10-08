@@ -21,7 +21,9 @@ describe('empty graph bootstrap into a graph-owned method library', () => {
     expect(await h.runtime.adoptRoot(STORE, ROOT)).toMatchObject({ adopted: false })
     expect(observed).not.toContain(STORE)
     const library = await h.runtime.libraryForSession(ROOT)
-    expect((await h.runtime.libraryRead(ROOT)).tasks).toEqual([])
+    // The library view reports the revision's own entries: an empty graph has
+    // no task templates and only the seeded coordination guidance.
+    expect((await h.runtime.libraryRead(ROOT)).taskTemplates).toEqual([])
     const root = await h.root(ROOT, {
       objective: 'Deliver a checked result from an initially empty graph',
       acceptanceCriteria: [{ description: 'The delivered result passes its check', command: 'true' }],
@@ -37,7 +39,13 @@ describe('empty graph bootstrap into a graph-owned method library', () => {
     expect((await h.runtime.awaitBatch(STORE, batch.batchId)).map(item => item.status)).toEqual(['verified'])
     const child = await h.task.taskIn(STORE, batch.childTaskIds[0]!)
     const childRun = await h.task.runIn(STORE, child.runIds[0]!)
-    expect(await h.runtime.libraryForSession(childRun.sessionId)).toEqual(library)
+    // The child resolves the same graph library: the same identity and the same
+    // revision roots, read after the initial revision was fixed.
+    expect(await h.runtime.libraryForSession(childRun.sessionId)).toMatchObject({
+      id: library.id,
+      taskTemplatesRoot: library.taskTemplatesRoot,
+      skillRoot: library.skillRoot,
+    })
     await h.runtime.submitResult(ROOT, { summary: 'The complete checked result is delivered' })
   })
 })

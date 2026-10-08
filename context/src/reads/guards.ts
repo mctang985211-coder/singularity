@@ -105,23 +105,23 @@ export function resolveProjectionTarget(loaded: LoadedCaller, spec: ProjectionTa
       ),
     }
   }
-  if (resolution.kind === 'reviewer' && resolution.task === undefined && spec.delegation !== undefined) {
+  if (resolution.kind === 'coordinator' && resolution.task === undefined && spec.delegation !== undefined) {
     return {
       kind: 'refused',
       read: refused(
         'not-found',
-        `the delegation of session "${resolution.sessionId}" names task "${resolution.delegation.taskId}", which store ` +
+        `the delegation of session "${resolution.sessionId}" names task "${resolution.binding.sourceTaskId}", which store ` +
           `"${resolution.storeId}" does not hold; ${spec.delegation}`,
       ),
     }
   }
   const task = 'task' in resolution ? resolution.task : undefined
   const run = resolution.kind === 'worker' || resolution.kind === 'root' ? resolution.run
-    : resolution.kind === 'reviewer' && resolution.delegation.sourceRunId != null
-      ? loaded.snapshot?.runs.find(item => item.taskId === task?.taskId && item.runId === resolution.delegation.sourceRunId)
+    : resolution.kind === 'coordinator' && resolution.binding.sourceRunId != null
+      ? loaded.snapshot?.runs.find(item => item.taskId === task?.taskId && item.runId === resolution.binding.sourceRunId)
       : undefined
-  if (resolution.kind === 'reviewer' && resolution.delegation.sourceRunId != null && run === undefined)
-    return { kind: 'refused', read: refused('not-found', `the coordination delegation names source Run "${resolution.delegation.sourceRunId}" of task "${resolution.delegation.taskId}", which this store does not hold.`) }
+  if (resolution.kind === 'coordinator' && resolution.binding.sourceRunId != null && run === undefined)
+    return { kind: 'refused', read: refused('not-found', `the coordination delegation names source Run "${resolution.binding.sourceRunId}" of task "${resolution.binding.sourceTaskId}", which this store does not hold.`) }
   return {
     kind: 'bound',
     resolution,
@@ -131,15 +131,15 @@ export function resolveProjectionTarget(loaded: LoadedCaller, spec: ProjectionTa
   }
 }
 
-/** Workers read their branch and context; a valid review delegation reads its whole graph, read-only. */
+/** Workers read their branch and context; a valid coordination delegation reads its whole graph, read-only. */
 export function readableTaskIds(loaded: LoadedCaller): ReadonlySet<string> | undefined {
   const { resolution, snapshot } = loaded
-  if (resolution.kind !== 'worker' && resolution.kind !== 'reviewer') return undefined
+  if (resolution.kind !== 'worker' && resolution.kind !== 'coordinator') return undefined
   const own = resolution.task
   if (own === undefined || snapshot === undefined) return new Set()
   // Placement and the delegator were checked by loadCaller. A missing delegated
   // task still grants nothing; a valid delegation needs peers to explain shared causes.
-  if (resolution.kind === 'reviewer') return undefined
+  if (resolution.kind === 'coordinator') return undefined
   const branch = new Set<string>()
   const pending = [own.taskId]
   while (pending.length > 0) {

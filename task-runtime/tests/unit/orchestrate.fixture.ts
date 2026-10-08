@@ -644,10 +644,11 @@ export function taskEvents(h: Harness): TaskEvent[] {
 }
 
 /**
- * The status walk of one run: the coordination events ride on the same run but
- * are not part of the lifecycle walk these assertions describe — `RunPhaseChanged`
- * (the phase protocol) and `RunProgressMarked` (the no-progress counter) are read
- * back explicitly where a test is about them.
+ * The status walk of one run: the coordination and record events ride on the same
+ * run but are not part of the lifecycle walk these assertions describe —
+ * `RunPhaseChanged` (the phase protocol), `RunProgressMarked` (the no-progress
+ * counter) and `RunReceiptSealed` (the execution receipt) are read back
+ * explicitly where a test is about them.
  */
 export function runEventKinds(h: Harness, runId: string): string[] {
   return taskEvents(h)
@@ -656,7 +657,8 @@ export function runEventKinds(h: Harness, runId: string): string[] {
         item.runId === runId &&
         item.kind !== 'HandoffCreated' &&
         item.kind !== 'RunPhaseChanged' &&
-        item.kind !== 'RunProgressMarked',
+        item.kind !== 'RunProgressMarked' &&
+        item.kind !== 'RunReceiptSealed',
     )
     .map(item => item.kind)
 }

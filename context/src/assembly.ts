@@ -134,7 +134,7 @@ export async function assembleSingularityContext(
       withQuestionContext(assembly, questions.text)
       return next()
     }
-    case 'reviewer': {
+    case 'coordinator': {
       const contract = await service.contractFor(caller)
       if (!contract.ok) throwRefusal(contract)
       withContractSection(assembly, contract.text)

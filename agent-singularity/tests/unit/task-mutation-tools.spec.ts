@@ -796,7 +796,7 @@ describe('task_intake', () => {
         'task-runtime: the intake of a root contract for session "root-1" was cancelled before anything was persisted',
       )
     }) as never
-    ctx.task.openStore = vi.fn(async () => {
+    ctx.task.snapshotReadOnly = vi.fn(async () => {
       throw new Error('task: invalid persisted event at seq 3')
     }) as never
     const result = (await defineTaskIntakeTool(ctx as never).execute(rootContract, exec('root-1'))) as string
@@ -913,7 +913,7 @@ describe('the root activation view', () => {
   })
 
   it('reads a store that does not exist yet as the same state, not as an error', async () => {
-    const { ctx } = await fixture({ storeError: new Error('task: store "sg-t-root-1" does not exist') })
+    const { ctx } = await fixture({ storeMissing: true })
 
     const read = (await defineTaskReadTool(ctx as never).execute({}, exec('root-1'))) as string
     expect(read).toContain('not activated')

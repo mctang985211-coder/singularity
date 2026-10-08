@@ -205,7 +205,9 @@ export interface StoreFixture {
  * tools are adapters over that service, so what a case asserts is the deployment's
  * own read path — one store, one rendering — and never a fixture's copy of it.
  */
-export async function fixture(options: { storeError?: Error; sessions?: Map<string, SessionEvent[]> } = {}) {
+export async function fixture(
+  options: { storeError?: Error; storeMissing?: true; sessions?: Map<string, SessionEvent[]> } = {},
+) {
   const services: Record<string, unknown> = {}
   // A real cordis context, so the read core is mounted through the deployment's
   // own plugin entry (`[Service.init]` registers the assembly listener) and the
@@ -234,6 +236,13 @@ export async function fixture(options: { storeError?: Error; sessions?: Map<stri
       members: () => ['root-1', 's-child', 's-worker'],
     }),
     task: {
+      // The zero-write read door the read core uses: a store that is not there
+      // answers `exists:false`, and one that cannot be replayed throws by name.
+      snapshotReadOnly: vi.fn(async (_storeId: string) => {
+        if (options.storeMissing === true) return { exists: false as const }
+        if (options.storeError !== undefined) throw options.storeError
+        return { exists: true as const, snapshot: store.snapshot }
+      }),
       openStore: vi.fn(async (_storeId: string) => {
         if (options.storeError !== undefined) throw options.storeError
         return store.snapshot

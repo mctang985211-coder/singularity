@@ -173,14 +173,14 @@ describe('TaskRuntime post-approval re-check (§6)', () => {
 
   test('a capability resolution that moved marks the approval stale, naming what moved', async () => {
     const h = harness({ config: { generatedTaskReview: 'all' } })
-    await h.runtime.applyCapabilityRow('build-thing', { skills: ['task-execution'], tools: ['bash'] })
+    h.runtime.config.capabilities['build-thing'] = { skills: ['task-execution'], tools: ['bash'] }
     const { taskId, runId } = await createRoot(h)
     const spec = batchSpec([childSpec('task a', { requiredCapabilities: ['build-thing'] })])
 
     const pending = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, spec)
     if (pending.status !== 'pending_review') throw new Error('unreachable')
     await approveInStore(h, pending.proposalId)
-    await h.runtime.applyCapabilityRow('build-thing', { skills: ['task-execution'], tools: ['filesystem'] })
+    h.runtime.config.capabilities['build-thing'] = { skills: ['task-execution'], tools: ['filesystem'] }
 
     const continued = await h.runtime.continueProposal(STORE, pending.proposalId, ROOT_SESSION, { spec })
     expect(continued.status).toBe('stale')
@@ -893,7 +893,7 @@ describe('TaskRuntime pre-check scope and obligations (§2)', () => {
     // An unrelated capability row is not part of what this batch resolved: adding
     // one does not invalidate the review.
     await approveInStore(h, pending.proposalId)
-    await h.runtime.applyCapabilityRow('unrelated-thing', { tools: ['bash'] })
+    h.runtime.config.capabilities['unrelated-thing'] = { tools: ['bash'] }
     const continued = await h.runtime.continueProposal(STORE, pending.proposalId, ROOT_SESSION, { spec })
     expect(continued.status).toBe('admitted')
   })

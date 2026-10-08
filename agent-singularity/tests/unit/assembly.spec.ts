@@ -116,7 +116,7 @@ async function mount(
     ['agentRuntime', {}],
     ['task', {}],
     ['taskRuntime', taskRuntime],
-    ['singularityContext', { registerReviewerBindingSource: () => () => {} }],
+    ['singularityContext', { registerCoordinationBindingSource: () => () => {} }],
     ['userQuestions', {}],
     ['approval', { request: vi.fn(async () => 'allowed-once') }],
   ]

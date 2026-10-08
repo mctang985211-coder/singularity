@@ -1,7 +1,7 @@
 import * as _dangosys_dsh_singularity_task0 from "@dangosys/dsh-singularity-task";
-import { AcceptanceCriterion, AdmissionContext, BudgetExtensionProposal, CapabilityManifest, CatalogPath, CriterionSpec, DecompositionAdmission, DecompositionIdentity, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionRecord, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunPlacement, RunProviderBinding, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractInput, TaskContractVersion, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalPolicy, TaskProposalRoot, TaskProposalStatus, TaskRun, TaskService, TaskSnapshot, TaskTemplate, TaskTemplateRef, TemplateParameters, TemplateScope } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, AdmissionContext, BudgetExtensionProposal, CapabilityManifest, CatalogPath, CriterionSpec, DecompositionAdmission, DecompositionIdentity, EvidenceBundle, ExecutionPhase, ExecutionReceipt, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionRecord, ReceiptMissingFact, ReceiptRequestIdentity, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RevisionPin, RunId, RunMcpServerBinding, RunMemberReuse, RunMemberReuseRefusal, RunPlacement, RunProviderBinding, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractInput, TaskContractVersion, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalPolicy, TaskProposalRoot, TaskProposalStatus, TaskRun, TaskService, TaskSnapshot, TaskTemplate, TaskTemplateRef, TemplateParameters, TemplateScope } from "@dangosys/dsh-singularity-task";
 import { Context, Service } from "@deepseek-ai/cordis";
-import { SessionId } from "@deepseek-ai/dsh-session";
+import { SessionEvent, SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
 import { AgentMessageIntent, AgentOptions, McpServerSpec, MessageDeliveryReport, MessageDeliveryStatus, SessionOwnLog, ToolCallBody, ToolCallRef, WorkerGrant, parseSkillFile } from "@dangosys/dsh-singularity-agent-runtime";
 import { ContextFormed } from "@deepseek-ai/dsh-llm";
@@ -93,59 +93,6 @@ interface PermissionSpec {
   sandbox: string;
   approval: string;
 }
-//#endregion
-//#region src/library.d.ts
-interface TaskLibrary {
-  id: string;
-  root: string;
-  taskTemplatesRoot: string;
-  skillRoot: string;
-}
-type LibraryStatus = 'temporary' | 'retained' | 'retired';
-interface LibrarySkill {
-  name: string;
-  version: number;
-  digest: string;
-  status: LibraryStatus;
-  reason?: string;
-  reviewedBy?: string;
-}
-interface LibraryTask {
-  templateRef: TaskTemplateRef;
-  status: LibraryStatus;
-  skills: string[];
-  reason?: string;
-  reviewedBy?: string;
-}
-interface TaskLibraryIndex {
-  version: 1;
-  tasks: LibraryTask[];
-  skills: LibrarySkill[];
-}
-type LibraryWrite = {
-  kind: 'task';
-  template: TaskTemplate;
-} | {
-  kind: 'skill';
-  name: string;
-  skillMd: string;
-  expectedVersion?: number;
-};
-interface LibraryReview {
-  kind: 'task' | 'skill';
-  name: string;
-  version: number;
-  status: 'retained' | 'retired';
-  reason: string;
-}
-/** Derived from the graph's immutable root identity; no second persistent binding. */
-declare function graphLibrary(rootSessionId: string, home?: string): TaskLibrary;
-/** Generic platform guidance is seeded once; domain libraries are authored by the graph's agents. */
-declare function ensureTaskLibrary(library: TaskLibrary): Promise<TaskLibrary>;
-declare function readTaskLibrary(library: TaskLibrary): Promise<TaskLibrary & TaskLibraryIndex>;
-declare function writeTaskLibrary(library: TaskLibrary, input: LibraryWrite, table?: Readonly<Record<string, CapabilityConfig>>): Promise<LibraryTask | LibrarySkill>;
-declare function reviewTaskLibrary(library: TaskLibrary, review: LibraryReview, reviewedBy: string): Promise<LibraryTask | LibrarySkill>;
-declare function libraryCapabilities(library: TaskLibrary): Promise<Record<string, CapabilityConfig>>;
 //#endregion
 //#region src/skill-contract.d.ts
 /**
@@ -806,6 +753,148 @@ declare class IterationCapRefusal extends Error {
   constructor(message: string);
 }
 //#endregion
+//#region src/environment/revision.d.ts
+/** The one id shape a revision directory, a pointer and a run record all agree on. */
+declare const ENVIRONMENT_REVISION_ID: RegExp;
+/** The id shape of a draft directory; allocated monotonically per library. */
+declare const ENVIRONMENT_DRAFT_ID: RegExp;
+/** The id a draft's prospective revision carries: deterministic, so a killed publish replays onto the same name. */
+declare function candidateRevisionId(draftId: string): string;
+/** One skill as one revision holds it: the current entry of its name, with the lineage-local version and both digests. */
+interface EnvironmentSkillEntry {
+  readonly name: string;
+  /** Monotonic within the graph library's lineage; two drafts of the same base both get version+1 and the pointer CAS settles the conflict. */
+  readonly version: number;
+  /** sha256 of the exact `SKILL.md` bytes. */
+  readonly digest: string;
+  /** `skillContentDigest` of `SKILL.md` plus the declared resources. */
+  readonly contentDigest: string;
+  /** `skillContractDigest` of the declared sidecar, or `null` for a skill that declares none. */
+  readonly contractDigest: string | null;
+  readonly status: 'temporary' | 'retained' | 'retired';
+  readonly reason?: string;
+  readonly reviewedBy?: string;
+}
+/** One task template as one revision holds it. */
+interface EnvironmentTaskTemplateEntry {
+  readonly templateRef: TaskTemplateRef;
+  readonly status: 'temporary' | 'retained' | 'retired';
+  readonly skills: string[];
+  readonly reason?: string;
+  readonly reviewedBy?: string;
+}
+/** The graph-internal capability table of one revision: explicit rows (including candidate `method:*` rows) and the MCP templates they resolve against. */
+interface EnvironmentCapabilityEntry {
+  readonly rows: Readonly<Record<string, CapabilityConfig>>;
+  readonly mcpServers: Readonly<Record<string, McpServerTemplate>>;
+}
+/** The self-describing identity of one immutable revision directory; `contentDigest` covers every other field. */
+interface EnvironmentRevisionManifest {
+  readonly formatVersion: 1;
+  readonly revisionId: string;
+  readonly libraryId: string;
+  readonly kind: 'official' | 'candidate';
+  readonly basedOn: string | null;
+  readonly createdAt: string;
+  readonly skills: readonly EnvironmentSkillEntry[];
+  readonly taskTemplates: readonly EnvironmentTaskTemplateEntry[];
+  readonly capabilities: EnvironmentCapabilityEntry;
+  /** sha256 over `canonicalize` of this manifest without this field. */
+  readonly contentDigest: string;
+}
+/** A revision directory resolved to its roots. */
+interface EnvironmentRevision {
+  readonly manifest: EnvironmentRevisionManifest;
+  readonly root: string;
+  readonly skillRoot: string;
+  readonly taskTemplatesRoot: string;
+}
+/** The listing projection of one revision: identity plus sizes, never the full manifest. */
+interface EnvironmentRevisionRef {
+  readonly revisionId: string;
+  readonly kind: 'official' | 'candidate';
+  readonly basedOn: string | null;
+  readonly contentDigest: string;
+  readonly createdAt: string;
+  readonly skills: number;
+  readonly taskTemplates: number;
+}
+/** One skill edit staged into a draft: the complete new `SKILL.md` and the complete declared resource set. */
+interface SkillEdit {
+  readonly name: string;
+  readonly skillMd: string;
+  /** The complete resource set of the new version: `<dir>/<file>` per `isSupportedSkillResourcePath`, plus optionally `SKILL.contract.json`. */
+  readonly resources?: Record<string, string>;
+  /** Must equal the current entry's version (0 when the name is new); the same discipline as the old library's `expectedVersion`. */
+  readonly expectedVersion?: number;
+  readonly actor: string;
+}
+/** One task template edit staged into a draft. */
+interface TemplateEdit {
+  readonly template: TaskTemplate;
+  readonly actor: string;
+}
+/** One capability-row edit staged into a draft: `entry` null removes the row; an `mcpServers` value of null removes that template. */
+interface CapabilityRowEdit {
+  readonly name: string;
+  readonly entry: CapabilityConfig | null;
+  readonly mcpServers?: Readonly<Record<string, McpServerTemplate | null>>;
+  readonly actor: string;
+}
+/** One retention review staged into a draft (the shape the old library's `reviewTaskLibrary` accepted, plus the reviewer). */
+interface EnvironmentReview {
+  readonly kind: 'task' | 'skill';
+  readonly name: string;
+  readonly version: number;
+  readonly status: 'retained' | 'retired';
+  readonly reason: string;
+  readonly actor: string;
+}
+/** Every edit a draft accepts. */
+type EnvironmentEdit = {
+  readonly kind: 'skill';
+  readonly edit: SkillEdit;
+} | {
+  readonly kind: 'task';
+  readonly edit: TemplateEdit;
+} | {
+  readonly kind: 'review';
+  readonly review: EnvironmentReview;
+} | {
+  readonly kind: 'capability';
+  readonly edit: CapabilityRowEdit;
+};
+/** The content digest of a manifest: canonical form without the digest field itself, so key order never moves it. */
+declare function manifestDigest(manifest: Omit<EnvironmentRevisionManifest, 'contentDigest'>): string;
+/** The manifest of a revision that holds nothing yet; `ensureInitialRevision` fills it, a draft copies and edits it. */
+declare function emptyRevisionManifest(input: {
+  libraryId: string;
+  revisionId: string;
+  kind: 'official' | 'candidate';
+  basedOn: string | null;
+  createdAt: string;
+}): EnvironmentRevisionManifest;
+/** Parse and fully validate one manifest, including its self-digest: a manifest whose bytes were edited is refused by name. */
+declare function parseRevisionManifest(raw: unknown, where: string): EnvironmentRevisionManifest;
+/** The current entry of one skill name in a revision. */
+declare function revisionSkillOf(manifest: EnvironmentRevisionManifest, name: string): EnvironmentSkillEntry | undefined;
+/** The newest entry of one template id in a revision. */
+declare function revisionTemplateOf(manifest: EnvironmentRevisionManifest, id: string): EnvironmentTaskTemplateEntry | undefined;
+/** The listing projection of one manifest. */
+declare function revisionRefOf(manifest: EnvironmentRevisionManifest): EnvironmentRevisionRef;
+/** The graph-internal capability rows of one revision; replaces the old index-derived `libraryCapabilities`. */
+declare function revisionCapabilityRows(manifest: EnvironmentRevisionManifest): Record<string, CapabilityConfig>;
+/** The hard rules any draft edit must pass, checked before any byte moves; the apply functions re-check them. */
+declare function assertDraftEditAllowed(manifest: EnvironmentRevisionManifest, edit: EnvironmentEdit): void;
+/** Apply one skill edit to a manifest, purely: the entry's digests come from the edit's declared bytes. */
+declare function applySkillEdit(manifest: EnvironmentRevisionManifest, edit: SkillEdit): EnvironmentRevisionManifest;
+/** Apply one task template edit to a manifest, purely: an identical repeat is a no-op, a conflicting version is refused. */
+declare function applyTemplateEdit(manifest: EnvironmentRevisionManifest, template: TaskTemplate, table?: Readonly<Record<string, CapabilityConfig>>): EnvironmentRevisionManifest;
+/** Apply one retention review to a manifest, purely: status is a field of the revision, never an in-place edit of a shared index. */
+declare function applyReviewEdit(manifest: EnvironmentRevisionManifest, review: EnvironmentReview, reviewedBy: string): EnvironmentRevisionManifest;
+/** Apply one capability-row edit to a manifest, purely: a null entry removes the row, a null MCP template removes it. */
+declare function applyCapabilityRowEdit(manifest: EnvironmentRevisionManifest, edit: CapabilityRowEdit): EnvironmentRevisionManifest;
+//#endregion
 //#region src/gate.d.ts
 /** A tool call that was let through and has not reported its result yet. */
 interface InFlightCall {
@@ -1191,6 +1280,15 @@ interface OrchestrateEnv {
    * when the run it serves is bound to one. A replay carries the experiment's
    */
   taskTemplatesRoot?: string;
+  /**
+   * The immutable environment revision the caller's Run is bound to, resolved
+   * once by the runtime when it builds this env: every run this orchestration
+   * admits (a batch child, a nested child) binds the same revision, so a publish
+   * landing mid-batch never moves a child admitted before it.
+   */
+  environmentRevision?: EnvironmentRevision;
+  /** The unpublished candidate revision a trial run binds; inherited by its children exactly like the revision. */
+  trialCandidateRef?: string;
   agentOptions?: AgentOptions;
   /**
    * The provider pre-check, for the one case that has no verdict to carry: a
@@ -1227,6 +1325,12 @@ interface OrchestrateEnv {
   onRunSettled?(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void;
   /** Called once per recorded terminal review, after the record is durable and never awaited. */
   onTerminalReview?(fact: TerminalReviewFact): void;
+  /**
+   * Seal one Run's execution receipt, awaited *before* the terminal review is
+   * handed over. Absent means this deployment seals nothing; a receipt that
+   * cannot be sealed is warned and queued, and never fails the settlement.
+   */
+  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId): Promise<void>;
   /**
    * The runtime's batch-failure seam: every child of the batch that has not
    * reached a terminal state is blocked and the batch's parent run is failed
@@ -1302,6 +1406,8 @@ interface RuntimeSettlementEnv {
    * and never awaited: a settlement hands the fact over and carries on, because
    */
   onTerminalReview?(fact: TerminalReviewFact): void;
+  /** The receipt sealer, awaited before the terminal review is handed over ({@link OrchestrateEnv.sealReceipt}). */
+  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId): Promise<void>;
   /**
    * The live process's execution gate, when this settlement has one (A4 §F.1).
    * A settled run ends the *questions addressed to it* — an open question needs
@@ -1372,6 +1478,20 @@ interface ReplayOverlay {
    */
   presetOverride?: string;
 }
+/**
+ * What one replay's receipt settled as: `sealed` names the receipt a consumer
+ * may read immediately, and `absent` names why there is none — the two are
+ * different refusals for a consumer, so they are different answers.
+ */
+type ReplayReceiptReport = {
+  readonly status: 'sealed';
+  readonly digest: string;
+  readonly completeness: 'complete' | 'incomplete';
+  readonly missing: readonly string[];
+} | {
+  readonly status: 'absent';
+  readonly reason: string;
+};
 /** What one settled replay run reports back to the comparison report. */
 interface ReplayRunOutcome {
   taskId: TaskId;
@@ -1385,6 +1505,8 @@ interface ReplayRunOutcome {
    * (`ReplayTaskOptions.workspace`, normalized): the directory its worker wrote
    */
   workspace?: string;
+  /** The execution receipt this run sealed, or why there is none. */
+  receipt?: ReplayReceiptReport;
 }
 //#endregion
 //#region src/question.d.ts
@@ -1563,6 +1685,12 @@ interface ReplayTaskOptions {
    * deployment's default for this run's worker and for every worker its
    */
   agentOptions?: AgentOptions;
+  /**
+   * The unpublished candidate revision this replay explicitly trials. The run
+   * binds the candidate's frozen content while the active revision stays where
+   * it is; absent replays under the active revision.
+   */
+  trialCandidateRef?: string;
   signal?: AbortSignal;
 }
 interface DecomposeProposalOptions {
@@ -1868,11 +1996,16 @@ interface TaskTemplateMatch {
 declare function parseTaskTemplate(raw: unknown): TaskTemplate;
 /** Append one immutable version. An identical repeat returns the same reference. */
 declare function registerTaskTemplate(root: string, input: TaskTemplate): Promise<TaskTemplateRef>;
-/** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery. */
-declare function findTaskTemplates(root: string | undefined, query?: string, scope?: TemplateScope, includeRetired?: boolean): Promise<TaskTemplateMatch[]>;
+/** Return the newest version of each id. Conditions are read by the caller; keyword search is only discovery.
+ *
+ * `retired` names the `id@version` keys the owning environment revision holds
+ * retired; the caller passes them in, because a template's status is a field of
+ * the immutable revision, never of an index a read may rewrite.
+ */
+declare function findTaskTemplates(root: string | undefined, query?: string, scope?: TemplateScope, retired?: ReadonlySet<string>): Promise<TaskTemplateMatch[]>;
 /** Expand into the same authoring fields as a free contract; no template-specific execution path follows. */
-declare function bindTaskTemplate<T extends TaskContractInput>(root: string | undefined, spec: T, scope?: TemplateScope): Promise<T & TaskContractInput>;
-declare function bindTaskDecomposition(root: string | undefined, spec: DecomposeSpec, scope?: TemplateScope): Promise<DecomposeSpec>;
+declare function bindTaskTemplate<T extends TaskContractInput>(root: string | undefined, spec: T, scope?: TemplateScope, retired?: ReadonlySet<string>): Promise<T & TaskContractInput>;
+declare function bindTaskDecomposition(root: string | undefined, spec: DecomposeSpec, scope?: TemplateScope, retired?: ReadonlySet<string>): Promise<DecomposeSpec>;
 interface TaskTemplateQuery {
   query?: string;
   catalogPath?: CatalogPath;
@@ -1907,8 +2040,6 @@ declare function taskTemplatePage(root: string | undefined, request?: Omit<TaskT
   templateRef?: undefined;
 }, scope?: TemplateScope): Promise<TaskTemplateCatalogPage>;
 declare function taskTemplatePage(root: string | undefined, request: TaskTemplateQuery, scope?: TemplateScope): Promise<TaskTemplateMatch | TaskTemplateCatalogPage>;
-/** Freeze the complete catalog for a replay; immutable older refs in recipes remain available. */
-declare function snapshotTaskTemplates(root: string | undefined, target: string): Promise<void>;
 //#endregion
 //#region src/run-binding.d.ts
 /** Everything one run needs to bind its content: the verdicts, the rows, and where the snapshot goes. */
@@ -1930,6 +2061,16 @@ interface RunBindingRequest {
   root?: string;
   /** The MCP template registry the granted server names resolve against (tests pass their own). */
   mcpRegistry?: Readonly<Record<string, McpServerTemplate>>;
+  /**
+   * The immutable environment revision this run is admitted against. Present on
+   * every new-protocol run: the bytes are read from the revision's own skill
+   * root and the binding records the revision id. Absent on an old-protocol run
+   * (or a caller with no revision), where the admitted verdicts' directories
+   * remain the source and no revision id is recorded.
+   */
+  revision?: EnvironmentRevision;
+  /** The unpublished candidate revision an explicit trial binds; recorded on the binding beside the revision. */
+  trialCandidateRef?: string;
 }
 /** The granted MCP servers' identity: the registry key and the template it resolved to, or `null` when the registry holds no such key. */
 declare function mcpServerBindings(manifest: CapabilityManifest, registry: Readonly<Record<string, McpServerTemplate>>): RunMcpServerBinding[];
@@ -2018,6 +2159,12 @@ interface Config {
    * per run holding the skills the run loads, outside the worker's checkout so a
    */
   runBindingRoot?: string;
+  /**
+   * The DSH home holding `singularity/environments/<libraryId>`, the immutable
+   * environment revisions and drafts of every graph library. Absent means the
+   * segment `runBindingRoot` already sits under (or `DSH_HOME`).
+   */
+  environmentRevisionRoot?: string;
   /**
    * What the whole tree may spend (A3 §3.5): a cap on the runs the tree may
    * start, and the concurrent-writer count — which this deployment can only
@@ -2121,6 +2268,323 @@ interface StoreRecoveryStateView {
   readonly cancelled?: boolean;
 }
 //#endregion
+//#region src/service/receipts.d.ts
+/** The actor every receipt is written under; no caller may write one. */
+declare const RECEIPT_ACTOR = "task-runtime:receipt";
+/** How long the sealer waits for a session log to pass a run's terminal boundary. */
+declare const RECEIPT_PERSIST_WAIT_MS = 2000;
+/** What one sealing attempt settled as. */
+type ReceiptSealStatus = {
+  readonly status: 'sealed';
+  readonly receipt: ExecutionReceipt;
+} | {
+  readonly status: 'already-sealed';
+  readonly receipt: ExecutionReceipt;
+} | {
+  readonly status: 'not-terminal';
+  readonly reason: string;
+} | {
+  readonly status: 'deferred';
+  readonly reason: string;
+} | {
+  readonly status: 'unsupported';
+  readonly reason: string;
+};
+/** What one flush or reconcile pass settled as. */
+interface ReceiptReconcileReport {
+  readonly sealed: readonly RunId[];
+  readonly alreadySealed: number;
+  readonly deferred: readonly {
+    readonly runId: RunId;
+    readonly reason: string;
+  }[];
+  readonly unsupported: readonly {
+    readonly runId: RunId;
+    readonly reason: string;
+  }[];
+}
+//#endregion
+//#region src/environment/store.d.ts
+/** One library's identity and root: `$DSH_HOME/singularity/environments/<id>`. */
+interface LibraryRoots {
+  readonly id: string;
+  readonly root: string;
+}
+/** A library root is derived from the graph's immutable root session identity; no second persistent binding. */
+declare function libraryRoots(rootSessionId: string, home?: string): LibraryRoots;
+declare function environmentProtocolMarker(library: LibraryRoots): string;
+declare function revisionsRoot(library: LibraryRoots): string;
+declare function draftsRoot(library: LibraryRoots): string;
+/** The directory of one revision; the id is validated before it ever becomes a path component. */
+declare function revisionRoot(library: LibraryRoots, revisionId: string): string;
+/** fsync one directory so an entry created, renamed or removed inside it is durable. */
+declare function syncDirectory(directory: string): Promise<void>;
+/** Replace `target` with exactly `bytes`, durably: staging sibling, file fsync, rename, directory fsync. */
+declare function writeFileAtomic(target: string, bytes: Buffer | string): Promise<void>;
+/** Append one line to a JSONL log, durably: append, file fsync, directory fsync. */
+declare function appendLineDurable(target: string, line: string): Promise<void>;
+/** Create the two directories every library of the new protocol holds. */
+declare function ensureEnvironmentLayout(library: LibraryRoots): Promise<void>;
+/** The new-protocol marker, written once when a library's initial revision is created; a legacy layout never gets one. */
+declare function ensureProtocolMarker(library: LibraryRoots): Promise<void>;
+/** Whether this library root predates the revision protocol: no marker, but the old mutable layout's tell-tale entries. */
+declare function hasLegacyLayout(library: LibraryRoots): Promise<boolean>;
+declare function serialEnvironment<T>(library: LibraryRoots, work: () => Promise<T>): Promise<T>;
+/** Read and fully validate one revision's manifest, including its self-digest. */
+declare function readRevisionManifest(library: LibraryRoots, revisionId: string): Promise<EnvironmentRevisionManifest>;
+/** Resolve one revision directory, or `undefined` when it does not exist. */
+declare function readRevision(library: LibraryRoots, revisionId: string): Promise<EnvironmentRevision | undefined>;
+/** List every revision of one library as listing projections, sorted by id. */
+declare function listRevisions(library: LibraryRoots): Promise<EnvironmentRevisionRef[]>;
+/** Write one manifest into its directory, durably; the manifest's self-digest is re-checked before a byte moves. */
+declare function writeRevisionManifest(directory: string, manifest: EnvironmentRevisionManifest): Promise<void>;
+/**
+ * Freeze one draft into an immutable revision: an atomic same-filesystem rename,
+ * then fsync of both the revisions directory and the library root, in that order —
+ * a pointer may only ever be written after this returns.
+ */
+declare function freezeDraftDirectory(library: LibraryRoots, draftId: string, revisionId: string): Promise<void>;
+/** Copy one revision directory as the starting content of a draft; a draft never edits its base in place. */
+declare function copyRevisionDirectory(from: string, to: string): Promise<void>;
+/** The defects one revision directory has against its manifest; empty means the directory is exactly what the manifest declares. */
+interface RevisionDefects {
+  readonly defects: readonly string[];
+}
+/**
+ * Verify one whole revision directory against its manifest: every skill's bytes
+ * and sidecar, every template file, and the capability table — the single check
+ * that replaces the old commit path's per-file and per-row read-backs.
+ */
+declare function verifyRevisionDirectory(directory: string, manifest: EnvironmentRevisionManifest): Promise<RevisionDefects>;
+/** Read one file of one skill inside one revision, through the verified walk: no links, no escapes, real entries only. */
+declare function readRevisionSkillFile(revision: EnvironmentRevision, name: string, rel: string): Promise<Buffer>;
+//#endregion
+//#region src/environment/pointer.d.ts
+/** The one active pointer of a library; `generation` increments on every switch and is the CAS dimension. */
+interface EnvironmentPointer {
+  readonly formatVersion: 1;
+  readonly libraryId: string;
+  readonly revisionId: string;
+  readonly manifestDigest: string;
+  readonly generation: number;
+  readonly publishedAt: string;
+  readonly publishedBy: string;
+  readonly approvalRef?: string;
+}
+/** The persistent record of an in-flight switch; exists only inside the switch window. */
+interface EnvironmentPointerIntent {
+  readonly formatVersion: 1;
+  /** `${libraryId}/g<expected.generation+1>/<nextRevisionId>` — deterministic, so a replayed request names the same intent. */
+  readonly intentId: string;
+  readonly libraryId: string;
+  readonly direction: 'publish' | 'rollback';
+  /** The pointer this switch expects to replace; `null` only for a library's first revision. */
+  readonly expected: {
+    revisionId: string;
+    generation: number;
+  } | null;
+  readonly next: {
+    revisionId: string;
+    manifestDigest: string;
+  };
+  readonly draftId?: string;
+  readonly approvalRef?: string;
+  readonly actor: string;
+  readonly at: string;
+}
+/** One settled switch, appended to `completions.jsonl`. */
+interface EnvironmentPointerCompletion {
+  readonly formatVersion: 1;
+  readonly intentId: string;
+  readonly libraryId: string;
+  readonly direction: 'publish' | 'rollback';
+  readonly revisionId: string;
+  readonly manifestDigest: string;
+  readonly generation: number;
+  readonly supersededRevisionId: string | null;
+  readonly approvalRef?: string;
+  readonly actor: string;
+  readonly at: string;
+}
+/** The stages the transaction reports to a test probe, in order. */
+type EnvironmentCommitStage = 'intent-recorded' | 'revision-frozen' | 'revision-verified' | 'pointer-switched' | 'completion-recorded' | 'intent-cleared';
+/** The host a commit runs against; `probe` is a typed test seam a production deployment never sets. */
+interface EnvironmentCommitHost {
+  readonly library: LibraryRoots;
+  probe?(stage: EnvironmentCommitStage, detail?: string): void | Promise<void>;
+}
+/** Where a published revision comes from: a draft (frozen by the transaction) or an already frozen revision. */
+type EnvironmentPublishSource = {
+  readonly kind: 'draft';
+  readonly draftId: string;
+} | {
+  readonly kind: 'revision';
+  readonly revisionId: string;
+};
+/** One requested switch. `expected` is the two-dimensional CAS: the caller must have read exactly this pointer. */
+interface PublishRequest {
+  readonly direction: 'publish' | 'rollback';
+  readonly source: EnvironmentPublishSource;
+  readonly expected: {
+    revisionId: string;
+    generation: number;
+  };
+  readonly approvalRef?: string;
+  readonly actor: string;
+}
+/** The result of one settled switch. */
+interface PublishOutcome {
+  readonly pointer: EnvironmentPointer;
+  readonly supersededRevisionId: string | null;
+  readonly completion: EnvironmentPointerCompletion;
+  /** `fresh` when this call ran the transaction; the other two name which step a reconcile had to redo. */
+  readonly recovered: 'fresh' | 'completed-frozen' | 'completed-switched';
+}
+/** What `reconcileEnvironmentPointer` concluded about one open intent. */
+interface EnvironmentPointerReconcile {
+  readonly intentId: string;
+  readonly direction: 'publish' | 'rollback';
+  readonly result: 'completed-switched' | 'completed-frozen' | 'blocked';
+  readonly revisionId: string;
+  readonly detail?: string;
+}
+/** What the initial revision of a new-protocol library is seeded with. */
+interface InitialSeed {
+  readonly actor: string;
+  readonly at?: string;
+}
+/** Read the current pointer, or `null` when the library has none yet (a fresh or a legacy root). */
+declare function readPointer(library: LibraryRoots): Promise<EnvironmentPointer | null>;
+/** The in-flight switch's intent, or `null` outside a switch window; the single concurrency exclusion point. */
+declare function openPointerIntent(library: LibraryRoots): Promise<EnvironmentPointerIntent | null>;
+/** Every settled switch of one library, in append order. */
+declare function listPointerCompletions(library: LibraryRoots): Promise<EnvironmentPointerCompletion[]>;
+/** The revision the pointer currently names; both must exist and agree, or the library is broken by name. */
+declare function readActiveRevision(library: LibraryRoots): Promise<EnvironmentRevision>;
+/**
+ * Create the initial revision `r0001` of a new-protocol library, seeded with the
+ * generic task-coordination guidance, and point at it (generation 1). A library
+ * with the old mutable layout is refused by name: it enters the legacy read-only
+ * view instead, and no `pointer.json` is ever created for it.
+ */
+declare function ensureInitialRevision(library: LibraryRoots, seed: InitialSeed): Promise<EnvironmentRevision>;
+/** Publish a draft or a frozen candidate revision: one CAS-checked pointer switch. */
+declare function publishEnvironmentRevision(host: EnvironmentCommitHost, request: PublishRequest): Promise<PublishOutcome>;
+/** Roll back to a frozen revision: the same transaction, freezing skipped, target verified. */
+declare function rollbackEnvironmentRevision(host: EnvironmentCommitHost, request: PublishRequest): Promise<PublishOutcome>;
+/**
+ * Settle every open intent of one library after a crash or at startup. The
+ * classification reads only disk facts: a switched pointer is completed and
+ * cleared, a frozen-but-unswitched intent is finished from step 7, an unfrozen
+ * publish intent is redone from step 5, and a pointer moved by a third party
+ * blocks the intent without touching anything.
+ */
+declare function reconcileEnvironmentPointer(host: EnvironmentCommitHost): Promise<EnvironmentPointerReconcile[]>;
+//#endregion
+//#region src/environment/draft.d.ts
+/** A draft: the prospective candidate revision it holds, with its lineage and a human-readable edit log. */
+interface EnvironmentDraft {
+  readonly libraryId: string;
+  readonly draftId: string;
+  /** The revision this draft was copied from. */
+  readonly basedOn: string;
+  readonly root: string;
+  /** The prospective revision this draft freezes into (`kind: 'candidate'`). */
+  readonly manifest: EnvironmentRevisionManifest;
+  readonly actor: string;
+  readonly createdAt: string;
+  readonly edits: readonly string[];
+}
+/** The listing projection of one draft. */
+interface EnvironmentDraftRef {
+  readonly draftId: string;
+  readonly basedOn: string;
+  readonly edits: number;
+  readonly createdAt: string;
+}
+/**
+ * Open a draft on top of a revision (the active one by default): a full copy of
+ * the base's directory under `drafts/<draftId>` with a candidate manifest. A
+ * legacy-layout library is refused by name — drafts belong to the new protocol.
+ */
+declare function createEnvironmentDraft(library: LibraryRoots, request: {
+  basedOn?: string;
+  actor: string;
+  purpose?: string;
+}): Promise<EnvironmentDraft>;
+/** Read one draft, or `undefined` when it does not exist. */
+declare function readEnvironmentDraft(library: LibraryRoots, draftId: string): Promise<EnvironmentDraft | undefined>;
+/** List every draft of one library, sorted by id. */
+declare function listEnvironmentDrafts(library: LibraryRoots): Promise<EnvironmentDraftRef[]>;
+/** The newest draft one actor opened, when one exists. */
+declare function latestDraftFor(library: LibraryRoots, actor: string): Promise<EnvironmentDraft | undefined>;
+/**
+ * Stage one edit into one draft: payload bytes first, then the manifest, then the
+ * draft record — all under the library's single write tail, so concurrent stages
+ * of one library serialize.
+ */
+declare function stageEnvironmentEdit(library: LibraryRoots, draftId: string, edit: EnvironmentEdit, table?: Readonly<Record<string, CapabilityConfig>>): Promise<EnvironmentDraft>;
+/** Delete one draft's directory; a discarded draft cannot be published, because publishing reads the draft record first. */
+declare function discardEnvironmentDraft(library: LibraryRoots, draftId: string): Promise<void>;
+/**
+ * Freeze one draft into an immutable candidate revision (`revisions/c-<draftId>`
+ * unless the caller names another id). The pointer does not move: only a publish
+ * switches it. This is the standalone entry an explicit trial uses; a publish
+ * runs the same freeze inside its transaction.
+ */
+declare function freezeEnvironmentDraft(library: LibraryRoots, draftId: string, revisionId?: string): Promise<EnvironmentRevision>;
+//#endregion
+//#region src/service/environment.d.ts
+/** Which protocol one library root is served under; `uninitialized` means neither layout exists yet. */
+type EnvironmentProtocol = 'environment-revision' | 'legacy' | 'uninitialized';
+/** One library resolved to the immutable roots a reader works in; no reader ever binds a mutable directory. */
+interface EnvironmentLibrary {
+  readonly id: string;
+  readonly root: string;
+  readonly protocol: EnvironmentProtocol;
+  readonly taskTemplatesRoot: string;
+  readonly skillRoot: string;
+  readonly revision?: EnvironmentRevision;
+}
+/** What one reader sees of a library: the effective revision's identity plus its entries, never a mutable index. */
+interface EnvironmentView {
+  readonly libraryId: string;
+  readonly revisionId: string;
+  readonly generation: number;
+  readonly manifestDigest: string;
+  readonly trialCandidateRef?: string;
+  readonly readOnly: boolean;
+  readonly protocol: EnvironmentProtocol;
+  readonly skills: readonly EnvironmentSkillEntry[];
+  readonly taskTemplates: readonly EnvironmentTaskTemplateEntry[];
+}
+/** What one staged library edit answers: a draft holds the change, and nothing is in effect until a publish switches the pointer. */interface LibraryEditResult {
+  readonly libraryId: string;
+  readonly draftId: string;
+  /** The candidate revision this draft freezes into. */
+  readonly revisionId: string;
+  readonly applied: 'draft';
+  readonly message: string;
+}
+/** One library write a caller asks for: a task template, or the complete new bytes of a Skill. */
+type LibraryWrite = {
+  kind: 'task';
+  template: TaskTemplate;
+} | {
+  kind: 'skill';
+  name: string;
+  skillMd: string;
+  expectedVersion?: number;
+};
+/** One retention review a caller asks for: the status is a field of the revision the draft freezes into. */
+interface LibraryReview {
+  kind: 'task' | 'skill';
+  name: string;
+  version: number;
+  status: 'retained' | 'retired';
+  reason: string;
+}
+//#endregion
 //#region src/service/runtime.d.ts
 declare class TaskRuntime extends Service {
   static inject: string[];
@@ -2146,35 +2610,34 @@ declare class TaskRuntime extends Service {
   readonly workspaces: WorkspaceRegistry;
   providerLoad?: Promise<ProviderLoadReport>;
   readonly parentChains: Map<string, Promise<void>>;
+  /** Runs whose receipt is sealed but not yet written, per store: the queue a reconciliation pass drains. */
+  readonly receiptSeals: Map<string, Set<string>>;
+  /** One write tail per store for receipt sealing, so two settlements never seal the same store concurrently. */
+  readonly receiptSealTails: Map<string, Promise<void>>;
   rootBudgetApproval?: RootBudgetApproval;
   readonly terminalReviewListeners: Set<(fact: TerminalReviewFact) => void | Promise<void>>;
   constructor(ctx: Context, config?: Partial<Config>);
-  libraryForRoot(rootSessionId: string): Promise<TaskLibrary>;
-  libraryForSession(sessionId: string): Promise<TaskLibrary>;
+  /** The immutable revision roots a session's graph library is served from; reading creates nothing. */
+  libraryForRoot(rootSessionId: string): Promise<EnvironmentLibrary>;
+  libraryForSession(sessionId: string): Promise<EnvironmentLibrary>;
+  /** The revision one run is bound to, or `undefined` on an old-protocol run. */
+  environmentRevisionForRun(run: TaskRun): Promise<EnvironmentRevision | undefined>;
+  /** Fix the initial revision of a brand-new graph before anything binds to it. */
+  ensureInitialEnvironment(rootSessionId: string, actor: string): Promise<EnvironmentLibrary>;
+  /** The retired task templates of a session's active revision, as `id@version` keys. */
+  retiredTaskTemplates(sessionId: string): Promise<ReadonlySet<string>>;
   comparisonRunForSession(sessionId: string): Promise<TaskRun | undefined>;
-  libraryRead(sessionId: string): Promise<(TaskLibrary & TaskLibraryIndex) | {
-    id: string;
-    graphLibraryId: string;
-    root: string;
+  /** The library as a reader sees it: the effective revision's entries and identity, with no write of any kind. */
+  libraryRead(sessionId: string): Promise<EnvironmentView & {
     taskTemplatesRoot: string;
     skillRoot: string;
-    version: number;
-    readOnly: boolean;
-    message: string;
-    tasks: {
-      templateRef: _dangosys_dsh_singularity_task0.TaskTemplateRef;
-      status: string;
-      skills: string[];
-    }[];
-    skills: {
-      name: string;
-      version: number;
-      digest: string;
-      status: string;
-    }[];
   }>;
-  libraryWrite(sessionId: string, input: LibraryWrite): Promise<LibraryTask | LibrarySkill>;
-  libraryReview(sessionId: string, review: LibraryReview): Promise<LibraryTask | LibrarySkill>;
+  /** Stage one library write into the caller's draft; the active revision does not move. */
+  libraryWrite(sessionId: string, input: LibraryWrite): Promise<LibraryEditResult>;
+  /** Stage one retention review into the caller's draft; retention decisions belong to the root or its supervisor. */
+  libraryReview(sessionId: string, review: LibraryReview): Promise<LibraryEditResult>;
+  /** The authority a temporary library write needs: the graph root, an active Run, or delegated method supervision. */
+  private assertLibraryWriteAuthority;
   capabilitiesForSession(sessionId: string): Promise<Record<string, CapabilityConfig>>;
   skillViewForSession(sessionId: string, extraRoots?: readonly string[]): Promise<SkillDiscoveryView>;
   taskTemplatesRootFor(sessionId?: string): Promise<string | undefined>;
@@ -2197,11 +2660,30 @@ declare class TaskRuntime extends Service {
   resolveCapabilities(required: readonly string[]): CapabilityManifest;
   listMcpServers(): Readonly<Record<string, McpServerTemplate>>;
   listCapabilities(): Readonly<Record<string, CapabilityConfig>>;
-  applyCapabilityRow(name: string, entry: CapabilityConfig | null, options?: {
-    commitTargets?: readonly string[];
-    commitRow?: string;
-    mcpServers?: Record<string, McpServerTemplate | null>;
-  }): Promise<void>;
+  /** Open a draft on the session's active revision; the only mutable region of a library. */
+  createDraft(sessionId: string, request?: {
+    basedOn?: string;
+    purpose?: string;
+  }): Promise<EnvironmentDraft>;
+  /** Stage one environment edit into one draft. */
+  stageDraftEdit(sessionId: string, draftId: string, edit: EnvironmentEdit): Promise<EnvironmentDraft>;
+  /** Remove one draft; a removed draft can no longer be published. */
+  removeEnvironmentDraft(sessionId: string, draftId: string): Promise<void>;
+  /** Freeze one draft into a candidate revision without moving the pointer — the entry an explicit trial binds. */
+  freezeDraft(sessionId: string, draftId: string): Promise<EnvironmentRevision>;
+  /** Switch the effective pointer to one draft or frozen revision, under an expected-pointer CAS. */
+  publishRevision(sessionId: string, request: PublishRequest): Promise<PublishOutcome>;
+  /** Switch the effective pointer back to a frozen revision. */
+  rollbackRevision(sessionId: string, request: PublishRequest): Promise<PublishOutcome>;
+  /** Settle any pointer intent a killed process left open. */
+  reconcilePointer(sessionId: string): Promise<EnvironmentPointerReconcile[]>;
+  /** The in-flight pointer switch of the session's library, or `null`; the single admission exclusion point. */
+  openPointerIntent(sessionId: string): Promise<EnvironmentPointerIntent | null>;
+  listRevisions(sessionId: string): Promise<EnvironmentRevisionRef[]>;
+  /** The legacy mutable layout read as a read-only view: no index rebuilt, no byte written. */
+  legacyLibraryView(sessionId: string): Promise<EnvironmentView>;
+  /** The one write tail of a library, for a caller that stages several edits as one unit. */
+  serializeEnvironment<T>(rootSessionId: string, work: () => Promise<T>): Promise<T>;
   adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption>;
   initializeStoreGates(storeId: string): Promise<void>;
   runGatePhase(run: TaskRun): ExecutionPhase | 'terminal' | undefined;
@@ -2231,6 +2713,20 @@ declare class TaskRuntime extends Service {
   registerRootBudgetApproval(approval: RootBudgetApproval): () => void;
   registerTerminalReviewListener(listener: (fact: TerminalReviewFact) => void | Promise<void>): () => void;
   notifyTerminalReview(fact: TerminalReviewFact): void;
+  /** Seal one Run's execution receipt. The store's own check decides; a repeat is `already-sealed`. */
+  sealRunReceipt(storeId: string, taskId: TaskId, runId: RunId): Promise<ReceiptSealStatus>;
+  /**
+   * Seal one receipt as part of a settlement: awaited, bounded by the sealer's
+   * own limits, and never throwing — an unsealed receipt is queued for the next
+   * recovery pass rather than turning a settlement into a failure.
+   */
+  sealReceiptBounded(storeId: string, taskId: TaskId, runId: RunId): Promise<void>;
+  /** Advance every queued seal of one store. */
+  flushReceiptSeals(storeId: string): Promise<ReceiptReconcileReport>;
+  /** Seal every terminal new-protocol Run of one store that has no receipt yet. */
+  reconcileRunReceipts(storeId: string): Promise<ReceiptReconcileReport>;
+  receiptFor(storeId: string, runId: RunId): Promise<ExecutionReceipt | undefined>;
+  receiptsOfStore(storeId: string): Promise<readonly ExecutionReceipt[]>;
   extendRootBudget(sessionId: string, host: RootBudgetExtensionHost, request: RootBudgetExtensionRequest): Promise<RootBudgetExtensionResult>;
   recoverRootTask(storeId: string, request: RootRecoveryRequest, caller: RootRecoveryCaller): Promise<RootRecoveryOutcome>;
   deriveBatch(identity: DecompositionIdentityContext, spec: DecomposeSpec): Promise<{
@@ -2547,6 +3043,102 @@ declare function owedBatchResults(snapshot: TaskSnapshot): OwedBatchResult[];
  */
 declare function settleRunFromRuntime(env: RuntimeSettlementEnv, storeId: string, run: TaskRun, status: 'cancelled' | 'failed', reason: string): Promise<void>;
 //#endregion
+//#region src/session-facts.d.ts
+/** The human-facing tools: calling one is a person's intervention, not the worker's own work. */
+declare const HUMAN_TOOLS: ReadonlySet<string>;
+/** One calling configuration and how many requests the session made under it. */
+interface ModelRequestFact {
+  readonly identity: ReceiptRequestIdentity;
+  readonly count: number;
+}
+/** One `task_decompose` call a session made, with the text its successful result carried. */
+interface DecompositionCallFact {
+  readonly callId: string;
+  readonly arguments: string;
+  /** The matching `tool/result`'s text, when the call succeeded and the result carried text. */
+  readonly resultText?: string;
+}
+/** Everything one persisted session log says, in the one shape every reader consumes. */
+interface SessionFacts {
+  /** Whole-session token buckets from the session's `tokenUsage` projection, when the caller could read one. */
+  readonly tokens?: ReviewTokenUsage;
+  /** Tool traffic the log shows; absent when no log was readable. */
+  readonly toolCalls?: {
+    readonly calls: readonly ReviewToolCall[];
+    readonly failures: number;
+  };
+  /** Skill names the session really loaded (a successful `skill` call, or a `task-skills` injection), in order, duplicates preserved. */
+  readonly skillCalls?: readonly string[];
+  readonly humanInterventions?: number;
+  readonly compactions?: number;
+  /** Distinct request identities in first-appearance order. */
+  readonly modelRequests?: readonly ModelRequestFact[];
+  /** The session's `task_decompose` calls. */
+  readonly decompositions?: readonly DecompositionCallFact[];
+  /** Events the persisted log held; `undefined` means no log could be read at all (which is not the same as an empty log). */
+  readonly logEvents?: number;
+  /** The last event's time as an ISO timestamp (the log's own `time` is epoch milliseconds), for judging whether it has already passed a run's terminal boundary. */
+  readonly lastEventAt?: string;
+}
+/** Whether one tool result reported a failure. */
+declare function toolResultFailed(data: {
+  error?: unknown;
+  message?: {
+    isError?: boolean;
+  };
+}): boolean;
+/** The `name` a `skill` tool call asked to load, when its arguments name one. */
+declare function skillNameFrom(rawArguments: string): string | undefined;
+/** Parse one session's events and token reading into the facts every reader consumes. One parse, one meaning. */
+declare function sessionFactsOf(events: readonly SessionEvent[], tokens?: ReviewTokenUsage): SessionFacts;
+//#endregion
+//#region src/receipt.d.ts
+/** What the sealer hands the builder: the store's own records plus the session facts it gathered. */
+interface ReceiptBuildInput {
+  readonly storeId: string;
+  readonly snapshot: TaskSnapshot;
+  readonly run: TaskRun;
+  readonly drain: 'in-process' | 'reconciled' | 'unconfirmed';
+  /** Session facts per run of the sealed subtree; a missing entry means no log could be read for that run. */
+  readonly sessionFacts: ReadonlyMap<RunId, SessionFacts>;
+  /** The environment revision this run is bound to, with its manifest digest. */
+  readonly revision: RevisionPin;
+  readonly sealedAt: string;
+}
+/** What one build attempt settled as; `refused` names a missing precondition and the sealer retries later. */
+type ReceiptBuildResult = {
+  readonly status: 'built';
+  readonly receipt: ExecutionReceipt;
+} | {
+  readonly status: 'refused';
+  readonly reason: string;
+};
+/** The execution subtree one run froze: itself first, then every descendant, in store order. */
+declare function executionSubtree(snapshot: TaskSnapshot, runId: RunId): readonly RunId[];
+/** Build one Run's receipt from the store's records and the session facts handed in. */
+declare function buildExecutionReceipt(input: ReceiptBuildInput): ReceiptBuildResult;
+/** The execution usage one receipt covers: the口径 of a run subtree's tokens and tool calls. */
+interface ExecutionUsage {
+  readonly status: 'reported' | 'unknown';
+  readonly reason?: string;
+  readonly runIds: readonly string[];
+  readonly tokens?: ReviewTokenUsage;
+  readonly toolCalls?: {
+    readonly calls: number;
+    readonly failures: number;
+  };
+  /** Runs whose counters are not terminal or not whole numbers, for diagnosis. */
+  readonly incompleteRuns: readonly string[];
+}
+/**
+ * Aggregate a sealed subtree's usage from the store's review metrics — never by
+ * walking `parentRunId` now: the members are the ones the receipt froze, so a
+ * later replay cannot be counted into a run that had already settled.
+ */
+declare function executionUsage(snapshot: TaskSnapshot, receipt: ExecutionReceipt): ExecutionUsage;
+/** Refuse a receipt that cannot establish the facts a consumer needs, naming them. */
+declare function requireReceiptFacts(receipt: ExecutionReceipt, facts: readonly ReceiptMissingFact[], where: string): void;
+//#endregion
 //#region src/replay-paths.d.ts
 /** Relocate declared workspace paths, retaining every other contract value. */
 declare function rebaseWorkspacePaths<T>(value: T, from: string, to: string): T;
@@ -2566,4 +3158,4 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 //#endregion
-export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionReviewRequest, ExecutionGate, IterationCapRefusal, LibraryReview, LibrarySkill, LibraryStatus, LibraryTask, LibraryWrite, type McpServerTemplate, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type RecoveryMode, type RecoveryRounds, type ReplayRunOutcome, type ReplayTaskOptions, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskLibrary, TaskLibraryIndex, TaskRuntime, TaskRuntime as default, TaskTemplateCatalogPage, TaskTemplateMatch, TaskTemplateQuery, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, bubbleWorkspacePath, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, decompositionIdentity, defaultTaskTemplatesRoot, driveBatch, ensureTaskLibrary, escalationHint, executionProviders, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, graphLibrary, inFlightRecoveryAttempt, isOpenProposal, latestBubbleWorkspacePath, libraryCapabilities, loadObligationTemplates, loadSkillSidecar, materializeBubble, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, readTaskLibrary, readVerifiedFile, rebaseWorkspacePaths, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, reviewTaskLibrary, serializeSkillSidecar, settleBubble, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, snapshotTaskTemplates, taskTemplatePage, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline, writeTaskLibrary };
+export { type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type CapabilityConfig, type CapabilityProviderPrecheck, type CapabilityRowEdit, type CapabilityToolQuery, type ChildOutcome, type Config, type CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_SUPERVISION, DEFAULT_VERIFY_TIMEOUT_MS, type DecomposeAdmissionResult, type DecomposeChildSpec, type DecomposeSpec, type DecompositionCallFact, type DecompositionReviewRequest, ENVIRONMENT_DRAFT_ID, ENVIRONMENT_REVISION_ID, type EnvironmentCapabilityEntry, type EnvironmentCommitHost, type EnvironmentCommitStage, type EnvironmentDraft, type EnvironmentDraftRef, type EnvironmentEdit, type EnvironmentLibrary, type EnvironmentPointer, type EnvironmentPointerCompletion, type EnvironmentPointerIntent, type EnvironmentPointerReconcile, type EnvironmentProtocol, type EnvironmentPublishSource, type EnvironmentReview, type EnvironmentRevision, type EnvironmentRevisionManifest, type EnvironmentRevisionRef, type EnvironmentSkillEntry, type EnvironmentTaskTemplateEntry, type EnvironmentView, ExecutionGate, type ExecutionUsage, HUMAN_TOOLS, type InitialSeed, IterationCapRefusal, type LibraryEditResult, type LibraryReview, type LibraryRoots, type LibraryWrite, type McpServerTemplate, type ModelRequestFact, type NormalizedBatch, type OrchestrateEnv, type ProposalContinuation, type ProposalReviewChannel, type ProposalReviewNotice, type ProposalReviewRequest, type ProposalSubmission, type ProviderPrecheck, type PublishOutcome, type PublishRequest, RECEIPT_ACTOR, RECEIPT_PERSIST_WAIT_MS, type ReceiptBuildInput, type ReceiptBuildResult, type ReceiptReconcileReport, type ReceiptSealStatus, type RecoveryMode, type RecoveryRounds, type ReplayReceiptReport, type ReplayRunOutcome, type ReplayTaskOptions, type RevisionDefects, type RootBudgetApproval, type RootBudgetApprovalAsk, type RootBudgetApprovalDecision, type RootBudgetExtensionHost, type RootBudgetExtensionRequest, type RootBudgetExtensionResult, type RootContractReviewRequest, type RootContractSpec, type RootIntakeResult, type RootRecoveryCaller, type RootRecoveryOutcome, type RootRecoveryRequest, type RunBindingRead, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, type SessionFacts, type SkillEdit, type SkillProviderCandidate, type SkillProviderVerdict, type SkillSidecar, type StoreRecoveryStateView, type StoreRecoveryStatus, type SupervisionConfig, TOOL_LABELS, TaskRuntime, type TaskRuntime as TaskRuntimeService, TaskRuntime as default, TaskTemplateCatalogPage, TaskTemplateMatch, TaskTemplateQuery, type TemplateEdit, type TerminalReviewFact, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, appendLineDurable, applyCapabilityRowEdit, applyReviewEdit, applySkillEdit, applyTemplateEdit, assertDraftEditAllowed, bindRunProviders, bindTaskDecomposition, bindTaskTemplate, bubbleWorkspacePath, buildExecutionReceipt, candidateRevisionId, capabilityToolQuery, checkObligationCoverage, checkRunStart, contractDefects, copyRevisionDirectory, createEnvironmentDraft, decompositionIdentity, defaultTaskTemplatesRoot, discardEnvironmentDraft, draftsRoot, driveBatch, emptyRevisionManifest, ensureEnvironmentLayout, ensureInitialRevision, ensureProtocolMarker, environmentProtocolMarker, escalationHint, executionProviders, executionSubtree, executionUsage, findRepoRoot, findTaskTemplates, fixProtectedInputs, fixSpecProtectedInputs, freezeDraftDirectory, freezeEnvironmentDraft, hasLegacyLayout, inFlightRecoveryAttempt, isOpenProposal, latestBubbleWorkspacePath, latestDraftFor, libraryRoots, listEnvironmentDrafts, listPointerCompletions, listRevisions, loadObligationTemplates, loadSkillSidecar, manifestDigest, materializeBubble, mcpServerBindings, normalizeDecomposition, normalizeRootContract, openPointerIntent, openProposalOf, optionalService, owedBatchResults, parseMcpServerRegistry, parseObligationTemplates, parseRevisionManifest, parseSkillFile, parseTaskTemplate, precheckProviders, precheckReplacedCapabilityRow, priorRoundNotice, priorRoundNoticeForRun, protectedInputDefects, providerRefusals, publishEnvironmentRevision, readActiveRevision, readEnvironmentDraft, readPointer, readRevision, readRevisionManifest, readRevisionSkillFile, readVerifiedFile, rebaseWorkspacePaths, reconcileEnvironmentPointer, recoveryAttemptWithKey, recoveryKindOf, recoveryModeOf, recoveryRoundsOf, recoverySourceRun, registerTaskTemplate, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requireReceiptFacts, resolveCapabilities, resolveMcpServerSpecs, resolveRootBudget, revisionCapabilityRows, revisionRefOf, revisionRoot, revisionSkillOf, revisionTemplateOf, revisionsRoot, rollbackEnvironmentRevision, serialEnvironment, serializeSkillSidecar, sessionFactsOf, settleBubble, settleRunFromRuntime, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillNameFrom, skillSearchRoots, stageEnvironmentEdit, syncDirectory, taskTemplatePage, toolResultFailed, unlistableVerifierRefusal, validateSkillProvider, verifyRevisionDirectory, walkVerified, workerBaseline, writeFileAtomic, writeRevisionManifest };

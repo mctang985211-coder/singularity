@@ -1,6 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
-import { SESSION_NOT_IN_GRAPH } from "@dangosys/dsh-singularity-graphs";
-import { blockingQuestionsOf, questionsAwaitingAnswerOf, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
+import { SESSION_NOT_IN_GRAPH, graphAccess } from "@dangosys/dsh-singularity-graphs";
+import { blockingQuestionsOf, questionsAwaitingAnswerOf, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
 import { TextRetainer, formatRetentionNotice } from "@deepseek-ai/dsh-output-retention";
 import { SESSION_QUERY_READ_WINDOW_MAX, extractSessionEventText } from "@deepseek-ai/dsh-session-query";
 import { checkObligationCoverage, findRepoRoot, loadObligationTemplates } from "@dangosys/dsh-singularity-task-runtime";
@@ -162,7 +162,7 @@ async function assembleSingularityContext(service, assembly, context, next) {
 			withQuestionContext(assembly, questions.text);
 			return next();
 		}
-		case "reviewer": {
+		case "coordinator": {
 			const contract = await service.contractFor(caller);
 			if (!contract.ok) throwRefusal(contract);
 			withContractSection(assembly, contract.text);
@@ -177,15 +177,6 @@ async function assembleSingularityContext(service, assembly, context, next) {
 
 //#endregion
 //#region src/bindings/types.ts
-/** What a source raises instead of picking a row: a conflict, or a ledger this process cannot read. */
-var ReviewerBindingError = class extends Error {
-	kind;
-	constructor(kind, message$1) {
-		super(message$1);
-		this.name = "ReviewerBindingError";
-		this.kind = kind;
-	}
-};
 /** The graph facts a resolution carries, from the registry's own record. */
 function callerGraph(graph) {
 	return {
@@ -201,34 +192,60 @@ async function isGraphMember(graphs, graphId, sessionId) {
 }
 
 //#endregion
-//#region src/bindings/reviewer.ts
+//#region src/bindings/coordination.ts
+/** What a source raises instead of picking a row: a conflict, an unreadable ledger, or a binding with no role. */
+var CoordinationBindingError = class extends Error {
+	kind;
+	constructor(kind, message$1) {
+		super(message$1);
+		this.name = "CoordinationBindingError";
+		this.kind = kind;
+	}
+};
+/** The refusal a binding failure is reported under; the vocabulary has no separate name for a missing role. */
+const REFUSAL_OF = {
+	"binding-conflict": "binding-conflict",
+	unreadable: "unreadable",
+	"role-missing": "binding-conflict"
+};
 /** The failure one binding source reported, from the error's own name-plus-`kind` contract. */
-function reviewerFailure(error) {
+function coordinationFailure(error) {
 	const kind = error?.kind;
-	if (kind !== "binding-conflict" && kind !== "unreadable") return void 0;
-	if (error instanceof Error && error.name === "ReviewerBindingError") return kind;
+	if (kind !== "binding-conflict" && kind !== "unreadable" && kind !== "role-missing") return void 0;
+	if (error instanceof Error && error.name === "CoordinationBindingError") return kind;
+}
+/** The role a row carries, read at run time: the record's own field is never taken on trust. */
+function roleOf(record) {
+	const role = record.role;
+	return role === "reviewer" || role === "supervisor" || role === "coordinator" ? role : void 0;
 }
 /** The one delegation recorded for a session; a source that cannot answer is reported as-is. */
-async function readDelegation(deps, sessionId) {
-	const source = deps.reviewerSource;
+async function readCoordination(deps, sessionId) {
+	const source = deps.coordinationSource;
 	if (source === void 0) return { kind: "none" };
 	let record;
 	try {
 		record = await source.read(sessionId);
 	} catch (error) {
-		const failure = reviewerFailure(error);
+		const failure = coordinationFailure(error);
 		if (failure !== void 0) return {
 			kind: "refused",
-			refusal: failure,
+			refusal: REFUSAL_OF[failure],
 			detail: message(error)
 		};
 		return {
 			kind: "refused",
 			refusal: "unreadable",
-			detail: `the reviewer binding source could not be read: ${message(error)}`
+			detail: `the coordination binding source could not be read: ${message(error)}`
 		};
 	}
-	return record === void 0 ? { kind: "none" } : {
+	if (record === void 0) return { kind: "none" };
+	if (roleOf(record) === void 0) return {
+		kind: "refused",
+		refusal: REFUSAL_OF["role-missing"],
+		detail: `session "${sessionId}" is recorded under a coordination delegation that names no role; a delegation is granted for the responsibility it records, and "reviewer" is never assumed for it.`
+	};
+	return {
 		kind: "record",
 		record
 	};
@@ -242,7 +259,7 @@ async function delegatorStanding(deps, sessionId, graph, actor) {
 		return {
 			kind: "refused",
 			refusal: "unreadable",
-			detail: `the delegator "${actor}" of the review delegation of session "${sessionId}" cannot be checked against graph "${graph.id}": ${message(error)}. An unverifiable delegator is not an authorization.`
+			detail: `the delegator "${actor}" of the coordination delegation of session "${sessionId}" cannot be checked against graph "${graph.id}": ${message(error)}. An unverifiable delegator is not an authorization.`
 		};
 	}
 	if (member) return { kind: "member" };
@@ -253,31 +270,30 @@ async function delegatorStanding(deps, sessionId, graph, actor) {
 		if (error?.code === SESSION_NOT_IN_GRAPH) return {
 			kind: "refused",
 			refusal: "unbound",
-			detail: `the delegation of session "${sessionId}" into graph "${graph.id}" (store "${rootTaskStoreId(graph.rootSessionId)}") records "${actor}" as its delegator, and no graph in this deployment publishes that session; a delegation is granted by a session of the graph it delegates into, not by a name in a file.`
+			detail: `the coordination delegation of session "${sessionId}" into graph "${graph.id}" (store "${rootTaskStoreId(graph.rootSessionId)}") records "${actor}" as its delegator, and no graph in this deployment publishes that session; a delegation is granted by a session of the graph it delegates into, not by a name in a file.`
 		};
 		return {
 			kind: "refused",
 			refusal: "unreadable",
-			detail: `the delegator "${actor}" of the review delegation of session "${sessionId}" cannot be placed: ${message(error)}. A delegator whose ownership cannot be read is not an authorization.`
+			detail: `the delegator "${actor}" of the coordination delegation of session "${sessionId}" cannot be placed: ${message(error)}. A delegator whose ownership cannot be read is not an authorization.`
 		};
 	}
 	return {
 		kind: "refused",
 		refusal: "cross-graph",
-		detail: `the delegation of session "${sessionId}" into graph "${graph.id}" (store "${rootTaskStoreId(graph.rootSessionId)}") was recorded by "${actor}", which graph "${graph.id}" does not publish: the delegator belongs to graph "${elsewhere?.id ?? "(unknown)"}", and a delegation never opens another graph's read domain.`
+		detail: `the coordination delegation of session "${sessionId}" into graph "${graph.id}" (store "${rootTaskStoreId(graph.rootSessionId)}") was recorded by "${actor}", which graph "${graph.id}" does not publish: the delegator belongs to graph "${elsewhere?.id ?? "(unknown)"}", and a delegation never opens another graph's read domain.`
 	};
 }
 
 //#endregion
 //#region src/bindings/resolve.ts
-/** The one legal shape of a store this deployment cannot open: it does not exist yet. */
+/** The domain store's own answer: its snapshot, or nothing when this deployment owns no such store. */
 async function openDomain(task, storeId) {
 	try {
-		return { snapshot: await task.openStore(storeId) };
+		const door = await task.snapshotReadOnly(storeId);
+		return door.exists ? { snapshot: door.snapshot } : {};
 	} catch (error) {
-		const detail = message(error);
-		if (/does not exist/.test(detail)) return {};
-		return { failure: detail };
+		return { failure: message(error) };
 	}
 }
 /** The session's own run in one store: the **last** `TaskStarted` naming it, never a runtime lookup. */
@@ -347,17 +363,17 @@ async function loadCaller(deps, sessionId, signal) {
 	if (membership.kind === "failed") return failed(sessionId, "unreadable", membership.detail);
 	const graph = membership.kind === "graph" ? membership.graph : void 0;
 	if (graph === void 0) {
-		const delegation$1 = await readDelegation(deps, sessionId);
-		if (delegation$1.kind === "refused") return failed(sessionId, delegation$1.refusal, delegation$1.detail);
-		if (delegation$1.kind === "none") return outside(sessionId, "unbound", `session "${sessionId}" is not a published member of any graph and no delegation binds it; a context read needs a graph, and a session is never placed by the ids it passes.`);
+		const coordination$1 = await readCoordination(deps, sessionId);
+		if (coordination$1.kind === "refused") return failed(sessionId, coordination$1.refusal, coordination$1.detail);
+		if (coordination$1.kind === "none") return outside(sessionId, "unbound", `session "${sessionId}" is not a published member of any graph and no delegation binds it; a context read needs a graph, and a session is never placed by the ids it passes.`);
 		let placed;
 		try {
-			placed = await graphForStore(deps.graphs, delegation$1.record.rootStoreId);
+			placed = await graphForStore(deps.graphs, coordination$1.record.rootStoreId);
 		} catch (error) {
-			return failed(sessionId, "unreadable", `the delegation of session "${sessionId}" names store "${delegation$1.record.rootStoreId}", and the graph registry could not be listed to place it: ${message(error)}`);
+			return failed(sessionId, "unreadable", `the delegation of session "${sessionId}" names store "${coordination$1.record.rootStoreId}", and the graph registry could not be listed to place it: ${message(error)}`);
 		}
-		if (placed === void 0) return failed(sessionId, "unbound", `session "${sessionId}" is delegated to store "${delegation$1.record.rootStoreId}", which no graph in this deployment owns; the delegation cannot be placed, so there is no domain to read.`);
-		return await reviewerOf(deps, sessionId, placed, delegation$1.record, signal);
+		if (placed === void 0) return failed(sessionId, "unbound", `session "${sessionId}" is delegated to store "${coordination$1.record.rootStoreId}", which no graph in this deployment owns; the delegation cannot be placed, so there is no domain to read.`);
+		return await coordinatorOf(deps, sessionId, placed, coordination$1.record, signal);
 	}
 	const facts = callerGraph(graph);
 	const storeId = rootTaskStoreId(graph.rootSessionId);
@@ -380,7 +396,7 @@ async function loadCaller(deps, sessionId, signal) {
 	const own = snapshot === void 0 ? void 0 : runOfSessionIn(snapshot, sessionId);
 	const task = snapshot === void 0 ? void 0 : taskOfRun(snapshot, own);
 	const workerRun = !isRoot && own !== void 0 && task !== void 0;
-	const ledger = isRoot || workerRun ? await readDelegation(deps, sessionId) : void 0;
+	const ledger = isRoot || workerRun ? await readCoordination(deps, sessionId) : void 0;
 	if (ledger?.kind === "refused" && ledger.refusal === "binding-conflict") return failed(sessionId, ledger.refusal, ledger.detail, facts);
 	if (isRoot) return {
 		resolution: {
@@ -402,9 +418,9 @@ async function loadCaller(deps, sessionId, signal) {
 		},
 		...snapshot === void 0 ? {} : { snapshot }
 	};
-	const delegation = ledger ?? await readDelegation(deps, sessionId);
-	if (delegation.kind === "refused") return failed(sessionId, delegation.refusal, delegation.detail, facts);
-	if (delegation.kind === "record") return await reviewerOf(deps, sessionId, graph, delegation.record, signal, {
+	const coordination = ledger ?? await readCoordination(deps, sessionId);
+	if (coordination.kind === "refused") return failed(sessionId, coordination.refusal, coordination.detail, facts);
+	if (coordination.kind === "record") return await coordinatorOf(deps, sessionId, graph, coordination.record, signal, {
 		...opened,
 		recovery
 	});
@@ -416,8 +432,8 @@ async function loadCaller(deps, sessionId, signal) {
 		...snapshot === void 0 ? {} : { snapshot }
 	};
 }
-/** A reviewer's resolved domain: the delegation, its graph and its delegator, all checked (Q2). */
-async function reviewerOf(deps, sessionId, graph, record, signal, domain) {
+/** A coordinator's resolved domain: the delegation, its graph and its delegator, all checked (Q2). */
+async function coordinatorOf(deps, sessionId, graph, record, signal, domain) {
 	signal?.throwIfAborted();
 	const facts = callerGraph(graph);
 	const storeId = rootTaskStoreId(graph.rootSessionId);
@@ -427,16 +443,17 @@ async function reviewerOf(deps, sessionId, graph, record, signal, domain) {
 	const opened = domain ?? await openDomain(deps.task, storeId);
 	if (opened.failure !== void 0) return failed(sessionId, "unreadable", `the delegated store "${storeId}" cannot be read: ${opened.failure}`, facts);
 	const recovery = domain?.recovery ?? await deps.taskRuntime.recoveryStatus(storeId);
-	const task = opened.snapshot?.tasks.find((item) => item.taskId === record.taskId);
+	const task = opened.snapshot?.tasks.find((item) => item.taskId === record.sourceTaskId);
 	return {
 		resolution: {
 			sessionId,
 			graph: facts,
 			storeId,
 			recovery,
-			kind: "reviewer",
+			kind: "coordinator",
+			role: record.role,
 			...task === void 0 ? {} : { task },
-			delegation: record
+			binding: record
 		},
 		...opened.snapshot === void 0 ? {} : { snapshot: opened.snapshot }
 	};
@@ -730,6 +747,7 @@ function taskSummaryLine(snapshot, task, roles = []) {
 function contractHeading(role) {
 	switch (role) {
 		case "reviewer": return "## Delegated contract (review-only)";
+		case "coordinator": return "## Delegated contract (coordination, no business Run)";
 		case "supervisor": return "## Source contract (method supervision, no business Run)";
 		case "root": return "## Your contract (graph root)";
 		default: return "## Your contract";
@@ -939,15 +957,15 @@ function resolveProjectionTarget(loaded, spec) {
 		kind: "refused",
 		read: refused("not-activated", notActivatedLines(resolution.graph, resolution.storeId, loaded.snapshot).join("\n"))
 	};
-	if (resolution.kind === "reviewer" && resolution.task === void 0 && spec.delegation !== void 0) return {
+	if (resolution.kind === "coordinator" && resolution.task === void 0 && spec.delegation !== void 0) return {
 		kind: "refused",
-		read: refused("not-found", `the delegation of session "${resolution.sessionId}" names task "${resolution.delegation.taskId}", which store "${resolution.storeId}" does not hold; ${spec.delegation}`)
+		read: refused("not-found", `the delegation of session "${resolution.sessionId}" names task "${resolution.binding.sourceTaskId}", which store "${resolution.storeId}" does not hold; ${spec.delegation}`)
 	};
 	const task = "task" in resolution ? resolution.task : void 0;
-	const run = resolution.kind === "worker" || resolution.kind === "root" ? resolution.run : resolution.kind === "reviewer" && resolution.delegation.sourceRunId != null ? loaded.snapshot?.runs.find((item) => item.taskId === task?.taskId && item.runId === resolution.delegation.sourceRunId) : void 0;
-	if (resolution.kind === "reviewer" && resolution.delegation.sourceRunId != null && run === void 0) return {
+	const run = resolution.kind === "worker" || resolution.kind === "root" ? resolution.run : resolution.kind === "coordinator" && resolution.binding.sourceRunId != null ? loaded.snapshot?.runs.find((item) => item.taskId === task?.taskId && item.runId === resolution.binding.sourceRunId) : void 0;
+	if (resolution.kind === "coordinator" && resolution.binding.sourceRunId != null && run === void 0) return {
 		kind: "refused",
-		read: refused("not-found", `the coordination delegation names source Run "${resolution.delegation.sourceRunId}" of task "${resolution.delegation.taskId}", which this store does not hold.`)
+		read: refused("not-found", `the coordination delegation names source Run "${resolution.binding.sourceRunId}" of task "${resolution.binding.sourceTaskId}", which this store does not hold.`)
 	};
 	return {
 		kind: "bound",
@@ -957,13 +975,13 @@ function resolveProjectionTarget(loaded, spec) {
 		...loaded.snapshot === void 0 ? {} : { snapshot: loaded.snapshot }
 	};
 }
-/** Workers read their branch and context; a valid review delegation reads its whole graph, read-only. */
+/** Workers read their branch and context; a valid coordination delegation reads its whole graph, read-only. */
 function readableTaskIds(loaded) {
 	const { resolution, snapshot } = loaded;
-	if (resolution.kind !== "worker" && resolution.kind !== "reviewer") return void 0;
+	if (resolution.kind !== "worker" && resolution.kind !== "coordinator") return void 0;
 	const own = resolution.task;
 	if (own === void 0 || snapshot === void 0) return /* @__PURE__ */ new Set();
-	if (resolution.kind === "reviewer") return void 0;
+	if (resolution.kind === "coordinator") return void 0;
 	const branch = /* @__PURE__ */ new Set();
 	const pending = [own.taskId];
 	while (pending.length > 0) {
@@ -1056,7 +1074,7 @@ async function contractProjection(deps, loaded) {
 	if (snapshot === void 0) return refused("unreadable", `store "${resolution.storeId}" of graph "${resolution.graph.id}" could not be read, so the contract it holds cannot be projected.`);
 	const task = target.task;
 	const run = target.run;
-	const role = resolution.kind === "reviewer" ? resolution.delegation.role ?? "reviewer" : resolution.kind === "root" ? "root" : task.parentTaskId === void 0 && run?.parentRunId !== void 0 ? "replay" : "worker";
+	const role = resolution.kind === "coordinator" ? resolution.binding.role : resolution.kind === "root" ? "root" : task.parentTaskId === void 0 && run?.parentRunId !== void 0 ? "replay" : "worker";
 	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
 	const header = [
 		"# Immutable context (contract)",
@@ -1092,17 +1110,17 @@ async function contractProjection(deps, loaded) {
 		contractHeading(role),
 		...contractBody(task)
 	]) > 0) return tooLarge("your contract", taskPageHint(task.taskId));
-	if (resolution.kind === "reviewer") {
+	if (resolution.kind === "coordinator") {
 		const label = [
 			"",
-			`- this session has no business Run: the contract above belongs to the task it was delegated to review (delegated by session ${resolution.delegation.actor}, recorded ${resolution.delegation.at}), and reading it is not executing it.`,
+			`- this session has no business Run: the contract above belongs to the task it was delegated to review (delegated by session ${resolution.binding.actor}, recorded ${resolution.binding.at}), and reading it is not executing it.`,
 			...role === "supervisor" ? ["- responsibility: investigate and compare reusable method candidates through Evolution; the platform owns round scheduling."] : [],
-			...resolution.delegation.sourceRunId == null ? [] : [`- exact source Run: ${resolution.delegation.sourceRunId}`]
+			...resolution.binding.sourceRunId == null ? [] : [`- exact source Run: ${resolution.binding.sourceRunId}`]
 		];
 		if (budget.addAll(label) > 0) return tooLarge("the review-only label", taskPageHint(task.taskId));
 	}
-	const summaryLines = resolution.kind === "reviewer" && run?.providerBinding !== void 0 ? await bindingLines(deps.taskRuntime, run.providerBinding) : [];
-	if (resolution.kind !== "reviewer") {
+	const summaryLines = resolution.kind === "coordinator" && run?.providerBinding !== void 0 ? await bindingLines(deps.taskRuntime, run.providerBinding) : [];
+	if (resolution.kind !== "coordinator") {
 		if (run?.providerBinding === void 0 || run.providerBinding.skills.length === 0) return refused("unreadable", `task "${task.taskId}" has no bound guidance Skill; its model request cannot execute unguided work.`);
 		let bound;
 		try {
@@ -1184,18 +1202,18 @@ async function dynamicProjection(deps, loaded) {
 	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
 	const header = [
 		"# Dynamic context (state)",
-		`role: ${resolution.kind === "reviewer" ? resolution.delegation.role ?? "reviewer" : resolution.kind}`,
+		`role: ${resolution.kind === "coordinator" ? resolution.binding.role : resolution.kind}`,
 		`graph: ${resolution.graph.id} "${resolution.graph.name}" — store ${resolution.storeId}`,
 		...marker === void 0 ? [] : [marker, RECOVERY_NOTE],
 		`gate phase: ${gate ?? "not tracked for this session"}`
 	];
 	if (budget.addAll(header) > 0) return tooLarge("the dynamic projection header", taskPageHint(task.taskId));
-	if (resolution.kind === "reviewer") {
-		const run = resolution.delegation.sourceRunId === void 0 ? snapshot === void 0 ? void 0 : latestRun(snapshot, task) : target.run;
-		const label = `delegated task state (${resolution.delegation.role === "supervisor" ? "method supervision" : "review-only"}, no business Run): ${run === void 0 ? "no source run was recorded" : ownRunLine(run, snapshot)}`;
+	if (resolution.kind === "coordinator") {
+		const run = resolution.binding.sourceRunId == null ? snapshot === void 0 ? void 0 : latestRun(snapshot, task) : target.run;
+		const label = `delegated task state (${resolution.binding.role === "supervisor" ? "method supervision" : "review-only"}, no business Run): ${run === void 0 ? "no source run was recorded" : ownRunLine(run, snapshot)}`;
 		if (!budget.add(label)) return tooLarge("the delegated task state", taskPageHint(task.taskId));
 	} else if (!budget.add(`your run: ${target.run === void 0 ? "none" : ownRunLine(target.run, snapshot)}`)) return tooLarge("the run line", taskPageHint(task.taskId));
-	if (target.run !== void 0 && deps.taskRuntime.decompositionState !== void 0 && resolution.kind !== "reviewer") {
+	if (target.run !== void 0 && deps.taskRuntime.decompositionState !== void 0 && resolution.kind !== "coordinator") {
 		const state = await deps.taskRuntime.decompositionState(resolution.sessionId);
 		const lines = [
 			`canDecompose: ${state.canDecompose}; depth: ${state.depth}/${state.maxDepth}; phase: ${state.phase}`,
@@ -1663,11 +1681,11 @@ async function taskRead(deps, loaded) {
 	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
 	const header = [`store ${resolution.storeId} of graph "${resolution.graph.id}"`, ...marker === void 0 ? [] : [marker, RECOVERY_NOTE]];
 	if (budget.addAll(header) > 0) return tooLarge("the task_read header", taskPageHint(task.taskId));
-	if (resolution.kind === "reviewer") {
+	if (resolution.kind === "coordinator") {
 		const lines$1 = [
 			"",
-			resolution.delegation.role === "supervisor" ? "source task (method supervision): this session has no business Run. Preserve this contract while comparing reusable method candidates; the platform schedules rounds." : "delegated task (review-only): this session has no business Run. The contract below is the task it was delegated to review.",
-			...resolution.delegation.sourceRunId == null ? [] : [`exact source Run: ${resolution.delegation.sourceRunId}`],
+			resolution.binding.role === "supervisor" ? "source task (method supervision): this session has no business Run. Preserve this contract while comparing reusable method candidates; the platform schedules rounds." : "delegated task (review-only): this session has no business Run. The contract below is the task it was delegated to review.",
+			...resolution.binding.sourceRunId == null ? [] : [`exact source Run: ${resolution.binding.sourceRunId}`],
 			...contractBody(task)
 		];
 		if (budget.addAll(lines$1) > 0) return tooLarge("the delegated contract", taskPageHint(task.taskId));
@@ -1749,7 +1767,7 @@ async function taskStatus(deps, loaded, query) {
 		"# Task status",
 		`graph: ${resolution.graph.id} "${resolution.graph.name}" — store ${resolution.storeId}`,
 		`scope: ${scope} · offset ${offset} · limit ${limit}` + (clamped ? ` (requested offset ${requestedOffset}, limit ${requestedLimit}: both are clamped into their ranges)` : ""),
-		...resolution.kind === "reviewer" && allowed === void 0 ? ["read boundary: delegated graph, read-only; task and session references cannot cross graphs"] : allowed === void 0 ? [] : ["read boundary: own branch, ancestor context and dependency neighbours"],
+		...resolution.kind === "coordinator" && allowed === void 0 ? ["read boundary: delegated graph, read-only; task and session references cannot cross graphs"] : allowed === void 0 ? [] : ["read boundary: own branch, ancestor context and dependency neighbours"],
 		`entries in scope: ${entries.length}`,
 		...marker === void 0 ? [] : [marker, RECOVERY_NOTE]
 	];
@@ -1799,6 +1817,345 @@ async function taskStatus(deps, loaded, query) {
 }
 
 //#endregion
+//#region src/view/facts.ts
+/** What one legacy answer looks like: a note prefix, or a fenced JSON outcome block. */
+const LEGACY_NOTE_PREFIXES = ["blocked:", "no_change:"];
+const LEGACY_OUTCOMES = [
+	"closed",
+	"blocked",
+	"no_change"
+];
+const FENCED_BLOCK = /```(?:json)?\s*([\s\S]*?)```/g;
+/** How much of a completion's reason a progress note carries. */
+const PROGRESS_NOTE_LIMIT = 200;
+/** A completion in the legacy text formats (note prefix / fenced JSON) is not a completion any more. */
+var LegacyCompletionError = class extends Error {
+	code = "legacy-completion-format";
+	constructor(detail) {
+		super(detail);
+		this.name = "LegacyCompletionError";
+	}
+};
+/** Which legacy format one text carries, if any. */
+function legacyFormatOf(text) {
+	const trimmed = text.trim();
+	for (const prefix of LEGACY_NOTE_PREFIXES) if (trimmed.startsWith(prefix)) return `the legacy "${prefix}" note prefix`;
+	for (const match of text.matchAll(FENCED_BLOCK)) {
+		let parsed;
+		try {
+			parsed = JSON.parse(match[1]);
+		} catch {
+			continue;
+		}
+		if (parsed === null || typeof parsed !== "object") continue;
+		const outcome = parsed.outcome;
+		if (typeof outcome === "string" && LEGACY_OUTCOMES.includes(outcome)) return "a fenced JSON outcome block";
+	}
+}
+/** One field's member of a fixed vocabulary, or a refusal naming the field. */
+function choiceOf(field, value, allowed) {
+	if (typeof value !== "string" || !allowed.includes(value)) throw new LegacyCompletionError(`a completion names ${field} as one of ${allowed.join(" | ")}; "${String(value)}" is not one of them`);
+	return value;
+}
+function textOf(field, value) {
+	if (typeof value !== "string" || value.trim().length === 0) throw new LegacyCompletionError(`a completion carries a non-empty ${field}, and this row does not`);
+	return value;
+}
+/** One approval source as it is recorded, or a refusal. */
+function approvalOf(value) {
+	if (value === void 0) return void 0;
+	if (value === null || typeof value !== "object" || Array.isArray(value)) throw new LegacyCompletionError("a completion approval is an object naming its source, or absent");
+	const source = value;
+	if (source.kind !== "human" && source.kind !== "platform_policy") throw new LegacyCompletionError(`a completion approval names its source as human | platform_policy; "${String(source.kind)}" is not one of them`);
+	return {
+		kind: source.kind,
+		...typeof source.actor === "string" ? { actor: source.actor } : {},
+		...typeof source.policy === "string" ? { policy: source.policy } : {}
+	};
+}
+/**
+* Read one recorded completion. A row in the legacy text formats — a
+* `blocked:`/`no_change:` note or a fenced JSON outcome block — and a row whose
+* structured fields are missing or malformed both refuse: no read ever derives
+* "completed" from prose.
+*/
+function readCompletion(row) {
+	if (typeof row === "string") throw new LegacyCompletionError(`a completion is a structured record, and this row is text carrying ${legacyFormatOf(row) ?? "no structured fields"}`);
+	if (row === null || typeof row !== "object" || Array.isArray(row)) throw new LegacyCompletionError(`a completion is a structured record; this row is ${row === null ? "null" : typeof row}`);
+	const record = row;
+	for (const field of [
+		"note",
+		"text",
+		"reply"
+	]) {
+		const text = record[field];
+		if (typeof text !== "string") continue;
+		const legacy = legacyFormatOf(text);
+		throw new LegacyCompletionError(legacy === void 0 ? `a completion carries structured fields, not the ${field} prose this row carries` : `this ${field} is ${legacy}, which the current runtime does not read as a completion`);
+	}
+	const evidenceRefs = record.evidenceRefs;
+	if (!Array.isArray(evidenceRefs) || evidenceRefs.some((ref) => typeof ref !== "string")) throw new LegacyCompletionError("a completion carries its evidenceRefs as an array of strings");
+	const trialCandidateRef = record.trialCandidateRef;
+	if (trialCandidateRef !== void 0 && typeof trialCandidateRef !== "string") throw new LegacyCompletionError("a completion trialCandidateRef is a string, or absent");
+	const approval = approvalOf(record.approval);
+	return {
+		businessAction: choiceOf("businessAction", record.businessAction, [
+			"continue",
+			"recover",
+			"finish"
+		]),
+		searchNext: choiceOf("searchNext", record.searchNext, ["explore", "stop"]),
+		methodDecision: choiceOf("methodDecision", record.methodDecision, [
+			"retain",
+			"trial",
+			"promote",
+			"discard",
+			"rollback"
+		]),
+		reason: textOf("reason", record.reason),
+		evidenceRefs: [...evidenceRefs],
+		...trialCandidateRef === void 0 ? {} : { trialCandidateRef },
+		...approval === void 0 ? {} : { approval },
+		at: textOf("at", record.at)
+	};
+}
+/** A completion's reason as a progress note, or nothing when it has no text. */
+function noteOf(reason) {
+	if (reason === void 0) return void 0;
+	const trimmed = reason.trim();
+	if (trimmed.length === 0) return void 0;
+	return trimmed.length <= PROGRESS_NOTE_LIMIT ? trimmed : `${trimmed.slice(0, PROGRESS_NOTE_LIMIT - 1)}…`;
+}
+/** The completion an assignment list ends with: the latest one recorded, by its own `at`. */
+function latestCompletion(assignments) {
+	let latest;
+	for (const assignment of assignments) {
+		const completion = assignment.completion;
+		if (completion === void 0) continue;
+		if (latest === void 0 || completion.at >= latest.at) latest = completion;
+	}
+	return latest;
+}
+/** The assignment a list is currently in: the highest round one still open. */
+function currentOpen(assignments) {
+	let current;
+	for (const assignment of assignments) {
+		if (assignment.state !== "open") continue;
+		if (current === void 0 || assignment.round >= current.round) current = assignment;
+	}
+	return current;
+}
+/**
+* The one derivation of a graph's progress, from the configured round count and
+* the recorded assignments alone. Every reader reports this and nothing else
+* computes it: a phase is never written down, only reduced again.
+*/
+function deriveProgress(rounds, assignments) {
+	const total = rounds === void 0 || !Number.isFinite(rounds) ? 0 : Math.max(0, Math.trunc(rounds));
+	if (assignments.length === 0) return {
+		round: 0,
+		rounds: total,
+		phase: "idle"
+	};
+	const settled = assignments.filter((assignment) => assignment.state === "settled");
+	const open = currentOpen(assignments);
+	if (open !== void 0) {
+		const awaiting = assignments.some((assignment) => assignment.state === "open" && assignment.completion?.methodDecision === "promote" && assignment.completion.approval === void 0);
+		const note$1 = noteOf(open.completion?.reason);
+		return {
+			round: open.round,
+			rounds: total,
+			phase: awaiting ? "awaiting_approval" : "running",
+			...note$1 === void 0 ? {} : { note: note$1 }
+		};
+	}
+	const latest = latestCompletion(assignments);
+	const note = noteOf(latest?.reason);
+	if (latest !== void 0 && latest.searchNext === "stop") return {
+		round: settled.length,
+		rounds: total,
+		phase: "stopped",
+		...note === void 0 ? {} : { note }
+	};
+	if (rounds !== void 0 && settled.length >= total) return {
+		round: settled.length,
+		rounds: total,
+		phase: "finished",
+		...note === void 0 ? {} : { note }
+	};
+	return {
+		round: settled.length,
+		rounds: total,
+		phase: "idle",
+		...note === void 0 ? {} : { note }
+	};
+}
+
+//#endregion
+//#region src/view/service.ts
+/** A read that cannot answer because this deployment registers no such fact producer. */
+var ReadSourceUnavailableError = class extends Error {
+	code = "read-source-unavailable";
+	source;
+	constructor(source, detail) {
+		super(detail);
+		this.name = "ReadSourceUnavailableError";
+		this.source = source;
+	}
+};
+/** How a graph stands: current, or sealed legacy history with the reason named. */
+function accessWire(graph) {
+	const access = graphAccess(graph);
+	return access.mode === "current" ? { mode: "current" } : {
+		mode: "legacy-readonly",
+		reason: access.reason
+	};
+}
+/**
+* The fingerprint of one graph's read facts: the registry record, the revision,
+* the evaluation and the assignment states. Two reads of the same facts carry
+* the same generation, so a cached projection can never be handed out for a
+* different state.
+*/
+function generationOf(facts) {
+	const digest = sha256Hex(JSON.stringify([
+		[
+			facts.graph.id,
+			facts.graph.name,
+			facts.graph.createdAt,
+			facts.graph.protocol?.id ?? null,
+			facts.graph.rsi?.iterationRounds ?? null
+		],
+		facts.key,
+		facts.revision === null ? null : [
+			facts.revision.revisionId,
+			facts.revision.manifestDigest,
+			facts.revision.origin,
+			facts.revision.publishedAt
+		],
+		facts.evaluation === null ? null : [
+			facts.evaluation.state,
+			facts.evaluation.reportRef,
+			facts.evaluation.candidateRef,
+			facts.evaluation.decidedAt,
+			facts.evaluation.decision ?? null
+		],
+		facts.assignments.map((assignment) => `${assignment.assignmentId}@${assignment.state}@${assignment.completion?.at ?? ""}`).sort()
+	]));
+	return Number.parseInt(digest.slice(0, 13), 16);
+}
+/**
+* A graph's version, evaluation, access mode and derived progress, from the one
+* registered fact source per plane. Web and tools read exactly this projection;
+* a missing producer is refused by name rather than answered with a default.
+*/
+var GraphViewService = class extends Service {
+	static inject = [
+		"graphs",
+		"task",
+		"taskRuntime"
+	];
+	coordination;
+	method;
+	cached = /* @__PURE__ */ new Map();
+	/** Bumped by every change the stores publish; a projection made under an older epoch is stale. */
+	epoch = 0;
+	constructor(ctx) {
+		super(ctx, "singularityGraphView");
+		this.watchEvents();
+	}
+	/** Every store change a projection reads is a reason to reduce it again. */
+	watchEvents() {
+		const on = this.ctx.on.bind(this.ctx);
+		on("graphs/change", () => this.invalidate());
+		on("task/change", () => this.invalidate());
+		on("graph/change", () => this.invalidate());
+	}
+	/** Register the one coordination fact source; the returned disposer removes it again. */
+	registerCoordinationFacts(reader) {
+		const previous = this.coordination;
+		this.coordination = reader;
+		this.invalidate();
+		return () => {
+			if (this.coordination !== reader) return;
+			this.coordination = previous;
+			this.invalidate();
+		};
+	}
+	/** Register the one method fact source; the returned disposer removes it again. */
+	registerMethodFacts(reader) {
+		const previous = this.method;
+		this.method = reader;
+		this.invalidate();
+		return () => {
+			if (this.method !== reader) return;
+			this.method = previous;
+			this.invalidate();
+		};
+	}
+	/** One graph's complete read state, from the facts the current epoch covers. */
+	async view(graphId) {
+		const cached = this.cached.get(graphId);
+		if (cached !== void 0 && cached.epoch === this.epoch) return cached.view;
+		const facts = await this.facts(graphId);
+		const view = {
+			formatVersion: 2,
+			graph: {
+				id: facts.graph.id,
+				name: facts.graph.name,
+				createdAt: facts.graph.createdAt
+			},
+			access: accessWire(facts.graph),
+			revision: facts.revision,
+			evaluation: facts.evaluation,
+			progress: deriveProgress(facts.graph.rsi?.iterationRounds, facts.assignments),
+			generation: generationOf(facts)
+		};
+		this.cached.set(graphId, {
+			epoch: this.epoch,
+			view
+		});
+		return view;
+	}
+	/** Every registered graph's view, in the registry's own order, from the same cache. */
+	async summaries() {
+		const graphs = await this.ctx.graphs.list();
+		return await Promise.all(graphs.map((graph) => this.view(graph.id)));
+	}
+	/** The facts the projection is made of; a producer this deployment lacks refuses the read by name. */
+	async facts(graphId) {
+		const coordination = this.requireCoordination();
+		const method = this.requireMethod();
+		const graph = await this.ctx.graphs.get(graphId);
+		const key = rootTaskStoreId(graph.rootSessionId);
+		const [revision, evaluation, assignments] = await Promise.all([
+			method.activeRevision(key),
+			method.latestEvaluation(key),
+			coordination.assignments(key)
+		]);
+		return {
+			graph,
+			key,
+			revision,
+			evaluation,
+			assignments
+		};
+	}
+	requireCoordination() {
+		if (this.coordination === void 0) throw new ReadSourceUnavailableError("coordination", "no coordination fact source is registered in this deployment, so a graph's progress cannot be reduced from its assignments");
+		return this.coordination;
+	}
+	requireMethod() {
+		if (this.method === void 0) throw new ReadSourceUnavailableError("method", "no method fact source is registered in this deployment, so a graph's active revision and latest evaluation cannot be read");
+		return this.method;
+	}
+	invalidate() {
+		this.epoch += 1;
+		this.cached.clear();
+	}
+};
+
+//#endregion
 //#region src/index.ts
 var SingularityContextService = class extends Service {
 	static inject = [
@@ -1807,21 +2164,22 @@ var SingularityContextService = class extends Service {
 		"taskRuntime",
 		"sessionQuery"
 	];
-	/** The one registered delegation source, when this deployment has one. */
-	reviewerSource;
+	/** The one registered coordination binding source, when this deployment has one. */
+	coordinationSource;
 	constructor(ctx) {
 		super(ctx, "singularityContext");
+		new GraphViewService(ctx);
 	}
 	/** Mount the one `system-prompt/assemble` waterfall listener this service owns. */
 	[Service.init]() {
 		this.ctx.effect(() => this.ctx.on("system-prompt/assemble", (assembly, context, next) => assembleSingularityContext(this, assembly, context, next)), "singularityContext: system-prompt assembly");
 	}
-	/** Register the one reviewer-delegation source; the returned disposer removes it again. */
-	registerReviewerBindingSource(source) {
-		const previous = this.reviewerSource;
-		this.reviewerSource = source;
+	/** Register the one coordination binding source; the returned disposer removes it again. */
+	registerCoordinationBindingSource(source) {
+		const previous = this.coordinationSource;
+		this.coordinationSource = source;
 		return () => {
-			if (this.reviewerSource === source) this.reviewerSource = previous;
+			if (this.coordinationSource === source) this.coordinationSource = previous;
 		};
 	}
 	/** The domain a live session may read, from durable facts. */
@@ -1878,7 +2236,7 @@ var SingularityContextService = class extends Service {
 			task: this.ctx.task,
 			graphs: this.ctx.graphs,
 			taskRuntime: this.ctx.taskRuntime,
-			...this.reviewerSource === void 0 ? {} : { reviewerSource: this.reviewerSource }
+			...this.coordinationSource === void 0 ? {} : { coordinationSource: this.coordinationSource }
 		};
 	}
 	readDeps() {
@@ -1897,4 +2255,4 @@ var SingularityContextService = class extends Service {
 var src_default = SingularityContextService;
 
 //#endregion
-export { AssemblyRefusalError, CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, OutputBudget, QUESTIONS_CONTEXT_NAME, QUESTIONS_CONTEXT_ORDER, ReviewerBindingError, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SingularityContextService, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, budgetList, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, src_default as default, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, questionProjection, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
+export { AssemblyRefusalError, CONTEXT_OUTPUT_LIMIT_BYTES, CoordinationBindingError, GraphViewService, LegacyCompletionError, NAMED_REFUSALS, OutputBudget, PROGRESS_NOTE_LIMIT, QUESTIONS_CONTEXT_NAME, QUESTIONS_CONTEXT_ORDER, ReadSourceUnavailableError, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SingularityContextService, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, budgetList, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, src_default as default, delegatorStanding, deriveProgress, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, questionProjection, read, readCompletion, readCoordination, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };

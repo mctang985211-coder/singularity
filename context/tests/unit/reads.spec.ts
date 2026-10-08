@@ -25,7 +25,7 @@ async function chainStack(): Promise<{ stack: FixtureStack; chain: Chain }> {
 test('supervisor context preserves its coordination responsibility and exact source Run', async () => {
   const { stack } = await chainStack()
   stack.bindingSource(stack.ledger({
-    rootStoreId: 'sg-t-s-root', taskId: 't-c1', actor: 's-root', at: '2026-10-07T00:00:00.000Z',
+    rootStoreId: 'sg-t-s-root', sourceTaskId: 't-c1', actor: 's-root', at: '2026-10-07T00:00:00.000Z',
     role: 'supervisor', sourceRunId: 'r-c1',
   }))
   const contract = expectOk(await stack.service.contractProjection('s-review')).text
@@ -39,7 +39,7 @@ test('supervisor context preserves its coordination responsibility and exact sou
 test('a missing exact coordination source Run is refused instead of falling back to the latest Run', async () => {
   const { stack } = await chainStack()
   stack.bindingSource(stack.ledger({
-    rootStoreId: 'sg-t-s-root', taskId: 't-c1', actor: 's-root', at: '2026-10-07T00:00:00.000Z',
+    rootStoreId: 'sg-t-s-root', sourceTaskId: 't-c1', actor: 's-root', at: '2026-10-07T00:00:00.000Z',
     role: 'supervisor', sourceRunId: 'r-missing',
   }))
   expect(expectRefused(await stack.service.contractProjection('s-review'), 'not-found')).toContain('r-missing')
@@ -232,7 +232,7 @@ describe("the caller's contract and its root briefing", () => {
     const historical = expectOk(await stack.service.contextRead('s-root', { kind: 'run', ref: 'r-c1' })).text
     expect(historical).toContain('run r-c1 of task t-c1 [cancelled]')
     expect(historical).toContain('content-mismatch')
-    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', taskId: 't-c1', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
+    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', sourceTaskId: 't-c1', sourceRunId: null, role: 'reviewer', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
     const reviewed = expectOk(await stack.service.contractProjection('s-review')).text
     expect(reviewed).toContain('objective: child one: build the bridge')
     expect(reviewed).toContain('no business Run')
@@ -315,7 +315,7 @@ describe('reading a sibling dependency by reference', () => {
     expect(diagnosis.text).toContain('a fixture cause')
 
     // A diagnosis read back as the record holds it (A5 §3): no judgements when
-    // the reviewer made none, and a suggestion whose target type is outside the
+    // the coordinator made none, and a suggestion whose target type is outside the
     // nine the store used to freeze.
     await stack.diagnose({
       taskId: 't-c2',
@@ -1015,10 +1015,10 @@ describe('task_status pagination', () => {
     expect(inRange.text).not.toContain('clamped')
   })
 
-  test("the related scope from a reviewer covers the delegated task's relations", async () => {
+  test("the related scope from a coordinator covers the delegated task's relations", async () => {
     const { stack } = await chainStack()
     stack.bindingSource(
-      stack.ledger({ rootStoreId: 'sg-t-s-root', taskId: 't-c1', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }),
+      stack.ledger({ rootStoreId: 'sg-t-s-root', sourceTaskId: 't-c1', sourceRunId: null, role: 'reviewer', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }),
     )
     const text = expectOk(await stack.service.taskStatus('s-review')).text
     expect(text).toContain('t-c1')

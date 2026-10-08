@@ -2,15 +2,12 @@
  * Runtime lifecycle: construction, provider load, capability rows and gates.
  */
 
-import { parseMcpServerRegistry, type McpServerTemplate } from '../mcp-servers.ts'
 import type { TaskRuntime } from './runtime.ts'
-import { dirname, resolve } from 'node:path'
 import type { CapabilityManifest } from '@dangosys/dsh-singularity-task'
 import { resolveCapabilities, type CapabilityConfig } from '../capability.ts'
 import { ExecutionGate } from '../gate.ts'
 import { message } from '../helpers.ts'
-import { precheckReplacedCapabilityRow, providerDefectLines } from '../provider-precheck.ts'
-import type { EvolutionCommitLedger } from '../provider-precheck.ts'
+import { providerDefectLines } from '../provider-precheck.ts'
 import type { RootBudgetConfig } from '../root-budget.ts'
 import type { BudgetConfig } from '../orchestration/types.ts'
 import { DEFAULT_SUPERVISION, type ProviderLoadReport, type SupervisionConfig } from '../config.ts'
@@ -258,71 +255,3 @@ export function listCapabilities(self: TaskRuntime): Readonly<Record<string, Cap
   return structuredClone(self.config.capabilities)
 }
 
-export async function applyCapabilityRow(
-  self: TaskRuntime,
-  name: string,
-  entry: CapabilityConfig | null,
-  options: { commitTargets?: readonly string[]; commitRow?: string; mcpServers?: Record<string, McpServerTemplate | null> } = {},
-): Promise<void> {
-  const registry = { ...self.config.mcpServers }
-  for (const [key, definition] of Object.entries(options.mcpServers ?? {})) {
-    if (definition === null) delete registry[key]
-    else registry[key] = definition
-  }
-  const parsed = parseMcpServerRegistry(registry)
-  if (entry === null) {
-    const rest = { ...self.config.capabilities }
-    delete rest[name]
-    self.config.capabilities = rest
-    self.config.mcpServers = parsed
-    return
-  }
-  await assertReplacementRow(self, name, entry, { ...options, mcpServers: parsed })
-  self.config.mcpServers = parsed
-  self.config.capabilities = { ...self.config.capabilities, [name]: structuredClone(entry) }
-}
-
-export async function assertReplacementRow(
-  self: TaskRuntime,
-  name: string,
-  entry: CapabilityConfig,
-  options: { commitTargets?: readonly string[]; commitRow?: string; mcpServers?: Record<string, McpServerTemplate | null> } = {},
-): Promise<void> {
-  const verifierRefs = await self.registeredVerifierIds()
-  const ledger = self.softService<EvolutionCommitLedger>('evolution')
-  const owned = new Set((options.commitTargets ?? []).map(target => dirname(resolve(target))))
-  const exemptRow = options.commitRow
-  const commitLedger =
-    ledger === undefined || (owned.size === 0 && exemptRow === undefined)
-      ? ledger
-      : {
-          ...(ledger.openIntentTargets === undefined
-            ? {}
-            : {
-                openIntentTargets: async () =>
-                  (await ledger.openIntentTargets!()).filter(target => !owned.has(dirname(resolve(target)))),
-              }),
-          ...(ledger.openIntentCapabilities === undefined
-            ? {}
-            : {
-                openIntentCapabilities: async () =>
-                  (await ledger.openIntentCapabilities!()).filter(row => row !== exemptRow),
-              }),
-        }
-  const { refusals } = await precheckReplacedCapabilityRow({
-    name,
-    entry,
-    table: self.config.capabilities,
-    mcpRegistry: parseMcpServerRegistry(options.mcpServers ?? self.config.mcpServers ?? {}),
-    // The deployment's own viewpoint, the same one the evolution gate and the
-    // load-time report ask from: this process knows its own skill roots.
-    view: { cwd: process.cwd() },
-    ...(verifierRefs === undefined ? {} : { verifierRefs }),
-    ...(commitLedger === undefined ? {} : { commitLedger }),
-  })
-  if (refusals.length === 0) return
-  throw new Error(
-    `task-runtime: capability "${name}" was not replaced — the row grants providers that are not usable:\n` +
-      refusals.map(line => `- ${line}`).join('\n'),
-  )
-}

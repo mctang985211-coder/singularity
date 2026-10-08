@@ -1,4 +1,4 @@
-/** Workers retain their branch; trusted review delegations inspect the same graph, read-only. */
+/** Workers retain their branch; trusted coordination delegations inspect the same graph, read-only. */
 import { describe, expect, test, vi } from 'vitest'
 import type { ContextReadQuery } from '../../src/types.ts'
 import { FixtureStack, expectOk, expectRefused, seedChain } from '../support/stack.ts'
@@ -57,9 +57,9 @@ describe('branch read boundaries', () => {
     }
   })
 
-  test('a valid reviewer reads peers and history throughout its delegated graph without changing the store', async () => {
+  test('a valid coordinator reads peers and history throughout its delegated graph without changing the store', async () => {
     const { stack } = await fixture()
-    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', taskId: 't-c1', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
+    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', sourceTaskId: 't-c1', sourceRunId: null, role: 'reviewer', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
     const before = await stack.snapshot('sg-t-s-root')
     const text = expectOk(await stack.service.taskStatus('s-review', { scope: 'graph' })).text
     for (const id of ['t-root', 't-c1', 't-g1', 't-c2', 't-replay']) expect(text).toContain(id)
@@ -74,7 +74,7 @@ describe('branch read boundaries', () => {
 
   test('a missing delegated task opens no task or session references', async () => {
     const { stack } = await fixture()
-    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', taskId: 't-missing', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
+    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', sourceTaskId: 't-missing', sourceRunId: null, role: 'reviewer', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
     const text = expectOk(await stack.service.taskStatus('s-review', { scope: 'graph' })).text
     expect(text).toContain('entries in scope: 0')
     for (const query of [...dependency, ...unrelated]) expectRefused(await stack.service.contextRead('s-review', query), 'not-found')
@@ -83,7 +83,7 @@ describe('branch read boundaries', () => {
 
   test('full graph visibility keeps the cross-graph session check before either log API', async () => {
     const { stack } = await fixture()
-    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', taskId: 't-c1', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
+    stack.bindingSource(stack.ledger({ rootStoreId: 'sg-t-s-root', sourceTaskId: 't-c1', sourceRunId: null, role: 'reviewer', actor: 's-root', at: '2026-09-25T00:00:00.000Z' }))
     stack.graph({ id: 'g-other', rootSessionId: 's-other' })
     stack.sessionLog('s-other', ['another graph'])
     const query = (stack.ctx as unknown as { sessionQuery: { readSession: (...args: unknown[]) => unknown; readEvent: (...args: unknown[]) => unknown } }).sessionQuery

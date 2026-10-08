@@ -7,7 +7,7 @@ import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EvolutionService, OUTCOME_
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, canonicalize, isTerminalRunStatus, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
-import { CONTEXT_OUTPUT_LIMIT_BYTES, OutputBudget, ReviewerBindingError, budgetList, utf8Bytes } from "@dangosys/dsh-singularity-context";
+import { CONTEXT_OUTPUT_LIMIT_BYTES, CoordinationBindingError, OutputBudget, budgetList, utf8Bytes } from "@dangosys/dsh-singularity-context";
 import { homedir } from "node:os";
 import { SessionId, SessionLogOffset } from "@deepseek-ai/dsh-session";
 import { graphAgentOptions } from "@dangosys/dsh-singularity-graphs";
@@ -1084,13 +1084,13 @@ async function admitReviewAgent(rootStoreId, work) {
 	});
 	return result;
 }
-/** The one delegation a session is recorded under, as the context package's reviewer binding source reads it (A2 §D): */
+/** The one delegation a session is recorded under, as the context package's binding source reads it (A2 §D): */
 async function readReviewerDelegation(sessionId$1) {
 	let rows;
 	try {
 		rows = await readLedgerRows();
 	} catch (error) {
-		throw new ReviewerBindingError("unreadable", `the reviewer ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`);
+		throw new CoordinationBindingError("unreadable", `the reviewer ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	const matches = (rows ?? []).filter(isStartedRow).filter((row) => row.sessionId === sessionId$1);
 	if (matches.length === 0) return void 0;
@@ -1109,12 +1109,29 @@ async function readReviewerDelegation(sessionId$1) {
 	};
 	const conflicting = matches.some((row) => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor);
 	const claimConflict = claims.some((row) => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor || (row.role ?? "reviewer") !== record.role || row.runId !== record.sourceRunId);
-	if (conflicting || claimConflict) throw new ReviewerBindingError("binding-conflict", `session "${sessionId$1}" is recorded under more than one reviewer delegation: ` + matches.map((row) => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join("; "));
+	if (conflicting || claimConflict) throw new CoordinationBindingError("binding-conflict", `session "${sessionId$1}" is recorded under more than one reviewer delegation: ` + matches.map((row) => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join("; "));
 	return record;
+}
+/**
+* The ledger row as the context binding: the shape is projected, and a row
+* whose claim names no role is refused rather than read as a reviewer's.
+*/
+async function coordinationBindingOf(sessionId$1) {
+	const row = await readReviewerDelegation(sessionId$1);
+	if (row === void 0) return void 0;
+	if (row.role === void 0) throw new CoordinationBindingError("role-missing", `session "${sessionId$1}" is recorded as a review delegation whose claim names no role; a role is never assumed`);
+	return {
+		role: row.role,
+		sourceTaskId: row.taskId,
+		sourceRunId: row.sourceRunId ?? null,
+		actor: row.actor,
+		rootStoreId: row.rootStoreId,
+		at: row.at
+	};
 }
 /** The binding source the plugin registers into the context service: this deployment's ledger, as the narrow read door above. */
 function reviewerBindingSource() {
-	return { read: readReviewerDelegation };
+	return { read: coordinationBindingOf };
 }
 
 //#endregion
@@ -5805,7 +5822,7 @@ var SingularityAgent = class extends Service {
 		new ProposalReviewService(ctx);
 		new EvolutionExposure(ctx, evolution === "on");
 		new SupervisionExposure(ctx, supervision);
-		ctx.effect(() => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()), "singularityAgent: reviewer binding source");
+		ctx.effect(() => ctx.singularityContext.registerCoordinationBindingSource(reviewerBindingSource()), "singularityAgent: coordination binding source");
 		ctx.effect(() => installRsiLoopDriver(ctx), "singularityAgent: rsi loop driver");
 		ctx.effect(() => ctx.taskRuntime.registerRootBudgetApproval(defineRootBudgetApproval(ctx)), "singularityAgent: root budget approval");
 		ctx.tools.register(defineMarkReadyTool(ctx));

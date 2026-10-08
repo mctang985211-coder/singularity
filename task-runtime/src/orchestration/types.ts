@@ -24,6 +24,7 @@ import type {
   TaskStatus,
 } from '@dangosys/dsh-singularity-task'
 import type { CapabilityConfig, PermissionSpec } from '../capability.ts'
+import type { EnvironmentRevision } from '../environment/revision.ts'
 import type { ExecutionGate, JobsView } from '../gate.ts'
 import type { ProviderPrecheck } from '../provider-precheck.ts'
 import type { RootBudgetConfig } from '../root-budget.ts'
@@ -205,6 +206,15 @@ export interface OrchestrateEnv {
    * when the run it serves is bound to one. A replay carries the experiment's
    */
   taskTemplatesRoot?: string
+  /**
+   * The immutable environment revision the caller's Run is bound to, resolved
+   * once by the runtime when it builds this env: every run this orchestration
+   * admits (a batch child, a nested child) binds the same revision, so a publish
+   * landing mid-batch never moves a child admitted before it.
+   */
+  environmentRevision?: EnvironmentRevision
+  /** The unpublished candidate revision a trial run binds; inherited by its children exactly like the revision. */
+  trialCandidateRef?: string
   agentOptions?: AgentOptions
   /**
    * The provider pre-check, for the one case that has no verdict to carry: a
@@ -241,6 +251,12 @@ export interface OrchestrateEnv {
   onRunSettled?(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void
   /** Called once per recorded terminal review, after the record is durable and never awaited. */
   onTerminalReview?(fact: TerminalReviewFact): void
+  /**
+   * Seal one Run's execution receipt, awaited *before* the terminal review is
+   * handed over. Absent means this deployment seals nothing; a receipt that
+   * cannot be sealed is warned and queued, and never fails the settlement.
+   */
+  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId): Promise<void>
   /**
    * The runtime's batch-failure seam: every child of the batch that has not
    * reached a terminal state is blocked and the batch's parent run is failed
@@ -315,6 +331,8 @@ export interface RuntimeSettlementEnv {
    * and never awaited: a settlement hands the fact over and carries on, because
    */
   onTerminalReview?(fact: TerminalReviewFact): void
+  /** The receipt sealer, awaited before the terminal review is handed over ({@link OrchestrateEnv.sealReceipt}). */
+  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId): Promise<void>
   /**
    * The live process's execution gate, when this settlement has one (A4 §F.1).
    * A settled run ends the *questions addressed to it* — an open question needs
@@ -468,7 +486,9 @@ export interface ReplayOverlay {
   presetOverride?: string
 }
 
-/** Everything one replay run needs, pre-shaped by the caller (`TaskRuntime.replayTask`). */
+/**
+ * Everything one replay run needs, pre-shaped by the caller (`TaskRuntime.replayTask`).
+ */
 export interface ReplayRunInit {
   /** The replayed task to create: parentless (depth 0), status `created`, objective already carrying the lineage tag. */
   task: TaskInstance
@@ -490,6 +510,16 @@ export interface ReplayRunInit {
    * resolved by the caller from the deployment's real configuration and registry:
    */
   taskTemplatesRoot?: string
+  /**
+   * The immutable environment revision this replay binds its content from: the
+   * active revision, or the candidate an explicit trial names. Absent leaves the
+   * replay on the admitted verdicts' own directories (an old-protocol replay).
+   */
+  revision?: EnvironmentRevision
+  /** The revision id recorded as the run's pinned environment version; defaults to `revision`'s own id. */
+  environmentRevisionId?: string
+  /** The unpublished candidate this replay explicitly trials, recorded beside the pinned revision. */
+  trialCandidateRef?: string
   agentOptions?: AgentOptions
   /** false: deterministic criteria replay — no worker is spawned, the verifier alone settles the run. */
   spawn: boolean
@@ -506,6 +536,20 @@ export interface ReplayRunSignals {
   advance?: AbortSignal
 }
 
+/**
+ * What one replay's receipt settled as: `sealed` names the receipt a consumer
+ * may read immediately, and `absent` names why there is none — the two are
+ * different refusals for a consumer, so they are different answers.
+ */
+export type ReplayReceiptReport =
+  | {
+      readonly status: 'sealed'
+      readonly digest: string
+      readonly completeness: 'complete' | 'incomplete'
+      readonly missing: readonly string[]
+    }
+  | { readonly status: 'absent'; readonly reason: string }
+
 /** What one settled replay run reports back to the comparison report. */
 export interface ReplayRunOutcome {
   taskId: TaskId
@@ -519,4 +563,6 @@ export interface ReplayRunOutcome {
    * (`ReplayTaskOptions.workspace`, normalized): the directory its worker wrote
    */
   workspace?: string
+  /** The execution receipt this run sealed, or why there is none. */
+  receipt?: ReplayReceiptReport
 }

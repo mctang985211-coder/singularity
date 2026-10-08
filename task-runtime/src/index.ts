@@ -82,6 +82,7 @@ export type {
   BatchContext,
   ChildOutcome,
   OrchestrateEnv,
+  ReplayReceiptReport,
   ReplayRunOutcome,
   TerminalReviewFact,
 } from './orchestration/types.ts'
@@ -126,6 +127,21 @@ export type {
   StoreRecoveryStatus,
 } from './types.ts'
 export type { StoreRecoveryStateView } from './config.ts'
+export type {
+  SessionFacts,
+  ModelRequestFact,
+  DecompositionCallFact,
+} from './session-facts.ts'
+export { HUMAN_TOOLS, sessionFactsOf, skillNameFrom, toolResultFailed } from './session-facts.ts'
+export type { ExecutionUsage, ReceiptBuildInput, ReceiptBuildResult } from './receipt.ts'
+export {
+  buildExecutionReceipt,
+  executionSubtree,
+  executionUsage,
+  requireReceiptFacts,
+} from './receipt.ts'
+export type { ReceiptReconcileReport, ReceiptSealStatus } from './service/receipts.ts'
+export { RECEIPT_ACTOR, RECEIPT_PERSIST_WAIT_MS } from './service/receipts.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -147,5 +163,14 @@ export default TaskRuntime
 export * from './task-template.ts'
 export { parseSkillFile } from '@dangosys/dsh-singularity-agent-runtime'
 
-export * from './library.ts'
+export * from './environment/index.ts'
+export type {
+  EnvironmentLibrary,
+  EnvironmentProtocol,
+  EnvironmentView,
+  LibraryEditResult,
+  LibraryReview,
+  LibraryWrite,
+} from './service/environment.ts'
+export type { TaskRuntime as TaskRuntimeService } from './service/runtime.ts'
 export { rebaseWorkspacePaths } from './replay-paths.ts'

@@ -187,7 +187,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   // one call the plugin makes at load time (registering its reviewer binding
   // source). The read core's consumers are the `context` specs and
   // `tests/integration/context-assembly.spec.ts`.
-  ctx.provide('singularityContext', { registerReviewerBindingSource: () => () => {} } as never)
+  ctx.provide('singularityContext', { registerCoordinationBindingSource: () => () => {} } as never)
   ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) } as never)
   ctx.provide('approval', { request: async () => 'allowed-once' } as never)
 

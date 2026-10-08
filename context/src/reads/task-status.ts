@@ -92,7 +92,7 @@ export async function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: St
       (clamped
         ? ` (requested offset ${requestedOffset}, limit ${requestedLimit}: both are clamped into their ranges)`
         : ''),
-    ...(resolution.kind === 'reviewer' && allowed === undefined
+    ...(resolution.kind === 'coordinator' && allowed === undefined
       ? ['read boundary: delegated graph, read-only; task and session references cannot cross graphs']
       : allowed === undefined ? [] : ['read boundary: own branch, ancestor context and dependency neighbours']),
     `entries in scope: ${entries.length}`,

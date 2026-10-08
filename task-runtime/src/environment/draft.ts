@@ -33,6 +33,7 @@ import {
   freezeDraftDirectory,
   hasLegacyLayout,
   readRevision,
+  revisionsRoot,
   serialEnvironment,
   syncDirectory,
   verifyRevisionDirectory,
@@ -136,16 +137,30 @@ function draftOf(library: LibraryRoots, record: DraftRecord, root: string): Envi
   }
 }
 
-/** The next draft id of one library: monotonic `d0001`, `d0002`, …, allocated under the library's write tail. */
+/**
+ * The next draft id of one library: monotonic `d0001`, `d0002`, …, allocated
+ * under the library's write tail. A frozen draft leaves `drafts/` for
+ * `revisions/c-<draftId>`, so the highest id is read from both directories —
+ * otherwise a second draft would take a name whose candidate revision exists.
+ */
 async function nextDraftId(library: LibraryRoots): Promise<string> {
-  let entries: string[]
-  try {
-    entries = await readdir(draftsRoot(library))
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'd0001'
-    throw error
+  const used: number[] = []
+  const collect = async (directory: string, pattern: RegExp, slice: number): Promise<void> => {
+    let entries: string[]
+    try {
+      entries = await readdir(directory)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    for (const name of entries) {
+      const match = pattern.exec(name)
+      if (match !== null) used.push(Number(name.slice(slice)))
+    }
   }
-  const highest = entries.filter(name => ENVIRONMENT_DRAFT_ID.test(name)).map(name => Number(name.slice(1))).reduce((max, value) => Math.max(max, value), 0)
+  await collect(draftsRoot(library), ENVIRONMENT_DRAFT_ID, 1)
+  await collect(revisionsRoot(library), /^c-d[0-9]{4}$/, 3)
+  const highest = used.reduce((max, value) => Math.max(max, value), 0)
   return `d${String(highest + 1).padStart(4, '0')}`
 }
 

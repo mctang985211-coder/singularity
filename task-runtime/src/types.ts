@@ -133,6 +133,12 @@ export interface ReplayTaskOptions {
    * deployment's default for this run's worker and for every worker its
    */
   agentOptions?: AgentOptions
+  /**
+   * The unpublished candidate revision this replay explicitly trials. The run
+   * binds the candidate's frozen content while the active revision stays where
+   * it is; absent replays under the active revision.
+   */
+  trialCandidateRef?: string
   signal?: AbortSignal
 }
 

@@ -22,7 +22,7 @@ describe('task_read', () => {
     const { ctx } = await fixture()
     const tool = defineTaskReadTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
-    expect(ctx.task.openStore).toHaveBeenCalledExactlyOnceWith('sg-t-root-1')
+    expect(ctx.task.snapshotReadOnly).toHaveBeenCalledExactlyOnceWith('sg-t-root-1')
     expect(result).toContain('store sg-t-root-1 of graph "graph1"')
     expect(result).toContain('task t-root [running/decomposed] depth 0')
     expect(result).toContain('objective: Build the feature')
@@ -42,7 +42,7 @@ describe('task_read', () => {
     // runtime's lookup (A2): the read door does not reconcile, and the resolution
     // is the one store read the answer rests on.
     expect(ctx.taskRuntime.runForSession).not.toHaveBeenCalled()
-    expect(ctx.task.openStore).toHaveBeenCalledExactlyOnceWith('sg-t-root-1')
+    expect(ctx.task.snapshotReadOnly).toHaveBeenCalledExactlyOnceWith('sg-t-root-1')
     expect(result).toContain('task t-worker [running/leaf] depth 1')
     expect(result).toContain('objective: Implement the parser')
     expect(result).toContain('- ac1-1 [deterministic, mandatory] parses the fixtures — $ pnpm test')
@@ -397,7 +397,7 @@ describe('task_status', () => {
     const { ctx } = await fixture()
     const tool = defineTaskStatusTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
-    expect(ctx.task.openStore).toHaveBeenCalledExactlyOnceWith('sg-t-root-1')
+    expect(ctx.task.snapshotReadOnly).toHaveBeenCalledExactlyOnceWith('sg-t-root-1')
     expect(result).toContain('graph: graph1 "graph1" — store sg-t-root-1')
     expect(result).toContain('entries in scope: 2')
     expect(result).toContain('- t-root [running] Build the feature (run: running — phase active) [you]')
@@ -408,7 +408,7 @@ describe('task_status', () => {
 
   it('renders the localized cause of a failed review', async () => {
     const { ctx } = await fixture()
-    ctx.task.openStore.mockResolvedValue({
+    ctx.task.snapshotReadOnly.mockResolvedValue({ exists: true, snapshot: {
       ...snapshot,
       tasks: [
         { ...rootTask, status: 'failed' },
@@ -426,7 +426,7 @@ describe('task_status', () => {
           localizedCause: 'mandatory criteria not satisfied: ac1-1 fail',
         },
       ],
-    })
+    } })
     const tool = defineTaskStatusTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(result).toContain('review: failed — mandatory criteria not satisfied: ac1-1 fail')
@@ -434,7 +434,7 @@ describe('task_status', () => {
 
   it('appends failing criterion ids and exit codes when the failed review carries criteria', async () => {
     const { ctx } = await fixture()
-    ctx.task.openStore.mockResolvedValue({
+    ctx.task.snapshotReadOnly.mockResolvedValue({ exists: true, snapshot: {
       ...snapshot,
       tasks: [
         { ...rootTask, status: 'failed' },
@@ -462,7 +462,7 @@ describe('task_status', () => {
           ],
         },
       ],
-    })
+    } })
     const tool = defineTaskStatusTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(result).toContain('review: failed — mandatory criteria not satisfied: ac1-1 fail [ac1-1 exit 1]')
@@ -470,7 +470,7 @@ describe('task_status', () => {
 
   it('renders the blocking anomaly of a runless blocked review', async () => {
     const { ctx } = await fixture()
-    ctx.task.openStore.mockResolvedValue({
+    ctx.task.snapshotReadOnly.mockResolvedValue({ exists: true, snapshot: {
       ...snapshot,
       tasks: [rootTask, { ...childTask, status: 'blocked', runIds: [] }],
       runs: [rootRun],
@@ -483,7 +483,7 @@ describe('task_status', () => {
           relatedTaskIds: ['t-other'],
         },
       ],
-    })
+    } })
     const tool = defineTaskStatusTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(result).toContain('review: blocked — dependencies [t-other] did not verify')
@@ -491,7 +491,7 @@ describe('task_status', () => {
 
   it("renders each run's coordination phase, and needs-recovery for a run with no phase", async () => {
     const { ctx } = await fixture()
-    ctx.task.openStore.mockResolvedValue({
+    ctx.task.snapshotReadOnly.mockResolvedValue({ exists: true, snapshot: {
       ...snapshot,
       tasks: [rootTask, { ...childTask, status: 'running' }],
       runs: [
@@ -499,7 +499,7 @@ describe('task_status', () => {
         { ...rootRun, executionPhase: undefined },
         { ...childRun, status: 'running', executionPhase: 'submitted' },
       ],
-    })
+    } })
     const result = (await defineTaskStatusTool(ctx as never).execute({}, exec('root-1'))) as string
     expect(result).toContain(
       '- t-root [running] Build the feature (run: running — needs-recovery (old record without a coordination phase))',
@@ -842,6 +842,7 @@ describe('task_diagnose', () => {
     const { ctx } = await fixture()
     const state = structuredClone(snapshot)
     ctx.task.openStore.mockImplementation(async () => state)
+    ctx.task.snapshotReadOnly.mockImplementation(async () => ({ exists: true, snapshot: state }))
     ctx.task.recordDiagnosisIn.mockImplementation(async (_storeId: string, diagnosis: never) => {
       state.diagnoses.push(diagnosis)
     })

@@ -9,7 +9,8 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
 import { assembleSingularityContext } from './assembly.ts'
 import { loadCaller } from './bindings/resolve.ts'
-import type { BindingDeps, LoadedCaller, ReviewerBindingSource } from './bindings/types.ts'
+import type { CoordinationBindingSource } from './bindings/coordination.ts'
+import type { BindingDeps, LoadedCaller } from './bindings/types.ts'
 import { contractProjection } from './reads/contract.ts'
 import { dynamicProjection } from './reads/dynamic.ts'
 import { questionProjection } from './reads/questions.ts'
@@ -18,6 +19,7 @@ import { taskRead } from './reads/task-read.ts'
 import { taskStatus } from './reads/task-status.ts'
 import type { ProjectedRead } from './refusals.ts'
 import type { ContextReadQuery, EnvPathSource, ReadDeps, StatusQuery } from './types.ts'
+import { GraphViewService } from './view/service.ts'
 
 export {
   assembleSingularityContext,
@@ -30,7 +32,15 @@ export {
   WORKER_CONTRACT_SECTION,
 } from './assembly.ts'
 export { loadCaller } from './bindings/resolve.ts'
-export { ReviewerBindingError, isGraphMember } from './bindings/types.ts'
+export { CoordinationBindingError, readCoordination, delegatorStanding } from './bindings/coordination.ts'
+export type {
+  CoordinationBinding,
+  CoordinationBindingSource,
+  CoordinationRead,
+  CoordinationRole,
+  DelegatorStanding,
+} from './bindings/coordination.ts'
+export { isGraphMember } from './bindings/types.ts'
 export type {
   BindingDeps,
   CallerBase,
@@ -44,8 +54,6 @@ export type {
   ReadOnlyGraphs,
   ReadOnlyTaskRuntime,
   ReadOnlyTaskStore,
-  ReviewerBindingRecord,
-  ReviewerBindingSource,
 } from './bindings/types.ts'
 export { budgetList, CONTEXT_OUTPUT_LIMIT_BYTES, omissionLine, OutputBudget, sliceUtf8, utf8Bytes } from './limits.ts'
 export type { OmissionReport, Utf8Slice } from './limits.ts'
@@ -97,6 +105,17 @@ export type {
   StatusQuery,
   StatusScope,
 } from './types.ts'
+export { GraphViewService, ReadSourceUnavailableError } from './view/service.ts'
+export type { ViewFactSource } from './view/service.ts'
+export { LegacyCompletionError, PROGRESS_NOTE_LIMIT, deriveProgress, readCompletion } from './view/facts.ts'
+export type {
+  CoordinationAssignmentFacts,
+  CoordinationCompletionFacts,
+  CoordinationFactsReader,
+  GraphKey,
+  MethodFactsReader,
+  ViewFactSources,
+} from './view/types.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -107,11 +126,12 @@ declare module '@deepseek-ai/cordis' {
 export class SingularityContextService extends Service {
   static inject = ['task', 'graphs', 'taskRuntime', 'sessionQuery']
 
-  /** The one registered delegation source, when this deployment has one. */
-  private reviewerSource: ReviewerBindingSource | undefined
+  /** The one registered coordination binding source, when this deployment has one. */
+  private coordinationSource: CoordinationBindingSource | undefined
 
   constructor(ctx: Context) {
     super(ctx, 'singularityContext')
+    new GraphViewService(ctx)
   }
 
   /** Mount the one `system-prompt/assemble` waterfall listener this service owns. */
@@ -125,12 +145,12 @@ export class SingularityContextService extends Service {
     )
   }
 
-  /** Register the one reviewer-delegation source; the returned disposer removes it again. */
-  registerReviewerBindingSource(source: ReviewerBindingSource): () => void {
-    const previous = this.reviewerSource
-    this.reviewerSource = source
+  /** Register the one coordination binding source; the returned disposer removes it again. */
+  registerCoordinationBindingSource(source: CoordinationBindingSource): () => void {
+    const previous = this.coordinationSource
+    this.coordinationSource = source
     return () => {
-      if (this.reviewerSource === source) this.reviewerSource = previous
+      if (this.coordinationSource === source) this.coordinationSource = previous
     }
   }
 
@@ -202,7 +222,7 @@ export class SingularityContextService extends Service {
       task: this.ctx.task,
       graphs: this.ctx.graphs,
       taskRuntime: this.ctx.taskRuntime,
-      ...(this.reviewerSource === undefined ? {} : { reviewerSource: this.reviewerSource }),
+      ...(this.coordinationSource === undefined ? {} : { coordinationSource: this.coordinationSource }),
     }
   }
 

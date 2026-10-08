@@ -392,6 +392,13 @@ async function startChildRound(
     sessionId,
     parentRunId: parentRun.runId,
     ...(env.taskTemplatesRoot === undefined ? {} : { taskTemplatesRoot: env.taskTemplatesRoot }),
+    /**
+     * A child inherits its parent Run's frozen environment version: the batch is
+     * one unit of work under one revision, and a publish that lands mid-batch
+     * does not move the children already admitted.
+     */
+    ...(parentRun.environmentRevisionId === undefined ? {} : { environmentRevisionId: parentRun.environmentRevisionId }),
+    ...(parentRun.trialCandidateRef === undefined ? {} : { trialCandidateRef: parentRun.trialCandidateRef }),
     capabilitySnapshot: capabilitySnapshot(manifest),
     ...(placement === undefined ? {} : { placement }),
     ...(!env.isolatedChildren && (env.maxActiveWorkers ?? 1) > 1 ? { sharedWorkspace: true } : {}),
@@ -427,6 +434,8 @@ async function startChildRound(
       manifest,
       ...(providers === undefined ? {} : { providers }),
       ...(env.runBindingRoot === undefined ? {} : { root: env.runBindingRoot }),
+      ...(env.environmentRevision === undefined ? {} : { revision: env.environmentRevision }),
+      ...(env.trialCandidateRef === undefined ? {} : { trialCandidateRef: env.trialCandidateRef }),
     })
   } catch (error) {
     const reason = `content binding failed: ${message(error)}`
