@@ -256,7 +256,7 @@ export interface OrchestrateEnv {
    * handed over. Absent means this deployment seals nothing; a receipt that
    * cannot be sealed is warned and queued, and never fails the settlement.
    */
-  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId): Promise<void>
+  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId, excludeCallId?: string): Promise<void>
   /**
    * The runtime's batch-failure seam: every child of the batch that has not
    * reached a terminal state is blocked and the batch's parent run is failed
@@ -332,7 +332,7 @@ export interface RuntimeSettlementEnv {
    */
   onTerminalReview?(fact: TerminalReviewFact): void
   /** The receipt sealer, awaited before the terminal review is handed over ({@link OrchestrateEnv.sealReceipt}). */
-  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId): Promise<void>
+  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId, excludeCallId?: string): Promise<void>
   /**
    * The live process's execution gate, when this settlement has one (A4 §F.1).
    * A settled run ends the *questions addressed to it* — an open question needs

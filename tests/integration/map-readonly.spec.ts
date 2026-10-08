@@ -140,7 +140,7 @@ it('shows a sealed graph one history panel and no write control at all', async (
   expect(legacy.some(panel => panel.id === 'canvas')).toBe(false)
 
   const current = panelsFor('current')
-  expect(current.map(panel => panel.id)).toEqual(['canvas', 'view', 'tasks', 'recovery', 'verifier'])
+  expect(current.map(panel => panel.id)).toEqual(['canvas', 'view', 'methods', 'tasks', 'recovery', 'verifier'])
   expect(current.some(panel => panel.id === 'history')).toBe(false)
 
   // The header renders Settings and Delete for a current graph, and neither for a sealed one.

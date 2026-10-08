@@ -8165,7 +8165,7 @@ async function recordTerminalReview(env, storeId, taskId, outcome, options = {})
 	* never turned into a failed settlement — the receipt is evidence, not a step.
 	*/
 	if (options.run !== void 0 && env.sealReceipt !== void 0) try {
-		await env.sealReceipt(storeId, taskId, options.run.runId);
+		await env.sealReceipt(storeId, taskId, options.run.runId, options.excludeCallId);
 	} catch (error) {
 		const warn$1 = env.warn;
 		warn$1?.(`the execution receipt of run "${options.run.runId}" could not be sealed (${message(error)}); the settlement stands and the receipt stays queued`);
@@ -9668,28 +9668,36 @@ async function settleSubmittedRun(env, storeId, taskId, runId, opts = {}) {
 	const unmet = unmetMandatory(task.acceptanceCriteria, bundle.verifierResults);
 	if (unmet.length === 0) {
 		await env.task.markRunStatusIn(storeId, taskId, runId, "verified", env.actor);
+		/**
+		* The terminal mark is what frees the checkout: the run is no longer a
+		* writer, and the next entry that claims this store's workspace — a recovery
+		* attempt opened the moment the store reports the run settled — may arrive
+		* before the review record and its receipt seal have done their own I/O.
+		*/
+		await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId);
 		await recordTerminalReview(env, storeId, taskId, "verified", {
 			run,
 			relatedTaskIds,
 			criteria,
-			anomalies
+			anomalies,
+			...opts.excludeCallId === void 0 ? {} : { excludeCallId: opts.excludeCallId }
 		});
 		env.onRunSettled?.(storeId, taskId, runId, "verified");
-		await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId);
 		return "verified";
 	}
 	const reason = failureReason(unmet);
 	await env.task.markRunStatusIn(storeId, taskId, runId, "failed", env.actor, { reason });
+	await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId);
 	await recordTerminalReview(env, storeId, taskId, "failed", {
 		run,
 		localizedCause: reason,
 		relatedTaskIds,
 		criteria,
 		anomalies,
-		logTail: await failedLogTail(env, unmet, bundle.verifierResults)
+		logTail: await failedLogTail(env, unmet, bundle.verifierResults),
+		...opts.excludeCallId === void 0 ? {} : { excludeCallId: opts.excludeCallId }
 	});
 	env.onRunSettled?.(storeId, taskId, runId, "failed");
-	await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId);
 	return "failed";
 }
 /**
@@ -10941,8 +10949,8 @@ function settlementParts(self, actor) {
 			runSettledFromRuntime(self, storeId, taskId, runId, status);
 		},
 		onTerminalReview: (fact) => self.notifyTerminalReview(fact),
-		sealReceipt: async (storeId, taskId, runId) => {
-			await self.sealReceiptBounded(storeId, taskId, runId);
+		sealReceipt: async (storeId, taskId, runId, excludeCallId) => {
+			await self.sealReceiptBounded(storeId, taskId, runId, excludeCallId);
 		},
 		gate: self.executionGate
 	};
@@ -12103,8 +12111,8 @@ async function orchestrateEnv(self, callerSessionId, actor, workspace, replayOve
 		readLogTail: async (logRef) => runVerifier(self)?.logTail?.(logRef),
 		observeSession: async (sessionId) => observeSession(self, sessionId),
 		onTerminalReview: (fact) => self.notifyTerminalReview(fact),
-		sealReceipt: async (storeId, taskId, runId) => {
-			await self.sealReceiptBounded(storeId, taskId, runId);
+		sealReceipt: async (storeId, taskId, runId, excludeCallId) => {
+			await self.sealReceiptBounded(storeId, taskId, runId, excludeCallId);
 		},
 		onRunBound: (sessionId, binding$1) => {
 			self.sessions.set(sessionId, binding$1);
@@ -12572,8 +12580,8 @@ function atOrUnder(snapshot, root, candidate) {
 * terminal boundary; when the last is not there yet the sealer waits inside a
 * bounded window before it records the fact as missing.
 */
-async function sealRunReceipt(self, storeId, taskId, runId) {
-	return await serialSeal(self, storeId, () => sealOnce(self, storeId, taskId, runId));
+async function sealRunReceipt(self, storeId, taskId, runId, excludeCallId) {
+	return await serialSeal(self, storeId, () => sealOnce(self, storeId, taskId, runId, excludeCallId));
 }
 /** Run one sealing attempt on the store's own tail. */
 async function serialSeal(self, storeId, work) {
@@ -12582,7 +12590,7 @@ async function serialSeal(self, storeId, work) {
 	return await pending;
 }
 /** One sealing attempt, without the store's serialization. */
-async function sealOnce(self, storeId, taskId, runId) {
+async function sealOnce(self, storeId, taskId, runId, excludeCallId) {
 	const snapshot = await self.context.task.snapshotIn(storeId);
 	const run = snapshot.runs.find((candidate) => candidate.runId === runId);
 	if (run === void 0) return {
@@ -12611,7 +12619,7 @@ async function sealOnce(self, storeId, taskId, runId) {
 		status: "unsupported",
 		reason: `run "${runId}" binds revision "${run.environmentRevisionId}", which the library no longer holds`
 	};
-	const drain = await drainForSealing(self, run.sessionId);
+	const drain = await drainForSealing(self, run.sessionId, excludeCallId);
 	const built = buildExecutionReceipt({
 		storeId,
 		snapshot,
@@ -12635,11 +12643,12 @@ async function sealOnce(self, storeId, taskId, runId) {
 	};
 }
 /** The drain conclusion for one session: the in-process drain, or the reconcile pass when the session is gone. */
-async function drainForSealing(self, sessionId) {
+async function drainForSealing(self, sessionId, excludeCallId) {
 	const agent = self.agentOrUndefined(sessionId);
 	if (self.startedSessions.has(sessionId) && agent !== void 0) try {
 		return (await drainSession(self.executionGate, sessionId, {
 			timeoutMs: Math.min(self.config.writeDrainTimeoutMs, RECEIPT_DRAIN_TIMEOUT_MS),
+			...excludeCallId === void 0 ? {} : { excludeCallId },
 			jobs: self.softService("jobs"),
 			agent
 		})).confirmed ? "in-process" : "unconfirmed";
@@ -13149,9 +13158,9 @@ var TaskRuntime = class extends Service {
 	* own limits, and never throwing — an unsealed receipt is queued for the next
 	* recovery pass rather than turning a settlement into a failure.
 	*/
-	async sealReceiptBounded(storeId, taskId, runId) {
+	async sealReceiptBounded(storeId, taskId, runId, excludeCallId) {
 		try {
-			const status = await sealRunReceipt(this, storeId, taskId, runId);
+			const status = await sealRunReceipt(this, storeId, taskId, runId, excludeCallId);
 			if (status.status === "sealed" || status.status === "already-sealed" || status.status === "unsupported") return;
 			queueReceiptSeal(this, storeId, taskId, runId);
 			this.warn(`store ${storeId}: the receipt of run "${runId}" is queued rather than sealed now (${status.reason})`);

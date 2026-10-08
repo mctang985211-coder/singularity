@@ -600,9 +600,9 @@ export class TaskRuntime extends Service {
    * own limits, and never throwing — an unsealed receipt is queued for the next
    * recovery pass rather than turning a settlement into a failure.
    */
-  async sealReceiptBounded(storeId: string, taskId: TaskId, runId: RunId): Promise<void> {
+  async sealReceiptBounded(storeId: string, taskId: TaskId, runId: RunId, excludeCallId?: string): Promise<void> {
     try {
-      const status = await svcReceipts.sealRunReceipt(this, storeId, taskId, runId)
+      const status = await svcReceipts.sealRunReceipt(this, storeId, taskId, runId, excludeCallId)
       if (status.status === 'sealed' || status.status === 'already-sealed' || status.status === 'unsupported') return
       svcReceipts.queueReceiptSeal(this, storeId, taskId, runId)
       this.warn(`store ${storeId}: the receipt of run "${runId}" is queued rather than sealed now (${status.reason})`)

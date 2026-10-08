@@ -97,7 +97,12 @@ describe('a bound request whose facts cannot be read spends no model input (Q1)'
 
     const refusal = await refusedTurn(loop, heard, String(ROOT))
     expect(refusal.refusal).toBe('unreadable')
-    expect(refusal.message).toContain('system-prompt assembly refused (unreadable)')
+    // The named refusal is the same family whatever the failed read: the request's
+    // own inputs (the run's contract, the task-template catalog the library
+    // supplies, the assembled context) are read before one model request is sent,
+    // and any of them failing refuses the turn by name with its cause.
+    expect(refusal.message).toContain('unreadable')
+    expect(refusal.message).toContain('input/output error while reading the store log')
     // The refused request is the one that never happened: the provider served
     // exactly the turns that ran while the store was readable, and the request
     // that would have carried no contract is not among them.

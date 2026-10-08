@@ -142,7 +142,7 @@ describe('the assembled request a worker receives', () => {
       expect(stack.ctx.tools.get(name, root), name).toBeDefined()
       const answer = await stack.call(root.id, name)
       expect(answer.isError, name).toBe(true)
-      expect(answer.text, name).toContain('singularity: use the root execution tools and task_decompose for delegated task work')
+      expect(answer.text, name).toContain('singularity: use the root execution tools, task_decompose for delegated task work')
     }
     expect(invoked).not.toHaveBeenCalled()
     // The root's own allow-list does name the local execution tools, so an

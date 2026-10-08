@@ -106,8 +106,8 @@ export function settlementParts(self: TaskRuntime, actor: string): RuntimeSettle
       runSettledFromRuntime(self, storeId, taskId, runId, status)
     },
     onTerminalReview: fact => self.notifyTerminalReview(fact),
-    sealReceipt: async (storeId, taskId, runId) => {
-      await self.sealReceiptBounded(storeId, taskId, runId)
+    sealReceipt: async (storeId, taskId, runId, excludeCallId) => {
+      await self.sealReceiptBounded(storeId, taskId, runId, excludeCallId)
     },
     gate: self.executionGate,
   }

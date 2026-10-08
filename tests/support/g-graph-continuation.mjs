@@ -247,7 +247,7 @@ singularityContext[Service.init]()
 // No coordination supervisor runs in this fixture: the spec's subject is the
 // graph's own continuation topology, and the platform RSI loop only touches a
 // graph that declares `rsi` settings (this one does not).
-const singularity = new SingularityAgent(ctx, { evolution: 'off' })
+const singularity = new SingularityAgent(ctx, { methodTools: 'off' })
 await singularity[Service.init]()
 // The rest of the root's core tool plane (`agent-runtime`'s `ROOT_CORE_TOOLS`):
 // a real bundle mounts these, and the root's own `tools.restrict` is fail-closed

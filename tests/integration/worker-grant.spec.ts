@@ -15,7 +15,8 @@ import { SingularityAgent } from '../../agent-singularity/src/index.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { WorkerGrant } from '../../agent-runtime/src/types.ts'
 import { workerBaseline } from '../../task-runtime/src/capability.ts'
-import { graphLibrary } from '../../task-runtime/src/library.ts'
+import { libraryRoots } from '../../task-runtime/src/environment/index.ts'
+import { INITIAL_REVISION_ID } from '../../task-runtime/src/service/environment.ts'
 
 /**
  * The real thing on the tools and skills axes: the deployment's own
@@ -31,9 +32,9 @@ import { graphLibrary } from '../../task-runtime/src/library.ts'
  * mints the scope and awaits `setup`, which is what the loop itself does.
  *
  * The plugin is mounted rather than a hand-copied name list, so the surface
- * under test is the deployment's registration: with the evolution chain off
- * (the shipped default) the nine `evolution_*` tools do not exist at all and no
- * grant, absence of a grant, or allow-list can conjure them.
+ * under test is the deployment's registration: with the method tools off
+ * the six `method_*` tools do not exist at all and no grant, absence of a
+ * grant, or allow-list can conjure them.
  */
 
 /**
@@ -117,12 +118,12 @@ interface HarnessOptions {
   /** Mount the real filesystem skill provider, rooted at this test's cwd. */
   readonly discovery?: boolean
   /**
-   * The deployment's evolution switch (`SingularityAgent`'s `evolution`). `on`
-   * by default because the grant cases are about a grant STRIPPING the chain,
-   * which is only observable where the chain exists; a case about the shipped
-   * default passes `off` and gets the composition nobody configured.
+   * The deployment's method-tool switch (`SingularityAgent`'s `methodTools`).
+   * `on` by default because the grant cases are about a grant STRIPPING the
+   * method surface, which is only observable where it exists; a case about a
+   * deployment that registered none passes `off`.
    */
-  readonly evolution?: 'off' | 'on'
+  readonly methodTools?: 'off' | 'on'
 }
 
 /**
@@ -179,7 +180,19 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   ctx.provide('taskRuntime', {
     registerRootBudgetApproval: () => () => {},
     registerTerminalReviewListener: () => () => {},
-    libraryForRoot: async (rootSessionId: string) => graphLibrary(rootSessionId),
+    // The real derivation `libraryForRoot` performs for a library with no
+    // published revision yet: the initial revision's own skill root.
+    libraryForRoot: async (rootSessionId: string) => {
+      const library = libraryRoots(rootSessionId)
+      const root = join(library.root, 'revisions', INITIAL_REVISION_ID)
+      return {
+        id: library.id,
+        root,
+        protocol: 'uninitialized',
+        skillRoot: join(root, 'skills'),
+        taskTemplatesRoot: join(root, 'task-templates'),
+      }
+    },
   } as never)
   // The read core the root-agent plugin injects (A2). No tool this spec drives
   // reads context — its subjects are the tool surface and the grant filter, both
@@ -208,8 +221,8 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   const runtime = new AgentRuntime(ctx)
   // The deployment's composition, mounted the way the loader mounts it: the
   // plugin registers the root/worker tool surface this spec filters, and the
-  // switch decides whether the nine `evolution_*` names exist to be filtered.
-  await ctx.plugin(SingularityAgent, { evolution: options.evolution ?? 'on' })
+  // switch decides whether the six `method_*` names exist to be filtered.
+  await ctx.plugin(SingularityAgent, { methodTools: options.methodTools ?? 'on' })
   const live = new Map<string, Agent>()
   const scopes: Scope[] = []
   const mint = async (
@@ -316,7 +329,7 @@ describe('worker capability grants', () => {
     for (const kept of ['read', 'write', 'edit', 'bash', 'glob', 'grep', 'skill', 'task_decompose', 'capability_list']) {
       expect(names, kept).toContain(kept)
     }
-    for (const stripped of ['evolution_decide', 'evolution_propose', 'graph_spawn', 'hitl_ask', 'task_review_pack', 'task_review_agent', 'task_budget_extend', 'session_search', 'web_fetch']) {
+    for (const stripped of ['method_publish', 'method_draft', 'graph_spawn', 'hitl_ask', 'task_review_pack', 'task_review_agent', 'task_budget_extend', 'session_search', 'web_fetch']) {
       expect(names, stripped).not.toContain(stripped)
     }
     // The four raw cross-session readers are off the surface (A2): the baseline
@@ -349,11 +362,11 @@ describe('worker capability grants', () => {
     expect(keptNames).toContain('task_read')
     expect(keptNames).toContain('context_read')
     for (const sealed of RAW_SESSION_READS) expect(keptNames, sealed).not.toContain(sealed)
-    expect(keptNames).not.toContain('evolution_decide')
+    expect(keptNames).not.toContain('method_publish')
     expect(keptNames).not.toContain('task_review_pack')
   })
 
-  it('keeps capability discovery for recursive decomposition without granting graph, HITL, or evolution tools', async () => {
+  it('keeps capability discovery for recursive decomposition without granting graph, HITL, or method tools', async () => {
     const h = await harness()
     const names = h.visible(await h.spawn(grantOf()))
 
@@ -363,16 +376,17 @@ describe('worker capability grants', () => {
     }
     // Nodes grow by task_decompose through admission, never by reaching for the graph plane:
     // graph_spawn skips admission and returns the child's prose, and the platform surface
-    // (HITL, review/diagnosis, evolution) stays the root's. The review *chain* is that
-    // surface's (K4): the gate admits `task_review_agent` in the phases a stopped tree's
-    // session is in, and what keeps a worker out of it is the grant — this baseline has no
-    // such name, and no capability label expands to one. `task_budget_extend` (K4) is the
-    // same fact one step further: the gate admits it in every phase because it raises a
-    // ceiling and does no work, and a worker — whose own budget a raise is not its to ask
-    // for — never carries it.
+    // (HITL, review/diagnosis, the method chain) stays the root's or the supervisor's. The
+    // review *chain* is that surface's (K4): the gate admits `task_review_agent` in the phases
+    // a stopped tree's session is in, and what keeps a worker out of it is the grant — this
+    // baseline has no such name, and no capability label expands to one. `task_budget_extend`
+    // (K4) is the same fact one step further: the gate admits it in every phase because it
+    // raises a ceiling and does no work, and a worker — whose own budget a raise is not its to
+    // ask for — never carries it. The six `method_*` tools are the supervisor's; a worker's
+    // baseline names none of them.
     for (const stripped of [
       'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve',
-      'evolution_propose', 'evolution_candidate', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
+      'method_list', 'method_draft', 'method_evaluate', 'method_publish', 'method_discard', 'method_rollback', 'escalate',
       'task_review_pack', 'task_review_agent', 'task_diagnose', 'task_budget_extend',
       ...RAW_SESSION_READS,
     ]) {
@@ -465,25 +479,25 @@ describe('worker capability grants', () => {
   })
 
   it('leaves an unauthorized spawn (a graph_spawn setup worker) on its full composition surface', async () => {
-    // The composition that registered the chain: an un-granted spawn inherits
-    // the global plane, so what it may call is what the deployment registered —
-    // and this one registered the nine.
-    const h = await harness({ evolution: 'on' })
+    // The composition that registered the method tools: an un-granted spawn
+    // inherits the global plane, so what it may call is what the deployment
+    // registered — and this one registered the six.
+    const h = await harness({ methodTools: 'on' })
     const child = await h.spawn(undefined)
-    expect(h.visible(child)).toContain('evolution_decide')
+    expect(h.visible(child)).toContain('method_publish')
     expect(h.visible(child)).toContain('subagent_fetchless')
   })
 
-  it('leaves an unauthorized spawn without the evolution chain on the shipped default composition', async () => {
+  it('leaves an unauthorized spawn without the method tools on a deployment that registered none', async () => {
     // No grant narrows this worker, so its surface is the composition's own:
     // read back from the assembly (the registry the plugin registered into)
     // rather than compared against a name list a fixture keeps by hand.
-    const h = await harness({ evolution: 'off' })
+    const h = await harness({ methodTools: 'off' })
     const child = await h.spawn(undefined)
     const names = h.visible(child)
-    expect(names.filter(name => name.startsWith('evolution_'))).toEqual([])
+    expect(names.filter(name => name.startsWith('method_'))).toEqual([])
     // Everything else the composition carries is still there: the switch gates
-    // the chain, not the worker's right to inherit an un-granted surface.
+    // the method surface, not the worker's right to inherit an un-granted one.
     expect(names).toContain('subagent_fetchless')
     expect(names).toContain('graph_spawn')
     expect(names).toContain('escalate')

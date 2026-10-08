@@ -150,10 +150,14 @@ async function statusOf(h: ScriptedLoop, storeId: string, proposalId: string, ex
   return await proposalOf(h, storeId, proposalId)
 }
 
-/** The batch id the store recorded on the root run — the admission's own fact, waited for. */
+/** The batch id the store recorded on the root run — the admission's own fact, waited for. A probe that races the handback reads the identity from the run's accumulation, where the batch end leaves it. */
 async function rootBatchId(h: ScriptedLoop): Promise<string> {
-  await vi.waitFor(async () => expect((await h.runForSession(ROOT)).run.batchId).toBeDefined())
-  return (await h.runForSession(ROOT)).run.batchId!
+  await vi.waitFor(async () => {
+    const run = (await h.runForSession(ROOT)).run
+    expect(run.batchId ?? run.batches?.at(-1)?.batchId).toBeDefined()
+  }, { timeout: 20_000, interval: 25 })
+  const run = (await h.runForSession(ROOT)).run
+  return (run.batchId ?? run.batches!.at(-1)!.batchId)!
 }
 
 /** Let the channel finish settling one ask on its own side: for an outcome that writes nothing, nothing follows. */
@@ -602,7 +606,24 @@ describe('the review policy on the real loop (T2 §5)', () => {
 
     // The row this batch resolved against changes while the person decides: the
     // resolution the review covered is not the one an admission would run under.
-    await h.runtime.applyCapabilityRow('align-capability', { skills: ['task-execution'], tools: ['filesystem'] })
+    // A library row moves by pointer transaction now — draft, stage, publish —
+    // and the pointer switch is what the staleness check reads.
+    const active = await h.runtime.libraryRead(String(ROOT))
+    const draft = await h.runtime.createDraft(String(ROOT))
+    await h.runtime.stageDraftEdit(String(ROOT), draft.draftId, {
+      kind: 'capability',
+      edit: {
+        name: 'align-capability',
+        entry: { skills: ['task-execution'], tools: ['filesystem'] },
+        actor: String(ROOT),
+      },
+    })
+    await h.runtime.publishRevision(String(ROOT), {
+      direction: 'publish',
+      source: { kind: 'draft', draftId: draft.draftId },
+      expected: { revisionId: active.revisionId, generation: active.generation },
+      actor: String(ROOT),
+    })
     h.review.answerBatch(0, 'allowed-once')
 
     const stale = await statusOf(h, root.storeId, proposalId, 'stale')

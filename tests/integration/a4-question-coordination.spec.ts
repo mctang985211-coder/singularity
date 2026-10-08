@@ -79,13 +79,14 @@ function spawnOf(h: ScriptedLoop, index: number): string {
   return spawn.sessionId
 }
 
-/** Wait until the store holds one batch id on a session's run, and return it. */
+/** Wait until the store holds one batch id on a session's run, and return it. A probe that races the handback reads the identity from the run's accumulation, where the batch end leaves it. */
 async function batchIdOf(h: ScriptedLoop, sessionId: string): Promise<string> {
   await vi.waitFor(async () => {
     const { run } = await h.runForSession(sessionId)
-    expect(run.batchId).toBeDefined()
-  })
-  return (await h.runForSession(sessionId)).run.batchId as string
+    expect(run.batchId ?? run.batches?.at(-1)?.batchId).toBeDefined()
+  }, { timeout: 20_000, interval: 25 })
+  const { run } = await h.runForSession(sessionId)
+  return (run.batchId ?? run.batches!.at(-1)!.batchId) as string
 }
 
 /** One recorded call of a name in one session, as soon as it reported a result (a deny reports one too). */

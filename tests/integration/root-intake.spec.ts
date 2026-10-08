@@ -239,10 +239,14 @@ async function activatedRoot(h: ScriptedLoop, storeId: string): Promise<{ taskId
   return found!
 }
 
-/** The batch id the store recorded on a session's run — the admission's own fact, waited for. */
+/** The batch id the store recorded on a session's run — the admission's own fact, waited for. A probe that races the handback reads the identity from the run's accumulation, where the batch end leaves it. */
 async function batchIdOf(h: ScriptedLoop, sessionId: string | SessionId): Promise<string> {
-  await vi.waitFor(async () => expect((await h.runForSession(sessionId)).run.batchId).toBeDefined())
-  return (await h.runForSession(sessionId)).run.batchId!
+  await vi.waitFor(async () => {
+    const run = (await h.runForSession(sessionId)).run
+    expect(run.batchId ?? run.batches?.at(-1)?.batchId).toBeDefined()
+  }, { timeout: 20_000, interval: 25 })
+  const run = (await h.runForSession(sessionId)).run
+  return (run.batchId ?? run.batches!.at(-1)!.batchId)!
 }
 
 /**
@@ -995,8 +999,9 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     // spawn sends is a pointer at it — the attribution ('runtime-prompt'/'spawn')
     // is unchanged. Everything else on the log is the deployment's own planes:
     // the dynamic half of the assembled context written as a snapshot when it
-    // changes (the `runtime-context` producer) and the skill catalog the skill
-    // tool publishes for the worker (the `skill-catalog` producer).
+    // changes (the `runtime-context` producer), the skill catalog the skill tool
+    // publishes for the worker (the `skill-catalog` producer), and the Run's own
+    // bound methods delivered before the first model action (`task-skills`).
     const userMessages = h.eventsOf(worker).filter(event => event.type === 'user/message')
     const delegated = userMessages.filter(event => (event.data as { source?: { channel?: string } }).source?.kind === 'runtime-prompt')
     expect(delegated).toHaveLength(1)
@@ -1006,7 +1011,7 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     for (const message of userMessages) {
       const source = (message.data as { source?: { kind?: string } }).source
       expect(
-        source?.kind === 'runtime-prompt' || source?.kind === 'runtime-context' || source?.kind === 'skill-catalog',
+        source?.kind === 'runtime-prompt' || source?.kind === 'runtime-context' || source?.kind === 'skill-catalog' || source?.kind === 'task-skills',
         JSON.stringify(source),
       ).toBe(true)
     }

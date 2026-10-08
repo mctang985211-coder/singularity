@@ -93,10 +93,11 @@ export async function sealRunReceipt(
   storeId: string,
   taskId: TaskId,
   runId: RunId,
+  excludeCallId?: string,
 ): Promise<ReceiptSealStatus> {
   // One seal per store at a time: a settlement's own seal and a recovery pass can
   // both ask for the same run, and a store accepts one receipt per run.
-  return await serialSeal(self, storeId, () => sealOnce(self, storeId, taskId, runId))
+  return await serialSeal(self, storeId, () => sealOnce(self, storeId, taskId, runId, excludeCallId))
 }
 
 /** Run one sealing attempt on the store's own tail. */
@@ -113,6 +114,7 @@ async function sealOnce(
   storeId: string,
   taskId: TaskId,
   runId: RunId,
+  excludeCallId?: string,
 ): Promise<ReceiptSealStatus> {
   const snapshot = await self.context.task.snapshotIn(storeId)
   const run = snapshot.runs.find(candidate => candidate.runId === runId)
@@ -134,7 +136,7 @@ async function sealOnce(
     return { status: 'unsupported', reason: `run "${runId}" binds revision "${run.environmentRevisionId}", which the library no longer holds` }
   }
 
-  const drain = await drainForSealing(self, run.sessionId)
+  const drain = await drainForSealing(self, run.sessionId, excludeCallId)
   const sessionFacts = await gatherSessionFacts(self, snapshot, runId, drain)
   const built = buildExecutionReceipt({
     storeId,
@@ -151,12 +153,20 @@ async function sealOnce(
 }
 
 /** The drain conclusion for one session: the in-process drain, or the reconcile pass when the session is gone. */
-async function drainForSealing(self: TaskRuntime, sessionId: string): Promise<'in-process' | 'reconciled' | 'unconfirmed'> {
+async function drainForSealing(
+  self: TaskRuntime,
+  sessionId: string,
+  excludeCallId?: string,
+): Promise<'in-process' | 'reconciled' | 'unconfirmed'> {
   const agent = self.agentOrUndefined(sessionId)
   if (self.startedSessions.has(sessionId) && agent !== undefined) {
     try {
       const drained: DrainResult = await drainSession(self.executionGate, sessionId, {
         timeoutMs: Math.min(self.config.writeDrainTimeoutMs, RECEIPT_DRAIN_TIMEOUT_MS),
+        // The call that is settling this run is still in flight — it cannot land
+        // until the settlement returns — so waiting on it would spend the whole
+        // drain window on the one write that is not the receipt's business.
+        ...(excludeCallId === undefined ? {} : { excludeCallId }),
         jobs: self.softService<JobsView>('jobs'),
         agent,
       })

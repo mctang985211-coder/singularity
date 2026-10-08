@@ -351,13 +351,28 @@ export async function settleSubmittedRun(
   const unmet = unmetMandatory(task.acceptanceCriteria, bundle.verifierResults)
   if (unmet.length === 0) {
     await env.task.markRunStatusIn(storeId, taskId, runId, 'verified', env.actor)
-    await recordTerminalReview(env, storeId, taskId, 'verified', { run, relatedTaskIds, criteria, anomalies })
-    env.onRunSettled?.(storeId, taskId, runId, 'verified')
+    /**
+     * The terminal mark is what frees the checkout: the run is no longer a
+     * writer, and the next entry that claims this store's workspace — a recovery
+     * attempt opened the moment the store reports the run settled — may arrive
+     * before the review record and its receipt seal have done their own I/O.
+     */
     await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId)
+    await recordTerminalReview(env, storeId, taskId, 'verified', {
+      run,
+      relatedTaskIds,
+      criteria,
+      anomalies,
+      ...(opts.excludeCallId === undefined ? {} : { excludeCallId: opts.excludeCallId }),
+    })
+    env.onRunSettled?.(storeId, taskId, runId, 'verified')
     return 'verified'
   }
   const reason = failureReason(unmet)
   await env.task.markRunStatusIn(storeId, taskId, runId, 'failed', env.actor, { reason })
+  // Same order as the verified branch: the checkout is handed back with the
+  // terminal mark, before the review record and the receipt seal run.
+  await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId)
   await recordTerminalReview(env, storeId, taskId, 'failed', {
     run,
     localizedCause: reason,
@@ -365,9 +380,9 @@ export async function settleSubmittedRun(
     criteria,
     anomalies,
     logTail: await failedLogTail(env, unmet, bundle.verifierResults),
+    ...(opts.excludeCallId === undefined ? {} : { excludeCallId: opts.excludeCallId }),
   })
   env.onRunSettled?.(storeId, taskId, runId, 'failed')
-  await releaseWorkspaceLayer(env, runOwner(storeId, taskId, runId), run.sessionId)
   return 'failed'
 }
 

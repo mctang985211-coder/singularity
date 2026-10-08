@@ -344,8 +344,8 @@ export async function orchestrateEnv(
     readLogTail: async logRef => runVerifier(self)?.logTail?.(logRef),
     observeSession: async sessionId => observeSession(self, sessionId),
     onTerminalReview: fact => self.notifyTerminalReview(fact),
-    sealReceipt: async (storeId, taskId, runId) => {
-      await self.sealReceiptBounded(storeId, taskId, runId)
+    sealReceipt: async (storeId, taskId, runId, excludeCallId) => {
+      await self.sealReceiptBounded(storeId, taskId, runId, excludeCallId)
     },
     onRunBound: (sessionId, binding) => {
       self.sessions.set(sessionId, binding)

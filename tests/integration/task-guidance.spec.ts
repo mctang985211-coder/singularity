@@ -27,6 +27,34 @@ async function install(h: { home: string }): Promise<void> {
   await copyFile(COORDINATION, join(root, 'task-coordination', 'SKILL.md'))
   await writeGuidanceSkill(root, 'answer-method', ANSWER_METHOD)
 }
+
+/**
+ * Publish one version of a graph library's own `task-coordination` production
+ * method, marked with `marker`. A library's contents move only through the
+ * pointer transaction (draft → stage → publish), and it is the *published*
+ * revision a Run binds — never a file edited in place.
+ */
+async function publishCoordination(h: ScriptedLoop, session: string, marker: string): Promise<void> {
+  await h.runtime.ensureInitialEnvironment(session, session)
+  const active = await h.runtime.libraryRead(session)
+  const declared = active.skills.find(entry => entry.name === 'task-coordination')
+  const draft = await h.runtime.createDraft(session)
+  await h.runtime.stageDraftEdit(session, draft.draftId, {
+    kind: 'skill',
+    edit: {
+      name: 'task-coordination',
+      skillMd: `${await readFile(COORDINATION, 'utf8')}\n${marker}\n`,
+      expectedVersion: declared?.version ?? 0,
+      actor: session,
+    },
+  })
+  await h.runtime.publishRevision(session, {
+    direction: 'publish',
+    source: { kind: 'draft', draftId: draft.draftId },
+    expected: { revisionId: active.revisionId, generation: active.generation },
+    actor: session,
+  })
+}
 const textOf = (h: ScriptedLoop, session: string) => h.requestsOf(session).map(request => request.texts.join('\n'))
 
 afterEach(async () => { await disposeScriptedLoops(); await disposeRunStacks() })
@@ -90,25 +118,26 @@ describe('guidance on actual model requests', () => {
     const h = await startScriptedLoop({ capabilities, roots: [ROOT, 's-new-root'], script: () => [{ text: 'coordinating with the admitted method' }],
     })
     await install(h)
-    // Each root graph's own library holds its production method, and a run
-    // binding discovers it there before the deployment catalog: the edit below is
-    // the production method the graph's next binding reads.
-    const production = join((await h.runtime.libraryForRoot(ROOT)).skillRoot, 'task-coordination', 'SKILL.md')
-    await writeFile(production, `${await readFile(production, 'utf8')}\nFROZEN_COORDINATION_ORIGINAL\n`)
+    // Each root graph's own library holds its production method, published as a
+    // revision, and a run binds the revision that was active when it was
+    // admitted — the graph's own copy, not the deployment catalog's.
+    await publishCoordination(h, ROOT, 'FROZEN_COORDINATION_ORIGINAL')
     const root = await h.begin(contract('coordinate the first answer'))
     await h.agent(ROOT).whenIdle()
     expect(textOf(h, ROOT).at(-1)).toContain('FROZEN_COORDINATION_ORIGINAL')
-    await writeFile(production, (await readFile(production, 'utf8')).replace('FROZEN_COORDINATION_ORIGINAL', 'PRODUCTION_COORDINATION_REVISED'))
+    // A second publish moves the pointer, and the admitted Run stays on the bytes
+    // it bound: its own frozen snapshot, not the library's new revision.
+    await publishCoordination(h, ROOT, 'PRODUCTION_COORDINATION_REVISED')
     h.userSays('continue under the same accepted contract')
     await h.agent(ROOT).whenIdle()
     expect(textOf(h, ROOT).at(-1)).toContain('FROZEN_COORDINATION_ORIGINAL')
     expect(textOf(h, ROOT).at(-1)).not.toContain('PRODUCTION_COORDINATION_REVISED')
     await h.runtime.submitResult(ROOT, { summary: 'the first accepted coordination is complete' })
     await vi.waitFor(async () => expect((await h.runForSession(ROOT)).run.status).toBe('verified'))
-    // The second graph's own production method carries the edit: a binding built
-    // now reads the revised bytes, while the first run stayed on its snapshot.
-    const second = join((await h.runtime.libraryForRoot('s-new-root')).skillRoot, 'task-coordination', 'SKILL.md')
-    await writeFile(second, `${await readFile(second, 'utf8')}\nPRODUCTION_COORDINATION_REVISED\n`)
+    // The second graph's own production method carries the revised bytes: a Run
+    // admitted now binds the revision published for that graph, while the first
+    // run stayed on its snapshot.
+    await publishCoordination(h, 's-new-root', 'PRODUCTION_COORDINATION_REVISED')
     h.recordRequest('coordinate the second answer', 's-new-root')
     const fresh = await h.runtime.intakeRootContract(rootTaskStoreId('s-new-root'), 's-new-root', contract('coordinate the second answer'))
     expect(fresh.status).toBe('activated')

@@ -222,6 +222,8 @@ interface TerminalReviewOptions {
   criteria?: readonly ReviewCriterion[]
   logTail?: string
   blockedBy?: readonly ReviewBlocker[]
+  /** The call that is settling the run: still in flight, so the receipt's drain never waits on it. */
+  excludeCallId?: string
 }
 
 /**
@@ -266,7 +268,7 @@ export async function recordTerminalReview(
    */
   if (options.run !== undefined && env.sealReceipt !== undefined) {
     try {
-      await env.sealReceipt(storeId, taskId, options.run.runId)
+      await env.sealReceipt(storeId, taskId, options.run.runId, options.excludeCallId)
     } catch (error) {
       const warn = (env as { warn?: (message: string) => void }).warn
       warn?.(`the execution receipt of run "${options.run.runId}" could not be sealed (${message(error)}); the settlement stands and the receipt stays queued`)

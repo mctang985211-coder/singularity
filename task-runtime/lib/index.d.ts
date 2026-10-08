@@ -1340,7 +1340,7 @@ interface OrchestrateEnv {
    * handed over. Absent means this deployment seals nothing; a receipt that
    * cannot be sealed is warned and queued, and never fails the settlement.
    */
-  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId): Promise<void>;
+  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId, excludeCallId?: string): Promise<void>;
   /**
    * The runtime's batch-failure seam: every child of the batch that has not
    * reached a terminal state is blocked and the batch's parent run is failed
@@ -1417,7 +1417,7 @@ interface RuntimeSettlementEnv {
    */
   onTerminalReview?(fact: TerminalReviewFact): void;
   /** The receipt sealer, awaited before the terminal review is handed over ({@link OrchestrateEnv.sealReceipt}). */
-  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId): Promise<void>;
+  sealReceipt?(storeId: string, taskId: TaskId, runId: RunId, excludeCallId?: string): Promise<void>;
   /**
    * The live process's execution gate, when this settlement has one (A4 §F.1).
    * A settled run ends the *questions addressed to it* — an open question needs
@@ -2736,7 +2736,7 @@ declare class TaskRuntime extends Service {
    * own limits, and never throwing — an unsealed receipt is queued for the next
    * recovery pass rather than turning a settlement into a failure.
    */
-  sealReceiptBounded(storeId: string, taskId: TaskId, runId: RunId): Promise<void>;
+  sealReceiptBounded(storeId: string, taskId: TaskId, runId: RunId, excludeCallId?: string): Promise<void>;
   /** Advance every queued seal of one store. */
   flushReceiptSeals(storeId: string): Promise<ReceiptReconcileReport>;
   /** Seal every terminal new-protocol Run of one store that has no receipt yet. */

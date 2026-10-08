@@ -146,8 +146,27 @@ async function generation(
   ctx.provide('sessionPersistence', sessionPersistence(memory) as never)
 
   const spawned: SpawnRequest[] = []
+  /**
+   * The graph root each session belongs to. A root session is its own graph's
+   * root; a spawned session belongs to the tree that spawned it. The runtime
+   * resolves a session's environment library from this identity, so a worker
+   * that mapped to itself would look for its own revision — a graph the
+   * deployment never created.
+   */
+  const graphRoot = new Map<string, string>()
+  const rootOf = (sessionId: string): string => {
+    const seen = new Set<string>()
+    let current = sessionId
+    while (graphRoot.has(current) && !seen.has(current)) {
+      seen.add(current)
+      current = graphRoot.get(current)!
+    }
+    return current
+  }
   ctx.provide('agentRuntime', {
     spawn: async (_parent: unknown, request: { sessionId: string; name: string; prompt?: { text: string }[]; taskWorker?: boolean; contract?: string }) => {
+      const parentId = String((_parent as { id?: unknown } | undefined)?.id ?? '')
+      graphRoot.set(request.sessionId, rootOf(memory.headers.has(parentId) ? parentId : request.sessionId))
       spawned.push({
         sessionId: request.sessionId,
         name: request.name,
@@ -170,7 +189,7 @@ async function generation(
   } as never)
   ctx.provide('agents', { get: (sessionId: string) => ({ id: sessionId }) } as never)
   ctx.provide('graphs', graphRegistry({
-    graphForSession: async (sessionId: SessionId) => ({ id: 'g1', name: 'graph', envId: 'env1', rootSessionId: sessionId }),
+    graphForSession: async (sessionId: SessionId) => ({ id: 'g1', name: 'graph', envId: 'env1', rootSessionId: rootOf(String(sessionId)) }),
     members: () => [...memory.headers.keys()],
   }) as never)
   // The read plane the tools and the assembly need (A2): the session log this

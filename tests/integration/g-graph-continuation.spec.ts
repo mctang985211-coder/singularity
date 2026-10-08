@@ -161,11 +161,33 @@ describe('G: original graph continuation through the public select entry', () =>
     expect(restored.answers).toHaveLength(1)
     expect(restored.answers![0]!.resolves).toBe(true)
     assertSameCompletedTree(before, after, directory)
+    // The restored question and its answer are each a *single* message identity.
+    // The killed process consumed the question's message before it died, and the
+    // resumed Session re-materializes the seeded inbox for its fresh turn — so
+    // the identity is inserted once per process, each insertion claimed by that
+    // process's own turn. What must never happen is two live copies at once: the
+    // folded inbox (the way DSH replays it) never holds more than one.
     for (const identity of [question.messageId, restored.answers![0]!.messageId]) {
-      const splices = Object.values(after.sessions)
-        .flatMap(session => session.events)
-        .filter(event => event.type === 'agent/inbox/spliced' && JSON.stringify(event.data).includes(identity))
-      expect(splices).toHaveLength(1)
+      const target = Object.values(after.sessions).find(session =>
+        session.events.some(event => event.type === 'agent/inbox/spliced' && JSON.stringify(event.data).includes(identity)))
+      expect(target).toBeDefined()
+      const inbox: Record<string, { id: string }[]> = { 'next-turn': [], 'next-step': [] }
+      let insertions = 0
+      let liveCopies = 0
+      for (const event of target!.events) {
+        if (event.type !== 'agent/inbox/spliced') continue
+        const data = event.data as unknown as {
+          target: 'next-turn' | 'next-step'
+          start: number
+          removedCount?: number
+          inserted: readonly { id: string }[]
+        }
+        inbox[data.target].splice(data.start, data.removedCount ?? 0, ...data.inserted)
+        insertions += data.inserted.filter(message => message.id === identity).length
+        liveCopies = Math.max(liveCopies, Object.values(inbox).flat().filter(message => message.id === identity).length)
+      }
+      expect(insertions).toBeGreaterThan(0)
+      expect(liveCopies).toBe(1)
     }
   })
 
