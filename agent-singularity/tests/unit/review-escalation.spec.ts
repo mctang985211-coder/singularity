@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'vitest'
 import { JUDGED_DIMENSIONS } from '@dangosys/dsh-singularity-task'
-import { REVIEW_AGENT_BUDGET_DEFAULT } from '../../src/coordination/ledger.ts'
 import { DEFAULT_SUPERVISION } from '../../src/coordination/supervision.ts'
 import { renderJudgementDimensions } from '../../src/tools/task-review-pack.ts'
+
+const REVIEW_AGENT_BUDGET_DEFAULT = DEFAULT_SUPERVISION.coordinationBudget
 
 /**
  * What is left of this module after A5 deleted the escalation derivation.

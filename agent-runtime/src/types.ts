@@ -130,4 +130,21 @@ export interface WorkerResumeRequest {
   readonly agentOptions?: AgentOptions
 }
 
+/**
+ * One controlled resume of a persisted coordination session: the same session
+ * id, the same composition, the same role. The coordination driver states the
+ * role and the preset; the Session's own durable header has to agree.
+ */
+export interface CoordinatorResumeRequest {
+  readonly sessionId: SessionId
+  readonly scope: GraphScope
+  readonly coordinationRole: 'reviewer' | 'supervisor'
+  readonly agentPreset: string
+  /** The grant the session was spawned with, resolved by the caller as the spawn resolved it. */
+  readonly grant?: WorkerGrant
+  /** The permission preset the session was spawned under; absent = the worker default. */
+  readonly permissionPreset?: string
+  readonly agentOptions?: AgentOptions
+}
+
 export type { AgentOptions } from '@deepseek-ai/dsh-agent'

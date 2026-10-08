@@ -5,9 +5,9 @@ import type {} from '@dangosys/dsh-singularity-task'
 import { budgetList, CONTEXT_OUTPUT_LIMIT_BYTES, OutputBudget, utf8Bytes } from '@dangosys/dsh-singularity-context'
 import type { Diagnosis, ReviewDimensions, ReviewMetrics, ReviewRecord, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { JUDGED_DIMENSIONS, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import { readReviewAgentAttempts } from '../coordination/ledger.ts'
-import type { ReviewAgentAttempt, ReviewAgentSource } from '../coordination/ledger.ts'
-import { supervisorAttemptsLine } from '../coordination/handoff-rules.ts'
+import { readCoordinationRows, workOf, type CoordinationRow, type CoordinatedWork } from '../coordination/store.ts'
+import { diagnosisIdOf, workOfSource } from '../coordination/facts-reader.ts'
+import { renderCoordinationWork } from '../coordination/render.ts'
 import { reviewRef } from '../coordination/identity.ts'
 import { sessionId, text } from '../shared.ts'
 
@@ -19,23 +19,17 @@ export function renderJudgementDimensions(): string {
 }
 
 /** The review record of one exact source, or nothing when the store holds none. */
-export function reviewForSource(snapshot: TaskSnapshot, source: ReviewAgentSource): ReviewRecord | undefined {
+export function reviewForSource(snapshot: TaskSnapshot, source: { readonly taskId: string; readonly runId: string | null }): ReviewRecord | undefined {
   return snapshot.reviews.find(review => review.taskId === source.taskId && (review.runId ?? null) === source.runId)
 }
 
-/** The ledger state of one source: every **review** attempt the store holds for it, in the order they were claimed — the default attempt (`null` key) and each explicit one — with how each ended. */
-function renderAttempts(attempts: readonly ReviewAgentAttempt[], source: ReviewAgentSource): string[] {
-  const mine = attempts.filter(attempt => attempt.role === 'reviewer' && attempt.source.taskId === source.taskId && attempt.source.runId === source.runId)
+/** The coordination work items of one source: every reviewer assignment, in claim order, with how it ended. */
+function renderAttempts(work: readonly CoordinatedWork[], source: { readonly taskId: string; readonly runId: string | null }): string[] {
+  const mine = workOfSource(work, source)
   if (mine.length === 0) {
-    return ['review attempts (0): none — no review agent has been started for this source']
+    return ['review work items (0): none — no review session has been assigned for this source']
   }
-  return [`review attempts (${mine.length}):`, ...mine.map(attempt => {
-    const label = attempt.requestKey === null ? 'default attempt' : `requestKey "${attempt.requestKey}"`
-    const status = attempt.settlement?.status ?? 'in-flight'
-    const note = attempt.settlement?.note === undefined ? '' : ` — ${attempt.settlement.note}`
-    const reason = attempt.reason === null ? '' : ` reason ${JSON.stringify(attempt.reason)}`
-    return `- ${label} ${attempt.sessionId} [${status}]${reason}${note}`
-  })]
+  return [`review work items (${mine.length}):`, ...mine.map(item => `- ${renderCoordinationWork(item)}`)]
 }
 
 /** The effort line: one clause per counter that exists, and nothing for the ones that do not — an absent field means "not observed" (see `ReviewMetrics`), so printing 0 for it would invent a measurement. */
@@ -132,12 +126,15 @@ function renderReview(review: ReviewRecord): string[] {
   return lines
 }
 
-/** How far one diagnosis's supervision has gone: the supervisor attempts the LEDGER holds for it. */
-function supervisionMark(diagnosis: Diagnosis, attempts: readonly ReviewAgentAttempt[]): string {
-  return supervisorAttemptsLine(diagnosis.diagnosisId, attempts)
+/** How far one diagnosis's supervision has gone: the work items the coordination store holds for its round. */
+function supervisionMark(diagnosis: Diagnosis, work: readonly CoordinatedWork[]): string {
+  const mine = work.filter(item => diagnosisIdOf(item.assignment) === diagnosis.diagnosisId)
+  if (mine.length === 0)
+    return 'no supervisor work item — a graph without RSI settings runs no platform supervisor for its diagnoses'
+  return mine.map(item => renderCoordinationWork(item)).join('; ')
 }
 
-function renderDiagnosis(diagnosis: Diagnosis, attempts: readonly ReviewAgentAttempt[]): string[] {
+function renderDiagnosis(diagnosis: Diagnosis, work: readonly CoordinatedWork[]): string[] {
   const producer = diagnosis.producedBy === undefined
     ? ''
     : diagnosis.producedBy.kind === 'agent' && diagnosis.producedBy.sessionId !== undefined
@@ -159,12 +156,12 @@ function renderDiagnosis(diagnosis: Diagnosis, attempts: readonly ReviewAgentAtt
     }
   }
   for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`)
-  lines.push(`  supervision: ${supervisionMark(diagnosis, attempts)}`)
+  lines.push(`  supervision: ${supervisionMark(diagnosis, work)}`)
   return lines
 }
 
 /** What the exact source run was bound to and loaded (S1-C item 4). */
-function renderBindings(snapshot: TaskSnapshot, source: ReviewAgentSource): string[] {
+function renderBindings(snapshot: TaskSnapshot, source: { readonly taskId: string; readonly runId: string | null }): string[] {
   const lines: string[] = []
   for (const run of snapshot.runs.filter(item => item.taskId === source.taskId && item.runId === source.runId)) {
     const binding = run.providerBinding
@@ -187,14 +184,14 @@ function renderBindings(snapshot: TaskSnapshot, source: ReviewAgentSource): stri
 export interface ReviewPackInput {
   readonly snapshot: TaskSnapshot
   /** The review source the pack is for: the task and its run, or the no-run case. */
-  readonly source: ReviewAgentSource
-  /** The store's coordination attempts, as the ledger holds them (`readReviewAgentAttempts`). */
-  readonly attempts: readonly ReviewAgentAttempt[]
+  readonly source: { readonly taskId: string; readonly runId: string | null }
+  /** The graph's coordination work items, as the store holds them. */
+  readonly work: readonly CoordinatedWork[]
 }
 
 /** One exact source in full, with bounded same-graph evidence navigation through the existing read tools. */
 export function buildReviewPack(input: ReviewPackInput): string {
-  const { snapshot, source, attempts } = input
+  const { snapshot, source, work } = input
   const { taskId } = source
   const task = snapshot.tasks.find(item => item.taskId === taskId)
   if (task === undefined) throw new Error(`task_review_pack: unknown task "${taskId}"`)
@@ -212,7 +209,7 @@ export function buildReviewPack(input: ReviewPackInput): string {
     `source run: ${sourceRun === undefined ? 'none' : `${sourceRun.runId} [${sourceRun.status}] session ${sourceRun.sessionId ?? review?.sessionId ?? 'unknown'}; ${sourceRun.runId === latestRunId ? 'latest run' : 'historical run'}; preset ${sourceRun.agentPreset ?? 'unknown'}`}; latest run of task: ${latestRunId ?? 'none'}`,
     `objective: ${task.objective}`,
     `dependencies: must verify first [${incoming.join(', ')}]; blocks [${outgoing.join(', ')}]`,
-    ...renderAttempts(attempts, source),
+    ...renderAttempts(work, source),
     renderJudgementDimensions(),
     `reviews (${reviews.length}): exact source in full; other versions in graph navigation`,
     ...(review === undefined ? [] : renderReview(review)),
@@ -266,7 +263,7 @@ export function buildReviewPack(input: ReviewPackInput): string {
   const shownDiagnoses = budgetList(budget, {
     header: [`diagnoses (${diagnoses.length}):`],
     units: diagnoses,
-    lines: diagnosis => renderDiagnosis(diagnosis, attempts),
+    lines: diagnosis => renderDiagnosis(diagnosis, work),
     tail: count => [`diagnoses shown: ${count}/${diagnoses.length}; exact records through context_read kind:"diagnosis" ref:<diagnosisId>, discovered through task_status scope:"graph".`],
   })
   if (shownDiagnoses === undefined) budget.add('Diagnoses did not fit; discover diagnosisRefs through task_status scope:"graph", then context_read kind:"diagnosis".')
@@ -280,10 +277,10 @@ export function defineTaskReviewPackTool(ctx: Context) {
       'Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, ' +
       'or runId null for a review that carries no run (a task blocked before it started). The pack names the task ' +
       'itself, the exact source review in full (criteria, log tail, blockers, session), historical review references, the ' +
-      'review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the ' +
+      'review work items the coordination store holds for this source and how each ended, the dimensions whose conclusion the ' +
       'fact table does not carry, the dependency edges touching ' +
       'it, and its diagnoses with any agent judgements — every diagnosis marked with the ' +
-      'supervisor attempts the coordination ledger holds for it (which session ran it and how it ended), which only a ' +
+      'supervisor work items the coordination store holds for its round (which session ran it and how it ended), which only a ' +
       'graph that runs an RSI loop has. It reports the facts only: whether a review agent runs is ' +
       'decided elsewhere (an explicit call names its source; a graph\'s RSI loop spawns its supervisor itself). ' +
       'It adds bounded same-graph DAG navigation with exact run/session ids, template and frozen provider digests, and observed counters. Continue with task_status scope:"graph" and context_read; no ancestry or sibling log replay. Feed this to task_diagnose, or ' +
@@ -300,7 +297,7 @@ export function defineTaskReviewPackTool(ctx: Context) {
     execute: async (args, exec) => {
       const graph = await ctx.graphs.graphForSession(sessionId(exec, 'task_review_pack'))
       const storeId = rootTaskStoreId(graph.rootSessionId)
-      const source: ReviewAgentSource = { taskId: args.taskId, runId: args.runId }
+      const source = { taskId: args.taskId, runId: args.runId }
       const snapshot = await ctx.task.openStore(storeId)
       if (!snapshot.tasks.some(task => task.taskId === args.taskId)) {
         throw new Error(`task_review_pack: unknown task "${args.taskId}" in store ${storeId}`)
@@ -311,8 +308,8 @@ export function defineTaskReviewPackTool(ctx: Context) {
       if (reviewForSource(snapshot, source) === undefined) {
         return `task_review_pack: no review record for source ${reviewRef(source)} in store ${storeId}; nothing to pack`
       }
-      const attempts = await readReviewAgentAttempts(storeId)
-      return buildReviewPack({ snapshot, source, attempts })
+      const rows: readonly CoordinationRow[] = (await readCoordinationRows()) ?? []
+      return buildReviewPack({ snapshot, source, work: workOf(rows, graph.id) })
     },
   })
 }

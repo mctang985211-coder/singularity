@@ -90,9 +90,9 @@ async function assemblyRefusal(stack: AssemblyStack, sessionId: string): Promise
   return outcome
 }
 
-/** The ledger file this deployment's reviewer delegations are read from and written to. */
+/** The coordination file this deployment's reviewer delegations are read from and written to. */
 function reviewerLedgerFile(stack: AssemblyStack): string {
-  return join(stack.home, 'review-agents', 'agents.jsonl')
+  return join(stack.home, 'coordination', 'assignments.jsonl')
 }
 
 /**
@@ -477,22 +477,23 @@ describe('a reviewer with no business run (A2-2)', () => {
     }
   })
 
-  it('spawns no reviewer at all whose ledger cannot take the claim', async () => {
+  it('spawns no reviewer at all whose store cannot take the assignment', async () => {
     const stack = await boot({ worker: async () => {} })
     const failed = await failedTask(stack, 's-root')
     const spawnsBefore = stack.spawns.length
-    // The ledger's home is a symlink to nothing: reading it answers "no ledger
-    // yet", while writing the claim the attempt owes before it may spawn fails.
-    // An attempt that cannot be recorded is not an attempt: the call fails where
-    // the claim failed, before any reviewer exists — so the delegation the
-    // assembly would read is absent, and the request the deployment never sent
-    // has no contract. The ledger is the authority (A5: claim before spawn).
-    symlinkSync(join(stack.dir, 'no-such-ledger-target'), join(stack.dir, 'ledger-link'))
-    vi.stubEnv('SINGULARITY_REVIEW_LEDGER_DIR', join(stack.dir, 'ledger-link'))
+    // The coordination home sits under a regular file: the directory cannot be
+    // created, so the assignment the attempt owes before it may spawn cannot be
+    // written. An attempt that cannot be recorded is not an attempt: the call
+    // fails where the write failed, before any reviewer exists — so the
+    // delegation the assembly would read is absent, and the request the
+    // deployment never sent has no contract. The assignment is the authority
+    // (claim before spawn).
+    writeFileSync(join(stack.dir, 'not-a-directory'), 'this is a file\n', 'utf8')
+    vi.stubEnv('SINGULARITY_COORDINATION_DIR', join(stack.dir, 'not-a-directory', 'coordination'))
 
     const answer = await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId, runId: failed.runId })
-    expect(answer.isError, 'the call fails where the claim failed').toBe(true)
-    expect(answer.text).toContain('ENOENT')
+    expect(answer.isError, 'the call fails where the assignment write failed').toBe(true)
+    expect(answer.text).toMatch(/ENOTDIR|ENOENT|EEXIST/)
     expect(stack.spawns.length, 'no reviewer was ever published').toBe(spawnsBefore)
     void failed.storeId
   })
@@ -693,11 +694,12 @@ describe('a binding that cannot be read refuses the request (Q1)', () => {
     expect(await stack.prompt(sessionId)).toContain('review-only')
     expect(await stack.prompt(sessionId)).toContain(`task ${failed.taskId}`)
 
-    // A ledger this process cannot parse is `unreadable`, never "no delegation".
+    // A coordination store this process cannot parse is `unreadable`, never
+    // "no delegation".
     writeFileSync(reviewerLedgerFile(stack), '{ half-written row', 'utf8')
     const refusal = await assemblyRefusal(stack, sessionId)
     expect(refusal.refusal).toBe('unreadable')
-    expect(refusal.message).toContain('reviewer ledger cannot be read')
+    expect(refusal.message).toContain('coordination store cannot be read')
     const read = await stack.call(sessionId, 'context_read', { kind: 'task', ref: failed.taskId })
     expect(read.text).toContain('context_read unreadable')
     expect(read.text).not.toContain('review-only')
@@ -709,21 +711,20 @@ describe('a binding that cannot be read refuses the request (Q1)', () => {
     const failed = await failedTask(stack, 's-root')
     await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId, runId: failed.runId })
     const sessionId = String(stack.spawns.at(-1)!.sessionId)
-    // The started row is the delegation: the claim beside it is an intent, not a
-    // read domain (A5), so the contradiction is written on the started fact.
+    // The assignment row is the delegation.
     const row = readFileSync(reviewerLedgerFile(stack), 'utf8')
       .split('\n')
       .filter(line => line.trim().length > 0)
       .map(line => JSON.parse(line) as Record<string, unknown>)
-      .find(entry => entry.kind === 'started')!
+      .find(entry => entry.kind === 'assignment')!
 
-    // A second row for the same reviewer session that disagrees with the first:
-    // the read domain cannot be chosen by file order, so nothing is assembled
-    // from either delegation.
-    appendLedgerRow(stack, { ...(row as Record<string, unknown>), taskId: 't-contradiction' })
+    // A second assignment for the same reviewer session that disagrees with the
+    // first: the read domain cannot be chosen by file order, so nothing is
+    // assembled from either delegation.
+    appendLedgerRow(stack, { ...(row as Record<string, unknown>), storeId: 'sg-t-contradiction' })
     const refusal = await assemblyRefusal(stack, sessionId)
     expect(refusal.refusal).toBe('binding-conflict')
-    expect(refusal.message).toContain('more than one reviewer delegation')
+    expect(refusal.message).toContain('more than one coordination assignment')
     const read = await stack.call(sessionId, 'task_read')
     expect(read.text).toContain('task_read binding-conflict')
   })

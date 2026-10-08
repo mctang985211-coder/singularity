@@ -15,9 +15,11 @@ import type { ModelSelection } from '@dangosys/dsh-singularity-evolution'
 import { HitlService } from './services/hitl.ts'
 import { EscalationService } from './services/escalation.ts'
 import { ProposalReviewService } from './services/proposal-review.ts'
-import { reviewerBindingSource } from './coordination/ledger.ts'
+import { coordinationBindingSource } from './coordination/store.ts'
+import { coordinationFactsReader } from './coordination/facts-reader.ts'
 import { configureSupervision, graphImprovementCap, DEFAULT_SUPERVISION, type SupervisionConfig } from './coordination/supervision.ts'
-import { installRsiLoopDriver } from './coordination/rsi-loop.ts'
+import { installCoordinationDriver } from './coordination/driver.ts'
+import { defineReviewerCompleteTool, defineSupervisorCompleteTool } from './tools/completion-tools.ts'
 import { logOf } from './log.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
@@ -104,7 +106,7 @@ class SupervisionExposure extends Service {
   /**
    * The round cap in force for one store: the round count its graph's RSI
    * settings declare when that graph runs a platform loop (the driver registers
-   * it — see `coordination/rsi-loop.ts`), `undefined` otherwise, so the
+   * it — see `coordination/driver.ts`), `undefined` otherwise, so the
    * runtime's own constant stands for every store without one. The runtime's
    * `iteration-cap` check reads this per store, so a graph-scheduled loop may
    * open exactly the rounds its graph names — and since the driver is the only
@@ -177,21 +179,33 @@ export class SingularityAgent extends Service {
     // The supervision policy, said where the task runtime reads it: the round
     // caps and the coordination allowance are one policy, declared once here.
     new SupervisionExposure(ctx, supervision)
-    // The reviewer ledger is the one delegation source this deployment has (A2
-    // §D): the context read core resolves a reviewer's read domain from it, and
+    // The coordination store is the one delegation source this deployment has:
+    // the context read core resolves a coordination session's read domain from
+    // it, with the role required and never assumed.
     ctx.effect(
-      () => ctx.singularityContext.registerCoordinationBindingSource(reviewerBindingSource()),
+      () => ctx.singularityContext.registerCoordinationBindingSource(coordinationBindingSource()),
       'singularityAgent: coordination binding source',
     )
-    // The platform-side RSI loop driver (F): a graph that carries `rsi` settings
-    // has its rounds scheduled here, from the platform, rather than by the root
-    // agent's prompt — one terminal root Run per round, one supervisor per round,
-    // one next round opened by this driver. It is the only place a coordination
-    // supervisor exists: no agent-side trigger consumes a diagnosis any more.
-    ctx.effect(
-      () => installRsiLoopDriver(ctx),
-      'singularityAgent: rsi loop driver',
-    )
+    // The platform-side coordination driver: a current graph that carries `rsi`
+    // settings has its rounds scheduled here — one terminal root Run per round,
+    // one supervisor per round, one next round opened by this driver. It is the
+    // only place a coordination supervisor exists, and the only writer of
+    // assignments and completions.
+    ctx.effect(() => installCoordinationDriver(ctx).dispose, 'singularityAgent: coordination driver')
+    // The one coordination fact producer the read model reduces progress from.
+    // A deployment without the view service is named at startup rather than
+    // silently reading a progress nobody can derive.
+    ctx.effect(() => {
+      const view = ctx.get('singularityGraphView') as { registerCoordinationFacts(reader: ReturnType<typeof coordinationFactsReader>): () => void } | undefined
+      if (view === undefined) {
+        this.warn(
+          'singularity-agent: no singularityGraphView service is mounted, so this deployment reads no derived ' +
+            'coordination progress; the driver still assigns and completes work',
+        )
+        return () => undefined
+      }
+      return view.registerCoordinationFacts(coordinationFactsReader())
+    }, 'singularityAgent: coordination facts')
     // The one approval a budget extension can be granted through (K4): the
     // runtime asks it alone — for the one request that is not already recorded —
     ctx.effect(
@@ -224,6 +238,11 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineTaskVerifyTool(ctx))
     ctx.tools.register(defineTaskReviewPackTool(ctx))
     ctx.tools.register(defineTaskReviewAgentTool(ctx))
+    // The completion protocol is part of this deployment, not of the evolution
+    // switch: a reviewer exists without any method tool, and both completion
+    // tools are visible only to the coordination role its assignment names.
+    ctx.tools.register(defineSupervisorCompleteTool(ctx))
+    ctx.tools.register(defineReviewerCompleteTool(ctx))
     // Asking a person to raise this tree's ceilings (K4): registered like the
     // rest of the task surface — who may reach it (a graph's root coordination
     ctx.tools.register(defineTaskBudgetExtendTool(ctx))

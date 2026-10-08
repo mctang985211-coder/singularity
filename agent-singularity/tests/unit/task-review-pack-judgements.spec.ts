@@ -87,20 +87,26 @@ function fixture(store: unknown) {
 
 const exec = { agent: { id: 'root-1' }, signal: new AbortController().signal }
 
-let ledgerDir: string
+/** The store's coordination rows live here for one test; the retired ledger name is never read. */
+let coordinationDir: string
 let previous: string | undefined
 
 beforeEach(() => {
-  ledgerDir = mkdtempSync(join(tmpdir(), 'review-ledger-'))
-  previous = process.env.SINGULARITY_REVIEW_LEDGER_DIR
-  process.env.SINGULARITY_REVIEW_LEDGER_DIR = ledgerDir
+  coordinationDir = mkdtempSync(join(tmpdir(), 'coordination-'))
+  previous = process.env.SINGULARITY_COORDINATION_DIR
+  process.env.SINGULARITY_COORDINATION_DIR = coordinationDir
 })
 
 afterEach(() => {
-  if (previous === undefined) delete process.env.SINGULARITY_REVIEW_LEDGER_DIR
-  else process.env.SINGULARITY_REVIEW_LEDGER_DIR = previous
-  rmSync(ledgerDir, { recursive: true, force: true })
+  if (previous === undefined) delete process.env.SINGULARITY_COORDINATION_DIR
+  else process.env.SINGULARITY_COORDINATION_DIR = previous
+  rmSync(coordinationDir, { recursive: true, force: true })
 })
+
+/** One coordination row written the way the store writes it. */
+function writeRows(rows: readonly unknown[]): void {
+  writeFileSync(join(coordinationDir, 'assignments.jsonl'), rows.map(row => `${JSON.stringify(row)}\n`).join(''))
+}
 
 describe('task_review_pack as a fact sheet, without a trigger decision', () => {
   it('keeps a historical source exact while other runs and shared evidence remain compact references', async () => {
@@ -201,11 +207,11 @@ describe('task_review_pack as a fact sheet, without a trigger decision', () => {
    * ran under and how it ended. A store whose graph runs no RSI loop has no such
    * attempt, and the pack says so rather than inventing a delegation.
    */
-  it('marks each diagnosis with the supervisor attempts the ledger holds for it', async () => {
+  it('marks each diagnosis with the supervisor work item the coordination store holds for its round', async () => {
     const full = failingSnapshot()
     full.diagnoses = [
       {
-        diagnosisId: 'd-with-suggestion', taskId: 't-child-1', observedFailure: 'ac1-1 fails on the fixtures',
+        diagnosisId: 'rsi-graph1-e1-round-1', taskId: 't-child-1', observedFailure: 'ac1-1 fails on the fixtures',
         scope: 'task t-child-1', localizedCause: 'the fixtures never feed empty input',
         evidenceRefs: ['ev-1'], reviewRefs: ['t-child-1#r-child-1'], confidence: 'medium' as never,
         proposals: [{ targetType: 'prompt_template', targetId: 'reviewer', rationale: 'name the empty-input case' }],
@@ -218,60 +224,60 @@ describe('task_review_pack as a fact sheet, without a trigger decision', () => {
         proposals: [], producedBy: { kind: 'agent' as never, sessionId: 's-rev-2' },
       },
     ] as never
-    // A round's supervisor ran for the first diagnosis and recorded its outcome.
-    writeFileSync(join(ledgerDir, 'agents.jsonl'), [
-      JSON.stringify({
-        formatVersion: 2, kind: 'claim', role: 'supervisor', rootStoreId: 'sg-t-root-1', taskId: 't-child-1',
-        runId: 'r-child-1', requestKey: 'rsi-supervise-g1-round-1', reason: null, diagnosisId: 'd-with-suggestion',
-        handoffDigest: 'digest-1', sessionId: 's-supervisor', actor: 'root-1', at: '2026-09-27T00:00:00.000Z',
-      }),
-      JSON.stringify({
-        formatVersion: 2, kind: 'started', rootStoreId: 'sg-t-root-1', taskId: 't-child-1',
-        sessionId: 's-supervisor', actor: 'root-1', at: '2026-09-27T00:00:01.000Z',
-      }),
-      JSON.stringify({
-        formatVersion: 2, kind: 'settled', rootStoreId: 'sg-t-root-1', taskId: 't-child-1', sessionId: 's-supervisor',
-        status: 'recorded', note: 'proposal p-1 [applied]', at: '2026-09-27T00:00:02.000Z',
-      }),
-      '',
-    ].join('\n'))
+    // Round 1's supervisor ran under the round's own work item and concluded it.
+    writeRows([
+      {
+        formatVersion: 1, kind: 'assignment', graphId: 'graph1', storeId: 'sg-t-root-1', epoch: 1, role: 'supervisor',
+        subject: { kind: 'round', businessRound: 1, searchRound: 1, source: { taskId: 't-root', runId: 'r-child-1' } },
+        sessionId: 's-supervisor', actor: 'root-1', digest: 'digest-1', at: '2026-09-27T00:00:00.000Z',
+      },
+      {
+        formatVersion: 1, kind: 'completion', graphId: 'graph1', storeId: 'sg-t-root-1', epoch: 1, role: 'supervisor',
+        sessionId: 's-supervisor',
+        result: {
+          kind: 'completed', businessAction: 'finish', reason: 'proposal p-1 [applied]',
+          evidenceRefs: ['t-child-1#r-child-1'], trialCandidateRef: null, methodDecision: 'retain', searchNext: 'stop',
+        },
+        at: '2026-09-27T00:00:02.000Z',
+      },
+    ])
     const pack = (await defineTaskReviewPackTool(fixture(full) as never)
       .execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
 
     expect(pack).toContain('proposal prompt_template reviewer: name the empty-input case')
-    expect(pack).toContain('supervision: supervisor attempt s-supervisor [recorded] — proposal p-1 [applied]')
-    expect(pack.match(/supervisor attempt s-supervisor/g)).toHaveLength(1)
+    expect(pack).toContain('supervision: supervisor round 1: session s-supervisor [settled (finish)]')
+    expect(pack.match(/supervisor round 1/g)).toHaveLength(1)
     expect(pack).toContain('- d-no-suggestion [high] no improvement needed [agent s-rev-2]')
-    expect(pack.slice(pack.indexOf('- d-no-suggestion'))).toContain('supervision: no supervisor attempt')
+    expect(pack.slice(pack.indexOf('- d-no-suggestion'))).toContain('supervision: no supervisor work item')
   })
 
   it('shows an interrupted attempt as interrupted, with no supervision invented for it', async () => {
     const full = failingSnapshot()
-    // The reviewer ran and produced nothing: the ledger holds the claim and the
-    // interrupted fact, and the store holds no diagnosis for it.
-    writeFileSync(join(ledgerDir, 'agents.jsonl'), [
-      JSON.stringify({
-        formatVersion: 2, kind: 'claim', rootStoreId: 'sg-t-root-1', taskId: 't-child-1', runId: 'r-child-1',
-        requestKey: null, reason: null, sessionId: 's-reviewer', actor: 'root-1', at: '2026-09-27T00:00:00.000Z',
-      }),
-      JSON.stringify({
-        formatVersion: 2, kind: 'started', rootStoreId: 'sg-t-root-1', taskId: 't-child-1',
-        sessionId: 's-reviewer', actor: 'root-1', at: '2026-09-27T00:00:01.000Z',
-      }),
-      JSON.stringify({
-        formatVersion: 2, kind: 'settled', rootStoreId: 'sg-t-root-1', taskId: 't-child-1', sessionId: 's-reviewer',
-        status: 'interrupted', note: 'the reviewer timed out after 5ms with no diagnosis', at: '2026-09-27T00:00:02.000Z',
-      }),
-      '',
-    ].join('\n'))
+    // The reviewer ran and produced nothing: the store holds the work item and a
+    // protocol failure, and no diagnosis for it.
+    writeRows([
+      {
+        formatVersion: 1, kind: 'assignment', graphId: 'graph1', storeId: 'sg-t-root-1', epoch: 1, role: 'reviewer',
+        subject: {
+          kind: 'review', businessRound: 1, source: { taskId: 't-child-1', runId: 'r-child-1' }, requestKey: null,
+        },
+        sessionId: 's-reviewer', actor: 'root-1', digest: 'review-digest', at: '2026-09-27T00:00:00.000Z',
+      },
+      {
+        formatVersion: 1, kind: 'completion', graphId: 'graph1', storeId: 'sg-t-root-1', epoch: 1, role: 'reviewer',
+        sessionId: 's-reviewer',
+        result: { kind: 'protocol-failure', detail: 'the reviewer timed out after 5ms with no diagnosis' },
+        at: '2026-09-27T00:00:02.000Z',
+      },
+    ])
     full.diagnoses = []
     const pack = (await defineTaskReviewPackTool(fixture(full) as never)
       .execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
 
-    expect(pack).toContain('review attempts (1):')
-    expect(pack).toContain('default attempt s-reviewer [interrupted] — the reviewer timed out after 5ms with no diagnosis')
+    expect(pack).toContain('review work items (1):')
+    expect(pack).toContain('reviewer review of t-child-1#r-child-1: session s-reviewer [protocol-failure]')
     expect(pack).toContain('diagnoses (0):')
-    expect(pack).not.toContain('supervisor attempt')
+    expect(pack).not.toContain('supervisor round')
   })
 
   it('renders agent judgements apart from the mechanical fact lines', async () => {

@@ -61,13 +61,14 @@ none — HITL 卡片由 graph-web 提供（`GET/POST /singularity/hitl`），gra
 4. ctx.escalation：追加式升级账本 `$DSH_HOME/escalations.jsonl`（未设置 `DSH_HOME` 时为 `<repoRoot>/.dsh`）；可用 `root` 配置覆盖。
 5. ctx.singularityEvolution：`{ enabled }`——本组合实际解析出的开关，供同类 assembly 读取以保持工具面同步。
 6. ctx.evolution：演化账本（`$DSH_HOME/evolution/proposals.jsonl`）与各提案沙箱；无论开关如何都会构造，链路关闭时不可达。
-7. 评审账本：`$DSH_HOME/review-agents/agents.jsonl`（可用 `SINGULARITY_REVIEW_LEDGER_DIR` 覆盖路径，`SINGULARITY_REVIEW_AGENT_BUDGET` 覆盖上限）——reviewer 与 supervisor 两种角色共用的追加式 claim/started/settled 行。
+7. 协同存储：`$DSH_HOME/coordination/assignments.jsonl`（可用 `SINGULARITY_COORDINATION_DIR` 覆盖目录，`SINGULARITY_COORDINATION_BUDGET` 覆盖每 store 上限）——追加式文件只有两种行：`assignment`（spawn 之前写入并 fsync）与 `completion`（工作项结束时由会话自己的完成工具或平台写入）。旧 `$DSH_HOME/review-agents/agents.jsonl` 与旧变量名 `SINGULARITY_REVIEW_LEDGER_DIR` / `SINGULARITY_REVIEW_AGENT_BUDGET` 完全不再读取；driver 在启动日志里打印真正生效的目录。
 
 ## Design notes
 
 - 目录布局：`src/index.ts` 是装配点。`src/services/` 放已挂载的服务（hitl、escalation、proposal-review 及其渲染）；`src/coordination/` 放协调账本、只读 reviewer 尝试、平台 RSI 驱动与身份辅助；`src/tools/` 放 32 个 `define*Tool` 入口。消费者直接导入负责模块。
 - `src/shared.ts` 收拢工具共用的辅助函数：`text()`、`sessionId(exec, tool)`、`message()`、`undeclaredParameters()`、`denialReason()` / `approvalAnswer()`、`adaptRead()`、`proposalStoreFor()`、`questionCall()`。每个辅助函数全包只有一份实现。
 - 人工闸门只读原生结果词表，不接受参数伪装：只有 `allowed-once` 才允许记录决策、apply 或升级；`rejected` / `cancelled` / `unavailable` 都会具名报告且不写任何东西。
-- 评审账本是协同尝试唯一的持久记录。`admitReviewAgent` 在按（账本文件, 根 store）划分的串行区内做决定，先写 claim 再创建 reviewer，并把 `started` 行计为已花费的运行；无人持有的开放行按既有事实回收。Supervisor 同样使用 claim/started/settled 事实，由平台按轮次重新对账。
+- 协同存储是协同工作唯一的持久记录。`assignment` 在图自己的串行区内写入并落盘（flush）之后才 spawn，spawn 的门会在任何模型输入之前回读它；一个 assignment 只由一条 `completion` 结案，重复调用完成工具按既有记录应答。会话是否存在、turn 是否收尾、额度是否已花，全部来自 DSH 自身（`ctx.agents`、`ctx.sessionPersistence`、`ctx.sessionQuery`），不再保存第二份事实。唯一的 driver 取事实、纯 reducer 决策一次、执行一步：事件唤醒 + 两秒兜底，且从不 await 监督会话；turn 结束却没有调用完成工具的会话被记为协议失败且不再催问（要重来只能显式提升 `rsi.epoch`）。
+- `supervisor_complete` / `reviewer_complete` 的图、源 Run、角色与权限全部取自该会话的 assignment，方法决定、审批来源与搜索步由本轮真实记录派生——这些都没有参数可传。调用即关闭该会话的写权限（组合在 spawn 与 resume 两条路径上都安装执行期 guard），读、证据与发现仍可用。
 - 拒绝是返回值而非静默丢弃：未声明参数、未知 store、未知记录与冲突账本行都以具名原因拒绝，模型或操作者可以据此行动。
 - 重构前的长文设计说明保留在 `packages/singularity/docs/`（singularity-harness-guide.md、exploration-evolution-architecture.md、agent-prompt-contracts.md）。

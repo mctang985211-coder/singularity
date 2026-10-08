@@ -41,7 +41,7 @@ export function supervisionSettings(): SupervisionConfig {
  * The round cap one graph's RSI settings declare for its root task store (F):
  * `rsi.iterationRounds` is how many rounds that graph's platform loop runs, and
  * the runtime's per-source cap has to admit exactly those. The platform driver
- * (`coordination/rsi-loop.ts`) registers a store when it takes the graph's loop
+ * (`coordination/driver.ts`) registers a store when it takes the graph's loop
  * over and forgets it when the loop ends or the config is cleared; a store no
  * graph registers is not running a loop, and the runtime's own constant stands
  * for it unchanged. This process never reads the cap itself — it answers the

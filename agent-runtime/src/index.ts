@@ -32,12 +32,15 @@ import { REVIEWER_POLICY_TEXT, SUPERVISOR_POLICY_TEXT } from './prompts/coordina
 import { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
 import { sealRawSessionReads } from './raw-session-guard.ts'
 import { sealNativeDelegation } from './delegation-guard.ts'
-import type { GraphScope, RootRequest, RuntimePromptSource, SpawnRequest, WorkerResumeRequest } from './types.ts'
+import { COORDINATION_SEALED_ALLOW, guardCoordinationWrites, sealCoordinationSession } from './coordination-seal.ts'
+import { resumeCoordinationAgent } from './coordination-resume.ts'
+import type { GraphScope, RootRequest, RuntimePromptSource, SpawnRequest, WorkerResumeRequest, CoordinatorResumeRequest } from './types.ts'
 import { WORKER_DEFAULT_PERMISSION_PRESET, resumeWorkerAgent as resumeWorker } from './worker-resume.ts'
 import type { WorkerResumeDeps, WorkerRole } from './worker-resume.ts'
 
 export type {
   AgentOptions,
+  CoordinatorResumeRequest,
   GraphScope,
   McpServerSpec,
   RootRequest,
@@ -50,6 +53,15 @@ export type {
 } from './types.ts'
 export { applyWorkerGrant } from './grants.ts'
 export type { ResolvedGrant } from './grants.ts'
+export {
+  COORDINATION_SEALED_ALLOW,
+  COORDINATION_WRITE_DENIAL,
+  guardCoordinationWrites,
+  isCoordinationSealed,
+  sealCoordinationSession,
+} from './coordination-seal.ts'
+export { CoordinationResumeRefusal, resumeCoordinationAgent } from './coordination-resume.ts'
+export type { CoordinationResumeDeps, CoordinationResumeRefusalCode } from './coordination-resume.ts'
 export { findSkillFileIn, parseSkillFile, skillRootsFor } from './skill-file.ts'
 export { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
 export { RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS } from './raw-session-guard.ts'
@@ -302,6 +314,46 @@ export class AgentRuntime extends Service {
     })
   }
 
+  /**
+   * Close one concluded coordination session's write access. The seal is an
+   * execution-time guard on the session's own scope, so no later preset, MCP
+   * server or resume can raise the surface back.
+   */
+  sealCoordinationSession(sessionId: SessionId): void {
+    sealCoordinationSession(String(sessionId))
+  }
+
+  /**
+   * Bring one persisted coordination Session back live, under its own role and
+   * composition. The driver resumes the same session id it assigned; a session
+   * something else owns is refused by name.
+   */
+  async resumeCoordinationSession(request: CoordinatorResumeRequest): Promise<AgentHandle> {
+    if (this.closing) throw new Error('agent-runtime: closing')
+    const sessionId = SessionId(request.sessionId)
+    return await this.inGraph(request.scope, async () => {
+      this.owned.add(sessionId)
+      this.scopes.set(sessionId, request.scope)
+      try {
+        const handle = await resumeCoordinationAgent(
+          {
+            agents: this.ctx.agents,
+            sessionQuery: this.ctx.sessionQuery,
+            graph: this.ctx.graph,
+            setup: role => workerSetup(this.ctx, role),
+            agentOptions: { ...this.ctx.agentDefaultModel.currentSelection(), ...request.agentOptions },
+          },
+          request,
+        )
+        this.handles.set(sessionId, handle)
+        return handle
+      } catch (error) {
+        await this.releaseSession(sessionId)
+        throw error
+      }
+    })
+  }
+
   async stopGraph(scope: GraphScope): Promise<void> {
     if (this.closing) throw new Error('agent-runtime: closing')
     if (this.stopping.has(scope.graphStoreId)) throw new Error('agent-runtime: graph already stopping')
@@ -544,6 +596,9 @@ function workerSetup(ctx: Context, role: WorkerRole): AgentSetup {
         text: role.coordinationRole === 'reviewer' ? REVIEWER_POLICY_TEXT : SUPERVISOR_POLICY_TEXT,
         interpolate: false,
       })
+      // The seal is installed on both composition paths (spawn and resume), so a
+      // concluded session cannot be resumed into a writable surface.
+      guardCoordinationWrites(agentCtx, agent, COORDINATION_SEALED_ALLOW)
     }
     if (role.taskWorker) {
       agentCtx.systemPrompt.section({

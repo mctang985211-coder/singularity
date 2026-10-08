@@ -807,10 +807,12 @@ describe('the spawn request contract (A2)', () => {
     expect(section).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ name: `singularity:${coordinationRole}`, order: 75, interpolate: false }))
     if (coordinationRole === 'supervisor') {
       expect(session.append).toHaveBeenCalledExactlyOnceWith('approval/policy', { policy: 'ask' })
-      expect(section.mock.calls[0]![0].text).toContain('evolution_decide and evolution_apply')
+      expect(section.mock.calls[0]![0].text).toContain('supervisor_complete')
+      expect(section.mock.calls[0]![0].text).toContain('protocol failure')
     } else {
       expect(session.append).not.toHaveBeenCalled()
-      expect(section.mock.calls[0]![0].text).toContain('Use your granted reads')
+      expect(section.mock.calls[0]![0].text).toContain('reviewer_complete')
+      expect(section.mock.calls[0]![0].text).toContain('protocol failure')
     }
   })
 

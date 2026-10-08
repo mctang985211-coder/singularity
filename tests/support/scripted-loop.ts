@@ -101,11 +101,12 @@ import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/ta
 import type { CapabilityConfig, Config, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { defineTaskLibraryTool } from '../../agent-singularity/src/tools/task-library.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
-import type { RsiConfig } from '../../graphs/src/index.ts'
+import { GRAPH_PROTOCOL_V2, type RsiConfig } from '../../graphs/src/index.ts'
 import { defineRootBudgetApproval, defineTaskBudgetExtendTool } from '../../agent-singularity/src/tools/budget-extend.ts'
 import { defineTaskReviewAgentTool } from '../../agent-singularity/src/tools/review-agent.ts'
 import { defineTaskReviewPackTool } from '../../agent-singularity/src/tools/task-review-pack.ts'
-import { supervisorGrant } from '../../agent-singularity/src/coordination/rsi-loop.ts'
+import { supervisorGrant } from '../../agent-singularity/src/coordination/roles.ts'
+import { defineReviewerCompleteTool, defineSupervisorCompleteTool } from '../../agent-singularity/src/tools/completion-tools.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import { graphRegistry, sessionQueryReads } from './context-plane.ts'
 
@@ -320,7 +321,7 @@ export interface ScriptedLoopOptions {
   readonly evolution?: { readonly ledgerRoot: string; readonly capabilityConfig?: string }
   /**
    * The graph's autonomous-improvement settings (F). A case that names them can
-   * drive the platform RSI loop over this deployment (`RsiLoopDriver.ensure`);
+   * drive the platform coordination loop over this deployment (`CoordinationDriver.wake`);
    * absent leaves the graph with no loop, exactly as a real graph without `rsi`.
    */
   readonly rsi?: RsiConfig
@@ -515,10 +516,6 @@ export interface ScriptedLoop {
   recordRequest(text: string, sessionId?: SessionId | string): void
   /** The run a session is bound to, with the store and task it belongs to. */
   runForSession(sessionId: SessionId | string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun }>
-  /** The loop position the RSI loop driver last reached, observed by this harness (the registry no longer stores one) (F). */
-  rsiProgressOf(): unknown
-  /** Observe one position the driver reached; specs wire this to the driver's `onProgress`. */
-  observeRsiProgress(progress: unknown): void
   dispose(): Promise<void>
 }
 
@@ -764,8 +761,6 @@ class ScriptedLoopImpl implements ScriptedLoop {
   private readonly callRecords: ToolCallRecord[] = []
   private readonly executedNames: string[] = []
   private readonly graphEvents: GraphCommit[] = []
-  /** The loop position the driver last reached, observed through its `onProgress` (F). */
-  private rsiProgress: unknown
   private readonly primary: SessionId
   private previousHome: string | undefined
   private callOrder = 0
@@ -907,6 +902,9 @@ class ScriptedLoopImpl implements ScriptedLoop {
         rootSessionId: this.primary,
         graphStoreId: 'sg-g-root',
         layoutStoreId: 'sg-l-root',
+        // The graph this fixture publishes is a current one: the protocol marker
+        // is what lets a coordination driver schedule it at all.
+        protocol: { id: GRAPH_PROTOCOL_V2, version: 2, since: Date.now() },
         ...(this.options.rsi === undefined ? {} : { rsi: { ...this.options.rsi } }),
       })
       return {
@@ -1000,6 +998,11 @@ class ScriptedLoopImpl implements ScriptedLoop {
     ctx.tools.register(defineTaskLibraryTool(ctx))
     ctx.tools.register(defineTaskReviewPackTool(ctx))
     ctx.tools.register(defineTaskReviewAgentTool(ctx))
+    // The completion protocol is part of the deployment (the coordination driver
+    // and `task_review_agent` both end through it), so the real definitions are
+    // mounted here rather than stand-ins.
+    ctx.tools.register(defineSupervisorCompleteTool(ctx))
+    ctx.tools.register(defineReviewerCompleteTool(ctx))
     // The budget tool (K4) as well: what it appends is a person's decision and
     // the store's own event, which only the real definition can produce.
     ctx.tools.register(defineTaskBudgetExtendTool(ctx))
@@ -1212,14 +1215,6 @@ class ScriptedLoopImpl implements ScriptedLoop {
 
   async runForSession(sessionId: SessionId | string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun }> {
     return await this.runtime.runForSession(String(sessionId))
-  }
-
-  rsiProgressOf(): unknown {
-    return this.rsiProgress
-  }
-
-  observeRsiProgress(progress: unknown): void {
-    this.rsiProgress = progress
   }
 
   async begin(contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }> {

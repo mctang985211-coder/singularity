@@ -186,7 +186,7 @@ declare class SupervisionExposure extends Service {
   /**
    * The round cap in force for one store: the round count its graph's RSI
    * settings declare when that graph runs a platform loop (the driver registers
-   * it — see `coordination/rsi-loop.ts`), `undefined` otherwise, so the
+   * it — see `coordination/driver.ts`), `undefined` otherwise, so the
    * runtime's own constant stands for every store without one. The runtime's
    * `iteration-cap` check reads this per store, so a graph-scheduled loop may
    * open exactly the rounds its graph names — and since the driver is the only

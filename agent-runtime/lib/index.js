@@ -567,12 +567,12 @@ A Task owns this execution's goal and acceptance. A TaskTemplate records reusabl
 //#endregion
 //#region src/prompts/coordination.prompts.ts
 /** Stable role guidance; exact source facts are supplied in the first request. */
-const REVIEWER_POLICY_TEXT = `You are a Singularity reviewer. Investigate the requested Task/Run through its original evidence, task tree, graph library and frozen Skills. Explain causes, useful next actions, applicability conditions and uncertainties. Weigh task quality and performance alongside recorded model usage and tool work. Use your granted reads and return the requested JSON with evidence references. Return ordinary repairs to the responsible parent and reusable method findings to the supervisor.`;
-const SUPERVISOR_POLICY_TEXT = `You are a Singularity supervisor. Read task_library, the actual task tree, results and costs. Review exploratory goals, decomposition templates and Skill experience; record retention or retirement with task_library review, and write useful revisions. A Task's acceptance belongs to that execution. TaskTemplates teach reusable goals and decomposition; Skills teach paths, methods and conditions. Preserve the user's objective and the original checks of each compared task.
+const REVIEWER_POLICY_TEXT = `You are a Singularity reviewer. Investigate the requested Task/Run through its original evidence, task tree, graph library and frozen Skills. Explain causes, useful next actions, applicability conditions and uncertainties. Weigh task quality and performance alongside recorded model usage and tool work. Use your granted reads and end the session by calling reviewer_complete with your observation, your conclusion and a confidence; a session that ends its turn without calling it is a protocol failure and no finding is recorded from it.`;
+const SUPERVISOR_POLICY_TEXT = `You are a Singularity supervisor. Read the library, the actual task tree, results and costs. Review exploratory goals, decomposition templates and Skill experience; record retention or retirement, and write useful revisions. A Task's acceptance belongs to that execution. TaskTemplates teach reusable goals and decomposition; Skills teach paths, methods and conditions. Preserve the user's objective and the original checks of each compared task.
 
-Choose the responsible TaskTemplate, Skill or capability provider, compare a useful candidate, and publish within authority. Use evolution_replay objective llm-outcome with evaluation.goal for task quality or performance, or tool-call-reduction for overhead. The LLM can supply a measurement plan that is frozen before real comparison. Reuse available tools and artifacts, clean starting inputs and comparable model budgets. Report seen cases as regression evidence and test transfer on fresh tasks when available. Weigh domain results together with model tokens, cache traffic, tool work and reported cost; mark unavailable readings unknown.
+Choose the responsible TaskTemplate, Skill or capability provider, compare a useful candidate, and publish within authority. Reuse available tools and artifacts, clean starting inputs and comparable model budgets. Report seen cases as regression evidence and test transfer on fresh tasks when available. Weigh domain results together with model tokens, cache traffic, tool work and reported cost; mark unavailable readings unknown.
 
-Reuse enough evidence to decide. A useful negative result or reasoned no_change can complete supervision. Use evolution_decide with REJECT or KEEP_FOR_FURTHER_RESEARCH and a reason to conclude an open proposal when comparison is unnecessary or unavailable. PROMOTE follows completed comparison and gate. Inspect later exact template or Skill bindings and outcomes to establish consumption and benefit. Finish each executable candidate through evolution_decide and evolution_apply as appropriate, then return your outcome; the platform driver opens the next round. Budget and recorded decisions bound your work.`;
+End the session by calling supervisor_complete with businessAction, reason and evidenceRefs — continue after a verified round, recover after a failed one, finish when the business work should not run again — and trialCandidateRef only when the next round should explicitly try one candidate. The platform derives the method decision, the approval source and whether the method search continues from what your round recorded; they are not parameters. Calling it closes this session’s write access. A session that ends its turn without calling it is a protocol failure, and the platform will not ask again.`;
 
 //#endregion
 //#region src/prompts/worker.prompts.ts
@@ -601,6 +601,42 @@ const RAW_SESSION_READ_DENIAL = "singularity: raw cross-session reads are sealed
 /** Deny the four readers on one agent's own scope, for the agent's whole life. */
 function sealRawSessionReads(agentCtx) {
 	agentCtx.tools.guard((execution) => RAW_SESSION_READ_TOOLS.includes(execution.name) ? RAW_SESSION_READ_DENIAL : void 0);
+}
+
+//#endregion
+//#region src/coordination-seal.ts
+/** What one refused write on a concluded coordination session answers with. */
+const COORDINATION_WRITE_DENIAL = "singularity: this coordination session has completed its work; writes are closed — reads, evidence and findings remain available";
+/** What a concluded coordination session may still call: the read-only surface, and its own completion tool for idempotence. */
+const COORDINATION_SEALED_ALLOW = [
+	"task_review_pack",
+	"task_read",
+	"task_status",
+	"context_read",
+	"capability_list",
+	"task_template_list",
+	"method_list",
+	"skill",
+	"read",
+	"glob",
+	"grep",
+	"supervisor_complete",
+	"reviewer_complete"
+];
+/** The sessions this process has sealed, by session id. */
+const sealed = /* @__PURE__ */ new Set();
+/** Mark one coordination session concluded: every later write is refused at execution time. */
+function sealCoordinationSession(sessionId) {
+	sealed.add(String(sessionId));
+}
+/** Whether one session has been sealed by this process. */
+function isCoordinationSealed(sessionId) {
+	return sealed.has(String(sessionId));
+}
+/** Install the seal check on one coordination agent's own scope. */
+function guardCoordinationWrites(agentCtx, agent, allow) {
+	const allowed = new Set(allow);
+	agentCtx.tools.guard((execution) => isCoordinationSealed(agent.id) && !allowed.has(execution.name) ? COORDINATION_WRITE_DENIAL : void 0);
 }
 
 //#endregion
@@ -707,6 +743,46 @@ function lastPermissionPreset(own) {
 	for (let index = own.length - 1; index >= 0; index -= 1) {
 		const event = own[index];
 		if (event.type === "permission/preset") return event.data.preset;
+	}
+}
+
+//#endregion
+//#region src/coordination-resume.ts
+/** One refused coordination resume, with the stable name of what could not be established. */
+var CoordinationResumeRefusal = class extends Error {
+	code;
+	constructor(code, message, options) {
+		super(message, options);
+		this.name = "CoordinationResumeRefusal";
+		this.code = code;
+	}
+};
+/** Bring one persisted coordination Session back live and idle under its own role, or refuse by name. */
+async function resumeCoordinationAgent(deps, request) {
+	const sessionId = request.sessionId;
+	if (deps.agents.get(sessionId) !== void 0) throw new CoordinationResumeRefusal("session-live", `agent-runtime: session "${String(sessionId)}" is already live; the coordination driver resumes a session nothing owns`);
+	const header = (await readPersistedSession(deps, sessionId)).session;
+	if (header.agentPreset !== void 0 && header.agentPreset !== request.agentPreset) throw new CoordinationResumeRefusal("binding-mismatch", `agent-runtime: session "${String(sessionId)}" ran under agent preset "${header.agentPreset}" but the resume declares "${request.agentPreset}"`);
+	const snapshot = await deps.graph.snapshotIn(request.scope.graphStoreId).catch((error) => {
+		throw new CoordinationResumeRefusal("not-in-graph", `agent-runtime: graph store "${request.scope.graphStoreId}" could not be read: ${messageOf(error)}`, { cause: error });
+	});
+	if (snapshot.agents.every((item) => String(item.id) !== String(sessionId))) throw new CoordinationResumeRefusal("not-in-graph", `agent-runtime: session "${String(sessionId)}" is not published by graph store "${request.scope.graphStoreId}"`);
+	if (snapshot.edges.find((edge) => edge.kind === "spawn" && String(edge.to) === String(sessionId)) === void 0) throw new CoordinationResumeRefusal("not-in-graph", `agent-runtime: graph store "${request.scope.graphStoreId}" records no spawn edge into session "${String(sessionId)}", so its delegation cannot be verified`);
+	try {
+		return await deps.agents.resume({
+			resumeSessionId: sessionId,
+			...deps.agentOptions === void 0 ? {} : { agentOptions: deps.agentOptions },
+			setup: deps.setup({
+				agentPreset: request.agentPreset,
+				permissionPreset: request.permissionPreset ?? "workspace-isolated",
+				taskWorker: false,
+				coordinationRole: request.coordinationRole,
+				...request.grant === void 0 ? {} : { grant: request.grant }
+			})
+		});
+	} catch (error) {
+		if (error instanceof SessionAlreadyOwnedError) throw new CoordinationResumeRefusal("session-live", `agent-runtime: session "${String(sessionId)}" is already owned by a write handle; retry once that owner settles`, { cause: error });
+		throw new CoordinationResumeRefusal("takeover-refused", `agent-runtime: session "${String(sessionId)}" could not be taken over safely: ${messageOf(error)}`, { cause: error });
 	}
 }
 
@@ -951,6 +1027,44 @@ var AgentRuntime = class extends Service {
 			}
 		});
 	}
+	/**
+	* Close one concluded coordination session's write access. The seal is an
+	* execution-time guard on the session's own scope, so no later preset, MCP
+	* server or resume can raise the surface back.
+	*/
+	sealCoordinationSession(sessionId) {
+		sealCoordinationSession(String(sessionId));
+	}
+	/**
+	* Bring one persisted coordination Session back live, under its own role and
+	* composition. The driver resumes the same session id it assigned; a session
+	* something else owns is refused by name.
+	*/
+	async resumeCoordinationSession(request) {
+		if (this.closing) throw new Error("agent-runtime: closing");
+		const sessionId = SessionId(request.sessionId);
+		return await this.inGraph(request.scope, async () => {
+			this.owned.add(sessionId);
+			this.scopes.set(sessionId, request.scope);
+			try {
+				const handle = await resumeCoordinationAgent({
+					agents: this.ctx.agents,
+					sessionQuery: this.ctx.sessionQuery,
+					graph: this.ctx.graph,
+					setup: (role) => workerSetup(this.ctx, role),
+					agentOptions: {
+						...this.ctx.agentDefaultModel.currentSelection(),
+						...request.agentOptions
+					}
+				}, request);
+				this.handles.set(sessionId, handle);
+				return handle;
+			} catch (error) {
+				await this.releaseSession(sessionId);
+				throw error;
+			}
+		});
+	}
 	async stopGraph(scope) {
 		if (this.closing) throw new Error("agent-runtime: closing");
 		if (this.stopping.has(scope.graphStoreId)) throw new Error("agent-runtime: graph already stopping");
@@ -1158,6 +1272,7 @@ function workerSetup(ctx, role) {
 				text: role.coordinationRole === "reviewer" ? REVIEWER_POLICY_TEXT : SUPERVISOR_POLICY_TEXT,
 				interpolate: false
 			});
+			guardCoordinationWrites(agentCtx, agent, COORDINATION_SEALED_ALLOW);
 		}
 		if (role.taskWorker) agentCtx.systemPrompt.section({
 			name: "singularity:worker",
@@ -1174,4 +1289,4 @@ function workerSetup(ctx, role) {
 var src_default = AgentRuntime;
 
 //#endregion
-export { AgentRuntime, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, WorkerResumeRefusal, answerMessageText, applyWorkerGrant, src_default as default, findSkillFileIn, parseSkillFile, questionMessageText, skillRootsFor, toolCallRefIn };
+export { AgentRuntime, COORDINATION_SEALED_ALLOW, COORDINATION_WRITE_DENIAL, CoordinationResumeRefusal, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, WorkerResumeRefusal, answerMessageText, applyWorkerGrant, src_default as default, findSkillFileIn, guardCoordinationWrites, isCoordinationSealed, parseSkillFile, questionMessageText, resumeCoordinationAgent, sealCoordinationSession, skillRootsFor, toolCallRefIn };

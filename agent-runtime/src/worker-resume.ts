@@ -5,6 +5,8 @@ import type { Agent, AgentHandle, AgentOptions, AgentSetup } from '@deepseek-ai/
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { SessionLogSnapshot } from '@deepseek-ai/dsh-session-query'
+
+export type { SessionLogSnapshot }
 import { SessionId as toSessionId } from '@deepseek-ai/dsh-session'
 import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
 // The `permission/preset` event type is declared into the session's event map by the permission-presets package.
@@ -111,7 +113,10 @@ export async function resumeWorkerAgent(deps: WorkerResumeDeps, request: WorkerR
 }
 
 /** One Session's persisted header and events, read through the deployment's own query path. */
-async function readPersistedSession(deps: WorkerResumeDeps, sessionId: SessionId): Promise<SessionLogSnapshot> {
+export async function readPersistedSession(
+  deps: { readonly sessionQuery: { readSession(sessionId: SessionId): Promise<SessionLogSnapshot> } },
+  sessionId: SessionId,
+): Promise<SessionLogSnapshot> {
   try {
     return await deps.sessionQuery.readSession(sessionId)
   } catch (error: unknown) {

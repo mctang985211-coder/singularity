@@ -73,7 +73,8 @@ import type { CapabilityConfig, Config, RootBudgetApproval, RootBudgetApprovalAs
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import { configureSupervision } from '../../agent-singularity/src/coordination/supervision.ts'
-import { supervisorGrant } from '../../agent-singularity/src/coordination/rsi-loop.ts'
+import { supervisorGrant } from '../../agent-singularity/src/coordination/roles.ts'
+import { defineReviewerCompleteTool, defineSupervisorCompleteTool as definesupervisorCompleteTool } from '../../agent-singularity/src/tools/completion-tools.ts'
 import { graphRegistry, sessionQueryReads } from './context-plane.ts'
 import type { SupervisionOptions } from './scripted-loop.ts'
 
@@ -478,6 +479,20 @@ class RunStackImpl implements RunStack {
         graphStoreId: 'sg-g-root',
         layoutStoreId: 'sg-l-root',
       }),
+      // The registry's own one-record read: a tool that needs the graph's
+      // declared settings (the round count a completion derives the search step
+      // from) reads this.
+      get: async (id: string) => {
+        if (id !== 'g1') throw new Error(`graphs: no graph "${id}" in this fixture`)
+        return {
+          id: 'g1',
+          name: 'graph',
+          envId: 'env1',
+          rootSessionId: this.primary,
+          graphStoreId: 'sg-g-root',
+          layoutStoreId: 'sg-l-root',
+        }
+      },
       list: async () => [{
         id: 'g1',
         name: 'graph',
@@ -534,6 +549,10 @@ class RunStackImpl implements RunStack {
       ctx.tools.register(defineTaskDecomposeTool(ctx))
       ctx.tools.register(defineTaskSubmitResultTool(ctx))
       ctx.tools.register(defineTaskCancelTool(ctx))
+      // The completion protocol is part of the deployment: the real definitions,
+      // not stand-ins, so a case can drive a coordination session's ending.
+      ctx.tools.register(definesupervisorCompleteTool(ctx))
+      ctx.tools.register(defineReviewerCompleteTool(ctx))
     }
     for (const root of this.roots) await this.agentRuntime.ensureRoot(root, { graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root' })
     return this

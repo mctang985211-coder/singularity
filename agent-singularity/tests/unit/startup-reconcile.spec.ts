@@ -147,7 +147,25 @@ async function mount(options: {
   ]
   for (const [name, value] of dependencies) await ctx.plugin(stub(name, value))
   const loading = options.config === undefined ? ctx.plugin(SingularityAgent) : ctx.plugin(SingularityAgent, options.config)
-  return { ctx, tools, home, target: join(home, 'skills', SKILL, 'SKILL.md'), warnings, mount: loading }
+  return {
+    ctx,
+    tools,
+    home,
+    target: join(home, 'skills', SKILL, 'SKILL.md'),
+    /**
+     * Every warning the mount reported except the coordination plane's own
+     * startup lines: this fixture mounts no view service, and the assembly and
+     * its driver say where assignments live and that no derived progress can be
+     * read rather than degrading silently.
+     */
+    get warnings(): string[] {
+      return warnings.filter(line => !line.startsWith('coordination:') && !line.includes('no singularityGraphView service'))
+    },
+    get allWarnings(): string[] {
+      return warnings
+    },
+    mount: loading,
+  }
 }
 
 /** Every ledger line's `kind`, oldest first — the file itself, never the service's memory. */

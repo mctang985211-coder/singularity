@@ -3,7 +3,7 @@ import { ContentBlock } from "@deepseek-ai/dsh-llm";
 import { Session, SessionEvent, SessionId } from "@deepseek-ai/dsh-session";
 import { AgentStatus } from "@dangosys/dsh-singularity-graph";
 import { Agent, AgentHandle, AgentOptions, AgentOptions as AgentOptions$1, AgentSetup } from "@deepseek-ai/dsh-agent";
-import { SessionEventReadRequest, SessionEventWindow, SessionLogSnapshot } from "@deepseek-ai/dsh-session-query";
+import { SessionEventReadRequest, SessionEventWindow, SessionLogSnapshot, SessionLogSnapshot as SessionLogSnapshot$1 } from "@deepseek-ai/dsh-session-query";
 
 //#region src/messages.d.ts
 /** Why one delivery or source read was refused; every refusal is named for the caller's next move. */
@@ -214,6 +214,22 @@ interface WorkerResumeRequest {
   /** Per-agent options for the resumed agent, overriding the runtime's default selection. */
   readonly agentOptions?: AgentOptions$1;
 }
+/**
+ * One controlled resume of a persisted coordination session: the same session
+ * id, the same composition, the same role. The coordination driver states the
+ * role and the preset; the Session's own durable header has to agree.
+ */
+interface CoordinatorResumeRequest {
+  readonly sessionId: SessionId;
+  readonly scope: GraphScope;
+  readonly coordinationRole: 'reviewer' | 'supervisor';
+  readonly agentPreset: string;
+  /** The grant the session was spawned with, resolved by the caller as the spawn resolved it. */
+  readonly grant?: WorkerGrant;
+  /** The permission preset the session was spawned under; absent = the worker default. */
+  readonly permissionPreset?: string;
+  readonly agentOptions?: AgentOptions$1;
+}
 //#endregion
 //#region src/grants.d.ts
 declare module '@deepseek-ai/dsh-llm' {
@@ -244,6 +260,69 @@ interface GraphSkillCatalogOptions {
 }
 /** Apply one worker's grant: restrict tools, register skills, mount MCP servers — all fail-closed. */
 declare function applyWorkerGrant(agentCtx: Context, agent: Agent, grant: WorkerGrant, graphCatalog?: GraphSkillCatalogOptions): Promise<void>;
+//#endregion
+//#region src/coordination-seal.d.ts
+/** What one refused write on a concluded coordination session answers with. */
+declare const COORDINATION_WRITE_DENIAL = "singularity: this coordination session has completed its work; writes are closed \u2014 reads, evidence and findings remain available";
+/** What a concluded coordination session may still call: the read-only surface, and its own completion tool for idempotence. */
+declare const COORDINATION_SEALED_ALLOW: readonly string[];
+/** Mark one coordination session concluded: every later write is refused at execution time. */
+declare function sealCoordinationSession(sessionId: string): void;
+/** Whether one session has been sealed by this process. */
+declare function isCoordinationSealed(sessionId: string): boolean;
+/** Install the seal check on one coordination agent's own scope. */
+declare function guardCoordinationWrites(agentCtx: Context, agent: Agent, allow: readonly string[]): void;
+//#endregion
+//#region src/coordination-resume.d.ts
+/** Why one coordination resume refused, named for the caller's next move. */
+type CoordinationResumeRefusalCode = /** No such persisted Session. */
+'session-missing'
+/** A live agent already owns the Session. */ | 'session-live'
+/** The graph store does not publish this Session as a member. */ | 'not-in-graph'
+/** The declared preset, role or grant contradicts the Session's own durable record. */ | 'binding-mismatch'
+/** The resume itself refused the Session. */ | 'takeover-refused';
+/** One refused coordination resume, with the stable name of what could not be established. */
+declare class CoordinationResumeRefusal extends Error {
+  readonly code: CoordinationResumeRefusalCode;
+  constructor(code: CoordinationResumeRefusalCode, message: string, options?: ErrorOptions);
+}
+/** What one resume reads and resumes through. */
+interface CoordinationResumeDeps {
+  readonly agents: {
+    get(id: SessionId): Agent | undefined;
+    resume(options: {
+      resumeSessionId: SessionId;
+      agentOptions?: AgentOptions$1;
+      setup?: AgentSetup;
+    }): Promise<AgentHandle>;
+  };
+  readonly sessionQuery: {
+    readSession(sessionId: SessionId): Promise<unknown>;
+  };
+  readonly graph: {
+    snapshotIn(storeId: string): Promise<{
+      readonly agents: readonly {
+        readonly id: SessionId;
+      }[];
+      readonly edges: readonly {
+        readonly kind: string;
+        readonly from: SessionId;
+        readonly to: SessionId;
+      }[];
+    }>;
+  };
+  /** Compose one coordination session's world — the caller's own spawn composition, reused verbatim. */
+  readonly setup: (role: {
+    agentPreset: string;
+    permissionPreset: string;
+    taskWorker: boolean;
+    coordinationRole: 'reviewer' | 'supervisor';
+    grant?: WorkerGrant;
+  }) => AgentSetup;
+  readonly agentOptions?: AgentOptions$1;
+}
+/** Bring one persisted coordination Session back live and idle under its own role, or refuse by name. */
+declare function resumeCoordinationAgent(deps: CoordinationResumeDeps, request: CoordinatorResumeRequest): Promise<AgentHandle>;
 //#endregion
 //#region src/skill-file.d.ts
 /** One parsed `SKILL.md`: the frontmatter the registry needs plus the body. */
@@ -317,7 +396,7 @@ interface WorkerResumeDeps {
   };
   /** The persisted Session's own record: the header (preset, lineage) and the log's own events. */
   readonly sessionQuery: {
-    readSession(sessionId: SessionId): Promise<SessionLogSnapshot>;
+    readSession(sessionId: SessionId): Promise<SessionLogSnapshot$1>;
   };
   /** The graph store: membership, the delegation edge, and the node status a resume repairs. */
   readonly graph: {
@@ -360,6 +439,18 @@ declare class AgentRuntime extends Service {
   spawn(parent: Agent, request: SpawnRequest): Promise<AgentHandle>;
   /** Bring one spawned worker's persisted Session back live and idle; refusals are named (A4 §F.1). */
   resumeWorkerAgent(request: WorkerResumeRequest): Promise<AgentHandle>;
+  /**
+   * Close one concluded coordination session's write access. The seal is an
+   * execution-time guard on the session's own scope, so no later preset, MCP
+   * server or resume can raise the surface back.
+   */
+  sealCoordinationSession(sessionId: SessionId): void;
+  /**
+   * Bring one persisted coordination Session back live, under its own role and
+   * composition. The driver resumes the same session id it assigned; a session
+   * something else owns is refused by name.
+   */
+  resumeCoordinationSession(request: CoordinatorResumeRequest): Promise<AgentHandle>;
   stopGraph(scope: GraphScope): Promise<void>;
   stopAgents(sessionIds: readonly SessionId[]): Promise<void>;
   prompt(agent: Agent, prompt: readonly ContentBlock[]): Promise<void>;
@@ -382,4 +473,4 @@ declare class AgentRuntime extends Service {
   private scope;
 }
 //#endregion
-export { type AgentMessageIntent, type AgentOptions, AgentRuntime, AgentRuntime as default, type GraphScope, type McpServerSpec, type MessageDelivery, type MessageDeliveryDeps, type MessageDeliveryReport, type MessageDeliveryStatus, type MessageRefusalCode, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, type ResolvedGrant, type RootRequest, type RuntimePromptSource, type SessionOwnLog, type SpawnRequest, type ToolCallBody, type ToolCallRef, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, type WorkerCapabilityGrant, type WorkerGrant, type WorkerResumeDeps, WorkerResumeRefusal, type WorkerResumeRefusalCode, type WorkerResumeRequest, type WorkerRole, type WorkerRunFacts, answerMessageText, applyWorkerGrant, findSkillFileIn, parseSkillFile, questionMessageText, skillRootsFor, toolCallRefIn };
+export { type AgentMessageIntent, type AgentOptions, AgentRuntime, AgentRuntime as default, COORDINATION_SEALED_ALLOW, COORDINATION_WRITE_DENIAL, type CoordinationResumeDeps, CoordinationResumeRefusal, type CoordinationResumeRefusalCode, type CoordinatorResumeRequest, type GraphScope, type McpServerSpec, type MessageDelivery, type MessageDeliveryDeps, type MessageDeliveryReport, type MessageDeliveryStatus, type MessageRefusalCode, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, type ResolvedGrant, type RootRequest, type RuntimePromptSource, type SessionOwnLog, type SpawnRequest, type ToolCallBody, type ToolCallRef, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, type WorkerCapabilityGrant, type WorkerGrant, type WorkerResumeDeps, WorkerResumeRefusal, type WorkerResumeRefusalCode, type WorkerResumeRequest, type WorkerRole, type WorkerRunFacts, answerMessageText, applyWorkerGrant, findSkillFileIn, guardCoordinationWrites, isCoordinationSealed, parseSkillFile, questionMessageText, resumeCoordinationAgent, sealCoordinationSession, skillRootsFor, toolCallRefIn };

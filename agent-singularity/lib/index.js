@@ -2,15 +2,15 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, bubbleWorkspacePath, materializeBubble, optionalService, recoveryAttemptWithKey, settleBubble, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
+import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, bubbleWorkspacePath, executionUsage, materializeBubble, optionalService, recoveryAttemptWithKey, settleBubble, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
 import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EvolutionService, OUTCOME_JUDGE_PROMPT, applyTargets, assertDecisionTransition, assertOutcomePlan, canonicalJson, digestOf, modelSelectionOf, normalizeSnapshot, renderProviderRoles } from "@dangosys/dsh-singularity-evolution";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, canonicalize, isTerminalRunStatus, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
-import { CONTEXT_OUTPUT_LIMIT_BYTES, CoordinationBindingError, OutputBudget, budgetList, utf8Bytes } from "@dangosys/dsh-singularity-context";
 import { homedir } from "node:os";
-import { SessionId, SessionLogOffset } from "@deepseek-ai/dsh-session";
-import { graphAgentOptions } from "@dangosys/dsh-singularity-graphs";
+import { CONTEXT_OUTPUT_LIMIT_BYTES, CoordinationBindingError, OutputBudget, budgetList, utf8Bytes } from "@dangosys/dsh-singularity-context";
+import { SessionId } from "@deepseek-ai/dsh-session";
+import { graphAccess, graphAgentOptions } from "@dangosys/dsh-singularity-graphs";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { BlockAssembler } from "@deepseek-ai/dsh-llm";
 
@@ -307,10 +307,6 @@ function liveRootAgentOf(ctx, storeId) {
 /** The ref a reader uses for one review source (`<taskId>#<runId>`, or `<taskId>#no-run`). */
 function reviewRef(source) {
 	return `${source.taskId}#${source.runId ?? "no-run"}`;
-}
-/** Whether two review sources are the same source. */
-function sameSource(left, right) {
-	return left.taskId === right.taskId && left.runId === right.runId;
 }
 
 //#endregion
@@ -726,7 +722,7 @@ function supervisionSettings() {
 * The round cap one graph's RSI settings declare for its root task store (F):
 * `rsi.iterationRounds` is how many rounds that graph's platform loop runs, and
 * the runtime's per-source cap has to admit exactly those. The platform driver
-* (`coordination/rsi-loop.ts`) registers a store when it takes the graph's loop
+* (`coordination/driver.ts`) registers a store when it takes the graph's loop
 * over and forgets it when the loop ends or the config is cleared; a store no
 * graph registers is not running a loop, and the runtime's own constant stands
 * for it unchanged. This process never reads the cap itself — it answers the
@@ -748,427 +744,761 @@ function graphImprovementCap(storeId) {
 }
 
 //#endregion
-//#region src/coordination/ledger.ts
-/** How many review agents this store has started, as this region's read of the ledger holds them — the shipped default of `supervision.coordinationBudget`. */
-const REVIEW_AGENT_BUDGET_DEFAULT = DEFAULT_SUPERVISION.coordinationBudget;
-/** Repo root, derived at this file's depth — the same root the agent assembly hands the evolution ledger. */
-const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
-/** Directory holding the ledger; `$DSH_HOME/review-agents` unless overridden. */
-function reviewAgentLedgerDir() {
-	const override = process.env.SINGULARITY_REVIEW_LEDGER_DIR;
+//#region src/coordination/store.ts
+/** The only row format this build reads. */
+const COORDINATION_FORMAT_VERSION = 1;
+/** How many times one work item may be re-assigned after an infrastructure failure (`interrupted`). */
+const MAX_ASSIGNMENT_ATTEMPTS = 3;
+/** The directory this deployment's coordination file lives in. `SINGULARITY_COORDINATION_DIR` wins over `$DSH_HOME`. */
+function coordinationDir() {
+	const override = process.env.SINGULARITY_COORDINATION_DIR;
 	if (override !== void 0 && override.length > 0) return resolve(override);
-	return join(process.env.DSH_HOME ?? join(repoRoot, ".dsh"), "review-agents");
+	return join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "coordination");
 }
-/** The ledger file (`<dir>/agents.jsonl`). */
-function reviewAgentLedgerFile() {
-	return join(reviewAgentLedgerDir(), "agents.jsonl");
+/** The coordination file itself. */
+function coordinationFile() {
+	return join(coordinationDir(), "assignments.jsonl");
 }
-/** The per-root-store cap: env `SINGULARITY_REVIEW_AGENT_BUDGET` wins, then the deployment's `supervision.coordinationBudget`, then {@link REVIEW_AGENT_BUDGET_DEFAULT}. */
-function reviewAgentBudget() {
-	const raw = process.env.SINGULARITY_REVIEW_AGENT_BUDGET;
+/** The per-store cap on coordination runs: env `SINGULARITY_COORDINATION_BUDGET` wins, then the deployment's policy. */
+function coordinationBudget() {
+	const raw = process.env.SINGULARITY_COORDINATION_BUDGET;
 	const parsed = raw === void 0 || raw.length === 0 ? NaN : Number(raw);
 	if (Number.isFinite(parsed) && parsed >= 1) return Math.floor(parsed);
-	return supervisionSettings().coordinationBudget;
+	return supervisionSettings().coordinationBudget || DEFAULT_SUPERVISION.coordinationBudget;
 }
-/** One parsed row. An unrecognized row throws by name rather than being read as something it is not. */
-function asLedgerRow(parsed, line) {
+/** One parsed row; an unrecognized version or kind is refused by name. */
+function asRow(parsed, line) {
 	const row = parsed;
-	if (row.formatVersion === 2 && (row.kind === "claim" || row.kind === "started" || row.kind === "settled")) return row;
-	throw new Error(`review-agent-ledger: unrecognized row ${line} in ${reviewAgentLedgerFile()}`);
+	if (row.formatVersion !== COORDINATION_FORMAT_VERSION || row.kind !== "assignment" && row.kind !== "completion") throw new Error(`coordination-store: unrecognized row ${line} in ${coordinationFile()}`);
+	return parsed;
 }
-/** Every ledger row, or `undefined` when the ledger has never been written (zero rows is a state, not a failure). A corrupt line throws by name rather than undercounting. */
-async function readLedgerRows() {
-	return await readJsonlFile(reviewAgentLedgerFile(), (line, lineNumber) => {
+/** Every row, or `undefined` when the file has never been written. A corrupt line throws by name. */
+async function readCoordinationRows() {
+	let text$1;
+	try {
+		text$1 = await readFile(coordinationFile(), "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return void 0;
+		throw error;
+	}
+	const rows = [];
+	text$1.split("\n").forEach((line, index) => {
+		if (line.trim().length === 0) return;
 		let parsed;
 		try {
 			parsed = JSON.parse(line);
 		} catch {
-			throw new Error(`review-agent-ledger: corrupt line ${lineNumber} in ${reviewAgentLedgerFile()}`);
+			throw new Error(`coordination-store: corrupt line ${index + 1} in ${coordinationFile()}`);
 		}
-		return asLedgerRow(parsed, lineNumber);
+		rows.push(asRow(parsed, index + 1));
 	});
+	return rows;
 }
-/** A started fact: the spend and the delegation. */
-function isStartedRow(row) {
-	return row.formatVersion === 2 && row.kind === "started";
+function isAssignment(row) {
+	return row.kind === "assignment";
 }
-/** One store's rows of a kind the caller needs. */
-function storeRows(rows, rootStoreId, match) {
-	return rows.filter((row) => row.rootStoreId === rootStoreId).filter(match);
+/** The completion one session recorded, if any — the first one is the only one written. */
+function completionOf(rows, sessionId$1) {
+	return rows.find((row) => row.kind === "completion" && row.sessionId === sessionId$1);
 }
-/** The store's started rows — the durable count, and the delegation rows. */
-function startedRowsOf(rows, rootStoreId) {
-	return storeRows(rows, rootStoreId, isStartedRow);
-}
-/** The attempts one store's rows hold, in the order they were claimed: each claim row is an attempt, its identity is the session it names, and the started/settled rows that name the same session are its facts. A settled */
-function attemptsOf(rows, rootStoreId) {
-	const startedSessions = new Set(startedRowsOf(rows, rootStoreId).map((row) => row.sessionId));
-	const settled = /* @__PURE__ */ new Map();
-	for (const row of storeRows(rows, rootStoreId, (candidate) => candidate.formatVersion === 2 && candidate.kind === "settled")) if (!settled.has(row.sessionId)) settled.set(row.sessionId, {
-		status: row.status,
-		...row.note === void 0 ? {} : { note: row.note },
-		at: row.at
-	});
-	return storeRows(rows, rootStoreId, (candidate) => candidate.formatVersion === 2 && candidate.kind === "claim").map((row) => ({
-		role: roleOf$1(row.role),
-		source: {
-			taskId: row.taskId,
-			runId: row.runId
-		},
-		requestKey: row.requestKey,
-		reason: row.reason,
-		...row.diagnosisId === void 0 ? {} : { diagnosisId: row.diagnosisId },
-		...row.handoffDigest === void 0 ? {} : { handoffDigest: row.handoffDigest },
-		sessionId: row.sessionId,
-		actor: row.actor,
-		at: row.at,
-		started: startedSessions.has(row.sessionId),
-		settlement: settled.get(row.sessionId)
-	}));
-}
-/** The role a row or a request belongs to: an older row carries none and is a reviewer's. */
-function roleOf$1(role) {
-	return role === "supervisor" ? "supervisor" : "reviewer";
-}
-/** The attempts of one role among a store's attempts — the two roles never dedupe against each other. */
-function attemptsOfRole(attempts, role) {
-	return attempts.filter((attempt) => attempt.role === role);
-}
-/** Decide one review request against one store's attempts. Pure, so every branch is testable and the admission's order is the order written here: */
-function planReviewAttempt(input) {
-	const { request, budget } = input;
-	const mine = attemptsOfRole(input.attempts, "reviewer").filter((attempt) => sameSource(attempt.source, request.source));
-	const same = mine.find((attempt) => attempt.requestKey === request.requestKey);
-	if (same !== void 0) {
-		if (same.reason !== request.reason) return {
-			kind: "refused",
-			code: "request-key-conflict",
-			attempt: same,
-			attempts: mine,
-			budget
-		};
-		return {
-			kind: "reuse",
-			attempt: same
-		};
+/** The rows-only projection of {@link coordinatedWork}, for callers that already hold the rows. */
+function workOf(rows, graphId) {
+	const mine = rows.filter((row) => row.graphId === graphId);
+	const work = [];
+	for (const row of mine) {
+		if (!isAssignment(row)) continue;
+		const completion = completionOf(mine, row.sessionId);
+		work.push({
+			assignment: row,
+			...completion === void 0 ? {} : { completion }
+		});
 	}
-	const open = mine.find((attempt) => attempt.settlement === void 0);
-	if (open !== void 0) return {
-		kind: "in-flight",
-		attempt: open
-	};
-	if (mine.length > 0 && request.requestKey === null) return {
-		kind: "refused",
-		code: "request-key-required",
-		attempt: mine.at(-1),
-		attempts: mine,
-		budget
-	};
-	if (budget.used >= budget.max) return {
-		kind: "refused",
-		code: "budget-exhausted",
-		attempt: void 0,
-		attempts: mine,
-		budget
-	};
-	return {
-		kind: "start",
-		budget
-	};
+	return work;
 }
-/** Decide one round's supervisor request against one store's attempts: a concluded supervision is answered with the supervisor it already had; an interrupted one is a failure and does not block a fresh attempt. */
-function planSupervisorAttempt(input) {
-	const { request, budget } = input;
-	const mine = attemptsOfRole(input.attempts, "supervisor").filter((attempt) => attempt.diagnosisId === request.diagnosisId);
-	const conflicting = mine.find((attempt) => attempt.handoffDigest !== request.handoffDigest);
-	if (conflicting !== void 0) return {
-		kind: "refused",
-		code: "request-key-conflict",
-		attempt: conflicting,
-		attempts: mine,
-		budget
-	};
-	const takenUp = mine.filter((attempt) => attempt.started && attempt.settlement === void 0).at(-1);
-	if (takenUp !== void 0) return {
-		kind: "reuse",
-		attempt: takenUp
-	};
-	const open = mine.find((attempt) => attempt.settlement === void 0);
-	if (open !== void 0) return {
-		kind: "in-flight",
-		attempt: open
-	};
-	const concluded = mine.filter((attempt) => attempt.settlement?.status === "closed" && input.retryClosed !== true || attempt.settlement?.status === "recorded" && !input.resumeRecorded).at(-1);
-	if (concluded !== void 0) return {
-		kind: "reuse",
-		attempt: concluded
-	};
-	if (budget.used >= budget.max) return {
-		kind: "refused",
-		code: "budget-exhausted",
-		attempt: void 0,
-		attempts: mine,
-		budget
-	};
-	return {
-		kind: "start",
-		budget
-	};
+/** Every work item of one graph's key space, newest assignment last. */
+function assignmentsForKey(rows, key) {
+	return rows.filter(isAssignment).filter((row) => row.graphId === key.graphId && row.epoch === key.epoch && row.role === key.role && sameSubject(row.subject, key.subject));
 }
-/** Every attempt this root store's ledger holds, for a reader that renders the state rather than deciding on it (`task_review_pack`). A display query: the decision is always made inside the admission's serial region. */
-async function readReviewAgentAttempts(rootStoreId) {
-	return attemptsOf(await readLedgerRows() ?? [], rootStoreId);
+/** Whether two subjects name the same work item. */
+function sameSubject(left, right) {
+	if (left.kind !== right.kind) return false;
+	if (left.kind === "round" && right.kind === "round") return left.businessRound === right.businessRound && left.searchRound === right.searchRound && left.source.taskId === right.source.taskId && left.source.runId === right.source.runId;
+	if (left.kind === "review" && right.kind === "review") return left.businessRound === right.businessRound && left.source.taskId === right.source.taskId && left.source.runId === right.source.runId && left.requestKey === right.requestKey;
+	return false;
 }
-/** The budget one admission belongs to: a ledger file and a root store. */
-function budgetKey(rootStoreId) {
-	return `${reviewAgentLedgerFile()}\u0000${rootStoreId}`;
+/** The completion one assignment settled with, from the rows alone. */
+function completionFor(rows, sessionId$1) {
+	return completionOf(rows, sessionId$1);
 }
-/** The serial regions, one promise chain per budget key. A region is the only place an attempt is decided on and claimed, so the attempts an admission sees and the claim it writes cannot have another. */
-const regions = /* @__PURE__ */ new Map();
-/** Append one row, creating the ledger directory if needed. Only the doors below write. */
-async function appendRow(row) {
-	await appendJsonlRow(reviewAgentLedgerFile(), row);
-}
-/** The claim row one request becomes. */
-function claimRow(rootStoreId, request) {
-	const role = roleOf$1(request.role);
-	return {
-		formatVersion: 2,
-		kind: "claim",
-		...role === "reviewer" ? {} : { role },
-		rootStoreId,
-		taskId: request.source.taskId,
-		runId: request.source.runId,
-		requestKey: request.requestKey,
-		reason: request.reason,
-		...request.diagnosisId === void 0 ? {} : { diagnosisId: request.diagnosisId },
-		...request.handoffDigest === void 0 ? {} : { handoffDigest: request.handoffDigest },
-		sessionId: request.sessionId,
-		actor: request.actor,
-		at: (/* @__PURE__ */ new Date()).toISOString()
-	};
-}
-/** Record one attempt's terminal fact. Append-only and outside the serial region on purpose: the caller writes it after it observed the outcome, which is always after the region that started the attempt has ended (A5: */
-async function settleReviewAgentAttempt(settlement) {
+/** fsync one directory, so a freshly created file's name survives a crash. */
+async function syncDir(dir) {
+	const handle = await open(dir, "r");
 	try {
-		await appendRow({
-			formatVersion: 2,
-			kind: "settled",
-			rootStoreId: settlement.rootStoreId,
-			taskId: settlement.taskId,
-			sessionId: settlement.sessionId,
-			status: settlement.status,
-			...settlement.note === void 0 ? {} : { note: settlement.note },
-			at: (/* @__PURE__ */ new Date()).toISOString()
-		});
+		await handle.sync();
 	} finally {
-		liveAttempts.delete(settlement.sessionId);
+		await handle.close();
 	}
 }
-/** What a claim without a started row says about how the attempt ended. */
-const CLAIM_NEVER_STARTED = "the attempt was claimed but its process never reached model input";
-/** What a started attempt no process is running any more says about how it ended. */
-const STARTED_OWNER_GONE = "the process that started this attempt is gone and no result was recorded";
-/** What an attempt whose diagnosis the store already holds says about how it ended. */
-const DIAGNOSIS_ALREADY_RECORDED = "the diagnosis was already recorded; the ledger is read back from the store";
-/** The attempts this process started and has not settled, by the reviewer session each was claimed under. */
-const liveAttempts = /* @__PURE__ */ new Set();
-/** Run one review-agent admission inside the ledger's serial region for a store. */
-async function admitReviewAgent(rootStoreId, work) {
-	const key = budgetKey(rootStoreId);
-	const result = (regions.get(key) ?? Promise.resolve()).then(async () => {
-		const rows = await readLedgerRows() ?? [];
-		const started = startedRowsOf(rows, rootStoreId).length;
-		let used = started;
-		const attempts = attemptsOf(rows, rootStoreId);
-		/** The attempt identities this store has already spent a run on, as this region read them. */
-		const startedSessions = new Set(startedRowsOf(rows, rootStoreId).map((row) => row.sessionId));
-		/** The attempts this very region claimed: its own work in progress, never a dead one. */
-		const claimedHere = /* @__PURE__ */ new Set();
-		return work({
-			started,
-			plan: async (request, hooks) => {
-				const requestRole = roleOf$1(request.role);
-				const recovered = [];
-				for (const attempt of attempts) {
-					if (attempt.role !== requestRole) continue;
-					if (requestRole === "reviewer") {
-						if (!sameSource(attempt.source, request.source)) continue;
-					} else if (attempt.diagnosisId !== request.diagnosisId) continue;
-					if (attempt.settlement !== void 0) continue;
-					if (liveAttempts.has(attempt.sessionId) || claimedHere.has(attempt.sessionId)) continue;
-					const latest = (await readReviewAgentAttempts(rootStoreId)).find((item) => item.sessionId === attempt.sessionId);
-					if (latest?.settlement !== void 0) {
-						Object.assign(attempt, { settlement: latest.settlement });
-						continue;
-					}
-					const recorded = await hooks?.recorded?.(attempt) === true;
-					const status = recorded ? "recorded" : "interrupted";
-					const note = recorded ? requestRole === "reviewer" ? DIAGNOSIS_ALREADY_RECORDED : "the proposal or recovery outcome is durable; resume from its recorded facts" : attempt.started ? STARTED_OWNER_GONE : CLAIM_NEVER_STARTED;
-					await settleReviewAgentAttempt({
-						rootStoreId,
-						taskId: attempt.source.taskId,
-						sessionId: attempt.sessionId,
-						status,
-						note
-					});
-					const settlement = {
-						status,
-						note,
-						at: (/* @__PURE__ */ new Date()).toISOString()
-					};
-					Object.assign(attempt, { settlement });
-					recovered.push(attempt);
-				}
-				return {
-					plan: requestRole === "supervisor" ? planSupervisorAttempt({
-						attempts,
-						request,
-						budget: {
-							used,
-							max: reviewAgentBudget()
-						},
-						resumeRecorded: hooks?.resumeRecorded,
-						retryClosed: hooks?.retryClosed
-					}) : planReviewAttempt({
-						attempts,
-						request,
-						budget: {
-							used,
-							max: reviewAgentBudget()
-						}
-					}),
-					recovered
-				};
-			},
-			claim: async (request) => {
-				await appendRow(claimRow(rootStoreId, request));
-				claimedHere.add(request.sessionId);
-				const role = roleOf$1(request.role);
-				attempts.push({
-					role,
-					source: request.source,
-					requestKey: request.requestKey,
-					reason: request.reason,
-					...request.diagnosisId === void 0 ? {} : { diagnosisId: request.diagnosisId },
-					...request.handoffDigest === void 0 ? {} : { handoffDigest: request.handoffDigest },
-					sessionId: request.sessionId,
-					actor: request.actor,
-					at: (/* @__PURE__ */ new Date()).toISOString(),
-					started: false,
-					settlement: void 0
-				});
-			},
-			start: async (record) => {
-				if (startedSessions.has(record.sessionId)) return;
-				await appendRow({
-					formatVersion: 2,
-					kind: "started",
-					rootStoreId,
-					taskId: record.taskId,
-					sessionId: record.sessionId,
-					actor: record.actor,
-					at: (/* @__PURE__ */ new Date()).toISOString()
-				});
-				startedSessions.add(record.sessionId);
-				used += 1;
-				liveAttempts.add(record.sessionId);
-				for (const attempt of attempts) if (attempt.sessionId === record.sessionId) Object.assign(attempt, { started: true });
-			}
-		});
+/** The directories this process has already fsynced after creating a file in them. */
+const syncedDirs = /* @__PURE__ */ new Set();
+/** Append one row and flush it to the device before returning; the first write also fsyncs its directory. */
+async function appendRow(row) {
+	const file = coordinationFile();
+	const dir = dirname(file);
+	await mkdir(dir, { recursive: true });
+	const firstWrite = !syncedDirs.has(dir);
+	await appendFile(file, `${JSON.stringify(row)}\n`, {
+		encoding: "utf8",
+		flush: true
 	});
+	if (firstWrite) {
+		await syncDir(dir);
+		syncedDirs.add(dir);
+	}
+}
+/**
+* Persist one assignment. Returns only after the row is on the device, which is
+* what makes "claim before spawn" a real order rather than a hoped-for one.
+*/
+async function appendAssignment(assignment) {
+	await appendRow(assignment);
+}
+/** Persist one completion, then wake this process's driver. */
+async function recordCompletion(completion) {
+	await appendRow(completion);
+	for (const listener of listeners) try {
+		listener(completion);
+	} catch {}
+}
+/** The serial regions, one promise chain per graph: decisions and writes never interleave inside one graph. */
+const regions = /* @__PURE__ */ new Map();
+/** Run one piece of work inside a graph's serial region, after everything already queued for it. */
+async function serializeCoordination(graphId, work) {
+	const result = (regions.get(graphId) ?? Promise.resolve()).then(work);
 	const tail = result.then(() => void 0, () => void 0);
-	regions.set(key, tail);
+	regions.set(graphId, tail);
 	tail.then(() => {
-		if (regions.get(key) === tail) regions.delete(key);
+		if (regions.get(graphId) === tail) regions.delete(graphId);
 	});
 	return result;
 }
-/** The one delegation a session is recorded under, as the context package's binding source reads it (A2 §D): */
-async function readReviewerDelegation(sessionId$1) {
-	let rows;
-	try {
-		rows = await readLedgerRows();
-	} catch (error) {
-		throw new CoordinationBindingError("unreadable", `the reviewer ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`);
-	}
-	const matches = (rows ?? []).filter(isStartedRow).filter((row) => row.sessionId === sessionId$1);
-	if (matches.length === 0) return void 0;
-	const first = matches[0];
-	const claims = (rows ?? []).filter((row) => row.kind === "claim" && row.sessionId === sessionId$1);
-	const claim = claims[0];
-	const record = {
-		rootStoreId: first.rootStoreId,
-		taskId: first.taskId,
-		actor: first.actor,
-		at: first.at,
-		...claim === void 0 ? {} : {
-			role: claim.role ?? "reviewer",
-			sourceRunId: claim.runId
-		}
-	};
-	const conflicting = matches.some((row) => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor);
-	const claimConflict = claims.some((row) => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor || (row.role ?? "reviewer") !== record.role || row.runId !== record.sourceRunId);
-	if (conflicting || claimConflict) throw new CoordinationBindingError("binding-conflict", `session "${sessionId$1}" is recorded under more than one reviewer delegation: ` + matches.map((row) => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join("; "));
-	return record;
+/** This process's completion listeners — the driver's first wake-up source. */
+const listeners = /* @__PURE__ */ new Set();
+/** Every assignment of one session, as the binding read needs them. */
+function assignmentsOfSession(rows, sessionId$1) {
+	return rows.filter(isAssignment).filter((row) => row.sessionId === sessionId$1);
 }
 /**
-* The ledger row as the context binding: the shape is projected, and a row
-* whose claim names no role is refused rather than read as a reviewer's.
+* Read the caller's coordination identity by session id. Two assignments of one
+* session that disagree about what the session is (a different graph, store,
+* role or subject) is a conflict and is refused, never resolved by picking one.
 */
-async function coordinationBindingOf(sessionId$1) {
-	const row = await readReviewerDelegation(sessionId$1);
-	if (row === void 0) return void 0;
-	if (row.role === void 0) throw new CoordinationBindingError("role-missing", `session "${sessionId$1}" is recorded as a review delegation whose claim names no role; a role is never assumed`);
+async function readCoordinationBinding(sessionId$1) {
+	let rows;
+	try {
+		rows = await readCoordinationRows();
+	} catch (error) {
+		throw new CoordinationBindingError("unreadable", `the coordination store cannot be read: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const mine = assignmentsOfSession(rows ?? [], sessionId$1);
+	const first = mine[0];
+	if (first === void 0) return void 0;
+	if (mine.some((row) => row.graphId !== first.graphId || row.storeId !== first.storeId || row.epoch !== first.epoch || row.role !== first.role || !sameSubject(row.subject, first.subject))) throw new CoordinationBindingError("binding-conflict", `session "${sessionId$1}" is recorded under more than one coordination assignment: ` + mine.map((row) => `${row.role} of ${row.graphId} in ${row.storeId} (by ${row.actor})`).join("; "));
+	const completion = completionOf(rows ?? [], sessionId$1);
 	return {
-		role: row.role,
-		sourceTaskId: row.taskId,
-		sourceRunId: row.sourceRunId ?? null,
-		actor: row.actor,
-		rootStoreId: row.rootStoreId,
-		at: row.at
+		graphId: first.graphId,
+		rootStoreId: first.storeId,
+		epoch: first.epoch,
+		role: first.role,
+		subject: first.subject,
+		sourceTaskId: first.subject.source.taskId,
+		sourceRunId: first.subject.source.runId,
+		sessionId: sessionId$1,
+		actor: first.actor,
+		at: first.at,
+		completed: completion !== void 0
 	};
 }
-/** The binding source the plugin registers into the context service: this deployment's ledger, as the narrow read door above. */
-function reviewerBindingSource() {
+/** The ledger row as the context package's binding wire: the wide shape narrowed to the seam it reads. */
+async function coordinationBindingOf(sessionId$1) {
+	const binding = await readCoordinationBinding(sessionId$1);
+	if (binding === void 0) return void 0;
+	return {
+		role: binding.role,
+		sourceTaskId: binding.sourceTaskId,
+		sourceRunId: binding.sourceRunId,
+		actor: binding.actor,
+		rootStoreId: binding.rootStoreId,
+		at: binding.at
+	};
+}
+/** The binding source this deployment registers into the context service. */
+function coordinationBindingSource() {
 	return { read: coordinationBindingOf };
 }
 
 //#endregion
-//#region src/coordination/handoff-rules.ts
-/** Shared host preset; runtime installs the actual coordination role. */
-const COORDINATION_PRESET = "singularity-coordinator";
+//#region src/coordination/rounds.ts
+/** The store's own root task: the one task that never had a parent. */
+function rootTaskOf(snapshot) {
+	return snapshot.tasks.find((task) => task.parentTaskId === void 0);
+}
 /**
-* A supervisor explicitly concludes that no shared method change is justified,
-* closes the loop, or names an obstruction. The driver checks a no_change
-* answer against the evolution ledger before accepting it as a completed round.
+* Every terminal-settled run of the root task, oldest first — the store's own
+* count of business rounds. A round is a settled attempt, verified or not.
 */
-function supervisorOutcomeOf(reply) {
-	if (reply === void 0) return void 0;
-	const blocks = [...reply.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((match) => match[1]);
-	for (const block of blocks.reverse()) try {
-		const parsed = JSON.parse(block);
-		if (parsed === null || typeof parsed !== "object") continue;
-		const outcome = parsed.outcome;
-		if (outcome !== "closed" && outcome !== "blocked" && outcome !== "no_change") continue;
-		const reason = parsed.reason;
-		if (typeof reason !== "string" || reason.trim().length === 0) continue;
-		return {
-			outcome,
-			reason: reason.trim()
+function terminalRootRuns(snapshot, rootTaskId) {
+	return snapshot.runs.filter((run) => run.taskId === rootTaskId && isTerminalRunStatus(run.status)).sort((left, right) => left.startedAt < right.startedAt ? -1 : left.startedAt > right.startedAt ? 1 : left.runId < right.runId ? -1 : left.runId > right.runId ? 1 : 0);
+}
+/** The run one round opened, read from the store's own attempt record by its request key. */
+function roundRunOf(snapshot, rootTaskId, requestKey) {
+	return recoveryAttemptWithKey(snapshot, rootTaskId, requestKey);
+}
+/** The platform diagnosis one round's run is recorded under: the epoch is in the id, so a restart is a new round. */
+function roundDiagnosisId(graphId, epoch, businessRound) {
+	return `rsi-${graphId}-e${epoch}-round-${businessRound}`;
+}
+/** The request key that opens one round. One key names one attempt. */
+function roundRequestKey(graphId, epoch, businessRound) {
+	return `rsi-${graphId}-e${epoch}-round-${businessRound}`;
+}
+/**
+* The platform's own diagnosis for one round. `proposals: []` says the driver
+* records no suggestion — the supervisor investigates; the diagnosis exists so
+* the next round's recovery has a store record to name.
+*/
+function roundDiagnosis(input) {
+	const verified = input.run.status === "verified";
+	const finalRound = input.businessRound >= input.rounds;
+	return {
+		diagnosisId: input.diagnosisId,
+		taskId: input.taskId,
+		observedFailure: verified ? `Round ${input.businessRound} of graph "${input.graphName}" (${input.graphId}) verified: the root task's run "${input.run.runId}" settled verified under the store's own acceptance criteria.` : input.review?.localizedCause ?? `Round ${input.businessRound} of graph "${input.graphName}" (${input.graphId}) settled ${input.run.status}: the root task's run "${input.run.runId}" did not pass the store's own acceptance criteria.`,
+		scope: `the root task ${input.taskId} of this store; graph ${input.graphId} runs a platform RSI loop of ${input.rounds} round(s)`,
+		localizedCause: finalRound ? `The platform RSI loop reviews round ${input.businessRound}'s library experience before completing this graph: ${input.objective}.` : verified ? `The platform RSI loop continues this graph's verified goal with round ${input.businessRound + 1}: ${input.objective}.` : `The platform RSI loop hands round ${input.businessRound}'s ${input.run.status} attempt to its supervisor, which investigates the cause and prepares the method change round ${input.businessRound + 1} (mode "recovery") consumes: ${input.objective}.`,
+		evidenceRefs: input.review?.evidenceRefs ?? [],
+		reviewRefs: [`${input.taskId}#${input.run.runId}`],
+		confidence: "high",
+		proposals: [],
+		producedBy: {
+			kind: "agent",
+			sessionId: input.producedBySessionId
+		}
+	};
+}
+
+//#endregion
+//#region src/coordination/facts-reader.ts
+/** The completion facts one row carries, in the wire shape the read model reduces. */
+function completionFacts(row) {
+	if (row.kind !== "completion" || row.result.kind !== "completed") return void 0;
+	const result = row.result;
+	return {
+		businessAction: result.businessAction,
+		searchNext: result.searchNext,
+		methodDecision: result.methodDecision,
+		reason: result.reason,
+		evidenceRefs: result.evidenceRefs,
+		...result.trialCandidateRef === null ? {} : { trialCandidateRef: result.trialCandidateRef },
+		...result.approval === void 0 ? {} : { approval: {
+			kind: result.approval.source,
+			actor: result.approval.ref
+		} },
+		at: row.at
+	};
+}
+/** One work item's state in the read model's vocabulary. */
+function stateOf(work) {
+	const completion = work.completion;
+	if (completion === void 0) return "open";
+	return completion.result.kind === "completed" || completion.result.kind === "reviewed" ? "settled" : "interrupted";
+}
+/**
+* The round work items one store holds, as the read model reduces them. A review
+* work item is not a round: it is read through `workForDiagnosis` and the review
+* pack, never counted into the round a graph reports.
+*/
+function assignmentFactsOf(rows, storeId) {
+	const graphIds = [...new Set(rows.filter((row) => row.storeId === storeId).map((row) => row.graphId))];
+	const facts = [];
+	for (const graphId of graphIds) for (const work of workOf(rows, graphId)) {
+		const assignment = work.assignment;
+		if (assignment.storeId !== storeId || assignment.role !== "supervisor") continue;
+		if (assignment.subject.kind !== "round") continue;
+		const completion = work.completion === void 0 ? void 0 : completionFacts(work.completion);
+		facts.push({
+			assignmentId: assignment.sessionId,
+			role: "supervisor",
+			round: assignment.subject.businessRound,
+			sessionId: assignment.sessionId,
+			sourceTaskId: assignment.subject.source.taskId,
+			sourceRunId: assignment.subject.source.runId,
+			state: stateOf(work),
+			...completion === void 0 ? {} : { completion }
+		});
+	}
+	return facts.sort((left, right) => left.round < right.round ? -1 : left.round > right.round ? 1 : 0);
+}
+/** The read model's one coordination fact producer, read straight from the store. */
+function coordinationFactsReader() {
+	return { async assignments(graphKey) {
+		return assignmentFactsOf(await readCoordinationRows() ?? [], graphKey);
+	} };
+}
+/** The diagnosis id one round assignment is supervised under, or `undefined` for a review assignment. */
+function diagnosisIdOf(assignment) {
+	if (assignment.subject.kind !== "round") return void 0;
+	return roundDiagnosisId(assignment.graphId, assignment.epoch, assignment.subject.businessRound);
+}
+/** The review work items of one exact source, filtered from work a caller already read. */
+function workOfSource(work, source) {
+	return work.filter((item) => {
+		const subject = item.assignment.subject;
+		if (subject.kind !== "review") return false;
+		return subject.source.taskId === source.taskId && subject.source.runId === source.runId;
+	});
+}
+
+//#endregion
+//#region src/coordination/assignment.ts
+/** Whether two keys name the same work item. */
+function sameCoordinationKey(left, right) {
+	return left.graphId === right.graphId && left.epoch === right.epoch && left.role === right.role && sameSubjectOf(left, right);
+}
+function sameSubjectOf(left, right) {
+	const a = left.subject;
+	const b = right.subject;
+	if (a.kind !== b.kind) return false;
+	if (a.kind === "round" && b.kind === "round") return a.businessRound === b.businessRound && a.searchRound === b.searchRound && a.source.taskId === b.source.taskId && a.source.runId === b.source.runId;
+	if (a.kind === "review" && b.kind === "review") return a.businessRound === b.businessRound && a.source.taskId === b.source.taskId && a.source.runId === b.source.runId && a.requestKey === b.requestKey;
+	return false;
+}
+/** The canonical digest of one work item: graph, epoch, role and subject, and nothing else. */
+function subjectDigest(key) {
+	return sha256Hex(canonicalize({
+		graphId: key.graphId,
+		epoch: key.epoch,
+		role: key.role,
+		subject: key.subject
+	}));
+}
+/** One work item's readable name, for logs, refusals and progress notes. */
+function keyLabel(key) {
+	const subject = key.subject;
+	const described = subject.kind === "round" ? `round ${subject.businessRound}` : `review of ${subject.source.taskId}#${subject.source.runId ?? "no-run"}`;
+	return `${key.role} of graph ${key.graphId} (epoch ${key.epoch}) for ${described}`;
+}
+/** The row one new attempt is persisted as, before anything is spawned for it. */
+function assignmentOf(request, at) {
+	return {
+		formatVersion: 1,
+		kind: "assignment",
+		graphId: request.key.graphId,
+		storeId: request.storeId,
+		epoch: request.key.epoch,
+		role: request.key.role,
+		subject: request.key.subject,
+		sessionId: String(request.sessionId),
+		actor: request.actor,
+		digest: request.digest,
+		...request.model === void 0 ? {} : { model: request.model },
+		at
+	};
+}
+/** One assignment's last completion, when it has one. */
+function settledWork(rows, assignment) {
+	const completion = completionFor(rows, assignment.sessionId);
+	return completion === void 0 ? void 0 : {
+		assignment,
+		completion
+	};
+}
+/**
+* Decide one key's application from the rows it already has, what DSH knows
+* about its sessions and what the store has spent. The decision is the whole
+* state machine of "may this key run now, wait, resume, or never again".
+*/
+function planAssignment(input) {
+	const { request, rows, sessions, budget } = input;
+	const mine = assignmentsForKey(rows, request.key);
+	const last = mine.at(-1);
+	if (last === void 0) {
+		if (budget.used >= budget.max) return {
+			kind: "refused",
+			code: "budget-exhausted",
+			detail: `store ${request.storeId} has spent its whole coordination allowance (${budget.used}/${budget.max})`
 		};
-	} catch {
-		continue;
+		return { kind: "assign" };
+	}
+	if (last.storeId !== request.storeId || last.role !== request.key.role) return {
+		kind: "refused",
+		code: "role-mismatch",
+		detail: `${keyLabel(request.key)} is recorded for ${last.role} of store ${last.storeId}`,
+		work: { assignment: last }
+	};
+	if (last.digest !== request.digest) return {
+		kind: "refused",
+		code: "subject-conflict",
+		detail: `${keyLabel(request.key)} already names a work item with another subject digest (${last.digest.slice(0, 19)}…) — a key names one work item and its contents cannot be changed`,
+		work: { assignment: last }
+	};
+	const settled = settledWork(rows, last);
+	if (settled !== void 0 && settled.completion.result.kind !== "interrupted") return {
+		kind: "reuse",
+		work: settled
+	};
+	if (settled !== void 0) {
+		if (mine.length >= MAX_ASSIGNMENT_ATTEMPTS) return {
+			kind: "refused",
+			code: "attempts-exhausted",
+			detail: `${keyLabel(request.key)} never reached model input ${MAX_ASSIGNMENT_ATTEMPTS} times (${settled.completion.result.detail}); the platform does not ask again`,
+			work: settled
+		};
+		return { kind: "assign" };
+	}
+	const facts = sessions.get(last.sessionId);
+	if (facts === void 0 || facts.presence === "missing") return {
+		kind: "assign",
+		reuseSessionId: last.sessionId
+	};
+	if (facts.presence === "stored" && !facts.turnClosed) return {
+		kind: "resume",
+		work: { assignment: last }
+	};
+	return {
+		kind: "in-flight",
+		work: { assignment: last }
+	};
+}
+
+//#endregion
+//#region src/coordination/completion.ts
+/** A non-empty string, or nothing. */
+function textOf(value) {
+	return typeof value === "string" && value.trim().length > 0 ? value : void 0;
+}
+/** The refs a store can resolve: reviews by `taskId#runId`, evidence bundles by id, criteria by id. */
+function knownReferences(snapshot) {
+	const known = /* @__PURE__ */ new Set();
+	for (const review of snapshot.reviews) known.add(reviewRef(review));
+	for (const evidence of snapshot.evidence) known.add(evidence.evidenceId);
+	for (const task of snapshot.tasks) for (const criterion of task.acceptanceCriteria) known.add(criterion.criterionId);
+	return known;
+}
+/** The refs a judgement may cite: the recorded reviews, evidence, sessions and review lineage already on the store. */
+function knownJudgementReferences(snapshot) {
+	const known = new Set(knownReferences(snapshot));
+	for (const review of snapshot.reviews) for (const ref of review.evidenceRefs) known.add(ref);
+	for (const run of snapshot.runs) if (run.sessionId !== void 0) known.add(run.sessionId);
+	for (const review of snapshot.reviews) if (review.sessionId !== void 0) known.add(review.sessionId);
+	return known;
+}
+/** Validate a supervisor's completion: the payload's own shape, and the evidence it rests on. */
+function validateSupervisorCompletion(input) {
+	const { payload, snapshot, binding } = input;
+	if (payload.businessAction !== "continue" && payload.businessAction !== "recover" && payload.businessAction !== "finish") return {
+		ok: false,
+		refusal: `businessAction "${String(payload.businessAction)}" is not continue | recover | finish`
+	};
+	const reason = textOf(payload.reason);
+	if (reason === void 0) return {
+		ok: false,
+		refusal: "reason must be non-empty free text"
+	};
+	if (!Array.isArray(payload.evidenceRefs) || payload.evidenceRefs.length === 0) return {
+		ok: false,
+		refusal: "evidenceRefs must name at least one recorded reference"
+	};
+	if (payload.trialCandidateRef !== void 0 && textOf(payload.trialCandidateRef) === void 0) return {
+		ok: false,
+		refusal: "trialCandidateRef must be a non-empty candidate id, or omitted"
+	};
+	if (binding.subject.kind !== "round") return {
+		ok: false,
+		refusal: "this session was not assigned a round; supervisor_complete concludes a round"
+	};
+	if (snapshot.runs.find((candidate) => candidate.runId === binding.subject.source.runId) === void 0) return {
+		ok: false,
+		refusal: `this session's assigned source run "${binding.sourceRunId ?? "(none)"}" is not in store ${binding.rootStoreId}`
+	};
+	const known = knownReferences(snapshot);
+	const unknown = [...new Set(payload.evidenceRefs)].filter((ref) => !known.has(ref));
+	if (unknown.length > 0) return {
+		ok: false,
+		refusal: `evidenceRefs cite ${unknown.join(", ")}, which store ${binding.rootStoreId} does not hold`
+	};
+	return {
+		ok: true,
+		payload: {
+			...payload,
+			reason,
+			evidenceRefs: [...new Set(payload.evidenceRefs)]
+		}
+	};
+}
+/** The non-empty strings of an unknown value, or nothing at all. */
+function nonEmptyStrings(value) {
+	if (!Array.isArray(value)) return [];
+	return value.filter((item) => typeof item === "string" && item.length > 0);
+}
+/** Validate the judgements the reviewer chose to make. Each one has to name a judged dimension and a verdict from the fixed vocabulary, cite at least one non-empty ref and carry a rationale. */
+function judgementsOf(value, known) {
+	if (value === void 0) return [];
+	if (!Array.isArray(value)) throw new Error("the \"judgements\" field is not an array");
+	return value.map((entry, index) => {
+		const dimension = entry.dimension;
+		if (!JUDGED_DIMENSIONS.includes(dimension)) throw new Error(`judgement ${index} names dimension "${String(dimension)}", which is not one of ${JUDGED_DIMENSIONS.join(", ")}`);
+		const verdict = entry.verdict;
+		if (!JUDGEMENT_VERDICTS.includes(verdict)) throw new Error(`judgement ${index} (${String(dimension)}) has verdict "${String(verdict)}", which is not adequate/inadequate/unknown`);
+		const refs = nonEmptyStrings(entry.evidenceRefs);
+		if (refs.length === 0) throw new Error(`judgement ${index} (${String(dimension)}) cites no evidence — a conclusion that rests on nothing is not recorded`);
+		const unresolvable = refs.filter((ref) => !known.has(ref));
+		if (unresolvable.length > 0) throw new Error(`judgement ${index} (${String(dimension)}) cites ${unresolvable.join(", ")}, which this store does not hold`);
+		const rationale = textOf(entry.rationale);
+		if (rationale === void 0) throw new Error(`judgement ${index} (${String(dimension)}) carries no rationale`);
+		return {
+			dimension,
+			verdict,
+			evidenceRefs: refs,
+			rationale
+		};
+	});
+}
+/** Validate the reviewer's proposals: a target name, an id and a reason, each non-empty. */
+function proposalsOf(value) {
+	if (value === void 0) return [];
+	if (!Array.isArray(value)) throw new Error("the \"proposals\" field is not an array");
+	return value.map((entry, index) => {
+		const targetType = textOf(entry.targetType);
+		const targetId = textOf(entry.targetId);
+		const rationale = textOf(entry.rationale);
+		if (targetType === void 0 || targetId === void 0 || rationale === void 0) throw new Error(`proposal ${index} needs a non-empty targetType, targetId and rationale`);
+		return {
+			targetType,
+			targetId,
+			rationale
+		};
+	});
+}
+/** The distinct non-empty strings of an optional ref list, or nothing. */
+function optionalRefs(value, field) {
+	if (value === void 0) return void 0;
+	if (!Array.isArray(value) || value.some((ref) => textOf(ref) === void 0)) throw new Error(`the "${field}" field must be an array of non-empty strings`);
+	return [...new Set(value)];
+}
+/** Validate a reviewer's completion and build the diagnosis it records. */
+function validateReviewCompletion(input) {
+	const { payload, snapshot, binding } = input;
+	const observation = textOf(payload.observation);
+	if (observation === void 0) return {
+		ok: false,
+		refusal: "observation must be the non-empty postmortem observation"
+	};
+	const conclusion = textOf(payload.conclusion);
+	if (conclusion === void 0) return {
+		ok: false,
+		refusal: "conclusion must be non-empty free text"
+	};
+	if (payload.confidence !== "high" && payload.confidence !== "medium" && payload.confidence !== "low") return {
+		ok: false,
+		refusal: `confidence "${String(payload.confidence)}" is not high/medium/low`
+	};
+	if (binding.subject.kind !== "review") return {
+		ok: false,
+		refusal: "this session was not assigned a review; reviewer_complete concludes a review"
+	};
+	const source = binding.subject.source;
+	if (snapshot.tasks.find((candidate) => candidate.taskId === source.taskId) === void 0) return {
+		ok: false,
+		refusal: `this session's assigned source task "${source.taskId}" is not in store ${binding.rootStoreId}`
+	};
+	const review = snapshot.reviews.find((item) => item.taskId === source.taskId && (item.runId ?? null) === source.runId);
+	if (review === void 0) return {
+		ok: false,
+		refusal: `store ${binding.rootStoreId} holds no review of ${reviewRef(source)}`
+	};
+	try {
+		const scope = textOf(payload.scope);
+		if (payload.scope !== void 0 && scope === void 0) throw new Error("the \"scope\" field must be a non-empty string");
+		const reviewRefs = optionalRefs(payload.reviewRefs, "reviewRefs");
+		const evidenceRefs = optionalRefs(payload.evidenceRefs, "evidenceRefs");
+		const relatedTaskIds = optionalRefs(payload.relatedTaskIds, "relatedTaskIds");
+		const known = knownReferences(snapshot);
+		const invalid = [
+			...[reviewRef(source), ...reviewRefs ?? []].filter((ref) => !known.has(ref)).map((ref) => `reviewRef "${ref}"`),
+			...(evidenceRefs ?? []).filter((ref) => !known.has(ref)).map((ref) => `evidenceRef "${ref}"`),
+			...(relatedTaskIds ?? []).filter((id) => !snapshot.tasks.some((candidate) => candidate.taskId === id)).map((id) => `relatedTaskId "${id}"`)
+		];
+		if (invalid.length > 0) return {
+			ok: false,
+			refusal: `the completion cites ${invalid.join(", ")} outside store ${binding.rootStoreId}`
+		};
+		const judgements = judgementsOf(payload.judgements, knownJudgementReferences(snapshot));
+		const proposals = proposalsOf(payload.proposals);
+		return {
+			ok: true,
+			payload: { diagnosis: {
+				diagnosisId: `review-agent-${binding.sessionId}`,
+				taskId: source.taskId,
+				observedFailure: observation,
+				scope: scope ?? `task ${source.taskId}`,
+				localizedCause: conclusion,
+				evidenceRefs: evidenceRefs ?? review.evidenceRefs,
+				reviewRefs: [...new Set([reviewRef(source), ...reviewRefs ?? []])],
+				confidence: payload.confidence,
+				proposals,
+				producedBy: {
+					kind: "agent",
+					sessionId: binding.sessionId
+				},
+				...relatedTaskIds === void 0 ? {} : { relatedTaskIds },
+				...judgements.length === 0 ? {} : { judgements }
+			} }
+		};
+	} catch (error) {
+		return {
+			ok: false,
+			refusal: `the completion's diagnosis fields are malformed: ${error instanceof Error ? error.message : String(error)}`
+		};
 	}
 }
-/** The text of one session's last assistant message — the reply a coordination agent's outcome is read from. */
-function lastAssistantText(events) {
-	const event = [...events].reverse().find((item) => item.type === "assistant/message");
-	if (event === void 0) return void 0;
-	const content = ((event.data?.message)?.content ?? []).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
-	return content.length === 0 ? void 0 : content;
+/** The base of one row for one assignment. */
+function completionRow(binding, result, at) {
+	return {
+		formatVersion: 1,
+		kind: "completion",
+		graphId: binding.graphId,
+		storeId: binding.rootStoreId,
+		epoch: binding.epoch,
+		role: binding.role,
+		sessionId: binding.sessionId,
+		result,
+		at
+	};
 }
-/** One review record's facts as the compact read-only block a supervisor's first request carries — criteria verdicts, the derived passed/total, and the effort counters. */
+/** The completion one accepted supervisor payload becomes, with the fields the platform derived. */
+function supervisorCompletion(binding, payload, derived) {
+	return completionRow(binding, {
+		kind: "completed",
+		businessAction: payload.businessAction,
+		reason: payload.reason,
+		evidenceRefs: [...payload.evidenceRefs],
+		trialCandidateRef: payload.trialCandidateRef ?? null,
+		methodDecision: derived.methodDecision,
+		searchNext: derived.searchNext,
+		...derived.approval === void 0 ? {} : { approval: derived.approval }
+	}, (/* @__PURE__ */ new Date()).toISOString());
+}
+/** The completion one accepted review becomes. */
+function reviewCompletion(binding, diagnosisId, confidence) {
+	return completionRow(binding, {
+		kind: "reviewed",
+		diagnosisId,
+		confidence
+	}, (/* @__PURE__ */ new Date()).toISOString());
+}
+/** The completion a session that ended without calling its tool leaves: recorded once, never re-asked. */
+function protocolFailure(binding, detail) {
+	return completionRow(binding, {
+		kind: "protocol-failure",
+		detail
+	}, (/* @__PURE__ */ new Date()).toISOString());
+}
+/** The completion a failed spawn or resume leaves: the session never reached model input. */
+function interrupted(binding, detail) {
+	return completionRow(binding, {
+		kind: "interrupted",
+		detail
+	}, (/* @__PURE__ */ new Date()).toISOString());
+}
+/** One on-disk row as the binding a completion is written against, for platform-written rows. */
+function bindingOfAssignment(assignment, completed) {
+	return {
+		graphId: assignment.graphId,
+		rootStoreId: assignment.storeId,
+		epoch: assignment.epoch,
+		role: assignment.role,
+		subject: assignment.subject,
+		sourceTaskId: assignment.subject.source.taskId,
+		sourceRunId: assignment.subject.source.runId,
+		sessionId: assignment.sessionId,
+		actor: assignment.actor,
+		at: assignment.at,
+		completed
+	};
+}
+
+//#endregion
+//#region src/coordination/method-read.ts
+function environmentPlane(ctx) {
+	return optionalService(ctx, "taskRuntime");
+}
+/** The revision this graph is running now, or `undefined` when no environment plane can answer. */
+async function activeMethodRevision(ctx, rootSessionId) {
+	const plane = environmentPlane(ctx);
+	try {
+		const view = await plane?.activeEnvironmentView?.(rootSessionId);
+		return view === void 0 ? void 0 : { revisionId: view.revisionId };
+	} catch {
+		return;
+	}
+}
+/**
+* The method records one business round produced. The round-scoped record store
+* belongs to the method tool surface; until it lands, no deployment can answer
+* and this returns nothing — which the completion reports as `retain`/`trial`
+* rather than as a promotion nobody recorded.
+*/
+async function roundMethodRecords(_ctx, _graphId, _businessRound) {
+	return [];
+}
+/** The last element of a list, or nothing. */
+function lastOf(items) {
+	return items.length === 0 ? void 0 : items[items.length - 1];
+}
+/** The platform's own account of what this round decided about the method. */
+function methodDecisionOf(records, trialCandidateRef) {
+	const discarded = lastOf(records.filter((record) => record.action === "discard"));
+	const rolledback = lastOf(records.filter((record) => record.action === "rollback"));
+	const published = lastOf(records.filter((record) => record.action === "publish"));
+	if (rolledback !== void 0) return {
+		methodDecision: "rollback",
+		...approvalOf(rolledback)
+	};
+	if (published !== void 0) return {
+		methodDecision: "promote",
+		...approvalOf(published)
+	};
+	if (discarded !== void 0) return {
+		methodDecision: "discard",
+		...approvalOf(discarded)
+	};
+	if (trialCandidateRef !== void 0) return {
+		methodDecision: "trial",
+		approval: {
+			source: "platform_policy",
+			ref: `trial:${trialCandidateRef}`
+		}
+	};
+	return { methodDecision: "retain" };
+}
+/** The approval source one publish/rollback record carried, when it carried one. */
+function approvalOf(record) {
+	if (record.approvalRef === null) return {};
+	return { approval: {
+		source: record.decidedBy === "human" ? "human" : "platform_policy",
+		ref: record.approvalRef
+	} };
+}
+/** Whether this round's search should continue; the search step never changes the business action. */
+function searchNextOf(input) {
+	if (input.steering === "stop-search") return "stop";
+	return input.businessRound >= input.rounds ? "stop" : "explore";
+}
+
+//#endregion
+//#region src/coordination/render.ts
+/** One review record's facts as the compact read-only block a supervisor's request carries. */
 function renderSupervisorReviewFacts(review) {
 	const criteria = review.criteria ?? [];
 	const passed = criteria.filter((criterion) => criterion.verdict === "pass").length;
@@ -1179,50 +1509,7 @@ function renderSupervisorReviewFacts(review) {
 	if (review.logTail !== void 0) lines.push(`logTail: ${review.logTail}`);
 	return lines.join("\n");
 }
-/** Executed descendants belong to an exact Run, including failed attempts, rather than a task's latest tree. */
-function runSubtree(snapshot, rootRunId) {
-	const selected = new Set([rootRunId]);
-	let changed = true;
-	while (changed) {
-		changed = false;
-		for (const run of snapshot.runs) if (run.parentRunId !== void 0 && selected.has(run.parentRunId) && !selected.has(run.runId)) {
-			selected.add(run.runId);
-			changed = true;
-		}
-	}
-	return snapshot.runs.filter((run) => selected.has(run.runId));
-}
-/** Sum readable session counters once; coverage keeps a missing reading distinct from zero effort. */
-function renderRecordedCostFacts(label, sessionIds, observations, unit = "sessions") {
-	const sessions = [...new Set(sessionIds)];
-	const tokens = {
-		uncachedInputTokens: 0,
-		outputTokens: 0,
-		cacheReadTokens: 0,
-		cacheWriteTokens: 0
-	};
-	const buckets = Object.keys(tokens);
-	let tokenSessions = 0;
-	let toolSessions = 0;
-	let calls = 0;
-	let failures = 0;
-	for (const sessionId$1 of sessions) {
-		const metrics = observations.get(sessionId$1);
-		if (metrics?.tokens !== void 0 && buckets.every((key) => Number.isFinite(metrics.tokens[key]) && metrics.tokens[key] >= 0)) {
-			tokenSessions += 1;
-			for (const key of buckets) tokens[key] += metrics.tokens[key];
-		}
-		if (metrics?.toolCalls !== void 0 && [metrics.toolCalls.calls, metrics.toolCalls.failures].every((value) => Number.isFinite(value) && value >= 0)) {
-			toolSessions += 1;
-			calls += metrics.toolCalls.calls;
-			failures += metrics.toolCalls.failures;
-		}
-	}
-	const usage = tokenSessions === 0 ? "tokens unknown" : `tokens ${Object.values(tokens).reduce((sum, value) => sum + value, 0)} (input ${tokens.uncachedInputTokens}, output ${tokens.outputTokens}, cache read ${tokens.cacheReadTokens}, cache write ${tokens.cacheWriteTokens})`;
-	const tools = toolSessions === 0 ? "toolCalls unknown" : `toolCalls ${calls} (${failures} failed)`;
-	return `${label}: ${sessions.length} ${unit}; ${usage}; ${tools}; coverage tokens ${tokenSessions}/${sessions.length}, tools ${toolSessions}/${sessions.length}; monetary cost unknown (no recorded price).`;
-}
-/** The effort counters of one review record, one clause per counter that exists — an absent field means "not observed". */
+/** The effort counters of one review record, one clause per counter that exists. */
 function metricsLine(review) {
 	const metrics = review.metrics;
 	if (metrics === void 0) return void 0;
@@ -1234,32 +1521,476 @@ function metricsLine(review) {
 	if (metrics.evidenceLogs !== void 0) parts.push(`evidenceLogs ${metrics.evidenceLogs}`);
 	return parts.length === 0 ? void 0 : parts.join(" — ");
 }
+/** The judged dimensions rendered as report lines. */
+function renderJudgements(judgements) {
+	return judgements.map((item) => `  ${item.dimension}: ${item.verdict} — ${item.rationale} refs [${item.evidenceRefs.join(", ")}]`);
+}
+/** One work item as a reader reads it: its identity, its role, how it stands and how it ended. */
+function renderCoordinationWork(work) {
+	const assignment = work.assignment;
+	const subject = assignment.subject;
+	const described = subject.kind === "round" ? `round ${subject.businessRound}` : `review of ${subject.source.taskId}#${subject.source.runId ?? "no-run"}${subject.requestKey === null ? "" : ` (key ${subject.requestKey})`}`;
+	const completion = work.completion;
+	const status = completion === void 0 ? "open" : completion.result.kind === "reviewed" ? `settled (diagnosis ${completion.result.diagnosisId})` : completion.result.kind === "completed" ? `settled (${completion.result.businessAction})` : completion.result.kind;
+	return `${assignment.role} ${described}: session ${assignment.sessionId} [${status}]`;
+}
+/** One completion as a single line: what was concluded, on what, and what was closed. */
+function renderCompletion(completion) {
+	const result = completion.result;
+	switch (result.kind) {
+		case "completed": return [
+			`supervisor_complete: ${result.businessAction} — ${result.reason}`,
+			`${result.evidenceRefs.length} evidence ref(s) [${result.evidenceRefs.join(", ")}]`,
+			`method ${result.methodDecision}; search ${result.searchNext}`,
+			...result.trialCandidateRef === null ? [] : [`trial candidate ${result.trialCandidateRef}`],
+			...result.approval === void 0 ? [] : [`approval ${result.approval.source}:${result.approval.ref}`],
+			"writes are closed for this session; the platform opens the next execution after this session settles"
+		].join("; ");
+		case "reviewed": return `reviewer_complete: diagnosis ${result.diagnosisId} [${result.confidence}] recorded; writes are closed for this session`;
+		case "protocol-failure": return `protocol-failure: ${result.detail}`;
+		case "interrupted": return `interrupted: ${result.detail}`;
+	}
+}
+/** The sum of several receipts' usages, or `undefined` when not one of them reported. */
+function aggregateUsage(usages) {
+	const reported = usages.filter((usage) => usage.status === "reported");
+	if (reported.length === 0) return void 0;
+	const runIds = [...new Set(reported.flatMap((usage) => usage.runIds))];
+	const incompleteRuns = [...new Set(reported.flatMap((usage) => usage.incompleteRuns))];
+	const withTokens = reported.filter((usage) => usage.tokens !== void 0);
+	const withCalls = reported.filter((usage) => usage.toolCalls !== void 0);
+	const tokens = withTokens.length === 0 ? void 0 : withTokens.reduce((sum, usage) => ({
+		uncachedInputTokens: sum.uncachedInputTokens + usage.tokens.uncachedInputTokens,
+		outputTokens: sum.outputTokens + usage.tokens.outputTokens,
+		cacheReadTokens: sum.cacheReadTokens + usage.tokens.cacheReadTokens,
+		cacheWriteTokens: sum.cacheWriteTokens + usage.tokens.cacheWriteTokens
+	}), {
+		uncachedInputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0
+	});
+	const toolCalls = withCalls.length === 0 ? void 0 : withCalls.reduce((sum, usage) => ({
+		calls: sum.calls + usage.toolCalls.calls,
+		failures: sum.failures + usage.toolCalls.failures
+	}), {
+		calls: 0,
+		failures: 0
+	});
+	return {
+		status: "reported",
+		runIds,
+		incompleteRuns,
+		...tokens === void 0 ? {} : { tokens },
+		...toolCalls === void 0 ? {} : { toolCalls }
+	};
+}
 /**
-* The supervisor attempts one diagnosis left, as the review pack renders them:
-* the session each attempt ran under and how it ended, or a named absence. Only
-* a graph that runs an RSI loop has such attempts — every other store's
-* diagnoses are dropped by the graph's root supervisor.
+* One cost line, from execution receipts alone. A reading the receipts do not
+* carry stays `unknown`: nothing here walks session logs, and nothing invents a
+* number a Run did not record.
 */
-function supervisorAttemptsLine(diagnosisId, attempts) {
-	const mine = attempts.filter((attempt) => attempt.role === "supervisor" && attempt.diagnosisId === diagnosisId);
-	if (mine.length === 0) return "no supervisor attempt — a graph without RSI settings runs no platform supervisor for its diagnoses";
-	return mine.map((attempt) => {
-		const status = attempt.settlement?.status ?? "in-flight";
-		const note = attempt.settlement?.note === void 0 ? "" : ` — ${attempt.settlement.note}`;
-		return `supervisor attempt ${attempt.sessionId} [${status}]${note}`;
-	}).join("; ");
+function renderExecutionCost(label, usage, runs) {
+	if (usage === void 0) return `${label}: ${runs} run(s); tokens unknown; toolCalls unknown; monetary cost unknown (no recorded price).`;
+	const tokens = usage.tokens === void 0 ? "tokens unknown" : `tokens ${Object.values(usage.tokens).reduce((sum, value) => sum + value, 0)} (input ${usage.tokens.uncachedInputTokens}, output ${usage.tokens.outputTokens}, cache read ${usage.tokens.cacheReadTokens}, cache write ${usage.tokens.cacheWriteTokens})`;
+	const tools = usage.toolCalls === void 0 ? "toolCalls unknown" : `toolCalls ${usage.toolCalls.calls} (${usage.toolCalls.failures} failed)`;
+	const coverage = usage.incompleteRuns.length === 0 ? "coverage complete" : `coverage incomplete for run(s) ${usage.incompleteRuns.join(", ")}`;
+	return `${label}: ${usage.runIds.length} run(s); ${tokens}; ${tools}; ${coverage}; monetary cost unknown (no recorded price).`;
 }
 
 //#endregion
-//#region src/coordination/spawn-under-claim.ts
-/** Claim the attempt and spawn its agent, or record the attempt interrupted when the spawn never reached model input. */
-async function spawnUnderClaim(input) {
-	await input.admission.claim(input.request);
+//#region src/coordination/prompts.ts
+/** The lines describing where this round stands and what its evidence is. */
+function locationLines(facts) {
+	const { run, review } = facts;
+	const artifacts = run.artifacts ?? [];
+	return [
+		`Store: the root store of graph "${facts.graphName}"; root task run: ${run.runId} (session ${run.sessionId ?? "unrecorded"}).`,
+		`Round objective as recorded on the graph: ${facts.objective}`,
+		`Metrics to explore and improve: ${facts.metrics.join("; ") || "derive useful measurements from the task and state the assumptions"}.`,
+		"Use the current task criteria to judge this execution, and its findings to improve reusable paths and experience.",
+		review === void 0 ? "The store holds no review record for this run." : `The round's review settled ${review.outcome}. ${renderSupervisorReviewFacts(review)}`,
+		"Where this round's delivery and evidence live:",
+		run.placement?.workspacePath === void 0 ? "- the run recorded no separate working tree; read the store's evidence bundles" : `- the run's working tree: ${run.placement.workspacePath} (read/glob/grep it directly)`,
+		...artifacts.length === 0 ? ["- the run recorded no artifacts of its own"] : artifacts.map((artifact) => `- artifact ${artifact.artifactId} (${artifact.kind}) at ${artifact.uri}${artifact.digest === void 0 ? "" : ` sha256:${artifact.digest}`}`),
+		review === void 0 || review.evidenceRefs.length === 0 ? "- the review recorded no evidence ids" : `- store evidence ids: ${review.evidenceRefs.join(", ")} (context_read kind:"evidence")`
+	];
+}
+/** The lines describing the method this graph is running now. */
+function methodLines(facts) {
+	return [`Active method revision: ${facts.method.activeRevision ?? "unknown"}`, `Last revision published by this graph: ${facts.method.lastPublishedRevision ?? "none recorded"}`];
+}
+/** The lines of the search-strategy view, when this deployment has one. */
+function strategyLines(facts) {
+	const strategy = facts.strategy;
+	if (strategy === void 0) return [];
+	return [
+		`Search strategy: edit budget ${strategy.editBudget}; steering ${strategy.steering}.`,
+		...strategy.untestedMechanisms.length === 0 ? [] : [`Untested mechanisms worth a round: ${strategy.untestedMechanisms.join(", ")}.`],
+		...strategy.lines
+	];
+}
+/** The one supervision request one round's supervisor receives. */
+function supervisionPrompt(facts) {
+	const verified = facts.outcome === "verified";
+	return [
+		`You are the platform RSI loop's supervisor for graph "${facts.graphName}" (${facts.graphId}), epoch ${facts.epoch}, round ${facts.businessRound} of ${facts.rounds} (search round ${facts.searchRound}).`,
+		...locationLines(facts),
+		...facts.cost,
+		...methodLines(facts),
+		...strategyLines(facts),
+		`Cite diagnosis:${facts.diagnosisId} when you record evidence for this round.`,
+		"",
+		...verified ? ["The round settled verified against the store's own acceptance criteria. Review its delivery and its reusable method, then choose one improvement or retain the current method."] : [`The round settled ${facts.run.status}. Debug that failure from its evidence, review and delivery, and choose the reusable method change that helps the next attempt. A one-off environmental or input repair is a repair, not a method change.`],
+		...facts.finalRound ? ["Final round: review this execution’s paths and experience for retention or revision. Settle your findings; this graph completes after your completion, and later Tasks can test any publication."] : [],
+		"Compare candidates with the method tools you have and publish within your authority.",
+		"",
+		"End this session by calling supervisor_complete with exactly these parameters: businessAction ('continue' when the business work should run another round, 'recover' when the next round must repair this failure, 'finish' when it should not), reason (non-empty free text), evidenceRefs (at least one recorded review/evidence/criterion reference), and trialCandidateRef (only when this round should explicitly try one candidate).",
+		"The platform derives the method decision and the approval source from what your round actually recorded; they are not parameters and cannot be asserted.",
+		"Calling it closes this session’s write access; reads, evidence and findings stay available. The platform opens the next execution only after this session’s log has been flushed. A session that ends its turn without calling the tool is a protocol failure, and the platform will not ask again — raising the graph’s epoch is the way to try a round once more."
+	].join("\n");
+}
+
+//#endregion
+//#region src/coordination/session-facts.ts
+/** The tools whose call in a session's own log marks that session's work as concluded. */
+const COMPLETION_TOOLS = ["supervisor_complete", "reviewer_complete"];
+/** One session's log, or `undefined` when this process cannot read it. */
+async function logOf$1(ctx, sessionId$1) {
+	const query = optionalService(ctx, "sessionQuery");
+	if (query === void 0) return void 0;
+	try {
+		return await query.readSession(sessionId$1);
+	} catch {
+		return;
+	}
+}
+/** Whether one event is a tool call to a completion tool. */
+function isCompletionCall(event) {
+	if (event.type !== "tool/call") return false;
+	const name = event.data?.name;
+	return typeof name === "string" && COMPLETION_TOOLS.includes(name);
+}
+/** The turn facts one persisted log carries. */
+function turnFacts(events) {
+	let open$1 = false;
+	let hasTurn = false;
+	for (const event of events) if (event.type === "turn/start") {
+		hasTurn = true;
+		open$1 = true;
+	} else if (event.type === "turn/end") open$1 = false;
+	return {
+		hasTurn,
+		turnClosed: hasTurn && !open$1
+	};
+}
+/** Whether a stored session exists, without insisting on either backend's API. */
+async function stored(ctx, sessionId$1) {
+	const persistence = optionalService(ctx, "sessionPersistence");
+	if (persistence === void 0) return false;
+	if (typeof persistence.stat === "function") try {
+		return await persistence.stat(sessionId$1) !== void 0;
+	} catch {
+		return false;
+	}
+	if (typeof persistence.list === "function") try {
+		return (await persistence.list()).some((item) => String(item.header.id) === sessionId$1);
+	} catch {
+		return false;
+	}
+	return false;
+}
+/** One session's facts: live from the registry, otherwise from the persisted log. */
+async function readSessionFacts(ctx, sessionId$1) {
+	const live = optionalService(ctx, "agents")?.get(sessionId$1);
+	const log = await logOf$1(ctx, sessionId$1);
+	const turns = turnFacts(log?.events ?? []);
+	return {
+		sessionId: sessionId$1,
+		presence: live !== void 0 ? "live" : await stored(ctx, sessionId$1) ? "stored" : "missing",
+		...live?.status === "idle" || live?.status === "running" ? { status: live.status } : {},
+		hasTurn: turns.hasTurn,
+		turnClosed: turns.turnClosed,
+		completionCall: (log?.events ?? []).some(isCompletionCall)
+	};
+}
+/** The facts of several sessions, read together. */
+async function readSessionFactsOf(ctx, sessionIds) {
+	const facts = /* @__PURE__ */ new Map();
+	await Promise.all([...new Set(sessionIds)].map(async (sessionId$1) => {
+		facts.set(sessionId$1, await readSessionFacts(ctx, sessionId$1));
+	}));
+	return facts;
+}
+/** DSH's own durability barrier: every session log a writer appended so far is where the next reader finds it. */
+async function flushSessions(ctx) {
+	const persistence = optionalService(ctx, "sessionPersistence");
+	if (typeof persistence?.flush === "function") await persistence.flush();
+}
+/** Whether one assignment has consumed its store's budget: its session reached the store at all. */
+function sessionSpent(facts) {
+	return facts !== void 0 && facts.presence !== "missing";
+}
+/** Whether one session's turn has ended and nothing further is running in it. */
+function turnSettled(facts) {
+	if (facts === void 0) return false;
+	if (facts.status === "running") return false;
+	return facts.turnClosed;
+}
+
+//#endregion
+//#region src/coordination/reducer.ts
+/** The recovery mode one business action asks for, or nothing when the action and the round disagree. */
+function nextRoundMode(action, outcome) {
+	if (action === "continue") return outcome === "verified" ? "improve" : void 0;
+	if (action === "recover") return outcome === "failed" ? "recovery" : void 0;
+}
+/** The round work item's key: one round, one supervisor, per epoch. */
+function roundKeyOf(input) {
+	return {
+		graphId: input.graphId,
+		epoch: input.epoch,
+		role: "supervisor",
+		subject: {
+			kind: "round",
+			businessRound: input.businessRound,
+			searchRound: input.businessRound,
+			source: {
+				taskId: input.taskId,
+				runId: input.runId
+			}
+		}
+	};
+}
+/** The assignment that claimed one key, if any. */
+function claimedFor(rows, key) {
+	const last = assignmentsForKey(rows, key).at(-1);
+	if (last === void 0) return void 0;
+	const completion = completionFor(rows, last.sessionId);
+	return {
+		assignment: last,
+		...completion === void 0 ? {} : { completion }
+	};
+}
+/** The reduction of one round that already has a completion. */
+function ofCompletion(input) {
+	const { facts, key, work, run, outcome, businessRound } = input;
+	const completion = work.completion;
+	const config = facts.graph.config;
+	const epoch = config.epoch ?? 1;
+	if (completion.result.kind === "protocol-failure") return {
+		kind: "suspended",
+		phase: "protocol-failure",
+		detail: `${keyLabel(key)} ended without a completion call (${completion.result.detail}); raise the graph's epoch to try this round again`
+	};
+	if (completion.result.kind !== "completed") return {
+		kind: "suspended",
+		phase: "failed",
+		detail: `${keyLabel(key)} settled ${completion.result.kind}, which no round does`
+	};
+	const action = completion.result.businessAction;
+	const mode = nextRoundMode(action, outcome);
+	if (action === "finish") return {
+		kind: "suspended",
+		phase: outcome === "verified" ? "done" : "failed",
+		detail: `${keyLabel(key)} finished the business work: round ${businessRound} settled ${run.status} — ${completion.result.reason}`
+	};
+	if (mode === void 0) return {
+		kind: "suspended",
+		phase: "protocol-failure",
+		detail: `${keyLabel(key)} asked to "${action}" a round that settled ${run.status}; the two disagree, so no execution is opened`
+	};
+	if (businessRound >= config.iterationRounds) return {
+		kind: "suspended",
+		phase: outcome === "verified" ? "done" : "failed",
+		detail: `${businessRound}/${config.iterationRounds} rounds settled; the search is over and the business outcome stays ${run.status} — ${completion.result.reason}`
+	};
+	const nextRound = businessRound + 1;
+	const nextKey = roundRequestKey(facts.graph.id, epoch, nextRound);
+	if (roundRunOf(facts.snapshot, run.taskId, nextKey) !== void 0) return {
+		kind: "idle",
+		detail: `round ${nextRound} is already open`
+	};
+	if (!facts.rootLive) return {
+		kind: "idle",
+		detail: `round ${nextRound} cannot be opened here: the graph's root session is not live in this process`
+	};
+	const trial = completion.result.trialCandidateRef;
+	return {
+		kind: "open-round",
+		work,
+		request: {
+			businessRound: nextRound,
+			sourceRunId: run.runId,
+			sourceDiagnosisId: roundDiagnosisId(facts.graph.id, epoch, businessRound),
+			requestKey: nextKey,
+			mode,
+			...trial === null ? {} : { trialCandidateRef: trial },
+			...mode === "improve" ? { reuses: [] } : {}
+		}
+	};
+}
+/**
+* One pass's decision. The graph's protocol marker and the store's own facts are
+* the only inputs: a legacy graph never reaches this function at all (the driver
+* refuses to build these facts for it).
+*/
+function reduce(facts) {
+	const config = facts.graph.config;
+	const epoch = config.epoch ?? 1;
+	const root = rootTaskOf(facts.snapshot);
+	if (root === void 0) return {
+		kind: "idle",
+		detail: "the store holds no root task yet"
+	};
+	const rounds = terminalRootRuns(facts.snapshot, root.taskId);
+	if (rounds.length === 0) return {
+		kind: "idle",
+		detail: "the root task has no settled round yet"
+	};
+	const businessRound = rounds.length;
+	const run = rounds.at(-1);
+	if (businessRound > config.iterationRounds) return {
+		kind: "suspended",
+		phase: run.status === "verified" ? "done" : "failed",
+		detail: `round ${businessRound} settled beyond the graph's ${config.iterationRounds} configured round(s); nothing more is opened`
+	};
+	const outcome = run.status === "verified" ? "verified" : "failed";
+	const key = roundKeyOf({
+		graphId: facts.graph.id,
+		epoch,
+		businessRound,
+		taskId: root.taskId,
+		runId: run.runId
+	});
+	if (!sameCoordinationKey(key, facts.candidate.key)) return {
+		kind: "idle",
+		detail: `this pass's work item does not describe round ${businessRound}; the driver re-derives it next time`
+	};
+	const claimed = claimedFor(facts.rows, key);
+	const interrupted$1 = claimed?.completion?.result.kind === "interrupted";
+	if (claimed?.completion !== void 0 && !interrupted$1) return ofCompletion({
+		facts,
+		key,
+		work: claimed,
+		run,
+		outcome,
+		businessRound
+	});
+	if (claimed !== void 0 && !interrupted$1) {
+		const session = claimed.assignment.sessionId;
+		const factsOfSession = facts.sessions.get(session);
+		if ((factsOfSession?.hasTurn ?? false) && turnSettled(factsOfSession)) return {
+			kind: "protocol-failure",
+			work: claimed,
+			detail: `${keyLabel(key)}: session ${session} ended its turn without calling supervisor_complete; the round is recorded as a protocol failure and the platform does not ask again`
+		};
+		return {
+			kind: "idle",
+			detail: `${keyLabel(key)} is taken up by session ${session}; the loop waits for it`
+		};
+	}
+	const plan = planAssignment({
+		request: facts.candidate,
+		rows: facts.rows,
+		sessions: facts.sessions,
+		budget: facts.budget
+	});
+	if (plan.kind === "refused") return {
+		kind: "suspended",
+		phase: "failed",
+		detail: `${plan.code}: ${plan.detail}`
+	};
+	if (plan.kind === "assign" || plan.kind === "resume") return {
+		kind: "supervise",
+		plan,
+		request: facts.candidate
+	};
+	return {
+		kind: "idle",
+		detail: `${keyLabel(key)} is already claimed; the loop waits for it`
+	};
+}
+
+//#endregion
+//#region src/coordination/roles.ts
+/** The host preset both coordination roles are composed from; the runtime installs the role's own policy. */
+const COORDINATION_PRESET = "singularity-coordinator";
+/** The read-only investigation surface: what a coordination session may still do after writes are closed. */
+const COORDINATION_READ_ONLY = [
+	"task_review_pack",
+	"task_read",
+	"task_status",
+	"context_read",
+	"capability_list",
+	"task_template_list",
+	"method_list",
+	"skill",
+	"read",
+	"glob",
+	"grep"
+];
+/** The host preset a review session is composed from — the same composition, a different role. */
+const REVIEWER_PRESET = COORDINATION_PRESET;
+/**
+* The method tools a supervisor needs. Until the method tool surface lands
+* (`tools/method-shared.ts` owns `METHOD_SUPERVISOR_BASELINE`), this constant
+* holds the evolution chain that plays that role today; the name is the seam, so
+* the switch is one import.
+*/
+const METHOD_SUPERVISOR_BASELINE = [
+	"evolution_propose",
+	"evolution_candidate",
+	"evolution_prepare",
+	"evolution_replay",
+	"evolution_gate",
+	"evolution_decide",
+	"evolution_apply",
+	"evolution_list"
+];
+/** The reviewer's whole surface: read-only, plus its own completion tool. */
+const REVIEWER_BASELINE = [
+	...COORDINATION_READ_ONLY,
+	"task_review_agent",
+	"reviewer_complete"
+];
+/** The supervisor's surface: the read-only investigation tools, the method tools and its own completion tool. */
+const SUPERVISOR_BASELINE = [
+	...COORDINATION_READ_ONLY,
+	"task_library",
+	"task_review_agent",
+	...METHOD_SUPERVISOR_BASELINE,
+	"supervisor_complete"
+];
+/** The grant one review session is spawned with. */
+function reviewerGrant() {
+	return {
+		capabilities: [],
+		baseline: REVIEWER_BASELINE,
+		keepPresetTools: false
+	};
+}
+/** The grant one round's supervisor is spawned with. */
+function supervisorGrant() {
+	return {
+		capabilities: [],
+		baseline: SUPERVISOR_BASELINE,
+		keepPresetTools: false
+	};
+}
+
+//#endregion
+//#region src/coordination/spawn-assignment.ts
+/** Write the assignment, spawn the agent, and let the spawn's own door read the row back. */
+async function spawnAssignment(input) {
+	const { ctx, request } = input;
+	const row = assignmentOf(request, (/* @__PURE__ */ new Date()).toISOString());
+	await appendAssignment(row);
 	const prompt = await input.prompt();
-	const pinned = graphAgentOptions(await input.ctx.graphs.graphForSession(input.parent.id));
-	let spawnFailure;
-	const handle = await input.ctx.agentRuntime.spawn(input.parent, {
-		sessionId: input.sessionId,
+	const pinned = graphAgentOptions(await ctx.graphs.graphForSession(input.parent.id));
+	let failure;
+	const handle = await ctx.agentRuntime.spawn(input.parent, {
+		sessionId: request.sessionId,
 		name: input.name,
 		prompt: [{
 			type: "text",
@@ -1268,32 +1999,21 @@ async function spawnUnderClaim(input) {
 		agentPreset: input.preset,
 		grant: input.grant,
 		permissionPreset: "danger-full-access",
-		coordinationRole: input.request.role === "supervisor" ? "supervisor" : "reviewer",
+		coordinationRole: input.role,
 		...pinned === void 0 ? {} : { agentOptions: pinned },
 		beforePrompt: async () => {
-			await input.admission.start({
-				taskId: input.taskId,
-				sessionId: input.sessionId,
-				actor: input.actor
-			});
-			const back = await readReviewerDelegation(input.sessionId);
-			if (back === void 0 || back.rootStoreId !== input.storeId || back.taskId !== input.taskId) throw new Error(`${input.errorLabel} "${input.sessionId}" could not be read back from the ledger (expected task ${input.taskId} in ${input.storeId}); no model input was sent`);
+			const binding = await readCoordinationBinding(String(request.sessionId)).catch(() => void 0);
+			if (binding === void 0 || binding.graphId !== request.key.graphId || binding.rootStoreId !== request.storeId || binding.role !== request.key.role) throw new Error(`coordination: the assignment of session "${String(request.sessionId)}" could not be read back from ${request.storeId} (expected ${request.key.role} of graph ${request.key.graphId}); no model input was sent`);
 		},
 		...input.signal === void 0 ? {} : { signal: input.signal }
 	}).catch((error) => {
-		spawnFailure = error instanceof Error ? error.message : String(error);
+		failure = error instanceof Error ? error.message : String(error);
 	});
 	if (handle === void 0) {
-		await settleReviewAgentAttempt({
-			rootStoreId: input.storeId,
-			taskId: input.taskId,
-			sessionId: input.sessionId,
-			status: "interrupted",
-			note: `${input.failureLabel}: ${spawnFailure ?? "unknown error"}`
-		}).catch(() => void 0);
+		await recordCompletion(interrupted(bindingOfAssignment(row, false), `the coordination session could not be spawned: ${failure ?? "unknown error"}`)).catch(() => void 0);
 		return {
 			kind: "spawn-failed",
-			failure: spawnFailure ?? "unknown error"
+			failure: failure ?? "unknown error"
 		};
 	}
 	return {
@@ -1312,604 +2032,400 @@ function backgroundScan(log, label, work) {
 }
 
 //#endregion
-//#region src/coordination/rsi-loop.ts
-/**
-* How many times a stalled supervisor is re-prompted before its unfinished
-* supervision is recorded as blocked. Exhausting reminders never completes a
-* publication and never opens the next round.
-*/
-const MAX_SUPERVISOR_REPROMPTS = 3;
-/**
-* The supervisor's tool surface: the read-only investigation tools, the store's
-* own records, and the nine-step evolution chain. `task_recover` is deliberately
-* absent — round scheduling belongs to the driver, so the agent that publishes a
-* round is never the one that opens the next.
-*/
-const SUPERVISOR_BASELINE = [
-	"task_review_pack",
-	"task_review_agent",
-	"task_read",
-	"task_status",
-	"context_read",
-	"capability_list",
-	"task_library",
-	"task_template_list",
-	"evolution_propose",
-	"evolution_candidate",
-	"evolution_prepare",
-	"evolution_replay",
-	"evolution_gate",
-	"evolution_decide",
-	"evolution_apply",
-	"evolution_list",
-	"read",
-	"glob",
-	"grep",
-	"skill"
-];
-/** The grant one round's supervisor is spawned with. */
-function supervisorGrant() {
-	return {
-		capabilities: [],
-		baseline: SUPERVISOR_BASELINE,
-		keepPresetTools: false
-	};
-}
-/** The id of the platform diagnosis one round's run is recorded under: the supervisor cites it and the next round's recovery names it. */
-function roundDiagnosisId(graphId, round) {
-	return `rsi-${graphId}-round-${round}`;
-}
-/** The request key that opens one round (A7 §3): one key names one attempt, so re-asking returns the attempt that key already names. */
-function roundRequestKey(graphId, round) {
-	return `rsi-${graphId}-round-${round}`;
-}
-/** The request key of one round's supervision attempt: one round is one supervisor hand-off, however many attempts it takes. */
-function supervisorRequestKey(graphId, round) {
-	return `rsi-supervise-${graphId}-round-${round}`;
-}
-/** The `$DSH_HOME` this deployment's graph libraries and bubbles live under, by the same fallback the library uses. */
-function bubbleHome() {
-	return process.env.DSH_HOME || join(homedir(), ".dsh");
-}
-/** The store's own root task: the one task that never had a parent (§1.6: one root per store, ever). */
-function rootTaskOf(snapshot) {
-	return snapshot.tasks.find((task) => task.parentTaskId === void 0);
-}
-/** The store's own first attempt of the root task: the run that is not a recovery of anything. */
-function firstRootRun(snapshot, rootTaskId) {
-	return snapshot.runs.find((run) => run.taskId === rootTaskId && run.recovery === void 0);
-}
-/**
-* Every terminal-settled run of the root task, oldest first — the store's own
-* count of rounds. A round is a settled attempt, verified or not: the driver
-* schedules on outcomes, and a failed non-final round still has its supervisor
-* and its next recovery round. The configured count includes the original run.
-*/
-function terminalRootRuns(snapshot, rootTaskId) {
-	return snapshot.runs.filter((run) => run.taskId === rootTaskId && isTerminalRunStatus(run.status)).sort((left, right) => left.startedAt < right.startedAt ? -1 : left.startedAt > right.startedAt ? 1 : left.runId < right.runId ? -1 : left.runId > right.runId ? 1 : 0);
-}
-/** The run one round opened, read from the store's own attempt record by its request key. */
-function roundRunOf(snapshot, rootTaskId, requestKey) {
-	return recoveryAttemptWithKey(snapshot, rootTaskId, requestKey);
-}
-/** The review record of one run, as the store holds it. */
-function reviewOfRun(snapshot, runId) {
-	return snapshot.reviews.find((review) => review.runId === runId);
-}
-/** One proposal's state as a reader says it: the id, its status, and the decision when it has one. */
-function proposalLine(proposals) {
-	return proposals.length === 0 ? "no proposal is recorded for this round" : proposals.map((proposal) => `${proposal.proposalId} [${proposal.status}]${proposal.decision === void 0 ? "" : ` ${proposal.decision}`}`).join("; ");
-}
-/** A publication is complete only when every apply-supported proposal of this round is settled. Research-only target types do not block it. */
-function publicationOf(proposals) {
-	const executable = proposals.filter((proposal) => APPLYABLE_TARGET_TYPES.includes(proposal.targetType));
-	const applied = executable.filter((proposal) => proposal.status === "applied" && proposal.rolledback === void 0).map((proposal) => proposal.proposalId);
-	const unresolved = executable.filter((proposal) => proposal.status !== "applied" && proposal.status !== "rolledback" && !(proposal.status === "decided" && (proposal.decision === "REJECT" || proposal.decision === "KEEP_FOR_FURTHER_RESEARCH"))).map((proposal) => proposal.proposalId);
-	return {
-		done: executable.length > 0 && unresolved.length === 0,
-		applied,
-		unresolved,
-		note: proposalLine(proposals)
-	};
-}
-/** Driver and agents read the same graph-scoped ledger. Legacy compositions retain their global reader. */
-async function evolutionOf(ctx, sessionId$1) {
-	const plane = ctx.evolution;
-	const evolution = typeof plane?.forSession === "function" ? await plane.forSession(sessionId$1) : plane;
-	const list = evolution?.list;
-	return typeof list !== "function" ? void 0 : {
-		list: () => list.call(evolution),
-		...evolution?.experiments === void 0 ? {} : { experiments: (proposalId) => evolution.experiments(proposalId) }
-	};
-}
-/**
-* The RSI loop driver of one deployment. One instance is installed per process
-* (see {@link installRsiLoopDriver}); every graph with `rsi` settings gets one
-* {@link LoopState}, and graphs without them are never touched.
-*/
-var RsiLoopDriver = class {
+//#region src/coordination/driver.ts
+/** This process's coordination driver over the graph registry. */
+var CoordinationDriver = class {
 	ctx;
 	log;
-	onProgress;
-	loops = /* @__PURE__ */ new Map();
+	fallbackMs;
+	settleGraceMs;
 	byStore = /* @__PURE__ */ new Map();
 	registered = /* @__PURE__ */ new Set();
-	/** One promise chain per graph: a terminal fact, an activation and the boot seed never interleave inside one loop. */
-	queues = /* @__PURE__ */ new Map();
+	/** Graphs holding an unsettled work item: the only ones the fallback tick reads. */
+	active = /* @__PURE__ */ new Set();
 	disposers = [];
+	timer;
 	stopped = false;
 	constructor(ctx, options = {}) {
 		this.ctx = ctx;
 		this.log = options.log ?? warnLine(ctx);
-		this.onProgress = options.onProgress;
+		this.fallbackMs = options.fallbackMs ?? 2e3;
+		this.settleGraceMs = options.settleGraceMs ?? 3e4;
 	}
-	/** Subscribe to the two facts that move a loop — one terminal review, one graph activation — and seed from the persisted registry. */
+	/** Subscribe to every wake-up source, take the registry's graphs over, and start the fallback tick. */
 	install() {
-		this.disposers.push(this.ctx.taskRuntime.registerTerminalReviewListener((fact) => this.handleFact(fact)));
-		this.disposers.push(this.ctx.on("graphs/selected", (graph) => {
-			this.observeGraph(graph);
+		this.log(`coordination: assignments are kept in ${coordinationFile()}`);
+		this.warnAboutRetiredNames();
+		this.disposers.push(this.ctx.taskRuntime.registerTerminalReviewListener((fact) => {
+			const graphId = this.byStore.get(fact.storeId);
+			if (graphId !== void 0) this.wake(graphId).catch((error) => this.logLine(graphId, error));
 		}));
-		this.disposers.push(this.ctx.on("graphs/change", (snapshot) => this.observeGraphs(snapshot.graphs)));
-		backgroundScan(this.log, "rsi loop", () => this.seed());
+		const on = this.ctx.on.bind(this.ctx);
+		this.disposers.push(on("agent/status", (payload) => {
+			const { agent, status } = payload;
+			if (status !== "idle") return;
+			this.wakeBySession(agent.id);
+		}));
+		this.disposers.push(on("graphs/selected", (graph) => this.observe(graph)));
+		this.disposers.push(on("graphs/change", (snapshot) => this.observeAll(snapshot.graphs)));
+		backgroundScan(this.log, "coordination driver", () => this.seed());
+		this.timer = setInterval(() => {
+			for (const graphId of this.active) this.wake(graphId).catch((error) => this.logLine(graphId, error));
+		}, this.fallbackMs);
+		this.timer.unref?.();
 		return () => this.stop();
 	}
-	/** Forget every loop, every declared cap and every subscription of this instance. */
+	/** Release every subscription, cap and timer of this instance. */
 	stop() {
 		if (this.stopped) return;
 		this.stopped = true;
+		if (this.timer !== void 0) clearInterval(this.timer);
+		this.timer = void 0;
 		for (const dispose of this.disposers.splice(0)) try {
 			dispose();
 		} catch (error) {
-			this.log(`rsi loop: a subscription could not be released (${message(error)})`);
+			this.log(`coordination: a subscription could not be released (${message(error)})`);
 		}
 		for (const storeId of this.registered) unregisterGraphImprovementCap(storeId);
 		this.registered.clear();
-		this.loops.clear();
 		this.byStore.clear();
+		this.active.clear();
 	}
-	/** One graph became the active one: declare its cap and take its loop over. */
-	observeGraph(graph) {
-		if (graph.rsi === void 0) {
-			this.forget(graph.id);
-			return;
-		}
-		const storeId = this.remember(graph);
-		registerGraphImprovementCap(storeId, graph.rsi.iterationRounds);
-		this.registered.add(storeId);
-		this.log(`rsi loop: graph ${graph.id} runs ${graph.rsi.iterationRounds} round(s) over store ${storeId}`);
-		this.ensure(graph.id).catch((error) => this.log(`rsi loop ${graph.id}: ${message(error)}`));
-	}
-	/** Reconcile the declared caps against the registry: a graph that gained a config is registered, one that lost it is forgotten. */
-	observeGraphs(graphs) {
-		const live = /* @__PURE__ */ new Set();
-		for (const graph of graphs) {
-			if (graph.rsi === void 0) continue;
-			const storeId = this.remember(graph);
-			registerGraphImprovementCap(storeId, graph.rsi.iterationRounds);
-			this.registered.add(storeId);
-			live.add(storeId);
-			this.ensure(graph.id).catch((error) => this.log(`rsi loop ${graph.id}: ${message(error)}`));
-		}
-		for (const storeId of [...this.registered]) {
-			if (live.has(storeId)) continue;
-			unregisterGraphImprovementCap(storeId);
-			this.registered.delete(storeId);
-			const graphId = this.byStore.get(storeId);
-			if (graphId !== void 0) this.forget(graphId);
-		}
-	}
-	/** One graph activation (or the boot seed): read what the graph holds now and take its loop's next step. */
-	ensure(graphId) {
-		return this.serialize(graphId, () => this.advance(graphId));
-	}
-	/**
-	* Bind one store to its graph before anything is read from it: a store's
-	* terminal facts arrive by store id alone, so the routing has to exist from
-	* the moment the graph is declared — a root task that does not exist yet
-	* still has its first attempt ahead of it.
-	*/
-	remember(graph) {
-		const state = this.loops.get(graph.id);
-		if (state !== void 0 && !this.matchesGraph(state, graph)) this.forget(graph.id);
-		const storeId = rootTaskStoreId(String(graph.rootSessionId));
-		this.byStore.set(storeId, graph.id);
-		return storeId;
-	}
-	/** One terminal review became durable: the graph's own store moves its loop, every other store is not this driver's business. */
-	handleFact(fact) {
-		if (this.stopped) return;
-		const graphId = this.byStore.get(fact.storeId);
-		if (graphId === void 0) return;
-		const state = this.loops.get(graphId);
-		if (state?.rootTaskId !== void 0 && fact.taskId !== state.rootTaskId) return;
-		this.ensure(graphId).catch((error) => this.log(`rsi loop ${graphId}: ${message(error)}`));
-	}
-	/** Read the persisted registry once: a graph selected before this process booted still gets its loop taken over. */
+	/** Read the registry once: a graph the platform already holds gets its loop taken over here. */
 	async seed() {
 		if (this.stopped) return;
 		const graphs = this.ctx.graphs;
 		if (typeof graphs?.list !== "function") return;
 		const all = await graphs.list();
-		this.observeGraphs(all);
-		for (const graph of all) {
-			if (graph.rsi === void 0) continue;
-			await this.ensure(graph.id);
-		}
+		this.observeAll(all);
+		await Promise.all(all.map(async (graph) => await this.wake(graph.id).catch((error) => this.logLine(graph.id, error))));
 	}
-	/** Serialize one moment of one graph's loop: the loop's state machine is single-threaded per graph. */
-	serialize(graphId, work) {
-		const settled = (this.queues.get(graphId) ?? Promise.resolve()).then(work).then(() => void 0, (error) => {
-			this.log(`rsi loop ${graphId}: ${message(error)}`);
-		});
-		this.queues.set(graphId, settled);
-		settled.then(() => {
-			if (this.queues.get(graphId) === settled) this.queues.delete(graphId);
-		});
-		return settled;
-	}
-	/**
-	* The one step a loop takes, from the store's own facts: how many rounds have
-	* settled, whether the next round is already open, and whether the round that
-	* just settled still needs its supervision. Every entry (a terminal fact, an
-	* activation, the boot seed) is this same read — memory is never the record.
-	*/
-	async advance(graphId) {
+	/** One graph activation: remember it when it is a current graph with RSI settings, forget it otherwise. */
+	observe(graph) {
 		if (this.stopped) return;
-		let graph;
-		try {
-			graph = await this.ctx.graphs.get(graphId);
-		} catch (error) {
-			this.log(`rsi loop: graph ${graphId} could not be read (${message(error)})`);
-			return;
-		}
-		const config = graph.rsi;
-		if (config === void 0) {
-			this.forget(graphId);
+		if (graph.rsi === void 0 || graphAccess(graph).mode !== "current") {
+			this.forget(graph.id);
 			return;
 		}
 		const storeId = this.remember(graph);
-		registerGraphImprovementCap(storeId, config.iterationRounds);
-		this.registered.add(storeId);
-		const state = this.loopFor(graph, storeId);
-		if (state.stopped) return;
-		state.config = config;
-		let snapshot;
-		try {
-			snapshot = await this.ctx.task.snapshotIn(storeId);
-		} catch (error) {
-			this.log(`rsi loop ${graphId}: store ${storeId} could not be read (${message(error)})`);
+		this.log(`coordination: graph ${graph.id} runs ${graph.rsi.iterationRounds} round(s) over store ${storeId}`);
+		this.wake(graph.id).catch((error) => this.logLine(graph.id, error));
+	}
+	/** Reconcile the driven set against the registry: what gained settings joins, what lost them leaves. */
+	observeAll(graphs) {
+		const live = /* @__PURE__ */ new Set();
+		for (const graph of graphs) {
+			if (graph.rsi === void 0 || graphAccess(graph).mode !== "current") continue;
+			this.remember(graph);
+			live.add(graph.id);
+		}
+		for (const graphId of new Set(this.byStore.values())) if (!live.has(graphId)) this.forget(graphId);
+	}
+	/** One pass for one graph, inside its own serial region. */
+	wake(graphId) {
+		if (this.stopped) return Promise.resolve(void 0);
+		return serializeCoordination(graphId, () => this.reconcile(graphId));
+	}
+	/** The graph one idle session belongs to, from the session's own coordination assignment. */
+	async wakeBySession(sessionId$1) {
+		const binding = await coordinationBindingSource().read(sessionId$1).catch(() => void 0);
+		if (binding === void 0) return;
+		const graphId = this.byStore.get(binding.rootStoreId);
+		if (graphId === void 0) return;
+		await this.wake(graphId).catch((error) => this.logLine(graphId, error));
+	}
+	/** Read facts → reduce → execute once, repeated while the facts keep moving; never awaits a session. */
+	async reconcile(graphId) {
+		let last;
+		for (let pass = 0; pass < 8; pass += 1) {
+			const step = await this.once(graphId);
+			if (step === void 0) return last;
+			last = step;
+			if (!await this.execute(graphId, step)) return step;
+		}
+		return last;
+	}
+	/** The work items one graph holds, as the driver reads them. */
+	async workOf(graphId) {
+		return await workOf(await readCoordinationRows() ?? [], graphId);
+	}
+	/** One read-and-decide pass; `undefined` means this graph is not driven here any more. */
+	async once(graphId) {
+		const graph = await this.readGraph(graphId);
+		if (graph === void 0) return void 0;
+		const storeId = rootTaskStoreId(String(graph.rootSessionId));
+		const snapshot = await this.ctx.task.snapshotIn(storeId).catch((error) => {
+			this.log(`coordination: store ${storeId} could not be read (${message(error)})`);
+		});
+		if (snapshot === void 0) return {
+			kind: "idle",
+			detail: `store ${storeId} could not be read`
+		};
+		const rootLive = liveRootAgentOf(this.ctx, storeId);
+		const facts = await this.factsFor(graph, storeId, snapshot, rootLive !== void 0);
+		return facts === void 0 ? {
+			kind: "idle",
+			detail: "the store holds no settled round yet"
+		} : reduce(facts);
+	}
+	/** The graph as this driver may drive it now, or `undefined` after forgetting it. */
+	async readGraph(graphId) {
+		if (this.stopped) return void 0;
+		const graph = await this.ctx.graphs.get(graphId).catch((error) => {
+			this.log(`coordination: graph ${graphId} could not be read (${message(error)})`);
+		});
+		if (graph === void 0 || graph.rsi === void 0 || graphAccess(graph).mode !== "current") {
+			this.forget(graphId);
 			return;
 		}
+		this.remember(graph);
+		return graph;
+	}
+	/** The facts one decision is made from, or `undefined` when the graph has no settled round yet. */
+	async factsFor(graph, storeId, snapshot, rootLive) {
+		const config = graph.rsi;
+		const root = rootTaskOf(snapshot);
+		if (root === void 0) return void 0;
+		const rounds = terminalRootRuns(snapshot, root.taskId);
+		const run = rounds.at(-1);
+		if (run === void 0) return void 0;
+		const epoch = config.epoch ?? 1;
+		const businessRound = rounds.length;
+		const key = roundKeyOf({
+			graphId: graph.id,
+			epoch,
+			businessRound,
+			taskId: root.taskId,
+			runId: run.runId
+		});
+		const rows = await readCoordinationRows() ?? [];
+		const sessions = await readSessionFactsOf(this.ctx, [...rows.filter((row) => row.graphId === graph.id).map((row) => row.sessionId), String(graph.rootSessionId)]);
+		const candidate = {
+			key,
+			storeId,
+			sessionId: SessionId(randomUUID()),
+			actor: String(graph.rootSessionId),
+			digest: subjectDigest(key),
+			focus: run.status === "verified" ? `the RSI loop's publication for round ${businessRound}` : `the RSI loop's repair of round ${businessRound}`,
+			...graph.model === void 0 ? {} : { model: graph.model }
+		};
+		return {
+			graph: {
+				id: graph.id,
+				name: graph.name,
+				storeId,
+				rootSessionId: String(graph.rootSessionId),
+				config
+			},
+			snapshot,
+			rows,
+			sessions,
+			budget: {
+				used: spentOf(rows, storeId, sessions),
+				max: coordinationBudget()
+			},
+			rootLive,
+			candidate
+		};
+	}
+	/** Run one reduction's action; `true` when the caller should look again immediately. */
+	async execute(graphId, step) {
+		await this.refreshActive(graphId).catch(() => void 0);
+		switch (step.kind) {
+			case "idle": return false;
+			case "suspended":
+				this.log(`coordination: graph ${graphId} ${step.phase} — ${step.detail}`);
+				this.active.delete(graphId);
+				return false;
+			case "protocol-failure":
+				await recordCompletion(protocolFailure(bindingOfAssignment(step.work.assignment, false), step.detail));
+				this.log(`coordination: graph ${graphId} protocol failure — ${step.detail}`);
+				return true;
+			case "open-round":
+				await this.openRound(graphId, step.request, step.work);
+				return true;
+			case "supervise": return await this.supervise(graphId, step);
+		}
+	}
+	/** Keep the fallback tick pointed at the graphs that still have an unsettled work item. */
+	async refreshActive(graphId) {
+		if ((await workOf(await readCoordinationRows() ?? [], graphId)).some((work) => work.completion === void 0)) this.active.add(graphId);
+		else this.active.delete(graphId);
+	}
+	/** Claim or recover the round's supervisor. */
+	async supervise(graphId, step) {
+		const graph = await this.readGraph(graphId);
+		if (graph === void 0) return false;
+		const storeId = rootTaskStoreId(String(graph.rootSessionId));
+		const liveRoot = liveRootAgentOf(this.ctx, storeId);
+		if (liveRoot === void 0) {
+			this.log(`coordination: graph ${graphId} cannot be supervised here — the graph's root session is not live in this process`);
+			this.active.add(graphId);
+			return false;
+		}
+		if (step.plan.kind === "resume") return await this.resume(graph, step.plan.work);
+		const reuse = step.plan.kind === "assign" ? step.plan.reuseSessionId : void 0;
+		const request = {
+			...step.request,
+			...reuse === void 0 ? {} : { sessionId: SessionId(reuse) }
+		};
+		const snapshot = await this.ctx.task.snapshotIn(storeId);
+		const rootTask = rootTaskOf(snapshot);
+		const run = rootTask === void 0 ? void 0 : terminalRootRuns(snapshot, rootTask.taskId).at(-1);
+		const businessRound = request.key.subject.kind === "round" ? request.key.subject.businessRound : 0;
+		if (run === void 0) {
+			this.log(`coordination: graph ${graphId} round ${businessRound} has no settled run to hand a supervisor`);
+			this.active.delete(graphId);
+			return false;
+		}
+		await this.settleRoundBubble(graph, businessRound);
+		const prompt = await this.supervisionText(request, snapshot, graph, run.runId);
+		const spawned = await spawnAssignment({
+			ctx: this.ctx,
+			request,
+			parent: liveRoot.agent,
+			name: `rsi supervisor for ${graphId} round ${businessRound}`,
+			preset: COORDINATION_PRESET,
+			grant: supervisorGrant(),
+			role: "supervisor",
+			prompt: () => prompt
+		});
+		this.active.add(graphId);
+		this.log(`coordination: graph ${graphId} round ${businessRound} ${spawned.kind === "spawned" ? `supervisor session ${String(request.sessionId)} assigned` : `supervisor could not be spawned (${spawned.failure})`}`);
+		return false;
+	}
+	/** Bring a stored session that never finished its turn back, under the assignment's own composition. */
+	async resume(graph, work) {
+		const assignment = work.assignment;
+		try {
+			await this.ctx.agentRuntime.resumeCoordinationSession({
+				sessionId: SessionId(assignment.sessionId),
+				scope: {
+					graphStoreId: graph.graphStoreId,
+					layoutStoreId: graph.layoutStoreId
+				},
+				coordinationRole: assignment.role,
+				agentPreset: COORDINATION_PRESET,
+				grant: assignment.role === "supervisor" ? supervisorGrant() : reviewerGrant(),
+				permissionPreset: "danger-full-access"
+			});
+			this.active.add(graph.id);
+			this.log(`coordination: graph ${graph.id} resumed ${assignment.role} session ${assignment.sessionId}`);
+		} catch (error) {
+			await recordCompletion(protocolFailure(bindingOfAssignment(assignment, false), `the coordination session could not be resumed: ${message(error)}`)).catch(() => void 0);
+			this.log(`coordination: graph ${graph.id} could not resume session ${assignment.sessionId} (${message(error)})`);
+		}
+		return false;
+	}
+	/** Flush the concluded session, record the round's diagnosis, and open the next round. */
+	async openRound(graphId, request, work) {
+		const graph = await this.readGraph(graphId);
+		if (graph === void 0) return;
+		const storeId = rootTaskStoreId(String(graph.rootSessionId));
+		const rootSessionId = String(graph.rootSessionId);
+		await flushSessions(this.ctx);
+		await this.awaitMaterialized(work.assignment.sessionId);
+		if (await this.readGraph(graphId) === void 0) return;
+		const snapshot = await this.ctx.task.snapshotIn(storeId);
 		const root = rootTaskOf(snapshot);
 		if (root === void 0) return;
-		state.rootTaskId = root.taskId;
-		this.byStore.set(storeId, graphId);
-		const rounds = terminalRootRuns(snapshot, root.taskId);
-		if (rounds.length >= config.iterationRounds) {
-			await this.superviseRound(state, graph, snapshot, rounds.length, rounds.at(-1));
-			return;
-		}
-		const next = rounds.length + 1;
-		const openRun = roundRunOf(snapshot, root.taskId, roundRequestKey(graphId, next));
-		if (openRun !== void 0) {
-			if (openRun.status === "running") await this.mark(state, {
-				round: next,
-				phase: "running",
-				note: `round ${next} is running`
-			});
-			return;
-		}
-		const latest = rounds.at(-1);
-		if (latest === void 0) {
-			const first = firstRootRun(snapshot, root.taskId);
-			if (first !== void 0 && first.status === "running") await this.mark(state, {
-				round: 1,
-				phase: "running",
-				note: "round 1 is running"
-			});
-			return;
-		}
-		await this.superviseRound(state, graph, snapshot, rounds.length, latest);
-	}
-	/**
-	* The round that just settled: record its diagnosis, take up its supervision,
-	* then open the next one. A supervisor that explicitly stopped the loop ends
-	* it here; a supervision that could not be taken up opens nothing and a later
-	* activation retries it.
-	*/
-	async superviseRound(state, graph, snapshot, round, run) {
-		if (await this.currentGraph(state) === void 0) return;
-		const operatorResume = state.progress === void 0;
-		await this.settleRoundBubble(state, graph, round);
-		const verified = run.status === "verified";
-		const review = reviewOfRun(snapshot, run.runId);
-		const diagnosisId = roundDiagnosisId(state.graphId, round);
-		await this.recordDiagnosis(state, graph, round, run, review, verified);
-		await this.mark(state, verified ? {
-			round,
-			phase: "publishing",
-			note: `round ${round} verified; supervising its method change`
-		} : {
-			round,
-			phase: "debugging",
-			note: `round ${round} settled ${run.status}; supervising its repair`
-		});
-		const supervision = await this.takeUpSupervision(state, graph, round, run, review, diagnosisId, verified, operatorResume);
-		if (await this.currentGraph(state) === void 0) return;
-		switch (supervision.kind) {
-			case "stop":
-				state.stopped = true;
-				await this.mark(state, {
-					round,
-					phase: "failed",
-					note: `round ${round}'s supervisor reported ${supervision.outcome}: ${supervision.reason}; the loop stops`
-				});
-				return;
-			case "deferred":
-				await this.mark(state, {
-					round,
-					phase: "failed",
-					note: supervision.note
-				});
-				return;
-			case "proceed":
-				if (round >= state.config.iterationRounds) {
-					state.stopped = true;
-					const cause = verified ? void 0 : review?.localizedCause;
-					await this.mark(state, {
-						round,
-						phase: verified ? "done" : "failed",
-						note: `${round}/${state.config.iterationRounds} rounds settled; final round ${run.status}${cause === void 0 ? "" : `: ${cause}`}; final library review settled; the loop is finished`
-					});
-					return;
-				}
-				await this.openRound(state, graph, round + 1, run.runId, diagnosisId, supervision.applied, verified ? "improve" : "recovery");
-		}
-	}
-	/**
-	* The platform's own diagnosis for one round: the observation names what the
-	* store recorded (the run's own review cause for a failed round), and
-	* `proposals: []` says the driver records no suggestion — the supervisor
-	* investigates. The diagnosis exists so the next round's `recoverRootTask`
-	* has a store record to name.
-	*/
-	async recordDiagnosis(state, graph, round, run, review, verified) {
-		const diagnosisId = roundDiagnosisId(state.graphId, round);
-		if ((await this.ctx.task.snapshotIn(state.storeId)).diagnoses.some((item) => item.diagnosisId === diagnosisId)) return;
-		const consumed = run.recovery?.proposalIds ?? [];
-		const diagnosis = {
-			diagnosisId,
-			taskId: state.rootTaskId,
-			observedFailure: verified ? `Round ${round} of graph "${graph.name}" (${state.graphId}) verified: the root task's run "${run.runId}" settled verified under the store's own acceptance criteria.` : review?.localizedCause ?? `Round ${round} of graph "${graph.name}" (${state.graphId}) settled ${run.status}: the root task's run "${run.runId}" did not pass the store's own acceptance criteria.`,
-			scope: `the root task ${state.rootTaskId} of this store; graph ${state.graphId} runs a platform RSI loop of ${state.config.iterationRounds} round(s)`,
-			localizedCause: round >= state.config.iterationRounds ? `The platform RSI loop reviews round ${round}'s library experience before completing this graph: ${state.config.task}.` : verified ? `The platform RSI loop continues this graph's verified goal with round ${round + 1}: ${state.config.task}.` + (consumed.length === 0 ? " No published change was consumed by this round." : ` This round consumed the applied proposal(s) ${consumed.join(", ")}.`) : `The platform RSI loop hands round ${round}'s ${run.status} attempt to its supervisor, which investigates the cause and prepares the method change round ${round + 1} (mode "recovery") consumes: ${state.config.task}.`,
-			evidenceRefs: review?.evidenceRefs ?? [],
-			reviewRefs: [`${state.rootTaskId}#${run.runId}`],
-			confidence: "high",
-			proposals: [],
-			producedBy: {
-				kind: "agent",
-				sessionId: state.rootSessionId
+		const config = graph.rsi;
+		const epoch = config.epoch ?? 1;
+		const diagnosisId = roundDiagnosisId(graphId, epoch, request.businessRound - 1);
+		if (!snapshot.diagnoses.some((item) => item.diagnosisId === diagnosisId)) {
+			const source = terminalRootRuns(snapshot, root.taskId).at(-1);
+			if (source !== void 0) {
+				const review = snapshot.reviews.find((item) => item.runId === source.runId);
+				await this.ctx.task.recordDiagnosisIn(storeId, roundDiagnosis({
+					diagnosisId,
+					taskId: root.taskId,
+					graphId,
+					graphName: graph.name,
+					epoch,
+					businessRound: request.businessRound - 1,
+					rounds: config.iterationRounds,
+					objective: config.task,
+					run: source,
+					...review === void 0 ? {} : { review },
+					producedBySessionId: rootSessionId
+				}), rootSessionId).catch((error) => this.log(`coordination: graph ${graphId} could not record its round diagnosis (${message(error)})`));
 			}
+		}
+		const envPath = await this.envPathOf(graph);
+		const workspacePath = envPath === void 0 ? void 0 : await materializeBubble(envPath, bubbleHome(), rootSessionId, graphId, request.businessRound).catch((error) => {
+			this.log(`coordination: graph ${graphId} round ${request.businessRound} bubble could not be materialized (${message(error)})`);
+		});
+		const recovery = {
+			sourceTaskId: work.assignment.subject.source.taskId,
+			sourceRunId: request.sourceRunId,
+			sourceDiagnosisId: request.sourceDiagnosisId,
+			requestKey: request.requestKey,
+			mode: request.mode,
+			...request.mode === "improve" ? { reuses: [] } : {},
+			...workspacePath === void 0 ? {} : { workspacePath }
 		};
 		try {
-			if (await this.currentGraph(state) === void 0) return;
-			await this.ctx.task.recordDiagnosisIn(state.storeId, diagnosis, state.rootSessionId);
-			this.log(`rsi loop ${state.graphId}: round ${round} diagnosis ${diagnosisId} recorded`);
+			const outcome = await this.ctx.taskRuntime.recoverRootTask(storeId, recovery, { sessionId: rootSessionId });
+			this.log(`coordination: graph ${graphId} round ${request.businessRound} ${outcome.attempt === "started" ? "opened" : "was already open"} — run ${outcome.runId} (${outcome.status})`);
 		} catch (error) {
-			if ((await this.ctx.task.snapshotIn(state.storeId).catch(() => void 0))?.diagnoses.some((item) => item.diagnosisId === diagnosisId) === true) return;
-			throw error;
+			const after = await this.ctx.task.snapshotIn(storeId).catch(() => void 0);
+			const recorded = after === void 0 ? void 0 : terminalRootRuns(after, root.taskId).find((run) => run.recovery?.requestKey === request.requestKey);
+			this.log(recorded === void 0 ? `coordination: graph ${graphId} round ${request.businessRound} could not be opened (${message(error)}); the same request key is retried on the next activation` : `coordination: graph ${graphId} round ${request.businessRound} was recorded ${recorded.status} despite its opening error (${message(error)}); the next activation reconciles the stored attempt`);
 		}
 	}
-	/**
-	* Take up one round's supervision: hand the round to a supervisor agent and
-	* watch it settle, or read what a previous attempt already settled. A settled
-	* attempt is the round's answer however this process came to read it, so a
-	* restart neither spawns a second supervisor for a round that already had one
-	* nor forgets the outcome that stopped the loop.
-	*/
-	async takeUpSupervision(state, graph, round, run, review, diagnosisId, verified, operatorResume) {
-		const already = publicationOf(await this.proposalsFor(state, diagnosisId));
-		const settled = supervisorAttemptOf(await readReviewAgentAttempts(state.storeId).catch(() => []), diagnosisId);
-		if (settled?.settlement?.status === "closed") {
-			const note = settled.settlement.note ?? "the round was closed";
-			const blocked = note.startsWith("blocked:");
-			if (!(blocked && operatorResume)) return {
-				kind: "stop",
-				outcome: blocked ? "blocked" : "closed",
-				reason: note
-			};
+	/** Wait, bounded, for one completed session's own log to reach the persistence layer. */
+	async awaitMaterialized(sessionId$1) {
+		const persistence = optionalService(this.ctx, "sessionPersistence");
+		if (typeof persistence?.stat !== "function") return;
+		const deadline = Date.now() + this.settleGraceMs;
+		while (Date.now() < deadline) {
+			if (await persistence.stat(sessionId$1).catch(() => void 0) !== void 0) return;
+			await new Promise((resolve$1) => setTimeout(resolve$1, 50));
 		}
-		if (settled?.settlement?.status === "recorded" && settled.settlement.note?.startsWith("no_change:") === true) {
-			if (already.applied.length === 0 && already.unresolved.length === 0) return {
-				kind: "proceed",
-				applied: []
-			};
-		} else if (already.done && (round < state.config.iterationRounds || settled?.settlement?.status === "recorded")) return {
-			kind: "proceed",
-			applied: already.applied
-		};
-		const delegator = liveRootAgentOf(this.ctx, state.storeId);
-		if (delegator === void 0) return {
-			kind: "deferred",
-			note: `round ${round} was not supervised: the graph's root session is not live in this process; the next activation retries`
-		};
-		const sessionId$1 = SessionId(randomUUID());
-		const request = {
-			role: "supervisor",
-			source: {
-				taskId: state.rootTaskId,
-				runId: run.runId
-			},
-			requestKey: supervisorRequestKey(state.graphId, round),
-			reason: verified ? `the RSI loop's publication for round ${round}` : `the RSI loop's repair of round ${round}`,
-			diagnosisId,
-			handoffDigest: roundHandoffDigest({
-				graphId: state.graphId,
-				round,
-				storeId: state.storeId,
-				taskId: state.rootTaskId,
-				runId: run.runId
-			}),
-			actor: delegator.sessionId,
-			sessionId: sessionId$1
-		};
-		const spawned = await admitReviewAgent(state.storeId, async (admission) => {
-			if (await this.currentGraph(state) === void 0) return {
-				kind: "refused",
-				reason: "the RSI config was cleared or replaced"
-			};
-			const { plan } = await admission.plan(request, {
-				recorded: () => already.done,
-				resumeRecorded: true,
-				retryClosed: operatorResume
-			});
-			if (plan.kind === "refused") return {
-				kind: "refused",
-				reason: `${plan.code}: ${plan.reason ?? "no reason given"}`
-			};
-			if (plan.kind === "in-flight") return {
-				kind: "running",
-				sessionId: plan.attempt.sessionId
-			};
-			if (plan.kind === "reuse") return {
-				kind: "reuse",
-				sessionId: plan.attempt.sessionId
-			};
-			const outcome = await spawnUnderClaim({
-				ctx: this.ctx,
-				admission,
-				storeId: state.storeId,
-				request,
-				sessionId: sessionId$1,
-				taskId: state.rootTaskId,
-				actor: delegator.sessionId,
-				parent: delegator.agent,
-				name: `rsi supervisor for ${state.graphId} round ${round}`,
-				preset: COORDINATION_PRESET,
-				grant: supervisorGrant(),
-				errorLabel: "rsi loop: the delegation of supervisor session",
-				failureLabel: "the supervisor could not be spawned",
-				prompt: () => verified ? this.verifiedPrompt(state, graph, round, run, review, diagnosisId) : this.failedPrompt(state, graph, round, run, review, diagnosisId)
-			});
-			if (outcome.kind === "spawn-failed") return {
-				kind: "spawn-failed",
-				reason: outcome.failure
-			};
-			return {
-				kind: "spawned",
-				agent: outcome.handle.agent
-			};
+	}
+	/** The one supervision request one round's supervisor receives. */
+	async supervisionText(request, snapshot, graph, runId) {
+		const storeId = rootTaskStoreId(String(graph.rootSessionId));
+		const root = rootTaskOf(snapshot);
+		const rounds = root === void 0 ? [] : terminalRootRuns(snapshot, root.taskId);
+		const run = rounds.find((candidate) => candidate.runId === runId) ?? rounds.at(-1);
+		const subject = request.key.subject;
+		const businessRound = subject.kind === "round" ? subject.businessRound : rounds.length;
+		const config = graph.rsi;
+		const epoch = config.epoch ?? 1;
+		const method = await activeMethodRevision(this.ctx, String(graph.rootSessionId));
+		const review = snapshot.reviews.find((item) => item.runId === run.runId);
+		return supervisionPrompt({
+			graphId: graph.id,
+			graphName: graph.name,
+			epoch,
+			businessRound,
+			searchRound: subject.kind === "round" ? subject.searchRound : businessRound,
+			rounds: config.iterationRounds,
+			objective: config.task,
+			metrics: config.metrics ?? [],
+			outcome: run.status === "verified" ? "verified" : "failed",
+			run,
+			...review === void 0 ? {} : { review },
+			diagnosisId: roundDiagnosisId(graph.id, epoch, businessRound),
+			cost: await this.costLines(storeId, snapshot, run.runId),
+			method: { ...method === void 0 ? {} : { activeRevision: method.revisionId } },
+			finalRound: businessRound >= config.iterationRounds
 		});
-		if (spawned.kind === "refused") return {
-			kind: "deferred",
-			note: `round ${round} was not supervised (${spawned.reason}); the next activation retries`
-		};
-		if (spawned.kind === "spawn-failed") return {
-			kind: "deferred",
-			note: `round ${round} was not supervised (${spawned.reason}); the next activation retries`
-		};
-		if (spawned.kind === "running" || spawned.kind === "reuse") return {
-			kind: "deferred",
-			note: `round ${round}'s supervision is taken up already; the loop waits for it`
-		};
-		return await this.watchSupervisor(state, round, diagnosisId, sessionId$1, spawned.agent);
 	}
-	/**
-	* Watch one supervisor to its settlement: every executable proposal concluded,
-	* an explicit no_change, the blocked re-prompt bound, or its own stop. The attempt's durable
-	* outcome is settled on the coordination ledger either way, so a later
-	* activation reads the same answer instead of spawning a second supervisor.
-	*/
-	async watchSupervisor(state, round, diagnosisId, sessionId$1, agent) {
-		let reprompts = 0;
-		try {
-			for (;;) {
-				await agent.whenIdle();
-				if (await this.currentGraph(state) === void 0) {
-					await this.settleSupervisor(state, sessionId$1, "interrupted", "the RSI config changed or the driver was unloaded");
-					return {
-						kind: "deferred",
-						note: "the RSI config changed or the driver was unloaded while the supervisor ran"
-					};
-				}
-				const outcome = supervisorOutcomeOf(lastAssistantText(agent.session.snapshotEvents()));
-				if (outcome !== void 0 && outcome.outcome !== "no_change") {
-					await this.settleSupervisor(state, sessionId$1, "closed", `${outcome.outcome}: ${outcome.reason}`);
-					return {
-						kind: "stop",
-						outcome: outcome.outcome,
-						reason: outcome.reason
-					};
-				}
-				const publication = publicationOf(await this.proposalsFor(state, diagnosisId));
-				if (await this.currentGraph(state) === void 0) {
-					await this.settleSupervisor(state, sessionId$1, "interrupted", "the RSI config changed or the driver was unloaded");
-					return {
-						kind: "deferred",
-						note: "the RSI config changed while reading the publication ledger"
-					};
-				}
-				const invalidNoChange = outcome?.outcome === "no_change" && (publication.applied.length > 0 || publication.unresolved.length > 0);
-				if (outcome?.outcome === "no_change" && !invalidNoChange) {
-					await this.settleSupervisor(state, sessionId$1, "recorded", `no_change: ${outcome.reason}`);
-					return {
-						kind: "proceed",
-						applied: []
-					};
-				}
-				if (publication.done && !invalidNoChange) {
-					await this.settleSupervisor(state, sessionId$1, "recorded", publication.note);
-					this.log(`rsi loop ${state.graphId}: round ${round} supervised — ${publication.note}`);
-					return {
-						kind: "proceed",
-						applied: publication.applied
-					};
-				}
-				if (reprompts >= MAX_SUPERVISOR_REPROMPTS) {
-					const reason = `supervision unfinished after ${MAX_SUPERVISOR_REPROMPTS} re-prompts: ${invalidNoChange ? "no_change contradicts the publication ledger; " : ""}${publication.note}`;
-					await this.settleSupervisor(state, sessionId$1, "closed", `blocked: ${reason}`);
-					return {
-						kind: "stop",
-						outcome: "blocked",
-						reason
-					};
-				}
-				reprompts += 1;
-				await this.ctx.agentRuntime.prompt(agent, [{
-					type: "text",
-					text: `Round ${round} of graph ${state.graphId} remains yours. Durable proposal state: ${publication.note}. Continue the existing proposal through its next candidate/prepare/replay/gate/decide/apply step, or settle it with REJECT / KEEP_FOR_FURTHER_RESEARCH and a reason. Unfinished executable proposals: ${publication.unresolved.join(", ") || "none"}. ` + (invalidNoChange ? "Your no_change outcome contradicts the ledger: resolve the executable proposals or correct your final answer. " : "") + "The platform driver opens the next round after you settle. To retain the current method with an empty or negatively settled executable ledger, finish with {\"outcome\":\"no_change\",\"reason\":\"...\"} in a fenced json block. Keep research suggestions as findings. Otherwise finish the chain or end with {\"outcome\":\"blocked\",\"reason\":\"...\"} for a concrete obstruction, or {\"outcome\":\"closed\",\"reason\":\"...\"} to end the loop, in a fenced json block."
-				}]);
-			}
-		} catch (error) {
-			await this.settleSupervisor(state, sessionId$1, "interrupted", message(error));
-			throw error;
-		}
+	/** The round's and the graph's recorded effort, read from execution receipts alone. */
+	async costLines(storeId, snapshot, runId) {
+		const receipts = await this.ctx.taskRuntime.receiptsOfStore(storeId).catch(() => []);
+		const round = receipts.find((receipt) => receipt.runId === runId);
+		const roundUsage = round === void 0 ? void 0 : executionUsage(snapshot, round);
+		const totalUsage = aggregateUsage(receipts.map((receipt) => executionUsage(snapshot, receipt)));
+		return [
+			renderExecutionCost("Current round execution tree", roundUsage, round?.subtree.length ?? 0),
+			renderExecutionCost("Graph usage to date (executions and recorded coordination)", totalUsage, receipts.length),
+			"Compare task effects with this recorded effort, including evaluation overhead. A reading an execution receipt does not carry remains unknown."
+		];
 	}
-	/** The proposal facts one round's publication left, read from the ledger the agents write. */
-	async proposalsFor(state, diagnosisId) {
-		const evolution = await evolutionOf(this.ctx, state.rootSessionId);
-		if (evolution === void 0) return [];
-		return (await evolution.list()).filter((proposal) => proposal.sourceRefs.includes(`diagnosis:${diagnosisId}`));
-	}
-	/** Every proposal this loop's rounds produced, oldest last, for the supervisor's "what is published now" line. */
-	async loopProposals(state) {
-		const evolution = await evolutionOf(this.ctx, state.rootSessionId);
-		if (evolution === void 0) return [];
-		const marker = `diagnosis:rsi-${state.graphId}-round-`;
-		return (await evolution.list()).filter((proposal) => proposal.sourceRefs.some((ref) => ref.startsWith(marker)));
-	}
-	/** Settle the ledger row of one supervisor attempt; the round's own outcome is already durable, so a refusal here is only logged. */
-	async settleSupervisor(state, sessionId$1, status, note) {
-		await settleReviewAgentAttempt({
-			rootStoreId: state.storeId,
-			taskId: state.rootTaskId,
-			sessionId: sessionId$1,
-			status,
-			note
-		}).catch((error) => this.log(`rsi loop ${state.graphId}: the supervisor attempt could not be settled (${message(error)})`));
-	}
-	/** The environment checkout one graph binds, when this deployment has an env-builder; `undefined` in test contexts and deployments without one. */
+	/** The environment checkout one graph binds, when this deployment has an env builder. */
 	async envPathOf(graph) {
 		const envBuilder = optionalService(this.ctx, "envBuilder");
 		if (typeof envBuilder?.store?.get !== "function") return void 0;
@@ -1919,298 +2435,330 @@ var RsiLoopDriver = class {
 			return;
 		}
 	}
-	/** Persist one settled round's bubble to `rsi/<graph>/round-<N>`, so the next round materializes from it. */
-	async settleRoundBubble(state, graph, round) {
+	/** Persist one settled round's bubble, so the next round materializes from it. */
+	async settleRoundBubble(graph, round) {
 		const envPath = await this.envPathOf(graph);
-		if (envPath === void 0) return;
-		await settleBubble(envPath, bubbleWorkspacePath(bubbleHome(), state.rootSessionId, round), state.graphId, round);
+		if (envPath === void 0 || round <= 0) return;
+		await settleBubble(envPath, bubbleWorkspacePath(bubbleHome(), String(graph.rootSessionId), round), graph.id, round).catch((error) => this.log(`coordination: graph ${graph.id} round ${round} bubble could not be settled (${message(error)})`));
 	}
-	/**
-	* Open the next round through the runtime's own recovery entry: one attempt of
-	* the round's run under the round's request key — `improve` after a verified
-	* round, `recovery` after a failed one — consuming the proposals it published.
-	* A key that already names an attempt is answered from the store instead of
-	* opening a second (§F.4).
-	*/
-	async openRound(state, graph, round, sourceRunId, diagnosisId, applied, mode) {
-		const requestKey = roundRequestKey(state.graphId, round);
-		if (await this.currentGraph(state) === void 0) return;
-		if (roundRunOf(await this.ctx.task.snapshotIn(state.storeId), state.rootTaskId, requestKey) === void 0) {
-			const delegator = liveRootAgentOf(this.ctx, state.storeId);
-			if (delegator === void 0) {
-				await this.mark(state, {
-					round,
-					phase: "failed",
-					note: `round ${round} could not be opened: the graph's root session is not live in this process; the next activation retries`
-				});
-				return;
-			}
-			const envPath = await this.envPathOf(graph);
-			const workspacePath = envPath === void 0 ? void 0 : await materializeBubble(envPath, bubbleHome(), state.rootSessionId, state.graphId, round);
-			const request = {
-				sourceTaskId: state.rootTaskId,
-				sourceRunId,
-				sourceDiagnosisId: diagnosisId,
-				requestKey,
-				mode,
-				...mode === "improve" ? { reuses: [] } : {},
-				...applied.length === 0 ? {} : { proposalIds: [...applied] },
-				...workspacePath === void 0 ? {} : { workspacePath }
-			};
-			try {
-				if (await this.currentGraph(state) === void 0) return;
-				const outcome = await this.ctx.taskRuntime.recoverRootTask(state.storeId, request, { sessionId: delegator.sessionId });
-				this.log(`rsi loop ${graph.id}: round ${round} ${outcome.attempt === "started" ? "opened" : "was already open"} — run ${outcome.runId} (${outcome.status})`);
-			} catch (error) {
-				const after = await this.ctx.task.snapshotIn(state.storeId).catch(() => void 0);
-				const recorded = after === void 0 ? void 0 : roundRunOf(after, state.rootTaskId, requestKey);
-				if (recorded !== void 0) {
-					await this.mark(state, {
-						round,
-						phase: recorded.status === "running" ? "running" : recorded.status === "verified" ? "publishing" : "debugging",
-						note: `round ${round} was recorded ${recorded.status} despite its opening error: ${message(error)}; the next activation reconciles the stored attempt`
-					});
-					return;
-				}
-				if (after === void 0) {
-					await this.mark(state, {
-						round,
-						phase: "failed",
-						note: `round ${round}'s opening could not be reconciled: ${message(error)}; the store could not be read, so the next activation retries the same request key`
-					});
-					return;
-				}
-				await this.mark(state, {
-					round,
-					phase: "failed",
-					note: `round ${round} could not be opened: ${message(error)}`
-				});
-				state.stopped = true;
-				return;
-			}
-		}
-		await this.mark(state, {
-			round,
-			phase: "running",
-			note: `round ${round} is running`
-		});
-	}
-	/** The lines both supervisor prompts share: where the round is, and what its evidence is. */
-	roundHeader(state, graph, round, run, review) {
-		const artifacts = run.artifacts ?? [];
-		return [
-			`Store: ${state.storeId}; root task: ${state.rootTaskId}; this round's run: ${run.runId} (session ${run.sessionId ?? "unrecorded"}).`,
-			`Round objective as recorded on the graph: ${state.config.task}`,
-			`Metrics to explore and improve: ${state.config.metrics?.join("; ") || "derive useful measurements from the task and state the assumptions"}.`,
-			"Use the current task criteria to judge this execution, and its findings to improve reusable paths and experience.",
-			review === void 0 ? "The store holds no review record for this run." : `The round's review settled ${review.outcome}. ${renderSupervisorReviewFacts(review)}`,
-			"Where this round's delivery and evidence live:",
-			run.placement?.workspacePath === void 0 ? "- the run recorded no separate working tree; read the store's evidence bundles" : `- the run's working tree: ${run.placement.workspacePath} (read/glob/grep it directly)`,
-			...artifacts.length === 0 ? ["- the run recorded no artifacts of its own"] : artifacts.map((artifact) => `- artifact ${artifact.artifactId} (${artifact.kind}) at ${artifact.uri}${artifact.digest === void 0 ? "" : ` sha256:${artifact.digest}`}`),
-			review === void 0 || review.evidenceRefs.length === 0 ? "- the review recorded no evidence ids" : `- store evidence ids: ${review.evidenceRefs.join(", ")} (context_read kind:"evidence")`
-		];
-	}
-	/** Existing review/session counters cover execution, replay and past coordination without a second cost ledger. */
-	async costFeedback(state, run) {
-		const snapshot = await this.ctx.task.snapshotIn(state.storeId);
-		const attempts = await readReviewAgentAttempts(state.storeId);
-		const sessions = [...new Set([...snapshot.runs.map((item) => item.sessionId), ...attempts.filter((attempt) => attempt.started).map((attempt) => attempt.sessionId)])];
-		const observations = /* @__PURE__ */ new Map();
-		for (const item of snapshot.reviews) {
-			const sessionId$1 = item.sessionId ?? snapshot.runs.find((candidate) => candidate.runId === item.runId)?.sessionId;
-			if (sessionId$1 !== void 0 && item.metrics !== void 0) observations.set(sessionId$1, item.metrics);
-		}
-		const query = optionalService(this.ctx, "sessionQuery");
-		const live = optionalService(this.ctx, "sessions");
-		const projections = optionalService(this.ctx, "sessionProjections");
-		const graphObservations = /* @__PURE__ */ new Map();
-		const validTokens = (value) => value !== void 0 && value !== null && typeof value === "object" && [
-			"uncachedInputTokens",
-			"outputTokens",
-			"cacheReadTokens",
-			"cacheWriteTokens"
-		].every((key) => {
-			const count = value[key];
-			return typeof count === "number" && Number.isFinite(count) && count >= 0;
-		});
-		await Promise.all(sessions.map(async (sessionId$1) => {
-			const observed = {};
-			if (live !== void 0 && projections !== void 0) try {
-				const session = live.get(SessionId(sessionId$1));
-				if (session !== void 0) {
-					const value = projections.snapshot(session, ["tokenUsage"]).values.tokenUsage;
-					if (validTokens(value)) observed.tokens = value;
-				}
-			} catch {}
-			if (query !== void 0) try {
-				const log = await query.readSession(SessionId(sessionId$1));
-				const { events } = log;
-				observed.toolCalls = {
-					calls: events.filter((event) => event.type === "tool/call").length,
-					failures: events.filter((event) => event.type === "tool/result" && (event.data?.error !== void 0 || event.data?.message?.isError === true)).length
-				};
-				if (observed.tokens === void 0 && projections?.restore !== void 0 && log.session !== void 0 && log.inheritedEventCount !== void 0) {
-					const value = projections.restore({}, events, SessionLogOffset(0), log.session, log.inheritedEventCount).snapshot.values.tokenUsage;
-					if (validTokens(value)) observed.tokens = value;
-				}
-			} catch {}
-			graphObservations.set(sessionId$1, observed);
-			observations.set(sessionId$1, {
-				...observed,
-				...observations.get(sessionId$1)
-			});
-		}));
-		const auxiliary = /* @__PURE__ */ new Map();
-		const evolution = await evolutionOf(this.ctx, state.rootSessionId);
-		let auxiliaryUnavailable = evolution?.experiments === void 0;
-		if (evolution?.experiments !== void 0) for (const proposal of await evolution.list()) {
-			const experiments = await evolution.experiments(proposal.proposalId).catch(() => {
-				auxiliaryUnavailable = true;
-				return [];
-			});
-			for (const experiment of experiments) {
-				const plan = experiment.frozen.evaluation;
-				if (plan?.generatedResponse !== void 0) auxiliary.set(`plan:${experiment.experimentId}`, {
-					...plan.generatedUsage === void 0 ? {} : { tokens: plan.generatedUsage },
-					toolCalls: {
-						calls: 0,
-						failures: 0
-					}
-				});
-				if (experiment.judged !== void 0) auxiliary.set(`judge:${experiment.experimentId}`, {
-					...experiment.judged.evaluation.judgeUsage === void 0 ? {} : { tokens: experiment.judged.evaluation.judgeUsage },
-					toolCalls: {
-						calls: 0,
-						failures: 0
-					}
-				});
-			}
-		}
-		return [
-			renderRecordedCostFacts("Current round execution tree", runSubtree(snapshot, run.runId).map((item) => item.sessionId), observations),
-			renderRecordedCostFacts("Graph usage to date (executions, replay experiments and recorded coordination)", sessions, graphObservations),
-			auxiliaryUnavailable ? "Auxiliary evaluation plan/judge usage: unknown; some experiment cost reports were unavailable." : auxiliary.size === 0 ? "Auxiliary evaluation plan/judge usage: no recorded model calls." : renderRecordedCostFacts("Auxiliary evaluation plan/judge usage", [...auxiliary.keys()], auxiliary, "model calls"),
-			"Compare task effects with this recorded effort, including evaluation overhead. Coverage shows available counters; an unavailable reading remains unknown."
-		];
-	}
-	/** A short method prompt: library, evidence, comparison, publication and a clear ending. */
-	supervisorMethod = [
-		"Read task_library and matching task_template_list entries, then the exact Skill or template bytes and this run's contracts, batches and evidence. Review temporary exploratory goals and experience; record retention or retirement with task_library review and write useful revisions in this graph's library.",
-		"Choose the responsible skill, capability or task_definition. TaskTemplates record reusable goals and decomposition; Skills record paths, methods and conditions. Cite the evidence that supports your choice and weigh task effects with model usage and cost.",
-		"Compare a useful candidate through evolution_propose → evolution_candidate → evolution_prepare → evolution_replay → evolution_gate → evolution_decide → evolution_apply. For llm-outcome, evaluation.goal is enough for an LLM-generated frozen plan; reuse real tools and artifacts. Preserve each task's original checks, use comparable budgets and fresh starting inputs, and identify seen cases as regression evidence.",
-		"Conclude every executable proposal, keeping useful negative results and research findings. After publication inspect exact later template and Skill bindings and outcomes. The platform driver opens the next round after your supervision settles.",
-		"When retaining the current methods, finish with fenced json {\"outcome\":\"no_change\",\"reason\":\"...\"} and a settled proposal ledger. REJECT, KEEP_FOR_FURTHER_RESEARCH and rollback finish candidates as negative results. For a concrete obstruction use {\"outcome\":\"blocked\",\"reason\":\"...\"}; for a reason to end the loop use {\"outcome\":\"closed\",\"reason\":\"...\"}."
-	];
-	/** The first prompt one round's supervisor receives after a **verified** round: publish the method change the round's evidence shows. */
-	async verifiedPrompt(state, graph, round, run, review, diagnosisId) {
-		const publishedSkill = (await this.loopProposals(state)).filter((proposal) => proposal.status === "applied" && proposal.targetType === "skill").at(-1);
-		const publishedTemplate = (await this.loopProposals(state)).filter((proposal) => proposal.status === "applied" && proposal.targetType === "task_definition").at(-1);
-		return [
-			`You are the platform RSI loop's supervisor for graph "${graph.name}" (${state.graphId}), round ${round} of ${state.config.iterationRounds}.`,
-			...this.roundHeader(state, graph, round, run, review),
-			...await this.costFeedback(state, run),
-			`Current published skill of this loop: ${publishedSkill === void 0 ? "none yet — the ledger holds no applied skill for this loop" : `${publishedSkill.targetId} (proposal ${publishedSkill.proposalId}, applied)`}`,
-			publishedTemplate === void 0 ? "Current published task template of this loop: none yet" : `Current published task template of this loop: ${publishedTemplate.targetId} (proposal ${publishedTemplate.proposalId}, applied)`,
-			`Cite diagnosis:${diagnosisId} in evolution_propose.sourceRefs.`,
-			"",
-			"The round settled verified against the store's own acceptance criteria. Review its delivery and library experience; choose a useful improvement or retain the current method with no_change.",
-			...round < state.config.iterationRounds ? [] : ["Final library review: review this execution's paths and experience for retention or revision. Settle your findings; this graph completes after review, and subsequent Tasks can test any final publication."],
-			...this.supervisorMethod
-		].join("\n");
-	}
-	/** The first prompt one round's supervisor receives after a **failed** round: debug the failure and prepare the method change the recovery round consumes. */
-	async failedPrompt(state, graph, round, run, review, diagnosisId) {
-		const publishedSkill = (await this.loopProposals(state)).filter((proposal) => proposal.status === "applied" && proposal.targetType === "skill").at(-1);
-		const publishedTemplate = (await this.loopProposals(state)).filter((proposal) => proposal.status === "applied" && proposal.targetType === "task_definition").at(-1);
-		return [
-			`You are the platform RSI loop's supervisor for graph "${graph.name}" (${state.graphId}), round ${round} of ${state.config.iterationRounds}.`,
-			...this.roundHeader(state, graph, round, run, review),
-			...await this.costFeedback(state, run),
-			`Current published skill of this loop: ${publishedSkill === void 0 ? "none yet — the ledger holds no applied skill for this loop" : `${publishedSkill.targetId} (proposal ${publishedSkill.proposalId}, applied)`}`,
-			publishedTemplate === void 0 ? "Current published task template of this loop: none yet" : `Current published task template of this loop: ${publishedTemplate.targetId} (proposal ${publishedTemplate.proposalId}, applied)`,
-			`Cite diagnosis:${diagnosisId} in evolution_propose.sourceRefs.`,
-			"",
-			`The round settled ${run.status}. Debug that failure using its evidence, review and delivery, and choose the reusable method change that helps the next attempt. For a one-off environmental or input repair, retain the current methods with no_change and explain the next useful recovery.`,
-			...round < state.config.iterationRounds ? [] : ["Final library review: retain useful failure conditions and experience, and revise methods when justified. Settle your findings; this graph completes with the recorded task outcome after review, and subsequent Tasks can test any final publication."],
-			...this.supervisorMethod
-		].join("\n");
-	}
-	/** Record one loop position in memory, skipping a rewrite of the position this loop already holds. */
-	async mark(state, progress) {
-		if (await this.currentGraph(state) === void 0) return;
-		const current$1 = state.progress;
-		if (current$1 !== void 0 && current$1.round === progress.round && current$1.phase === progress.phase && current$1.note === progress.note) return;
-		state.progress = progress;
-		this.onProgress?.(state.graphId, progress);
-	}
-	/** The loop state of one graph, created on first sight and aligned with the graph record every time it is read. */
-	loopFor(graph, storeId) {
-		const existing = this.loops.get(graph.id);
-		if (existing !== void 0) {
-			if (this.matchesGraph(existing, graph)) return existing;
-			this.forget(graph.id);
-		}
-		const state = {
-			graphId: graph.id,
-			storeId,
-			rootSessionId: String(graph.rootSessionId),
-			config: graph.rsi,
-			stopped: false
-		};
-		this.loops.set(graph.id, state);
+	/** Bind one store to its graph before anything is read from it. */
+	remember(graph) {
+		const storeId = rootTaskStoreId(String(graph.rootSessionId));
 		this.byStore.set(storeId, graph.id);
-		return state;
+		registerGraphImprovementCap(storeId, graph.rsi?.iterationRounds ?? 0);
+		this.registered.add(storeId);
+		return storeId;
 	}
-	/** A graph this driver no longer schedules: its loop state goes away with its config. */
+	/** A graph this driver no longer drives: its cap goes away with it. */
 	forget(graphId) {
-		const state = this.loops.get(graphId);
-		if (state !== void 0) state.stopped = true;
-		this.loops.delete(graphId);
-		const stores = new Set([...this.byStore].filter(([, id]) => id === graphId).map(([id]) => id));
-		if (state !== void 0) stores.add(state.storeId);
-		for (const storeId of stores) {
+		for (const [storeId, id] of [...this.byStore]) {
+			if (id !== graphId) continue;
 			this.byStore.delete(storeId);
 			unregisterGraphImprovementCap(storeId);
 			this.registered.delete(storeId);
 		}
+		this.active.delete(graphId);
 	}
-	/** A config carrying a different epoch or different settings replaces the loop; an identical re-set does not. */
-	matchesGraph(state, graph) {
-		return graph.rsi !== void 0 && String(graph.rootSessionId) === state.rootSessionId && sameRsiConfig(state.config, graph.rsi);
+	/** The retired environment names, said at startup instead of being silently honoured (R20). */
+	warnAboutRetiredNames() {
+		const retired = ["SINGULARITY_REVIEW_LEDGER_DIR", "SINGULARITY_REVIEW_AGENT_BUDGET"].filter((name) => (process.env[name] ?? "").length > 0);
+		if (retired.length === 0) return;
+		this.log(`coordination: ${retired.join(" and ")} ${retired.length === 1 ? "is" : "are"} no longer read; this deployment's coordination store is ${coordinationFile()}`);
 	}
-	/** Re-read authority after an await and immediately before graph/recovery side effects. */
-	async currentGraph(state) {
-		if (this.stopped || this.loops.get(state.graphId) !== state) return void 0;
-		const graph = await this.ctx.graphs.get(state.graphId).catch(() => void 0);
-		if (this.stopped || this.loops.get(state.graphId) !== state || graph === void 0) return void 0;
-		if (!this.matchesGraph(state, graph)) {
-			this.forget(state.graphId);
-			return;
-		}
-		return graph;
+	logLine(graphId, error) {
+		this.log(`coordination: graph ${graphId}: ${message(error)}`);
 	}
 };
-/** The newest attempt that supervises one round's diagnosis, whether it settled or not. */
-function supervisorAttemptOf(attempts, diagnosisId) {
-	return attempts.filter((attempt) => attempt.role === "supervisor" && attempt.diagnosisId === diagnosisId).at(-1);
+/** How many assignments of one store have materialized a session — the spend the allowance counts. */
+function spentOf(rows, storeId, sessions) {
+	return rows.filter((row) => row.kind === "assignment" && row.storeId === storeId).filter((row) => sessionSpent(sessions.get(row.sessionId))).length;
 }
-/** Whether two readings agree; replacement revokes a watcher while the same frozen root's facts remain authoritative. */
-function sameRsiConfig(left, right) {
-	return left.task === right.task && left.iterationRounds === right.iterationRounds && left.humanReview === right.humanReview && (left.epoch ?? 1) === (right.epoch ?? 1) && canonicalize(left.metrics ?? []) === canonicalize(right.metrics ?? []);
+/** The bubble home this deployment's round workspaces live under. */
+function bubbleHome() {
+	return process.env.DSH_HOME || join(homedir(), ".dsh");
 }
-/**
-* One round's supervision identity: the hand-off content this driver promises
-* for it. It is derived from the round alone, so every attempt of one round —
-* the first, the retry after a crash — carries the same promise, and the
-* ledger's own conflict check never reads two attempts of one round as two
-* different hand-offs.
-*/
-function roundHandoffDigest(input) {
-	return sha256Hex(canonicalize({ ...input }));
+/** Install one deployment's coordination driver and register its fact reader. */
+function installCoordinationDriver(ctx, options = {}) {
+	const driver = new CoordinationDriver(ctx, options);
+	return {
+		driver,
+		dispose: driver.install()
+	};
 }
-/** Install one deployment's RSI loop driver: every graph that carries `rsi` settings gets its platform-scheduled loop. */
-function installRsiLoopDriver(ctx, options = {}) {
-	return new RsiLoopDriver(ctx, options).install();
+
+//#endregion
+//#region src/tools/completion-tools.ts
+const SUPERVISOR_PARAMETERS = [
+	"businessAction",
+	"reason",
+	"evidenceRefs",
+	"trialCandidateRef"
+];
+const REVIEWER_PARAMETERS = [
+	"observation",
+	"conclusion",
+	"confidence",
+	"scope",
+	"reviewRefs",
+	"evidenceRefs",
+	"relatedTaskIds",
+	"judgements",
+	"proposals"
+];
+/** Why a completion call was refused, in the caller's own terms. */
+function refuse(tool, detail) {
+	return `${tool} rejected: ${detail}; nothing was recorded and this session may still work`;
+}
+/** The already-recorded completion one repeat of a call returns. */
+function alreadySettled(tool, binding, summary) {
+	return `${tool}: this session (${binding.sessionId}) already settled its work item — ${summary}; a completion is recorded once`;
+}
+/** The completion call's own binding: the session must hold an unsettled work item of the expected role. */
+async function bindingFor(tool, caller, role) {
+	const binding = await readCoordinationBinding(caller);
+	if (binding === void 0) throw new Error(refuse(tool, `session "${caller}" holds no coordination work item; the platform assigns work, a session never claims it`));
+	if (binding.role !== role) throw new Error(refuse(tool, `session "${caller}" is recorded as a ${binding.role}, and only a ${role} calls ${tool}`));
+	return binding;
+}
+/** The graph's configured round count, when this deployment's registry can answer for it. */
+async function readGraphRounds(ctx, graphId) {
+	const graphs = ctx.graphs;
+	if (typeof graphs?.get !== "function") return void 0;
+	try {
+		return (await graphs.get(graphId)).rsi?.iterationRounds;
+	} catch {
+		return;
+	}
+}
+/** The supervisor's completion tool. */
+function defineSupervisorCompleteTool(ctx) {
+	return defineTool({
+		name: "supervisor_complete",
+		description: "Conclude this round and tell the platform what the business work does next. businessAction is your own judgement of the business step only: 'continue' when the verified round's work should run again with the improved method, 'recover' when the failed round must be repaired and tried again, 'finish' when the business work should not run another round. reason is non-empty free text. evidenceRefs must name at least one reference this store already holds (a review ref taskId#runId, an evidence bundle id, or a criterion id) — a conclusion that rests on nothing is not recorded. trialCandidateRef is optional and names one candidate this next round should explicitly try. The method decision, the approval source and whether the method search continues are derived by the platform from what this round actually recorded: they are not parameters, and passing one is an undeclared parameter. businessAction must agree with the round you were given: continue after a verified round, recover after a failed one, finish in either case. Calling this tool closes this session’s write access; reads and findings stay available, and the platform opens the next execution after this session’s log is flushed.",
+		parameters: {
+			businessAction: {
+				type: "string",
+				required: true,
+				enum: [
+					"continue",
+					"recover",
+					"finish"
+				],
+				description: "What the business work does next: continue | recover | finish"
+			},
+			reason: {
+				type: "string",
+				required: true,
+				description: "Why this is the right next step, in your own words"
+			},
+			evidenceRefs: {
+				type: "array",
+				items: { type: "string" },
+				required: true,
+				description: "At least one recorded reference: a review ref taskId#runId, an evidence bundle id, or a criterion id"
+			},
+			trialCandidateRef: {
+				type: "string",
+				description: "Optional: the candidate id the next round should explicitly try without promoting it"
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text(v)
+		},
+		execute: async (args, exec) => {
+			const undeclared = undeclaredParameters(args, SUPERVISOR_PARAMETERS, "supervisor_complete");
+			if (undeclared !== void 0) return undeclared;
+			const caller = sessionId(exec, "supervisor_complete");
+			let binding;
+			try {
+				binding = await bindingFor("supervisor_complete", caller, "supervisor");
+			} catch (error) {
+				return error instanceof Error ? error.message : String(error);
+			}
+			if (binding.completed) return alreadySettled("supervisor_complete", binding, `the round already has a completion for session ${binding.sessionId}`);
+			const snapshot = await ctx.task.openStore(binding.rootStoreId);
+			const outcome = snapshot.runs.find((candidate) => candidate.runId === binding.sourceRunId)?.status === "verified" ? "verified" : "failed";
+			const payload = {
+				businessAction: args.businessAction,
+				reason: args.reason,
+				evidenceRefs: Array.isArray(args.evidenceRefs) ? args.evidenceRefs : [],
+				...typeof args.trialCandidateRef === "string" && args.trialCandidateRef.trim().length > 0 ? { trialCandidateRef: args.trialCandidateRef } : {}
+			};
+			const validated = validateSupervisorCompletion({
+				binding,
+				snapshot,
+				outcome,
+				payload
+			});
+			if (!validated.ok) return `supervisor_complete rejected: ${validated.refusal}; nothing was recorded`;
+			const action = validated.payload.businessAction;
+			if (action !== "finish" && nextRoundMode(action, outcome) === void 0) return `supervisor_complete rejected: businessAction "${action}" does not agree with the round this session was given (the source run settled ${outcome}); use ${outcome === "verified" ? "'continue'" : "'recover'"} or 'finish'; nothing was recorded`;
+			const graph = await readGraphRounds(ctx, binding.graphId);
+			const businessRound = binding.subject.kind === "round" ? binding.subject.businessRound : 0;
+			const rounds = graph ?? businessRound;
+			const records = await roundMethodRecords(ctx, binding.graphId, businessRound);
+			const completion = supervisorCompletion(binding, validated.payload, {
+				...methodDecisionOf(records, validated.payload.trialCandidateRef),
+				searchNext: searchNextOf({
+					businessRound,
+					rounds
+				})
+			});
+			await recordCompletion(completion);
+			ctx.agentRuntime.sealCoordinationSession(caller);
+			return renderCompletion(completion);
+		}
+	});
+}
+/** The reviewer's completion tool. */
+function defineReviewerCompleteTool(ctx) {
+	return defineTool({
+		name: "reviewer_complete",
+		description: "Conclude this review and record the diagnosis it produced. observation is required: the postmortem observation (复盘观察) — what was actually observed in the source, whether it failed or succeeded. conclusion is required: the cause, citing the original outcome evidence. confidence is required: high, medium or low. scope, reviewRefs, evidenceRefs and relatedTaskIds are optional and must name records this store already holds (reviewRefs as exact taskId#runId or taskId#no-run; evidenceRefs as evidence bundle ids). judgements are optional: [{dimension, verdict, evidenceRefs, rationale}] where dimension is one of the judged dimensions, verdict is adequate|inadequate|unknown, and each judgement cites at least one recorded ref and a rationale — a judgement that cites nothing is refused rather than downgraded. proposals are optional suggestions ([{targetType, targetId, rationale}]); nothing here executes them. Calling this tool writes the Diagnosis and closes this session’s write access. A session that ends its turn without calling it is a protocol failure: no diagnosis is invented from its silence, and the platform does not ask again.",
+		parameters: {
+			observation: {
+				type: "string",
+				required: true,
+				description: "The postmortem observation (复盘观察): what was actually observed"
+			},
+			conclusion: {
+				type: "string",
+				required: true,
+				description: "The cause, citing the original outcome evidence"
+			},
+			confidence: {
+				type: "string",
+				required: true,
+				enum: [
+					"high",
+					"medium",
+					"low"
+				],
+				description: "How sure you are; coarse on purpose"
+			},
+			scope: {
+				type: "string",
+				description: "How far the cause reaches (this task, its subtree, a shared assumption, …)"
+			},
+			reviewRefs: {
+				type: "array",
+				items: { type: "string" },
+				description: "Exact taskId#runId (or taskId#no-run) refs this conclusion rests on"
+			},
+			evidenceRefs: {
+				type: "array",
+				items: { type: "string" },
+				description: "Evidence bundle ids read through context_read kind:\"evidence\""
+			},
+			relatedTaskIds: {
+				type: "array",
+				items: { type: "string" },
+				description: "Actual task ids in this graph the finding spans"
+			},
+			judgements: {
+				type: "array",
+				description: "Optional judgements on dimensions no parser settles; each needs refs and a rationale",
+				items: {
+					type: "object",
+					additionalProperties: false,
+					properties: {
+						dimension: {
+							type: "string",
+							required: true,
+							description: "One of the judged dimensions"
+						},
+						verdict: {
+							type: "string",
+							required: true,
+							enum: [
+								"adequate",
+								"inadequate",
+								"unknown"
+							],
+							description: "The judgement"
+						},
+						evidenceRefs: {
+							type: "array",
+							items: { type: "string" },
+							required: true,
+							description: "At least one recorded ref"
+						},
+						rationale: {
+							type: "string",
+							required: true,
+							description: "Why this verdict, grounded in the refs"
+						}
+					}
+				}
+			},
+			proposals: {
+				type: "array",
+				description: "Optional structured suggestions for the supervisor; stored as data, never auto-executed",
+				items: {
+					type: "object",
+					additionalProperties: false,
+					properties: {
+						targetType: {
+							type: "string",
+							required: true,
+							description: "The mutation surface the suggestion points at"
+						},
+						targetId: {
+							type: "string",
+							required: true,
+							description: "The concrete target name"
+						},
+						rationale: {
+							type: "string",
+							required: true,
+							description: "The mechanism, expected benefit and how it could be tested"
+						}
+					}
+				}
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text(v)
+		},
+		execute: async (args, exec) => {
+			const undeclared = undeclaredParameters(args, REVIEWER_PARAMETERS, "reviewer_complete");
+			if (undeclared !== void 0) return undeclared;
+			const caller = sessionId(exec, "reviewer_complete");
+			let binding;
+			try {
+				binding = await bindingFor("reviewer_complete", caller, "reviewer");
+			} catch (error) {
+				return error instanceof Error ? error.message : String(error);
+			}
+			if (binding.completed) {
+				const diagnosis$1 = (await ctx.task.openStore(binding.rootStoreId)).diagnoses.find((item) => item.diagnosisId === `review-agent-${binding.sessionId}`);
+				return alreadySettled("reviewer_complete", binding, diagnosis$1 === void 0 ? "the review already has a completion" : `diagnosis ${diagnosis$1.diagnosisId} is recorded`);
+			}
+			const snapshot = await ctx.task.openStore(binding.rootStoreId);
+			const validated = validateReviewCompletion({
+				binding,
+				snapshot,
+				payload: args
+			});
+			if (!validated.ok) return `reviewer_complete rejected: ${validated.refusal}; nothing was recorded`;
+			const diagnosis = validated.payload.diagnosis;
+			try {
+				await ctx.task.recordDiagnosisIn(binding.rootStoreId, diagnosis, binding.sessionId);
+			} catch (error) {
+				return `reviewer_complete rejected: the diagnosis could not be recorded (${error instanceof Error ? error.message : String(error)}); nothing was recorded`;
+			}
+			await recordCompletion(reviewCompletion(binding, diagnosis.diagnosisId, diagnosis.confidence));
+			ctx.agentRuntime.sealCoordinationSession(caller);
+			return [
+				`reviewer_complete: diagnosis ${diagnosis.diagnosisId} [${diagnosis.confidence}] recorded`,
+				`refs: ${diagnosis.reviewRefs.length} review, ${diagnosis.evidenceRefs.length} evidence, ${(diagnosis.relatedTaskIds ?? []).length} related task(s)`,
+				`judgements: ${diagnosis.judgements?.length ?? 0}; proposals: ${diagnosis.proposals.length} (suggestions only)`,
+				"writes are closed for this session; reads and findings remain available"
+			].join("; ");
+		}
+	});
 }
 
 //#endregion
@@ -4911,17 +5459,11 @@ function renderJudgementDimensions() {
 function reviewForSource(snapshot, source) {
 	return snapshot.reviews.find((review) => review.taskId === source.taskId && (review.runId ?? null) === source.runId);
 }
-/** The ledger state of one source: every **review** attempt the store holds for it, in the order they were claimed — the default attempt (`null` key) and each explicit one — with how each ended. */
-function renderAttempts(attempts, source) {
-	const mine = attempts.filter((attempt) => attempt.role === "reviewer" && attempt.source.taskId === source.taskId && attempt.source.runId === source.runId);
-	if (mine.length === 0) return ["review attempts (0): none — no review agent has been started for this source"];
-	return [`review attempts (${mine.length}):`, ...mine.map((attempt) => {
-		const label = attempt.requestKey === null ? "default attempt" : `requestKey "${attempt.requestKey}"`;
-		const status = attempt.settlement?.status ?? "in-flight";
-		const note = attempt.settlement?.note === void 0 ? "" : ` — ${attempt.settlement.note}`;
-		const reason = attempt.reason === null ? "" : ` reason ${JSON.stringify(attempt.reason)}`;
-		return `- ${label} ${attempt.sessionId} [${status}]${reason}${note}`;
-	})];
+/** The coordination work items of one source: every reviewer assignment, in claim order, with how it ended. */
+function renderAttempts(work, source) {
+	const mine = workOfSource(work, source);
+	if (mine.length === 0) return ["review work items (0): none — no review session has been assigned for this source"];
+	return [`review work items (${mine.length}):`, ...mine.map((item) => `- ${renderCoordinationWork(item)}`)];
 }
 /** The effort line: one clause per counter that exists, and nothing for the ones that do not — an absent field means "not observed" (see `ReviewMetrics`), so printing 0 for it would invent a measurement. */
 function renderMetrics(metrics) {
@@ -4993,11 +5535,13 @@ function renderReview(review) {
 	if (review.logTail !== void 0) lines.push("  logTail:", ...review.logTail.split("\n").map((line) => `    ${line}`));
 	return lines;
 }
-/** How far one diagnosis's supervision has gone: the supervisor attempts the LEDGER holds for it. */
-function supervisionMark(diagnosis, attempts) {
-	return supervisorAttemptsLine(diagnosis.diagnosisId, attempts);
+/** How far one diagnosis's supervision has gone: the work items the coordination store holds for its round. */
+function supervisionMark(diagnosis, work) {
+	const mine = work.filter((item) => diagnosisIdOf(item.assignment) === diagnosis.diagnosisId);
+	if (mine.length === 0) return "no supervisor work item — a graph without RSI settings runs no platform supervisor for its diagnoses";
+	return mine.map((item) => renderCoordinationWork(item)).join("; ");
 }
-function renderDiagnosis(diagnosis, attempts) {
+function renderDiagnosis(diagnosis, work) {
 	const producer = diagnosis.producedBy === void 0 ? "" : diagnosis.producedBy.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? ` [agent ${diagnosis.producedBy.sessionId}]` : ` [${diagnosis.producedBy.kind}]`;
 	const lines = [`- ${diagnosis.diagnosisId} [${diagnosis.confidence}] ${diagnosis.localizedCause}${producer}`];
 	lines.push(`  observation: ${diagnosis.observedFailure}`, `  scope: ${diagnosis.scope}; task ${diagnosis.taskId}`, `  reviewRefs: [${diagnosis.reviewRefs.join(", ")}]; evidenceRefs: [${diagnosis.evidenceRefs.join(", ")}]; relatedTaskIds: [${(diagnosis.relatedTaskIds ?? []).join(", ")}]`);
@@ -5007,7 +5551,7 @@ function renderDiagnosis(diagnosis, attempts) {
 		for (const judgement of diagnosis.judgements) lines.push(`    ${judgement.dimension}: ${judgement.verdict} — ${judgement.rationale} refs [${judgement.evidenceRefs.join(", ")}]`);
 	}
 	for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
-	lines.push(`  supervision: ${supervisionMark(diagnosis, attempts)}`);
+	lines.push(`  supervision: ${supervisionMark(diagnosis, work)}`);
 	return lines;
 }
 /** What the exact source run was bound to and loaded (S1-C item 4). */
@@ -5025,7 +5569,7 @@ function renderBindings(snapshot, source) {
 }
 /** One exact source in full, with bounded same-graph evidence navigation through the existing read tools. */
 function buildReviewPack(input) {
-	const { snapshot, source, attempts } = input;
+	const { snapshot, source, work } = input;
 	const { taskId } = source;
 	const task = snapshot.tasks.find((item) => item.taskId === taskId);
 	if (task === void 0) throw new Error(`task_review_pack: unknown task "${taskId}"`);
@@ -5042,7 +5586,7 @@ function buildReviewPack(input) {
 		`source run: ${sourceRun === void 0 ? "none" : `${sourceRun.runId} [${sourceRun.status}] session ${sourceRun.sessionId ?? review?.sessionId ?? "unknown"}; ${sourceRun.runId === latestRunId ? "latest run" : "historical run"}; preset ${sourceRun.agentPreset ?? "unknown"}`}; latest run of task: ${latestRunId ?? "none"}`,
 		`objective: ${task.objective}`,
 		`dependencies: must verify first [${incoming.join(", ")}]; blocks [${outgoing.join(", ")}]`,
-		...renderAttempts(attempts, source),
+		...renderAttempts(work, source),
 		renderJudgementDimensions(),
 		`reviews (${reviews.length}): exact source in full; other versions in graph navigation`,
 		...review === void 0 ? [] : renderReview(review),
@@ -5092,7 +5636,7 @@ function buildReviewPack(input) {
 	if (budgetList(budget, {
 		header: [`diagnoses (${diagnoses.length}):`],
 		units: diagnoses,
-		lines: (diagnosis) => renderDiagnosis(diagnosis, attempts),
+		lines: (diagnosis) => renderDiagnosis(diagnosis, work),
 		tail: (count) => [`diagnoses shown: ${count}/${diagnoses.length}; exact records through context_read kind:"diagnosis" ref:<diagnosisId>, discovered through task_status scope:"graph".`]
 	}) === void 0) budget.add("Diagnoses did not fit; discover diagnosisRefs through task_status scope:\"graph\", then context_read kind:\"diagnosis\".");
 	return budget.text();
@@ -5100,7 +5644,7 @@ function buildReviewPack(input) {
 function defineTaskReviewPackTool(ctx) {
 	return defineTool({
 		name: "task_review_pack",
-		description: "Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started). The pack names the task itself, the exact source review in full (criteria, log tail, blockers, session), historical review references, the review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the fact table does not carry, the dependency edges touching it, and its diagnoses with any agent judgements — every diagnosis marked with the supervisor attempts the coordination ledger holds for it (which session ran it and how it ended), which only a graph that runs an RSI loop has. It reports the facts only: whether a review agent runs is decided elsewhere (an explicit call names its source; a graph's RSI loop spawns its supervisor itself). It adds bounded same-graph DAG navigation with exact run/session ids, template and frozen provider digests, and observed counters. Continue with task_status scope:\"graph\" and context_read; no ancestry or sibling log replay. Feed this to task_diagnose, or to task_review_agent when a judgement is needed.",
+		description: "Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started). The pack names the task itself, the exact source review in full (criteria, log tail, blockers, session), historical review references, the review work items the coordination store holds for this source and how each ended, the dimensions whose conclusion the fact table does not carry, the dependency edges touching it, and its diagnoses with any agent judgements — every diagnosis marked with the supervisor work items the coordination store holds for its round (which session ran it and how it ended), which only a graph that runs an RSI loop has. It reports the facts only: whether a review agent runs is decided elsewhere (an explicit call names its source; a graph's RSI loop spawns its supervisor itself). It adds bounded same-graph DAG navigation with exact run/session ids, template and frozen provider digests, and observed counters. Continue with task_status scope:\"graph\" and context_read; no ancestry or sibling log replay. Feed this to task_diagnose, or to task_review_agent when a judgement is needed.",
 		parameters: {
 			taskId: {
 				type: "string",
@@ -5118,7 +5662,8 @@ function defineTaskReviewPackTool(ctx) {
 			render: (_a, v) => text(v)
 		},
 		execute: async (args, exec) => {
-			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(sessionId(exec, "task_review_pack"))).rootSessionId);
+			const graph = await ctx.graphs.graphForSession(sessionId(exec, "task_review_pack"));
+			const storeId = rootTaskStoreId(graph.rootSessionId);
 			const source = {
 				taskId: args.taskId,
 				runId: args.runId
@@ -5130,7 +5675,7 @@ function defineTaskReviewPackTool(ctx) {
 			return buildReviewPack({
 				snapshot,
 				source,
-				attempts: await readReviewAgentAttempts(storeId)
+				work: workOf(await readCoordinationRows() ?? [], graph.id)
 			});
 		}
 	});
@@ -5138,375 +5683,159 @@ function defineTaskReviewPackTool(ctx) {
 
 //#endregion
 //#region src/coordination/review-run.ts
-/** Shared coordinator composition; runtime installs the reviewer policy. */
-const REVIEWER_PRESET = "singularity-coordinator";
-/** The review agent's whole tool surface. Read-only by construction: */
-const REVIEWER_BASELINE = [
-	"task_review_pack",
-	"task_read",
-	"task_status",
-	"context_read",
-	"capability_list",
-	"task_template_list",
-	"read",
-	"glob",
-	"grep",
-	"skill"
-];
-/** The capability grant one review agent is spawned with. */
-function reviewerGrant() {
-	return {
-		capabilities: [],
-		baseline: REVIEWER_BASELINE,
-		keepPresetTools: false
-	};
-}
 /** The source one attempt reviews, as a ref a reader reads back (`t1#r1`, `t2#no-run`). */
 function sourceRef(source) {
-	return reviewRef({
-		taskId: source.taskId,
-		runId: source.runId
-	});
-}
-/** The last fenced JSON object is the reviewer's answer. */
-function parseReviewerObject(reply) {
-	if (reply === void 0) return void 0;
-	const fenced = [...reply.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((match) => match[1]);
-	const candidate = fenced[fenced.length - 1];
-	if (candidate === void 0) return void 0;
-	try {
-		const parsed = JSON.parse(candidate);
-		return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : void 0;
-	} catch {
-		return;
-	}
-}
-/** A non-empty string out of the reply, or nothing. */
-function textOf(value) {
-	return typeof value === "string" && value.trim().length > 0 ? value : void 0;
-}
-/** Optional lineage is explicit: malformed ids are refused, and repeated ids add no evidence. */
-function refsOf(value, field) {
-	if (value === void 0) return void 0;
-	if (!Array.isArray(value) || value.some((ref) => textOf(ref) === void 0)) throw new Error(`the "${field}" field must be an array of non-empty strings`);
-	return [...new Set(value)];
-}
-/** Validate the judgements the reviewer chose to make. Each one has to name a judged dimension and a verdict from the fixed vocabulary, cite at least one non-empty ref and carry a rationale — this is the. */
-function judgementsOf(value) {
-	if (value === void 0) return [];
-	if (!Array.isArray(value)) throw new Error("the \"judgements\" field is not an array");
-	return value.map((item, index) => {
-		const entry = item ?? {};
-		const dimension = entry.dimension;
-		if (!JUDGED_DIMENSIONS.includes(dimension)) throw new Error(`judgement ${index} names dimension "${String(dimension)}", which is not one of ${JUDGED_DIMENSIONS.join(", ")}`);
-		const verdict = entry.verdict;
-		if (!JUDGEMENT_VERDICTS.includes(verdict)) throw new Error(`judgement ${index} (${String(dimension)}) has verdict "${String(verdict)}", which is not adequate/inadequate/unknown`);
-		const refs = Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs.filter((ref) => typeof ref === "string" && ref.length > 0) : [];
-		if (refs.length === 0) throw new Error(`judgement ${index} (${String(dimension)}) cites no evidence — a conclusion that rests on nothing is not recorded`);
-		const rationale = textOf(entry.rationale);
-		if (rationale === void 0) throw new Error(`judgement ${index} (${String(dimension)}) carries no rationale`);
-		return {
-			dimension,
-			verdict,
-			evidenceRefs: refs,
-			rationale
-		};
-	});
-}
-/** Validate the proposals the reviewer chose to make: a target name, an id and a reason, each grounded in what it wrote. */
-function proposalsOf(value) {
-	if (value === void 0) return [];
-	if (!Array.isArray(value)) throw new Error("the \"proposals\" field is not an array");
-	return value.map((item, index) => {
-		const entry = item ?? {};
-		const targetType = textOf(entry.targetType);
-		const targetId = textOf(entry.targetId);
-		const rationale = textOf(entry.rationale);
-		if (targetType === void 0 || targetId === void 0 || rationale === void 0) throw new Error(`proposal ${index} needs a non-empty targetType, targetId and rationale`);
-		return {
-			targetType,
-			targetId,
-			rationale
-		};
-	});
-}
-/** The diagnosis the reviewer's reply carries, or a named reason it carries none. What is required is what a Diagnosis is: the **observation** (the persisted `observedFailure` slot, read as the postmortem observation — a */
-function parseReviewerDiagnosis(reply) {
-	if (reply === void 0) return {
-		ok: false,
-		refusal: "the reviewer returned no output"
-	};
-	const parsed = parseReviewerObject(reply);
-	if (parsed === void 0) return {
-		ok: false,
-		refusal: "the reviewer returned no parseable json object"
-	};
-	const observation = textOf(parsed.observation);
-	if (observation === void 0) return {
-		ok: false,
-		refusal: "the reply carries no observation (the postmortem observation is required)"
-	};
-	const conclusion = textOf(parsed.conclusion);
-	if (conclusion === void 0) return {
-		ok: false,
-		refusal: "the reply carries no conclusion"
-	};
-	const confidence = parsed.confidence;
-	if (confidence !== "high" && confidence !== "medium" && confidence !== "low") return {
-		ok: false,
-		refusal: `the reply's confidence "${String(confidence)}" is not high/medium/low`
-	};
-	try {
-		const scope = textOf(parsed.scope);
-		if (parsed.scope !== void 0 && scope === void 0) throw new Error("the \"scope\" field must be a non-empty string");
-		const reviewRefs = refsOf(parsed.reviewRefs, "reviewRefs");
-		const evidenceRefs = refsOf(parsed.evidenceRefs, "evidenceRefs");
-		const relatedTaskIds = refsOf(parsed.relatedTaskIds, "relatedTaskIds");
-		return {
-			ok: true,
-			diagnosis: {
-				observation,
-				conclusion,
-				confidence,
-				...scope === void 0 ? {} : { scope },
-				...reviewRefs === void 0 ? {} : { reviewRefs },
-				...evidenceRefs === void 0 ? {} : { evidenceRefs },
-				...relatedTaskIds === void 0 ? {} : { relatedTaskIds },
-				judgements: judgementsOf(parsed.judgements),
-				proposals: proposalsOf(parsed.proposals)
-			}
-		};
-	} catch (error) {
-		return {
-			ok: false,
-			refusal: `the reply's diagnosis fields are malformed: ${error instanceof Error ? error.message : String(error)}`
-		};
-	}
-}
-/** The judged dimensions rendered as report lines (agent judgements, kept apart from the fact lines). */
-function renderJudgements(judgements) {
-	return judgements.map((item) => `  ${item.dimension}: ${item.verdict} — ${item.rationale} refs [${item.evidenceRefs.join(", ")}]`);
+	return reviewRef(source);
 }
 /** The diagnosis one attempt recorded, as the store holds it (the id is the attempt's session). */
 function recordedDiagnosis(snapshot, sessionId$1) {
 	return snapshot.diagnoses.find((diagnosis) => diagnosis.diagnosisId === `review-agent-${sessionId$1}`);
 }
-/** Run one review attempt for one source: the admission's serial region (plan, claim, spawn) and then, outside it, the reviewer's reply, the diagnosis it carries and the one terminal fact. */
+/** How long the completion record may lag behind the turn it concluded before the call stops waiting for it. */
+const COMPLETION_GRACE_MS = 2e3;
+/** How often that grace re-reads the store. */
+const COMPLETION_POLL_MS = 50;
+/** Run one review attempt for one source: plan, claim, spawn, then read the record back. */
 async function runReviewAgentAttempt(input) {
 	const { ctx, storeId, source, review, parent, actor } = input;
-	const reviewerSessionId = SessionId(randomUUID());
+	const sessionId$1 = SessionId(randomUUID());
+	const graph = await ctx.graphs.graphForSession(parent.id);
+	const snapshot = await ctx.task.snapshotIn(storeId);
+	const root = rootTaskOf(snapshot);
+	const businessRound = root === void 0 ? null : terminalRootRuns(snapshot, root.taskId).length;
+	const key = {
+		graphId: graph.id,
+		epoch: graph.rsi?.epoch ?? 1,
+		role: "reviewer",
+		subject: {
+			kind: "review",
+			businessRound,
+			source,
+			requestKey: input.requestKey
+		}
+	};
 	const request = {
-		source,
-		requestKey: input.requestKey,
-		reason: input.reason,
+		key,
+		storeId,
+		sessionId: sessionId$1,
 		actor,
-		sessionId: reviewerSessionId
+		digest: subjectDigest(key),
+		focus: input.reason
 	};
-	const outcome = await admitReviewAgent(storeId, async (admission) => {
-		const current$1 = await ctx.task.snapshotIn(storeId);
-		const { plan, recovered } = await admission.plan(request, { recorded: (attempt) => recordedDiagnosis(current$1, attempt.sessionId) !== void 0 });
-		if (plan.kind === "refused") return {
-			kind: "refused",
-			plan,
-			recovered
-		};
-		if (plan.kind === "reuse") return {
-			kind: "reuse",
-			attempt: plan.attempt,
-			recovered
-		};
-		if (plan.kind === "in-flight") return {
-			kind: "in-flight",
-			attempt: plan.attempt,
-			recovered
-		};
-		const spawned = await spawnUnderClaim({
-			ctx,
-			admission,
-			storeId,
-			request,
-			sessionId: reviewerSessionId,
-			taskId: source.taskId,
-			actor,
-			parent,
-			name: `review ${source.taskId}`,
-			preset: REVIEWER_PRESET,
-			grant: reviewerGrant(),
-			signal: input.signal,
-			errorLabel: "task_review_agent: the delegation of reviewer session",
-			failureLabel: "spawn failed",
-			prompt: async () => {
-				const pack = buildReviewPack({
-					snapshot: current$1,
-					source,
-					attempts: await readReviewAgentAttempts(storeId)
-				});
-				return [
-					"You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.",
-					"Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and context_read reach the sibling tasks, their sessions and their evidence; task_template_list reads the delegated task's template catalog and exact templateRef contracts. Cite what you rest on.",
-					"Provide read-only analysis grounded in the recorded evidence.",
-					"Start with this exact source, then inspect the business DAG and read original evidence where it distinguishes plausible causes. Explain how exploration decisions, result boundaries, upstream contracts, dependencies, shared providers or decomposition could produce the observed result. Establish a shared cause with evidence linking the implicated results.",
-					...review.outcome === "verified" ? ["The run passed its review; inspect the delivered result, acceptance coverage and exploration choices as well as avoidable tool calls, repeated reads, retries and decomposition costs. Compare candidates under the original acceptance with real two-sided replay. Graph-local observed cases support experience for this graph; independent holdouts provide transfer evidence and are required for shared publication. Mark fresh transfer unknown when it has not been measured. Domain outcome claims use llm-outcome with real measurements under a frozen evaluation plan; execution overhead claims use tool-call-reduction over the complete Run subtree. Treat an observed opportunity as a testable hypothesis until measured."] : [],
-					"Return EXACTLY one fenced json block, no prose around it:",
-					"```json",
-					JSON.stringify({
-						observation: "...",
-						conclusion: "...",
-						confidence: "low",
-						reviewRefs: [sourceRef(source)]
-					}),
-					"```",
-					"- observation (required): the postmortem observation (复盘观察) — what was actually observed in the source, whether it failed or succeeded.",
-					"- Keep observation and conclusion concise; cite the failure command, log or session ref rather than restating the whole pack.",
-					"- conclusion (required): explain the cause and cite the original outcome evidence. For a failed source, name one concrete next action for its business coordinator, such as a smaller independently verifiable child result after the batch settles. Check its task/run state first: task_decompose needs an active run; a terminal run returns its next-action recommendation to the supervisor. Investigate accessible facts before concluding that the cause is unknown; if it remains unsettled, identify the specific missing fact.",
-					"- confidence (required): high, medium or low.",
-					"- A successful source may conclude \"no improvement needed\" with its supporting evidence.",
-					"- scope, reviewRefs, evidenceRefs, relatedTaskIds (optional): name the causal scope and include only records you read that support the explanation. reviewRefs must be exact taskId#runId (or taskId#no-run) refs from task_review_pack or context_read kind:\"review\". Top-level evidenceRefs must be evidence bundle ids read through context_read kind:\"evidence\"; use reviewRefs for a review and cite commands, log paths, criterion ids or template ids in prose, not in these arrays. relatedTaskIds must be actual task ids in this graph. The triggering review is retained automatically. Include the additional lineage that supports the finding.",
-					"- For a shared cause, cite the original evidence from each implicated task and the common contract, provider version or dependency that connects them; inspect a passing contrast when available. State uncertainty and conflicting evidence. A causally supported candidate may describe an anticipated benefit as a testable hypothesis and say what would refute it; describe untested benefit as a hypothesis to measure. If the cause is unresolved, identify the missing evidence and use low confidence.",
-					`- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}], only when useful and supported. Dimensions: ${JUDGED_DIMENSIONS.join(", ")}; verdict: adequate|inadequate|unknown. Each evidenceRefs array must cite at least one exact review ref, evidence ref printed by a review, evidence bundle id, or Run/review session id from this graph. Use these recorded identities as judgement refs; include the dimensions the evidence supports.`,
-					"- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. For an evidenced reusable gap, executable targetType names are task_definition (a TaskTemplate; targetId is its template id), skill or capability. Include the causal mechanism, expected benefit and how it could be tested in rationale. Other targetType names remain recorded suggestions. Connect a shared-change recommendation to evidence of a reusable cause; proposals record recommendations for the supervisor.",
-					"- The platform RSI loop schedules the next round. Return useful exploration or decomposition goals and method experience for TaskTemplate or Skill review; the authorized supervisor evaluates and applies reusable changes.",
-					"Include observation, conclusion and confidence so the finding can be recorded as a diagnosis.",
-					"",
-					`--- source under review ---`,
-					`review ${sourceRef(source)} [${review.outcome}]${request.reason === null ? "" : ` — focus: ${request.reason}`}`,
-					"",
-					"--- review pack ---",
-					pack
-				].join("\n");
-			}
-		});
-		if (spawned.kind === "spawn-failed") return {
-			kind: "spawn-failed",
-			failure: spawned.failure,
-			sessionId: reviewerSessionId
-		};
-		return {
-			kind: "spawned",
-			handle: spawned.handle
-		};
+	const rows = await readCoordinationRows() ?? [];
+	const plan = planAssignment({
+		request,
+		rows,
+		sessions: await readSessionFactsOf(ctx, rows.filter((row) => row.graphId === graph.id).map((row) => row.sessionId)),
+		budget: {
+			used: rows.filter((row) => row.kind === "assignment" && row.storeId === storeId).length,
+			max: Number.MAX_SAFE_INTEGER
+		}
 	});
-	if (outcome.kind === "refused" || outcome.kind === "reuse" || outcome.kind === "in-flight" || outcome.kind === "spawn-failed") return outcome;
-	const { handle } = outcome;
-	/** The one exit an attempt has: every path that ends this execution records its terminal fact, so no failure of this entry leaves the source looking in flight forever. A ledger that cannot take the fact is best-effort */
-	const settleAttempt = async (status, note) => {
-		await settleReviewAgentAttempt({
-			rootStoreId: storeId,
-			taskId: source.taskId,
-			sessionId: reviewerSessionId,
-			status,
-			...note === void 0 ? {} : { note }
-		}).catch(() => void 0);
+	if (plan.kind === "refused") return {
+		kind: "refused",
+		code: plan.code,
+		detail: plan.detail,
+		budget: void 0,
+		work: plan.work
 	};
-	const cancel = () => handle.agent.cancel({ kind: "parent" });
-	input.signal?.addEventListener("abort", cancel, { once: true });
-	let waiting = true;
-	let unloaded = false;
-	let resolveCompleted;
-	const completed = new Promise((resolve$1) => {
-		resolveCompleted = resolve$1;
+	if (plan.kind === "reuse") return {
+		kind: "reuse",
+		work: plan.work
+	};
+	if (plan.kind === "in-flight" || plan.kind === "resume") return {
+		kind: "in-flight",
+		work: plan.work
+	};
+	const spawned = await spawnAssignment({
+		ctx,
+		request,
+		parent,
+		name: `review ${source.taskId}`,
+		preset: REVIEWER_PRESET,
+		grant: reviewerGrant(),
+		role: "reviewer",
+		signal: input.signal,
+		prompt: () => reviewerPrompt(input, snapshot)
 	});
-	let disposeWait;
-	try {
-		disposeWait = ctx.effect(() => async () => {
-			if (!waiting) return;
-			unloaded = true;
-			cancel();
-			await completed;
-		}, "singularityAgent: review agent wait");
-		if (input.signal?.aborted === true) cancel();
-		await handle.agent.whenIdle();
-		const parsed = input.signal?.aborted === true || unloaded ? {
-			ok: false,
-			refusal: unloaded ? "the plugin was unloaded before the reviewer produced a diagnosis" : "the attempt was cancelled before the reviewer produced a diagnosis"
-		} : parseReviewerDiagnosis(lastAssistantText(handle.agent.session.snapshotEvents()));
-		if (!parsed.ok) {
-			await settleAttempt("interrupted", parsed.refusal);
-			return {
-				kind: "no-diagnosis",
-				sessionId: reviewerSessionId,
-				failure: parsed.refusal
-			};
-		}
-		const { observation, conclusion, confidence, judgements, proposals } = parsed.diagnosis;
-		const current$1 = await ctx.task.snapshotIn(storeId);
-		const knownReviews = new Set(current$1.reviews.map(reviewRef));
-		const knownEvidence = new Set(current$1.evidence.map((item) => item.evidenceId));
-		const knownTasks = new Set(current$1.tasks.map((item) => item.taskId));
-		const knownJudgementRefs = new Set([
-			...knownReviews,
-			...knownEvidence,
-			...current$1.reviews.flatMap((item) => item.evidenceRefs),
-			...current$1.runs.map((run) => run.sessionId),
-			...current$1.reviews.map((item) => item.sessionId)
-		]);
-		const invalid = [
-			...[sourceRef(source), ...parsed.diagnosis.reviewRefs ?? []].filter((ref) => !knownReviews.has(ref)).map((ref) => `reviewRef "${ref}"`),
-			...(parsed.diagnosis.evidenceRefs ?? []).filter((ref) => !knownEvidence.has(ref)).map((ref) => `evidenceRef "${ref}"`),
-			...(parsed.diagnosis.relatedTaskIds ?? []).filter((id) => !knownTasks.has(id)).map((id) => `relatedTaskId "${id}"`),
-			...judgements.flatMap((item) => item.evidenceRefs).filter((ref) => !knownJudgementRefs.has(ref)).map((ref) => `judgement ref "${ref}"`)
-		];
-		if (invalid.length > 0) {
-			const failure = `the diagnosis cites ${invalid.join(", ")} outside store ${storeId}`;
-			await settleAttempt("interrupted", failure);
-			return {
-				kind: "no-diagnosis",
-				sessionId: reviewerSessionId,
-				failure
-			};
-		}
-		const diagnosis = {
-			diagnosisId: `review-agent-${reviewerSessionId}`,
-			taskId: source.taskId,
-			observedFailure: observation,
-			scope: parsed.diagnosis.scope ?? `task ${source.taskId}`,
-			localizedCause: conclusion,
-			evidenceRefs: parsed.diagnosis.evidenceRefs ?? review.evidenceRefs,
-			reviewRefs: [...new Set([sourceRef(source), ...parsed.diagnosis.reviewRefs ?? []])],
-			confidence,
-			proposals,
-			producedBy: {
-				kind: "agent",
-				sessionId: reviewerSessionId
-			},
-			...parsed.diagnosis.relatedTaskIds === void 0 ? {} : { relatedTaskIds: parsed.diagnosis.relatedTaskIds },
-			...judgements.length === 0 ? {} : { judgements }
-		};
-		try {
-			await ctx.task.recordDiagnosisIn(storeId, diagnosis, actor);
-		} catch (error) {
-			await settleAttempt("interrupted", `the diagnosis could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
-			return {
-				kind: "unrecorded",
-				sessionId: reviewerSessionId,
-				failure: error instanceof Error ? error.message : String(error)
-			};
-		}
-		await settleAttempt("recorded");
-		return {
-			kind: "recorded",
-			sessionId: reviewerSessionId,
-			diagnosisId: diagnosis.diagnosisId,
-			confidence,
-			observation,
-			conclusion,
-			scope: diagnosis.scope,
-			reviewRefs: diagnosis.reviewRefs,
-			evidenceRefs: diagnosis.evidenceRefs,
-			relatedTaskIds: diagnosis.relatedTaskIds ?? [],
-			judgements,
-			proposals
-		};
-	} catch (error) {
-		cancel();
-		await settleAttempt("interrupted", `the review attempt failed: ${error instanceof Error ? error.message : String(error)}`);
-		throw error;
-	} finally {
-		waiting = false;
-		resolveCompleted();
-		input.signal?.removeEventListener("abort", cancel);
-		if (!unloaded) await disposeWait?.();
+	if (spawned.kind === "spawn-failed") return {
+		kind: "spawn-failed",
+		failure: spawned.failure,
+		sessionId: String(sessionId$1)
+	};
+	const completion = await waitForCompletion(input, String(sessionId$1), spawned.handle);
+	const diagnosis = recordedDiagnosis(await ctx.task.snapshotIn(storeId), String(sessionId$1));
+	if (completion?.result.kind !== "reviewed" || diagnosis === void 0) return {
+		kind: "no-completion",
+		failure: completion === void 0 ? "the reviewer session ended its turn without calling reviewer_complete" : `the reviewer reported ${completion.result.kind} rather than a completed review`,
+		sessionId: String(sessionId$1)
+	};
+	return {
+		kind: "recorded",
+		sessionId: String(sessionId$1),
+		diagnosisId: diagnosis.diagnosisId,
+		confidence: diagnosis.confidence,
+		observation: diagnosis.observedFailure,
+		conclusion: diagnosis.localizedCause,
+		scope: diagnosis.scope,
+		reviewRefs: diagnosis.reviewRefs,
+		evidenceRefs: diagnosis.evidenceRefs,
+		relatedTaskIds: diagnosis.relatedTaskIds ?? [],
+		judgements: diagnosis.judgements ?? [],
+		proposals: diagnosis.proposals
+	};
+}
+/**
+* Wait for the reviewer's own turn to end, then read the completion it wrote.
+* The wait is on the agent this call spawned — not on a session somewhere else —
+* so a reviewer that never calls its tool is a protocol failure rather than a
+* call that hangs, and an interrupted turn stays DSH's to repair.
+*/
+async function waitForCompletion(input, sessionId$1, handle) {
+	const idle = handle.agent.whenIdle().catch(() => void 0);
+	await (input.signal === void 0 ? idle : Promise.race([idle, new Promise((resolve$1) => input.signal.addEventListener("abort", () => resolve$1(), { once: true }))]));
+	const deadline = Date.now() + COMPLETION_GRACE_MS;
+	let found;
+	for (;;) {
+		found = (await readCoordinationRows().catch(() => []) ?? []).find((row) => row.kind === "completion" && row.sessionId === sessionId$1);
+		if (found !== void 0 || Date.now() >= deadline) break;
+		await new Promise((resolve$1) => setTimeout(resolve$1, COMPLETION_POLL_MS));
 	}
+	if (found === void 0 && input.signal?.aborted !== true) await abandon(sessionId$1).catch(() => void 0);
+	return found;
+}
+/** Record a work item whose reviewer ended without a completion as a protocol failure. */
+async function abandon(sessionId$1) {
+	const binding = await readCoordinationBinding(sessionId$1);
+	if (binding === void 0 || binding.completed) return;
+	await recordCompletion(protocolFailure(binding, "the reviewer session ended without calling reviewer_complete"));
+}
+/** The one request a reviewer reads: the facts of the source, and how to end. */
+function reviewerPrompt(input, snapshot) {
+	const { source, review } = input;
+	const pack = buildReviewPack({
+		snapshot,
+		source,
+		work: []
+	});
+	return [
+		"You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.",
+		"Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and context_read reach the sibling tasks, their sessions and their evidence; task_template_list reads the delegated task's template catalog and exact templateRef contracts. Cite what you rest on.",
+		"Provide read-only analysis grounded in the recorded evidence.",
+		"Start with this exact source, then inspect the business DAG and read original evidence where it distinguishes plausible causes. Explain how exploration decisions, result boundaries, upstream contracts, dependencies, shared providers or decomposition could produce the observed result. Establish a shared cause with evidence linking the implicated results.",
+		...review.outcome === "verified" ? ["The run passed its review; inspect the delivered result, acceptance coverage and exploration choices as well as avoidable tool calls, repeated reads, retries and decomposition costs. Compare candidates under the original acceptance with real two-sided replay. Mark fresh transfer unknown when it has not been measured."] : [],
+		"End this session by calling reviewer_complete with observation (required: what was actually observed), conclusion (required: the cause, citing the original outcome evidence), confidence (required: high | medium | low), and only when you made them scope, reviewRefs, evidenceRefs, relatedTaskIds, judgements and proposals.",
+		"- reviewRefs must be exact taskId#runId (or taskId#no-run) refs from this store; top-level evidenceRefs must be evidence bundle ids read through context_read kind:\"evidence\"; relatedTaskIds must be actual task ids in this graph.",
+		"- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}] where dimension is one of the judged dimensions and each judgement cites at least one recorded ref and a rationale.",
+		"- proposals (optional): [{targetType, targetId, rationale}] — suggestions for the supervisor; nothing here executes them.",
+		"Calling reviewer_complete closes this session’s write access; reads and findings stay available. A session that ends its turn without calling it is a protocol failure and no diagnosis is invented from its silence.",
+		"",
+		"--- source under review ---",
+		`review ${sourceRef(source)} [${review.outcome}]${input.reason === null ? "" : ` — focus: ${input.reason}`}`,
+		"",
+		"--- review pack ---",
+		pack
+	].join("\n");
 }
 
 //#endregion
@@ -5521,16 +5850,18 @@ const DECLARED_PARAMETERS = [
 function optionalText(value) {
 	return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
-/** How one attempt is named in a result, in the words the source's caller uses. */
-function attemptLabel(attempt) {
-	return attempt.requestKey === null ? "default attempt" : `requestKey "${attempt.requestKey}"`;
+/** How one work item is named in a result, in the words the source's caller uses. */
+function workLabel(work) {
+	const requestKey = work.assignment.subject.kind === "review" ? work.assignment.subject.requestKey : null;
+	return requestKey === null ? "default work item" : `requestKey "${requestKey}"`;
 }
-/** What one attempt the caller asked for already is: its identity, how it ended, and — when it recorded a judgement — the same lines the attempt's own call returned. A repeat is answered from the ledger and the store; */
-function renderExistingAttempt(attempt, snapshot) {
-	const diagnosis = recordedDiagnosis(snapshot, attempt.sessionId);
-	const status = attempt.settlement?.status ?? (diagnosis === void 0 ? "started" : "recorded");
-	const head = `task_review_agent: source ${sourceRef(attempt.source)} already has this attempt (${attemptLabel(attempt)}, session ${attempt.sessionId}, ${status}${attempt.settlement?.note === void 0 ? "" : `: ${attempt.settlement.note}`}) — returning it; no review agent started`;
-	if (diagnosis === void 0) return status === "interrupted" ? `${head}; a new review for this source needs an explicit requestKey` : `${head}; its diagnosis is not in the store`;
+/** What one work item the caller asked for already is: its identity, how it ended, and the diagnosis it recorded. */
+function renderExistingWork(work, snapshot) {
+	const assignment = work.assignment;
+	const diagnosis = recordedDiagnosis(snapshot, assignment.sessionId);
+	const status = work.completion?.result.kind ?? (diagnosis === void 0 ? "open" : "recorded");
+	const head = `task_review_agent: source ${sourceRef(assignment.subject.source)} already has this work item (${workLabel(work)}, session ${assignment.sessionId}, ${status}) — returning it; no review session started`;
+	if (diagnosis === void 0) return status === "interrupted" || status === "protocol-failure" ? `${head}; a new review for this source needs an explicit requestKey` : `${head}; its diagnosis is not in the store`;
 	const lines = [
 		head,
 		`observation: ${diagnosis.observedFailure}`,
@@ -5538,37 +5869,28 @@ function renderExistingAttempt(attempt, snapshot) {
 		`scope: ${diagnosis.scope}; related tasks: ${diagnosis.relatedTaskIds?.join(", ") || "none"}`,
 		`review refs: ${diagnosis.reviewRefs.join(", ")}; evidence refs: ${diagnosis.evidenceRefs.join(", ") || "none"}`
 	];
-	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) lines.push(`judgements (agent ${attempt.sessionId}):`, ...renderJudgements(diagnosis.judgements));
+	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) lines.push(`judgements (agent ${assignment.sessionId}):`, ...renderJudgements(diagnosis.judgements));
 	lines.push(`diagnosis ${diagnosis.diagnosisId} recorded [${diagnosis.confidence}]`);
 	if (diagnosis.proposals.length === 0) lines.push("proposals: none — the conclusion carries no suggestion");
 	else for (const proposal of diagnosis.proposals) lines.push(`proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
 	return lines.join("\n");
 }
-/** What one refusal says, by name, before any claim or spawn exists. */
-function renderRefusal(plan, source, storeId) {
-	const label = plan.attempt === void 0 ? "" : attemptLabel(plan.attempt);
-	if (plan.code === "request-key-conflict") return `task_review_agent: ${plan.attempt.requestKey === null ? `source ${sourceRef(source)} already has a ${label}` : `${label} already names an attempt for source ${sourceRef(source)}`} with a different reason (${JSON.stringify(plan.attempt?.reason ?? null)}); refusing — a key names one review focus and cannot be changed (session ${plan.attempt?.sessionId}); no review agent started`;
-	if (plan.code === "request-key-required") {
-		const held = plan.attempts.map((attempt) => `${attemptLabel(attempt)} ${attempt.sessionId}`).join(", ");
-		return `task_review_agent: source ${sourceRef(source)} was already reviewed (${held}) and this request names no key; a new review for a reviewed source needs an explicit requestKey — no review agent started`;
-	}
-	return `task_review_agent: budget exhausted (${plan.budget.used}/${plan.budget.max}) for store ${storeId} — no review agent started`;
-}
-/** What one request that arrived while an attempt was open is answered with. */
-function renderOpenAttempt(attempt) {
-	return `task_review_agent: source ${sourceRef(attempt.source)} already has an attempt in flight (${attemptLabel(attempt)}, session ${attempt.sessionId}, run by this process right now) — the new request was not accepted; attempts of one source never run in parallel; no review agent started`;
+/** What one refusal says, by name, before any assignment or spawn exists. */
+function renderRefusal(outcome, source, storeId) {
+	if (outcome.code === "subject-conflict") return `task_review_agent: ${outcome.detail} for source ${sourceRef(source)}; refusing — a key names one review focus and cannot be changed. No review session started`;
+	if (outcome.code === "attempts-exhausted") return `task_review_agent: ${outcome.detail}; a new review for this source needs an explicit requestKey — no review session started`;
+	return `task_review_agent: ${outcome.detail}; no review session started for store ${storeId}`;
 }
 /** The answer one attempt ended with, rendered for its caller. */
 function renderOutcome(outcome, source, storeId, snapshot, review) {
 	switch (outcome.kind) {
-		case "refused": return renderRefusal(outcome.plan, source, storeId);
-		case "reuse": return renderExistingAttempt(outcome.attempt, snapshot);
-		case "in-flight": return renderOpenAttempt(outcome.attempt);
-		case "spawn-failed": return `task_review_agent: spawn failed: ${outcome.failure} (source ${sourceRef(source)}, attempt ${outcome.sessionId} recorded interrupted); no review agent started`;
-		case "unrecorded": return `task_review_agent: diagnosis produced but not recorded: ${outcome.failure}`;
-		case "no-diagnosis": return `task_review_agent: review agent ${outcome.sessionId} ended without a diagnosis — ${outcome.failure} (source ${sourceRef(source)}, attempt ${outcome.sessionId} recorded interrupted); no diagnosis was recorded and nothing was invented from its silence`;
+		case "refused": return renderRefusal(outcome, source, storeId);
+		case "reuse": return renderExistingWork(outcome.work, snapshot);
+		case "in-flight": return `task_review_agent: source ${sourceRef(source)} already has a work item in flight (${workLabel(outcome.work)}, session ${outcome.work.assignment.sessionId}) — the new request was not accepted; one source never runs two review sessions at once; no review session started`;
+		case "spawn-failed": return `task_review_agent: spawn failed: ${outcome.failure} (source ${sourceRef(source)}, work item ${outcome.sessionId} recorded interrupted); no review session started`;
+		case "no-completion": return `task_review_agent: review session ${outcome.sessionId} ended without a diagnosis — ${outcome.failure} (source ${sourceRef(source)}, work item ${outcome.sessionId} recorded as a protocol failure); no diagnosis was recorded and nothing was invented from its silence`;
 		case "recorded": return [
-			`task_review_agent: review agent ${outcome.sessionId} judged task ${source.taskId} (source ${sourceRef(source)}; the review it read settled ${review.outcome})`,
+			`task_review_agent: review session ${outcome.sessionId} judged task ${source.taskId} (source ${sourceRef(source)}; the review it read settled ${review.outcome})`,
 			`observation: ${outcome.observation}`,
 			`conclusion: ${outcome.conclusion}`,
 			`scope: ${outcome.scope}; related tasks: ${outcome.relatedTaskIds.join(", ") || "none"}`,
@@ -5582,7 +5904,7 @@ function renderOutcome(outcome, source, storeId, snapshot, review) {
 function defineTaskReviewAgentTool(ctx) {
 	return defineTool({
 		name: "task_review_agent",
-		description: "Spawn ONE read-only review agent for one exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started) — take the diagnosis it produces, and persist it as a Diagnosis. The reviewer reads the review pack and, beyond it, whatever settles the question through its own context reads. What it returns is an observation (the postmortem observation — what really happened, for a successful source as much as a failed one), a conclusion in its own words (\"no improvement needed\" and \"the evidence does not settle this\" are conclusions), a confidence, and — only when it made them — judgements and proposals. A judgement names one of the dimensions no parser settles (task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency) with verdict adequate|inadequate|unknown, the refs it rests on and a rationale; judgements are optional and never padded, and a judgement that cites nothing is refused rather than downgraded. A proposal is a suggestion only: it names a target type the diagnosis does not freeze, and nothing here executes it. reason names what the review should focus on. A reviewer that is cancelled or answers without a diagnosis leaves an interrupted attempt with the reason named and records no Diagnosis. One source has one default attempt: a repeat of the same call returns that attempt and its result instead of starting another, and never spends the budget again. Reviewing the same source again after that attempt ended is an explicit act: pass a new non-empty requestKey, which is persisted with the source and the focus; the same key with a different reason is refused. While an attempt of the source is in flight the call returns its identity and starts nothing. The reviewer has no write, shell, spawn, or evolution tool and is capped per root store (default 8).",
+		description: "Spawn ONE read-only review session for one exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started) — and take the diagnosis it records. The reviewer reads the review pack and, beyond it, whatever settles the question through its own context reads. It ends by calling reviewer_complete with an observation (required: what really happened, for a successful source as much as a failed one), a conclusion in its own words (\"no improvement needed\" and \"the evidence does not settle this\" are conclusions), a confidence, and — only when it made them — scope, refs, judgements and proposals. A judgement names one of the dimensions no parser settles (task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency) with verdict adequate|inadequate|unknown, the refs it rests on and a rationale; a judgement that cites nothing is refused rather than downgraded. A proposal is a suggestion only: it names a target type the diagnosis does not freeze, and nothing here executes it. reason names what the review should focus on. A session whose turn ends without calling reviewer_complete is a protocol failure: no Diagnosis is invented from its silence, and the platform does not ask again. One source has one default work item: a repeat of the same call returns that work item and its result instead of starting another. Reviewing the same source again after that work item settled is an explicit act: pass a new non-empty requestKey, which is persisted with the source and the focus; the same key with a different source is refused. While a work item of the source is in flight the call returns its identity and starts nothing. The reviewer has no write, shell, spawn, or evolution tool and is capped per root store.",
 		parameters: {
 			taskId: {
 				type: "string",
@@ -5600,7 +5922,7 @@ function defineTaskReviewAgentTool(ctx) {
 			},
 			requestKey: {
 				type: "string",
-				description: "Optional non-empty key for an explicit further review of the same source; omit for the source's default attempt"
+				description: "Optional non-empty key for an explicit further review of the same source; omit for the source's default work item"
 			}
 		},
 		output: {
@@ -5617,10 +5939,10 @@ function defineTaskReviewAgentTool(ctx) {
 				runId: args.runId
 			};
 			const snapshot = await ctx.task.openStore(storeId);
-			if (snapshot.tasks.find((item) => item.taskId === args.taskId) === void 0) return `task_review_agent: unknown task "${args.taskId}" in store ${storeId} (the caller's graph root); no review agent started`;
-			if (args.runId !== null && !snapshot.runs.some((run) => run.runId === args.runId && run.taskId === args.taskId)) return `task_review_agent: run "${args.runId}" is not a run of task "${args.taskId}"; no review agent started`;
+			if (snapshot.tasks.find((item) => item.taskId === args.taskId) === void 0) return `task_review_agent: unknown task "${args.taskId}" in store ${storeId} (the caller's graph root); no review session started`;
+			if (args.runId !== null && !snapshot.runs.some((run) => run.runId === args.runId && run.taskId === args.taskId)) return `task_review_agent: run "${args.runId}" is not a run of task "${args.taskId}"; no review session started`;
 			const review = reviewForSource(snapshot, source);
-			if (review === void 0) return `task_review_agent: no review record for source ${sourceRef(source)} in store ${storeId}; no review agent started`;
+			if (review === void 0) return `task_review_agent: no review record for source ${sourceRef(source)} in store ${storeId}; no review session started`;
 			return renderOutcome(await runReviewAgentAttempt({
 				ctx,
 				storeId,
@@ -5773,7 +6095,7 @@ var SupervisionExposure = class extends Service {
 	/**
 	* The round cap in force for one store: the round count its graph's RSI
 	* settings declare when that graph runs a platform loop (the driver registers
-	* it — see `coordination/rsi-loop.ts`), `undefined` otherwise, so the
+	* it — see `coordination/driver.ts`), `undefined` otherwise, so the
 	* runtime's own constant stands for every store without one. The runtime's
 	* `iteration-cap` check reads this per store, so a graph-scheduled loop may
 	* open exactly the rounds its graph names — and since the driver is the only
@@ -5822,8 +6144,16 @@ var SingularityAgent = class extends Service {
 		new ProposalReviewService(ctx);
 		new EvolutionExposure(ctx, evolution === "on");
 		new SupervisionExposure(ctx, supervision);
-		ctx.effect(() => ctx.singularityContext.registerCoordinationBindingSource(reviewerBindingSource()), "singularityAgent: coordination binding source");
-		ctx.effect(() => installRsiLoopDriver(ctx), "singularityAgent: rsi loop driver");
+		ctx.effect(() => ctx.singularityContext.registerCoordinationBindingSource(coordinationBindingSource()), "singularityAgent: coordination binding source");
+		ctx.effect(() => installCoordinationDriver(ctx).dispose, "singularityAgent: coordination driver");
+		ctx.effect(() => {
+			const view = ctx.get("singularityGraphView");
+			if (view === void 0) {
+				this.warn("singularity-agent: no singularityGraphView service is mounted, so this deployment reads no derived coordination progress; the driver still assigns and completes work");
+				return () => void 0;
+			}
+			return view.registerCoordinationFacts(coordinationFactsReader());
+		}, "singularityAgent: coordination facts");
 		ctx.effect(() => ctx.taskRuntime.registerRootBudgetApproval(defineRootBudgetApproval(ctx)), "singularityAgent: root budget approval");
 		ctx.tools.register(defineMarkReadyTool(ctx));
 		ctx.tools.register(defineSpawnTool(ctx));
@@ -5847,6 +6177,8 @@ var SingularityAgent = class extends Service {
 		ctx.tools.register(defineTaskVerifyTool(ctx));
 		ctx.tools.register(defineTaskReviewPackTool(ctx));
 		ctx.tools.register(defineTaskReviewAgentTool(ctx));
+		ctx.tools.register(defineSupervisorCompleteTool(ctx));
+		ctx.tools.register(defineReviewerCompleteTool(ctx));
 		ctx.tools.register(defineTaskBudgetExtendTool(ctx));
 		ctx.tools.register(defineTaskDiagnoseTool(ctx));
 		if (evolution === "on") {

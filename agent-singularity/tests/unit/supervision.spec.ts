@@ -1,10 +1,10 @@
 /**
  * The supervision policy (agent-singularity's `supervision` config): the shipped
- * allowance, the budget precedence env > config > default, the graph-declared
- * round cap a store's RSI loop registers, and the ledger's supervisor planning.
+ * allowance, the precedence env > config > default, and the graph-declared round
+ * cap a store's coordination loop registers.
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import { REVIEW_AGENT_BUDGET_DEFAULT, planSupervisorAttempt, reviewAgentBudget } from '../../src/coordination/ledger.ts'
+import { coordinationBudget } from '../../src/coordination/store.ts'
 import {
   DEFAULT_SUPERVISION,
   configureSupervision,
@@ -28,24 +28,28 @@ describe('the supervision settings', () => {
   test('ship the contract default allowance', () => {
     expect(DEFAULT_SUPERVISION).toEqual({ coordinationBudget: 8 })
     expect(supervisionSettings()).toEqual(DEFAULT_SUPERVISION)
-    expect(REVIEW_AGENT_BUDGET_DEFAULT).toBe(DEFAULT_SUPERVISION.coordinationBudget)
   })
 
   test('resolve a partial config over the default, refusing a budget below one', () => {
     expect(configureSupervision({ coordinationBudget: 3 })).toEqual({ coordinationBudget: 3 })
-    // A coordination budget below one reads as the default.
     expect(configureSupervision({ coordinationBudget: 0 })).toMatchObject({ coordinationBudget: 8 })
   })
 
   test('the env override wins over the config, and the config wins over the default', () => {
-    expect(reviewAgentBudget()).toBe(REVIEW_AGENT_BUDGET_DEFAULT)
+    expect(coordinationBudget()).toBe(DEFAULT_SUPERVISION.coordinationBudget)
     configureSupervision({ coordinationBudget: 4 })
-    expect(reviewAgentBudget()).toBe(4)
-    vi.stubEnv('SINGULARITY_REVIEW_AGENT_BUDGET', '2')
-    expect(reviewAgentBudget()).toBe(2)
+    expect(coordinationBudget()).toBe(4)
+    vi.stubEnv('SINGULARITY_COORDINATION_BUDGET', '2')
+    expect(coordinationBudget()).toBe(2)
     // A value the env cannot parse falls back to the config, not the default.
-    vi.stubEnv('SINGULARITY_REVIEW_AGENT_BUDGET', 'nonsense')
-    expect(reviewAgentBudget()).toBe(4)
+    vi.stubEnv('SINGULARITY_COORDINATION_BUDGET', 'nonsense')
+    expect(coordinationBudget()).toBe(4)
+  })
+
+  test('the retired budget name is not read', () => {
+    configureSupervision({ coordinationBudget: 4 })
+    vi.stubEnv('SINGULARITY_REVIEW_AGENT_BUDGET', '2')
+    expect(coordinationBudget()).toBe(4)
   })
 })
 
@@ -54,7 +58,6 @@ describe('the graph-declared round cap', () => {
     expect(graphImprovementCap('sg-t-root')).toBeUndefined()
     registerGraphImprovementCap('sg-t-root', 5)
     expect(graphImprovementCap('sg-t-root')).toBe(5)
-    // A store no graph registered keeps the runtime's own backstop.
     expect(graphImprovementCap('sg-t-elsewhere')).toBeUndefined()
     unregisterGraphImprovementCap('sg-t-root')
     expect(graphImprovementCap('sg-t-root')).toBeUndefined()
@@ -68,55 +71,15 @@ describe('the graph-declared round cap', () => {
   })
 })
 
-describe('the supervisor planning', () => {
-  const request = {
-    role: 'supervisor' as const,
-    source: { taskId: 't1', runId: 'r1' },
-    requestKey: null,
-    reason: null,
-    diagnosisId: 'd-1',
-    handoffDigest: 'digest-1',
-    actor: 'root',
-    sessionId: 's-new',
-  }
-  const attempt = (overrides: Record<string, unknown> = {}) => ({
-    role: 'supervisor' as const,
-    source: { taskId: 't1', runId: 'r1' },
-    requestKey: null,
-    reason: null,
-    diagnosisId: 'd-1',
-    handoffDigest: 'digest-1',
-    sessionId: 's-old',
-    actor: 'root',
-    at: '2026-10-01T00:00:00.000Z',
-    started: true,
-    settlement: undefined,
-    ...overrides,
-  })
-
-  test('an interrupted attempt does not block a fresh start; a concluded one is reused', () => {
-    const dead = attempt({
-      sessionId: 's-dead',
-      settlement: { status: 'interrupted', note: 'gone', at: '2026-10-01T00:01:00.000Z' },
-    })
-    expect(planSupervisorAttempt({ attempts: [dead] as never, request, budget: { used: 1, max: 8 } })).toMatchObject({
-      kind: 'start',
-    })
-    const concluded = attempt({ settlement: { status: 'closed', note: 'done', at: '2026-10-01T00:02:00.000Z' } })
-    const plan = planSupervisorAttempt({ attempts: [concluded] as never, request, budget: { used: 8, max: 8 } })
-    expect(plan).toMatchObject({ kind: 'reuse' })
-    expect((plan as { attempt: { sessionId: string } }).attempt.sessionId).toBe('s-old')
-  })
-
-  test('refuses a second hand-off content for one diagnosis, and a spent allowance', () => {
-    const conflicting = attempt({ handoffDigest: 'another-digest' })
-    expect(planSupervisorAttempt({ attempts: [conflicting] as never, request, budget: { used: 0, max: 8 } })).toMatchObject(
-      { kind: 'refused', code: 'request-key-conflict' },
-    )
-    const spent = attempt({ settlement: { status: 'interrupted', note: 'gone', at: '2026-10-01T00:01:00.000Z' } })
-    expect(planSupervisorAttempt({ attempts: [spent] as never, request, budget: { used: 8, max: 8 } })).toMatchObject({
-      kind: 'refused',
-      code: 'budget-exhausted',
-    })
+describe('the coordination store directory', () => {
+  test('reads SINGULARITY_COORDINATION_DIR, and never the retired ledger name', async () => {
+    const { coordinationFile, coordinationDir } = await import('../../src/coordination/store.ts')
+    vi.stubEnv('SINGULARITY_COORDINATION_DIR', '/tmp/coord-under-test')
+    expect(coordinationDir()).toBe('/tmp/coord-under-test')
+    expect(coordinationFile()).toBe('/tmp/coord-under-test/assignments.jsonl')
+    vi.unstubAllEnvs()
+    vi.stubEnv('SINGULARITY_REVIEW_LEDGER_DIR', '/tmp/legacy-ledger')
+    vi.stubEnv('DSH_HOME', '/tmp/dsh-under-test')
+    expect(coordinationDir()).toBe('/tmp/dsh-under-test/coordination')
   })
 })

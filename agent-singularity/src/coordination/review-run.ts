@@ -1,202 +1,38 @@
-/** One review attempt, from its claim to its settled fact — the entry both triggers share (A5). @module @dangosys/dsh-singularity-agent/review-agent-run */
+/**
+ * One review attempt: claim the work item, spawn the reviewer, wait for its
+ * completion record and read the diagnosis it recorded back out of the store.
+ * The reviewer's answer is a structured record it writes through
+ * `reviewer_complete`; nothing here parses prose.
+ *
+ * @module @dangosys/dsh-singularity-agent/coordination/review-run
+ */
 
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
 import type {
   Diagnosis,
-  DiagnosisConfidence,
   DiagnosisProposal,
-  JudgementVerdict,
   ReviewJudgement,
   ReviewRecord,
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
-import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS } from '@dangosys/dsh-singularity-task'
-import { lastAssistantText } from './handoff-rules.ts'
+import { planAssignment, subjectDigest, type AssignmentRefusalCode, type AssignmentRequest } from './assignment.ts'
+import { protocolFailure } from './completion.ts'
+import { onCoordinationCompletion, readCoordinationBinding, readCoordinationRows, recordCompletion, type CoordinatedWork, type CoordinationCompletion } from './store.ts'
 import { reviewRef, type ReviewParentAgent } from './identity.ts'
-import {
-  admitReviewAgent,
-  readReviewAgentAttempts,
-  settleReviewAgentAttempt,
-  type ReviewAgentAttempt,
-  type ReviewAgentAttemptRequest,
-  type ReviewAgentPlan,
-  type ReviewAgentSettlementStatus,
-  type ReviewAgentSource,
-} from './ledger.ts'
-import { spawnUnderClaim } from './spawn-under-claim.ts'
+import { readSessionFactsOf } from './session-facts.ts'
+import { spawnAssignment } from './spawn-assignment.ts'
+import { REVIEWER_PRESET, reviewerGrant } from './roles.ts'
+import { rootTaskOf, terminalRootRuns } from './rounds.ts'
 import { buildReviewPack } from '../tools/task-review-pack.ts'
 
-/** Shared coordinator composition; runtime installs the reviewer policy. */
-export const REVIEWER_PRESET = 'singularity-coordinator'
-
-/** The review agent's whole tool surface. Read-only by construction: */
-export const REVIEWER_BASELINE: readonly string[] = [
-  'task_review_pack',
-  'task_read',
-  'task_status',
-  'context_read',
-  'capability_list',
-  'task_template_list',
-  'read',
-  'glob',
-  'grep',
-  'skill',
-]
-
-/** The capability grant one review agent is spawned with. */
-export function reviewerGrant(): WorkerGrant {
-  return { capabilities: [], baseline: REVIEWER_BASELINE, keepPresetTools: false }
-}
+export { REVIEWER_BASELINE, REVIEWER_PRESET, reviewerGrant } from './roles.ts'
+export { renderJudgements } from './render.ts'
 
 /** The source one attempt reviews, as a ref a reader reads back (`t1#r1`, `t2#no-run`). */
-export function sourceRef(source: ReviewAgentSource): string {
-  return reviewRef({ taskId: source.taskId, runId: source.runId })
-}
-
-/** One raw judgement object as the reviewer wrote it, before validation. */
-interface RawJudgement {
-  dimension?: unknown
-  verdict?: unknown
-  evidenceRefs?: unknown
-  rationale?: unknown
-}
-
-/** One raw proposal object as the reviewer wrote it, before validation. */
-interface RawProposal {
-  targetType?: unknown
-  targetId?: unknown
-  rationale?: unknown
-}
-
-/** The reviewer's answer: the two prose slots a diagnosis is made of, and what it chose to add. */
-interface RawDiagnosisReply {
-  observation: string
-  conclusion: string
-  confidence: DiagnosisConfidence
-  scope?: string
-  reviewRefs?: string[]
-  evidenceRefs?: string[]
-  relatedTaskIds?: string[]
-  judgements: ReviewJudgement[]
-  proposals: DiagnosisProposal[]
-}
-
-/** The last fenced JSON object is the reviewer's answer. */
-function parseReviewerObject(reply: string | undefined): Record<string, unknown> | undefined {
-  if (reply === undefined) return undefined
-  const fenced = [...reply.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map(match => match[1])
-  const candidate = fenced[fenced.length - 1]
-  if (candidate === undefined) return undefined
-  try {
-    const parsed: unknown = JSON.parse(candidate)
-    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined
-  } catch {
-    return undefined
-  }
-}
-
-/** A non-empty string out of the reply, or nothing. */
-function textOf(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim().length > 0 ? value : undefined
-}
-
-/** Optional lineage is explicit: malformed ids are refused, and repeated ids add no evidence. */
-function refsOf(value: unknown, field: string): string[] | undefined {
-  if (value === undefined) return undefined
-  if (!Array.isArray(value) || value.some(ref => textOf(ref) === undefined)) {
-    throw new Error(`the "${field}" field must be an array of non-empty strings`)
-  }
-  return [...new Set(value as string[])]
-}
-
-/** Validate the judgements the reviewer chose to make. Each one has to name a judged dimension and a verdict from the fixed vocabulary, cite at least one non-empty ref and carry a rationale — this is the. */
-function judgementsOf(value: unknown): ReviewJudgement[] {
-  if (value === undefined) return []
-  if (!Array.isArray(value)) throw new Error('the "judgements" field is not an array')
-  return value.map((item: unknown, index: number) => {
-    const entry = (item ?? {}) as RawJudgement
-    const dimension = entry.dimension
-    if (!JUDGED_DIMENSIONS.includes(dimension as never)) {
-      throw new Error(`judgement ${index} names dimension "${String(dimension)}", which is not one of ${JUDGED_DIMENSIONS.join(', ')}`)
-    }
-    const verdict = entry.verdict
-    if (!JUDGEMENT_VERDICTS.includes(verdict as JudgementVerdict)) {
-      throw new Error(`judgement ${index} (${String(dimension)}) has verdict "${String(verdict)}", which is not adequate/inadequate/unknown`)
-    }
-    const refs = Array.isArray(entry.evidenceRefs)
-      ? entry.evidenceRefs.filter((ref): ref is string => typeof ref === 'string' && ref.length > 0)
-      : []
-    if (refs.length === 0) {
-      throw new Error(`judgement ${index} (${String(dimension)}) cites no evidence — a conclusion that rests on nothing is not recorded`)
-    }
-    const rationale = textOf(entry.rationale)
-    if (rationale === undefined) throw new Error(`judgement ${index} (${String(dimension)}) carries no rationale`)
-    return { dimension: dimension as ReviewJudgement['dimension'], verdict: verdict as JudgementVerdict, evidenceRefs: refs, rationale }
-  })
-}
-
-/** Validate the proposals the reviewer chose to make: a target name, an id and a reason, each grounded in what it wrote. */
-function proposalsOf(value: unknown): DiagnosisProposal[] {
-  if (value === undefined) return []
-  if (!Array.isArray(value)) throw new Error('the "proposals" field is not an array')
-  return value.map((item: unknown, index: number) => {
-    const entry = (item ?? {}) as RawProposal
-    const targetType = textOf(entry.targetType)
-    const targetId = textOf(entry.targetId)
-    const rationale = textOf(entry.rationale)
-    if (targetType === undefined || targetId === undefined || rationale === undefined) {
-      throw new Error(`proposal ${index} needs a non-empty targetType, targetId and rationale`)
-    }
-    return { targetType, targetId, rationale }
-  })
-}
-
-/** The diagnosis the reviewer's reply carries, or a named reason it carries none. What is required is what a Diagnosis is: the **observation** (the persisted `observedFailure` slot, read as the postmortem observation — a */
-export function parseReviewerDiagnosis(
-  reply: string | undefined,
-): { readonly ok: true; readonly diagnosis: RawDiagnosisReply } | { readonly ok: false; readonly refusal: string } {
-  if (reply === undefined) return { ok: false, refusal: 'the reviewer returned no output' }
-  const parsed = parseReviewerObject(reply)
-  if (parsed === undefined) return { ok: false, refusal: 'the reviewer returned no parseable json object' }
-  const observation = textOf(parsed.observation)
-  if (observation === undefined) return { ok: false, refusal: 'the reply carries no observation (the postmortem observation is required)' }
-  const conclusion = textOf(parsed.conclusion)
-  if (conclusion === undefined) return { ok: false, refusal: 'the reply carries no conclusion' }
-  const confidence = parsed.confidence
-  if (confidence !== 'high' && confidence !== 'medium' && confidence !== 'low') {
-    return { ok: false, refusal: `the reply's confidence "${String(confidence)}" is not high/medium/low` }
-  }
-  try {
-    const scope = textOf(parsed.scope)
-    if (parsed.scope !== undefined && scope === undefined) throw new Error('the "scope" field must be a non-empty string')
-    const reviewRefs = refsOf(parsed.reviewRefs, 'reviewRefs')
-    const evidenceRefs = refsOf(parsed.evidenceRefs, 'evidenceRefs')
-    const relatedTaskIds = refsOf(parsed.relatedTaskIds, 'relatedTaskIds')
-    return {
-      ok: true,
-      diagnosis: {
-        observation,
-        conclusion,
-        confidence,
-        ...(scope === undefined ? {} : { scope }),
-        ...(reviewRefs === undefined ? {} : { reviewRefs }),
-        ...(evidenceRefs === undefined ? {} : { evidenceRefs }),
-        ...(relatedTaskIds === undefined ? {} : { relatedTaskIds }),
-        judgements: judgementsOf(parsed.judgements),
-        proposals: proposalsOf(parsed.proposals),
-      },
-    }
-  } catch (error) {
-    return { ok: false, refusal: `the reply's diagnosis fields are malformed: ${error instanceof Error ? error.message : String(error)}` }
-  }
-}
-
-/** The judged dimensions rendered as report lines (agent judgements, kept apart from the fact lines). */
-export function renderJudgements(judgements: readonly ReviewJudgement[]): string[] {
-  return judgements.map(item => `  ${item.dimension}: ${item.verdict} — ${item.rationale} refs [${item.evidenceRefs.join(', ')}]`)
+export function sourceRef(source: { readonly taskId: string; readonly runId: string | null }): string {
+  return reviewRef(source)
 }
 
 /** The diagnosis one attempt recorded, as the store holds it (the id is the attempt's session). */
@@ -204,254 +40,199 @@ export function recordedDiagnosis(snapshot: TaskSnapshot, sessionId: string): Di
   return snapshot.diagnoses.find(diagnosis => diagnosis.diagnosisId === `review-agent-${sessionId}`)
 }
 
-/** Everything one attempt needs, resolved by the caller that means the source. */
+/** Everything one review attempt needs, resolved by the caller that means the source. */
 export interface ReviewAttemptInput {
   readonly ctx: Context
-  /** The root task store the attempt and the allowance belong to. */
+  /** The root task store the attempt and its allowance belong to. */
   readonly storeId: string
   /** The exact source: the task and the run under review, or the no-run case. */
-  readonly source: ReviewAgentSource
+  readonly source: { readonly taskId: string; readonly runId: string | null }
   /** The review record of that source, as the store holds it. */
   readonly review: ReviewRecord
   /** The reviewer's parent — the live agent whose spawn publishes the review node. */
   readonly parent: ReviewParentAgent
   /** The session that asked for the attempt (the caller). */
   readonly actor: string
-  /** The caller's explicit key, or `null` for the source's default attempt. */
   readonly requestKey: string | null
-  /** The review focus the caller named, or `null` when it named none. */
   readonly reason: string | null
-  /** The caller's signal, when the attempt should end with it. */
   readonly signal?: AbortSignal
 }
 
 /** What one attempt ended as. */
 export type ReviewAttemptOutcome =
-  /** Refused by name before any claim or spawn (key conflict, new-key-required, allowance spent). */
-  | { readonly kind: 'refused'; readonly plan: Extract<ReviewAgentPlan, { kind: 'refused' }>; readonly recovered: readonly ReviewAgentAttempt[] }
-  /** The request is this source's attempt already: return it; nothing spawned, nothing written. */
-  | { readonly kind: 'reuse'; readonly attempt: ReviewAgentAttempt; readonly recovered: readonly ReviewAgentAttempt[] }
-  /** Another attempt of the source is not settled and is being run here: the request was not accepted. */
-  | { readonly kind: 'in-flight'; readonly attempt: ReviewAgentAttempt; readonly recovered: readonly ReviewAgentAttempt[] }
-  /** The spawn failed before any model input: the attempt is recorded interrupted. */
-  | { readonly kind: 'spawn-failed'; readonly failure: string; readonly sessionId: string }
-  /** The diagnosis was produced and the store refused it: the attempt is interrupted, the reviewer did run. */
-  | { readonly kind: 'unrecorded'; readonly failure: string; readonly sessionId: string }
-  /** The reviewer ended without a diagnosis: it was cancelled, or what it returned carries none (see {@link parseReviewerDiagnosis}). The attempt is settled `interrupted` with the reason named — no Diagnosis is */
-  | { readonly kind: 'no-diagnosis'; readonly failure: string; readonly sessionId: string }
-  /** The reviewer ran and its diagnosis is on the store: the attempt is settled `recorded`. */
+  /** Refused by name before any assignment or spawn. */
   | {
-    readonly kind: 'recorded'
-    readonly sessionId: string
-    readonly diagnosisId: string
-    readonly confidence: DiagnosisConfidence
-    /** The postmortem observation the reviewer wrote (the stored `observedFailure`). */
-    readonly observation: string
-    /** The conclusion in the reviewer's own words (the stored `localizedCause`). */
-    readonly conclusion: string
-    readonly scope: string
-    readonly reviewRefs: readonly string[]
-    readonly evidenceRefs: readonly string[]
-    readonly relatedTaskIds: readonly string[]
-    readonly judgements: readonly ReviewJudgement[]
-    readonly proposals: readonly DiagnosisProposal[]
-  }
+      readonly kind: 'refused'
+      readonly code: AssignmentRefusalCode
+      readonly detail: string
+      readonly budget: { readonly used: number; readonly max: number } | undefined
+      readonly work: CoordinatedWork | undefined
+    }
+  /** The request is this source's work item already: return it; nothing spawned, nothing written. */
+  | { readonly kind: 'reuse'; readonly work: CoordinatedWork }
+  /** Another attempt of the source is not settled here: the request was not accepted. */
+  | { readonly kind: 'in-flight'; readonly work: CoordinatedWork }
+  /** The spawn failed before any model input: the work item is recorded interrupted. */
+  | { readonly kind: 'spawn-failed'; readonly failure: string; readonly sessionId: string }
+  /** The reviewer ended without writing a completion: the attempt is a protocol failure. */
+  | { readonly kind: 'no-completion'; readonly failure: string; readonly sessionId: string }
+  /** The reviewer recorded its diagnosis: the work item is settled and the store holds the record. */
+  | {
+      readonly kind: 'recorded'
+      readonly sessionId: string
+      readonly diagnosisId: string
+      readonly confidence: 'high' | 'medium' | 'low'
+      readonly observation: string
+      readonly conclusion: string
+      readonly scope: string
+      readonly reviewRefs: readonly string[]
+      readonly evidenceRefs: readonly string[]
+      readonly relatedTaskIds: readonly string[]
+      readonly judgements: readonly ReviewJudgement[]
+      readonly proposals: readonly DiagnosisProposal[]
+    }
 
-/** Run one review attempt for one source: the admission's serial region (plan, claim, spawn) and then, outside it, the reviewer's reply, the diagnosis it carries and the one terminal fact. */
+/** How long the completion record may lag behind the turn it concluded before the call stops waiting for it. */
+const COMPLETION_GRACE_MS = 2_000
+
+/** How often that grace re-reads the store. */
+const COMPLETION_POLL_MS = 50
+
+/** Run one review attempt for one source: plan, claim, spawn, then read the record back. */
 export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<ReviewAttemptOutcome> {
   const { ctx, storeId, source, review, parent, actor } = input
-  const reviewerSessionId = SessionId(randomUUID())
-  const request: ReviewAgentAttemptRequest = {
-    source,
-    requestKey: input.requestKey,
-    reason: input.reason,
+  const sessionId = SessionId(randomUUID())
+  const graph = await ctx.graphs.graphForSession(parent.id)
+  const snapshot: TaskSnapshot = await ctx.task.snapshotIn(storeId)
+  const root = rootTaskOf(snapshot)
+  const businessRound = root === undefined ? null : terminalRootRuns(snapshot, root.taskId).length
+  const key = {
+    graphId: graph.id,
+    epoch: graph.rsi?.epoch ?? 1,
+    role: 'reviewer' as const,
+    subject: {
+      kind: 'review' as const,
+      businessRound,
+      source,
+      requestKey: input.requestKey,
+    },
+  }
+  const request: AssignmentRequest = {
+    key,
+    storeId,
+    sessionId,
     actor,
-    sessionId: reviewerSessionId,
+    digest: subjectDigest(key),
+    focus: input.reason,
   }
-  const outcome = await admitReviewAgent(storeId, async admission => {
-    // The store, read inside the region: the pack the reviewer judges from, and
-    // the one fact the ledger cannot see — whether an attempt whose row is open
-    const current: TaskSnapshot = await ctx.task.snapshotIn(storeId)
-    const { plan, recovered } = await admission.plan(request, {
-      recorded: attempt => recordedDiagnosis(current, attempt.sessionId) !== undefined,
-    })
-    if (plan.kind === 'refused') return { kind: 'refused' as const, plan, recovered }
-    if (plan.kind === 'reuse') return { kind: 'reuse' as const, attempt: plan.attempt, recovered }
-    if (plan.kind === 'in-flight') return { kind: 'in-flight' as const, attempt: plan.attempt, recovered }
-    const spawned = await spawnUnderClaim({
-      ctx,
-      admission,
-      storeId,
-      request,
-      sessionId: reviewerSessionId,
-      taskId: source.taskId,
-      actor,
-      parent,
-      name: `review ${source.taskId}`,
-      preset: REVIEWER_PRESET,
-      grant: reviewerGrant(),
-      signal: input.signal,
-      errorLabel: 'task_review_agent: the delegation of reviewer session',
-      failureLabel: 'spawn failed',
-      prompt: async () => {
-        const attempts = await readReviewAgentAttempts(storeId)
-        const pack = buildReviewPack({ snapshot: current, source, attempts })
-        return [
-          'You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.',
-          'Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and ' +
-          'context_read reach the sibling tasks, their sessions and their evidence; task_template_list reads the delegated task\'s template catalog and exact templateRef contracts. Cite what you rest on.',
-          'Provide read-only analysis grounded in the recorded evidence.',
-          'Start with this exact source, then inspect the business DAG and read original evidence where it distinguishes plausible causes. Explain how exploration decisions, result boundaries, upstream contracts, dependencies, shared providers or decomposition could produce the observed result. Establish a shared cause with evidence linking the implicated results.',
-          ...(review.outcome === 'verified'
-            ? ['The run passed its review; inspect the delivered result, acceptance coverage and exploration choices as well as avoidable tool calls, repeated reads, retries and decomposition costs. Compare candidates under the original acceptance with real two-sided replay. Graph-local observed cases support experience for this graph; independent holdouts provide transfer evidence and are required for shared publication. Mark fresh transfer unknown when it has not been measured. Domain outcome claims use llm-outcome with real measurements under a frozen evaluation plan; execution overhead claims use tool-call-reduction over the complete Run subtree. Treat an observed opportunity as a testable hypothesis until measured.']
-            : []),
-          'Return EXACTLY one fenced json block, no prose around it:',
-          '```json',
-          JSON.stringify({ observation: '...', conclusion: '...', confidence: 'low', reviewRefs: [sourceRef(source)] }),
-          '```',
-          '- observation (required): the postmortem observation (复盘观察) — what was actually observed in the source, whether it failed or succeeded.',
-          '- Keep observation and conclusion concise; cite the failure command, log or session ref rather than restating the whole pack.',
-          '- conclusion (required): explain the cause and cite the original outcome evidence. For a failed source, name one concrete next action for its business coordinator, such as a smaller independently verifiable child result after the batch settles. Check its task/run state first: task_decompose needs an active run; a terminal run returns its next-action recommendation to the supervisor. Investigate accessible facts before concluding that the cause is unknown; if it remains unsettled, identify the specific missing fact.',
-          '- confidence (required): high, medium or low.',
-          '- A successful source may conclude "no improvement needed" with its supporting evidence.',
-          '- scope, reviewRefs, evidenceRefs, relatedTaskIds (optional): name the causal scope and include only records you read that support the explanation. reviewRefs must be exact taskId#runId (or taskId#no-run) refs from task_review_pack or context_read kind:"review". Top-level evidenceRefs must be evidence bundle ids read through context_read kind:"evidence"; use reviewRefs for a review and cite commands, log paths, criterion ids or template ids in prose, not in these arrays. relatedTaskIds must be actual task ids in this graph. The triggering review is retained automatically. Include the additional lineage that supports the finding.',
-          '- For a shared cause, cite the original evidence from each implicated task and the common contract, provider version or dependency that connects them; inspect a passing contrast when available. State uncertainty and conflicting evidence. A causally supported candidate may describe an anticipated benefit as a testable hypothesis and say what would refute it; describe untested benefit as a hypothesis to measure. If the cause is unresolved, identify the missing evidence and use low confidence.',
-          `- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}], only when useful and supported. Dimensions: ${JUDGED_DIMENSIONS.join(', ')}; verdict: adequate|inadequate|unknown. Each evidenceRefs array must cite at least one exact review ref, evidence ref printed by a review, evidence bundle id, or Run/review session id from this graph. Use these recorded identities as judgement refs; include the dimensions the evidence supports.`,
-          '- proposals (optional): [{targetType, targetId, rationale}]. A business retry or re-decomposition belongs in the conclusion. For an evidenced reusable gap, executable targetType names are task_definition (a TaskTemplate; targetId is its template id), skill or capability. Include the causal mechanism, expected benefit and how it could be tested in rationale. Other targetType names remain recorded suggestions. Connect a shared-change recommendation to evidence of a reusable cause; proposals record recommendations for the supervisor.',
-          '- The platform RSI loop schedules the next round. Return useful exploration or decomposition goals and method experience for TaskTemplate or Skill review; the authorized supervisor evaluates and applies reusable changes.',
-          'Include observation, conclusion and confidence so the finding can be recorded as a diagnosis.',
-          '',
-          `--- source under review ---`,
-          `review ${sourceRef(source)} [${review.outcome}]${request.reason === null ? '' : ` — focus: ${request.reason}`}`,
-          '',
-          '--- review pack ---',
-          pack,
-        ].join('\n')
-      },
-    })
-    if (spawned.kind === 'spawn-failed') {
-      return { kind: 'spawn-failed' as const, failure: spawned.failure, sessionId: reviewerSessionId }
-    }
-    return { kind: 'spawned' as const, handle: spawned.handle }
+  const rows = (await readCoordinationRows()) ?? []
+  const sessions = await readSessionFactsOf(ctx, rows.filter(row => row.graphId === graph.id).map(row => row.sessionId))
+  const budget = { used: rows.filter(row => row.kind === 'assignment' && row.storeId === storeId).length, max: Number.MAX_SAFE_INTEGER }
+  const plan = planAssignment({ request, rows, sessions, budget })
+  if (plan.kind === 'refused')
+    return { kind: 'refused', code: plan.code, detail: plan.detail, budget: undefined, work: plan.work }
+  if (plan.kind === 'reuse') return { kind: 'reuse', work: plan.work }
+  if (plan.kind === 'in-flight' || plan.kind === 'resume') return { kind: 'in-flight', work: plan.work }
+  const spawned = await spawnAssignment({
+    ctx,
+    request,
+    parent,
+    name: `review ${source.taskId}`,
+    preset: REVIEWER_PRESET,
+    grant: reviewerGrant(),
+    role: 'reviewer',
+    signal: input.signal,
+    prompt: () => reviewerPrompt(input, snapshot),
   })
-  if (outcome.kind === 'refused' || outcome.kind === 'reuse' || outcome.kind === 'in-flight' || outcome.kind === 'spawn-failed') {
-    return outcome
-  }
-  const { handle } = outcome
-
-  /** The one exit an attempt has: every path that ends this execution records its terminal fact, so no failure of this entry leaves the source looking in flight forever. A ledger that cannot take the fact is best-effort */
-  const settleAttempt = async (status: ReviewAgentSettlementStatus, note?: string) => {
-    await settleReviewAgentAttempt({
-      rootStoreId: storeId, taskId: source.taskId, sessionId: reviewerSessionId, status,
-      ...(note === undefined ? {} : { note }),
-    }).catch(() => undefined)
-  }
-  const cancel = () => handle.agent.cancel({ kind: 'parent' })
-  input.signal?.addEventListener('abort', cancel, { once: true })
-  let waiting = true
-  let unloaded = false
-  let resolveCompleted!: () => void
-  const completed = new Promise<void>(resolve => { resolveCompleted = resolve })
-  let disposeWait: (() => void | Promise<void>) | undefined
-  try {
-    // The plugin owns this wait. Unload cancels its reviewer and waits for the
-    // attempt's terminal fact; no elapsed-time limit ends the model's work.
-    disposeWait = ctx.effect(() => async () => {
-      if (!waiting) return
-      unloaded = true
-      cancel()
-      await completed
-    }, 'singularityAgent: review agent wait')
-    if (input.signal?.aborted === true) cancel()
-    await handle.agent.whenIdle()
-    const parsed = input.signal?.aborted === true || unloaded
-      ? {
-        ok: false as const,
-        refusal: unloaded
-          ? 'the plugin was unloaded before the reviewer produced a diagnosis'
-          : 'the attempt was cancelled before the reviewer produced a diagnosis',
-      }
-      : parseReviewerDiagnosis(lastAssistantText(handle.agent.session.snapshotEvents()))
-    if (!parsed.ok) {
-      // Nothing is invented out of silence: the attempt's terminal fact says
-      // what ended it, and the store holds no Diagnosis for it.
-      await settleAttempt('interrupted', parsed.refusal)
-      return { kind: 'no-diagnosis' as const, sessionId: reviewerSessionId, failure: parsed.refusal }
-    }
-    const { observation, conclusion, confidence, judgements, proposals } = parsed.diagnosis
-    const current: TaskSnapshot = await ctx.task.snapshotIn(storeId)
-    const knownReviews = new Set(current.reviews.map(reviewRef))
-    const knownEvidence = new Set(current.evidence.map(item => item.evidenceId))
-    const knownTasks = new Set(current.tasks.map(item => item.taskId))
-    // Older reviews may retain evidence refs without a bundle in the snapshot;
-    // preserve their original lineage, but additional evidence must resolve.
-    const knownJudgementRefs = new Set([
-      ...knownReviews, ...knownEvidence, ...current.reviews.flatMap(item => item.evidenceRefs),
-      ...current.runs.map(run => run.sessionId), ...current.reviews.map(item => item.sessionId),
-    ])
-    const invalid = [
-      ...[sourceRef(source), ...(parsed.diagnosis.reviewRefs ?? [])]
-        .filter(ref => !knownReviews.has(ref)).map(ref => `reviewRef "${ref}"`),
-      ...(parsed.diagnosis.evidenceRefs ?? []).filter(ref => !knownEvidence.has(ref)).map(ref => `evidenceRef "${ref}"`),
-      ...(parsed.diagnosis.relatedTaskIds ?? []).filter(id => !knownTasks.has(id)).map(id => `relatedTaskId "${id}"`),
-      ...judgements.flatMap(item => item.evidenceRefs).filter(ref => !knownJudgementRefs.has(ref)).map(ref => `judgement ref "${ref}"`),
-    ]
-    if (invalid.length > 0) {
-      const failure = `the diagnosis cites ${invalid.join(', ')} outside store ${storeId}`
-      await settleAttempt('interrupted', failure)
-      return { kind: 'no-diagnosis', sessionId: reviewerSessionId, failure }
-    }
-    const diagnosis: Diagnosis = {
-      diagnosisId: `review-agent-${reviewerSessionId}`,
-      taskId: source.taskId,
-      // The persisted `observedFailure` slot read as what it is here: the
-      // postmortem observation the reviewer wrote, for a failed source and a
-      observedFailure: observation,
-      scope: parsed.diagnosis.scope ?? `task ${source.taskId}`,
-      localizedCause: conclusion,
-      evidenceRefs: parsed.diagnosis.evidenceRefs ?? review.evidenceRefs,
-      reviewRefs: [...new Set([sourceRef(source), ...(parsed.diagnosis.reviewRefs ?? [])])],
-      confidence,
-      proposals,
-      producedBy: { kind: 'agent', sessionId: reviewerSessionId },
-      ...(parsed.diagnosis.relatedTaskIds === undefined ? {} : { relatedTaskIds: parsed.diagnosis.relatedTaskIds }),
-      ...(judgements.length === 0 ? {} : { judgements }),
-    }
-    try {
-      await ctx.task.recordDiagnosisIn(storeId, diagnosis, actor)
-    } catch (error) {
-      await settleAttempt('interrupted', `the diagnosis could not be recorded: ${error instanceof Error ? error.message : String(error)}`)
-      return {
-        kind: 'unrecorded' as const,
-        sessionId: reviewerSessionId,
-        failure: error instanceof Error ? error.message : String(error),
-      }
-    }
-    await settleAttempt('recorded')
-    // The diagnosis is durable and that is the reviewer's whole output: the
-    // caller that asked for it reads it back from this result and the store.
+  if (spawned.kind === 'spawn-failed')
+    return { kind: 'spawn-failed', failure: spawned.failure, sessionId: String(sessionId) }
+  const completion = await waitForCompletion(input, String(sessionId), spawned.handle)
+  const current: TaskSnapshot = await ctx.task.snapshotIn(storeId)
+  const diagnosis = recordedDiagnosis(current, String(sessionId))
+  if (completion?.result.kind !== 'reviewed' || diagnosis === undefined)
     return {
-      kind: 'recorded' as const,
-      sessionId: reviewerSessionId,
-      diagnosisId: diagnosis.diagnosisId,
-      confidence,
-      observation,
-      conclusion,
-      scope: diagnosis.scope,
-      reviewRefs: diagnosis.reviewRefs,
-      evidenceRefs: diagnosis.evidenceRefs,
-      relatedTaskIds: diagnosis.relatedTaskIds ?? [],
-      judgements,
-      proposals,
+      kind: 'no-completion',
+      failure:
+        completion === undefined
+          ? 'the reviewer session ended its turn without calling reviewer_complete'
+          : `the reviewer reported ${completion.result.kind} rather than a completed review`,
+      sessionId: String(sessionId),
     }
-  } catch (error) {
-    cancel()
-    await settleAttempt('interrupted', `the review attempt failed: ${error instanceof Error ? error.message : String(error)}`)
-    throw error
-  } finally {
-    waiting = false
-    resolveCompleted()
-    input.signal?.removeEventListener('abort', cancel)
-    if (!unloaded) await disposeWait?.()
+  return {
+    kind: 'recorded',
+    sessionId: String(sessionId),
+    diagnosisId: diagnosis.diagnosisId,
+    confidence: diagnosis.confidence,
+    observation: diagnosis.observedFailure,
+    conclusion: diagnosis.localizedCause,
+    scope: diagnosis.scope,
+    reviewRefs: diagnosis.reviewRefs,
+    evidenceRefs: diagnosis.evidenceRefs,
+    relatedTaskIds: diagnosis.relatedTaskIds ?? [],
+    judgements: diagnosis.judgements ?? [],
+    proposals: diagnosis.proposals,
   }
+}
+
+/**
+ * Wait for the reviewer's own turn to end, then read the completion it wrote.
+ * The wait is on the agent this call spawned — not on a session somewhere else —
+ * so a reviewer that never calls its tool is a protocol failure rather than a
+ * call that hangs, and an interrupted turn stays DSH's to repair.
+ */
+async function waitForCompletion(
+  input: ReviewAttemptInput,
+  sessionId: string,
+  handle: { readonly agent: { whenIdle(): Promise<void> } },
+): Promise<CoordinationCompletion | undefined> {
+  const idle = handle.agent.whenIdle().catch(() => undefined)
+  await (input.signal === undefined
+    ? idle
+    : Promise.race([idle, new Promise<void>(resolve => input.signal!.addEventListener('abort', () => resolve(), { once: true }))]))
+  const deadline = Date.now() + COMPLETION_GRACE_MS
+  let found: CoordinationCompletion | undefined
+  for (;;) {
+    const rows = (await readCoordinationRows().catch(() => [])) ?? []
+    found = rows.find(row => row.kind === 'completion' && row.sessionId === sessionId) as CoordinationCompletion | undefined
+    if (found !== undefined || Date.now() >= deadline) break
+    await new Promise(resolve => setTimeout(resolve, COMPLETION_POLL_MS))
+  }
+  if (found === undefined && input.signal?.aborted !== true) await abandon(sessionId).catch(() => undefined)
+  return found
+}
+
+/** Record a work item whose reviewer ended without a completion as a protocol failure. */
+async function abandon(sessionId: string): Promise<void> {
+  const binding = await readCoordinationBinding(sessionId)
+  if (binding === undefined || binding.completed) return
+  await recordCompletion(protocolFailure(binding, 'the reviewer session ended without calling reviewer_complete'))
+}
+
+/** The one request a reviewer reads: the facts of the source, and how to end. */
+function reviewerPrompt(input: ReviewAttemptInput, snapshot: TaskSnapshot): string {
+  const { source, review } = input
+  const pack = buildReviewPack({ snapshot, source, work: [] })
+  return [
+    'You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.',
+    'Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and ' +
+      'context_read reach the sibling tasks, their sessions and their evidence; task_template_list reads the delegated task\'s template catalog and exact templateRef contracts. Cite what you rest on.',
+    'Provide read-only analysis grounded in the recorded evidence.',
+    'Start with this exact source, then inspect the business DAG and read original evidence where it distinguishes plausible causes. Explain how exploration decisions, result boundaries, upstream contracts, dependencies, shared providers or decomposition could produce the observed result. Establish a shared cause with evidence linking the implicated results.',
+    ...(review.outcome === 'verified'
+      ? [
+          'The run passed its review; inspect the delivered result, acceptance coverage and exploration choices as well as avoidable tool calls, repeated reads, retries and decomposition costs. Compare candidates under the original acceptance with real two-sided replay. Mark fresh transfer unknown when it has not been measured.',
+        ]
+      : []),
+    'End this session by calling reviewer_complete with observation (required: what was actually observed), conclusion (required: the cause, citing the original outcome evidence), confidence (required: high | medium | low), and only when you made them scope, reviewRefs, evidenceRefs, relatedTaskIds, judgements and proposals.',
+    '- reviewRefs must be exact taskId#runId (or taskId#no-run) refs from this store; top-level evidenceRefs must be evidence bundle ids read through context_read kind:"evidence"; relatedTaskIds must be actual task ids in this graph.',
+    "- judgements (optional): [{dimension, verdict, evidenceRefs, rationale}] where dimension is one of the judged dimensions and each judgement cites at least one recorded ref and a rationale.",
+    '- proposals (optional): [{targetType, targetId, rationale}] — suggestions for the supervisor; nothing here executes them.',
+    'Calling reviewer_complete closes this session’s write access; reads and findings stay available. A session that ends its turn without calling it is a protocol failure and no diagnosis is invented from its silence.',
+    '',
+    '--- source under review ---',
+    `review ${sourceRef(source)} [${review.outcome}]${input.reason === null ? '' : ` — focus: ${input.reason}`}`,
+    '',
+    '--- review pack ---',
+    pack,
+  ].join('\n')
 }

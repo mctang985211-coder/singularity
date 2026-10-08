@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
-import { supervisorGrant } from '../../agent-singularity/src/coordination/rsi-loop.ts'
+import { supervisorGrant } from '../../agent-singularity/src/coordination/roles.ts'
 
 let stack: AssemblyStack | undefined
 afterEach(async () => {
