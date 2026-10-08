@@ -7639,6 +7639,14 @@ async function ensureInitialEnvironment(self, rootSessionId, actor) {
 async function activeRevisionOrUndefined(self, sessionId) {
 	return (await environmentLibraryForSession(self, sessionId)).revision;
 }
+/** The active revision of one library; a library without one (legacy or uninitialized) is refused by name. */
+async function activeRevisionFor(self, sessionId) {
+	return await activeRevisionForLibrary(self, await activeEnvironmentLibrary(self, sessionId));
+}
+async function activeRevisionForLibrary(self, library) {
+	if (library.revision === void 0) throw new Error(`task-runtime: library "${library.id}" is ${library.protocol} and holds no active environment revision; a new graph fixes its initial revision when its root contract is admitted`);
+	return library.revision;
+}
 /** One frozen revision of one library root, by id. */
 async function revisionForManifest(self, libraryId, revisionId) {
 	const revision = await readRevision(libraryRootsForRoot(self, libraryId), revisionId);
@@ -12859,6 +12867,14 @@ var TaskRuntime = class extends Service {
 	}
 	async libraryForSession(sessionId) {
 		return await environmentLibraryForSession(this, sessionId);
+	}
+	/** The active revision view of this session's graph library — a pure read, and the one version read every method tool shares. */
+	async activeEnvironmentView(sessionId, options = {}) {
+		return await activeEnvironmentView(this, sessionId, options);
+	}
+	/** The active revision of this session's graph library; a legacy or uninitialized library is refused by name. */
+	async activeRevisionFor(sessionId) {
+		return await activeRevisionFor(this, sessionId);
 	}
 	/** The revision one run is bound to, or `undefined` on an old-protocol run. */
 	async environmentRevisionForRun(run) {

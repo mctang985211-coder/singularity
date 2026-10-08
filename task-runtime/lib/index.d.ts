@@ -2620,6 +2620,12 @@ declare class TaskRuntime extends Service {
   /** The immutable revision roots a session's graph library is served from; reading creates nothing. */
   libraryForRoot(rootSessionId: string): Promise<EnvironmentLibrary>;
   libraryForSession(sessionId: string): Promise<EnvironmentLibrary>;
+  /** The active revision view of this session's graph library — a pure read, and the one version read every method tool shares. */
+  activeEnvironmentView(sessionId: string, options?: {
+    readonly trialCandidateRef?: string;
+  }): Promise<EnvironmentView>;
+  /** The active revision of this session's graph library; a legacy or uninitialized library is refused by name. */
+  activeRevisionFor(sessionId: string): Promise<EnvironmentRevision>;
   /** The revision one run is bound to, or `undefined` on an old-protocol run. */
   environmentRevisionForRun(run: TaskRun): Promise<EnvironmentRevision | undefined>;
   /** Fix the initial revision of a brand-new graph before anything binds to it. */

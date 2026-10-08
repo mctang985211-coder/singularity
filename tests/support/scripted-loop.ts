@@ -74,15 +74,12 @@ import { SingularityContextService } from '../../context/src/index.ts'
 import { EvolutionService, modelSelectionOf } from '../../evolution/src/index.ts'
 import { ProposalReviewService } from '../../agent-singularity/src/services/proposal-review.ts'
 import { configureSupervision } from '../../agent-singularity/src/coordination/supervision.ts'
-import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
-import { defineEvolutionCandidateTool } from '../../agent-singularity/src/tools/evolution-candidate.ts'
-import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
-import { defineEvolutionGateTool } from '../../agent-singularity/src/tools/evolution-gate.ts'
-import { defineEvolutionListTool } from '../../agent-singularity/src/tools/evolution-list.ts'
-import { defineEvolutionPrepareTool } from '../../agent-singularity/src/tools/evolution-prepare.ts'
-import { defineEvolutionProposeTool } from '../../agent-singularity/src/tools/evolution-propose.ts'
-import { defineEvolutionReplayTool } from '../../agent-singularity/src/tools/evolution-replay.ts'
-import { defineEvolutionRollbackTool } from '../../agent-singularity/src/tools/evolution-rollback.ts'
+import { defineMethodDiscardTool } from '../../agent-singularity/src/tools/method-discard.ts'
+import { defineMethodDraftTool } from '../../agent-singularity/src/tools/method-draft.ts'
+import { defineMethodEvaluateTool } from '../../agent-singularity/src/tools/method-evaluate.ts'
+import { defineMethodListTool } from '../../agent-singularity/src/tools/method-list.ts'
+import { defineMethodPublishTool } from '../../agent-singularity/src/tools/method-publish.ts'
+import { defineMethodRollbackTool } from '../../agent-singularity/src/tools/method-rollback.ts'
 import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
 import { defineTaskTemplateListTool } from '../../agent-singularity/src/tools/task-template-list.ts'
 import { defineContextReadTool } from '../../agent-singularity/src/tools/context-read.ts'
@@ -113,8 +110,8 @@ import { graphRegistry, sessionQueryReads } from './context-plane.ts'
 /** The root agent's allow-list, exactly as `agent-runtime` composes it. Exported so a fixture that mounts no loop still composes the deployment's root surface. */
 export const ROOT_TOOLS = [
   'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_library', 'task_read', 'capability_list', 'task_template_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
-  'task_submit_result', 'task_answer', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'task_budget_extend', 'evolution_propose',
-  'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
+  'task_submit_result', 'task_answer', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'task_budget_extend',
+  'method_list', 'method_draft', 'method_evaluate', 'method_publish', 'method_discard', 'method_rollback', 'escalate',
 ]
 
 /**
@@ -177,14 +174,13 @@ export interface SupervisionOptions {
 }
 
 /**
- * The evolution plane's model-facing tools. They are stand-ins in a deployment
+ * The method plane's model-facing tools — the six the composition registers. They are stand-ins in a deployment
  * that never mounted the plane, and the real definitions in one that did: the
  * candidate chain a coordinator walks only means something when the calls really
  * reach `ctx.evolution`.
  */
 const EVOLUTION_TOOLS: readonly string[] = [
-  'evolution_propose', 'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate',
-  'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list',
+  'method_list', 'method_draft', 'method_evaluate', 'method_publish', 'method_discard', 'method_rollback',
 ]
 
 /**
@@ -257,8 +253,8 @@ export interface ScriptedLoopOptions {
   readonly roots?: readonly string[]
   /**
    * Sessions composed as supervisors rather than roots (the RSI round's agent,
-   * `supervisorGrant()`): the nine `evolution_*` tools and the read-only
-   * investigation tools, with the root's own allow-list keeping the chain off a
+   * `supervisorGrant()`): the six `method_*` tools and the read-only
+   * investigation tools, with the root's own allow-list keeping the pointer tools off a
    * root's surface. Each is spawned under the primary root, so its session owns
    * the graph scope a replay's worker spawns resolve under. Spawned with the
    * fixture's own kickoff, so a spec drives its real turns with {@link
@@ -956,7 +952,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
       }))
     }
     const shippedQuestionTools = this.options.questionTools !== 'stand-in'
-    // The evolution plane's own nine tools are registered for real when the
+    // The method plane's own six tools are registered for real when the
     // deployment mounts that plane (see the `evolution` arm below); until then
     // the name stays a stand-in like every other tool this fixture does not run.
     const evolutionTools = new Set(EVOLUTION_TOOLS)
@@ -1020,21 +1016,18 @@ class ScriptedLoopImpl implements ScriptedLoop {
       // The service registers itself (`ctx.evolution`) in its own constructor;
       // the switch is what a sibling reads, and it is on for this deployment.
       void service
-      ctx.provide('singularityEvolution', { enabled: true })
+      ctx.provide('singularityMethods', { enabled: true })
       // The plane's own tools, registered for real for the same reason: a spec
       // whose subject is the *chain a coordinator walks* has to reach the
       // deployment's definitions — a stand-in that answers "fixture answer" would
       // be a candidate chain nothing ever ran.
       for (const tool of [
-        defineEvolutionProposeTool(ctx),
-        defineEvolutionCandidateTool(ctx),
-        defineEvolutionPrepareTool(ctx),
-        defineEvolutionReplayTool(ctx),
-        defineEvolutionGateTool(ctx),
-        defineEvolutionDecideTool(ctx),
-        defineEvolutionApplyTool(ctx),
-        defineEvolutionRollbackTool(ctx),
-        defineEvolutionListTool(ctx),
+        defineMethodListTool(ctx),
+        defineMethodDraftTool(ctx),
+        defineMethodEvaluateTool(ctx),
+        defineMethodPublishTool(ctx),
+        defineMethodDiscardTool(ctx),
+        defineMethodRollbackTool(ctx),
       ]) {
         evolutionDefinitions.push(tool)
         ctx.tools.register(tool)
@@ -1143,9 +1136,9 @@ class ScriptedLoopImpl implements ScriptedLoop {
         permissionPreset: 'danger-full-access',
         prompt: [{ type: 'text', text: 'supervise' }],
       })
-      // The chain's own nine tools on the supervisor's scope, the surface the
-      // deployment's grant names: `evolution_rollback` is not in
-      // `SUPERVISOR_BASELINE` even though a case here drives it.
+      // The method tools on the supervisor's scope, the surface the
+      // deployment's grant names: `method_rollback` is registered even though
+      // the read-only baseline alone does not name it.
       for (const tool of evolutionDefinitions) handle.agent.ctx.tools.register(tool)
     }
     return this

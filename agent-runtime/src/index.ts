@@ -17,6 +17,7 @@ import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { DEFAULT_ROOT, type GraphEvent } from '@dangosys/dsh-singularity-graph'
 import { installGraphSkillCatalog, applyWorkerGrant, type GraphSkillCatalogOptions } from './grants.ts'
+import { sealMethodAuthority } from './method-authority.ts'
 import { fileURLToPath } from 'node:url'
 import { ensureAgentMessageDelivered, readToolCallBody, reconcileAgentMessageDeliveries } from './messages.ts'
 import type {
@@ -63,6 +64,14 @@ export {
 export { CoordinationResumeRefusal, resumeCoordinationAgent } from './coordination-resume.ts'
 export type { CoordinationResumeDeps, CoordinationResumeRefusalCode } from './coordination-resume.ts'
 export { findSkillFileIn, parseSkillFile, skillRootsFor } from './skill-file.ts'
+export {
+  assertNoMethodAuthorityGrant,
+  grantCarriesMethodAuthority,
+  isMethodAuthorityTool,
+  METHOD_AUTHORITY_DENIAL,
+  METHOD_AUTHORITY_TOOLS,
+  sealMethodAuthority,
+} from './method-authority.ts'
 export { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
 export { RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS } from './raw-session-guard.ts'
 export { WorkerResumeRefusal } from './worker-resume.ts'
@@ -493,7 +502,7 @@ function runtimePrompt(channel: RuntimePromptSource['channel']): RuntimePromptSo
   return { kind: 'runtime-prompt', channel }
 }
 
-/** The tools every root may call whatever the deployment's evolution switch says (README Design notes). */
+/** The tools every root may call whatever the deployment's method-tool switch says (README Design notes). */
 const ROOT_CORE_TOOLS = [
   'read', 'glob', 'grep', 'write', 'edit', 'bash', 'job_list', 'job_output', 'job_kill',
   'task_library',
@@ -522,27 +531,32 @@ const ROOT_CORE_TOOLS = [
   'task_budget_extend',
 ]
 
-/** Structural view of `ctx.singularityEvolution`, read softly so this package needs no dependency on it. */
-interface EvolutionExposureLike {
+/** The root's method surface: observation and candidacy. It never names a pointer-moving tool. */
+const ROOT_METHOD_TOOLS = ['method_list', 'method_draft']
+
+/** Structural view of `ctx.singularityMethods`, read softly so this package needs no dependency on it. */
+interface MethodToolsExposureLike {
   readonly enabled: boolean
 }
 
-/** Whether this composition registered the nine `evolution_*` tools; a context without the service reads as off. */
-function evolutionEnabled(ctx: Context): boolean {
-  return (ctx.get('singularityEvolution') as EvolutionExposureLike | undefined)?.enabled ?? false
+/** Whether this composition registered the six `method_*` tools; a context without the service reads as off. */
+function methodToolsEnabled(ctx: Context): boolean {
+  return (ctx.get('singularityMethods') as MethodToolsExposureLike | undefined)?.enabled ?? false
 }
 
-/** The root's tool allow-list: the core tools plus `escalate`; the evolution chain belongs to the supervisor. */
-const ROOT_TOOLS = [...ROOT_CORE_TOOLS, 'escalate']
+/** The root's tool allow-list: the core tools plus `escalate`, plus the two method tools the switch registered. */
+function rootTools(methods: boolean): readonly string[] {
+  return [...ROOT_CORE_TOOLS, ...(methods ? ROOT_METHOD_TOOLS : []), 'escalate']
+}
 
 /** Root-local registrations also obey the coordination allow-list. */
-function sealRootTools(agentCtx: Context): void {
+function sealRootTools(agentCtx: Context, allow: readonly string[]): void {
   agentCtx.tools.presentAs('native')
-  const allowed = new Set(ROOT_TOOLS)
+  const allowed = new Set(allow)
   agentCtx.tools.guard(execution =>
     allowed.has(execution.name)
       ? undefined
-      : 'singularity: use the root execution tools and task_decompose for delegated task work',
+      : 'singularity: use the root execution tools, task_decompose for delegated task work, and method_draft/method_list to propose or inspect a method candidate',
   )
 }
 
@@ -574,12 +588,16 @@ function rootSetup(ctx: Context, agentPreset: string): AgentSetup {
     ctx.permissionPresets.set(agent.session, 'workspace-isolated')
     // The bubble's own approval policy is not the root's business: hitl_approve must reach the answerer, so pin the root to 'ask'.
     setApprovalPolicy(agent.session, 'ask')
-    const evolution = evolutionEnabled(ctx)
-    agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
-    agentCtx.tools.restrict({ allow: ROOT_TOOLS })
+    const methods = methodToolsEnabled(ctx)
+    agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(methods) })
+    agentCtx.tools.restrict({ allow: rootTools(methods) })
     await installGraphSkillCatalog(agentCtx, await graphCatalogFor(ctx, agent, true))
     sealRawSessionReads(agentCtx)
-    sealRootTools(agentCtx)
+    sealRootTools(agentCtx, rootTools(methods))
+    // The root holds observation and candidacy, never publication: the seal makes
+    // a call to method_publish/method_rollback fail closed here too, not merely
+    // absent from the allow-list.
+    sealMethodAuthority(agentCtx, false)
   }
 }
 

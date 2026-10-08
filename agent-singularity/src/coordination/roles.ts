@@ -8,6 +8,7 @@
  */
 
 import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
+import { METHOD_SUPERVISOR_BASELINE } from '../tools/method-shared.ts'
 
 /** The host preset both coordination roles are composed from; the runtime installs the role's own policy. */
 export const COORDINATION_PRESET = 'singularity-coordinator'
@@ -31,20 +32,11 @@ export const COORDINATION_READ_ONLY: readonly string[] = [
 export const REVIEWER_PRESET = COORDINATION_PRESET
 
 /**
- * The method tools a supervisor needs. Until the method tool surface lands
- * (`tools/method-shared.ts` owns `METHOD_SUPERVISOR_BASELINE`), this constant
- * holds the evolution chain that plays that role today; the name is the seam, so
- * the switch is one import.
+ * The method tools a supervisor needs. The list is owned by the tool surface
+ * (`tools/method-shared.ts`) so the grant and the tool definitions can never
+ * disagree about what the round supervisor holds.
  */
-export const METHOD_SUPERVISOR_BASELINE: readonly string[] = [  'evolution_propose',
-  'evolution_candidate',
-  'evolution_prepare',
-  'evolution_replay',
-  'evolution_gate',
-  'evolution_decide',
-  'evolution_apply',
-  'evolution_list',
-]
+export { METHOD_SUPERVISOR_BASELINE }
 
 /** The reviewer's whole surface: read-only, plus its own completion tool. */
 export const REVIEWER_BASELINE: readonly string[] = [...COORDINATION_READ_ONLY, 'task_review_agent', 'reviewer_complete']

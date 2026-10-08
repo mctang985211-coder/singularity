@@ -1,11 +1,11 @@
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, bubbleWorkspacePath, executionUsage, materializeBubble, optionalService, recoveryAttemptWithKey, settleBubble, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
-import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EvolutionService, OUTCOME_JUDGE_PROMPT, applyTargets, assertDecisionTransition, assertOutcomePlan, canonicalJson, digestOf, modelSelectionOf, normalizeSnapshot, renderProviderRoles } from "@dangosys/dsh-singularity-evolution";
+import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, bubbleWorkspacePath, executionUsage, materializeBubble, optionalService, readEnvironmentDraft, readRevision, recoveryAttemptWithKey, settleBubble, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
+import { DEFAULT_STRATEGY_POLICY, EvolutionService, OUTCOME_JUDGE_PROMPT, adapterFor, admit, aggregateEvaluation, assertOutcomePlan, calibrateNoise, canonicalJson, cohortDigestOf, createDraft, digestOf, discardDraft, editBudget, evaluate, evaluationOf, evaluationSourcesOf, exploration, foldHistory, foldMethods, markPublished, markRolledback, methodList, modelSelectionOf, openMethodLedger, refutationFor, renderHistory, revisionViewOf, scaleOf, screenBeforeMeasurement, sideMeasurementOf, stallFlag, strategyDecisionOf, validateEvaluation } from "@dangosys/dsh-singularity-evolution";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdir, open, readFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir, writeFile } from "node:fs/promises";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, canonicalize, isTerminalRunStatus, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
 import { homedir } from "node:os";
 import { CONTEXT_OUTPUT_LIMIT_BYTES, CoordinationBindingError, OutputBudget, budgetList, utf8Bytes } from "@dangosys/dsh-singularity-context";
@@ -370,17 +370,6 @@ function questionCall(exec, tool) {
 		callId
 	};
 }
-/** The lines a commit tool reports for an intent it settled instead of starting a second commit. */
-function renderOpenIntentRecovery(intent, recovered) {
-	return [`recovered commit intent ${intent.intentId} (${recovered ?? "unreported"}): ${recoveryNote(recovered)}`, `no second approval was asked — the intent already binds ${intent.approvalRef}`];
-}
-function recoveryNote(recovered) {
-	switch (recovered) {
-		case "redone": return "production still held the state before this commit, so the same write was carried out and its completion recorded";
-		case "written": return "production already held the content this commit installed, so only its completion was recorded and production was not written again";
-		default: return "the service reported no recovery result for a proposal that had an open commit intent — production was left exactly as the intent found it";
-	}
-}
 
 //#endregion
 //#region src/services/proposal-render.ts
@@ -422,7 +411,7 @@ function resolutionLines(manifest) {
 	if (manifest === void 0) return [];
 	const entries = Object.entries(manifest.capabilities);
 	if (entries.length === 0 && manifest.missing.length === 0) return [];
-	const lines = entries.map(([name, entry]) => {
+	const lines$1 = entries.map(([name, entry]) => {
 		const parts = [
 			...entry.skills.length === 0 ? [] : [`skills: ${entry.skills.join(", ")}`],
 			...entry.tools.length === 0 ? [] : [`tools: ${entry.tools.join(", ")}`],
@@ -435,7 +424,7 @@ function resolutionLines(manifest) {
 	const missing = manifest.missing.map((name) => `  - ${name} → NOT GRANTED (capability gap: the registry has no such row, and this batch's admission recorded it)`);
 	return [
 		"  resolution (the manifests this batch resolved to):",
-		...lines,
+		...lines$1,
 		...missing
 	];
 }
@@ -1433,6 +1422,16 @@ function bindingOfAssignment(assignment, completed) {
 function environmentPlane(ctx) {
 	return optionalService(ctx, "taskRuntime");
 }
+/** Whether this graph's method publication is decided by the platform policy rather than a person. */
+async function platformDecided(ctx, graphId) {
+	const graphs = optionalService(ctx, "graphs");
+	if (graphs === void 0) return false;
+	try {
+		return (await graphs.graphForSession(SessionId(graphId))).rsi?.humanReview === false;
+	} catch {
+		return false;
+	}
+}
 /** The revision this graph is running now, or `undefined` when no environment plane can answer. */
 async function activeMethodRevision(ctx, rootSessionId) {
 	const plane = environmentPlane(ctx);
@@ -1444,13 +1443,78 @@ async function activeMethodRevision(ctx, rootSessionId) {
 	}
 }
 /**
-* The method records one business round produced. The round-scoped record store
-* belongs to the method tool surface; until it lands, no deployment can answer
-* and this returns nothing — which the completion reports as `retain`/`trial`
-* rather than as a promotion nobody recorded.
+* The method records one business round produced, read from this graph's own v5
+* ledger (`<library>/methods.jsonl`) and bounded by the round's own assignment:
+* a record counts for this round when it was appended after the round's
+* supervisor was assigned. A deployment that has not mounted the environment
+* plane answers nothing — the completion then reports `retain`/`trial` rather
+* than a promotion nobody recorded.
 */
-async function roundMethodRecords(_ctx, _graphId, _businessRound) {
-	return [];
+async function roundMethodRecords(ctx, graphId, businessRound) {
+	const plane = environmentPlane(ctx);
+	if (plane?.libraryForSession === void 0) return [];
+	const boundary = await roundBoundaryOf(graphId, businessRound);
+	if (boundary === void 0) return [];
+	let library;
+	try {
+		library = await plane.libraryForSession(graphId);
+	} catch {
+		return [];
+	}
+	let views;
+	try {
+		views = [...foldMethods((await openMethodLedger({
+			root: library.root,
+			libraryId: library.id
+		})).records()).values()];
+	} catch {
+		return [];
+	}
+	const platform = await platformDecided(ctx, graphId);
+	const records = [];
+	for (const view of views) {
+		const published = view.published;
+		if (published !== void 0 && published.at >= boundary) records.push({
+			action: "publish",
+			revisionId: published.revisionId,
+			approvalRef: published.approvalRef ?? null,
+			decidedBy: platform ? "platform_policy" : "human",
+			reason: `draft ${view.draft.draftId} published as revision ${published.revisionId}`
+		});
+		const rolledback = view.rolledback;
+		if (rolledback !== void 0 && rolledback.at >= boundary) records.push({
+			action: "rollback",
+			revisionId: rolledback.revisionId,
+			approvalRef: rolledback.approvalRef ?? null,
+			decidedBy: platform ? "platform_policy" : "human",
+			reason: `draft ${view.draft.draftId} rolled back to revision ${rolledback.revisionId}`
+		});
+		const discardedAt = lastHistoryAt(view.history, "discard");
+		if (view.status === "discarded" && discardedAt !== void 0 && discardedAt >= boundary) records.push({
+			action: "discard",
+			revisionId: null,
+			approvalRef: null,
+			decidedBy: "operator",
+			reason: view.discardReason ?? `draft ${view.draft.draftId} discarded`
+		});
+	}
+	return records.sort((left, right) => left.action < right.action ? -1 : left.action > right.action ? 1 : 0);
+}
+/** The `at` of the last record of one kind in a draft's own history, or nothing. */
+function lastHistoryAt(history, kind) {
+	let at;
+	for (const entry of history) if (entry.kind === kind) at = entry.at;
+	return at;
+}
+/** When this round's supervisor was assigned: the lower bound a record must be appended after to belong to this round. */
+async function roundBoundaryOf(graphId, businessRound) {
+	let rows;
+	try {
+		rows = await readCoordinationRows() ?? [];
+	} catch {
+		return;
+	}
+	return rows.filter((row) => row.kind === "assignment").filter((row) => row.graphId === graphId && row.role === "supervisor").filter((row) => row.subject.kind === "round" && row.subject.businessRound === businessRound).map((row) => row.at).sort()[0];
 }
 /** The last element of a list, or nothing. */
 function lastOf(items) {
@@ -1502,12 +1566,12 @@ function searchNextOf(input) {
 function renderSupervisorReviewFacts(review) {
 	const criteria = review.criteria ?? [];
 	const passed = criteria.filter((criterion) => criterion.verdict === "pass").length;
-	const lines = [`review ${review.taskId}#${review.runId ?? "no-run"} [${review.outcome}]`];
-	lines.push(criteria.length === 0 ? "criteria: none recorded" : `criteria (${passed}/${criteria.length} passed): ${criteria.map((criterion) => `${criterion.criterionId} ${criterion.verdict}`).join("; ")}`);
+	const lines$1 = [`review ${review.taskId}#${review.runId ?? "no-run"} [${review.outcome}]`];
+	lines$1.push(criteria.length === 0 ? "criteria: none recorded" : `criteria (${passed}/${criteria.length} passed): ${criteria.map((criterion) => `${criterion.criterionId} ${criterion.verdict}`).join("; ")}`);
 	const metrics = metricsLine(review);
-	if (metrics !== void 0) lines.push(`metrics: ${metrics}`);
-	if (review.logTail !== void 0) lines.push(`logTail: ${review.logTail}`);
-	return lines.join("\n");
+	if (metrics !== void 0) lines$1.push(`metrics: ${metrics}`);
+	if (review.logTail !== void 0) lines$1.push(`logTail: ${review.logTail}`);
+	return lines$1.join("\n");
 }
 /** The effort counters of one review record, one clause per counter that exists. */
 function metricsLine(review) {
@@ -1913,6 +1977,400 @@ function reduce(facts) {
 }
 
 //#endregion
+//#region src/tools/method-shared.ts
+/** The supervisor's method surface: the whole draft → evaluate → publish/discard/rollback path, plus the read. */
+const METHOD_SUPERVISOR_BASELINE = [
+	"method_list",
+	"method_draft",
+	"method_evaluate",
+	"method_publish",
+	"method_discard",
+	"method_rollback"
+];
+function graphRegistry(ctx) {
+	const graphs = optionalService(ctx, "graphs");
+	if (graphs === void 0) throw new Error("method tools: this deployment offers no graph registry, so no method tool can resolve its graph; nothing was read or changed");
+	return graphs;
+}
+/** The graph one caller belongs to: its identity, its library and its own method settings. */
+async function methodGraphFor(ctx, caller) {
+	const graph = await graphRegistry(ctx).graphForSession(SessionId(caller));
+	const rootSessionId = String(graph.rootSessionId);
+	return {
+		id: String(graph.id),
+		rootSessionId,
+		libraryId: rootSessionId,
+		...graph.rsi == null ? {} : { rsi: { humanReview: graph.rsi.humanReview === true } }
+	};
+}
+/** The mode one graph's record puts method publication in. Mode is never an argument. */
+async function methodModeFor(ctx, caller) {
+	return (await methodGraphFor(ctx, caller)).rsi?.humanReview === false ? "auto" : "manual";
+}
+/** Who answers: an unmanned graph's publication is the platform policy's, not a person's. */
+function deciderFor(mode) {
+	return mode === "auto" ? "platform_policy" : "human";
+}
+/** The environment plane, resolved from the runtime alone; a deployment without one is refused by name. */
+function environmentPlaneOf(ctx) {
+	const runtime = optionalService(ctx, "taskRuntime");
+	if (runtime === void 0) throw new Error("method tools: this deployment offers no task runtime, so no environment revision can be read or drafted; nothing was read or changed");
+	const bind = (member) => {
+		const value = runtime[member];
+		if (typeof value !== "function") throw new Error(`method tools: this deployment's task runtime offers no ${String(member)}, so the environment plane cannot answer; nothing was changed`);
+		return value.bind(runtime);
+	};
+	return {
+		activeEnvironmentView: bind("activeEnvironmentView"),
+		activeRevisionFor: bind("activeRevisionFor"),
+		libraryForSession: bind("libraryForSession"),
+		createDraft: bind("createDraft"),
+		stageDraftEdit: bind("stageDraftEdit"),
+		removeEnvironmentDraft: bind("removeEnvironmentDraft"),
+		freezeDraft: bind("freezeDraft"),
+		publishRevision: bind("publishRevision"),
+		rollbackRevision: bind("rollbackRevision"),
+		openPointerIntent: bind("openPointerIntent"),
+		reconcilePointer: bind("reconcilePointer")
+	};
+}
+/** The strategy's pure functions, as one bundle; the policy defaults to the frozen first-version one. */
+function strategyPlaneOf(policy = DEFAULT_STRATEGY_POLICY) {
+	return {
+		policy,
+		editBudget: (round, chosen) => editBudget(round, {
+			rounds: chosen.rounds,
+			...chosen.editBudget
+		}),
+		screenBeforeMeasurement,
+		aggregateEvaluation,
+		calibrateNoise,
+		admit,
+		foldHistory,
+		renderHistory,
+		stallFlag,
+		exploration,
+		refutationFor,
+		criticOf: (verdict) => verdict
+	};
+}
+/** The path one strategy decision record is written to: beside the report it recomputes from. */
+function decisionPathOf(root, draftId, evaluationId) {
+	return join(root, "evaluations", draftId, evaluationId, "strategy-decision.json");
+}
+/**
+* The prospective candidate revision one draft holds, as the publish approval
+* reads it for its difference. It is the draft's own directory, not a frozen
+* revision: only the pointer transaction freezes it, by rename.
+*/
+async function candidateRevisionOf(library, draftId) {
+	const draft = await readEnvironmentDraft(library, draftId);
+	if (draft === void 0) return void 0;
+	return {
+		manifest: draft.manifest,
+		root: draft.root,
+		skillRoot: join(draft.root, "skills"),
+		taskTemplatesRoot: join(draft.root, "task-templates")
+	};
+}
+/**
+* The method ledger plane, bound to the caller's own graph library. Every entry
+* opens the library's ledger again, so a line another process appended between
+* two calls is read rather than cached past.
+*/
+async function methodLedgerPlaneOf(ctx, caller) {
+	const resolved = await environmentPlaneOf(ctx).libraryForSession(caller);
+	const library = {
+		id: resolved.id,
+		root: resolved.root
+	};
+	const policy = DEFAULT_STRATEGY_POLICY;
+	const open$1 = async () => {
+		const ledger = await openMethodLedger({
+			root: library.root,
+			libraryId: library.id
+		});
+		return {
+			ledger,
+			sources: evaluationSourcesOf({
+				ctx,
+				caller,
+				root: library.root,
+				libraryId: library.id,
+				ledger
+			})
+		};
+	};
+	const viewOf = async (draftId) => {
+		const { ledger } = await open$1();
+		const view = foldMethods(ledger.records()).get(draftId);
+		if (view === void 0) throw new Error(`evolution: unknown draft "${draftId}"`);
+		return view;
+	};
+	const reportOf = async (view) => {
+		if (view.evaluation === void 0) return void 0;
+		const { sources } = await open$1();
+		return await evaluationOf(sources, view.draft.draftId);
+	};
+	return {
+		libraryId: library.id,
+		root: library.root,
+		view: viewOf,
+		async list(filter) {
+			const { sources } = await open$1();
+			return methodList(sources, filter);
+		},
+		async evaluationOf(draftId) {
+			return await reportOf(await viewOf(draftId));
+		},
+		async prepareStructure(input) {
+			return await prepareStructureFor(library, input);
+		},
+		async createDraft(request) {
+			const { ledger } = await open$1();
+			return await createDraft(ledger, request);
+		},
+		async evaluate(input, signal) {
+			const { sources } = await open$1();
+			return await evaluate(sources, {
+				draftId: input.draftId,
+				samples: input.samples,
+				input: input.input,
+				model: input.model,
+				rules: input.rules,
+				budget: input.budget,
+				repetition: input.repetition,
+				...input.evaluation === void 0 ? {} : { evaluation: input.evaluation },
+				...input.judge === void 0 ? {} : { judge: input.judge },
+				...signal === void 0 ? {} : { signal },
+				...input.maxParallel === void 0 ? {} : { maxParallel: input.maxParallel },
+				policy,
+				actor: caller
+			});
+		},
+		async decisionFor(draftId) {
+			const view = await viewOf(draftId);
+			if (view.evaluation === void 0) return void 0;
+			return await readDecision(decisionPathOf(library.root, draftId, view.evaluation.evaluationId));
+		},
+		async recordDecision(report) {
+			const decision = deriveDecision(report, policy);
+			await writeJson(decisionPathOf(library.root, report.draftId, report.evaluationId), decision);
+			return decision;
+		},
+		async validatePrePublish(report) {
+			const { sources } = await open$1();
+			const outcome = await validateEvaluation({
+				report,
+				sources,
+				mode: "pre-publish"
+			});
+			return {
+				guards: outcome.guards.map((guard) => ({
+					id: guard.id,
+					passed: guard.ok
+				})),
+				verdict: outcome.verdict
+			};
+		},
+		async discardDraft(input) {
+			const { ledger } = await open$1();
+			return await discardDraft(ledger, input);
+		},
+		async markPublished(input) {
+			const { sources } = await open$1();
+			await markPublished(sources, input);
+		},
+		async markRolledback(input) {
+			const { sources } = await open$1();
+			await markRolledback(sources, input);
+		},
+		async history() {
+			const { ledger, sources } = await open$1();
+			return await historyFactsOf(ledger, sources, policy);
+		}
+	};
+}
+/** One library's drafts, its reports and its versions, as the strategy's history folds them. */
+async function historyFactsOf(ledger, sources, policy) {
+	const views = [...foldMethods(ledger.records()).values()];
+	const candidates = views.map((view, index) => ({
+		candidateId: view.draft.draftId,
+		libraryId: view.libraryId,
+		contentDigest: view.draft.candidateRevision.digest,
+		round: index,
+		edits: []
+	}));
+	const roundOf = new Map(candidates.map((candidate) => [candidate.candidateId, candidate.round]));
+	const evaluations = [];
+	const refutations = [];
+	const versions = [];
+	for (const view of views) {
+		const draftId = view.draft.draftId;
+		const round = roundOf.get(draftId) ?? 0;
+		if (view.evaluation !== void 0) {
+			const report = await evaluationOf(sources, draftId);
+			evaluations.push({
+				candidateId: draftId,
+				scope: cohortDigestOf(report),
+				measurement: sideMeasurementOf({
+					report,
+					side: "candidate",
+					scale: scaleOf(report),
+					policy
+				}),
+				verdict: report.verdict,
+				evidenceRefs: [report.evaluationId]
+			});
+			const admission = (await readDecision(decisionPathOf(ledger.root, draftId, report.evaluationId)))?.admissions.find((entry) => entry.candidateId === draftId);
+			if (admission !== void 0 && !admission.admissible) refutations.push({
+				candidateId: draftId,
+				contentDigest: view.draft.candidateRevision.digest,
+				reasonCode: admission.reasonCode,
+				reason: admission.reason,
+				evidenceRefs: [report.evaluationId],
+				round
+			});
+		} else if (view.status === "discarded") refutations.push({
+			candidateId: draftId,
+			contentDigest: view.draft.candidateRevision.digest,
+			reasonCode: "not-measured",
+			reason: view.discardReason ?? "discarded without an evaluation",
+			evidenceRefs: [],
+			round
+		});
+		if (view.published !== void 0) versions.push({
+			round,
+			libraryId: view.libraryId,
+			revisionId: view.published.revisionId,
+			contentDigest: view.draft.candidateRevision.digest
+		});
+	}
+	return {
+		candidates,
+		evaluations,
+		consumption: [],
+		refutations,
+		versions
+	};
+}
+async function readDecision(path) {
+	return await readJson(path);
+}
+async function readJson(path) {
+	let text$1;
+	try {
+		text$1 = await readFile(path, "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return void 0;
+		throw error;
+	}
+	try {
+		return JSON.parse(text$1);
+	} catch {
+		throw new Error(`evolution: ${path} is not readable JSON`);
+	}
+}
+async function writeJson(path, value) {
+	await mkdir(dirname(path), { recursive: true });
+	await writeFile(path, `${JSON.stringify(value)}\n`, "utf8");
+}
+/**
+* The structure check one candidate runs before anything measures it: the
+* adapter parses the asset the draft claims to change, against the frozen
+* baseline, and a shape it cannot represent is a refusal by name rather than a
+* finding nobody reads.
+*/
+async function prepareStructureFor(library, input) {
+	const change = {
+		kind: input.kind,
+		identity: input.identity,
+		before: null,
+		after: input.candidateRevision.digest
+	};
+	const staged = await readEnvironmentDraft(library, input.draftId);
+	const baseline = await readRevision(library, input.baseRevision.revisionId);
+	if (staged === void 0 || baseline === void 0) return {
+		ok: false,
+		findings: ["the draft or its baseline revision is absent from the library"],
+		change,
+		files: []
+	};
+	const candidate = {
+		manifest: staged.manifest,
+		root: staged.root,
+		skillRoot: join(staged.root, "skills"),
+		taskTemplatesRoot: join(staged.root, "task-templates")
+	};
+	const draft = {
+		draftId: input.draftId,
+		kind: input.kind,
+		identity: input.identity,
+		baseRevision: input.baseRevision,
+		candidateRevision: {
+			...input.candidateRevision,
+			files: []
+		},
+		rationale: input.rationale,
+		sourceRefs: [...input.sourceRefs],
+		actor: input.actor,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	};
+	try {
+		const prepared = await adapterFor(input.kind).prepare({
+			draft,
+			revision: revisionViewOf(candidate),
+			baseline: revisionViewOf(baseline)
+		});
+		return {
+			ok: true,
+			findings: [],
+			change: prepared.change,
+			files: prepared.files.map((file) => ({
+				path: file.path,
+				sha256: file.sha256
+			}))
+		};
+	} catch (error) {
+		return {
+			ok: false,
+			findings: [error instanceof Error ? error.message : String(error)],
+			change,
+			files: []
+		};
+	}
+}
+/** The one decision record a report yields, from the report's own baseline reading and the frozen policy. */
+function deriveDecision(report, policy) {
+	const baseline = sideMeasurementOf({
+		report,
+		side: "baseline",
+		scale: scaleOf(report),
+		policy
+	});
+	const incumbent = aggregateEvaluation(baseline);
+	const calibration = calibrateNoise([baseline], policy);
+	const history = foldHistory({
+		candidates: [],
+		evaluations: [],
+		consumption: [],
+		refutations: [],
+		versions: []
+	}, policy, 0);
+	const guards = report.guards.filter((guard) => !guard.ok).map((guard) => guard.id);
+	return strategyDecisionOf({
+		report,
+		policy,
+		incumbent,
+		bestQuality: incumbent.quality,
+		calibration,
+		history,
+		guards,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	});
+}
+
+//#endregion
 //#region src/coordination/roles.ts
 /** The host preset both coordination roles are composed from; the runtime installs the role's own policy. */
 const COORDINATION_PRESET = "singularity-coordinator";
@@ -1932,22 +2390,6 @@ const COORDINATION_READ_ONLY = [
 ];
 /** The host preset a review session is composed from — the same composition, a different role. */
 const REVIEWER_PRESET = COORDINATION_PRESET;
-/**
-* The method tools a supervisor needs. Until the method tool surface lands
-* (`tools/method-shared.ts` owns `METHOD_SUPERVISOR_BASELINE`), this constant
-* holds the evolution chain that plays that role today; the name is the seam, so
-* the switch is one import.
-*/
-const METHOD_SUPERVISOR_BASELINE = [
-	"evolution_propose",
-	"evolution_candidate",
-	"evolution_prepare",
-	"evolution_replay",
-	"evolution_gate",
-	"evolution_decide",
-	"evolution_apply",
-	"evolution_list"
-];
 /** The reviewer's whole surface: read-only, plus its own completion tool. */
 const REVIEWER_BASELINE = [
 	...COORDINATION_READ_ONLY,
@@ -2932,58 +3374,22 @@ function defineRootBudgetApproval(ctx) {
 
 //#endregion
 //#region src/tools/task-library.ts
-/** One graph-owned table for reusable Task contracts and methods, including temporary discoveries. */
+/**
+* One graph-owned table for reusable Task contracts and methods, read through the
+* one version view. Writing is not an action any role holds here: a change to the
+* executable library is a method candidate (`method_draft`) that an evaluation and
+* a publish switch into effect, and no model edits the library's bytes directly.
+*/
 function defineTaskLibraryTool(ctx) {
 	return defineTool({
 		name: "task_library",
-		description: "Manage this graph's TaskTemplate and Skill library. Read its task table and bound Skill table; use task_template_list for complete contracts and bind method:<name> through requiredCapabilities. Write useful exploration/decomposition goals as TaskTemplates and experience as concise Skills. New and changed entries are temporary and available to later tasks. The supervisor reviews execution evidence and model cost during iteration, retains useful experience, revises it by writing a new version, or retires an entry. Each Task keeps its own acceptance and frozen method binding.",
-		parameters: {
-			action: {
-				type: "string",
-				enum: [
-					"read",
-					"write_task",
-					"write_skill",
-					"review"
-				],
-				required: true
-			},
-			template: {
-				type: "object",
-				additionalProperties: true,
-				description: "Existing TaskTemplate format: id, version, catalogPath, appliesTo, parametersSchema, contract, optional direct-child decomposition."
-			},
-			name: {
-				type: "string",
-				description: "Skill name or TaskTemplate id."
-			},
-			skillMd: {
-				type: "string",
-				description: "Complete SKILL.md with name/description YAML frontmatter and concise method advice."
-			},
-			expectedVersion: {
-				type: "integer",
-				description: "For write_skill: 0 creates a new Skill; a change names its current version from read."
-			},
-			kind: {
-				type: "string",
-				enum: ["task", "skill"],
-				description: "For review: the table containing the entry."
-			},
-			version: {
-				type: "integer",
-				description: "For review: the exact version from the table."
-			},
-			status: {
-				type: "string",
-				enum: ["retained", "retired"],
-				description: "For review: retain or retire this reusable experience."
-			},
-			reason: {
-				type: "string",
-				description: "Review finding grounded in task results, cost and experience."
-			}
-		},
+		description: "Read this graph's TaskTemplate and Skill library — the table binding a Task contract to a method. Use task_template_list for complete contracts and bind method:<name> through requiredCapabilities. This tool is read-only for every role: to change a method, propose a candidate with method_draft and let it be evaluated and published.",
+		parameters: { action: {
+			type: "string",
+			enum: ["read"],
+			required: true,
+			description: "Only read: the library is never edited in place"
+		} },
 		output: {
 			schema: { type: "string" },
 			render: (_args, value) => text(value)
@@ -2991,31 +3397,8 @@ function defineTaskLibraryTool(ctx) {
 		execute: async (args, exec) => {
 			try {
 				const caller = sessionId(exec, "task_library");
-				if (args.action === "read") return JSON.stringify(await ctx.taskRuntime.libraryRead(caller), null, 2);
-				if (args.action === "write_task") {
-					if (args.template === void 0) throw new Error("write_task requires template");
-					return JSON.stringify(await ctx.taskRuntime.libraryWrite(caller, {
-						kind: "task",
-						template: args.template
-					}), null, 2);
-				}
-				if (args.action === "write_skill") {
-					if (args.name === void 0 || args.skillMd === void 0 || args.expectedVersion === void 0) throw new Error("write_skill requires name, skillMd and expectedVersion");
-					return JSON.stringify(await ctx.taskRuntime.libraryWrite(caller, {
-						kind: "skill",
-						name: args.name,
-						skillMd: args.skillMd,
-						expectedVersion: args.expectedVersion
-					}), null, 2);
-				}
-				if (args.kind === void 0 || args.name === void 0 || args.version === void 0 || args.status === void 0 || args.reason === void 0) throw new Error("review requires kind, name, version, status and reason");
-				return JSON.stringify(await ctx.taskRuntime.libraryReview(caller, {
-					kind: args.kind,
-					name: args.name,
-					version: args.version,
-					status: args.status,
-					reason: args.reason
-				}), null, 2);
+				if (args.action !== "read") return `task_library rejected: "${String(args.action)}" is not an action this tool offers — it reads only. A method change is a candidate: propose it with method_draft, measure it with method_evaluate and publish it with method_publish.`;
+				return JSON.stringify(await ctx.taskRuntime.libraryRead(caller), null, 2);
 			} catch (error) {
 				return `task_library failed: ${message(error)}`;
 			}
@@ -3078,7 +3461,7 @@ function defineCapabilityListTool(ctx) {
 			if (names.length === 0 && servers.length === 0) return "no capabilities or MCP servers configured";
 			const report = typeof caller === "string" && caller.length > 0 ? await ctx.taskRuntime.capabilityProviderReport(caller) : void 0;
 			const verdicts = new Map((report?.capabilities ?? []).map((row) => [row.capability, row]));
-			const lines = names.flatMap((name) => {
+			const lines$1 = names.flatMap((name) => {
 				const entry = capabilities[name];
 				const mcp = renderMcpServers(entry);
 				return [`- ${name} — ${[
@@ -3091,7 +3474,7 @@ function defineCapabilityListTool(ctx) {
 			});
 			return [
 				`capabilities (${names.length}):`,
-				...lines,
+				...lines$1,
 				"",
 				`registered MCP servers (${servers.length}):`,
 				...servers.map(([name, server]) => `- ${name}: ${server.description} (namespace mcp__${server.serverName}__*)`),
@@ -3318,329 +3701,252 @@ function defineEscalateTool(ctx) {
 }
 
 //#endregion
-//#region src/tools/evolution-scope.ts
-/** Resolve the Evolution ledger for the caller's graph.  The compatibility
-* fallback is intentionally only for embedders without a graph library (unit
-* fixtures and the legacy direct API); a live TaskRuntime always supplies the
-* graph library and therefore cannot silently use another graph's ledger. */
-async function evolutionForSession(ctx, caller) {
-	const service = ctx.evolution;
-	if (typeof service.forSession !== "function") return service;
-	return service.forSession(caller);
+//#region src/tools/method-render.ts
+/** A digest short enough to match two readings by eye. */
+function short(digest) {
+	return digest.slice(0, 12);
 }
-
-//#endregion
-//#region src/tools/evolution-apply.ts
-/** Why a decided PROMOTE proposal still cannot be applied: L4 harness evolution and target types this build has no executor for. */
-function manualGuidance(proposal) {
-	if (proposal.level === "L4") return "L4 harness evolution has no executor in evolution_apply: supervisor implementation and validation must precede human review through the harness change workflow";
-	if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) return `this build writes a Task template, an existing Skill or one capability row with optional MCP definitions and Skill, so a decided "${proposal.targetType}" proposal has no executor here — its ledger record stays readable and nothing writes it`;
-	return null;
+function lines(text$1) {
+	return text$1.length === 0 ? [] : text$1.replace(/\n$/, "").split("\n");
 }
-/** How the approved production write takes effect. */
-function effectNote(proposal) {
-	if (proposal.targetType === "task_definition") return "effective for new task instances — the library serves the published template; existing task contracts and Run bindings stay fixed";
-	if (proposal.targetType === "capability") return "effective for new admissions — the committed capability row, MCP definitions and optional new execution Skill are available to the runtime; a run already bound to the previous capability snapshot keeps that snapshot";
-	return "effective immediately — the skill filesystem watches the skill root, so the write is live; the skill directory is admitted again now that its commit intent is closed, and a run already bound to the previous version keeps loading the snapshot it was bound to";
+/**
+* The changed region of two line arrays, as unified-diff lines with three lines
+* of context. The longest common subsequence keeps unchanged inner lines out of
+* the hunk, so a reader sees what moved rather than the whole file.
+*/
+function unifiedLines(before, after) {
+	const n = before.length;
+	const m = after.length;
+	const table = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+	for (let i$1 = n - 1; i$1 >= 0; i$1 -= 1) for (let j$1 = m - 1; j$1 >= 0; j$1 -= 1) table[i$1][j$1] = before[i$1] === after[j$1] ? table[i$1 + 1][j$1 + 1] + 1 : Math.max(table[i$1 + 1][j$1], table[i$1][j$1 + 1]);
+	const marks = [];
+	let i = 0;
+	let j = 0;
+	while (i < n && j < m) if (before[i] === after[j]) {
+		marks.push(` ${before[i]}`);
+		i += 1;
+		j += 1;
+	} else if (table[i + 1][j] >= table[i][j + 1]) {
+		marks.push(`-${before[i]}`);
+		i += 1;
+	} else {
+		marks.push(`+${after[j]}`);
+		j += 1;
+	}
+	for (; i < n; i += 1) marks.push(`-${before[i]}`);
+	for (; j < m; j += 1) marks.push(`+${after[j]}`);
+	const changed = marks.map((mark) => mark[0] !== " ");
+	return marks.filter((_mark, index) => changed.slice(Math.max(0, index - 3), index + 4).some(Boolean));
 }
-function defineEvolutionApplyTool(ctx) {
-	return defineTool({
-		name: "evolution_apply",
-		description: "Apply a PROMOTE-decided Task template, Skill or capability candidate at L1–L3. Recheck the frozen candidate, experiment and production baseline. One exact-write approval is always requested through the native seam — a graph whose RSI settings run without a human resolves it on the spot. Review shows the exact mutation, definitions and targets. One existing durable commit writes production; retry settles its open intent without asking again. New admissions consume the published version; existing Task contracts and Run bindings stay fixed. evolution_rollback restores the baseline.",
-		parameters: { proposalId: {
-			type: "string",
-			required: true,
-			description: "Decided (PROMOTE) proposal to apply to production"
-		} },
-		output: {
-			schema: { type: "string" },
-			render: (_a, v) => text(v)
-		},
-		execute: async (args, exec) => {
-			const caller = sessionId(exec, "evolution_apply");
-			const evolution = await evolutionForSession(ctx, caller);
-			const agent = exec.agent;
-			if (agent === void 0) throw new Error("evolution_apply: missing agent");
-			let proposal;
-			try {
-				proposal = await evolution.get(args.proposalId);
-			} catch (error) {
-				return `evolution_apply rejected: ${message(error)}`;
-			}
-			if (proposal.openIntent !== void 0) try {
-				const recovered = await evolution.apply(args.proposalId, caller, proposal.openIntent.approvalRef);
-				return [
-					`proposal ${recovered.proposal.proposalId} [applied] ${recovered.proposal.level} ${recovered.proposal.targetType} ${recovered.proposal.targetId} — PROMOTE in effect`,
-					...renderOpenIntentRecovery(proposal.openIntent, recovered.recovered),
-					"wrote production targets:",
-					...recovered.proposal.targetType === "capability" ? [`  - capability row ${recovered.proposal.targetId} in the production table`] : [],
-					...recovered.targets.map((target) => `  - ${target}`),
-					effectNote(recovered.proposal)
-				].join("\n");
-			} catch (error) {
-				return `evolution_apply rejected: ${message(error)}`;
-			}
-			if (proposal.status !== "decided") return `evolution_apply rejected: proposal ${proposal.proposalId} is ${proposal.status}; only a decided proposal can be applied`;
-			if (proposal.decision !== "PROMOTE") return `evolution_apply rejected: proposal ${proposal.proposalId} was decided ${proposal.decision}; only a PROMOTE decision can be applied`;
-			const manual = manualGuidance(proposal);
-			if (manual !== null) return `evolution_apply rejected: ${manual}`;
-			let promotion;
-			try {
-				promotion = await evolution.checkPromotion(proposal.proposalId);
-				await evolution.checkProductionBaseline(proposal.proposalId);
-			} catch (error) {
-				return `evolution_apply rejected: ${message(error)}`;
-			}
-			const targets = applyTargets(proposal, evolution);
-			const reason = [
-				`Evolution apply for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
-				`rationale: ${proposal.rationale}`,
-				"recorded decision: PROMOTE",
-				`version set: ${JSON.stringify(proposal.versionSet)}`,
-				`evaluated mutation: ${JSON.stringify(proposal.mutation)}`,
-				`evaluation gate: ${JSON.stringify(proposal.gate)}`,
-				`experiment/regression evidence: ${proposal.gate.regressionEvidenceRefs.join(", ")}`,
-				...proposal.prepared?.mcpServers === void 0 ? [] : [`MCP definitions sha256:${proposal.prepared.mcpServers.digest}`],
-				...proposal.prepared?.capabilityTable === void 0 ? [] : [`deployment config baseline sha256:${proposal.prepared.capabilityTable.baselineSha256}; apply sha256:${proposal.prepared.capabilityTable.applySha256}; rollback sha256:${proposal.prepared.capabilityTable.rollbackSha256}`],
-				"this writes production targets:",
-				...proposal.targetType === "capability" ? [`  - capability row ${proposal.targetId} in the production table`] : [],
-				...targets.map((target) => `  - ${target}`),
-				...renderProviderRoles(promotion.providers),
-				effectNote(proposal),
-				proposal.targetType === "capability" ? "rollback: evolution_rollback restores the row baseline and removes new MCP definitions and any new Skill" : proposal.targetType === "task_definition" ? "rollback: append the previous template content as a new version, or remove a first publication; existing contracts stay fixed" : "rollback: evolution_rollback restores the champion snapshot from the sandbox"
-			].join("\n");
-			const outcome = await ctx.approval.request({
-				agent,
-				toolName: "evolution_apply",
-				callId: exec.callId,
-				reason,
-				signal: exec.signal
-			});
-			if (outcome !== "allowed-once") return `evolution_apply: nothing written — ${denialReason(outcome)}; proposal ${proposal.proposalId} stays decided`;
-			const approvalRef = `approval:${exec.callId}`;
-			try {
-				const applied = await evolution.apply(args.proposalId, caller, approvalRef);
-				return [
-					`proposal ${applied.proposal.proposalId} [applied] ${applied.proposal.level} ${applied.proposal.targetType} ${applied.proposal.targetId} — PROMOTE in effect`,
-					"wrote production targets:",
-					...applied.proposal.targetType === "capability" ? [`  - capability row ${applied.proposal.targetId} in the production table`] : [],
-					...applied.targets.map((target) => `  - ${target}`),
-					...renderProviderRoles(applied.providers ?? []),
-					effectNote(applied.proposal),
-					`human approval: ${approvalRef} — rollback with evolution_rollback`
-				].join("\n");
-			} catch (error) {
-				return `evolution_apply rejected: ${message(error)}`;
-			}
-		}
-	});
+/** Every file one revision directory holds, relative to it. */
+async function filesOf(root, prefix = "") {
+	let entries;
+	try {
+		entries = await readdir(join(root, prefix), { withFileTypes: true });
+	} catch (error) {
+		if (error.code === "ENOENT") return [];
+		throw error;
+	}
+	const files = [];
+	for (const entry of entries) {
+		const path = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`;
+		if (entry.isDirectory()) files.push(...await filesOf(root, path));
+		else if (entry.isFile()) files.push(path);
+	}
+	return files.filter((path) => path !== "manifest.json" && path !== "draft.json").sort();
 }
-
-//#endregion
-//#region src/tools/evolution-candidate.ts
-function defineEvolutionCandidateTool(ctx) {
-	return defineTool({
-		name: "evolution_candidate",
-		description: "Record one candidate as mutationJson (a JSON string). task_definition: {template:<complete canonical TaskTemplate>,criterionRepair?:{positive:{taskId,sourceDir,parameters},negative:{taskId,sourceDir,parameters}}}; changed child criteria need both fixed examples under the original independent parent oracle. Skill: {name,content:<whole SKILL.md>,resources?:{<relative path>:<whole UTF-8 text>}}. SKILL.md must have valid YAML frontmatter with the same name. Resources support resources/<file>, scripts/<file> and references/<file>, including executable Tool source; supply the complete resource collection to replace it, or omit resources to preserve production resources. Capability: {rows:{<name>:<whole row>},mcpServers?:{<id>:{serverName,description,command,args?,env?,cwd?,toolCallTimeoutMs?}},skill?:{name,content,sidecar:{precondition,inputs,outputs,requiredTools,verifier:{ref}}}}. A row may grant skills, native tool labels or MCP ids and need not contain a Skill. New definitions must be granted by that row; use their serverName in mcp__<serverName>__<tool> names. Native tools must already be authorized; existing permission and preset stay fixed. New Skill sidecar contractVersion, type, capabilities, content hashes and resources are derived by this tool. No production changes. Next: evolution_prepare, evolution_replay, evolution_gate.",
-		parameters: {
-			proposalId: {
-				type: "string",
-				required: true,
-				description: "Proposal to move into candidate"
-			},
-			versionSet: {
-				type: "object",
-				additionalProperties: true,
-				required: true,
-				description: "Complete version set the candidate aligns to: name → version string, at least one entry"
-			},
-			mutationJson: {
-				type: "string",
-				required: true,
-				description: "JSON text of one complete Task template, Skill or capability mutation as described above. If skill is present, its sidecar is an object, not quoted JSON; supply only precondition, inputs, outputs, requiredTools and verifier:{ref}."
-			}
-		},
-		output: {
-			schema: { type: "string" },
-			render: (_a, v) => text(v)
-		},
-		execute: async (args, exec) => {
-			const caller = sessionId(exec, "evolution_candidate");
-			const evolution = await evolutionForSession(ctx, caller);
-			const versions = args.versionSet;
-			try {
-				const mutation = JSON.parse(args.mutationJson);
-				if (mutation === null || typeof mutation !== "object" || Array.isArray(mutation)) throw new Error("mutationJson must contain a JSON object");
-				const candidate = mutation;
-				if (candidate.skill !== void 0) {
-					const skill = candidate.skill;
-					if (skill === null || typeof skill !== "object" || Array.isArray(skill) || typeof skill.content !== "string") throw new Error("mutationJson.skill must carry the whole SKILL.md content");
-					const sidecar = skill.sidecar;
-					if (sidecar === null || typeof sidecar !== "object" || Array.isArray(sidecar)) throw new Error("mutationJson.skill.sidecar must be an object");
-					for (const key of Object.keys(sidecar)) if (![
-						"precondition",
-						"inputs",
-						"outputs",
-						"requiredTools",
-						"verifier"
-					].includes(key)) throw new Error(`mutationJson.skill.sidecar.${key} is not an authorable field`);
-					const rows = candidate.rows;
-					if (rows === null || typeof rows !== "object" || Array.isArray(rows) || Object.keys(rows).length !== 1) throw new Error("mutationJson.rows must hold exactly one capability row");
-					skill.sidecar = {
-						contractVersion: 1,
-						type: "execution",
-						capabilities: Object.keys(rows),
-						...sidecar,
-						content: {
-							skillMdSha256: createHash("sha256").update(skill.content).digest("hex"),
-							resources: []
-						}
-					};
-				}
-				const proposal = await evolution.candidate(args.proposalId, versions, caller, candidate);
-				const versionsText = Object.entries(proposal.versionSet).map(([key, value]) => `${key}=${value}`).join(", ");
-				return [`proposal ${proposal.proposalId} [candidate] version set: ${versionsText}`, "ledger entry only — no branch created, nothing executed; mutation recorded — next: evolution_prepare (sandbox materialization), then evolution_replay (the two-sided experiment), then evolution_gate"].join("\n");
-			} catch (error) {
-				return `evolution_candidate rejected: ${message(error)}`;
-			}
-		}
-	});
+/** The content digest of one file's bytes, as the ledger records it. */
+async function digestOfFile(path) {
+	return createHash("sha256").update(await readFile(path)).digest("hex");
 }
-
-//#endregion
-//#region src/tools/evolution-decide.ts
-/** The six verbatim gate questions with their answers, the regression evidence on the third — what the human approves. */
-function gateAnswerLines(gate) {
-	if (gate === void 0) return ["gate answers: none recorded"];
-	const evidence = gate.regressionEvidenceRefs.length === 0 ? "" : ` [evidence: ${gate.regressionEvidenceRefs.join(", ")}]`;
+/**
+* The complete asset difference between two frozen revisions: every file either
+* side holds, with a unified view and the digest of the bytes this difference
+* reports.
+*/
+async function diffOfRevisions(from, to) {
+	const before = from === null ? [] : await filesOf(from.root);
+	const after = await filesOf(to.root);
+	const paths = [...new Set([...before, ...after])].sort();
+	const files = [];
+	for (const path of paths) {
+		const inBefore = before.includes(path);
+		const inAfter = after.includes(path);
+		const beforeText = inBefore ? await readFile(join(from.root, path), "utf8") : "";
+		const afterText = inAfter ? await readFile(join(to.root, path), "utf8") : "";
+		const change = !inBefore ? "added" : !inAfter ? "removed" : "updated";
+		if (change === "updated" && beforeText === afterText) continue;
+		files.push({
+			path,
+			change,
+			unified: unifiedLines(lines(beforeText), lines(afterText)),
+			sha256: inAfter ? await digestOfFile(join(to.root, path)) : await digestOfFile(join(from.root, path))
+		});
+	}
+	const digest = createHash("sha256").update(files.map((file) => `${file.change} ${file.path} ${file.sha256}`).join("\n")).digest("hex");
+	return {
+		from: from?.manifest.revisionId ?? null,
+		to: to.manifest.revisionId,
+		files,
+		digest
+	};
+}
+/** One revision difference as the approval's own lines, truncated by the caller's ceiling. */
+function renderDiff(diff, options = {}) {
+	const maxFiles = options.maxFiles ?? 12;
+	const maxLines = options.maxLinesPerFile ?? 120;
+	const shown = diff.files.slice(0, maxFiles);
+	const out = [`asset diff (${diff.files.length} file${diff.files.length === 1 ? "" : "s"}, diff ${diff.digest}):`];
+	out.push(`  from ${diff.from ?? "(nothing)"} → ${diff.to}`);
+	for (const file of shown) {
+		const counted = file.unified.reduce((counts, line) => line.startsWith("-") ? {
+			added: counts.added,
+			removed: counts.removed + 1
+		} : line.startsWith("+") ? {
+			added: counts.added + 1,
+			removed: counts.removed
+		} : counts, {
+			added: 0,
+			removed: 0
+		});
+		out.push(`  --- ${file.path} (${file.change}, +${counted.added}/-${counted.removed}, sha256:${short(file.sha256)})`);
+		for (const line of file.unified.slice(0, maxLines)) out.push(`  ${line}`);
+		if (file.unified.length > maxLines) out.push(`  … ${file.unified.length - maxLines} more lines (diff ${diff.digest})`);
+	}
+	if (diff.files.length > maxFiles) out.push(`  … ${diff.files.length - maxFiles} more files (diff ${diff.digest})`);
+	return out;
+}
+/** One sample's two sides and their verdict, in the words the report uses. */
+function sampleLine(comparison) {
+	const tokens = (trial) => trial.receipt.cost.status === "reported" ? `${trial.receipt.cost.tokens.uncachedInputTokens + trial.receipt.cost.tokens.outputTokens + trial.receipt.cost.tokens.cacheReadTokens + trial.receipt.cost.tokens.cacheWriteTokens} tokens` : `cost unknown (${trial.receipt.cost.reason})`;
+	return `  ${comparison.sampleTaskId} [${comparison.role}] baseline ${comparison.baseline.outcome} (${tokens(comparison.baseline)}) → candidate ${comparison.candidate.outcome} (${tokens(comparison.candidate)}) — ${comparison.verdict}`;
+}
+/** The evaluation one publication rests on: the frozen identity, the samples and the score. */
+function renderEvaluation(report) {
+	const score = report.score;
+	const cost = score.cost.status === "reported" ? `status reported, baseline ${score.cost.baselineTokens} → candidate ${score.cost.candidateTokens} tokens (relative delta ${score.cost.relativeDelta.toFixed(3)})` : `status unknown (${score.cost.reason}) — an unknown cost is inconclusive, never a zero`;
 	return [
-		"gate answers:",
-		`1. Target failure fixed? ${gate.targetFailureFixed}`,
-		`2. Original acceptance maintained? ${gate.originalAcceptanceMaintained}`,
-		`3. Existing regression maintained? ${gate.existingRegressionMaintained}${evidence}`,
-		`4. No unacceptable side effects? ${gate.noUnacceptableSideEffects}`,
-		`5. Holdout performance acceptable? ${gate.holdoutPerformanceAcceptable}`,
-		`6. Resource cost acceptable? ${gate.resourceCostAcceptable}`
+		`evaluation ${report.evaluationId} (report ${report.planDigest.slice(0, 12)}, verdict ${report.verdict}, repetition ${report.plan.repetition + 1}):`,
+		`  plan ${report.planId} (plan digest ${report.planDigest.slice(0, 12)}, scope ${report.plan.strategy?.cohortDigest.slice(0, 12) ?? "(unfrozen)"})`,
+		`  model ${report.plan.sides.candidate.model.label}; baseline revision ${report.plan.sides.baseline.revision.revisionId} (${short(report.plan.sides.baseline.revision.digest)}), candidate ${report.plan.sides.candidate.revision.revisionId} (${short(report.plan.sides.candidate.revision.digest)})`,
+		...report.trials.map(sampleLine),
+		`  quality: baseline ${score.quality.baseline.toFixed(4)} → candidate ${score.quality.candidate.toFixed(4)} (delta ${score.quality.delta >= 0 ? "+" : ""}${score.quality.delta.toFixed(4)} ${score.quality.unit})`,
+		`  cost: ${cost}`,
+		`  uncertainty: basis ${score.uncertainty.basis}, repeats ${score.uncertainty.repeats}, noise band ${score.uncertainty.noiseBand === null ? "none observed" : score.uncertainty.noiseBand.toFixed(4)}${score.uncertainty.reason === void 0 ? "" : ` (${score.uncertainty.reason})`}`,
+		`  guards (non-compensatory): ${report.guards.length === 0 ? "none declared" : report.guards.map((guard) => `${guard.id} ${guard.ok ? "held" : "FAILED"} — ${guard.detail}`).join("; ")}`,
+		`  inconclusive: ${score.inconclusive ? "yes" : "no"}`
 	];
 }
-function defineEvolutionDecideTool(ctx) {
-	return defineTool({
-		name: "evolution_decide",
-		description: "Settle a proposal with PROMOTE, REJECT or KEEP_FOR_FURTHER_RESEARCH. REJECT and KEEP_FOR_FURTHER_RESEARCH can conclude an open proposal before gate with a reason in note. PROMOTE requires a gated proposal and rechecks the frozen Task template, Skill or capability candidate and completed experiment. The decision is recorded only after one approval is requested through the native seam — a graph whose RSI settings run without a human resolves it on the spot; evolution_apply handles the production write afterwards.",
-		parameters: {
-			proposalId: {
-				type: "string",
-				required: true,
-				description: "Open or gated proposal to decide"
-			},
-			decision: {
-				type: "string",
-				required: true,
-				enum: EVOLUTION_DECISIONS,
-				description: "Model decision to record"
-			},
-			note: {
-				type: "string",
-				description: "Rationale attached to the decision; required to conclude an ungated proposal"
-			}
-		},
-		output: {
-			schema: { type: "string" },
-			render: (_a, v) => text(v)
-		},
-		execute: async (args, exec) => {
-			const caller = sessionId(exec, "evolution_decide");
-			const evolution = await evolutionForSession(ctx, caller);
-			const agent = exec.agent;
-			if (agent === void 0) throw new Error("evolution_decide: missing agent");
-			let proposal;
-			try {
-				proposal = await evolution.get(args.proposalId);
-			} catch (error) {
-				return `evolution_decide rejected: ${message(error)}`;
-			}
-			try {
-				assertDecisionTransition(proposal, args.decision, args.note);
-			} catch (error) {
-				return `evolution_decide rejected: ${message(error)}`;
-			}
-			if (args.decision === "PROMOTE") try {
-				await evolution.checkPromotion(proposal.proposalId);
-			} catch (error) {
-				return `evolution_decide rejected: ${message(error)}`;
-			}
-			const reason = [
-				`Evolution decision for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
-				...gateAnswerLines(proposal.gate),
-				`proposed decision: ${args.decision}${args.note === void 0 ? "" : ` — ${args.note}`}`,
-				`proposal rationale: ${proposal.rationale}`,
-				"this records the decision only — nothing is promoted, written or rolled back."
-			].join("\n");
-			const outcome = await ctx.approval.request({
-				agent,
-				toolName: "evolution_decide",
-				callId: exec.callId,
-				reason,
-				signal: exec.signal
-			});
-			if (outcome !== "allowed-once") return `evolution_decide: no decision recorded — ${denialReason(outcome)}; proposal ${proposal.proposalId} stays ${proposal.status}`;
-			try {
-				const decided = await evolution.decide(args.proposalId, args.decision, caller, `approval:${exec.callId}`, args.note);
-				return [`proposal ${decided.proposalId} [decided] ${decided.decision}${decided.decisionNote === void 0 ? "" : ` — ${decided.decisionNote}`}`, decided.decision === "PROMOTE" ? "nothing applied yet; evolution_apply (second human gate) takes it to production" : "no decision becomes production — nothing was applied"].join("\n");
-			} catch (error) {
-				return `evolution_decide rejected: ${message(error)}`;
-			}
-		}
-	});
+/** The frozen strategy's admission of one candidate, with the calibration it was read under. */
+function renderAdmission(admission, calibration) {
+	return [
+		`admission: ${admission.reasonCode} — ${admission.reason}`,
+		`  deltaQuality ${admission.deltaQuality === void 0 ? "unknown" : admission.deltaQuality.toFixed(4)}; deltaCost ${admission.deltaCost === void 0 ? "unknown" : admission.deltaCost.toFixed(4)}; novelty ${admission.novelty}; bundleLevel ${admission.bundleLevel ? "yes" : "no"}; guards [${admission.guards.join(", ")}]`,
+		`  calibration: ${calibration.method}, ${calibration.evaluations} evaluation(s), quality band ${calibration.qualityBand.toFixed(4)}, relative cost band ${calibration.relativeCostBand.toFixed(3)}${calibration.degenerate ? " (degenerate — no noise observed, the declared floor stands)" : ""}`
+	];
+}
+/** The exact pointer switch one publication would make. */
+function renderVersionSwitch(input) {
+	return `version switch: ${input.pointer === null ? "active (none)" : `active ${input.pointer.revisionId} g${input.pointer.generation} (${short(input.pointer.manifestDigest)})`} → candidate ${input.candidate.revisionId} (${short(input.candidate.manifestDigest)}); mode ${input.mode}`;
+}
+/**
+* The one publication approval text: the candidate's identity, the exact version
+* switch, the complete asset difference, the evaluation, the admission and what
+* a rollback would restore. Every refusal above has already landed, and nothing
+* has been written when this is rendered.
+*/
+function renderPublishReason(input) {
+	return [
+		`Method publish for ${input.draft.kind} ${input.draft.identity} (draft ${input.draft.draftId}, base ${input.draft.baseRevision.revisionId}, bundle ${input.admission.bundleLevel ? "yes" : "no"})`,
+		renderVersionSwitch({
+			pointer: input.pointer,
+			candidate: input.candidate,
+			mode: input.mode
+		}),
+		...input.diff,
+		...renderEvaluation(input.report),
+		...renderAdmission(input.admission, input.calibration),
+		`mode: ${input.mode === "auto" ? `auto (the platform policy decides and records; the decider is ${input.decider})` : `manual (a human decides; the decider is ${input.decider})`}`,
+		`rollback: method_rollback toRevision=${input.rollbackToRevisionId ?? "none (this is the library's first publication)"}`,
+		...input.extra ?? [],
+		"nothing has been written yet; the pointer moves only if this approval is granted and the post-approval re-check still passes"
+	].join("\n");
+}
+/** What one settled pointer switch reports. */
+function renderPublishOutcome(outcome, mode, decider) {
+	return [
+		`published: active revision ${outcome.pointer.revisionId} g${outcome.pointer.generation} (${short(outcome.pointer.manifestDigest)})`,
+		`superseded: ${outcome.supersededRevisionId ?? "(nothing — the library held no revision)"}`,
+		`completion: ${outcome.completion.intentId} (${outcome.recovered}); approval ${outcome.completion.approvalRef ?? "(none recorded)"}`,
+		`mode ${mode}; decided by ${decider}`,
+		"new Runs admit against this revision; Runs already bound keep the revision they were admitted against"
+	];
+}
+/** What one discard reports; nothing was measured and nothing moved. */
+function renderDiscard(view, outcome, reason) {
+	return [
+		`discarded ${view.draft.kind} ${view.draft.identity} (draft ${view.draft.draftId}) as ${outcome}`,
+		`reason: ${reason}`,
+		view.evaluation === void 0 ? "this candidate was never measured: the refusal is recorded, the denominator does not shrink and the method search keeps its slots" : `the evaluation ${view.evaluation.evaluationId} stays on the ledger as the evidence this candidate was refused on`,
+		"no approval was required and the active revision is unchanged"
+	];
+}
+/** What a resumed pointer intent reports: the switch was continued, not restarted. */
+function renderRecoveredIntent(intent, settled) {
+	return [
+		`recovered pointer intent ${intent.intentId} (${intent.direction} → ${intent.next.revisionId}): ${settled.result}`,
+		`no second approval was requested — the intent already binds ${intent.approvalRef ?? "(no approval recorded)"}`,
+		settled.result === "blocked" ? `the switch could not be settled: ${settled.detail ?? "no reason reported"}` : `the effective revision is now ${settled.revisionId}; the run the approval was for continues without being asked again`
+	];
+}
+/** One draft line, as the list tool and the Web both render it. */
+function renderDraftLine(view) {
+	const handled = view.published !== void 0 ? ` → published ${view.published.revisionId}` : view.rolledback !== void 0 ? ` → rolled back to ${view.rolledback.revisionId}` : "";
+	const verdict = view.evaluation === void 0 ? "" : ` verdict ${view.evaluation.verdict}`;
+	return `- ${view.draft.draftId} [${view.status}] ${view.draft.kind} ${view.draft.identity} candidate ${short(view.draft.candidateRevision.digest)}${verdict}${handled}`;
 }
 
 //#endregion
-//#region src/tools/evolution-gate.ts
-function defineEvolutionGateTool(ctx) {
+//#region src/tools/method-discard.ts
+const PARAMETERS$5 = [
+	"draftId",
+	"outcome",
+	"reason",
+	"evidenceRefs"
+];
+/** The outcomes a discard may name; only a measured one answers a question the round asked. */
+const OUTCOMES = [
+	"measured-rejected",
+	"unmeasured-declined",
+	"falsified",
+	"duplicate",
+	"pruned"
+];
+function defineMethodDiscardTool(ctx) {
 	return defineTool({
-		name: "evolution_gate",
-		description: "Answer the minimal Validation Gate for a candidate (status: gated). The six questions (细化想法4 §32): 1. Target failure fixed (or frozen success objective improved)? 2. Original acceptance maintained? 3. Existing regression maintained? 4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? All six answers are required, and the regression side must cite evidence ids (from this graph's task store) or file paths whose existence is checked — cited evidence is never executed. A Task template, Skill or capability candidate must pass evolution_prepare (sandbox materialization) and then evolution_replay (the two-sided experiment: a new baseline run and a new candidate run per frozen sample, the production object and the prepared object each loaded whole), and its report path must be one of the regressionEvidenceRefs — the gate refuses either candidate whose experiment is not complete. A capability sample without a provider records the runtime's real not-admitted baseline. Other target types cannot become candidates and have no gate to answer. Records the ledger entry only; nothing is promoted or changed, and evolution_decide re-checks the candidate's whole content identity and its provider verdict before a PROMOTE can be recorded. Next step is evolution_decide, which requests one approval — auto-resolved when the graph runs without a human.",
+		name: "method_discard",
+		description: "Discard one candidate: record why it is refused and remove its working directory. No approval is requested and the active revision never moves. Name the outcome — measured-rejected for a candidate the frozen strategy refused, unmeasured-declined for one declined before measurement and therefore not counted against the measured history, falsified, duplicate or pruned. A falsified candidate must cite the evidence that falsified it.",
 		parameters: {
-			proposalId: {
+			draftId: {
 				type: "string",
 				required: true,
-				description: "Candidate to gate"
+				description: "The draft to discard"
 			},
-			targetFailureFixed: {
+			outcome: {
 				type: "string",
 				required: true,
-				description: "Target failure fixed, or verified source improved under frozen tool-call-reduction or llm-outcome; cite the saved report verdict. LLM judgement input and response identities are mechanically rechecked without resampling."
+				enum: [...OUTCOMES],
+				description: "Why this candidate is closed"
 			},
-			originalAcceptanceMaintained: {
+			reason: {
 				type: "string",
 				required: true,
-				description: "Answer to \"2. Original acceptance maintained?\""
+				description: "The refusal, in the words the history will show"
 			},
-			existingRegressionMaintained: {
-				type: "string",
-				required: true,
-				description: "Answer to \"3. Existing regression maintained?\""
-			},
-			noUnacceptableSideEffects: {
-				type: "string",
-				required: true,
-				description: "Answer to \"4. No unacceptable side effects?\""
-			},
-			holdoutPerformanceAcceptable: {
-				type: "string",
-				required: true,
-				description: "Answer to \"5. Holdout performance acceptable?\""
-			},
-			resourceCostAcceptable: {
-				type: "string",
-				required: true,
-				description: "Answer to \"6. Resource cost acceptable?\""
-			},
-			regressionEvidenceRefs: {
+			evidenceRefs: {
 				type: "array",
 				items: { type: "string" },
-				required: true,
-				description: "Evidence behind the regression answers: the experiment report path plus evidence ids or paths (existence-checked, never executed), at least one"
+				description: "Required for falsified: the evidence that falsified this candidate"
 			}
 		},
 		output: {
@@ -3648,262 +3954,256 @@ function defineEvolutionGateTool(ctx) {
 			render: (_a, v) => text(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId(exec, "evolution_gate");
-			const evolution = await evolutionForSession(ctx, caller);
-			let evidenceIds = /* @__PURE__ */ new Set();
+			const undeclared = undeclaredParameters(args, PARAMETERS$5, "method_discard");
+			if (undeclared !== void 0) return undeclared;
+			const caller = sessionId(exec, "method_discard");
 			try {
-				const graph = await ctx.graphs.graphForSession(caller);
-				const snapshot = await ctx.task.openStore(rootTaskStoreId(graph.rootSessionId));
-				evidenceIds = new Set(snapshot.evidence.map((item) => item.evidenceId));
-			} catch {
-				evidenceIds = /* @__PURE__ */ new Set();
-			}
-			try {
-				const proposal = await evolution.gate(args.proposalId, {
-					targetFailureFixed: args.targetFailureFixed,
-					originalAcceptanceMaintained: args.originalAcceptanceMaintained,
-					existingRegressionMaintained: args.existingRegressionMaintained,
-					noUnacceptableSideEffects: args.noUnacceptableSideEffects,
-					holdoutPerformanceAcceptable: args.holdoutPerformanceAcceptable,
-					resourceCostAcceptable: args.resourceCostAcceptable,
-					regressionEvidenceRefs: args.regressionEvidenceRefs
-				}, caller, async (ref) => evidenceIds.has(ref));
-				return [`proposal ${proposal.proposalId} [gated] gate answered 6/6, regression evidence: [${proposal.gate.regressionEvidenceRefs.join(", ")}]`, "ledger entry only — nothing executed or promoted; next: evolution_decide (one approval)"].join("\n");
+				if (typeof args.draftId !== "string" || args.draftId.length === 0) throw new Error("draftId is required");
+				const outcome = args.outcome;
+				if (!OUTCOMES.includes(outcome)) throw new Error(`outcome must be one of ${OUTCOMES.join(" | ")}`);
+				if (typeof args.reason !== "string" || args.reason.trim().length === 0) throw new Error("reason must be non-empty free text");
+				const evidenceRefs = Array.isArray(args.evidenceRefs) ? args.evidenceRefs : [];
+				if (outcome === "falsified" && evidenceRefs.length === 0) throw new Error("a falsified candidate must cite the evidenceRefs that falsified it; a refutation without evidence is not one");
+				const ledger = await methodLedgerPlaneOf(ctx, caller);
+				const view = await ledger.view(args.draftId);
+				if (view.status === "published") return `method_discard rejected: draft "${args.draftId}" is published as revision ${view.published?.revisionId}; a published revision is restored with method_rollback, not discarded`;
+				if (view.status === "discarded") return `method_discard rejected: draft "${args.draftId}" is already discarded (${view.discardReason ?? "no reason recorded"})`;
+				const recorded = await ledger.discardDraft({
+					draftId: args.draftId,
+					reason: `${outcome}: ${args.reason}${evidenceRefs.length === 0 ? "" : ` [evidence: ${evidenceRefs.join(", ")}]`}`,
+					actor: caller
+				});
+				const cleaned = await environmentPlaneOf(ctx).removeEnvironmentDraft(caller, args.draftId).then(() => true, (error) => {
+					if (/is absent; nothing to discard/.test(message(error))) return false;
+					throw error;
+				});
+				return [...renderDiscard(recorded, outcome, args.reason), cleaned ? "the draft working directory was removed" : "the draft working directory was already absent"].join("\n");
 			} catch (error) {
-				return `evolution_gate rejected: ${message(error)}`;
+				return `method_discard rejected: ${message(error)}`;
 			}
 		}
 	});
 }
 
 //#endregion
-//#region src/tools/evolution-list.ts
-const TARGET_TYPES = [
-	"skill",
-	"tool",
-	"capability",
-	"task_definition",
-	"decomposition_policy",
-	"agent_preset",
-	"workflow_policy",
-	"verifier",
-	"runtime_policy"
+//#region src/tools/method-draft.ts
+const PARAMETERS$4 = [
+	"kind",
+	"identity",
+	"edits",
+	"editPayload",
+	"rationale",
+	"sourceRefs",
+	"expectedBaseRevision",
+	"round",
+	"critic"
 ];
-function defineEvolutionListTool(ctx) {
-	return defineTool({
-		name: "evolution_list",
-		description: "Read the existing proposal ledger, optionally filtering status or target. Shows Task template, Skill and capability candidates, frozen identities, experiment evidence, decisions, production writes and open commit intents. Follow the recorded status; reuse an existing proposal and settle its open intent before starting another write.",
-		parameters: {
-			status: {
-				type: "string",
-				enum: [
-					"proposed",
-					"candidate",
-					"prepared",
-					"gated",
-					"decided",
-					"applied",
-					"rolledback"
-				],
-				description: "Only proposals in this status"
-			},
-			targetType: {
-				type: "string",
-				enum: TARGET_TYPES,
-				description: "Only proposals pointing at this mutation surface"
-			},
-			targetId: {
-				type: "string",
-				description: "Only proposals pointing at this target"
+/** One declared edit, as the tool's own parameter shape reads it. */
+function declaredEditsOf(raw) {
+	if (!Array.isArray(raw)) throw new Error("edits must be an array of {id, mechanism, hypothesis?, targets?}");
+	return raw.map((entry, index) => {
+		if (typeof entry !== "object" || entry === null) throw new Error(`edits[${index}] must be an object`);
+		const record = entry;
+		if (typeof record.id !== "string" || record.id.length === 0) throw new Error(`edits[${index}].id must be a non-empty string`);
+		if (typeof record.mechanism !== "string") throw new Error(`edits[${index}].mechanism must name a mechanism`);
+		return {
+			id: record.id,
+			mechanism: record.mechanism,
+			...typeof record.hypothesis === "string" ? { hypothesis: record.hypothesis } : {},
+			targets: Array.isArray(record.targets) ? record.targets.filter((item) => typeof item === "string") : []
+		};
+	});
+}
+function criticOf(raw) {
+	if (raw === void 0) return void 0;
+	if (typeof raw !== "object" || raw === null) throw new Error("critic must be an object {verdict, reason, evidenceRefs}");
+	const record = raw;
+	if (record.verdict !== "accept" && record.verdict !== "reject") throw new Error("critic.verdict must be accept or reject");
+	if (typeof record.reason !== "string" || record.reason.length === 0) throw new Error("critic.reason must be non-empty free text");
+	if (!Array.isArray(record.evidenceRefs) || record.evidenceRefs.length === 0) throw new Error("critic.evidenceRefs must cite at least one reference");
+	return {
+		verdict: record.verdict,
+		reason: record.reason,
+		evidenceRefs: record.evidenceRefs.filter((item) => typeof item === "string"),
+		criticId: `draft-critic:${record.verdict}`,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	};
+}
+/** The complete asset content one candidate stages, in this asset kind's own shape. */
+function editOf(kind, identity, payload, actor, currentVersion) {
+	if (kind === "skill") {
+		let parsed$1;
+		try {
+			parsed$1 = JSON.parse(payload);
+		} catch {
+			parsed$1 = void 0;
+		}
+		if (typeof parsed$1 === "string") return {
+			kind: "skill",
+			edit: {
+				name: identity,
+				skillMd: parsed$1,
+				actor,
+				expectedVersion: currentVersion
 			}
-		},
-		output: {
-			schema: { type: "string" },
-			render: (_a, v) => text(v)
-		},
-		execute: async (args, exec) => {
-			const evolution = await evolutionForSession(ctx, sessionId(exec, "evolution_list"));
-			const proposals = await evolution.list({
-				...args.status === void 0 ? {} : { status: args.status },
-				...args.targetType === void 0 ? {} : { targetType: args.targetType },
-				...args.targetId === void 0 ? {} : { targetId: args.targetId }
-			});
-			if (proposals.length === 0) return "evolution ledger: no proposals match";
-			const lines = [`evolution ledger (${proposals.length}):`];
-			for (const proposal of proposals) {
-				const decision = proposal.decision === void 0 ? "" : ` ${proposal.decision}`;
-				lines.push(`- ${proposal.proposalId} [${proposal.status}${decision}] ${proposal.level} ${proposal.targetType} ${proposal.targetId} (base ${proposal.baseVersion})`);
-				lines.push(`  rationale: ${proposal.rationale}`);
-				lines.push(`  sourceRefs: [${proposal.sourceRefs.join(", ")}]`);
-				if (proposal.versionSet !== void 0) lines.push(`  version set: ${Object.entries(proposal.versionSet).map(([key, value]) => `${key}=${value}`).join(", ")}`);
-				if (proposal.mutation !== void 0) lines.push(`  mutation: ${proposal.targetType} mutation recorded`);
-				if (proposal.prepared !== void 0) {
-					const view = proposal.prepared;
-					if (proposal.targetType === "task_definition") {
-						lines.push(`  sandbox: ${evolution.root}/${view.sandbox} (${view.files.length} files, frozen template libraries)`);
-						lines.push(`  candidate template: ${view.templateCandidate.template.id}@${view.templateCandidate.template.version} sha256:${view.templateCandidate.digest}`);
-						lines.push(view.templateBaseline == null ? "  template baseline: absent" : `  template baseline: ${view.templateBaseline.template.id}@${view.templateBaseline.template.version} sha256:${view.templateBaseline.digest}`);
-					} else if (proposal.targetType === "capability") {
-						const row = view.capabilityRow;
-						const baseline = view.capabilityBaseline;
-						lines.push(`  sandbox: ${evolution.root}/${view.sandbox} (${view.files.length} files, capability row${view.skillContent === void 0 ? "" : " + new execution skill"})`);
-						lines.push(`  candidate row: ${row.name} sha256:${row.digest.slice(0, 12)}…`);
-						lines.push(`  production row baseline: ${baseline === null ? "absent" : `${baseline.name} sha256:${baseline.digest.slice(0, 12)}…`}`);
-						lines.push(view.skillContent === void 0 ? "  no new skill object" : `  new execution skill: ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}… (SKILL.md + SKILL.contract.json)`);
-						if (view.skillContent !== void 0) lines.push("  production skill baseline: absent");
-						if (view.mcpServers !== void 0) lines.push(`  candidate MCP definitions sha256:${view.mcpServers.digest}: ${JSON.stringify(view.mcpServers.definitions)}`);
-					} else {
-						const shape = view.skillContent.contract === void 0 ? "guidance (SKILL.md)" : "execution provider (SKILL.md + SKILL.contract.json)";
-						lines.push(`  sandbox: ${evolution.root}/${view.sandbox} (${view.files.length} files, ${shape}, champion snapshot ${view.champion}, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…, ` + (view.skillBaseline == null ? "production baseline absent)" : `production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…)`));
+		};
+		if (typeof parsed$1 !== "object" || parsed$1 === null) return {
+			kind: "skill",
+			edit: {
+				name: identity,
+				skillMd: payload,
+				actor,
+				expectedVersion: currentVersion
+			}
+		};
+		const record = parsed$1;
+		if (typeof record.skillMd !== "string" || record.skillMd.trim().length === 0) throw new Error("a skill candidate's editPayload must carry skillMd (the complete SKILL.md), or be the SKILL.md text itself");
+		const resources = record.resources;
+		return {
+			kind: "skill",
+			edit: {
+				name: identity,
+				skillMd: record.skillMd,
+				...resources === void 0 || typeof resources !== "object" || resources === null ? {} : { resources },
+				expectedVersion: currentVersion,
+				actor
+			}
+		};
+	}
+	if (kind === "task-template") {
+		const template = parsePayload(payload).template;
+		if (typeof template !== "object" || template === null) throw new Error("a task-template candidate's editPayload must carry template (the complete template)");
+		if (template.id !== identity) throw new Error(`a task-template candidate's identity "${identity}" must be the template's own id`);
+		return {
+			kind: "task",
+			edit: {
+				template,
+				actor
+			}
+		};
+	}
+	const parsed = parsePayload(payload);
+	const entry = parsed.entry === void 0 ? { ...parsed } : parsed.entry;
+	if (entry !== null && (typeof entry !== "object" || Array.isArray(entry))) throw new Error("a capability candidate's editPayload must carry entry (the complete row, or null to remove it)");
+	const mcpServers = parsed.mcpServers;
+	return {
+		kind: "capability",
+		edit: {
+			name: identity,
+			entry,
+			...mcpServers === void 0 || typeof mcpServers !== "object" || mcpServers === null ? {} : { mcpServers },
+			actor
+		}
+	};
+}
+function parsePayload(payload) {
+	let parsed;
+	try {
+		parsed = JSON.parse(payload);
+	} catch (error) {
+		throw new Error(`editPayload is not readable JSON (${message(error)})`);
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("editPayload must be a JSON object");
+	return parsed;
+}
+/** The version of one skill in the active revision, `0` when the name is new. */
+function versionOf(skills, identity) {
+	return skills.find((skill) => skill.name === identity)?.version ?? 0;
+}
+function defineMethodDraftTool(ctx) {
+	return defineTool({
+		name: "method_draft",
+		description: "Propose one candidate method for this graph library. Name one asset kind, its stable identity, the complete new content, the experiments this evidence answers and the independent mechanism you are testing. The base revision must be the active one, and the number of independent edits must fit the round's frozen edit budget. The candidate is checked for structure and screened before any measurement: a refusal names its reason and consumes no evaluation budget. Nothing becomes effective until method_publish switches the pointer. Next: method_evaluate.",
+		parameters: {
+			kind: {
+				type: "string",
+				required: true,
+				enum: [
+					"skill",
+					"task-template",
+					"capability"
+				],
+				description: "Which asset class this candidate changes"
+			},
+			identity: {
+				type: "string",
+				required: true,
+				description: "The asset's stable identity: a skill name, a template id, or a capability row name"
+			},
+			edits: {
+				type: "array",
+				required: true,
+				description: "The independent mechanism(s) this candidate declares: [{id, mechanism, hypothesis?, targets?}]",
+				items: {
+					type: "object",
+					additionalProperties: true,
+					properties: {
+						id: {
+							type: "string",
+							description: "This edit's own id"
+						},
+						mechanism: {
+							type: "string",
+							enum: [
+								"skill",
+								"capability",
+								"task-template",
+								"text",
+								"parameter"
+							],
+							description: "The mechanism the change belongs to"
+						},
+						hypothesis: {
+							type: "string",
+							description: "What this edit is testing"
+						},
+						targets: {
+							type: "array",
+							items: { type: "string" },
+							description: "The asset paths the edit really touches"
+						}
 					}
 				}
-				if (proposal.gate !== void 0) lines.push(`  gate regression evidence: [${proposal.gate.regressionEvidenceRefs.join(", ")}]`);
-				if (proposal.openIntent !== void 0) {
-					const intent = proposal.openIntent;
-					lines.push(`  open commit intent: ${intent.intentId} (${intent.direction}) recorded ${intent.at} — production targets [${intent.files.map((file) => file.target).join(", ")}]`, `  a production write is underway and its completion has not been recorded: ${proposal.targetType === "capability" ? "the capability table and optional new skill directory stay" : "the skill directory stays"} closed to new admission until a reconciliation (a restart, or a retry of the apply/rollback) settles it`);
-				}
-				if (proposal.applied !== void 0) lines.push(`  applied: [${proposal.applied.targets.join(", ")}] (approval ${proposal.applied.approvalRef})`);
-				if (proposal.rolledback !== void 0) lines.push(`  rolled back: [${proposal.rolledback.targets.join(", ")}] (approval ${proposal.rolledback.approvalRef})`);
-				lines.push(`  history: ${proposal.history.map((entry) => `${entry.status} by ${entry.actor} at ${entry.at}`).join(" → ")}`);
-			}
-			return lines.join("\n");
-		}
-	});
-}
-
-//#endregion
-//#region src/tools/evolution-prepare.ts
-function defineEvolutionPrepareTool(ctx) {
-	return defineTool({
-		name: "evolution_prepare",
-		description: "Freeze the candidate and its production baseline in the proposal sandbox. A Task candidate freezes both template libraries; a Skill freezes SKILL.md, its complete text resource collection and existing execution declaration; a capability freezes its whole row, optional MCP launch definitions and optional new execution Skill. No production changes. Next: evolution_replay, then evolution_gate.",
-		parameters: { proposalId: {
-			type: "string",
-			required: true,
-			description: "Task template, Skill or capability candidate to freeze"
-		} },
-		output: {
-			schema: { type: "string" },
-			render: (_a, v) => text(v)
-		},
-		execute: async (args, exec) => {
-			const caller = sessionId(exec, "evolution_prepare");
-			const evolution = await evolutionForSession(ctx, caller);
-			try {
-				const prepared = await evolution.prepare(args.proposalId, caller);
-				const view = prepared.prepared;
-				if (view.templateCandidate !== void 0) return [
-					`proposal ${prepared.proposalId} [prepared] sandbox: ${evolution.root}/${view.sandbox}`,
-					...view.files.map((file) => `  wrote ${file}`),
-					`candidate template: ${view.templateCandidate.template.id}@${view.templateCandidate.template.version} sha256:${view.templateCandidate.digest}`,
-					view.templateBaseline == null ? "template baseline: absent" : `template baseline: ${view.templateBaseline.template.id}@${view.templateBaseline.template.version} sha256:${view.templateBaseline.digest}`,
-					"sandbox only — production was not touched; next: evolution_replay (the two-sided experiment), then evolution_gate"
-				].join("\n");
-				if (view.capabilityRow !== void 0) {
-					const rowBaseline = view.capabilityBaseline ?? null;
-					return [
-						`proposal ${prepared.proposalId} [prepared] sandbox: ${evolution.root}/${view.sandbox}`,
-						...view.files.map((file) => `  wrote ${file}`),
-						`candidate row: ${view.capabilityRow.name} sha256:${view.capabilityRow.digest.slice(0, 12)}…`,
-						rowBaseline === null ? "registry baseline: the table held no such row, so this candidate adds it" : `registry baseline: row sha256:${rowBaseline.digest.slice(0, 12)}… (an apply refuses if the registry row changed since this read)`,
-						...view.mcpServers === void 0 ? [] : [`candidate MCP definitions sha256:${view.mcpServers.digest}: ${JSON.stringify(view.mcpServers.definitions)}`],
-						view.skillContent === void 0 ? "candidate object: the row alone — no new skill object is materialized" : "candidate object: a new execution provider (SKILL.md + SKILL.contract.json) the row grants, judged by a registered verifier with resources: []",
-						"sandbox only — production was not touched; next: evolution_replay (the two-sided experiment), then evolution_gate"
-					].join("\n");
-				}
-				const baseline = view.skillBaseline;
-				return [
-					`proposal ${prepared.proposalId} [prepared] sandbox: ${evolution.root}/${view.sandbox}`,
-					...view.files.map((file) => `  wrote ${file}`),
-					view.skillContent.contract === void 0 ? "candidate object: guidance (SKILL.md and its frozen text resources)" : "candidate object: execution provider (SKILL.md + SKILL.contract.json) — the sidecar is derived from production with the candidate content identity, so this candidate cannot move a capability, a required tool or a verifier",
-					`frozen resources: ${(view.skillContent.resources ?? []).map((resource) => `${resource.path} sha256:${resource.sha256}`).join(", ") || "none"}`,
-					baseline == null ? "champion snapshot: absent; both experiment sides execute the original Task" : "champion snapshot: captured under champion/",
-					baseline == null ? "production baseline: absent; candidate introduces this Skill" : `production baseline: ${baseline.name} sha256:${baseline.sha256.slice(0, 12)}… (an apply refuses if the production object changed since this read)`,
-					"sandbox only — production was not touched; next: evolution_replay (the two-sided experiment), then evolution_gate"
-				].join("\n");
-			} catch (error) {
-				return `evolution_prepare rejected: ${message(error)}`;
-			}
-		}
-	});
-}
-
-//#endregion
-//#region src/tools/evolution-propose.ts
-/** The mutation surfaces this build records for Evolution — its own vocabulary, not the diagnosis's (A5): */
-const PROPOSAL_TARGET_TYPES = [
-	"skill",
-	"tool",
-	"capability",
-	"task_definition",
-	"decomposition_policy",
-	"agent_preset",
-	"workflow_policy",
-	"verifier",
-	"runtime_policy"
-];
-const TARGET_TYPE_SET = new Set(PROPOSAL_TARGET_TYPES);
-function isProposalTargetType(value) {
-	return typeof value === "string" && TARGET_TYPE_SET.has(value);
-}
-function defineEvolutionProposeTool(ctx) {
-	return defineTool({
-		name: "evolution_propose",
-		description: "Record an evidenced shared change as a proposal. Executable targetType names are task_definition (a TaskTemplate), skill (a new or existing Skill in this graph library), and capability (one whole row with optional new MCP definitions and an optional new execution Skill). Use evolution_candidate, evolution_prepare, evolution_replay and evolution_gate before recording the model decision through evolution_decide. evolution_apply publishes under the deployment publication approval policy. Other target types remain suggestions. Existing Task contracts and Run bindings stay fixed.",
-		parameters: {
-			proposalId: {
+			},
+			editPayload: {
 				type: "string",
 				required: true,
-				description: "Unique id for this proposal; a duplicate id is rejected"
-			},
-			level: {
-				type: "string",
-				required: true,
-				enum: [
-					"L1",
-					"L2",
-					"L3",
-					"L4"
-				],
-				description: "Evolution level (L1 execution adaptation / L2 capability / L3 workflow / L4 harness); publication follows the deployment approval policy"
-			},
-			baseVersion: {
-				type: "string",
-				required: true,
-				description: "Current target version; a first Task template or new Skill uses absent (first template version 1)"
-			},
-			targetType: {
-				type: "string",
-				enum: PROPOSAL_TARGET_TYPES,
-				description: "Executable: task_definition for a TaskTemplate, skill or capability. Other types remain suggestions. Required unless fromDiagnosis."
-			},
-			targetId: {
-				type: "string",
-				description: "Name of the concrete target (required unless fromDiagnosis)"
+				description: "The complete new content as JSON: {\"skillMd\":…,\"resources\":…} for a skill (or the SKILL.md text itself), {\"template\":…} for a task template, {\"entry\":…,\"mcpServers\":…} for a capability row"
 			},
 			rationale: {
 				type: "string",
-				description: "Why this change would address the diagnosed cause (required unless fromDiagnosis)"
+				required: true,
+				description: "Why this candidate is worth measuring"
 			},
 			sourceRefs: {
 				type: "array",
+				required: true,
 				items: { type: "string" },
-				description: "Sources this proposal rests on: diagnosis:<diagnosisId>, exact taskId#runId review refs, or evidence ids. Known bare diagnosis ids are stored as diagnosis:<id>."
+				description: "The recorded evidence this candidate answers: diagnosis:<id>, task:<taskId>#<runId>, or an evidence id"
 			},
-			fromDiagnosis: {
+			expectedBaseRevision: {
+				type: "string",
+				required: true,
+				description: "The active revision id this candidate was written against; a pointer that moved refuses the draft"
+			},
+			round: {
+				type: "integer",
+				required: true,
+				description: "The search round this candidate belongs to; the edit budget is derived from it"
+			},
+			critic: {
 				type: "object",
-				additionalProperties: false,
-				description: "Transcribe targetType/targetId/rationale from one proposal of a recorded diagnosis",
+				description: "The one independent pre-measurement critic verdict: {verdict: accept|reject, reason, evidenceRefs}",
+				additionalProperties: true,
 				properties: {
-					diagnosisId: {
+					verdict: {
 						type: "string",
-						required: true,
-						description: "Recorded diagnosis id"
+						enum: ["accept", "reject"]
 					},
-					proposalIndex: {
-						type: "number",
-						required: true,
-						description: "Index into the diagnosis proposals array (0-based)"
+					reason: { type: "string" },
+					evidenceRefs: {
+						type: "array",
+						items: { type: "string" }
 					}
 				}
 			}
@@ -3913,202 +4213,183 @@ function defineEvolutionProposeTool(ctx) {
 			render: (_a, v) => text(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId(exec, "evolution_propose");
-			const evolution = await evolutionForSession(ctx, caller);
-			let targetType = args.targetType;
-			let targetId = args.targetId;
-			let rationale = args.rationale;
-			const sourceRefs = [...args.sourceRefs ?? []];
-			if (args.fromDiagnosis !== void 0) {
-				if (targetType !== void 0 || targetId !== void 0 || rationale !== void 0) throw new Error("evolution_propose: fromDiagnosis already supplies targetType/targetId/rationale — do not pass both");
-				const graph = await ctx.graphs.graphForSession(caller);
-				const diagnosis = (await ctx.task.openStore(rootTaskStoreId(graph.rootSessionId))).diagnoses.find((item) => item.diagnosisId === args.fromDiagnosis.diagnosisId);
-				if (diagnosis === void 0) throw new Error(`evolution_propose: unknown diagnosis "${args.fromDiagnosis.diagnosisId}"`);
-				const proposal = diagnosis.proposals[args.fromDiagnosis.proposalIndex];
-				if (proposal === void 0) throw new Error(`evolution_propose: diagnosis "${diagnosis.diagnosisId}" has no proposal #${args.fromDiagnosis.proposalIndex}`);
-				targetType = proposal.targetType;
-				targetId = proposal.targetId;
-				rationale = proposal.rationale;
-				if (!isProposalTargetType(targetType)) throw new Error(`evolution_propose: diagnosis "${diagnosis.diagnosisId}" proposal #${args.fromDiagnosis.proposalIndex} names targetType "${String(targetType)}", which this build cannot execute; it stays a recorded suggestion (recorded target types: ${PROPOSAL_TARGET_TYPES.join(" / ")})`);
-				sourceRefs.unshift(`diagnosis:${diagnosis.diagnosisId}`);
-			} else if (targetType === void 0 || targetId === void 0 || rationale === void 0) throw new Error("evolution_propose: targetType, targetId and rationale are required without fromDiagnosis");
-			if (!isProposalTargetType(targetType)) throw new Error(`evolution_propose: targetType must be one of ${PROPOSAL_TARGET_TYPES.join(" / ")}, got "${String(targetType)}"`);
+			const undeclared = undeclaredParameters(args, PARAMETERS$4, "method_draft");
+			if (undeclared !== void 0) return undeclared;
+			const caller = sessionId(exec, "method_draft");
+			const kind = args.kind;
 			try {
-				const proposal = await evolution.propose({
-					proposalId: args.proposalId,
-					targetType,
-					targetId,
-					baseVersion: args.baseVersion,
-					level: args.level,
-					rationale,
-					sourceRefs
-				}, caller);
-				const skillReplacement = "ledger entry only — nothing was executed or changed; next: evolution_candidate with mutationJson as JSON text carrying the full replacement text of the Skill's SKILL.md (use baseVersion absent for its first version). An execution skill's SKILL.contract.json is derived from production at evolution_prepare (only its content.skillMdSha256 is recomputed, so a content update cannot move a capability, a required tool or a verifier)";
-				const capabilityReplacement = "ledger entry only — nothing was executed or changed; next: evolution_candidate with mutationJson as JSON text carrying exactly one whole capability row { rows }, optional new MCP launch definitions { mcpServers }, and optionally a NEW execution skill { name, content, sidecar semantic fields }; the definitions and granted capability are evaluated together; permission and preset stay fixed";
-				const taskReplacement = "ledger entry only — next: evolution_candidate with mutationJson {template,criterionRepair?}; submit one complete canonical TaskTemplate. Changing child criteria requires fixed positive and negative examples under the original independent parent oracle.";
-				const recordedSuggestion = `ledger entry only — nothing was executed or changed; this build promotes a Task template, an existing Skill or one capability row with an optional new execution skill, so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become a candidate, is never evaluated, and is never promoted`;
+				if (typeof args.identity !== "string" || args.identity.length === 0) throw new Error("identity must be a non-empty string");
+				if (typeof args.rationale !== "string" || args.rationale.length === 0) throw new Error("rationale must be non-empty free text");
+				if (typeof args.editPayload !== "string" || args.editPayload.length === 0) throw new Error("editPayload must carry the complete new content");
+				if (typeof args.expectedBaseRevision !== "string" || args.expectedBaseRevision.length === 0) throw new Error("expectedBaseRevision is required");
+				if (!Array.isArray(args.sourceRefs) || args.sourceRefs.length === 0) throw new Error("sourceRefs must name at least one recorded reference");
+				if (!Number.isInteger(args.round) || args.round < 0) throw new Error("round must be a non-negative integer");
+				const edits = declaredEditsOf(args.edits);
+				const critic = criticOf(args.critic);
+				const env = environmentPlaneOf(ctx);
+				const ledger = await methodLedgerPlaneOf(ctx, caller);
+				const strategy = strategyPlaneOf();
+				const view = await env.activeEnvironmentView(caller);
+				if (view.readOnly) return [`method_draft rejected: library "${view.libraryId}" is read-only (${view.protocol}); a sealed or legacy graph takes no draft.`, "nothing was created."].join(" ");
+				if (view.revisionId !== args.expectedBaseRevision) return [
+					`method_draft rejected: the active revision is "${view.revisionId}", not the "${args.expectedBaseRevision}" this candidate was written against —`,
+					"the pointer moved (this round, or another session); re-read the library and re-author the candidate.",
+					"nothing was created."
+				].join(" ");
+				const budget = strategy.editBudget(args.round, strategy.policy);
+				const verified = edits.filter((edit) => edit.mechanismUnverified !== true);
+				if (edits.length === 0) return "method_draft rejected: a candidate declares at least one independent edit; nothing was created.";
+				if (verified.length > budget) return [
+					`method_draft rejected: ${verified.length} independent edits exceed the round ${String(args.round)} budget of ${budget}`,
+					"(the frozen policy anneals the budget down to one edit in the last round); nothing was created and no evaluation budget was consumed,",
+					"so this refusal does not enter the measured history."
+				].join(" ");
+				const draft = await env.createDraft(caller, {
+					basedOn: view.revisionId,
+					purpose: args.rationale
+				});
+				const refuse$1 = async (detail) => {
+					await env.removeEnvironmentDraft(caller, draft.draftId);
+					return `${detail} (draft ${draft.draftId} removed; nothing was recorded and no evaluation budget was consumed)`;
+				};
+				let staged;
+				try {
+					staged = await env.stageDraftEdit(caller, draft.draftId, editOf(kind, args.identity, args.editPayload, caller, versionOf(view.skills, args.identity)));
+				} catch (error) {
+					return await refuse$1(`method_draft rejected: the candidate content is not a ${kind} this library can hold — ${message(error)};`);
+				}
+				const baseRevision = {
+					revisionId: view.revisionId,
+					digest: view.manifestDigest,
+					libraryId: view.libraryId
+				};
+				const structure = await ledger.prepareStructure({
+					draftId: staged.draftId,
+					kind,
+					identity: args.identity,
+					baseRevision,
+					candidateRevision: {
+						revisionId: staged.manifest.revisionId,
+						digest: staged.manifest.contentDigest
+					},
+					rationale: args.rationale,
+					sourceRefs: [...args.sourceRefs],
+					actor: caller
+				});
+				const screen = strategy.screenBeforeMeasurement({
+					round: args.round,
+					edits,
+					structure: {
+						ok: structure.ok,
+						findings: structure.findings
+					},
+					...critic === void 0 ? {} : { critic },
+					policy: strategy.policy
+				});
+				if (!screen.ok) {
+					const criticNote = screen.reasonCode === "critic-missing" ? " This round carries no independent critic verdict, and the frozen policy requires one before any measurement — the candidate is refused rather than measured silently." : "";
+					return await refuse$1(`method_draft rejected: ${screen.reasonCode} — ${screen.reason}.${criticNote}`);
+				}
+				const facts = await ledger.history();
+				const refutation = strategy.refutationFor(facts, view.libraryId, staged.manifest.contentDigest);
+				if (refutation !== void 0) return await refuse$1(`method_draft rejected: this candidate's bytes (${staged.manifest.contentDigest.slice(0, 12)}…) were already refused by draft ${refutation.refutation.candidateId} (${refutation.kind}) — ${refutation.refutation.reason}. Use method_discard on this draft, or add new evidence and a new repetition.`);
+				await ledger.createDraft({
+					draftId: staged.draftId,
+					kind,
+					identity: args.identity,
+					baseRevision,
+					candidateRevision: {
+						revisionId: staged.manifest.revisionId,
+						digest: staged.manifest.contentDigest,
+						files: structure.files
+					},
+					rationale: args.rationale,
+					sourceRefs: [...args.sourceRefs],
+					actor: caller
+				});
 				return [
-					`proposal ${proposal.proposalId} registered [proposed] ${proposal.level} ${proposal.targetType} ${proposal.targetId} (base ${proposal.baseVersion})`,
-					`rationale: ${proposal.rationale}`,
-					`sourceRefs: [${proposal.sourceRefs.join(", ")}]`,
-					proposal.targetType === "skill" ? skillReplacement : proposal.targetType === "capability" ? capabilityReplacement : proposal.targetType === "task_definition" ? taskReplacement : recordedSuggestion
+					`method_draft: ${kind} "${args.identity}" recorded as draft ${staged.draftId}`,
+					`  base revision ${view.revisionId} (${view.manifestDigest.slice(0, 12)}) → candidate ${staged.manifest.revisionId} (${staged.manifest.contentDigest.slice(0, 12)})`,
+					`  name: ${structure.change.identity}; before ${structure.change.before === null ? "(absent)" : structure.change.before.slice(0, 12)} → after ${structure.change.after.slice(0, 12)}`,
+					`  bundle level: ${screen.bundleLevel ? "yes (more than one independent edit)" : "no"}; round ${String(args.round)} edit budget ${budget}`,
+					`  files: ${structure.files.map((file) => file.path).join(", ") || "(none)"}`,
+					"  no production change; next: method_evaluate (frozen cohort, both sides, at least three repetitions)"
 				].join("\n");
 			} catch (error) {
-				return `evolution_propose rejected: ${message(error)}`;
+				return `method_draft rejected: ${message(error)}`;
 			}
 		}
 	});
 }
 
 //#endregion
-//#region src/tools/evolution-replay.ts
-/** The model selection this experiment freezes — read from the evolution plane's injected resolver, never from the caller (§F.2: the model is frozen before the runs, and a model-filled string could not be one). */
-/** The workspace the caller's own session runs in — the frozen input snapshot both experiment sides are built from. */
-async function callerWorkspace(ctx, caller) {
-	const runtime = optionalService(ctx, "taskRuntime");
-	let path;
-	try {
-		path = await runtime?.workspacePathFor?.(caller);
-	} catch (error) {
-		throw new Error(`cannot resolve the caller session's workspace: ${message(error)}`);
-	}
-	if (typeof path !== "string" || path.length === 0) throw new Error(`this deployment cannot name the workspace of session "${caller}", which the experiment would freeze as its input snapshot — name the caller's env workspace before evaluating a Task template, Skill or capability candidate`);
-	return path;
+//#region src/tools/method-evaluate.ts
+const PARAMETERS$3 = [
+	"draftId",
+	"round",
+	"samples",
+	"quality",
+	"objective",
+	"evaluation",
+	"budget",
+	"repetition",
+	"input",
+	"maxParallel"
+];
+const SAMPLE_ROLES = [
+	"observed-failure",
+	"observed-success",
+	"observed-regression",
+	"holdout"
+];
+/** The model selection this deployment's runs share, read exactly as the assembly's own resolver reads it. */
+function deploymentModel(ctx) {
+	return modelSelectionOf(optionalService(ctx, "agentDefaultModel")?.currentSelection());
 }
-/** The task's latest review record — the record a sample's role is read from. */
-function latestReview(snapshot, task) {
-	const runId = task.runIds[task.runIds.length - 1];
-	return snapshot.reviews.find((item) => item.runId === runId);
-}
-/** The role one named task has, from the store's own history: its latest review decides whether the case is a failure the candidate is meant to fix or a passing case it must not break. The caller names tasks; */
-function roleOf(snapshot, taskId, objective) {
-	const task = snapshot.tasks.find((item) => item.taskId === taskId);
-	if (task === void 0) throw new Error(`unknown task "${taskId}" in this graph's task store`);
-	if (task.status !== "verified" && task.status !== "failed") throw new Error(`task "${taskId}" is ${task.status}; only a terminal (verified or failed) task carries the history a role is read from`);
-	const review = latestReview(snapshot, task);
-	if (review === void 0) throw new Error(`task "${taskId}" has no review record on its latest run; there is no case to reproduce`);
-	if (review.outcome === "failed") return "observed-failure";
-	if (review.outcome === "verified") return objective !== void 0 ? "observed-success" : "observed-regression";
-	throw new Error(`task "${taskId}" is ${task.status} but its latest review record is "${review.outcome}"; a sample must be the case its role names, and only a failed or verified record names one`);
-}
-/** Derive sample roles from real Task history. Shared publication also needs independent holdout Tasks. */
-function deriveExperimentSamples(snapshot, taskIds, holdoutTaskIds, objective, libraryId) {
-	const named = [...taskIds, ...holdoutTaskIds];
-	if (new Set(named).size !== named.length) throw new Error("taskIds and holdoutTaskIds must not overlap or repeat");
-	if (taskIds.length === 0) throw new Error("taskIds must name the observed samples the candidate is evaluated against");
-	if (holdoutTaskIds.length === 0 && libraryId === void 0) throw new Error("holdoutTaskIds must name at least one task that did not select this candidate — the two-sided experiment evaluates the observed cases and the held-out ones together, and an empty holdout proves nothing about what the candidate may break");
-	const samples = [...taskIds.map((taskId) => ({
-		taskId,
-		role: roleOf(snapshot, taskId, objective)
-	})), ...holdoutTaskIds.map((taskId) => ({
-		taskId,
-		role: "holdout"
-	}))];
-	const requiredRole = objective !== void 0 ? "observed-success" : "observed-failure";
-	if (!samples.some((sample) => sample.role === requiredRole)) throw new Error(`taskIds must include at least one ${requiredRole} for the experiment objective`);
-	return samples;
-}
-/** The experiment's criterion diff: the baseline run's verdict → the candidate run's, per criterion that moved. */
-function renderExperimentCriterionDiff(baseline, candidate) {
-	const byId = new Map(candidate.map((item) => [item.criterionId, item]));
-	const diff = [];
-	for (const item of baseline) {
-		const other = byId.get(item.criterionId);
-		byId.delete(item.criterionId);
-		if (other?.verdict !== item.verdict) diff.push(`${item.criterionId} ${item.verdict}→${other?.verdict ?? "—"}`);
-	}
-	for (const item of byId.values()) diff.push(`${item.criterionId} —→${item.verdict}`);
-	return diff.length === 0 ? "no criterion diff" : diff.join(", ");
-}
-/** What one experiment produced, as its caller reads it. The baseline is said to be a new run of *this* experiment in the first line that describes the sides: */
-function renderExperiment(result, targetId) {
-	const { report } = result;
-	const ceiling = report.frozen.budget.maxTokens;
-	const budget = ceiling === void 0 ? "no maxTokens ceiling declared" : `maxTokens ${ceiling}`;
-	const baseline = report.frozen.productionBaseline;
-	const candidate = report.frozen.candidate;
-	const capability = report.frozen.capability;
-	const definition = report.frozen.taskDefinition;
-	const tokens = (usage) => usage === void 0 ? "unknown" : Object.values(usage).reduce((sum, value) => sum + value, 0);
-	const skillIdentity = candidate === void 0 ? void 0 : `${candidate.contract === void 0 ? "guidance" : "execution"} sha256 ${candidate.sha256}${candidate.contract === void 0 ? "" : ` sidecar sha256 ${candidate.contract.sha256}`}`;
-	const candidateIdentity = definition !== void 0 ? `TaskTemplate ${definition.candidate.template.id}@${definition.candidate.template.version} sha256:${definition.candidate.digest}` : capability !== void 0 ? `capability row "${capability.row.name}" sha256 ${capability.row.digest} (the table held ${capability.baseline === null ? "no such row" : `row sha256 ${capability.baseline.digest}`})${skillIdentity === void 0 ? "" : ` and a new skill, ${skillIdentity}`}` : skillIdentity;
-	if (candidateIdentity === void 0) throw new Error(`experiment ${result.experimentId} carries neither a skill object identity nor a capability row — a report without a candidate identity is not one this build evaluated, and its record is read back through evolution_list`);
-	const baselineIdentity = definition !== void 0 ? `template baseline ${definition.baseline === null ? "absent" : `${definition.baseline.template.id}@${definition.baseline.template.version} sha256:${definition.baseline.digest}`}; fixed original parent oracle; only new children use the side library` : capability === void 0 ? `production baseline ${baseline?.sha256 ?? "absent (first Skill)"}${baseline?.contract === void 0 ? "" : ` sidecar sha256 ${baseline.contract.sha256}`}` : `row this candidate moves: ${capability.baseline === null ? "none (a new row)" : `sha256 ${capability.baseline.digest}`}`;
-	return [
-		`proposal ${report.proposalId} [experiment] ${definition !== void 0 ? "task_definition" : capability === void 0 ? "skill" : "capability"} ${targetId} — verdict: ${report.verdict}`,
-		`samples (${report.samples.length}):`,
-		...report.frozen.libraryId === void 0 ? [] : [`graph library: ${report.frozen.libraryId}; ${report.samples.some((sample) => sample.role === "holdout") ? "independent holdout included" : "graph-local observed evidence; transfer to unseen Tasks: unknown"}`],
-		...report.samples.map((sample) => `  ${sample.taskId} [${sample.role}] baseline ${sample.baseline.outcome} → candidate ${sample.candidate.outcome} (${renderExperimentCriterionDiff(sample.baseline.criteria, sample.candidate.criteria)}) — ${sample.verdict}; subtree tokens ${tokens(sample.baseline.cost.status === "reported" ? sample.baseline.cost.metrics.tokens : void 0)} → ${tokens(sample.candidate.cost.status === "reported" ? sample.candidate.cost.metrics.tokens : void 0)}; toolCalls ${sample.baseline.cost.status === "reported" ? sample.baseline.cost.metrics.toolCalls?.calls ?? "unknown" : "unknown"} → ${sample.candidate.cost.status === "reported" ? sample.candidate.cost.metrics.toolCalls?.calls ?? "unknown" : "unknown"}`),
-		"every side above is a new run this experiment started — the baseline under the production configuration (the production object, or the production table for a capability sample, whose frozen identity is read again at every promotion gate), the candidate on the prepared object's bytes (the prepared `SKILL.md`, the sidecar derived from production for an execution skill, and, for a capability candidate, the frozen row the candidate overlay mounts); the sample's historical record only locates the case",
-		`report: ${result.reportPath}`,
-		...report.evaluation === void 0 ? [] : [
-			`independent judge: ${report.frozen.evaluation.judge.model.label}; input ${report.evaluation.inputDigest}; response ${report.evaluation.responseDigest}`,
-			`auxiliary model tokens: plan ${report.frozen.evaluation.generatedResponse === void 0 ? "0 (provided plan)" : tokens(report.frozen.evaluation.generatedUsage)}; judge ${tokens(report.evaluation.judgeUsage)}; monetary cost unknown (no price source)`,
-			...report.evaluation.judgement.samples.map((sample) => `${sample.taskId} judge ${sample.verdict}: ${sample.findings.map((finding) => `${finding.claim} [${finding.evidenceRefs.join(", ")}]`).join("; ")}; uncertainty: ${sample.uncertainties.join("; ") || "none reported"}`)
-		],
-		`experiment ${result.experimentId} (repetition ${report.frozen.repetition}, frozen ${report.frozenDigest}); candidate ${candidateIdentity}; ` + baselineIdentity + `; model ${report.frozen.model.label}; budget ${budget}; snapshot ${report.frozen.snapshot.digest}; comparer ${report.frozen.comparerVersion}`,
-		"next: evolution_gate (cite the report path in regressionEvidenceRefs)"
-	].join("\n");
-}
-/** Fresh one-shot context, using the same deployed llm/stream route, without executor conversation or tools. */
-async function outcomeModel(ctx, model, prompt, input, signal) {
-	const llm = optionalService(ctx, "llm");
-	if (llm === void 0) throw new Error("llm-outcome requires the deployment llm service");
-	const assembled = new BlockAssembler();
-	let finished = false;
-	for await (const chunk of llm.stream({
-		provider: model.provider,
-		model: model.model,
-		...model.reasoningEffort === void 0 ? {} : { reasoningEffort: model.reasoningEffort },
-		...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
-		system: prompt,
-		messages: [{
-			role: "user",
-			content: [{
-				type: "text",
-				text: input
-			}]
-		}],
-		signal
-	})) {
-		assembled.push(chunk);
-		if (chunk.type === "finish") {
-			if (chunk.reason.kind !== "stop") throw new Error(`outcome model stopped with ${JSON.stringify(chunk.reason)}`);
-			finished = true;
+/** One fresh one-shot model call, using the deployment's own llm route and no executor conversation. */
+function judgeCall(ctx) {
+	return async (model, prompt, input, signal) => {
+		const llm = optionalService(ctx, "llm");
+		if (llm === void 0) throw new Error("the llm-outcome objective needs the deployment llm service");
+		const assembled = new BlockAssembler();
+		let finished = false;
+		for await (const chunk of llm.stream({
+			provider: model.provider,
+			model: model.model,
+			...model.reasoningEffort === void 0 ? {} : { reasoningEffort: model.reasoningEffort },
+			...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
+			system: prompt,
+			messages: [{
+				role: "user",
+				content: [{
+					type: "text",
+					text: input
+				}]
+			}],
+			signal
+		})) {
+			assembled.push(chunk);
+			if (chunk.type === "finish") {
+				if (chunk.reason.kind !== "stop") throw new Error(`the outcome model stopped with ${JSON.stringify(chunk.reason)}`);
+				finished = true;
+			}
 		}
-	}
-	const response = assembled.blocks().filter((block) => block.type === "text").map((block) => block.text).join("");
-	if (!finished || !response.trim()) throw new Error("outcome model returned no complete response");
-	const usage = assembled.usage;
-	const tokens = usage === void 0 ? void 0 : {
-		uncachedInputTokens: usage.inputTokens,
-		outputTokens: usage.outputTokens,
-		cacheReadTokens: usage.cacheReadTokens ?? 0,
-		cacheWriteTokens: usage.cacheWriteTokens ?? 0
-	};
-	return {
-		response,
-		...tokens === void 0 ? {} : { usage: tokens }
+		const response = assembled.blocks().filter((block) => block.type === "text").map((block) => block.text).join("");
+		if (!finished || response.trim().length === 0) throw new Error("the outcome model returned no complete response");
+		const usage = assembled.usage;
+		return {
+			response,
+			...usage === void 0 ? {} : { usage: {
+				uncachedInputTokens: usage.inputTokens,
+				outputTokens: usage.outputTokens,
+				cacheReadTokens: usage.cacheReadTokens ?? 0,
+				cacheWriteTokens: usage.cacheWriteTokens ?? 0
+			} }
+		};
 	};
 }
-async function evaluationPlan(ctx, input, samples, snapshot, signal, model) {
-	let rubric = input.rubric;
-	let measurements = input.measurements;
-	let generatedResponse;
-	let generatedUsage;
-	if (rubric === void 0 || measurements === void 0) {
-		const generatedCall = await outcomeModel(ctx, model, "Create an outcome evaluation plan from the supplied goal, original tasks and available artifacts. Return JSON {\"rubric\":\"...\",\"measurements\":[{\"id\":\"safe_name\",\"command\":\"...\"}]}. Use concise commands that inspect real outputs in each isolated workspace. Preserve supplied rubric and measurements. Each command runs with a 300 second limit and a 1 MiB output limit per stream. Keep the original acceptance fixed and explain benefit, uncertainty and model cost through the measurements.", canonicalJson({
-			goal: input.goal,
-			rubric,
-			measurements,
-			tasks: samples.map((sample) => snapshot.tasks.find((task) => task.taskId === sample.taskId))
-		}), signal);
-		generatedResponse = generatedCall.response;
-		generatedUsage = generatedCall.usage;
-		const generated = JSON.parse(generatedResponse);
-		rubric ??= generated.rubric;
-		measurements ??= generated.measurements;
-	}
+/** One frozen outcome evaluation plan: the caller's plan, or one plan the judge model writes from the goal. */
+async function outcomePlanOf(ctx, input, samples, model, signal) {
 	const judge = {
 		model,
 		prompt: OUTCOME_JUDGE_PROMPT,
@@ -4117,10 +4398,28 @@ async function evaluationPlan(ctx, input, samples, snapshot, signal, model) {
 			prompt: OUTCOME_JUDGE_PROMPT
 		})
 	};
+	let rubric = input.rubric;
+	let measurements = input.measurements;
+	let generatedResponse;
+	let generatedUsage;
+	if (rubric === void 0 || measurements === void 0) {
+		const generated = await judgeCall(ctx)(model, "Create an outcome evaluation plan from the supplied goal and samples. Return JSON {\"rubric\":\"…\",\"measurements\":[{\"id\":\"safe_name\",\"command\":\"…\"}]}. Each command runs in one isolated workspace with a 300 second limit and a 1 MiB output limit per stream. Preserve any supplied rubric and measurements, and keep the original acceptance fixed.", canonicalJson({
+			goal: input.goal,
+			rubric,
+			measurements,
+			samples
+		}), signal);
+		if (typeof generated === "string") throw new Error("the outcome plan model returned no usage record");
+		generatedResponse = generated.response;
+		generatedUsage = generated.usage;
+		const parsed = JSON.parse(generated.response);
+		rubric ??= parsed.rubric;
+		measurements ??= parsed.measurements;
+	}
 	const plan = {
 		goal: input.goal,
-		rubric,
-		measurements,
+		rubric: rubric ?? "",
+		measurements: measurements === void 0 ? [] : [...measurements],
 		judge,
 		...generatedResponse === void 0 ? {} : { generatedResponse },
 		...generatedUsage === void 0 ? {} : { generatedUsage }
@@ -4128,151 +4427,116 @@ async function evaluationPlan(ctx, input, samples, snapshot, signal, model) {
 	assertOutcomePlan(plan);
 	return plan;
 }
-/** The experiment one call runs: the derived samples, the caller's frozen input, and the model selection it runs under. */
-async function runExperimentFor(ctx, args, caller, signal) {
-	const evolution = await evolutionForSession(ctx, caller);
-	const model = evolution.modelSelection();
-	let snapshot;
-	try {
-		const graph = await ctx.graphs.graphForSession(caller);
-		snapshot = await ctx.task.openStore(rootTaskStoreId(graph.rootSessionId));
-	} catch (error) {
-		throw new Error(`cannot open this graph's task store: ${message(error)}`);
-	}
-	const proposal = await evolution.get(args.proposalId);
-	const samples = deriveExperimentSamples(snapshot, args.taskIds, args.holdoutTaskIds, args.objective, proposal.targetType === "capability" ? void 0 : evolution.libraryId);
-	if (args.snapshot !== void 0 && !args.snapshot.sourceDir.trim()) throw new Error("snapshot.sourceDir must name a clean input directory");
-	const sourceDir = args.snapshot === void 0 ? await callerWorkspace(ctx, caller) : isAbsolute(args.snapshot.sourceDir) ? args.snapshot.sourceDir : resolve(await callerWorkspace(ctx, caller), args.snapshot.sourceDir);
-	const inputSnapshot = normalizeSnapshot({
-		...args.snapshot,
-		sourceDir
-	});
-	let evaluation;
-	if (args.objective === "llm-outcome") {
-		if (args.evaluation === void 0) throw new Error("objective llm-outcome requires evaluation.goal");
-		const previous = (await evolution.experiments(args.proposalId)).find((item) => item.frozen.objective === "llm-outcome" && item.frozen.repetition === (args.repetition ?? 0));
-		if (previous !== void 0) {
-			evaluation = previous.frozen.evaluation;
-			if (evaluation.goal !== args.evaluation.goal || args.evaluation.rubric !== void 0 && evaluation.rubric !== args.evaluation.rubric || args.evaluation.measurements !== void 0 && canonicalJson(evaluation.measurements) !== canonicalJson(args.evaluation.measurements) || canonicalJson(evaluation.judge.model) !== canonicalJson(model)) throw new Error("evaluation plan or resolved judge changed; use a new repetition for a new experiment");
-		} else evaluation = await evaluationPlan(ctx, args.evaluation, samples, snapshot, signal, model);
-	} else if (args.evaluation !== void 0) throw new Error("evaluation is only valid for objective llm-outcome");
-	return evolution.runExperiment({
-		proposalId: args.proposalId,
-		samples,
-		...evaluation === void 0 ? {} : { evaluation },
-		...args.objective === void 0 ? {} : { objective: args.objective },
-		snapshot: inputSnapshot,
-		model,
-		budget: { ...args.budget ?? {} },
-		repetition: args.repetition ?? 0
-	}, caller, caller, {
-		signal,
-		...args.maxParallel === void 0 ? {} : { maxParallel: args.maxParallel },
-		judge: (model$1, prompt, input, abort) => outcomeModel(ctx, model$1, prompt, input, abort)
-	});
-}
-function defineEvolutionReplayTool(ctx) {
+function defineMethodEvaluateTool(ctx) {
 	return defineTool({
-		name: "evolution_replay",
-		description: "Compare a prepared Task template, Skill or capability candidate with its frozen baseline. Both sides execute through the same runtime and original acceptance in parallel, separate copies of snapshot.sourceDir (or the caller workspace when omitted). Supply clean original inputs; snapshot.paths selects only the files or directories needed for comparison. Use cwd-relative contracts, or snapshot.rebaseFrom to relocate declared absolute workspace paths into each side while retaining the original checks. Task replay freezes the complete template library for each side; new children must use the candidate template while the parent oracle stays fixed. Capability replay mounts the candidate row, MCP definitions and optional Skill; a baseline admission refusal is recorded as that refusal. Samples, inputs, model, budget and comparer are frozen. Omit objective for observed failure repair. For a verified source use llm-outcome with evaluation.goal for generic domain benefit, or tool-call-reduction for fewer calls. llm-outcome freezes the supplied or LLM-generated rubric and measurement commands before replay; commands execute in each side workspace, then one independent LLM request judges actual outputs. The deployed resolved model and judge prompt are fixed, and gate/apply recheck saved evidence without resampling. The candidate may already be prepared before plan freeze. For tool-call-reduction both sides pass, every observed sample uses fewer tool calls over its complete executed Run subtree, and holdouts pass without cost growth. Missing counters are inconclusive. Graph-local experience can use the observed Task; add independent holdoutTaskIds when available to measure transfer. Shared publication and capability changes require a holdout. Cite the sandbox report in evolution_gate.regressionEvidenceRefs. The same call reuses settled Runs; a higher repetition freezes a new experiment.",
+		name: "method_evaluate",
+		description: "Measure one draft through the one evaluation pipeline. Name the frozen cohort explicitly — both sides of every sample, its role and the original acceptance — the [0,1] quality scale, the objective and the budget; the tool derives no sample and no role. At least three independent repetitions calibrate noise: a single trial never claims a zero noise band. A missing cost inside the cohort is inconclusive rather than zero, and a missing trial does not shrink the denominator. The same frozen cohort returns the same evaluation without charging again. Next: method_publish (one approval) or method_discard.",
 		parameters: {
-			proposalId: {
+			draftId: {
 				type: "string",
 				required: true,
-				description: "Prepared Task template, Skill or capability candidate"
+				description: "The draft to measure"
 			},
-			snapshot: {
-				type: "object",
-				additionalProperties: false,
-				properties: {
-					sourceDir: {
-						type: "string",
-						required: true,
-						description: "Clean input directory copied separately to every side; absolute or relative to caller workspace. Omit snapshot to use the caller workspace."
-					},
-					paths: {
-						type: "array",
-						items: { type: "string" },
-						description: "Relative files or directories needed for comparison, such as fixture, checks and a small workload. Omit to freeze all content. The selection and its digest are frozen."
-					},
-					rebaseFrom: {
-						type: "string",
-						description: "Original absolute workspace root in the Task contract. Its declared paths are mapped into each independent side. Input file contents stay fixed; scripts and binaries use their own relative paths."
+			round: {
+				type: "integer",
+				required: true,
+				description: "The search round this evaluation belongs to"
+			},
+			samples: {
+				type: "array",
+				required: true,
+				description: "The frozen cohort: [{taskId, role}] with role observed-failure | observed-success | observed-regression | holdout",
+				items: {
+					type: "object",
+					additionalProperties: false,
+					properties: {
+						taskId: {
+							type: "string",
+							description: "An existing task in this graph store"
+						},
+						role: {
+							type: "string",
+							enum: [...SAMPLE_ROLES],
+							description: "How this sample entered the cohort"
+						}
 					}
 				}
 			},
-			maxParallel: {
-				type: "integer",
-				description: "Concurrent experiment sides. Defaults to deployment maxActiveWorkers (normally at least 2); runtime worker limits still apply."
+			quality: {
+				type: "object",
+				required: true,
+				additionalProperties: false,
+				description: "The frozen [0,1] quality scale: the original acceptance, or a declared numeric metric",
+				properties: {
+					metricId: {
+						type: "string",
+						description: "acceptance for the original acceptance rate, or a criterion id carrying a numeric reading"
+					},
+					extractor: {
+						type: "string",
+						description: "How the number is read out of the side"
+					}
+				}
 			},
 			objective: {
 				type: "string",
 				enum: ["tool-call-reduction", "llm-outcome"],
-				description: "Verified-source optimization: measured domain benefit with an independent judge, or fewer subtree tool calls. Original acceptance remains mandatory. Omit for failure repair."
+				description: "Omit for failure repair against the original acceptance"
 			},
 			evaluation: {
 				type: "object",
-				additionalProperties: false,
+				additionalProperties: true,
+				description: "Required for llm-outcome: {goal, rubric?, measurements?}; rubric and measurements may be generated once and are then frozen",
 				properties: {
-					goal: {
-						type: "string",
-						required: true,
-						description: "Original user outcome to improve; domain measurements must come from real tools."
-					},
-					rubric: {
-						type: "string",
-						description: "Frozen comparison rules; omit to generate with the deployed LLM."
-					},
+					goal: { type: "string" },
+					rubric: { type: "string" },
 					measurements: {
 						type: "array",
 						items: {
 							type: "object",
 							additionalProperties: false,
 							properties: {
-								id: {
-									type: "string",
-									required: true
-								},
-								command: {
-									type: "string",
-									required: true
-								}
+								id: { type: "string" },
+								command: { type: "string" }
 							}
-						},
-						description: "Same shell commands in each side workspace, 300s/1 MiB per stream; omit to generate. Excess output errors explicitly."
+						}
 					}
-				},
-				description: "Required for llm-outcome. Plan and judge are frozen before replay, then real command outputs are judged once."
-			},
-			taskIds: {
-				type: "array",
-				items: { type: "string" },
-				required: true,
-				description: "Observed task ids: a failed target plus verified regressions for failure repair; verified sources for either success objective"
-			},
-			holdoutTaskIds: {
-				type: "array",
-				items: { type: "string" },
-				description: "Independent verified Tasks for transfer evidence. Optional for graph-local Skill/Task experience; shared publication and capability changes require at least one."
-			},
-			repetition: {
-				type: "integer",
-				description: "Repeat index of the frozen experiment (default 0). Only a new experiment at a higher index may run a sample again and charge budget again."
+				}
 			},
 			budget: {
 				type: "object",
+				additionalProperties: true,
+				description: "The token ceiling frozen with this evaluation: {maxTokens?, note?}"
+			},
+			repetition: {
+				type: "integer",
+				required: true,
+				description: "This cohort's repetition; 0 is the first. At least 3 calibrate noise"
+			},
+			input: {
+				type: "object",
+				required: true,
 				additionalProperties: false,
+				description: "The frozen input both sides are built from",
 				properties: {
-					maxTokens: {
-						type: "integer",
-						description: "Token ceiling for the whole experiment. No further side is started once the sides already settled have reported this many tokens (the ledger is the count, so a restart does not reset it)"
-					},
-					note: {
+					sourceDir: {
 						type: "string",
-						description: "What the budget was derived from and why it is judged enough"
+						description: "A clean input directory both sides copy"
+					},
+					paths: {
+						type: "array",
+						items: { type: "string" },
+						description: "Only the files or directories needed for the comparison"
+					},
+					rebaseFrom: {
+						type: "string",
+						description: "A workspace path the declared contracts use, relocated into each side"
 					}
-				},
-				description: "The total token budget frozen with the experiment, including business Run subtrees and llm-outcome plan/judge calls. maxTokens is optional; omit it when this deployment does not report token counts for business Runs. If you declare it, promotion requires a measured token total for every executed side; tool-call counts and model guesses cannot satisfy that check. A declared total also stops further sides once reported usage reaches it. Runs retain the deployment's own runtime limits."
+				}
+			},
+			maxParallel: {
+				type: "integer",
+				description: "Scheduling limit for the sides this evaluation starts"
 			}
 		},
 		output: {
@@ -4280,108 +4544,524 @@ function defineEvolutionReplayTool(ctx) {
 			render: (_a, v) => text(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId(exec, "evolution_replay");
-			const taskIds = args.taskIds.map((id) => String(id));
-			const holdoutTaskIds = (args.holdoutTaskIds ?? []).map((id) => String(id));
+			const undeclared = undeclaredParameters(args, PARAMETERS$3, "method_evaluate");
+			if (undeclared !== void 0) return undeclared;
+			const caller = sessionId(exec, "method_evaluate");
 			try {
-				const proposal = await (await evolutionForSession(ctx, caller)).get(args.proposalId);
-				if (proposal.targetType !== "skill" && proposal.targetType !== "capability" && proposal.targetType !== "task_definition") throw new Error(`proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared Task template, Skill or capability candidate; this target has no evaluator, so its proposal stays a record`);
-				return renderExperiment(await runExperimentFor(ctx, {
-					proposalId: args.proposalId,
-					taskIds,
-					holdoutTaskIds,
+				if (typeof args.draftId !== "string" || args.draftId.length === 0) throw new Error("draftId is required");
+				if (!Number.isInteger(args.round) || args.round < 0) throw new Error("round must be a non-negative integer");
+				if (!Number.isInteger(args.repetition) || args.repetition < 0) throw new Error("repetition must be a non-negative integer");
+				if (!Array.isArray(args.samples) || args.samples.length === 0) throw new Error("samples must name at least one sample; the cohort is never inferred");
+				const samples = args.samples.map((sample, index) => {
+					if (typeof sample.taskId !== "string" || sample.taskId.length === 0) throw new Error(`samples[${index}].taskId is required`);
+					if (!SAMPLE_ROLES.includes(sample.role)) throw new Error(`samples[${index}].role must be one of ${SAMPLE_ROLES.join(" | ")}`);
+					return {
+						taskId: sample.taskId,
+						role: sample.role
+					};
+				});
+				const quality = args.quality;
+				if (quality === void 0 || typeof quality.metricId !== "string" || quality.metricId.length === 0) throw new Error("quality.metricId is required: the frozen scale must be named before anything is measured");
+				if (typeof quality.extractor !== "string" || quality.extractor.length === 0) throw new Error("quality.extractor is required");
+				const input = args.input;
+				if (input === void 0 || typeof input.sourceDir !== "string" || input.sourceDir.length === 0) throw new Error("input.sourceDir is required: both sides are built from one clean input directory");
+				const model = deploymentModel(ctx);
+				if (model === void 0) throw new Error("this deployment offers no default model, so the model both sides run under cannot be frozen; nothing was evaluated");
+				const rules = {
 					...args.objective === void 0 ? {} : { objective: args.objective },
-					...args.evaluation === void 0 ? {} : { evaluation: args.evaluation },
-					...args.repetition === void 0 ? {} : { repetition: args.repetition },
-					...args.budget === void 0 ? {} : { budget: args.budget },
-					...args.snapshot === void 0 ? {} : { snapshot: args.snapshot },
+					quality: {
+						metricId: quality.metricId,
+						direction: "higher-is-better",
+						extractor: quality.extractor
+					},
+					guards: []
+				};
+				if (rules.objective !== "llm-outcome" && args.evaluation !== void 0) throw new Error("evaluation is only valid for the llm-outcome objective");
+				let evaluation;
+				let judge;
+				if (rules.objective === "llm-outcome") {
+					const declared = args.evaluation;
+					if (declared === void 0 || typeof declared.goal !== "string" || declared.goal.length === 0) throw new Error("objective llm-outcome requires evaluation.goal; the judged objective is never assumed");
+					judge = judgeCall(ctx);
+					evaluation = await outcomePlanOf(ctx, {
+						goal: declared.goal,
+						...typeof declared.rubric === "string" ? { rubric: declared.rubric } : {},
+						...Array.isArray(declared.measurements) ? { measurements: declared.measurements } : {}
+					}, samples, model, exec.signal);
+				}
+				const ledger = await methodLedgerPlaneOf(ctx, caller);
+				const existing = await ledger.evaluationOf(args.draftId);
+				const report = await ledger.evaluate({
+					draftId: args.draftId,
+					samples,
+					input: {
+						sourceDir: input.sourceDir,
+						...Array.isArray(input.paths) ? { paths: input.paths } : {},
+						...typeof input.rebaseFrom === "string" ? { rebaseFrom: input.rebaseFrom } : {}
+					},
+					rules,
+					budget: args.budget ?? {},
+					repetition: args.repetition,
+					model,
+					...evaluation === void 0 ? {} : { evaluation },
+					...judge === void 0 ? {} : { judge },
 					...args.maxParallel === void 0 ? {} : { maxParallel: args.maxParallel }
-				}, caller, exec.signal), proposal.targetId);
+				}, exec.signal);
+				const decision = await ledger.decisionFor(args.draftId) ?? await ledger.recordDecision(report);
+				const admission = decision.admissions.find((entry) => entry.candidateId === args.draftId);
+				strategyPlaneOf();
+				const lines$1 = [
+					renderEvaluation(report),
+					...admission === void 0 ? ["admission: the frozen strategy recorded no admission for this draft"] : renderAdmission(admission, decision.calibration),
+					`scope: ${decision.scope}`
+				];
+				if (existing !== void 0) lines$1.push("this draft was already measured under this frozen cohort; the same report was read back and nothing was charged again");
+				lines$1.push(admission?.admissible === true ? "next: method_publish (one approval; a refused or tampered candidate is refused before anyone is asked) or method_discard" : "next: method_discard — the frozen strategy did not admit this candidate, so no approval will be requested");
+				return lines$1.join("\n");
 			} catch (error) {
-				return `evolution_replay rejected: ${message(error)}`;
+				return `method_evaluate rejected: ${message(error)}`;
 			}
 		}
 	});
 }
 
 //#endregion
-//#region src/tools/evolution-rollback.ts
-/** What a restored object means for production, stated honestly in the output: */
-function restoreNote(targetType) {
-	if (targetType === "task_definition") return "new task instances use the restored library state; existing Task contracts and Run bindings stay fixed";
-	if (targetType === "capability") return "the capability row and MCP definitions were restored or removed to their prepared baseline, and any new Skill was removed; new admissions read that state while runs already bound to the applied snapshot keep their snapshot";
-	return "the restored object is what the skill filesystem now serves and what the next admission loads, and the skill directory is admitted again now that its commit intent is closed; a run already bound to the applied version keeps loading the snapshot it was bound to";
+//#region src/tools/method-list.ts
+const PARAMETERS$2 = [
+	"kind",
+	"status",
+	"identity",
+	"detail"
+];
+/** The task store this graph's Runs live in, or nothing when the deployment offers no task service. */
+async function snapshotFor(ctx, caller) {
+	const task = optionalService(ctx, "task");
+	if (task === void 0) return void 0;
+	const graph = await methodGraphFor(ctx, caller);
+	return await task.openStore(rootTaskStoreId(graph.rootSessionId)).catch(() => void 0);
 }
-function defineEvolutionRollbackTool(ctx) {
+/** Every Run that explicitly binds a candidate, by the candidate it binds. */
+function trialBindings(runs) {
+	const bindings = /* @__PURE__ */ new Map();
+	for (const run of runs) {
+		if (run.trialCandidateRef === void 0) continue;
+		bindings.set(run.trialCandidateRef, [...bindings.get(run.trialCandidateRef) ?? [], run.runId]);
+	}
+	return bindings;
+}
+function defineMethodListTool(ctx) {
 	return defineTool({
-		name: "evolution_rollback",
-		description: "Roll back an applied Task template, Skill or capability proposal after human approval. Restore its frozen baseline through the existing durable commit. Template updates append the old content at the next version; a first publication is removed. Capability rollback restores the row and removes new MCP definitions and any new Skill. Existing Task contracts and Run bindings stay fixed. Retry settles an open intent without asking again.",
-		parameters: { proposalId: {
-			type: "string",
-			required: true,
-			description: "Applied proposal to roll back"
-		} },
+		name: "method_list",
+		description: "Read this library's method state: the effective revision and pointer, every draft with its status and last verdict, which Runs are explicitly trying which candidate, the compact history (measured rounds, and a bounded table of refusals that were never measured), what the strategy suggests next, and any pointer switch that is open. Use it before drafting a candidate and when deciding whether to publish, discard or stop searching. This tool only reads.",
+		parameters: {
+			kind: {
+				type: "string",
+				enum: [
+					"skill",
+					"task-template",
+					"capability"
+				],
+				description: "Only drafts of this asset class"
+			},
+			status: {
+				type: "string",
+				enum: [
+					"draft",
+					"evaluated",
+					"discarded",
+					"published"
+				],
+				description: "Only drafts in this state"
+			},
+			identity: {
+				type: "string",
+				description: "Only drafts for this asset identity"
+			},
+			detail: {
+				type: "string",
+				enum: ["compact", "full"],
+				description: "compact (default) renders the recent history; full renders every draft line"
+			}
+		},
 		output: {
 			schema: { type: "string" },
 			render: (_a, v) => text(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId(exec, "evolution_rollback");
-			const evolution = await evolutionForSession(ctx, caller);
+			const undeclared = undeclaredParameters(args, PARAMETERS$2, "method_list");
+			if (undeclared !== void 0) return undeclared;
+			const caller = sessionId(exec, "method_list");
+			try {
+				const env = environmentPlaneOf(ctx);
+				const ledger = await methodLedgerPlaneOf(ctx, caller);
+				const strategy = strategyPlaneOf();
+				const view = await env.activeEnvironmentView(caller);
+				const mode = await methodModeFor(ctx, caller);
+				const filter = {
+					...args.kind === void 0 ? {} : { kind: args.kind },
+					...args.status === void 0 ? {} : { status: args.status }
+				};
+				const drafts = (await ledger.list(filter)).filter((draft) => args.identity === void 0 || draft.draft.identity === args.identity);
+				const intent = await env.openPointerIntent(caller);
+				const bindings = trialBindings((await snapshotFor(ctx, caller))?.runs ?? []);
+				const facts = await ledger.history();
+				const history = strategy.foldHistory(facts, strategy.policy, facts.candidates.length);
+				const detail = args.detail === "full" ? "full" : "compact";
+				const rendered = strategy.renderHistory(history, detail === "full" ? drafts.length + 1 : 8);
+				const measuredEntries = history.entries.filter((entry) => entry.measured);
+				const stall = history.roundsWithoutQualityGain >= strategy.policy.stallRounds ? 1 : 0;
+				const exploration$1 = strategy.exploration(facts.candidates.length, stall, history.triedMechanisms, strategy.policy.stall.reservedDrafts);
+				return [
+					`method state — library ${view.libraryId} (${view.protocol})`,
+					`  active revision ${view.revisionId} g${view.generation} (${view.manifestDigest.slice(0, 12)})${view.trialCandidateRef === void 0 ? "" : `, trial candidate ${view.trialCandidateRef}`}${view.readOnly ? " [read-only]" : ""}`,
+					`  mode ${mode}; policy ${strategy.policy.version} (rounds ${strategy.policy.rounds}, trials ${strategy.policy.trials}, edit budget ${strategy.policy.editBudget.max}→${strategy.policy.editBudget.min})`,
+					`drafts (${drafts.length})${detail === "full" ? "" : ", most recent first"}:`,
+					...drafts.length === 0 ? ["  (none)"] : (detail === "full" ? drafts : drafts.slice(-8)).map((draft) => {
+						const trial = bindings.get(draft.draft.draftId);
+						return `${renderDraftLine(draft)}${trial === void 0 ? "" : ` (tried by ${trial.length} run(s): ${trial.join(", ")})`}`;
+					}),
+					measuredEntries.length === 0 ? `history: nothing measured yet${history.entries.length === 0 ? "" : ` (${history.entries.length} candidate(s) never measured, so the denominator stays empty)`}` : `history (scope ${history.scope || "(none)"}):`,
+					...measuredEntries.length === 0 ? [] : rendered.map((entry) => `  round ${entry.round} ${entry.candidateId} ${entry.measured ? entry.deltaQuality === void 0 ? "measured" : `Δquality ${entry.deltaQuality.toFixed(4)}` : "not measured"} → ${entry.outcome}${entry.reasonCode === void 0 ? "" : ` (${entry.reasonCode})`}`),
+					`  best quality ${history.bestQuality === void 0 ? "(none measured)" : history.bestQuality.toFixed(4)}; rounds without a quality gain ${history.roundsWithoutQualityGain}; steering ${history.steering}`,
+					`  untouched candidate slots: ${exploration$1.reservedDrafts} of this round's candidates are reserved for untried mechanisms [${exploration$1.untried.join(", ")}]`,
+					...bindings.size === 0 ? ["trial: no Run is explicitly trying a candidate"] : [`trial: ${[...bindings.entries()].map(([draftId, runs]) => `${draftId} tried by ${runs.join(", ")}`).join("; ")} (a trial never moves the active revision)`],
+					...history.simplificationCandidates.length === 0 ? [] : [`simplification suggestions (a deletion candidate is still measured on both sides before it publishes): ${history.simplificationCandidates.map((candidate) => `${candidate.mechanism} via ${candidate.candidateIds.join(", ")}`).join("; ")}`],
+					...intent === null ? [] : [`open pointer intent: ${intent.intentId} (${intent.direction} → ${intent.next.revisionId}, recorded ${intent.at}) — a switch is in flight; a retry of the publication that opened it continues it without a second approval`],
+					"next: method_draft (one candidate, its evidence and the budget) → method_evaluate (frozen cohort, ≥3 repetitions) → method_publish or method_discard"
+				].join("\n");
+			} catch (error) {
+				return `method_list rejected: ${message(error)}`;
+			}
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/method-publish.ts
+const PARAMETERS$1 = [
+	"draftId",
+	"expectedActiveRevision",
+	"expectedGeneration",
+	"reason"
+];
+/** The admission one draft's landed decision holds, or a refusal naming what is missing. */
+function admissionOf(decision, draftId) {
+	if (decision === void 0) return `no landed strategy decision covers draft "${draftId}"; a candidate is measured (method_evaluate) before it is published`;
+	const admission = decision.admissions.find((entry) => entry.candidateId === draftId);
+	if (admission === void 0) return `the landed strategy decision names no admission for draft "${draftId}"`;
+	if (!admission.admissible) return `the frozen strategy did not admit this candidate (${admission.reasonCode}) — ${admission.reason}; a refused candidate consumes no approval, so none was requested`;
+	return admission;
+}
+function defineMethodPublishTool(ctx) {
+	return defineTool({
+		name: "method_publish",
+		description: "Publish one evaluated candidate as this library's effective revision. The expected active revision and generation are required: they are the compare-and-swap pair the approval shows, and a pointer anyone else moved refuses this call. A candidate the frozen strategy did not admit is refused here without asking anyone. Otherwise exactly one approval is requested, showing the complete asset difference, the evaluation and the exact version switch; after it is granted the graph, the pointer and the pre-publish check are re-read, and only then does the pointer transaction run. An open pointer intent for this same candidate is continued without a second approval.",
+		parameters: {
+			draftId: {
+				type: "string",
+				required: true,
+				description: "The evaluated draft to publish"
+			},
+			expectedActiveRevision: {
+				type: "string",
+				required: true,
+				description: "The active revision id the approval displays"
+			},
+			expectedGeneration: {
+				type: "integer",
+				required: true,
+				description: "The pointer generation the approval displays"
+			},
+			reason: {
+				type: "string",
+				description: "Anything the approver should know beyond the rendered evidence"
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text(v)
+		},
+		execute: async (args, exec) => {
+			const undeclared = undeclaredParameters(args, PARAMETERS$1, "method_publish");
+			if (undeclared !== void 0) return undeclared;
+			const caller = sessionId(exec, "method_publish");
 			const agent = exec.agent;
-			if (agent === void 0) throw new Error("evolution_rollback: missing agent");
-			let proposal;
+			if (agent === void 0) throw new Error("method_publish: missing agent");
 			try {
-				proposal = await evolution.get(args.proposalId);
+				if (typeof args.draftId !== "string" || args.draftId.length === 0) throw new Error("draftId is required");
+				if (typeof args.expectedActiveRevision !== "string" || args.expectedActiveRevision.length === 0) throw new Error("expectedActiveRevision is required: the approval displays the pointer this publication replaces");
+				if (!Number.isInteger(args.expectedGeneration) || args.expectedGeneration < 0) throw new Error("expectedGeneration is required: the second half of the pointer compare-and-swap pair");
+				const env = environmentPlaneOf(ctx);
+				const ledger = await methodLedgerPlaneOf(ctx, caller);
+				const view = await env.activeEnvironmentView(caller);
+				if (view.readOnly) return `method_publish rejected: library "${view.libraryId}" is read-only (${view.protocol}); nothing was written`;
+				if (view.revisionId !== args.expectedActiveRevision || view.generation !== args.expectedGeneration) return [
+					`method_publish rejected: the active pointer is ${view.revisionId} g${view.generation}, not the approved`,
+					`${args.expectedActiveRevision} g${String(args.expectedGeneration)} — a third party moved it (or the approval displayed a stale pointer).`,
+					"nothing was written; re-read the library and approve the switch that is actually in front of you."
+				].join(" ");
+				const intent = await env.openPointerIntent(caller);
+				if (intent !== null) {
+					if (!(intent.direction === "publish" && intent.draftId === args.draftId && intent.expected?.revisionId === args.expectedActiveRevision)) return [`method_publish rejected: pointer intent ${intent.intentId} (${intent.direction} → ${intent.next.revisionId}) is open,`, "so this library is mid-switch for another candidate; nothing was written. Settle it (restart, or a retry of the tool that opened it) first."].join(" ");
+					const settled = (await env.reconcilePointer(caller)).find((entry) => entry.intentId === intent.intentId);
+					if (settled === void 0) return `method_publish: no pointer moved — the open intent ${intent.intentId} reported no outcome; nothing was written`;
+					if (settled.result !== "blocked") await ledger.markPublished({
+						draftId: args.draftId,
+						revisionId: intent.next.revisionId,
+						supersededRevisionId: intent.expected?.revisionId ?? null,
+						intentId: intent.intentId,
+						...intent.approvalRef === void 0 ? {} : { approvalRef: intent.approvalRef },
+						actor: caller
+					});
+					const recoveredMode = await methodModeFor(ctx, caller);
+					return [...renderRecoveredIntent(intent, settled), `mode ${recoveredMode}; decided by ${deciderFor(recoveredMode)}`].join("\n");
+				}
+				const report = await ledger.evaluationOf(args.draftId);
+				if (report === void 0) return `method_publish rejected: draft "${args.draftId}" carries no evaluation; only a measured candidate is published. Nothing was written.`;
+				const decision = await ledger.decisionFor(args.draftId);
+				const admission = admissionOf(decision, args.draftId);
+				if (typeof admission === "string") return `method_publish rejected: ${admission}. Nothing was written and no approval was requested.`;
+				if (decision === void 0) throw new Error("unreachable: a missing decision was refused above");
+				try {
+					await ledger.validatePrePublish(report);
+				} catch (error) {
+					return [`method_publish rejected: the pre-publish re-check of report ${report.evaluationId} refused this candidate — ${message(error)};`, "nothing was written and no approval was requested."].join(" ");
+				}
+				const draft = await ledger.view(args.draftId);
+				const mode = await methodModeFor(ctx, caller);
+				const decider = deciderFor(mode);
+				const library = {
+					id: ledger.libraryId,
+					root: ledger.root
+				};
+				const baselineRevision = await env.activeRevisionFor(caller).catch(() => void 0);
+				const candidateRevision = await candidateRevisionOf(library, args.draftId);
+				if (candidateRevision === void 0) return `method_publish rejected: draft "${args.draftId}" has no draft directory; nothing was written.`;
+				const diff = renderDiff(await diffOfRevisions(baselineRevision ?? null, candidateRevision).catch(() => ({
+					from: baselineRevision?.manifest.revisionId ?? null,
+					to: candidateRevision.manifest.revisionId,
+					files: [],
+					digest: "unavailable"
+				})));
+				const pointer = {
+					revisionId: view.revisionId,
+					generation: view.generation,
+					manifestDigest: view.manifestDigest
+				};
+				const approvalRef = `approval:${exec.callId}`;
+				{
+					const reason = renderPublishReason({
+						draft: draft.draft,
+						report,
+						admission,
+						calibration: decision.calibration,
+						diff,
+						pointer,
+						candidate: {
+							revisionId: candidateRevision.manifest.revisionId,
+							manifestDigest: candidateRevision.manifest.contentDigest
+						},
+						mode,
+						rollbackToRevisionId: view.revisionId,
+						decider,
+						...typeof args.reason === "string" && args.reason.length > 0 ? { extra: [`note: ${args.reason}`] } : {}
+					});
+					const outcome = await ctx.approval.request({
+						agent,
+						toolName: "method_publish",
+						callId: exec.callId,
+						reason,
+						signal: exec.signal
+					});
+					if (outcome !== "allowed-once") return `method_publish: no pointer moved — ${denialReason(outcome)}; draft ${args.draftId} stays evaluated and nothing was written`;
+				}
+				const [recheck, recheckMode] = await Promise.all([env.activeEnvironmentView(caller), methodModeFor(ctx, caller)]);
+				if (recheck.revisionId !== args.expectedActiveRevision || recheck.generation !== args.expectedGeneration) return [`method_publish: no pointer moved — the pointer is now ${recheck.revisionId} g${recheck.generation}, not the approved`, `${args.expectedActiveRevision} g${String(args.expectedGeneration)}; the approval is spent and no second one is requested.`].join(" ");
+				if (recheckMode !== mode) return `method_publish: no pointer moved — this graph's method mode changed from ${mode} to ${recheckMode} while the approval was open.`;
+				try {
+					await ledger.validatePrePublish(report);
+				} catch (error) {
+					return `method_publish: no pointer moved — the post-approval re-check refused this candidate — ${message(error)}`;
+				}
+				const published = await env.publishRevision(caller, {
+					direction: "publish",
+					source: {
+						kind: "draft",
+						draftId: args.draftId
+					},
+					expected: {
+						revisionId: args.expectedActiveRevision,
+						generation: args.expectedGeneration
+					},
+					approvalRef,
+					actor: caller
+				});
+				await ledger.markPublished({
+					draftId: args.draftId,
+					revisionId: published.pointer.revisionId,
+					supersededRevisionId: published.supersededRevisionId,
+					intentId: published.completion.intentId,
+					approvalRef,
+					actor: caller
+				});
+				return [...renderPublishOutcome(published, mode, decider)].join("\n");
 			} catch (error) {
-				return `evolution_rollback rejected: ${message(error)}`;
+				return `method_publish rejected: ${message(error)}`;
 			}
-			if (proposal.openIntent !== void 0) try {
-				const recovered = await evolution.rollback(args.proposalId, caller, proposal.openIntent.approvalRef);
-				return [
-					`proposal ${recovered.proposal.proposalId} [rolledback] ${recovered.proposal.level} ${recovered.proposal.targetType} ${recovered.proposal.targetId} — ${recovered.proposal.targetType === "capability" ? "production baseline restored" : "champion restored"}`,
-					...renderOpenIntentRecovery(proposal.openIntent, recovered.recovered),
-					"wrote production targets:",
-					...recovered.proposal.targetType === "capability" ? [`  - capability row ${recovered.proposal.targetId} restored in the production table`] : [],
-					...recovered.targets.map((target) => `  - ${target}`),
-					restoreNote(recovered.proposal.targetType)
-				].join("\n");
-			} catch (error) {
-				return `evolution_rollback rejected: ${message(error)}`;
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/method-rollback.ts
+const PARAMETERS = [
+	"toRevisionId",
+	"expectedActiveRevision",
+	"expectedGeneration",
+	"reason"
+];
+function defineMethodRollbackTool(ctx) {
+	return defineTool({
+		name: "method_rollback",
+		description: "Restore one revision this library published before. The expected active revision and generation are the compare-and-swap pair the approval shows; a pointer anyone else moved refuses the call. One approval is requested, showing the reverse asset difference and the exact switch; after it is granted the graph, the pointer and the target revision are re-read before the pointer transaction runs. A revision this library never held as effective is refused by name.",
+		parameters: {
+			toRevisionId: {
+				type: "string",
+				required: true,
+				description: "The revision to restore; it must have been effective in this library before"
+			},
+			expectedActiveRevision: {
+				type: "string",
+				required: true,
+				description: "The active revision id the approval displays"
+			},
+			expectedGeneration: {
+				type: "integer",
+				required: true,
+				description: "The pointer generation the approval displays"
+			},
+			reason: {
+				type: "string",
+				required: true,
+				description: "Why this method is rolled back"
 			}
-			if (proposal.status !== "applied") return `evolution_rollback rejected: proposal ${proposal.proposalId} is ${proposal.status}; only an applied proposal can be rolled back`;
-			const targets = applyTargets(proposal, evolution, "rollback");
-			if (targets.length === 0 && proposal.targetType !== "capability") return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build restores a Task template, Skill or capability candidate, so there is no executor for this target type`;
-			const reason = [
-				`Evolution rollback for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
-				`rationale: ${proposal.rationale}`,
-				`applied mutation: ${JSON.stringify(proposal.mutation)}`,
-				...proposal.prepared?.capabilityTable === void 0 ? [] : [`deployment config baseline sha256:${proposal.prepared.capabilityTable.baselineSha256}; apply sha256:${proposal.prepared.capabilityTable.applySha256}; rollback sha256:${proposal.prepared.capabilityTable.rollbackSha256}`],
-				`applied at: ${[...proposal.targetType === "capability" ? [`capability row ${proposal.targetId}`] : [], ...proposal.applied.targets].join(", ")} (approval ${proposal.applied.approvalRef})`,
-				proposal.targetType === "capability" ? "this restores the capability row baseline and removes new MCP definitions and any new Skill from production targets:" : proposal.targetType === "task_definition" ? "this restores the template library state; prior contracts stay fixed:" : "this restores the champion snapshot over production targets:",
-				...proposal.targetType === "capability" ? [`  - capability row ${proposal.targetId} in the production table`] : [],
-				...targets.map((target) => `  - ${target}`)
-			].join("\n");
-			const outcome = await ctx.approval.request({
-				agent,
-				toolName: "evolution_rollback",
-				callId: exec.callId,
-				reason,
-				signal: exec.signal
-			});
-			if (outcome !== "allowed-once") return `evolution_rollback: nothing written — ${denialReason(outcome)}; proposal ${proposal.proposalId} stays applied`;
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text(v)
+		},
+		execute: async (args, exec) => {
+			const undeclared = undeclaredParameters(args, PARAMETERS, "method_rollback");
+			if (undeclared !== void 0) return undeclared;
+			const caller = sessionId(exec, "method_rollback");
+			const agent = exec.agent;
+			if (agent === void 0) throw new Error("method_rollback: missing agent");
 			try {
-				const rolledback = await evolution.rollback(args.proposalId, caller, `approval:${exec.callId}`);
-				return [
-					`proposal ${rolledback.proposal.proposalId} [rolledback] ${rolledback.proposal.level} ${rolledback.proposal.targetType} ${rolledback.proposal.targetId} — ${rolledback.proposal.targetType === "capability" ? "production baseline restored" : "champion restored"}`,
-					"wrote production targets:",
-					...rolledback.proposal.targetType === "capability" ? [`  - capability row ${rolledback.proposal.targetId} restored in the production table`] : [],
-					...rolledback.targets.map((target) => `  - ${target}`),
-					restoreNote(rolledback.proposal.targetType),
-					`human approval: approval:${exec.callId}`
+				if (typeof args.toRevisionId !== "string" || args.toRevisionId.length === 0) throw new Error("toRevisionId is required");
+				if (typeof args.expectedActiveRevision !== "string" || args.expectedActiveRevision.length === 0) throw new Error("expectedActiveRevision is required");
+				if (!Number.isInteger(args.expectedGeneration) || args.expectedGeneration < 0) throw new Error("expectedGeneration is required");
+				if (typeof args.reason !== "string" || args.reason.trim().length === 0) throw new Error("reason must be non-empty free text");
+				const env = environmentPlaneOf(ctx);
+				const ledger = await methodLedgerPlaneOf(ctx, caller);
+				const view = await env.activeEnvironmentView(caller);
+				if (view.readOnly) return `method_rollback rejected: library "${view.libraryId}" is read-only (${view.protocol}); nothing was written`;
+				if (view.revisionId !== args.expectedActiveRevision || view.generation !== args.expectedGeneration) return [`method_rollback rejected: the active pointer is ${view.revisionId} g${view.generation}, not the approved`, `${args.expectedActiveRevision} g${String(args.expectedGeneration)}; nothing was written.`].join(" ");
+				if (args.toRevisionId === view.revisionId) return `method_rollback rejected: "${args.toRevisionId}" is the revision already in effect; nothing was written`;
+				const drafts = await ledger.list();
+				const effective = /* @__PURE__ */ new Set();
+				for (const draft of drafts) {
+					effective.add(draft.draft.baseRevision.revisionId);
+					if (draft.published !== void 0) effective.add(draft.published.revisionId);
+				}
+				if (!effective.has(args.toRevisionId)) return `method_rollback rejected: revision "${args.toRevisionId}" was never effective in library "${ledger.libraryId}" — a rollback restores a revision this library published, it does not adopt an arbitrary one; nothing was written`;
+				const library = {
+					id: ledger.libraryId,
+					root: ledger.root
+				};
+				const target = await readRevision(library, args.toRevisionId);
+				if (target === void 0) return `method_rollback rejected: library "${ledger.libraryId}" holds no revision "${args.toRevisionId}"; nothing was written`;
+				const mode = await methodModeFor(ctx, caller);
+				const decider = deciderFor(mode);
+				const current$1 = await env.activeRevisionFor(caller).catch(() => void 0);
+				const diff = renderDiff(await diffOfRevisions(current$1 ?? null, target).catch(() => ({
+					from: current$1?.manifest.revisionId ?? null,
+					to: target.manifest.revisionId,
+					files: [],
+					digest: "unavailable"
+				})));
+				const reason = [
+					`Method rollback of library ${ledger.libraryId}`,
+					renderVersionSwitch({
+						pointer: {
+							revisionId: view.revisionId,
+							generation: view.generation,
+							manifestDigest: view.manifestDigest
+						},
+						candidate: {
+							revisionId: target.manifest.revisionId,
+							manifestDigest: target.manifest.contentDigest
+						},
+						mode
+					}),
+					...diff,
+					`mode: ${mode === "auto" ? `auto (the platform policy decides and records; the decider is ${decider})` : `manual (a human decides; the decider is ${decider})`}`,
+					`reason: ${args.reason}`,
+					"nothing has been written yet; the pointer moves only if this approval is granted and the post-approval re-check still passes"
 				].join("\n");
+				const rolledBackDraft = drafts.find((draft) => draft.published?.revisionId === view.revisionId);
+				const intent = await env.openPointerIntent(caller);
+				if (intent !== null) {
+					if (!(intent.direction === "rollback" && intent.next.revisionId === args.toRevisionId && intent.expected?.revisionId === args.expectedActiveRevision)) return `method_rollback rejected: pointer intent ${intent.intentId} (${intent.direction} → ${intent.next.revisionId}) is open; nothing was written`;
+					const settled = (await env.reconcilePointer(caller)).find((entry) => entry.intentId === intent.intentId);
+					if (settled === void 0) return `method_rollback: no pointer moved — the open intent ${intent.intentId} reported no outcome; nothing was written`;
+					if (settled.result !== "blocked") await ledger.markRolledback({
+						draftId: rolledBackDraft?.draft.draftId ?? null,
+						revisionId: intent.next.revisionId,
+						supersededRevisionId: intent.expected?.revisionId ?? null,
+						intentId: intent.intentId,
+						...intent.approvalRef === void 0 ? {} : { approvalRef: intent.approvalRef },
+						actor: caller
+					});
+					return [...renderRecoveredIntent(intent, settled), `mode ${mode}; decided by ${decider}`].join("\n");
+				}
+				const approvalRef = `approval:${exec.callId}`;
+				const outcome = await ctx.approval.request({
+					agent,
+					toolName: "method_rollback",
+					callId: exec.callId,
+					reason,
+					signal: exec.signal
+				});
+				if (outcome !== "allowed-once") return `method_rollback: no pointer moved — ${denialReason(outcome)}; nothing was written`;
+				const [recheck, recheckMode] = await Promise.all([env.activeEnvironmentView(caller), methodModeFor(ctx, caller)]);
+				if (recheck.revisionId !== args.expectedActiveRevision || recheck.generation !== args.expectedGeneration) return [`method_rollback: no pointer moved — the pointer is now ${recheck.revisionId} g${recheck.generation}, not the approved`, `${args.expectedActiveRevision} g${String(args.expectedGeneration)}; the approval is spent and no second one is requested.`].join(" ");
+				if (recheckMode !== mode) return `method_rollback: no pointer moved — this graph's method mode changed from ${mode} to ${recheckMode} while the approval was open.`;
+				const targetAgain = await readRevision(library, args.toRevisionId);
+				if (targetAgain === void 0 || targetAgain.manifest.contentDigest !== target.manifest.contentDigest) return `method_rollback: no pointer moved — revision "${args.toRevisionId}" changed or vanished while the approval was open.`;
+				const rolledback = await env.rollbackRevision(caller, {
+					direction: "rollback",
+					source: {
+						kind: "revision",
+						revisionId: args.toRevisionId
+					},
+					expected: {
+						revisionId: args.expectedActiveRevision,
+						generation: args.expectedGeneration
+					},
+					approvalRef,
+					actor: caller
+				});
+				await ledger.markRolledback({
+					draftId: rolledBackDraft?.draft.draftId ?? null,
+					revisionId: rolledback.pointer.revisionId,
+					supersededRevisionId: rolledback.supersededRevisionId,
+					intentId: rolledback.completion.intentId,
+					approvalRef,
+					actor: caller
+				});
+				return [...renderPublishOutcome(rolledback, mode, decider), `next Runs admit against "${rolledback.pointer.revisionId}"; the candidate this rollback left stays on the ledger as its own record`].join("\n");
 			} catch (error) {
-				return `evolution_rollback rejected: ${message(error)}`;
+				return `method_rollback rejected: ${message(error)}`;
 			}
 		}
 	});
@@ -4508,11 +5188,11 @@ function deliveryText$1(delivery) {
 /** One answer as its reply: what was recorded, how it was delivered, and what it did to the asking run. */
 function answeredText(outcome) {
 	const answer = outcome.answer;
-	const lines = [`task_answer: answer ${answer.answerId} recorded for question ${answer.questionId}; ${deliveryText$1(outcome.delivery)}.`];
-	if (!outcome.created) lines.push("This is the answer the same request key already recorded: nothing was written a second time and the same identity stands.");
-	lines.push(answer.resolves ? "`resolves: true` releases exactly that question: the asking run's block is recomputed from the store, so another question of its own keeps it blocked. It changes no contract, no permission and no task state, and the framework does not vouch for what the answer says." : "`resolves: false` keeps the question open: the asking run stays blocked on it and your words are recorded as an answer that settled nothing. Answer it again with `resolves: true` once it is settled.");
-	lines.push("Your words reach the asking run as a message in its session and in its context, under the identity recorded here.");
-	return lines.join("\n");
+	const lines$1 = [`task_answer: answer ${answer.answerId} recorded for question ${answer.questionId}; ${deliveryText$1(outcome.delivery)}.`];
+	if (!outcome.created) lines$1.push("This is the answer the same request key already recorded: nothing was written a second time and the same identity stands.");
+	lines$1.push(answer.resolves ? "`resolves: true` releases exactly that question: the asking run's block is recomputed from the store, so another question of its own keeps it blocked. It changes no contract, no permission and no task state, and the framework does not vouch for what the answer says." : "`resolves: false` keeps the question open: the asking run stays blocked on it and your words are recorded as an answer that settled nothing. Answer it again with `resolves: true` once it is settled.");
+	lines$1.push("Your words reach the asking run as a message in its session and in its context, under the identity recorded here.");
+	return lines$1.join("\n");
 }
 function defineTaskAnswerTool(ctx) {
 	return defineTool({
@@ -4584,13 +5264,13 @@ function deliveryText(delivery) {
 /** One ask as its answer: what was recorded, how it was delivered, and what the asking run may do now. */
 function askedText(outcome) {
 	const question = outcome.question;
-	const lines = [`task_ask_parent: question ${question.questionId} recorded for your direct parent (run ${question.parentRunId}); ${deliveryText(outcome.delivery)}.`];
-	if (!outcome.created) lines.push("This is the question the same request key already recorded, word for word: nothing was written a second time and the same identity stands. Do not re-send it under a new key.");
+	const lines$1 = [`task_ask_parent: question ${question.questionId} recorded for your direct parent (run ${question.parentRunId}); ${deliveryText(outcome.delivery)}.`];
+	if (!outcome.created) lines$1.push("This is the question the same request key already recorded, word for word: nothing was written a second time and the same identity stands. Do not re-send it under a new key.");
 	if (question.blocking) {
-		lines.push("This run is now blocked on that answer: writes, shell commands, another decomposition and `task_submit_result` are refused until an answer with `resolves: true` is recorded — a child batch of this run ending does not lift the block, because nothing answers a question on your behalf. Stop the work that would write and end this step — an idle run waiting on this question gets no submission reminder.");
-		lines.push("The answer arrives as a message in this session and in your context, where the question stays while it is open; read it before you continue, and keep to what it says.");
-	} else lines.push("This run is not blocked: it may carry on working while the answer is pending, so it may pass you later in this session or in your context — do not treat the silence as an answer.");
-	return lines.join("\n");
+		lines$1.push("This run is now blocked on that answer: writes, shell commands, another decomposition and `task_submit_result` are refused until an answer with `resolves: true` is recorded — a child batch of this run ending does not lift the block, because nothing answers a question on your behalf. Stop the work that would write and end this step — an idle run waiting on this question gets no submission reminder.");
+		lines$1.push("The answer arrives as a message in this session and in your context, where the question stays while it is open; read it before you continue, and keep to what it says.");
+	} else lines$1.push("This run is not blocked: it may carry on working while the answer is pending, so it may pass you later in this session or in your context — do not treat the silence as an answer.");
+	return lines$1.join("\n");
 }
 function defineTaskAskParentTool(ctx) {
 	return defineTool({
@@ -5477,63 +6157,63 @@ function renderMetrics(metrics) {
 }
 /** One line per dimension that the record actually carries: the observed facts, copied out, never rated and never narrated. */
 function renderDimensions(dimensions) {
-	const lines = [];
+	const lines$1 = [];
 	const outcome = dimensions.outcomeCorrectness;
-	if (outcome !== void 0) lines.push(`  dim outcome correctness: ${outcome.outcome}, criteria ${outcome.criteriaCount}, unmet [${outcome.unmetCriterionIds.join(", ")}]`);
+	if (outcome !== void 0) lines$1.push(`  dim outcome correctness: ${outcome.outcome}, criteria ${outcome.criteriaCount}, unmet [${outcome.unmetCriterionIds.join(", ")}]`);
 	const specification = dimensions.taskSpecification;
-	if (specification !== void 0) lines.push(`  dim task specification: objective ${specification.objectivePresent ? "present" : "empty"}, criteria ${specification.criteriaCount}, with command ${specification.criteriaWithCommand}`);
+	if (specification !== void 0) lines$1.push(`  dim task specification: objective ${specification.objectivePresent ? "present" : "empty"}, criteria ${specification.criteriaCount}, with command ${specification.criteriaWithCommand}`);
 	const acceptance = dimensions.acceptance;
 	if (acceptance !== void 0) {
 		const criteria = acceptance.criteria.map((item) => `${item.criterionId} ${item.mode}${item.hasCommand ? " +command" : ""}${item.mandatory ? "" : " optional"}`);
-		lines.push(`  dim acceptance: ${criteria.join("; ")}`);
+		lines$1.push(`  dim acceptance: ${criteria.join("; ")}`);
 	}
 	const decomposition = dimensions.decomposition;
-	if (decomposition !== void 0) lines.push(`  dim decomposition: depth ${decomposition.depth}, ${decomposition.decompositionStatus}, children ${decomposition.childCount}, edges in/out ${decomposition.incomingEdges}/${decomposition.outgoingEdges}`);
+	if (decomposition !== void 0) lines$1.push(`  dim decomposition: depth ${decomposition.depth}, ${decomposition.decompositionStatus}, children ${decomposition.childCount}, edges in/out ${decomposition.incomingEdges}/${decomposition.outgoingEdges}`);
 	const coverage = dimensions.capabilityCoverage;
-	if (coverage !== void 0) lines.push(`  dim capability coverage: ${coverage.closure}, granted [${coverage.granted.join(", ")}], missing [${coverage.missing.join(", ")}]`);
+	if (coverage !== void 0) lines$1.push(`  dim capability coverage: ${coverage.closure}, granted [${coverage.granted.join(", ")}], missing [${coverage.missing.join(", ")}]`);
 	const skill = dimensions.skillFit;
 	if (skill !== void 0) {
 		const loaded = (skill.loaded === void 0 ? "" : `, loaded [${skill.loaded.join(", ")}]`) + (skill.loadedOutsideGrant === void 0 ? "" : `, outside grant [${skill.loadedOutsideGrant.join(", ")}]`);
-		lines.push(`  dim skill fit: granted [${skill.granted.join(", ")}]${loaded}`);
+		lines$1.push(`  dim skill fit: granted [${skill.granted.join(", ")}]${loaded}`);
 	}
 	const tools = dimensions.toolFit;
 	if (tools !== void 0) {
 		const called = (tools.called === void 0 ? "" : `, called [${tools.called.map((item) => `${item.name} x${item.count}`).join(", ")}]`) + (tools.calledOutsideGrant === void 0 ? "" : `, outside grant [${tools.calledOutsideGrant.join(", ")}]`);
-		lines.push(`  dim tool fit: granted [${tools.granted.join(", ")}]${called}`);
+		lines$1.push(`  dim tool fit: granted [${tools.granted.join(", ")}]${called}`);
 	}
 	const context = dimensions.contextEfficiency;
 	if (context !== void 0) {
 		const tokens = context.tokens === void 0 ? "" : ` tokens in/out ${context.tokens.uncachedInputTokens}/${context.tokens.outputTokens}`;
 		const compactions = context.compactions === void 0 ? "" : ` compactions ${context.compactions}`;
 		const cache = context.tokens === void 0 ? "" : ` cache read/write ${context.tokens.cacheReadTokens}/${context.tokens.cacheWriteTokens}`;
-		lines.push(`  dim context efficiency:${tokens}${compactions}${cache}`);
+		lines$1.push(`  dim context efficiency:${tokens}${compactions}${cache}`);
 	}
-	return lines;
+	return lines$1;
 }
 /** One review line, with the session id a reader drills into. Printing it here is what lets a diagnosis point `session_trace` at the session the review came from without a second lookup (§2.7.5). */
 function renderReview(review) {
 	const duration = review.durationMs === void 0 ? "" : ` duration ${review.durationMs}ms`;
 	const session = review.sessionId === void 0 ? "" : ` session ${review.sessionId}`;
-	const lines = [`- review ${reviewRef(review)} [${review.outcome}]${duration} evidence: [${review.evidenceRefs.join(", ")}]${session}`];
-	if (review.relatedTaskIds !== void 0) lines.push(`  relatedTaskIds: [${review.relatedTaskIds.join(", ")}]`);
-	if (review.localizedCause !== void 0) lines.push(`  cause: ${review.localizedCause}`);
-	for (const anomaly of review.anomalies) lines.push(`  anomaly: ${anomaly}`);
+	const lines$1 = [`- review ${reviewRef(review)} [${review.outcome}]${duration} evidence: [${review.evidenceRefs.join(", ")}]${session}`];
+	if (review.relatedTaskIds !== void 0) lines$1.push(`  relatedTaskIds: [${review.relatedTaskIds.join(", ")}]`);
+	if (review.localizedCause !== void 0) lines$1.push(`  cause: ${review.localizedCause}`);
+	for (const anomaly of review.anomalies) lines$1.push(`  anomaly: ${anomaly}`);
 	for (const criterion of review.criteria ?? []) {
 		const judge = criterion.verifierId === void 0 ? "" : criterion.verifierVersion === void 0 ? ` [${criterion.verifierId}]` : ` [${criterion.verifierId}@${criterion.verifierVersion}]`;
 		const command = criterion.command === void 0 ? "" : ` — $ ${criterion.command}`;
 		const exit = criterion.exitCode === void 0 ? "" : ` exit ${criterion.exitCode}`;
 		const log = criterion.logRef === void 0 ? "" : ` log ${criterion.logRef}`;
 		const unknown = criterion.unknownKind === void 0 ? "" : ` unknownKind ${criterion.unknownKind}`;
-		lines.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${judge}${exit}${command}${log}${unknown}`);
+		lines$1.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${judge}${exit}${command}${log}${unknown}`);
 	}
-	for (const blocker of review.blockedBy ?? []) lines.push(`  blockedBy ${blocker.taskId} [${blocker.outcome}]`);
+	for (const blocker of review.blockedBy ?? []) lines$1.push(`  blockedBy ${blocker.taskId} [${blocker.outcome}]`);
 	if (review.metrics !== void 0) {
 		const metrics = renderMetrics(review.metrics);
-		if (metrics.length > 0) lines.push(`  metrics: ${metrics}`);
+		if (metrics.length > 0) lines$1.push(`  metrics: ${metrics}`);
 	}
-	if (review.dimensions !== void 0) lines.push(...renderDimensions(review.dimensions));
-	if (review.logTail !== void 0) lines.push("  logTail:", ...review.logTail.split("\n").map((line) => `    ${line}`));
-	return lines;
+	if (review.dimensions !== void 0) lines$1.push(...renderDimensions(review.dimensions));
+	if (review.logTail !== void 0) lines$1.push("  logTail:", ...review.logTail.split("\n").map((line) => `    ${line}`));
+	return lines$1;
 }
 /** How far one diagnosis's supervision has gone: the work items the coordination store holds for its round. */
 function supervisionMark(diagnosis, work) {
@@ -5543,29 +6223,29 @@ function supervisionMark(diagnosis, work) {
 }
 function renderDiagnosis(diagnosis, work) {
 	const producer = diagnosis.producedBy === void 0 ? "" : diagnosis.producedBy.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? ` [agent ${diagnosis.producedBy.sessionId}]` : ` [${diagnosis.producedBy.kind}]`;
-	const lines = [`- ${diagnosis.diagnosisId} [${diagnosis.confidence}] ${diagnosis.localizedCause}${producer}`];
-	lines.push(`  observation: ${diagnosis.observedFailure}`, `  scope: ${diagnosis.scope}; task ${diagnosis.taskId}`, `  reviewRefs: [${diagnosis.reviewRefs.join(", ")}]; evidenceRefs: [${diagnosis.evidenceRefs.join(", ")}]; relatedTaskIds: [${(diagnosis.relatedTaskIds ?? []).join(", ")}]`);
+	const lines$1 = [`- ${diagnosis.diagnosisId} [${diagnosis.confidence}] ${diagnosis.localizedCause}${producer}`];
+	lines$1.push(`  observation: ${diagnosis.observedFailure}`, `  scope: ${diagnosis.scope}; task ${diagnosis.taskId}`, `  reviewRefs: [${diagnosis.reviewRefs.join(", ")}]; evidenceRefs: [${diagnosis.evidenceRefs.join(", ")}]; relatedTaskIds: [${(diagnosis.relatedTaskIds ?? []).join(", ")}]`);
 	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) {
 		const header = diagnosis.producedBy?.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? `judgements (agent ${diagnosis.producedBy.sessionId})` : "judgements";
-		lines.push(`  ${header}:`);
-		for (const judgement of diagnosis.judgements) lines.push(`    ${judgement.dimension}: ${judgement.verdict} — ${judgement.rationale} refs [${judgement.evidenceRefs.join(", ")}]`);
+		lines$1.push(`  ${header}:`);
+		for (const judgement of diagnosis.judgements) lines$1.push(`    ${judgement.dimension}: ${judgement.verdict} — ${judgement.rationale} refs [${judgement.evidenceRefs.join(", ")}]`);
 	}
-	for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
-	lines.push(`  supervision: ${supervisionMark(diagnosis, work)}`);
-	return lines;
+	for (const proposal of diagnosis.proposals) lines$1.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
+	lines$1.push(`  supervision: ${supervisionMark(diagnosis, work)}`);
+	return lines$1;
 }
 /** What the exact source run was bound to and loaded (S1-C item 4). */
 function renderBindings(snapshot, source) {
-	const lines = [];
+	const lines$1 = [];
 	for (const run of snapshot.runs.filter((item) => item.taskId === source.taskId && item.runId === source.runId)) {
 		const binding = run.providerBinding;
 		if (binding === void 0) continue;
 		const skills = binding.skills.length === 0 ? "no provider skill" : binding.skills.map((skill) => `${skill.name} [${skill.role}] content ${skill.contentDigest.slice(0, 12)}${skill.contractDigest === null ? "" : ` contract ${skill.contractDigest.slice(0, 12)}`}`).join("; ");
 		const servers = binding.mcpServers.length === 0 ? "" : `; mcp ${binding.mcpServers.map((server) => server.serverName).join(", ")}`;
 		const snapshotRoot = binding.snapshotRoot === void 0 ? "" : `; snapshot ${binding.snapshotRoot}`;
-		lines.push(`- run ${run.runId} [${run.status}] bound registry ${binding.registryRevision.slice(0, 12)}: ${skills}${servers}${snapshotRoot}`);
+		lines$1.push(`- run ${run.runId} [${run.status}] bound registry ${binding.registryRevision.slice(0, 12)}: ${skills}${servers}${snapshotRoot}`);
 	}
-	return lines;
+	return lines$1;
 }
 /** One exact source in full, with bounded same-graph evidence navigation through the existing read tools. */
 function buildReviewPack(input) {
@@ -5580,7 +6260,7 @@ function buildReviewPack(input) {
 	const diagnoses = snapshot.diagnoses.filter((item) => item.taskId === task.taskId || item.reviewRefs.includes(reviewRef(source)) || item.relatedTaskIds?.includes(task.taskId));
 	const sourceRun = source.runId === null ? void 0 : snapshot.runs.find((run) => run.runId === source.runId && run.taskId === taskId);
 	const latestRunId = task.runIds.at(-1);
-	const lines = [
+	const lines$1 = [
 		`review pack for task ${task.taskId} [${task.status}] depth ${task.depth}`,
 		`source: review ${reviewRef(source)}${review === void 0 ? " (not on the record)" : ` [${review.outcome}]`}`,
 		`source run: ${sourceRun === void 0 ? "none" : `${sourceRun.runId} [${sourceRun.status}] session ${sourceRun.sessionId ?? review?.sessionId ?? "unknown"}; ${sourceRun.runId === latestRunId ? "latest run" : "historical run"}; preset ${sourceRun.agentPreset ?? "unknown"}`}; latest run of task: ${latestRunId ?? "none"}`,
@@ -5596,11 +6276,11 @@ function buildReviewPack(input) {
 	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
 	const footerReserve = 512;
 	const navigationBytes = navigation.reduce((total, line) => total + utf8Bytes(line) + 1, 0);
-	if (utf8Bytes(lines.join("\n")) + navigationBytes + footerReserve > budget.maxBytes) return `task_review_pack: exact source ${reviewRef(source)} exceeds the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound; its full record was not shortened. Read it in pages with context_read kind:"review" ref:${JSON.stringify({
+	if (utf8Bytes(lines$1.join("\n")) + navigationBytes + footerReserve > budget.maxBytes) return `task_review_pack: exact source ${reviewRef(source)} exceeds the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound; its full record was not shortened. Read it in pages with context_read kind:"review" ref:${JSON.stringify({
 		taskId,
 		runId: source.runId
 	})}${source.runId === null ? "" : `, and kind:"run" ref:${JSON.stringify(source.runId)}`}; task_status scope:"graph" navigates this graph.`;
-	budget.addAll(lines);
+	budget.addAll(lines$1);
 	budget.addAll(navigation);
 	const tasks = [...snapshot.tasks].sort((left, right) => left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0);
 	if (budgetList(budget, {
@@ -5613,7 +6293,7 @@ function buildReviewPack(input) {
 			const template = entry.templateRef === void 0 ? "unknown" : `${entry.templateRef.id}@${entry.templateRef.version} digest ${entry.templateRef.digest.slice(0, 12)}`;
 			const definition = entry.definitionRef === void 0 ? "unknown" : `${entry.definitionRef.taskType}@${entry.definitionRef.version}`;
 			const diagnosisRefs = snapshot.diagnoses.filter((item) => item.taskId === entry.taskId || item.relatedTaskIds?.includes(entry.taskId)).map((item) => item.diagnosisId);
-			const lines$1 = [`- task ${entry.taskId} [${entry.status}] parent ${entry.parentTaskId ?? "none"}; dependencies [${incoming$1.join(", ")}]; blocks [${outgoing$1.join(", ")}]; definition ${definition}; template ${template}; diagnoses [${diagnosisRefs.join(", ")}]`];
+			const lines$2 = [`- task ${entry.taskId} [${entry.status}] parent ${entry.parentTaskId ?? "none"}; dependencies [${incoming$1.join(", ")}]; blocks [${outgoing$1.join(", ")}]; definition ${definition}; template ${template}; diagnoses [${diagnosisRefs.join(", ")}]`];
 			for (const run of snapshot.runs.filter((item) => item.taskId === entry.taskId)) {
 				const review$1 = reviewForSource(snapshot, {
 					taskId: entry.taskId,
@@ -5626,10 +6306,10 @@ function buildReviewPack(input) {
 				const skills = binding === void 0 ? "unknown" : binding.skills.map((skill) => `${skill.name}[${skill.role}] content ${skill.contentDigest.slice(0, 12)} contract ${skill.contractDigest?.slice(0, 12) ?? "unknown"}`).join("; ") || "none";
 				const frozen = latest || exact ? `; preset ${run.agentPreset ?? "unknown"}; registry ${binding?.registryRevision.slice(0, 12) ?? "unknown"}; frozen skills [${skills}]` : "";
 				const metrics = review$1?.metrics === void 0 ? "" : renderMetrics(review$1.metrics);
-				lines$1.push(`  run ${run.runId} [${run.status}; ${version}] session ${run.sessionId ?? review$1?.sessionId ?? "unknown"}; review ${review$1 === void 0 ? "none" : `${reviewRef(review$1)} [${review$1.outcome}]`}${frozen}; observed counters ${metrics || "unknown"}`);
+				lines$2.push(`  run ${run.runId} [${run.status}; ${version}] session ${run.sessionId ?? review$1?.sessionId ?? "unknown"}; review ${review$1 === void 0 ? "none" : `${reviewRef(review$1)} [${review$1.outcome}]`}${frozen}; observed counters ${metrics || "unknown"}`);
 			}
-			for (const review$1 of snapshot.reviews.filter((item) => item.taskId === entry.taskId && item.runId === void 0)) lines$1.push(`  review ${reviewRef(review$1)} [${review$1.outcome}; no-run source]`);
-			return lines$1;
+			for (const review$1 of snapshot.reviews.filter((item) => item.taskId === entry.taskId && item.runId === void 0)) lines$2.push(`  review ${reviewRef(review$1)} [${review$1.outcome}; no-run source]`);
+			return lines$2;
 		},
 		tail: (count) => [`navigation shown: ${count}/${tasks.length} tasks. Continue task_status scope:"graph" offset:${count}, then context_read for exact task, run, review and diagnosis refs; pages are separate observations.`]
 	}) === void 0) budget.add("Graph navigation did not fit; use task_status scope:\"graph\" offset:0 and context_read for exact records.");
@@ -5862,18 +6542,18 @@ function renderExistingWork(work, snapshot) {
 	const status = work.completion?.result.kind ?? (diagnosis === void 0 ? "open" : "recorded");
 	const head = `task_review_agent: source ${sourceRef(assignment.subject.source)} already has this work item (${workLabel(work)}, session ${assignment.sessionId}, ${status}) — returning it; no review session started`;
 	if (diagnosis === void 0) return status === "interrupted" || status === "protocol-failure" ? `${head}; a new review for this source needs an explicit requestKey` : `${head}; its diagnosis is not in the store`;
-	const lines = [
+	const lines$1 = [
 		head,
 		`observation: ${diagnosis.observedFailure}`,
 		`conclusion: ${diagnosis.localizedCause}`,
 		`scope: ${diagnosis.scope}; related tasks: ${diagnosis.relatedTaskIds?.join(", ") || "none"}`,
 		`review refs: ${diagnosis.reviewRefs.join(", ")}; evidence refs: ${diagnosis.evidenceRefs.join(", ") || "none"}`
 	];
-	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) lines.push(`judgements (agent ${assignment.sessionId}):`, ...renderJudgements(diagnosis.judgements));
-	lines.push(`diagnosis ${diagnosis.diagnosisId} recorded [${diagnosis.confidence}]`);
-	if (diagnosis.proposals.length === 0) lines.push("proposals: none — the conclusion carries no suggestion");
-	else for (const proposal of diagnosis.proposals) lines.push(`proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
-	return lines.join("\n");
+	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) lines$1.push(`judgements (agent ${assignment.sessionId}):`, ...renderJudgements(diagnosis.judgements));
+	lines$1.push(`diagnosis ${diagnosis.diagnosisId} recorded [${diagnosis.confidence}]`);
+	if (diagnosis.proposals.length === 0) lines$1.push("proposals: none — the conclusion carries no suggestion");
+	else for (const proposal of diagnosis.proposals) lines$1.push(`proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
+	return lines$1.join("\n");
 }
 /** What one refusal says, by name, before any assignment or spawn exists. */
 function renderRefusal(outcome, source, storeId) {
@@ -6069,19 +6749,19 @@ function defineTaskVerifyTool(ctx) {
 
 //#endregion
 //#region src/index.ts
-/** The shipped switch position: `off`. */
-const DEFAULT_EVOLUTION = "off";
+/** The shipped switch position: `on` — the method tools are the one way a method changes. */
+const DEFAULT_METHOD_TOOLS = "on";
 const Supervision = z.object({ coordinationBudget: z.number().default(DEFAULT_SUPERVISION.coordinationBudget) });
 const ConfigSchema = z.object({
-	evolution: z.union([z.const("off"), z.const("on")]).default(DEFAULT_EVOLUTION),
+	methodTools: z.union([z.const("off"), z.const("on")]).default(DEFAULT_METHOD_TOOLS),
 	supervision: Supervision.default({ ...DEFAULT_SUPERVISION })
 });
-/** The evolution exposure this composition resolved, provided on the agent's own fiber as `ctx.singularityEvolution`. */
-var EvolutionExposure = class extends Service {
-	/** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
+/** The method-tool exposure this composition resolved, provided on the agent's own fiber as `ctx.singularityMethods`. */
+var MethodToolsExposure = class extends Service {
+	/** `true` when `Config.methodTools` is `on`, i.e. the six `method_*` tools are registered. */
 	enabled;
 	constructor(ctx, enabled) {
-		super(ctx, "singularityEvolution");
+		super(ctx, "singularityMethods");
 		this.enabled = enabled;
 	}
 };
@@ -6133,7 +6813,7 @@ var SingularityAgent = class extends Service {
 		super(ctx, "singularityAgent");
 		this.assertClosedConfig(config);
 		const supervision = configureSupervision(config?.supervision);
-		const evolution = config?.evolution ?? DEFAULT_EVOLUTION;
+		const methodTools = config?.methodTools ?? DEFAULT_METHOD_TOOLS;
 		ctx.plugin(HitlService);
 		this.evolution = new EvolutionService(ctx, {
 			repoRoot: REPO_ROOT,
@@ -6142,7 +6822,7 @@ var SingularityAgent = class extends Service {
 		});
 		new EscalationService(ctx);
 		new ProposalReviewService(ctx);
-		new EvolutionExposure(ctx, evolution === "on");
+		new MethodToolsExposure(ctx, methodTools === "on");
 		new SupervisionExposure(ctx, supervision);
 		ctx.effect(() => ctx.singularityContext.registerCoordinationBindingSource(coordinationBindingSource()), "singularityAgent: coordination binding source");
 		ctx.effect(() => installCoordinationDriver(ctx).dispose, "singularityAgent: coordination driver");
@@ -6181,16 +6861,13 @@ var SingularityAgent = class extends Service {
 		ctx.tools.register(defineReviewerCompleteTool(ctx));
 		ctx.tools.register(defineTaskBudgetExtendTool(ctx));
 		ctx.tools.register(defineTaskDiagnoseTool(ctx));
-		if (evolution === "on") {
-			ctx.tools.register(defineEvolutionProposeTool(ctx));
-			ctx.tools.register(defineEvolutionCandidateTool(ctx));
-			ctx.tools.register(defineEvolutionPrepareTool(ctx));
-			ctx.tools.register(defineEvolutionReplayTool(ctx));
-			ctx.tools.register(defineEvolutionGateTool(ctx));
-			ctx.tools.register(defineEvolutionDecideTool(ctx));
-			ctx.tools.register(defineEvolutionApplyTool(ctx));
-			ctx.tools.register(defineEvolutionRollbackTool(ctx));
-			ctx.tools.register(defineEvolutionListTool(ctx));
+		if (methodTools === "on") {
+			ctx.tools.register(defineMethodListTool(ctx));
+			ctx.tools.register(defineMethodDraftTool(ctx));
+			ctx.tools.register(defineMethodEvaluateTool(ctx));
+			ctx.tools.register(defineMethodPublishTool(ctx));
+			ctx.tools.register(defineMethodDiscardTool(ctx));
+			ctx.tools.register(defineMethodRollbackTool(ctx));
 		}
 		ctx.tools.register(defineEscalateTool(ctx));
 	}
@@ -6210,7 +6887,7 @@ var SingularityAgent = class extends Service {
 	/** Refuse a configuration member this plugin does not read. The schema keeps unknown keys on the object it validates, so this is where a caller's typo is caught: */
 	assertClosedConfig(config) {
 		if (config === void 0) return;
-		const known = new Set(["evolution", "supervision"]);
+		const known = new Set(["methodTools", "supervision"]);
 		const unknown = Object.keys(config).filter((key) => !known.has(key));
 		if (unknown.length > 0) throw new Error(`singularity-agent: the configuration names [${unknown.join(", ")}], which this plugin does not read; a member nobody reads refuses to start rather than being silently ignored`);
 		const supervision = config.supervision;
@@ -6228,4 +6905,4 @@ var SingularityAgent = class extends Service {
 var src_default = SingularityAgent;
 
 //#endregion
-export { DEFAULT_EVOLUTION, DEFAULT_SUPERVISION, EscalationService, HitlService, ProposalReviewService, SingularityAgent, src_default as default, deploymentModelSelection };
+export { DEFAULT_METHOD_TOOLS, DEFAULT_SUPERVISION, EscalationService, HitlService, ProposalReviewService, SingularityAgent, src_default as default, deploymentModelSelection };

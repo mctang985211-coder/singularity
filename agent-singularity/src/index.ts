@@ -28,15 +28,12 @@ import { defineTaskLibraryTool } from './tools/task-library.ts'
 import { defineCapabilityListTool } from './tools/capability-list.ts'
 import { defineContextReadTool } from './tools/context-read.ts'
 import { defineEscalateTool } from './tools/escalate.ts'
-import { defineEvolutionApplyTool } from './tools/evolution-apply.ts'
-import { defineEvolutionCandidateTool } from './tools/evolution-candidate.ts'
-import { defineEvolutionDecideTool } from './tools/evolution-decide.ts'
-import { defineEvolutionGateTool } from './tools/evolution-gate.ts'
-import { defineEvolutionListTool } from './tools/evolution-list.ts'
-import { defineEvolutionPrepareTool } from './tools/evolution-prepare.ts'
-import { defineEvolutionProposeTool } from './tools/evolution-propose.ts'
-import { defineEvolutionReplayTool } from './tools/evolution-replay.ts'
-import { defineEvolutionRollbackTool } from './tools/evolution-rollback.ts'
+import { defineMethodDiscardTool } from './tools/method-discard.ts'
+import { defineMethodDraftTool } from './tools/method-draft.ts'
+import { defineMethodEvaluateTool } from './tools/method-evaluate.ts'
+import { defineMethodListTool } from './tools/method-list.ts'
+import { defineMethodPublishTool } from './tools/method-publish.ts'
+import { defineMethodRollbackTool } from './tools/method-rollback.ts'
 import { defineMarkReadyTool } from './tools/mark-ready.ts'
 import { defineSpawnTool } from './tools/spawn.ts'
 import { defineTaskAnswerTool } from './tools/task-answer.ts'
@@ -65,31 +62,31 @@ export type { SupervisionConfig } from './coordination/supervision.ts'
 
 /** Plugin configuration — the deployment's composition, not a model's choice. */
 export interface Config {
-  /** Whether this composition registers the nine `evolution_*` tools on the global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} — registers none of them: no model surface (root, granted worker, or the */
-  evolution: 'off' | 'on'
+  /** Whether this composition registers the six `method_*` tools on the global layer. `on` — the shipped default, see {@link DEFAULT_METHOD_TOOLS} — registers all six; `off` registers none, so no model surface (root, granted worker) can read, draft or publish a method. */
+  methodTools: 'off' | 'on'
   /** The review/supervision policy: the coordination allowance a store's coordination agents spend (see {@link SupervisionConfig}). */
   supervision?: SupervisionConfig
 }
 
-/** The shipped switch position: `off`. */
-export const DEFAULT_EVOLUTION: 'off' = 'off'
+/** The shipped switch position: `on` — the method tools are the one way a method changes. */
+export const DEFAULT_METHOD_TOOLS: 'on' = 'on'
 
 const Supervision: z<SupervisionConfig> = z.object({
   coordinationBudget: z.number().default(DEFAULT_SUPERVISION.coordinationBudget),
 })
 
 const ConfigSchema: z<Config> = z.object({
-  evolution: z.union([z.const('off'), z.const('on')]).default(DEFAULT_EVOLUTION),
+  methodTools: z.union([z.const('off'), z.const('on')]).default(DEFAULT_METHOD_TOOLS),
   supervision: Supervision.default({ ...DEFAULT_SUPERVISION }),
 })
 
-/** The evolution exposure this composition resolved, provided on the agent's own fiber as `ctx.singularityEvolution`. */
-class EvolutionExposure extends Service {
-  /** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
+/** The method-tool exposure this composition resolved, provided on the agent's own fiber as `ctx.singularityMethods`. */
+class MethodToolsExposure extends Service {
+  /** `true` when `Config.methodTools` is `on`, i.e. the six `method_*` tools are registered. */
   readonly enabled: boolean
 
   constructor(ctx: Context, enabled: boolean) {
-    super(ctx, 'singularityEvolution')
+    super(ctx, 'singularityMethods')
     this.enabled = enabled
   }
 }
@@ -124,7 +121,7 @@ class SupervisionExposure extends Service {
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    singularityEvolution: EvolutionExposure
+    singularityMethods: MethodToolsExposure
     singularitySupervision: SupervisionExposure
   }
 }
@@ -157,11 +154,11 @@ export class SingularityAgent extends Service {
     super(ctx, 'singularityAgent')
     this.assertClosedConfig(config)
     const supervision = configureSupervision(config?.supervision)
-    const evolution = config?.evolution ?? DEFAULT_EVOLUTION
+    const methodTools = config?.methodTools ?? DEFAULT_METHOD_TOOLS
     ctx.plugin(HitlService)
-    // The evolution tools read `ctx.evolution`, and a service a child fiber
-    // provides is invisible to the parent that mounted it — so this assembly
-    // constructs the ledger on its own fiber and hands its service to the tools.
+    // The v4 evolution ledger stays mounted while old graphs are still readable:
+    // a deployment with a legacy library keeps its own startup reconciliation, and
+    // no model tool writes it any more.
     this.evolution = new EvolutionService(ctx, {
       repoRoot: REPO_ROOT,
       modelSelection: () => deploymentModelSelection(ctx),
@@ -174,8 +171,8 @@ export class SingularityAgent extends Service {
     // `ctx.proposalReviewChannel` softly and asks it when a batch waits for a
     new ProposalReviewService(ctx)
     // What this assembly did, said where a sibling can read it (the root agent's
-    // tool allow-list is the consumer) — see {@link EvolutionExposure}.
-    new EvolutionExposure(ctx, evolution === 'on')
+    // tool allow-list is the consumer) — see {@link MethodToolsExposure}.
+    new MethodToolsExposure(ctx, methodTools === 'on')
     // The supervision policy, said where the task runtime reads it: the round
     // caps and the coordination allowance are one policy, declared once here.
     new SupervisionExposure(ctx, supervision)
@@ -247,18 +244,16 @@ export class SingularityAgent extends Service {
     // rest of the task surface — who may reach it (a graph's root coordination
     ctx.tools.register(defineTaskBudgetExtendTool(ctx))
     ctx.tools.register(defineTaskDiagnoseTool(ctx))
-    // The evolution chain is the one part of this surface a deployment may
-    // withhold (R0). Off, none of the nine is registered, so no agent surface
-    if (evolution === 'on') {
-      ctx.tools.register(defineEvolutionProposeTool(ctx))
-      ctx.tools.register(defineEvolutionCandidateTool(ctx))
-      ctx.tools.register(defineEvolutionPrepareTool(ctx))
-      ctx.tools.register(defineEvolutionReplayTool(ctx))
-      ctx.tools.register(defineEvolutionGateTool(ctx))
-      ctx.tools.register(defineEvolutionDecideTool(ctx))
-      ctx.tools.register(defineEvolutionApplyTool(ctx))
-      ctx.tools.register(defineEvolutionRollbackTool(ctx))
-      ctx.tools.register(defineEvolutionListTool(ctx))
+    // The six method tools are the one surface a deployment may withhold (R0).
+    // Registered together: a supervisor that cannot publish or a root that cannot
+    // read the method's state would each be a different, half-wired protocol.
+    if (methodTools === 'on') {
+      ctx.tools.register(defineMethodListTool(ctx))
+      ctx.tools.register(defineMethodDraftTool(ctx))
+      ctx.tools.register(defineMethodEvaluateTool(ctx))
+      ctx.tools.register(defineMethodPublishTool(ctx))
+      ctx.tools.register(defineMethodDiscardTool(ctx))
+      ctx.tools.register(defineMethodRollbackTool(ctx))
     }
     ctx.tools.register(defineEscalateTool(ctx))
   }
@@ -287,7 +282,7 @@ export class SingularityAgent extends Service {
   /** Refuse a configuration member this plugin does not read. The schema keeps unknown keys on the object it validates, so this is where a caller's typo is caught: */
   private assertClosedConfig(config: Config | undefined): void {
     if (config === undefined) return
-    const known = new Set(['evolution', 'supervision'])
+    const known = new Set(['methodTools', 'supervision'])
     const unknown = Object.keys(config).filter(key => !known.has(key))
     if (unknown.length > 0) {
       throw new Error(

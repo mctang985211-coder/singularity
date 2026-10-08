@@ -12,8 +12,11 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { foldMethods, openMethodLedger } from '@dangosys/dsh-singularity-evolution'
 import { optionalService } from '@dangosys/dsh-singularity-task-runtime'
 import type { CompletionApproval } from './store.ts'
+import { readCoordinationRows } from './store.ts'
 
 /** One method record a round produced, as the completion derives from it. */
 export interface RoundMethodRecord {
@@ -27,11 +30,27 @@ export interface RoundMethodRecord {
 /** The environment plane this module reads through, as the runtime answers it. */
 interface EnvironmentPlane {
   activeEnvironmentView?(sessionId: string): Promise<{ readonly revisionId: string }>
-  libraryForSession?(sessionId: string): Promise<{ readonly root: string }>
+  libraryForSession?(sessionId: string): Promise<{ readonly id: string; readonly root: string }>
 }
 
 function environmentPlane(ctx: Context): EnvironmentPlane | undefined {
   return optionalService<EnvironmentPlane>(ctx, 'taskRuntime')
+}
+
+/** The graph registry, read softly: the mode one graph runs its method in. */
+interface GraphReader {
+  graphForSession(sessionId: SessionId): Promise<{ rsi?: { humanReview?: boolean } | null }>
+}
+
+/** Whether this graph's method publication is decided by the platform policy rather than a person. */
+async function platformDecided(ctx: Context, graphId: string): Promise<boolean> {
+  const graphs = optionalService<GraphReader>(ctx, 'graphs')
+  if (graphs === undefined) return false
+  try {
+    return (await graphs.graphForSession(SessionId(graphId))).rsi?.humanReview === false
+  } catch {
+    return false
+  }
 }
 
 /** The revision this graph is running now, or `undefined` when no environment plane can answer. */
@@ -49,17 +68,94 @@ export async function activeMethodRevision(
 }
 
 /**
- * The method records one business round produced. The round-scoped record store
- * belongs to the method tool surface; until it lands, no deployment can answer
- * and this returns nothing — which the completion reports as `retain`/`trial`
- * rather than as a promotion nobody recorded.
+ * The method records one business round produced, read from this graph's own v5
+ * ledger (`<library>/methods.jsonl`) and bounded by the round's own assignment:
+ * a record counts for this round when it was appended after the round's
+ * supervisor was assigned. A deployment that has not mounted the environment
+ * plane answers nothing — the completion then reports `retain`/`trial` rather
+ * than a promotion nobody recorded.
  */
 export async function roundMethodRecords(
-  _ctx: Context,
-  _graphId: string,
-  _businessRound: number,
+  ctx: Context,
+  graphId: string,
+  businessRound: number,
 ): Promise<readonly RoundMethodRecord[]> {
-  return []
+  const plane = environmentPlane(ctx)
+  if (plane?.libraryForSession === undefined) return []
+  const boundary = await roundBoundaryOf(graphId, businessRound)
+  if (boundary === undefined) return []
+  let library: { readonly id: string; readonly root: string }
+  try {
+    library = await plane.libraryForSession(graphId)
+  } catch {
+    return []
+  }
+  let views
+  try {
+    const ledger = await openMethodLedger({ root: library.root, libraryId: library.id })
+    views = [...foldMethods(ledger.records()).values()]
+  } catch {
+    return []
+  }
+  const platform = await platformDecided(ctx, graphId)
+  const records: RoundMethodRecord[] = []
+  for (const view of views) {
+    const published = view.published
+    if (published !== undefined && published.at >= boundary) {
+      records.push({
+        action: 'publish',
+        revisionId: published.revisionId,
+        approvalRef: published.approvalRef ?? null,
+        decidedBy: platform ? 'platform_policy' : 'human',
+        reason: `draft ${view.draft.draftId} published as revision ${published.revisionId}`,
+      })
+    }
+    const rolledback = view.rolledback
+    if (rolledback !== undefined && rolledback.at >= boundary) {
+      records.push({
+        action: 'rollback',
+        revisionId: rolledback.revisionId,
+        approvalRef: rolledback.approvalRef ?? null,
+        decidedBy: platform ? 'platform_policy' : 'human',
+        reason: `draft ${view.draft.draftId} rolled back to revision ${rolledback.revisionId}`,
+      })
+    }
+    const discardedAt = lastHistoryAt(view.history, 'discard')
+    if (view.status === 'discarded' && discardedAt !== undefined && discardedAt >= boundary) {
+      records.push({
+        action: 'discard',
+        revisionId: null,
+        approvalRef: null,
+        decidedBy: 'operator',
+        reason: view.discardReason ?? `draft ${view.draft.draftId} discarded`,
+      })
+    }
+  }
+  return records.sort((left, right) => (left.action < right.action ? -1 : left.action > right.action ? 1 : 0))
+}
+
+/** The `at` of the last record of one kind in a draft's own history, or nothing. */
+function lastHistoryAt(history: readonly { readonly kind: string; readonly at: string }[], kind: string): string | undefined {
+  let at: string | undefined
+  for (const entry of history) if (entry.kind === kind) at = entry.at
+  return at
+}
+
+/** When this round's supervisor was assigned: the lower bound a record must be appended after to belong to this round. */
+async function roundBoundaryOf(graphId: string, businessRound: number): Promise<string | undefined> {
+  let rows
+  try {
+    rows = (await readCoordinationRows()) ?? []
+  } catch {
+    return undefined
+  }
+  const at = rows
+    .filter((row): row is Extract<(typeof rows)[number], { kind: 'assignment' }> => row.kind === 'assignment')
+    .filter(row => row.graphId === graphId && row.role === 'supervisor')
+    .filter(row => row.subject.kind === 'round' && row.subject.businessRound === businessRound)
+    .map(row => row.at)
+    .sort()
+  return at[0]
 }
 
 /** The last element of a list, or nothing. */

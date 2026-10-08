@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {} from '@dangosys/dsh-singularity-evolution'
-import { DEFAULT_EVOLUTION, SingularityAgent } from '../../src/index.ts'
+import { DEFAULT_METHOD_TOOLS, SingularityAgent } from '../../src/index.ts'
 import type { Config } from '../../src/index.ts'
 import {
   configureSupervision,
@@ -31,17 +31,14 @@ import {
   unregisterGraphImprovementCap,
 } from '../../src/coordination/supervision.ts'
 
-/** The nine tools the switch gates; nothing else on the surface depends on it. */
-const EVOLUTION_TOOLS = [
-  'evolution_propose',
-  'evolution_candidate',
-  'evolution_prepare',
-  'evolution_replay',
-  'evolution_gate',
-  'evolution_decide',
-  'evolution_apply',
-  'evolution_rollback',
-  'evolution_list',
+/** The six tools the switch gates; nothing else on the surface depends on it. */
+const METHOD_TOOLS = [
+  'method_list',
+  'method_draft',
+  'method_evaluate',
+  'method_publish',
+  'method_discard',
+  'method_rollback',
 ]
 
 /**
@@ -137,32 +134,33 @@ afterEach(() => {
 })
 
 describe('SingularityAgent assembly', () => {
-  it('registers the twenty-seven unconditional tools and no evolution tool on the shipped default', async () => {
+  it('registers the always-on tools plus the six method tools on the shipped default', async () => {
     const { tools } = await mount()
-    expect(DEFAULT_EVOLUTION).toBe('off')
+    expect(DEFAULT_METHOD_TOOLS).toBe('on')
 
-    for (const name of ALWAYS_TOOLS) expect(tools.has(name), name).toBe(true)
-    for (const name of EVOLUTION_TOOLS) expect(tools.has(name), name).toBe(false)
-    expect(tools.size).toBe(ALWAYS_TOOLS.length)
+    for (const name of [...ALWAYS_TOOLS, ...METHOD_TOOLS]) expect(tools.has(name), name).toBe(true)
+    expect(tools.size).toBe(ALWAYS_TOOLS.length + METHOD_TOOLS.length)
     // The name is the surface: a gate written as an internal permission check
-    // would still leave all thirty-six reachable by an un-granted worker.
-    expect([...tools.keys()].filter(name => name.startsWith('evolution_'))).toEqual([])
+    // would still leave all the method tools reachable by an un-granted worker.
+    expect([...tools.keys()].filter(name => name.startsWith('method_')).sort()).toEqual([...METHOD_TOOLS].sort())
   })
 
-  it('registers all thirty-six tools when the deployment turns evolution on', async () => {
-    const { tools } = await mount({ evolution: 'on' })
-    for (const name of [...ALWAYS_TOOLS, ...EVOLUTION_TOOLS]) expect(tools.has(name), name).toBe(true)
-    expect(tools.size).toBe(ALWAYS_TOOLS.length + EVOLUTION_TOOLS.length)
+  it('registers no method tool when the deployment withholds them', async () => {
+    const { tools } = await mount({ methodTools: 'off' })
+    for (const name of ALWAYS_TOOLS) expect(tools.has(name), name).toBe(true)
+    for (const name of METHOD_TOOLS) expect(tools.has(name), name).toBe(false)
+    expect(tools.size).toBe(ALWAYS_TOOLS.length)
+    expect([...tools.keys()].filter(name => name.startsWith('method_'))).toEqual([])
   })
 
   it('refuses a switch value this build does not implement, naming the member', async () => {
-    await expect(mount({ evolution: 'sometimes' } as unknown as Config)).rejects.toThrow(/evolution/)
-    await expect(mount({ evolution: true } as unknown as Config)).rejects.toThrow(/evolution/)
+    await expect(mount({ methodTools: 'sometimes' } as unknown as Config)).rejects.toThrow(/methodTools/)
+    await expect(mount({ methodTools: true } as unknown as Config)).rejects.toThrow(/methodTools/)
   })
 
   it('refuses a configuration member this plugin does not read, naming it', async () => {
-    await expect(mount({ evolution: 'off', evolutionEnabled: true } as unknown as Config))
-      .rejects.toThrow(/evolutionEnabled/)
+    await expect(mount({ methodTools: 'off', methodToolsEnabled: true } as unknown as Config))
+      .rejects.toThrow(/methodToolsEnabled/)
   })
 
   it('resolves the supervision block over its shipped defaults, and refuses an unknown member of it by name', async () => {
@@ -175,22 +173,22 @@ describe('SingularityAgent assembly', () => {
     expect(DEFAULT_SUPERVISION).toEqual({ coordinationBudget: 8 })
 
     // A partial block resolves against the defaults rather than blanking them.
-    await mount({ evolution: 'off', supervision: { coordinationBudget: 3 } } as Config)
+    await mount({ methodTools: 'off', supervision: { coordinationBudget: 3 } } as Config)
     expect(supervisionSettings()).toEqual({ coordinationBudget: 3 })
 
     // A member nobody reads refuses to start, exactly as a top-level typo does.
-    await expect(mount({ evolution: 'off', supervision: { coordinationBudgets: 3 } } as unknown as Config))
+    await expect(mount({ methodTools: 'off', supervision: { coordinationBudgets: 3 } } as unknown as Config))
       .rejects.toThrow(/coordinationBudgets/)
     // The two round caps this deployment no longer declares are refused too: the
     // RSI loop opens the rounds its graph names, and the runtime's own constant
     // is the backstop for every other store.
-    await expect(mount({ evolution: 'off', supervision: { maxRecoveryRounds: 1000 } } as unknown as Config))
+    await expect(mount({ methodTools: 'off', supervision: { maxRecoveryRounds: 1000 } } as unknown as Config))
       .rejects.toThrow(/maxRecoveryRounds/)
 
     // The resolved policy is exposed where a sibling reads it: the coordination
     // allowance the ledger reads, and the per-store cap the runtime's
     // `iteration-cap` check reads.
-    const exposed = await mount({ evolution: 'off', supervision: { coordinationBudget: 3 } } as Config)
+    const exposed = await mount({ methodTools: 'off', supervision: { coordinationBudget: 3 } } as Config)
     expect(exposed.ctx.get('singularitySupervision')).toMatchObject({ coordinationBudget: 3 })
     // A store an RSI loop declared reports that graph's own round count; a store
     // nobody declared reports no answer, so the runtime's constant stands.
@@ -209,14 +207,14 @@ describe('SingularityAgent assembly', () => {
     // How the root assembly reads it (agent-runtime, at root creation): a soft
     // query, so a composition with no singularity agent plugin reads the
     // absence as off rather than failing to load.
-    const read = (ctx: Context): boolean => ctx.get('singularityEvolution')?.enabled ?? false
+    const read = (ctx: Context): boolean => ctx.get('singularityMethods')?.enabled ?? false
 
-    const off = await mount()
+    const off = await mount({ methodTools: 'off' })
     expect(read(off.ctx)).toBe(false)
     await off.ctx.fiber.dispose()
-    expect(off.ctx.get('singularityEvolution')).toBeUndefined()
+    expect(off.ctx.get('singularityMethods')).toBeUndefined()
 
-    const on = await mount({ evolution: 'on' })
+    const on = await mount()
     expect(read(on.ctx)).toBe(true)
     await on.ctx.fiber.dispose()
   })
@@ -226,7 +224,7 @@ describe('SingularityAgent assembly', () => {
     // approval card is answered by a person or resolved on the spot, so this
     // composition declares no policy of its own and a config that still names
     // one is a member nobody reads.
-    await expect(mount({ evolution: 'on', publicationApproval: 'auto' } as unknown as Config)).rejects.toThrow(
+    await expect(mount({ methodTools: 'on', publicationApproval: 'auto' } as unknown as Config)).rejects.toThrow(
       /publicationApproval/,
     )
   })
@@ -284,7 +282,7 @@ describe('SingularityAgent assembly', () => {
     // `@dangosys/dsh-singularity-evolution`, whose own depth is different — so
     // the assembly computes it at the depth the ledger used to sit at, and
     // passes it in. This spec's own five-level path names the same directory.
-    const { ctx, home } = await mount({ evolution: 'on' })
+    const { ctx, home } = await mount({ methodTools: 'on' })
     const evolution = ctx.get('evolution')
     expect(evolution?.repoRoot).toBe(fileURLToPath(new URL('../../../../../', import.meta.url)))
     // and the data roots still resolve off DSH_HOME, exactly as before
@@ -293,66 +291,27 @@ describe('SingularityAgent assembly', () => {
     await ctx.fiber.dispose()
   })
 
-  it('advertises no experiment wall clock on the evolution_replay budget', async () => {
-    // The experiment has one optional ceiling left (`maxTokens`): a model reading
-    // this schema must not see a wall-clock field, and a caller that still sends
-    // one is refused by the service before the first write rather than run
-    // without the window it named.
-    const { tools } = await mount({ evolution: 'on' })
-    const replay = tools.get('evolution_replay') as unknown as {
-      parameters: { properties: Record<string, { properties?: Record<string, unknown> }> }
-    }
-    expect(Object.keys(replay.parameters.properties.budget!.properties!)).toEqual(['maxTokens', 'note'])
-    expect(JSON.stringify(replay.parameters)).not.toContain('wallTimeMs')
-  })
-
-  it('declares the candidate mutation required on the model surface, in whole-object and whole-row terms (A6)', async () => {
-    // `evolution_candidate` admits two shapes, and the model surface says which:
-    // a same-name improvement of an existing skill (the full replacement
-    // `SKILL.md` text, whose execution sidecar is *derived* at prepare rather
-    // than submitted) and — A6 — one whole capability row with an optional new
-    // execution skill. The mutation is required, the row carries its whole
-    // configuration rather than a patch, and a suggestion-only proposal is named
-    // as something that never becomes a candidate.
-    const { tools } = await mount({ evolution: 'on' })
-    const candidate = tools.get('evolution_candidate') as unknown as {
-      description: string
-      parameters: {
-        required: string[]
-        properties: Record<string, {
-          description?: string
-          type?: string
-        }>
-      }
-    }
-    expect(candidate.parameters.required).toContain('mutationJson')
-    expect(candidate.parameters.required).toContain('versionSet')
-    const mutation = candidate.parameters.properties.mutationJson!
-    expect(mutation.type).toBe('string')
-    expect(candidate.description).toContain('task_definition: {template:<complete canonical TaskTemplate>')
-    expect(candidate.description).toContain('Skill:')
-    expect(candidate.description).toContain('Capability:')
-    expect(candidate.description).toContain('mcpServers?')
-    expect(candidate.description).toContain('derived by this tool')
-  })
-
-  it('describes all nine evolution tools in whole-object terms, with no single-file claim left', async () => {
-    // K3-5: these descriptions are the model's only statement of what this build
-    // can do, and every one of them used to say "single-file" — a model reading
-    // that would look for a build that refuses to update an execution skill, or
-    // would try to submit a sidecar itself. The phrase is gone from all nine
-    // surfaces.
-    const { tools } = await mount({ evolution: 'on' })
-    for (const name of EVOLUTION_TOOLS) {
+  it('describes the six method tools in the one-approval protocol terms the supervisor runs', async () => {
+    // These descriptions are the model's only statement of what this build can
+    // do: a candidate is measured before it is published, exactly one approval
+    // shows the complete difference and the pointer switch, and a candidate the
+    // frozen strategy refused consumes no approval at all.
+    const { tools } = await mount()
+    for (const name of METHOD_TOOLS) expect(tools.has(name), name).toBe(true)
+    const publish = tools.get('method_publish') as unknown as { description: string }
+    expect(publish.description).toContain('compare-and-swap')
+    expect(publish.description).toContain('exactly one approval')
+    expect(publish.description).toContain('did not admit')
+    const draft = tools.get('method_draft') as unknown as { description: string }
+    expect(draft.description).toContain('edit budget')
+    expect(draft.description).toContain('screened before any measurement')
+    const evaluate = tools.get('method_evaluate') as unknown as { description: string }
+    expect(evaluate.description).toContain('three independent repetitions')
+    const discard = tools.get('method_discard') as unknown as { description: string }
+    expect(discard.description).toContain('No approval is requested')
+    for (const name of METHOD_TOOLS) {
       const tool = tools.get(name) as unknown as { description: string }
-      expect(tool.description, name).not.toMatch(/single-file|single file/i)
+      expect(tool.description, name).not.toMatch(/nine-step|gate answer/i)
     }
-    for (const name of ['evolution_prepare', 'evolution_apply', 'evolution_rollback', 'evolution_decide']) {
-      const tool = tools.get(name) as unknown as { description: string }
-      expect(tool.description, name).toMatch(/Task template|Task candidate/)
-      expect(tool.description, name).toContain('Skill')
-      expect(tool.description, name).toContain('capability')
-    }
-
   })
 })

@@ -375,7 +375,7 @@ export class AssemblyStack {
     // is a stand-in, and a stand-in records that its body ran.
     await mountContextReadCore(ctx)
     await ctx.plugin(SingularityAgent, {
-      evolution: 'off',
+      methodTools: 'off',
       ...(this.options.supervision === undefined ? {} : { supervision: this.options.supervision }),
     })
     for (const name of [...ROOT_TOOLS, ...OTHER_TOOLS]) {

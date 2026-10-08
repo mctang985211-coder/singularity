@@ -247,6 +247,8 @@ interface ResolvedGrant {
   readonly allow: readonly string[];
   /** Baseline names this composition does not offer; never fatal, the composition mounted nothing to take away. */
   readonly baselineUnavailable: readonly string[];
+  /** Whether the resolved surface holds a pointer-moving tool — the supervisor's own baseline is the only place one may come from. */
+  readonly methodAuthority: boolean;
 }
 /** The graph's live methods; execution workers instead receive their Run's frozen grant. */
 interface GraphSkillCatalogOptions {
@@ -343,6 +345,20 @@ declare function parseSkillFile(text: string, path: string): ParsedSkillFile;
 declare function skillRootsFor(cwd: string | undefined): Promise<string[]>;
 /** Locate the `SKILL.md` a granted skill name refers to under an explicit root list, in the given order. */
 declare function findSkillFileIn(roots: readonly string[], name: string): Promise<string | undefined>;
+//#endregion
+//#region src/method-authority.d.ts
+/** The two tools that move a library's effective environment pointer. */
+declare const METHOD_AUTHORITY_TOOLS: readonly string[];
+/** What a call to one of them answers on an agent that does not hold the authority. */
+declare const METHOD_AUTHORITY_DENIAL: string;
+/** Whether the tool is one the authority seal watches. */
+declare function isMethodAuthorityTool(name: string): boolean;
+/** Refuse a grant whose capability plane names an authority tool. */
+declare function assertNoMethodAuthorityGrant(grant: WorkerGrant): void;
+/** The authority one resolved grant carries: true only when its own allow-list holds such a tool. */
+declare function grantCarriesMethodAuthority(allow: readonly string[]): boolean;
+/** Deny the two pointer tools at execution time unless this agent was granted them. */
+declare function sealMethodAuthority(agentCtx: Context, allow: boolean): void;
 //#endregion
 //#region src/prompts/worker.prompts.d.ts
 /** Stable worker policy; each Task supplies its own result and acceptance. */
@@ -473,4 +489,4 @@ declare class AgentRuntime extends Service {
   private scope;
 }
 //#endregion
-export { type AgentMessageIntent, type AgentOptions, AgentRuntime, AgentRuntime as default, COORDINATION_SEALED_ALLOW, COORDINATION_WRITE_DENIAL, type CoordinationResumeDeps, CoordinationResumeRefusal, type CoordinationResumeRefusalCode, type CoordinatorResumeRequest, type GraphScope, type McpServerSpec, type MessageDelivery, type MessageDeliveryDeps, type MessageDeliveryReport, type MessageDeliveryStatus, type MessageRefusalCode, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, type ResolvedGrant, type RootRequest, type RuntimePromptSource, type SessionOwnLog, type SpawnRequest, type ToolCallBody, type ToolCallRef, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, type WorkerCapabilityGrant, type WorkerGrant, type WorkerResumeDeps, WorkerResumeRefusal, type WorkerResumeRefusalCode, type WorkerResumeRequest, type WorkerRole, type WorkerRunFacts, answerMessageText, applyWorkerGrant, findSkillFileIn, guardCoordinationWrites, isCoordinationSealed, parseSkillFile, questionMessageText, resumeCoordinationAgent, sealCoordinationSession, skillRootsFor, toolCallRefIn };
+export { type AgentMessageIntent, type AgentOptions, AgentRuntime, AgentRuntime as default, COORDINATION_SEALED_ALLOW, COORDINATION_WRITE_DENIAL, type CoordinationResumeDeps, CoordinationResumeRefusal, type CoordinationResumeRefusalCode, type CoordinatorResumeRequest, type GraphScope, METHOD_AUTHORITY_DENIAL, METHOD_AUTHORITY_TOOLS, type McpServerSpec, type MessageDelivery, type MessageDeliveryDeps, type MessageDeliveryReport, type MessageDeliveryStatus, type MessageRefusalCode, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, type ResolvedGrant, type RootRequest, type RuntimePromptSource, type SessionOwnLog, type SpawnRequest, type ToolCallBody, type ToolCallRef, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, type WorkerCapabilityGrant, type WorkerGrant, type WorkerResumeDeps, WorkerResumeRefusal, type WorkerResumeRefusalCode, type WorkerResumeRequest, type WorkerRole, type WorkerRunFacts, answerMessageText, applyWorkerGrant, assertNoMethodAuthorityGrant, findSkillFileIn, grantCarriesMethodAuthority, guardCoordinationWrites, isCoordinationSealed, isMethodAuthorityTool, parseSkillFile, questionMessageText, resumeCoordinationAgent, sealCoordinationSession, sealMethodAuthority, skillRootsFor, toolCallRefIn };

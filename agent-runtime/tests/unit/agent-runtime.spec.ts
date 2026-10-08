@@ -58,26 +58,28 @@ const ROOT_CORE_TOOLS = [
   'task_budget_extend',
 ]
 
-/** The nine tools the evolution chain is reached through; the deployment's switch registers them for the supervisor. */
-const EVOLUTION_TOOLS = [
-  'evolution_propose',
-  'evolution_candidate',
-  'evolution_prepare',
-  'evolution_replay',
-  'evolution_gate',
-  'evolution_decide',
-  'evolution_apply',
-  'evolution_rollback',
-  'evolution_list',
+/** The two method tools the switch adds to a root: observation and candidacy, never a pointer move. */
+const ROOT_METHOD_TOOLS = ['method_list', 'method_draft']
+
+/** The six method tools the switch registers; the supervisor's grant is what carries the pointer-moving two. */
+const METHOD_TOOLS = [
+  'method_list',
+  'method_draft',
+  'method_evaluate',
+  'method_publish',
+  'method_discard',
+  'method_rollback',
 ]
 
-/** The root's allow-list: the core tools plus `escalate`; the evolution chain is the supervisor's. */
-const ROOT_TOOLS = [...ROOT_CORE_TOOLS, 'escalate']
+/** The root's allow-list for one switch position: the core tools plus `escalate`, plus the method tools the switch registered. */
+function rootTools(methods: boolean): readonly string[] {
+  return [...ROOT_CORE_TOOLS, ...(methods ? ROOT_METHOD_TOOLS : []), 'escalate']
+}
 
 function context(
   roots: readonly SessionId[],
   status: 'idle' | 'running' = 'idle',
-  services: { readonly evolution?: { readonly enabled: boolean } } = {},
+  services: { readonly methods?: { readonly enabled: boolean } } = {},
 ) {
   const root = agent('root')
   const created: string[] = []
@@ -96,10 +98,10 @@ function context(
     reflect: { provide: () => {} },
     provide: () => {},
     // The deployment's evolution switch, as `agent-singularity` provides it on
-    // the assembly (`ctx.get('singularityEvolution')`): a context with no such
+    // the assembly (`ctx.get('singularityMethods')`): a context with no such
     // service — this default, and any composition that mounts no singularity
     // agent plugin — answers `undefined`, which the root assembly reads as off.
-    get: (name: string) => (name === 'singularityEvolution' ? services.evolution : undefined),
+    get: (name: string) => (name === 'singularityMethods' ? services.methods : undefined),
     agentDefaultModel: { currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }) },
     agentPresets: {
       defaultId: 'standard',
@@ -608,10 +610,10 @@ describe('AgentRuntime root lifecycle', () => {
     // hitl_approve routes through ctx.approval; the root session is pinned to
     // 'ask' whatever the bubble's bundle says, so the request reaches the answerer.
     expect(session.append).toHaveBeenCalledExactlyOnceWith('approval/policy', { policy: 'ask' })
-    // The composition carries no evolution exposure (this context mounts none),
-    // so neither its allow-list nor its prompt names the chain: a root that
-    // cannot call evolution_propose must not be told to.
-    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS })
+    // The composition carries no method exposure (this context mounts none), so
+    // neither its allow-list nor its prompt names one: a root that cannot read
+    // the method's state must not be told to.
+    expect(restrict).toHaveBeenCalledWith({ allow: rootTools(false) })
     const prompt = promptTextOf(section)
     expect(section).toHaveBeenCalledWith({
       name: 'singularity:root',
@@ -638,25 +640,25 @@ describe('AgentRuntime root lifecycle', () => {
     expect(prompt).not.toContain('task_recover')
   })
 
-  test('resumes a root on the same allow-list and states the evolution boundary when the deployment turned the chain on', async () => {
-    const state = context([id('root')], 'idle', { evolution: { enabled: true } })
+  test('resumes a root on the same allow-list and states the method boundary when the deployment turned the tools on', async () => {
+    const state = context([id('root')], 'idle', { methods: { enabled: true } })
     const runtime = new AgentRuntime(state.ctx as never)
     await runtime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
 
     const { restrict, section } = await assemble(state.resumeOptions[0])
-    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS })
+    expect(restrict).toHaveBeenCalledWith({ allow: rootTools(true) })
     const prompt = promptTextOf(section)
-    // The switch opens the chain for the supervisor; this surface still cannot
-    // call it, so the prompt names the boundary instead of tools it does not hold.
+    // The switch opens the pointer-moving tools for the supervisor; this surface
+    // still cannot call them, so the prompt names the boundary instead.
     expect(prompt).not.toContain('Evolution tools are available')
-    expect(prompt).toContain('You hold no evolution tools')
+    expect(prompt).toContain('You hold no publication authority')
     expect(prompt).toContain('Return improvement leads and capability gaps')
     expect(prompt).toContain('recorded human decisions')
     // The domain reference map is a deployed skill, not part of the general root prompt.
     expect(prompt).not.toContain('Buckyball')
   })
 
-  test('reads a context that provides no evolution exposure as the closed composition', async () => {
+  test('reads a context that provides no method exposure as the closed composition', async () => {
     const state = context([id('root')])
     const read = vi.fn(() => undefined)
     Object.assign(state.ctx, { get: read })
@@ -664,12 +666,12 @@ describe('AgentRuntime root lifecycle', () => {
     await runtime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
 
     // A composition that mounts no singularity agent plugin is read as off —
-    // never as "assume the chain is there".
+    // never as "assume the tools are there".
     const { restrict, section } = await assemble(state.resumeOptions[0])
-    expect(read).toHaveBeenCalledWith('singularityEvolution')
+    expect(read).toHaveBeenCalledWith('singularityMethods')
     const allow = (restrict.mock.calls[0]?.[0] as { allow: readonly string[] }).allow
-    expect(allow.filter(name => name.startsWith('evolution_'))).toEqual([])
-    expect(allow).toEqual(ROOT_TOOLS)
+    expect(allow.filter(name => name.startsWith('method_'))).toEqual([])
+    expect(allow).toEqual(rootTools(false))
     expect(promptTextOf(section)).not.toContain('evolution')
   })
 
@@ -686,7 +688,7 @@ describe('AgentRuntime root lifecycle', () => {
     expect(closedPrompt).not.toContain('Normalize clear requests')
     expect(closedPrompt).not.toContain('evolution')
 
-    const open = context([id('root')], 'idle', { evolution: { enabled: true } })
+    const open = context([id('root')], 'idle', { methods: { enabled: true } })
     const openRuntime = new AgentRuntime(open.ctx as never)
     await openRuntime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
     const openAssembly = await assemble(open.resumeOptions[0])
@@ -694,7 +696,7 @@ describe('AgentRuntime root lifecycle', () => {
 
     expect(openAllow).toContain('task_intake')
     expect(promptTextOf(openAssembly.section)).toContain('load task-coordination with skill')
-    expect(promptTextOf(openAssembly.section)).toContain('You hold no evolution tools')
+    expect(promptTextOf(openAssembly.section)).toContain('You hold no publication authority')
   })
 
   test('ensureRoot returns an interrupted running root to idle before resuming it', async () => {
@@ -727,8 +729,8 @@ describe('AgentRuntime root lifecycle', () => {
     expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(session, 'workspace-isolated')
     expect(session.append).toHaveBeenCalledExactlyOnceWith('approval/policy', { policy: 'ask' })
     // A newly created root is assembled on the same facts as a resumed one: with
-    // no exposure mounted, the nine names and the protocol behind them are absent.
-    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS })
+    // no exposure mounted, the six names and the protocol behind them are absent.
+    expect(restrict).toHaveBeenCalledWith({ allow: rootTools(false) })
     const prompt = promptTextOf(section)
     expect(prompt).toContain("coordinate the user's complete objective through task workers")
     expect(prompt).not.toContain('evolution')
@@ -736,8 +738,8 @@ describe('AgentRuntime root lifecycle', () => {
     expect(state.added).toEqual([['graph', { id: id('root'), name: 'Singularity', status: 'idle' }, true]])
   })
 
-  test('createRoot states the evolution boundary in the prompt when the deployment turned it on', async () => {
-    const state = context([], 'idle', { evolution: { enabled: true } })
+  test('createRoot states the method boundary in the prompt when the deployment turned them on', async () => {
+    const state = context([], 'idle', { methods: { enabled: true } })
     const runtime = new AgentRuntime(state.ctx as never)
     await runtime.createRoot({
       sessionId: id('root'),
@@ -746,10 +748,10 @@ describe('AgentRuntime root lifecycle', () => {
     })
 
     const { restrict, section } = await assemble(state.createOptions[0])
-    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS })
+    expect(restrict).toHaveBeenCalledWith({ allow: rootTools(true) })
     const prompt = promptTextOf(section)
-    expect(prompt).toContain('You hold no evolution tools')
-    expect(prompt).toContain('the RSI supervisor reviews the library')
+    expect(prompt).toContain('You hold no publication authority')
+    expect(prompt).toContain('the RSI supervisor evaluates the candidate')
     expect(prompt).not.toContain('Evolution tools are available')
     expect(prompt).not.toContain('Buckyball')
   })
@@ -945,27 +947,32 @@ describe('the spawn request contract (A2)', () => {
       expect(denialOf(guard, name)).toBeUndefined()
   })
 
-  test.each([false, true])('root-local tools obey the coordination allow-list (evolution=%s)', async enabled => {
-    const created = context([], 'idle', { evolution: { enabled } })
+  test.each([false, true])('root-local tools obey the coordination allow-list (methodTools=%s)', async enabled => {
+    const created = context([], 'idle', { methods: { enabled } })
     const runtime = new AgentRuntime(created.ctx as never)
     await runtime.createRoot({
       sessionId: id('root'),
       cwd: '/workspace',
       scope: { graphStoreId: 'graph', layoutStoreId: 'layout' },
     })
-    const resumed = context([id('root')], 'idle', { evolution: { enabled } })
+    const resumed = context([id('root')], 'idle', { methods: { enabled } })
     await new AgentRuntime(resumed.ctx as never).ensureRoot(id('root'), {
       graphStoreId: 'graph',
       layoutStoreId: 'layout',
     })
     for (const assembly of [await assemble(created.createOptions[0]), await assemble(resumed.resumeOptions[0])]) {
       expect(assembly.presentAs).toHaveBeenCalledExactlyOnceWith('native')
-      for (const name of ROOT_TOOLS) expect(denialOf(assembly.guard, name), name).toBeUndefined()
+      for (const name of rootTools(enabled)) expect(denialOf(assembly.guard, name), name).toBeUndefined()
       for (const name of ['run_code', 'subagent', 'subagent_fork', 'jobs', 'mcp_custom']) {
         expect(denialOf(assembly.guard, name), name).toContain('task_decompose')
       }
-      // The chain is the supervisor's: a root denies it even in a deployment that registered it.
-      for (const name of EVOLUTION_TOOLS) expect(denialOf(assembly.guard, name), name).toBeDefined()
+      // The pointer-moving tools are the supervisor's: a root denies them even in
+      // a deployment that registered them, while its own two method tools pass
+      // only where the switch registered them.
+      for (const name of ['method_evaluate', 'method_publish', 'method_discard', 'method_rollback'])
+        expect(denialOf(assembly.guard, name), name).toBeDefined()
+      for (const name of ROOT_METHOD_TOOLS)
+        expect(denialOf(assembly.guard, name), name)[enabled ? 'toBeUndefined' : 'toBeDefined']()
     }
   })
 

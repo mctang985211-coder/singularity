@@ -13,6 +13,12 @@ import { messageOf } from './messages.ts'
 import type { WorkerGrant } from './types.ts'
 import { isNativeDelegationTool, TASK_DELEGATION_DENIAL } from './delegation-guard.ts'
 import {
+  assertNoMethodAuthorityGrant,
+  grantCarriesMethodAuthority,
+  isMethodAuthorityTool,
+  sealMethodAuthority,
+} from './method-authority.ts'
+import {
   findSkillFile,
   listSkillFiles,
   readSkillFile,
@@ -99,6 +105,8 @@ export interface ResolvedGrant {
   readonly allow: readonly string[]
   /** Baseline names this composition does not offer; never fatal, the composition mounted nothing to take away. */
   readonly baselineUnavailable: readonly string[]
+  /** Whether the resolved surface holds a pointer-moving tool — the supervisor's own baseline is the only place one may come from. */
+  readonly methodAuthority: boolean
 }
 
 /** Compute the allow-list one grant resolves to; throws when a capability tool is not visible. */
@@ -110,6 +118,7 @@ export function resolveGrant(agentCtx: Context, agent: Agent, grant: WorkerGrant
       throw new Error(`agent-runtime: capability "${capability.capability}" declares native delegation tools [${bypasses.join(', ')}]; ${TASK_DELEGATION_DENIAL}`)
   }
   assertCapabilityTools(grant, visible)
+  assertNoMethodAuthorityGrant(grant)
   const allow = new Set<string>()
   for (const capability of grant.capabilities) for (const tool of capability.tools) allow.add(tool)
   for (const tool of grant.baseline) if (visible.has(tool) && !isNativeDelegationTool(tool)) allow.add(tool)
@@ -117,11 +126,13 @@ export function resolveGrant(agentCtx: Context, agent: Agent, grant: WorkerGrant
   // capability that named its preset keeps that preset's own tools, which no label could enumerate.
   if (grant.keepPresetTools) {
     const global = visibleToolNames(agentCtx)
-    for (const tool of visible) if (!global.has(tool) && !isNativeDelegationTool(tool)) allow.add(tool)
+    for (const tool of visible) if (!global.has(tool) && !isNativeDelegationTool(tool) && !isMethodAuthorityTool(tool)) allow.add(tool)
   }
+  const resolved = [...allow].sort()
   return {
-    allow: [...allow].sort(),
+    allow: resolved,
     baselineUnavailable: [...new Set(grant.baseline.filter(tool => !visible.has(tool)))].sort(),
+    methodAuthority: grantCarriesMethodAuthority(resolved),
   }
 }
 
@@ -271,7 +282,11 @@ export async function applyWorkerGrant(
   grant: WorkerGrant,
   graphCatalog?: GraphSkillCatalogOptions,
 ): Promise<void> {
-  const { allow } = resolveGrant(agentCtx, agent, grant)
+  const { allow, methodAuthority } = resolveGrant(agentCtx, agent, grant)
+  // The grant is the single place publication authority is decided, and the seal
+  // below is what makes a call to method_publish/method_rollback fail closed on
+  // every other agent — a preset or an MCP merge cannot raise it back.
+  sealMethodAuthority(agentCtx, methodAuthority)
   // An empty allow-list is the honest outcome of a composition that offers none of the declared tools.
   try {
     agentCtx.tools.restrict({ allow })

@@ -59,7 +59,7 @@ function harness(
     return {}
   })
   const ctx = {
-    tools: { schemas, restrict },
+    tools: { schemas, restrict, guard: vi.fn() },
     get: (name: string) => (name === 'skills' ? skills : undefined),
     // The cordis plugin seam mcp-client mounts through; captured, never run.
     plugin,

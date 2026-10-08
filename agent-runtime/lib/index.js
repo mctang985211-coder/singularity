@@ -207,6 +207,32 @@ function sealNativeDelegation(agentCtx) {
 }
 
 //#endregion
+//#region src/method-authority.ts
+/** The two tools that move a library's effective environment pointer. */
+const METHOD_AUTHORITY_TOOLS = ["method_publish", "method_rollback"];
+/** What a call to one of them answers on an agent that does not hold the authority. */
+const METHOD_AUTHORITY_DENIAL = "singularity: publish and rollback rest with the round supervisor (auto) or the answered publication approval (manual); draft a candidate with method_draft and let it be evaluated";
+/** Whether the tool is one the authority seal watches. */
+function isMethodAuthorityTool(name) {
+	return METHOD_AUTHORITY_TOOLS.includes(name);
+}
+/** Refuse a grant whose capability plane names an authority tool. */
+function assertNoMethodAuthorityGrant(grant) {
+	const declared = grant.capabilities.filter((capability) => capability.tools.some(isMethodAuthorityTool)).map((capability) => capability.capability);
+	if (declared.length === 0) return;
+	throw new Error(`agent-runtime: capabilit${declared.length > 1 ? "ies" : "y"} ${declared.map((name) => `"${name}"`).join(", ")} declares ${METHOD_AUTHORITY_TOOLS.join(" / ")}, which no capability may grant; ${METHOD_AUTHORITY_DENIAL}`);
+}
+/** The authority one resolved grant carries: true only when its own allow-list holds such a tool. */
+function grantCarriesMethodAuthority(allow) {
+	return allow.some(isMethodAuthorityTool);
+}
+/** Deny the two pointer tools at execution time unless this agent was granted them. */
+function sealMethodAuthority(agentCtx, allow) {
+	if (allow) return;
+	agentCtx.tools.guard((execution) => isMethodAuthorityTool(execution.name) ? METHOD_AUTHORITY_DENIAL : void 0);
+}
+
+//#endregion
 //#region src/skill-file.ts
 /** How far up from a worker's cwd project skill roots are looked for. */
 const PROJECT_LOOKUP_DEPTH = 8;
@@ -388,16 +414,19 @@ function resolveGrant(agentCtx, agent, grant) {
 		if (bypasses.length > 0) throw new Error(`agent-runtime: capability "${capability.capability}" declares native delegation tools [${bypasses.join(", ")}]; ${TASK_DELEGATION_DENIAL}`);
 	}
 	assertCapabilityTools(grant, visible);
+	assertNoMethodAuthorityGrant(grant);
 	const allow = /* @__PURE__ */ new Set();
 	for (const capability of grant.capabilities) for (const tool of capability.tools) allow.add(tool);
 	for (const tool of grant.baseline) if (visible.has(tool) && !isNativeDelegationTool(tool)) allow.add(tool);
 	if (grant.keepPresetTools) {
 		const global = visibleToolNames(agentCtx);
-		for (const tool of visible) if (!global.has(tool) && !isNativeDelegationTool(tool)) allow.add(tool);
+		for (const tool of visible) if (!global.has(tool) && !isNativeDelegationTool(tool) && !isMethodAuthorityTool(tool)) allow.add(tool);
 	}
+	const resolved = [...allow].sort();
 	return {
-		allow: [...allow].sort(),
-		baselineUnavailable: [...new Set(grant.baseline.filter((tool) => !visible.has(tool)))].sort()
+		allow: resolved,
+		baselineUnavailable: [...new Set(grant.baseline.filter((tool) => !visible.has(tool)))].sort(),
+		methodAuthority: grantCarriesMethodAuthority(resolved)
 	};
 }
 /** A separate registry prevents host providers from merging into the agent's catalog. */
@@ -534,7 +563,8 @@ async function mountMcpServers(agentCtx, agent, grant) {
 }
 /** Apply one worker's grant: restrict tools, register skills, mount MCP servers — all fail-closed. */
 async function applyWorkerGrant(agentCtx, agent, grant, graphCatalog) {
-	const { allow } = resolveGrant(agentCtx, agent, grant);
+	const { allow, methodAuthority } = resolveGrant(agentCtx, agent, grant);
+	sealMethodAuthority(agentCtx, methodAuthority);
 	try {
 		agentCtx.tools.restrict({ allow });
 	} catch (error) {
@@ -556,23 +586,25 @@ async function applyWorkerGrant(agentCtx, agent, grant, graphCatalog) {
 //#endregion
 //#region src/prompts/root.prompts.ts
 /** The graph root turns a user's objective and metrics into an executable contract. */
-function rootPromptText(evolutionEnabled$1) {
+function rootPromptText(methodToolsEnabled$1) {
 	return `You are the root router of a Singularity graph. You coordinate the user's complete objective through task workers and own the combined result. Start from the user's task and metrics: investigate the available environment, state useful assumptions, and define the result and checks for this execution. Use your tools for local investigation, measurement and implementation, and delegate useful independent results to Tasks. Resolve ordinary engineering choices from evidence; ask the user for consequential decisions about their objective or authority. An exploratory Task can supply facts needed for a later implementation.
 
 Before intake, load task-coordination with skill and read task_library, capability_list and relevant task_template_list entries. The graph's library holds reusable TaskTemplates and their guidance Skills. Bind a fitting template and its exact parameters, or author the contract the current task needs. Declare each Task's execution capabilities and relevant guidance through requiredCapabilities, using actual catalog names. Define useful direct children with owned results, inputs and checks; they choose their descendants. Integrate their evidence and deliver the complete objective.
 
-A Task owns this execution's goal and acceptance. A TaskTemplate records reusable goals and decomposition; a Skill records methods, conditions and experience. You may record useful exploratory goals or methods in the graph library as temporary templates or Skills. ${evolutionEnabled$1 ? "You hold no evolution tools: the RSI supervisor reviews the library and actual results, chooses what to retain or modify, compares candidates, publishes, and inspects later consumption, and owns Task and Skill improvements and capability/MCP changes when execution means are missing. Return improvement leads and capability gaps with Task/Run and evidence references. Weigh task quality and performance together with recorded model tokens, cache traffic, tool work and cost. Work within budget and recorded human decisions." : "Return useful goals, methods and capability gaps with Task/Run and evidence references. Delegate execution to Tasks through requiredCapabilities."}`;
+A Task owns this execution's goal and acceptance. A TaskTemplate records reusable goals and decomposition; a Skill records methods, conditions and experience; the environment revision holds all of it. task_library is read-only here: no role edits the executable library directly. Inspect the method's history and drafts with method_list, and when you have a mechanism worth trying, propose it with method_draft — one candidate, its complete content, the evidence it answers and the round's edit budget. ${methodToolsEnabled$1 ? "You hold no publication authority: the RSI supervisor evaluates the candidate, publishes it through the one recorded approval (or the platform policy in an unmanned graph), and inspects later consumption. Return improvement leads and capability gaps with Task/Run and evidence references. Weigh task quality and performance together with recorded model tokens, cache traffic, tool work and cost. Work within budget and recorded human decisions." : "Return useful goals, methods and capability gaps with Task/Run and evidence references. Delegate execution to Tasks through requiredCapabilities."}`;
 }
 
 //#endregion
 //#region src/prompts/coordination.prompts.ts
 /** Stable role guidance; exact source facts are supplied in the first request. */
 const REVIEWER_POLICY_TEXT = `You are a Singularity reviewer. Investigate the requested Task/Run through its original evidence, task tree, graph library and frozen Skills. Explain causes, useful next actions, applicability conditions and uncertainties. Weigh task quality and performance alongside recorded model usage and tool work. Use your granted reads and end the session by calling reviewer_complete with your observation, your conclusion and a confidence; a session that ends its turn without calling it is a protocol failure and no finding is recorded from it.`;
-const SUPERVISOR_POLICY_TEXT = `You are a Singularity supervisor. Read the library, the actual task tree, results and costs. Review exploratory goals, decomposition templates and Skill experience; record retention or retirement, and write useful revisions. A Task's acceptance belongs to that execution. TaskTemplates teach reusable goals and decomposition; Skills teach paths, methods and conditions. Preserve the user's objective and the original checks of each compared task.
+const SUPERVISOR_POLICY_TEXT = `You are a Singularity supervisor. Read the library and the method's own history with method_list, then read the actual task tree, results and costs. A Task owns this execution's acceptance; the environment revision holds the executable material — Skills, TaskTemplates and capability rows. Preserve the user's objective and the original checks of each compared task.
 
-Choose the responsible TaskTemplate, Skill or capability provider, compare a useful candidate, and publish within authority. Reuse available tools and artifacts, clean starting inputs and comparable model budgets. Report seen cases as regression evidence and test transfer on fresh tasks when available. Weigh domain results together with model tokens, cache traffic, tool work and reported cost; mark unavailable readings unknown.
+Choose one mechanism per round and state it as a DeclaredEdit: call method_draft with the asset's kind, its identity, the complete new content and the evidence it answers. The round's edit budget comes from the frozen policy and nothing else; a candidate over budget, structurally unsound, or without the independent critic verdict the policy requires is refused before any measurement, and a refusal is not a measurement. Then call method_evaluate on the frozen cohort you name: both sides of every sample, the original acceptance, at least three independent repetitions so noise is calibrated, and a declared [0,1] quality scale. Missing cost is inconclusive — never assume dC = 0 — and missing trials do not shrink the denominator.
 
-End the session by calling supervisor_complete with businessAction, reason and evidenceRefs — continue after a verified round, recover after a failed one, finish when the business work should not run again — and trialCandidateRef only when the next round should explicitly try one candidate. The platform derives the method decision, the approval source and whether the method search continues from what your round recorded; they are not parameters. Calling it closes this session’s write access. A session that ends its turn without calling it is a protocol failure, and the platform will not ask again.`;
+Then either publish or discard. method_publish asks for exactly one approval showing the complete diff, the evaluation and the exact version switch; a candidate the frozen strategy refused is refused here without asking anyone. method_discard needs no approval and says why. method_rollback restores the revision a publish superseded. Never edit the executable library directly: task_library is read-only, and every method change is a draft that a publish switches into effect.
+
+End the session by calling supervisor_complete with businessAction, reason and evidenceRefs — continue after a verified round, recover after a failed one, finish when the business work should not run again — and trialCandidateRef only when the next round should explicitly try one candidate. The platform derives the method decision, the approval source and whether the method search continues from what your round recorded; they are not parameters. Calling it closes this session's write access. A session that ends its turn without calling it is a protocol failure, and the platform will not ask again.`;
 
 //#endregion
 //#region src/prompts/worker.prompts.ts
@@ -1184,7 +1216,7 @@ function runtimePrompt(channel) {
 		channel
 	};
 }
-/** The tools every root may call whatever the deployment's evolution switch says (README Design notes). */
+/** The tools every root may call whatever the deployment's method-tool switch says (README Design notes). */
 const ROOT_CORE_TOOLS = [
 	"read",
 	"glob",
@@ -1220,17 +1252,25 @@ const ROOT_CORE_TOOLS = [
 	"task_diagnose",
 	"task_budget_extend"
 ];
-/** Whether this composition registered the nine `evolution_*` tools; a context without the service reads as off. */
-function evolutionEnabled(ctx) {
-	return ctx.get("singularityEvolution")?.enabled ?? false;
+/** The root's method surface: observation and candidacy. It never names a pointer-moving tool. */
+const ROOT_METHOD_TOOLS = ["method_list", "method_draft"];
+/** Whether this composition registered the six `method_*` tools; a context without the service reads as off. */
+function methodToolsEnabled(ctx) {
+	return ctx.get("singularityMethods")?.enabled ?? false;
 }
-/** The root's tool allow-list: the core tools plus `escalate`; the evolution chain belongs to the supervisor. */
-const ROOT_TOOLS = [...ROOT_CORE_TOOLS, "escalate"];
+/** The root's tool allow-list: the core tools plus `escalate`, plus the two method tools the switch registered. */
+function rootTools(methods) {
+	return [
+		...ROOT_CORE_TOOLS,
+		...methods ? ROOT_METHOD_TOOLS : [],
+		"escalate"
+	];
+}
 /** Root-local registrations also obey the coordination allow-list. */
-function sealRootTools(agentCtx) {
+function sealRootTools(agentCtx, allow) {
 	agentCtx.tools.presentAs("native");
-	const allowed = new Set(ROOT_TOOLS);
-	agentCtx.tools.guard((execution) => allowed.has(execution.name) ? void 0 : "singularity: use the root execution tools and task_decompose for delegated task work");
+	const allowed = new Set(allow);
+	agentCtx.tools.guard((execution) => allowed.has(execution.name) ? void 0 : "singularity: use the root execution tools, task_decompose for delegated task work, and method_draft/method_list to propose or inspect a method candidate");
 }
 async function graphCatalogFor(ctx, agent, root) {
 	const libraries = ctx.get("taskRuntime");
@@ -1247,16 +1287,17 @@ function rootSetup(ctx, agentPreset) {
 		await ctx.agentPresets.mount(agentCtx, agentPreset);
 		ctx.permissionPresets.set(agent.session, "workspace-isolated");
 		setApprovalPolicy(agent.session, "ask");
-		const evolution = evolutionEnabled(ctx);
+		const methods = methodToolsEnabled(ctx);
 		agentCtx.systemPrompt.section({
 			name: "singularity:root",
 			order: 70,
-			text: rootPromptText(evolution)
+			text: rootPromptText(methods)
 		});
-		agentCtx.tools.restrict({ allow: ROOT_TOOLS });
+		agentCtx.tools.restrict({ allow: rootTools(methods) });
 		await installGraphSkillCatalog(agentCtx, await graphCatalogFor(ctx, agent, true));
 		sealRawSessionReads(agentCtx);
-		sealRootTools(agentCtx);
+		sealRootTools(agentCtx, rootTools(methods));
+		sealMethodAuthority(agentCtx, false);
 	};
 }
 /** The one composition a worker's scoped world is built from; `spawn` and a resume both hand this to the factory. */
@@ -1289,4 +1330,4 @@ function workerSetup(ctx, role) {
 var src_default = AgentRuntime;
 
 //#endregion
-export { AgentRuntime, COORDINATION_SEALED_ALLOW, COORDINATION_WRITE_DENIAL, CoordinationResumeRefusal, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, WorkerResumeRefusal, answerMessageText, applyWorkerGrant, src_default as default, findSkillFileIn, guardCoordinationWrites, isCoordinationSealed, parseSkillFile, questionMessageText, resumeCoordinationAgent, sealCoordinationSession, skillRootsFor, toolCallRefIn };
+export { AgentRuntime, COORDINATION_SEALED_ALLOW, COORDINATION_WRITE_DENIAL, CoordinationResumeRefusal, METHOD_AUTHORITY_DENIAL, METHOD_AUTHORITY_TOOLS, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, WorkerResumeRefusal, answerMessageText, applyWorkerGrant, assertNoMethodAuthorityGrant, src_default as default, findSkillFileIn, grantCarriesMethodAuthority, guardCoordinationWrites, isCoordinationSealed, isMethodAuthorityTool, parseSkillFile, questionMessageText, resumeCoordinationAgent, sealCoordinationSession, sealMethodAuthority, skillRootsFor, toolCallRefIn };

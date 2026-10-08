@@ -3,11 +3,11 @@
  * ready every commit intent its ledger left open is settled against what
  * production actually holds.
  *
- * The switch is not part of that question. `evolution: 'off'` removes the nine
- * model-facing tools — the composition R0 asks for — and changes nothing about
- * recovery: production is reconciled whether or not the deployment ever exposes
- * the chain, which is exactly the point of wiring it into the plugin's own
- * startup rather than into a tool. What is real here: the `EvolutionService`, the
+ * The switch is not part of that question. `methodTools: 'off'` removes the six
+ * model-facing method tools — the composition R0 asks for — and changes nothing
+ * about recovery: production is reconciled whether or not the deployment ever
+ * exposes a method tool, which is exactly the point of wiring it into the
+ * plugin's own startup rather than into a tool. What is real here: the `EvolutionService`, the
  * ledger file under a pinned `$DSH_HOME`, the sandbox and production `SKILL.md`
  * files, the atomic write and its read-back, and the plugin the loader mounts.
  * The blocked and unreadable cases are the two the wiring has to tell apart — one
@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_EVOLUTION, SingularityAgent } from '../../src/index.ts'
+import { DEFAULT_METHOD_TOOLS, SingularityAgent } from '../../src/index.ts'
 import type { Config } from '../../src/index.ts'
 
 const PROPOSAL_ID = 's1'
@@ -177,12 +177,13 @@ async function ledgerKinds(home: string): Promise<string[]> {
 describe('SingularityAgent startup reconciliation', () => {
   it('settles an open commit intent before the plugin is ready, with the tool switch off', async () => {
     const open = await mount({ ledger: home => ledgerLines(home, []) })
-    expect(DEFAULT_EVOLUTION).toBe('off')
+    expect(DEFAULT_METHOD_TOOLS).toBe('on')
     await open.mount
 
-    // The recovery ran even though this deployment exposes no evolution tool at
-    // all (the switch is the composition, not a licence to leave production
-    // inconsistent with its ledger).
+    // The recovery ran whatever the switch says: the v4 ledger's own open commit
+    // intent is settled by the plugin's startup, not by a model tool — the
+    // composition is not a licence to leave production inconsistent with its
+    // ledger.
     expect([...open.tools.keys()].filter(name => name.startsWith('evolution_'))).toEqual([])
     expect(await readFile(open.target, 'utf8')).toBe(CANDIDATE)
     expect(await ledgerKinds(open.home)).toEqual([

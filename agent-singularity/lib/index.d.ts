@@ -166,16 +166,16 @@ declare class ProposalReviewService extends Service implements ProposalReviewCha
 //#region src/index.d.ts
 /** Plugin configuration — the deployment's composition, not a model's choice. */
 interface Config {
-  /** Whether this composition registers the nine `evolution_*` tools on the global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} — registers none of them: no model surface (root, granted worker, or the */
-  evolution: 'off' | 'on';
+  /** Whether this composition registers the six `method_*` tools on the global layer. `on` — the shipped default, see {@link DEFAULT_METHOD_TOOLS} — registers all six; `off` registers none, so no model surface (root, granted worker) can read, draft or publish a method. */
+  methodTools: 'off' | 'on';
   /** The review/supervision policy: the coordination allowance a store's coordination agents spend (see {@link SupervisionConfig}). */
   supervision?: SupervisionConfig;
 }
-/** The shipped switch position: `off`. */
-declare const DEFAULT_EVOLUTION: 'off';
-/** The evolution exposure this composition resolved, provided on the agent's own fiber as `ctx.singularityEvolution`. */
-declare class EvolutionExposure extends Service {
-  /** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
+/** The shipped switch position: `on` — the method tools are the one way a method changes. */
+declare const DEFAULT_METHOD_TOOLS: 'on';
+/** The method-tool exposure this composition resolved, provided on the agent's own fiber as `ctx.singularityMethods`. */
+declare class MethodToolsExposure extends Service {
+  /** `true` when `Config.methodTools` is `on`, i.e. the six `method_*` tools are registered. */
   readonly enabled: boolean;
   constructor(ctx: Context, enabled: boolean);
 }
@@ -198,7 +198,7 @@ declare class SupervisionExposure extends Service {
 }
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    singularityEvolution: EvolutionExposure;
+    singularityMethods: MethodToolsExposure;
     singularitySupervision: SupervisionExposure;
   }
 }
@@ -218,4 +218,4 @@ declare class SingularityAgent extends Service {
   private warn;
 }
 //#endregion
-export { Config, DEFAULT_EVOLUTION, DEFAULT_SUPERVISION, EscalationService, type HitlAnswer, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, type SupervisionConfig, deploymentModelSelection };
+export { Config, DEFAULT_METHOD_TOOLS, DEFAULT_SUPERVISION, EscalationService, type HitlAnswer, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, type SupervisionConfig, deploymentModelSelection };

@@ -22,7 +22,6 @@ import {
   modelSelectionOf,
   protectedInputsDigest,
 } from '../../src/replay.ts'
-import { defineEvolutionReplayTool } from '../../../agent-singularity/src/tools/evolution-replay.ts'
 
 /**
  * The task-store rows a promotion fixture's gate re-reads. `fixtureCtx()` owns
@@ -516,7 +515,6 @@ export async function preparedSkillExperiment(options: { candidate?: string; pro
     identity,
     store,
     replayTask,
-    replayTool: defineEvolutionReplayTool(ctx as never),
     experiment: { workspace, identity },
   }
 }

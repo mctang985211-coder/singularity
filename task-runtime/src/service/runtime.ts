@@ -240,6 +240,19 @@ export class TaskRuntime extends Service {
     return await svcEnvironment.environmentLibraryForSession(this, sessionId)
   }
 
+  /** The active revision view of this session's graph library — a pure read, and the one version read every method tool shares. */
+  async activeEnvironmentView(
+    sessionId: string,
+    options: { readonly trialCandidateRef?: string } = {},
+  ): Promise<EnvironmentView> {
+    return await svcEnvironment.activeEnvironmentView(this, sessionId, options)
+  }
+
+  /** The active revision of this session's graph library; a legacy or uninitialized library is refused by name. */
+  async activeRevisionFor(sessionId: string): Promise<EnvironmentRevision> {
+    return await svcEnvironment.activeRevisionFor(this, sessionId)
+  }
+
   /** The revision one run is bound to, or `undefined` on an old-protocol run. */
   async environmentRevisionForRun(run: TaskRun): Promise<EnvironmentRevision | undefined> {
     return await svcEnvironment.revisionForRun(this, run)

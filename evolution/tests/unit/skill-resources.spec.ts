@@ -2,24 +2,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { loadSkillSidecar } from '@dangosys/dsh-singularity-task-runtime'
-import { exec, preparedSkillExperiment, reopenLike, serviceWithProduction, skillProposal, skillText, VERSION_SET, walkToDecided } from './evolution.fixture.ts'
-
-it('replay copies an explicit clean snapshot relative to the caller workspace and freezes its source directory', async () => {
-  const w = await preparedSkillExperiment()
-  const sourceDir = join(w.workspace, 'clean')
-  await mkdir(sourceDir)
-  await writeFile(join(sourceDir, 'input.txt'), 'original input\n')
-  await writeFile(join(w.workspace, 'old-case.txt'), 'historical answer\n')
-  const result = await w.replayTool.execute({ proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'], snapshot: { sourceDir: 'clean' } }, exec('root-1'))
-  expect(result).not.toContain('rejected')
-  expect((await w.svc.experiments('s1'))[0]!.frozen.snapshot.sourceDir).toBe(sourceDir)
-  for (const call of w.replayTask.mock.calls) {
-    const workspace = call[2].workspace!.path
-    expect(await readFile(join(workspace, 'input.txt'), 'utf8')).toBe('original input\n')
-    await expect(readFile(join(workspace, 'old-case.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
-  }
-  await rm(w.root, { recursive: true, force: true })
-})
+import { reopenLike, serviceWithProduction, skillProposal, skillText, VERSION_SET, walkToDecided } from './evolution.fixture.ts'
 
 it('rejects an invalid Skill before recording a candidate', async () => {
   const { svc } = await serviceWithProduction()
