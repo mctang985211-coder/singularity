@@ -1,5 +1,29 @@
-/** The evolution plane: the proposal ledger, experiments, promotion, commit.
+/** The evolution plane: the draft ledger, the one evaluation pipeline and the publish pointer switch.
  * @module dsh-singularity-evolution */
+
+export * from './types.ts'
+export * from './ledger/records.ts'
+export * from './ledger/fold.ts'
+export * from './draft/draft.ts'
+export * from './evidence/receipt.ts'
+export * from './evidence/consumption.ts'
+export * from './history/legacy-reader.ts'
+export * from './pipeline/sources.ts'
+export * from './pipeline/plan.ts'
+export * from './pipeline/run.ts'
+export * from './pipeline/validate.ts'
+export * from './pipeline/guards.ts'
+export * from './pipeline/score.ts'
+export * from './pipeline/report.ts'
+export * from './pipeline/evaluate.ts'
+export * from './draft/adapters.ts'
+export * from './evidence/snapshot.ts'
+export * from './evidence/judge.ts'
+export * from './service/jsonl-ledger.ts'
+export * from './service/runtime-sources.ts'
+export * from './publish/request.ts'
+export * from './publish/pointer.ts'
+export * from './strategy/index.ts'
 
 export * from './evolution.ts'
 export * from './experiment/spec.ts'
@@ -11,7 +35,6 @@ export * from './replay.ts'
 export * from './replay/snapshot.ts'
 export * from './capability-candidate.ts'
 export * from './task-definition.ts'
-export * from './strategy/index.ts'
 export { assertDecisionTransition } from './ledger/state-machine.ts'
 
 export { default } from './evolution.ts'

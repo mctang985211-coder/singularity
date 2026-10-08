@@ -3,6 +3,7 @@
 
 import { existsSync } from 'node:fs'
 import { dirname, isAbsolute, resolve, sep } from 'node:path'
+import { sha256Hex } from '@dangosys/dsh-singularity-task'
 
 /** Whether a value is a lowercase 64-character SHA-256 hex digest. */
 export function isHex64(value: unknown): boolean {
@@ -86,4 +87,21 @@ export function tableRefusal(file: string, detail: string): Error {
 /** The refusal a table that is not a frozen state is reported by, naming the file and never quoting it. */
 export function tableChangedRefusal(file: string, detail: string): Error {
   return new Error(`evolution: capability-table-changed: the capability table "${file}" cannot be edited: ${detail}`)
+}
+
+/** JSON with object keys sorted recursively: the one serialization every new-protocol digest is taken over. */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(item => canonicalJson(item)).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+/** Lowercase SHA-256 hex over {@link canonicalJson} of a value — the v5 ledger's digest primitive. */
+export function digestOf(value: unknown): string {
+  return sha256Hex(canonicalJson(value))
 }

@@ -9,3 +9,5 @@ export * from './measure.ts'
 export * from './screen.ts'
 export * from './selection.ts'
 export * from './history.ts'
+export * from './observe.ts'
+
