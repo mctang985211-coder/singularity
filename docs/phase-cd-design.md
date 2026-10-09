@@ -256,3 +256,65 @@ missing=[那个槽位]`。旧仓在此返回 `quality=1, incomplete=true`——`
 5. **文字风格**：docstring 写**为什么**（尤其是"不这样做会错在哪"），拒绝消息**点名替代方案**，
    不写"注意""请确保"这类没有机制支撑的话。
 6. **不写 TODO / 不写未来的钩子 / 不留未使用的成员。** `noUnusedLocals` 已开。
+
+---
+
+## 11. 冻结：`src/strategy/decision.ts` 的接口（B 实现，C 消费）
+
+**这是 C 与 B 之间唯一的接口。** 纯函数，不碰日志、不碰事实：输入是普通数据，输出是判定。
+**B 拥有这个文件的实现，C 只 import 它，不修改它。**
+
+```ts
+/** 一次候选的度量结果，已由 src/measure/** 的投影算好。cost 未观测 = null（**不是 0**）。 */
+export interface Measurement { readonly quality: number; readonly cost: number | null; readonly denominator: number; readonly missing: number }
+
+/** 一个候选，按它在轮里的槽位。 */
+export interface Candidate {
+  readonly slot: number
+  readonly exploratory: boolean
+  /** 它改动的结构性资产类（`skill`/`tool`/`template`），去重后。 */
+  readonly assets: readonly string[]
+  /** 度量不完整或未度量时为 null。 */
+  readonly measurement: Measurement | null
+  /** 硬约束是否**全部**满足。false 时任何分数都不进 argmax（非补偿）。 */
+  readonly constraintsMet: boolean
+  /** 不可采纳的具名理由；可采纳时为 null。 */
+  readonly inadmissible: string | null
+}
+
+/** 冻结的历史：只看 historyCutoff 之前的事实，绝不按"今天的 head"重算（R03 的实测反例）。 */
+export interface History {
+  /** 已经**实际发布**过的资产类，用于 novelty（R05：两条 skill edit 的 novelty 仍是 1）。 */
+  readonly acceptedAssets: readonly string[]
+  /** 每个槽位相对**当轮** incumbent 的增益，测量时冻结。 */
+  readonly deltas: readonly { readonly slot: number; readonly deltaQuality: number; readonly deltaCost: number | null }[]
+}
+
+/** 噪声依据：实测校准还是声明的下限。两者必须可区分（R06）。 */
+export interface Calibration { readonly floor: number; readonly source: 'measured' | 'declared' }
+
+export interface Outcome { readonly slot: number; readonly admitted: boolean; readonly reason: string }
+export interface Selection { readonly winner: number | null; readonly outcomes: readonly Outcome[] }
+
+/** 编辑预算按轮次退火，`rounds-1` 而不是 `/T`：最后一轮必须真的能到 minimum（ADR 收紧 #1）。 */
+export function editBudgetFor(round: number, rounds: number, first: number, minimum: number): number
+
+/** 此前未被接受过的结构性机制类型的数量（类型，不是条数）。 */
+export function noveltyOf(assets: readonly string[], history: History): number
+
+/**
+ * 先 admissibility，再噪声带，再成本规则，最后 argmax。顺序是冻结的：
+ * **高分但越界者必须在 argmax 之前出局**，噪声带内的增益不算增益，同分按槽位号升序。
+ * 每个候选都要有一个 `Outcome`，无论采纳与否。
+ */
+export function select(
+  candidates: readonly Candidate[],
+  history: History,
+  calibration: Calibration,
+  weights: { readonly quality: number; readonly cost: number },
+): Selection
+```
+
+**C 的用法**：`src/strategy/view.ts` 从 `measure@1` 的投影和 `strategy@1` 的 state 构造
+`Candidate[]` / `History` / `Calibration`，调用 `select`，把结果写进 `round/decided`。
+`constraintsMet` / `inadmissible` 由 C 从 `projectEvaluation`（§5.4）填。

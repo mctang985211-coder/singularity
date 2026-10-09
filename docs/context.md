@@ -293,7 +293,33 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 **B 的最后一段已全部完成**（提交 `c26c0be`，证据见 `docs/k1-evidence.md`）：S6 真实纵切（`slice-b` 22 项）、两个边界各一次真实 SIGKILL（`recovery-probe` 21 项）、K1 12 场景逐条交回、完整 `pnpm verify` 输出。仍**未做**的是"真实模型 → 真实产物 → 我们的真实验证器 → 命令边界"接成一条（模型产出内容、真实验证器裁决、verdict 经命令边界落为事实；**不能断言判决为 pass**）——这一条属 C，见 §12。
 
-## 12. C 阶段（可信评估）的进入方式：先冻接口，再四路并行
+## 12. C/D 执行中（接口已冻结，四路并行）
+
+**接口契约：[`docs/phase-cd-design.md`](phase-cd-design.md)。动代码前先读它。**
+
+第 0 轮（协调者，已完成）：
+- `protocol-baseline.json` + 门禁 `protocol-inventory`（提交 `6075c47`）—— 账本**双向**比对真实 registry；
+  `ProtocolRegistry.protocols()` 让注册表能自报声明。它第一次运行就抓到了 `task@4` 的版本升级。
+- `task@4`（提交 `7436c69`）—— `bubble/opened` 增必填隔离清单 `{model, tools, conditions}`（R08）。
+  六条规则各有变异证明。**这是 C/D 唯一一次任务侧改动。**
+- 4 个新 refusal code：`caliber-mismatch`、`budget-exhausted`、`stale-approval`、`unapproved-revision`。
+  `evidence-conflict` 的文档行扩到"一个判据一个判决、一个槽位一次观测"（字符串不变）。
+
+四路并行的工作流与文件域（细节见设计文档 §1）：**A** `src/measure/**` + 真实执行器；
+**B** `src/strategy/decision.ts` + 差分向量 + `docs/divergence-ledger.md`；
+**C** `src/strategy/{protocol,commands,view}.ts` + `scripts/round-probe.mjs`；
+**D** `src/release/**` + `src/environment/**`（`environment@2` 的唯一指针切换）。
+
+**集成时的已知跨文件改动（协调者负责，工作流看不到）**：
+`tests/environment-revision.spec.ts:237` 断言"environment 不声明条件更新"——`environment@2` 落地后
+它必须改成 `conditionalOwner() === ENVIRONMENT_PROTOCOL`，kind 列表也要加 `pointer/switched`。
+
+**下一步（协调者的第 2 轮）**：把三个新探针接到门禁（与探针同一次提交）；补账本行；
+跑一条真实端到端：**同一 incumbent 起草 m≥2 个候选 → 各自真实 k 次 trial → 一个高分但违反硬约束的候选
+必须在 argmax 之前出局 → 选择 → 草稿 → 批准 → 指针切换**，并且**第二轮读第一轮的事实**（R04 的两轮要求）；
+证据文档 `docs/cevidence.md`（格式同 `k1-evidence.md`，未观测项单列）。
+
+## 12b. C 阶段（可信评估）的进入方式：先冻接口，再四路并行
 
 **C 的退出条件（`review.md` §5 冻结原文）**：好候选通过；高分但越界拒绝；缺失分母正确；每份报告有真实 trials。对应 R02 / R06 / R08。
 
