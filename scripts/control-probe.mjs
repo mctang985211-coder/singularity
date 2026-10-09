@@ -183,7 +183,6 @@ async function probe() {
   console.log(`node                ${process.version}`)
   console.log(`dsh installed build ${DSH_INSTALLED}`)
   const { ControlSessionStore, CONTROL_EVENT_TYPE, controlSessionIdOf } = await import('../src/control/session-store.ts')
-  const persistenceModule = await dshModule('@deepseek-ai/dsh-session-persistence')
 
   const root = await mkdtemp(join(tmpdir(), 'singularity-control-probe-'))
   console.log(`session root        ${root}`)
@@ -209,18 +208,23 @@ async function probe() {
       `facts=${reported.facts.length}`,
     )
 
-    try {
-      const second = await ControlSessionStore.open({ persistence: live.persistence, controlId: CONTROL_ID, registry: registry(), subjects: SUBJECTS })
-      check('a second process write open is refused', false, `it succeeded and holds ${String(second.sessionId)}`)
-      await second.close()
-    } catch (error) {
-      console.log(`  observed: ${error.constructor.name} name=${JSON.stringify(error.name)} message=${JSON.stringify(error.message)}`)
-      check(
-        'a second process write open fails with SessionAlreadyOwnedError',
-        error instanceof persistenceModule.SessionAlreadyOwnedError,
-        `instanceof SessionAlreadyOwnedError = ${error instanceof persistenceModule.SessionAlreadyOwnedError}`,
-      )
-    }
+    // A genuine second process, because that is what the claim is about. Opening again inside this
+    // process would test the in-process ownership table, which is a different guarantee and, as
+    // this check's own history showed, one that can answer differently.
+    const rival = spawn(process.execPath, [HERE, '--claim', root, CONTROL_ID], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let rivalStderr = ''
+    rival.stderr.on('data', chunk => {
+      rivalStderr += String(chunk)
+    })
+    const claimed = await waitForEvent(rival, 'claimed', 20000).catch(error => ({ event: 'claimed', granted: null, name: 'no-report', message: `${error.message} stderr=${rivalStderr.slice(-300)}` }))
+    await new Promise(resolve => rival.on('exit', resolve))
+    console.log(`  second process reported: ${JSON.stringify(claimed)}`)
+    check('a second process write open is refused', claimed.granted === false, `granted=${JSON.stringify(claimed.granted)} name=${JSON.stringify(claimed.name)}`)
+    check(
+      'a second process write open fails with SessionAlreadyOwnedError',
+      claimed.name === 'SessionAlreadyOwnedError',
+      `name=${JSON.stringify(claimed.name)} message=${JSON.stringify(claimed.message)}`,
+    )
 
     // -----------------------------------------------------------------------
     section('2. a read handle while the write handle is held')
@@ -322,5 +326,26 @@ async function probe() {
   process.exitCode = failures.length === 0 && gaps.length === 0 ? 0 : 1
 }
 
-if (process.argv[2] === '--hold') await hold()
+/**
+ * The rival writer: one attempt to open the same control session for write, reported as data.
+ *
+ * It is a separate process on purpose. Two handles in one process answer a different question -
+ * whether this instance already owns the session - and the phase's claim is about processes.
+ */
+async function claim(root, controlId) {
+  const { ControlSessionStore } = await import('../src/control/session-store.ts')
+  const live = await openPersistence(root)
+  try {
+    const store = await ControlSessionStore.open({ persistence: live.persistence, controlId, registry: registry(), subjects: SUBJECTS })
+    line({ event: 'claimed', granted: true, sessionId: String(store.sessionId) })
+    await store.close()
+  } catch (error) {
+    line({ event: 'claimed', granted: false, name: error?.name, constructor: error?.constructor?.name, message: error?.message })
+  } finally {
+    await live.context.fiber.dispose()
+  }
+}
+
+if (process.argv[2] === '--claim') await claim(process.argv[3], process.argv[4])
+else if (process.argv[2] === '--hold') await hold()
 else await probe()
