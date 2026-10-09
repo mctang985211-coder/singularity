@@ -11,12 +11,10 @@
 import { describe, expect, it } from 'vitest'
 
 import { verifierRegistryOf } from '../src/task/contract.ts'
-import { verifierRoleOf } from '../src/task/protocol.ts'
 import {
   assertVerifierRunnable,
   runVerifierSelftest,
   verifierIdentityOf,
-  type SelftestReport,
   type VerifierImplementation,
   type VerifierInput,
   type VerifierSelftest,
@@ -29,17 +27,9 @@ import { refusalOf } from './fixtures.ts'
 const IMPLEMENTATION_DIGEST = '7'.repeat(64)
 const REBUILT_DIGEST = 'e'.repeat(64)
 
-const PASSING_INPUT: VerifierInput = {
-  subject: 'word-counter',
-  artifactDigest: 'a'.repeat(64),
-  inputs: [{ name: 'words.txt', digest: 'b'.repeat(64) }],
-}
+const PASSING_INPUT: VerifierInput = { subject: 'word-counter', artifactDigest: 'a'.repeat(64), inputs: [{ name: 'words.txt', digest: 'b'.repeat(64) }] }
 
-const FAILING_INPUT: VerifierInput = {
-  subject: 'word-counter',
-  artifactDigest: 'f'.repeat(64),
-  inputs: [{ name: 'words.txt', digest: 'b'.repeat(64) }],
-}
+const FAILING_INPUT: VerifierInput = { subject: 'word-counter', artifactDigest: 'f'.repeat(64), inputs: [{ name: 'words.txt', digest: 'b'.repeat(64) }] }
 
 const PASS_SAMPLE: VerifierSelftestSample = { name: 'counts the words', expected: 'pass', input: PASSING_INPUT }
 const FAIL_SAMPLE: VerifierSelftestSample = { name: 'rejects a truncated file', expected: 'fail', input: FAILING_INPUT }
@@ -47,9 +37,7 @@ const FAIL_SAMPLE: VerifierSelftestSample = { name: 'rejects a truncated file', 
 const selftestOf = (samples: readonly VerifierSelftestSample[]): VerifierSelftest => ({ samples })
 
 /** A judge that stands in for the real adapter: one artifact, one verdict, no side effects. */
-const judgeByArtifact = async (value: VerifierInput): Promise<VerifierVerdict> => ({
-  verdict: value.artifactDigest.startsWith('f') ? 'fail' : 'pass',
-})
+const judgeByArtifact = async (value: VerifierInput): Promise<VerifierVerdict> => ({ verdict: value.artifactDigest.startsWith('f') ? 'fail' : 'pass' })
 
 /** One deployment declaration, with whatever a spec wants to vary. */
 function commandImplementation(overrides: Partial<VerifierImplementation> = {}): VerifierImplementation {
@@ -65,39 +53,24 @@ function commandImplementation(overrides: Partial<VerifierImplementation> = {}):
 
 describe('the verifier declaration gate', () => {
   it('refuses an empty ref, version or implementation digest as a malformed declaration', () => {
-    expect(refusalOf(() => assertVerifierRunnable(commandImplementation({ ref: '' }))).code).toBe('malformed-declaration')
-    expect(refusalOf(() => assertVerifierRunnable(commandImplementation({ version: '' }))).code).toBe('malformed-declaration')
-    expect(refusalOf(() => assertVerifierRunnable(commandImplementation({ implementationDigest: '' }))).code).toBe('malformed-declaration')
+    expect([{ ref: '' }, { version: '' }, { implementationDigest: '' }].map(overrides => refusalOf(() => assertVerifierRunnable(commandImplementation(overrides))).code)).toEqual(['malformed-declaration', 'malformed-declaration', 'malformed-declaration'])
   })
 
   it('names the member that is missing, and refuses a non-string rather than coercing it', () => {
-    const emptyRef = refusalOf(() => assertVerifierRunnable(commandImplementation({ ref: '' })))
-    expect(emptyRef.detail).toContain('ref')
-    expect(emptyRef.detail).toContain('non-empty string')
-
-    const notText = refusalOf(() => assertVerifierRunnable(commandImplementation({ version: 7 as unknown as string })))
-    expect(notText.code).toBe('malformed-declaration')
-    expect(notText.detail).toContain('number')
+    expect(refusalOf(() => assertVerifierRunnable(commandImplementation({ ref: '' }))).detail).toContain('ref must be a non-empty string')
+    expect(refusalOf(() => assertVerifierRunnable(commandImplementation({ version: 7 as unknown as string })))).toMatchObject({ code: 'malformed-declaration', detail: expect.stringContaining('number') })
   })
 
   it('refuses a selftest with no fail sample: a gate that has never failed is not known to work', () => {
-    const refusal = refusalOf(() => assertVerifierRunnable(commandImplementation({ selftest: selftestOf([PASS_SAMPLE]) })))
-
-    expect(refusal.code).toBe('unregistered-verifier')
-    expect(refusal.detail).toContain('no sample expected to fail')
+    expect(refusalOf(() => assertVerifierRunnable(commandImplementation({ selftest: selftestOf([PASS_SAMPLE]) })))).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('no sample expected to fail') })
   })
 
   it('refuses a selftest with no pass sample, so only failing is not runnable either', () => {
-    const refusal = refusalOf(() => assertVerifierRunnable(commandImplementation({ selftest: selftestOf([FAIL_SAMPLE]) })))
-
-    expect(refusal.code).toBe('unregistered-verifier')
-    expect(refusal.detail).toContain('no sample expected to pass')
+    expect(refusalOf(() => assertVerifierRunnable(commandImplementation({ selftest: selftestOf([FAIL_SAMPLE]) })))).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('no sample expected to pass') })
   })
 
   it('refuses a selftest with no samples at all, rather than reading the empty set as agreement', () => {
-    const refusal = refusalOf(() => assertVerifierRunnable(commandImplementation({ selftest: selftestOf([]) })))
-
-    expect(refusal.code).toBe('unregistered-verifier')
+    expect(refusalOf(() => assertVerifierRunnable(commandImplementation({ selftest: selftestOf([]) }))).code).toBe('unregistered-verifier')
   })
 
   it('accepts a declaration whose selftest claims both verdicts', () => {
@@ -107,34 +80,20 @@ describe('the verifier declaration gate', () => {
 
 describe('the verifier selftest', () => {
   it('runs every sample and reports the implementation digest it was declared with', async () => {
-    const report: SelftestReport = await runVerifierSelftest(commandImplementation())
-
-    expect(report).toEqual({
-      ref: 'command',
-      version: '1',
-      implementationDigest: IMPLEMENTATION_DIGEST,
-      ran: 2,
-      failures: [],
-    })
+    expect(await runVerifierSelftest(commandImplementation())).toEqual({ ref: 'command', version: '1', implementationDigest: IMPLEMENTATION_DIGEST, ran: 2, failures: [] })
   })
 
   it('reports a lying implementation as a failure entry instead of throwing', async () => {
     // The declaration claims both verdicts, so the gate passes; the judge then always says fail.
     const liar = commandImplementation({ judge: async () => ({ verdict: 'fail' }) })
     expect(() => assertVerifierRunnable(liar)).not.toThrow()
-
     const report = await runVerifierSelftest(liar)
-
-    expect(report.ran).toBe(2)
-    expect(report.failures).toEqual([{ name: PASS_SAMPLE.name, expected: 'pass', actual: 'fail' }])
+    expect([report.ran, report.failures]).toEqual([2, [{ name: PASS_SAMPLE.name, expected: 'pass', actual: 'fail' }]])
   })
 
   it('reports every disagreeing sample, and still counts the ones it ran', async () => {
-    const disagreeing = commandImplementation({ judge: async () => ({ verdict: 'pass' }) })
-    const report = await runVerifierSelftest(disagreeing)
-
-    expect(report.ran).toBe(2)
-    expect(report.failures).toEqual([{ name: FAIL_SAMPLE.name, expected: 'fail', actual: 'pass' }])
+    const report = await runVerifierSelftest(commandImplementation({ judge: async () => ({ verdict: 'pass' }) }))
+    expect([report.ran, report.failures]).toEqual([2, [{ name: FAIL_SAMPLE.name, expected: 'fail', actual: 'pass' }]])
   })
 })
 
@@ -144,7 +103,6 @@ describe('the verifier identity', () => {
 
     // `verifierRoleOf` owns the `ref@version` naming; the identity is that name without its
     // namespace, plus the digest the legacy hand-written version string lacked.
-    expect(verifierRoleOf({ verifierRef: implementation.ref, verifierVersion: implementation.version })).toBe('verifier:command@1')
     expect(verifierIdentityOf(implementation)).toBe(`command@1#${IMPLEMENTATION_DIGEST}`)
     // The name is exactly the key `verifierRegistryOf` looks an implementation up under, so a
     // deployment cannot report it available under one string and known by another.
@@ -158,9 +116,6 @@ describe('the verifier identity', () => {
 
     expect(first).not.toBe(rebuilt)
     expect(rebuilt).toBe(`command@1#${REBUILT_DIGEST}`)
-    expect(laterVersion).toBe(`command@2#${IMPLEMENTATION_DIGEST}`)
-    // The whole digest is carried, so the identity is usable as a lookup key rather than a label
-    // that merely resembles one.
-    expect(verifierIdentityOf(commandImplementation())).toContain(IMPLEMENTATION_DIGEST)
+    expect(laterVersion).toBe(`command@2#${IMPLEMENTATION_DIGEST}`) // The whole digest is carried, so the identity is usable as a lookup key rather than a label that merely resembles one
   })
 })

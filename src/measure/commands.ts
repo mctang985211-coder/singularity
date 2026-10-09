@@ -12,11 +12,11 @@
  * the store's committed cut at the moment they decide rather than a cut taken earlier.
  *
  * The command fills the parts a caller must not. `verifierRef` and `verifierVersion` are copied from
- * the metric the plan froze — the same discipline `recordVerdict` uses for a criterion — and the
- * digest a producer reports is checked here only for *availability*: whether this deployment holds
- * that implementation at all, which is a question about now and not about the fact. Whether it is
- * the implementation the plan names is the reducer's rule. A caller supplies what it observed; it
- * does not supply who observed it, and it cannot point a trial at a different run than the plan's.
+ * the metric the plan froze — the same discipline `recordVerdict` uses for a criterion — the
+ * evaluation's `context` is read from the bubble the run declared, and the digest a producer reports
+ * is checked here only for *availability*: whether this deployment holds that implementation at all,
+ * which is a question about now and not about the fact. A caller supplies what it observed; it does
+ * not supply who observed it, and it cannot point a trial at a different run than the plan's.
  *
  * What this module does not do is run anything. Measuring is `src/measure/execution.ts`, called by
  * the deployment *before* the fact is committed: a commit region that spawned a process would hold
@@ -29,11 +29,12 @@ import type { ControlReadCut, ControlSessionStore } from '../control/session-sto
 import type { Envelope } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import type { ProtocolRegistry } from '../protocol/registry.ts'
-import { assertInputsBound } from '../task/bubble.ts'
+import { assertInputsBound, type Bubble } from '../task/bubble.ts'
 import type { AcceptanceCriterion } from '../task/contract.ts'
 import { TASK_PROTOCOL, TASK_VERSION, verifierRoleOf, type RevisionRef, type RunState, type TaskState } from '../task/protocol.ts'
 import type { MeasuredTrial } from './execution.ts'
 import {
+  contextDigestOf,
   MEASURE_KINDS,
   MEASURE_PROTOCOL,
   MEASURE_VERSION,
@@ -106,8 +107,13 @@ interface OpenPlan {
 
 export function createMeasureCommands(options: MeasureCommandOptions): MeasureCommands {
   const commands: MeasureCommands = {
-    openEvaluation: input =>
-      emitRaw(
+    openEvaluation: input => {
+      const action = `open evaluation "${input.evaluationId}"`
+      // The context is *read*, never supplied: a caller that could declare the context two candidates
+      // are compared under could make them comparable by assertion. The bubble it comes from is
+      // immutable once opened, so the value read here is the value the region below will see.
+      const run = requireBubbledRun(cutOf(options), input.run, action)
+      return emitRaw(
         options,
         input.commandId,
         MEASURE_KINDS.evaluationOpened,
@@ -116,18 +122,19 @@ export function createMeasureCommands(options: MeasureCommandOptions): MeasureCo
           baseline: input.baseline,
           candidate: input.candidate,
           run: input.run,
+          context: contextDigestOf(run.bubble),
           metric: input.metric,
           weights: input.weights,
           trials: input.trials,
           judgement: input.judgement,
         },
         () => {
-          // Cross-subject: a plan that names a run this log never started can never be bound to a
-          // bubble, so every trial in it would be unmeasurable. Naming that here, in the commit
-          // region, is what makes the refusal about the state the plan is appended to.
-          requireRun(cutOf(options), input.run, `open evaluation "${input.evaluationId}"`)
+          // Cross-subject, decided in the commit region: a plan whose run this log never started, or
+          // whose run declared no execution context, can never produce a comparable measurement.
+          requireBubbledRun(cutOf(options), input.run, action)
         },
-      ),
+      )
+    },
 
     recordTrial: input => {
       // The metric is read before the payload is built and again inside the commit region. The two
@@ -246,6 +253,17 @@ function requireRun(cut: Cut, run: EvaluationRun, action: string): RunState {
   if (state === undefined)
     refuse('unknown-run', `cannot ${action}: task "${run.taskId}" never started run "${run.runId}", so there is no execution context to measure in`)
   return state
+}
+
+/** The run *and* the execution context it declared: without the bubble there is no context to freeze. */
+function requireBubbledRun(cut: Cut, run: EvaluationRun, action: string): RunState & { readonly bubble: Bubble } {
+  const state = requireRun(cut, run, action)
+  if (state.bubble === undefined)
+    refuse(
+      'illegal-transition',
+      `cannot ${action}: run "${run.runId}" has not declared an execution context (its bubble), so there is no model, tool set or condition set for this measurement to be comparable under; open the bubble first`,
+    )
+  return { ...state, bubble: state.bubble }
 }
 
 /** One hard constraint of the plan, or a refusal listing what the plan does declare. */

@@ -186,9 +186,7 @@ describe('the draft binds the content the log holds, for one environment', () =>
 
     const envelope = await draft(store, REVISION, digest)
 
-    expect(envelope.subject).toBe(ENVIRONMENT)
-    expect(envelope.payload).toEqual({ revisionId: REVISION, draftDigest: digestOf(MANIFEST) })
-    expect(envelope.emitter).toBe(SCHEDULER_ROLE)
+    expect([envelope.subject, envelope.payload, envelope.emitter]).toEqual([ENVIRONMENT, { revisionId: REVISION, draftDigest: digestOf(MANIFEST) }, SCHEDULER_ROLE])
     expect(releaseState(store)).toEqual({ revisionId: REVISION, draftDigest: digest })
   })
 
@@ -198,8 +196,7 @@ describe('the draft binds the content the log holds, for one environment', () =>
 
     // The right id at the digest of *other* content: what a re-pointed id would look like.
     const refusal = await asyncRefusalOf(() => draft(store, REVISION, digestOf(OTHER_MANIFEST), ENVIRONMENT, 'draft-wrong'))
-    expect(refusal.code).toBe<RefusalCode>('unknown-revision')
-    expect(refusal.detail).toContain(REVISION)
+    expect(refusal).toMatchObject({ code: 'unknown-revision', detail: expect.stringContaining(REVISION) })
     expect(releaseState(store)).toBeUndefined()
   })
 
@@ -208,8 +205,7 @@ describe('the draft binds the content the log holds, for one environment', () =>
     await createRevision(store, REVISION, MANIFEST)
 
     const refusal = await asyncRefusalOf(() => draft(store, 'r9999', digestOf(MANIFEST), ENVIRONMENT, 'draft-ghost'))
-    expect(refusal.code).toBe<RefusalCode>('unknown-revision')
-    expect(refusal.detail).toContain('r9999')
+    expect(refusal).toMatchObject({ code: 'unknown-revision', detail: expect.stringContaining('r9999') })
   })
 
   it('refuses a draft that changes nothing', async () => {
@@ -218,8 +214,7 @@ describe('the draft binds the content the log holds, for one environment', () =>
     await draft(store, REVISION, digest)
 
     const refusal = await asyncRefusalOf(() => draft(store, REVISION, digest, ENVIRONMENT, 'draft-again'))
-    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
-    expect(refusal.detail).toContain('changes nothing')
+    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('changes nothing') })
     expect(releaseState(store)?.draftDigest).toBe(digest)
   })
 
@@ -256,9 +251,7 @@ describe('the draft binds the content the log holds, for one environment', () =>
 
   it('refuses a draft digest that is not a sha256, and a payload that offers an extra member', async () => {
     const log = releaseLog()
-    expect((await asyncRefusalOf(() => log.emit(rawFact(RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: 'not-a-digest' })))).code).toBe<RefusalCode>('malformed-payload')
-    expect((await asyncRefusalOf(() => log.emit(rawFact(RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: digestOf(MANIFEST), note: 'ok' })))).code).toBe<RefusalCode>('malformed-payload')
-    expect((await asyncRefusalOf(() => log.emit(rawFact(RELEASE_KINDS.drafted, { draftDigest: digestOf(MANIFEST) })))).code).toBe<RefusalCode>('malformed-payload')
+    for (const payload of [{ revisionId: REVISION, draftDigest: 'not-a-digest' }, { revisionId: REVISION, draftDigest: digestOf(MANIFEST), note: 'ok' }, { draftDigest: digestOf(MANIFEST) }]) expect((await asyncRefusalOf(() => log.emit(rawFact(RELEASE_KINDS.drafted, payload)))).code).toBe<RefusalCode>('malformed-payload')
   })
 })
 
@@ -270,11 +263,7 @@ describe('the approval binds content, and names the draft it answers', () => {
 
     const envelope = await approve(store, seam('allowed-once', 'approval-42'))
 
-    expect(envelope.subject).toBe(ENVIRONMENT)
-    expect(envelope.emitter).toBe(APPROVER_ROLE)
-    expect(envelope.actor).toBe(APPROVAL_SEAM)
-    expect(envelope.actor).not.toBe(SCHEDULER)
-    expect(envelope.payload).toEqual(approved(REVISION, digest, ALICE, 'approval-42'))
+    expect([envelope.subject, envelope.emitter, envelope.actor, envelope.payload]).toEqual([ENVIRONMENT, APPROVER_ROLE, APPROVAL_SEAM, approved(REVISION, digest, ALICE, 'approval-42')])
     expect(releaseState(store)).toEqual(approved(REVISION, digest, ALICE, 'approval-42'))
   })
 
@@ -285,8 +274,7 @@ describe('the approval binds content, and names the draft it answers', () => {
 
     // The human looked at content other than the draft that is on the table.
     const refusal = await asyncRefusalOf(() => approve(store, seam(), { draftDigest: digestOf(OTHER_MANIFEST) }))
-    expect(refusal.code).toBe<RefusalCode>('stale-approval')
-    expect(refusal.detail).toContain(digestOf(OTHER_MANIFEST).slice(0, 12))
+    expect(refusal).toMatchObject({ code: 'stale-approval', detail: expect.stringContaining(digestOf(OTHER_MANIFEST).slice(0, 12)) })
     expect(refusal.detail).toContain(digest.slice(0, 12))
     expect(releaseState(store)?.approvedBy).toBeUndefined()
   })
@@ -309,40 +297,30 @@ describe('the approval binds content, and names the draft it answers', () => {
     const double = seam()
 
     const early = await asyncRefusalOf(() => approve(store, double))
-    expect(early.code).toBe<RefusalCode>('illegal-transition')
-    expect(early.detail).toContain('no draft')
+    expect(early).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('no draft') })
 
     await draft(store, REVISION, digest)
     await approve(store, double)
     const again = await asyncRefusalOf(() => approve(store, double, { approvedBy: 'human:bob', commandId: 'approve-2' }))
-    expect(again.code).toBe<RefusalCode>('illegal-transition')
-    expect(again.detail).toContain(ALICE)
+    expect(again).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining(ALICE) })
     expect(releaseState(store)?.approvedBy).toBe(ALICE)
   })
 
   it('refuses a nameless human, a missing audit id, and a payload that offers an extra member', async () => {
     const log = releaseLog()
     await log.emit(rawFact(RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: digestOf(MANIFEST) }))
-    for (const payload of [
-      approved(REVISION, digestOf(MANIFEST), ''),
-      approved(REVISION, digestOf(MANIFEST), ALICE, ''),
-      { ...approved(REVISION, digestOf(MANIFEST)), role: 'admin' },
-      approved(REVISION, 'nope'),
-    ])
-      expect((await asyncRefusalOf(() => log.emit(rawFact(RELEASE_KINDS.approved, payload)))).code).toBe<RefusalCode>('malformed-payload')
+    for (const payload of [approved(REVISION, digestOf(MANIFEST), ''), approved(REVISION, digestOf(MANIFEST), ALICE, ''), { ...approved(REVISION, digestOf(MANIFEST)), role: 'admin' }, approved(REVISION, 'nope')]) expect((await asyncRefusalOf(() => log.emit(rawFact(RELEASE_KINDS.approved, payload)))).code).toBe<RefusalCode>('malformed-payload')
   })
 
   it('makes drafting and approving different held identities, in both directions', async () => {
     const draftOnly = releaseLog({ [SCHEDULER_ROLE]: SCHEDULER })
     await draftOnly.emit(rawFact(RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: digestOf(MANIFEST) }))
     const unapproved = await asyncRefusalOf(() => draftOnly.emit(rawFact(RELEASE_KINDS.approved, approved(REVISION, digestOf(MANIFEST)))))
-    expect(unapproved.code).toBe<RefusalCode>('unknown-emitter-role')
-    expect(unapproved.detail).toContain(APPROVER_ROLE)
+    expect(unapproved).toMatchObject({ code: 'unknown-emitter-role', detail: expect.stringContaining(APPROVER_ROLE) })
 
     const approveOnly = releaseLog({ [APPROVER_ROLE]: APPROVAL_SEAM })
     const undrafted = await asyncRefusalOf(() => approveOnly.emit(rawFact(RELEASE_KINDS.drafted, { revisionId: REVISION, draftDigest: digestOf(MANIFEST) })))
-    expect(undrafted.code).toBe<RefusalCode>('unknown-emitter-role')
-    expect(undrafted.detail).toContain(SCHEDULER_ROLE)
+    expect(undrafted).toMatchObject({ code: 'unknown-emitter-role', detail: expect.stringContaining(SCHEDULER_ROLE) })
   })
 })
 
@@ -382,10 +360,8 @@ describe('release@1 is exactly these two kinds', () => {
   it('declares two appended kinds at version 1, and does not claim the conditional update', async () => {
     const { registry } = await live()
 
-    expect(registry.versionsOf(RELEASE_PROTOCOL)).toEqual([RELEASE_VERSION])
-    expect(registry.kindsOf(RELEASE_PROTOCOL, RELEASE_VERSION)).toEqual([...Object.values(RELEASE_KINDS)].sort())
-    for (const kind of Object.values(RELEASE_KINDS)) expect(registry.ruleFor(RELEASE_PROTOCOL, RELEASE_VERSION, kind).guarantees).toEqual({ appended: true })
     // The one conditional update is the environment's pointer switch, not anything here.
-    expect(registry.conditionalOwner()).toBe(ENVIRONMENT_PROTOCOL)
+    expect([registry.versionsOf(RELEASE_PROTOCOL), registry.kindsOf(RELEASE_PROTOCOL, RELEASE_VERSION), registry.conditionalOwner()]).toEqual([[RELEASE_VERSION], [...Object.values(RELEASE_KINDS)].sort(), ENVIRONMENT_PROTOCOL])
+    for (const kind of Object.values(RELEASE_KINDS)) expect(registry.ruleFor(RELEASE_PROTOCOL, RELEASE_VERSION, kind).guarantees).toEqual({ appended: true })
   })
 })

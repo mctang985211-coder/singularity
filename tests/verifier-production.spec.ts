@@ -23,7 +23,6 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { AcceptanceCriterion } from '../src/task/contract.ts'
-import type { BubbleInput } from '../src/task/bubble.ts'
 import type { VerifierImplementation, VerifierInput, VerifierVerdict } from '../src/verifier/implementation.ts'
 import {
   runProductionVerdict,
@@ -194,7 +193,6 @@ describe('the production verdict', () => {
     const verdict: ProductionVerdict = await runProductionVerdict(await request())
 
     // The frozen evidence shape, with the digests of the bytes that were actually read.
-    const inputDigests: readonly BubbleInput[] = verdict.inputDigests
     expect(verdict).toEqual({
       runId: 'run-1',
       criterionId: 'correctness',
@@ -206,9 +204,7 @@ describe('the production verdict', () => {
       inputDigests: [{ name: INPUT_NAME, digest: sha256(inputBytes) }],
       detail: expect.any(String),
     })
-    expect(inputDigests).toHaveLength(1)
-    // Hashed after the command overwrote it, not before: the post-run bytes name the verdict.
-    expect(verdict.artifactDigest).not.toBe(sha256('stale bytes written before the command ran'))
+    // Hashed after the command overwrote it, not before: the bytes on disk are the post-run bytes the verdict names.
     expect(sha256(await readFile(artifact))).toBe(verdict.artifactDigest)
     // The command really ran, and it was the criterion's run rather than only the selftest's.
     expect(await markerLabels()).toContain('criterion')
@@ -218,8 +214,7 @@ describe('the production verdict', () => {
     const failed = await runProductionVerdict(
       await request({ inputs: [{ name: INPUT_NAME, digest: sha256('BAD three words') }], command: criterionCommand() }),
     )
-    expect(failed.verdict).toBe('fail')
-    expect(failed.artifactDigest).toBe(sha256('BAD three words'))
+    expect([failed.verdict, failed.artifactDigest]).toEqual(['fail', sha256('BAD three words')])
   })
 
   it('refuses input bytes that are not the declared bytes, before any real run', async () => {
@@ -227,8 +222,10 @@ describe('the production verdict', () => {
 
     const refusal = await asyncRefusalOf(async () => runProductionVerdict(await request()))
 
-    expect(refusal.code).toBe('evidence-input-mismatch')
-    expect(refusal.detail).toContain(INPUT_NAME)
+    expect(refusal).toMatchObject({
+      code: 'evidence-input-mismatch',
+      detail: expect.stringContaining(INPUT_NAME),
+    })
     // The selftest ran, but the criterion's own command was never reached.
     expect(await markerLabels()).not.toContain('criterion')
   })
@@ -238,8 +235,7 @@ describe('the production verdict', () => {
 
     const refusal = await asyncRefusalOf(async () => runProductionVerdict(await request({ implementations: [rebuilt] })))
 
-    expect(refusal.code).toBe('unregistered-verifier')
-    expect(refusal.detail).toContain('rebuilt')
+    expect(refusal).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('rebuilt') })
     // Not a single execution: the rebuilt code must not run at all, not merely be reported later.
     expect(await markerLabels()).toBe('')
   })
@@ -263,8 +259,7 @@ describe('the production verdict', () => {
 
     const refusal = await asyncRefusalOf(async () => runProductionVerdict(await request({ implementations: [lying] })))
 
-    expect(refusal.code).toBe('unregistered-verifier')
-    expect(refusal.detail).toContain('rejects the same bad input twice')
+    expect(refusal).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('rejects the same bad input twice') })
     // The selftest itself ran the samples for real; the criterion's run did not.
     expect(await markerLabels()).toContain('sample')
     expect(await markerLabels()).not.toContain('criterion')
@@ -279,8 +274,7 @@ describe('the production verdict', () => {
 
     const refusal = await asyncRefusalOf(async () => runProductionVerdict(await request({ implementations: [oneSided] })))
 
-    expect(refusal.code).toBe('unregistered-verifier')
-    expect(refusal.detail).toContain('no sample expected to fail')
+    expect(refusal).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('no sample expected to fail') })
     expect(await markerLabels()).toBe('')
   })
 
@@ -293,8 +287,7 @@ describe('the production verdict', () => {
 
     const refusal = await asyncRefusalOf(async () => runProductionVerdict(await request({ implementations: [broken] })))
 
-    expect(refusal.code).toBe('unregistered-verifier')
-    expect(refusal.detail).toContain('could not run')
+    expect(refusal).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('could not run') })
     expect(await markerLabels()).toBe('')
   })
 
@@ -311,8 +304,7 @@ describe('the production verdict', () => {
       runProductionVerdict(await request({ implementations: [held], criterion: declaredCriterion })),
     )
 
-    expect(refusal.code).toBe('wrong-verifier')
-    expect(refusal.detail).toContain(declared.slice(0, 12))
+    expect(refusal).toMatchObject({ code: 'wrong-verifier', detail: expect.stringContaining(declared.slice(0, 12)) })
     // The rebuilt implementation really did run; the refusal is about *which* implementation ran.
     expect(await markerLabels()).toContain('criterion')
   })
@@ -327,8 +319,6 @@ describe('the production verdict', () => {
     }
     const removed = await asyncRefusalOf(async () => runProductionVerdict(await request({ runJudge: vanishing })))
 
-    expect(removed.code).toBe('evidence-input-mismatch')
-    expect(removed.detail).toContain('artifact')
     // The judged command really ran; only the binding to what it left behind is refused.
     expect(await markerLabels()).toContain('criterion')
 
@@ -342,29 +332,32 @@ describe('the production verdict', () => {
     const absent = await asyncRefusalOf(async () =>
       runProductionVerdict(await request({ artifactPath: 'out/never-written.txt', runJudge: absentJudge })),
     )
-    expect(absent.code).toBe('evidence-input-mismatch')
+    // This path's own refusal, under the same name, for the artifact taken away and the one never written.
+    expect([removed, absent]).toMatchObject([
+      { code: 'evidence-input-mismatch', detail: expect.stringContaining('artifact') },
+      { code: 'evidence-input-mismatch' },
+    ])
   })
 
   it('refuses a request that is not the frozen shape, by name', async () => {
     const badDigest = await request({ inputs: [{ name: INPUT_NAME, digest: 'not-a-digest' }] })
-    expect((await asyncRefusalOf(() => runProductionVerdict(badDigest))).code).toBe('malformed-payload')
-
     const noJudge = await request({ runJudge: undefined as unknown as RealJudge })
-    expect((await asyncRefusalOf(() => runProductionVerdict(noJudge))).code).toBe('malformed-payload')
-
     const escaping = await request({ artifactPath: '../outside.txt' })
-    expect((await asyncRefusalOf(() => runProductionVerdict(escaping))).code).toBe('malformed-payload')
-
     const absolute = await request({ inputs: [{ name: input, digest: sha256(inputBytes) }] })
-    expect((await asyncRefusalOf(() => runProductionVerdict(absolute))).code).toBe('malformed-payload')
-
     const duplicated = await request({
       inputs: [
         { name: INPUT_NAME, digest: sha256(inputBytes) },
         { name: INPUT_NAME, digest: sha256('other bytes') },
       ],
     })
-    expect((await asyncRefusalOf(() => runProductionVerdict(duplicated))).code).toBe('malformed-payload')
+
+    // Five ways of not being the frozen shape — a digest that is not one, no judge port, an escaping
+    // artifact path, an absolute input name, a repeated input name — are one decision at the shape
+    // gate, refused under the payload's own name, and none of them is run.
+    const refused = await Promise.all(
+      [badDigest, noJudge, escaping, absolute, duplicated].map(async payload => (await asyncRefusalOf(() => runProductionVerdict(payload))).code),
+    )
+    expect(refused).toEqual(['malformed-payload', 'malformed-payload', 'malformed-payload', 'malformed-payload', 'malformed-payload'])
 
     // A criterion's shape is the contract's rule, so the refusal is the contract's own name for
     // it: the production path reads that shape, it does not own a second copy of it.

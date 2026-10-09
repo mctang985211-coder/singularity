@@ -1,54 +1,52 @@
 /**
- * The measurement protocol: one evaluation is one frozen plan, and every number in it comes from
- * the implementation that plan's metric names.
+ * The measurement protocol: one evaluation is one frozen plan, and every number in it comes from the
+ * implementation that plan's metric names.
  *
- * **Why a plan of slots.** A trial count is a *repetition* count, not a count of whatever happened
- * to be recorded. `trials = k` fixes slots `0..k-1` before the first run, and a report is read
- * against those slots. The system this replaces aggregated the observations it had and reported
+ * **Why a plan of slots.** `trials = k` fixes slots `0..k-1` before the first run, and a report is
+ * read against those slots. The system this replaces aggregated the observations it had and reported
  * `quality = 1` for `trials = 2, missing = 1`: the absent slot filled nothing, so one lucky
- * repetition read as a complete measurement. Here the denominator is the plan's, a slot without an
- * observation is named by the projection, and `trial/missed` is a kind because absence is a fact
- * somebody recorded rather than a gap a reader has to notice.
+ * repetition read as a complete measurement. Here the denominator is the plan's, and `trial/missed`
+ * is a kind because absence is a fact somebody recorded rather than a gap a reader has to notice.
  *
- * **Why the metric's implementation is also the emitter.** `metric.measured` is an
- * `AcceptanceCriterion`, whose `implementationDigest` is the content digest of the implementation
- * that decides it, and a trial is emitted by `verifier:<ref>@<version>` — the role discipline
- * `evidence/produced` already uses. A name a deployment can re-point is not an identity, so the
- * reducer refuses a trial whose emitter is not the metric's implementation and whose content digest
- * is not the metric's. The identity members travel *in the payload* (`verifierRef`,
- * `verifierVersion`, `implementationDigest`) for the same reason they do in `evidence/produced`: a
- * kind's emitter is a function of its own payload and of nothing else, so the role a fact must be
- * emitted under can only be derived from what the fact carries. The command layer fills them from
- * the frozen plan, so a producer supplies the numbers it observed and never who produced them.
+ * **Why the metric's implementation is also the emitter.** A trial is emitted by
+ * `verifier:<ref>@<version>`, the role discipline `evidence/produced` uses, and the identity members
+ * travel in the payload because a kind's emitter sees only its own payload. The command fills them
+ * from the frozen plan, so a producer supplies the numbers it observed and never who produced them;
+ * the reducer refuses a trial whose emitter or content digest is not the metric's, because a name a
+ * deployment can re-point is not an identity. `trial/missed` carries the ref and version but **not**
+ * an `implementationDigest`: a miss names no artifact and no number, so there is no content to bind.
  *
- * `trial/missed` carries the ref and version but **not** an `implementationDigest`, and the
- * asymmetry is deliberate rather than an oversight: a miss names no artifact and no number, so
- * there is no content whose digest could be bound, and inventing one would require an
- * implementation to have produced bytes it did not produce. The role is what must hold — a
- * deployment that cannot run the metric cannot report the gap either — and the digest check belongs
- * where a number exists.
+ * **Why the caliber is the execution context and not the run.** Comparability is taken over the
+ * model, the tool implementations, the conditions and the inputs a run declared (`contextDigestOf`),
+ * never over the run's identity — otherwise every candidate would have to be measured inside one
+ * run, and the isolation manifest a bubble declares for exactly this comparison would be unusable.
  *
- * **Why hard constraints are a separate kind.** `constraint/checked` never touches `weights`.
- * Whether a constraint holds is decided by that criterion's own implementation, once per criterion,
- * and no score compensates for it — which is what makes "high score, out of bounds, rejected"
- * expressible at all. The check is also bound to the artifact the numbers were formed on: a
- * constraint cleared on different bytes describes a different measurement, and the report would be
- * reading as one acceptance two things that never happened together.
+ * **Why hard constraints are a separate kind.** `constraint/checked` never touches `weights`: one
+ * check per criterion, by that criterion's own implementation, and no score compensates for it —
+ * which is what makes "high score, out of bounds, rejected" expressible at all. The check is also
+ * bound to the artifact the numbers were formed on, so a report cannot read as one acceptance two
+ * things that never happened together.
  *
  * @module singularity-core/measure/protocol
  */
 
-import { assertClosedKeys, type Envelope } from '../protocol/envelope.ts'
+import { assertClosedKeys, digestOf, type Envelope } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
-import { inputList, type BubbleInput } from '../task/bubble.ts'
+import { inputList, type Bubble, type BubbleInput } from '../task/bubble.ts'
 import { assertCriterionShape, type AcceptanceCriterion } from '../task/contract.ts'
 import { SCHEDULER_ROLE, verifierRoleOf, type RevisionRef } from '../task/protocol.ts'
 import { digest, maybeText, record, text } from '../task/shape.ts'
 
 export const MEASURE_PROTOCOL = 'measure'
-/** Version 1. No earlier version exists, and there is no compatibility layer. */
-export const MEASURE_VERSION = 1
+/**
+ * Version 3. The caliber's execution context covers the run's declared `inputs` as well as the
+ * model, the tool digests and the conditions: two candidates measured on different datasets are not
+ * answers to the same question. Version 2 covered the context without the inputs, and version 1
+ * covered the run identity itself. Older versions are refused by name with no compatibility layer —
+ * comparability is a historical interpretation, and it moved.
+ */
+export const MEASURE_VERSION = 3
 
 export const MEASURE_KINDS = {
   evaluationOpened: 'evaluation/opened',
@@ -61,6 +59,23 @@ export const MEASURE_KINDS = {
 export interface EvaluationRun {
   readonly taskId: string
   readonly runId: string
+}
+
+/**
+ * The content identity of an execution context: the model that ran, every tool's content digest, the
+ * observable conditions, and the **inputs** the run declared — and nothing else.
+ *
+ * This is the question two evaluations must be answers to before their scores can be pooled, and
+ * every member is in it because a change to any of them changes the question: another model, a
+ * rebuilt tool behind its name, another condition, another dataset. R02 lists the model,
+ * environment and dataset as the measurement context, and R08 says a tool can be rebuilt behind its
+ * name. The *run identity* is deliberately out — a caliber keyed on the run could only pool
+ * candidates measured inside one run, so no candidate could be measured in its own bubble — and the
+ * *workspace* is out for the same reason: two runs in two temporary directories are the same
+ * question, and putting a path in would make every per-candidate bubble incomparable.
+ */
+export function contextDigestOf(bubble: Bubble): string {
+  return digestOf({ model: bubble.model, tools: bubble.tools, conditions: bubble.conditions, inputs: bubble.inputs })
 }
 
 /** What is measured, and which way a better number goes. */
@@ -118,6 +133,8 @@ export interface EvaluationState {
   readonly baseline?: RevisionRef
   readonly candidate?: RevisionRef
   readonly run?: EvaluationRun
+  /** `contextDigestOf` of that run's bubble: model, tool digests, conditions, inputs. Comparability. */
+  readonly context?: string
   readonly metric?: EvaluationMetric
   readonly weights?: EvaluationWeights
   /** The plan's slot count k. It is the denominator, and it never comes from the observations. */
@@ -128,11 +145,6 @@ export interface EvaluationState {
   readonly missed: readonly MissedTrial[]
   readonly checks: readonly ConstraintCheck[]
 }
-
-const OPENED_MEMBERS = ['baseline', 'candidate', 'run', 'metric', 'weights', 'trials', 'judgement'] as const
-const RECORDED_MEMBERS = ['slot', 'quality', 'cost', 'artifactDigest', 'inputDigests', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail'] as const
-const MISSED_MEMBERS = ['slot', 'reason', 'verifierRef', 'verifierVersion'] as const
-const CONSTRAINT_MEMBERS = ['criterionId', 'met', 'artifactDigest', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail'] as const
 
 /** One revision pin: the environment it is unique in, the id, and the content it names. */
 function revisionRef(raw: unknown, where: string): RevisionRef {
@@ -186,7 +198,7 @@ function criterionList(raw: unknown, where: string): readonly AcceptanceCriterio
 
 function trialOf(raw: unknown, where: string): TrialRecord {
   const source = record(raw, where)
-  assertClosedKeys(source, RECORDED_MEMBERS, where)
+  assertClosedKeys(source, ['slot', 'quality', 'cost', 'artifactDigest', 'inputDigests', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail'], where)
   const cost = maybeFinite(source, 'cost', where)
   const detail = maybeText(source, 'detail', where)
   return {
@@ -204,7 +216,7 @@ function trialOf(raw: unknown, where: string): TrialRecord {
 
 function missedOf(raw: unknown, where: string): MissedTrial {
   const source = record(raw, where)
-  assertClosedKeys(source, MISSED_MEMBERS, where)
+  assertClosedKeys(source, ['slot', 'reason', 'verifierRef', 'verifierVersion'], where)
   return {
     slot: finite(source, 'slot', where),
     reason: text(source, 'reason', where),
@@ -215,7 +227,7 @@ function missedOf(raw: unknown, where: string): MissedTrial {
 
 function constraintOf(raw: unknown, where: string): ConstraintCheck {
   const source = record(raw, where)
-  assertClosedKeys(source, CONSTRAINT_MEMBERS, where)
+  assertClosedKeys(source, ['criterionId', 'met', 'artifactDigest', 'verifierRef', 'verifierVersion', 'implementationDigest', 'detail'], where)
   const met = source['met']
   if (typeof met !== 'boolean') refuse('malformed-payload', `${where}.met must be a boolean, got ${met === null ? 'null' : typeof met}`)
   const detail = maybeText(source, 'detail', where)
@@ -271,25 +283,21 @@ function requireImplementationDigest(implementationDigest: string, criterion: Ac
     refuse('wrong-verifier', `${where} came from the implementation ${implementationDigest.slice(0, 12)}…, but ${subject} names ${criterion.implementationDigest.slice(0, 12)}…`)
 }
 
-/**
- * Declare the measurement protocol. Call once at load. Whether this deployment can run the metric
- * is a command-time question and is not decided here: what a deployment holds today is not a rule
- * about a plan recorded last month.
- */
+/** Declare the measurement protocol. Call once at load; what a deployment can run today is a command-time question, not a replay-time one. */
 export function declareMeasureProtocol(registry: ProtocolRegistry): void {
   registry.declare<EvaluationState>(MEASURE_PROTOCOL, MEASURE_VERSION, {
     initialState: { evaluationId: '', observed: [], missed: [], checks: [] },
     kinds: {
       [MEASURE_KINDS.evaluationOpened]: defineKind<
         EvaluationState,
-        { baseline: RevisionRef; candidate: RevisionRef; run: EvaluationRun; metric: EvaluationMetric; weights: EvaluationWeights; trials: number; judgement: readonly AcceptanceCriterion[] }
+        { baseline: RevisionRef; candidate: RevisionRef; run: EvaluationRun; context: string; metric: EvaluationMetric; weights: EvaluationWeights; trials: number; judgement: readonly AcceptanceCriterion[] }
       >({
         guarantees: { appended: true },
         emitter: SCHEDULER_ROLE,
         parse: raw => {
           const where = `${MEASURE_KINDS.evaluationOpened} payload`
           const source = record(raw, where)
-          assertClosedKeys(source, OPENED_MEMBERS, where)
+          assertClosedKeys(source, ['baseline', 'candidate', 'run', 'context', 'metric', 'weights', 'trials', 'judgement'], where)
           const trials = finite(source, 'trials', where)
           if (!Number.isInteger(trials) || trials < 1)
             refuse('malformed-payload', `${where}.trials must be an integer >= 1, got ${String(trials)}; a plan with no slots has no denominator, so nothing could be reported complete or missing`)
@@ -303,6 +311,7 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
             baseline: revisionRef(source['baseline'], `${where}.baseline`),
             candidate: revisionRef(source['candidate'], `${where}.candidate`),
             run: { taskId: text(run, 'taskId', `${where}.run`), runId: text(run, 'runId', `${where}.run`) },
+            context: digest(source, 'context', where),
             metric,
             weights: weightsOf(source['weights'], `${where}.weights`),
             trials,
@@ -319,6 +328,7 @@ export function declareMeasureProtocol(registry: ProtocolRegistry): void {
             baseline: payload.baseline,
             candidate: payload.candidate,
             run: payload.run,
+            context: payload.context,
             metric: payload.metric,
             weights: payload.weights,
             trials: payload.trials,

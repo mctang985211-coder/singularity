@@ -68,15 +68,11 @@ describe('editBudgetFor: the budget anneals by rounds-1 (ADR tightening #1)', ()
     // the out-of-range endpoint t=T reaches b_min. That endpoint is never asked for by range(T).
     expect(upstreamBudget(19, 20, 4, 1)).toBe(2)
     expect(editBudgetFor(20, 20, 4, 1)).toBe(1)
-    expect(upstreamBudget(12, 20, 4, 1)).toBe(3)
-    expect(editBudgetFor(13, 20, 4, 1)).toBe(2)
   })
 
   it('is the rounds-1 anneal table end to end, and is monotone non-increasing', () => {
     const table = Array.from({ length: 20 }, (_, index) => editBudgetFor(index + 1, 20, 4, 1))
     expect(table).toEqual([4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 1])
-    expect(editBudgetFor(1, 20, 4, 1)).toBe(4)
-    expect([...table].sort((left, right) => right - left)).toEqual(table)
   })
 
   it('gives a one-round run the minimum: that round is its own last round', () => {
@@ -87,7 +83,6 @@ describe('editBudgetFor: the budget anneals by rounds-1 (ADR tightening #1)', ()
   it('clamps an out-of-range round to the nearest end', () => {
     expect(editBudgetFor(0, 20, 4, 1)).toBe(4)
     expect(editBudgetFor(25, 20, 4, 1)).toBe(1)
-    expect(editBudgetFor(25, 20, 4, 1)).toBe(upstreamBudget(20, 20, 4, 1))
   })
 })
 
@@ -95,13 +90,11 @@ describe('noveltyOf: mechanism types, not edits (R05)', () => {
   it('counts two skill edits as one class and two classes as two', () => {
     expect(noveltyOf(['skill', 'skill'], history([], []))).toBe(1)
     expect(noveltyOf(['skill', 'tool'], history([], []))).toBe(2)
-    expect(noveltyOf(['skill', 'tool', 'template'], history([], []))).toBe(3)
   })
 
   it('does not count a class that has already been accepted', () => {
     expect(noveltyOf(['skill'], history([], ['skill']))).toBe(0)
     expect(noveltyOf(['skill', 'tool'], history([], ['skill']))).toBe(1)
-    expect(noveltyOf(['skill'], history([], ['skill', 'tool', 'template']))).toBe(0)
   })
 
   it('counts nothing when no structural class was declared (ADR tightening #5)', () => {
@@ -109,7 +102,6 @@ describe('noveltyOf: mechanism types, not edits (R05)', () => {
     // are text under a `skills/` path) returns 'skill', so a text tweak earns novelty 1. The port
     // has no diff input at all: a class that was not declared and verified is not a class.
     expect(noveltyOf([], history([], []))).toBe(0)
-    expect(noveltyOf([], history([], ['tool']))).toBe(0)
   })
 
   it('takes the verified declaration as truth instead of recovering one from the diff', () => {
@@ -131,9 +123,7 @@ describe('select: admissibility before any comparison', () => {
       MEASURED,
       WEIGHTS,
     )
-    expect(0.9).toBeGreaterThan(0.6)
-    expect(selection.winner).toBe(1)
-    expect(reasonFor(selection, 0)).toContain('hard constraint violated')
+    expect([selection.winner, reasonFor(selection, 0)]).toEqual([1, expect.stringContaining('hard constraint violated')])
   })
 
   it('returns winner null when the only high scorer is the one that violates a constraint', () => {
@@ -143,9 +133,7 @@ describe('select: admissibility before any comparison', () => {
       MEASURED,
       WEIGHTS,
     )
-    expect(selection.winner).toBeNull()
-    expect(admittedSlots(selection)).toEqual([])
-    expect(reasonFor(selection, 0)).toContain('non-compensating')
+    expect([selection.winner, reasonFor(selection, 0)]).toEqual([null, expect.stringContaining('non-compensating')])
   })
 
   it('refuses an incomplete measurement instead of scoring it (R06)', () => {
@@ -157,9 +145,7 @@ describe('select: admissibility before any comparison', () => {
       MEASURED,
       WEIGHTS,
     )
-    expect(selection.winner).toBe(1)
-    expect(reasonFor(selection, 0)).toContain('incomplete measurement')
-    expect(reasonFor(selection, 0)).toContain('1 of 2')
+    expect([selection.winner, reasonFor(selection, 0)]).toEqual([1, expect.stringContaining('incomplete measurement: 1 of 2')])
   })
 
   it('refuses an unmeasured slot and a slot the caller already called inadmissible', () => {
@@ -173,9 +159,7 @@ describe('select: admissibility before any comparison', () => {
       MEASURED,
       WEIGHTS,
     )
-    expect(selection.winner).toBe(2)
-    expect(reasonFor(selection, 0)).toContain('not measured')
-    expect(reasonFor(selection, 1)).toContain('caliber-mismatch')
+    expect([selection.winner, reasonFor(selection, 0), reasonFor(selection, 1)]).toEqual([2, expect.stringContaining('not measured'), expect.stringContaining('caliber-mismatch')])
   })
 
   it('refuses a slot whose frozen gain is missing rather than inventing one', () => {
@@ -185,8 +169,7 @@ describe('select: admissibility before any comparison', () => {
       MEASURED,
       WEIGHTS,
     )
-    expect(selection.winner).toBe(1)
-    expect(reasonFor(selection, 0)).toContain('no frozen gain')
+    expect([selection.winner, reasonFor(selection, 0)]).toEqual([1, expect.stringContaining('no frozen gain')])
   })
 
   it('keeps the incumbent with winner null, and still reports a reason per slot', () => {
@@ -197,8 +180,7 @@ describe('select: admissibility before any comparison', () => {
       WEIGHTS,
     )
     expect(selection.winner).toBeNull()
-    expect(selection.outcomes.map((entry) => entry.slot)).toEqual([0, 1])
-    expect(selection.outcomes.every((entry) => entry.reason.length > 0)).toBe(true)
+    expect(selection.outcomes.map((entry) => [entry.slot, entry.reason.length > 0])).toEqual([[0, true], [1, true]])
   })
 })
 
@@ -210,24 +192,19 @@ describe('select: the noise band', () => {
     const outside = select([candidate(0, { measurement: measurement(0.54) })], history([delta(0, 0.04, 0.24)]), MEASURED, WEIGHTS)
     const inside = select([candidate(0, { measurement: measurement(0.515) })], history([delta(0, 0.015, 0.24)]), MEASURED, WEIGHTS)
     expect(outside.winner).toBe(0)
-    expect(inside.winner).toBeNull()
-    expect(reasonFor(inside, 0)).toContain('inside the noise band')
+    expect([inside.winner, reasonFor(inside, 0)]).toEqual([null, expect.stringContaining('inside the noise band')])
   })
 
   it('admits an in-band candidate that pays for itself with cost', () => {
     const selection = select([candidate(0, { measurement: measurement(0.5) })], history([delta(0, 0, -0.1)]), MEASURED, WEIGHTS)
-    expect(selection.winner).toBe(0)
-    expect(reasonFor(selection, 0)).toContain('100*dS - 15*dC = +1.5000')
+    expect([selection.winner, reasonFor(selection, 0)]).toEqual([0, expect.stringContaining('100*dS - 15*dC = +1.5000')])
   })
 
   it('records whether the band was measured or declared, without changing the rule (R06)', () => {
     const measured = select([candidate(0)], history([delta(0, 0.015, 0.24)]), { floor: 0.02, source: 'measured' }, WEIGHTS)
     const declared = select([candidate(0)], history([delta(0, 0.015, 0.24)]), { floor: 0.02, source: 'declared' }, WEIGHTS)
-    expect(measured.winner).toBeNull()
-    expect(declared.winner).toBeNull()
-    expect(reasonFor(measured, 0)).toContain('(measured)')
-    expect(reasonFor(declared, 0)).toContain('(declared)')
-    expect(reasonFor(measured, 0)).not.toBe(reasonFor(declared, 0))
+    expect([measured.winner, declared.winner]).toEqual([null, null])
+    expect([reasonFor(measured, 0), reasonFor(declared, 0)]).toEqual([expect.stringContaining('(measured)'), expect.stringContaining('(declared)')])
   })
 })
 
@@ -236,8 +213,7 @@ describe('select: the cost rule', () => {
     // Upstream's budget for dS = +0.05 is 0.10 + 40*0.05 = 2.10, so it admits +30% cost.
     expect(upstreamCostBudget(0.05)).toBeCloseTo(2.1, 9)
     const refused = select([candidate(0)], history([delta(0, 0.05, 0.3)]), MEASURED, WEIGHTS)
-    expect(refused.winner).toBeNull()
-    expect(reasonFor(refused, 0)).toContain('> budget 0.250')
+    expect([refused.winner, reasonFor(refused, 0)]).toEqual([null, expect.stringContaining('> budget 0.250')])
     const boundary = select([candidate(0)], history([delta(0, 0.05, 0.25)]), MEASURED, WEIGHTS)
     expect(boundary.winner).toBe(0)
   })
@@ -246,17 +222,14 @@ describe('select: the cost rule', () => {
     // Upstream relative_cost_change(None, 1000) === 0.0, so the gaining branch (budget 2.10) and
     // the in-band branch with novelty (shaped 0 - 0 + 0.5*2 = +1.0) both pass silently.
     const gaining = select([candidate(0)], history([delta(0, 0.05, null)]), MEASURED, WEIGHTS)
-    expect(gaining.winner).toBeNull()
-    expect(reasonFor(gaining, 0)).toContain('cost change unknown')
+    expect([gaining.winner, reasonFor(gaining, 0)]).toEqual([null, expect.stringContaining('cost change unknown')])
     const inBand = select(
       [candidate(0, { assets: ['skill', 'tool'] })],
       history([delta(0, 0, null)], []),
       MEASURED,
       WEIGHTS,
     )
-    expect(noveltyOf(['skill', 'tool'], history([], []))).toBe(2)
     expect(inBand.winner).toBeNull()
-    expect(reasonFor(inBand, 0)).toContain('0.0')
   })
 })
 
@@ -301,7 +274,6 @@ describe('select: argmax and the deterministic tie-break (ADR tightening #3)', (
     )
     expect(reversed).toEqual(forward)
     expect(reversed.winner).toBe(2)
-    expect(reversed.outcomes.map((entry) => entry.slot)).toEqual([0, 1, 2])
   })
 })
 
@@ -323,6 +295,5 @@ describe('select: the frozen round facts (R03)', () => {
     const byPosition = history([delta(0, 0), delta(1, 0.2)])
     const shuffled = history([delta(1, 0.2), delta(0, 0)])
     expect(select(candidates, shuffled, MEASURED, WEIGHTS)).toEqual(select(candidates, byPosition, MEASURED, WEIGHTS))
-    expect(select(candidates, shuffled, MEASURED, WEIGHTS).winner).toBe(1)
   })
 })

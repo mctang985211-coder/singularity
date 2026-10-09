@@ -20,7 +20,6 @@ import {
   TASK_PROTOCOL,
   TASK_VERSION,
   type ReceiptView,
-  type RunView,
   type TaskState,
   type TaskView,
 } from '../src/index.ts'
@@ -63,23 +62,14 @@ describe('the task slice', () => {
     const { state } = await slice()
     const view: TaskView = projectTask(state)
 
-    expect(view.taskId).toBe(TASK_ID)
-    expect(view.goal).toBe('implement a word counter')
-    expect(view.phase).toBe('verified')
-    expect(view.criteria.map(criterion => criterion.criterionId)).toEqual(['correctness', 'limits'])
-    expect(view.runs).toHaveLength(1)
-
-    const run: RunView | undefined = view.runs[0]
-    expect(run?.status).toBe('verified')
-    expect(run?.emitter).toBe('scheduler')
-    expect(run?.actor).toBe(SCHEDULER)
-    expect(run?.revision.revisionId).toBe('r0001')
-    expect(run?.verdicts.map(verdict => `${verdict.criterionId}:${verdict.verdict}:${verdict.decidedBy}`)).toEqual([
-      `correctness:pass:${UNIT_VERIFIER}@1`,
-      `limits:pass:${INTEGRATION_VERIFIER}@1`,
+    // One read of the view: the admitted contract, the phase it settled in, its criteria in contract
+    // order, and its one run - pinned to a revision by the trusted scheduler identity.
+    expect(view).toMatchObject({ taskId: TASK_ID, goal: 'implement a word counter', phase: 'verified', criteria: [{ criterionId: 'correctness' }, { criterionId: 'limits' }], runs: [{ status: 'verified', emitter: 'scheduler', actor: SCHEDULER, revision: { revisionId: 'r0001' } }], })
+    // Every verdict names the verifier that decided it and pins the artifact content it was formed on.
+    expect(view.runs[0]?.verdicts.map(verdict => [verdict.criterionId, verdict.verdict, verdict.decidedBy, verdict.artifactDigest])).toEqual([
+      ['correctness', 'pass', `${UNIT_VERIFIER}@1`, ARTIFACT],
+      ['limits', 'pass', `${INTEGRATION_VERIFIER}@1`, ARTIFACT],
     ])
-    // Every verdict pins the artifact content it was formed on.
-    expect(run?.verdicts.every(verdict => verdict.artifactDigest === ARTIFACT)).toBe(true)
   })
 
   it('reports an admitted task with no run as awaiting a run, not as failed', async () => {
@@ -91,8 +81,8 @@ describe('the task slice', () => {
     if (state === undefined) throw new Error('expected a folded task')
     const view = projectTask(state)
 
-    expect(view.phase).toBe('awaiting-run')
-    expect(view.runs).toEqual([])
+    // A phase is never inferred from absence: a contract with no run is awaiting one, not failed.
+    expect([view.phase, view.runs]).toEqual(['awaiting-run', []])
     expect(renderTaskForAgent(view)).toContain('awaiting a run')
   })
 
@@ -100,20 +90,17 @@ describe('the task slice', () => {
     const { log, state } = await slice()
     const receipt: ReceiptView = projectReceipt(state, RUN_ID, log.entries().length)
 
-    expect(receipt.status).toBe('verified')
-    expect(receipt.executor).toEqual({ emitter: 'scheduler', actor: SCHEDULER })
-    expect(receipt.contractDigest).toBe(projectTask(state).contractDigest)
-    expect(receipt.criteria.map(entry => `${entry.criterionId}:${entry.verdict}:${entry.verifierRef}@${entry.verifierVersion}`)).toEqual([
-      `correctness:pass:${UNIT_VERIFIER}@1`,
-      `limits:pass:${INTEGRATION_VERIFIER}@1`,
+    // The receipt names the facts it accounts for (the committed cutoff) and the contract it answers
+    // to, and its identity is a content digest - so "fixed source" is a property a reader can check.
+    expect(receipt).toMatchObject({ status: 'verified', executor: { emitter: 'scheduler', actor: SCHEDULER }, contractDigest: projectTask(state).contractDigest, cutoff: log.entries().length, })
+    // Each criterion carries the verifier that decided it and the artifact content it judged.
+    expect(receipt.criteria.map(entry => [entry.criterionId, entry.verdict, `${entry.verifierRef}@${entry.verifierVersion}`, entry.artifactDigest])).toEqual([
+      ['correctness', 'pass', `${UNIT_VERIFIER}@1`, ARTIFACT],
+      ['limits', 'pass', `${INTEGRATION_VERIFIER}@1`, ARTIFACT],
     ])
-    expect(receipt.criteria.every(entry => entry.artifactDigest === ARTIFACT)).toBe(true)
+    // What the attempt actually consumed: the declared inputs and the workspace it executed in.
+    expect(receipt.consumption).toEqual({ inputs: BUBBLE_INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' } })
     expect(receiptDigest(receipt)).toMatch(/^[0-9a-f]{64}$/)
-    // The receipt names the facts it accounts for and what the attempt consumed, so "fixed source"
-    // is a property a reader can check rather than a claim.
-    expect(receipt.cutoff).toBe(log.entries().length)
-    expect(receipt.consumption.inputs).toEqual(BUBBLE_INPUTS)
-    expect(receipt.consumption.workspace).toEqual({ kind: 'git', ref: 'refs/heads/main' })
   })
 
   it('gives a different receipt for the same run at a different committed cutoff', async () => {
@@ -179,16 +166,25 @@ describe('the task slice', () => {
 
   it('renders the same view for an agent, adding nothing and hiding nothing', async () => {
     const { state } = await slice()
-    const text = renderTaskForAgent(projectTask(state))
+    const view = projectTask(state)
+    const text = renderTaskForAgent(view)
 
-    expect(text).toContain(`Task ${TASK_ID} — phase verified`)
-    expect(text).toContain('goal: implement a word counter')
-    // The rendering carries the implementation's own digest, so a reader sees *which* code decided
-    // a criterion rather than only the name a deployment could re-point.
-    expect(text).toContain(`correctness: counts match the golden file [decided by ${UNIT_VERIFIER}@1 implemented by ${UNIT_IMPLEMENTATION.slice(0, 12)}…]`)
-    // The run names the environment as well as the revision: a revision id is unique only within one.
-    expect(text).toContain(`run-1: verified by ${SCHEDULER} (role scheduler) on ${REVISION.environmentId} revision r0001`)
-    expect(text).toContain(`correctness: pass by ${UNIT_VERIFIER}@1 on artifact bbbbbbbbbbbb…`)
+    // The reading is the view line for line: the same contract and admission time, the implementation's
+    // own digest (so a reader sees *which* code decided a criterion rather than only the name a
+    // deployment could re-point), and the run with its environment as well as its revision (a revision
+    // id is unique only within one). A line added or hidden anywhere fails the equality.
+    expect(text).toBe([
+      `Task ${TASK_ID} — phase verified`,
+      `  goal: implement a word counter`,
+      `  contract ${view.contractDigest.slice(0, 12)}… admitted by ${SCHEDULER} at ${view.admittedAt}`,
+      `  criteria (2):`,
+      `    - correctness: counts match the golden file [decided by ${UNIT_VERIFIER}@1 implemented by ${UNIT_IMPLEMENTATION.slice(0, 12)}…]`,
+      `    - limits: rejects input over 1 MiB [decided by ${INTEGRATION_VERIFIER}@1 implemented by ${contract().criteria[1]!.implementationDigest.slice(0, 12)}…]`,
+      `  runs (1):`,
+      `    - ${RUN_ID}: verified by ${SCHEDULER} (role scheduler) on ${REVISION.environmentId} revision ${REVISION.revisionId} (${REVISION.digest.slice(0, 12)}…)`,
+      `        correctness: pass by ${UNIT_VERIFIER}@1 on artifact ${ARTIFACT.slice(0, 12)}…`,
+      `        limits: pass by ${INTEGRATION_VERIFIER}@1 on artifact ${ARTIFACT.slice(0, 12)}…`,
+    ].join('\n'))
   })
 
   it('does not let a receipt be persisted: the vocabulary keeps it derived', async () => {
@@ -216,8 +212,9 @@ describe('the task slice', () => {
 
     const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
     if (state === undefined) throw new Error('expected a folded task')
-    expect(projectTask(state).phase).toBe('failed')
+    // Both readings of the settled run say failed, rather than reading a failure out of a missing value ...
+    expect([projectTask(state).phase, projectReceipt(state, RUN_ID, log.entries().length).status]).toEqual(['failed', 'failed'])
+    // ... and the failure recorded no reason, so the projection reports none instead of inventing one.
     expect(projectTask(state).runs[0]?.failureReason).toBeNull()
-    expect(projectReceipt(state, RUN_ID, log.entries().length).status).toBe('failed')
   })
 })

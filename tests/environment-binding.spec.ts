@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { digestOf, foldSubjects, MemoryLog, ProtocolRegistry, type EmitInput, type RefusalCode } from '../src/index.ts'
+import { digestOf, foldSubjects, MemoryLog, ProtocolRegistry, type EmitInput } from '../src/index.ts'
 import { assertPinnedRevision, projectBindings } from '../src/environment/binding.ts'
 import {
   declareEnvironmentProtocol,
@@ -69,52 +69,39 @@ describe('resolving one pin', () => {
   it('returns the created revision, whose manifest the caller never supplied', async () => {
     const revision = assertPinnedRevision(pinned, await environments(), WHERE)
 
-    expect(revision.revisionId).toBe(REVISION_ID)
-    expect(revision.contentDigest).toBe(digestOf(MANIFEST))
-    expect(revision.manifest).toEqual(MANIFEST)
-    expect(revision.at.length).toBeGreaterThan(0)
+    expect([revision.revisionId, revision.contentDigest, revision.manifest, revision.at.length > 0]).toEqual([REVISION_ID, digestOf(MANIFEST), MANIFEST, true])
   })
 
   it('refuses a pin on an environment no revision/created fact created', async () => {
     const map = await environments()
     const refusal = refusalOf(() => assertPinnedRevision({ ...pinned, environmentId: 'env-ghost' }, map, WHERE))
-    expect(refusal.code).toBe<RefusalCode>('unknown-revision')
-    expect(refusal.detail).toContain('env-ghost')
     // The refusal says what does exist, so a missing creation is visible as a missing fact.
-    expect(refusal.detail).toContain(ENVIRONMENT_ID)
+    expect([refusal.code, refusal.detail.includes('env-ghost'), refusal.detail.includes(ENVIRONMENT_ID)]).toEqual(['unknown-revision', true, true])
   })
 
   it('refuses a pin on a revision id the environment never created', async () => {
     const map = await environments()
     const refusal = refusalOf(() => assertPinnedRevision({ ...pinned, revisionId: 'r9999' }, map, WHERE))
-    expect(refusal.code).toBe<RefusalCode>('unknown-revision')
-    expect(refusal.detail).toContain('r9999')
-    expect(refusal.detail).toContain(OTHER_REVISION)
+    expect([refusal.code, refusal.detail.includes('r9999'), refusal.detail.includes(OTHER_REVISION)]).toEqual(['unknown-revision', true, true])
   })
 
   it('refuses a pin whose digest is not the created content, even when the id exists', async () => {
     const map = await environments()
     const refusal = refusalOf(() => assertPinnedRevision({ ...pinned, digest: 'c'.repeat(64) }, map, WHERE))
-    expect(refusal.code).toBe<RefusalCode>('unknown-revision')
-    expect(refusal.detail).toContain(REVISION_ID)
-    expect(refusal.detail).toContain(digestOf(MANIFEST).slice(0, 12))
+    expect([refusal.code, refusal.detail.includes(REVISION_ID), refusal.detail.includes(digestOf(MANIFEST).slice(0, 12))]).toEqual(['unknown-revision', true, true])
   })
 
   it('refuses a pin that names the right revision id in the wrong environment', async () => {
     const map = await environments()
     // Both environments hold an `r0001`, with different content, so the pinned digest cannot resolve.
-    const refusal = refusalOf(() =>
-      assertPinnedRevision({ environmentId: OTHER_ENVIRONMENT, revisionId: REVISION_ID, digest: digestOf(MANIFEST) }, map, WHERE),
-    )
-    expect(refusal.code).toBe<RefusalCode>('unknown-revision')
-    expect(refusal.detail).toContain(OTHER_ENVIRONMENT)
+    const refusal = refusalOf(() => assertPinnedRevision({ environmentId: OTHER_ENVIRONMENT, revisionId: REVISION_ID, digest: digestOf(MANIFEST) }, map, WHERE))
+    expect(refusal).toMatchObject({ code: 'unknown-revision', detail: expect.stringContaining(OTHER_ENVIRONMENT) })
   })
 
   it('treats inherited member names as unknown revisions rather than as content', async () => {
     const map = await environments()
     const refusal = refusalOf(() => assertPinnedRevision({ ...pinned, revisionId: 'constructor' }, map, WHERE))
-    expect(refusal.code).toBe<RefusalCode>('unknown-revision')
-    expect(refusal.detail).toContain('constructor')
+    expect(refusal).toMatchObject({ code: 'unknown-revision', detail: expect.stringContaining('constructor') })
   })
 })
 
@@ -145,8 +132,7 @@ describe('projecting many runs', () => {
     ]
 
     const refusal = refusalOf(() => projectBindings(runs, map))
-    expect(refusal.code).toBe<RefusalCode>('unknown-revision')
     // Named: the unbindable run is refused, not dropped from a list that looks complete.
-    expect(refusal.detail).toContain('run-2')
+    expect(refusal).toMatchObject({ code: 'unknown-revision', detail: expect.stringContaining('run-2') })
   })
 })

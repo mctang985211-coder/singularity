@@ -169,28 +169,24 @@ describe('the control store over a real session', () => {
       subject: TASK_ID,
       payload: { contract: contract() },
     })
-    expect(admitted.seq).toBe(0)
+    // The fold the successor below is compared against: it must be a real value, not two undefined
+    // ones that a comparison between them would accept.
     const before = store.load()
     expect(before.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.contractDigest).toBeDefined()
     await store.close()
 
-    // The stored event is ours, is marked ignorable, carries the sealed envelope, and its data
-    // holds exactly the four declared members.
+    // The stored event is ours, is marked ignorable, and its data holds exactly the four declared
+    // members, carrying the sealed envelope under the first sequence of our own chain.
     const stored = await storedControlEvents(live.root)
-    expect(stored).toHaveLength(1)
-    const event = stored[0]
-    expect(event?.['ignorable']).toBe(true)
-    expect(Object.keys((event?.['data'] ?? {}) as ControlEventData).sort()).toEqual(['kind', 'payload', 'protocol', 'version'])
-    const carried = (event?.['data'] as ControlEventData).payload
-    expect(carried.digest).toBe(admitted.digest)
-    expect(carried.seq).toBe(0)
+    const carried = ((stored[0]?.['data'] ?? {}) as ControlEventData).payload
+    expect([stored.length, stored[0]?.['ignorable'], Object.keys((stored[0]?.['data'] ?? {}) as ControlEventData).sort(), carried.digest, carried.seq])
+      .toEqual([1, true, ['kind', 'payload', 'protocol', 'version'], admitted.digest, 0])
 
     // A second store over the same session adopts the same fact and folds the same state.
     const successor = await ControlSessionStore.open(optionsFor(live, 'graph-1'))
-    expect(successor.load().entries().map(entry => entry.digest)).toEqual([admitted.digest])
-    expect(successor.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.contractDigest).toBe(
-      before.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.contractDigest,
-    )
+    const adopted = successor.load()
+    expect([adopted.entries().map(entry => entry.digest), adopted.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.contractDigest])
+      .toEqual([[admitted.digest], before.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.contractDigest])
     await successor.close()
   })
 
@@ -209,6 +205,7 @@ describe('the control store over a real session', () => {
     await handle.close()
 
     const store = await ControlSessionStore.open(optionsFor(live, 'shared'))
+    // The foreign event is not ours to adopt: our cut holds no fact yet.
     expect(store.load().entries()).toHaveLength(0)
     const admitted = await store.emit({
       commandId: 'cmd-1',
@@ -221,10 +218,8 @@ describe('the control store over a real session', () => {
 
     // Our chain starts at 0, the medium's event sequence continues at 1, and the record is really
     // there: a store that mistook the two cursors would have returned an envelope it never wrote.
-    expect(admitted.seq).toBe(0)
     const stored = await storedControlEvents(live.root)
-    expect(stored).toHaveLength(1)
-    expect(stored[0]?.['seq']).toBe(1)
+    expect([admitted.seq, ...stored.map(event => event['seq'])]).toEqual([0, 1])
     await store.close()
   })
 
@@ -291,22 +286,21 @@ describe('the control store over a real session', () => {
     const request = { commandId: 'cmd-0', protocol: 'probe', version: 1, kind: 'noted', subject: 'probe-a', payload: { n: -0 } }
 
     // `-0` and `0` are distinct numbers that JSON writes identically, so this stack refuses it in
-    // the content identity itself — before DSH's materializer could ever see it.
-    expect(Number.isFinite(-0)).toBe(true)
+    // the content identity itself — before DSH's materializer could ever see it — and records
+    // nothing for it.
     const inMemory = new MemoryLog(probeRegistry(), { subjects: { writer: 'writer-1' } })
-    expect((await asyncRefusalOf(() => inMemory.emit(request))).code).toBe<RefusalCode>('not-lossless-json')
-    expect(inMemory.entries()).toHaveLength(0)
+    const inMemoryRefusal = await asyncRefusalOf(() => inMemory.emit(request))
+    expect([inMemoryRefusal.code, inMemory.entries().length]).toEqual(['not-lossless-json', 0])
     // DSH refuses it one layer down, for the same reason.
     expect(() => materializeAppendBatch([{ type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: -0 } }])).toThrow(TypeError)
 
-    expect((await asyncRefusalOf(() => store.emit(request))).code).toBe<RefusalCode>('not-lossless-json')
+    const storeRefusal = await asyncRefusalOf(() => store.emit(request))
+    expect([storeRefusal.code, store.load().entries().length]).toEqual(['not-lossless-json', 0])
 
-    // Nothing was written, and the store kept no phantom sequence: the next record is #0.
-    expect(store.load().entries()).toHaveLength(0)
-    expect(await storedControlEvents(live.root)).toHaveLength(0)
+    // The refused attempt wrote no bytes and reserved no sequence: the next record is #0 and the
+    // only record on disk.
     const next = await store.emit({ ...request, commandId: 'cmd-1', payload: { n: 1 } })
-    expect(next.seq).toBe(0)
-    expect(await storedControlEvents(live.root)).toHaveLength(1)
+    expect([next.seq, (await storedControlEvents(live.root)).length]).toEqual([0, 1])
     await store.close()
   })
 
@@ -324,12 +318,11 @@ describe('the control store over a real session', () => {
     // The reply never reached the caller; re-delivering the same command must return that fact and
     // must not append a second one.
     const recovered = await store.emit(request)
-    expect(recovered.digest).toBe(committed.digest)
-    expect(recovered.seq).toBe(committed.seq)
+    expect([recovered.digest, recovered.seq]).toEqual([committed.digest, committed.seq])
     expect(store.load().entries()).toHaveLength(1)
 
+    // A different request under the same command id is refused, and appends nothing either.
     expect((await asyncRefusalOf(() => store.emit({ ...request, payload: { n: 2 } }))).code).toBe<RefusalCode>('command-conflict')
-    expect(store.load().entries()).toHaveLength(1)
     expect(await storedControlEvents(live.root)).toHaveLength(1)
     await store.close()
   })

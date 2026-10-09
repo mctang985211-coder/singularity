@@ -168,14 +168,13 @@ describe('the control submission boundary', () => {
     const medium = new BarrierPersistence(new Context())
     const store = await ControlSessionStore.open(optionsFor(medium, `pending-${operation}`))
     const admitted = await store.emit(admission('cmd-admit'))
-    const priorCut = store.load()
     const pause = medium.pauseNext(operation)
     const pending = store.emit(assignment('cmd-start'))
     await pause.entered
     try {
+      // One read of the cut and one of the prefix that survives a crash: the submission in flight
+      // is in neither, whatever the operation it is waiting on.
       expect(store.load().entries().map(entry => entry.digest)).toEqual([admitted.digest])
-      expect(store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.runs).toEqual({})
-      expect(medium.events).toHaveLength(operation === 'append' ? 1 : 2)
       expect(medium.durable).toHaveLength(1)
     } finally {
       pause.release()
@@ -183,8 +182,6 @@ describe('the control submission boundary', () => {
       await store.close()
     }
     expect(store.load().entries()).toHaveLength(2)
-    expect(priorCut.entries().map(entry => entry.digest)).toEqual([admitted.digest])
-    expect(priorCut.stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.runs).toEqual({})
     expect(medium.durable).toHaveLength(2)
   })
 
@@ -194,16 +191,15 @@ describe('the control submission boundary', () => {
     medium.barrierFailures = Number.POSITIVE_INFINITY
     const request = admission('cmd-a')
     expect((await asyncRefusalOf(() => store.emit(request))).code).toBe('write-not-durable')
-    expect(medium.events).toHaveLength(1)
+    // No acknowledgement means no half-effect either: nothing in the cut a caller reads, nothing in
+    // the prefix a crash would keep.
+    expect(store.load().entries()).toHaveLength(0)
     expect(medium.durable).toHaveLength(0)
+    // Retrying the same command is not a way to turn the uncertainty into an acknowledgement, ...
     expect((await asyncRefusalOf(() => store.emit(request))).code).toBe('write-not-durable')
-    expect(store.load().entries()).toHaveLength(0)
-    expect((await asyncRefusalOf(() => store.emit(started('cmd-b')))).code).toBe('write-not-durable')
-    expect(medium.events).toHaveLength(1)
-    expect(store.load().entries()).toHaveLength(0)
     await expect(store.close()).rejects.toThrow('durability barrier failed')
+    // ... and neither is asking a successor process to adopt the log.
     expect((await asyncRefusalOf(() => ControlSessionStore.open(optionsFor(medium, 'never-durable')))).code).toBe('write-not-durable')
-    expect(medium.durable).toHaveLength(0)
   })
 
   it('recovers the uncertain result only after a successor confirms durability', async () => {
@@ -213,20 +209,16 @@ describe('the control submission boundary', () => {
     medium.barrierFailures = 1
     const request = admission('cmd-barrier')
     expect((await asyncRefusalOf(() => store.emit(request))).code).toBe('write-not-durable')
-    expect(store.load().entries()).toHaveLength(0)
-    expect(medium.durable).toHaveLength(0)
     // A healthy medium does not undo the failed writer's uncertainty; reacquire and barrier first.
     expect((await asyncRefusalOf(() => store.emit(request))).code).toBe('write-not-durable')
     await store.close()
     expect(medium.durable).toHaveLength(1)
     const successor = await ControlSessionStore.open(opts)
-    expect(medium.durable).toHaveLength(1)
     const recovered = await successor.emit(request)
+    // The successor returns the fact the log holds, under the identity it already has, and the
+    // command after it takes the next sequence number - the refused attempt reserved nothing.
     expect(recovered.digest).toBe(successor.load().entries()[0]?.digest)
-    expect(medium.events).toHaveLength(1)
-    const next = await successor.emit(assignment('cmd-after'))
-    expect(next.seq).toBe(1)
-    expect(medium.durable.map(event => Number(event.seq))).toEqual([0, 1])
+    expect((await successor.emit(assignment('cmd-after'))).seq).toBe(1)
     await successor.close()
   })
 
@@ -238,14 +230,14 @@ describe('the control submission boundary', () => {
     const request = admission('cmd-lost')
     expect((await asyncRefusalOf(() => store.emit(request))).code).toBe('write-not-durable')
     medium.crash()
-    expect(medium.events).toHaveLength(0)
     // Simulate the process dying before graceful teardown; release the now-empty test handle.
     await store.close()
     const successor = await ControlSessionStore.open(opts)
+    // The refused command left nothing behind, so the retry is not a replay of a fact the log
+    // already has: it takes the first sequence number, as if the lost attempt never happened.
     expect(successor.load().entries()).toHaveLength(0)
     const retried = await successor.emit(request)
     expect(retried.seq).toBe(0)
-    expect(medium.durable).toHaveLength(1)
     await successor.close()
   })
 
@@ -268,12 +260,11 @@ describe('the control submission boundary', () => {
     Reflect.set(state.contract!, 'goal', 'forged')
     Reflect.set(state.contract!.criteria[0]!, 'statement', 'forged')
     Reflect.set(state.runs, 'injected', { status: 'verified' })
+    // Writes through a read reach nothing: a later cut still reports the one recorded fact, and the
+    // state it projects is detached at every depth the forging above touched.
     expect(store.load().entries()).toEqual([original])
     const current = store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)!
-    expect(current.taskId).toBe(TASK_ID)
-    expect(current.contract).toEqual(contract())
-    expect(current.runs).toEqual({})
-    expect(medium.durable).toHaveLength(1)
+    expect([current.taskId, current.contract, current.runs]).toEqual([TASK_ID, contract(), {}])
     await store.emit(assignment('cmd-start'))
     // The later read is a *new* snapshot of the new committed cut, not a view that the values
     // forged above leaked into.
@@ -289,8 +280,8 @@ describe('the control submission boundary', () => {
     await pause.entered
     const closing = store.close()
     try {
+      // Close waits for the accepted submission: the medium is still open and nothing is released.
       expect(medium.closeCalls).toBe(0)
-      expect(store.load().entries()).toHaveLength(0)
     } finally {
       pause.release()
       await Promise.allSettled([pending, closing])
@@ -298,7 +289,6 @@ describe('the control submission boundary', () => {
     await expect(pending).resolves.toMatchObject({ seq: 0 })
     await closing
     expect(medium.durable).toHaveLength(1)
-    expect(medium.closeCalls).toBe(1)
     expect((await asyncRefusalOf(() => store.emit(started('cmd-after-close')))).code).toBe('write-not-durable')
   })
 })

@@ -64,7 +64,12 @@ import { readCalibration, sameRevision, type CandidateSubmission, type RoundStat
  */
 export interface RoundEvaluation extends EvaluationView {
   readonly evaluationId: string
-  /** The digest of the frozen measurement settings: run, metric, weights, trials, judgement. */
+  /**
+   * The digest of the frozen measurement settings: the execution context's content — the run's
+   * declared model, tool digests, conditions and inputs — plus the metric, the weights, the trial
+   * plan and the judgement. The run's *identity* is deliberately not in it: two candidates may be
+   * measured in two bubbles and still be answers to the same question (`measure@3`).
+   */
   readonly caliberDigest: string
   readonly baseline: RevisionRef
   readonly candidate: RevisionRef

@@ -21,16 +21,17 @@
  *
  * **The caliber is derived, never persisted.** It is the set of measurement settings two
  * evaluations must share to be comparable: everything the plan froze except the two revisions being
- * compared. Its digest is computed from the folded state at read time. A stored caliber digest
- * would be a second copy of the facts, free to drift away from them, and `caliber-mismatch` is only
- * meaningful while the comparison is over the settings actually frozen in the plan.
+ * compared and the run's identity, which the run's *context* digest replaces. Its digest is computed
+ * from the folded state at read time: a stored one would be a second copy of the facts, free to
+ * drift away from them, and `caliber-mismatch` is only meaningful while the comparison is over the
+ * settings actually frozen in the plan.
  *
  * @module singularity-core/measure/view
  */
 
 import { digestOf } from '../protocol/envelope.ts'
 import type { AcceptanceCriterion } from '../task/contract.ts'
-import type { EvaluationMetric, EvaluationRun, EvaluationState, EvaluationWeights, TrialRecord } from './protocol.ts'
+import type { EvaluationMetric, EvaluationState, EvaluationWeights, TrialRecord } from './protocol.ts'
 
 /** One planned slot that produced no number, with the reason it produced none. */
 export interface MissingSlot {
@@ -121,21 +122,32 @@ export function projectEvaluation(state: EvaluationState): EvaluationView {
 
 /**
  * The measurement settings two evaluations must share to be comparable: everything the plan froze
- * except the two revisions being compared.
+ * except the two revisions being compared — and except the run, whose *context* stands in its place.
+ *
+ * The run identity is deliberately not here. If it were, only candidates measured inside one run
+ * could be pooled, so no candidate could be measured in its own bubble; the isolation manifest a
+ * bubble declares (model, tool digests, conditions) exists to make exactly that comparison honest,
+ * so the caliber carries that manifest's digest and lets two runs be comparable.
  */
 export interface Caliber {
-  readonly run: EvaluationRun
+  /** `contextDigestOf` of the run's bubble: the model, the tool digests, the conditions, the inputs. */
+  readonly context: string
   readonly metric: EvaluationMetric
   readonly weights: EvaluationWeights
   readonly trials: number
   readonly judgement: readonly AcceptanceCriterion[]
 }
 
-/** The caliber of one evaluation, or `undefined` when no plan was opened under that id. */
+/**
+ * The caliber of one evaluation, or `undefined` when no plan was opened under that id.
+ *
+ * `undefined` is comparable with nothing: two unopened evaluations are not "equal" because both
+ * digests are missing, and a caller that pools on `digestA === digestB` alone pools them.
+ */
 export function caliberOf(state: EvaluationState): Caliber | undefined {
-  const { run, metric, weights, trials, judgement } = state
-  if (run === undefined || metric === undefined || weights === undefined || trials === undefined || judgement === undefined) return undefined
-  return { run, metric, weights, trials, judgement }
+  const { context, metric, weights, trials, judgement } = state
+  if (context === undefined || metric === undefined || weights === undefined || trials === undefined || judgement === undefined) return undefined
+  return { context, metric, weights, trials, judgement }
 }
 
 /**

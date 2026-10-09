@@ -190,31 +190,31 @@ describe('the production measurement', () => {
   it('measures by running the real program, and pins the bytes it left behind', async () => {
     const outcome: MeasurementOutcome = await runMeasurement(await request())
     if (outcome.kind !== 'trial') throw new Error(`expected a trial, got a miss: ${outcome.reason}`)
-    const inputDigests: readonly BubbleInput[] = outcome.trial.inputDigests
-    expect(outcome.trial).toMatchObject({
+    // One read of the trial, the whole shape at once: a length check on `inputDigests` or a separate
+    // "not the stale bytes" check would only restate what this says.
+    expect(outcome.trial).toEqual({
       quality: 0.75,
       cost: 2,
       implementationDigest: await programDigest(),
       artifactDigest: sha256(INPUT_BYTES.toUpperCase()),
       inputDigests: [{ name: INPUT_NAME, digest: sha256(INPUT_BYTES) }],
+      detail: expect.any(String),
     })
-    expect(inputDigests).toHaveLength(1)
-    // Hashed after the program overwrote it, not before: the post-run bytes name the measurement.
-    expect(outcome.trial.artifactDigest).not.toBe(sha256('stale bytes written before the program ran'))
+    // Hashed after the program overwrote it, not before: the digest names the bytes on disk, never
+    // the stale ones written before the run.
     expect(sha256(await readFile(artifact))).toBe(outcome.trial.artifactDigest)
     expect(await markerLabels()).toContain('measured')
     // A cost nobody reported stays absent rather than becoming 0.
     const uncosted = await runMeasurement(await request({ command: commandFor('measured', '0.5') }))
     if (uncosted.kind !== 'trial') throw new Error('expected a trial')
-    expect(uncosted.trial.quality).toBe(0.5)
-    expect('cost' in uncosted.trial).toBe(false)
+    expect([uncosted.trial.quality, 'cost' in uncosted.trial]).toEqual([0.5, false])
   })
 
   it('reports a program that produced no number as a miss, never as a zero', async () => {
     const outcome = await runMeasurement(await request({ command: commandFor('failing', '0.9') }))
     if (outcome.kind !== 'missed') throw new Error('expected a miss')
-    expect(outcome.reason).toContain('exited 1')
-    expect(outcome.reason).toContain('produced no number')
+    // One reason, naming both facts: the program exited non-zero and produced no number.
+    expect([outcome.reason.includes('exited 1'), outcome.reason.includes('produced no number')]).toEqual([true, true])
     // The program really ran; only its number is absent, and the artifact it never wrote is not
     // hashed as if it had.
     expect(await markerLabels()).toContain('failing')
@@ -223,8 +223,7 @@ describe('the production measurement', () => {
   it('does not find an implementation rebuilt under the same ref@version but different bytes', async () => {
     const rebuilt = await heldImplementation({ implementationDigest: sha256('rebuilt implementation bytes') })
     const refusal = await asyncRefusalOf(async () => runMeasurement(await request({ implementations: [rebuilt] })))
-    expect(refusal.code).toBe('unregistered-verifier')
-    expect(refusal.detail).toContain('rebuilt')
+    expect(refusal).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('rebuilt') })
     // Not a single execution: the rebuilt code must not run at all, not merely be reported later.
     expect(await markerLabels()).toBe('')
   })
@@ -246,10 +245,10 @@ describe('the production measurement', () => {
       },
     })
     const refusal = await asyncRefusalOf(async () => runMeasurement(await request({ implementations: [lying] })))
-    expect(refusal.code).toBe('unregistered-verifier')
-    expect(refusal.detail).toContain('rejects the same bad input twice')
-    expect(await markerLabels()).toContain('sample')
-    expect(await markerLabels()).not.toContain('measured')
+    expect(refusal).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining('rejects the same bad input twice') })
+    // The selftest ran the samples for real, and the measured run was never reached.
+    const labels = await markerLabels()
+    expect([labels.includes('sample'), labels.includes('measured')]).toEqual([true, false])
   })
 
   it('refuses a one-sided declaration, and one whose selftest cannot run at all', async () => {
@@ -259,16 +258,17 @@ describe('the production measurement', () => {
       selftest: { samples: [{ name: 'accepts a good input', expected: 'pass', input: { subject: good, artifactDigest: sha256('good'), inputs: [] } }] },
     })
     const sided = await asyncRefusalOf(async () => runMeasurement(await request({ implementations: [oneSided] })))
-    expect(sided.code).toBe('unregistered-verifier')
-    expect(sided.detail).toContain('no sample expected to fail')
     const broken = await heldImplementation({
       judge: async () => {
         throw new Error('the measurement program is missing')
       },
     })
     const unrunnable = await asyncRefusalOf(async () => runMeasurement(await request({ implementations: [broken] })))
-    expect(unrunnable.code).toBe('unregistered-verifier')
-    expect(unrunnable.detail).toContain('could not run')
+    // The same refusal for both, each naming its own defect: no sample expected to fail, and a judge that could not run.
+    expect([sided, unrunnable]).toMatchObject([
+      { code: 'unregistered-verifier', detail: expect.stringContaining('no sample expected to fail') },
+      { code: 'unregistered-verifier', detail: expect.stringContaining('could not run') },
+    ])
     expect(await markerLabels()).toBe('')
   })
 
@@ -280,8 +280,7 @@ describe('the production measurement', () => {
     // the real port reports no longer matches what the metric named.
     await writeFile(program, `${PROGRAM_SOURCE}// rebuilt without changing behaviour\n`, 'utf8')
     const refusal = await asyncRefusalOf(async () => runMeasurement(await request({ implementations: [held], metric: declared })))
-    expect(refusal.code).toBe('wrong-verifier')
-    expect(refusal.detail).toContain(declared.implementationDigest.slice(0, 12))
+    expect(refusal).toMatchObject({ code: 'wrong-verifier', detail: expect.stringContaining(declared.implementationDigest.slice(0, 12)) })
     // The rebuilt implementation really did run; the refusal is about *which* implementation ran.
     expect(await markerLabels()).toContain('measured')
   })
@@ -289,8 +288,7 @@ describe('the production measurement', () => {
   it('refuses input bytes that are not the declared bytes, before any run', async () => {
     await writeFile(input, 'tampered after the bubble declared its digest', 'utf8')
     const refusal = await asyncRefusalOf(async () => runMeasurement(await request()))
-    expect(refusal.code).toBe('evidence-input-mismatch')
-    expect(refusal.detail).toContain(INPUT_NAME)
+    expect(refusal).toMatchObject({ code: 'evidence-input-mismatch', detail: expect.stringContaining(INPUT_NAME) })
     // The selftest ran, but the measured run was never reached.
     expect(await markerLabels()).not.toContain('measured')
   })
@@ -304,19 +302,23 @@ describe('the production measurement', () => {
       return reported
     }
     const removed = await asyncRefusalOf(async () => runMeasurement(await request({ measure: vanishing })))
-    expect(removed.code).toBe('evidence-input-mismatch')
-    expect(removed.detail).toContain('artifact')
+    expect(removed).toMatchObject({ code: 'evidence-input-mismatch', detail: expect.stringContaining('artifact') })
     expect(await markerLabels()).toContain('measured')
   })
 
   it('refuses a request that is not the frozen shape, by name', async () => {
     const codeOf = async (body: MeasurementRequest) => (await asyncRefusalOf(() => runMeasurement(body))).code
-    expect(await codeOf(await request({ inputs: [{ name: INPUT_NAME, digest: 'not-a-digest' }] }))).toBe('malformed-payload')
-    expect(await codeOf(await request({ measure: undefined as unknown as RealMeasurement }))).toBe('malformed-payload')
-    expect(await codeOf(await request({ artifactPath: '../outside.txt' }))).toBe('malformed-payload')
-    expect(await codeOf(await request({ inputs: [{ name: input, digest: sha256(INPUT_BYTES) }] }))).toBe('malformed-payload')
     const duplicated = await request({ inputs: [{ name: INPUT_NAME, digest: sha256(INPUT_BYTES) }, { name: INPUT_NAME, digest: sha256('other bytes') }] })
-    expect(await codeOf(duplicated)).toBe('malformed-payload')
+    // Five ways of not being the frozen shape — a digest that is not one, no measure port, an escaping
+    // path, an absolute input name, a repeated name — are one refusal under the payload's own name.
+    const refused = await Promise.all([
+      codeOf(await request({ inputs: [{ name: INPUT_NAME, digest: 'not-a-digest' }] })),
+      codeOf(await request({ measure: undefined as unknown as RealMeasurement })),
+      codeOf(await request({ artifactPath: '../outside.txt' })),
+      codeOf(await request({ inputs: [{ name: input, digest: sha256(INPUT_BYTES) }] })),
+      codeOf(duplicated),
+    ])
+    expect(refused).toEqual(['malformed-payload', 'malformed-payload', 'malformed-payload', 'malformed-payload', 'malformed-payload'])
     // A metric's shape is the contract's rule, so the refusal is the contract's own name for it.
     expect(await codeOf(await request({ metric: await criterion({ implementationDigest: 'short' }) }))).toBe('malformed-contract')
   })
@@ -324,8 +326,7 @@ describe('the production measurement', () => {
   it('refuses a port report that is neither a number nor a named miss', async () => {
     const lying = (report: MeasuredNumber | MissedMeasurement): RealMeasurement => async () => report
     const notANumber = await asyncRefusalOf(async () => runMeasurement(await request({ measure: lying({ quality: '0.9' as unknown as number, implementationDigest: await programDigest() }) })))
-    expect(notANumber.code).toBe('malformed-payload')
-    expect(notANumber.detail).toContain('quality')
+    expect(notANumber).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('quality') })
     const reasonless = await asyncRefusalOf(async () => runMeasurement(await request({ measure: lying({ reason: '' }) })))
     expect(reasonless.code).toBe('malformed-payload')
   })
@@ -346,26 +347,28 @@ describe('the measurement adapter', () => {
 
   it('reports the number, the artifact bytes and the input bytes it actually read', async () => {
     const result = await invoke({ command: commandFor('measured', '0.25', '7'), artifactPath: artifact, inputs: [{ name: INPUT_NAME, digest: 'b'.repeat(64), path: input }] })
-    expect(result.code).toBe(0)
     const lines = result.stdout.trimEnd().split('\n')
-    expect(lines.at(-1)).toBe(OK)
     const report = JSON.parse(lines[0] ?? '{}') as { quality: number; cost: number; artifactDigest: string; inputDigests: readonly BubbleInput[]; detail: string }
-    expect(report.quality).toBe(0.25)
-    expect(report.cost).toBe(7)
-    expect(report.artifactDigest).toBe(sha256(INPUT_BYTES.toUpperCase()))
-    // The input is hashed from its own bytes, not echoed from the declared digest.
-    expect(report.inputDigests).toEqual([{ name: INPUT_NAME, digest: sha256(INPUT_BYTES) }])
-    // The declared digest stays visible in the detail, so a reader can see what was claimed.
-    expect(report.detail).toContain('b'.repeat(12))
+    // Exit 0 with the OK trailer, then one read of the whole report: the number, the cost, the bytes
+    // of the artifact, the input hashed from its own bytes, the declared digest in the detail.
+    expect([result.code, lines.at(-1)]).toEqual([0, OK])
+    expect(report).toEqual({
+      quality: 0.25,
+      cost: 7,
+      artifactDigest: sha256(INPUT_BYTES.toUpperCase()),
+      inputDigests: [{ name: INPUT_NAME, digest: sha256(INPUT_BYTES) }],
+      detail: expect.stringContaining('b'.repeat(12)),
+    })
   })
 
   it('leaves an unreported cost absent, and reports a failed program as a miss it still measured', async () => {
     const uncosted = await invoke({ command: commandFor('measured', '0.25'), artifactPath: artifact, inputs: [] })
-    expect(uncosted.code).toBe(0)
-    expect('cost' in (JSON.parse(uncosted.stdout.split('\n')[0] ?? '{}') as { cost?: number })).toBe(false)
+    const uncostedReport = JSON.parse(uncosted.stdout.split('\n')[0] ?? '{}') as { cost?: number }
+    // The run succeeded, and its report carries no `cost` member at all rather than a zero.
+    expect([uncosted.code, 'cost' in uncostedReport]).toEqual([0, false])
+    // A failed program is a miss the adapter still measured: exit 0, the OK trailer, the reason.
     const missed = await invoke({ command: commandFor('failing'), artifactPath: artifact, inputs: [] })
-    expect(missed.code).toBe(0)
-    expect(missed.stdout).toContain(OK)
+    expect(missed).toMatchObject({ code: 0, stdout: expect.stringContaining(OK) })
     expect(JSON.parse(missed.stdout.split('\n')[0] ?? '{}')).toMatchObject({ missed: expect.stringContaining('exited 1') })
   })
 
@@ -373,24 +376,20 @@ describe('the measurement adapter', () => {
     // A program that exits 0 without a number is broken, not missable: it claims success and reports
     // nothing, so there is no outcome to record.
     const silent = await invoke({ command: `"${process.execPath}" -e ""`, artifactPath: artifact, inputs: [] })
-    expect(silent.code).not.toBe(0)
-    expect(silent.stderr).toContain('measure-runner:')
-    expect(silent.stdout).not.toContain(OK)
+    expect([silent.stdout.includes(OK), silent.stderr.includes('measure-runner:')]).toEqual([false, true])
     const absent = await invoke({ command: 'true', artifactPath: join(directory, 'not-there.txt'), inputs: [] })
-    expect(absent.code).not.toBe(0)
     // An input with no readable path names no bytes, so there is nothing to hash.
     const pathless = await invoke({ command: 'true', artifactPath: artifact, inputs: [{ name: INPUT_NAME, digest: sha256('x') }] })
-    expect(pathless.code).not.toBe(0)
-    expect(pathless.stderr).toContain('path')
     const undeclared = await invoke({ command: 'true', artifactPath: artifact, inputs: [], verbose: true })
-    expect(undeclared.code).not.toBe(0)
-    expect(undeclared.stderr).toContain('undeclared member')
+    // None of the four could measure, so none of them exits 0, and each names its own defect on stderr.
+    expect([silent.code, absent.code, pathless.code, undeclared.code].map(code => code !== 0)).toEqual([true, true, true, true])
+    expect([pathless.stderr.includes('path'), undeclared.stderr.includes('undeclared member')]).toEqual([true, true])
   })
 
   it('reads a request from stdin when argv carries none', async () => {
     const result = await invoke({ command: commandFor('measured', '0.5', '1'), artifactPath: artifact, inputs: [] }, true)
-    expect(result.code).toBe(0)
-    expect(result.stdout).toContain(OK)
+    // The request read from stdin measures like the one on argv: exit 0, the OK trailer, the report.
+    expect(result).toMatchObject({ code: 0, stdout: expect.stringContaining(OK) })
     expect(JSON.parse(result.stdout.split('\n')[0] ?? '{}')).toMatchObject({ quality: 0.5, cost: 1, artifactDigest: sha256(INPUT_BYTES.toUpperCase()) })
   })
 })

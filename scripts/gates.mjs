@@ -67,18 +67,100 @@ function sourceFiles() {
 }
 
 /**
- * Source with comments and string literals replaced by empty ones.
+ * Source with comments and string literal contents replaced by spaces, at exactly the input length.
  *
- * Lexical, not a parser: it is meant to stop a *name* from counting as a use, and it is honest
- * about being approximate. A real AST pass is the next step if a bypass appears.
+ * Lexical, not a parser, and honest about being approximate: a regex literal is not a literal here,
+ * a `'` or `"` that does not close on its own line is not a string, and a `${…}` substitution inside
+ * a template reads as literal text — so a name used only there is not a use. A real AST pass is the
+ * next step if a bypass appears.
+ *
+ * One pass, because comments and literals are one lexical problem: which of `//`, `/*`, `'`, `"` and
+ * `` ` `` opens anything depends on what is already open, and four sequential regexes cannot know
+ * that. The version that stripped comments first read the `//` inside a template literal as a
+ * comment, blanked the backtick that closed the template, and let the template rule swallow the
+ * ninety lines that followed it — lines no detector ever saw.
+ *
+ * Length and line breaks survive, because the detectors read line numbers and offsets out of the
+ * result: a comment or a literal body becomes spaces, never disappears.
  */
 function codeOnly(source) {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:'"`])\/\/[^\n]*/g, '$1 ')
-    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
-    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
-    .replace(/`(?:[^`\\]|\\.)*`/g, '``')
+  const out = source.split('')
+  const blank = index => {
+    if (index < source.length && out[index] !== '\n') out[index] = ' '
+  }
+  let state = 'code'
+  let opened = 0
+  let index = 0
+  while (index < source.length) {
+    const char = source[index]
+    const next = source[index + 1]
+    if (state === 'line') {
+      if (char === '\n' || char === '\r') state = 'code'
+      else blank(index)
+      index += 1
+    } else if (state === 'block') {
+      if (char === '*' && next === '/') {
+        blank(index)
+        blank(index + 1)
+        state = 'code'
+        index += 2
+      } else {
+        blank(index)
+        index += 1
+      }
+    } else if (state === 'single' || state === 'double') {
+      if (char === '\\' && next !== '\n') {
+        blank(index)
+        blank(index + 1)
+        index += 2
+      } else if (char === '\n' || char === '\r') {
+        // An unescaped line break cannot be inside a quoted literal, so the quote was not one — an
+        // apostrophe in a regex literal, say. The text is restored and read as code rather than
+        // swallowed to the end of the file.
+        for (let restored = opened + 1; restored < index; restored += 1) out[restored] = source[restored]
+        state = 'code'
+        index = opened + 1
+      } else if (char === (state === 'single' ? "'" : '"')) {
+        state = 'code'
+        index += 1
+      } else {
+        blank(index)
+        index += 1
+      }
+    } else if (state === 'template') {
+      if (char === '\\') {
+        blank(index)
+        blank(index + 1)
+        index += 2
+      } else if (char === '`') {
+        state = 'code'
+        index += 1
+      } else {
+        blank(index)
+        index += 1
+      }
+    } else if (char === '/' && next === '/') {
+      blank(index)
+      blank(index + 1)
+      state = 'line'
+      index += 2
+    } else if (char === '/' && next === '*') {
+      blank(index)
+      blank(index + 1)
+      state = 'block'
+      index += 2
+    } else if (char === "'" || char === '"') {
+      state = char === "'" ? 'single' : 'double'
+      opened = index
+      index += 1
+    } else if (char === '`') {
+      state = 'template'
+      index += 1
+    } else {
+      index += 1
+    }
+  }
+  return out.join('')
 }
 
 /** Every name a file exports, from `export <decl>` and from `export { … }` blocks. */
@@ -289,8 +371,8 @@ const REAL_TREE_GATES = new Set(DETECTORS.filter(detector => detector.realTree =
  * These are ratchets, not targets: the numbers came down from 0.88 and 7.8 by deleting restatement,
  * and may only go down further. Lowering one is part of the commit that makes it possible.
  */
-const SPEC_BUDGET = 0.9
-const SPEC_DENSITY = 8
+const SPEC_BUDGET = 0.85
+const SPEC_DENSITY = 5
 
 /** Total source lines, and total spec lines, over the same file set the other gates see. */
 function specBudgetFindings(files, views) {
@@ -627,6 +709,42 @@ if (PROBE) {
       console.log(`  ok    ${name} fired (${findings.length} findings)`)
     }
   }
+
+  // Every code-reading detector reads this one function's output, and its contract is exact: the
+  // input's length and its line breaks, so a line number in a finding is the line number in the
+  // file. Its failure mode is silent — the four-regex version ate a backtick, swallowed ninety
+  // lines of a spec, and reported a density of 4.7 for a file whose density was 4.5, wrong in the
+  // numerator *and* the denominator. So each nasty input below pins what must be hidden and what
+  // must survive, not merely that the call returns.
+  const STRIPPER_CASES = [
+    ['an escaped quote and a `//` inside a string', String.raw`const a = 'it\'s // "fine"'` + '\n', 'fine', 'const a'],
+    ['a `/*` and an escaped `"` inside a string', String.raw`const b = "a \"b\" /* c"` + '\n', 'c"', 'const b'],
+    ['a quote inside a line comment', 'const c = 1 // don\'t "quote" me\n', 'quote', 'const c'],
+    ['a quote inside a block comment', '/* it\'s "fine" */ const d = 2\n', 'fine', 'const d'],
+    ['a `//` and a quote inside a template literal', 'const e = `a // b /* c */ one\'s`\n', "one's", 'const e'],
+    ['a backslash at the end of a line inside a template literal', 'const f = `one \\\ntwo`\n', 'two', 'const f'],
+    ['the counterexample: a `//` in a template whose backtick closes on the same line', 'write(`${PROGRAM}// rebuilt\n`, 1)\nconst survivor = 1\n', 'rebuilt', 'survivor'],
+    ['an unterminated block comment on the last line', 'const g = 3\n/* never closed\n', 'closed', 'const g'],
+    ['an unterminated template literal on the last line', 'const h = `never closed\n', 'closed', 'const h'],
+    ['a template whose last character is a backslash', 'const k = `never closed \\', 'never', 'const k'],
+    ['an unterminated single quote, which is not a string', "const i = don't\nconst survivor2 = 1 // trailing\n", 'trailing', 'survivor2'],
+    ['nested-looking delimiters', 'const j = "a \'b\' `c` // d" /* "e" */ `f \'g\'`\n', '"e"', 'const j'],
+  ]
+  let stripperBreaks = 0
+  for (const [label, input, hidden, kept] of STRIPPER_CASES) {
+    const stripped = codeOnly(input)
+    const faults = []
+    if (stripped.length !== input.length) faults.push(`${input.length} characters in, ${stripped.length} out`)
+    if (stripped.split('\n').length !== input.split('\n').length) faults.push('the line breaks moved')
+    if (stripped.includes(hidden)) faults.push(`${JSON.stringify(hidden)} survived`)
+    if (!stripped.includes(kept)) faults.push(`${JSON.stringify(kept)} was stripped with it`)
+    if (faults.length === 0) continue
+    missed += 1
+    stripperBreaks += 1
+    console.log(`  FAIL  codeOnly on ${label}: ${faults.join('; ')}`)
+  }
+  if (stripperBreaks === 0)
+    console.log(`  ok    codeOnly held its contract on ${STRIPPER_CASES.length} nasty inputs (length, line breaks, what must go, what must stay)`)
 
   // The inventory reads the real registries, so its probe hands the check a wrong ledger. Each of
   // the three ways it can disagree must produce a finding, or the ledger protects nothing.

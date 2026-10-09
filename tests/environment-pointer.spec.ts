@@ -198,15 +198,11 @@ describe('the pointer is a compare-and-swap, decided by the reducer', () => {
     await log.emit(create(R2, MANIFEST))
     await log.emit(switched('', R1))
     await log.emit(switched(R1, R2))
-    const before = log.count
     // Based on a head that has already moved: the switch is refused, not re-based onto R2.
     const refusal = await asyncRefusalOf(() => log.emit(switched(R1, R2)))
-    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
-    expect(refusal.detail).toContain('"r0001"')
-    expect(refusal.detail).toContain('"r0002"')
+    expect([refusal.code, refusal.detail.includes('"r0001"'), refusal.detail.includes('"r0002"')]).toEqual(['illegal-transition', true, true])
     // Refused, not repaired: the fact is not in the log and the head did not move.
-    expect(log.count).toBe(before)
-    expect(headOf(log)).toBe(R2)
+    expect([log.count, headOf(log)]).toEqual([4, R2])
   })
 
   it('refuses a switch that changes nothing, because a no-op is a mistake rather than a retry', async () => {
@@ -214,18 +210,15 @@ describe('the pointer is a compare-and-swap, decided by the reducer', () => {
     await log.emit(create(R1, MANIFEST))
     await log.emit(switched('', R1))
     const refusal = await asyncRefusalOf(() => log.emit(switched(R1, R1)))
-    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
-    expect(refusal.detail).toContain('already the head')
+    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('already the head') })
   })
 
   it('refuses a head that names a revision this environment never created', async () => {
     const log = emittingLog()
     await log.emit(create(R1, MANIFEST))
     const refusal = await asyncRefusalOf(() => log.emit(switched('', R3)))
-    expect(refusal.code).toBe<RefusalCode>('unknown-revision')
-    expect(refusal.detail).toContain(R3)
     // The refusal names what does exist, so the missing creation is visible as a missing fact.
-    expect(refusal.detail).toContain(R1)
+    expect([refusal.code, refusal.detail.includes(R3), refusal.detail.includes(R1)]).toEqual(['unknown-revision', true, true])
     expect(headOf(log)).toBeUndefined()
   })
 
@@ -242,8 +235,7 @@ describe('the pointer is a compare-and-swap, decided by the reducer', () => {
     await log.emit(create(R1, MANIFEST, ENVIRONMENT))
     await log.emit(create(R1, OTHER_MANIFEST, OTHER_ENVIRONMENT))
     await log.emit(switched('', R1, OTHER_ENVIRONMENT))
-    expect(headOf(log, ENVIRONMENT)).toBeUndefined()
-    expect(headOf(log, OTHER_ENVIRONMENT)).toBe(R1)
+    expect([headOf(log, ENVIRONMENT), headOf(log, OTHER_ENVIRONMENT)]).toEqual([undefined, R1])
   })
 
   it('refuses a payload that is closed or ill-typed rather than guessing a head', async () => {
@@ -298,15 +290,12 @@ describe('the command boundary decides the half the reducer cannot see', () => {
     const publish = (commandId: string) => commands.publish({ commandId, environmentId: ENVIRONMENT, expected: '', to: R1 })
 
     const undrafted = await asyncRefusalOf(() => publish('publish-undrafted'))
-    expect(undrafted.code).toBe<RefusalCode>('unapproved-revision')
-    expect(undrafted.detail).toContain('no draft is on the table')
+    expect(undrafted).toMatchObject({ code: 'unapproved-revision', detail: expect.stringContaining('no draft is on the table') })
     expect(environmentStateOf(store)?.pointer).toBeUndefined()
-    expect(digest).toBe(digestOf(MANIFEST))
 
     await commands.draft({ commandId: 'draft-1', revision: { environmentId: ENVIRONMENT, revisionId: R1, digest } })
     const unapproved = await asyncRefusalOf(() => publish('publish-unapproved'))
-    expect(unapproved.code).toBe<RefusalCode>('unapproved-revision')
-    expect(unapproved.detail).toContain('carries no approval')
+    expect(unapproved).toMatchObject({ code: 'unapproved-revision', detail: expect.stringContaining('carries no approval') })
   })
 
   it('moves the head onto an approved revision, and the fact is the publisher’s', async () => {
@@ -315,11 +304,7 @@ describe('the command boundary decides the half the reducer cannot see', () => {
 
     const envelope = await createReleaseCommands({ store }).publish({ commandId: 'publish-1', environmentId: ENVIRONMENT, expected: '', to: R1 })
 
-    expect(envelope.kind).toBe(ENVIRONMENT_KINDS.pointerSwitched)
-    expect(envelope.subject).toBe(ENVIRONMENT)
-    expect(envelope.emitter).toBe(PUBLISHER_ROLE)
-    expect(envelope.actor).toBe(PUBLISHER)
-    expect(envelope.payload).toEqual({ expected: '', to: R1 })
+    expect([envelope.kind, envelope.subject, envelope.emitter, envelope.actor, envelope.payload]).toEqual([ENVIRONMENT_KINDS.pointerSwitched, ENVIRONMENT, PUBLISHER_ROLE, PUBLISHER, { expected: '', to: R1 }])
     expect(environmentStateOf(store)?.pointer).toBe(R1)
     // The head is derived from the log, not stored beside it.
     expect(foldedEnvironment(store.load().entries())?.pointer).toBe(R1)
@@ -327,7 +312,7 @@ describe('the command boundary decides the half the reducer cannot see', () => {
 
   it('refuses a head whose approved content this environment does not hold', async () => {
     const store = await live()
-    const digest = await createRevision(store, R1, MANIFEST)
+    await createRevision(store, R1, MANIFEST)
     // A release this build did not write — an adopted log, or content prepared outside the store and
     // referenced before it existed (U05). The draft names r0001 at content the environment never
     // created, and the reducer cannot see that: only the publish precondition can.
@@ -336,12 +321,10 @@ describe('the command boundary decides the half the reducer cannot see', () => {
     await store.emit({ commandId: 'forged-approval', protocol: RELEASE_PROTOCOL, version: RELEASE_VERSION, kind: RELEASE_KINDS.approved, subject: ENVIRONMENT, payload: { ...forged, approvedBy: ALICE, approvalId: 'audit-forged' } })
 
     const refusal = await asyncRefusalOf(() => publish(store, R1))
-    expect(refusal.code).toBe<RefusalCode>('unknown-revision')
-    expect(refusal.detail).toContain(ENVIRONMENT)
+    expect(refusal).toMatchObject({ code: 'unknown-revision', detail: expect.stringContaining(ENVIRONMENT) })
     // Without the content half the reducer's own existence check would pass, and the head would name
     // this environment's r0001 at content nobody approved.
     expect(environmentStateOf(store)?.pointer).toBeUndefined()
-    expect(digest).toBe(digestOf(MANIFEST))
   })
 
   it('refuses a head onto a revision other than the one the approval names, at identical content', async () => {
@@ -353,8 +336,7 @@ describe('the command boundary decides the half the reducer cannot see', () => {
     await approve(store, ENVIRONMENT, R1, digest)
 
     const refusal = await asyncRefusalOf(() => publish(store, R2))
-    expect(refusal.code).toBe<RefusalCode>('unapproved-revision')
-    expect(refusal.detail).toContain(R1)
+    expect(refusal).toMatchObject({ code: 'unapproved-revision', detail: expect.stringContaining(R1) })
     expect(environmentStateOf(store)?.pointer).toBeUndefined()
   })
 
@@ -372,13 +354,11 @@ describe('the command boundary decides the half the reducer cannot see', () => {
 
     const won = results.filter((result): result is PromiseFulfilledResult<Envelope> => result.status === 'fulfilled')
     const lost = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-    expect(won.length).toBe(1)
-    expect(lost.length).toBe(1)
+    expect([won.length, lost.length]).toEqual([1, 1])
     expect(lost[0]?.reason?.refusal?.code).toBe<RefusalCode>('illegal-transition')
     // One fact, one head, and it is the winner's target: the loser was refused, not re-based.
     const pointerFacts = store.load().entriesOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION).filter(entry => entry.kind === ENVIRONMENT_KINDS.pointerSwitched)
-    expect(pointerFacts.length).toBe(1)
-    expect(pointerFacts[0]?.commandId).toBe(won[0]?.value.commandId)
+    expect([pointerFacts.length, pointerFacts[0]?.commandId]).toEqual([1, won[0]?.value.commandId])
     expect(environmentStateOf(store)?.pointer).toBe((won[0]?.value.payload as { to: string }).to)
   })
 })
@@ -388,7 +368,6 @@ describe('environment@2 is the one conditional owner, and version 1 is refused b
     const registry = environmentRegistry()
     expect(registry.ruleFor(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, ENVIRONMENT_KINDS.pointerSwitched).guarantees).toEqual({ appended: true, conditional: true, atomicFact: true })
     expect(registry.conditionalOwner()).toBe(ENVIRONMENT_PROTOCOL)
-    expect(ENVIRONMENT_VERSION).toBe(2)
     expect(registry.versionsOf(ENVIRONMENT_PROTOCOL)).toEqual([2])
     expect(registry.kindsOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION)).toEqual([...Object.values(ENVIRONMENT_KINDS)].sort())
     // Named: the refusal says which version *is* declared, so "upgrade or stay" is actionable.

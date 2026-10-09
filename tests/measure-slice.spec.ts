@@ -2,9 +2,8 @@
  * The measurement slice, driven through its own command boundary over a real control store.
  *
  * The subject is what the facts mean: the denominator is the plan's, an unknown cost stays unknown, a
- * hard constraint is not a number, and every cross-subject precondition refuses by name. Facts only a
- * reducer can refuse are emitted straight into the log — the fold is the authority. Real programs and
- * real processes are `measure-execution.spec.ts`.
+ * hard constraint is not a number, and every cross-subject precondition refuses by name. What only a
+ * reducer can refuse is emitted straight into the log; real programs are `measure-execution.spec.ts`.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -16,6 +15,7 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { ControlSessionStore } from '../src/control/session-store.ts'
+import { digestOf } from '../src/protocol/envelope.ts'
 import { ProtocolRegistry } from '../src/protocol/registry.ts'
 import type { AcceptanceCriterion } from '../src/task/contract.ts'
 import { declareTaskProtocol, TASK_KINDS, TASK_PROTOCOL, TASK_VERSION, verifierRoleOf } from '../src/task/protocol.ts'
@@ -29,7 +29,7 @@ import {
   type EvaluationWeights,
 } from '../src/measure/protocol.ts'
 import { createMeasureCommands, type MeasureCommands } from '../src/measure/commands.ts'
-import { caliberDigestOf, caliberOf, projectEvaluation, type Caliber } from '../src/measure/view.ts'
+import { caliberDigestOf, caliberOf, projectEvaluation } from '../src/measure/view.ts'
 import { asyncRefusalOf } from './fixtures.ts'
 
 const TASK = 'task-measured'
@@ -37,6 +37,12 @@ const RUN = 'run-1'
 const AGENT = 'agent-1'
 const EVALUATION = 'eval-1'
 const OTHER = 'eval-2'
+const [THIRD, FOURTH, FIFTH, SIXTH, SEVENTH] = ['eval-3', 'eval-4', 'eval-5', 'eval-6', 'eval-7']
+const RUN_SAME = 'run-same'
+const RUN_MODEL = 'run-model'
+const RUN_TOOLS = 'run-tools'
+const RUN_BARE = 'run-bare'
+const RUN_INPUTS = 'run-inputs'
 const METER = 'meter'
 const BOUNDS = 'bounds'
 const METER_DIGEST = 'a'.repeat(64)
@@ -49,6 +55,21 @@ const ARTIFACT = 'd'.repeat(64)
 const REVISION = { environmentId: 'lib-1', revisionId: 'r0001', digest: 'e'.repeat(64) }
 const OTHER_REVISION = { environmentId: 'lib-1', revisionId: 'r0002', digest: 'f'.repeat(64) }
 const BUBBLE_INPUTS = [{ name: 'words.txt', digest: '1'.repeat(64) }]
+/** A different dataset for the same task: the same question only if the inputs did not matter. */
+const OTHER_INPUTS = [{ name: 'words.txt', digest: '2'.repeat(64) }]
+/** The manifest a run declares: the model, each tool's content digest, and the conditions. */
+const BUBBLE = { model: 'model-1', tools: [{ name: 'count', implementationDigest: METER_DIGEST, version: '1' }], conditions: ['no-network'] }
+/** A run's declared manifest: the context members, plus a dataset a test may vary on its own. */
+type Manifest = Partial<typeof BUBBLE> & { readonly inputs?: typeof BUBBLE_INPUTS }
+const bubbleOf = (runId: string, overrides: Manifest) => ({
+  runId, inputs: BUBBLE_INPUTS, workspace: { kind: 'dir', ref: '/tmp/workspace' }, ...BUBBLE, ...overrides,
+})
+/** The runs this log holds: two under one manifest, one under another model, one under a rebuilt tool, and one that declared no context at all. */
+const RUNS: readonly (readonly [string, Manifest | null])[] = [
+  [RUN, {}], [RUN_SAME, {}], [RUN_MODEL, { model: 'model-2' }],
+  [RUN_TOOLS, { tools: [{ name: 'count', implementationDigest: UNHELD_DIGEST, version: '1' }] }], [RUN_BARE, null],
+  [RUN_INPUTS, { inputs: OTHER_INPUTS }],
+]
 const CONTRACT = {
   goal: 'count the words',
   inputs: ['words.txt'],
@@ -72,10 +93,7 @@ afterEach(async () => {
   }
 })
 
-interface Live {
-  readonly store: ControlSessionStore
-  readonly measure: MeasureCommands
-}
+interface Live { readonly store: ControlSessionStore; readonly measure: MeasureCommands }
 
 /** One deployment: a task whose run declared a bubble, and the two implementations a plan may name. */
 async function openLive(meterIdentity = METER_ACTOR, boundsIdentity = BOUNDS_ACTOR): Promise<Live> {
@@ -96,18 +114,10 @@ async function openLive(meterIdentity = METER_ACTOR, boundsIdentity = BOUNDS_ACT
   const facts: readonly { readonly kind: string; readonly payload: unknown }[] = [
     { kind: TASK_KINDS.admitted, payload: { contract: CONTRACT } },
     { kind: TASK_KINDS.assigned, payload: { agentId: AGENT, agentIdentity: SCHEDULER } },
-    { kind: TASK_KINDS.runStarted, payload: { runId: RUN, revision: REVISION } },
-    {
-      kind: TASK_KINDS.bubbleOpened,
-      payload: {
-        runId: RUN,
-        inputs: BUBBLE_INPUTS,
-        workspace: { kind: 'dir', ref: '/tmp/workspace' },
-        model: 'model-1',
-        tools: [{ name: 'count', implementationDigest: METER_DIGEST, version: '1' }],
-        conditions: ['no-network'],
-      },
-    },
+    ...RUNS.flatMap(([runId, manifest]) => [
+      { kind: TASK_KINDS.runStarted, payload: { runId, revision: REVISION } },
+      ...(manifest === null ? [] : [{ kind: TASK_KINDS.bubbleOpened, payload: bubbleOf(runId, manifest) }]),
+    ]),
   ]
   for (const [index, fact] of facts.entries())
     await store.emit({ commandId: `fixture-${index}`, protocol: TASK_PROTOCOL, version: TASK_VERSION, subject: TASK, ...fact })
@@ -125,28 +135,18 @@ async function openLive(meterIdentity = METER_ACTOR, boundsIdentity = BOUNDS_ACT
 
 const metric = (digest = METER_DIGEST): EvaluationMetric => ({
   measured: { criterionId: 'quality', statement: 'the artifact is good', verifierRef: METER, verifierVersion: '1', implementationDigest: digest },
-  unit: 'points',
-  direction: 'higher',
+  unit: 'points', direction: 'higher',
 })
 
 const bounds = (criterionId = 'limits'): AcceptanceCriterion => ({
-  criterionId,
-  statement: 'the artifact stays under 1 MiB',
-  verifierRef: BOUNDS,
-  verifierVersion: '1',
-  implementationDigest: BOUNDS_DIGEST,
+  criterionId, statement: 'the artifact stays under 1 MiB', verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: BOUNDS_DIGEST,
 })
 
 interface PlanOverrides {
-  readonly commandId?: string
-  readonly evaluationId?: string
-  readonly trials?: number
-  readonly metric?: EvaluationMetric
-  readonly judgement?: readonly AcceptanceCriterion[]
-  readonly weights?: EvaluationWeights
-  readonly run?: { readonly taskId: string; readonly runId: string }
-  readonly baseline?: typeof REVISION
-  readonly candidate?: typeof REVISION
+  readonly commandId?: string; readonly evaluationId?: string; readonly trials?: number
+  readonly metric?: EvaluationMetric; readonly judgement?: readonly AcceptanceCriterion[]
+  readonly weights?: EvaluationWeights; readonly run?: { readonly taskId: string; readonly runId: string }
+  readonly baseline?: typeof REVISION; readonly candidate?: typeof REVISION
 }
 
 /** Open one plan through the command boundary. A repeated plan needs a fresh command id. */
@@ -169,12 +169,7 @@ let commandCounter = 0
 const nextCommand = (): string => `cmd-${(commandCounter += 1)}`
 
 const trial = (overrides: Partial<Parameters<MeasureCommands['recordTrial']>[0]['trial']> = {}) => ({
-  slot: 0,
-  quality: 1,
-  artifactDigest: ARTIFACT,
-  inputDigests: BUBBLE_INPUTS,
-  implementationDigest: METER_DIGEST,
-  ...overrides,
+  slot: 0, quality: 1, artifactDigest: ARTIFACT, inputDigests: BUBBLE_INPUTS, implementationDigest: METER_DIGEST, ...overrides,
 })
 
 const record = (instance: Live, overrides = {}, evaluationId = EVALUATION) =>
@@ -199,18 +194,14 @@ describe('the measurement slice', () => {
     await record(instance, { slot: 0, quality: 1 })
     // The frozen counterexample: trials=2 with one observation answered quality=1, incomplete=true.
     const view = projectEvaluation(stateOf(instance))
-    expect(view.denominator).toBe(2)
-    expect(view.observed).toBe(1)
-    expect(view.quality).toBe(0.5)
+    expect(view).toMatchObject({ denominator: 2, observed: 1, quality: 0.5, admissible: false, cost: null })
     expect(view.missing.map(entry => entry.slot)).toEqual([1])
-    expect(view.admissible).toBe(false)
-    expect(view.why).toContain('slot 1')
-    expect(view.why).toContain('hard constraint "limits"')
-    // One repetition reported no cost, so the total is unknown — 0 would be an invented measurement.
-    expect(view.cost).toBeNull()
+    // One assertion on `why`, naming both failing rules: the constraint nobody has checked yet and
+    // the planned slot that produced no number.
+    expect([view.why?.includes('hard constraint "limits"'), view.why?.includes('slot 1')]).toEqual([true, true])
+    // One repetition reported no cost, so the total was unknown; a second one that reported a cost
+    // does not make it known — a sum over a term nobody observed is not a measurement.
     await record(instance, { slot: 1, quality: 1, cost: 4 })
-    // The second repetition reported a cost and the first did not: the total stays unknown, because
-    // a sum over a term nobody observed is not a measurement.
     expect(projectEvaluation(stateOf(instance))).toMatchObject({ observed: 2, quality: 1, cost: null })
   })
 
@@ -218,23 +209,20 @@ describe('the measurement slice', () => {
     const instance = await openLive()
     await plan(instance, { trials: 1 })
     await record(instance, { quality: 0.99, cost: 1 })
+    // Unchecked is not met: a constraint nobody has judged keeps the evaluation inadmissible.
     expect(projectEvaluation(stateOf(instance)).admissible).toBe(false)
     await check(instance, false)
     const view = projectEvaluation(stateOf(instance))
-    expect(view.constraints).toEqual([{ criterionId: 'limits', met: false }])
-    expect(view.admissible).toBe(false)
+    expect(view).toMatchObject({ constraints: [{ criterionId: 'limits', met: false }], admissible: false, quality: 0.99 })
     expect(view.why).toContain('not met')
-    expect(view.quality).toBe(0.99)
   })
 
   it('reports an evaluation that was never opened as inadmissible rather than throwing', async () => {
     const unopened: EvaluationState = { evaluationId: 'never-opened', observed: [], missed: [], checks: [] }
     const view = projectEvaluation(unopened)
-    expect(view).toMatchObject({ denominator: 0, observed: 0, admissible: false })
-    expect(view.why).toContain('no measurement plan was opened')
-    const caliber: Caliber | undefined = caliberOf(unopened)
-    expect(caliber).toBeUndefined()
-    expect(caliberDigestOf(unopened)).toBeUndefined()
+    expect(view).toMatchObject({ denominator: 0, observed: 0, admissible: false, why: expect.stringContaining('no measurement plan was opened') })
+    // A measurement that does not exist shares its settings with nothing.
+    expect([caliberOf(unopened), caliberDigestOf(unopened)]).toEqual([undefined, undefined])
   })
 
   it('is admissible only when every slot is observed and every constraint is met', async () => {
@@ -243,13 +231,14 @@ describe('the measurement slice', () => {
     await record(instance, { slot: 0, quality: 0.5, cost: 3 })
     await instance.measure.missTrial({ commandId: nextCommand(), evaluationId: EVALUATION, slot: 1, reason: 'the program timed out twice' })
     await check(instance, true)
-    // A declared miss is still a slot without an observation, and it carries its own reason.
-    const incomplete = projectEvaluation(stateOf(instance))
-    expect(incomplete.missing).toEqual([{ slot: 1, reason: 'the program timed out twice' }])
-    expect(incomplete.admissible).toBe(false)
-    expect(incomplete.why).toContain('the program timed out twice')
-    // Every observation reported a cost, so the total is the one that was measured.
-    expect(incomplete.cost).toBe(3)
+    // A declared miss is still a slot without an observation, and it carries its own reason; every
+    // observation reported a cost, so the total is the one that was measured.
+    expect(projectEvaluation(stateOf(instance))).toMatchObject({
+      missing: [{ slot: 1, reason: 'the program timed out twice' }],
+      admissible: false,
+      cost: 3,
+      why: expect.stringContaining('the program timed out twice'),
+    })
     await plan(instance, { commandId: 'open-second', evaluationId: OTHER, trials: 1, judgement: [] })
     await record(instance, { quality: 0.2, cost: 0 }, OTHER)
     expect(projectEvaluation(stateOf(instance, OTHER))).toMatchObject({ admissible: true, why: null, denominator: 1, quality: 0.2, cost: 0 })
@@ -259,16 +248,13 @@ describe('the measurement slice', () => {
     const instance = await openLive()
     await plan(instance)
     const outside = await asyncRefusalOf(() => record(instance, { slot: 2 }))
-    expect(outside.code).toBe('illegal-transition')
-    expect(outside.detail).toContain('slots 0..1')
+    expect(outside).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('slots 0..1') })
     await record(instance, { slot: 0, quality: 1 })
     const twice = await asyncRefusalOf(() => record(instance, { slot: 0, quality: 0.1 }))
-    expect(twice.code).toBe('evidence-conflict')
-    expect(twice.detail).toContain('one slot carries one observation')
+    expect(twice).toMatchObject({ code: 'evidence-conflict', detail: expect.stringContaining('one slot carries one observation') })
     await instance.measure.missTrial({ commandId: nextCommand(), evaluationId: EVALUATION, slot: 1, reason: 'no number was produced' })
     const afterMiss = await asyncRefusalOf(() => record(instance, { slot: 1, quality: 0.9 }))
-    expect(afterMiss.code).toBe('evidence-conflict')
-    expect(afterMiss.detail).toContain('already declared missed')
+    expect(afterMiss).toMatchObject({ code: 'evidence-conflict', detail: expect.stringContaining('already declared missed') })
   })
 
   it("refuses a trial that is not from the metric's implementation", async () => {
@@ -278,35 +264,29 @@ describe('the measurement slice', () => {
     // fills the role from the plan, so only a caller talking around it can produce this.
     // Only the role differs here — the digest is still the metric's — so this pins the emitter rule.
     const role = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: BOUNDS, verifierVersion: '1' }))
-    expect(role.code).toBe('wrong-verifier')
-    expect(role.detail).toContain('was emitted by verifier:bounds@1')
+    expect(role).toMatchObject({ code: 'wrong-verifier', detail: expect.stringContaining('was emitted by verifier:bounds@1') })
     // The metric's own role, but not the bytes the metric names: the fold refuses that too.
     const content = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1', implementationDigest: BOUNDS_DIGEST }))
-    expect(content.code).toBe('wrong-verifier')
-    expect(content.detail).toContain(BOUNDS_DIGEST.slice(0, 12))
+    expect(content).toMatchObject({ code: 'wrong-verifier', detail: expect.stringContaining(BOUNDS_DIGEST.slice(0, 12)) })
     const digest = await asyncRefusalOf(() => record(instance, { implementationDigest: BOUNDS_DIGEST }))
-    expect(digest.code).toBe('wrong-verifier')
-    expect(digest.detail).toContain(BOUNDS_DIGEST.slice(0, 12))
+    expect(digest).toMatchObject({ code: 'wrong-verifier', detail: expect.stringContaining(BOUNDS_DIGEST.slice(0, 12)) })
     const unheld = await openLive()
     await plan(unheld, { trials: 1, metric: metric(UNHELD_DIGEST) })
     const notHeld = await asyncRefusalOf(() => record(unheld, { implementationDigest: UNHELD_DIGEST }))
-    expect(notHeld.code).toBe('unregistered-verifier')
-    expect(notHeld.detail).toContain(UNHELD_DIGEST.slice(0, 12))
+    expect(notHeld).toMatchObject({ code: 'unregistered-verifier', detail: expect.stringContaining(UNHELD_DIGEST.slice(0, 12)) })
   })
 
   it('refuses inputs that are not the run declaration, and the executor as the reporter', async () => {
     const instance = await openLive()
     await plan(instance)
     const foreign = await asyncRefusalOf(() => record(instance, { inputDigests: [{ name: 'words.txt', digest: '9'.repeat(64) }] }))
-    expect(foreign.code).toBe('evidence-input-mismatch')
-    expect(foreign.detail).toContain('words.txt')
+    expect(foreign).toMatchObject({ code: 'evidence-input-mismatch', detail: expect.stringContaining('words.txt') })
     // A deployment that binds the metric's role to the identity that ran the work: the log would
     // stamp the run's own actor, so the numbers would be self-reported.
     const selfReporting = await openLive(SCHEDULER)
     await plan(selfReporting)
     const refusal = await asyncRefusalOf(() => record(selfReporting))
-    expect(refusal.code).toBe('self-reported-evidence')
-    expect(refusal.detail).toContain(SCHEDULER)
+    expect(refusal).toMatchObject({ code: 'self-reported-evidence', detail: expect.stringContaining(SCHEDULER) })
     const missByExecutor = await asyncRefusalOf(() => selfReporting.measure.missTrial({ commandId: nextCommand(), evaluationId: EVALUATION, slot: 0, reason: 'the executor says so' }))
     expect(missByExecutor.code).toBe('self-reported-evidence')
     // The fact that decides admissibility carries the same rule: a candidate that ran the work may
@@ -317,25 +297,28 @@ describe('the measurement slice', () => {
     expect(ownConstraint.code).toBe('self-reported-evidence')
   })
 
-  it('refuses a plan whose run does not exist, a trial before a plan, a second plan, an undeclared member', async () => {
+  it('refuses a plan with no run, no declared context or an old version, a trial before a plan, a second plan, an undeclared member', async () => {
     const instance = await openLive()
     const noRun = await asyncRefusalOf(() => plan(instance, { run: { taskId: TASK, runId: 'run-never-started' } }))
     expect(noRun.code).toBe('unknown-run')
+    // A run that declared no bubble has no model, tool set or condition set to freeze.
+    const noContext = await asyncRefusalOf(() => plan(instance, { commandId: 'open-bare', run: { taskId: TASK, runId: RUN_BARE } }))
+    expect(noContext).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('has not declared an execution context') })
+    // Version 1 measured a different caliber, so it is refused by name rather than reinterpreted.
+    const oldVersion = await asyncRefusalOf(() => instance.store.emit({ commandId: nextCommand(), protocol: MEASURE_PROTOCOL, version: 1, kind: MEASURE_KINDS.evaluationOpened, subject: EVALUATION, payload: {} }))
+    expect(oldVersion).toMatchObject({ code: 'version-mismatch', detail: expect.stringContaining(`declared at ${MEASURE_VERSION}`) })
     const beforePlan = await asyncRefusalOf(() => record(instance))
-    expect(beforePlan.code).toBe('illegal-transition')
-    expect(beforePlan.detail).toContain('no measurement plan is open')
+    expect(beforePlan).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('no measurement plan is open') })
     // Straight through the log, the fold is the authority: no plan is open for this evaluation.
     const unplanned = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1' }))
-    expect(unplanned.code).toBe('illegal-transition')
-    expect(unplanned.detail).toContain('carried a measurement plan')
+    expect(unplanned).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('carried a measurement plan') })
     await plan(instance)
     const twice = await asyncRefusalOf(() => plan(instance, { commandId: 'open-again' }))
-    expect(twice.code).toBe('illegal-transition')
-    expect(twice.detail).toContain('second measurement plan')
+    expect(twice).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('second measurement plan') })
+    // The payload is closed and typed: an undeclared member, a wrong type for a member the plan
+    // froze, and a digest that is not a digest are each refused by the fold, not by the caller.
     const extra = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1', confidence: 0.9 }))
-    expect(extra.code).toBe('malformed-payload')
-    expect(extra.detail).toContain('confidence')
-
+    expect(extra).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('confidence') })
     const wrongType = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1', quality: '1' }))
     expect(wrongType.code).toBe('malformed-payload')
     const shortDigest = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.trialRecorded, { ...trial(), verifierRef: METER, verifierVersion: '1', artifactDigest: 'short' }))
@@ -345,25 +328,20 @@ describe('the measurement slice', () => {
   it('refuses a plan that judges its own metric, repeats a criterion, or has no slots or quality weight', async () => {
     const instance = await openLive()
     const sameId = await asyncRefusalOf(() => plan(instance, { judgement: [bounds('quality')] }))
-    expect(sameId.code).toBe('malformed-contract')
-    expect(sameId.detail).toContain('quality')
+    expect(sameId).toMatchObject({ code: 'malformed-contract', detail: expect.stringContaining('quality') })
     const repeated = await asyncRefusalOf(() => plan(instance, { judgement: [bounds(), bounds()] }))
-    expect(repeated.code).toBe('malformed-contract')
-    expect(repeated.detail).toContain('twice')
+    expect(repeated).toMatchObject({ code: 'malformed-contract', detail: expect.stringContaining('twice') })
     const noSlots = await asyncRefusalOf(() => plan(instance, { trials: 0 }))
-    expect(noSlots.code).toBe('malformed-payload')
-    expect(noSlots.detail).toContain('>= 1')
+    expect(noSlots).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('>= 1') })
     const noQuality = await asyncRefusalOf(() => plan(instance, { weights: { quality: 0, cost: 1 }, trials: 1, judgement: [] }))
-    expect(noQuality.code).toBe('malformed-payload')
-    expect(noQuality.detail).toContain('quality')
+    expect(noQuality).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('quality') })
   })
 
   it('refuses a constraint this evaluation does not judge, and checking one twice', async () => {
     const instance = await openLive()
     await plan(instance, { trials: 1 })
     const unknown = await asyncRefusalOf(() => check(instance, true, 'not-judged'))
-    expect(unknown.code).toBe('unknown-criterion')
-    expect(unknown.detail).toContain('cannot check hard constraint')
+    expect(unknown).toMatchObject({ code: 'unknown-criterion', detail: expect.stringContaining('cannot check hard constraint') })
     // Straight through the log: the fold refuses a constraint the plan does not judge, and a
     // decision that is not a boolean.
     const undeclared = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.constraintChecked, { criterionId: 'not-judged', met: true, artifactDigest: ARTIFACT, verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: BOUNDS_DIGEST }))
@@ -371,13 +349,11 @@ describe('the measurement slice', () => {
     const unboolean = await asyncRefusalOf(() => directEmit(instance, MEASURE_KINDS.constraintChecked, { criterionId: 'limits', met: 'yes', artifactDigest: ARTIFACT, verifierRef: BOUNDS, verifierVersion: '1', implementationDigest: BOUNDS_DIGEST }))
     expect(unboolean.code).toBe('malformed-payload')
     const foreignArtifact = await asyncRefusalOf(() => check(instance, true, 'limits', '9'.repeat(64)))
-    expect(foreignArtifact.code).toBe('evidence-input-mismatch')
-    expect(foreignArtifact.detail).toContain('no observation of this evaluation was formed on')
+    expect(foreignArtifact).toMatchObject({ code: 'evidence-input-mismatch', detail: expect.stringContaining('no observation of this evaluation was formed on') })
     await record(instance)
     await check(instance, true)
     const twice = await asyncRefusalOf(() => check(instance, true))
-    expect(twice.code).toBe('evidence-conflict')
-    expect(twice.detail).toContain('once')
+    expect(twice).toMatchObject({ code: 'evidence-conflict', detail: expect.stringContaining('once') })
   })
 
   it('fills the implementation identity from the frozen plan, and compares evaluations by settings', async () => {
@@ -385,14 +361,36 @@ describe('the measurement slice', () => {
     await plan(instance, { trials: 1 })
     const envelope = await record(instance)
     await check(instance, true)
+    // Each recorded fact carries the identity the plan froze rather than the caller's: the trial the
+    // metric's implementation, the constraint check the bounds one.
     expect(envelope.payload).toMatchObject({ verifierRef: METER, verifierVersion: '1', implementationDigest: METER_DIGEST, inputDigests: BUBBLE_INPUTS })
     expect(stateOf(instance).checks[0]).toMatchObject({ verifierRef: BOUNDS, implementationDigest: BOUNDS_DIGEST })
+  })
+
+  it('takes comparability over the declared execution context, not over the run', async () => {
+    const instance = await openLive()
+    await plan(instance, { trials: 2 })
+    // Filled from the run's own bubble: a caller cannot declare the context it is compared under.
+    expect(stateOf(instance).context).toBe(digestOf({ model: BUBBLE.model, tools: BUBBLE.tools, conditions: BUBBLE.conditions, inputs: BUBBLE_INPUTS }))
     const first = caliberDigestOf(stateOf(instance))
-    await plan(instance, { commandId: 'open-second', evaluationId: OTHER, trials: 1, baseline: OTHER_REVISION, candidate: REVISION })
-    expect(first).toBeDefined()
+    // Mirrored revisions inside one run are the same settings: the revisions are not the caliber.
+    await plan(instance, { commandId: 'open-mirrored', evaluationId: OTHER, trials: 2, baseline: OTHER_REVISION, candidate: REVISION })
     expect(caliberDigestOf(stateOf(instance, OTHER))).toBe(first)
-    const recalibrated = await openLive()
-    await plan(recalibrated, { trials: 3 })
-    expect(caliberDigestOf(stateOf(recalibrated))).not.toBe(first)
+    // A second candidate in its own run under the same manifest: comparable — which is what makes a
+    // per-candidate bubble usable for the comparison it exists for.
+    await plan(instance, { commandId: 'open-same', evaluationId: THIRD, trials: 2, run: { taskId: TASK, runId: RUN_SAME } })
+    expect(caliberDigestOf(stateOf(instance, THIRD))).toBe(first)
+    // A different model, then a rebuilt tool behind the same name: each is a different context.
+    await plan(instance, { commandId: 'open-model', evaluationId: FOURTH, trials: 2, run: { taskId: TASK, runId: RUN_MODEL } })
+    expect(caliberDigestOf(stateOf(instance, FOURTH))).not.toBe(first)
+    await plan(instance, { commandId: 'open-tools', evaluationId: FIFTH, trials: 2, run: { taskId: TASK, runId: RUN_TOOLS } })
+    expect(caliberDigestOf(stateOf(instance, FIFTH))).not.toBe(first)
+    // The dataset is part of the question too: the same model and tools on different inputs answer
+    // different questions, and the two calibers differ so the round's pool refuses `caliber-mismatch`.
+    await plan(instance, { commandId: 'open-inputs', evaluationId: SEVENTH, trials: 2, run: { taskId: TASK, runId: RUN_INPUTS } })
+    expect(caliberDigestOf(stateOf(instance, SEVENTH))).not.toBe(first)
+    // A different slot count is a different plan, whatever the context says.
+    await plan(instance, { commandId: 'open-trials', evaluationId: SIXTH, trials: 3 })
+    expect(caliberDigestOf(stateOf(instance, SIXTH))).not.toBe(first)
   })
 })

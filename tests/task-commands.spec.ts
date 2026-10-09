@@ -100,12 +100,10 @@ describe('a run starts only when every cross-entity condition holds', () => {
         implementations: [],
       }).assign({ commandId: 'a-ghost', taskId: PARENT, agentId: 'agent-ghost' }),
     )
-    expect(notOpened.code).toBe<RefusalCode>('unknown-emitter-role')
-    expect(notOpened.detail).toContain('no opened node')
+    expect(notOpened).toMatchObject({ code: 'unknown-emitter-role', detail: expect.stringContaining('no opened node') })
 
     const notHeld = await asyncRefusalOf(() => commands.assign({ commandId: 'a-unknown', taskId: PARENT, agentId: 'agent-nobody-holds' }))
-    expect(notHeld.code).toBe<RefusalCode>('unknown-emitter-role')
-    expect(notHeld.detail).toContain('not one this deployment holds')
+    expect(notHeld).toMatchObject({ code: 'unknown-emitter-role', detail: expect.stringContaining('not one this deployment holds') })
   })
 
   it('fills the responsible identity from the deployment, not from the caller', async () => {
@@ -116,8 +114,7 @@ describe('a run starts only when every cross-entity condition holds', () => {
     await commands.assign({ commandId: 'assign', taskId: PARENT, agentId: AGENT })
 
     const state = live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)
-    expect(state?.responsibility?.agentId).toBe(AGENT)
-    expect(state?.responsibility?.agentIdentity).toBe(SCHEDULER)
+    expect([state?.responsibility?.agentId, state?.responsibility?.agentIdentity]).toEqual([AGENT, SCHEDULER])
   })
 
   it('refuses a sub-task the plan does not call ready, quoting the plan', async () => {
@@ -140,9 +137,7 @@ describe('a run starts only when every cross-entity condition holds', () => {
     await commands.assign({ commandId: 'assign-child', taskId: CHILD, agentId: AGENT })
 
     const blocked = await asyncRefusalOf(() => commands.startRun({ commandId: 'r-blocked', taskId: CHILD, runId: RUN, revision: pin(live) }))
-    expect(blocked.code).toBe<RefusalCode>('illegal-transition')
-    expect(blocked.detail).toContain('task-sibling')
-    expect(blocked.detail).toContain('only a verified dependency')
+    expect(blocked).toMatchObject({ code: 'illegal-transition', detail: expect.stringMatching(/task-sibling.*only a verified dependency/) })
   })
 
   it('refuses work once the plan budget is spent, and admits exactly one of two concurrent starts', async () => {
@@ -159,9 +154,7 @@ describe('a run starts only when every cross-entity condition holds', () => {
       commands.startRun({ commandId: 'r-second', taskId: CHILD, runId: 'run-b', revision: pin(live) }),
     ])
     const fulfilled = outcomes.filter(outcome => outcome.status === 'fulfilled')
-    const rejected = outcomes.filter(outcome => outcome.status === 'rejected')
-    expect(fulfilled).toHaveLength(1)
-    expect(rejected).toHaveLength(1)
+    expect(outcomes.map(outcome => outcome.status).sort()).toEqual(['fulfilled', 'rejected'])
 
     const state = live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, CHILD)
     expect(Object.keys(state?.runs ?? {})).toHaveLength(1)
@@ -173,9 +166,7 @@ describe('a run starts only when every cross-entity condition holds', () => {
     await commands.failRun({ commandId: 'f1', taskId: CHILD, runId: settled.value.payload.runId, reason: 'the counting attempt failed' })
 
     const spent = await asyncRefusalOf(() => commands.startRun({ commandId: 'r-third', taskId: CHILD, runId: 'run-c', revision: pin(live) }))
-    expect(spent.code).toBe<RefusalCode>('illegal-transition')
-    expect(spent.detail).toContain('budget exhausted')
-    expect(spent.detail).toContain('1 of 1')
+    expect(spent).toMatchObject({ code: 'illegal-transition', detail: expect.stringMatching(/budget exhausted.*1 of 1/) })
   })
 })
 
@@ -186,8 +177,9 @@ describe('a verdict is produced by a verifier, not by an agent', () => {
     const commands = commandsFor(live)
     const asAgent = commands.forAgent(AGENT)
 
+    // The exact surface, `recordVerdict` included in its absence: the boundary is a method the agent
+    // view does not have, not a rule it is asked to respect.
     expect(Object.keys(asAgent).sort()).toEqual(['admit', 'assign', 'decompose', 'failRun', 'openBubble', 'reassign', 'startRun'])
-    expect('recordVerdict' in asAgent).toBe(false)
     expect(() => commands.forAgent('agent-nobody-holds')).toThrowError(/not one this deployment holds/)
   })
 
@@ -223,9 +215,7 @@ describe('a verdict is produced by a verifier, not by an agent', () => {
       verdict: { runId: RUN, criterionId: 'part', verdict: 'pass', implementationDigest: UNIT_IMPLEMENTATION, artifactDigest: 'b'.repeat(64), inputDigests: BUBBLE_INPUTS },
     })
     const evidence = recorded.payload as { verifierRef: string; verifierVersion: string; inputDigests: unknown }
-    expect(evidence.verifierRef).toBe(UNIT_VERIFIER)
-    expect(evidence.verifierVersion).toBe('1')
-    expect(evidence.inputDigests).toEqual(BUBBLE_INPUTS)
+    expect([evidence.verifierRef, evidence.verifierVersion, evidence.inputDigests]).toEqual([UNIT_VERIFIER, '1', BUBBLE_INPUTS])
   })
 })
 
@@ -235,8 +225,7 @@ describe('the command boundary against a store that refuses', () => {
     await createRevision(live)
     const commands = commandsFor(live)
     const refusal = await asyncRefusalOf(() => commands.startRun({ commandId: 'r', taskId: 'task-ghost', runId: RUN, revision: pin(live) }))
-    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
-    expect(refusal.detail).toContain('no admitted contract')
+    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('no admitted contract') })
   })
 
   it('reports a malformed command as a refusal rather than throwing a bare error', () => {

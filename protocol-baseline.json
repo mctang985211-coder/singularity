@@ -24,7 +24,7 @@
     },
     {
       "protocol": "measure",
-      "version": 1,
+      "version": 3,
       "subject": "the evaluation id",
       "kinds": [
         "constraint/checked",
@@ -33,7 +33,7 @@
         "trial/recorded"
       ],
       "producedBy": "src/measure/commands.ts createMeasureCommands; the three verification kinds are emitted by the implementation the frozen plan names, by content digest",
-      "readBy": "src/measure/view.ts projectEvaluation (the aggregate, the missing denominator and the admissibility of one candidate)"
+      "readBy": "src/measure/view.ts projectEvaluation (the aggregate, the missing denominator and the admissibility of one candidate) and caliberDigestOf (the comparability a round pools on)"
     },
     {
       "protocol": "release",

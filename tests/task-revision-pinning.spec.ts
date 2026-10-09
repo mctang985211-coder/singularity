@@ -32,8 +32,6 @@ describe('a revision is chosen when a run starts, and never moved afterwards', (
 
     const firstPin = pin(live)
     await commands.startRun({ commandId: 'r-old', taskId: PARENT, runId: 'run-old', revision: firstPin })
-    const pinned = live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-old']?.revision
-    expect(pinned?.digest).toBe(firstPin.digest)
 
     // A second revision, created through the environment's own protocol.
     await live.store.emit({
@@ -49,7 +47,7 @@ describe('a revision is chosen when a run starts, and never moved afterwards', (
     expect(secondDigest).not.toBe(firstPin.digest)
 
     // The run that was already pinned is untouched: its pin records when it started.
-    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-old']?.revision).toEqual(pinned)
+    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-old']?.revision).toEqual(firstPin)
 
     // A later run may choose the newer revision, explicitly, and is recorded with that choice.
     await commands.startRun({
@@ -58,9 +56,7 @@ describe('a revision is chosen when a run starts, and never moved afterwards', (
       runId: 'run-new',
       revision: { environmentId: ENVIRONMENT, revisionId: 'r0002', digest: secondDigest },
     })
-    const newer = live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-new']?.revision
-    expect(newer?.revisionId).toBe('r0002')
-    expect(newer?.digest).toBe(secondDigest)
+    expect(live.store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, PARENT)?.runs?.['run-new']?.revision).toEqual({ environmentId: ENVIRONMENT, revisionId: 'r0002', digest: secondDigest })
 
     // And the same revision id cannot be re-pointed at different content, so "the newer revision"
     // can never be a silent replacement of what an older run was pinned to.

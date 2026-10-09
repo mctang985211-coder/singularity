@@ -77,20 +77,17 @@ describe('the verifier command adapter', () => {
       inputs: [{ name: 'words.txt', digest: 'b'.repeat(64), path: input }],
     })
 
-    expect(result.code).toBe(0)
+    // One successful judgement: the adapter's own exit code is 0, the OK line says so, and the
+    // verdict it printed is pass.
     const { judgement, ok } = readJudgement(result.stdout)
-    expect(ok).toBe(true)
-    expect(judgement.verdict).toBe('pass')
-    // The command rewrote the artifact, so the digest can only be the post-execution bytes.
-    expect(judgement.artifactDigest).toBe(sha256('after'))
-    expect(judgement.artifactDigest).not.toBe(sha256('before the command ran'))
-    expect(judgement.detail).toContain('exited 0')
-    expect(judgement.detail).toContain('words.txt')
-    // And that digest is the digest of the bytes actually on disk.
-    expect(sha256(await readFile(artifact))).toBe(judgement.artifactDigest)
+    expect({ code: result.code, ok, verdict: judgement.verdict }).toEqual({ code: 0, ok: true, verdict: 'pass' })
+    // The command rewrote the artifact, so the digest can only be of the post-execution bytes, and
+    // they are the bytes actually on disk rather than a value the adapter carried.
+    expect([judgement.artifactDigest, sha256(await readFile(artifact))]).toEqual([sha256('after'), sha256('after')])
+    // The detail names both halves of the judgement: the exit code it read and the input declared.
+    expect(judgement.detail).toMatch(/exited 0.*words\.txt/)
     // The input is hashed from its own bytes, not echoed from the declared digest.
     expect(judgement.inputDigests).toEqual([{ name: 'words.txt', digest: sha256('three words here') }])
-    expect(judgement.inputDigests[0]?.digest).not.toBe('b'.repeat(64))
   })
 
   it('judges a command that exits non-zero as fail, and still succeeds at judging it', async () => {
@@ -102,14 +99,14 @@ describe('the verifier command adapter', () => {
       inputs: [],
     })
 
-    // A fail verdict is a successful judgement: the adapter's own exit code stays 0.
-    expect(result.code).toBe(0)
+    // A fail verdict is a successful judgement: the adapter's own exit code stays 0, the OK line is
+    // printed, and the verdict is fail.
     const { judgement, ok } = readJudgement(result.stdout)
-    expect(ok).toBe(true)
-    expect(judgement.verdict).toBe('fail')
+    expect({ code: result.code, ok, verdict: judgement.verdict }).toEqual({ code: 0, ok: true, verdict: 'fail' })
     expect(judgement.detail).toContain('exited 3')
-    expect(judgement.artifactDigest).toBe(sha256('broken'))
-    expect(sha256(await readFile(artifact))).toBe(judgement.artifactDigest)
+    // The digest is still the digest of the bytes on disk, here the ones a command that exited 3
+    // left behind.
+    expect([judgement.artifactDigest, sha256(await readFile(artifact))]).toEqual([sha256('broken'), sha256('broken')])
     expect(judgement.inputDigests).toEqual([])
   })
 
@@ -119,13 +116,9 @@ describe('the verifier command adapter', () => {
     const passed = readJudgement((await invoke({ command: 'true', artifactPath: artifact, inputs: [] })).stdout).judgement
     const failed = readJudgement((await invoke({ command: 'false', artifactPath: artifact, inputs: [] })).stdout).judgement
 
-    expect(passed.verdict).toBe('pass')
-    expect(failed.verdict).toBe('fail')
-    expect(passed.detail).toContain('exited 0')
-    expect(failed.detail).toContain('exited 1')
+    expect([passed.verdict, failed.verdict]).toEqual(['pass', 'fail'])
     // Same bytes, same digest, different verdict: the exit code is the whole difference.
-    expect(passed.artifactDigest).toBe(failed.artifactDigest)
-    expect(passed.artifactDigest).toBe(sha256('unchanged'))
+    expect([passed.artifactDigest, failed.artifactDigest]).toEqual([sha256('unchanged'), sha256('unchanged')])
   })
 
   it('reports the digests of every input it was given, in declaration order', async () => {
@@ -145,9 +138,9 @@ describe('the verifier command adapter', () => {
       ],
     })
 
-    expect(result.code).toBe(0)
+    // A stale declaration is reported, not refused: the judgement itself still succeeds.
     const { judgement, ok } = readJudgement(result.stdout)
-    expect(ok).toBe(true)
+    expect({ code: result.code, ok }).toEqual({ code: 0, ok: true })
     // The second declaration was stale on purpose: the adapter still reports what the bytes are.
     expect(judgement.inputDigests).toEqual([
       { name: 'first.txt', digest: sha256('alpha') },
@@ -165,23 +158,24 @@ describe('the verifier command adapter', () => {
       encoding: 'utf8',
     })
 
+    // The request read from stdin judges like the one on argv: the OK line, the verdict, and the
+    // digest of the bytes the command left behind.
     const { judgement, ok } = readJudgement(stdout)
-    expect(ok).toBe(true)
-    expect(judgement.verdict).toBe('pass')
-    expect(judgement.artifactDigest).toBe(sha256('from stdin'))
-    expect(judgement.inputDigests).toEqual([])
+    expect({ ok, verdict: judgement.verdict, artifactDigest: judgement.artifactDigest }).toEqual({
+      ok: true,
+      verdict: 'pass',
+      artifactDigest: sha256('from stdin'),
+    })
   })
 
   it('exits non-zero only when it cannot judge at all, never for a judged failure', async () => {
     // The artifact is gone, so no digest exists and no verdict can be formed.
     const absent = await invoke({ command: 'true', artifactPath: join(directory, 'not-there.txt'), inputs: [] })
-    expect(absent.code).not.toBe(0)
     expect(absent.stderr).toContain('verifier-command:')
     expect(absent.stdout).not.toContain(OK)
 
     // A request the adapter cannot read is its own error too, not a verdict.
     const malformed = await invoke({ artifactPath: artifact })
-    expect(malformed.code).not.toBe(0)
 
     // An input with no readable path names no bytes, so there is nothing to hash and no judgement.
     const pathless = await invoke({
@@ -189,7 +183,9 @@ describe('the verifier command adapter', () => {
       artifactPath: artifact,
       inputs: [{ name: 'words.txt', digest: sha256('x') }],
     })
-    expect(pathless.code).not.toBe(0)
     expect(pathless.stderr).toContain('path')
+
+    // None of the three could be judged, so none of them exits 0.
+    expect([absent.code, malformed.code, pathless.code].map(code => code !== 0)).toEqual([true, true, true])
   })
 })

@@ -104,11 +104,9 @@ describe('the reducer computes the content identity itself', () => {
     await log.emit(create(REVISION_ID, MANIFEST))
     const revision = folded(log).revisions[REVISION_ID]
 
-    expect(revision?.contentDigest).toBe(digestOf(MANIFEST))
-    expect(revision?.contentDigest).toMatch(/^[0-9a-f]{64}$/)
-    expect(revision?.contentDigest).not.toBe(digestOf(MANIFEST_TAMPERED))
-    // The manifest itself is kept, so a reader re-derives the same identity from the recorded fact.
-    expect(revision?.manifest).toEqual(MANIFEST)
+    // The digest is the one the manifest hashes to, and the manifest itself is kept, so a reader
+    // re-derives the same identity from the recorded fact.
+    expect(revision).toMatchObject({ contentDigest: digestOf(MANIFEST), manifest: MANIFEST })
   })
 
   it('refuses a payload that offers a digest, because the shape is closed', async () => {
@@ -116,14 +114,14 @@ describe('the reducer computes the content identity itself', () => {
     const refusal = await asyncRefusalOf(() =>
       log.emit({ ...create(REVISION_ID, MANIFEST), payload: { revisionId: REVISION_ID, manifest: MANIFEST, contentDigest: 'c'.repeat(64) } }),
     )
-    expect(refusal.code).toBe<RefusalCode>('malformed-payload')
-    expect(refusal.detail).toContain('contentDigest')
+    expect(refusal).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('contentDigest') })
   })
 
   it('refuses a manifest JSON cannot round-trip, so it cannot carry a borrowed identity', async () => {
     const log = emittingLog()
-    expect((await asyncRefusalOf(() => log.emit(create(REVISION_ID, { ratio: Number.NaN })))).code).toBe<RefusalCode>('not-lossless-json')
-    expect((await asyncRefusalOf(() => log.emit(create(REVISION_ID, { present: undefined })))).code).toBe<RefusalCode>('not-lossless-json')
+    // `NaN` and `undefined` are the two ways JSON loses a value, and both are refused by name.
+    const codes = await Promise.all([{ ratio: Number.NaN }, { present: undefined }].map(async m => (await asyncRefusalOf(() => log.emit(create(REVISION_ID, m)))).code))
+    expect(codes).toEqual<RefusalCode[]>(['not-lossless-json', 'not-lossless-json'])
   })
 })
 
@@ -139,12 +137,12 @@ describe('the same revision id is idempotent, and only with the same content', (
     await log.emit(create(REVISION_ID, MANIFEST_REORDERED))
     const second = folded(log)
 
-    // Unchanged is stronger than equal: the reducer returned the very state it was handed.
-    expect(second).toBe(first)
-    expect(second.revisions[REVISION_ID]?.at).toBe(first.revisions[REVISION_ID]?.at)
-    expect(Object.keys(second.revisions)).toEqual([REVISION_ID])
-    // And a fresh replay of the same log arrives at the same state, with no cursor to rely on.
-    expect(foldSubjects<EnvironmentState>(environmentRegistry(), log.entries(), ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION).get(ENVIRONMENT_ID)).toEqual(second)
+    // Unchanged is stronger than equal: the reducer returned the very state it was handed, so the
+    // revision arrived at the same moment, nothing was re-minted, and the later fact was appended
+    // without changing the fold. And a fresh replay of both facts arrives at that state with no
+    // cursor to rely on.
+    expect([second, log.entries().length]).toEqual([first, 2])
+    expect(foldSubjects<EnvironmentState>(environmentRegistry(), log.entries(), ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION).get(ENVIRONMENT_ID)).toEqual(first)
   })
 
   it('refuses the same revision id with different content', async () => {
@@ -152,8 +150,7 @@ describe('the same revision id is idempotent, and only with the same content', (
     await log.emit(create(REVISION_ID, MANIFEST))
 
     const refusal = await asyncRefusalOf(() => log.emit(create(REVISION_ID, MANIFEST_TAMPERED)))
-    expect(refusal.code).toBe<RefusalCode>('revision-conflict')
-    expect(refusal.detail).toContain(REVISION_ID)
+    expect(refusal).toMatchObject({ code: 'revision-conflict', detail: expect.stringContaining(REVISION_ID) })
     // The refusal is a refusal: the created revision still reads its own content.
     expect(folded(log).revisions[REVISION_ID]?.contentDigest).toBe(digestOf(MANIFEST))
   })
@@ -164,8 +161,8 @@ describe('the same revision id is idempotent, and only with the same content', (
     await log.emit(create(OTHER_REVISION, MANIFEST_TAMPERED))
 
     const state = folded(log)
-    expect(Object.keys(state.revisions).sort()).toEqual([OTHER_REVISION, REVISION_ID].sort())
-    expect(state.revisions[OTHER_REVISION]?.contentDigest).toBe(digestOf(MANIFEST_TAMPERED))
+    // Every id that was created is there, and each reads its own content.
+    expect(state.revisions).toMatchObject({ [REVISION_ID]: { contentDigest: digestOf(MANIFEST) }, [OTHER_REVISION]: { contentDigest: digestOf(MANIFEST_TAMPERED) } })
   })
 })
 
@@ -175,14 +172,15 @@ describe('the environment is the subject, so its facts are keyed by environment 
     await log.emit(create(REVISION_ID, MANIFEST, ENVIRONMENT_ID))
     await log.emit(create(REVISION_ID, MANIFEST_TAMPERED, OTHER_ENVIRONMENT))
 
+    // One read of the whole fold: the two subjects it holds and what each environment's revision was
+    // created with. The second emits MANIFEST_TAMPERED for a different environment, so the two
+    // digests below differ, as does the content each fold reports.
     const states = foldSubjects<EnvironmentState>(environmentRegistry(), log.entries(), ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION)
     expect([...states.keys()].sort()).toEqual([ENVIRONMENT_ID, OTHER_ENVIRONMENT].sort())
-    expect(states.get(ENVIRONMENT_ID)?.revisions[REVISION_ID]?.contentDigest).toBe(digestOf(MANIFEST))
-    expect(states.get(OTHER_ENVIRONMENT)?.revisions[REVISION_ID]?.contentDigest).toBe(digestOf(MANIFEST_TAMPERED))
+    expect([states.get(ENVIRONMENT_ID)?.revisions[REVISION_ID], states.get(OTHER_ENVIRONMENT)?.revisions[REVISION_ID]]).toMatchObject([{ contentDigest: digestOf(MANIFEST) }, { contentDigest: digestOf(MANIFEST_TAMPERED) }])
+    // The isolation boundary: folding one environment reads that environment's subjects only, and an
+    // environment with no facts is absent rather than empty.
     expect(folded(log, OTHER_ENVIRONMENT).environmentId).toBe(OTHER_ENVIRONMENT)
-
-    // The isolation boundary: the same id with different content is legal across environments, and
-    // folding one subject never reports on the other.
     expect(foldSubject<EnvironmentState>(environmentRegistry(), log.entries(), ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, 'env-ghost')).toBeUndefined()
   })
 })
@@ -195,8 +193,7 @@ describe('the reducer, not the append path, is where the invariant holds', () =>
     const refusal = refusalOf(() =>
       foldSubjects<EnvironmentState>(environmentRegistry(), [first, second], ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION),
     )
-    expect(refusal.code).toBe<RefusalCode>('revision-conflict')
-    expect(refusal.detail).toContain(REVISION_ID)
+    expect(refusal).toMatchObject({ code: 'revision-conflict', detail: expect.stringContaining(REVISION_ID) })
   })
 
   it('refuses a hand-framed fact that carries a digest member', () => {
@@ -205,8 +202,7 @@ describe('the reducer, not the append path, is where the invariant holds', () =>
     const refusal = refusalOf(() =>
       foldSubjects<EnvironmentState>(environmentRegistry(), [forged], ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION),
     )
-    expect(refusal.code).toBe<RefusalCode>('malformed-payload')
-    expect(refusal.detail).toContain('contentDigest')
+    expect(refusal).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('contentDigest') })
   })
 })
 
@@ -215,24 +211,24 @@ describe('the shape is closed and the surface is exactly one kind', () => {
     const log = emittingLog()
     const bad = (payload: unknown): EmitInput => ({ ...create(REVISION_ID, MANIFEST), payload })
 
-    expect((await asyncRefusalOf(() => log.emit(bad({ revisionId: REVISION_ID, manifest: MANIFEST, extra: 1 })))).code).toBe<RefusalCode>('malformed-payload')
-    expect((await asyncRefusalOf(() => log.emit(bad({ revisionId: REVISION_ID })))).code).toBe<RefusalCode>('malformed-payload')
-    expect((await asyncRefusalOf(() => log.emit(bad({ manifest: MANIFEST })))).code).toBe<RefusalCode>('malformed-payload')
-    expect((await asyncRefusalOf(() => log.emit(bad({ revisionId: '', manifest: MANIFEST })))).code).toBe<RefusalCode>('malformed-payload')
-    expect((await asyncRefusalOf(() => log.emit(bad({ revisionId: 7, manifest: MANIFEST })))).code).toBe<RefusalCode>('malformed-payload')
-    expect((await asyncRefusalOf(() => log.emit(bad('not an object')))).code).toBe<RefusalCode>('malformed-payload')
+    // Six payloads a caller could send instead of `{ revisionId, manifest }`: an extra member, each
+    // member missing in turn, an empty id, a wrong-typed id, and not an object at all. One rule
+    // closes the shape, so the same code comes back for all six.
+    const codes = await Promise.all([{ revisionId: REVISION_ID, manifest: MANIFEST, extra: 1 }, { revisionId: REVISION_ID }, { manifest: MANIFEST }, { revisionId: '', manifest: MANIFEST }, { revisionId: 7, manifest: MANIFEST }, 'not an object'].map(async payload => (await asyncRefusalOf(() => log.emit(bad(payload)))).code))
+    expect(codes).toEqual<RefusalCode[]>(['malformed-payload', 'malformed-payload', 'malformed-payload', 'malformed-payload', 'malformed-payload', 'malformed-payload'])
   })
 
   it('refuses to create a revision in a deployment with no identity for the environment role', async () => {
     const log = new MemoryLog(environmentRegistry(), { subjects: {} })
     const refusal = await asyncRefusalOf(() => log.emit(create(REVISION_ID, MANIFEST)))
-    expect(refusal.code).toBe<RefusalCode>('unknown-emitter-role')
-    expect(refusal.detail).toContain(ENVIRONMENT_ROLE)
+    expect(refusal).toMatchObject({ code: 'unknown-emitter-role', detail: expect.stringContaining(ENVIRONMENT_ROLE) })
   })
 
   it('owns the one conditional update, and the codes are accounted for', () => {
     const registry = environmentRegistry()
     expect(ENVIRONMENT_PROTOCOL).toBe('environment')
+    // The literal `2` is the one place that says which interpretation of history is current:
+    // `revision/created` alone was version 1.
     expect(ENVIRONMENT_VERSION).toBe(2)
     expect(registry.versionsOf(ENVIRONMENT_PROTOCOL)).toEqual([ENVIRONMENT_VERSION])
     // Derived from the constants rather than spelled out, so adding a kind to this protocol is one
@@ -241,7 +237,8 @@ describe('the shape is closed and the surface is exactly one kind', () => {
     // The environment owns the stack's single compare-and-swap: the pointer switch is the only
     // place a fact must be checked against an expected prior state inside the commit queue.
     expect(registry.conditionalOwner()).toBe(ENVIRONMENT_PROTOCOL)
-    expect(REFUSAL_CODES).toContain<RefusalCode>('revision-conflict')
-    expect(REFUSAL_CODES).toContain<RefusalCode>('unknown-revision')
+    // Both codes this protocol can refuse with are in the vocabulary; nothing else in the file
+    // asserts that `unknown-revision`, which no kind here raises yet, is accounted for at all.
+    expect(REFUSAL_CODES.filter(code => code === 'revision-conflict' || code === 'unknown-revision')).toHaveLength(2)
   })
 })

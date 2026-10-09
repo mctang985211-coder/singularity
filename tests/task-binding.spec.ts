@@ -89,8 +89,7 @@ describe('only the agent currently answerable may start work', () => {
     const log = logWith()
     await log.emit(admitted())
     const refusal = await asyncRefusalOf(() => log.emit(started()))
-    expect(refusal.code).toBe<RefusalCode>('not-responsible')
-    expect(refusal.detail).toContain('no agent is responsible')
+    expect(refusal).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining('no agent is responsible') })
   })
 
   it('refuses a second assignment, because a change of hands is a transfer', async () => {
@@ -98,8 +97,7 @@ describe('only the agent currently answerable may start work', () => {
     await log.emit(admitted())
     await log.emit(assigned('agent-1', SCHEDULER))
     const refusal = await asyncRefusalOf(() => log.emit(assigned('agent-2', SCHEDULER)))
-    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
-    expect(refusal.detail).toContain('transfer')
+    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('transfer') })
   })
 
   it('refuses a transfer that names the wrong holder, or the same one', async () => {
@@ -108,12 +106,10 @@ describe('only the agent currently answerable may start work', () => {
     await log.emit(assigned('agent-1', SCHEDULER))
 
     const wrongHolder = await asyncRefusalOf(() => log.emit(reassigned('agent-elsewhere', 'agent-2', 'runtime-2')))
-    expect(wrongHolder.code).toBe<RefusalCode>('illegal-transition')
-    expect(wrongHolder.detail).toContain('current holder')
+    expect(wrongHolder).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('current holder') })
 
     const sameAgent = await asyncRefusalOf(() => log.emit(reassigned('agent-1', 'agent-1', 'runtime-2')))
-    expect(sameAgent.code).toBe<RefusalCode>('illegal-transition')
-    expect(sameAgent.detail).toContain('already holds it')
+    expect(sameAgent).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('already holds it') })
   })
 
   it('refuses the previous holder after a transfer, and lets the new one work', async () => {
@@ -123,8 +119,7 @@ describe('only the agent currently answerable may start work', () => {
     await original.emit(assigned('agent-1', SCHEDULER))
     await original.emit(reassigned('agent-1', 'agent-2', 'runtime-2'))
     const refusal = await asyncRefusalOf(() => original.emit(started()))
-    expect(refusal.code).toBe<RefusalCode>('not-responsible')
-    expect(refusal.detail).toContain('agent-2')
+    expect(refusal).toMatchObject({ code: 'not-responsible', detail: expect.stringContaining('agent-2') })
 
     // The new holder works in a deployment whose scheduler identity *is* that agent, which is what
     // recovery with a different agent looks like: same facts, different trusted identity.
@@ -162,8 +157,7 @@ describe('the execution context says what actually ran', () => {
 
     // The tool shape is closed: a widened tool is refused, not trimmed.
     const widened = refusalOf(() => log.emit(bubbleWith({ tools: [{ ...BUBBLE_TOOLS[0], note: 'extra' }] })))
-    expect(widened.code).toBe<RefusalCode>('malformed-payload')
-    expect(widened.detail).toContain('closed')
+    expect(widened).toMatchObject({ code: 'malformed-payload', detail: expect.stringContaining('closed') })
 
     // A tool's content identity is a digest, not a version string that happens to look right.
     expect(refusalOf(() => log.emit(bubbleWith({ tools: [{ name: 'count', version: '1', implementationDigest: 'v1' }] }))).code).toBe<RefusalCode>('malformed-payload')
@@ -181,9 +175,7 @@ describe('the execution context says what actually ran', () => {
     log.emit(bubble())
 
     const state = foldSubject<TaskState>(taskRegistry(), log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
-    expect(state?.runs['run-1']?.bubble?.model).toBe(BUBBLE_MODEL)
-    expect(state?.runs['run-1']?.bubble?.tools).toEqual(BUBBLE_TOOLS)
-    expect(state?.runs['run-1']?.bubble?.conditions).toEqual(BUBBLE_CONDITIONS)
+    expect([state?.runs['run-1']?.bubble?.model, state?.runs['run-1']?.bubble?.tools, state?.runs['run-1']?.bubble?.conditions]).toEqual([BUBBLE_MODEL, BUBBLE_TOOLS, BUBBLE_CONDITIONS])
   })
 })
 
@@ -214,8 +206,7 @@ describe('a verdict is bound to the inputs the run declared', () => {
     await log.emit(assigned('agent-1', SCHEDULER))
     await log.emit(started())
     const refusal = await asyncRefusalOf(() => log.emit(judged()))
-    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
-    expect(refusal.detail).toContain('execution context was never declared')
+    expect(refusal).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('execution context was never declared') })
   })
 
   it('refuses a second execution context for one run, and one for a settled run', async () => {
@@ -225,8 +216,7 @@ describe('a verdict is bound to the inputs the run declared', () => {
     await log.emit(started())
     await log.emit(bubble())
     const twice = await asyncRefusalOf(() => log.emit(bubble()))
-    expect(twice.code).toBe<RefusalCode>('illegal-transition')
-    expect(twice.detail).toContain('second execution context')
+    expect(twice).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('second execution context') })
 
     const settled = logWith()
     await settled.emit(admitted())
@@ -234,8 +224,7 @@ describe('a verdict is bound to the inputs the run declared', () => {
     await settled.emit(started())
     await settled.emit(fact(TASK_KINDS.runFailed, { runId: 'run-1', reason: 'gave up' }))
     const late = await asyncRefusalOf(() => settled.emit(bubble()))
-    expect(late.code).toBe<RefusalCode>('illegal-transition')
-    expect(late.detail).toContain('already settled')
+    expect(late).toMatchObject({ code: 'illegal-transition', detail: expect.stringContaining('already settled') })
   })
 
   it('refuses a bubble whose inputs are malformed, each by name', async () => {

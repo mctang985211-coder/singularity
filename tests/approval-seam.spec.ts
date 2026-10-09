@@ -26,7 +26,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { ProtocolRegistry, type RefusalCode } from '../src/index.ts'
+import { ProtocolRegistry } from '../src/index.ts'
 import { ControlSessionStore } from '../src/control/session-store.ts'
 import {
   declareEnvironmentProtocol,
@@ -99,9 +99,7 @@ const ask = (agent: Agent) => ({ agent, toolName: 'release_approve', callId: 'ca
 describe('the load-time seam assertion names every absent seam', () => {
   it('refuses a deployment with no approval service and no append feed', () => {
     const refusal = refusalOf(() => assertApprovalSeams({}))
-    expect(refusal.code).toBe<RefusalCode>('malformed-declaration')
-    expect(refusal.detail).toContain('ctx.approval')
-    expect(refusal.detail).toContain("ctx.on('session/event')")
+    expect(refusal).toMatchObject({ code: 'malformed-declaration', detail: expect.stringMatching(/ctx\.approval.*ctx\.on\('session\/event'\)/) })
   })
 
   it('names only the seam that is missing, and accepts a deployment that has both', () => {
@@ -147,8 +145,7 @@ describe('one ask, one audit id', () => {
     const double = seam({ throwWith: new Error('approval.request() outside an open turn') })
 
     const refusal = await asyncRefusalOf(() => askForApproval(double.seams, ask(double.agent)))
-    expect(refusal.code).toBe<RefusalCode>('write-not-durable')
-    expect(refusal.detail).toContain('outside an open turn')
+    expect(refusal).toMatchObject({ code: 'write-not-durable', detail: expect.stringContaining('outside an open turn') })
     expect(double.listeners.size).toBe(0)
   })
 })
@@ -197,44 +194,29 @@ describe('a release approval exists only on the exact grant, attributed to one q
   async function attempt(options: SeamOptions) {
     const { store, digest } = await drafted()
     const double = seam(options)
-    const refusal = await asyncRefusalOf(() =>
-      createReleaseCommands({ store, approvalSeams: double.seams }).approve({
-        commandId: 'approve-1', environmentId: ENVIRONMENT, revisionId: REVISION, draftDigest: digest, approvedBy: ALICE,
-        ask: ask(double.agent),
-      }),
-    )
+    const refusal = await asyncRefusalOf(() => createReleaseCommands({ store, approvalSeams: double.seams }).approve({ commandId: 'approve-1', environmentId: ENVIRONMENT, revisionId: REVISION, draftDigest: digest, approvedBy: ALICE, ask: ask(double.agent) }))
     return { refusal, state: releaseOf(store) }
   }
 
   it('refuses every answer that is not the grant, and records nothing', async () => {
     for (const outcome of ['rejected', 'cancelled', 'unavailable', 'allowed-twice']) {
       const { refusal, state } = await attempt({ outcome, asks: ['audit-1'] })
-      expect(refusal.code).toBe<RefusalCode>('unapproved-revision')
-      expect(refusal.detail).toContain(outcome)
+      expect(refusal).toMatchObject({ code: 'unapproved-revision', detail: expect.stringContaining(outcome) })
       expect(state?.approvedBy).toBeUndefined()
     }
   })
 
   it('refuses a grant whose audit identity cannot be attributed to one question', async () => {
     const { refusal, state } = await attempt({ asks: ['audit-1', 'audit-2'] })
-    expect(refusal.code).toBe<RefusalCode>('unapproved-revision')
-    expect(refusal.detail).toContain('audit id')
+    expect(refusal).toMatchObject({ code: 'unapproved-revision', detail: expect.stringContaining('audit id') })
     expect(state?.approvedBy).toBeUndefined()
   })
 
   it('refuses to approve at all when this deployment composed no approval seam', async () => {
     const { store, digest } = await drafted()
     const double = seam()
-
-    const refusal = await asyncRefusalOf(() =>
-      createReleaseCommands({ store }).approve({
-        commandId: 'approve-1', environmentId: ENVIRONMENT, revisionId: REVISION, draftDigest: digest, approvedBy: ALICE,
-        ask: ask(double.agent),
-      }),
-    )
-    expect(refusal.code).toBe<RefusalCode>('malformed-declaration')
-    expect(refusal.detail).toContain('ctx.approval')
-    expect(refusal.detail).toContain("ctx.on('session/event')")
+    const refusal = await asyncRefusalOf(() => createReleaseCommands({ store }).approve({ commandId: 'approve-1', environmentId: ENVIRONMENT, revisionId: REVISION, draftDigest: digest, approvedBy: ALICE, ask: ask(double.agent) }))
+    expect(refusal).toMatchObject({ code: 'malformed-declaration', detail: expect.stringMatching(/ctx\.approval.*ctx\.on\('session\/event'\)/) })
     expect(releaseOf(store)?.approvedBy).toBeUndefined()
   })
 })

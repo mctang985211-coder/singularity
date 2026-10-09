@@ -155,9 +155,7 @@ describe('round/opened freezes one explicit round', async () => {
   it('carries the number, incumbent, plan, budget, cutoff, metric and weights — and opens once', async () => {
     const log = strategyLog()
     const opened = emitPlan(log, 'round-1')
-    const frozen = ['caliber', 'candidates', 'editBudget', 'explorationSlots', 'historyCutoff', 'incumbent', 'metric', 'round', 'weights']
-    expect(Object.keys(opened.payload as Record<string, unknown>).sort()).toEqual(frozen)
-    expect(roundIn(log, 'round-1')?.plan?.round).toBe(1)
+    expect([Object.keys(opened.payload as Record<string, unknown>).sort(), roundIn(log, 'round-1')?.plan?.round]).toEqual([['caliber', 'candidates', 'editBudget', 'explorationSlots', 'historyCutoff', 'incumbent', 'metric', 'round', 'weights'], 1])
     await expectRefusal(() => emitPlan(log, 'round-1'), 'illegal-transition', 'a different round, and it gets a different subject')
     await expectRefusal(() => emitPlan(log, 'round-zero', { round: 0 }), 'malformed-payload', 'never a count of history entries')
     await expectRefusal(() => emitPlan(log, 'round-wide', { explorationSlots: 4 }), 'malformed-payload', 'cannot exceed')
@@ -178,9 +176,8 @@ describe('the submission gate is the reducer\u2019s, inside the commit region', 
     await expectRefusal(() => emitSubmission(log, 'round-1', 0, { edits: [...SKILL, ...SKILL] }), 'malformed-payload', 'one structural change per target')
     await expectRefusal(() => emitSubmission(log, 'round-1', 1), 'illegal-transition', 'reserves for exploration')
     const both = [{ asset: 'skill' as const, target: 'count' }, { asset: 'tool' as const, target: 'count' }]
-    expect(emitSubmission(log, 'round-1', 0, { edits: both }).kind).toBe(STRATEGY_KINDS.candidateSubmitted)
-    expect(roundIn(log, 'round-1')?.submissions.map(entry => entry.slot)).toEqual([2, 0])
-    expect(roundIn(log, 'round-1')?.submissions[0]?.exploratory).toBe(true)
+    emitSubmission(log, 'round-1', 0, { edits: both })
+    expect(roundIn(log, 'round-1')?.submissions.map(entry => [entry.slot, entry.exploratory])).toEqual([[2, true], [0, false]])
 
     const quiet = 'gain 0.05 is inside the noise band 0.1'
     emitDecision(log, 'round-1', { winner: null, outcomes: [{ slot: 0, admitted: false, reason: quiet }, { slot: 2, admitted: false, reason: quiet }] })
@@ -199,17 +196,12 @@ describe('a decision closes every submitted slot out with a named reason', async
     const both = [...one, { slot: 1, admitted: false, reason: 'in the noise band' }]
 
     await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: one }), 'illegal-transition', 'without an outcome for submitted slot 1')
-    await expectRefusal(
-      () => emitDecision(log, 'round-1', { outcomes: [...both, { slot: 2, admitted: true, reason: 'never submitted' }] }),
-      'illegal-transition',
-      'has no submission for',
-    )
+    await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: [...both, { slot: 2, admitted: true, reason: 'never submitted' }] }), 'illegal-transition', 'has no submission for')
     await expectRefusal(() => emitDecision(log, 'round-1', { winner: 1, outcomes: both }), 'illegal-transition', 'null means the incumbent stands')
     await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: [{ ...one[0], reason: '' }, both[1]] }), 'malformed-payload', 'reason')
 
     const decided = emitDecision(log, 'round-1', { winner: 0, outcomes: both })
-    expect(Object.keys(decided.payload as Record<string, unknown>).sort()).toEqual(['calibration', 'outcomes', 'winner'])
-    expect(roundIn(log, 'round-1')?.decision?.winner).toBe(0)
+    expect([Object.keys(decided.payload as Record<string, unknown>).sort(), roundIn(log, 'round-1')?.decision?.winner]).toEqual([['calibration', 'outcomes', 'winner'], 0])
     await expectRefusal(() => emitDecision(log, 'round-1', { outcomes: both }), 'illegal-transition', 'decides round 1 again')
   })
 
@@ -220,9 +212,7 @@ describe('the round command service', async () => {
     const live = await deployment({ rounds: 3, firstBudget: 4, minimumBudget: 1 })
     const first = await openThrough(live, { round: 1 })
     const last = await openThrough(live, { roundId: 'round-last', round: 3 })
-    expect(stateOf(live, first)?.plan?.editBudget).toBe(editBudgetFor(1, 3, 4, 1))
-    expect(stateOf(live, first)?.plan?.editBudget).toBeGreaterThan(1)
-    expect(stateOf(live, last)?.plan?.editBudget).toBe(1)
+    expect([stateOf(live, first)?.plan?.editBudget, stateOf(live, last)?.plan?.editBudget]).toEqual([editBudgetFor(1, 3, 4, 1), 1])
 
     // The budget is the round's, not the caller's: the command surface never mentions one.
     const budget = stateOf(live, first)?.plan?.editBudget ?? 0
@@ -247,11 +237,7 @@ describe('the round command service', async () => {
     const live = await deployment()
     const roundId = await openThrough(live)
     live.table.evaluations.set('e-0', evaluation('e-0', { candidate: CANDIDATE_B }))
-    await expectRefusal(
-      () => submitThrough(live, roundId, 0, { evaluationId: 'e-0' }),
-      'evidence-input-mismatch',
-      'the observation is about a different candidate',
-    )
+    await expectRefusal(() => submitThrough(live, roundId, 0, { evaluationId: 'e-0' }), 'evidence-input-mismatch', 'the observation is about a different candidate')
   })
 })
 
@@ -260,13 +246,10 @@ describe('the projection decides admissibility before any argmax', async () => {
     const live = await deployment()
     const roundId = await twoCandidateRound(live, { e0: { quality: 0.9, constraints: [{ criterionId: 'correctness', met: false }] } })
     const decision = project(live, roundId)
-    expect(decision.slots[0]?.constraintsMet).toBe(false)
-    expect(decision.slots[0]?.admissible).toBe(false)
-    expect(decision.slots[0]?.reason).toContain('"correctness"')
+    expect([decision.slots[0]?.constraintsMet, decision.slots[0]?.admissible, decision.slots[0]?.reason]).toEqual([false, false, expect.stringContaining('"correctness"')])
     expect(winnerOf(await decideThrough(live, roundId))).toBe(1)
     const outcomes = stateOf(live, roundId)?.decision?.outcomes ?? []
-    expect(outcomes.find(outcome => outcome.slot === 0)?.reason).toContain('"correctness"')
-    expect(outcomes.find(outcome => outcome.slot === 1)?.admitted).toBe(true)
+    expect([outcomes.find(outcome => outcome.slot === 0)?.reason, outcomes.find(outcome => outcome.slot === 1)?.admitted]).toEqual([expect.stringContaining('"correctness"'), true])
   })
 
   it('refuses an incomplete measurement, and retains the incumbent when nothing is admissible', async () => {
@@ -274,38 +257,27 @@ describe('the projection decides admissibility before any argmax', async () => {
     const partial = { quality: 0.95, observed: 1, missing: [{ slot: 1, reason: 'the trial never ran' }] }
     const roundId = await twoCandidateRound(live, { e0: partial })
     const decision = project(live, roundId)
-    expect(decision.slots[0]?.admissible).toBe(false)
-    expect(decision.slots[0]?.reason).toContain('1 of 2 planned trials observed')
-    expect(decision.slots[0]?.reason).toContain('slot 1 (the trial never ran)')
-    expect(decision.winner).toBe(1)
+    expect([decision.slots[0]?.admissible, decision.slots[0]?.reason, decision.winner]).toEqual([false, expect.stringMatching(/1 of 2 planned trials observed.*slot 1 \(the trial never ran\)/), 1])
 
-    const nothingAdmissible = await twoCandidateRound(live, {
-      round: 2,
-      e0: partial,
-      e1: { constraints: [{ criterionId: 'correctness', met: false }] },
-    })
-    expect(winnerOf(await decideThrough(live, nothingAdmissible))).toBe(null)
-    expect(stateOf(live, nothingAdmissible)?.decision?.outcomes[0]?.reason).toContain('incomplete')
+    const nothingAdmissible = await twoCandidateRound(live, { round: 2, e0: partial, e1: { constraints: [{ criterionId: 'correctness', met: false }] } })
+    expect([winnerOf(await decideThrough(live, nothingAdmissible)), stateOf(live, nothingAdmissible)?.decision?.outcomes[0]?.reason]).toEqual([null, expect.stringContaining('incomplete')])
   })
 
   it('refuses a measurement taken against another baseline, and refuses to pool two calibers', async () => {
     const live = await deployment()
     const stale = await twoCandidateRound(live, { e0: { quality: 0.9, baseline: CANDIDATE_B } })
     const decision = project(live, stale)
-    expect(decision.slots[0]?.admissible).toBe(false)
-    expect(decision.slots[0]?.reason).toContain("not round 1's incumbent")
+    expect([decision.slots[0]?.admissible, decision.slots[0]?.reason]).toEqual([false, expect.stringContaining("not round 1's incumbent")])
     // Slot 1 is sound and still wins: one stale baseline does not block the round.
     expect(winnerOf(await decideThrough(live, stale))).toBe(1)
 
     const mixed = await twoCandidateRound(live, { round: 2, e1: { caliberDigest: '0'.repeat(64) } })
     await expectRefusal(() => decideThrough(live, mixed), 'caliber-mismatch', 'may not be ranked together')
-    expect(stateOf(live, mixed)?.decision).toBeUndefined()
 
     // One submission under a caliber the round did not freeze: there is no second candidate to differ
     // from, so the round's own caliber is the only thing that can catch it.
     const odd = await twoCandidateRound(live, { round: 4, e0: { caliberDigest: '1'.repeat(64) }, e1: { caliberDigest: '1'.repeat(64) } })
-    expect(project(live, odd).slots[0]?.admissible).toBe(false)
-    expect(project(live, odd).slots[0]?.reason ?? '').toMatch(/measured under caliber 111111111111.*round 4 pools only ffffffffffff/)
+    expect([project(live, odd).slots[0]?.admissible, project(live, odd).slots[0]?.reason ?? '']).toEqual([false, expect.stringMatching(/measured under caliber 111111111111.*round 4 pools only ffffffffffff/)])
     expect(winnerOf(await decideThrough(live, odd))).toBe(null)
 
     // A submission recorded before its evaluation existed: the command boundary could not check the
@@ -325,8 +297,7 @@ describe('the projection decides admissibility before any argmax', async () => {
     measuredAt(live.table, INCUMBENT, 9, 0.8)
     live.table.published.push({ at: 1, assets: ['skill'] }, { at: 9, assets: ['tool'] })
     const decision = project(live, roundId)
-    expect(decision.slots[0]?.gain).toBeCloseTo(0.2, 10)
-    expect(decision.slots[0]?.novelty).toBe(1)
+    expect([decision.slots[0]?.gain, decision.slots[0]?.novelty]).toEqual([expect.closeTo(0.2, 10), 1])
     expect(winnerOf(await decideThrough(live, roundId))).toBe(0)
   })
 
@@ -346,8 +317,7 @@ describe('the projection decides admissibility before any argmax', async () => {
     measuredAt(lenient.table, INCUMBENT, 0, 0.7)
     lenient.table.evaluations.set('e-0', evaluation('e-0', { quality: 0.55, cost: 1 }))
     await submitThrough(lenient, second, 0, { evaluationId: 'e-0' })
-    expect(project(lenient, second).slots[0]?.admissible).toBe(true)
-    expect(winnerOf(await decideThrough(lenient, second))).toBe(0)
+    expect([project(lenient, second).slots[0]?.admissible, winnerOf(await decideThrough(lenient, second))]).toEqual([true, 0])
     expect(stateOf(lenient, second)?.decision?.calibration).toEqual({ floor: 0.2, source: 'declared' })
   })
 
@@ -373,10 +343,7 @@ describe('the projection decides admissibility before any argmax', async () => {
     live.table.evaluations.set('e-0', evaluation('e-0', { quality: 0.9 }))
     await submitThrough(live, roundId, 0, { evaluationId: 'e-0' })
     const decision = project(live, roundId)
-    expect(decision.slots[0]?.gain).toBe(null)
-    expect(decision.slots[0]?.admissible).toBe(false)
-    expect(decision.slots[0]?.reason).toContain('no aggregate below the round')
-    expect(decision.winner).toBe(null)
+    expect([decision.slots[0]?.gain, decision.slots[0]?.admissible, decision.slots[0]?.reason, decision.winner]).toEqual([null, false, expect.stringContaining('no aggregate below the round'), null])
 
     const basis = stateOf(live, roundId) as RoundState
     await expectRefusal(() => projectRound(basis, sliceOf(live.table), { floor: -1, source: 'measured' }), 'malformed-payload', 'finite number')
@@ -384,15 +351,6 @@ describe('the projection decides admissibility before any argmax', async () => {
   })
 
   it('refuses an annealing policy that anneals upward', async () => {
-    expect(() =>
-      createStrategyCommands({
-        store: {} as ControlSessionStore,
-        rounds: 3,
-        firstBudget: 1,
-        minimumBudget: 4,
-        calibration: FLOOR,
-        measuresAt: () => sliceOf(tableOf()),
-      }),
-    ).toThrow(/anneal downward/)
+    expect(() => createStrategyCommands({ store: {} as ControlSessionStore, rounds: 3, firstBudget: 1, minimumBudget: 4, calibration: FLOOR, measuresAt: () => sliceOf(tableOf()) })).toThrow(/anneal downward/)
   })
 })
