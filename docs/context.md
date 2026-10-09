@@ -161,7 +161,7 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 ## 5. 当前代码状态（`pnpm verify` 全绿）
 
-`src`/`tests` 共 31 个文件；**126 测试**；**9 门禁 + 门禁自检**（含 `dsh-alignment` 与 `control-store-probe`）。
+`src`/`tests` 共 36 个文件；**140 测试**；**9 门禁 + 门禁自检**（含 `dsh-alignment` 与 `control-store-probe`）。
 
 - `src/protocol/{refusal,envelope,registry,fold,log}.ts` —— 一个拒绝契约、一个信封、一个版本闸+保证词表+发射者纪律、一个 fold 引擎、一条追加路径（提交队列 + 命令识别 + 提交前 dry-run）。
 - `src/task/{contract,protocol,view}.ts` —— 契约（shape 纯 / 可用性命令期）、5 种 kind、唯一读投影 + G4 派生 receipt。
@@ -270,12 +270,15 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 **已完成（本轮）**：S1（`src/environment/**`，提交 `d1bed1a`）与 **v2a + S3 验证器半边**（提交 `bbb3dd7`）——`TASK_VERSION = 2`、criterion 与 verdict 各带必填 `implementationDigest`（reducer 比对，**换掉实现即不放行**）、可用性检查也吃摘要、`RevisionRef` 增 `environmentId`、`protocol.ts` 切出 `shape.ts`、`verifierIdentityOf` 与 registry key **统一为全摘要**（此前一个截 12 位、一个是查找键，是静默漏配的隐患）。
 
-**已完成（本轮）**：S2，见 §5 与设计 §8。
+**已完成（本轮）**：
+- **S2**（提交 `d07c148`）：`src/task/decomposition.ts` + `src/task/tree.ts`。一条完整事实的分解（`dependsOn`/`supports`/`maxRuns`，无环、覆盖面、子 id 唯一，声明 `atomicFact`）+ 全日志投影 `projectTree`。**只有 `verified` 满足依赖**，停止/阻塞沿链具名传播，预算耗尽即 `stopped`，父的完成是派生量。
+- **task@3 + agent@1**（提交 `bf1fdbf`）：`task/assigned`/`task/reassigned` + **`run/started` 的责任门**（只接受当前责任人的**身份**；新码 `not-responsible`）；`bubble/opened` + **verdict 的输入绑定**（新码 `evidence-input-mismatch`，同 subject 纯判）；`agent@1` 的 `agent/opened` **引用**真实 DSH 会话且**不声称存活**。一次升版本承载全部"改变历史解释"的变更，v1/v2 按 `version-mismatch` 具名拒绝、无兼容层。
+- 四条承重规则各有变异证明：去掉责任门、去掉输入绑定、把"任何终止都算满足依赖"、把"未 verified 的子任务算作接受判据"——每次都只有对应用例失败，文件逐字节还原。
 
 **剩余**：
 
 1. **S4**：`task/decomposed` **一条完整事实**（一次性、子 id 唯一非空、依赖须在声明内、**无环**）+ `projectTree`（**只有 `verified` 满足依赖**，terminal-but-unverified 阻塞**带具名理由**，父完成**不落盘**、是汇总）+ `bubble/opened`（`{runId, inputs[], workspace}`）+ **verdict 的输入绑定**（判决的输入摘要必须等于该 run 的 bubble 声明）。这两个 code（`cyclic-dependency`、`evidence-input-mismatch`）到那时才加进 `REFUSAL_CODES`——本轮**故意没加**，因为还没有消费者。
-2. **S5**：E3（`agent/opened{agentId, role, sessionId}`，**引用** DSH 会话）+ `task/assigned`/`task/reassigned` + `run/started` 的**责任门**（新码 `not-responsible`）+ **装载期缝断言**（约束 10：`inject` 缺席的插件是静默不存在的）。
+2. **S5 剩余**：**装载期缝断言**（约束 10：`inject` 缺席的插件是静默不存在的）与运行期 `src/runtime/**`（两条并行路线在做：验证器执行、DSH 生命周期）。
 3. **S6 / K1**：12 场景逐条复核，A 的探针不能替代 B 的执行恢复；含执行/结算边界真实 SIGKILL 与桩 LlmAdapter 的确定性小任务冒烟，至少一条真实模型小任务按 review K1 要求交回。
 
 ## 12. 2026-10-09 提交边界纠正与下一阶段

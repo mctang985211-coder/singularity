@@ -61,12 +61,12 @@
 
 | 领域 | 种类（定） | subject | 不变量 | 强制点 | 消费者 |
 |---|---|---|---|---|---|
-| **R3 责任** | `task/assigned{agentId, agentIdentity}`、`task/reassigned{from, agentId, agentIdentity}` | task | 指派一次；转移的 `from` 必须**等于当前责任人**；**`run/started` 只接受当前责任人的身份** | **reducer** | K1 §6 |
+| **R3 责任** ✅ | `task/assigned{agentId, agentIdentity}`、`task/reassigned{from, agentId, agentIdentity}` | task | 指派一次；转移的 `from` 必须**等于当前责任人**且不能是同一人；**`run/started` 只接受当前责任人的身份**（新码 `not-responsible`） | **reducer** | K1 §6 |
 | **分解** | `task/decomposed{children:[{taskId, dependsOn[], supports[], maxRuns}]}`——**一条完整事实**，声明 `atomicFact` | 父 task | 一次性（不可改）；子 id 非空、唯一、≠父；`dependsOn` 必须在声明内且不重复；**无环**；`supports` 必须是**父契约**声明的判据；`maxRuns` 为正整数且没有任何 kind 能改大它 | **reducer**（纯：形状 + 无环 + 覆盖面）；子任务是否已准入、依赖是否就绪由**串行命令边界**检查（§2） | `projectTree` 的就绪与汇总；`supports` 让“子验收支持父契约的哪一条”成为**父契约能拒绝**的声明 |
 | **初始 Revision** | `revision/created{revisionId, manifest}` | 环境 | 内容摘要由 reducer **重算并自校验**（篡改即拒）；同 id 同内容 = 幂等；同 id 异内容 = 具名拒绝；**没有任何 kind 能改已创建的 revision** | **reducer**；Run 准入的存在性在串行命令边界检查 | `run/started` 的钉住 + 投影的存在性 |
-| **最小 Bubble** | `bubble/opened{runId, inputs:[{name,digest}], workspace:{kind,ref}}` | task | 一次 run 一个 bubble；只对 running 的 run；**每条 verdict 的输入摘要必须等于该 run 的 bubble 所声明的输入** | **reducer**（同 subject，所以是纯判） | K1 §7 的输入绑定 |
+| **最小 Bubble** ✅ | `bubble/opened{runId, inputs:[{name,digest}], workspace:{kind,ref}}` | task | 一次 run 一个 bubble；只对 running 的 run；**每条 verdict 必须逐项回显该 run 的 bubble 所声明的输入**（数量、名字、摘要，顺序敏感；新码 `evidence-input-mismatch`） | **reducer**（同 subject，所以是纯判） | K1 §7 的输入绑定 |
 | **真实 verifier** | `evidence/produced` 增必填 `implementationDigest`；criterion 增 `implementationDigest`；verifier 实现须带 `selftest` 样本 | task | 实现摘要与 criterion 声明不一致即拒；**selftest 必须既有 pass 样本又有 fail 样本** | **reducer** + 部署期 selftest | K1 §7 / §11 |
-| **E3 agent node** | `agent/opened{agentId, role, sessionId}` | agentId | 开通一次；三字段非空；载荷闭合。**"可见节点必有活会话"是 ordering，不是不变量**（见下） | **reducer**（形状）；存活**判不了** | `task/assigned`（只能指派已开通的 agent）+ 投影露出 `sessionId`，供恢复**同一会话**（K1 §9） |
+| **E3 agent node** ✅ | `agent/opened{agentId, role, sessionId}`（**协议 `agent@1`**） | agentId | 开通一次；三字段非空；载荷闭合。**"可见节点必有活会话"是 ordering，不是不变量**（见下） | **reducer**（形状）；存活**判不了** | `task/assigned`（只能指派已开通的 agent）+ 投影露出 `sessionId`，供恢复**同一会话**（K1 §9） |
 
 **E3 的形态（证据 B 已裁）**：**引用 DSH 的运行时对象，不自建模。** 持久层是 `SessionHandle`（字节），运行层是 `ctx.agents`（`AgentRegistry`，`dsh-agent`）配 `AgentLoop`（`dsh-agent-loop`，`implements AgentFactory`）——实测用**桩 LlmAdapter** 跑完了一整轮。我们的 `agent/opened` 只记 `sessionId`，不复制 agent 内部。
 
