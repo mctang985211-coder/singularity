@@ -218,9 +218,14 @@ export class MemoryLog {
     return envelope as Envelope<Payload>
   }
 
-  /** Every fact this store holds, oldest first. The durable medium's payload, and the fold's input. */
+  /**
+   * Every fact this store holds, oldest first. The durable medium's payload, and the fold's input.
+   *
+   * A copy: the store's own sequence and its chain are invariants, and handing out the live array
+   * would let a caller push a fact that no reducer ever accepted and no digest ever sealed.
+   */
   entries(): readonly Envelope[] {
-    return this.#entries
+    return [...this.#entries]
   }
 
   /** The facts of one protocol version, oldest first. */

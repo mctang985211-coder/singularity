@@ -281,7 +281,7 @@ describe('the control store over a real session', () => {
     expect((await asyncRefusalOf(() => ControlSessionStore.open(optionsFor(live, 'unknown-kind')))).code).toBe<RefusalCode>('unknown-kind')
   })
 
-  it('refuses a payload DSH cannot serialize before it is written', async () => {
+  it('refuses a payload whose content identity JSON could not round-trip, before anything is written', async () => {
     const live = await deployment()
     const store = await ControlSessionStore.open({
       persistence: live.persistence,
@@ -291,11 +291,13 @@ describe('the control store over a real session', () => {
     })
     const request = { commandId: 'cmd-0', protocol: 'probe', version: 1, kind: 'noted', subject: 'probe-a', payload: { n: -0 } }
 
-    // `-0` passes this stack's frame (a finite number) and DSH's materializer refuses it.
+    // `-0` and `0` are distinct numbers that JSON writes identically, so this stack refuses it in
+    // the content identity itself — before DSH's materializer could ever see it.
     expect(Number.isFinite(-0)).toBe(true)
     const inMemory = new MemoryLog(probeRegistry(), { subjects: { writer: 'writer-1' } })
-    await inMemory.emit(request)
-    expect(inMemory.entries()).toHaveLength(1)
+    expect((await asyncRefusalOf(() => inMemory.emit(request))).code).toBe<RefusalCode>('not-lossless-json')
+    expect(inMemory.entries()).toHaveLength(0)
+    // DSH refuses it one layer down, for the same reason.
     expect(() => materializeAppendBatch([{ type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: -0 } }])).toThrow(TypeError)
 
     expect((await asyncRefusalOf(() => store.emit(request))).code).toBe<RefusalCode>('not-lossless-json')

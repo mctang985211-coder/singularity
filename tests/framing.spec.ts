@@ -159,6 +159,21 @@ describe('the one append path', () => {
     expect([first.at, second.at]).toEqual(['2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'])
   })
 
+  it('hands out its facts as a copy, so nothing outside can append an unsealed one', async () => {
+    const log = openDemoLog()
+    await log.emit(opened())
+
+    // A handed-out live array would let a caller push a fact no reducer accepted and no digest
+    // sealed — the store's sequence and chain are invariants, not a shared buffer.
+    const handed = log.entries() as Envelope[]
+    const last = log.entries().at(-1)
+    if (last === undefined) throw new Error('expected a recorded fact')
+    handed.push(sealEnvelope({ ...body(), kind: 'bumped', seq: 1, prevDigest: last.digest }) as Envelope)
+
+    expect(log.entries()).toHaveLength(1)
+    expect(log.stateOf<Gate>('demo', 1, 'gate-a')).toEqual({ open: true, bumps: 0 })
+  })
+
   it('refuses to adopt a sequence no append path could produce', () => {
     const entries = chainOf([
       { kind: 'closed', subject: 'gate-a' },
@@ -207,6 +222,9 @@ describe('the one envelope', () => {
     const cyclic: Record<string, unknown> = {}
     cyclic['self'] = cyclic
     expect(refusalOf(() => digestOf(cyclic)).code).toBe<RefusalCode>('not-lossless-json')
+
+    // `-0` and `0` are distinct numbers that JSON writes identically, so they would collide too.
+    expect(refusalOf(() => digestOf({ v: -0 })).code).toBe<RefusalCode>('not-lossless-json')
 
     // The values that are losslessly JSON still digest, and still ignore key order.
     expect(() => assertLosslessJson({ a: [1, 'two', null, true] }, 'probe')).not.toThrow()

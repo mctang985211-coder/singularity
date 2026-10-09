@@ -90,6 +90,9 @@ export function assertLosslessJson(value: unknown, where: string, seen = new Set
     case 'number':
       if (!Number.isFinite(value))
         refuse('not-lossless-json', `${where} is ${String(value)}, which JSON round-trips as null`)
+      // `-0` and `0` are distinct numbers that JSON writes identically, so they would share one
+      // content identity. Same class as NaN/null: a silent coercion inside the identity itself.
+      if (Object.is(value, -0)) refuse('not-lossless-json', `${where} is -0, which JSON round-trips as 0`)
       return
     case 'object':
       break
