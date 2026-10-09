@@ -28,3 +28,33 @@ export {
 } from './protocol/registry.ts'
 export { ProtocolLog, type EmitInput, type LogOptions } from './protocol/log.ts'
 export { foldSubject, foldSubjects } from './protocol/fold.ts'
+
+export {
+  assertContract,
+  contractDigest,
+  verifierRegistryOf,
+  type AcceptanceCriterion,
+  type TaskContract,
+  type VerifierRegistry,
+} from './task/contract.ts'
+export {
+  declareTaskProtocol,
+  TASK_KINDS,
+  TASK_PROTOCOL,
+  TASK_VERSION,
+  type EvidenceRecord,
+  type RevisionRef,
+  type RunState,
+  type RunStatus,
+  type TaskState,
+} from './task/protocol.ts'
+export {
+  projectReceipt,
+  projectTask,
+  receiptDigest,
+  renderTaskForAgent,
+  type CriterionVerdictView,
+  type ReceiptView,
+  type RunView,
+  type TaskView,
+} from './task/view.ts'

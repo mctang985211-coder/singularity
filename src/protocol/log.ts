@@ -13,6 +13,7 @@
 
 import { open, readFile, stat } from 'node:fs/promises'
 import { assertEnvelope, sealEnvelope, type Envelope, type EnvelopeBody } from './envelope.ts'
+import { foldSubjects } from './fold.ts'
 import { refuse } from './refusal.ts'
 import type { ProtocolRegistry } from './registry.ts'
 
@@ -37,6 +38,12 @@ export class ProtocolLog {
   readonly #registry: ProtocolRegistry
   readonly #now: () => string
   readonly #entries: Envelope[]
+  /**
+   * The folded state of every subject this log has already accepted, used as an append-time
+   * cursor. It is not a second interpreter: every transition goes through the kind's own
+   * reducer, the same one `foldSubjects` replays. A spec asserts the two agree.
+   */
+  readonly #states = new Map<string, unknown>()
   #size: number
 
   private constructor(path: string, registry: ProtocolRegistry, now: () => string, entries: Envelope[], size: number) {
@@ -96,14 +103,27 @@ export class ProtocolLog {
       registry.ruleFor(entry.protocol, entry.version, entry.kind)
     }
 
-    return new ProtocolLog(path, registry, now, entries, await sizeOf(path))
+    const log = new ProtocolLog(path, registry, now, entries, await sizeOf(path))
+    // Loading also replays every subject through its reducers, so a log whose sequence is
+    // illegal is refused when it is opened rather than when a reader happens to ask.
+    for (const pair of new Set(entries.map(entry => `${entry.protocol}@${entry.version}`))) {
+      const separator = pair.lastIndexOf('@')
+      const protocol = pair.slice(0, separator)
+      const version = Number(pair.slice(separator + 1))
+      for (const [subject, state] of foldSubjects(registry, entries, protocol, version)) {
+        log.#states.set(stateKey(protocol, version, subject), state)
+      }
+    }
+    return log
   }
 
   /**
    * Record one fact, returning the sealed envelope.
    *
    * The gate runs before anything is written: an unknown protocol, version, kind, or a derived
-   * (G4) kind is refused with nothing on disk.
+   * (G4) kind is refused with nothing on disk. The fact's own reducer then runs against this
+   * subject's state so far, so a fact the protocol cannot accept is refused **before** it is
+   * durable — the log never records a sequence its own fold would reject.
    */
   async emit<Payload>(input: EmitInput<Payload>): Promise<Envelope<Payload>> {
     const rule = this.#registry.ruleFor(input.protocol, input.version, input.kind)
@@ -111,6 +131,15 @@ export class ProtocolLog {
       refuse(
         'g4-not-persistable',
         `${input.protocol}@${input.version} kind ${input.kind} is G4 (derived state); it is folded from persisted facts, never appended`,
+      )
+
+    // Single-writer first: a cursor that no longer matches the file is the symptom of a second
+    // writer, and reporting that as an illegal transition would name the wrong cause.
+    const sizeBefore = await sizeOf(this.#path)
+    if (sizeBefore !== this.#size)
+      refuse(
+        'concurrent-writer',
+        `${this.#path} is ${sizeBefore} bytes but this writer opened it at ${this.#size}; one log has exactly one writer`,
       )
 
     const body: EnvelopeBody = {
@@ -126,17 +155,25 @@ export class ProtocolLog {
     }
     const envelope = sealEnvelope(body)
 
-    const before = await sizeOf(this.#path)
-    if (before !== this.#size)
-      refuse(
-        'concurrent-writer',
-        `${this.#path} is ${before} bytes but this writer opened it at ${this.#size}; one log has exactly one writer`,
-      )
+    // The reducer is the single authority on legality. Ask it first, then write.
+    const key = stateKey(input.protocol, input.version, input.subject)
+    const before = this.#states.get(key)
+    const spec = this.#registry.specFor(input.protocol, input.version)
+    const after = rule.reduce(before === undefined ? spec.initialState : before, envelope)
 
-    const after = await this.#appendLine(envelope)
+    const sizeAfter = await this.#appendLine(envelope)
     this.#entries.push(envelope)
-    this.#size = after
+    this.#states.set(key, after)
+    this.#size = sizeAfter
     return envelope as Envelope<Payload>
+  }
+
+  /**
+   * The folded state of one subject as of everything appended so far, or `undefined` when this
+   * log holds none of its facts. Equal by construction to folding `entries()` afresh.
+   */
+  stateOf<State>(protocol: string, version: number, subject: string): State | undefined {
+    return this.#states.get(stateKey(protocol, version, subject)) as State | undefined
   }
 
   /** Every fact this log holds, oldest first. The fold engine's only input. */
@@ -200,4 +237,9 @@ async function sizeOf(path: string): Promise<number> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0
     throw error
   }
+}
+
+/** One subject's cursor key. The separator cannot appear in a protocol or version, so keys are unambiguous. */
+function stateKey(protocol: string, version: number, subject: string): string {
+  return `${protocol}@${version}\u0000${subject}`
 }

@@ -31,6 +31,7 @@ import {
   AUDIT_V1,
   asyncRefusalOf,
   bumped,
+  chainOf,
   closed,
   DEMO_V1,
   demoRegistry,
@@ -124,6 +125,32 @@ describe('the one append path', () => {
     const first = await log.emit(opened())
     const second = await log.emit(bumped())
     expect([first.at, second.at]).toEqual(['2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'])
+  })
+
+  it('keeps its append cursor equal to a fresh fold of its own entries', async () => {
+    const registry = demoRegistry()
+    const log = await ProtocolLog.open(logPath, registry)
+    await log.emit(opened('gate-a'))
+    await log.emit(bumped('gate-a'))
+    await log.emit(opened('gate-b'))
+
+    // The cursor is an optimization, never a second interpretation: it must equal the fold.
+    expect(log.stateOf<Gate>('demo', 1, 'gate-a')).toEqual(foldSubject<Gate>(registry, log.entries(), 'demo', 1, 'gate-a'))
+    expect(log.stateOf<Gate>('demo', 1, 'gate-b')).toEqual(foldSubject<Gate>(registry, log.entries(), 'demo', 1, 'gate-b'))
+    expect(log.stateOf<Gate>('demo', 1, 'never-seen')).toBeUndefined()
+  })
+
+  it('refuses to open a log whose recorded sequence is illegal', async () => {
+    // What a log written by an older or buggier build looks like: framing and chain are fine,
+    // the sequence is not. Loading replay it, so the refusal lands at open, not at a later read.
+    const entries = chainOf([
+      { kind: 'closed', subject: 'gate-a' },
+      { kind: 'bumped', subject: 'gate-a' },
+    ])
+    await writeFile(logPath, `${entries.map(entry => JSON.stringify(entry)).join('\n')}\n`, 'utf8')
+
+    const refusal = await asyncRefusalOf(() => ProtocolLog.open(logPath, demoRegistry()))
+    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
   })
 })
 

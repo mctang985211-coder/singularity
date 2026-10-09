@@ -24,6 +24,7 @@ import {
   AUDIT_V1,
   asyncRefusalOf,
   bumped,
+  chainOf,
   closed,
   DEMO_V1,
   demoRegistry,
@@ -131,23 +132,36 @@ describe('the one guarantee ladder', () => {
 })
 
 describe('illegal transitions', () => {
-  it('refuses a bump on a closed gate, and the fold scope decides who is affected', async () => {
+  it('refuses a bump on a closed gate at fold time, and the fold scope decides who is affected', () => {
     const registry = demoRegistry()
-    const log = await ProtocolLog.open(logPath, registry)
-    await log.emit(opened('gate-a'))
-    await log.emit(bumped('gate-a'))
-    await log.emit(bumped('gate-a'))
-    await log.emit(opened('gate-b'))
-    await log.emit(closed('gate-b'))
-    await log.emit(bumped('gate-b'))
+    // gate-b is closed and then bumped. No append path would write this, which is the point.
+    const entries = chainOf([
+      { kind: 'opened', subject: 'gate-a' },
+      { kind: 'bumped', subject: 'gate-a' },
+      { kind: 'bumped', subject: 'gate-a' },
+      { kind: 'opened', subject: 'gate-b' },
+      { kind: 'closed', subject: 'gate-b' },
+      { kind: 'bumped', subject: 'gate-b' },
+    ])
 
     // foldSubject is the isolation boundary: gate-a still reads, though gate-b's sequence is broken.
-    expect(foldSubject<Gate>(registry, log.entries(), 'demo', 1, 'gate-a')).toEqual({ open: true, bumps: 2 })
+    expect(foldSubject<Gate>(registry, entries, 'demo', 1, 'gate-a')).toEqual({ open: true, bumps: 2 })
 
     // foldSubjects is the whole-store read and fails closed on that same sequence.
-    const refusal = refusalOf(() => foldSubjects<Gate>(registry, log.entries(), 'demo', 1))
+    const refusal = refusalOf(() => foldSubjects<Gate>(registry, entries, 'demo', 1))
     expect(refusal.code).toBe<RefusalCode>('illegal-transition')
     expect(refusal.detail).toContain('demo/bumped #5')
+  })
+
+  it('refuses an illegal fact at append time, so the log never records a sequence it would reject', async () => {
+    const log = await ProtocolLog.open(logPath, demoRegistry())
+    await log.emit(opened('gate-b'))
+    await log.emit(closed('gate-b'))
+
+    const refusal = await asyncRefusalOf(() => log.emit(bumped('gate-b')))
+    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
+    // Nothing reached the disk beyond the two legal facts.
+    expect(log.entries()).toHaveLength(2)
   })
 })
 

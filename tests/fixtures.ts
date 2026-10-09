@@ -13,7 +13,9 @@ import {
   ProtocolRefusal,
   ProtocolRegistry,
   refuse,
+  sealEnvelope,
   type EmitInput,
+  type Envelope,
   type ProtocolSpec,
   type Refusal,
 } from '../src/index.ts'
@@ -90,6 +92,33 @@ export async function asyncRefusalOf(step: () => Promise<unknown>): Promise<Refu
 export async function newLogPath(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'singularity-core-'))
   return join(directory, 'singularity.log')
+}
+
+/**
+ * A correctly framed, correctly chained sequence of `demo` facts built in memory.
+ *
+ * The append path refuses an illegal sequence before writing it, so the only way to test what
+ * a *fold* does with one is to hand it a sequence no append path produced — which is also
+ * exactly what a log written by an older or buggier build looks like.
+ */
+export function chainOf(facts: readonly { kind: string; subject: string; payload?: unknown }[]): Envelope[] {
+  const entries: Envelope[] = []
+  for (const fact of facts) {
+    entries.push(
+      sealEnvelope({
+        protocol: 'demo',
+        version: 1,
+        kind: fact.kind,
+        subject: fact.subject,
+        actor: 'test',
+        at: `2026-10-09T00:00:0${entries.length}.000Z`,
+        seq: entries.length,
+        prevDigest: entries.at(-1)?.digest ?? null,
+        payload: fact.payload ?? {},
+      }),
+    )
+  }
+  return entries
 }
 
 export const opened = (subject = 'gate-a'): EmitInput => ({ protocol: 'demo', version: 1, kind: 'opened', subject, actor: 'test', payload: {} })

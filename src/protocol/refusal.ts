@@ -38,6 +38,20 @@ export const REFUSAL_CODES = [
   'write-not-durable',
   /** The log changed underneath this writer: another writer holds the append path. */
   'concurrent-writer',
+  /** A task contract is not a contract: no goal, no criteria, or a malformed criterion. */
+  'malformed-contract',
+  /** A criterion names a verifier this deployment has not registered at that version. */
+  'unregistered-verifier',
+  /** A fact names a run this task never started. */
+  'unknown-run',
+  /** A fact names a criterion this task's contract does not declare. */
+  'unknown-criterion',
+  /** The actor that executed a run tried to judge it, or a verifier judged a criterion that is not its own. */
+  'self-reported-evidence',
+  /** A criterion already carries a verdict for this run; one criterion has one verdict. */
+  'evidence-conflict',
+  /** A run cannot settle verified while a criterion has no passing verdict. */
+  'unadjudicated-criterion',
 ] as const
 
 export type RefusalCode = (typeof REFUSAL_CODES)[number]

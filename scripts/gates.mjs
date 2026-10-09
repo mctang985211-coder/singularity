@@ -13,6 +13,7 @@
  * Usage: node scripts/gates.mjs
  */
 
+import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 
@@ -202,6 +203,24 @@ gate('single-g3-claim', () => {
       })
   }
   return claims.length > 1 ? [`${claims.length} kinds claim G3 (${claims.join(', ')}); the ladder allows exactly one instance`] : []
+})
+
+// 7 ── The slice itself. Static checks cannot see a frame that no longer folds.
+gate('vertical-slice-smoke', () => {
+  try {
+    const output = execFileSync(process.execPath, ['scripts/slice.mjs'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return output.includes('slice: OK') ? [] : ['the slice ran but never reported OK']
+  } catch (error) {
+    const lines = `${error.stdout ?? ''}${error.stderr ?? ''}`
+      .split('\n')
+      .filter(line => line.includes('FAIL') || line.includes('failed') || line.includes('Refusal'))
+      .slice(0, 4)
+    return [`the vertical slice did not run end to end: ${lines.join(' | ') || error.message}`]
+  }
 })
 
 let failed = 0
