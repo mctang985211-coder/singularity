@@ -230,10 +230,10 @@ describe('what the protocol does not know', () => {
     const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
     if (state === undefined) throw new Error('expected a folded task')
 
-    const refusal = refusalOf(() => projectReceipt(state, RUN_ID))
+    const refusal = refusalOf(() => projectReceipt(state, RUN_ID, log.entries().length))
     expect(refusal.code).toBe<RefusalCode>('illegal-transition')
     expect(refusal.detail).toContain('still running')
-    expect(refusalOf(() => projectReceipt(state, 'run-ghost')).code).toBe<RefusalCode>('unknown-run')
+    expect(refusalOf(() => projectReceipt(state, 'run-ghost', log.entries().length)).code).toBe<RefusalCode>('unknown-run')
   })
 
   it('declares exactly the nine kinds this slice needs, and no receipt kind', () => {

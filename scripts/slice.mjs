@@ -156,7 +156,7 @@ try {
 
   const state = foldSubject(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK)
   const view = projectTask(state)
-  const receipt = projectReceipt(state, RUN)
+  const receipt = projectReceipt(state, RUN, log.entries().length)
 
   console.log('')
   console.log(renderTaskForAgent(view))
@@ -175,7 +175,7 @@ try {
   // What a durable medium hands back must replay to the same facts, and two readers must agree.
   const adopted = MemoryLog.adopt(log.entries(), registry, { subjects })
   const refolded = foldSubject(registry, adopted.entries(), TASK_PROTOCOL, TASK_VERSION, TASK)
-  check('adopting the recorded facts yields the same receipt digest', receiptDigest(projectReceipt(refolded, RUN)) === receiptDigest(receipt))
+  check('adopting the recorded facts yields the same receipt digest', receiptDigest(projectReceipt(refolded, RUN, adopted.entries().length)) === receiptDigest(receipt))
   check('no receipt kind exists, so a receipt can never be persisted', !Object.values(TASK_KINDS).includes('receipt/sealed'))
 } finally {
   await rm(directory, { recursive: true, force: true })

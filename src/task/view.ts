@@ -72,10 +72,25 @@ export interface ReceiptView {
   readonly runId: string
   readonly contractDigest: string
   readonly revision: RevisionRef
+  /**
+   * The committed read cutoff the receipt was derived from: the exclusive sequence bound of the
+   * facts it accounts for. Two readers of the same prefix agree on it, and a reader of a *later*
+   * prefix gets a different digest - which is what makes "this receipt accounts for exactly these
+   * facts" checkable instead of assumed.
+   */
+  readonly cutoff: number
   readonly executor: { readonly emitter: string; readonly actor: string }
   readonly status: 'verified' | 'failed'
   readonly startedAt: string
   readonly finishedAt: string
+  /**
+   * What the attempt actually consumed: the declared inputs and the workspace the run executed in.
+   * A receipt that named only the contract would say what was asked and not what was used.
+   */
+  readonly consumption: {
+    readonly inputs: readonly { readonly name: string; readonly digest: string }[]
+    readonly workspace: { readonly kind: string; readonly ref: string } | null
+  }
   readonly criteria: readonly {
     readonly criterionId: string
     readonly verifierRef: string
@@ -158,7 +173,11 @@ export function projectTask(state: TaskState): TaskView {
  * Refuses a run that has not settled: a receipt is what a terminal run leaves behind, and
  * inventing one for a running attempt would be a completion claim nobody made.
  */
-export function projectReceipt(state: TaskState, runId: string): ReceiptView {
+export function projectReceipt(state: TaskState, runId: string, cutoff: number): ReceiptView {
+  // The cutoff is required rather than defaulted: a receipt whose identity did not name the facts
+  // it was derived from would be fixed to nothing in particular.
+  if (!Number.isInteger(cutoff) || cutoff < 1)
+    refuse('malformed-payload', `a receipt cutoff must be a positive integer sequence bound, got ${JSON.stringify(cutoff)}`)
   const { contract, digest } = requireContract(state)
   const run = state.runs[runId]
   if (run === undefined) refuse('unknown-run', `task "${state.taskId}" never started run "${runId}", so it has no receipt`)
@@ -172,7 +191,12 @@ export function projectReceipt(state: TaskState, runId: string): ReceiptView {
     runId,
     contractDigest: digest,
     revision: run.revision,
+    cutoff,
     executor: { emitter: run.emitter, actor: run.actor },
+    consumption: {
+      inputs: run.bubble?.inputs.map(entry => ({ name: entry.name, digest: entry.digest })) ?? [],
+      workspace: run.bubble === undefined ? null : { kind: run.bubble.workspace.kind, ref: run.bubble.workspace.ref },
+    },
     status: run.status,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,

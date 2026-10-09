@@ -15,6 +15,7 @@ import {
   projectTask,
   receiptDigest,
   renderTaskForAgent,
+  type RefusalCode,
   TASK_PROTOCOL,
   TASK_VERSION,
   type ReceiptView,
@@ -22,12 +23,14 @@ import {
   type TaskState,
   type TaskView,
 } from '../src/index.ts'
-import { newLogPath } from './fixtures.ts'
+import { newLogPath, refusalOf } from './fixtures.ts'
 import {
   admitted,
   ARTIFACT,
   assigned,
+  BUBBLE_INPUTS,
   bubbleOpened,
+  failed,
   INTEGRATION_VERIFIER,
   judged,
   REVISION,
@@ -99,8 +102,8 @@ describe('the task slice', () => {
   })
 
   it('derives the receipt from the log instead of storing it', async () => {
-    const { state } = await slice()
-    const receipt: ReceiptView = projectReceipt(state, RUN_ID)
+    const { log, state } = await slice()
+    const receipt: ReceiptView = projectReceipt(state, RUN_ID, log.entries().length)
 
     expect(receipt.status).toBe('verified')
     expect(receipt.executor).toEqual({ emitter: 'scheduler', actor: SCHEDULER })
@@ -111,11 +114,40 @@ describe('the task slice', () => {
     ])
     expect(receipt.criteria.every(entry => entry.artifactDigest === ARTIFACT)).toBe(true)
     expect(receiptDigest(receipt)).toMatch(/^[0-9a-f]{64}$/)
+    // The receipt names the facts it accounts for and what the attempt consumed, so "fixed source"
+    // is a property a reader can check rather than a claim.
+    expect(receipt.cutoff).toBe(log.entries().length)
+    expect(receipt.consumption.inputs).toEqual(BUBBLE_INPUTS)
+    expect(receipt.consumption.workspace).toEqual({ kind: 'git', ref: 'refs/heads/main' })
+  })
+
+  it('gives a different receipt for the same run at a different committed cutoff', async () => {
+    const { log, state } = await slice()
+    const atCutoff = receiptDigest(projectReceipt(state, RUN_ID, log.entries().length))
+    // One fewer fact is a different accounting: same run, different set of facts answered for.
+    expect(receiptDigest(projectReceipt(state, RUN_ID, log.entries().length - 1))).not.toBe(atCutoff)
+    // A cutoff that is not a committed bound is refused rather than rounded to one.
+    expect(refusalOf(() => projectReceipt(state, RUN_ID, 0)).code).toBe<RefusalCode>('malformed-payload')
+  })
+
+  it('reports a run that declared no execution context as having consumed nothing, not as unknown', async () => {
+    // A run that failed before a bubble was opened has an empty consumption, which is a fact about
+    // the attempt rather than a missing value to be invented.
+    const registry = taskRegistry()
+    const log = new MemoryLog(registry, { subjects: SUBJECTS })
+    await log.emit(admitted())
+    await log.emit(assigned())
+    await log.emit(started())
+    await log.emit(failed('no context was ever declared'))
+    const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
+    if (state === undefined) throw new Error('expected a folded task')
+    const receipt = projectReceipt(state, RUN_ID, log.entries().length)
+    expect(receipt.consumption).toEqual({ inputs: [], workspace: null })
   })
 
   it('gives two independent readers the same receipt, before and after adopting the facts', async () => {
     const { log, state } = await slice()
-    const fromMemory = receiptDigest(projectReceipt(state, RUN_ID))
+    const fromMemory = receiptDigest(projectReceipt(state, RUN_ID, log.entries().length))
 
     // What a durable medium hands back must fold to the same task, and agree on the receipt.
     const registry = taskRegistry()
@@ -123,7 +155,7 @@ describe('the task slice', () => {
     const refolded = foldSubject<TaskState>(registry, adopted.entries(), TASK_PROTOCOL, TASK_VERSION, TASK_ID)
     if (refolded === undefined) throw new Error('the adopted facts must fold to the same task')
 
-    expect(receiptDigest(projectReceipt(refolded, RUN_ID))).toBe(fromMemory)
+    expect(receiptDigest(projectReceipt(refolded, RUN_ID, log.entries().length))).toBe(fromMemory)
     expect(projectTask(refolded)).toEqual(projectTask(state))
   })
 
@@ -167,6 +199,6 @@ describe('the task slice', () => {
     if (state === undefined) throw new Error('expected a folded task')
     expect(projectTask(state).phase).toBe('failed')
     expect(projectTask(state).runs[0]?.failureReason).toBeNull()
-    expect(projectReceipt(state, RUN_ID).status).toBe('failed')
+    expect(projectReceipt(state, RUN_ID, log.entries().length).status).toBe('failed')
   })
 })
