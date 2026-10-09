@@ -1,6 +1,10 @@
 # singularity-core
 
-The one protocol stack. Built from the spine in `singularity-s0-spine.md`, not by porting code.
+The one protocol stack. Built from the spine in `docs/blueprint.md`, not by porting code.
+
+**Read [`docs/blueprint.md`](docs/blueprint.md) first.** It states what Singularity is for, what
+the previous system did and did not achieve, the root causes of its complexity, why the rebuild
+is organised this way, and where each remaining layer attaches.
 
 ```sh
 pnpm install
@@ -9,7 +13,8 @@ pnpm verify   # tsc --noEmit && vitest run && node scripts/gates.mjs
 
 ## What is here
 
-Five things, and only five. Every durable fact in the future system travels through them.
+Five protocol things, and only five. Every durable fact in the future system travels through
+them. Storage itself is DSH's job, not this package's (see *Next*, below).
 
 | Module | The one thing it owns |
 |---|---|
@@ -87,8 +92,16 @@ An execution receipt is G4: recomputed from the run's own facts at read time. Th
 
 ## What is deliberately absent
 
-No decomposition, no questions, no proposals, no budget, no pointer. No second file format. No `export *`. No default-substitution. No compatibility shim. No abstraction over the log. Adding any of these is a change to the spine spec (`singularity-s0-spine.md`), not a local decision.
+No decomposition, no questions, no proposals, no budget, no pointer. No second file format. No `export *`. No default-substitution. No compatibility shim. Adding any of these is a change to the blueprint (`docs/blueprint.md`), not a local decision.
 
-## Next (S3)
+## Next (S3'): the storage swap, and why the pointer needs no file
 
-The environment revision and its pointer — the one **G3** instance. That is where a run's pinned revision stops being a declared reference and starts being enforced by a compare-and-swap, and where the guarantee ladder stops being a declaration and starts having teeth.
+`ProtocolLog` self-builds what DSH already owns: append, fsync, read-back, a single-writer size check, a digest chain. That was a mistake — it re-implements a worse `session-persistence-jsonl`. It becomes a memory-only test backend, and durability moves behind a `SessionEventSink` adapter copying the shape of the previous system's `EventStoreSet`.
+
+The measurement that settles it (blueprint §4.1): over the JSON backend, `ctx.storageDomain` has **no cross-process exclusion and silently loses concurrent writes** — a second process's record was overwritten by a whole-document rewrite. Session persistence has a kernel `flock(2)` lease, released on process death, pinned by DSH's own two-process e2e test.
+
+That also **removes** a mechanism rather than adding one: the G3 pointer needs **no intent file**. Single writer comes from the lease, the compare-and-swap from the reducer, and crash reconciliation from replaying the session. The previous system's `pointer.json` plus persisted intent plus atomic replace plus startup reconcile all disappear.
+
+### Dependency rule (learn it before it bites you)
+
+npm publishes `@deepseek-ai/dsh-*` at **`0.0.1-rc.1`**; the local CLI runs **`0.2.0-rc.2`**. Never install these from the registry. Point them at `thirdparty/deepseek-harness` or at the CLI's own installed copy, exactly as the previous system did.
