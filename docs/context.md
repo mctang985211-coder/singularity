@@ -32,14 +32,14 @@
 
 | 阶段 | 交付 | 退出条件 | 状态 |
 |---|---|---|---|
-| **A** | 专用控制 store、DSH 承载、串行提交、严格边界、命令结果识别 | 双进程互斥；并发命令正确；屏障失败不返回成功；提交后/答复前崩溃可识别原结果 | **进行中**：串行提交 ✅、命令识别 ✅、严格边界 ✅、DSH 承载实验 ✅（见 §4.1）；**剩余：把存储接到已知 DSH 事件类型上** |
+| **A** | 专用控制 store、DSH 承载、串行提交、严格边界、命令结果识别 | 双进程互斥；并发命令正确；屏障失败不返回成功；提交后/答复前崩溃可识别原结果 | **完成**：四条退出条件全部观测证明（逐条见 §4.1 末尾表） |
 | **B** | 最小 E3、Task 分解与责任、初始不可变 Revision、最小 Bubble、真实 verifier 与固定来源 receipt | 根/子任务执行与依赖推进；产物独立验收；SIGKILL 后恢复同 session/责任/绑定 | 未开始（**K1 检查点**） |
 | **C** | 冻结双侧输入、真实领域取数、非补偿约束、真实重复与噪声依据 | 好候选通过；高分越界拒绝；缺失分母正确；每份报告有真实 trials | 未开始 |
 | **D** | draft 状态机、E6 原生审批、决定重算、唯一指针切换 | 批准绑定具体差异；陈旧/内容变化拒绝；head 不引用半成品 | 未开始 |
 | **E** | 显式 round、真实历史与 frozen deltas、m≥2 选优、探索/剪枝消费者、消费反馈 | 至少两轮；第二轮读第一轮；历史不被新 head 改写 | 未开始（**K2**） |
 | **F** | 关键行为回归、领域任务集对照、部署替代 | 恢复/边界满足新契约 | 未开始 |
 
-**下一次重要审核在 A+B 完成时**。A 的承载实验已成功 → 可以进 B。
+**下一次重要审核在 A+B 完成时**。A 已收口（§4.1 末尾表），B 进行中（§8）。
 
 ## 3. 反例清单：状态与归属
 
@@ -111,7 +111,7 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 | 双进程互斥 | ✅ 探针第 2 节观测：第二写者拿 `SessionAlreadyOwnedError`；read 句柄不受影响 |
 | 并发命令正确 | ✅ 提交队列串行化 + `gate.spec.ts` 回归 |
 | 提交后/答复前崩溃可识别原结果 | ✅ **本轮修好**：`commandId` 进信封，`adopt` 重建命令表；探针 4b 由 GAP 变 `ok`，`failures: 0, gaps: 0` |
-| **屏障失败不返回成功** | ⚠️ **代码正确但尚未观测证明**。更正一处我自己的措辞：`SessionHandle.flush()` 的签名是 `Promise<void>`（`dsh-session-persistence/lib/types/handle.d.ts:99`），**没有 `false` 可查**；我说的"`false` 即失败"指的是 `ctx.sessions.flush(session)` 那条**我们不用的活跃缝**。store 的做法是捕获 flush **抛出** 并拒绝（`write-not-durable`），随后重读并比对摘要——比信任返回值更强。**但缺一个"屏障确实失败"的用例**：`tests/control-store.spec.ts` 现有 6 测覆盖了往返、外来事件、未知内层形状、不可序列化载荷、丢失答复恢复、以及关闭后的写入拒绝，**没有一条让 flush 拒绝**。修法是注入一个 `flush` 抛出的假 `SessionPersistence`（`ControlSessionStore.open` 只用 handle 的 `read/append/flush/close`，假件很小）。**这是下一轮的第一件事。** |
+| **屏障失败不返回成功** | ✅ **本轮已观测证明**。更正一处我自己的措辞：`SessionHandle.flush()` 的签名是 `Promise<void>`（`dsh-session-persistence/lib/types/handle.d.ts:99`），**没有 `false` 可查**；我说的"`false` 即失败"指的是 `ctx.sessions.flush(session)` 那条**我们不用的活跃缝**。store 的做法是捕获 flush **抛出** 并拒绝（`write-not-durable`），随后重读并比对摘要——比信任返回值更强。**新回归** `tests/control-barrier.spec.ts`（独立文件，因为 `source-size` 门禁把单文件压在 400 行内）：注入一个"接受 append、随后屏障拒绝"的假 `SessionPersistence`（它按接口原文实现——`append` 解析即对本实例可见、只有解析的 `flush` 才承诺崩溃后仍在，并用 DSH 自己的 `assertContiguous` 强制续尾，所以**发明序号的 store 会被介质自己拒绝**）。两条用例：①单次屏障失败 → 拒绝且**不返回成功**，介质里那条记录可见因此 store 采纳它（不否认介质持有的事实），同命令重投返回**同一事实**且**不追加第二条**，下一条记录续用介质游标（回滚游标的 store 会被介质的续尾检查拒），后继 store 采纳到 `[0,1]`；②屏障持续失败 → 每次都不返回成功，store 报告的中介内容恰为介质的两条（既不是一条也不是三条）。**已用变异证明这两条用例真的能失败**：把 flush 的 catch 改成吞掉（即"屏障失败当成功放行"），两条都失败于 `expected the step to refuse`。 |
 
 ### 4.2 RRSI：**我现在亲自读过上游源码**（此前只读 README）
 
@@ -161,7 +161,7 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 ## 5. 当前代码状态（`pnpm verify` 全绿）
 
-`src`/`tests` 共 17 个文件；**62 测试**；**8 门禁 + 门禁自检**（新增 `dsh-alignment`）。
+`src`/`tests` 共 18 个文件；**64 测试**；**8 门禁 + 门禁自检**（新增 `dsh-alignment`）。
 
 - `src/protocol/{refusal,envelope,registry,fold,log}.ts` —— 一个拒绝契约、一个信封、一个版本闸+保证词表+发射者纪律、一个 fold 引擎、一条追加路径（提交队列 + 命令识别 + 提交前 dry-run）。
 - `src/task/{contract,protocol,view}.ts` —— 契约（shape 纯 / 可用性命令期）、5 种 kind、唯一读投影 + G4 派生 receipt。
@@ -169,6 +169,7 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 - `scripts/slice.mjs` —— 端到端冒烟（门禁 `vertical-slice-smoke` 跑它）。
 - `dsh-baseline.json` —— **DSH 基线的单一事实来源**；门禁 `dsh-alignment` 强制它。
 - `src/control/session-store.ts` + `scripts/control-probe.mjs` —— 控制 store 与双进程探针（见 §4.1）。
+- `tests/control-barrier.spec.ts` —— **屏障失败可失败性**（假介质：接受 append、屏障拒绝）+ 该用例自身的变异证明（见 §4.1 末尾表）。
 
 **S2 的三条不变量（写在 reducer 里，必须保留）**：判据由它命名的验证器实现裁决；执行者不自判自己的 run（角色 + 身份双重校验）；每条判据都有 pass 才 verified（拒绝时点出缺哪条）。
 
@@ -209,6 +210,6 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 ## 7. 下一轮的第一批动作
 
-1. **补屏障失败那一测**（阶段 A 的最后一条退出条件）：注入一个 `flush` 抛出的假 `SessionPersistence`，断言 store 以 `write-not-durable` 拒绝且不报成功。`ControlSessionStore.open` 只用 handle 的 `read/append/flush/close`，假件很小。
-2. A 收口后进**阶段 B**（真实执行纵切：最小 E3 + Task 分解与责任 + 初始不可变 Revision + 最小 Bubble + 真实 verifier 与固定来源 receipt）。
+1. ~~补屏障失败那一测~~ —— **本轮完成**：`tests/control-barrier.spec.ts`，并用变异证明它真的能失败（§4.1 末尾表）。**阶段 A 收口。**
+2. **阶段 B 进行中**（真实执行纵切）：B 的形态**不是**照旧仓重画一遍，而是先取两份证据——（a）旧仓的**行为**参照（只抄行为，丢掉形状繁殖）；（b）已装 DSH 里 E3/E6/审批/跨进程恢复这几个缝**到底存在什么**（F01 的教训：不能假定上游会替我们保证语义）。两份证据到齐后再定 B 的 kind 集与 reducer 不变量。**在证据到齐前不动手写 `src/`。**
 3. **K1 检查点在 B 完成后**（review §6 的 12 个验收场景，含真实 DSH session 与验证器、至少一条真实模型小任务冒烟）。
