@@ -1,5 +1,5 @@
 /**
- * Vitest resolution for the DSH packages our control store imports.
+ * Vitest resolution for the DSH packages our code imports.
  *
  * The packages are declared as peer dependencies and are never installed: the host DSH profile
  * provides them at runtime, and `tsconfig.json`'s `paths` resolves them for `tsc`. Vitest resolves
@@ -17,6 +17,8 @@ export default defineConfig({
       '@deepseek-ai/dsh-session': `${DSH_INSTALLED}/dsh-session/lib/index.js`,
       '@deepseek-ai/dsh-session-persistence': `${DSH_INSTALLED}/dsh-session-persistence/lib/index.js`,
       '@deepseek-ai/dsh-session-persistence-jsonl': `${DSH_INSTALLED}/dsh-session-persistence-jsonl/lib/index.js`,
+      '@deepseek-ai/dsh-agent': `${DSH_INSTALLED}/dsh-agent/lib/index.js`,
+      '@deepseek-ai/dsh-agent-loop': `${DSH_INSTALLED}/dsh-agent-loop/lib/index.js`,
       '@deepseek-ai/dsh-agent': `${DSH_INSTALLED}/dsh-agent/lib/index.js`,
       '@deepseek-ai/dsh-agent-loop': `${DSH_INSTALLED}/dsh-agent-loop/lib/index.js`,
     },

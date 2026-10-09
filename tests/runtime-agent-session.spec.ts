@@ -20,7 +20,7 @@
  *    still becomes a named refusal carrying the upstream text.
  * 5. **Close is ordered and idempotent.** The lease is released before `closeAgentSession` resolves,
  *    two concurrent closes dispose once, a failed close stays retryable, and a refused second claim
- *    — for a live agent, or from another context — never costs the first claimant its lease.
+ *    — same context or another one — never costs the first claimant its lease.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'

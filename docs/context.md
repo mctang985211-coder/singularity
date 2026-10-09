@@ -266,6 +266,17 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 **给 D 的预告（现在记账，届时不用重查）**：原生审批**绑定到确切的 `ToolCallId` + agent，没有载荷摘要、不复制参数**；`allowed-once` 是唯一授予且**不持久**。所以 D 的"批准绑定具体差异"**不能**靠审批缝自带——必须由我们自己的事实绑定内容摘要，审批只提供"人授权过"这一件事。
 
+## 11. K1 交回材料（见 `docs/k1-evidence.md`）
+
+**逐条证据已写完**：12 场景 + 真实模型调用，每条给出观测与证据位置；三处**未观测/未做**的单列在文档末尾（不混进通过项）。三条行为检查是**门禁**而非"记得要跑"的脚本：`control-store-probe`、`root-child-slice`、`recovery-probe`，各自有合成失败探针。
+
+**本轮新增的观测**：
+- `scripts/slice-b.mjs`（门禁）——真实纵切 22 项全过：父提出分解 → 子有依赖与责任 → run 钉住真实 revision → bubble 声明真实输入 → **真实验证器 spawn 出去读产物并裁决** → verdict 落为事实 → 结算 → receipt（cutoff + 真实消费 + 产物摘要）。
+- `scripts/recovery-probe.mjs`（门禁）——两个边界各一次真实 SIGKILL，21 项全过。**它抓到我命令边界的一个真实缺陷**：前置条件原先在 store 解析命令身份之前求值，丢失答复因此无法通过命令面恢复；修法是把前置条件放进 append 路径（身份之后、reducer 之前），变异证明顺序改回去即以那句拒绝失败。
+- `scripts/model-smoke.mjs`——**真实模型补全**（宿主 profile 的 commandcode 路由，`deepseek/deepseek-v4.1-flash`），实测 16 chunks / 收敛 / `"four"` / 2956ms，只断言结构性三条。**边界**：这是一次真实补全，不是"真实模型驱动带工具的 agent turn"；后者需要手工挂载 agent-loop 一组插件（宿主用 `dsh-base` 的 profile bundle 组合，该包无运行时 API）。**刻意不做门禁**（依赖网络与凭据）。
+
+**仍未做**：真实模型驱动一个带工具的 agent turn（见上）；group/router（上游没有，且无消费者）。
+
 ## 11. 下一轮的第一批动作
 
 **已完成（本轮）**：S1（`src/environment/**`，提交 `d1bed1a`）与 **v2a + S3 验证器半边**（提交 `bbb3dd7`）——`TASK_VERSION = 2`、criterion 与 verdict 各带必填 `implementationDigest`（reducer 比对，**换掉实现即不放行**）、可用性检查也吃摘要、`RevisionRef` 增 `environmentId`、`protocol.ts` 切出 `shape.ts`、`verifierIdentityOf` 与 registry key **统一为全摘要**（此前一个截 12 位、一个是查找键，是静默漏配的隐患）。
