@@ -241,7 +241,21 @@ const DETECTORS = [
   },
   {
     name: 'protocol-inventory',
+    /** Its synthetic failure is its own leg below, because it reduces to arithmetic over a file set. */
+    probeSeparately: true,
     detect: () => inventoryFindingsWith(readLedger()),
+  },
+  {
+    name: 'spec-budget',
+    /** Its synthetic failure is its own leg below, because it reduces to arithmetic over a file set. */
+    probeSeparately: true,
+    detect: (files, views) => specBudgetFindings(files, views),
+  },
+  {
+    name: 'spec-density',
+    /** Its synthetic failure is its own leg below, because it reduces to arithmetic over a file set. */
+    probeSeparately: true,
+    detect: (files, views) => specDensityFindings(files, views),
   },
   {
     name: 'dsh-alignment',
@@ -263,6 +277,56 @@ const DETECTORS = [
  * their verdicts away, and then `pnpm gates` ran them a second time for real.
  */
 const REAL_TREE_GATES = new Set(DETECTORS.filter(detector => detector.realTree === true).map(detector => detector.name))
+
+/**
+ * The spec budget, and its ratchet.
+ *
+ * A spec's size is set by the surface it locks, not by the source it covers. When specs approach
+ * the source's size they are locking structure, and every refactor turns them red - which is how a
+ * codebase stops being refactorable. The previous system had no such bound and grew specs to parity.
+ *
+ * These are ratchets, not targets: the numbers came down from 0.88 and 7.8 by deleting restatement,
+ * and may only go down further. Lowering one is part of the commit that makes it possible.
+ */
+const SPEC_BUDGET = 0.9
+const SPEC_DENSITY = 8
+
+/** Total source lines, and total spec lines, over the same file set the other gates see. */
+function specBudgetFindings(files, views) {
+  const lines = prefix => files.filter(file => file.startsWith(prefix)).reduce((total, file) => total + views.raw.get(file).split('\n').length, 0)
+  const source = lines('src/')
+  const specs = files.filter(file => file.startsWith('tests/') && file.endsWith('.spec.ts')).reduce((total, file) => total + views.raw.get(file).split('\n').length, 0)
+  if (source === 0) return []
+  const ratio = specs / source
+  return ratio > SPEC_BUDGET
+    ? [
+        `the specs are ${specs} lines against ${source} of source (${ratio.toFixed(2)}, budget ${SPEC_BUDGET}); a spec that grows with the source is locking structure, so delete the assertion that states no external fact - see docs/spec-policy.md`,
+      ]
+    : []
+}
+
+/**
+ * One behaviour per test.
+ *
+ * `expect` count over `it` count is a crude proxy for a real rule: a test asserting the same
+ * external fact eight times costs eight edits and adds no information. It is counted textually,
+ * which is honest about being approximate - a loop that asserts is counted once, so a file can only
+ * under-report here, never over-report.
+ */
+function specDensityFindings(files, views) {
+  const findings = []
+  for (const file of files) {
+    if (!file.startsWith('tests/') || !file.endsWith('.spec.ts')) continue
+    const code = views.code.get(file)
+    const assertions = (code.match(/\bexpect\s*\(/g) ?? []).length
+    const tests = (code.match(/^\s*it(?:\.each)?\s*\(/gm) ?? []).length
+    if (tests === 0) continue
+    const density = assertions / tests
+    if (density > SPEC_DENSITY)
+      findings.push(`${file} asserts ${assertions} times in ${tests} test(s) (${density.toFixed(1)} each, budget ${SPEC_DENSITY}); one behaviour is one assertion`)
+  }
+  return findings
+}
 
 /** The one baseline file every other declaration must agree with. */
 const DSH_BASELINE = 'dsh-baseline.json'
@@ -521,7 +585,9 @@ export const probeCommentAnchor = 1
 
 if (PROBE) {
   const { files, raw, code } = probeSet()
-  const scored = DETECTORS.filter(detector => detector.realTree !== true && detector.name !== 'protocol-inventory')
+  // `realTree` gates read the real tree, and a `probeSeparately` gate has its own synthetic leg
+  // below. Both are declared where the detector is, so this filter cannot drift from the list.
+  const scored = DETECTORS.filter(detector => detector.realTree !== true && detector.probeSeparately !== true)
   const results = scored.map(({ name, detect }) => ({ name, findings: detect(files, { raw, code }) }))
   let missed = 0
   console.log('gate self-test: every detector must fire on one violating file\n')
@@ -534,6 +600,33 @@ if (PROBE) {
       console.log(`  ok    ${name} fired (${findings.length} finding${findings.length === 1 ? '' : 's'})`)
     }
   }
+  // Both spec gates reduce to arithmetic over the file set, so each probe hands them a file set
+  // that breaks it. Without this they would be numbers nobody has watched fail.
+  for (const [name, files, raw] of [
+    [
+      'spec-budget',
+      ['src/a.ts', 'tests/a.spec.ts'],
+      new Map([
+        ['src/a.ts', 'export const a = 1\n'],
+        ['tests/a.spec.ts', Array.from({ length: 20 }, () => 'expect(1).toBe(1)').join('\n')],
+      ]),
+    ],
+    [
+      'spec-density',
+      ['tests/a.spec.ts'],
+      new Map([['tests/a.spec.ts', `it('a', () => {\n${Array.from({ length: 12 }, () => '  expect(1).toBe(1)').join('\n')}\n})\n`]]),
+    ],
+  ]) {
+    const detect = DETECTORS.find(detector => detector.name === name).detect
+    const findings = detect(files, { raw, code: new Map([...raw].map(([file, text]) => [file, codeOnly(text)])) })
+    if (findings.length === 0) {
+      missed += 1
+      console.log(`  FAIL  ${name} did not fire on a file set that breaks it`)
+    } else {
+      console.log(`  ok    ${name} fired (${findings.length} findings)`)
+    }
+  }
+
   // The inventory reads the real registries, so its probe hands the check a wrong ledger. Each of
   // the three ways it can disagree must produce a finding, or the ledger protects nothing.
   for (const [label, wrong] of [

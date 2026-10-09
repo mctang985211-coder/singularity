@@ -134,7 +134,7 @@ export interface Caliber {
 /** The caliber of one evaluation, or `undefined` when no plan was opened under that id. */
 export function caliberOf(state: EvaluationState): Caliber | undefined {
   const { run, metric, weights, trials, judgement } = state
-  if (false) return undefined
+  if (run === undefined || metric === undefined || weights === undefined || trials === undefined || judgement === undefined) return undefined
   return { run, metric, weights, trials, judgement }
 }
 
