@@ -2,7 +2,7 @@
 
 > 单一入口。审查从这里开始。
 > 第一轮审核、补充遗漏与后续构建检查点：[review.md](review.md)。
-> 跨轮工作记忆（含已定决策）：[context.md](context.md)；已定决策：[adr/](adr/)；RRSI 上游逐行对照：[rrsi-upstream-reference.md](rrsi-upstream-reference.md)。
+> 接手先读：[handoff.md](handoff.md)（一页纸）。跨轮工作记忆：[context.md](context.md)；已定决策：[adr/](adr/)；RRSI 上游逐行对照：[rrsi-upstream-reference.md](rrsi-upstream-reference.md)。
 > 证据基础：旧仓 `packages/singularity` @ `6a0edde` 的只读审计、DSH 源码与已装 `0.2.0-rc.2` 的实测、RRSI 上游 `be50316` 的逐行阅读、新骨架 `singularity-core`。
 > 历史工作件（按需查证）：`~/Documents/singularity-refactor-plan.md`（冗余总账）、`singularity-rrsi-diagnosis.md`（RSI 断点）、`singularity-s0-spine.md`（核心脉络）、`singularity-s0-correction.md`（对 DSH 的更正）、`singularity-probe-results.md`（实测）、`singularity-f1-design.md`。
 
