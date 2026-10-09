@@ -1,16 +1,21 @@
 /**
- * The real execution adapter, driven for real: one command that exits 0, one that does not, and
- * the artifact's bytes hashed after the command ran.
+ * The real execution adapter, driven for real: one command that exits 0, one that does not, the
+ * artifact's bytes hashed after the command ran, and every declared input hashed from disk.
  *
  * The adapter is a script rather than a function because a judgement that runs a process may never
  * be replayed by the fold. This spec is what keeps it honest: the verdict comes from the exit code
- * alone, the digest is the digest of what is actually on disk afterwards, and the adapter's own
- * exit code distinguishes "the judgement failed" from "the judged command failed".
+ * alone, the digests are the digests of what is actually on disk, and the adapter's own exit code
+ * distinguishes "the judgement failed" from "the judged command failed".
+ *
+ * The input half is the part that cannot be an echo: a declaration carries a digest, but the
+ * adapter reports the digest of the bytes it read. The test below declares a stale digest on
+ * purpose and pins that the *real* one comes back — comparing the two is the production path's
+ * refusal, not the sensor's.
  */
 
 import { execFile, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,6 +31,7 @@ const sha256 = (bytes: string | Buffer): string => createHash('sha256').update(b
 interface Judgement {
   readonly verdict: 'pass' | 'fail'
   readonly artifactDigest: string
+  readonly inputDigests: readonly { readonly name: string; readonly digest: string }[]
   readonly detail: string
 }
 
@@ -62,11 +68,13 @@ function readJudgement(stdout: string): { judgement: Judgement; ok: boolean } {
 describe('the verifier command adapter', () => {
   it('judges a command that exits 0 as pass, and pins the bytes the command left behind', async () => {
     await writeFile(artifact, 'before the command ran', 'utf8')
+    const input = join(directory, 'words.txt')
+    await writeFile(input, 'three words here', 'utf8')
 
     const result = await invoke({
       command: `printf '%s' after > "${artifact}"`,
       artifactPath: artifact,
-      inputs: [{ name: 'words.txt', digest: 'b'.repeat(64) }],
+      inputs: [{ name: 'words.txt', digest: 'b'.repeat(64), path: input }],
     })
 
     expect(result.code).toBe(0)
@@ -80,6 +88,9 @@ describe('the verifier command adapter', () => {
     expect(judgement.detail).toContain('words.txt')
     // And that digest is the digest of the bytes actually on disk.
     expect(sha256(await readFile(artifact))).toBe(judgement.artifactDigest)
+    // The input is hashed from its own bytes, not echoed from the declared digest.
+    expect(judgement.inputDigests).toEqual([{ name: 'words.txt', digest: sha256('three words here') }])
+    expect(judgement.inputDigests[0]?.digest).not.toBe('b'.repeat(64))
   })
 
   it('judges a command that exits non-zero as fail, and still succeeds at judging it', async () => {
@@ -99,6 +110,7 @@ describe('the verifier command adapter', () => {
     expect(judgement.detail).toContain('exited 3')
     expect(judgement.artifactDigest).toBe(sha256('broken'))
     expect(sha256(await readFile(artifact))).toBe(judgement.artifactDigest)
+    expect(judgement.inputDigests).toEqual([])
   })
 
   it('produces the two verdicts from the exit code alone, on identical artifact bytes', async () => {
@@ -116,6 +128,35 @@ describe('the verifier command adapter', () => {
     expect(passed.artifactDigest).toBe(sha256('unchanged'))
   })
 
+  it('reports the digests of every input it was given, in declaration order', async () => {
+    await writeFile(artifact, 'artifact', 'utf8')
+    const first = join(directory, 'first.txt')
+    const second = join(directory, 'nested', 'second.txt')
+    await writeFile(first, 'alpha', 'utf8')
+    await mkdir(join(directory, 'nested'), { recursive: true })
+    await writeFile(second, 'beta', 'utf8')
+
+    const result = await invoke({
+      command: 'true',
+      artifactPath: artifact,
+      inputs: [
+        { name: 'first.txt', digest: sha256('alpha'), path: first },
+        { name: 'nested/second.txt', digest: sha256('stale'), path: second },
+      ],
+    })
+
+    expect(result.code).toBe(0)
+    const { judgement, ok } = readJudgement(result.stdout)
+    expect(ok).toBe(true)
+    // The second declaration was stale on purpose: the adapter still reports what the bytes are.
+    expect(judgement.inputDigests).toEqual([
+      { name: 'first.txt', digest: sha256('alpha') },
+      { name: 'nested/second.txt', digest: sha256('beta') },
+    ])
+    // The declared digests stay visible in the detail, so a reader can see what was claimed.
+    expect(judgement.detail).toContain(sha256('stale').slice(0, 12))
+  })
+
   it('reads a request from stdin when argv carries none', async () => {
     await writeFile(artifact, 'from stdin', 'utf8')
 
@@ -128,6 +169,7 @@ describe('the verifier command adapter', () => {
     expect(ok).toBe(true)
     expect(judgement.verdict).toBe('pass')
     expect(judgement.artifactDigest).toBe(sha256('from stdin'))
+    expect(judgement.inputDigests).toEqual([])
   })
 
   it('exits non-zero only when it cannot judge at all, never for a judged failure', async () => {
@@ -140,5 +182,14 @@ describe('the verifier command adapter', () => {
     // A request the adapter cannot read is its own error too, not a verdict.
     const malformed = await invoke({ artifactPath: artifact })
     expect(malformed.code).not.toBe(0)
+
+    // An input with no readable path names no bytes, so there is nothing to hash and no judgement.
+    const pathless = await invoke({
+      command: 'true',
+      artifactPath: artifact,
+      inputs: [{ name: 'words.txt', digest: sha256('x') }],
+    })
+    expect(pathless.code).not.toBe(0)
+    expect(pathless.stderr).toContain('path')
   })
 })
