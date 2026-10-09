@@ -161,7 +161,7 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 ## 5. 当前代码状态（`pnpm verify` 全绿）
 
-`src`/`tests` 共 18 个文件；**64 测试**；**8 门禁 + 门禁自检**（新增 `dsh-alignment`）。
+`src`/`tests` 共 26 个文件；**103 测试**；**8 门禁 + 门禁自检**（含 `dsh-alignment`）。
 
 - `src/protocol/{refusal,envelope,registry,fold,log}.ts` —— 一个拒绝契约、一个信封、一个版本闸+保证词表+发射者纪律、一个 fold 引擎、一条追加路径（提交队列 + 命令识别 + 提交前 dry-run）。
 - `src/task/{contract,protocol,view}.ts` —— 契约（shape 纯 / 可用性命令期）、5 种 kind、唯一读投影 + G4 派生 receipt。
@@ -170,6 +170,9 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 - `dsh-baseline.json` —— **DSH 基线的单一事实来源**；门禁 `dsh-alignment` 强制它。
 - `src/control/session-store.ts` + `scripts/control-probe.mjs` —— 控制 store 与双进程探针（见 §4.1）。
 - `tests/control-barrier.spec.ts` —— **屏障失败可失败性**（假介质：接受 append、屏障拒绝）+ 该用例自身的变异证明（见 §4.1 末尾表）。
+- `src/environment/{protocol,binding}.ts` + 两个 spec（**S1 已落地**）——修订一条被创建一次、**摘要由 reducer 自己算**（不可借身份）、同 id 同内容幂等 / 异内容 `revision-conflict`；`assertPinnedRevision` 与 `projectBindings` 判 `unknown-revision`（含继承键 `constructor` 用例；投影**拒绝**首个不可绑定的 run，不静默跳过）。
+- `src/verifier/implementation.ts` + `scripts/verifier-command.mjs` + 两个 spec（**S3 验证器半边已落地**）——部署声明 `implementationDigest` 与 selftest；`assertVerifierRunnable` 要求 selftest **既有 pass 又有 fail 样本**（"没失败过的门禁不算门禁"用在验证器上）；`runVerifierSelftest` 把"实现说谎"记为数据而不是抛出；真实执行器由退出码判决、**执行后**再哈希产物字节。
+- `src/task/shape.ts` —— 任务协议的共享形状读取器（从 `protocol.ts` 切出，因它越过 400 行门禁）。
 
 **S2 的三条不变量（写在 reducer 里，必须保留）**：判据由它命名的验证器实现裁决；执行者不自判自己的 run（角色 + 身份双重校验）；每条判据都有 pass 才 verified（拒绝时点出缺哪条）。
 
@@ -264,6 +267,10 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 ## 11. 下一轮的第一批动作
 
-1. **设计六行全部定案**（[`docs/phase-b-design.md`](phase-b-design.md)）：S1–S6 已可派发，§8 逐片给了 kind 名、payload、不变量、**强制点**、消费者、可机械判定的退出条件，以及 5 个新拒绝码的逐条记账与复用清单。
-2. **按文件所有权分工，避免两个写者改同一个文件**：`src/environment/**`（S1）与 `src/verifier/**`（S3 的验证器半边）各自独立成文件、**不触碰 `src/task/**`**；**任务协议 v2（S2/S3/S4/S5）单一所有者**——它是全阶段的耦合点，`TASK_VERSION = 2` 只能改一次。
-3. **K1（S6）在 v2 落地后跑**：12 场景，**1–5 已由 A/S2 满足，6–12 归 B**；含真实 SIGKILL（探针已证 23–31 ms 取得租约、前缀连续）与**桩 LlmAdapter** 的确定性小任务冒烟。
+**已完成（本轮）**：S1（`src/environment/**`，提交 `d1bed1a`）与 **v2a + S3 验证器半边**（提交 `bbb3dd7`）——`TASK_VERSION = 2`、criterion 与 verdict 各带必填 `implementationDigest`（reducer 比对，**换掉实现即不放行**）、可用性检查也吃摘要、`RevisionRef` 增 `environmentId`、`protocol.ts` 切出 `shape.ts`、`verifierIdentityOf` 与 registry key **统一为全摘要**（此前一个截 12 位、一个是查找键，是静默漏配的隐患）。
+
+**剩余**：
+
+1. **S2 + S4（下一轮的第一件事）**：`task/decomposed` **一条完整事实**（一次性、子 id 唯一非空、依赖须在声明内、**无环**）+ `projectTree`（**只有 `verified` 满足依赖**，terminal-but-unverified 阻塞**带具名理由**，父完成**不落盘**、是汇总）+ `bubble/opened`（`{runId, inputs[], workspace}`）+ **verdict 的输入绑定**（判决的输入摘要必须等于该 run 的 bubble 声明）。这两个 code（`cyclic-dependency`、`evidence-input-mismatch`）到那时才加进 `REFUSAL_CODES`——本轮**故意没加**，因为还没有消费者。
+2. **S5**：E3（`agent/opened{agentId, role, sessionId}`，**引用** DSH 会话）+ `task/assigned`/`task/reassigned` + `run/started` 的**责任门**（新码 `not-responsible`）+ **装载期缝断言**（约束 10：`inject` 缺席的插件是静默不存在的）。
+3. **S6 / K1**（v2 落地后）：12 场景，**1–5 已由 A/S2 满足，6–12 归 B**；含真实 SIGKILL（探针已证 23–31 ms 取得租约、前缀连续）与**桩 LlmAdapter** 的确定性小任务冒烟。
