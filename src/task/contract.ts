@@ -30,6 +30,14 @@ export interface AcceptanceCriterion {
   readonly verifierRef: string
   /** That implementation's version, so re-registering it cannot silently redefine this criterion. */
   readonly verifierVersion: string
+  /**
+   * The **content digest of the implementation itself** — its code and its pinned toolchain, as
+   * the deployment computed it. A ref and a version are names a deployment can re-point; a digest
+   * is the only thing that makes "the implementation that judged this" checkable after the fact.
+   * The legacy system stamped a hand-written `'1'` here, so replacing an implementation while
+   * keeping its name produced an indistinguishable verdict.
+   */
+  readonly implementationDigest: string
 }
 
 /** What the task is for. Fixed at admission; a later contract is a different task. */
@@ -42,23 +50,41 @@ export interface TaskContract {
 }
 
 export const CONTRACT_MEMBERS = ['goal', 'inputs', 'criteria'] as const
-export const CRITERION_MEMBERS = ['criterionId', 'statement', 'verifierRef', 'verifierVersion'] as const
+export const CRITERION_MEMBERS = ['criterionId', 'statement', 'verifierRef', 'verifierVersion', 'implementationDigest'] as const
 
-/** The verifier implementations this deployment can currently run. */
+/** A sha256 hex content digest: the only form this stack accepts as a content identity. */
+const DIGEST = /^[0-9a-f]{64}$/
+
+/**
+ * The verifier implementations this deployment can currently run.
+ *
+ * The digest is part of the question, not decoration: "can I run `command@1`" is answerable by a
+ * deployment that swapped the implementation behind that name, which is exactly the hole this
+ * closes.
+ */
 export interface VerifierRegistry {
-  has(verifierRef: string, verifierVersion: string): boolean
+  has(verifierRef: string, verifierVersion: string, implementationDigest: string): boolean
 }
 
-/** Which verifiers are currently runnable, from a plain list of `id@version` entries. */
+/** Which verifiers are currently runnable, from `id@version#implementationDigest` entries. */
 export function verifierRegistryOf(entries: readonly string[]): VerifierRegistry {
   const known = new Set(entries)
-  return { has: (verifierRef, verifierVersion) => known.has(`${verifierRef}@${verifierVersion}`) }
+  return {
+    has: (verifierRef, verifierVersion, implementationDigest) =>
+      known.has(`${verifierRef}@${verifierVersion}#${implementationDigest}`),
+  }
 }
 
 function requireText(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.length === 0)
     refuse('malformed-contract', `${field} must be a non-empty string, got ${value === null ? 'null' : typeof value}`)
   return value
+}
+
+function requireDigest(value: unknown, field: string): string {
+  const digest = requireText(value, field)
+  if (!DIGEST.test(digest)) refuse('malformed-contract', `${field} must be a sha256 hex content digest, got ${JSON.stringify(digest)}`)
+  return digest
 }
 
 function requireRecord(value: unknown, field: string): Record<string, unknown> {
@@ -78,6 +104,7 @@ export function assertCriterionShape(raw: unknown, field: string): AcceptanceCri
     statement: requireText(record['statement'], `${field}.statement`),
     verifierRef: requireText(record['verifierRef'], `${field}.verifierRef`),
     verifierVersion: requireText(record['verifierVersion'], `${field}.verifierVersion`),
+    implementationDigest: requireDigest(record['implementationDigest'], `${field}.implementationDigest`),
   }
 }
 
@@ -120,10 +147,12 @@ export function assertContractShape(raw: unknown, field: string): TaskContract {
 export function assertContract(raw: unknown, field: string, verifiers: VerifierRegistry): TaskContract {
   const contract = assertContractShape(raw, field)
   for (const [index, criterion] of contract.criteria.entries()) {
-    if (!verifiers.has(criterion.verifierRef, criterion.verifierVersion))
+    if (!verifiers.has(criterion.verifierRef, criterion.verifierVersion, criterion.implementationDigest))
       refuse(
         'unregistered-verifier',
-        `${field}.criteria[${index}] names verifier "${criterion.verifierRef}@${criterion.verifierVersion}", which this deployment cannot currently run`,
+        `${field}.criteria[${index}] names verifier "${criterion.verifierRef}@${criterion.verifierVersion}" implemented by ${
+          criterion.implementationDigest.slice(0, 12)
+        }…, which this deployment cannot currently run`,
       )
   }
   return contract

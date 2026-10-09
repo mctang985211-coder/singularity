@@ -27,6 +27,7 @@ import {
   admitted,
   ARTIFACT,
   contract,
+  INTEGRATION_IMPLEMENTATION,
   INTEGRATION_VERIFIER,
   judged,
   REVISION,
@@ -37,6 +38,7 @@ import {
   SUBJECTS,
   TASK_ID,
   taskRegistry,
+  UNIT_IMPLEMENTATION,
   UNIT_VERIFIER,
   VERIFIERS,
   verified,
@@ -63,6 +65,19 @@ describe('the verifier boundary', () => {
     const refusal = await asyncRefusalOf(() => log.emit(judged('limits', UNIT_VERIFIER)))
     expect(refusal.code).toBe<RefusalCode>('wrong-verifier')
     expect(refusal.detail).toContain('integration-verifier@1')
+  })
+
+  it('refuses a verdict from different code behind the same verifier name', async () => {
+    const log = await running()
+    // The criterion names `unit-verifier@1` implemented by UNIT_IMPLEMENTATION. A deployment that
+    // rebuilt that verifier under the same name and version is *different code*, and its verdict
+    // must not inherit the criterion's acceptance. A ref and a version cannot express this; the
+    // digest can, which is why the criterion and the verdict both carry one.
+    const refusal = await asyncRefusalOf(() =>
+      log.emit(judged('correctness', UNIT_VERIFIER, 'pass', { implementationDigest: INTEGRATION_IMPLEMENTATION })),
+    )
+    expect(refusal.code).toBe<RefusalCode>('wrong-verifier')
+    expect(refusal.detail).toContain('names the implementation')
   })
 
   it('refuses a deployment that binds one identity to both the executor and a verifier', async () => {
@@ -167,6 +182,17 @@ describe('replay never consults what this deployment can run today', () => {
     // Explaining a recorded contract: pure shape, so history stays readable. The reviewer's
     // counterexample had this call refuse with an empty registry.
     expect(assertContractShape(named, 'contract')).toEqual(named)
+  })
+
+  it('refuses a criterion whose implementation this deployment does not hold, at the same name and version', () => {
+    // The name and version are exactly the criterion's; only the code behind them differs. This is
+    // the deployment-side half of the same guarantee, and the reason `has` takes a digest: a
+    // deployment that rebuilt `unit-verifier@1` must not be able to claim it can decide a criterion
+    // that named the old code.
+    const rebuilt = verifierRegistryOf([`${UNIT_VERIFIER}@1#${INTEGRATION_IMPLEMENTATION}`])
+    const refusal = refusalOf(() => assertContract(contract(), 'contract', rebuilt))
+    expect(refusal.code).toBe<RefusalCode>('unregistered-verifier')
+    expect(refusal.detail).toContain('implemented by')
   })
 
   it('folds a log whose verifiers this deployment no longer holds identities for', async () => {

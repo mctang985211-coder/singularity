@@ -24,9 +24,19 @@ export const SCHEDULER = 'runtime-1'
 export const UNIT_VERIFIER = 'unit-verifier'
 export const INTEGRATION_VERIFIER = 'integration-verifier'
 export const ARTIFACT = 'b'.repeat(64)
+/** The content digest of each verifier *implementation*, as its deployment computed it. */
+export const UNIT_IMPLEMENTATION = 'd'.repeat(64)
+export const INTEGRATION_IMPLEMENTATION = 'e'.repeat(64)
 
-/** The verifier implementations this deployment can currently run. */
-export const VERIFIERS = [`${UNIT_VERIFIER}@1`, `${INTEGRATION_VERIFIER}@1`]
+/**
+ * The verifier implementations this deployment can currently run, as
+ * `id@version#implementationDigest`. A deployment that swapped the code behind a name is not
+ * running this entry, which is the hole the digest closes.
+ */
+export const VERIFIERS = [
+  `${UNIT_VERIFIER}@1#${UNIT_IMPLEMENTATION}`,
+  `${INTEGRATION_VERIFIER}@1#${INTEGRATION_IMPLEMENTATION}`,
+]
 
 /** The trusted identities held, keyed by emitter role. */
 export const SUBJECTS: Readonly<Record<string, string>> = {
@@ -35,8 +45,8 @@ export const SUBJECTS: Readonly<Record<string, string>> = {
   [verifierRoleOf({ verifierRef: INTEGRATION_VERIFIER, verifierVersion: '1' })]: 'integration-verifier-service',
 }
 
-/** One revision the run is pinned to. The digest is the content identity. */
-export const REVISION = { revisionId: 'r0001', digest: 'a'.repeat(64) }
+/** One revision the run is pinned to, named by its environment and content identity. */
+export const REVISION = { environmentId: 'library-1', revisionId: 'r0001', digest: 'a'.repeat(64) }
 
 export function taskRegistry(): ProtocolRegistry {
   const registry = new ProtocolRegistry()
@@ -50,8 +60,20 @@ export function contract(): TaskContract {
     goal: 'implement a word counter',
     inputs: ['fixture/words.txt'],
     criteria: [
-      { criterionId: 'correctness', statement: 'counts match the golden file', verifierRef: UNIT_VERIFIER, verifierVersion: '1' },
-      { criterionId: 'limits', statement: 'rejects input over 1 MiB', verifierRef: INTEGRATION_VERIFIER, verifierVersion: '1' },
+      {
+        criterionId: 'correctness',
+        statement: 'counts match the golden file',
+        verifierRef: UNIT_VERIFIER,
+        verifierVersion: '1',
+        implementationDigest: UNIT_IMPLEMENTATION,
+      },
+      {
+        criterionId: 'limits',
+        statement: 'rejects input over 1 MiB',
+        verifierRef: INTEGRATION_VERIFIER,
+        verifierVersion: '1',
+        implementationDigest: INTEGRATION_IMPLEMENTATION,
+      },
     ],
   }
 }
@@ -77,7 +99,13 @@ export const judged = (
   criterionId: string,
   verifierRef: string,
   verdict: 'pass' | 'fail' = 'pass',
-  options: { runId?: string; verifierVersion?: string; artifactDigest?: string; detail?: string } = {},
+  options: {
+    runId?: string
+    verifierVersion?: string
+    implementationDigest?: string
+    artifactDigest?: string
+    detail?: string
+  } = {},
 ): EmitInput =>
   emit(TASK_KINDS.evidenceProduced, {
     runId: options.runId ?? RUN_ID,
@@ -85,6 +113,7 @@ export const judged = (
     verdict,
     verifierRef,
     verifierVersion: options.verifierVersion ?? '1',
+    implementationDigest: options.implementationDigest ?? (verifierRef === UNIT_VERIFIER ? UNIT_IMPLEMENTATION : INTEGRATION_IMPLEMENTATION),
     artifactDigest: options.artifactDigest ?? ARTIFACT,
     ...(options.detail === undefined ? {} : { detail: options.detail }),
   })

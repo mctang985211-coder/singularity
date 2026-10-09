@@ -43,6 +43,7 @@ export {
   type TaskContract,
   type VerifierRegistry,
 } from './task/contract.ts'
+export { digest, maybeText, record, requireContractOf, requireRun, settled, text } from './task/shape.ts'
 export {
   declareTaskProtocol,
   verifierRoleOf,
@@ -66,3 +67,29 @@ export {
   type RunView,
   type TaskView,
 } from './task/view.ts'
+
+export {
+  assertPinnedRevision,
+  projectBindings,
+} from './environment/binding.ts'
+export {
+  declareEnvironmentProtocol,
+  ENVIRONMENT_KINDS,
+  ENVIRONMENT_PROTOCOL,
+  ENVIRONMENT_ROLE,
+  ENVIRONMENT_VERSION,
+  type EnvironmentState,
+  type RevisionState,
+} from './environment/protocol.ts'
+
+export {
+  assertVerifierRunnable,
+  runVerifierSelftest,
+  verifierIdentityOf,
+  type SelftestReport,
+  type VerifierImplementation,
+  type VerifierInput,
+  type VerifierSelftest,
+  type VerifierSelftestSample,
+  type VerifierVerdict,
+} from './verifier/implementation.ts'

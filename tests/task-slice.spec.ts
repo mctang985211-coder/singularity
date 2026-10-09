@@ -28,6 +28,7 @@ import {
   ARTIFACT,
   INTEGRATION_VERIFIER,
   judged,
+  REVISION,
   RUN_ID,
   SCHEDULER,
   sliceCommands,
@@ -35,6 +36,7 @@ import {
   SUBJECTS,
   TASK_ID,
   taskRegistry,
+  UNIT_IMPLEMENTATION,
   UNIT_VERIFIER,
   verified,
 } from './task-fixtures.ts'
@@ -129,8 +131,11 @@ describe('the task slice', () => {
 
     expect(text).toContain(`Task ${TASK_ID} — phase verified`)
     expect(text).toContain('goal: implement a word counter')
-    expect(text).toContain('correctness: counts match the golden file [decided by unit-verifier@1]')
-    expect(text).toContain(`run-1: verified by ${SCHEDULER} (role scheduler) on revision r0001`)
+    // The rendering carries the implementation's own digest, so a reader sees *which* code decided
+    // a criterion rather than only the name a deployment could re-point.
+    expect(text).toContain(`correctness: counts match the golden file [decided by ${UNIT_VERIFIER}@1 implemented by ${UNIT_IMPLEMENTATION.slice(0, 12)}…]`)
+    // The run names the environment as well as the revision: a revision id is unique only within one.
+    expect(text).toContain(`run-1: verified by ${SCHEDULER} (role scheduler) on ${REVISION.environmentId} revision r0001`)
     expect(text).toContain(`correctness: pass by ${UNIT_VERIFIER}@1 on artifact bbbbbbbbbbbb…`)
   })
 

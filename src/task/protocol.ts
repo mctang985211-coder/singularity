@@ -27,9 +27,16 @@ import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
 import { assertContractShape, contractDigest, type TaskContract } from './contract.ts'
+import { digest, maybeText, record, requireContractOf, requireRun, settled, text } from './shape.ts'
 
 export const TASK_PROTOCOL = 'task'
-export const TASK_VERSION = 1
+/**
+ * Version 2. Version 1 is **refused by name, with no compatibility layer**: a criterion and a
+ * verdict each carry a required `implementationDigest` that v1 facts do not have, and this stack
+ * has no distributed v1 ledger to migrate (review §5: adding a required field to a frozen format
+ * bumps the version; "no old data here" is not a licence to change a version in place).
+ */
+export const TASK_VERSION = 2
 
 /** The trusted role that admits contracts and starts, settles or fails runs. */
 export const SCHEDULER_ROLE = 'scheduler'
@@ -39,8 +46,15 @@ export function verifierRoleOf(payload: { verifierRef: string; verifierVersion: 
   return `verifier:${payload.verifierRef}@${payload.verifierVersion}`
 }
 
-/** The method revision a run is pinned to. Pin the digest too: an id alone can be re-pointed. */
+/**
+ * The method revision a run is pinned to. Pin the digest too: an id alone can be re-pointed.
+ *
+ * The environment is named because a revision id is only unique **within** an environment; without
+ * it, "which revision is this run pinned to" would have to be guessed by searching every
+ * environment, and two environments could both hold a revision with that id.
+ */
 export interface RevisionRef {
+  readonly environmentId: string
   readonly revisionId: string
   readonly digest: string
 }
@@ -54,6 +68,11 @@ export interface EvidenceRecord {
   /** Which verifier implementation decided it: the criterion's own, or the fold refuses. */
   readonly verifierRef: string
   readonly verifierVersion: string
+  /**
+   * The content digest of the implementation that actually decided it. A verdict recorded for
+   * implementation A cannot be inherited by implementation B, even if B keeps A's name and version.
+   */
+  readonly implementationDigest: string
   /** The artifact content the verdict was formed on. A later artifact change does not inherit it. */
   readonly artifactDigest: string
   /** The emitter role and identity the log stamped. Never what a caller asked for. */
@@ -93,53 +112,7 @@ export const TASK_KINDS = {
   runFailed: 'run/failed',
 } as const
 
-const DIGEST = /^[0-9a-f]{64}$/
 const APPENDED = { appended: true } as const
-
-function record(raw: unknown, where: string): Record<string, unknown> {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw))
-    refuse('malformed-payload', `${where} must be an object, got ${raw === null ? 'null' : Array.isArray(raw) ? 'an array' : typeof raw}`)
-  return raw as Record<string, unknown>
-}
-
-function text(source: Record<string, unknown>, key: string, where: string): string {
-  const value = source[key]
-  if (typeof value !== 'string' || value.length === 0)
-    refuse('malformed-payload', `${where}.${key} must be a non-empty string, got ${value === null ? 'null' : typeof value}`)
-  return value
-}
-
-/** An optional member: absent stays absent; present-but-wrong is refused rather than normalized. */
-function maybeText(source: Record<string, unknown>, key: string, where: string): string | undefined {
-  if (!Object.hasOwn(source, key)) return undefined
-  return text(source, key, where)
-}
-
-function digest(source: Record<string, unknown>, key: string, where: string): string {
-  const value = text(source, key, where)
-  if (!DIGEST.test(value))
-    refuse('malformed-payload', `${where}.${key} must be a sha256 hex content digest, got ${JSON.stringify(value)}`)
-  return value
-}
-
-/** The run a fact names, or a refusal naming the run. */
-function requireRun(state: TaskState, runId: string, where: string): RunState {
-  const run = state.runs[runId]
-  if (run === undefined) refuse('unknown-run', `${where} names run "${runId}", which task "${state.taskId}" never started`)
-  return run
-}
-
-function requireContractOf(state: TaskState, where: string, subject: string): TaskContract {
-  if (state.contract === undefined) refuse('illegal-transition', `${where} arrived before task "${subject}" carried a contract`)
-  return state.contract
-}
-
-/** One run's settlement, shared by the verified and failed kinds. */
-function settled(run: RunState, status: RunStatus, at: string, reason?: string): RunState {
-  return reason === undefined
-    ? { ...run, status, finishedAt: at }
-    : { ...run, status, finishedAt: at, failureReason: reason }
-}
 
 /**
  * Declare the task protocol. Call once at load. The deployment's runnable verifiers are not
@@ -182,10 +155,14 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
           const source = record(raw, where)
           assertClosedKeys(source, ['runId', 'revision'], where)
           const revision = record(source['revision'], `${where}.revision`)
-          assertClosedKeys(revision, ['revisionId', 'digest'], `${where}.revision`)
+          assertClosedKeys(revision, ['environmentId', 'revisionId', 'digest'], `${where}.revision`)
           return {
             runId: text(source, 'runId', where),
-            revision: { revisionId: text(revision, 'revisionId', `${where}.revision`), digest: digest(revision, 'digest', `${where}.revision`) },
+            revision: {
+              environmentId: text(revision, 'environmentId', `${where}.revision`),
+              revisionId: text(revision, 'revisionId', `${where}.revision`),
+              digest: digest(revision, 'digest', `${where}.revision`),
+            },
           }
         },
         reduce: (state, envelope, payload) => {
@@ -219,6 +196,7 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
           verdict: 'pass' | 'fail'
           verifierRef: string
           verifierVersion: string
+          implementationDigest: string
           artifactDigest: string
           detail?: string
         }
@@ -230,7 +208,11 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
         parse: raw => {
           const where = `${TASK_KINDS.evidenceProduced} payload`
           const source = record(raw, where)
-          assertClosedKeys(source, ['runId', 'criterionId', 'verdict', 'verifierRef', 'verifierVersion', 'artifactDigest', 'detail'], where)
+          assertClosedKeys(
+            source,
+            ['runId', 'criterionId', 'verdict', 'verifierRef', 'verifierVersion', 'implementationDigest', 'artifactDigest', 'detail'],
+            where,
+          )
           const verdict = source['verdict']
           if (verdict !== 'pass' && verdict !== 'fail')
             refuse('malformed-payload', `${where}.verdict must be "pass" or "fail", got ${JSON.stringify(verdict ?? null)}`)
@@ -241,6 +223,7 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
             verdict,
             verifierRef: text(source, 'verifierRef', where),
             verifierVersion: text(source, 'verifierVersion', where),
+            implementationDigest: digest(source, 'implementationDigest', where),
             artifactDigest: digest(source, 'artifactDigest', where),
             ...(detail === undefined ? {} : { detail }),
           }
@@ -269,6 +252,13 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
               'wrong-verifier',
               `${where} decides criterion "${payload.criterionId}" as ${payload.verifierRef}@${payload.verifierVersion}, but that criterion names ${criterion.verifierRef}@${criterion.verifierVersion}`,
             )
+          // ...and to that implementation's *content*, not merely its name. A ref and a version can
+          // be re-pointed at different code; a digest cannot.
+          if (criterion.implementationDigest !== payload.implementationDigest)
+            refuse(
+              'wrong-verifier',
+              `${where} was formed by the implementation ${payload.implementationDigest.slice(0, 12)}…, but criterion "${payload.criterionId}" names the implementation ${criterion.implementationDigest.slice(0, 12)}…`,
+            )
 
           if (run.evidence.some(entry => entry.criterionId === payload.criterionId))
             refuse(
@@ -289,6 +279,7 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
                     verdict: payload.verdict,
                     verifierRef: payload.verifierRef,
                     verifierVersion: payload.verifierVersion,
+                    implementationDigest: payload.implementationDigest,
                     artifactDigest: payload.artifactDigest,
                     emitter: envelope.emitter,
                     actor: envelope.actor,

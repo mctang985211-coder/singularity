@@ -29,6 +29,8 @@ export interface CriterionVerdictView {
   /** The implementation this criterion names. */
   readonly verifierRef: string
   readonly verifierVersion: string
+  /** The content digest of the implementation the criterion names. */
+  readonly implementationDigest: string
   readonly verdict: 'pass' | 'fail' | 'unjudged'
   /** The implementation that actually decided it, or `null` while unjudged. */
   readonly decidedBy: string | null
@@ -78,6 +80,7 @@ export interface ReceiptView {
     readonly criterionId: string
     readonly verifierRef: string
     readonly verifierVersion: string
+    readonly implementationDigest: string
     readonly verdict: 'pass' | 'fail' | 'unjudged'
     readonly artifactDigest: string | null
     readonly actor: string | null
@@ -127,6 +130,7 @@ export function projectTask(state: TaskState): TaskView {
         statement: criterion.statement,
         verifierRef: criterion.verifierRef,
         verifierVersion: criterion.verifierVersion,
+        implementationDigest: criterion.implementationDigest,
         verdict: judged?.verdict ?? 'unjudged',
         decidedBy: judged === undefined ? null : `${judged.verifierRef}@${judged.verifierVersion}`,
         artifactDigest: judged?.artifactDigest ?? null,
@@ -178,6 +182,7 @@ export function projectReceipt(state: TaskState, runId: string): ReceiptView {
         criterionId: criterion.criterionId,
         verifierRef: criterion.verifierRef,
         verifierVersion: criterion.verifierVersion,
+        implementationDigest: criterion.implementationDigest,
         verdict: judged?.verdict ?? 'unjudged',
         artifactDigest: judged?.artifactDigest ?? null,
         actor: judged?.actor ?? null,
@@ -200,7 +205,7 @@ export function renderTaskForAgent(view: TaskView): string {
     `  criteria (${view.criteria.length}):`,
     ...view.criteria.map(
       criterion =>
-        `    - ${criterion.criterionId}: ${criterion.statement} [decided by ${criterion.verifierRef}@${criterion.verifierVersion}]`,
+        `    - ${criterion.criterionId}: ${criterion.statement} [decided by ${criterion.verifierRef}@${criterion.verifierVersion} implemented by ${criterion.implementationDigest.slice(0, 12)}…]`,
     ),
     `  runs (${view.runs.length}):`,
   ]
@@ -209,7 +214,7 @@ export function renderTaskForAgent(view: TaskView): string {
 
   for (const run of view.runs) {
     lines.push(
-      `    - ${run.runId}: ${run.status} by ${run.actor} (role ${run.emitter}) on revision ${run.revision.revisionId} (${run.revision.digest.slice(0, 12)}…)`,
+      `    - ${run.runId}: ${run.status} by ${run.actor} (role ${run.emitter}) on ${run.revision.environmentId} revision ${run.revision.revisionId} (${run.revision.digest.slice(0, 12)}…)`,
     )
     for (const verdict of run.verdicts) {
       const by =

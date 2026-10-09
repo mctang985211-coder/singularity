@@ -36,7 +36,9 @@ const SCHEDULER = 'runtime-1'
 const UNIT = 'unit-verifier'
 const INTEGRATION = 'integration-verifier'
 const ARTIFACT = 'c'.repeat(64)
-const REVISION = { revisionId: 'r0001', digest: 'a'.repeat(64) }
+const UNIT_IMPL = 'd'.repeat(64)
+const INTEGRATION_IMPL = 'e'.repeat(64)
+const REVISION = { environmentId: 'library-1', revisionId: 'r0001', digest: 'a'.repeat(64) }
 
 const failures = []
 const check = (label, condition) => {
@@ -64,8 +66,17 @@ const emit = (kind, payload) => ({
   subject: TASK,
   payload,
 })
-const judged = (criterionId, verifierRef, digest = ARTIFACT) =>
-  emit(TASK_KINDS.evidenceProduced, { runId: RUN, criterionId, verdict: 'pass', verifierRef, verifierVersion: '1', artifactDigest: digest })
+const judged = (criterionId, verifierRef, options = {}) =>
+  emit(TASK_KINDS.evidenceProduced, {
+    runId: RUN,
+    criterionId,
+    verdict: options.verdict ?? 'pass',
+    verifierRef,
+    verifierVersion: '1',
+    // The implementation's own content digest, not just its name: a deployment can re-point a name.
+    implementationDigest: options.implementationDigest ?? (verifierRef === UNIT ? UNIT_IMPL : INTEGRATION_IMPL),
+    artifactDigest: options.artifactDigest ?? ARTIFACT,
+  })
 
 const directory = await mkdtemp(join(tmpdir(), 'singularity-slice-'))
 const path = join(directory, 'singularity.log')
@@ -79,8 +90,8 @@ try {
         goal: 'implement a word counter',
         inputs: ['fixture/words.txt'],
         criteria: [
-          { criterionId: 'correctness', statement: 'counts match the golden file', verifierRef: UNIT, verifierVersion: '1' },
-          { criterionId: 'limits', statement: 'rejects input over 1 MiB', verifierRef: INTEGRATION, verifierVersion: '1' },
+          { criterionId: 'correctness', statement: 'counts match the golden file', verifierRef: UNIT, verifierVersion: '1', implementationDigest: UNIT_IMPL },
+          { criterionId: 'limits', statement: 'rejects input over 1 MiB', verifierRef: INTEGRATION, verifierVersion: '1', implementationDigest: INTEGRATION_IMPL },
         ],
       },
     }),
@@ -97,6 +108,16 @@ try {
     else throw error
   }
 
+  // Nor from a *different implementation* of the verifier the criterion names. Swapping the code
+  // behind a name must invalidate the verdict, which a ref and a version alone cannot do.
+  let refusedWrongImplementation = null
+  try {
+    await log.emit(judged('correctness', UNIT, { implementationDigest: INTEGRATION_IMPL }))
+  } catch (error) {
+    if (error instanceof ProtocolRefusal) refusedWrongImplementation = error.refusal.code
+    else throw error
+  }
+
   // A verdict may not come from the identity that started the run, either. The criterion names
   // the verifier whose role emits it, but this deployment binds the executor to that same
   // identity — so the role check passes and the identity check is what refuses.
@@ -104,7 +125,11 @@ try {
   const sharedLog = new MemoryLog(registry, { subjects: sharedSubjects })
   await sharedLog.emit(
     emit(TASK_KINDS.admitted, {
-      contract: { goal: 'g', inputs: [], criteria: [{ criterionId: 'c', statement: 's', verifierRef: UNIT, verifierVersion: '1' }] },
+      contract: {
+        goal: 'g',
+        inputs: [],
+        criteria: [{ criterionId: 'c', statement: 's', verifierRef: UNIT, verifierVersion: '1', implementationDigest: UNIT_IMPL }],
+      },
     }),
   )
   await sharedLog.emit(emit(TASK_KINDS.runStarted, { runId: RUN, revision: REVISION }))
@@ -131,6 +156,7 @@ try {
   console.log('')
 
   check('a verdict from an implementation the criterion does not name was refused', refusedWrongVerifier === 'wrong-verifier')
+  check('a verdict from different code behind the same verifier name was refused', refusedWrongImplementation === 'wrong-verifier')
   check('an executor bound to the verifier identity cannot judge its own run', refusedSelfJudgement === 'self-reported-evidence')
   check('the task settled verified', view.phase === 'verified')
   check('both criteria carry the verdict of the implementation they named', view.runs[0]?.verdicts.every(verdict => verdict.verdict === 'pass'))
