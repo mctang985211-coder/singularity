@@ -28,6 +28,7 @@ import {
   CHILD_B_CONTRACT,
   CHILD_C,
   CHILD_C_CONTRACT,
+  assigned,
   chain,
   decompose,
   failed,
@@ -35,8 +36,8 @@ import {
   PARENT,
   parentContract,
   plan,
+  openRun,
   planned,
-  startRun,
   treeLog,
   verified,
 } from './tree-fixtures.ts'
@@ -86,7 +87,7 @@ describe('a plan is presented with its gates, not its hopes', () => {
   it('lets a dependent proceed only once the dependency has verified', async () => {
     const registry = taskRegistry()
     const log = await planned(registry)
-    await log.emit(startRun(CHILD_A, 'a1'))
+    await openRun(log, CHILD_A, 'a1')
     await log.emit(judge(CHILD_A, 'a1', 'part-a', UNIT_VERIFIER))
     await log.emit(verified(CHILD_A, 'a1'))
 
@@ -102,7 +103,7 @@ describe('a plan is presented with its gates, not its hopes', () => {
     // A has two runs of budget; both fail, so it is stopped rather than retryable.
     const log = await planned(registry, { aDependsOn: [] })
     for (const runId of ['a1', 'a2']) {
-      await log.emit(startRun(CHILD_A, runId))
+      await openRun(log, CHILD_A, runId)
       await log.emit(failed(CHILD_A, runId, 'the counter crashed'))
     }
 
@@ -123,9 +124,10 @@ describe('a plan is presented with its gates, not its hopes', () => {
     await log.emit(admit(CHILD_A, CHILD_A_CONTRACT()))
     await log.emit(admit(CHILD_B, CHILD_B_CONTRACT()))
     await log.emit(admit(CHILD_C, CHILD_C_CONTRACT()))
+    for (const subject of [PARENT, CHILD_A, CHILD_B, CHILD_C]) await log.emit(assigned(subject))
 
     // A's single declared run fails: A is stopped, and nothing downstream may start.
-    await log.emit(startRun(CHILD_A, 'a1'))
+    await openRun(log, CHILD_A, 'a1')
     await log.emit(failed(CHILD_A, 'a1', 'the counter crashed'))
 
     const view = tree(registry, log)
@@ -142,7 +144,7 @@ describe('a plan is presented with its gates, not its hopes', () => {
   it('reports a failing sub-task as retryable while its budget remains, without calling it verified', async () => {
     const registry = taskRegistry()
     const log = await planned(registry)
-    await log.emit(startRun(CHILD_A, 'a1'))
+    await openRun(log, CHILD_A, 'a1')
     await log.emit(failed(CHILD_A, 'a1', 'first attempt failed'))
 
     const view = tree(registry, log)
@@ -163,7 +165,7 @@ describe('a parent is accepted by verification, never by its children ending', (
       [CHILD_A, 'part-a', 'a1'],
       [CHILD_B, 'part-b', 'b1'],
     ] as const) {
-      await log.emit(startRun(taskId, runId))
+      await openRun(log, taskId, runId)
       await log.emit(judge(taskId, runId, contractCriterion, taskId === CHILD_A ? UNIT_VERIFIER : INTEGRATION_VERIFIER))
       await log.emit(verified(taskId, runId))
     }
@@ -177,10 +179,10 @@ describe('a parent is accepted by verification, never by its children ending', (
     const registry = taskRegistry()
     const log = await planned(registry, { maxRunsB: 1 })
     // A verifies and supports `counts`; B supports `limits` but runs out of budget without verifying.
-    await log.emit(startRun(CHILD_A, 'a1'))
+    await openRun(log, CHILD_A, 'a1')
     await log.emit(judge(CHILD_A, 'a1', 'part-a', UNIT_VERIFIER))
     await log.emit(verified(CHILD_A, 'a1'))
-    await log.emit(startRun(CHILD_B, 'b1'))
+    await openRun(log, CHILD_B, 'b1')
     await log.emit(failed(CHILD_B, 'b1', 'the limit check never ran'))
 
     const view = tree(registry, log)
@@ -195,14 +197,16 @@ describe('a parent is accepted by verification, never by its children ending', (
     await log.emit(admit(PARENT, parentContract()))
     // One sub-task carries `counts`; the parent's own run carries `limits`.
     await log.emit(decompose(PARENT, [{ taskId: CHILD_A, dependsOn: [], supports: ['counts'], maxRuns: 1 }]))
+    await log.emit(assigned(PARENT))
     await log.emit(admit(CHILD_A, CHILD_A_CONTRACT()))
-    await log.emit(startRun(CHILD_A, 'a1'))
+    await log.emit(assigned(CHILD_A))
+    await openRun(log, CHILD_A, 'a1')
     await log.emit(judge(CHILD_A, 'a1', 'part-a', UNIT_VERIFIER))
     await log.emit(verified(CHILD_A, 'a1'))
     // The parent's own run must judge *every* criterion of the parent's contract before it may
     // settle verified - the protocol refuses a partial settlement - so it accepts both here, and
     // `counts` is still credited to the verified sub-task that declared it.
-    await log.emit(startRun(PARENT, 'p1'))
+    await openRun(log, PARENT, 'p1')
     await log.emit(judge(PARENT, 'p1', 'counts', UNIT_VERIFIER))
     await log.emit(judge(PARENT, 'p1', 'limits', INTEGRATION_VERIFIER))
     await log.emit(verified(PARENT, 'p1'))
@@ -215,10 +219,10 @@ describe('a parent is accepted by verification, never by its children ending', (
   it('is incomplete while any declared sub-task has not verified, even with every criterion accepted', async () => {
     const registry = taskRegistry()
     const log = await planned(registry)
-    await log.emit(startRun(CHILD_A, 'a1'))
+    await openRun(log, CHILD_A, 'a1')
     await log.emit(judge(CHILD_A, 'a1', 'part-a', UNIT_VERIFIER))
     await log.emit(verified(CHILD_A, 'a1'))
-    await log.emit(startRun(CHILD_B, 'b1'))
+    await openRun(log, CHILD_B, 'b1')
     await log.emit(judge(CHILD_B, 'b1', 'part-b', INTEGRATION_VERIFIER))
     await log.emit(verified(CHILD_B, 'b1'))
 
@@ -227,7 +231,7 @@ describe('a parent is accepted by verification, never by its children ending', (
 
     // The same acceptance, but B never verified: a criterion cannot be accepted on its behalf.
     const partial = await planned(registry)
-    await partial.emit(startRun(CHILD_A, 'a1'))
+    await openRun(partial, CHILD_A, 'a1')
     await partial.emit(judge(CHILD_A, 'a1', 'part-a', UNIT_VERIFIER))
     await partial.emit(verified(CHILD_A, 'a1'))
     expect(tree(registry, partial).complete).toBe(false)
@@ -245,7 +249,7 @@ describe('what the tree refuses to answer', () => {
   it('keeps a child that has not started out of the blocked list', async () => {
     const registry = taskRegistry()
     const log = await planned(registry)
-    await log.emit(startRun(CHILD_A, 'a1'))
+    await openRun(log, CHILD_A, 'a1')
     await log.emit(judge(CHILD_A, 'a1', 'part-a', UNIT_VERIFIER))
     await log.emit(verified(CHILD_A, 'a1'))
     const view = tree(registry, log)

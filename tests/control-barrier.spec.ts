@@ -151,6 +151,14 @@ function started(commandId: string): EmitInput {
   return { commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.runStarted, subject: TASK_ID, payload: { runId: RUN_ID, revision: REVISION } }
 }
 
+/**
+ * A fact the task protocol accepts with no prior fact. This spec is about the storage boundary, so
+ * its "second fact" must not also be testing the task protocol's responsibility rule.
+ */
+function assignment(commandId: string): EmitInput {
+  return { commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: TASK_KINDS.assigned, subject: TASK_ID, payload: { agentId: 'agent-1', agentIdentity: 'runtime-1' } }
+}
+
 function optionsFor(medium: BarrierPersistence, controlId: string): ControlStoreOptions {
   return { persistence: medium, controlId, registry: taskRegistry(), subjects: SUBJECTS }
 }
@@ -162,7 +170,7 @@ describe('the control submission boundary', () => {
     const admitted = await store.emit(admission('cmd-admit'))
     const priorCut = store.load()
     const pause = medium.pauseNext(operation)
-    const pending = store.emit(started('cmd-start'))
+    const pending = store.emit(assignment('cmd-start'))
     await pause.entered
     try {
       expect(store.load().entries().map(entry => entry.digest)).toEqual([admitted.digest])
@@ -216,7 +224,7 @@ describe('the control submission boundary', () => {
     const recovered = await successor.emit(request)
     expect(recovered.digest).toBe(successor.load().entries()[0]?.digest)
     expect(medium.events).toHaveLength(1)
-    const next = await successor.emit(started('cmd-after'))
+    const next = await successor.emit(assignment('cmd-after'))
     expect(next.seq).toBe(1)
     expect(medium.durable.map(event => Number(event.seq))).toEqual([0, 1])
     await successor.close()
@@ -266,8 +274,10 @@ describe('the control submission boundary', () => {
     expect(current.contract).toEqual(contract())
     expect(current.runs).toEqual({})
     expect(medium.durable).toHaveLength(1)
-    await store.emit(started('cmd-start'))
-    expect(store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.runs[RUN_ID]?.status).toBe('running')
+    await store.emit(assignment('cmd-start'))
+    // The later read is a *new* snapshot of the new committed cut, not a view that the values
+    // forged above leaked into.
+    expect(store.load().stateOf<TaskState>(TASK_PROTOCOL, TASK_VERSION, TASK_ID)?.responsibility?.agentId).toBe('agent-1')
     await store.close()
   })
 

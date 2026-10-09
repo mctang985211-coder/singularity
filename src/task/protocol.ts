@@ -27,17 +27,23 @@ import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
 import { assertContractShape, contractDigest, type TaskContract } from './contract.ts'
+import { assertInputsBound, bubbleOpenedKind, inputList, type Bubble, type BubbleInput } from './bubble.ts'
 import { decomposedKind, type Decomposition } from './decomposition.ts'
+import { assignedKind, reassignedKind, requireResponsible, type Responsibility } from './responsibility.ts'
 import { digest, maybeText, record, requireContractOf, requireRun, settled, text } from './shape.ts'
 
 export const TASK_PROTOCOL = 'task'
 /**
- * Version 2. Version 1 is **refused by name, with no compatibility layer**: a criterion and a
- * verdict each carry a required `implementationDigest` that v1 facts do not have, and this stack
- * has no distributed v1 ledger to migrate (review §5: adding a required field to a frozen format
- * bumps the version; "no old data here" is not a licence to change a version in place).
+ * Version 3. Older versions are **refused by name, with no compatibility layer**: this stack has no
+ * distributed ledger to migrate, and review §5 is explicit that "no old data here" is not a licence
+ * to change a version in place.
+ *
+ * The bump is batched deliberately. What changed is not one field but the shape of a verdict and
+ * the parties to a task: `evidence/produced` gained a **required** `inputDigests`, and
+ * responsibility (`task/assigned` / `task/reassigned`) became a precondition of starting work.
+ * Batching them into one version means one historical interpretation, not three.
  */
-export const TASK_VERSION = 2
+export const TASK_VERSION = 3
 
 /** The trusted role that admits contracts and starts, settles or fails runs. */
 export const SCHEDULER_ROLE = 'scheduler'
@@ -76,6 +82,8 @@ export interface EvidenceRecord {
   readonly implementationDigest: string
   /** The artifact content the verdict was formed on. A later artifact change does not inherit it. */
   readonly artifactDigest: string
+  /** The named inputs the verdict was formed against: exactly the bubble's, or the fold refuses. */
+  readonly inputDigests: readonly BubbleInput[]
   /** The emitter role and identity the log stamped. Never what a caller asked for. */
   readonly emitter: string
   readonly actor: string
@@ -90,6 +98,8 @@ export interface RunState {
   readonly revision: RevisionRef
   readonly startedAt: string
   readonly status: RunStatus
+  /** The declared execution context. A verdict about this run is bound to its inputs. */
+  readonly bubble?: Bubble
   readonly evidence: readonly EvidenceRecord[]
   readonly finishedAt?: string
   readonly failureReason?: string
@@ -107,12 +117,17 @@ export interface TaskState {
    * edited would make "which sub-task accepted which criterion" unanswerable after the fact.
    */
   readonly decomposition?: Decomposition
+  /** Who is answerable for this task. A task without one cannot be worked on at all. */
+  readonly responsibility?: Responsibility
   readonly runs: Readonly<Record<string, RunState>>
 }
 
 export const TASK_KINDS = {
   admitted: 'task/admitted',
   decomposed: 'task/decomposed',
+  assigned: 'task/assigned',
+  reassigned: 'task/reassigned',
+  bubbleOpened: 'bubble/opened',
   runStarted: 'run/started',
   evidenceProduced: 'evidence/produced',
   runVerified: 'run/verified',
@@ -155,6 +170,9 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
       }),
 
       [TASK_KINDS.decomposed]: decomposedKind(TASK_KINDS.decomposed, SCHEDULER_ROLE),
+      [TASK_KINDS.assigned]: assignedKind(TASK_KINDS.assigned, SCHEDULER_ROLE),
+      [TASK_KINDS.reassigned]: reassignedKind(TASK_KINDS.reassigned, SCHEDULER_ROLE),
+      [TASK_KINDS.bubbleOpened]: bubbleOpenedKind(TASK_KINDS.bubbleOpened, SCHEDULER_ROLE),
 
       [TASK_KINDS.runStarted]: defineKind<TaskState, { runId: string; revision: RevisionRef }>({
         guarantees: APPENDED,
@@ -177,6 +195,9 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
         reduce: (state, envelope, payload) => {
           const where = `${TASK_KINDS.runStarted} #${envelope.seq}`
           requireContractOf(state, where, envelope.subject)
+          // Responsibility is a precondition, not a label: work nobody is answerable for is not
+          // started, and after a transfer the previous holder's attempt is refused by name.
+          requireResponsible(state, envelope.actor, where)
           if (state.runs[payload.runId] !== undefined)
             refuse('illegal-transition', `${where} starts run "${payload.runId}" again; one run id is one attempt`)
           return {
@@ -207,6 +228,7 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
           verifierVersion: string
           implementationDigest: string
           artifactDigest: string
+          inputDigests: readonly BubbleInput[]
           detail?: string
         }
       >({
@@ -219,7 +241,7 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
           const source = record(raw, where)
           assertClosedKeys(
             source,
-            ['runId', 'criterionId', 'verdict', 'verifierRef', 'verifierVersion', 'implementationDigest', 'artifactDigest', 'detail'],
+            ['runId', 'criterionId', 'verdict', 'verifierRef', 'verifierVersion', 'implementationDigest', 'artifactDigest', 'inputDigests', 'detail'],
             where,
           )
           const verdict = source['verdict']
@@ -234,6 +256,7 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
             verifierVersion: text(source, 'verifierVersion', where),
             implementationDigest: digest(source, 'implementationDigest', where),
             artifactDigest: digest(source, 'artifactDigest', where),
+            inputDigests: inputList(source['inputDigests'], `${where}.inputDigests`),
             ...(detail === undefined ? {} : { detail }),
           }
         },
@@ -269,6 +292,10 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
               `${where} was formed by the implementation ${payload.implementationDigest.slice(0, 12)}…, but criterion "${payload.criterionId}" names the implementation ${criterion.implementationDigest.slice(0, 12)}…`,
             )
 
+          // A verdict is bound to the inputs the run declared it executed against. Without this,
+          // swapping an input after the fact would leave the old pass standing.
+          assertInputsBound(run.bubble, payload.inputDigests, where)
+
           if (run.evidence.some(entry => entry.criterionId === payload.criterionId))
             refuse(
               'evidence-conflict',
@@ -290,6 +317,7 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
                     verifierVersion: payload.verifierVersion,
                     implementationDigest: payload.implementationDigest,
                     artifactDigest: payload.artifactDigest,
+                    inputDigests: payload.inputDigests,
                     emitter: envelope.emitter,
                     actor: envelope.actor,
                     ...(payload.detail === undefined ? {} : { detail: payload.detail }),

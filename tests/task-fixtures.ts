@@ -45,6 +45,9 @@ export const SUBJECTS: Readonly<Record<string, string>> = {
   [verifierRoleOf({ verifierRef: INTEGRATION_VERIFIER, verifierVersion: '1' })]: 'integration-verifier-service',
 }
 
+/** The named inputs every run in these fixtures declares it executed against. */
+export const BUBBLE_INPUTS = [{ name: 'fixture/words.txt', digest: 'f'.repeat(64) }]
+
 /** One revision the run is pinned to, named by its environment and content identity. */
 export const REVISION = { environmentId: 'library-1', revisionId: 'r0001', digest: 'a'.repeat(64) }
 
@@ -94,7 +97,11 @@ function emit(kind: string, payload: unknown, commandId?: string): EmitInput {
 
 export const admitted = (value: TaskContract = contract(), commandId?: string): EmitInput =>
   emit(TASK_KINDS.admitted, { contract: value }, commandId)
+export const assigned = (commandId?: string, agentIdentity: string = SCHEDULER): EmitInput =>
+  emit(TASK_KINDS.assigned, { agentId: 'agent-1', agentIdentity }, commandId)
 export const started = (runId = RUN_ID): EmitInput => emit(TASK_KINDS.runStarted, { runId, revision: REVISION })
+export const bubbleOpened = (runId = RUN_ID): EmitInput =>
+  emit(TASK_KINDS.bubbleOpened, { runId, inputs: BUBBLE_INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' } })
 export const judged = (
   criterionId: string,
   verifierRef: string,
@@ -104,6 +111,7 @@ export const judged = (
     verifierVersion?: string
     implementationDigest?: string
     artifactDigest?: string
+    inputDigests?: readonly { readonly name: string; readonly digest: string }[]
     detail?: string
   } = {},
 ): EmitInput =>
@@ -115,6 +123,7 @@ export const judged = (
     verifierVersion: options.verifierVersion ?? '1',
     implementationDigest: options.implementationDigest ?? (verifierRef === UNIT_VERIFIER ? UNIT_IMPLEMENTATION : INTEGRATION_IMPLEMENTATION),
     artifactDigest: options.artifactDigest ?? ARTIFACT,
+    inputDigests: options.inputDigests ?? BUBBLE_INPUTS,
     ...(options.detail === undefined ? {} : { detail: options.detail }),
   })
 export const verified = (runId = RUN_ID): EmitInput => emit(TASK_KINDS.runVerified, { runId })
@@ -124,7 +133,9 @@ export const failed = (reason?: string, runId = RUN_ID): EmitInput =>
 /** The whole slice: admit, start, judge both criteria with their own verifiers, settle. */
 export const sliceCommands = (): readonly EmitInput[] => [
   admitted(),
+  assigned(),
   started(),
+  bubbleOpened(),
   judged('correctness', UNIT_VERIFIER),
   judged('limits', INTEGRATION_VERIFIER),
   verified(),

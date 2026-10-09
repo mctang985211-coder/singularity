@@ -61,6 +61,33 @@ export {
   type TreeView,
 } from './task/tree.ts'
 export {
+  assertInputsBound,
+  bubbleOpenedKind,
+  inputList,
+  BUBBLE_INPUT_MEMBERS,
+  BUBBLE_MEMBERS,
+  WORKSPACE_MEMBERS,
+  type Bubble,
+  type BubbleInput,
+} from './task/bubble.ts'
+export {
+  assignedKind,
+  reassignedKind,
+  requireResponsible,
+  REASSIGNMENT_MEMBERS,
+  RESPONSIBILITY_MEMBERS,
+  type Responsibility,
+} from './task/responsibility.ts'
+export {
+  declareAgentProtocol,
+  AGENT_KINDS,
+  AGENT_OPENED_MEMBERS,
+  AGENT_PROTOCOL,
+  AGENT_ROLE,
+  AGENT_VERSION,
+  type AgentState,
+} from './agent/protocol.ts'
+export {
   declareTaskProtocol,
   verifierRoleOf,
   SCHEDULER_ROLE,

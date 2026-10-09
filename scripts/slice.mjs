@@ -36,6 +36,8 @@ const SCHEDULER = 'runtime-1'
 const UNIT = 'unit-verifier'
 const INTEGRATION = 'integration-verifier'
 const ARTIFACT = 'c'.repeat(64)
+// The named inputs the run declares it executed against; every verdict must echo exactly these.
+const INPUTS = [{ name: 'fixture/words.txt', digest: 'f'.repeat(64) }]
 const UNIT_IMPL = 'd'.repeat(64)
 const INTEGRATION_IMPL = 'e'.repeat(64)
 const REVISION = { environmentId: 'library-1', revisionId: 'r0001', digest: 'a'.repeat(64) }
@@ -76,6 +78,7 @@ const judged = (criterionId, verifierRef, options = {}) =>
     // The implementation's own content digest, not just its name: a deployment can re-point a name.
     implementationDigest: options.implementationDigest ?? (verifierRef === UNIT ? UNIT_IMPL : INTEGRATION_IMPL),
     artifactDigest: options.artifactDigest ?? ARTIFACT,
+    inputDigests: INPUTS,
   })
 
 const directory = await mkdtemp(join(tmpdir(), 'singularity-slice-'))
@@ -96,7 +99,11 @@ try {
       },
     }),
   )
+  // Responsibility first: work nobody is answerable for is not started, and it is what makes a
+  // transfer observable later.
+  await log.emit(emit(TASK_KINDS.assigned, { agentId: 'slice-agent', agentIdentity: SCHEDULER }))
   await log.emit(emit(TASK_KINDS.runStarted, { runId: RUN, revision: REVISION }))
+  await log.emit(emit(TASK_KINDS.bubbleOpened, { runId: RUN, inputs: INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' } }))
 
   // A verdict may not come from an implementation the criterion does not name. The caller cannot
   // choose an author here; the refusal comes from the reducer, before anything reaches the disk.
@@ -132,7 +139,9 @@ try {
       },
     }),
   )
+  await sharedLog.emit(emit(TASK_KINDS.assigned, { agentId: 'slice-agent', agentIdentity: 'shared' }))
   await sharedLog.emit(emit(TASK_KINDS.runStarted, { runId: RUN, revision: REVISION }))
+  await sharedLog.emit(emit(TASK_KINDS.bubbleOpened, { runId: RUN, inputs: INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' } }))
   let refusedSelfJudgement = null
   try {
     await sharedLog.emit(judged('c', UNIT))

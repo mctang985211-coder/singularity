@@ -51,6 +51,12 @@ const CONTRACT = {
   ],
 }
 const SUBJECTS = { scheduler: 'scheduler-1' }
+/**
+ * How many facts the holder commits before it is killed: the contract, the responsibility, and the
+ * run start whose reply the caller never receives. Named rather than repeated, because a check that
+ * hard-codes a count silently becomes a lie when a fact is added.
+ */
+const EXPECTED_FACTS = 3
 
 function registry() {
   const made = new ProtocolRegistry()
@@ -65,6 +71,14 @@ const admitRequest = commandId => ({
   kind: TASK_KINDS.admitted,
   subject: TASK,
   payload: { contract: CONTRACT },
+})
+const assignRequest = commandId => ({
+  commandId,
+  protocol: TASK_PROTOCOL,
+  version: TASK_VERSION,
+  kind: TASK_KINDS.assigned,
+  subject: TASK,
+  payload: { agentId: 'probe-agent', agentIdentity: 'scheduler-1' },
 })
 const startRequest = commandId => ({
   commandId,
@@ -100,6 +114,9 @@ async function hold() {
     const store = await ControlSessionStore.open({ persistence: live.persistence, controlId, registry: registry(), subjects: SUBJECTS })
 
     const admitted = await store.emit(admitRequest(`${commandId}-admit`))
+    // A run needs someone answerable for it before it may start, so the probe records the
+    // responsibility it is about to exercise. The successor adopts it rather than re-declaring it.
+    await store.emit(assignRequest(`${commandId}-assign`))
     const committed = await store.emit(startRequest(commandId))
     // The caller of `commandId` never received this reply. Re-delivering it while this store is
     // alive is what the memory log's command identity answers, and nothing is appended twice.
@@ -188,7 +205,7 @@ async function probe() {
     console.log(`  holder pid ${holder.pid} reported: ${JSON.stringify(reported)}`)
     check(
       'the holder committed the command and holds the write handle',
-      reported.facts.length === 2 && typeof reported.committedDigest === 'string',
+      reported.facts.length === EXPECTED_FACTS && typeof reported.committedDigest === 'string',
       `facts=${reported.facts.length}`,
     )
 
@@ -219,7 +236,7 @@ async function probe() {
     console.log(`  read handle observed: ${JSON.stringify(observedRead)}`)
     check(
       'the read handle is unaffected and every record is our type, marked ignorable',
-      observedRead.length === 2 && observedRead.every(event => event.type === CONTROL_EVENT_TYPE && event.ignorable === true),
+      observedRead.length === EXPECTED_FACTS && observedRead.every(event => event.type === CONTROL_EVENT_TYPE && event.ignorable === true),
     )
 
     // -----------------------------------------------------------------------

@@ -20,9 +20,11 @@ import {
   type TaskContract,
 } from '../src/index.ts'
 import {
+  BUBBLE_INPUTS,
   INTEGRATION_IMPLEMENTATION,
   INTEGRATION_VERIFIER,
   REVISION,
+  SCHEDULER,
   SUBJECTS,
   taskRegistry,
   UNIT_IMPLEMENTATION,
@@ -98,6 +100,17 @@ function emit(subject: string, kind: string, payload: unknown): EmitInput {
 export const admit = (subject: string, contract: TaskContract): EmitInput => emit(subject, TASK_KINDS.admitted, { contract })
 export const decompose = (subject: string, children: readonly DecompositionChild[]): EmitInput => emit(subject, TASK_KINDS.decomposed, { children })
 export const startRun = (subject: string, runId: string): EmitInput => emit(subject, TASK_KINDS.runStarted, { runId, revision: REVISION })
+/** Work nobody is answerable for is not started, so every sub-task that runs is assigned first. */
+export const assigned = (subject: string): EmitInput =>
+  emit(subject, TASK_KINDS.assigned, { agentId: `agent-for-${subject}`, agentIdentity: SCHEDULER })
+export const openBubble = (subject: string, runId: string): EmitInput =>
+  emit(subject, TASK_KINDS.bubbleOpened, { runId, inputs: BUBBLE_INPUTS, workspace: { kind: 'git', ref: 'refs/heads/main' } })
+
+/** Start a run **and** declare the context it executes in: a judged run needs both. */
+export async function openRun(log: MemoryLog, subject: string, runId: string): Promise<void> {
+  await log.emit(startRun(subject, runId))
+  await log.emit(openBubble(subject, runId))
+}
 export const verified = (subject: string, runId: string): EmitInput => emit(subject, TASK_KINDS.runVerified, { runId })
 export const failed = (subject: string, runId: string, reason?: string): EmitInput =>
   emit(subject, TASK_KINDS.runFailed, reason === undefined ? { runId } : { runId, reason })
@@ -118,6 +131,7 @@ export function judge(
     verifierVersion: '1',
     implementationDigest,
     artifactDigest: 'b'.repeat(64),
+    inputDigests: BUBBLE_INPUTS,
   })
 }
 
@@ -129,8 +143,11 @@ export function treeLog(registry: ProtocolRegistry = taskRegistry()): MemoryLog 
 export async function planned(registry: ProtocolRegistry = taskRegistry(), options: Parameters<typeof plan>[0] = {}): Promise<MemoryLog> {
   const log = treeLog(registry)
   await log.emit(admit(PARENT, parentContract()))
+  await log.emit(assigned(PARENT))
   await log.emit(decompose(PARENT, plan(options)))
   await log.emit(admit(CHILD_A, CHILD_A_CONTRACT()))
+  await log.emit(assigned(CHILD_A))
   await log.emit(admit(CHILD_B, CHILD_B_CONTRACT()))
+  await log.emit(assigned(CHILD_B))
   return log
 }

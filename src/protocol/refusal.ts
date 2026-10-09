@@ -52,6 +52,10 @@ export const REFUSAL_CODES = [
   'illegal-transition',
   /** A decomposition declares a dependency cycle. The shape is legal; no execution order satisfies it. */
   'cyclic-dependency',
+  /** The actor is not the agent currently responsible for the task, or nobody is. */
+  'not-responsible',
+  /** A verdict was formed on inputs other than the ones the run's bubble declared. */
+  'evidence-input-mismatch',
   /** A task contract is not a contract: no goal, no criteria, an unknown member, or a bad criterion. */
   'malformed-contract',
   /** A criterion names a verifier this deployment cannot currently run at that version. */

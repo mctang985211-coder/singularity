@@ -26,6 +26,8 @@ import { asyncRefusalOf, newLogPath, refusalOf } from './fixtures.ts'
 import {
   admitted,
   ARTIFACT,
+  assigned,
+  bubbleOpened,
   contract,
   INTEGRATION_IMPLEMENTATION,
   INTEGRATION_VERIFIER,
@@ -50,11 +52,13 @@ beforeEach(async () => {
   logPath = await newLogPath()
 })
 
-/** A log that already carries an admitted, running task. */
+/** A log that already carries an admitted, assigned, running task with its execution context. */
 async function running(): Promise<MemoryLog> {
   const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
   await log.emit(admitted())
+  await log.emit(assigned())
   await log.emit(started())
+  await log.emit(bubbleOpened())
   return log
 }
 
@@ -86,7 +90,11 @@ describe('the verifier boundary', () => {
     const shared = { scheduler: 'shared-identity', [verifierRoleOf({ verifierRef: UNIT_VERIFIER, verifierVersion: '1' })]: 'shared-identity' }
     const log = new MemoryLog(taskRegistry(), { subjects: shared })
     await log.emit(admitted())
+    // Responsibility is held by the same identity too: the point of the case is that role
+    // separation alone must not be enough, so both roles resolve to one identity.
+    await log.emit(assigned(undefined, 'shared-identity'))
     await log.emit(started())
+    await log.emit(bubbleOpened())
 
     const refusal = await asyncRefusalOf(() => log.emit(judged('correctness', UNIT_VERIFIER)))
     expect(refusal.code).toBe<RefusalCode>('self-reported-evidence')
@@ -228,16 +236,19 @@ describe('what the protocol does not know', () => {
     expect(refusalOf(() => projectReceipt(state, 'run-ghost')).code).toBe<RefusalCode>('unknown-run')
   })
 
-  it('declares exactly the six kinds this slice needs, and no receipt kind', () => {
+  it('declares exactly the nine kinds this slice needs, and no receipt kind', () => {
     const registry = taskRegistry()
     // Sorted, because `kindsOf` sorts: `evidence/produced` < `run/*` < `task/*`.
     expect(registry.kindsOf(TASK_PROTOCOL, TASK_VERSION)).toEqual([
+      TASK_KINDS.bubbleOpened,
       TASK_KINDS.evidenceProduced,
       TASK_KINDS.runFailed,
       TASK_KINDS.runStarted,
       TASK_KINDS.runVerified,
       TASK_KINDS.admitted,
+      TASK_KINDS.assigned,
       TASK_KINDS.decomposed,
+      TASK_KINDS.reassigned,
     ])
     expect(Object.values(TASK_KINDS)).not.toContain('receipt/sealed')
     expect(verifierRoleOf({ verifierRef: 'x', verifierVersion: '1' })).toBe('verifier:x@1')

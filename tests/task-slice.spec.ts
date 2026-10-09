@@ -26,6 +26,8 @@ import { newLogPath } from './fixtures.ts'
 import {
   admitted,
   ARTIFACT,
+  assigned,
+  bubbleOpened,
   INTEGRATION_VERIFIER,
   judged,
   REVISION,
@@ -142,6 +144,7 @@ describe('the task slice', () => {
   it('does not let a receipt be persisted: the vocabulary keeps it derived', async () => {
     const log = new MemoryLog(taskRegistry(), { subjects: SUBJECTS })
     await log.emit(admitted())
+    await log.emit(assigned())
     await log.emit(started())
 
     // The only way to store a receipt would be a kind for it, and the protocol declares none.
@@ -154,7 +157,9 @@ describe('the task slice', () => {
     const registry = taskRegistry()
     const log = new MemoryLog(registry, { subjects: SUBJECTS })
     await log.emit(admitted())
+    await log.emit(assigned())
     await log.emit(started())
+    await log.emit(bubbleOpened())
     await log.emit(judged('correctness', UNIT_VERIFIER, 'fail'))
     await log.emit({ commandId: 'fail-1', protocol: TASK_PROTOCOL, version: TASK_VERSION, kind: 'run/failed', subject: TASK_ID, payload: { runId: RUN_ID } })
 
