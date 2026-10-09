@@ -90,6 +90,8 @@ interface Election {
   readonly round: number
   readonly incumbent: string
   readonly revision: string
+  /** The content the slot pins, when it is not this log's content for that revision id. */
+  readonly digest?: string
   readonly edits: readonly { readonly asset: string; readonly target: string }[]
 }
 
@@ -99,6 +101,7 @@ interface Election {
  * submission names the revision — the pairing is what the projection has to find.
  */
 function elected(log: MemoryLog, roundId: string, election: Election): void {
+  const pin = revisionOf(election.revision)
   log.emit({
     commandId: nextId(`open-${roundId}`),
     protocol: STRATEGY_PROTOCOL,
@@ -125,7 +128,7 @@ function elected(log: MemoryLog, roundId: string, election: Election): void {
     subject: roundId,
     payload: {
       slot: 0,
-      revision: revisionOf(election.revision),
+      revision: election.digest === undefined ? pin : { ...pin, digest: election.digest },
       evaluationId: `evaluation-${roundId}`,
       edits: election.edits,
       exploratory: false,
@@ -200,5 +203,55 @@ describe('the assets a frozen history counts as accepted', () => {
     switched(log, '', 'r0009')
 
     expect(publishedAssetsBelow(log.entries(), ENVIRONMENT, log.count)).toEqual([])
+  })
+
+  it('does not let an election above the cutoff add a class to the frozen history', () => {
+    const log = factsLog()
+    created(log, 'r0001')
+    created(log, 'r0002')
+    elected(log, 'round-1', { round: 1, incumbent: 'r0001', revision: 'r0002', edits: [{ asset: 'tool', target: 'tokenizer' }] })
+    switched(log, '', 'r0002')
+    const cutoff = log.count
+    // The same revision is elected again above the cutoff, declaring a class this history never saw.
+    // A publication needs an approval, not a round (`release.publish`), so the election that put the
+    // head there is not guaranteed to be the only one below the cutoff of the round reading it.
+    elected(log, 'round-2', { round: 2, incumbent: 'r0001', revision: 'r0002', edits: [{ asset: 'skill', target: 'count-words' }] })
+
+    expect(publishedAssetsBelow(log.entries(), ENVIRONMENT, cutoff)).toEqual(['tool'])
+  })
+
+  it('counts nothing for a slot that pinned content the head revision does not hold', () => {
+    const log = factsLog()
+    created(log, 'r0001')
+    created(log, 'r0002')
+    // A well-formed digest that is not r0002's content: a slot can name the right revision id at
+    // content this environment never created, and only the full triple tells the two apart.
+    elected(log, 'round-1', {
+      round: 1,
+      incumbent: 'r0001',
+      revision: 'r0002',
+      digest: 'b'.repeat(64),
+      edits: [{ asset: 'template', target: 'report' }],
+    })
+    elected(log, 'round-2', { round: 2, incumbent: 'r0001', revision: 'r0002', edits: [{ asset: 'skill', target: 'count-words' }] })
+    switched(log, '', 'r0002')
+
+    expect(publishedAssetsBelow(log.entries(), ENVIRONMENT, log.count)).toEqual(['skill'])
+  })
+
+  it('unions the classes of two rounds that elected the same revision, round order then declaration order', () => {
+    const log = factsLog()
+    created(log, 'r0001')
+    created(log, 'r0002')
+    elected(log, 'round-1', { round: 1, incumbent: 'r0001', revision: 'r0002', edits: [{ asset: 'tool', target: 'tokenizer' }] })
+    elected(log, 'round-2', {
+      round: 2,
+      incumbent: 'r0001',
+      revision: 'r0002',
+      edits: [{ asset: 'skill', target: 'count-words' }, { asset: 'tool', target: 'selector' }],
+    })
+    switched(log, '', 'r0002')
+
+    expect(publishedAssetsBelow(log.entries(), ENVIRONMENT, log.count)).toEqual(['tool', 'skill'])
   })
 })

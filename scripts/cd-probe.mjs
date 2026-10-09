@@ -326,15 +326,6 @@ function scriptedAdapter(LlmAdapter) {
   }
 }
 
-/** The asset classes one revision's manifest declares: what novelty counts (R05 counts types). */
-function assetsOfManifest(manifest) {
-  const classes = []
-  if (Array.isArray(manifest.skills) && manifest.skills.length > 0) classes.push('skill')
-  if (Array.isArray(manifest.tools) && manifest.tools.length > 0) classes.push('tool')
-  if (Array.isArray(manifest.taskTemplates) && manifest.taskTemplates.length > 0) classes.push('template')
-  return classes
-}
-
 async function main() {
   // Resolved dynamically, after `dsh-control-runtime` registered its resolve hook: ESM links static
   // imports before evaluating any of them, so a hook registered during evaluation is too late.
@@ -463,10 +454,17 @@ async function main() {
     /** The bubble members two runs differ in: exactly what `contextDigestOf` is taken over. */
     const differingMembers = (left, right) => ['model', 'tools', 'conditions', 'inputs'].filter(key => digestOf(left[key]) !== digestOf(right[key]))
 
-    /** The measure slice as one round reads it, folded at the cut it is handed. */
+    /**
+     * The measure slice as one round reads it, folded at the cut it is handed.
+     *
+     * `entries` is the log itself: what counts as *accepted* in it is `publishedAssetsBelow`'s one
+     * derivation, not a convention invented here. An injected convention is how two wirings could
+     * disagree about one log, and novelty feeds selection, so that disagreement is two winners.
+     */
     function sliceOf(cut) {
       const belowCut = (protocol, version, cutoff) => cut.entriesOf(protocol, version).filter(entry => entry.seq < cutoff)
       return {
+        entries: cut.entries(),
         evaluationOf: evaluationId => {
           const state = cut.stateOf(MEASURE_PROTOCOL, MEASURE_VERSION, evaluationId)
           if (state === undefined || state.trials === undefined || state.baseline === undefined || state.candidate === undefined) return undefined
@@ -484,17 +482,6 @@ async function main() {
           const states = foldSubjects(registry, entries, MEASURE_PROTOCOL, MEASURE_VERSION)
           const view = projectEvaluation(states.get(opened.subject))
           return { quality: view.quality, cost: view.cost }
-        },
-        // Asset classes actually published below the cutoff: the revisions a `pointer/switched` fact
-        // below it names, by the classes their manifests declare. There is no separate "assets
-        // published" kind, so the head's own history is the only honest source (R05).
-        acceptedAssetsBelow: cutoff => {
-          const entries = belowCut(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION, cutoff)
-          const states = foldSubjects(registry, entries, ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION)
-          const classes = new Set()
-          for (const entry of entries.filter(candidate => candidate.kind === ENVIRONMENT_KINDS.pointerSwitched))
-            for (const asset of assetsOfManifest(states.get(entry.subject)?.revisions[entry.payload.to]?.manifest ?? {})) classes.add(asset)
-          return [...classes].sort()
         },
       }
     }
@@ -895,9 +882,18 @@ async function main() {
     const [novel, known] = [...projectedTwo.slots].sort((left, right) => left.slot - right.slot)
     const incumbentQuality = projectEvaluation(measureStateOf('r2-baseline')).quality
     check('round two counts novelty against the asset class round one published', novel.novelty === 1 && known.novelty === 0, `slot 0 novelty ${novel.novelty}, slot 1 novelty ${known.novelty}`)
-    const blind = { ...sliceOf(store.load()), acceptedAssetsBelow: () => [] }
-    const withoutHistory = projectRound(roundStateOf('round-2'), blind, FLOOR)
-    check('with the published assets removed from the read, the same slots read as novel', withoutHistory.slots[0].novelty === 2 && withoutHistory.slots[1].novelty === 1, JSON.stringify(withoutHistory.slots.map(slot => slot.novelty)))
+    // The counterfactual is the *same log with one fact removed* — the switch that made r0002 the
+    // head — so novelty really reads 2 and 1 instead of being asserted: `publishedAssetsBelow` folds
+    // the head out of the entries it is handed, and with the switch gone there is no head and no
+    // accepted class. A counterfactual that cannot differ from the live reading is a check that
+    // cannot fail, which is the defect this probe exists to catch in other people's wiring.
+    const publication = pointerFacts()[0]
+    const withoutPublication = store.load().entries().filter(entry => entry.seq !== publication.seq)
+    const unread = projectRound(roundStateOf('round-2'), { ...sliceOf(store.load()), entries: withoutPublication }, FLOOR)
+    check('the counterfactual is the live log minus that one publication fact',
+      withoutPublication.length === store.load().entries().length - 1 && withoutPublication.every(entry => entry.seq !== publication.seq) && publication.payload.to === 'r0002')
+    check('with the publication removed from the log the same slots really read as novel', unread.slots[0].novelty === 2 && unread.slots[1].novelty === 1, JSON.stringify(unread.slots.map(slot => slot.novelty)))
+    check('and only novelty moves: the same winner and the same frozen gains', unread.winner === projectedTwo.winner && close(unread.slots[0].gain, novel.gain) && close(unread.slots[1].gain, known.gain))
     check('round two\'s frozen gain is relative to round one\'s incumbent', close(novel.gain, twoOne.quality - incumbentQuality) && !close(incumbentQuality, baselineOne.quality), `gain ${novel.gain}, incumbent ${incumbentQuality}`)
     check('both of round two\'s candidates are admissible, so the argmax ranks them', novel.admissible === true && known.admissible === true)
     check('the higher quality wins round two', projectedTwo.winner === 0 && close(novel.quality, 0.9) && close(known.quality, 0.8), `winner ${projectedTwo.winner}`)
