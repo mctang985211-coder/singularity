@@ -164,7 +164,8 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 ## 5. 当前代码状态（`pnpm verify` 全绿）
 
-`src`/`tests` 共 44 个文件；**181 测试**；**10 门禁 + 门禁自检**（含 `dsh-alignment` 与三条跑真实进程的行为门禁）。
+`src`/`tests` 共 44 个 `.ts` 文件；**181 测试**；**10 门禁 + 门禁自检**（含 `dsh-alignment` 与三条跑真实进程的行为门禁）。
+**这份清单要按 §12.1 变成被门禁检查的账本**——它上一次是错的（见 §12.1 的实测）。
 
 **一条事实只有一条路径**（本轮收敛，`docs/debugging.md` 记了根因）：`MemoryLog.decide` 判全部规则并封信封但**不记录**，`record` 才让它进入日志。控制 store 的提交区是**全栈唯一队列**——它是唯一跨越真实写入的地方；命令层与 `MemoryLog` 自己的队列都已删除。读侧：`load()` 是一个真正的 **cut**（`stateAt(p,v,s,cut)`），头部读 O(1)，写侧提交的 reducer 调用数从 51 降到 **1**。
 
@@ -289,6 +290,88 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 - **S2**（提交 `d07c148`）：`src/task/decomposition.ts` + `src/task/tree.ts`。一条完整事实的分解（`dependsOn`/`supports`/`maxRuns`，无环、覆盖面、子 id 唯一，声明 `atomicFact`）+ 全日志投影 `projectTree`。**只有 `verified` 满足依赖**，停止/阻塞沿链具名传播，预算耗尽即 `stopped`，父的完成是派生量。
 - **task@3 + agent@1**（提交 `bf1fdbf`）：`task/assigned`/`task/reassigned` + **`run/started` 的责任门**（只接受当前责任人的**身份**；新码 `not-responsible`）；`bubble/opened` + **verdict 的输入绑定**（新码 `evidence-input-mismatch`，同 subject 纯判）；`agent@1` 的 `agent/opened` **引用**真实 DSH 会话且**不声称存活**。一次升版本承载全部"改变历史解释"的变更，v1/v2 按 `version-mismatch` 具名拒绝、无兼容层。
 - 四条承重规则各有变异证明：去掉责任门、去掉输入绑定、把"任何终止都算满足依赖"、把"未 verified 的子任务算作接受判据"——每次都只有对应用例失败，文件逐字节还原。
+
+**B 的最后一段已全部完成**（提交 `c26c0be`，证据见 `docs/k1-evidence.md`）：S6 真实纵切（`slice-b` 22 项）、两个边界各一次真实 SIGKILL（`recovery-probe` 21 项）、K1 12 场景逐条交回、完整 `pnpm verify` 输出。仍**未做**的是"真实模型 → 真实产物 → 我们的真实验证器 → 命令边界"接成一条（模型产出内容、真实验证器裁决、verdict 经命令边界落为事实；**不能断言判决为 pass**）——这一条属 C，见 §12。
+
+## 12. C 阶段（可信评估）的进入方式：先冻接口，再四路并行
+
+**C 的退出条件（`review.md` §5 冻结原文）**：好候选通过；高分但越界拒绝；缺失分母正确；每份报告有真实 trials。对应 R02 / R06 / R08。
+
+### 12.1 先修掉那个已经发生的病：账本会烂
+
+**实测**：`c26c0be` 时 `context.md` 声称"36 个文件 / 140 测试 / 9 门禁"；同一提交的真实值是
+**44 个 `.ts` 文件 / 177 测试 / 11 门禁**。差了 8 个文件、37 个测试、2 条门禁，**没有任何东西发现**。
+
+这正是旧仓"根因一：形状繁殖没有门禁"在**文档层**的复现：`no-unreferenced-export` 管住了导出，
+`dsh-baseline.json` + `dsh-alignment` 管住了版本路径，而"我们声明了多少种协议/kind、各自谁写谁读"
+**没有任何机械检查**。
+
+**机制（C 的第 0 项，且是唯一必须串行的前置）**：`protocol-baseline.json` + 一条门禁
+`protocol-inventory`。文件逐行列出 `(protocol, version, kind)` 与它的**生产者**与**读者**；
+门禁用真实 registry 枚举声明集，与文件**双向**比对：
+
+- 声明了而文件里没有 → "你新增了一个形状，把它的消费者写下来"；
+- 文件里有而没声明 → "账本记着一个没人声明的形状"。
+
+形状与 `dsh-baseline.json` 相同，而那条路已经**抓到过一个真实错误**。这就是为什么选它，而不是再写一段散文。
+
+### 12.2 高并行的前提：第 0 轮只冻接口（串行、小）
+
+C 比 B 更依赖接口先定：四个工作流都要编译同一组类型。所以第 0 轮**只**做一件事——
+把 `measure@1` 与 `strategy@1` 的**闭合形状与拒绝码**定下来（`MeasurementContext` 的口径摘要、
+`TrialPlan` 的固定槽位、`Observation`、`Aggregate`、`RoundInput`），**不写实现**。
+
+这一步就是 S0/B 那个"先抽主干"的动作。它的代价只有一轮，收益是后面四路**互不阻塞**。
+之后的任何接口改动都是**升版本**，也就是所有人停下来——所以第 0 轮的产出必须是**真的要用的形状**，
+不是"先占个位"。
+
+### 12.3 四路并行（文件域互不相交，各自 owner）
+
+| 工作流 | 独占文件 | 交付 | 对应 |
+|---|---|---|---|
+| **W1 口径与聚合** | `src/measure/{context,plan,aggregate}.ts`、`tests/measure-*.spec.ts`、`tests/measure-fixtures.ts` | 口径 = 一个摘要（数据集/输入、契约、模型身份、环境、metric 方向与单位与归一化、权重、trial 计划、判断策略）；`TrialPlan` 是**固定槽位**；`aggregate(plan, observations)` 的分母来自**计划**，缺失按冻结策略显式计入 | **缺失分母正确**；R02、R06 |
+| **W2 决策层移植** | `src/strategy/{selection,novelty,budget,noise,history}.ts`、`tests/strategy-*.spec.ts`、`tests/vectors/*.json`、`scripts/strategy-vectors.mjs`、`docs/divergence-ledger.md` | RRSI 纯决策函数 + **五处有意收紧各一条反例**；与 Python checkout 的差分向量 + 分歧账本；硬约束在 argmax **之前**判定 | **好候选通过 / 高分但越界拒绝**；R01、R03、R05、R09；ADR 0001 |
+| **W3 真实执行器** | `src/measure/execution.ts`、`scripts/measure-runner.mjs`、`scripts/measure-probe.mjs` | k 次 trial，每次一个**稳定身份**与**独立执行证据**；观测只接受来自**按摘要登记的**测量实现（复用 `src/verifier/**` 的纪律，不另造一套）；顺带把"真实模型产出 → 真实验证器裁决 → 命令边界"接成一条 | **每份报告有真实 trials**；R06、R08 |
+| **W4 显式轮次** | `src/round/{protocol,submit}.ts`、`tests/round-*.spec.ts`、`scripts/round-probe.mjs` | 一轮 = 一条事实，冻结 incumbent、候选集合、预算、历史截止范围与口径；**`done()` 式提交闸**作为提交区里的 `require`（超预算/标签不符/槽位违反被拒）；保留探索槽是**计划里的槽位**而不是提示词里的一句话 | R01、R04、R05、R07 |
+
+**串行点（单一 owner = 协调者，任何工作流都不许碰）**：
+`src/protocol/**`、**`src/task/**`（冻结在 `task@3`）**、`scripts/gates.mjs`、`tests/fixtures.ts`、`docs/**`。
+
+**`src/task/**` 为什么能冻住**：C 关于任务的新事实都放进新协议、挂在**同一个 subject**（task id）上——
+"多协议一条日志"就是这个设计的回报。若真需要任务侧的新字段，那是**一次** `TASK_VERSION` 升级，
+由协调者批量决定，不是一个工作流顺手加。
+
+### 12.4 老仓六个根因在 C 的暴露面与机制（不是意图，是闸）
+
+| 旧仓根因 | C 最容易复发的样子 | 机制 |
+|---|---|---|
+| 形状繁殖没有门禁 | C 新增的协议最多 | §12.1 的可检查账本 + `no-duplicate-type-body` + **"加字段 ⇒ 升版本"**，没有第二种加法 |
+| 自建上游已有的东西 | 自己写调度器 / 测量框架 / 又一个会话层 | 执行与会话用 DSH；观测的信任复用 `src/verifier/**`；RRSI **只作规格与向量**，永不作为运行时（ADR 0001） |
+| 契约声明了没有消费者 | `strategy` 的 kind 先于轮次存在 | 每个新 kind **与它的生产者、读者同一次提交**落地；账本那一行必须写明两者 |
+| 该由数据结构保证的交给提示词 | 保留探索槽、预算、"禁止自述数字" | 提交闸是提交区里的 `require`；保留槽是**冻结计划里的槽位**；观测只来自按摘要登记的实现 |
+| RRSI 只引进一半 | 公式搬对了、约束掉光了（旧仓实测） | 五处收紧各一条反例；差分向量 + 分歧账本；约束落在命令与门禁里并各有变异证明 |
+| 两次大重构没换掉根因 | C 是第三次大加法 | 全部靠上面的闸，不靠"这次注意"；§12.1 那个**已经发生的漂移**就是"账本必须被检查"的实证 |
+
+### 12.5 明确不做（写下来，免得下一个人以为是漏了）
+
+通用沙箱平台、group/router、`storageDomain`、发布/审批状态机（那是 D）、第二套轮次编排、
+第二个状态存储、Python 侧的任何运行时调用、给已冻结版本加成员。
+
+### 12.6 第 2 轮（串行整合）与判据
+
+1. 新探针**与门禁接线在同一次提交**（B 的教训：行为检查掉在自动路径外，坏了没人报）。
+2. 一条真实的端到端探针：**m ≥ 2 个候选从同一 incumbent 起草** → 各 k 次 trial 真实执行 →
+   一个**高分但违反硬约束**的候选必须在 argmax 之前被拒 → 选择 → 发布 → **第二轮读第一轮的事实**
+   （R04 的两轮要求）。
+3. 证据文档 `docs/c-evidence.md`，格式同 `k1-evidence.md`：逐条观测 + **未观测项单列**。
+4. 每条新规则一次变异证明；MISSED 的当场删规则（`debugging.md` §2）。
+
+### 12.7 并行工作流的规矩（B 已证有效的四条，重复使用）
+
+1. 一个文件域一个 owner；共享文件只有协调者动。
+2. 每个工作流自带 fixture 文件（`measure-fixtures.ts` / `strategy-fixtures.ts`），不碰 `tests/fixtures.ts`。
+3. 交付时报告**量出来的数字**，不是"能跑"。
+4. 每轮边界更新 §5 的清单——而 C 之后这份清单是被门禁检查的，不再靠自觉。
 
 **剩余（B 的最后一段）**：
 
