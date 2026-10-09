@@ -317,11 +317,23 @@ novelty 按第一轮发布的资产类计数，增益相对第一轮 incumbent �
 （−41%）、spec 6,909 → **6,407** 行、比值 0.877 → **0.809**，**没有删掉或拆开任何一条测试**。
 棘轮已降到 **0.85 / 5**。0.6 是方向不是可达目标——再删就是删覆盖。
 
-**仍然记账、没有做的一件事**：`acceptedAssetsBelow`（novelty 的历史输入）**没有承载它的事实**。
-两个 wiring 已经各发明了一套约定：一个从 `pointer/switched` + 修订清单推导，另一个读**探针自己协议**里
-的 `assets/published`。因为 `noveltyOf` 喂给 `selection`，两套约定可以从同一条日志得出两个不同的
-胜者，而 R03 要求历史输入冻结在事实里而不是重算。下一轮第一件事。
+**`acceptedAssetsBelow` 已结清（E1，第一个按缝切片做的）**：注入端口**删除**，改成一个所有者一个推导
+—— `src/strategy/published-assets.ts` 的 `publishedAssetsBelow(entries, environmentId, cutoff)`。
+两个 wiring 各自发明的约定（一个从 `pointer/switched` + 清单推导，一个读探针自己协议里的
+`assets/published`）都已删除。8 条 spec、9 条变异全部 caught。
 
+**按缝切片的第一轮证明了这个顺序的价值**：实现方**按签字原文**实现，然后指出缝本身自相矛盾。
+三处修正已写回 `docs/tdd-seams.md`（a：第 2 步也要按 cutoff 界定，否则 cutoff 之上的选举仍能给冻结
+历史添类；b：head 与提议槽位要按 `sameRevision` 比**内容摘要**，不是只比 id；c：两轮选出同一修订时
+取并集，并补一条 spec 把自由选择钉死）。
+
+**修掉的第二个"不可能失败的检查"**：`round-probe` 的 novelty 检查在接上 `entries` 之前**是空的**
+（日志里根本没有环境 head，`novelty 1` 来自空历史；把发布事实删掉它照样 `ok`）。现在它有真实发布
+（`release.draft → approve → publish`，真命令），删掉发布或把它移到 cutoff 之上都会红（2/2 caught）。
+`cd-probe` 的反事实同样重建为"同一份日志减去那一条 `pointer/switched`"，**实测** novelty 2/1。
+
+**下一批（已认，未做）**：E2 消费登记（R08：钉住 revision 不等于证明某个 Skill/Tool 被使用）、
+E3 轮次结案（R01：停滞要是事实而不是推断）。方法见 `docs/tdd-seams.md` §3。
 ## 12x. C/D 已落地（提交 `0f64df6`）；剩余两项在飞
 
 **绿色**：`tsc` 干净；**289 测试 / 25 文件**；**15 门禁**（7 条行为门禁全在自动路径上，每条都有合成失败探针）；
