@@ -161,11 +161,11 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 
 ## 5. 当前代码状态（`pnpm verify` 全绿）
 
-`src`/`tests` 共 26 个文件；**103 测试**；**8 门禁 + 门禁自检**（含 `dsh-alignment`）。
+`src`/`tests` 共 26 个文件；**103 测试**；**9 门禁 + 门禁自检**（含 `dsh-alignment` 与 `control-store-probe`）。
 
 - `src/protocol/{refusal,envelope,registry,fold,log}.ts` —— 一个拒绝契约、一个信封、一个版本闸+保证词表+发射者纪律、一个 fold 引擎、一条追加路径（提交队列 + 命令识别 + 提交前 dry-run）。
 - `src/task/{contract,protocol,view}.ts` —— 契约（shape 纯 / 可用性命令期）、5 种 kind、唯一读投影 + G4 派生 receipt。
-- `scripts/gates.mjs` —— **8 条门禁** + `--probe` 自检（每个静态检测器都必须能失败；两条读真实树的门禁各有独立探针）。
+- `scripts/gates.mjs` —— **9 条门禁** + `--probe` 自检（每个静态检测器都必须能失败；三条读真实树的门禁各有独立探针）。新增的第 9 条 `control-store-probe` 跑 `scripts/control-probe.mjs`，它是阶段 A 四条退出条件**唯一**的端到端证据。**为什么要加它**：v2 版本变更把那个探针弄坏时，没有任何自动路径会报警，直到我手动跑它——「证据必须在每次提交上被机械检查」这条，我此前漏在了 `pnpm verify` 之外。
 - `scripts/slice.mjs` —— 端到端冒烟（门禁 `vertical-slice-smoke` 跑它）。
 - `dsh-baseline.json` —— **DSH 基线的单一事实来源**；门禁 `dsh-alignment` 强制它。
 - `src/control/session-store.ts` + `scripts/control-probe.mjs` —— 控制 store 与双进程探针（见 §4.1）。

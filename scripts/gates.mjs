@@ -227,6 +227,10 @@ const DETECTORS = [
     detect: () => alignmentFindingsWith(readBaseline()),
   },
   {
+    name: 'control-store-probe',
+    detect: () => controlProbeFindings(runControlProbe),
+  },
+  {
     name: 'vertical-slice-smoke',
     detect: () => {
       try {
@@ -306,6 +310,39 @@ function alignmentFindingsWith(baseline) {
   return findings
 }
 
+/**
+ * The control store's end-to-end probe, as a gate.
+ *
+ * Phase A's exit conditions - mutual exclusion, a lost reply recovered, a failed barrier refused -
+ * are observed by `scripts/control-probe.mjs`, the only check that exercises them against a real
+ * DSH session and real child processes. It was part of no automated path, so a task-protocol
+ * version bump broke it and nothing reported that until the probe happened to be run by hand.
+ * A behavioural check belongs beside the other behavioural smoke.
+ *
+ * Parameterised over its runner so the self-test can hand it a synthetic failure, because this
+ * gate reads the real tree and the synthetic file set cannot reach it.
+ */
+function controlProbeFindings(run) {
+  const findings = []
+  let output
+  let status = 0
+  try {
+    output = run(ROOT)
+  } catch (error) {
+    status = typeof error.status === 'number' ? error.status : 1
+    output = `${error.stdout ?? ''}${error.stderr ?? ''}${error.message ?? ''}`
+  }
+  const tail = `${output}`.trim().split('\n').slice(-3).join(' | ')
+  if (!/failures: 0\b/.test(output)) findings.push(`the control store probe did not report zero failures: ${tail}`)
+  if (!/gaps: 0\b/.test(output)) findings.push(`the control store probe did not report zero gaps: ${tail}`)
+  if (status !== 0) findings.push(`the control store probe exited ${status}: ${tail}`)
+  return findings
+}
+
+function runControlProbe(root) {
+  return execFileSync(process.execPath, ['scripts/control-probe.mjs'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+}
+
 /** Run every detector over one file set and report per gate. */
 function scan(files, views) {
   return DETECTORS.map(({ name, detect }) => ({ name, findings: detect(files, views) }))
@@ -374,7 +411,7 @@ if (PROBE) {
   console.log('gate self-test: every detector must fire on one violating file\n')
   for (const { name, findings } of results) {
     // These two read the real tree rather than the synthetic file map, so each gets its own probe.
-    if (name === 'vertical-slice-smoke' || name === 'dsh-alignment') {
+    if (name === 'vertical-slice-smoke' || name === 'dsh-alignment' || name === 'control-store-probe') {
       console.log(`  skip  ${name} (reads the real tree; probed separately below)`)
       continue
     }
@@ -397,6 +434,15 @@ if (PROBE) {
     console.log('  FAIL  dsh-alignment did not fire on a version nobody installed')
   } else {
     console.log(`  ok    dsh-alignment fired (${misaligned.length} findings)`)
+  }
+
+  // The control-store gate reads the real tree, so its probe is a synthetic failing run.
+  const probeFindings = controlProbeFindings(() => 'ok\nfailures: 1 (the probe did not run to completion)\ngaps: 0\n')
+  if (probeFindings.length === 0) {
+    missed += 1
+    console.log('  FAIL  control-store-probe did not fire on a failing probe')
+  } else {
+    console.log(`  ok    control-store-probe fired (${probeFindings.length} findings)`)
   }
 
   console.log('')

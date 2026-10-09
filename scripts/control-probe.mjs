@@ -36,11 +36,19 @@ const HERE = fileURLToPath(import.meta.url)
 const CONTROL_ID = 'probe-graph'
 const TASK = 'probe-task'
 const RUN = 'probe-run-1'
-const REVISION = { revisionId: 'r0001', digest: 'a'.repeat(64) }
+const REVISION = { environmentId: 'probe-library', revisionId: 'r0001', digest: 'a'.repeat(64) }
 const CONTRACT = {
   goal: 'carry a control fact through a DSH session',
   inputs: ['probe/input.txt'],
-  criteria: [{ criterionId: 'observed', statement: 'the probe observed the fact', verifierRef: 'probe-verifier', verifierVersion: '1' }],
+  criteria: [
+    {
+      criterionId: 'observed',
+      statement: 'the probe observed the fact',
+      verifierRef: 'probe-verifier',
+      verifierVersion: '1',
+      implementationDigest: 'f'.repeat(64),
+    },
+  ],
 }
 const SUBJECTS = { scheduler: 'scheduler-1' }
 

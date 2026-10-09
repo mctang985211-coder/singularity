@@ -319,7 +319,7 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 | **F01 承载实验** | DSH 事件词表是**仓内生成**的；仓外扩展事件运行时不可见；`ignorable` 是唯一机制且活跃缝设不了 → **控制 store 必须骑在"已知 log-only 类型"上** | 完成（结论见 [context.md](context.md) §4.1） |
 | **RRSI 独立复核** | E09–E12 与 R05/R06 确认，并对审核自身给出两处修正（E12 被高估、R06 需拆分） | 完成 |
 
-**当前实测**：`src` 1721 行 / `tests` 1306 行 / **55 测试** / **7 门禁 + 门禁自检**，`pnpm verify` 全绿。
+**当前实测**（阶段 B 进行中）：**103 测试** / **9 门禁 + 门禁自检**；`pnpm verify` 与 `node scripts/control-probe.mjs` 全绿；`src`/`tests` 共 26 个文件。
 
 ## 待做（审核 §5 的顺序，每项含退出条件）
 
@@ -387,7 +387,7 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 | `src/task/contract.ts` | 152 | 契约：**shape（纯）与可用性（命令期）分开**；闭合契约与判据 |
 | `src/task/protocol.ts` | 334 | 5 种 kind + **三条写在 reducer 里的不变量** + 按 kind 闭合载荷 |
 | `src/task/view.ts` | 265 | 唯一读投影（含 `awaiting-run`）+ 派生 receipt（含验证器实现与产物摘要）+ agent 渲染 |
-| `scripts/gates.mjs` | 345 | **7 条门禁 + 自检**（`--probe`：每个静态检测器都必须能失败） |
+| `scripts/gates.mjs` | 470 | **9 条门禁 + 自检**（`--probe`：每个静态检测器都必须能失败；三条读真实树的门禁各有独立探针） |
 | `scripts/slice.mjs` | 154 | 端到端冒烟（第 7 条门禁跑它） |
 
 **三条不变量**（写在 reducer 里，不在提示词里）：
@@ -409,6 +409,7 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 | `source-size` | 400 行（起始上界，不是目标） | ✅ |
 | `single-conditional-owner` | 第二个条件更新（CAS）实例 | ✅ |
 | `vertical-slice-smoke` | 框架不再能折叠（跑真实纵切） | ✅ |
+| `control-store-probe` | 阶段 A 的退出条件悄悄失效（跑真实 DSH 会话与真实子进程） | ✅（v2 变更真的弄坏过它，它报了 `failures: 1`） |
 
 **门禁自检**：`node scripts/gates.mjs --probe` 让每个静态检测器面对一个同时违反全部六条的合成文件 + 一个"只在注释里提到别人导出"的文件，**每一个都必须触发**。它已经两次抓到真实缺陷：
 
