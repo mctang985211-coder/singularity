@@ -273,9 +273,9 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 **本轮新增的观测**：
 - `scripts/slice-b.mjs`（门禁）——真实纵切 22 项全过：父提出分解 → 子有依赖与责任 → run 钉住真实 revision → bubble 声明真实输入 → **真实验证器 spawn 出去读产物并裁决** → verdict 落为事实 → 结算 → receipt（cutoff + 真实消费 + 产物摘要）。
 - `scripts/recovery-probe.mjs`（门禁）——两个边界各一次真实 SIGKILL，21 项全过。**它抓到我命令边界的一个真实缺陷**：前置条件原先在 store 解析命令身份之前求值，丢失答复因此无法通过命令面恢复；修法是把前置条件放进 append 路径（身份之后、reducer 之前），变异证明顺序改回去即以那句拒绝失败。
-- `scripts/model-smoke.mjs`——**真实模型补全**（宿主 profile 的 commandcode 路由，`deepseek/deepseek-v4.1-flash`），实测 16 chunks / 收敛 / `"four"` / 2956ms，只断言结构性三条。**边界**：这是一次真实补全，不是"真实模型驱动带工具的 agent turn"；后者需要手工挂载 agent-loop 一组插件（宿主用 `dsh-base` 的 profile bundle 组合，该包无运行时 API）。**刻意不做门禁**（依赖网络与凭据）。
+- `scripts/model-smoke.mjs`——**真实模型补全**（宿主 profile 的 commandcode 路由，`deepseek/deepseek-v4.1-flash`），实测 16 chunks / 收敛 / `"four"` / 2956ms，只断言结构性三条。**两段**：§1 一次真实补全；§2 **真实模型驱动真实 agent turn**——手工挂载 runtime track 用的同一组插件（persistence/sessions/agents/llm/tools/systemPrompt/projections/agentLoop）但**不注册桩适配器**，实测 `turn/start … assistant/message … turn/end`，并从记录的 `assistant/message` 事件读出模型产出文本。断言只取结构性三条。**刻意不做门禁**（依赖网络与凭据）。
 
-**仍未做**：真实模型驱动一个带工具的 agent turn（见上）；group/router（上游没有，且无消费者）。
+**仍未做**：把"真实模型"与"真实 Task 管线"接成同一条（见 `k1-evidence.md` 倒数第二行，并注意不能断言判决为 pass）；group/router（上游没有，且无消费者）。
 
 ## 11. 下一轮的第一批动作
 
