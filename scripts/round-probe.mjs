@@ -245,13 +245,13 @@ async function main() {
         ...over,
       })
 
-    const openCommands = () =>
+    const openCommands = (calibration = FLOOR) =>
       createStrategyCommands({
         store,
         rounds: ROUNDS,
         firstBudget: FIRST_BUDGET,
         minimumBudget: MINIMUM_BUDGET,
-        calibration: FLOOR,
+        calibration,
         // The commit region hands the reader a fixed cut; the reader turns it into the log position
         // its historical reads are bounded by.
         measuresAt: cut => sliceAt(cut.entries().length),
@@ -348,6 +348,32 @@ async function main() {
     const late = await refusalOf(() => submit('round-1', 0, { evaluationId: 'e-0', revision: CANDIDATE_0 }))
     check('a submission after the close is refused', late.code === 'illegal-transition' && late.detail.includes('closed'), late.code)
 
+    // ---------------------------------------------------------------- 6b. the incumbent is a floor
+    // A candidate well below the incumbent but almost free: the in-band cost rule would admit it
+    // (100*-0.15 - 15*-9 > 0), and only the incumbent's floor refuses it. The band is the round's
+    // calibration, so the same facts under a declared, wider band are admissible.
+    await open('round-floor', 5)
+    await record(result('e-floor', CANDIDATE_0, CALIBER_A, [0.25, 0.25]))
+    await submit('round-floor', 0, { evaluationId: 'e-floor', revision: CANDIDATE_0 })
+    const stateFloor = () => store.load().stateOf(STRATEGY_PROTOCOL, STRATEGY_VERSION, 'round-floor')
+    const floored = projectRound(stateFloor(), sliceAt(head()), FLOOR)
+    check(
+      'a candidate below the incumbent floor is inadmissible',
+      floored.slots[0].admissible === false && floored.slots[0].reason.includes('below the admissible floor'),
+      floored.slots[0].reason ?? '',
+    )
+    check('the reason names the measured band it was judged against', floored.slots[0].reason.includes('the measured noise band'))
+    const belowFloor = await refusalOf(() => commands.decideRound({ commandId: 'decide-floor', roundId: 'round-floor' }))
+    check('a below-floor winner cannot be decided into the log', belowFloor.code === 'illegal-transition', belowFloor.code)
+    check('the refused round has no decision fact', stateFloor().decision === undefined)
+
+    const lenient = openCommands({ floor: 0.2, source: 'declared' })
+    const widened = projectRound(stateFloor(), sliceAt(head()), { floor: 0.2, source: 'declared' })
+    check('the same candidate clears a declared, wider band', widened.slots[0].admissible === true, widened.slots[0].reason ?? '')
+    check('the wider band is the one the decision records', (await lenient.decideRound({ commandId: 'decide-floor-declared', roundId: 'round-floor' })).kind === STRATEGY_KINDS.roundDecided)
+    check('the admitted slot is the winner under the declared band', stateFloor().decision.winner === 0)
+    check('the outcome names the declared band', stateFloor().decision.outcomes[0].reason.includes('(declared)'), stateFloor().decision.outcomes[0].reason)
+
     // ---------------------------------------------------------------- 7. gains and novelty are frozen
     // A re-measurement of the incumbent and a publication of `skill` land **above** the round's
     // cutoff. The round's projection must not move: that is R03's measured counterexample, where
@@ -407,6 +433,7 @@ async function main() {
     )
     console.log(`budget: round 1 = ${firstBudget}, round ${ROUNDS} = ${lastBudget}, floor = ${MINIMUM_BUDGET}`)
     console.log(`decision: winner slot ${decision.winner} of ${decision.outcomes.length} submitted slots`)
+    console.log(`floor: ${floored.slots[0].quality} against incumbent ${FLOOR.source} band ${FLOOR.floor} — inadmissible; declared band 0.2 — admitted`)
     if (failures.length > 0) {
       console.log(`round-probe: ${failures.length} check(s) failed`)
       for (const failure of failures) console.log(`  - ${failure}`)

@@ -230,15 +230,17 @@ describe('the shape is closed and the surface is exactly one kind', () => {
     expect(refusal.detail).toContain(ENVIRONMENT_ROLE)
   })
 
-  it('declares one kind at version 1, claims no conditional update, and the codes are accounted for', () => {
+  it('owns the one conditional update, and the codes are accounted for', () => {
     const registry = environmentRegistry()
     expect(ENVIRONMENT_PROTOCOL).toBe('environment')
-    expect(ENVIRONMENT_VERSION).toBe(1)
+    expect(ENVIRONMENT_VERSION).toBe(2)
     expect(registry.versionsOf(ENVIRONMENT_PROTOCOL)).toEqual([ENVIRONMENT_VERSION])
     // Derived from the constants rather than spelled out, so adding a kind to this protocol is one
     // edit and the assertion keeps meaning what it says: the declared set is exactly the constants.
     expect(registry.kindsOf(ENVIRONMENT_PROTOCOL, ENVIRONMENT_VERSION)).toEqual([...Object.values(ENVIRONMENT_KINDS)].sort())
-    expect(registry.conditionalOwner()).toBeUndefined()
+    // The environment owns the stack's single compare-and-swap: the pointer switch is the only
+    // place a fact must be checked against an expected prior state inside the commit queue.
+    expect(registry.conditionalOwner()).toBe(ENVIRONMENT_PROTOCOL)
     expect(REFUSAL_CODES).toContain<RefusalCode>('revision-conflict')
     expect(REFUSAL_CODES).toContain<RefusalCode>('unknown-revision')
   })

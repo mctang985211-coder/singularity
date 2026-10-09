@@ -6,9 +6,8 @@
  * ran in a marker file, so "the implementation actually ran" is a byte on disk rather than a call, and
  * each refusal that must happen *before* it runs is pinned by the marker's absence.
  *
- * The measurement *port* is the only thing a test supplies, because execution is deliberately a port
- * in `src/` (`execution.ts` runs nothing). Where the subject is the measurement check — digest
- * lookup, input hashing, the identity of what ran — the port is still the real adapter.
+ * The measurement *port* is the only thing a test supplies: execution is deliberately a port in
+ * `src/`, and where the subject is a measurement check, that port is still the real adapter.
  */
 
 import { execFile } from 'node:child_process'
@@ -40,8 +39,8 @@ const sha256 = (bytes: string | Buffer): string => createHash('sha256').update(b
 
 /**
  * The measurement program itself, as real bytes on disk. It records the label it was run under in a
- * marker file, writes its artifact, prints its number on stdout, and exits non-zero for a `failing`
- * label or a BAD input — so one program produces a trial, a miss, and both selftest verdicts.
+ * marker file, writes its artifact, prints its number, and exits non-zero for a `failing` label or a
+ * BAD input — so one program produces a trial, a miss, and both selftest verdicts.
  */
 const PROGRAM_SOURCE = `import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 const [inputPath, artifactPath, markerPath, label, quality, cost] = process.argv.slice(2)
@@ -208,13 +207,11 @@ describe('the production measurement', () => {
     const uncosted = await runMeasurement(await request({ command: commandFor('measured', '0.5') }))
     if (uncosted.kind !== 'trial') throw new Error('expected a trial')
     expect(uncosted.trial.quality).toBe(0.5)
-    expect(uncosted.trial.cost).toBeUndefined()
     expect('cost' in uncosted.trial).toBe(false)
   })
 
   it('reports a program that produced no number as a miss, never as a zero', async () => {
     const outcome = await runMeasurement(await request({ command: commandFor('failing', '0.9') }))
-    expect(outcome.kind).toBe('missed')
     if (outcome.kind !== 'missed') throw new Error('expected a miss')
     expect(outcome.reason).toContain('exited 1')
     expect(outcome.reason).toContain('produced no number')
@@ -299,8 +296,8 @@ describe('the production measurement', () => {
   })
 
   it('refuses an artifact that cannot be read after the run, by name', async () => {
-    // The program runs and its number is formed; the artifact is then taken away before the digest
-    // can be read, so there are no bytes this measurement could be bound to.
+    // The program runs; the artifact is then taken away before the digest can be read, so there are
+    // no bytes this measurement could be bound to.
     const vanishing: RealMeasurement = async execution => {
       const reported = await realMeasurement()(execution)
       await rm(execution.artifactPath, { force: true })
@@ -313,24 +310,24 @@ describe('the production measurement', () => {
   })
 
   it('refuses a request that is not the frozen shape, by name', async () => {
-    const badInputDigest = await request({ inputs: [{ name: INPUT_NAME, digest: 'not-a-digest' }] })
-    expect((await asyncRefusalOf(() => runMeasurement(badInputDigest))).code).toBe('malformed-payload')
-    const noMeasure = await request({ measure: undefined as unknown as RealMeasurement })
-    expect((await asyncRefusalOf(() => runMeasurement(noMeasure))).code).toBe('malformed-payload')
-    const escaping = await request({ artifactPath: '../outside.txt' })
-    expect((await asyncRefusalOf(() => runMeasurement(escaping))).code).toBe('malformed-payload')
-    const absolute = await request({ inputs: [{ name: input, digest: sha256(INPUT_BYTES) }] })
-    expect((await asyncRefusalOf(() => runMeasurement(absolute))).code).toBe('malformed-payload')
-    const duplicated = await request({
-      inputs: [
-        { name: INPUT_NAME, digest: sha256(INPUT_BYTES) },
-        { name: INPUT_NAME, digest: sha256('other bytes') },
-      ],
-    })
-    expect((await asyncRefusalOf(() => runMeasurement(duplicated))).code).toBe('malformed-payload')
+    const codeOf = async (body: MeasurementRequest) => (await asyncRefusalOf(() => runMeasurement(body))).code
+    expect(await codeOf(await request({ inputs: [{ name: INPUT_NAME, digest: 'not-a-digest' }] }))).toBe('malformed-payload')
+    expect(await codeOf(await request({ measure: undefined as unknown as RealMeasurement }))).toBe('malformed-payload')
+    expect(await codeOf(await request({ artifactPath: '../outside.txt' }))).toBe('malformed-payload')
+    expect(await codeOf(await request({ inputs: [{ name: input, digest: sha256(INPUT_BYTES) }] }))).toBe('malformed-payload')
+    const duplicated = await request({ inputs: [{ name: INPUT_NAME, digest: sha256(INPUT_BYTES) }, { name: INPUT_NAME, digest: sha256('other bytes') }] })
+    expect(await codeOf(duplicated)).toBe('malformed-payload')
     // A metric's shape is the contract's rule, so the refusal is the contract's own name for it.
-    const badMetric = await request({ metric: await criterion({ implementationDigest: 'short' }) })
-    expect((await asyncRefusalOf(() => runMeasurement(badMetric))).code).toBe('malformed-contract')
+    expect(await codeOf(await request({ metric: await criterion({ implementationDigest: 'short' }) }))).toBe('malformed-contract')
+  })
+
+  it('refuses a port report that is neither a number nor a named miss', async () => {
+    const lying = (report: MeasuredNumber | MissedMeasurement): RealMeasurement => async () => report
+    const notANumber = await asyncRefusalOf(async () => runMeasurement(await request({ measure: lying({ quality: '0.9' as unknown as number, implementationDigest: await programDigest() }) })))
+    expect(notANumber.code).toBe('malformed-payload')
+    expect(notANumber.detail).toContain('quality')
+    const reasonless = await asyncRefusalOf(async () => runMeasurement(await request({ measure: lying({ reason: '' }) })))
+    expect(reasonless.code).toBe('malformed-payload')
   })
 })
 
@@ -364,9 +361,8 @@ describe('the measurement adapter', () => {
 
   it('leaves an unreported cost absent, and reports a failed program as a miss it still measured', async () => {
     const uncosted = await invoke({ command: commandFor('measured', '0.25'), artifactPath: artifact, inputs: [] })
-    const first = JSON.parse(uncosted.stdout.split('\n')[0] ?? '{}') as { cost?: number }
     expect(uncosted.code).toBe(0)
-    expect('cost' in first).toBe(false)
+    expect('cost' in (JSON.parse(uncosted.stdout.split('\n')[0] ?? '{}') as { cost?: number })).toBe(false)
     const missed = await invoke({ command: commandFor('failing'), artifactPath: artifact, inputs: [] })
     expect(missed.code).toBe(0)
     expect(missed.stdout).toContain(OK)

@@ -5,17 +5,58 @@
       "protocol": "agent",
       "version": 1,
       "subject": "the agent id",
-      "kinds": ["agent/opened"],
+      "kinds": [
+        "agent/opened"
+      ],
       "producedBy": "scripts/*.mjs deployments (a deployment opens the node before recording it)",
       "readBy": "src/task/commands.ts requireOpenedNode"
     },
     {
       "protocol": "environment",
-      "version": 1,
+      "version": 2,
       "subject": "the environment id",
-      "kinds": ["revision/created"],
-      "producedBy": "scripts/*.mjs deployments and tests",
-      "readBy": "src/environment/binding.ts assertPinnedRevision, src/task/commands.ts (the pin gate)"
+      "kinds": [
+        "pointer/switched",
+        "revision/created"
+      ],
+      "producedBy": "src/environment/protocol.ts revision/created (a deployment mints revisions) and src/release/commands.ts publish (the one conditional update)",
+      "readBy": "src/environment/binding.ts assertPinnedRevision, src/task/commands.ts (the pin gate), src/release/commands.ts (the head it expects)"
+    },
+    {
+      "protocol": "measure",
+      "version": 1,
+      "subject": "the evaluation id",
+      "kinds": [
+        "constraint/checked",
+        "evaluation/opened",
+        "trial/missed",
+        "trial/recorded"
+      ],
+      "producedBy": "src/measure/commands.ts createMeasureCommands; the three verification kinds are emitted by the implementation the frozen plan names, by content digest",
+      "readBy": "src/measure/view.ts projectEvaluation (the aggregate, the missing denominator and the admissibility of one candidate)"
+    },
+    {
+      "protocol": "release",
+      "version": 1,
+      "subject": "the environment whose head is moving",
+      "kinds": [
+        "release/approved",
+        "release/drafted"
+      ],
+      "producedBy": "src/release/commands.ts createReleaseCommands (draft, and approve behind the native approval seam)",
+      "readBy": "src/release/commands.ts publish (a head may only move to an approved revision)"
+    },
+    {
+      "protocol": "strategy",
+      "version": 1,
+      "subject": "the round id",
+      "kinds": [
+        "candidate/submitted",
+        "round/decided",
+        "round/opened"
+      ],
+      "producedBy": "src/strategy/commands.ts createStrategyCommands (the submission gate is a precondition of candidate/submitted)",
+      "readBy": "src/strategy/view.ts projectRound (each slot's aggregate, gain and admissibility, then the selection)"
     },
     {
       "protocol": "task",

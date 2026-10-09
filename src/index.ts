@@ -129,9 +129,96 @@ export {
   ENVIRONMENT_PROTOCOL,
   ENVIRONMENT_ROLE,
   ENVIRONMENT_VERSION,
+  PUBLISHER_ROLE,
   type EnvironmentState,
   type RevisionState,
 } from './environment/protocol.ts'
+
+export {
+  declareMeasureProtocol,
+  MEASURE_KINDS,
+  MEASURE_PROTOCOL,
+  MEASURE_VERSION,
+  type ConstraintCheck,
+  type EvaluationMetric,
+  type EvaluationRun,
+  type EvaluationState,
+  type EvaluationWeights,
+  type MissedTrial,
+  type TrialRecord,
+} from './measure/protocol.ts'
+export {
+  caliberDigestOf,
+  caliberOf,
+  projectEvaluation,
+  type Caliber,
+  type ConstraintView,
+  type EvaluationView,
+  type MissingSlot,
+} from './measure/view.ts'
+export {
+  createMeasureCommands,
+  type EvaluationPlanInput,
+  type MeasureCommandOptions,
+  type MeasureCommands,
+  type TrialInput,
+} from './measure/commands.ts'
+export {
+  runMeasurement,
+  type MeasuredTrial,
+  type MeasurementOutcome,
+  type MeasurementRequest,
+  type MissedMeasurement,
+  type RealMeasurement,
+} from './measure/execution.ts'
+
+export {
+  editBudgetFor,
+  noveltyOf,
+  select,
+  type Calibration,
+  type Candidate,
+  type History,
+  type Measurement,
+  type Outcome,
+  type Selection,
+} from './strategy/decision.ts'
+export {
+  declareStrategyProtocol,
+  STRATEGY_KINDS,
+  STRATEGY_PROTOCOL,
+  STRATEGY_ROLE,
+  STRATEGY_VERSION,
+  type CandidateSubmission,
+  type EditAsset,
+  type RoundDecisionRecord,
+  type RoundPlan,
+  type RoundState,
+  type StructuralEdit,
+} from './strategy/protocol.ts'
+export { projectRound, type RoundDecision } from './strategy/view.ts'
+export {
+  createStrategyCommands,
+  type DecideRoundInput,
+  type OpenRoundInput,
+  type StrategyCommandOptions,
+  type StrategyCommands,
+  type SubmitCandidateInput,
+} from './strategy/commands.ts'
+
+export {
+  declareReleaseProtocol,
+  APPROVER_ROLE,
+  RELEASE_KINDS,
+  RELEASE_PROTOCOL,
+  RELEASE_VERSION,
+  type ReleaseState,
+} from './release/protocol.ts'
+export {
+  createReleaseCommands,
+  type ReleaseCommandOptions,
+  type ReleaseCommands,
+} from './release/commands.ts'
 
 export {
   assertVerifierRunnable,

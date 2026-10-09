@@ -19,9 +19,21 @@
  *    incomplete measurement is inadmissible too, with the missing trial slots named: `review.md`
  *    R06's counterexample reported `quality` from the one observation it had while quietly dropping
  *    the plan's denominator.
+ * 4. **The incumbent's own quality is a floor, and its band is the round's calibration.** `select`
+ *    cannot enforce upstream's `S' >= S* - delta` (`rrsi/selection.py:107`): `S*` is not one of its
+ *    inputs, so a candidate far below the incumbent can still be admitted when its cost saving is
+ *    large enough. The floor therefore lives here, with the band taken from the round's own
+ *    `Calibration` — a `measured` floor and a `declared` one behave differently because the value is
+ *    the band, and the source is named in the reason (R06). Quality is floored; `constraintsMet` is
+ *    not: a below-floor candidate and an out-of-bounds one carry two different reasons.
  *
  * Every submitted slot gets a decision and a reason, admitted or not. `winner: null` means nothing
  * was admitted and the incumbent stands.
+ *
+ * One consequence a first reader will meet: a round opened with `historyCutoff: 0` on a fresh log has
+ * nothing below its cutoff, so the incumbent has no frozen aggregate, every slot has no frozen gain,
+ * and the round can only retain the incumbent. That is the correct reading of a frozen history — the
+ * cutoff has to be the position after the incumbent's own measurement — not a broken round.
  *
  * @module singularity-core/strategy/view
  */
@@ -159,14 +171,16 @@ function assertCalibration(calibration: Calibration): void {
  *
  * The order is the order of the questions a reader asks: is this measurement even about this
  * candidate (the two anchors), did a hard constraint fail, is the measurement complete, is there a
- * frozen baseline to make its gain a gain at all, and — last, because it is the least specific —
- * does the measure slice refuse it for a reason only it can see.
+ * frozen baseline to make its gain a gain at all, does its quality clear the incumbent's floor, and —
+ * last, because it is the least specific — does the measure slice refuse it for a reason only it can
+ * see.
  */
 function inadmissibleReason(
   evaluation: RoundEvaluation,
   submission: CandidateSubmission,
   incumbent: RevisionRef,
   incumbentAggregate: FrozenAggregate | null,
+  calibration: Calibration,
   round: number,
 ): string | null {
   if (!sameRevision(evaluation.baseline, incumbent))
@@ -191,9 +205,14 @@ function inadmissibleReason(
     }; the denominator keeps the plan's trials (R06), so this aggregate is not this candidate's score — finish the trials or record them as missed`
   if (incumbentAggregate === null)
     return `the incumbent ${describeRevision(incumbent)} has no aggregate below the round's frozen history cutoff, so this candidate has no frozen gain to place against the noise floor; measure the incumbent first, or this round can only retain it`
-  // Last, because it is the least specific: the round's own reading of the constraints and the
-  // trials names what it can see itself, and this fallback carries a refusal only the measure slice
-  // could know (a broken trial identity, an unbound input, a retired implementation).
+  // Upstream's floor, which `select` cannot apply because `S*` is not one of its inputs: a candidate
+  // more than the band below the round's incumbent is not a candidate, however cheap it is.
+  const floor = incumbentAggregate.quality - calibration.floor
+  if (evaluation.quality < floor)
+    return `quality ${evaluation.quality.toFixed(4)} sits ${(floor - evaluation.quality).toFixed(4)} below the admissible floor ${floor.toFixed(4)} (round ${round}'s incumbent ${incumbentAggregate.quality.toFixed(4)} less the ${calibration.source} noise band ${calibration.floor.toFixed(4)}); a cost saving below the floor is not a gain, so this candidate does not enter the comparison — improve it, or propose it in a round whose incumbent it can clear`
+  // Last, because it is the least specific: the round's own reading of the constraints, the trials
+  // and the floor names what it can see itself, and this fallback carries a refusal only the measure
+  // slice could know (a broken trial identity, an unbound input, a retired implementation).
   if (!evaluation.admissible)
     return `the measure slice refuses it: ${evaluation.why ?? 'no reason recorded, which is itself a reason not to pool it'}`
   return null
@@ -204,6 +223,7 @@ function plannedOf(
   slice: MeasureSlice,
   plan: { incumbent: RevisionRef; round: number; historyCutoff: number },
   incumbentAggregate: FrozenAggregate | null,
+  calibration: Calibration,
 ): PlannedSlot {
   const evaluation = slice.evaluationOf(submission.evaluationId)
   // An unmeasured slot has met no constraint: absence of a judgement is not a passed one.
@@ -215,7 +235,7 @@ function plannedOf(
   return {
     submission,
     evaluation,
-    reason: inadmissibleReason(evaluation, submission, plan.incumbent, incumbentAggregate, plan.round),
+    reason: inadmissibleReason(evaluation, submission, plan.incumbent, incumbentAggregate, calibration, plan.round),
     gain: incumbentAggregate === null ? null : evaluation.quality - incumbentAggregate.quality,
     costGain: frozenCostGain,
     constraintsMet: evaluation.constraints.every(constraint => constraint.met === true),
@@ -294,7 +314,7 @@ export function projectRound(state: RoundState, slice: MeasureSlice, calibration
     )
   }
 
-  const planned = submissions.map(submission => plannedOf(submission, slice, plan, incumbentAggregate))
+  const planned = submissions.map(submission => plannedOf(submission, slice, plan, incumbentAggregate, calibration))
 
   // The gains the decision layer sees are the frozen ones — one entry per slot whose two sides were
   // both measurable. A gain that cannot be computed is absent rather than invented as 0.

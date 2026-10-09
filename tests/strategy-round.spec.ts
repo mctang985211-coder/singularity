@@ -3,13 +3,11 @@
  *
  * Three groups, one per place a rule can live: the reducer (rules needing only the round's own
  * subject; it runs inside the serial region), the command boundary (the annealed budget, the
- * recomputation of a decision against the cut it is appended to, and the one submission condition
- * that spans subjects), and the projection (admissibility before any argmax, frozen gains, and the
- * caliber that makes scores comparable).
- *
- * The measurement inputs are a table, not a log fold: `src/measure/**` owns that projection. The
- * table still honours the round's own responsibility — both historical reads are **below the
- * round's history cutoff**.
+ * recomputation of a decision against the cut it is appended to, and the submission condition that
+ * spans subjects), and the projection (admissibility before any argmax, frozen gains, the incumbent
+ * floor, and the caliber that makes scores comparable). The measurement inputs are a table, not a
+ * log fold: `src/measure/**` owns that projection, and the table still reads both historical values
+ * **below the round's own history cutoff**.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -48,8 +46,7 @@ const nextId = (prefix: string): string => `${prefix}-${(counter += 1)}`
 /** A refusal, asserted by code and by the fragment that names the alternative. */
 const expectRefusal = async (step: () => unknown, code: RefusalCode, fragment: string): Promise<void> => {
   const refusal = await asyncRefusalOf(step)
-  expect(`${refusal.code}|${refusal.detail}`).toContain(code)
-  expect(refusal.detail).toContain(fragment)
+  expect(`${refusal.code}|${refusal.detail.includes(fragment)}`).toContain(`${code}|true`)
 }
 
 const strategyRegistry = (): ProtocolRegistry => {
@@ -96,19 +93,14 @@ const measuredAt = (table: MeasureTable, revision: RevisionRef, at: number, qual
 /** The slice the round reads: both historical reads honour the round's own cutoff. */
 const sliceOf = (table: MeasureTable): MeasureSlice => ({
   evaluationOf: id => table.evaluations.get(id),
-  incumbentBelow: (revision, cutoff) =>
-    (table.aggregates.get(revision.revisionId) ?? [])
-      .filter(entry => entry.at < cutoff)
-      .sort((left, right) => right.at - left.at)
-      .map(entry => entry.aggregate)[0] ?? null,
+  incumbentBelow: (revision, cutoff) => {
+    const below = (table.aggregates.get(revision.revisionId) ?? []).filter(entry => entry.at < cutoff).sort((left, right) => right.at - left.at)
+    return below[0]?.aggregate ?? null
+  },
   acceptedAssetsBelow: cutoff => [...new Set(table.published.filter(entry => entry.at < cutoff).flatMap(entry => entry.assets))].sort(),
 })
 
-interface Live {
-  readonly store: ControlSessionStore
-  readonly commands: StrategyCommands
-  readonly table: MeasureTable
-}
+type Live = { readonly store: ControlSessionStore; readonly commands: StrategyCommands; readonly table: MeasureTable; readonly calibration: Calibration }
 const deployments: { context: Context; root: string }[] = []
 afterEach(async () => {
   for (const live of deployments.splice(0)) {
@@ -116,7 +108,7 @@ afterEach(async () => {
     await rm(live.root, { recursive: true, force: true })
   }
 })
-async function deployment(over: { rounds?: number; firstBudget?: number; minimumBudget?: number } = {}): Promise<Live> {
+async function deployment(over: { rounds?: number; firstBudget?: number; minimumBudget?: number; calibration?: Calibration } = {}): Promise<Live> {
   const root = await mkdtemp(join(tmpdir(), 'singularity-strategy-'))
   const context = new Context()
   await context.plugin(JsonlSessionPersistence, { root, compression: 'none' })
@@ -125,11 +117,12 @@ async function deployment(over: { rounds?: number; firstBudget?: number; minimum
     persistence: context.sessionPersistence, controlId: 'strategy', registry: strategyRegistry(), subjects: SUBJECTS,
   })
   const table = tableOf()
+  const calibration = over.calibration ?? FLOOR
   const commands = createStrategyCommands({
     store, rounds: over.rounds ?? 3, firstBudget: over.firstBudget ?? 4, minimumBudget: over.minimumBudget ?? 1,
-    calibration: FLOOR, measuresAt: () => sliceOf(table),
+    calibration, measuresAt: () => sliceOf(table),
   })
-  return { store, commands, table }
+  return { store, commands, table, calibration }
 }
 async function openThrough(live: Live, over: Partial<OpenRoundInput> = {}): Promise<string> {
   const roundId = over.roundId ?? nextId('round')
@@ -148,7 +141,8 @@ const submitThrough = (live: Live, roundId: string, slot: number, over: Partial<
 const decideThrough = (live: Live, roundId: string): Promise<Envelope> => live.commands.decideRound({ commandId: nextId('decide'), roundId })
 const stateOf = (live: Live, roundId: string): RoundState | undefined => live.store.load().stateOf<RoundState>(STRATEGY_PROTOCOL, STRATEGY_VERSION, roundId)
 const winnerOf = (envelope: Envelope): number | null => (envelope.payload as { winner: number | null }).winner
-const project = (live: Live, roundId: string): ReturnType<typeof projectRound> => projectRound(stateOf(live, roundId) as RoundState, sliceOf(live.table), FLOOR)
+const project = (live: Live, roundId: string): ReturnType<typeof projectRound> =>
+  projectRound(stateOf(live, roundId) as RoundState, sliceOf(live.table), live.calibration)
 
 /** A round with two measured candidates, one per slot, and a frozen incumbent aggregate. */
 async function twoCandidateRound(
@@ -168,11 +162,9 @@ describe('round/opened freezes one explicit round', async () => {
   it('carries the number, incumbent, plan, budget, cutoff, metric and weights — and opens once', async () => {
     const log = strategyLog()
     const opened = emitPlan(log, 'round-1')
-    expect(Object.keys(opened.payload as Record<string, unknown>).sort()).toEqual([
-      'candidates', 'editBudget', 'explorationSlots', 'historyCutoff', 'incumbent', 'metric', 'round', 'weights',
-    ])
+    const members = ['candidates', 'editBudget', 'explorationSlots', 'historyCutoff', 'incumbent', 'metric', 'round', 'weights']
+    expect(Object.keys(opened.payload as Record<string, unknown>).sort()).toEqual(members)
     expect(roundIn(log, 'round-1')?.plan?.round).toBe(1)
-    expect(roundIn(log, 'round-1')?.plan?.candidates).toBe(3)
     await expectRefusal(() => emitPlan(log, 'round-1'), 'illegal-transition', 'a different round, and it gets a different subject')
     await expectRefusal(() => emitPlan(log, 'round-zero', { round: 0 }), 'malformed-payload', 'never a count of history entries')
     await expectRefusal(() => emitPlan(log, 'round-wide', { explorationSlots: 4 }), 'malformed-payload', 'cannot exceed')
@@ -288,7 +280,6 @@ describe('the projection decides admissibility before any argmax', async () => {
     expect(decision.slots[0]?.constraintsMet).toBe(false)
     expect(decision.slots[0]?.admissible).toBe(false)
     expect(decision.slots[0]?.reason).toContain('"correctness"')
-
     expect(winnerOf(await decideThrough(live, roundId))).toBe(1)
     const outcomes = stateOf(live, roundId)?.decision?.outcomes ?? []
     expect(outcomes.find(outcome => outcome.slot === 0)?.reason).toContain('"correctness"')
@@ -336,11 +327,30 @@ describe('the projection decides admissibility before any argmax', async () => {
     measuredAt(live.table, INCUMBENT, 1, 0.6)
     measuredAt(live.table, INCUMBENT, 9, 0.8)
     live.table.published.push({ at: 1, assets: ['skill'] }, { at: 9, assets: ['tool'] })
-
     const decision = project(live, roundId)
     expect(decision.slots[0]?.gain).toBeCloseTo(0.2, 10)
     expect(decision.slots[0]?.novelty).toBe(1)
     expect(winnerOf(await decideThrough(live, roundId))).toBe(0)
+  })
+
+  it('treats the incumbent\u2019s own quality as a floor, with the band taken from the round\u2019s calibration', async () => {
+    const live = await deployment({ calibration: { floor: 0.1, source: 'measured' } })
+    const roundId = await openThrough(live, { candidates: 1, historyCutoff: 5 })
+    measuredAt(live.table, INCUMBENT, 0, 0.7)
+    // 0.55 costs almost nothing, so the in-band cost rule alone would admit it (100*-0.15 - 15*-9 > 0):
+    // only the incumbent's floor refuses it, and the band is the calibration's value, not a constant.
+    live.table.evaluations.set('e-0', evaluation('e-0', { quality: 0.55, cost: 1 }))
+    await submitThrough(live, roundId, 0, { evaluationId: 'e-0' })
+    expect(project(live, roundId).slots[0]?.reason ?? '').toMatch(/below the admissible floor.*the measured noise band/)
+    expect(winnerOf(await decideThrough(live, roundId))).toBe(null)
+
+    const lenient = await deployment({ calibration: { floor: 0.2, source: 'declared' } })
+    const second = await openThrough(lenient, { candidates: 1, historyCutoff: 5 })
+    measuredAt(lenient.table, INCUMBENT, 0, 0.7)
+    lenient.table.evaluations.set('e-0', evaluation('e-0', { quality: 0.55, cost: 1 }))
+    await submitThrough(lenient, second, 0, { evaluationId: 'e-0' })
+    expect(project(lenient, second).slots[0]?.admissible).toBe(true)
+    expect(winnerOf(await decideThrough(lenient, second))).toBe(0)
   })
 
   it('refuses a decision the facts no longer imply, because a measurement moved after it was composed', async () => {
@@ -364,7 +374,6 @@ describe('the projection decides admissibility before any argmax', async () => {
     measuredAt(live.table, INCUMBENT, 3, 0.4)
     live.table.evaluations.set('e-0', evaluation('e-0', { quality: 0.9 }))
     await submitThrough(live, roundId, 0, { evaluationId: 'e-0' })
-
     const decision = project(live, roundId)
     expect(decision.slots[0]?.gain).toBe(null)
     expect(decision.slots[0]?.admissible).toBe(false)

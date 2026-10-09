@@ -96,6 +96,23 @@ function exportedNames(code) {
   return names
 }
 
+/**
+ * The gates that read the real tree by running a script and reading the verdict line it prints.
+ *
+ * One entry each, because three consumers need the same three facts: the detector, the probe's
+ * synthetic failing run (which needs the markers to know that a script reporting failure is
+ * reported), and the skip line that says which gates the synthetic file set cannot reach.
+ */
+const SCRIPT_GATES = [
+  { name: 'control-store-probe', label: 'the control store probe', script: 'scripts/control-probe.mjs', markers: ['failures: 0', 'gaps: 0'] },
+  { name: 'root-child-slice', label: 'the root/child slice', script: 'scripts/slice-b.mjs', markers: ['slice-b: OK'] },
+  { name: 'recovery-probe', label: 'the recovery probe', script: 'scripts/recovery-probe.mjs', markers: ['recovery-probe: OK'] },
+  { name: 'strategy-vectors', label: 'the strategy vector corpus', script: 'scripts/strategy-vectors.mjs', markers: ['strategy-vectors: OK'] },
+  { name: 'measure-probe', label: 'the measurement probe', script: 'scripts/measure-probe.mjs', markers: ['measure-probe: OK'] },
+  { name: 'round-probe', label: 'the round probe', script: 'scripts/round-probe.mjs', markers: ['round-probe: OK'] },
+  { name: 'release-probe', label: 'the release probe', script: 'scripts/release-probe.mjs', markers: ['release-probe: OK'] },
+]
+
 /** One detector per gate. Each takes the file list and the code-stripped texts. */
 const DETECTORS = [
   {
@@ -231,21 +248,11 @@ const DETECTORS = [
     realTree: true,
     detect: () => alignmentFindingsWith(readBaseline()),
   },
-  {
-    name: 'control-store-probe',
+  ...SCRIPT_GATES.map(gate => ({
+    name: gate.name,
     realTree: true,
-    detect: () => scriptFindings('the control store probe', ['failures: 0', 'gaps: 0'], runControlProbe),
-  },
-  {
-    name: 'root-child-slice',
-    realTree: true,
-    detect: () => scriptFindings('the root/child slice', ['slice-b: OK'], runRootChildSlice),
-  },
-  {
-    name: 'recovery-probe',
-    realTree: true,
-    detect: () => scriptFindings('the recovery probe', ['recovery-probe: OK'], runRecoveryProbe),
-  },
+    detect: () => scriptFindings(gate.label, gate.markers, runScript(gate.script)),
+  })),
 ]
 
 /**
@@ -451,10 +458,6 @@ function runScript(name) {
   return root => execFileSync(process.execPath, [name], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
-const runControlProbe = runScript('scripts/control-probe.mjs')
-const runRootChildSlice = runScript('scripts/slice-b.mjs')
-const runRecoveryProbe = runScript('scripts/recovery-probe.mjs')
-
 /** Run every detector over one file set and report per gate. */
 function scan(files, views) {
   return DETECTORS.map(({ name, detect }) => ({ name, findings: detect(files, views) }))
@@ -562,18 +565,13 @@ if (PROBE) {
   }
 
   // These gates read the real tree, so each probe is a synthetic failing run.
-  for (const [name, run] of [
-    ['control-store-probe', () => 'ok\nfailures: 1 (the probe did not run to completion)\ngaps: 0\n'],
-    ['root-child-slice', () => 'ok\nsome checks failed\n'],
-    ['recovery-probe', () => 'ok\nthe holder exited early (1)\n'],
-  ]) {
-    const markers = name === 'control-store-probe' ? ['failures: 0', 'gaps: 0'] : name === 'root-child-slice' ? ['slice-b: OK'] : ['recovery-probe: OK']
-    const findings = scriptFindings(name, markers, run)
+  for (const gate of SCRIPT_GATES) {
+    const findings = scriptFindings(gate.name, gate.markers, () => 'ok\nsome checks failed\n')
     if (findings.length === 0) {
       missed += 1
-      console.log(`  FAIL  ${name} did not fire on a failing run`)
+      console.log(`  FAIL  ${gate.name} did not fire on a failing run`)
     } else {
-      console.log(`  ok    ${name} fired (${findings.length} findings)`)
+      console.log(`  ok    ${gate.name} fired (${findings.length} findings)`)
     }
   }
 
