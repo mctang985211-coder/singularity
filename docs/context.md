@@ -275,27 +275,9 @@ handoff §3 的 A1 写"选一个**已知的、log-only**的 DSH 事件类型"，
 - **task@3 + agent@1**（提交 `bf1fdbf`）：`task/assigned`/`task/reassigned` + **`run/started` 的责任门**（只接受当前责任人的**身份**；新码 `not-responsible`）；`bubble/opened` + **verdict 的输入绑定**（新码 `evidence-input-mismatch`，同 subject 纯判）；`agent@1` 的 `agent/opened` **引用**真实 DSH 会话且**不声称存活**。一次升版本承载全部"改变历史解释"的变更，v1/v2 按 `version-mismatch` 具名拒绝、无兼容层。
 - 四条承重规则各有变异证明：去掉责任门、去掉输入绑定、把"任何终止都算满足依赖"、把"未 verified 的子任务算作接受判据"——每次都只有对应用例失败，文件逐字节还原。
 
-**剩余**：
+**剩余（B 的最后一段）**：
 
-1. **S4**：`task/decomposed` **一条完整事实**（一次性、子 id 唯一非空、依赖须在声明内、**无环**）+ `projectTree`（**只有 `verified` 满足依赖**，terminal-but-unverified 阻塞**带具名理由**，父完成**不落盘**、是汇总）+ `bubble/opened`（`{runId, inputs[], workspace}`）+ **verdict 的输入绑定**（判决的输入摘要必须等于该 run 的 bubble 声明）。这两个 code（`cyclic-dependency`、`evidence-input-mismatch`）到那时才加进 `REFUSAL_CODES`——本轮**故意没加**，因为还没有消费者。
-2. **S5 剩余**：**装载期缝断言**（约束 10：`inject` 缺席的插件是静默不存在的）与运行期 `src/runtime/**`（两条并行路线在做：验证器执行、DSH 生命周期）。
-3. **S6 / K1**：12 场景逐条复核，A 的探针不能替代 B 的执行恢复；含执行/结算边界真实 SIGKILL 与桩 LlmAdapter 的确定性小任务冒烟，至少一条真实模型小任务按 review K1 要求交回。
-
-## 12. 2026-10-09 提交边界纠正与下一阶段
-
-复核基线 `ea72d85` 的 103 测试、9 门禁通过，但独立探针仍复现三个 P1：append 前内存状态已公开；持续 flush 失败后同命令重送成功；`load().emit()` 完全绕过持久化。旧屏障测试明确断言第二种错误行为，不能以测试数量或变异检查代替业务契约。
-
-本轮修复 `src/control/session-store.ts`：
-
-- `load()` 返回固定的已提交读取快照，只包含 `entries / entriesOf / stateOf`，所有返回值与内部状态隔离；没有运行时写方法，返回的 envelope 也不共享可变引用。
-- 下一状态私下准备，append、成功 flush、读回摘要校验全部完成后才发布。检查输入失败不改变已提交状态；并发读取保持旧截止范围。
-- append/flush/readback 失败进入结果不确定状态，所有后续提交具名拒绝，重复 `commandId` 也不能绕过。显式 close/open 并完成新的成功屏障后，才采纳介质记录并识别原结果；不静默重试外部副作用。
-- close 与提交同队列，释放写租约前先完成已排入的提交。重放准备与发布沿用现有纯 reducer，没有新增事务框架；当前每次提交需要重放历史，日志增长时应按实际负载评估其成本。
-
-**下一阶段是补齐 B 并交回 K1，随后进入 C。** 保留 S1/S3 的现有实现，补 S2 分解/依赖、S4 输入与产物绑定、S5 可信命令边界/责任/E3 生命周期、S6 真实执行与 SIGKILL 恢复。`phase-b-design.md` §2/§5 已纠正两处降级：跨实体条件要在串行命令提交边界检查，投影保留读取诊断用途；K1 的预算耗尽必须实际停止，不能只证明声明没有被改大。
-
-验证结果：`pnpm verify` 的 108 测试、9 门禁及门禁自检通过；7 项边界回归在旧实现上有 6 项失败。测试假件明确区分可见/持久前缀，write close 完成屏障，崩溃丢失只发生在未确认前缀；独立代码复核未发现本轮三个 P1 的残留阻断问题。
-
-真实 verifier 还须在生产路径验证实际执行的实现和输入内容，运行正反自测并拒绝失败者；只比较部署声明的摘要字符串不等于实现已核验。固定来源 receipt 需要 session 截止序号与真实消费/产物证据。独立 DSH 探针、手填 verdict 和控制 store 租约恢复均不能替代同 agent session 的执行恢复。
-
-下次交回：固定提交、K1 12 场景逐条结果与证据引用、真实根/子任务冒烟、执行与结算边界的故障恢复、完整 verify 输出；缺项保留未完成状态。K1 通过后按 `review.md` §5 的 C 推进可信评估，再依次 D/E，不提前建设多候选或通用 group/沙箱平台。
+1. **S6 真实纵切**（一件脚本 + 一个探针）：根任务提出并执行分解 → 子任务有明确依赖与责任 → run 钉住**真实已创建**的 revision → `bubble/opened` 声明真实输入 → **真实验证器在真实产物上执行**（经 `runProductionVerdict`）→ verdict 落为事实 → 结算 → receipt（含 cutoff 与真实消费）。**预算耗尽必须实际停止调度**（`projectTree` 的 `stopped` + 命令边界的拒绝），不能只证明声明没被改大。
+2. **执行与结算边界各 SIGKILL 一次**：重启后同一 session/身份/责任/绑定可恢复；已提交结果不重复创建或结算；外部不确定操作明确呈现。
+3. **K1 12 场景逐条交回**：每条给出观测与证据引用（`review.md` §6 的表；1–5 由 A/S2 满足，6–12 归 B）。**独立探针不能替代产品执行闭环**——但 DSH 生命周期的崩溃恢复探针（并行路线）提供场景 9 的底层观测。
+4. 完整 `pnpm verify` + `node scripts/control-probe.mjs` 输出、固定提交。
