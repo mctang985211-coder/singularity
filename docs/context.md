@@ -79,7 +79,29 @@
 
 **另一处更正**：review §7 的 E01 复核脚本用的导入路径 `dsh-session-persistence/lib/types/storage-contract.js` **在装好的 build 里不存在**；`validateStoredEvents` 由 `dsh-session-persistence/lib/index.js` 导出。复核时要用后者。
 
-### 4.2 RRSI 复核的更正（子代理独立复核，含对审查的修正）
+### 4.2 RRSI：**我现在亲自读过上游源码**（此前只读 README）
+
+**完整对照件：[`docs/rrsi-upstream-reference.md`](rrsi-upstream-reference.md)**（逐条带行号，并明确标注未读范围）。
+
+已逐行读：`selection.py` `components.py` `evaluate.py` `schedule.py` `history.py` `calibrate.py` `domain.py` 接口 `loop.py` 的 `round()` 与 `readjudicate()`。
+**未读**：`propose.py` `analyst.py` `digester.py` `critic.py` `driver.py` `config.py` `gitops.py` `llm.py` 及 `loop.py` 其余 ≈1400 行。
+
+**我此前的一处符号错误**：蓝图 §2.3 写「每轮 **k** 个候选」——实际是**每轮 `cfg.m` 个候选**（`loop.py:292`，标签 A..H），**`k` 是每任务 trial 数**。review 的 R01 已指出，我当时只改了口径没改蓝图正文。
+
+**我已自证的关键事实**（不再依赖转述）：
+
+- `loop.py:335` `S* = max(S*, S_{t+1})` **在 `if winner is not None` 之内** → 被拒候选永不抬高 S*（E10 成立）。
+- `loop.py:363` readjudicate 里 `S_star = max(x["S"] for x in fr["trajectory"][:t+1])`。
+- `history.py:91-92` 把 `ΔS`/`ΔC` **按测量时刻写进记录**，`:143-150` 直接读记录 → **ΔS 冻结**（E09 成立）。
+- `history.py:36-38,83` **一条记录 = 一条 edit**，带 `t`（轮）与 `variant` → 端口「候选序号充当 round」确实是错的。
+- `components.py:107` 用 `set()` → **两条同机制编辑的 novelty 是 1**。
+- `selection.py:90` 带内成本规则**含 novelty 项**；`:107-118` 准入顺序 = 噪声底线 → 成本规则 → guards。
+- `evaluate.py:110-114` `aggregate` **只遍历 `rewards`**，`missing` 只计数；而模块 docstring 声称 "full denominator"、`TaskResult.rewards` 注释说 "missing trials -> 0.0"（= scorer 的义务）→ **上游本身就有"注释描述义务、代码不实现"的缺口**，端口是忠实复制。我此前说"端口这块是错的"措辞不准。
+- `schedule.py:48` 除以 `T`、`budget_table` 用 `range(T)` → 末轮拿不到 `b_min`，端口改成 `/ (rounds−1)` 的记载准确。
+- `calibrate.py:68,103` k=1 单次评估时 bootstrap 的 pstdev 为 0 → **δ=0**，端口加下限是真实加固。
+- 端口**缺失的是整整一条证据管线**：analyst（失败模式/成功习惯，跨轮累积到 `global_analysis`，`loop.py:249-268`）→ `directives.json`(`:285-288`) → propose → critic/smoke 门(`selection.py:57`) → 并行评估(`:301-302`) → **`attribute`**(`:323`) → history。另有 `constitution()`（SKILL.md + PATTERNS.md，`domain.py:109`）、每变体 `prep.json`/`eval.json`、`harness_tree` 与 **winner 必须是 `H_t` 的后代**(`loop.py:403-406`)。
+
+### 4.3 RRSI 复核的更正（子代理独立复核，含对审查的修正）
 
 1. **E12 被高估**：`aggregateEvaluation` 忠实复制上游 `rrsi/evaluate.py:110-120`，上游同样不在 S 里用 `tr.missing`。上游的契约是**领域 scorer 把 missing trial 物化为 reward 0.0**（`evaluate.py:53`）；端口的 adapter 正是这么做的（`observe.ts:100-104` 为每个 trial 推一条 quality-0 观测并把 `missing` 加一）。E12 的输入是手工构造、违反调用方契约的，**没有 pipeline 路径会产出它**；且 `selection.ts:145-146` 会拒绝任何 `missing > 0` 的聚合。**准确表述：文档/API 契约缺口（`input.missing` 对 `quality` 是 no-op），不是 pipeline 可见的分母 bug，也不是与上游的分歧。**
 2. **R06 必须拆开**：`measure.ts` 与 `score.ts` 的注释是**对调用方的义务描述**，不是函数行为。`quality` 对 `missing:1` 与 `missing:0` 相同 → `missing` 从不进入平均。
