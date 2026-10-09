@@ -284,6 +284,20 @@ describe('the production verdict', () => {
     expect(await markerLabels()).toBe('')
   })
 
+  it('refuses a declaration whose selftest cannot run at all, by name', async () => {
+    const broken = await heldImplementation({
+      judge: async () => {
+        throw new Error('the judge binary is missing')
+      },
+    })
+
+    const refusal = await asyncRefusalOf(async () => runProductionVerdict(await request({ implementations: [broken] })))
+
+    expect(refusal.code).toBe('unregistered-verifier')
+    expect(refusal.detail).toContain('could not run')
+    expect(await markerLabels()).toBe('')
+  })
+
   it('refuses a verdict from an implementation whose bytes are not the criterion\'s', async () => {
     const held = await heldImplementation()
     // The criterion is read *before* the rebuild, so it names the bytes that were held then.

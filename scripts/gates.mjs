@@ -228,7 +228,15 @@ const DETECTORS = [
   },
   {
     name: 'control-store-probe',
-    detect: () => controlProbeFindings(runControlProbe),
+    detect: () => scriptFindings('the control store probe', ['failures: 0', 'gaps: 0'], runControlProbe),
+  },
+  {
+    name: 'root-child-slice',
+    detect: () => scriptFindings('the root/child slice', ['slice-b: OK'], runRootChildSlice),
+  },
+  {
+    name: 'recovery-probe',
+    detect: () => scriptFindings('the recovery probe', ['recovery-probe: OK'], runRecoveryProbe),
   },
   {
     name: 'vertical-slice-smoke',
@@ -311,18 +319,18 @@ function alignmentFindingsWith(baseline) {
 }
 
 /**
- * The control store's end-to-end probe, as a gate.
+ * One behavioural script, as a gate.
  *
- * Phase A's exit conditions - mutual exclusion, a lost reply recovered, a failed barrier refused -
- * are observed by `scripts/control-probe.mjs`, the only check that exercises them against a real
- * DSH session and real child processes. It was part of no automated path, so a task-protocol
- * version bump broke it and nothing reported that until the probe happened to be run by hand.
- * A behavioural check belongs beside the other behavioural smoke.
+ * These are the checks that observe the product doing something: the control store across real
+ * processes (phase A), and the root/child slice with a real verifier (phase B). The first of them
+ * was part of no automated path, so a task-protocol version bump broke it and nothing reported
+ * that until it happened to be run by hand. A behavioural check belongs on the automated path, and
+ * a script that prints its own verdict needs that verdict read rather than assumed.
  *
- * Parameterised over its runner so the self-test can hand it a synthetic failure, because this
- * gate reads the real tree and the synthetic file set cannot reach it.
+ * Parameterised over its runner so the self-test can hand it a synthetic failure, because these
+ * gates read the real tree and the synthetic file set cannot reach them.
  */
-function controlProbeFindings(run) {
+function scriptFindings(label, markers, run) {
   const findings = []
   let output
   let status = 0
@@ -333,15 +341,20 @@ function controlProbeFindings(run) {
     output = `${error.stdout ?? ''}${error.stderr ?? ''}${error.message ?? ''}`
   }
   const tail = `${output}`.trim().split('\n').slice(-3).join(' | ')
-  if (!/failures: 0\b/.test(output)) findings.push(`the control store probe did not report zero failures: ${tail}`)
-  if (!/gaps: 0\b/.test(output)) findings.push(`the control store probe did not report zero gaps: ${tail}`)
-  if (status !== 0) findings.push(`the control store probe exited ${status}: ${tail}`)
+  for (const marker of markers) {
+    if (!`${output}`.includes(marker)) findings.push(`${label} did not report ${JSON.stringify(marker)}: ${tail}`)
+  }
+  if (status !== 0) findings.push(`${label} exited ${status}: ${tail}`)
   return findings
 }
 
-function runControlProbe(root) {
-  return execFileSync(process.execPath, ['scripts/control-probe.mjs'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+function runScript(name) {
+  return root => execFileSync(process.execPath, [name], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
+
+const runControlProbe = runScript('scripts/control-probe.mjs')
+const runRootChildSlice = runScript('scripts/slice-b.mjs')
+const runRecoveryProbe = runScript('scripts/recovery-probe.mjs')
 
 /** Run every detector over one file set and report per gate. */
 function scan(files, views) {
@@ -411,7 +424,7 @@ if (PROBE) {
   console.log('gate self-test: every detector must fire on one violating file\n')
   for (const { name, findings } of results) {
     // These two read the real tree rather than the synthetic file map, so each gets its own probe.
-    if (name === 'vertical-slice-smoke' || name === 'dsh-alignment' || name === 'control-store-probe') {
+    if (name === 'vertical-slice-smoke' || name === 'dsh-alignment' || name.startsWith('control-store-probe') || name === 'root-child-slice' || name === 'recovery-probe') {
       console.log(`  skip  ${name} (reads the real tree; probed separately below)`)
       continue
     }
@@ -436,13 +449,20 @@ if (PROBE) {
     console.log(`  ok    dsh-alignment fired (${misaligned.length} findings)`)
   }
 
-  // The control-store gate reads the real tree, so its probe is a synthetic failing run.
-  const probeFindings = controlProbeFindings(() => 'ok\nfailures: 1 (the probe did not run to completion)\ngaps: 0\n')
-  if (probeFindings.length === 0) {
-    missed += 1
-    console.log('  FAIL  control-store-probe did not fire on a failing probe')
-  } else {
-    console.log(`  ok    control-store-probe fired (${probeFindings.length} findings)`)
+  // These gates read the real tree, so each probe is a synthetic failing run.
+  for (const [name, run] of [
+    ['control-store-probe', () => 'ok\nfailures: 1 (the probe did not run to completion)\ngaps: 0\n'],
+    ['root-child-slice', () => 'ok\nsome checks failed\n'],
+    ['recovery-probe', () => 'ok\nthe holder exited early (1)\n'],
+  ]) {
+    const markers = name === 'control-store-probe' ? ['failures: 0', 'gaps: 0'] : name === 'root-child-slice' ? ['slice-b: OK'] : ['recovery-probe: OK']
+    const findings = scriptFindings(name, markers, run)
+    if (findings.length === 0) {
+      missed += 1
+      console.log(`  FAIL  ${name} did not fire on a failing run`)
+    } else {
+      console.log(`  ok    ${name} fired (${findings.length} findings)`)
+    }
   }
 
   console.log('')

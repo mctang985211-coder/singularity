@@ -141,10 +141,10 @@ export class MemoryLog {
    * Serialized: the gate, the cursor read, the reducer check and the append happen as one critical
    * section, so two concurrent commands cannot both claim `seq` 0.
    */
-  async emit<Payload>(input: EmitInput<Payload>): Promise<Envelope<Payload>> {
+  async emit<Payload>(input: EmitInput<Payload>, require?: () => void): Promise<Envelope<Payload>> {
     const run = this.#queue.then(
-      () => this.#commit(input),
-      () => this.#commit(input),
+      () => this.#commit(input, require),
+      () => this.#commit(input, require),
     )
     this.#queue = run.then(
       () => undefined,
@@ -153,7 +153,7 @@ export class MemoryLog {
     return run
   }
 
-  async #commit<Payload>(input: EmitInput<Payload>): Promise<Envelope<Payload>> {
+  async #commit<Payload>(input: EmitInput<Payload>, require?: () => void): Promise<Envelope<Payload>> {
     const rule = this.#registry.ruleFor(input.protocol, input.version, input.kind)
     if (rule.guarantees.derived === true)
       refuse(
@@ -190,6 +190,14 @@ export class MemoryLog {
         `command ${JSON.stringify(input.commandId)} already committed ${recorded.envelope.protocol}/${recorded.envelope.kind} #${recorded.envelope.seq} for a different request`,
       )
     }
+
+    // Cross-subject preconditions run only for a command that will actually append.
+    //
+    // The ordering is the point: a re-delivered command has already been decided, and re-deciding
+    // it against a state that has moved on would turn "give me back the result I lost" into a
+    // refusal - which is exactly the recovery a lost reply is supposed to have. Identity first,
+    // then the preconditions, then the reducer.
+    require?.()
 
     const body: EnvelopeBody = {
       protocol: input.protocol,

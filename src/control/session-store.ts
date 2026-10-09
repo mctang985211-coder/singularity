@@ -202,10 +202,10 @@ export class ControlSessionStore {
    * digest read back. A re-delivered command returns the fact it already committed and appends
    * nothing — the record is already durable, so a second append would be a second fact.
    */
-  async emit<Payload>(input: EmitInput<Payload>): Promise<Envelope<Payload>> {
+  async emit<Payload>(input: EmitInput<Payload>, require?: () => void): Promise<Envelope<Payload>> {
     const run = this.#queue.then(
-      () => this.#commit(input),
-      () => this.#commit(input),
+      () => this.#commit(input, require),
+      () => this.#commit(input, require),
     )
     this.#queue = run.then(
       () => undefined,
@@ -214,14 +214,14 @@ export class ControlSessionStore {
     return run
   }
 
-  async #commit<Payload>(input: EmitInput<Payload>): Promise<Envelope<Payload>> {
+  async #commit<Payload>(input: EmitInput<Payload>, require?: () => void): Promise<Envelope<Payload>> {
     if (this.#closed) refuse('write-not-durable', `control store ${this.#sessionId} is closed; a closed store records nothing`)
     if (this.#uncertain)
       refuse('write-not-durable', `control store ${this.#sessionId} has an uncertain storage result; close and reopen it with a successful durability barrier before retrying`)
 
     // Prepare privately. A reducer or append must never advance the state ordinary readers see.
     const prepared = MemoryLog.adopt(structuredClone(this.#log.entries()), this.#options.registry, logOptionsOf(this.#options))
-    const envelope = await prepared.emit(input)
+    const envelope = await prepared.emit(input, require)
     // Command identity: the same command id with the same request returned the fact it committed,
     // whose sequence is below our own cursor because that fact is already a record in this session.
     if (envelope.seq < this.#ownSeq) return structuredClone(envelope)

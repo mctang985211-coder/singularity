@@ -148,13 +148,17 @@ export async function openAgentSession(ctx: RuntimeSeams, request: AgentSessionR
       : await resumeAgent(agents, sessionId, request.agentOptions)
 
   const claimed = CLAIMS.get(sessionId)
-  if (claimed !== undefined && claimed.owner !== ctx) {
-    // Roll the new handle back before refusing. A refusal that kept it would leave the session
-    // unwritable with nobody able to release it.
+  // A successful open proves the *medium* granted a new write handle; it does not prove this
+  // module's earlier claim is gone. Replacing the claim would drop the only reference to a live
+  // lease, leaving the session unwritable with nobody holding it, so a second claim is rolled back
+  // and refused — by name, and recoverable: `closeAgentSession` releases the first one.
+  if (claimed !== undefined) {
     await handle.dispose().catch(() => undefined)
     refuse(
       'concurrent-writer',
-      `agent session ${sessionId} is already claimed by a different context in this process; two contexts may not hold one session id, and this module will not lose track of a lease it holds`,
+      `agent session ${sessionId} is already claimed in this process (${
+        claimed.owner === ctx ? 'this context' : 'another context'
+      } opened it); close that claim before opening the session again, so no write lease is left with no holder`,
     )
   }
   CLAIMS.set(sessionId, { owner: ctx, handle })

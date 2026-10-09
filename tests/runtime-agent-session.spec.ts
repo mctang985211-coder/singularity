@@ -19,8 +19,8 @@
  *    becomes our `concurrent-writer`, and a bare repair `Error` — one `instanceof` cannot identify —
  *    still becomes a named refusal carrying the upstream text.
  * 5. **Close is ordered and idempotent.** The lease is released before `closeAgentSession` resolves,
- *    two concurrent closes dispose once, a failed close stays retryable, and a refused second
- *    claimant never costs the first claimant its lease.
+ *    two concurrent closes dispose once, a failed close stays retryable, and a refused second claim
+ *    — for a live agent, or from another context — never costs the first claimant its lease.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -262,6 +262,20 @@ describe('closing', () => {
     // The failed claim stayed registered, so a second close really releases the lease.
     await closeAgentSession('stubborn')
     expect(live.disposed).toEqual(['singularity:agent:stubborn'])
+  })
+
+  it('refuses a second claim for the same id, and keeps the first lease releasable', async () => {
+    const live = harness()
+    await openAgentSession(live.context, { agentId: 'live-agent', resume: false })
+
+    // The stub medium would grant a second handle (its `stat` says nothing is persisted), so only
+    // the module's own claim bookkeeping stops a second claim from replacing the first.
+    const refusal = await asyncRefusalOf(() => openAgentSession(live.context, { agentId: 'live-agent', resume: false }))
+    expect(refusal.code).toBe<RefusalCode>('concurrent-writer')
+    expect(live.disposed).toHaveLength(1)
+
+    await closeAgentSession('live-agent')
+    expect(live.disposed).toHaveLength(2)
   })
 
   it('refuses a second context claiming one session id, and keeps the first lease releasable', async () => {

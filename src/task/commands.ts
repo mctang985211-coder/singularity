@@ -128,50 +128,64 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
   }
 
   const commands: TaskCommands = {
-    admit: input =>
-      command(() => emitRaw(options, input.commandId, TASK_KINDS.admitted, input.taskId, { contract: input.contract })),
+    admit: input => command(() => emitRaw(options, input.commandId, TASK_KINDS.admitted, input.taskId, { contract: input.contract })),
 
     decompose: input =>
       command(() => emitRaw(options, input.commandId, TASK_KINDS.decomposed, input.parentTaskId, { children: input.children })),
 
     assign: input =>
-      command(cut =>
-        emitRaw(options, input.commandId, TASK_KINDS.assigned, input.taskId, {
-          agentId: input.agentId,
-          agentIdentity: requireHeldAgent(options, cut, input.agentId, `assign task "${input.taskId}"`),
-        }),
-      ),
+      command(() => {
+        // The identity is filled from the deployment's table, so a caller supplies what it did and
+        // never who it is. Holding it is a deployment fact; the node is a log fact.
+        const identity = requireHeldIdentity(options, input.agentId, `assign task "${input.taskId}"`)
+        return emitRaw(options, input.commandId, TASK_KINDS.assigned, input.taskId, { agentId: input.agentId, agentIdentity: identity }, () =>
+          requireOpenedNode(cutOf(options), input.agentId, `assign task "${input.taskId}"`),
+        )
+      }),
 
     reassign: input =>
-      command(cut =>
-        emitRaw(options, input.commandId, TASK_KINDS.reassigned, input.taskId, {
-          from: input.from,
-          agentId: input.agentId,
-          agentIdentity: requireHeldAgent(options, cut, input.agentId, `transfer task "${input.taskId}"`),
-        }),
-      ),
+      command(() => {
+        const identity = requireHeldIdentity(options, input.agentId, `transfer task "${input.taskId}"`)
+        return emitRaw(
+          options,
+          input.commandId,
+          TASK_KINDS.reassigned,
+          input.taskId,
+          { from: input.from, agentId: input.agentId, agentIdentity: identity },
+          () => requireOpenedNode(cutOf(options), input.agentId, `transfer task "${input.taskId}"`),
+        )
+      }),
 
     startRun: input =>
-      command(cut => {
-        const task = cut.task(input.taskId)
-        if (task === undefined || task.contract === undefined)
-          refuse('illegal-transition', `cannot start a run for task "${input.taskId}": it has no admitted contract, so there is nothing to accept`)
-        // Cross-entity 1: the revision the run pins must exist, in the named environment, with the
-        // content the pin claims. This reuses the environment slice's own check, not a second one.
-        assertPinnedRevision(input.revision, cut.environments, `run "${input.runId}" of task "${input.taskId}"`)
-        // Cross-entity 2: someone must be answerable, and it must be an agent this deployment holds
-        // with an opened node. The identity comparison itself stays in the reducer, on its own subject.
-        if (task.responsibility === undefined)
-          refuse(
-            'not-responsible',
-            `cannot start a run for task "${input.taskId}": no agent is responsible for it, so no attempt is answerable`,
-          )
-        requireHeldAgent(options, cut, task.responsibility.agentId, `start a run for task "${input.taskId}"`)
-        // Cross-entity 3: if a plan declares this task, the plan's gate decides whether it may start.
-        // Readiness already subsumes dependencies, budget and admission, and carries its own reason.
-        requirePlanAllows(cut, input.taskId)
-        return emitRaw(options, input.commandId, TASK_KINDS.runStarted, input.taskId, { runId: input.runId, revision: input.revision })
-      }),
+      command(() =>
+        emitRaw(
+          options,
+          input.commandId,
+          TASK_KINDS.runStarted,
+          input.taskId,
+          { runId: input.runId, revision: input.revision },
+          () => {
+            const cut = cutOf(options)
+            const task = cut.task(input.taskId)
+            if (task === undefined || task.contract === undefined)
+              refuse('illegal-transition', `cannot start a run for task "${input.taskId}": it has no admitted contract, so there is nothing to accept`)
+            // Cross-entity 1: the revision must exist, in the named environment, with the content
+            // the pin claims. This reuses the environment slice's own check, not a second one.
+            assertPinnedRevision(input.revision, cut.environments, `run "${input.runId}" of task "${input.taskId}"`)
+            // Cross-entity 2: someone must be answerable, and it must be an agent this deployment
+            // holds with an opened node. The identity comparison itself is the reducer's.
+            if (task.responsibility === undefined)
+              refuse(
+                'not-responsible',
+                `cannot start a run for task "${input.taskId}": no agent is responsible for it, so no attempt is answerable`,
+              )
+            requireOpenedNode(cut, task.responsibility.agentId, `start a run for task "${input.taskId}"`)
+            // Cross-entity 3: if a plan declares this task, the plan's gate decides. Readiness
+            // already subsumes dependencies, budget and admission, and carries its own reason.
+            requirePlanAllows(cut, input.taskId)
+          },
+        ),
+      ),
 
     openBubble: input =>
       command(() =>
@@ -194,36 +208,42 @@ export function createTaskCommands(options: TaskCommandOptions): TaskCommands {
       ),
 
     recordVerdict: input =>
-      command(cut => {
-        const verdict = input.verdict
-        const task = cut.task(input.taskId)
-        if (task === undefined || task.contract === undefined)
-          refuse('illegal-transition', `cannot record a verdict for task "${input.taskId}": it has no admitted contract to decide against`)
-        const criterion = task.contract.criteria.find(entry => entry.criterionId === verdict.criterionId)
-        if (criterion === undefined)
-          refuse('unknown-criterion', `task "${input.taskId}" does not declare criterion "${verdict.criterionId}", so nothing decides it`)
-        // The ref and the version come from the frozen criterion, so a caller cannot choose who judged.
-        if (verdict.implementationDigest !== criterion.implementationDigest)
-          refuse(
-            'wrong-verifier',
-            `criterion "${verdict.criterionId}" names the implementation ${criterion.implementationDigest.slice(0, 12)}…, but the verdict came from ${verdict.implementationDigest.slice(0, 12)}…`,
-          )
-        if (!options.implementations.some(entry => entry.implementationDigest === verdict.implementationDigest))
-          refuse(
-            'unregistered-verifier',
-            `this deployment holds no implementation with digest ${verdict.implementationDigest.slice(0, 12)}…, so it cannot have produced this verdict`,
-          )
-        return emitRaw(options, input.commandId, TASK_KINDS.evidenceProduced, input.taskId, {
-          runId: verdict.runId,
-          criterionId: verdict.criterionId,
-          verdict: verdict.verdict,
-          verifierRef: criterion.verifierRef,
-          verifierVersion: criterion.verifierVersion,
-          implementationDigest: verdict.implementationDigest,
-          artifactDigest: verdict.artifactDigest,
-          inputDigests: verdict.inputDigests,
-          ...(verdict.detail === undefined ? {} : { detail: verdict.detail }),
-        })
+      command(() => {
+        // The payload has to be final before it is parsed, so the criterion is read here to fill
+        // the verifier's ref and version - a read, inside the serial region, not a decision. The
+        // decisions all live in the preconditions below, which run only when a fact is appended.
+        const cut = cutOf(options)
+        const criterion = requireCriterion(cut, input.taskId, input.verdict.criterionId)
+        return emitRaw(
+          options,
+          input.commandId,
+          TASK_KINDS.evidenceProduced,
+          input.taskId,
+          {
+            runId: input.verdict.runId,
+            criterionId: input.verdict.criterionId,
+            verdict: input.verdict.verdict,
+            verifierRef: criterion.verifierRef,
+            verifierVersion: criterion.verifierVersion,
+            implementationDigest: input.verdict.implementationDigest,
+            artifactDigest: input.verdict.artifactDigest,
+            inputDigests: input.verdict.inputDigests,
+            ...(input.verdict.detail === undefined ? {} : { detail: input.verdict.detail }),
+          },
+          () => {
+            const now = requireCriterion(cutOf(options), input.taskId, input.verdict.criterionId)
+            if (input.verdict.implementationDigest !== now.implementationDigest)
+              refuse(
+                'wrong-verifier',
+                `criterion "${input.verdict.criterionId}" names the implementation ${now.implementationDigest.slice(0, 12)}…, but the verdict came from ${input.verdict.implementationDigest.slice(0, 12)}…`,
+              )
+            if (!options.implementations.some(entry => entry.implementationDigest === input.verdict.implementationDigest))
+              refuse(
+                'unregistered-verifier',
+                `this deployment holds no implementation with digest ${input.verdict.implementationDigest.slice(0, 12)}…, so it cannot have produced this verdict`,
+              )
+          },
+        )
       }),
 
     forAgent: agentId => {
@@ -266,20 +286,24 @@ function cutOf(options: TaskCommandOptions): Cut {
   }
 }
 
-/** The identity this deployment holds for one agent, refusing an agent it does not hold or has not opened. */
-function requireHeldAgent(options: TaskCommandOptions, cut: Cut, agentId: string, action: string): string {
+/** The identity this deployment holds for one agent. A deployment fact, not a log fact. */
+function requireHeldIdentity(options: TaskCommandOptions, agentId: string, action: string): string {
   const held = options.agents.get(agentId)
   if (held === undefined)
     refuse(
       'unknown-emitter-role',
       `cannot ${action}: agent "${agentId}" is not one this deployment holds (known: ${[...options.agents.keys()].sort().join(', ') || 'none'})`,
     )
+  return held.identity
+}
+
+/** The log half: a held agent whose node was never opened has no session backing it. */
+function requireOpenedNode(cut: Cut, agentId: string, action: string): void {
   if (cut.agent(agentId) === undefined)
     refuse(
       'unknown-emitter-role',
       `cannot ${action}: agent "${agentId}" is held by this deployment but has no opened node in this log, so no session backs it`,
     )
-  return held.identity
 }
 
 /**
@@ -303,6 +327,30 @@ function requirePlanAllows(cut: Cut, taskId: string): void {
   }
 }
 
-async function emitRaw(options: TaskCommandOptions, commandId: string, kind: string, subject: string, payload: unknown): Promise<Envelope> {
-  return options.store.emit({ commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind, subject, payload }) as Promise<Envelope>
+/** The criterion a verdict must belong to, or a refusal naming why there is none. */
+function requireCriterion(cut: Cut, taskId: string, criterionId: string) {
+  const task = cut.task(taskId)
+  if (task === undefined || task.contract === undefined)
+    refuse('illegal-transition', `cannot record a verdict for task "${taskId}": it has no admitted contract to decide against`)
+  const criterion = task.contract.criteria.find(entry => entry.criterionId === criterionId)
+  if (criterion === undefined) refuse('unknown-criterion', `task "${taskId}" does not declare criterion "${criterionId}", so nothing decides it`)
+  return criterion
+}
+
+/**
+ * Produce one fact, with its cross-subject preconditions handed to the append path.
+ *
+ * They are not run here, immediately before the call, because command identity has to be decided
+ * first: a re-delivered command was already decided, and deciding it again against a state that has
+ * moved on turns "give me back the result I lost" into a refusal.
+ */
+async function emitRaw(
+  options: TaskCommandOptions,
+  commandId: string,
+  kind: string,
+  subject: string,
+  payload: unknown,
+  require?: () => void,
+): Promise<Envelope> {
+  return options.store.emit({ commandId, protocol: TASK_PROTOCOL, version: TASK_VERSION, kind, subject, payload }, require) as Promise<Envelope>
 }
