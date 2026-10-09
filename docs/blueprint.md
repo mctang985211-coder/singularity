@@ -2,7 +2,7 @@
 
 > 单一入口。审查从这里开始。
 > 第一轮审核、补充遗漏与后续构建检查点：[review.md](review.md)。
-> 接手先读：[handoff.md](handoff.md)（一页纸）。跨轮工作记忆：[context.md](context.md)；已定决策：[adr/](adr/)；RRSI 上游逐行对照：[rrsi-upstream-reference.md](rrsi-upstream-reference.md)。
+> 接手先读：[handoff.md](handoff.md)（一页纸）。跨轮工作记忆：[context.md](context.md)；已定决策：[adr/](adr/)；RRSI 上游逐行对照：[rrsi-upstream-reference.md](rrsi-upstream-reference.md)；当前阶段设计：[phase-b-design.md](phase-b-design.md)。
 > 证据基础：旧仓 `packages/singularity` @ `6a0edde` 的只读审计、DSH 源码与已装 `0.2.0-rc.2` 的实测、RRSI 上游 `be50316` 的逐行阅读、新骨架 `singularity-core`。
 > 历史工作件（按需查证）：`~/Documents/singularity-refactor-plan.md`（冗余总账）、`singularity-rrsi-diagnosis.md`（RSI 断点）、`singularity-s0-spine.md`（核心脉络）、`singularity-s0-correction.md`（对 DSH 的更正）、`singularity-probe-results.md`（实测）、`singularity-f1-design.md`。
 
@@ -325,8 +325,8 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 
 | 阶段 | 交付 | 退出条件（可机械判定） | 状态 |
 |---|---|---|---|
-| **A** | 专用控制 store、DSH 承载、串行提交、严格边界、命令结果识别 | 双进程互斥；并发命令正确；屏障失败不返回成功；提交后/答复前崩溃可识别原结果 | **进行中**：串行提交 ✅ 命令识别 ✅ 严格边界 ✅ 承载实验 ✅；**剩余：把存储接到已知 log-only 的 DSH 事件类型上，`append` + `await flush`（`false` 即失败）** |
-| **B** | 最小 E3、Task 分解与责任、初始不可变 Revision、最小 Bubble、真实 verifier 与固定来源 receipt | 根/子任务执行与依赖推进；产物独立验收；SIGKILL 后恢复同一 session/责任/绑定 | 未开始（**K1 检查点**） |
+| **A** | 专用控制 store、DSH 承载、串行提交、严格边界、命令结果识别 | 双进程互斥；并发命令正确；屏障失败不返回成功；提交后/答复前崩溃可识别原结果 | **完成**：四条退出条件全部观测证明（屏障失败那条含变异证明，见 `context.md` §4.1 末尾表） |
+| **B** | 最小 E3、Task 分解与责任、初始不可变 Revision、最小 Bubble、真实 verifier 与固定来源 receipt | 根/子任务执行与依赖推进；产物独立验收；SIGKILL 后恢复同一 session/责任/绑定 | **进行中（K1 检查点）**：设计见 [`phase-b-design.md`](phase-b-design.md)——§1 约束、§2 架构决定（写侧单 subject / 读侧全日志）、§5 明确不做、§6 K1 归属已定；**§3 事实面与 §4 投影字段等两份证据**（旧仓行为参照 + 已装 DSH 缝实测），不由猜测填 |
 | **C** | 冻结双侧输入、真实领域取数、非补偿约束、真实重复与噪声依据 | 好候选通过；高分越界拒绝；缺失分母正确；每份报告有真实 trials | 未开始 |
 | **D** | draft 状态机、E6 原生审批、决定重算、唯一指针切换 | 批准绑定具体差异；陈旧/内容变化拒绝；head 不引用半成品 | 未开始 |
 | **E** | 显式 round、真实历史与 frozen deltas、m≥2 选优、探索/剪枝消费者、消费反馈 | 至少两轮完整执行；第二轮读第一轮；历史不被新 head 改写 | 未开始（**K2**） |
