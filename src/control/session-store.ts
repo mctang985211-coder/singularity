@@ -26,8 +26,9 @@
  * `materializeAppendBatch` as the serializability gate — a value DSH cannot carry is refused by
  * name *before* a byte is written — then `append` (sequence contiguous from the stored cursor),
  * then `await flush()`, then read the record back and check the digest that came back is the
- * digest that was sealed. A failed barrier is a refusal, never a success, and a refusal re-adopts
- * the medium's visible prefix: the memory log leads the medium only while a record is in flight.
+ * digest that was sealed. Only then is the prepared state published. A storage failure leaves
+ * the previous committed snapshot readable and disables writes until close and a new open
+ * complete a successful durability barrier; a visible prefix alone is not a committed prefix.
  *
  * @module singularity-core/control/session-store
  */
@@ -100,15 +101,15 @@ export function controlSessionIdOf(controlId: string): SessionId {
 /**
  * One control session, open for writing.
  *
- * One instance is one writer, because the medium's write handle is the one lease. `emit` is
- * serialized end to end — the memory log's own queue plus this store's — so two concurrent
- * commands cannot interleave their sequence numbers on either chain.
+ * One instance is one writer, because the medium's write handle is the one lease. This store's
+ * queue serializes preparation, append, barrier and publication, so concurrent commands cannot
+ * interleave their sequence numbers or observe one another's uncommitted state.
  */
 export class ControlSessionStore {
   readonly #handle: SessionHandle
   readonly #sessionId: SessionId
   readonly #options: ControlStoreOptions
-  /** The adopted facts. Re-adopted after a refused record, so memory never leads the medium. */
+  /** Only facts whose durability and readback have been confirmed are published here. */
   #log: MemoryLog
   /** The medium's next event sequence. The medium refuses a batch that does not continue it. */
   #nextSeq: number
@@ -121,6 +122,8 @@ export class ControlSessionStore {
   #ownSeq: number
   #queue: Promise<unknown> = Promise.resolve()
   #closed = false
+  #uncertain = false
+  #closing: Promise<void> | undefined
 
   private constructor(handle: SessionHandle, log: MemoryLog, options: ControlStoreOptions, sessionId: SessionId, nextSeq: number, ownSeq: number) {
     this.#handle = handle
@@ -155,10 +158,17 @@ export class ControlSessionStore {
     }
 
     try {
+      try {
+        // A predecessor may have lost its barrier or its reply. Visibility does not establish
+        // durability, so adoption first confirms the prefix through the write handle's barrier.
+        await handle.flush()
+      } catch (error) {
+        refuse('write-not-durable', `control store ${sessionId} cannot confirm its opening durability barrier: ${error instanceof Error ? error.message : String(error)}`)
+      }
       const stored = await handle.read()
       // Select our records by type, then decide meaning entirely ourselves: framing, digest, chain
       // link, sequence, declared kind and payload shape are all re-checked by the calls below.
-      const entries = stored.events.filter(isControlEvent).map(decodeControlEvent)
+      const entries = structuredClone(stored.events.filter(isControlEvent).map(decodeControlEvent))
       const log = MemoryLog.adopt(entries, options.registry, logOptionsOf(options))
       return new ControlSessionStore(handle, log, options, sessionId, stored.events.length, entries.length)
     } catch (error) {
@@ -176,9 +186,15 @@ export class ControlSessionStore {
     return this.#sessionId
   }
 
-  /** The facts this store adopted, with every rule in `src/protocol/` already applied. */
-  load(): MemoryLog {
-    return this.#log
+  /** A fixed committed read cut. The view has no writer and shares no mutable values with it. */
+  load(): Readonly<Pick<MemoryLog, 'entries' | 'entriesOf' | 'stateOf'>> {
+    const log = this.#log
+    return Object.freeze({
+      entries: (): readonly Envelope[] => structuredClone(log.entries()),
+      entriesOf: (protocol: string, version: number): readonly Envelope[] => structuredClone(log.entriesOf(protocol, version)),
+      stateOf: <State>(protocol: string, version: number, subject: string): State | undefined =>
+        structuredClone(log.stateOf<State>(protocol, version, subject)),
+    })
   }
 
   /**
@@ -200,11 +216,15 @@ export class ControlSessionStore {
 
   async #commit<Payload>(input: EmitInput<Payload>): Promise<Envelope<Payload>> {
     if (this.#closed) refuse('write-not-durable', `control store ${this.#sessionId} is closed; a closed store records nothing`)
+    if (this.#uncertain)
+      refuse('write-not-durable', `control store ${this.#sessionId} has an uncertain storage result; close and reopen it with a successful durability barrier before retrying`)
 
-    const envelope = await this.#log.emit(input)
+    // Prepare privately. A reducer or append must never advance the state ordinary readers see.
+    const prepared = MemoryLog.adopt(structuredClone(this.#log.entries()), this.#options.registry, logOptionsOf(this.#options))
+    const envelope = await prepared.emit(input)
     // Command identity: the same command id with the same request returned the fact it committed,
     // whose sequence is below our own cursor because that fact is already a record in this session.
-    if (envelope.seq < this.#ownSeq) return envelope
+    if (envelope.seq < this.#ownSeq) return structuredClone(envelope)
 
     const event: SessionEvent<typeof CONTROL_EVENT_TYPE> = {
       type: CONTROL_EVENT_TYPE,
@@ -216,10 +236,10 @@ export class ControlSessionStore {
 
     // DSH's own serializability gate, and it runs before any byte is written. It throws a bare
     // TypeError; this stack refuses by name, so the refusal survives the boundary as data.
+    let batch: readonly SessionEvent[]
     try {
-      materializeAppendBatch([event])
+      batch = materializeAppendBatch([event])
     } catch (error) {
-      await this.#resync()
       refuse(
         'not-lossless-json',
         `control record ${envelope.protocol}/${envelope.kind} #${envelope.seq} is not losslessly JSON-serializable, so session ${this.#sessionId} cannot carry it: ${
@@ -227,79 +247,47 @@ export class ControlSessionStore {
         }`,
       )
     }
+    // Materialization detaches the caller's payload. Verify that sealed snapshot before any write.
+    assertEnvelope((batch[0] as SessionEvent<typeof CONTROL_EVENT_TYPE>).data.payload)
 
     const label = `${envelope.protocol}/${envelope.kind} #${envelope.seq}`
+    let phase = 'append'
     try {
-      await this.#handle.append([event])
-    } catch (error) {
-      await this.#resync()
-      refuse(
-        'write-not-durable',
-        `${label} was refused by ${this.#sessionId} at seq ${this.#nextSeq}: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
-    try {
+      await this.#handle.append(batch)
+      phase = 'durability barrier'
       await this.#handle.flush()
+      phase = 'readback'
+      const { events } = await this.#handle.read(this.#nextSeq, 1)
+      const readBack = events[0]
+      if (readBack === undefined || !isControlEvent(readBack))
+        refuse('write-not-durable', `${label} was written at seq ${this.#nextSeq} but ${this.#sessionId} reads back no control record there`)
+      const durable = decodeControlEvent(readBack)
+      if (durable.digest !== envelope.digest)
+        refuse('write-not-durable', `${label} sealed digest ${envelope.digest} but ${this.#sessionId} reads back ${durable.digest}`)
+
+      // Publish from the confirmed stored value, with no references to a caller or a DSH handle.
+      this.#log = MemoryLog.adopt(structuredClone([...this.#log.entries(), durable]), this.#options.registry, logOptionsOf(this.#options))
+      this.#nextSeq += 1
+      this.#ownSeq += 1
+      return structuredClone(durable) as Envelope<Payload>
     } catch (error) {
-      // The medium may hold the event and may not; it promised nothing, so this is a refusal. The
-      // resync below re-reads what the handle actually holds, so the next append continues the
-      // medium's prefix instead of a sequence its own memory invented.
-      await this.#resync()
-      refuse(
-        'write-not-durable',
-        `${label} was accepted by ${this.#sessionId} but its durability barrier failed: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
-
-    const { events } = await this.#handle.read(this.#nextSeq, 1)
-    const readBack = events[0]
-    if (readBack === undefined || readBack.type !== CONTROL_EVENT_TYPE) {
-      await this.#resync()
-      refuse('write-not-durable', `${label} was written at seq ${this.#nextSeq} but ${this.#sessionId} reads back no control record there`)
-    }
-    const durable = decodeControlEvent(readBack)
-    if (durable.digest !== envelope.digest) {
-      await this.#resync()
-      refuse(
-        'write-not-durable',
-        `${label} sealed digest ${envelope.digest.slice(0, 12)}… but ${this.#sessionId} reads back ${durable.digest.slice(0, 12)}…`,
-      )
-    }
-
-    this.#nextSeq += 1
-    this.#ownSeq += 1
-    return envelope
-  }
-
-  /**
-   * Re-adopt the medium's visible prefix after a failed record.
-   *
-   * A refusal must leave the store exactly as durable as it was: the memory log is only allowed to
-   * lead the medium while a record is in flight, and a refusal means it may not keep that lead, or
-   * the next append would continue a sequence no session holds. A resync that itself fails leaves
-   * the previous state in place, where the medium's contiguity check refuses the next append rather
-   * than letting a phantom sequence through.
-   */
-  async #resync(): Promise<void> {
-    try {
-      const stored = await this.#handle.read()
-      const entries = stored.events.filter(isControlEvent).map(decodeControlEvent)
-      this.#log = MemoryLog.adopt(entries, this.#options.registry, logOptionsOf(this.#options))
-      this.#nextSeq = stored.events.length
-      this.#ownSeq = entries.length
-    } catch {
-      // Fail closed: the stale cursor makes the next append a contiguity refusal at the medium.
+      this.#uncertain = true
+      refuse('write-not-durable', `${label} ${phase} failed in ${this.#sessionId}; storage result is uncertain: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
   /**
-   * Flush-free teardown: the handle's own close completes pending durability and releases write
-   * ownership. Idempotent, so a caller's cleanup path cannot double-release the lease.
+   * Ordered teardown: accepted commands finish before the handle releases its write lease.
+   * Later commands observe a closed store. All callers await the same close result.
    */
-  async close(): Promise<void> {
-    if (this.#closed) return
-    this.#closed = true
-    await this.#handle.close()
+  close(): Promise<void> {
+    if (this.#closing !== undefined) return this.#closing
+    this.#closing = this.#queue.then(async () => {
+      this.#closed = true
+      await this.#handle.close()
+    })
+    this.#queue = this.#closing.then(() => undefined, () => undefined)
+    return this.#closing
   }
 }
 
