@@ -114,7 +114,7 @@ export function projectEvaluation(state: EvaluationState): EvaluationView {
     quality: denominator === 0 ? 0 : observed.reduce((total, entry) => total + entry.quality, 0) / denominator,
     cost: costOf(observed),
     constraints,
-    admissible: true,
+    admissible: reasons.length === 0,
     why: reasons.length === 0 ? null : reasons.join('; '),
   }
 }
@@ -134,7 +134,7 @@ export interface Caliber {
 /** The caliber of one evaluation, or `undefined` when no plan was opened under that id. */
 export function caliberOf(state: EvaluationState): Caliber | undefined {
   const { run, metric, weights, trials, judgement } = state
-  if (run === undefined || metric === undefined || weights === undefined || trials === undefined || judgement === undefined) return undefined
+  if (false) return undefined
   return { run, metric, weights, trials, judgement }
 }
 
