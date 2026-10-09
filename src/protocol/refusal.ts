@@ -56,6 +56,8 @@ export const REFUSAL_CODES = [
   'unregistered-verifier',
   /** A fact names a run this task never started. */
   'unknown-run',
+  /** A run is pinned to a revision this log never recorded, or the wrong content for that id. */
+  'unknown-revision',
   /** A fact names a criterion this task's contract does not declare. */
   'unknown-criterion',
   /** The emitter role that produced a verdict may not judge this run, or may not decide this criterion. */
@@ -64,6 +66,8 @@ export const REFUSAL_CODES = [
   'wrong-verifier',
   /** A criterion already carries a verdict for this run; one criterion has one verdict. */
   'evidence-conflict',
+  /** A revision id was offered twice with different content; content addressing forbids it. */
+  'revision-conflict',
   /** A run cannot settle verified while a criterion has no passing verdict. */
   'unadjudicated-criterion',
 ] as const
