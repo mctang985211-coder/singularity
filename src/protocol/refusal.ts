@@ -50,6 +50,8 @@ export const REFUSAL_CODES = [
   'digest-mismatch',
   /** A reducer met a fact it cannot accept in the state it is in. */
   'illegal-transition',
+  /** A decomposition declares a dependency cycle. The shape is legal; no execution order satisfies it. */
+  'cyclic-dependency',
   /** A task contract is not a contract: no goal, no criteria, an unknown member, or a bad criterion. */
   'malformed-contract',
   /** A criterion names a verifier this deployment cannot currently run at that version. */

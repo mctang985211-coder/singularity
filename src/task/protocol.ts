@@ -27,6 +27,7 @@ import { assertClosedKeys } from '../protocol/envelope.ts'
 import { refuse } from '../protocol/refusal.ts'
 import { defineKind, type ProtocolRegistry } from '../protocol/registry.ts'
 import { assertContractShape, contractDigest, type TaskContract } from './contract.ts'
+import { decomposedKind, type Decomposition } from './decomposition.ts'
 import { digest, maybeText, record, requireContractOf, requireRun, settled, text } from './shape.ts'
 
 export const TASK_PROTOCOL = 'task'
@@ -101,11 +102,17 @@ export interface TaskState {
   readonly contractDigest?: string
   readonly admittedBy?: string
   readonly admittedAt?: string
+  /**
+   * The fixed plan, when this task has one. Declared once and never revised: a plan that could be
+   * edited would make "which sub-task accepted which criterion" unanswerable after the fact.
+   */
+  readonly decomposition?: Decomposition
   readonly runs: Readonly<Record<string, RunState>>
 }
 
 export const TASK_KINDS = {
   admitted: 'task/admitted',
+  decomposed: 'task/decomposed',
   runStarted: 'run/started',
   evidenceProduced: 'evidence/produced',
   runVerified: 'run/verified',
@@ -146,6 +153,8 @@ export function declareTaskProtocol(registry: ProtocolRegistry): void {
           }
         },
       }),
+
+      [TASK_KINDS.decomposed]: decomposedKind(TASK_KINDS.decomposed, SCHEDULER_ROLE),
 
       [TASK_KINDS.runStarted]: defineKind<TaskState, { runId: string; revision: RevisionRef }>({
         guarantees: APPENDED,

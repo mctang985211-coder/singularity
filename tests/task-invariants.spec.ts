@@ -228,14 +228,16 @@ describe('what the protocol does not know', () => {
     expect(refusalOf(() => projectReceipt(state, 'run-ghost')).code).toBe<RefusalCode>('unknown-run')
   })
 
-  it('declares exactly the five kinds this slice needs, and no receipt kind', () => {
+  it('declares exactly the six kinds this slice needs, and no receipt kind', () => {
     const registry = taskRegistry()
+    // Sorted, because `kindsOf` sorts: `evidence/produced` < `run/*` < `task/*`.
     expect(registry.kindsOf(TASK_PROTOCOL, TASK_VERSION)).toEqual([
       TASK_KINDS.evidenceProduced,
       TASK_KINDS.runFailed,
       TASK_KINDS.runStarted,
       TASK_KINDS.runVerified,
       TASK_KINDS.admitted,
+      TASK_KINDS.decomposed,
     ])
     expect(Object.values(TASK_KINDS)).not.toContain('receipt/sealed')
     expect(verifierRoleOf({ verifierRef: 'x', verifierVersion: '1' })).toBe('verifier:x@1')

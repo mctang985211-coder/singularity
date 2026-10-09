@@ -1,0 +1,136 @@
+/**
+ * The decomposition fact's invariants, and the one guarantee that makes it a single fact.
+ *
+ * Every case here is decided by the payload parser or by the reducer, so none of them depends on a
+ * scheduler, a runtime or a deployment's goodwill. The plan is also where a *cycle* is caught: no
+ * execution order satisfies one, and it is a property of the declared shape alone.
+ */
+
+import { describe, expect, it } from 'vitest'
+
+import {
+  foldSubject,
+  type ProtocolRegistry,
+  type RefusalCode,
+  TASK_KINDS,
+  TASK_PROTOCOL,
+  TASK_VERSION,
+  type TaskState,
+} from '../src/index.ts'
+import { asyncRefusalOf } from './fixtures.ts'
+import {
+  admit,
+  CHILD_A,
+  CHILD_A_CONTRACT,
+  CHILD_B,
+  CHILD_B_CONTRACT,
+  decompose,
+  PARENT,
+  parentContract,
+  plan,
+  treeLog,
+} from './tree-fixtures.ts'
+import { taskRegistry } from './task-fixtures.ts'
+
+/** A parent with a plan, in a log whose registry the caller keeps so it can be folded. */
+async function decomposed(children = plan(), registry: ProtocolRegistry = taskRegistry()): Promise<ReturnType<typeof treeLog>> {
+  const log = treeLog(registry)
+  await log.emit(admit(PARENT, parentContract()))
+  await log.emit(decompose(PARENT, children))
+  return log
+}
+
+const child = (taskId: string, extra: Partial<{ dependsOn: readonly string[]; supports: readonly string[]; maxRuns: number }> = {}) => ({
+  taskId,
+  dependsOn: extra.dependsOn ?? [],
+  supports: extra.supports ?? [],
+  maxRuns: extra.maxRuns ?? 1,
+})
+
+describe('a decomposition is one complete fact', () => {
+  it('folds the declared plan onto the parent, and claims business atomicity', async () => {
+    const registry = taskRegistry()
+    const log = await decomposed(plan(), registry)
+    const state = foldSubject<TaskState>(registry, log.entries(), TASK_PROTOCOL, TASK_VERSION, PARENT)
+    expect(state?.decomposition?.children.map(entry => entry.taskId)).toEqual([CHILD_A, CHILD_B])
+    expect(state?.decomposition?.children[1]?.dependsOn).toEqual([CHILD_A])
+    expect(state?.decomposition?.at).toBeTypeOf('string')
+
+    // One fact stands for the whole plan, so it declares that it is business-atomic.
+    const declared = registry.ruleFor(TASK_PROTOCOL, TASK_VERSION, TASK_KINDS.decomposed).guarantees
+    expect(declared.atomicFact).toBe(true)
+    expect(declared.appended).toBe(true)
+  })
+
+  it('refuses a second decomposition instead of merging plans', async () => {
+    const log = await decomposed()
+    const refusal = await asyncRefusalOf(() => log.emit(decompose(PARENT, [child(CHILD_A)])))
+    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
+    expect(refusal.detail).toContain('again')
+  })
+
+  it('refuses a plan that cannot be executed, each by name', async () => {
+    const cases: readonly { readonly label: string; readonly children: unknown; readonly code: RefusalCode }[] = [
+      { label: 'no children', children: [], code: 'malformed-payload' },
+      { label: 'the parent as its own child', children: [child(PARENT)], code: 'malformed-payload' },
+      { label: 'a duplicate child', children: [child(CHILD_A), child(CHILD_A)], code: 'malformed-payload' },
+      { label: 'a dependency outside the declared set', children: [child(CHILD_A, { dependsOn: ['task-elsewhere'] })], code: 'malformed-payload' },
+      { label: 'a self-dependency', children: [child(CHILD_A, { dependsOn: [CHILD_A] })], code: 'malformed-payload' },
+      { label: 'a repeated dependency', children: [child(CHILD_A, { dependsOn: [CHILD_B, CHILD_B] })], code: 'malformed-payload' },
+      { label: 'a cycle', children: [child(CHILD_A, { dependsOn: [CHILD_B] }), child(CHILD_B, { dependsOn: [CHILD_A] })], code: 'cyclic-dependency' },
+      { label: 'a criterion the parent does not declare', children: [child(CHILD_A, { supports: ['not-a-criterion'] })], code: 'unknown-criterion' },
+      { label: 'a zero budget', children: [child(CHILD_A, { maxRuns: 0 })], code: 'malformed-payload' },
+      { label: 'a fractional budget', children: [child(CHILD_A, { maxRuns: 1.5 })], code: 'malformed-payload' },
+      { label: 'an unknown member', children: [{ ...child(CHILD_A), note: 'extra' }], code: 'malformed-payload' },
+    ]
+
+    for (const item of cases) {
+      const log = treeLog()
+      await log.emit(admit(PARENT, parentContract()))
+      const refusal = await asyncRefusalOf(() => log.emit(decompose(PARENT, item.children as never)))
+      expect(`${item.label}: ${refusal.code}`).toBe(`${item.label}: ${item.code}`)
+    }
+  })
+
+  it('names the cycle it found rather than only reporting one', async () => {
+    const log = treeLog()
+    await log.emit(admit(PARENT, parentContract()))
+    const refusal = await asyncRefusalOf(() =>
+      log.emit(decompose(PARENT, [child(CHILD_A, { dependsOn: [CHILD_B] }), child(CHILD_B, { dependsOn: [CHILD_A] })])),
+    )
+    expect(refusal.code).toBe<RefusalCode>('cyclic-dependency')
+    expect(refusal.detail).toContain(CHILD_A)
+    expect(refusal.detail).toContain(CHILD_B)
+    expect(refusal.detail).toContain('->')
+  })
+
+  it('refuses a plan for a task that has no contract to plan against', async () => {
+    const log = treeLog()
+    const refusal = await asyncRefusalOf(() => log.emit(decompose(PARENT, plan())))
+    expect(refusal.code).toBe<RefusalCode>('illegal-transition')
+    expect(refusal.detail).toContain('contract')
+  })
+
+  it('does not require the sub-tasks to exist yet, so either publication order recovers', async () => {
+    // Plan first, children admitted after: a crash in between leaves them `missing`, which the tree
+    // names and the command boundary refuses to schedule. The reverse order is just as valid,
+    // because the children are ordinary tasks that happen to be named by a plan.
+    const planFirstRegistry = taskRegistry()
+    const planFirst = await decomposed(plan(), planFirstRegistry)
+    await planFirst.emit(admit(CHILD_A, CHILD_A_CONTRACT()))
+    await planFirst.emit(admit(CHILD_B, CHILD_B_CONTRACT()))
+    expect(
+      foldSubject<TaskState>(planFirstRegistry, planFirst.entries(), TASK_PROTOCOL, TASK_VERSION, PARENT)?.decomposition?.children,
+    ).toHaveLength(2)
+
+    const childrenFirstRegistry = taskRegistry()
+    const childrenFirst = treeLog(childrenFirstRegistry)
+    await childrenFirst.emit(admit(CHILD_A, CHILD_A_CONTRACT()))
+    await childrenFirst.emit(admit(CHILD_B, CHILD_B_CONTRACT()))
+    await childrenFirst.emit(admit(PARENT, parentContract()))
+    await childrenFirst.emit(decompose(PARENT, plan()))
+    expect(
+      foldSubject<TaskState>(childrenFirstRegistry, childrenFirst.entries(), TASK_PROTOCOL, TASK_VERSION, PARENT)?.decomposition?.children,
+    ).toHaveLength(2)
+  })
+})

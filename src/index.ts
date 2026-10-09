@@ -45,6 +45,22 @@ export {
 } from './task/contract.ts'
 export { digest, maybeText, record, requireContractOf, requireRun, settled, text } from './task/shape.ts'
 export {
+  assertDecompositionAgainst,
+  decomposedKind,
+  DECOMPOSITION_CHILD_MEMBERS,
+  DECOMPOSITION_MEMBERS,
+  type Decomposition,
+  type DecompositionChild,
+} from './task/decomposition.ts'
+export {
+  projectTree,
+  type ChildOutcome,
+  type ChildStatus,
+  type TreeChildView,
+  type TreeCriterionView,
+  type TreeView,
+} from './task/tree.ts'
+export {
   declareTaskProtocol,
   verifierRoleOf,
   SCHEDULER_ROLE,

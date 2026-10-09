@@ -62,7 +62,7 @@
 | 领域 | 种类（定） | subject | 不变量 | 强制点 | 消费者 |
 |---|---|---|---|---|---|
 | **R3 责任** | `task/assigned{agentId, agentIdentity}`、`task/reassigned{from, agentId, agentIdentity}` | task | 指派一次；转移的 `from` 必须**等于当前责任人**；**`run/started` 只接受当前责任人的身份** | **reducer** | K1 §6 |
-| **分解** | `task/decomposed{children:[{taskId, dependsOn:[…]}]}`——**一条完整事实** | 父 task | 一次性（不可改）；子 id 非空、唯一、≠父；`dependsOn` 必须在声明内；**无环** | **reducer**（纯，形状+无环） | 投影的就绪判定 |
+| **分解** | `task/decomposed{children:[{taskId, dependsOn[], supports[], maxRuns}]}`——**一条完整事实**，声明 `atomicFact` | 父 task | 一次性（不可改）；子 id 非空、唯一、≠父；`dependsOn` 必须在声明内且不重复；**无环**；`supports` 必须是**父契约**声明的判据；`maxRuns` 为正整数且没有任何 kind 能改大它 | **reducer**（纯：形状 + 无环 + 覆盖面）；子任务是否已准入、依赖是否就绪由**串行命令边界**检查（§2） | `projectTree` 的就绪与汇总；`supports` 让“子验收支持父契约的哪一条”成为**父契约能拒绝**的声明 |
 | **初始 Revision** | `revision/created{revisionId, manifest}` | 环境 | 内容摘要由 reducer **重算并自校验**（篡改即拒）；同 id 同内容 = 幂等；同 id 异内容 = 具名拒绝；**没有任何 kind 能改已创建的 revision** | **reducer**；Run 准入的存在性在串行命令边界检查 | `run/started` 的钉住 + 投影的存在性 |
 | **最小 Bubble** | `bubble/opened{runId, inputs:[{name,digest}], workspace:{kind,ref}}` | task | 一次 run 一个 bubble；只对 running 的 run；**每条 verdict 的输入摘要必须等于该 run 的 bubble 所声明的输入** | **reducer**（同 subject，所以是纯判） | K1 §7 的输入绑定 |
 | **真实 verifier** | `evidence/produced` 增必填 `implementationDigest`；criterion 增 `implementationDigest`；verifier 实现须带 `selftest` 样本 | task | 实现摘要与 criterion 声明不一致即拒；**selftest 必须既有 pass 样本又有 fail 样本** | **reducer** + 部署期 selftest | K1 §7 / §11 |
@@ -96,6 +96,10 @@
 - `projectTree(states)`：输入 `foldSubjects(...)`（全日志，fail-closed）。派生分解树、每个子的依赖就绪、父的汇总（**点名**失败的子）。**就绪规则照抄旧仓的承重行为**：只有 `verified` 满足依赖，terminal-but-unverified 视为阻塞并带具名理由（`child.ts:576-582,658-663`；回归见 `tests/integration/a3-coordination-loop.spec.ts:450-453`、`a6-recovery.spec.ts:333-340`）。
 - `projectBinding(taskState, environmentStates)`：判定 run 钉住的 revision **确实被创建过**，且 `contentDigest` 与创建事实一致；不符即**具名拒绝**。执行主路径还须在串行命令提交边界复用该检查，不能只在事后读投影时发现。
 - receipt 已存在且已派生；B 追加 K1 §11 的证明：**卸载验证器实现后历史 receipt 摘要不变**，而**新**执行缺实现则具名拒绝——两者必须分开（`contract.ts` 的 shape/availability 拆分）。
+
+**已落地（S2）**：`src/task/decomposition.ts`（一条完整事实 + 无环 + 覆盖面）与 `src/task/tree.ts`（`projectTree`）。
+子任务状态是 `missing | blocked | waiting | ready | running | verified | stopped`；**只有 `verified` 满足依赖**，停止与阻塞沿链**具名传播**（`"B" is blocked`），预算耗尽即 `stopped` 并点名“用了 N/N 次仍未 verified”。
+父的 `complete` 是派生量：**每条判据都必须被一个 verified 且声明支持它的子任务（或父自己的 verified run）接受，并且每个声明的子任务都已 verified**——子任务“结束”永远不构成父任务被接受。
 
 ## 5. B 明确不做（写下来，防止它自己长回来）
 
@@ -148,7 +152,7 @@
 | 片 | 内容 | 退出条件（可机械判定） |
 |---|---|---|
 | **S1** | `environment` 协议 v1：`revision/created{revisionId, manifest}`；`projectBinding`；`run/started` 的消费者 | 同 id 同内容**幂等**；同 id 异内容**具名拒绝**；manifest 摘要被篡改即拒（reducer 自校验）；run 钉住**未创建**的 revision 或无投影时摘要不符 → 投影**具名拒绝** |
-| **S2** | 任务协议 v2：`task/decomposed` **一条完整事实**；`projectTree` | 依赖非 `verified` 时子**不就绪**；terminal-but-unverified 依赖→阻塞**带具名理由**；`dependsOn` 越界/重复/自指/环各具名拒绝；父**没有**完成态事实，只有汇总 |
+| **S2** ✅ | `task/decomposed` **一条完整事实**（`dependsOn`/`supports`/`maxRuns`）；`projectTree` | **已达成**：依赖非 `verified` 即不就绪；停止/阻塞沿链具名传播；越界/重复/自指/环各具名拒绝；父没有完成态事实，只有汇总 |
 | **S3** | v2 必填字段：`evidence/produced` 与 criterion 各增 `implementationDigest`；verifier **selftest 门（命令期）** | 判决的实现摘要 ≠ criterion 声明的 → 具名拒绝（复用 `wrong-verifier`）；verifier **缺 fail 样本即不可运行**（"门禁必须能失败"用在验证器上）；**卸载实现后历史 receipt 摘要不变**，而新执行缺实现具名拒绝 |
 | **S4** | `bubble/opened{runId, inputs[], workspace}`；verdict 的**输入绑定** | 判决的输入摘要 ≠ 该 run 的 bubble 所声明 → 具名拒绝；对已结算的 run 开 bubble / 同 run 开第二个 → `illegal-transition` |
 | **S5** | E3（`agent/opened`，引用 DSH 会话）+ `task/assigned`/`task/reassigned` + `run/started` 的**责任门** + **装载期缝断言**（约束 10） | 转移后**旧责任人**启动 run → **具名拒绝**；转移的 `from` ≠ 当前责任人 → 拒绝；只能指派**已开通**的 agent；所需上游缝缺席 → **装载期具名拒绝**，不是运行期 `undefined` |
