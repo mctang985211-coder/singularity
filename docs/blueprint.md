@@ -87,23 +87,50 @@ RRSI 是 *Regularized Recursive Self-Improvement of Agent Harnesses*（[google-r
 | 图拓扑 / 画布 / 多图注册表 / HTTP+SSE / SPA | `graph` `graphs` `graph-web` `map` | 绿 |
 | 真实模型正例：xv6 supervisor repair（69/70 → 发布 v2 → 新检出消费 v2 → 70/70） | `docs/2026-10-04-live-xv6-supervisor-repair-run2.json` | 有记录 |
 
-## 2.3 RRSI 对照表：接了什么、半接了什么、缺了什么
+## 2.3 RRSI 对照表（**按上游源码行号重写**）
 
-| RRSI 上游 | 端口位置 | 接线状态 |
-|---|---|---|
-| `evaluate.py: aggregate`（加权 per-trial、missing 计 0 不缩分母） | `strategy/measure.ts` | ✅ 已接 |
-| `schedule.py: edit_budget`（退火编辑预算） | `strategy/schedule.ts` | ✅ 已接（`method-draft` 强制；进 supervisor 提示） |
-| `critic.py`（评估前泄漏筛查） | `strategy/screen.ts` | ✅ 已接（`method-draft` 调用） |
-| `selection.py` 的准入规则（噪声底线/成本规则） | `strategy/selection.ts:admit` | ✅ 已接（门禁 `method_publish`） |
-| `history.py: History`（每条 edit 的 component/hypothesis/分数/verdict） | `strategy/history.ts` | ⚠️ **半接：函数在，输入是空的** |
-| `history.py: stall_flag / exploration` | 同上 | ⚠️ 半接（派生自空输入） |
-| `components.py: novelty`（从未出现在获胜 edit 里的结构组件） | `strategy/selection.ts:noveltyOf` | ❌ **恒为常数 1** |
-| `calibrate.py`（噪声带实测） | `strategy/measure.ts` | ⚠️ 半接（`repetition` 由调用方声明，重复调用短路到第一份报告） |
-| **每轮 k 个候选 → argmax 选优** | — | ❌ **缺失**（`selectRound` 零调用） |
-| `analyst.py` / `digester.py` | — | ❌ 缺失（由 supervisor LLM 替代） |
-| `Domain.guards`（非补偿性领域判据） | `pipeline/guards.ts` + adapter `guard()` | ⚠️ 真实约束只有 token 上限与 adapter guard；`rules.guards[].bound` 恒被盖 `ok: true` |
+> 本节此前是**读 README 推的**；现已逐行读过上游算法面（≈2500 行，覆盖范围见 [`docs/rrsi-upstream-reference.md`](rrsi-upstream-reference.md) §0）。
+> 符号（`config.py:31-42`）：`T` 轮数 / **`k` 每任务 trial 数** / **`m` 每轮候选数** / `b_t` 编辑预算 / `w` 停滞窗 / `m_draft` 保留槽 / `δ` 噪声带。默认 `T=20, k=2, m=2`——`k` 与 `m` 都是 2，所以两者极易写混。
+> **我此前写的"每轮 k 个候选"是错的**：那是 `m`。
 
-**结论**：**算法引进了，闭环没有。** 细节见 §3 根因五。
+| # | RRSI 上游（行号） | 端口位置 | 接线状态 |
+|---|---|---|---|
+| 1 | `evaluate.py:104-119` `aggregate`：`S_hat = Σr·w / Σw`，`C_hat = mean(tokens>0)` | `strategy/measure.ts` | ✅ 已接 |
+| 2 | `schedule.py:43-50` 退火编辑预算 `b_t`（除以 `T`） | `strategy/schedule.ts` | ✅ 已接（`rounds−1` 是有意改动） |
+| 3 | `critic.py:105-110` 确定性预检 + `:113-147` LLM 意图审查（**六条具名理由**） | `strategy/screen.ts` | ⚠️ **只接了结构检查**：没有"泄漏/记忆化/无界工作"这六条语义审查 |
+| 4 | `selection.py:107-118` 准入顺序：噪声底线 → 成本规则 → guards | `strategy/selection.ts:admit` | ✅ 已接（门禁 `method_publish`） |
+| 5 | `selection.py:84-86` 增益分支 `ΔC <= β0 + β1·ΔS`（无上界） | 同上 | ⚠️ 端口加了 25% 上界（有意收紧） |
+| 6 | `selection.py:90` 带内分支 `w_s·ΔS − w_c·ΔC + **w_n·ν** > 0` | `strategy/selection.ts:costRule` | ⚠️ 端口**删除了 novelty 项**（有意），但 `w_n` 的替代（确定性 tie-break）需显式测试 |
+| 7 | `selection.py:133-136` `argmax_{admissible} S'`，无则保留 incumbent | `strategy/selection.ts:selectRound` | ❌ **`selectRound` 零调用**——每轮只记一次准入 |
+| 8 | `loop.py:292,301-302` **每轮 `m` 个候选，同一 incumbent，并行评估** | — | ❌ **缺失** |
+| 9 | `components.py:44-46` `K`(9) / `K_STR`(4) | `strategy/policy.ts` 的 5 个资产类别 | ⚠️ **轴不同**：上游按 harness 组件 + diff 回退分类；端口按资产类别 |
+| 10 | `components.py:103-108` `novelty`（`set()` 去重，只数 `K_STR`，且 `incumbent_counts==0`） | `strategy/selection.ts:noveltyOf` | ❌ **恒为常数 1**（合成机制 × 空 incumbent 计数） |
+| 11 | `components.py:82-100` 声明标签需 **diff 证据**，否则回退按 diff 分类 | `draft/adapters.ts`（按适配器核验） | ⚠️ 端口改为适配器核验（有意），但**没有回退分类** |
+| 12 | `history.py:36-38,83` **一条记录 = 一条 edit**，带 `t`（轮）与 `variant` | `strategy/history.ts` | ⚠️ 半接：函数在，**输入是空的**；且端口用候选序号/history 长度充当 round |
+| 13 | `history.py:91-92` `ΔS`/`ΔC` **按测量时刻冻结**，`:143-150` 读回 | `strategy/history.ts:107` | ❌ 端口**按最新 head 重算所有旧候选**（E09 实测：发布 B 后 A 的 Δ 从 0 变 −0.2） |
+| 14 | `history.py:129-141` `incumbent_component_counts`（读 `accepted` 标记） | `strategy/selection.ts:admit` 的 `incumbentMechanismCounts` | ❌ **从未传入**（生产调用恒为 `{}`） |
+| 15 | `history.py:143-163` `g_t` / `prune_set`（**带要移除的具体已接受编辑**） | `strategy/history.ts` 的 `simplificationCandidates` | ⚠️ 只有组件级建议，无"要删哪条" |
+| 16 | `history.py:189-211` `σ_t` / `U_t` / 保留槽文案 | 同上 + `coordination/prompts.ts:82` | ⚠️ 半接（派生自空输入） |
+| 17 | `loop.py:294` + `propose.py:349-354` + `loop.py:523-530` **保留槽的机械约束**（`done()` 回弹 **且** critic 后按 **diff** 再验） | — | ❌ **缺失**（只在提示词里说） |
+| 18 | `history.py:152-157` + `loop.py:159-178` **归因 scoreboard**（`predicted_affected` 命中率 + `unpredicted_regressions`，最近 20 行回喂） | — | ❌ **缺失**（我此前整条漏掉） |
+| 19 | `loop.py:134-150` 选轨迹规则（**最差任务的 worst trial + 最好任务的 best trial**，`n_fail=22`/`n_success=6`） | — | ❌ 缺失 |
+| 20 | `digester.py` **只读子代理**（工具 jail、三套 schema、6000 字符硬顶） | — | ❌ 缺失 |
+| 21 | `analyst.py:121-198` 三镜报告（failure_modes / capability_gaps / success_habits），**跨轮累积模式名** | — | ❌ 缺失（由 supervisor LLM 替代，但**没有这三镜结构**） |
+| 22 | `propose.py:91-104` 每条编辑的证据契约（`trigger_condition`/`predicted_affected`/`retroactive_check`/`regression_risk`） | `method-draft` 的 `edits[]{id,mechanism,hypothesis,targets}` | ⚠️ 只有 4 个字段，**无预测与反事实** |
+| 23 | `propose.py:107-111` **"THERE IS NO ABORT ACTION"** | — | ⚠️ 端口允许模型不发布；上游要求必须提交候选 |
+| 24 | `loop.py:495-496,550-552,566-568,599-602` 测量前**四道具名门**（`no_proposal`/`critic_reject`/`smoke_fail`/`eval_invalid`） | `pipeline/validate.ts` 的部分检查 | ⚠️ 只有部分；`smoke_fail` 与 `critic_reject` 无对应 |
+| 25 | `loop.py:249-268` analyst 阶段的**跨轮 `global_analysis`** | — | ❌ 缺失 |
+| 26 | `calibrate.py:89-103` `δ`：≥2 次基线评估直接观测，单次则 bootstrap | `strategy/measure.ts:calibrateNoise` | ⚠️ 半接（`repetition` 由调用方声明，重复调用短路到第一份报告） |
+| 27 | `loop.py:335` `S* = max(S*, S_{t+1})` **在 `if winner is not None` 之内** | `strategy/history.ts:bestQuality` | ❌ 端口的 `bestQuality` **包含未采用的候选**（E10 实测：被成本拒绝的 B=.8 仍抬高底线） |
+| 28 | `loop.py:403-406` winner 必须是 `H_t` 的**后代** | — | ❌ 缺失 |
+| 29 | `domain.py:78` `guards(incumbent, candidate)`（**吃双侧**，非补偿） | `pipeline/guards.ts` + adapter `guard()` | ⚠️ adapter 那半真的吃双侧；`rules.guards[].bound` 恒被盖 `ok: true` |
+| 30 | `domain.py:109` `constitution()` → SKILL.md + PATTERNS.md 交给 proposer | 部分（Skill 正文冻结进 contract context） | ⚠️ 有 Skill，**无 PATTERNS（模式库）** |
+| 31 | `loop.py:348-420` 重新裁决：用**存储测量**重跑算法 2，不花新评估 | — | ❌ 缺失（端口无 readjudicate 入口） |
+| 32 | `evaluate.py:131-135` `ΔC` 任一侧未知 → **0.0 放行** | `strategy/selection.ts` | ⚠️ 端口改为拒绝（**有意收紧**，应作显式策略保留） |
+
+**结论（未变，但依据更强）**：**算法引进了，闭环没有。** 且缺的不是几个函数，而是**一条证据管线 + 一套机械约束**：选轨迹 → 只读 digester → 三镜报告（跨轮累积）→ 归因 scoreboard → 带预测/反事实的提案 → critic 语义审查 → 保留槽与预算的机械回弹 → 并行评估 → 具名门 → 冻结 Δ 与只算已接受 head 的 S*。
+
+细节见 §3 根因五，上游逐行依据见 [`docs/rrsi-upstream-reference.md`](rrsi-upstream-reference.md)。
 
 ---
 

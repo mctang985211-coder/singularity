@@ -81,12 +81,23 @@
 
 ### 4.2 RRSI：**我现在亲自读过上游源码**（此前只读 README）
 
-**完整对照件：[`docs/rrsi-upstream-reference.md`](rrsi-upstream-reference.md)**（逐条带行号，并明确标注未读范围）。
+**完整对照件：[`docs/rrsi-upstream-reference.md`](rrsi-upstream-reference.md)**（逐条带行号，覆盖范围见其 §0）。
 
-已逐行读：`selection.py` `components.py` `evaluate.py` `schedule.py` `history.py` `calibrate.py` `domain.py` 接口 `loop.py` 的 `round()` 与 `readjudicate()`。
-**未读**：`propose.py` `analyst.py` `digester.py` `critic.py` `driver.py` `config.py` `gitops.py` `llm.py` 及 `loop.py` 其余 ≈1400 行。
+**算法面已全覆盖（≈2500 行）**：`config.py` `components.py` `schedule.py` `evaluate.py` `calibrate.py` `selection.py` `history.py` `analyst.py` `digester.py` `propose.py` `critic.py` `domain.py` 接口、`loop.py` 除 :420-452 外全部（`Run` 状态/git/evidence/baseline、`round()`、`readjudicate()`、`_draft()`、`_evaluate()`）。
+**仍未读（纯管道 ≈400 行）**：`gitops.py` `llm.py` `driver.py` `__init__.py` `loop.py`:420-452、`rrsi.py`。
 
-**我此前的一处符号错误**：蓝图 §2.3 写「每轮 **k** 个候选」——实际是**每轮 `cfg.m` 个候选**（`loop.py:292`，标签 A..H），**`k` 是每任务 trial 数**。review 的 R01 已指出，我当时只改了口径没改蓝图正文。
+**我此前的一处符号错误**：蓝图 §2.3 写「每轮 **k** 个候选」——实际是**每轮 `cfg.m` 个候选**（`loop.py:292`，标签 A..H），**`k` 是每任务 trial 数**；`config.py:60-61` 两者默认都是 2，所以极易写混。review 的 R01 已指出，我当时只改了口径没改蓝图正文（**现已按行号重写 §2.3**）。
+
+**读 `config.py` 得到的权威符号表**（`:31-46`）：`T=20` `k=2` `m=2` `b_min/b_max=1/4` `w=3` `m_draft=1` `delta_z=2.0` `beta0=0.10` `beta1=40` `w_s/w_c/w_n=100/15/0.5` `n_prune=4`；工程旋钮 `repair_rounds=5` `invalid_missing_frac=0.15` `n_fail_traces=22` `n_success_traces=6` `eval_parallel=1`。**单位**：`ΔC` 是相对值，`beta0=0.10` = "10% token 增量免费"，`beta1=40` = "每 +1pp 的 S 换 +40% 成本"。
+
+**我此前整条漏掉的机制（读全后才看到）**：
+
+1. **测量前四道具名门**：`no_proposal`（未 done 或零改动，`loop.py:495`）→ `critic_reject`（含 `repair_rounds` 次修复，`:550`）→ **按 diff 重新打标签**后破坏保留槽也算拒（`:523-530`）→ `smoke_fail`（liveness 冒烟，`:566`）；评估期再加 `eval_invalid`（崩溃或缺失率超限，重试一次，`:599`）。**被筛掉的候选有具名归因且不进 `T_t`/`g_t`。**
+2. **归因 scoreboard**（`loop.py:159-178`）：每条编辑的 `predicted_affected` 被核对命中率，`unpredicted_regressions` = 退化超过 `regression_threshold(k)` 且未被预测的任务；`attribution.jsonl` 的**最近 20 行**回喂 proposer（`scoreboard()`:152-157）。
+3. **证据管线**：`build_traces`（**最差任务的 worst trial + 最好任务的 best trial**，`n_fail=22`/`n_success=6`，`:134-150`）→ **只读 digester 子代理**（工具 jail 在渲染目录、三套 schema、6000 字符硬顶，`digester.py:41-73`）→ **analyst 三镜报告**（failure_modes/capability_gaps/success_habits，合并/拆分/按影响排序/entity-free/沿用旧模式名，`analyst.py:52-102`）→ **跨轮 `global_analysis`**（`loop.py:265-267`）。
+4. **propose.py 的 `done()` 是机械执行点**（`:328-369`）：预算、保留槽、`component ∈ K`、六个必填字段都在这里**回弹重做**；且明确 **"THERE IS NO ABORT ACTION"**（`:107-111`）。每条编辑还有**预测与三段反事实**（`trigger_condition`/`predicted_affected`/`retroactive_check`/`regression_weight`，`:91-104`）——端口只有 4 个字段。
+5. **critic 是两层且只管意图**：确定性预检（凭据 + 领域 patterns）命中即拒、不进 LLM；LLM 层有**六条具名理由**（泄漏/退化/评分器作弊/未声明捆绑/**运行期记忆化**/无界工作），并明说"运行期正确性不是你的职责，确定性 compile/smoke 在你之后处理"（`critic.py:50-102`）。
+6. **winner 必须是 `H_t` 的后代**（`git merge-base --is-ancestor`，`loop.py:403-406`）。
 
 **我已自证的关键事实**（不再依赖转述）：
 
